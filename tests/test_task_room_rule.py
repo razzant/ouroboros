@@ -18,8 +18,8 @@ import pytest
 from ouroboros import projects_registry as pr
 from ouroboros.project_dialogue import ROOM_FIXED_ROW_TYPES, room_membership
 from ouroboros.task_results import write_task_result
+from tests._cases import case_folders
 
-pytestmark = pytest.mark.serial
 
 
 def _bus(monkeypatch, root):
@@ -104,14 +104,17 @@ def test_a_main_direct_task_with_a_project_id_stays_main(tmp_path, monkeypatch):
     assert _membership(tmp_path, rooms["native"])(1, {"task_id": "direct-1"}) is False
 
 
-@pytest.mark.parametrize("system_type", sorted(ROOM_FIXED_ROW_TYPES))
-def test_a_fixed_row_type_keeps_its_producers_address_and_borrows_no_lineage(tmp_path, monkeypatch, system_type):
-    rooms = _world(tmp_path)
-    bus, sent = _bus(monkeypatch, tmp_path)
-    bus.send_with_budget(rooms["native"], "Not delivered", task_id="kid-1", role="system", system_type=system_type)
-    stored = dialogue_test.log_rows(tmp_path / "logs/chat.jsonl")[-1]
-    assert stored["chat_id"] == rooms["native"] == sent[-1][0][0], "the producer's address stands"
-    assert not {"delegation_role", "parent_task_id", "root_task_id"} & set(stored), "the target is not the speaker"
+def test_a_fixed_row_type_keeps_its_producers_address_and_borrows_no_lineage(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for system_type in sorted(ROOM_FIXED_ROW_TYPES):
+        tmp_path = next(case_paths)
+        with subtests.test(system_type=system_type), monkeypatch.context() as monkeypatch:
+            rooms = _world(tmp_path)
+            bus, sent = _bus(monkeypatch, tmp_path)
+            bus.send_with_budget(rooms["native"], "Not delivered", task_id="kid-1", role="system", system_type=system_type)
+            stored = dialogue_test.log_rows(tmp_path / "logs/chat.jsonl")[-1]
+            assert stored["chat_id"] == rooms["native"] == sent[-1][0][0], "the producer's address stands"
+            assert not {"delegation_role", "parent_task_id", "root_task_id"} & set(stored), "the target is not the speaker"
 
 
 def _count_store_work(monkeypatch):

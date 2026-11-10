@@ -30,7 +30,6 @@ from scripts import regenerate_size_ratchet as regenerate
 from tests import test_smoke as ci_consumer
 from tests.test_repo_health_smoke import _bootstrap_repo, _git, _manifest, _write_lines, _write_manifest
 
-pytestmark = pytest.mark.serial
 
 MANIFEST = "ouroboros/size_ratchet_manifest.py"
 GROWTH = "new module debt above 1600 lines: new.py"

@@ -5,8 +5,10 @@ from typing import Any
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from ouroboros.deployment_policy import choice_refusal
+from ouroboros.gateway._helpers import request_json_or
 from ouroboros.gateway.owner_settings import (
-    _owner_audit, _owner_read_settings_raw, _owner_update_settings, owner_write_guard,
+    MANAGED_BY_DEPLOYMENT, _owner_audit, _owner_update_settings, owner_write_guard, record_settings_change,
     settings_document_digest, settings_document_mutation, unsaved_error,
 )
 
@@ -33,9 +35,9 @@ def audit_safety_change(request: Request, before: dict, after: dict) -> None:
 
 
 async def _write(request: Request, writer: Any) -> JSONResponse:
-    from ouroboros.gateway.settings import _json_body_or_empty, _run_settings_writer
+    from ouroboros.gateway.settings import _run_settings_writer
 
-    return await _run_settings_writer(writer, request, await _json_body_or_empty(request))
+    return await _run_settings_writer(writer, request, await request_json_or(request, {}))
 
 
 @owner_write_guard
@@ -55,6 +57,8 @@ def _api_owner_safety_mode_sync(request: Request, body: Any) -> JSONResponse:
     if mode not in config.VALID_SAFETY_MODES:
         return unsaved_error("'mode' must be one of: full, light, off", 400)
     key = "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE" if kind == "consciousness" else "OUROBOROS_SAFETY_MODE"
+    if refusal := choice_refusal(key, mode):  # even when the document already says so
+        return unsaved_error(refusal, 403, code=MANAGED_BY_DEPLOYMENT)
     _persist(request, {key: mode}, "safety_mode", {"kind": kind, "safety_mode": mode})
     return JSONResponse({"ok": True, "safety_mode": mode})
 
@@ -81,6 +85,8 @@ def _api_owner_safety_model_sync(request: Request, body: Any) -> JSONResponse:
     settings = body.get("settings") if isinstance(body, dict) else None
     if not isinstance(settings, dict) or not settings or set(settings) - SAFETY_MODEL_KEYS:
         return unsaved_error("'settings' must contain Safety Supervisor model or catalog settings only", 400)
+    if refusal := next(filter(None, (choice_refusal(key, value) for key, value in settings.items())), ""):
+        return unsaved_error(refusal, 403, code=MANAGED_BY_DEPLOYMENT)  # role maps and the catalog: the write's own judge
     from ouroboros.configured_subagents import normalize_configured_subagents, roster_save_error
     from ouroboros.config import load_settings, safety_configuration
     from ouroboros.gateway.settings import ALLOW_EMPTY_REVIEW_POOL, review_pool_save_judgement
@@ -109,7 +115,9 @@ def _api_owner_safety_model_sync(request: Request, body: Any) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
-def _persist(request: Request, changes: dict, action: str, audit: dict) -> dict:
+def _persist(request: Request, changes: dict, action: str, audit: dict) -> None:
+    """One Safety owner write; its committed old → new is the shared settings record, and the
+    endpoint's own action keeps only what was asked."""
     from ouroboros.config import apply_settings_to_env
 
     def merge(current):
@@ -129,11 +137,9 @@ def _persist(request: Request, changes: dict, action: str, audit: dict) -> dict:
 
     with settings_document_mutation():
         digest = settings_document_digest()
-        previous = _owner_read_settings_raw()
-        _owner_update_settings(merge, digest,
-                               authored_keys=tuple(changes), allow_safety_lowering=True)
+        record_settings_change(request, _owner_update_settings(
+            merge, digest, authored_keys=tuple(changes), allow_safety_lowering=True))
         # Projection only; the owner writer has already released its file lock.
         from ouroboros.config import load_settings
         apply_settings_to_env(load_settings())
-    _owner_audit(request, action, {**audit, "previous": {key: previous.get(key) for key in changes}})
-    return previous
+    _owner_audit(request, action, audit)

@@ -8,10 +8,12 @@ existing worker or consumes its late result instead of dispatching twice.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import json
 import logging
+import math
 import queue
 import threading
 import time
@@ -754,30 +756,40 @@ def _attempt_key(request: Any, slot: Any) -> str:
     return hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()
 
 
-def _logical_timeout(slot: Any, request: Any, usage_meta: Dict[str, Any]) -> float:
+def _logical_timeout(slot: Any, request: Any, usage_meta: Dict[str, Any]) -> Optional[float]:
+    """The slot's logical window, ``None`` when nothing true bounds it: the delivery fact
+    decides, so a retrieving api row's episode never borrows one send's socket timeout."""
     deadline = str(getattr(request, "deadline_at", "") or "").strip()
     if not deadline and isinstance(usage_meta, dict):
         deadline = str(usage_meta.get("deadline_at") or "").strip()
     from ouroboros.config import get_finalization_grace_sec
+    from ouroboros.review_execution import delivery_retrieves
 
     return review_operation_timeout_sec(
         getattr(slot, "timeout_sec", None),
-        route=getattr(slot, "route", None),
+        retrieves=delivery_retrieves(getattr(slot, "route", None), getattr(slot, "native_retrieval", None)),
         deadline_at=deadline,
         transport_timeout_sec=getattr(slot, "transport_timeout_sec", None),
         reserve_sec=get_finalization_grace_sec(),
     )
 
 
-def _rejoin_window(root: Any, token: str, frozen_row: Any, logical_window: float) -> float:
+def _slot_deadline(slot_id: str, window: Optional[float]) -> float:
+    """A window's end on the slot clock; ``inf`` = no window, compared but never waited on."""
+    return math.inf if window is None else monotonic_now(slot_id) + window
+
+
+def _rejoin_window(root: Any, token: str, frozen_row: Any, logical_window: Optional[float]) -> Optional[float]:
     """Remaining ORIGINAL window of the paid operation a rejoin attaches to (#1547):
     saved facts only (durable STARTED/START_REQUESTED start + ``max_seconds``, else the
     frozen row's ``awaiting_since`` + this slot's logical window), floored at the
     settlement margin — so a repeated collect never extends it and an expired run
-    gets exactly the margin, never a fresh full window."""
+    gets exactly the margin, never a fresh full window. A recorded cap keeps its number;
+    without one, a stored request with no ``maxSeconds`` sent the run with its clock off, so
+    the rejoin has no window either (``None``); an unreadable body keeps the saved facts."""
     from ouroboros.config import NESTED_SETTLEMENT_MARGIN_SEC
 
-    started, max_seconds = "", 0.0
+    started, max_seconds, clock_off = "", 0.0, False
     if root is not None and token:
         try:
             record = invocation_record(root, token) or {}
@@ -785,9 +797,13 @@ def _rejoin_window(root: Any, token: str, frozen_row: Any, logical_window: float
             # A start never bound to a run still began at its durable request row.
             started = started or str(record.get("requested_at") or "")
             max_seconds = float(cap or record.get("max_seconds") or 0)
+            body = record.get("request")
+            clock_off = max_seconds <= 0 and isinstance(body, dict) and bool(body) and "maxSeconds" not in body
         except Exception:
             log.debug("rejoin window: durable custody unreadable", exc_info=True)
-    if not (started and max_seconds > 0) and isinstance(frozen_row, dict):
+    if clock_off:
+        return None
+    if not (started and max_seconds > 0) and isinstance(frozen_row, dict) and logical_window is not None:
         started, max_seconds = str(frozen_row.get("awaiting_since") or ""), float(logical_window)
     sent = parse_deadline_ts(started) if max_seconds > 0 else None
     remaining = (sent - utc_now()).total_seconds() + max_seconds if sent is not None else 0.0
@@ -854,7 +870,7 @@ def _emit_operation(
 
 
 def _late_or_timeout_actor(
-    slot: Any, entry: Any, timeout: float, error_actor: Callable[..., Any],
+    slot: Any, entry: Any, timeout: Optional[float], error_actor: Callable[..., Any],
     *, released_early: bool = False,
 ) -> Any:
     if entry is not None:
@@ -868,12 +884,14 @@ def _late_or_timeout_actor(
                 entry.released_early = True  # the roster itself was registered by the caller
             else:
                 entry.timed_out = True
+    window = "no logical window" if timeout is None else f"window {timeout:g}s"
     if released_early and entry is not None:
         # Paid iff dispatched: a $0 presence until the settled row proves a physical send.
-        message = f"Pending dispatch; the physical review operation is in flight (window {timeout:g}s)"
+        message = f"Pending dispatch; the physical review operation is in flight ({window})"
         state = "pending_dispatch"
     else:
-        message = f"Timeout after {timeout:g}s; physical review operation remains in flight"
+        message = (f"Timeout after {timeout:g}s" if timeout is not None else "Wait ended (no logical window)") + (
+            "; physical review operation remains in flight")
         state = "in_flight" if entry is not None else "settled"
     actor = error_actor(
         slot, message, entry.operation_id if entry is not None else "", state,
@@ -1243,6 +1261,8 @@ def _execute_review_attempt(*, admitted, request, slot, entry, usage_ctx, task_i
         usage_ctx, task_id=task_id, request=request, entry=entry, slot=slot,
         phase="started",
     )
+    # No window (``inf``) scopes no execution deadline and reaches the executor as ``None``.
+    bounded = math.isfinite(logical_deadline)
     try:
         if not admitted:
             actor = error_actor(slot, "Owner paused before review dispatch", entry.operation_id, "not_dispatched")
@@ -1250,11 +1270,12 @@ def _execute_review_attempt(*, admitted, request, slot, entry, usage_ctx, task_i
         else:
             with (usage_scope(review_usage_scope),
                   calendar_scope(str(getattr(request, "deadline_at", "") or "")),
-                  execution_deadline_scope(logical_deadline, review_slot_id=str(slot.slot_id)),
+                  execution_deadline_scope(logical_deadline, review_slot_id=str(slot.slot_id)) if bounded
+                  else contextlib.nullcontext(),
                   review_pause.slot_episode(entry, review_usage_scope)):
                 actor = run_slot(
                     slot, entry.operation_id, entry.retry_state,
-                    logical_deadline,
+                    logical_deadline if bounded else None,
                     entry.pending_invocation_checkpoint,
                 )
     except Exception as exc:
@@ -1285,7 +1306,6 @@ def _run_custodied_review_slots(
     settle_actor: Any = None,
 ) -> List[Any]:
     """Run slots with independent logical windows and late-result custody."""
-    import contextlib
     from ouroboros.review_wave import current_review_wave
 
     wave = current_review_wave()
@@ -1313,7 +1333,7 @@ def _run_custodied_review_slots(
         ) else ""
         window = _logical_timeout(slot, request, usage_meta)
         slot_windows[slot_id] = window
-        slot_deadlines[slot_id] = monotonic_now(slot_id) + window
+        slot_deadlines[slot_id] = _slot_deadline(slot_id, window)
         custody_lost = False
         frozen_surfaces = getattr(usage_ctx, "_review_frozen_rows", None)
         frozen_surface = (
@@ -1397,8 +1417,8 @@ def _run_custodied_review_slots(
                     # Rejoin the same paid operation for what remains of ITS window (#1547).
                     window = _rejoin_window(root, retry_token, frozen_row, window)
                     slot_windows[slot_id] = window
-                    slot_deadlines[slot_id] = monotonic_now(slot_id) + window
-                if window > 0:
+                    slot_deadlines[slot_id] = _slot_deadline(slot_id, window)
+                if window is None or window > 0:
                     entry = ActiveReviewAttempt(
                         key=key,
                         operation_id=retry_operation_id or reserved_operation_id or new_call_id(
@@ -1437,8 +1457,8 @@ def _run_custodied_review_slots(
             return
         if entry is None:
             immediate_actors[slot_id] = error_actor(
-                slot, "Owner deadline exhausted before physical review dispatch",
-                reserved_operation_id, "not_dispatched",
+                slot, "No review window remains (owner deadline or task execution window spent) "
+                "before physical review dispatch", reserved_operation_id, "not_dispatched",
             )
             return
         slot_entries[slot_id] = entry
@@ -1447,9 +1467,10 @@ def _run_custodied_review_slots(
             # A live rejoin uses the original clock/window, never another full
             # slot timeout. The operation scope has rebound that same clock.
             slot_deadlines[slot_id] = min(slot_deadlines[slot_id], entry.logical_deadline)
-            window = max(0.0, slot_deadlines[slot_id] - monotonic_now(slot_id))
+            window = (None if math.isinf(slot_deadlines[slot_id])
+                      else max(0.0, slot_deadlines[slot_id] - monotonic_now(slot_id)))
             slot_windows[slot_id] = window
-        if window <= 0 and cached_actor is None:
+        if window is not None and window <= 0 and cached_actor is None:
             immediate_actors[slot_id] = _late_or_timeout_actor(
                 slot, entry, window, error_actor,
             )
@@ -1477,7 +1498,7 @@ def _run_custodied_review_slots(
                 with permit as admitted:
                     if entry.waiting_for_capacity:
                         # The old fan-out semaphore waited before opening the slot window.
-                        slot_deadlines[slot_id] = monotonic_now(slot_id) + _logical_timeout(slot, request, usage_meta)
+                        slot_deadlines[slot_id] = _slot_deadline(slot_id, _logical_timeout(slot, request, usage_meta))
                         entry.logical_deadline = slot_deadlines[slot_id]
                         entry.waiting_for_capacity = False
                     _execute_review_attempt(
@@ -1560,9 +1581,7 @@ def _run_custodied_review_slots(
         if slot_id in returned_ids:
             continue
         entry = slot_entries.get(slot_id)
-        timeout = slot_windows.get(slot_id)
-        if timeout is None:
-            timeout = _logical_timeout(slot, request, usage_meta)
+        timeout = slot_windows[slot_id] if slot_id in slot_windows else _logical_timeout(slot, request, usage_meta)
         actors.append(review_pause.detached_actor(slot, entry, error_actor, usage_ctx=usage_ctx, request=request,
                                                   operation=operation) if detached and entry is not None else
                       _late_or_timeout_actor(slot, entry, timeout, error_actor, released_early=slot_id in released_ids))

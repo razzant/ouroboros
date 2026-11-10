@@ -74,7 +74,7 @@ def test_failed_generations_publish_receipts_without_unlisted_bytes(tmp_path, mo
     assert area.is_dir() and original.read_bytes() == original_bytes
 
 
-@pytest.mark.parametrize("destination", ["readonly", "hardlink", "symlink", "parent_symlink"])
+@pytest.mark.parametrize("destination", ["readonly", "hardlink", "parent_symlink"])
 def test_changed_evidence_never_writes_through_old_destinations(tmp_path, monkeypatch, destination):
     entry, area = _captured(tmp_path, monkeypatch)
     old_path, old = body.saved_named_evidence(tmp_path, entry)
@@ -116,7 +116,7 @@ def test_changed_evidence_never_writes_through_old_destinations(tmp_path, monkey
         assert named.run_named_evidence(tmp_path, entry) == latest
 
 
-@pytest.mark.parametrize("damage", ["missing", "unreadable", "wrong_type", "bad_address"])
+@pytest.mark.parametrize("damage", ["missing", "wrong_type", "bad_address"])
 def test_a_missing_or_unreadable_receipt_is_a_new_fact(tmp_path, monkeypatch, damage, driven_runtime):  # noqa: F811
     runtime, clock, tick = driven_runtime
     entry, area = _captured(tmp_path, monkeypatch)

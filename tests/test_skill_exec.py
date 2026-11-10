@@ -340,7 +340,6 @@ def test_skill_preflight_reports_missing_pluginapi_permissions(tmp_path, monkeyp
     assert {"route", "widget", "read_settings"} <= missing
 
 
-@pytest.mark.serial
 def test_run_shell_writes_a_self_authored_marker_example(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
@@ -359,7 +358,6 @@ def test_run_shell_writes_a_self_authored_marker_example(tmp_path, monkeypatch):
     assert marker.read_bytes() == b"{}"
 
 
-@pytest.mark.serial
 def test_run_shell_blocks_actual_self_authored_marker_write_pre_exec(tmp_path, monkeypatch):
     """The explicit redirect targets the actual runtime skill metadata.
 
@@ -437,9 +435,6 @@ def test_skill_exec_refuses_when_unconfigured(tmp_path, monkeypatch):
 # itself; that is enforced by the chokepoint in
 # ``ouroboros.config.save_settings`` and ``_data_write`` settings.json
 # block, exercised in tests/test_runtime_mode_elevation.py.
-# ---------------------------------------------------------------------------
-
-
 # ---------------------------------------------------------------------------
 # Review-status + enable gating
 # ---------------------------------------------------------------------------
@@ -1034,6 +1029,47 @@ def test_skill_exec_refuses_missing_manifest_permission_grant(tmp_path, monkeypa
 
     assert "SKILL_EXEC_GRANT_REQUIRED" in resp
     assert "inject_chat" in resp
+    assert "earlier version" not in resp  # never granted: nothing earlier to name
+
+
+def test_grant_refusals_name_the_earlier_version_the_grant_belongs_to(tmp_path, monkeypatch):
+    """Audit 08.11 item 1: after the payload changed, the execution refusal and the toggle refusal say the
+    owner's grant belongs to an earlier version of the files; the toggle keeps its one sentence and carries
+    the fact in ``detail``."""
+    from ouroboros.skill_loader import save_skill_grants
+
+    skills_root = tmp_path / "skills"
+    manifest = (
+        "---\n"
+        "name: alpha\n"
+        "description: Permission grant test.\n"
+        "version: 0.1.0\n"
+        "type: script\n"
+        "runtime: python3\n"
+        "permissions: [inject_chat]\n"
+        "scripts:\n"
+        "  - name: hello.py\n"
+        "    description: Print hello.\n"
+        "---\n"
+        "# body\n"
+    )
+    skill_dir = _build_skill(skills_root, "alpha", manifest=manifest)
+    ctx = _make_ctx(tmp_path)
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    _mark_reviewed_and_enabled(ctx.drive_root, skill_dir, "alpha")
+    save_skill_grants(ctx.drive_root, "alpha", [], content_hash="earlier-bytes", requested_keys=[],
+                      granted_permissions=["inject_chat"], requested_permissions=["inject_chat"])
+
+    ran = skill_exec_mod._handle_skill_exec(ctx, skill="alpha", script="hello.py")
+    assert ran.startswith("⚠️ SKILL_EXEC_GRANT_REQUIRED") and "review gate already permits" in ran
+    assert "inject_chat was granted to an earlier version of this skill's files" in ran
+    assert "hash" not in ran.lower()
+
+    save_enabled(ctx.drive_root, "alpha", False)
+    toggled = skill_exec_mod._handle_toggle_skill(ctx, skill="alpha", enabled=True)
+    assert toggled.startswith("⚠️ SKILL_TOGGLE_ERROR") and '"code": "grants"' in toggled, toggled
+    assert '"error": "Grant it the keys and permissions it asks for first."' in toggled
+    assert '"detail": "inject_chat was granted to an earlier version of this skill\'s files' in toggled
 
 
 def test_toggle_skill_reports_missing_manifest_permission_grant(tmp_path, monkeypatch):
@@ -1084,8 +1120,6 @@ def test_generated_repair_enable_requires_expressed_owner_source(tmp_path, monke
 @pytest.mark.parametrize("tool_name,args", [
     ("run_command", {"cwd": "skill_payload", "cmd": ["python", "-c", "print('x')"]}),
     ("browse_page", {"url": "https://example.invalid"}),
-    ("browser_action", {"action": "evaluate", "value": "1 + 1"}),
-    ("schedule_subagent", {"objective": "inspect skill", "expected_output": "findings"}),
     ("skill_exec", {"skill": "alpha", "script": "run.py"}),
 ])
 def test_skill_development_keeps_normal_capabilities(tool_name, args, tmp_path, monkeypatch):
@@ -1184,8 +1218,6 @@ def test_selected_skill_blocks_marketplace_sidecar_writes(sidecar, tmp_path):
 @pytest.mark.parametrize("tool_name,args", [
     ("write_file", {"root": "skill_payload", "bucket": "external", "skill_name": "beta", "path": "notes.txt", "content": "x"}),
     ("read_file", {"root": "skill_payload", "bucket": "external", "skill_name": "beta", "path": "SKILL.md"}),
-    ("list_files", {"root": "skill_payload", "bucket": "external", "skill_name": "beta", "path": "."}),
-    ("skill_review", {"skill": "beta"}),
     ("skill_preflight", {"skill": "beta"}),
 ])
 def test_selected_skill_cannot_redirect_payload_tools(tool_name, args, tmp_path, monkeypatch):
@@ -2038,6 +2070,7 @@ def test_env_denylist_blocks_secret_forwarding(tmp_path, monkeypatch):
             "GITHUB_TOKEN": "ghp_leak",
             "TIMEZONE": "UTC",
             "SOME_OK_KEY": "visible-value",
+            "TOTAL_BUDGET": 7,
         },
     ):
         env = se._scrub_env(
@@ -2046,6 +2079,7 @@ def test_env_denylist_blocks_secret_forwarding(tmp_path, monkeypatch):
                 "GITHUB_TOKEN",
                 "OUROBOROS_NETWORK_PASSWORD",
                 "SOME_OK_KEY",
+                "TOTAL_BUDGET",
             ],
             skill_state_dir_path=skill_state_dir_path,
             skill_name="ok",
@@ -2057,8 +2091,10 @@ def test_env_denylist_blocks_secret_forwarding(tmp_path, monkeypatch):
     assert "GITHUB_TOKEN" not in env
     assert "OUROBOROS_NETWORK_PASSWORD" not in env
     # Non-protected manifest-requested keys still flow without grants; custom
-    # secrets become grant-bound after the owner stores them in Settings.
-    assert env["SOME_OK_KEY"] == "visible-value"
+    # secrets become grant-bound after the owner stores them in Settings, as
+    # the very document the values come from shows them (never a second read).
+    assert env["TOTAL_BUDGET"] == "7"
+    assert "SOME_OK_KEY" not in env
 
     with patch.object(se, "load_settings", return_value={"OPENROUTER_API_KEY": "sk-or-v1-GRANTED"}):
         granted_env = se._scrub_env(

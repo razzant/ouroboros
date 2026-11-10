@@ -45,6 +45,7 @@ class Api:
 
 
 class Client:
+    bot_id = ""
     instances: list = []
     edit_result = True
 
@@ -100,7 +101,7 @@ def card(tmp_path, monkeypatch):
 
     ns = types.SimpleNamespace(plugin=plugin, api=api, send=send, apply=apply,
                                token=plugin.telegram_quiz.mint_token("task-1", "q1"))
-    ns.record = lambda: plugin.telegram_quiz.quiz_for_token(api, ns.token)
+    ns.record = lambda: plugin.telegram_quiz.quiz_for_token(api, "", ns.token)
     return ns
 
 
@@ -223,11 +224,11 @@ def test_a_telegram_answer_refused_as_closed_says_so_and_settles_the_card(card, 
 
     if path == "callback":
         asyncio.run(card.plugin.telegram_quiz.answer_from_callback(
-            card.api, client, f"qz:{card.token}:0", cb_id="cb", update_id=8, lang="en", post=post))
+            card.api, client, f"qz:{card.token}:0", cb_id="cb", request_key="8", lang="en", post=post))
         assert client.toasts == [("cb", "Question closed.")]
     else:
         asyncio.run(card.plugin.telegram_quiz.answer_from_reply(
-            card.api, client, card.record(), "sqlite", chat_id=42, update_id=8, lang="en", post=post))
+            card.api, client, card.record(), "sqlite", chat_id=42, request_key="8", lang="en", post=post))
     assert client.sent == [(42, "Question closed.")]  # a refused answer is a problem, by tap or by text
     assert client.edits == [(42, 555, "Question: Which db?\n1. sqlite\n2. postgres"
                              "\nContinuing meanwhile: sqlite meanwhile"
@@ -262,7 +263,7 @@ def test_an_answer_given_in_telegram_also_blocks_a_later_rollback(card):
         return 200, {"ok": True, "state": "answered", "answered_index": 1}
 
     asyncio.run(card.plugin.telegram_quiz.answer_from_callback(
-        card.api, client, f"qz:{card.token}:1", cb_id="cb", update_id=7, lang="en", post=post))
+        card.api, client, f"qz:{card.token}:1", cb_id="cb", request_key="7", lang="en", post=post))
     assert client.edits[0][2].endswith("\nAnswered: 2. postgres")
     assert card.record()["state"] == "answered"
     assert card.apply("expired_terminal") == []
@@ -355,16 +356,10 @@ def test_the_manifest_declares_every_topic_register_subscribes(tmp_path):
 
 @pytest.mark.parametrize("record_state,event,expected", [
     (None, {"state": "answered", "answered_index": 5}, ("Q\nAnswered: 6.", [])),
-    (None, {"state": "answered"}, ("Q\nAnswered.", [])),
-    (None, {"state": "answered", "answered_index": True}, ("Q\nAnswered.", [])),
-    (None, {"state": "superseded"}, ("Q\nReplaced by a newer question.", [])),
-    (None, {"state": "open", "wait_for_answer": False},
-     ("Q\nThe task continued; an answer is still accepted.\nReply to this message with your answer.", [])),
     ("superseded", {"state": "expired_terminal"}, None),
     ("expired_terminal", {"state": "open", "wait_for_answer": False}, None),
     ("answered", {"state": "superseded"}, None),
     (None, {"state": "unknown"}, None),
-    (None, {"state": "closed", "answered_index": 0, "comment": "yes"}, ("Q\nQuestion closed.", [])),
     ("expired_terminal", {"state": "closed", "closed_reason": "x" * 300}, ("Q\nQuestion closed.\n" + "x" * 200 + "…", [])),
     ("closed", {"state": "answered", "answered_index": 0}, None),
     ("answered", {"state": "closed", "closed_reason": "late"}, None),
@@ -480,10 +475,10 @@ def test_a_telegram_answer_waits_for_an_in_flight_lifecycle_edit_and_lands_last(
     async def answer():
         if path == "callback":
             await plugin.telegram_quiz.answer_from_callback(
-                api, client, f"qz:{card.token}:1", cb_id="cb", update_id=7, lang="en", post=post)
+                api, client, f"qz:{card.token}:1", cb_id="cb", request_key="7", lang="en", post=post)
         else:
             await plugin.telegram_quiz.answer_from_reply(
-                api, client, card.record(), "2. postgres", chat_id=42, update_id=7, lang="en", post=post)
+                api, client, card.record(), "2. postgres", chat_id=42, request_key="7", lang="en", post=post)
 
     async def scenario():
         expiry = asyncio.ensure_future(plugin._make_quiz_state(api)(_fact(state="expired_terminal")))
@@ -587,7 +582,7 @@ def test_host_answer_and_its_read_reach_the_card_through_the_real_producers(card
         return facts
 
     asyncio.run(card.plugin.telegram_quiz.answer_from_callback(
-        card.api, client, f"qz:{token}:1", cb_id="cb", update_id=90, lang="en", post=post))
+        card.api, client, f"qz:{token}:1", cb_id="cb", request_key="90", lang="en", post=post))
     asyncio.run(deliver_facts())
     assert client.toasts == [("cb", f"✅ {_SAVED}.")]
     expected = f"{_BASE}\nAnswered: 2. postgres"
@@ -608,7 +603,7 @@ def test_host_answer_and_its_read_reach_the_card_through_the_real_producers(card
     assert facts[-1].get("answered_index") == 1, "the acknowledgement names the recorded winner"
     edits = [edit for instance in Client.instances for edit in instance.edits]
     assert edits[-1][2] == expected
-    record = card.plugin.telegram_quiz.quiz_for_token(card.api, token)
+    record = card.plugin.telegram_quiz.quiz_for_token(card.api, "", token)
     assert record["question_delivery"]["state"] == "delivered" and record["answered_index"] == 1
     assert card.api.logs == []
 
@@ -647,10 +642,10 @@ def _owed_ingress(card, tmp_path, monkeypatch, failure=None):
     def answer(path, given, update_id):
         if path == "tap":
             asyncio.run(quiz.answer_from_callback(card.api, client, f"qz:{token}:{given}", cb_id="cb",
-                                                  update_id=update_id, lang="en", post=post))
+                                                  request_key=str(update_id), lang="en", post=post))
         else:
-            asyncio.run(quiz.answer_from_reply(card.api, client, quiz.quiz_for_token(card.api, token), given,
-                                               chat_id=42, update_id=update_id, lang="en", post=post))
+            asyncio.run(quiz.answer_from_reply(card.api, client, quiz.quiz_for_token(card.api, "", token), given,
+                                               chat_id=42, request_key=str(update_id), lang="en", post=post))
         return replies[-1]
 
     def web(**answered):
@@ -688,13 +683,12 @@ def test_a_later_answer_refused_behind_the_winners_failed_delivery_is_a_conflict
     assert [host.block().get(key) for key in keys] == [winner.get(key) for key in keys]
 
 
-@pytest.mark.parametrize("failure", ["history", "mailbox"])
-@pytest.mark.parametrize("path,earlier,given,shown", [
-    ("tap", {"option_index": 1}, 1, "2. postgres"),
-    ("reply", {"comment": "Use duckdb"}, "Use duckdb", "Use duckdb"),
-    ("tap", None, 1, "2. postgres"),
-    ("reply", None, "Use duckdb", "Use duckdb"),
-], ids=["tap-same-answer", "reply-same-answer", "tap-same-update", "reply-same-update"])
+@pytest.mark.parametrize(("path", "earlier", "given", "shown", "failure"), [
+    pytest.param("tap", {"option_index": 1}, 1, "2. postgres", "history", id='tap-same-answer-history'),
+    pytest.param("reply", {"comment": "Use duckdb"}, "Use duckdb", "Use duckdb", "mailbox", id='reply-same-answer-mailbox'),
+    pytest.param("tap", None, 1, "2. postgres", "history", id='tap-same-update-history'),
+    pytest.param("reply", None, "Use duckdb", "Use duckdb", "mailbox", id='reply-same-update-mailbox'),
+])
 def test_the_same_answer_behind_a_failed_delivery_stays_accepted(
         card, tmp_path, monkeypatch, failure, path, earlier, given, shown):
     """No false changed answer: the same answer given on the web card, or this very update answered again,

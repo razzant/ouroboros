@@ -69,6 +69,13 @@ test('the sender line signs a wake-up final and leaves every other bubble alone'
     assert.equal(senderLabel('user', false, '', { initiator: 'consciousness' }), 'You');
 });
 
+test('the owner reads "You" on his own words from another window; a Telegram message keeps its source', () => {
+    // Audit 05.11 (U008): no `WebUI (<session id>)` on the owner's own message.
+    assert.equal(senderLabel('user', false, '', { senderSessionId: 'f3a9c2d1e8b7' }), 'You');
+    assert.equal(senderLabel('user', false, '', { source: 'telegram' }), 'Telegram');
+    assert.equal(senderLabel('user', false, '', { source: 'telegram', senderLabel: 'Telegram · Anton' }), 'Telegram · Anton');
+});
+
 test('Logs files a wake-up row under Consciousness by its origin fact; errors stay errors', () => {
     const wake = { initiator: 'consciousness' };
     assert.equal(categorizeLogEvent({ type: 'tool_call_finished', tool: 'read_file', is_error: false, task_id: 'w', ...wake }), 'consciousness');

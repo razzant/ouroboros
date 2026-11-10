@@ -200,10 +200,12 @@ def run_chat_viewport_smoke(
         return result
 
     def feed_wheel_point(page):
-        # .chat-live-card is overflow:hidden (web/style.css). WebKit treats
-        # that as a scrollport and does not chain the wheel to #chat-messages.
-        # The feed center is often that card. Cards are flex-start, so aim
-        # at a point on the feed that is not inside such a scrollport.
+        # A general feed gesture: aim at a point that is not inside any
+        # overflow:hidden/auto/scroll box, so the wheel reaches #chat-messages
+        # whatever sits under the pointer. A wheel aimed at a card's heading or
+        # actions is its own check (test_history_continuity_browser.py, #1524);
+        # the historical Linux report was not reproduced by card-aimed checks in
+        # macOS/Linux Chromium and Playwright WebKit; the system WKWebView is untested.
         return page.locator("#chat-messages").evaluate(
             """feed => {
                 const box = feed.getBoundingClientRect();
@@ -620,9 +622,8 @@ def run_chat_viewport_smoke(
                 state = jump_state(page)
                 assert state["remaining"] <= 6 and state["dotHidden"], state
 
-                # The reader's own wheel leaves the live edge. Aim it outside any
-                # card scrollport (WebKit swallows a wheel there, see
-                # feed_wheel_point); only a wheel that moved nothing at all is
+                # The reader's own wheel leaves the live edge, aimed by
+                # feed_wheel_point; only a wheel that moved nothing at all is
                 # retried, inside one 30 s deadline.
                 page.evaluate("""() => {
                     window.__readerScrolls = 0;
@@ -1214,7 +1215,7 @@ def run_chat_viewport_smoke(
                 page.evaluate(_SETTLE_TWO_FRAMES)
                 assert_noop_read(page, noop_top)
                 page.screenshot(
-                    path=str(diagnostic_directory(data_dir.parent, "chat-viewport") / f"live-card-viewport-{browser_engine}.png"),
+                    path=str(diagnostic_directory(data_dir.parent, "chat-viewport", publish=True) / f"live-card-viewport-{browser_engine}.png"),
                     full_page=True,
                 )
 

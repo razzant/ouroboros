@@ -14,9 +14,10 @@ from urllib.parse import urlparse
 import pytest
 from tests import test_voice_browser as voice
 from tests import test_subscription_setup_browser as browser
+from tests._shared import answer_projects
 
 subscription_ui = browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = "/api/extensions/live_conversation/ui/synthetic/ui/"
 CALL_ID = "a" * 32
@@ -101,7 +102,8 @@ FAKES = r"""(() => {
 })();"""
 
 
-def open_call_ui(ui, monkeypatch, *, width, scheme, engine="openai", enabled=True, offered=True, projects=(), refusal=""):
+def open_call_ui(ui, monkeypatch, *, width, scheme, engine="openai", enabled=True, offered=True, projects=(), refusal="",
+                 registered=None):
     state = {"whisper": True, "voice": {"stt": "whisper-voice:stt", "tts": "", "tts_voice": ""}}
     projection = voice.projection
     include_call = False
@@ -176,8 +178,7 @@ def open_call_ui(ui, monkeypatch, *, width, scheme, engine="openai", enabled=Tru
             "call_id": CALL_ID, "ws_path": "/ws/call/" + CALL_ID, "vision": engine != "grok"}))
     page.route("**/api/call/open", admit)
     if projects:
-        page.route("**/api/projects*", lambda route: route.fulfill(
-            content_type="application/json", body=json.dumps({"projects": list(projects)})))
+        page.route("**/api/projects*", lambda route: answer_projects(route, registered or projects))
         page.route("**/api/state", lambda route: route.fulfill(content_type="application/json", body=json.dumps({
             "supervisor_ready": True, "projects": list(projects), "active_chat_activities": [],
             "active_chat_activities_complete": True})))
@@ -187,6 +188,7 @@ def open_call_ui(ui, monkeypatch, *, width, scheme, engine="openai", enabled=Tru
     page.route("**/modules/**", lambda route: route.fulfill(status=404, body="Not served by the host")
                if urlparse(route.request.url).path.startswith("/modules/") else route.fallback())
     include_call = True
+    ui["errors"].watch(page)
     page.reload()
     page.wait_for_selector("#chat-input")
     return page, posts
@@ -220,12 +222,11 @@ def test_talk_a_real_composer_and_loaded_feature(subscription_ui, monkeypatch, w
         assert len(posts) == 1 and posts[0]["chat_id"] == 1
         assert page.locator("#page-chat [data-composer-voice]").is_hidden()
         assert page.evaluate("window.__callFixture.microphones") == 1
-        if engine == "grok":
-            assert page.locator(".call-show").is_hidden()
-            assert page.locator(".call-vision-note").inner_text() == "This voice engine does not accept images."
-        else:
-            assert page.locator(".call-show").is_visible()
-            assert page.locator(".call-vision-note").count() == 0
+        # Show follows what this page can capture, never the engine's own sight: a blind route (grok) still takes a
+        # shared screen or camera and reads the exact saved frame (owner 27.10), so no engine hides Show or explains a
+        # refusal (call.js `vision`).
+        assert page.locator(".call-show").is_visible()
+        assert page.locator(".call-vision-note").count() == 0
         browser.capture(page, f"live-voice-{engine}-{width}-{scheme}")
         assert page.locator('.call-glass').evaluate("node => getComputedStyle(node).borderRadius") == radius
         page.locator('.call-size').click()
@@ -323,6 +324,44 @@ def assert_ended(page):
     }""")
 
 
+@pytest.mark.parametrize("width,scheme", [(360, "dark"), (1280, "light")])
+def test_long_captions_read_whole_while_the_call_goes_on(subscription_ui, monkeypatch, width, scheme):
+    from playwright.sync_api import expect
+    # Fewer characters than a peer's control may carry bytes, more UTF-8 bytes than that; one token never breaks.
+    said = "Синтетическая длинная реплика владельца 🐍. " * 400
+    answered = "Синтетический длинный ответ Ouroboros 🐍. " * 400 + "https://example.com/" + "синтетика" * 200
+    page, _ = open_call_ui(subscription_ui, monkeypatch, width=width, scheme=scheme, engine="gemini")
+    start_call(page)
+    page.evaluate("""([said, answered]) => {
+        const socket = __callFixture.sockets.at(-1);
+        socket.emit({type:'caption',speaker:'owner',text:said,final:true,item_id:'owner-long',replace:false});
+        socket.emit({type:'turn',turn:'answering'});
+        socket.emit({type:'caption',speaker:'ouroboros',text:answered,final:true,item_id:'answer-long',replace:false});
+        socket.emit({type:'turn',turn:'idle'});
+    }""", [said, answered])
+    assert_live(page)
+    expect(page.locator("#page-chat .call-state")).to_have_text("Listening")
+    page.locator("#page-chat .call-card-head").click()
+    text = page.locator("#page-chat .call-line.call-caption .call-line-text")
+    assert text.evaluate_all("nodes => nodes.map(node => node.textContent)") == [said, answered]
+    assert page.locator("#page-chat .call-card").evaluate("node => node.scrollWidth <= node.clientWidth"), "words wrap inside the card"
+    voice.no_page_scroll(page)
+    browser.capture(page, f"live-long-transcript-{width}-{scheme}")
+    last = page.locator("#page-chat .call-line.call-caption").last
+    last.evaluate("node => node.scrollIntoView({block: 'end'})")
+    browser.capture(page, f"live-long-transcript-end-{width}-{scheme}")
+    end = page.locator("#page-chat .call-end").bounding_box()
+    assert end and end["x"] >= 0 and end["x"] + end["width"] <= width and end["y"] + end["height"] <= 800, "End stays in reach"
+    page.locator("#page-chat .call-mute").click()
+    expect(page.locator("#page-chat .call-state")).to_have_text("Muted")
+    page.locator("#page-chat .call-mute").click()
+    expect(page.locator("#page-chat .call-state")).to_have_text("Listening")
+    assert_live(page)
+    page.locator("#page-chat .call-end").click()
+    assert_ended(page)
+    assert not subscription_ui["errors"].unexpected(), subscription_ui["errors"].report()
+
+
 @pytest.mark.parametrize("reason", ["pagehide", "panic", "device_loss", "server_stop"])
 def test_call_lifecycle_ends_capture_playback_and_socket(subscription_ui, monkeypatch, reason):
     page, _ = open_call_ui(subscription_ui, monkeypatch, width=1280, scheme="light")
@@ -397,7 +436,7 @@ def test_project_call_names_and_reveals_its_room_across_navigation(subscription_
     projects = [{"id": "voice-room", "name": "Voice project", "chat_id": 71, "lifecycle": "active"},
                 {"id": "other-room", "name": "Other project", "chat_id": 72, "lifecycle": "active"}]
     page, posts = open_call_ui(subscription_ui, monkeypatch, width=1280, scheme="light",
-                               projects=projects[1:] if from_reference else projects)
+                               projects=projects[1:] if from_reference else projects, registered=projects)
     if from_reference:
         page.evaluate("project => window.dispatchEvent(new CustomEvent('ouro:open-project', {detail: {project}}))", projects[0])
     else:
@@ -437,7 +476,7 @@ def test_composer_inserted_text_restores_send(subscription_ui, monkeypatch, widt
     talk = page.locator("#page-chat [data-call-entry='talk']")
     talk.wait_for()
     page.locator("#page-chat [data-composer-plus]").click()
-    page.get_by_role("menuitem", name="Make a button with Ouroboros…").click()
+    page.get_by_role("menuitem", name="Make a button…").click()
     expect(page.locator("#chat-input")).not_to_have_value("")
     expect(page.locator("#page-chat .chat-send-inline")).to_have_text("Send")
     assert not posts
@@ -498,8 +537,12 @@ def test_catalog_settings_save_and_client_devices(subscription_ui, monkeypatch, 
     form.locator('[name="thinking"]').select_option(thinking['thinking_levels'][-1])
     grok = by_id['grok_realtime:grok']
     form.locator('[name="provider"]').select_option(grok['id'])
-    assert_catalog_model(grok, next(model for model in grok['models'] if model['default']))
-    expect(form.locator('[name="thinking"]')).to_have_value('none')
+    grok_model = next(model for model in grok['models'] if model['default'])
+    assert_catalog_model(grok, grok_model)
+    # Another engine starts at its own default, not at the level chosen for the last one, and names it (owner 28.10).
+    expect(form.locator('[name="thinking"]')).to_have_value('')
+    expect(form.locator('[name="thinking"] option[value=""]')).to_have_text(
+        f"Default ({grok_model['thinking_default'] or grok_model['thinking_levels'][0]})")
     expect(form).not_to_contain_text('Google does not offer Gemini Live in Russia or Belarus.')
     form.locator('[name="provider"]').select_option('openai_realtime:openai')
     expect(form.locator('[data-call-memory]')).to_contain_text('not yet measured')

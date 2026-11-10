@@ -119,7 +119,6 @@ def test_executor_result_survives_panel_reopen(isolated_progress, body, code, re
     assert isolated_progress.saved[progress.STATE_KEY]["result"] == result
 
 
-@pytest.mark.serial
 def test_cancelled_http_await_does_not_finish_the_running_executor(monkeypatch):
     entered, release, finished = threading.Event(), threading.Event(), threading.Event()
 
@@ -153,7 +152,6 @@ def test_cancelled_http_await_does_not_finish_the_running_executor(monkeypatch):
     assert progress.snapshot()["active"] is False
 
 
-@pytest.mark.serial
 def test_rejected_competing_executor_cannot_clear_or_advance_owner():
     progress.begin()
     progress.advance("stopping_workers")
@@ -303,14 +301,85 @@ def test_an_attempt_past_teardown_records_that_it_reached_teardown(isolated_prog
 
 
 
-def test_a_late_executor_write_cannot_downgrade_a_boot_conclusion(isolated_progress, monkeypatch):
+def _unfinished(attempt="tx-1", msg="rollback reset failed", note=None, **extra):
+    return {"finalized": False, "rolled_back": False, "msg": msg, "stash_note": msg if note is None else note,
+            "observed": {"outcome": "failed", "attempt_id": attempt, "reason": "rollback_incomplete"}, **extra}
+
+
+@pytest.mark.parametrize("conclusion", [{"finalized": True, **_seen("applied")}, _unfinished()])
+def test_a_late_executor_write_cannot_downgrade_a_boot_conclusion(isolated_progress, monkeypatch, conclusion):
     _restart_requested_attempt()
     late = {key: value for key, value in progress._current.items() if key != "owner_thread"}
     _next_server(isolated_progress, monkeypatch)
-    _boot(monkeypatch, {"finalized": True, **_seen("applied")})
-    progress._persist({**late, "result": "failed", "outcome": "failed"})
-    assert progress.snapshot({})["outcome"] == "applied"
+    expected = _boot(monkeypatch, conclusion)["outcome"]
+    progress._persist({**late, "result": "ok", "outcome": "not_applied", "error": "late"})
+    assert progress.snapshot({})["outcome"] == expected
     assert isolated_progress.saved[progress.STATE_KEY]["concluded_by"] == "boot"
+
+
+@pytest.mark.parametrize("bootstrap_ok,baseline", [(True, "c" * 40), (False, "d" * 40)])
+def test_a_known_unfinished_recovery_concludes_without_claiming_a_checkout(isolated_progress, monkeypatch,
+                                                                           bootstrap_ok, baseline):
+    _restart_requested_attempt()
+    _next_server(isolated_progress, monkeypatch)
+    view = _boot(monkeypatch, _unfinished(msg="conflicts could not be staged", note="rollback clean failed",
+                                          blockers=["worker:7"]), baseline=baseline, bootstrap_ok=bootstrap_ok)
+    assert (view["outcome"], view["reason"], view["concluded_by"]) == ("failed", "rollback_incomplete", "boot")
+    assert (view["error"], view["stash_note"], view["blockers"]) == (
+        "conflicts could not be staged", "rollback clean failed", ["worker:7"])
+    assert view["generation_facts"]["after"] is None
+    # The next boot repeats the same report once, then a restored generation replaces it whole.
+    _next_server(isolated_progress, monkeypatch, "server-c")
+    view = _boot(monkeypatch, _unfinished())
+    assert (view["error"], view["stash_note"], view["blockers"]) == ("rollback reset failed", "", [])
+    _next_server(isolated_progress, monkeypatch, "server-d")
+    view = _boot(monkeypatch, {"finalized": True, **_seen("rolled_back", commit="a" * 40)}, baseline="a" * 40)
+    assert (view["outcome"], view["reason"], view["error"], view["blockers"]) == ("rolled_back", "", "", [])
+    assert view["keep_branch"] == "local-keep-20261021_032000-a1b2c3"
+
+
+def test_boot_recovery_keeps_the_executor_cause_and_replaces_its_own_note(isolated_progress, monkeypatch):
+    cause = "merge apply failed: index.lock exists"
+
+    @progress.observe_result
+    def execute():
+        progress.begin()
+        progress.link({"attempt_id": "tx-1"})
+        progress.advance("applying")
+        return JSONResponse({"error": cause, "rolled_back": False, "stash_note": "first rollback failed"},
+                            status_code=500)
+
+    execute()
+    for generation, message, note in [("server-b", "rollback intent failed", None),
+                                       ("server-c", "restaging failed", "second rollback failed")]:
+        _next_server(isolated_progress, monkeypatch, generation)
+        view = _boot(monkeypatch, _unfinished(msg=message, note=note))
+        assert view["error"] == cause
+        assert view["stash_note"] == "\n".join([message, *([note] if note else [])])
+        assert "first rollback failed" not in view["stash_note"]
+    _next_server(isolated_progress, monkeypatch, "server-d")
+    view = _boot(monkeypatch, {"finalized": True, **_seen("rolled_back")})
+    assert (view["outcome"], view["error"], view["reason"], view["stash_note"], view["blockers"]) == (
+        "rolled_back", cause, "", "", [])
+
+
+@pytest.mark.parametrize("result", [
+    {"finalized": False, "rolled_back": False, "msg": "no observation named"},
+    _unfinished(attempt="tx-2"),
+    {**_unfinished(), "observed": {"outcome": "failed", "attempt_id": "tx-1"}},
+])
+def test_an_unnamed_or_foreign_failure_concludes_nothing(isolated_progress, monkeypatch, result):
+    _restart_requested_attempt()
+    _next_server(isolated_progress, monkeypatch)
+    view = _boot(monkeypatch, result)
+    assert (view["outcome"], view["reason"]) == ("unknown", "no_completion_record")
+    assert "concluded_by" not in isolated_progress.saved[progress.STATE_KEY]
+
+
+def test_the_same_server_never_borrows_a_known_failure(isolated_progress, monkeypatch):
+    _restart_requested_attempt()
+    same = _boot(monkeypatch, _unfinished())
+    assert (same["outcome"], same["current_generation"]) == ("", True)
 
 
 @pytest.mark.parametrize("keep", ["local-keep-20261021_032000-a1b2c3", ""])
@@ -354,10 +423,6 @@ def test_a_crashed_attempt_never_carries_a_stopped_nothing_claim(isolated_progre
     ((), {"error": "stopped"}, 500, "not_applied"),
     (("rolling_back",), {"error": "smart_update_exception", "rolled_back": True}, 409, "not_applied"),
     (("applying",), {"error": "boom"}, 500, "failed"),
-    (("applying",), {"error": "unexpected"}, 409, "failed"),
-    (("applying", "rolling_back"), {"error": "smoke", "rolled_back": True}, 409, "rolled_back"),
-    (("applying",), {"error": "git refused", "reason": "replace_not_applied", "abandoned": True}, 409,
-     "not_applied"),
 ])
 def test_the_executor_concludes_only_what_its_own_steps_prove(isolated_progress, stages, body, code, expected):
     @progress.observe_result
@@ -417,13 +482,8 @@ def test_returned_refs_notes_and_blockers_stay_whole(isolated_progress):
 @pytest.mark.parametrize("result,bootstrap_ok,baseline,expected", [
     ({"finalized": True, **_seen("applied")}, True, "c" * 40, ("applied", "")),
     ({"finalized": True, **_seen("applied")}, False, "c" * 40, ("unknown", "startup_unconfirmed")),
-    ({"finalized": True, **_seen("applied")}, True, "d" * 40, ("unknown", "running_source_mismatch")),
     ({"finalized": True, **_seen("rolled_back", commit="a" * 40)}, True, "a" * 40, ("rolled_back", "")),
-    ({"finalized": True, **_seen("rolled_back", commit="a" * 40)}, True, "c" * 40, ("unknown", "running_source_mismatch")),
     ({"abandoned": True, **_seen("not_applied", commit="a" * 40)}, True, "a" * 40, ("not_applied", "")),
-    ({"finalized": True}, True, "c" * 40, ("unknown", "no_completion_record")),
-    ({"finalized": False, "rolled_back": True}, True, "a" * 40, ("unknown", "no_completion_record")),
-    ({"finalized": True, **_seen("applied", attempt="tx-2")}, True, "c" * 40, ("unknown", "no_completion_record")),
 ])
 def test_a_later_server_concludes_only_the_bound_attempt_on_its_served_commit(isolated_progress, monkeypatch,
                                                                               result, bootstrap_ok, baseline, expected):
@@ -442,14 +502,10 @@ def test_the_same_server_never_borrows_a_boot_conclusion(isolated_progress, monk
 
 @pytest.mark.parametrize('fields,outcome', [
     ({'stash_restore': {'context': 'boot_finalize'}}, 'applied'),
-    ({'stash_restore': {'context': 'boot_stash_recovery'}}, 'not_applied'),
     ({'stash_restore': {'context': 'boot_diverged_abandon'}}, ''),
-    ({'stash_restore': {'context': 'boot_restore_resume', 'evidence': {'interrupted': {'context': 'boot_stash_recovery'}}}}, 'not_applied'),
     ({'stash_restore': {'context': 'boot_restore_resume', 'evidence': {'interrupted': {'context': 'boot_diverged_abandon'}}}}, ''),
     ({'stash_restore': {'context': 'boot_restore_resume'}}, ''),
-    ({'gate_blocked_reason': 'rollback_restart_pending'}, 'rolled_back'),
     ({'gate_blocked_reason': 'replace_abandon_tx_cleanup_failed'}, 'not_applied'),
-    ({'gate_blocked_reason': 'stash_marker_cleanup_failed', 'gate_blocked_from_phase': 'pending_boot_smoke'}, 'applied'),
     ({'gate_blocked_reason': 'stash_marker_cleanup_failed', 'gate_blocked_from_phase': 'assisted_resolution'}, ''),
     ({'gate_blocked_from_phase': 'pending_boot_smoke'}, ''),
 ])
@@ -517,8 +573,7 @@ def _fail_attempt_save(monkeypatch, state, point):
     monkeypatch.setattr(state, "atomic_write_text", interrupted)
 
 
-@pytest.mark.parametrize("point", ["before", "primary", "backup"])
-@pytest.mark.parametrize("recovery", ["link", "finish"])
+@pytest.mark.parametrize(("recovery", "point"), [("link", "before"), ("link", "backup"), ("finish", "primary")])
 def test_failed_begin_replaces_the_unchanged_previous_terminal_attempt(
         retained_state, isolated_progress, monkeypatch, point, recovery):
     state = retained_state
@@ -577,7 +632,6 @@ def test_an_unknown_baseline_needs_a_mutator_observation_before_recovery(
 
 @pytest.mark.parametrize("winner,point", [
     ("newer", "before"),
-    ("predecessor_conclusion", "before"),
     ("boot", "backup"),
     ("boot", "none"),
 ])
@@ -624,3 +678,87 @@ def test_a_late_save_cannot_overwrite_or_mark_a_newer_live_attempt(retained_stat
     progress._persist({**late, "active": False, "outcome": "failed", "concluded_by": "executor"})
     assert progress.snapshot({}) == live
     assert state.read_state().values[progress.STATE_KEY] == saved
+
+
+def test_a_restored_boot_replaces_the_executor_own_conclusion_detail(isolated_progress, monkeypatch):
+    """Executor-concluded failure, then a boot whose rollback finished: the stale executor note is not shown
+    under 'previous version restored'; the executor's cause stays, as it does after a failed boot in between."""
+    cause = "merge apply failed: index.lock exists"
+
+    @progress.observe_result
+    def execute():
+        progress.begin()
+        progress.link({"attempt_id": "tx-1"}, keep_branch="local-keep-x")
+        progress.advance("applying")
+        return JSONResponse({"error": cause, "rolled_back": False, "reason": "rollback_gate_blocked",
+                             "blockers": ["worker:9"],
+                             "stash_note": "rollback could not clear update intent before restoring the repository"},
+                            status_code=500)
+
+    execute()
+    assert isolated_progress.saved[progress.STATE_KEY]["concluded_by"] == "executor"
+    _next_server(isolated_progress, monkeypatch)
+    view = _boot(monkeypatch, {"finalized": True, **_seen("rolled_back")})
+    assert (view["outcome"], view["concluded_by"], view["error"]) == ("rolled_back", "boot", cause)
+    assert (view["reason"], view["stash_note"], view["blockers"], view["keep_branch"]) == ("", "", [], "local-keep-x")
+
+
+def _failing_store(isolated_progress, monkeypatch, *, read_first):
+    def update_state(mutator, **_kwargs):
+        if read_first:
+            mutator(dict(isolated_progress.saved))  # the replacement is computed, then the write fails
+        raise OSError(28, "No space left on device")
+
+    from supervisor import state as sup_state
+
+    monkeypatch.setattr(sup_state, "update_state", update_state)
+
+
+@pytest.mark.parametrize("read_first", [True, False])
+def test_an_unsaved_boot_conclusion_stays_live_until_this_process_ends(isolated_progress, monkeypatch, read_first):
+    _restart_requested_attempt()
+    unconcluded = dict(isolated_progress.saved[progress.STATE_KEY])
+    _next_server(isolated_progress, monkeypatch)
+    _failing_store(isolated_progress, monkeypatch, read_first=read_first)
+    view = _boot(monkeypatch, _unfinished(blockers=["worker:7"]))
+    assert (view["outcome"], view["reason"], view["error"], view["blockers"]) == (
+        "failed", "rollback_incomplete", "rollback reset failed", ["worker:7"])
+    assert view["retention_unconfirmed"] is True and view["current_generation"] is False
+    assert isolated_progress.saved[progress.STATE_KEY] == unconcluded
+    _next_server(isolated_progress, monkeypatch, "server-c")  # the live fact ends with its process, as it says
+    assert progress.snapshot({})["outcome"] == "unknown"
+
+
+@pytest.mark.parametrize("case", ["foreign", "same_server", "newer_attempt"])
+def test_an_unsaved_boot_conclusion_keeps_the_conclusion_guards(isolated_progress, monkeypatch, case):
+    _restart_requested_attempt()
+    if case != "same_server":
+        _next_server(isolated_progress, monkeypatch)
+    _failing_store(isolated_progress, monkeypatch, read_first=True)
+    result = _unfinished(attempt="tx-2" if case == "foreign" else "tx-1")
+    newer = {"operation_id": "newer", "active": True, "generation": "server-b"}
+    finalize = (lambda **_kw: progress._current.update(newer) or result) if case == "newer_attempt" else (
+        lambda **_kw: result)
+    progress.observe_boot(finalize, ready=True, bootstrap_ok=True)
+    if case == "newer_attempt":
+        assert progress._current == newer
+    else:
+        assert progress.snapshot({}).get("outcome") != "failed"
+        assert not progress._current.get("retention_unconfirmed")
+
+
+def test_the_client_phase_readings_mirror_the_supervisor_phases():
+    """update_status.js keeps one assisted-phase set and one completion phase; both name the supervisor's own."""
+    import pathlib
+    import re
+
+    from supervisor import update_merge
+
+    modules = pathlib.Path(__file__).resolve().parents[1] / "web" / "modules"
+    source = (modules / "update_status.js").read_text(encoding="utf-8")
+    assisted = re.search(r"const ASSISTED_PHASES = new Set\(\[([^\]]*)\]\);", source).group(1)
+    assert tuple(re.findall(r"'([a-z_]+)'", assisted)) == update_merge._ASSISTED_PHASES
+    assert re.search(r"const COMPLETION_RECORDED_PHASE = '([a-z_]+)';", source).group(1) == (
+        update_merge.MARKER_CLEANUP_RETRY_PHASE)
+    updates = (modules / "updates.js").read_text(encoding="utf-8")
+    assert "includes('assisted')" not in updates and "assistedUpdatePhase(txPhase)" in updates

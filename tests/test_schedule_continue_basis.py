@@ -1,7 +1,7 @@
 import copy
+
 import pytest
 
-pytestmark = pytest.mark.serial
 
 from ouroboros.schedule_continuation import admission_basis
 from ouroboros.owner_continue import work_order_text
@@ -207,3 +207,83 @@ def test_mixed_hold_reclassification_invalidates_old_restore_identity(world):
     outcome = restore(root, registered['id'], 'combined-old-id')
     assert outcome['status'] == 'stale_hold'
     assert row(root, registered['id'])['followup_hold'] == stop_hold
+
+
+# --- the schedule's text rides every Continue to the successor and its helpers (#2764) -----------------------------
+
+CONDITION = "Do not publish anything; keep the summary in the project notes."
+
+
+def _scheduled_occurrence(*, authors=True):
+    """The frozen task an accepted occurrence runs, as ``queue_schedules._task_from_schedule`` builds it: the
+    objective and a context-only condition, each with the supplier the Schedules API door recorded (or none)."""
+    supplied = {"objective_author": {"kind": "schedule_api", "at": "2026-11-09T09:00:00+00:00"},
+                "context_author": {"kind": "schedule_api", "at": "2026-11-09T09:05:00+00:00"}} if authors else {}
+    return {"schedule_id": "digest", "token": "token", "task": {
+        "id": "pred-1", "text": "Summarize the tickets.", "context": CONDITION,
+        "task_contract": {"objective": "Summarize the tickets.", "context": CONDITION},
+        "metadata": {"schedule_id": "digest", "schedule_occurrence": {"schedule_id": "digest", "token": "token"},
+                     **supplied}}}
+
+
+def _successor_reads(task, root):
+    """The successor as its run starts: its corpus, what it hands a helper, a session and a reviewer, its cites."""
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_relay import task_words_text
+    from ouroboros.owner_words import (SCHEDULE_FIELD, cited_owner_basis, governing_words_for_schedule,
+                                       owner_words_contain, owner_words_text)
+    from ouroboros.subagent_work_order import _owner_words_section
+    from ouroboros.tools.tool_context import ToolContext
+
+    ctx = ToolContext(repo_dir=root, drive_root=root, task_id=task["id"], task_metadata=task["metadata"],
+                      task_contract=task.get("task_contract") or {})
+    _initialize_owner_directives(ctx, [{"role": "user", "content": task["text"]}])
+    handed = governing_words_for_schedule(ctx)
+    child = {"id": "child", "root_task_id": task["id"], "metadata": {"delegation_role": "subagent", **handed}}
+    renders = {"helper": task_words_text(None, child), "session": _owner_words_section({**child, **handed}),
+               "reviewer": owner_words_text(ctx, audience="reviewer")}
+    return ctx, handed.get(SCHEDULE_FIELD) or [], renders, cited_owner_basis, owner_words_contain
+
+
+def _carried(task):
+    return [(row["field"], row["content"], row.get("supplier", ""), row.get("supplied_at", ""))
+            for row in task["metadata"]["owner_corpus"] if row["source"] == "schedule_text"]
+
+
+@pytest.mark.parametrize("authors", [True, False], ids=["schedules_api", "legacy_unknown"])
+def test_a_scheduled_run_s_continue_carries_its_schedule_text_through_every_successor(tmp_path, monkeypatch, authors):
+    """One Continue and a repeated one: each successor's corpus holds the occurrence's accepted objective and its
+    context-only condition under the supplier recorded for them (an unknown one stays unknown), each successor hands
+    them to its helpers, sessions and reviewers, and none of them ever verifies as owner words, while my human's own
+    mail to the work stays theirs and citable."""
+    from tests.test_owner_continue import _install_queue, _interrupted, _owner_mail
+    from ouroboros.owner_words import OWNER_SOURCES
+    from ouroboros.task_results import write_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    _interrupted(tmp_path, reason_code="interrupted_retry_lost", schedule_admission=_scheduled_occurrence(authors=authors),
+                 origin_message_text="", origin_message_ref={})
+    _owner_mail(tmp_path)  # my human's words to the work: "Also add the charts", "Use last week's numbers"
+    expected = [("objective", "Summarize the tickets.", "schedule_api" if authors else "",
+                 "2026-11-09T09:00:00+00:00" if authors else ""),
+                ("context", CONDITION, "schedule_api" if authors else "", "2026-11-09T09:05:00+00:00" if authors else "")]
+    predecessor = "pred-1"
+    for hop in (1, 2):
+        admitted = admit_continuation(predecessor, action_nonce=f"schedule-text-{hop}")
+        assert admitted["ok"], admitted
+        successor = workers.PENDING.pop()
+        assert _carried(successor) == expected, f"hop {hop}: the accepted text, its supplier and date, unchanged"
+        ctx, handed, renders, cited_owner_basis, owner_words_contain = _successor_reads(successor, tmp_path)
+        owners = [row["content"] for row in ctx._owner_directives if row["source"] in OWNER_SOURCES]
+        assert "Use last week's numbers" in owners, "my human's words stay theirs"
+        assert [item["content"] for item in handed] == ["Summarize the tickets.", CONDITION]
+        for audience, text in renders.items():
+            assert CONDITION in text and "not my human's words" in text, (hop, audience)
+            assert ("supplied by the Schedules API" if authors else "a supplier the host did not record") in text
+        basis, refusal = cited_owner_basis(ctx, "Do not publish anything")
+        assert basis is None and refusal and not owner_words_contain(ctx, CONDITION), "never cited as owner words"
+        assert cited_owner_basis(ctx, "Use last week's numbers")[0]["source"] == "owner_mailbox"
+        write_task_result(tmp_path, successor["id"], "running", metadata=successor["metadata"])
+        write_task_result(tmp_path, successor["id"], "failed", reason_code="interrupted_retry_lost", result="again")
+        predecessor = successor["id"]

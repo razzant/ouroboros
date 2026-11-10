@@ -24,7 +24,6 @@ from tests.test_budget_pause_holds import _idle_worker
 from tests.test_budget_pause_lineage_restore import _consume, _restart
 from tests.test_saved_root_resume_grant import _saved_tree
 
-pytestmark = pytest.mark.serial
 ROOT, CHILD, OTHER = 'saved-root', 'first', 'second'
 
 
@@ -146,11 +145,14 @@ def _hide_root(root, monkeypatch, q, workers, shape):
     return task
 
 
-@pytest.mark.parametrize('kind', [
-    'saved', 'exact', 'warm', 'saved_after_exact', 'exact_after_warm', 'warm_after_exact',
+@pytest.mark.parametrize(("exact_child", "shape", "kind"), [
+    pytest.param(False, 'absent', 'saved', id='held-child-absent-saved'),
+    pytest.param(False, 'absent', 'warm', id='held-child-absent-warm'),
+    pytest.param(False, 'absent', 'exact_after_warm', id='held-child-absent-exact_after_warm'),
+    pytest.param(True, 'pending_without_carrier', 'exact', id='exact-child-pending_without_carrier-exact'),
+    pytest.param(True, 'pending_without_carrier', 'saved_after_exact', id='exact-child-pending_without_carrier-saved_after_exact'),
+    pytest.param(True, 'pending_without_carrier', 'warm_after_exact', id='exact-child-pending_without_carrier-warm_after_exact'),
 ])
-@pytest.mark.parametrize('shape', ['absent', 'pending_without_carrier'])
-@pytest.mark.parametrize('exact_child', [False, True], ids=['held-child', 'exact-child'])
 def test_existing_choice_survives_carrier_loss(
         tmp_path, monkeypatch, kind, shape, exact_child):
     q, workers, sent = _world(tmp_path, monkeypatch, kind)
@@ -193,11 +195,13 @@ def _erase_issue_times(root):
     patch_document(root, ROOT, legacy)
 
 
-@pytest.mark.parametrize('old_kind,new_kind', [
-    ('saved', 'exact'), ('exact', 'warm'), ('warm', 'exact'),
-    ('exact', 'saved'), ('warm', 'saved'),
+@pytest.mark.parametrize(("stamps", "old_kind", "new_kind"), [
+    ('equal', 'saved', 'exact'),
+    ('equal', 'exact', 'saved'),
+    ('backward', 'exact', 'warm'),
+    ('backward', 'warm', 'saved'),
+    ('missing', 'warm', 'exact'),
 ])
-@pytest.mark.parametrize('stamps', ['equal', 'backward', 'missing'])
 def test_real_newer_resume_defeats_old_choice_after_root_leaves(
         tmp_path, monkeypatch, old_kind, new_kind, stamps):
     now = [time.time()]

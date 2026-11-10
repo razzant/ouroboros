@@ -11,6 +11,8 @@ import { ANSWERABLE_QUIZ_STATES, QUIZ_LIFECYCLE, questionMark, questionPresentat
     appendQuestionReplyControls, paintChosenAnswer } from './question_presentation.js';
 import { fmt, tr, tx } from './i18n.js';
 import { syncQuestionMaterials } from './result_files.js';
+import { memberPaused } from './work_status.js';
+import { createSecretRequestForms } from './secret_hitl.js';
 import { createStatusMark, paintStatusMark } from './status_mark.js';
 
 // A question head's mark: its lifecycle's dot (question_presentation.questionMark), neutral while an answer is in
@@ -24,8 +26,19 @@ function paintQuestionHead(card, row = HEAD_ROWS.get(card)) {
         inFlight ? { shape: 'dot', hue: 'neutral' } : questionMark(row || {}));
 }
 
+// The status beside the head: the lifecycle's words, saying so when the question's task is a paused member of its
+// work (`paused`, from the instance's work projection): its answer waits for that task's Resume.
+function paintStatusText(card, row, paused) {
+    const status = card.querySelector('.chat-quiz-status-text');
+    const next = questionPresentation(row, { paused }).status;
+    if (!status || status.textContent === next) return false;
+    status.textContent = next;
+    return true;
+}
+
 // What one observation of a question carries: its identity, lifecycle, recorded answer and wait facts.
-const LIFECYCLE_FIELDS = ['task_id', 'quiz_id', 'state', 'answered_index', 'comment', 'closed_reason', 'closed_at', 'closed_actor', 'closed_request_id', 'question_delivery', ...WAIT_FIELDS];
+const LIFECYCLE_FIELDS = ['task_id', 'quiz_id', 'state', 'answered_index', 'comment', 'closed_reason', 'closed_at', 'closed_actor', 'closed_request_id', 'question_delivery',
+    'secret_outcome', 'secret_save', ...WAIT_FIELDS];
 const lifecycleOf = (row) => Object.fromEntries(LIFECYCLE_FIELDS.filter((field) => Object.hasOwn(row, field))
     .map((field) => [field, row[field]]));
 // How many questions one chat instance remembers; least recently touched first.
@@ -76,6 +89,7 @@ export function createChatDecision({
     const detailReads = new Map();
     const questionKey = (taskId, quizId) => JSON.stringify([String(taskId || ''), String(quizId || '')]);
     let disposed = false;
+    let pausedMember = () => false;  // the instance's works (syncWorks): is this task a paused member of its work?
     let questionNavigation = 0;
     let connected = true, epoch = 0;  // the socket's state and how many closes voided reads (revalidateMirror)
     // The memory is bounded: the question touched least recently goes first. Once one has gone,
@@ -125,9 +139,10 @@ export function createChatDecision({
     }
 
     // The detail projects the shared room resolver for this exact quiz. Stored task context
-    // and publication/reply addresses do not prove where its question is displayed now.
+    // and publication/reply addresses do not prove where its question is displayed now. A private
+    // Main question also shows in the Project its work lives in (`also_project_ids`).
     const questionInRoom = (room, projectId) => room?.state === 'known' && Number.isInteger(room.chat_id)
-        && (projectId ? room.project_id === String(projectId)
+        && (projectId ? room.project_id === String(projectId) || (room.also_project_ids || []).includes(String(projectId))
             : isMain && room.project_id === '' && room.chat_id === Number(chatId));
 
     // Navigation single-flights per task. A revalidation is its own read, begun after the copy it
@@ -215,8 +230,8 @@ export function createChatDecision({
     const MIRROR_SETTLE_MS = 5000;
     // Display fields a narrower delivery (the census, a lifecycle frame) may lack: an empty value
     // there never blanks what a complete row already carried.
-    const MIRROR_FIELDS = ['question', 'options', 'option_details', 'stake', 'project_name', 'assumption', 'recommended_index', 'materials'];
-    const MIRROR_SIGNATURE = ['quiz_state', ...MIRROR_FIELDS, 'answered_index', 'comment', 'closed_reason', 'question_delivery', ...WAIT_FIELDS];
+    const MIRROR_FIELDS = ['question', 'options', 'option_details', 'stake', 'project_name', 'assumption', 'recommended_index', 'materials', 'secret_request'];
+    const MIRROR_SIGNATURE = ['quiz_state', ...MIRROR_FIELDS, 'answered_index', 'comment', 'closed_reason', 'question_delivery', 'secret_outcome', 'secret_save', ...WAIT_FIELDS];
     // The pointer row in the shape of the Project's quiz row, so one normalizer reads both.
     const mirrorQuiz = (row) => ({ ...row, type: 'quiz', role: 'assistant', state: row.quiz_state });
     // An empty recorded comment and no comment are the same fact.
@@ -284,6 +299,7 @@ export function createChatDecision({
                 view.disposeMarkdown?.();
                 releaseMaterials(bubble);
                 submissions.release(card);
+                secretForms.release(card);
                 if (quizViews.get(view.key) === card) quizViews.delete(view.key);
                 const next = mountMirror(view);
                 if (!next) return false;
@@ -310,7 +326,7 @@ export function createChatDecision({
         clearTimeout(view.timer);
         view.timer = null;
         view.disposeMarkdown?.();
-        if (view.card) submissions.release(view.card);
+        if (view.card) { submissions.release(view.card); secretForms.release(view.card); }
         view.disposeMarkdown = null;
         if (mirrors.get(view.key) === view) mirrors.delete(view.key);
         if (quizViews.get(view.key) === view.card) quizViews.delete(view.key);
@@ -504,14 +520,19 @@ export function createChatDecision({
     const submissions = createQuizSubmission({ apiFetch, onDomWrite, showToast, paintHead: paintQuestionHead,
         canUse: card => !disposed && (!isMain || (connected && card.dataset.authorityStale !== '1')),
         readQuestion: quiz => readQuestion(quiz.taskId, quiz.quizId, quiz.projectId, { fresh: true }),
-        accept(card, body) {
-            if (body) {
-                const current = observe({ ...body, task_id: card.dataset.taskId, quiz_id: card.dataset.quizId });
-                if (Object.hasOwn(current, 'comment')) card.dataset.ownerComment = current.comment || '';
-                setCardState(card, current.state, current.answered_index);
-            } else setCardState(card, card.dataset.state, null);
-        },
+        accept: acceptReceipt,
     });
+    function acceptReceipt(card, body) {
+        if (body) {
+            const current = observe({ ...body, task_id: card.dataset.taskId, quiz_id: card.dataset.quizId });
+            if (Object.hasOwn(current, 'comment')) card.dataset.ownerComment = current.comment || '';
+            setCardState(card, current.state, current.answered_index);
+        } else setCardState(card, card.dataset.state, null);
+    }
+    // The protected form of an integration-secret request: no draft storage, no free answer.
+    const secretForms = createSecretRequestForms({ apiFetch, showToast, accept: acceptReceipt, paintHead: paintQuestionHead,
+        canUse: card => !disposed && (!isMain || (connected && card.dataset.authorityStale !== '1')),
+        readQuestion: quiz => readQuestion(quiz.taskId, quiz.quizId, quiz.projectId, { fresh: true }) });
     function submitAnswer(card, quiz, index, comment, _settle = setCardState, action = 'answer') {
         if (action !== 'answer') {
             if (card.dataset.submission) return;
@@ -640,12 +661,7 @@ export function createChatDecision({
                 const ended = card.querySelector('.chat-quiz-wait-ended');
                 if (ended) { ended.remove(); changed = true; }
             }
-            const status = card.querySelector('.chat-quiz-status-text');
-            const nextStatus = questionPresentation(current).status;
-            if (status && status.textContent !== nextStatus) {
-                status.textContent = nextStatus;
-                changed = true;
-            }
+            if (paintStatusText(card, current, pausedMember(current.task_id))) changed = true;
             if (paintQuestionHead(card, current)) changed = true;
             // An accepted late answer whose delivery became unknown: Main's copy lets the owner
             // stop counting it as pending. Nothing is resent; the answer and its record stay.
@@ -654,7 +670,7 @@ export function createChatDecision({
             if (removable && !remove) {
                 remove = document.createElement('button');
                 remove.type = 'button';
-                remove.className = 'chat-quiz-dismiss btn btn-xs btn-default';
+                remove.className = 'chat-quiz-dismiss btn btn-sm btn-default';
                 remove.textContent = tr('quiz.remove_unknown', 'Remove from pending');
                 remove.addEventListener('click', () => submitAnswer(card,
                     { taskId: card.dataset.taskId, quizId: card.dataset.quizId, options: [] }, null, '', setCardState, 'dismiss'));
@@ -665,6 +681,7 @@ export function createChatDecision({
                 changed = true;
             }
             if (remove) remove.disabled = isMain && (!connected || card.dataset.authorityStale === '1');
+            if (card.dataset.secretRequest === '1' && secretForms.sync(card, state, current)) changed = true;
             const buttons = card.querySelectorAll('.chat-quiz-option');
             buttons.forEach((btn, i) => {
                 const chosen = state === 'answered' && answeredIndex !== null && i === answeredIndex;
@@ -823,7 +840,8 @@ export function createChatDecision({
             card.append(note);
         }
 
-        if (complete && ANSWERABLE_QUIZ_STATES.includes(quiz.state))
+        if (quiz.secretRequest) secretForms.mount(card, quiz);
+        else if (complete && ANSWERABLE_QUIZ_STATES.includes(quiz.state))
             commentField = appendQuestionReplyControls(card, quiz, { showToast, onDomWrite,
                 submit: text => submitAnswer(card, quiz, null, text),
                 close: reason => submitAnswer(card, quiz, null, reason, setCardState, 'close') });
@@ -846,7 +864,7 @@ export function createChatDecision({
 
         if (quiz.comment) card.dataset.ownerComment = quiz.comment;
         setCardState(card, quiz.state, quiz.answeredIndex);
-        if (complete) submissions.attach(card, quiz);
+        if (complete && !quiz.secretRequest) submissions.attach(card, quiz);
         // The bubble says who asks and when: a Main copy's Project reference joins its voice line beside
         // `Ouroboros` (the mirror's one addition to the Project form), and its time line is the time alone.
         const framed = frameNode(msg, card, { voice: mirror ? [mirrorChip(mirror)] : [] });
@@ -1062,12 +1080,20 @@ export function createChatDecision({
 
     // A released node takes its views with it: a mirror's countdown and rendered markdown go too.
     function releaseViews(root) {
-        for (const [key, card] of quizViews) if (root.contains(card)) { submissions.release(card); quizViews.delete(key); }
+        for (const [key, card] of quizViews) if (root.contains(card)) { submissions.release(card); secretForms.release(card); quizViews.delete(key); }
         for (const view of [...mirrors.values()]) if (root.contains(view.bubble)) releaseMirror(view);
     }
 
     return { buildQuizCard, buildQuestionPointer, appendQuestionPointer, appendActivityQuestion, syncCurrentQuestions, observedQuestion, readQuestion, revealQuestion, setCardState, applyQuizStateFrame, renderRoutingDecision,
         releaseViews,
+        // The instance's reconciled work state (work_status.reconcileWorkState): a question whose task is paused, or
+        // resumed, says so at once; an answer still in flight keeps its own words until it settles.
+        syncWorks(state) {
+            pausedMember = (taskId) => memberPaused(state, taskId);
+            return onDomWrite(() => [...quizViews.values()].reduce((changed, card) => (HEAD_ROWS.has(card)
+                && !['sending', 'unknown', 'checking'].includes(card.dataset.submission)
+                && paintStatusText(card, HEAD_ROWS.get(card), pausedMember(card.dataset.taskId))) || changed, false));
+        },
         setConnected(value) {
             connected = value;
             if (value || !isMain) return;  // reconnection alone is no census
@@ -1084,6 +1110,7 @@ export function createChatDecision({
         destroy() {
             disposed = true;
             submissions.destroy();
+            secretForms.dispose();
             for (const view of [...mirrors.values()]) releaseMirror(view);
             observations.clear(); quizViews.clear(); detailReads.clear();
         },

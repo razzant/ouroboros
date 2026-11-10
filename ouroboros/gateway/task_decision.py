@@ -401,6 +401,10 @@ async def _close_quiz_decision(root: pathlib.Path, task_id: str, quiz_id: str,
     except ValueError as exc:
         return _refused(str(exc), 400, reason_code="malformed_decision_id")
     request_id, decision_id = str(body["request_id"]).strip(), str(body["decision_id"]).strip()
+    from ouroboros.gateway.secret_decision import cancel_secret, is_secret_question
+
+    if is_secret_question(root, task_id, quiz_id):  # the owner's close of a secret request is its cancel
+        return await run_sync_to_completion(cancel_secret, root, decision_id, task_id, quiz_id, request_id)
     try:
         _task, refusal = _live_root_task(task_id)
         if refusal == "not_a_root_task":
@@ -458,7 +462,8 @@ async def _dismiss_quiz_decision(root: pathlib.Path, family: str, task_id: str, 
     return 200, payload
 
 
-async def answer_decision(drive_root: pathlib.Path, body: Any, *, source: str = "web", _recovery: bool = False) -> Tuple[int, Dict[str, Any]]:
+async def answer_decision(drive_root: pathlib.Path, body: Any, *, source: str = "web", _recovery: bool = False,
+                          request: Optional[Request] = None) -> Tuple[int, Dict[str, Any]]:
     """The ONE decision-answer ingress, transport-neutral: ``(status, payload)``.
 
     ``POST /api/decisions`` (the browser card) and the loopback Host Service
@@ -482,7 +487,7 @@ async def answer_decision(drive_root: pathlib.Path, body: Any, *, source: str = 
     if decision_id.split(":", 1)[0] == "model_wait":
         from ouroboros.gateway.task_model_wait import answer_model_wait_decision
 
-        return await answer_model_wait_decision(drive_root, body)
+        return await answer_model_wait_decision(drive_root, body, request=request)  # its saved choice's origin
     if decision_id.split(":", 1)[0] == "card":  # its own fields (values) and its own per-press semantics
         from ouroboros.gateway.card_decision import answer_card_decision
 
@@ -568,6 +573,13 @@ async def answer_decision(drive_root: pathlib.Path, body: Any, *, source: str = 
         task_id = validate_task_id(task_id)
     except ValueError as exc:
         return _refused(str(exc), 400)
+    from ouroboros.gateway.secret_decision import is_secret_question
+
+    if is_secret_question(drive_root, task_id, quiz_id):
+        # A secret request's values travel only through its protected form; neither an
+        # option nor the comment may stand in for them or for the host's secret_filled.
+        return _refused("this secret request is answered only through its protected form "
+                        "(POST /api/decisions/secret)", 409, task_id=task_id, reason_code="secret_request_form_only")
     try:
         task, refusal = _live_root_task(task_id)
         if refusal == "not_a_root_task":
@@ -699,7 +711,7 @@ async def answer_decision(drive_root: pathlib.Path, body: Any, *, source: str = 
 async def api_decision_answer(request: Request) -> JSONResponse:
     """POST /api/decisions — idempotent owner answer for a decision card."""
     body = await request_json_or(request, {})
-    status, payload = await answer_decision(request_drive_root(request), body)
+    status, payload = await answer_decision(request_drive_root(request), body, request=request)
     return JSONResponse(payload, status_code=status)
 
 
@@ -745,7 +757,11 @@ async def recover_question_deliveries(drive_root: pathlib.Path, *, limit: int = 
                 continue
             report["attempted"] += 1
             try:
-                if block.get("state") == "answered":
+                if block.get("state") == "answered" and block.get("secret_request"):
+                    from ouroboros.gateway.secret_decision import deliver_secret_outcome
+
+                    await run_sync_to_completion(deliver_secret_outcome, drive_root, task_id, quiz_id, recovery=True)
+                elif block.get("state") == "answered":
                     if not block.get("request_id"):
                         claim_quiz_delivery(drive_root, task_id, quiz_id)
                         record_quiz_delivery_failure(drive_root, task_id, quiz_id, "answer_request_unknown")

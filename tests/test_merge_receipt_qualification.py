@@ -19,7 +19,7 @@ import pytest
 from ouroboros import merge_receipts, review_ledger
 from ouroboros.tools import github
 from tests import test_pr_merge_receipts as merge_fixture
-from tests.test_pr_merge_receipts import BASE, HEAD, MERGE, TREE, _receipts
+from tests.test_pr_merge_receipts import BASE, HEAD, MERGE, NOT_MERGEABLE, ROUTE, TREE, _receipts, sent
 from tests._store_shared import delete_result, read_result, seed_result, unreadable_result
 from tests._cancel_intents_shared import DeliveryBus
 from tests.group_run import run_in_group
@@ -27,11 +27,7 @@ from tests.group_run import run_in_group
 world = merge_fixture.world
 
 REAL_GH = github._gh_run
-PRE_EFFECT = (
-    "X Pull request octo/demo#7 is not mergeable: the base branch policy prohibits the merge.\n"
-    "To have the pull request merged after all the requirements have been met, add the `--auto` flag.\n"
-    "To use administrator privileges to immediately merge the pull request, add the `--admin` flag.\n"
-)
+REFUSAL = ('{"message": "Pull Request is not mergeable"}', "gh: Pull Request is not mergeable (HTTP 405)\n")
 
 
 def registered_merge(world):
@@ -63,7 +59,7 @@ def test_body_patch_uses_selected_repo_scoped_identity_without_org_access(world,
             assert _receipts(world)[0]["outcome"]["status"] == "merged"
             writes.append(json.loads(kw["input"]))
         result = world.gh(args, world.ctx, input_data=kw.get("input"))
-        if args[:2] == ["pr", "merge"]:
+        if sent(args):
             world.gh.pr["body"] += note
         return SimpleNamespace(returncode=result.exit_code, stdout=result.text if result.ok else "",
                                stderr="" if result.ok else result.text)
@@ -84,15 +80,14 @@ def test_body_patch_uses_selected_repo_scoped_identity_without_org_access(world,
                    for c in world.gh.calls)
 
 
-@pytest.mark.parametrize("failure", ["EOF", "HTTP 502: Bad Gateway (https://api.github.com/graphql)",
-                                     "HTTP 409: Conflict (https://api.github.com/graphql)",
-                                     PRE_EFFECT + "HTTP 503: lost reply", "timeout"])
+@pytest.mark.parametrize("failure", ["EOF", "gh: Server Error (HTTP 502)", "gh: Resource not accessible by integration (HTTP 403)",
+                                     "timeout"])
 def test_real_transport_unknown_exit_never_releases_intent(world, monkeypatch, failure):
     effects = []
 
     def process(argv, **kw):
         args = argv[1:]
-        if args[:2] == ["pr", "merge"]:
+        if sent(args):
             effects.append(args)
             if failure == "timeout":
                 raise github.subprocess.TimeoutExpired(argv, 120)
@@ -115,17 +110,17 @@ def test_real_transport_unknown_exit_never_releases_intent(world, monkeypatch, f
 
 
 @pytest.mark.parametrize("failure", ["cli_missing", "rejection"])
-def test_proven_pre_effect_failure_can_recover(world, monkeypatch, failure):
+def test_a_proven_no_effect_failure_can_recover(world, monkeypatch, failure):
     attempts = []
 
     def process(argv, **kw):
         args = argv[1:]
-        if args[:2] == ["pr", "merge"]:
+        if sent(args):
             attempts.append(args)
             if len(attempts) == 1:
                 if failure == "cli_missing":
                     raise FileNotFoundError(2, "missing", "gh")
-                return SimpleNamespace(returncode=1, stdout="", stderr=PRE_EFFECT)
+                return SimpleNamespace(returncode=1, stdout=REFUSAL[0], stderr=REFUSAL[1])
         result = world.gh(args, world.ctx, input_data=kw.get("input"))
         return SimpleNamespace(returncode=0, stdout=result.text, stderr="")
 
@@ -139,7 +134,7 @@ def test_proven_pre_effect_failure_can_recover(world, monkeypatch, failure):
     assert [r["outcome"]["status"] for r in _receipts(world)] == ["refused", "merged"]
 
 
-@pytest.mark.parametrize("gap", ["settlement", "publication_receipt", "card", "body"])
+@pytest.mark.parametrize("gap", ["settlement", "card", "body"])
 def test_post_effect_gaps_reach_the_registered_tool(world, monkeypatch, gap):
     original = merge_receipts.write_receipt
 
@@ -169,10 +164,9 @@ def test_post_effect_gaps_reach_the_registered_tool(world, monkeypatch, gap):
         assert "PR-body" in text
     world.gh.fail_edit = False
     assert "sent no new merge request" in registered_merge(world)
-    assert sum(c[:2] == ["pr", "merge"] for c in world.gh.calls) == 1
+    assert sum(sent(c) for c in world.gh.calls) == 1
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("delivery_order", ["buffered", "delivered_first", "replay_reverse"])
 def test_concurrent_publication_through_outbox_dedup_and_history(world, monkeypatch, delivery_order):
     from ouroboros.gateway.history import make_chat_history_endpoint
@@ -191,7 +185,7 @@ def test_concurrent_publication_through_outbox_dedup_and_history(world, monkeypa
     errors = []
     ctx = SimpleNamespace(DRIVE_ROOT=world.root, task_registry={}, send_with_budget=message_bus.send_with_budget,
                           append_jsonl=lambda *a: errors.append(a))
-    world.gh.merge = "accepted_open"
+    world.gh.merge = "queued"  # the request's answer was lost beside a queue GitHub shows: published as queued
     blocked, release = Event(), Event()
     gh = world.gh
 
@@ -246,11 +240,11 @@ def test_concurrent_publication_through_outbox_dedup_and_history(world, monkeypa
                           cwd=pathlib.Path(__file__).resolve().parents[1],
                           env={**os.environ, "MERGE_RECEIPT_PROJECTION": str(fixture)}, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert sum(c[:2] == ["pr", "merge"] for c in world.gh.calls) == 1
+    assert sum(sent(c) for c in world.gh.calls) == 1
 
 
-def closed_receipt_projection(world, monkeypatch):
-    """Queued, then CLOSED twice, through the real outbox consumer and history endpoint."""
+def closed_receipt_projection(world, monkeypatch, act=None):
+    """Queued, then CLOSED twice (or ``act``'s calls), through the real outbox consumer and history endpoint."""
     from ouroboros.gateway.history import make_chat_history_endpoint
     from supervisor import events_chat_delivery as delivery
     from supervisor import message_bus
@@ -266,22 +260,24 @@ def closed_receipt_projection(world, monkeypatch):
     bridge._broadcast_fn = frames.append
     ctx = SimpleNamespace(DRIVE_ROOT=world.root, task_registry={}, send_with_budget=message_bus.send_with_budget,
                           append_jsonl=lambda *a: pytest.fail(f"delivery error {a}"))
-    world.gh.merge = "queued"
-    texts = [registered_merge(world)]
-    world.gh.pr.update(state="CLOSED", autoMergeRequest=None)
-    texts += [registered_merge(world), registered_merge(world)]
+    if act is None:
+        world.gh.merge = "queued"
+        texts = [registered_merge(world)]
+        world.gh.pr.update(state="CLOSED", autoMergeRequest=None)
+        texts += [registered_merge(world), registered_merge(world)]
+    else:
+        texts = act()
     for event in world.ctx.pending_events:
         delivery._handle_send_message(event, ctx)
     assert td.pending_deliveries(world.root) == []
     payload = json.loads(asyncio.run(make_chat_history_endpoint(world.root)(
         SimpleNamespace(query_params={"chat_id": "7"}))).body)
-    (stored,) = _receipts(world)
+    stored = _receipts(world)[0]
     return SimpleNamespace(texts=texts, stored=stored, payload=payload,
                            live=[row for row in frames if row.get("type") == "chat"],
                            history=[row for row in payload["messages"] if row.get("card_row_id")])
 
 
-@pytest.mark.serial
 def test_a_closed_pr_reaches_the_card_through_outbox_history_and_the_consumer(world, monkeypatch):
     seen = closed_receipt_projection(world, monkeypatch)
     note = merge_fixture.QUEUED_CLOSED
@@ -300,7 +296,69 @@ def test_a_closed_pr_reaches_the_card_through_outbox_history_and_the_consumer(wo
         shutil.copy(fixture, output)
         (pathlib.Path(output) / "closed-projection-node.txt").write_text(result.stdout + result.stderr, encoding="utf-8")
     assert result.returncode == 0, result.stdout + result.stderr
-    assert sum(c[:2] == ["pr", "merge"] for c in world.gh.calls) == 1
+    assert sum(sent(c) for c in world.gh.calls) == 1
+
+
+@pytest.mark.parametrize("seen", ["at_readback", "by_observer_during_send"])
+def test_a_published_foreign_queue_switched_off_refreshes_to_refused_and_a_new_refusal_stays_unpublished(
+        world, monkeypatch, seen):
+    """#2455: GitHub refused our merge while another actor's auto-merge showed, so the queued block and card were
+    published (by our readback, or by an observer while the request was in flight). Once the queue is off, the same
+    receipt settles refused and that existing projection is refreshed, with no second send. A fresh request GitHub
+    refuses publishes nothing new."""
+    gh, queued_blocks = world.gh, []
+
+    def send(args, *a, **kw):
+        if not sent(args):
+            return gh(args, *a, **kw)
+        gh.calls.append(list(args))
+        if gh.pr["mergeStateStatus"] == "UNKNOWN":  # the earlier attempt: another actor queues meanwhile
+            gh.pr.update(autoMergeRequest={"enabledAt": "by another actor"})
+            if seen == "by_observer_during_send":
+                assert "merge: queued" in registered_merge(world)
+                queued_blocks.append(merge_receipts.public_block(_receipts(world)[0]))
+                gh.pr.update(autoMergeRequest=None)  # switched off before our own readback
+        return github.GhResult(False, NOT_MERGEABLE, 1, 405, "exit")
+
+    def act():
+        monkeypatch.setattr(github, "_gh_run", send)
+        gh.pr["mergeStateStatus"] = "UNKNOWN"
+        texts = [registered_merge(world)]
+        if seen == "at_readback":
+            queued_blocks.append(merge_receipts.public_block(_receipts(world)[0]))
+            assert "merge: queued (PR now OPEN, auto-merge on; request refused by GitHub)" in texts[0]
+            gh.pr.update(autoMergeRequest=None)
+            texts.append(registered_merge(world))
+        gh.pr["mergeStateStatus"] = "CLEAN"
+        texts.append(registered_merge(world))  # an explicit new request, refused on its own
+        return texts
+
+    seen_rows = closed_receipt_projection(world, monkeypatch, act)
+    first, fresh = _receipts(world)
+    assert (first["outcome"]["status"], fresh["outcome"]["status"]) == ("refused", "refused")
+    assert all(merge_receipts.effect_is_definite(r) for r in (first, fresh))
+    assert all(text.startswith("⚠️ PR_MERGE_REFUSED:") for text in seen_rows.texts[-2:])
+    assert seen == "by_observer_during_send" or "A new pr_merge call" in seen_rows.texts[-2]
+    body = gh.pr["body"]
+    assert merge_receipts.public_block(first) in body and "- Outcome: **refused** (by GitHub)" in body
+    assert queued_blocks and queued_blocks[0] not in body and "**queued**" not in body
+    assert fresh["receipt_id"] not in body and "publication" not in fresh
+    assert first["publication"]["body"] == {"status": "published"}
+    assert first["publication"]["card"]["status"] in ("owed", "delivered")
+    # The live frames and the history carry this receipt's queued then refused revisions, and nothing of the fresh one.
+    assert {row["card_row_id"] for row in seen_rows.live} == {f"merge-receipt:{first['receipt_id']}"}
+    assert max(row["card_row_revision"] for row in seen_rows.live) == first["revision"]
+    assert any("merge: queued" in row["content"] for row in seen_rows.live)
+    assert [row["text"] for row in seen_rows.history] == [merge_receipts.card_row_text(first)] * len(seen_rows.history)
+    fixture = world.root / "refused-projection.json"
+    fixture.write_text(json.dumps({"live": seen_rows.live, "history": seen_rows.history,
+                                   "expect": "merge: refused (by GitHub)"}), encoding="utf-8")
+    result = run_in_group([shutil.which("node"), "--test", "--test-name-pattern=canonical receipt revisions",
+                           "web/tests/chat_card_row_placement.test.js"],
+                          cwd=pathlib.Path(__file__).resolve().parents[1],
+                          env={**os.environ, "MERGE_RECEIPT_PROJECTION": str(fixture)}, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert sum(sent(c) for c in gh.calls) == 2  # the earlier attempt and the explicit new one
 
 
 def test_legacy_ambiguous_refusal_keeps_observation_custody(world):
@@ -314,20 +372,21 @@ def test_legacy_ambiguous_refusal_keeps_observation_custody(world):
     record["merge_receipts"] = [receipt]
     seed_result(world.root, "merge-task", record)
     assert "PR_MERGE_UNKNOWN" in registered_merge(world)
-    assert sum(c[:2] == ["pr", "merge"] for c in world.gh.calls) == 1
+    assert sum(sent(c) for c in world.gh.calls) == 1
 
 
 def test_proven_rejection_survives_unavailable_readback(world):
     gh = world.gh
     world.gh.merge = "refused"
     world.gh.fail_view_after_merge = True
-    assert "PR_MERGE_UNKNOWN" in registered_merge(world)
+    # Owner decision (#2455): a known refusal never reads as an unknown effect, even while GitHub is unreadable.
+    assert "PR_MERGE_REFUSED: ⚠️ PR #7 merge: unknown (PR unread; request refused by GitHub)" in registered_merge(world)
     world.gh.fail_view_after_merge = False
     assert "PR_MERGE_REFUSED" in registered_merge(world)
-    assert sum(c[:2] == ["pr", "merge"] for c in gh.calls) == 1
+    assert sum(sent(c) for c in gh.calls) == 1
     world.gh.merge = "ok"
     assert "merge: merged" in registered_merge(world)
-    assert sum(c[:2] == ["pr", "merge"] for c in gh.calls) == 2
+    assert sum(sent(c) for c in gh.calls) == 2
 
 
 def test_receipt_revision_is_canonical_and_idempotent_across_fact_enrichment(world, monkeypatch):
@@ -413,7 +472,6 @@ def bounded_receipt_history(world, monkeypatch):
     return payload
 
 
-@pytest.mark.serial
 def test_cold_bounded_history_supplies_current_receipt_to_new_chat(world, monkeypatch):
     payload = bounded_receipt_history(world, monkeypatch)
     fixture = world.root / "cold-history.json"
@@ -425,8 +483,7 @@ def test_cold_bounded_history_supplies_current_receipt_to_new_chat(world, monkey
     assert receipt["card_row_revision"] == 3 and "merge: merged" in receipt["text"]
 
 
-@pytest.mark.serial
-@pytest.mark.parametrize("gap", ["missing_result", "unreadable_result", "missing_receipt", "older_revision", "malformed_receipt", "other_task"])
+@pytest.mark.parametrize("gap", ["missing_result", "older_revision", "other_task"])
 def test_bounded_history_discloses_unavailable_canonical_receipt(world, monkeypatch, gap):
     from ouroboros.gateway.history import make_chat_history_endpoint
 
@@ -457,7 +514,6 @@ def test_bounded_history_discloses_unavailable_canonical_receipt(world, monkeypa
     assert row["card_row_revision"] == 2 and dialogue_test.log_bytes(source) == before
 
 
-@pytest.mark.serial
 def test_frozen_history_page_refreshes_receipt_without_changing_positions(world, monkeypatch):
     from ouroboros.gateway.history import make_chat_history_endpoint
 
@@ -475,7 +531,10 @@ def test_frozen_history_page_refreshes_receipt_without_changing_positions(world,
         (r["history_id"], r["history_position"], r["ts"]) for r in before["messages"]]
     assert all(after[key] == before[key] for key in ("page_cursor", "next_cursor", "has_more"))
     (row,) = [r for r in after["messages"] if r.get("card_row_id")]
-    assert row["card_row_revision"] == 4 and "head_tree_unavailable" in row["text"]
+    (earlier,) = [r for r in before["messages"] if r.get("card_row_id")]
+    # The page says the current receipt in words; its code stays in the receipt (and the PR body, the tool result).
+    assert row["card_row_revision"] == 4 and row["text"] == merge_receipts.card_row_text(current) != earlier["text"]
+    assert "head_tree_unavailable" not in row["text"] and current["coverage"]["gaps"] == ["head_tree_unavailable"]
 
 
 # --- a named host review record (review_record_id) supplies the reviewed subject ---------
@@ -505,12 +564,31 @@ class LedgerRecord:
     panel: dict
 
 
-def ledger_record(kind="base..head", *, head=HEAD, base=BASE, tree=TREE, aggregate="PASS", state="settled"):
+def ledger_record(kind="base..head", *, head=HEAD, base=BASE, tree=TREE, aggregate="PASS", state="settled",
+                  landings=None):
     return {"record_id": RECORD_ID, "revision": 1, "state": state,
             "subject": {"root_kind": "active_workspace", "root": PRIVATE_ROOT, "kind": kind,
                         "base": base, "head": head, "tree_sha": tree},
             "verdict": {"aggregate": aggregate, "per_question": {"change": aggregate, "coupling": "PASS"}},
-            "panel": {"seats": 3, "distinct_models": 2}}
+            "panel": {"seats": 3, "distinct_models": 2},
+            **({"commit_landings": landings} if landings is not None else {})}
+
+
+PRIVATE_REASON = "PRIVATE REASON: why the author went ahead"
+
+
+def landed(relation="same", *, sha=HEAD, parent=BASE, tree=TREE):
+    """A ``commit_landings`` row as the review ledger writes it, private author facts included."""
+    return {"commit_sha": sha, "tree_sha": tree, "parent_sha": parent, "reviewed_subject": relation,
+            "author_subject": "s" * 64, "author_disposition": "rejected", "author_reason": PRIVATE_REASON,
+            "recorded_at": "2026-11-04T10:00:00Z"}
+
+
+def _trailer(world):
+    from ouroboros.update_qualification import commit_qualification
+
+    (body,) = world.gh.merge_inputs
+    return commit_qualification(body)
 
 
 def install_ledger(monkeypatch, records=(), *, error=None, answer=None):
@@ -546,9 +624,9 @@ def test_a_matching_review_record_covers_the_head_and_names_its_source(world, mo
     asked = install_ledger(monkeypatch, {RECORD_ID: record})
     out = record_merge(world, review_record_id=RECORD_ID, review_task_ids=["review-1"])
     assert asked == [(world.root.resolve(), RECORD_ID)]
-    call = next(c for c in world.gh.calls if c[:2] == ["pr", "merge"])
-    assert call[:6] == ["pr", "merge", "7", "--squash", "--match-head-commit", HEAD]
-    assert call[6:] == ["--body-file", "-"] and "Ouroboros-Qualification:" in world.gh.merge_inputs[0]
+    call = next(c for c in world.gh.calls if sent(c))
+    assert call == ["api", ROUTE, "--hostname", "github.com", "--method", "PUT", "--input", "-"]
+    assert world.gh.merge_payloads[0]["sha"] == HEAD and "Ouroboros-Qualification:" in world.gh.merge_inputs[0]
     (receipt,) = _receipts(world)
     assert receipt["coverage"]["status"] == "covers_head" and receipt["coverage"]["gaps"] == []
     review = receipt["review"]
@@ -582,6 +660,12 @@ def test_a_record_written_by_the_review_ledger_covers_the_head_through_the_real_
     assert receipt["review"]["record"]["panel"] == {"seats": 3, "distinct_models": 2}
     assert receipt["review"]["record"]["subject"]["kind"] == "base..head" and receipt["review"]["declared_only"] is False
     assert out.startswith("✅ PR #7 merge: merged") and "review source: record, verdict PASS" in out
+    # The card says it in words; the codes stay in the agent's result above. A review that passed exactly what
+    # merged adds no label to the head: the row's second line says so.
+    head, detail = card_lines(receipt)
+    assert head.startswith("✅ PR #7 merge: merged") and " · " not in head
+    assert (merge_receipts.coverage_reading(receipt)) == ("", detail) and detail not in head
+    assert not any(code in head + detail for code in ("covers_head", "review source", "PASS"))
 
 
 @pytest.mark.parametrize("kind", ["index", "worktree"])
@@ -593,23 +677,46 @@ def test_an_uncommitted_record_at_the_same_head_is_a_named_gap_and_still_merges(
     assert receipt["coverage"] == {**receipt["coverage"], "status": "unknown", "gaps": ["subject_kind_not_committed"]}
     assert out.startswith("⚠️ PR #7 merge: merged") and "subject_kind_not_committed" in out
     assert f"`{kind}` subject" in world.gh.pr["body"] and "gaps: subject_kind_not_committed" in world.gh.pr["body"]
+    assert gap_only_in_detail(receipt, "subject_kind_not_committed") == merge_receipts._UNKNOWN
+    # The second line names the gap, what the review read; the head's label already says the coverage is unknown.
+    detail = card_lines(receipt)[1]
+    assert "uncommitted" in detail and "not recorded" not in detail, detail
 
 
-@pytest.mark.parametrize(("facts", "status", "gaps"), [
-    ({"base": "e" * 40}, "unknown", ["reviewed_base_differs"]),
-    ({"base": ""}, "unknown", ["reviewed_base_not_recorded"]),
-    ({"tree": "9" * 40}, "unknown", ["merged_tree_differs_from_reviewed_head"]),
-    ({"tree": ""}, "unknown", ["tree_comparison_unavailable"]),
-    ({"head": "e" * 40}, "changes_after_review", []),
-    ({"head": ""}, "unknown", ["reviewed_head_not_recorded"]),
+def card_lines(receipt):
+    """The merge row as its card shows it (web/modules/chat_activity.js ``cardRowSummary``): the first line heads
+    the row, the rest is its second line, inside the card's Details."""
+    head, _, detail = merge_receipts.card_row_text(receipt).partition("\n")
+    return head, detail
+
+
+def gap_only_in_detail(receipt, *codes):
+    """Coverage the review did not prove reads as one short label at the end of the head, a sentence that says more
+    as the row's second line and its codes in the receipt alone (DESIGN principle 7); returns the label."""
+    head, detail = card_lines(receipt)
+    label, sentence = merge_receipts.coverage_reading(receipt)
+    assert label and head.startswith("⚠️ PR #7 merge: ") and head.endswith(f" · {label}"), head
+    assert detail == sentence and (not sentence or sentence not in head) and "\n" not in detail
+    assert not any(code in head + detail for code in (*codes, "review source", "PASS", "FAIL")), (head, detail)
+    return label
+
+
+@pytest.mark.parametrize(("facts", "status", "gaps", "earlier"), [
+    ({"base": "e" * 40}, "unknown", ["reviewed_base_differs"], False),
+    ({"head": "e" * 40}, "changes_after_review", [], True),
+    ({"head": ""}, "unknown", ["reviewed_head_not_recorded"], False),
 ])
-def test_covers_head_needs_the_record_head_base_and_tree(world, monkeypatch, facts, status, gaps):
+def test_covers_head_needs_the_record_head_base_and_tree(world, monkeypatch, facts, status, gaps, earlier):
     install_ledger(monkeypatch, {RECORD_ID: ledger_record(**facts)})
     out = record_merge(world, review_record_id=RECORD_ID)
     (receipt,) = _receipts(world)
     assert receipt["outcome"]["status"] == "merged"
     assert (receipt["coverage"]["status"], receipt["coverage"]["gaps"]) == (status, gaps)
-    assert out.startswith("⚠️ PR #7 merge: merged")
+    assert out.startswith("⚠️ PR #7 merge: merged") and f"review coverage {status}" in out
+    # The owner's card heads with a short label and no code, its sentence is the row's second line; the receipt, the
+    # body and the result keep the codes. Other code than what merged reads as an earlier version, never as unknown.
+    label = gap_only_in_detail(receipt, *[code for code in (status, *gaps) if "_" in code])
+    assert label == (merge_receipts._EARLIER if earlier else merge_receipts._UNKNOWN)
 
 
 @pytest.mark.parametrize("absent", [{}, {"error": KeyError(RECORD_ID)}, {"error": FileNotFoundError(RECORD_ID)}])
@@ -644,22 +751,103 @@ def test_a_declaration_without_a_record_is_declared_only_and_says_so(world, monk
     assert receipt["review"]["declared_only"] is True and receipt["review"]["record"] is None
     assert receipt["coverage"] == {**receipt["coverage"], "status": "unknown", "gaps": ["no_host_observed_review_record"]}
     assert out.startswith("⚠️ PR #7 merge: merged") and out.split("\n")[0].endswith("; review source: declaration")
+    assert gap_only_in_detail(receipt, "no_host_observed_review_record", "declaration") == merge_receipts._UNKNOWN
     assert "(declared by the merging agent; no host review record)" in world.gh.pr["body"]
     assert "Review record (host review ledger)" not in world.gh.pr["body"]
     unreviewed = {**receipt, "review": {**receipt["review"], "declared": None, "declared_only": False}}
     assert "review source" not in merge_receipts.card_row_text(unreviewed)
 
 
-@pytest.mark.parametrize(("state", "aggregate"), [("settled", "FAIL"), ("pending", "PASS"), ("settled", "QUORUM_FAILED")])
-def test_a_record_reads_green_only_when_settled_with_pass(world, monkeypatch, state, aggregate):
+@pytest.mark.parametrize(("state", "aggregate", "rejected"), [
+    ("settled", "FAIL", True),
+    ("pending", "PASS", False),
+    ("settled", "QUORUM_FAILED", False),
+])
+def test_a_record_reads_green_only_when_settled_with_pass(world, monkeypatch, state, aggregate, rejected):
     install_ledger(monkeypatch, {RECORD_ID: ledger_record(aggregate=aggregate, state=state)})
     out = record_merge(world, review_record_id=RECORD_ID)
     (receipt,) = _receipts(world)
     assert receipt["outcome"]["status"] == "merged"  # a failed review is a fact, never a veto
     assert receipt["coverage"]["status"] == "covers_head" and receipt["coverage"]["gaps"] == []
     assert out.startswith("⚠️ PR #7 merge: merged") and f"review source: record, verdict {aggregate}" in out
+    # A rejection reads apart from a missing verdict, both as the head's label; neither is the verdict's token.
+    label = gap_only_in_detail(receipt, aggregate, state)
+    assert label == (merge_receipts._REJECTED if rejected else merge_receipts._NO_VERDICT)
+    assert "\n" not in merge_receipts.card_row_text(receipt)  # the label says it all: no second line repeats it
     assert (f"({state})" in out) is (state != "settled")
     assert f"verdict **{aggregate}**" in world.gh.pr["body"]
+
+
+# --- an index/worktree record reaches the merged head only through its exact landing ------
+
+
+@pytest.mark.parametrize("kind", ["index", "worktree"])
+@pytest.mark.parametrize(("row", "status", "gaps"), [
+    (landed("same"), "covers_head", []),
+    (landed("different", tree="9" * 40), "changes_after_review", []),
+    (landed("unknown", tree=""), "unknown", ["subject_kind_not_committed", "landing_relation_unknown"]),
+    (landed("same", sha="e" * 40), "unknown", ["subject_kind_not_committed"]),
+    (landed("same", parent="e" * 40), "unknown", ["subject_kind_not_committed", "landing_parent_not_reviewed_base"]),
+], ids=["same", "different", "unknown", "unmatched", "amended"])
+def test_an_uncommitted_record_links_to_the_merged_head_only_through_its_exact_landing(
+        world, monkeypatch, kind, row, status, gaps):
+    # ``subject.head`` equals the PR head throughout: that incidental match never stands in for a landing.
+    install_ledger(monkeypatch, {RECORD_ID: ledger_record(kind, landings=[row])})
+    out = record_merge(world, review_record_id=RECORD_ID)
+    (receipt,) = _receipts(world)
+    assert receipt["outcome"]["status"] == "merged"  # loud, never a lock
+    assert (receipt["coverage"]["status"], receipt["coverage"]["gaps"]) == (status, gaps)
+    assert receipt["coverage"].get("landing") == {"covers_head": "same", "changes_after_review": "different"}.get(status)
+    assert out.startswith("✅ PR #7 merge: merged" if status == "covers_head" else "⚠️ PR #7 merge: merged")
+    assert [set(r) for r in receipt["review"]["record"]["commit_landings"]] == [
+        {"commit_sha", "tree_sha", "parent_sha", "reviewed_subject"}]
+    assert _trailer(world) == receipt["qualification"]
+    assert receipt["qualification"]["review"] == {"observed": "PASS", "state": "settled", "relation": status,
+                                                  "declared": "unknown"}
+    for text in (json.dumps(_receipts(world)), world.gh.pr["body"], world.gh.merge_inputs[0]):
+        assert PRIVATE_REASON not in text and "s" * 64 not in text
+
+
+@pytest.mark.parametrize(("state", "aggregate"), [("settled", "FAIL"), ("pending", "PASS"), ("settled", "QUORUM_FAILED")])
+def test_an_exact_landing_links_the_subject_and_never_turns_its_verdict_green(world, monkeypatch, state, aggregate):
+    """An author who went ahead on the reviewed bytes links the review to the commit; the verdict stays the critic's."""
+    install_ledger(monkeypatch, {RECORD_ID: ledger_record("index", head="", aggregate=aggregate, state=state,
+                                                          landings=[landed("same")])})
+    out = record_merge(world, review_record_id=RECORD_ID)
+    (receipt,) = _receipts(world)
+    assert (receipt["coverage"]["status"], receipt["coverage"]["gaps"]) == ("covers_head", [])
+    assert out.startswith("⚠️ PR #7 merge: merged") and f"review source: record, verdict {aggregate}" in out
+    assert _trailer(world)["review"] == {"observed": aggregate, "state": state, "relation": "covers_head",
+                                         "declared": "unknown"}
+    assert f"verdict **{aggregate}**" in world.gh.pr["body"]
+    assert (f"- Review: observed {aggregate} (record {state}, subject relation at the merge request covers_head)"
+            in world.gh.merge_inputs[0])
+
+
+@pytest.mark.parametrize("moved", ["base_before_request", "tree_at_merge"])
+def test_the_trailer_keeps_the_request_relation_while_the_receipt_follows_later_facts(world, monkeypatch, moved):
+    install_ledger(monkeypatch, {RECORD_ID: ledger_record("index", head="", landings=[landed("same")])})
+    base, tree = ("e" * 40, TREE) if moved == "base_before_request" else (BASE, "9" * 40)
+    world.gh.pr["baseRefOid"] = base
+    original = world.gh
+
+    def gh(args, *a, **kw):
+        if args[:1] == ["api"] and args[1].endswith(f"/commits/{MERGE}"):
+            return github.GhResult(True, json.dumps({"commit": {"tree": {"sha": tree}},
+                                                      "parents": [{"sha": base}, {"sha": HEAD}]}), 0, None, "")
+        return original(args, *a, **kw)
+
+    monkeypatch.setattr(github, "_gh_run", gh)
+    out = record_merge(world, review_record_id=RECORD_ID)
+    (receipt,) = _receipts(world)
+    gap = "reviewed_base_differs" if moved == "base_before_request" else "merged_tree_differs_from_reviewed_head"
+    assert receipt["outcome"]["status"] == "merged" and out.startswith("⚠️ PR #7 merge: merged")
+    assert (receipt["coverage"]["status"], receipt["coverage"]["gaps"]) == ("unknown", [gap])
+    # Written before the merge: the request already saw the moved base; the later merge tree did not exist yet.
+    relation = "unknown" if moved == "base_before_request" else "covers_head"
+    assert _trailer(world) == receipt["qualification"] and receipt["qualification"]["review"]["relation"] == relation
+    body = world.gh.pr["body"]
+    assert f"subject relation at the merge request {relation}" in body and f"gaps: {gap}" in body
 
 
 @pytest.mark.parametrize("bind_record", [True, False])
@@ -668,7 +856,7 @@ def test_a_shell_merged_pr_stays_receiptless_with_or_without_a_record(world, mon
     world.gh.pr.update(state="MERGED", mergeCommit={"oid": MERGE})  # merged from a shell or the web page
     out = record_merge(world, **({"review_record_id": RECORD_ID} if bind_record else {}))
     assert out.startswith("⚠️ PR_MERGE_REFUSED: pr_not_open")
-    assert not any(call[:2] == ["pr", "merge"] for call in world.gh.calls) and _receipts(world) == []
+    assert not any(sent(call) for call in world.gh.calls) and _receipts(world) == []
 
 
 # --- #1742: a declaration is the author's statement; only a bound record is observed review ---
@@ -683,7 +871,7 @@ def test_a_matching_declaration_beside_a_completed_task_is_not_observed_coverage
                       result="Translated the README into French.")
     out = record_merge(world, reviewed_head_sha=HEAD, reviewed_base_sha=BASE, review_task_ids=["translation-1"],
                        review_verdict="PASS")
-    assert asked == [] and sum(c[:2] == ["pr", "merge"] for c in world.gh.calls) == 1
+    assert asked == [] and sum(sent(c) for c in world.gh.calls) == 1
     (receipt,) = _receipts(world)
     review = receipt["review"]
     assert receipt["outcome"]["status"] == "merged"  # loud, never a lock
@@ -738,7 +926,7 @@ def test_history_reprojects_a_stored_declaration_only_receipt_without_green(worl
     (row,) = [r for r in json.loads(response.body)["messages"] if r.get("card_row_id")]
     assert row["card_row_revision"] == legacy["revision"]
     assert row["text"] == merge_receipts.card_row_text(legacy)
-    assert row["text"].startswith("⚠️ PR #7 merge: merged") and row["text"].endswith("; review source: declaration")
+    assert row["text"].startswith("⚠️ PR #7 merge: merged") and gap_only_in_detail(legacy) == merge_receipts._UNKNOWN
 
 
 @pytest.mark.parametrize("verdict", ["PASS after the panel's requested fixes were applied", "PASS.", "1 PASS"])

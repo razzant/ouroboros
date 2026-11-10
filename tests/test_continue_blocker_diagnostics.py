@@ -20,7 +20,6 @@ from tests._budget_pause_exact_helpers import _install_queue
 from tests.test_continue_independent_review import PRED, _current_pool, _pending, _rows  # noqa: F401
 from tests.test_owner_continue import NONCE, _interrupted
 
-pytestmark = pytest.mark.serial
 
 
 def _http(handler, task_id, body=None):
@@ -138,7 +137,7 @@ PAUSED_HELD = {"running": "running_delegated_leaf", "unknown": "unbound_unknown_
                "running_and_unknown": "running_and_unknown_start"}
 
 
-@pytest.mark.parametrize("condition", ["settled", "running", "unknown", "running_and_unknown", "point_refusal"])
+@pytest.mark.parametrize("condition", ["settled", "unknown", "point_refusal"])
 def test_owner_resume_of_a_paused_held_continue_rechecks_its_predecessor(tmp_path, monkeypatch, condition):
     from ouroboros import owner_pause
     from ouroboros.work_stop import hold_fact as budget_hold_fact
@@ -167,7 +166,17 @@ def test_owner_resume_of_a_paused_held_continue_rechecks_its_predecessor(tmp_pat
         assert continuation_refusal(held)["reason"] == "separate_owner_hold"
     status, result = _http(api_task_resume, successor)
     print("paused Continue Resume:", condition, status, result)
-    if condition in {"settled", "point_refusal"}:
+    if condition == "running":
+        # Owner 1 Nov: Resume over writers that all observably run returns the Continue to its own writer wait,
+        # releasing the Pause; it starts by itself once they settle. Nothing is selected or dispatched now.
+        expected = [{**RUNNING, "task_id": PRED, "review_owned": False}]
+        assert status == 200 and result["ok"] and result["held"] and result["owner_pause_released"], result
+        assert result["blockers"] == expected and "_resume_selection" not in held
+        assert budget_hold_fact(held)["reason"] == "continuation_writer_unsettled"
+        assert budget_hold_fact(held)["blockers"] == expected
+        assert not owner_pause.fence_closed(owner_pause.read_fence(tmp_path, successor))
+        assert successor not in queue.BUDGET_ROOT_FENCES and held in workers.PENDING
+    elif condition in {"settled", "point_refusal"}:
         assert status == 200 and result["ok"], result
         assert result["same_generation"] and result["owner_pause_released"]
         assert held in workers.PENDING and budget_hold_fact(held) is None
@@ -181,13 +190,13 @@ def test_owner_resume_of_a_paused_held_continue_rechecks_its_predecessor(tmp_pat
         # Pause replaced the writer wait; a refusal keeps this current tree stop (A6).
         assert budget_hold_fact(held) is None
         assert current_stop(held, {"owner": fence})["cause"] == "pause"
-        # The same reply as the unpaused held Continue: the census facts, advice only for running work.
-        facts = {"running": [RUNNING], "unknown": [UNBOUND], "running_and_unknown": [RUNNING, UNBOUND]}
+        # A fact no wait settles (an unknown outcome, alone or beside running work) still refuses with the census.
+        facts = {"unknown": [UNBOUND], "running_and_unknown": [RUNNING, UNBOUND]}
         expected = sorted(({**fact, "task_id": PRED, "review_owned": False} for fact in facts[condition]),
                           key=json.dumps)
         assert status == 409 and result["error"] == "predecessor_writers_unsettled", result
         assert sorted(result["blockers"], key=json.dumps) == expected
-        assert result.get("action") == ("wait_or_stop_the_previous_work" if condition == "running" else None)
+        assert "action" not in result, "no wait/stop advice while any outcome is unknown"
 
 
 def test_a_census_past_twenty_rows_reaches_every_continue_consumer_whole(tmp_path, monkeypatch):

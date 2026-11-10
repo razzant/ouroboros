@@ -355,6 +355,40 @@ def _admit_stored(data: Dict[str, Any], task_id: str, *, strict: bool, noun: str
         raise ValueError(f"{noun} is unreadable or invalid: task:{task_id}")
 
 
+def load_task_results(drive_root: Any, task_ids: List[str]) -> Dict[str, Any]:
+    """Many results in ONE read transaction (``task_store.documents_by_ids``), each strictly admitted.
+
+    A reader over every live root pays one round trip however many roots live. An unreadable store is
+    one aggregate fact (``{"_unavailable": exc}``); a row the strict admission refuses is named on its
+    own entry (``{"_refused": exc}``), never read as an absent result. Absent ids are absent keys."""
+    from ouroboros.task_store import documents_by_ids
+
+    if not task_ids:
+        return {}
+    valid: Dict[str, str] = {}
+    for task_id in task_ids:
+        try:
+            valid[task_id] = validate_task_id(task_id)
+        except ValueError:
+            valid[task_id] = ""
+    try:
+        documents = documents_by_ids(drive_root, sorted({tid for tid in valid.values() if tid}))
+    except Exception as exc:
+        return {"_unavailable": exc}
+    results: Dict[str, Any] = {}
+    for task_id, tid in valid.items():
+        data = documents.get(tid) if tid else None
+        if data is None:
+            continue
+        try:
+            _admit_stored(data, tid, strict=True, noun="task result authority")
+        except Exception as exc:
+            results[task_id] = {"_refused": exc}
+            continue
+        results[task_id] = _normalize_swarm_efficiency(data)
+    return results
+
+
 def list_task_results(
     drive_root: Any,
     *,
@@ -443,6 +477,15 @@ def write_task_result(
         projected_fields = _field_projector(existing, {**prepared_fields, "status": status}) if _field_projector else prepared_fields
         if projected_fields is None:  # projector saw a terminal/stale row: no mutation
             return None
+        # The owner's lift of a producer allowance outlives any writer's older copy of the task (a warm stack's own
+        # dict at its terminal): nothing re-arms the number a restart, a member or a Continue would read (#2566).
+        metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+        if isinstance(metadata.get("producer_allowance_lifted"), dict):
+            projected_fields.pop("root_cost_ceiling_usd", None)
+            if isinstance(projected_fields.get("metadata"), dict):
+                projected_fields["metadata"] = {**{key: value for key, value in projected_fields["metadata"].items()
+                                                   if key != "root_cost_ceiling_usd"},
+                                                "producer_allowance_lifted": metadata["producer_allowance_lifted"]}
         # The store reconciles fan-out base witnesses with addressed event union,
         # including an independently repaired execution-root base on copy-back.
         projected_status = str(projected_fields.pop("status", status))
@@ -500,7 +543,8 @@ def write_task_result(
 
             title = wake_cause_title(projected_fields.get("metadata", existing.get("metadata")) or {})
             if title or existing.get("wake_summary"):
-                projected_fields.update(wake_summary=None, suggested_name=title or existing.get("title") or None)
+                projected_fields.update(wake_summary=None, fold_read=None,
+                                        suggested_name=title or existing.get("title") or None)
         now = utc_now_iso()
         projected_fields.update(terminal_time_patch(existing, projected_fields, status=projected_status,
             task_id=task_id, observed_at=now if _terminal_observed else None, replica=_terminal_time_source))

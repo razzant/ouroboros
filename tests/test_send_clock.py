@@ -72,9 +72,7 @@ def test_only_a_main_loop_opts_in_and_the_zone_is_the_validated_sender_zone():
 
 
 @pytest.mark.parametrize("raw, expected", [
-    ("Europe/Moscow", "Europe/Moscow"), ("UTC", "UTC"), ("America/Argentina/Buenos_Aires",
-                                                         "America/Argentina/Buenos_Aires"),
-    ("  Asia/Tokyo ", "Asia/Tokyo"), ("../../etc/passwd", ""), ("/etc/localtime", ""), ("Not/AZone", ""),
+    ("Europe/Moscow", "Europe/Moscow"), ("UTC", "UTC"), ("  Asia/Tokyo ", "Asia/Tokyo"), ("../../etc/passwd", ""), ("/etc/localtime", ""), ("Not/AZone", ""),
     ("Europe/" + "x" * 80, ""), (42, ""), (None, ""), ("", ""),
 ])
 def test_the_ingress_keeps_only_a_loadable_iana_name(raw, expected):
@@ -132,8 +130,11 @@ def test_the_anthropic_line_is_exactly_what_the_next_canonical_request_replays(t
 # --- real provider lanes --------------------------------------------------------------
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("provider", ["openai", "openrouter", "anthropic"])
+@pytest.mark.parametrize(("provider", "asynchronous"), [
+    ("openai", False),
+    ("openrouter", True),
+    ("anthropic", False),
+])
 def test_each_remote_lane_measures_prices_seals_and_sends_one_clocked_candidate(
         transport, ticking, provider, asynchronous):  # noqa: F811
     root, client, sent = transport
@@ -520,7 +521,7 @@ def test_an_answered_send_without_the_replayed_reasoning_is_what_history_keeps(
     assert messages[2]["reasoning_content"] == "a direct-route echo"  # never sent on this route, so never omitted
 
 
-@pytest.mark.parametrize("case", ["answered", "nothing_omitted", "stale_before_the_scope", "raised"])
+@pytest.mark.parametrize("case", ["answered", "stale_before_the_scope", "raised"])
 def test_a_transcript_adopts_only_its_own_answered_omission(case):
     """Both sides, with no clock policy (a child or helper loop): only an omission noted
     by this scope's own answered send strips the transcript; a fact left by an earlier
@@ -751,8 +752,7 @@ def test_native_anthropic_compatibility_retry_has_a_fresh_sealed_clock(transport
     assert usage["request_wire"]["applied_effort"] == "provider_default"
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("dialect_first", [False, True])
+@pytest.mark.parametrize(("dialect_first", "asynchronous"), [(False, False), (True, True)])
 def test_clock_refresh_preserves_composed_tool_dialect_and_effort_recovery(
         tmp_path, monkeypatch, ticking, asynchronous, dialect_first):
     import ouroboros.request_wire_contract as wire

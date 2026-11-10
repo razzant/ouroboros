@@ -63,7 +63,6 @@ def test_workspace_context_routes_project_files_and_keeps_system_tools_reachable
     assert (workspace / "README.md").read_text(encoding="utf-8") == "workspace edited"
 
 
-@pytest.mark.serial
 def test_workspace_run_shell_cwd_allows_scratch_and_explicit_system(tmp_path, tmp_path_factory, monkeypatch):
     """External-workspace tasks may run from host scratch (a sibling checkout, a
     /tmp tree) and explicitly select the system repo; generic runtime data stays
@@ -165,7 +164,6 @@ def test_workspace_shell_safe_stdio_redirects_are_not_write_like(tmp_path, monke
     assert not (outside / "out.txt").exists()  # direct argv never executes redirection
 
 
-@pytest.mark.serial
 def test_workspace_direct_argv_keeps_windows_paths_as_literal_data(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     system_repo = tmp_path / "system"
@@ -217,7 +215,6 @@ def test_workspace_shell_keeps_symlinked_workspace_absolute_paths_allowed(tmp_pa
     assert (real_workspace / "inside.txt").exists()
 
 
-@pytest.mark.serial
 def test_workspace_shell_blocks_nested_symlink_escape_absolute_path(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     system_repo = tmp_path / "system"

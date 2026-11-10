@@ -1,4 +1,4 @@
-"""``POST /api/tasks/{task_id}/continue`` — the owner's Continue of an interrupted root.
+"""``POST /api/tasks/{task_id}/continue`` — the owner's Continue of an interrupted or author-stopped root.
 
 Owner Batch4 (1A). The body carries ONLY ``{"action_nonce"}``: a random id the
 client keeps across retry and reload, so the same press always answers the
@@ -23,7 +23,8 @@ from ouroboros.task_results import validate_task_id
 _NOT_FOUND = frozenset({"predecessor_missing"})
 _UNAVAILABLE = frozenset({"predecessor_record_unreadable", "successor_record_unreadable",
                           "continuation_claim_unwritable", "queue_snapshot_persist_failed",
-                          "continuation_unconfirmed", "task_id_lookup_failed", "queue_not_restored"})
+                          "continuation_unconfirmed", "task_id_lookup_failed", "queue_not_restored",
+                          "continuation_drive_unavailable"})
 
 
 async def api_task_continue(request: Request) -> JSONResponse:

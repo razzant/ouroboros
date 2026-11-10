@@ -17,7 +17,7 @@ from tests import test_recent_wake_store_busy as store_busy, test_subscription_s
 from tests.test_recent_wake_store_busy import busy, exclusive
 
 subscription_ui, client, wake = setup_browser.subscription_ui, store_busy.client, store_busy.wake
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 STATE = {"supervisor_ready": True, "active_chat_activities": [], "projects": [], "runtime_mode": "advanced",
          "bg_consciousness_enabled": True, "bg_consciousness_state": {"status": "sleeping"}}
 

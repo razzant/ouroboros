@@ -3,7 +3,8 @@
 This is a command lifetime owner, not a recovery daemon. Its guardian ends the
 command's tree if this owner is SIGKILLed, but then nothing records a result
 and scratch stays; an exit or a matching filename never proves deletion safe.
-Stage one prints the one final SAFE_TEST_RETAINED/RELEASED line.
+A launch that failed stays red, yet with its result recorded and its first reap
+clean it holds no scratch. Stage one prints the one final SAFE_TEST_RETAINED/RELEASED line.
 """
 from __future__ import annotations
 
@@ -16,7 +17,9 @@ import threading
 import time
 
 from ouroboros.process_containment import ProcessContainer
-from ouroboros.test_environment import SCRATCH_MARKER, isolated_environment, retain_tree, retention_markers
+from ouroboros.test_environment import (
+    isolated_environment, kept_facts, release_except_retained, retain_tree, retained_folders,
+)
 from ouroboros.test_evidence import (
     EVIDENCE_ENV, EVIDENCE_POINTER, FileOutput, describe_gaps, evidence_directory, retain_uncaptured_source,
     source_evidence, write_record, remove_scratch_tree, report_diagnostic,
@@ -28,22 +31,18 @@ _LISTED_MARKERS = 5  # release diagnostics name a few markers, never grant delet
 
 
 def release_scratch(root: Path) -> dict:
-    """Release declared *direct* children, never unknown command data or symlinks."""
-    released, retained = [], []
-    markers = retention_markers(root)
-    if markers:
+    """Release declared *direct* children, never unknown command data or symlinks. A retention marker
+    keeps its own folder, and at the top of ``root`` all of it (``retained_folders``)."""
+    kept = retained_folders(root)
+    if root in kept:
+        markers = [found for held in kept.values() for found in held]
         listed = ", ".join(map(str, markers[:_LISTED_MARKERS]))
         more = f" (+{len(markers) - _LISTED_MARKERS} more)" if len(markers) > _LISTED_MARKERS else ""
-        return {"released": [], "retained": [str(root)],
+        return {"released": [], "retained": [str(root)], "kept": kept_facts(kept),
                 "reason": f"retention marker or unreadable subtree: {listed}{more}"}
-    for path in root.iterdir():
-        if path.is_symlink():
-            retained.append(str(path))
-        elif path.is_dir() and (path / SCRATCH_MARKER).is_file():
-            # Declarations say reproducible, not idle. The caller already reaped
-            # its container; no independent consumer may call this as a reaper.
-            remove_scratch_tree(path)
-            released.append(str(path))
+    # Declarations say reproducible, not idle. The caller already reaped its
+    # container; no independent consumer may call this as a reaper.
+    released = release_except_retained(root, kept, remove_scratch_tree, declared_only=True)
     # The launcher's empty defaults carry no unique content. Remove empty
     # directories bottom-up only; an arbitrary HOME/file is not test scratch.
     defaults = isolated_environment(root, Path(__file__).resolve().parents[1], source={}, create=False)
@@ -56,7 +55,7 @@ def release_scratch(root: Path) -> dict:
             path.rmdir()
         except OSError:
             pass
-    return {"released": released, "retained": [str(root)] if root.exists() else []}
+    return {"released": released, "retained": [str(root)] if root.exists() else [], "kept": kept_facts(kept)}
 
 
 class _LiveDisplay(threading.Thread):
@@ -98,10 +97,10 @@ class _LiveDisplay(threading.Thread):
         return self.error or (RuntimeError("display did not drain") if self.is_alive() else None)
 
 
-def _evidence_directory(repo: Path, root: Path, explicit) -> tuple[Path, str]:
+def _evidence_directory(repo: Path, root: Path, explicit, owner_data_root=None) -> tuple[Path, str]:
     """The run's evidence; only an unwritable DEFAULT parent falls back into retained scratch."""
     try:
-        return evidence_directory(repo, parent=explicit), ""
+        return evidence_directory(repo, parent=explicit, owner_data_root=owner_data_root), ""
     except OSError as exc:
         if explicit or os.environ.get(EVIDENCE_ENV):
             raise  # A selected destination is never silently redirected.
@@ -131,13 +130,13 @@ def _record_source(repo: Path, destination: Path) -> str:
     return gap
 
 
-def main(root, repo, command, evidence_parent=None, keep=False, timeout=None) -> int:
+def main(root, repo, command, evidence_parent=None, keep=False, timeout=None, owner_data_root=None) -> int:
     root, repo = Path(root), Path(repo)
     evidence = None
     proc = None
     container = ProcessContainer(lifeline=True)
     code, reap_error, evidence_error, fallback, source_gap = 2, "command not started", "", "", ""
-    stopped = ""
+    stopped = launch_error = escalation = ""
     reaped = False
     execution = "not_run"
     requested: list[int] = []
@@ -151,7 +150,9 @@ def main(root, repo, command, evidence_parent=None, keep=False, timeout=None) ->
         if signum is not None:
             previous[signum] = signal.signal(signum, request_stop)
     try:
-        evidence, fallback = _evidence_directory(repo, root, evidence_parent)
+        if keep:  # before the command: a test's folder goes at its end unless its root is held
+            retain_tree(root, "debug retention")
+        evidence, fallback = _evidence_directory(repo, root, evidence_parent, owner_data_root)
         if fallback:
             report_diagnostic(f"SAFE_TEST_EVIDENCE_FALLBACK {fallback}: {evidence}")
         (root / EVIDENCE_POINTER).write_text(str(evidence), encoding="utf-8")
@@ -173,27 +174,39 @@ def main(root, repo, command, evidence_parent=None, keep=False, timeout=None) ->
                 # No pipe EOF wait: first wait for the direct child, then reap ALL
                 # attributed descendants, then close/read the regular log files.
                 execution = "attempted"
-                proc = container.spawn(command, cwd=repo, env=env,
-                                       stdout=output.stdout, stderr=output.stderr)
-                execution = "executed"
-                display.start()
-                deadline = None if timeout is None else time.monotonic() + timeout
-                while proc.poll() is None and not requested and (deadline is None or time.monotonic() < deadline):
-                    time.sleep(0.05)
-                if proc.poll() is None:
-                    stopped = f"signal {requested[0]}" if requested else "timeout"
-                    report_diagnostic(f"SAFE_TEST_INTERRUPTED by {stopped}: stopping the command and every process it started"
-                                      if requested else f"SAFE_TEST_TIMEOUT after {timeout:g}s: stopping the command "
-                                      "and every process it started")
-                    if requested and requested[0] == signal.SIGINT and container.interrupt_root():
-                        # spawn's new session cannot receive the terminal's INT.
-                        # Give pytest time to export sessionfinish/JUnit first.
-                        try:
-                            proc.wait(timeout=_GRACE_SEC)
-                        except subprocess.TimeoutExpired:
-                            pass
-                    # Also when the root already exited: what it left gets TERM grace.
-                    container.terminate_tree(_GRACE_SEC)
+                try:
+                    proc = container.spawn(command, cwd=repo, env=env,
+                                           stdout=output.stdout, stderr=output.stderr)
+                    execution = "executed"
+                except Exception as exc:
+                    # The command's own red result, not lost evidence: the reap and the
+                    # records below still decide the scratch.
+                    launch_error = f"{type(exc).__name__}: {exc}"
+                    execution = "attempted" if container.root_created else "not_run"
+                    report_diagnostic(f"SAFE_TEST_ERROR {launch_error}")
+                if proc is not None:
+                    display.start()
+                    deadline = None if timeout is None else time.monotonic() + timeout
+                    while proc.poll() is None and not requested and (deadline is None or time.monotonic() < deadline):
+                        time.sleep(0.05)
+                    if proc.poll() is None:
+                        stopped = f"signal {requested[0]}" if requested else "timeout"
+                        report_diagnostic(f"SAFE_TEST_INTERRUPTED by {stopped}: stopping the command and every process it started"
+                                          if requested else f"SAFE_TEST_TIMEOUT after {timeout:g}s: stopping the command "
+                                          "and every process it started")
+                        if requested and requested[0] == signal.SIGINT and container.interrupt_root():
+                            # spawn's new session cannot receive the terminal's INT.
+                            # Give pytest time to export sessionfinish/JUnit first.
+                            try:
+                                proc.wait(timeout=_GRACE_SEC)
+                            except subprocess.TimeoutExpired:
+                                # The wait, not the output, observed it: the TERM below may cut whatever
+                                # the root still had to do, such as a nested runner's final report.
+                                escalation = (f"root still running after its {_GRACE_SEC} s interrupt window: escalated "
+                                              "to TERM and the forced reap; its own completion is unconfirmed")
+                                report_diagnostic(f"SAFE_TEST_INTERRUPT_ESCALATED {escalation}")
+                        # Also when the root already exited: what it left gets TERM grace.
+                        container.terminate_tree(_GRACE_SEC)
             reap_error = container.reap()
             reaped = True
             if proc is not None and proc.poll() is None:
@@ -208,7 +221,8 @@ def main(root, repo, command, evidence_parent=None, keep=False, timeout=None) ->
             if display.is_alive() and (failure := display.finish()) is not None:
                 output.failed("display", failure)
             output.finish(command=command, returncode=None if proc is None else proc.returncode,
-                          stopped=stopped, containment_error=reap_error)
+                          stopped=stopped, interrupt_escalation=escalation, containment_error=reap_error,
+                          launch_error=launch_error)
             evidence_error = "; ".join(output.errors)
         finally:
             output.close()
@@ -218,35 +232,40 @@ def main(root, repo, command, evidence_parent=None, keep=False, timeout=None) ->
     finally:
         if not reaped:
             # spawn may have created a process before raising. Even without a
-            # returned handle, the container still owns its token/job.
+            # returned handle, the container still holds its first reap's answer.
             reap_error = container.reap() or reap_error
         container.close()
         cleanup = {"released": [], "retained": [str(root)]}
         why = ("debug retention" if keep else reap_error or evidence_error)
+        # Both writes carry every observed fact; only the evidence error, cleanup and retention move on.
+        facts = {"command": command, "returncode": code, "containment_error": reap_error, "launch_error": launch_error,
+                 "source_gap": source_gap, "scratch": str(root), "execution": execution, "stopped": stopped,
+                 "interrupt_escalation": escalation, "evidence_fallback": fallback}
         if evidence is not None and not why:
             # Commit the result before deleting anything it describes. A failed
             # evidence write is itself a reason to keep the source tree.
             try:
-                write_record(evidence / "result.json", {"command": command, "returncode": code,
-                             "containment_error": reap_error, "evidence_error": evidence_error,
-                             "source_gap": source_gap, "scratch": str(root), "cleanup": "pending"})
+                write_record(evidence / "result.json", {**facts, "evidence_error": evidence_error, "cleanup": "pending"})
                 (root / EVIDENCE_POINTER).unlink()
                 cleanup = release_scratch(root)
                 why = cleanup.get("reason", "")
             except OSError as exc:
                 why = evidence_error = f"evidence/cleanup incomplete: {exc}"
         if why:
-            retain_tree(root, why)
+            retain_tree(root, why)  # a marker beneath the root already holds its own folder, and only that
+        kept = cleanup.pop("kept", None)
+        if kept is None:  # the root's own hold: nothing was walked, and only its reason matters
+            kept = [{"path": str(root), "reasons": [why.split("\n")[0]]}]
+        reason = why or (f"{kept[0]['path']}: {kept[0]['reasons'][0]}" if kept else "")
         if evidence is not None:
             try:
-                write_record(evidence / "result.json", {"command": command, "returncode": code,
-                             "containment_error": reap_error, "evidence_error": evidence_error,
-                             "source_gap": source_gap, "scratch": str(root), "cleanup": cleanup, "retention_reason": why,
-                             "execution": execution, "stopped": stopped, "evidence_fallback": fallback})
+                write_record(evidence / "result.json", {**facts, "evidence_error": evidence_error, "cleanup": cleanup,
+                                                        "retention_reason": reason, "kept": kept,
+                                                        "containment_tokens": [container.token] if kept else []})
             except OSError as exc:
                 report_diagnostic(f"SAFE_TEST_EVIDENCE_INCOMPLETE {exc}")
-        if why:
-            report_diagnostic(f"SAFE_TEST_RETENTION {why}")
+        if reason:
+            report_diagnostic(f"SAFE_TEST_RETENTION {reason}")
         for signum, handler in previous.items():
             signal.signal(signum, handler)
     # Command status stays the status. Containment/evidence failures have their

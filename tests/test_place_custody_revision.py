@@ -596,7 +596,7 @@ def test_distinct_conversations_run_their_own_authors_side_by_side(v2, monkeypat
 
 @pytest.mark.parametrize("version", [1, 2])
 def test_an_arrival_reaches_the_model_with_its_message_conversation_and_attachments(v2, version):
-    from ouroboros import dialogue_store
+    from ouroboros import chat_chain, dialogue_store
     from ouroboros.presence_bindings import conversation_key
 
     h, go = v2, threading.Event()
@@ -628,12 +628,12 @@ def test_an_arrival_reaches_the_model_with_its_message_conversation_and_attachme
     queue = arrival["conversation"]["transport_queue"]
     assert {key: value for key, value in queue.items() if key != "events"} == {
         key: value for key, value in inbox.items() if key != "events"}
-    source = arrival["context_source_ref"]  # a locator of the arrival's own retained source, as row readers print it
-    assert "memory_read(source_ref=" in queue["events"] and source["task_id"] == turn_ref(h, 2)
-    assert source["kind"] == "task_source" and not {"read", "canonical_root"} & set(source)
-    room_row, = [entry.row for entry in dialogue_store.iter_rows(h.root, "chat")
+    source = arrival["context_source_ref"]  # the arrival's own room row, by its exact address, as row readers print it
+    assert "memory_read(source_ref=" in queue["events"]
+    room_row, = [entry.row for entry in dialogue_store.whole_rows(h.root, dialogue_store.iter_rows(h.root, "chat"))
                  if entry.row.get("client_message_id") == "chat:a:2" and entry.row.get("direction") == "in"]
-    assert room_row["transport"]["conversation"]["transport_queue"] == inbox  # the exact snapshot, kept
+    assert source == chat_chain.context_address(room_row.source_body) and source["kind"] == "chat_row"
+    assert room_row["transport"]["conversation"]["transport_queue"] == inbox  # the exact snapshot, kept (read as written)
     assert room_row["transport"]["message"] == message
     # The author's own registered readers resolve that reference: one retained source, and the room row's
     # reference in its chat history and memory rows. No history scan, no other store.
@@ -648,10 +648,10 @@ def test_an_arrival_reaches_the_model_with_its_message_conversation_and_attachme
     assert source in context_refs(history) and source in context_refs(rows)
 
 
-def test_an_arrival_whose_queue_source_cannot_be_retained_is_not_handed_over(v2, monkeypatch):
-    """No omission without a source this author can resolve: when the arrival's exact facts cannot be retained,
-    the handoff is refused before any mail, and its transport retries the same event."""
-    from ouroboros import chat_chain
+def test_an_arrival_whose_queue_source_cannot_be_named_is_not_handed_over(v2, monkeypatch):
+    """No omission without a source this author can resolve: when the arrival's room row cannot be named as its
+    source, the handoff is refused before any mail, and its transport retries the same event."""
+    from ouroboros import place_arrivals
     from ouroboros.presence_bindings import conversation_key
 
     h, go = v2, threading.Event()
@@ -663,19 +663,19 @@ def test_an_arrival_whose_queue_source_cannot_be_retained_is_not_handed_over(v2,
              "conversation_key": conversation_key("chat", "a", "r", ""), "after_source_event_id": "chat:a:2",
              "complete": True, "pending_count": 1, "omitted_count": 0,
              "events": [{"source_event_id": "chat:a:3", "text": "a queued follow-up"}]}
-    real = chat_chain.retain_memory_source
+    real = place_arrivals.retain_focus_source
 
     def unavailable(*_args, **_kwargs):
-        raise OSError("source storage unavailable")
+        raise OSError("the arrival's record is unavailable")
 
-    monkeypatch.setattr(chat_chain, "retain_memory_source", unavailable)
+    monkeypatch.setattr(place_arrivals, "retain_focus_source", unavailable)
     refused = post(h, 2, "see the queue", conversation={"transport_queue": inbox})
     assert refused.status_code == 400 and refused.json()["disposition"] == "retry", refused.text
     assert place_mail(h, ref) == []
-    monkeypatch.setattr(chat_chain, "retain_memory_source", real)
+    monkeypatch.setattr(place_arrivals, "retain_focus_source", real)
     assert post(h, 2, "see the queue", conversation={"transport_queue": inbox}).json()["outcome"] == "silent"
     entry, = place_mail(h, ref)
-    assert json.loads(entry["text"])["context_source_ref"]["task_id"] == turn_ref(h, 2)
+    assert json.loads(entry["text"])["context_source_ref"]["kind"] == "chat_row"
     go.set()
     assert settled(h, ref)["reply_anchor"]["source_event_id"] == "chat:a:2"
 
@@ -759,3 +759,148 @@ def test_a_resumed_author_covers_only_the_arrivals_its_reentry_note_carries_whol
     covered_send(author, lambda: ({"content": "read"}, 0.0, "full"))
     assert reply_anchor(author, metadata) == {"source_event_id": "chat:a:8",
                                               "message": {"message_id": "8", "source_order": 8}}
+
+
+def post_reaction(h, number, target="1"):
+    """A person's typed reaction on an older message: the connector reports the reacted message's own id."""
+    reaction = {"schema_version": 1, "change": "add", "new": [{"type": "emoji", "value": "👍"}],
+                "target": {"message_id": target, "resolution": "resolved"}}
+    return h.client.post("/presence/turn", headers=V2_HEADERS, json={"continuation_version": 2, "event": {
+        "source_event_id": f"chat:a:{number}", "provider": "chat", "account_id": "a", "conversation_id": "r",
+        "thread_id": "", "conversation_key": "ignored", "actor": {"kind": "user", "platform_actor_id": "ann"},
+        "conversation": {}, "message": {"message_id": target, "source_order": number, "reaction": reaction},
+        "text": "", "facts": []}})
+
+
+@pytest.mark.parametrize("background", [False, True])
+def test_a_reaction_reaches_the_live_author_as_context_and_never_becomes_its_reply_anchor(v2, background):
+    h, go = v2, threading.Event()
+    h.script = [held(go, probe_call()), finish_call("Answer.", 2)]
+    assert post(h, 5, "please answer").json()["status"] == "continuing"
+    ref = turn_ref(h, 5)
+    wait_until(lambda: len(h.calls) == 1, "the author's first model send")
+    if background:  # ordinary background speech still anchors
+        assert post(h, 6, "by the way", facts=(), actor="other").json()["outcome"] == "silent"
+    assert post_reaction(h, 7).json()["outcome"] == "silent"
+    assert [entry["place_arrival"]["wake"] for entry in place_mail(h, ref)] == [False] * (2 if background else 1)
+    go.set()
+    late = settled(h, ref)
+    seen = arrivals_seen(h.calls[1])
+    assert late["text"] == "Answer." and len(h.calls) == 2
+    assert seen[-1]["source_event_id"] == "chat:a:7" and seen[-1]["non_speech"].startswith("Reaction, not speech: added 👍")
+    assert late["reply_anchor"] == ({"source_event_id": "chat:a:6", "message": {"message_id": "6", "source_order": 6}}
+                                    if background else
+                                    {"source_event_id": "chat:a:5", "message": {"message_id": "5", "source_order": 5}})
+
+
+def test_a_reentry_note_carries_a_reaction_as_context_and_never_as_coverage(tmp_path, monkeypatch):
+    from ouroboros import presence_continuation as pc, presence_observations
+    from ouroboros.presence_continuation import covered_send, reentry_note, reply_anchor
+
+    key = "chat:a:r:0"
+    reaction = {"schema_version": 1, "change": "add", "new": [{"type": "emoji", "value": "👍"}],
+                "target": {"message_id": "1", "resolution": "resolved"}}
+    rows = [{"ts": "2026-10-29T00:00:06+00:00", "chat_id": 7, "direction": "in", "task_id": "turn-6", "text": "words 6",
+             "client_message_id": "chat:a:6", "transport": {"conversation_key": key, "message": {"message_id": "6", "source_order": 6}}},
+            {"ts": "2026-10-29T00:00:07+00:00", "chat_id": 7, "direction": "in", "task_id": "turn-7", "text": "",
+             "sender_label": "Ann", "client_message_id": "chat:a:7", "transport": {
+                 "conversation_key": key, "actor": {"kind": "user"},
+                 "message": {"message_id": "1", "source_order": 7, "reaction": reaction}}}]
+    monkeypatch.setattr(pc, "_conversation_rows_since", lambda *_a: (rows, []))
+    monkeypatch.setattr(pc, "_retain_reentry", lambda *_a: "")
+    monkeypatch.setattr(presence_observations, "transport_queue_observation",
+                        lambda *_a: {"status": "unavailable", "reason": "transport_has_not_reported_queue"})
+    event = SimpleNamespace(conversation_key=key, provider="chat", account_id="a", conversation_id="r", thread_id="")
+    binding = pc.ReviewWaitBinding(None, tmp_path, "author", "identity", event, cursor={"at": "2026-10-29T00:00:00+00:00"})
+    author = SimpleNamespace(task_metadata={})
+    note = reentry_note(binding, author)
+    assert "- reaction from Ann (event chat:a:7" in note and "[Reaction, not speech: added 👍 on message 1]" in note
+    assert [row["source_event_id"] for row in author._presence_delivered] == ["chat:a:6"]
+    covered_send(author, lambda: ({"content": "read"}, 0.0, "full"))
+    metadata = {"presence_continuation_version": 2,
+                "presence": {"event": {"source_event_id": "chat:a:5", "message": {"message_id": "5", "source_order": 5}}}}
+    assert reply_anchor(author, metadata)["source_event_id"] == "chat:a:6"
+
+
+def test_a_carried_version_2_author_answers_early_from_its_carrier(v2, monkeypatch):
+    """Review K4: the early answer comes from the turn's own intake opening in whichever process carries it.
+    Here the v2 event is admitted to a READY conversation-lane carrier (executor ``worker``), never the degraded
+    executor a TestClient Host otherwise uses; this test is that carrier: it runs the real worker body, which
+    re-admits the turn and runs the production agent, and hands its frames to the server's handlers. The Host
+    answers ``continuing`` while the author's first model call is still in flight."""
+    from ouroboros.presence_carrier import handle_presence_turn_initial, handle_presence_turn_settled
+    from supervisor import conversation_lane, workers
+    from supervisor.worker_process import run_worker_task
+    from tests.conversation_carrier_support import isolate_lane_pool
+
+    h = v2
+    slot, = isolate_lane_pool(monkeypatch, h.root, spares=1)
+    monkeypatch.setattr(conversation_lane, "_ARMED_TABLE", id(workers.WORKERS))  # a started pool generation
+    monkeypatch.setattr(conversation_lane, "replenish_after_claim", lambda: None)  # this test is the only carrier
+
+    class ServerBus:
+        """The server's consumer of the carrier's frames (the Host's waiter is settled from them)."""
+
+        def put(self, item, *_a, **_k):
+            kind = item.get("type") if isinstance(item, dict) else None
+            if kind == "presence_turn_initial":
+                handle_presence_turn_initial(item, workers)
+            elif kind == "presence_turn_settled":
+                handle_presence_turn_settled(item, workers)
+
+    stop, carried = threading.Event(), []
+
+    def carrier():
+        while not stop.is_set():
+            if not slot.in_q:
+                time.sleep(0.01)
+                continue
+            task = slot.in_q.pop(0)
+            carried.append(task)
+            run_worker_task(SimpleNamespace(owner_wait_callback=None, _event_queue=None), task, wid=slot.wid,
+                            out_q=ServerBus(), repo_dir=str(h.root), drive_root=str(h.root))
+
+    thread = threading.Thread(target=carrier, name="test-carrier", daemon=True)
+    thread.start()
+    release = threading.Event()
+    h.script = [held(release, finish_call("Carried answer."))]
+    try:
+        request, box = post_later(h, 1)
+        try:
+            request.join(BARRIER)
+            assert "response" in box and not release.is_set(), "no early answer while the carried author was working"
+            assert box["response"].status_code == 200 and box["response"].json()["status"] == "continuing"
+            assert carried and carried[0]["_execution_owner"]["executor"] == "worker"  # a carrier, not degraded
+        finally:
+            release.set()
+            request.join(BARRIER)
+        assert settled(h, turn_ref(h, 1))["text"] == "Carried answer."
+        wait_until(lambda: not h.host.presence_turns.live(), "the carried author's settlement")
+    finally:
+        stop.set()
+        thread.join(BARRIER)
+
+
+def test_the_authors_durable_intake_closes_with_its_final_drain_before_the_turn_returns(v2):
+    """Review M10: a Host in another process reads only the author's durable intake fact. It closes with the
+    loop's own admission, before the final drain reads, so between the final closure and the turn's return a
+    remote arrival is refused (it becomes its own turn), never acknowledged to an author that will not read it."""
+    from ouroboros.conversation_lease import author_intake_accepting
+    from ouroboros.presence_bindings import conversation_key
+
+    h, go = v2, threading.Event()
+    h.script = [held(go, finish_call("Answer."))]
+    h.terminal.clear()
+    thread, _box = post_later(h, 1)
+    ref, key = turn_ref(h, 1), conversation_key("chat", "a", "r", "")
+    try:
+        wait_until(lambda: len(h.calls) == 1, "the author's first model call")
+        assert author_intake_accepting(h.root, ref, key)  # its loop reads mail: a remote Host may offer it
+        go.set()
+        assert h.closed.wait(BARRIER)  # the final closure passed; the turn has not returned yet
+        assert not author_intake_accepting(h.root, ref, key)
+    finally:
+        go.set()
+        h.terminal.set()
+        thread.join(BARRIER)
+    assert settled(h, ref)["text"] == "Answer."

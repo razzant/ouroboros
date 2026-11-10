@@ -95,7 +95,9 @@ _ISO_SETTINGS_ALLOW_PREFIX = ("OUROBOROS_MODEL", "OUROBOROS_EFFORT", "LOCAL_MODE
 _ISO_SETTINGS_ALLOW_EXACT = frozenset({
     # The roster carries the delegation actor AND the review pool (its marked rows).
     "OUROBOROS_SUBAGENTS",
-    "OUROBOROS_WEBSEARCH_MODEL",
+    # The web search Source and Model are one choice: a ddgs pin's stale Model must not become
+    # paid Auto search, nor an Anthropic pin's legacy bare id change meaning. Overrides still win.
+    "OUROBOROS_WEBSEARCH_MODEL", "OUROBOROS_WEBSEARCH_BACKEND",
     # Review policy knobs (non-secret): must propagate so settings.json's result-review
     # config is honored by isolated benchmark servers (else it silently
     # falls back to the "auto" default and the end-of-task review never runs).
@@ -129,7 +131,7 @@ _PROVIDER_ENV_KEYS = frozenset({
 # path/port values that this lifecycle writes back explicitly, plus one
 # operational host-load lever: ``OUROBOROS_PREFLIGHT_TEST_WORKERS`` caps the
 # xdist fan-out of the commit gate's hermetic pytest pass (read by
-# ``preflight_runner._preflight_worker_count`` in the server process, never a
+# ``preflight_probe._preflight_worker_count`` in the server process, never a
 # model/credential/settings key, and still scrubbed from the candidate suite's
 # own environment by ``preflight_runner._preflight_env``).  Without it every
 # isolated server resolves ``-n auto`` to the host's CPU count.  This is scoped
@@ -566,11 +568,16 @@ class IsolatedServer:
 
     def __init__(self, clone: pathlib.Path, data_root: pathlib.Path, settings_path: pathlib.Path,
                  *, host: str = "127.0.0.1", settings_authoritative_env: bool = False,
-                 expected_settings_sha256: str | None = None) -> None:
+                 expected_settings_sha256: str | None = None, stdio_path: pathlib.Path | None = None) -> None:
         self.clone = pathlib.Path(clone)
         self.data_root = pathlib.Path(data_root)
         self.settings_path = pathlib.Path(settings_path)
         self.host = host
+        # Where the server's stdout and stderr go, appended (``None``: nowhere, the historical
+        # DEVNULL). ``start`` hands the child the descriptor and closes only its own copy: the
+        # process keeps writing through its in-place re-exec, and a failure before the first
+        # import (a missing dependency, a syntax error) stays readable after the stop.
+        self.stdio_path = pathlib.Path(stdio_path) if stdio_path else None
         # Some adapters inject one deliberately selected credential after this base
         # environment is built. Those adapters opt into settings-authoritative mode so
         # ambient provider/model settings cannot shadow the applied snapshot. The default
@@ -703,13 +710,25 @@ class IsolatedServer:
             # into a defaults-only file, defeating the authority contract.
             self._read_authoritative_settings()
         self._patch_settings_ports()
-        # Own process group/session so a hung server + its worker children can be
-        # killed as a tree (platform_layer), not orphaned past graceful SIGTERM.
-        self.proc = subprocess.Popen(
-            [sys.executable, "server.py"], cwd=str(self.clone), env=self._env(),
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            **subprocess_new_group_kwargs(),
-        )
+        sink = None
+        if self.stdio_path is not None:
+            self.stdio_path.parent.mkdir(parents=True, exist_ok=True)
+            # 0600 like a strict lane's settings file: a server's output can carry what it was configured with.
+            sink = os.fdopen(os.open(self.stdio_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "ab")
+            sink.write(f"=== IsolatedServer.start {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} "
+                       f"port {self.port} ===\n".encode("utf-8"))
+            sink.flush()
+        try:
+            # Own process group/session so a hung server + its worker children can be
+            # killed as a tree (platform_layer), not orphaned past graceful SIGTERM.
+            self.proc = subprocess.Popen(
+                [sys.executable, "server.py"], cwd=str(self.clone), env=self._env(),
+                stdout=sink or subprocess.DEVNULL, stderr=subprocess.STDOUT if sink else subprocess.DEVNULL,
+                **subprocess_new_group_kwargs(),
+            )
+        finally:
+            if sink is not None:
+                sink.close()
         try:
             self._wait_ready(ready_timeout)
         except BaseException:

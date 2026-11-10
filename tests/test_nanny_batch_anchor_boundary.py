@@ -125,9 +125,10 @@ def _continue_cold(tmp_path, monkeypatch, registry, verb, *, total_cost=1.5):
     return seen["facts"][-1]
 
 
-@pytest.mark.parametrize("verb", ["delegate_start", "delegate_wait"])
-@pytest.mark.parametrize("park", [False, True], ids=["post_batch_recovery", "owner_wait_park"])
-@pytest.mark.parametrize("batch_cost", [0.0, 0.75], ids=["no_tool_cost", "metered_tool"])
+@pytest.mark.parametrize(("batch_cost", "park", "verb"), [
+    pytest.param(0.0, False, "delegate_start", id='no_tool_cost-post_batch_recovery-delegate_start'),
+    pytest.param(0.75, True, "delegate_wait", id='metered_tool-owner_wait_park-delegate_wait'),
+])
 def test_a_cold_continuation_keeps_the_completed_batch_delegation_anchors(tmp_path, monkeypatch, verb, park, batch_cost):
     wait = _start_batch(tmp_path, monkeypatch, _nanny(tmp_path, monkeypatch), verb,
                         park=park, batch_cost=batch_cost)

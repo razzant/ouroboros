@@ -16,7 +16,7 @@ import json
 import pathlib
 import re
 from collections import Counter
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping
 
 from ouroboros.jsonl_tail import cached_tail_objects
 from ouroboros.utils import read_json_dict, read_text
@@ -44,6 +44,32 @@ def safe_read(path: pathlib.Path, fallback: str = "") -> str:
 def _iter_recent_jsonl(path: pathlib.Path, max_bytes: int = 256_000):
     """The log's bounded tail, read once per file identity and shared with the Runtime section's body fact."""
     yield from cached_tail_objects(path, max_bytes)
+
+
+def _host_work_line(receipts: List[Mapping[str, Any]]) -> str:
+    """What the running code's recent builds did past one pass, from their ``context_memory_view`` receipts: work repeated
+    on the same input (a ``<verb>_again`` above zero) and rows read past those open and new. A fact for the mind, and
+    only when one of the two is there: in a healthy state nothing is added."""
+    from ouroboros.transcript_prefix import _running_code
+
+    code = _running_code()
+    builds = [dict(receipt.get("work") or {}) for receipt in receipts if receipt.get("code") == code and receipt.get("work")]
+    if not builds:
+        return ""
+    repeats: Counter = Counter()
+    repeating = 0
+    for work in builds:
+        again = {verb[:-len("_again")]: n for verb, n in work.items() if verb.endswith("_again") and n}
+        repeats.update(again)
+        repeating += bool(again)
+    newest = builds[-1]
+    read, opened, new = (int(newest.get(name) or 0) for name in ("rows_read", "rows_open", "rows_new"))
+    facts = [f"the newest capture read {read:,} rows of the chat tail for {opened:,} open and {new:,} new"] if read > opened + new else []
+    if repeats:
+        facts.append(f"{repeating} of {len(builds)} recent builds did work again on an input they already had "
+                     f"({', '.join(f'{verb} {n:,}' for verb, n in repeats.most_common())})")
+    return (f"INFO: HOST WORK BEYOND ONE PASS under the running code ({code if ' ' in code else code[:12]}) — {'; '.join(facts)}. "
+            "Receipts: logs/events.jsonl, context_memory_view, field work.") if facts else ""
 
 
 def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:
@@ -86,6 +112,7 @@ def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:
         llm_error_models: Counter = Counter()
         local_overflow_models: Counter = Counter()
         remote_overflow_models: Counter = Counter()
+        view_receipts: List[Dict[str, Any]] = []
         for ev in _iter_recent_jsonl(events_path):
             evt_type = str(ev.get("type") or "")
             model = str(ev.get("model") or "unknown")
@@ -95,6 +122,11 @@ def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:
                 local_overflow_models[model] += 1
             elif evt_type == "remote_context_overflow":
                 remote_overflow_models[model] += 1
+            elif evt_type == "context_memory_view":
+                view_receipts.append(ev)
+        host_work = _host_work_line(view_receipts)
+        if host_work:
+            checks.append(host_work)
         if llm_error_models:
             top = ", ".join(f"{model} x{count}" for model, count in llm_error_models.most_common(3))
             checks.append(f"WARNING: PROVIDER/ROUTING ERRORS — {sum(llm_error_models.values())} recent failures ({top}). Reliability or failover may need attention.")
@@ -201,13 +233,15 @@ def _plan_review_note(env: Any, task_id: str) -> str:
 def _identity_age_line(env: Any) -> str:
     """When ``identity.md`` was last written, as a fact; whether that is long is the mind's reading
     (the STALE/THIN identity and EMPTY/BLOATED scratchpad verdicts and their OK lines left with the
-    owner's rule that no threshold stands in for judgment). An absent file is no fact."""
+    owner's rule that no threshold stands in for judgment). An absent file is no fact. A write's timestamp can run
+    ahead of a coarse clock (Windows, Python 3.10: 15.6 ms), so a file written just now is 0.0 h old, never -0.0."""
     import time as _time
 
     try:
         identity_path = env.drive_path("memory/identity.md")
         if identity_path.exists():
-            return f"identity.md last updated {(_time.time() - identity_path.stat().st_mtime) / 3600:.1f} h ago"
+            age = max(0.0, _time.time() - identity_path.stat().st_mtime)
+            return f"identity.md last updated {age / 3600:.1f} h ago"
     except Exception:
         pass
     return ""
@@ -411,15 +445,19 @@ def build_health_invariants(env: Any, task_id: str = "", active_root: str = "",
     except Exception:
         pass
 
-    try:
-        state_data = read_json_dict(env.drive_path("state/state.json")) or {}
-        from ouroboros.usage_accounting import usage_breakdown
-
-        accounted = float(usage_breakdown(env.drive_root).get("accounted_usd") or 0.0)
-        if state_data.get("budget_drift_alert"):
-            checks.append(f"WARNING: BUDGET DRIFT {state_data.get('budget_drift_pct', 0):.1f}% — tracked=${accounted:.2f} vs OpenRouter=${state_data.get('openrouter_total_usd', 0):.2f}")
-    except Exception:
-        checks.append("WARNING: COST ACCOUNTING UNAVAILABLE — budget drift check skipped")
+    # The drift check saved its own like-for-like pair and baseline (supervisor.state._apply_openrouter_ground_truth):
+    # the line says the two changes since that baseline, the ones its percentage compares (as /status prints them),
+    # with no usage-store read on a context build.
+    state_data = read_json_dict(env.drive_path("state/state.json")) or {}
+    if state_data.get("budget_drift_alert"):
+        try:
+            ledger = state_data.get("openrouter_checked_ledger_settled_usd", state_data.get("openrouter_ledger_settled_usd"))
+            ledger_since = float(ledger) - float(state_data["session_openrouter_settled_snapshot"])
+            key_since = float(state_data["openrouter_total_usd"]) - float(state_data["session_total_snapshot"])
+            checks.append(f"WARNING: BUDGET DRIFT {float(state_data['budget_drift_pct']):.1f}% — since its baseline the "
+                          f"ledger counted ${ledger_since:.2f} of OpenRouter spend, the key's usage grew ${key_since:.2f}")
+        except (KeyError, TypeError, ValueError):
+            checks.append("WARNING: BUDGET DRIFT — the saved drift figures are unreadable (state/state.json)")
 
     checks.extend(filter(None, [_identity_age_line(env)]))
 

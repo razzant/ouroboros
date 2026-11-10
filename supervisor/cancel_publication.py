@@ -52,8 +52,8 @@ CANCEL_SOURCE_PHRASES = {
     "snapshot_restore": "The server stopped while this task was still running",
     # ``join_ledger`` cancel_task, Ouroboros's own tool; the asking run is below.
     "agent_tool": "Stopped by Ouroboros",
-    # ``work_diagnostics.withdraw_revoked`` and the unsent withdrawals (#1376): a
-    # silence diagnostic whose observed work moved on, settled or stopped.
+    # Historical rows of the retired silence diagnostic (#1376, removed 09.11.2026):
+    # a silence check whose observed work moved on, settled or stopped.
     "silence_resolved": "Silence check withdrawn: the observed work no longer needed it",
 }
 # The fixed label a producer writes as ``reason`` restates its phrase, so that
@@ -431,7 +431,7 @@ def _publish_cancelled_task(
     reload, so the stored status is emitted instead.
     """
     from supervisor import workers
-
+    from ouroboros.model_wait import record_execution_close
     from ouroboros.task_results import STATUS_CANCELLED
     from ouroboros.headless import terminal_task_files_ready
 
@@ -439,12 +439,12 @@ def _publish_cancelled_task(
         return CANCEL_FAILED  # Publication/cleanup cannot outrun terminal source custody.
 
     settled_status = str((stored or {}).get("status") or STATUS_CANCELLED)
-    # The row leaves RUNNING only NOW — death confirmed, terminal result durable.
-    # A natural task_done that raced us may have consumed the row already; that
-    # handler also emitted the terminal event, so whoever pops the row owns the
-    # emit and the card resolves exactly once.
+    # The row leaves RUNNING only NOW (death confirmed, result durable; its #939 clock closes first), custody's own
+    # only (its reaping slot's): a raced task_done consumed it and owns the emit; a newer row is another attempt's.
+    row = q.RUNNING.get(task_id) if (q.RUNNING.get(task_id) or {}).get("worker_id", worker.wid) == worker.wid else None
+    record_execution_close(q.DRIVE_ROOT, task_id, task, row)
     with q._queue_lock:
-        row_owned = q.RUNNING.pop(task_id, None) is not None
+        row_owned = row is not None and q.RUNNING.get(task_id) is row and q.RUNNING.pop(task_id) is row
     try:
         from ouroboros.tools.services import archive_task_service_logs
         archive_task_service_logs(pathlib.Path(q.DRIVE_ROOT), str(task_id), task)
@@ -767,12 +767,16 @@ def _finish_captured_chat_turn(
 
 
 def finish_in_process_turn(q: Any, task_id: str, turn: Optional[Dict[str, Any]], row: Dict[str, Any], *,
-                           intent: Optional[Dict[str, Any]] = None, deliver: bool = True) -> Optional[str]:
+                           intent: Optional[Dict[str, Any]] = None, deliver: bool = True,
+                           runner_owned: bool = False) -> Optional[str]:
     """Custody of a task no queue map holds but this process runs, else ``None``: a direct chat turn or its
     billing synthesis takes ``_finish_captured_chat_turn``. An inline Presence turn the census witnesses or
     cannot rule out (``presence_execution_witness``) reads this open intent and its runner writes the terminal
     (#2012); custody never writes that row: it releases the claim (an unreadable census recorded as unknown)
-    and settles the intent once the row settles (``cancelled`` only for this request); an absent turn: None."""
+    and settles the intent once the row settles (``cancelled`` only for this request); an absent turn: None.
+    A pooled author whose Stop custody left to its runner (``runner_owned``, ``runner_takes_stop``) is held the
+    same way, and while its row is unsettled it never reaches the miss lane, whose cancelled write would land
+    beside a worker that may still run: the next pass reads it again (#2566)."""
     from ouroboros.post_task_checkpoint import post_task_synthesis_in_flight
     from ouroboros.presence_runner import presence_execution_witness
     from supervisor.queue_transitions import settled_status_of
@@ -780,27 +784,56 @@ def finish_in_process_turn(q: Any, task_id: str, turn: Optional[Dict[str, Any]],
     from supervisor import workers
     if turn is not None or workers.get_direct_chat_agent(task_id) is not None or post_task_synthesis_in_flight(q.DRIVE_ROOT, task_id):
         return _finish_captured_chat_turn(q, task_id, turn, intent=intent, deliver=deliver)
-    if not (isinstance(owner := (row or {}).get("execution_owner"), dict) and owner.get("kind") == "presence"):
+    carried = isinstance(owner := (row or {}).get("execution_owner"), dict) and owner.get("kind") == "presence"
+    if not (carried or runner_owned):
         return None
     live = presence_execution_witness(task_id, drive_root=pathlib.Path(q.DRIVE_ROOT))
     current = _load_result_row(q, task_id) or row  # read after the witness: an end in between is settled
     if not (settled := settled_status_of(current)):
-        if live is not False:  # witnessed or unknown: the Stop stays pending, recorded as what it is
-            _release_intent_claim(q, task_id, intent=intent, error="Presence turn has not reached its next stop check"
-                                  if live else "Presence liveness unknown: its author census is unreadable")
-        return None if live is False else CANCEL_FAILED
+        if live is False and carried:
+            return None
+        # The Stop stays pending, recorded as what it is.
+        if live is None:
+            error = "Presence liveness unknown: its author census is unreadable"
+        elif live:
+            error = "Presence turn has not reached its next stop check"
+        else:  # the pooled author left its census before its terminal: the next pass reads its worker again
+            error = "Presence author no longer witnessed before its terminal"
+        _release_intent_claim(q, task_id, intent=intent, error=error)
+        return CANCEL_FAILED
     stopped = (settled == "cancelled" and bool(intent) and isinstance(origin := current.get("cancel_origin"), dict)
                and origin.get("request_id") == intent.get("request_id"))
     _settle_intent(q, task_id, outcome="cancelled" if stopped else SETTLED_ALREADY, detail=settled, intent=intent)
     return CANCEL_CANCELLED if stopped else CANCEL_ALREADY_SETTLED
 
 
-def live_presence_row(row: Any) -> bool:
-    """An unsettled row a live Presence turn owns: its runner settles it, not cancel custody."""
+def runner_takes_stop(q: Any, task_id: str, row: Any) -> bool:
+    """A live Presence turn's Stop is its runner's wherever it runs (#2012), the conversation lane's carrier
+    included, and so is a moved text turn's author a pool worker continues (#2566: a Resume or a restart's return
+    stamps its row ``pooled``; it reads its own Stop, ``owner_stop.runner_reads_stop``): custody never captures or
+    kills a carrier whose author the census positively witnesses, and ``finish_in_process_turn`` keeps the Stop
+    pending until the runner's next stop check writes the terminal. Read before Q; an author that cannot be
+    witnessed takes the ordinary capture and kill, and saved work the queue holds takes the queue's cancel."""
+    from ouroboros.presence_carrier import moved_text_turn
+    from ouroboros.presence_runner import presence_execution_witness
     from supervisor.queue_transitions import settled_status_of
 
     owner = row.get("execution_owner") if isinstance(row, dict) else None
-    return isinstance(owner, dict) and owner.get("kind") == "presence" and not settled_status_of(row)
+    carried_saved = (isinstance(owner, dict) and owner.get("kind") == "pooled" and not settled_status_of(row)
+                     and moved_text_turn(q.DRIVE_ROOT, task_id, row.get("metadata")))
+    return ((live_presence_row(row) or carried_saved)
+            and presence_execution_witness(task_id, drive_root=pathlib.Path(q.DRIVE_ROOT)) is True)
+
+
+def live_presence_row(row: Any) -> bool:
+    """An unsettled row a live Presence turn owns: its runner settles it, not cancel custody. A moved turn's
+    saved work the queue keeps (``presence_recovery.queue_kept``) is the queue's, as any queued row."""
+    from ouroboros.presence_recovery import queue_kept
+    from supervisor.queue_transitions import settled_status_of
+
+    owner = row.get("execution_owner") if isinstance(row, dict) else None
+    return (isinstance(owner, dict) and owner.get("kind") == "presence" and not settled_status_of(row)
+            and not queue_kept(row))
 
 
 def _finalize_cancel_intent_on_miss(

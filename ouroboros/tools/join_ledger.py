@@ -8,8 +8,10 @@ not orphaning spawned subagent children:
     shared typed task-tree decision ledger, lineage-gated to OWN children.
 
 The shared lineage/ledger helpers (_status_drive_root, _is_own_child,
-_record_child_decision_beacon) and the cancel_task handler (moved here from control.py,
-upgraded with a recorded reason + lineage gate) live here too.
+_record_child_decision_beacon), the reads that tell finalization which direct children
+still owe a disposition (_load_direct_child_results, _child_disposition_state; the loop
+re-exports both) and the cancel_task handler (moved here from control.py, upgraded with
+a recorded reason + lineage gate) live here too.
 """
 
 from __future__ import annotations
@@ -56,7 +58,9 @@ def _child_result_sha256(result: Dict[str, Any]) -> str:
     construction. A content/status/artifact change therefore invalidates a prior
     disposition, while accounting or coordination telemetry does not. The host
     notice is part of the parent's consumed result, separate from model-answer
-    identity; its absence preserves the historical hash exactly.
+    identity; its absence preserves the historical hash exactly. So does hashing
+    the custody text with its empty categories: a shorter display of the same
+    facts must not void a recorded disposition (#1403).
     """
 
     semantic_result = result
@@ -109,7 +113,7 @@ def _child_result_sha256(result: Dict[str, Any]) -> str:
     }
     from ouroboros.task_finalization import terminal_host_notice_text
 
-    notice = terminal_host_notice_text(semantic_result)
+    notice = terminal_host_notice_text(semantic_result, include_empty=True)
     if "terminal_host_notice" in semantic_result or notice:
         payload["terminal_host_notice"] = notice
     encoded = json.dumps(
@@ -146,6 +150,47 @@ def _current_child_result_disposition(result: Dict[str, Any]) -> str:
     return disposition if expected == _child_result_sha256(result) else ""
 
 
+def _load_direct_child_results(
+    status_root: Path,
+    task_id: str,
+    root_task_id: str,
+) -> list[Dict[str, Any]]:
+    """Read this task's direct children (plan review spawns none)."""
+
+    from ouroboros.task_status import find_child_tasks
+
+    return [
+        row for row in find_child_tasks(
+            Path(status_root),
+            parent_task_id=task_id,
+            root_task_id=root_task_id,
+            exclude_task_id=task_id,
+            scope="direct",
+        )
+        if isinstance(row, dict)
+    ]
+
+
+def _child_disposition_state(child: Dict[str, Any]) -> str:
+    """Return cancellation or the current task-tree exact-hash disposition."""
+
+    # Explicit cancellation wins every completion race; late scratch results are
+    # not recovered. Only a SETTLED ``cancelled`` counts as handled (GR2-8c):
+    # ``cancel_requested`` is intent, so such a child stays cancel-pending.
+    if (
+        str(child.get("parent_decision") or "").strip().lower() == "cancelled"
+        and str(child.get("status") or "").strip().lower() == "cancelled"
+    ):
+        return "cancelled"
+    try:
+        current = _current_child_result_disposition(child)
+        if current:
+            return current
+    except Exception:
+        pass
+    return ""
+
+
 def _record_child_result_disposition(
     ctx: ToolContext,
     payload: Dict[str, Any],
@@ -161,16 +206,11 @@ def _record_child_result_disposition(
     reason_text = " ".join(str(rationale or "").split())
     if not reason_text:
         problems.append("tree_note text is required as the rationale")
-    elif len(reason_text) > 500:
-        problems.append(
-            f"tree_note rationale must be at most 500 characters (got {len(reason_text)}; "
-            "shorten it yourself — it is never truncated for you)"
-        )
     if problems:
         return _publish_tool_result(ctx, ToolResult(
             status="error", code="TOOL_ARG_ERROR",
             text=("⚠️ CHILD_RESULT_DISPOSITION_INVALID: " + "; ".join(problems) + ". "
-            "Correct example: tree_note(kind='decision', text='<short why, ≤500 chars>', "
+            "Correct example: tree_note(kind='decision', text='<why>', "
             "payload={'type': 'child_result_disposition', 'child_task_id': '<id>', "
             "'disposition': 'integrated'|'irrelevant'|'deferred', "
             "'child_result_sha256': '<the 64-hex sha from [SUBTASK_OUTCOME]/get_task_result>'})."
@@ -474,9 +514,10 @@ def _peek_task(ctx: ToolContext, task_id: str, view: str = "summary") -> str:
     status = str(data.get("status") or "unknown")
     # SSOT cost projection (C2): a missing/unknown cost says "unknown", never a
     # confident $0.00, and an open amount is labelled as the upper bound it is.
-    from ouroboros.cost_projection import cost_display
+    from ouroboros.cost_projection import cost_display, current_cost
     from ouroboros.work_stop import stop_for_reader
 
+    data = current_cost(data, status_drive_root)
     parts = [
         f"Task {tid} [{status}] cost={cost_display(data)} (peek — NOT absorbed)",
         f"child_result_sha256={_child_result_sha256(data)}",

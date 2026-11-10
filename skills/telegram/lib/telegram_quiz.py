@@ -4,7 +4,7 @@ The host's ``chat.quiz`` event carries the card identity (``task_id``,
 ``quiz_id``). The owner's button tap or reply is relayed to the SAME decision
 ingress the web card uses — Host Service ``POST /chat/decision`` →
 ``task_decision.answer_decision`` — so the answer is idempotent per
-``request_id`` (``tg:<update_id>``), first answer wins, and a late answer is
+``request_id`` (``tg:<bot id>:<update_key>``), first answer wins, and a late answer is
 accepted exactly as it is for the browser card. The only state kept here maps a
 short callback token and the sent message to that identity: Telegram caps
 ``callback_data`` at 64 bytes, too short for the ids themselves. A card also
@@ -30,6 +30,10 @@ tap, a reply to it and the answered-edit keep working exactly as for a short
 card; a reply to an earlier explanation part is an ordinary owner message
 carrying the bridge's host-row reference. An open question (no
 options) is the same card without a keyboard; its hint asks for a reply.
+
+A secret request (the event carries ``secret_request``) is never answered here: the host's
+question already says where to enter it, the card has no keyboard and asks for no reply, and a
+reply to it is answered locally and posted nowhere, so no value is relayed from this chat.
 """
 
 from __future__ import annotations
@@ -42,7 +46,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tupl
 
 from .telegram_api import _TELEGRAM_TEXT_LIMIT, _u16len
 from .telegram_i18n import Index
-from .telegram_state import _read_json_file, _state_file
+from .telegram_state import _message_ref, _read_json_file, _state_file
 
 _QUIZ_STATE_FILE = "quiz_state.json"
 _MAX_REMEMBERED = 50
@@ -58,6 +62,10 @@ HostPost = Callable[[Any, str, Dict[str, Any]], Awaitable[Tuple[int, Dict[str, A
 _TEXTS_EN = {
     "hint": "Tap an option, or reply to this message with your own answer.",
     "hint_open": "Reply to this message with your answer.",
+    "hint_secret": "A reply here is not sent to Ouroboros.",
+    "secret_reply": "Not sent: a secret goes only into the protected form in the Ouroboros app. You can delete your message here.",
+    "reply_held": "Not sent: this may answer an earlier question. Use that question's buttons or answer it in the Ouroboros app; for a new message, don't reply to the card.",
+    "secret_saved": "Saved in Ouroboros.",
     # The host's delivery of an accepted answer, as the web card says it; never a read receipt.
     "status_saved": "Answer saved · the task reads it when it continues",
     "status_pending": "Answer recorded · delivery pending",
@@ -118,6 +126,10 @@ def hint(lang: str) -> str:
 
 def hint_open(lang: str) -> str:
     return _texts(lang)["hint_open"]
+
+
+def hint_secret(lang: str) -> str:
+    return _texts(lang)["hint_secret"]
 
 
 def mint_token(task_id: str, quiz_id: str) -> str:
@@ -238,16 +250,29 @@ async def send_quiz_card(client, chat_id: int, *, body: str, compact: str, hint_
 
 def _load(api) -> Dict[str, Any]:
     data = _read_json_file(_state_file(api, _QUIZ_STATE_FILE))
-    quizzes = data.get("quizzes") if isinstance(data, dict) else None
-    return {"quizzes": dict(quizzes) if isinstance(quizzes, dict) else {}}
+    data = data if isinstance(data, dict) else {}
+    quizzes, bots = data.get("quizzes"), data.get("bots")
+    return {"quizzes": dict(quizzes) if isinstance(quizzes, dict) else {},
+            "bots": dict(bots) if isinstance(bots, dict) else {}}
 
 
-def remember_quiz(api, token: str, record: Dict[str, Any]) -> None:
-    """Bounded token → card mapping (the newest ``_MAX_REMEMBERED`` cards)."""
+def _bot_cards(data: Dict[str, Any], bot: str) -> Tuple[Dict[str, Any], str]:
+    """Where one bot's cards live, and the prefix of its keys there: a card's message id means
+    something only to the bot that sent it, and one question can have a card at each. Every
+    named bot's cards share ``bots``, keyed ``<bot id>:<token>``, in one order, as before this file
+    named its bots: a card stays while it is among the newest ``_MAX_REMEMBERED``, however many
+    bots sent cards after it. ``""`` (a token naming no bot) is ``quizzes``, keyed by token, where
+    cards saved before this file named its bots also stay: their sender is unknown."""
+    return (data["bots"], f"{bot}:") if bot else (data["quizzes"], "")
+
+
+def remember_quiz(api, bot: str, token: str, record: Dict[str, Any]) -> None:
+    """Bounded token → card mapping: the newest ``_MAX_REMEMBERED`` cards (``_bot_cards``)."""
     data = _load(api)
-    quizzes = data["quizzes"]
-    quizzes.pop(token, None)
-    quizzes[token] = dict(record)
+    quizzes, prefix = _bot_cards(data, bot)
+    key = f"{prefix}{token}"
+    quizzes.pop(key, None)
+    quizzes[key] = dict(record)
     for stale in list(quizzes)[:-_MAX_REMEMBERED]:
         quizzes.pop(stale, None)
     path = _state_file(api, _QUIZ_STATE_FILE)
@@ -257,12 +282,22 @@ def remember_quiz(api, token: str, record: Dict[str, Any]) -> None:
     tmp.replace(path)
 
 
-def quiz_for_token(api, token: str) -> Optional[Dict[str, Any]]:
-    record = _load(api)["quizzes"].get(str(token or ""))
+def quiz_for_token(api, bot: str, token: str) -> Optional[Dict[str, Any]]:
+    quizzes, prefix = _bot_cards(_load(api), bot)
+    record = quizzes.get(f"{prefix}{token or ''}")
     return dict(record) if isinstance(record, dict) else None
 
 
-def remember_state(api, token: str, record: Dict[str, Any], state: str,
+def _tapped_card(api, bot: str, token: str) -> Optional[Dict[str, Any]]:
+    """What a tap answers: its button names the question by token, whichever bot sent the card,
+    so a card saved before this file named its bots still answers it, but with no message id to
+    edit: a tap on an old card must not lose the answer, and its sender stays unknown."""
+    record = quiz_for_token(api, bot, token)
+    legacy = quiz_for_token(api, "", token) if record is None and bot else None
+    return {**legacy, "message_id": 0} if legacy else record
+
+
+def remember_state(api, bot: str, token: str, record: Dict[str, Any], state: str,
                    facts: Optional[Dict[str, Any]] = None) -> None:
     """Persist a settled lifecycle state on the card: the no-rollback evidence. An answer
     also keeps the host's recorded facts (``merge_answer_facts``) for later partial facts."""
@@ -271,27 +306,46 @@ def remember_state(api, token: str, record: Dict[str, Any], state: str,
     updated = {key: value for key, value in record.items() if facts is None or key not in _ANSWER_FACTS}
     updated.update(state=state, **(facts or {}))
     if updated != record:
-        remember_quiz(api, token, updated)
+        remember_quiz(api, bot, token, updated)
 
 
-def quiz_for_message(api, chat_id: int, message_id: int) -> Optional[Dict[str, Any]]:
-    """The card sent as ``message_id`` in ``chat_id`` (for reply-to answers)."""
+def quiz_for_message(api, bot: str, chat_id: int, message_id: int) -> Optional[Dict[str, Any]]:
+    """The card ``bot`` sent as ``message_id`` in ``chat_id`` (for reply-to answers).
+
+    A card saved before this file named its bots is no anchor: a matching number does not say
+    which bot's message this is. So a reply at its number, unless ``bot``'s own map knows the
+    message as something else, comes back marked ``ambiguous``: it answers and edits nothing, and
+    the caller keeps the reply here with a route to the question rather than post it as input on
+    a guess (a secret request's reply whatever it holds, another one unless it is a command).
+    """
     if not message_id:
         return None
-    for record in _load(api)["quizzes"].values():
-        if (isinstance(record, dict)
-                and int(record.get("chat_id") or 0) == int(chat_id)
-                and int(record.get("message_id") or 0) == int(message_id)):
+
+    def sent_as_this(record: Any) -> bool:
+        return (isinstance(record, dict) and int(record.get("chat_id") or 0) == int(chat_id)
+                and int(record.get("message_id") or 0) == int(message_id))
+
+    data = _load(api)
+    quizzes, prefix = _bot_cards(data, bot)
+    for key, record in quizzes.items():
+        if key.startswith(prefix) and sent_as_this(record):
             return dict(record)
+    if bot and not _message_ref(api, bot, chat_id, message_id):
+        for record in data["quizzes"].values():
+            if sent_as_this(record):
+                return {**record, "message_id": 0, "ambiguous": True}
     return None
 
 
 async def _deliver(
     api, post: HostPost, record: Dict[str, Any], *,
-    option_index: Optional[int], comment: str, update_id: int,
+    option_index: Optional[int], comment: str, request_key: str, bot: str,
 ) -> Tuple[int, Dict[str, Any]]:
     body: Dict[str, Any] = {
-        "request_id": f"tg:{int(update_id)}",
+        # The host answers a repeated request id with its recorded answer, before reading this one. So it
+        # names this very tap or reply (``update_key``, the same on every server); an update id is one
+        # server's queue number, and nothing here is unique across bots without the bot.
+        "request_id": f"tg:{f'{bot}:' if bot else ''}{request_key}",
         "decision_id": f"quiz:{record.get('task_id')}:{record.get('quiz_id')}",
     }
     if option_index is not None:
@@ -420,10 +474,12 @@ def lifecycle_edit(
     if state == "closed":
         reason = str(event.get("closed_reason") or "").strip()
         return f"{base}\n{texts['closed']}" + (f"\n{_echo(reason)}" if reason else ""), []
-    if state == "answered":
+    if state == "answered" and not record.get("secret"):
         return _answered_text(record, merge_answer_facts(record, event), lang), []
     if state == "superseded":
         return f"{base}\n{texts['superseded']}", []
+    if record.get("secret"):  # its form is in the app: no late-answer line, no buttons, no reply prompt
+        return (f"{base}\n{texts['secret_saved']}" if state == "answered" else f"{base}\n{texts['hint_secret']}"), []
     status = texts["resumed" if state == "open" else "expired_terminal"]
     labels = [str(label) for label in record.get("options") or []]
     if not labels:
@@ -433,9 +489,9 @@ def lifecycle_edit(
 
 
 def lifecycle_target(
-    api, event: Dict[str, Any], lang: str,
+    api, bot: str, event: Dict[str, Any], lang: str,
 ) -> Optional[Tuple[int, int, str, List[List[dict]]]]:
-    """``(chat_id, message_id, text, keyboard)`` for a card sent here, else ``None``.
+    """``(chat_id, message_id, text, keyboard)`` for a card ``bot`` sent here, else ``None``.
 
     A card never sent to Telegram has nothing to edit. A settled state is
     remembered before the edit: it is the host's fact, whatever the edit does.
@@ -443,13 +499,13 @@ def lifecycle_target(
     task_id = str(event.get("task_id") or "").strip()
     quiz_id = str(event.get("quiz_id") or "").strip()
     token = mint_token(task_id, quiz_id)
-    record = quiz_for_token(api, token) if task_id and quiz_id else None
+    record = quiz_for_token(api, bot, token) if task_id and quiz_id else None
     message_id = int((record or {}).get("message_id") or 0)
     edit = lifecycle_edit(record, event, lang) if record and message_id else None
     if record is None or edit is None:
         return None
     state = str(event.get("state") or "")
-    remember_state(api, token, record, state, merge_answer_facts(record, event) if state == "answered" else None)
+    remember_state(api, bot, token, record, state, merge_answer_facts(record, event) if state == "answered" else None)
     return int(record.get("chat_id") or 0), message_id, edit[0], edit[1]
 
 
@@ -481,13 +537,14 @@ def _retain_fact(token: str, event: Dict[str, Any]) -> None:
 
 
 async def _apply_fact(api, token: str, event: Dict[str, Any], lang: str, client_factory) -> None:
-    if quiz_for_token(api, token) is None:
+    client = client_factory()  # only this client's own card can be edited; another bot's waits for its bot
+    if quiz_for_token(api, client.bot_id, token) is None:
         _retain_fact(token, event)  # the card's send may still be in flight
         return
-    target = lifecycle_target(api, event, lang)
+    target = lifecycle_target(api, client.bot_id, event, lang)
     if target is None:
         return
-    if not await client_factory().edit_message_text_with_inline_keyboard(*target, parse_mode=""):
+    if not await client.edit_message_text_with_inline_keyboard(*target, parse_mode=""):
         api.log("warning", f"Telegram quiz card edit failed ({event.get('state')}).")  # never retried
 
 
@@ -556,13 +613,13 @@ async def _settle_answer(api, client, record: Dict[str, Any], payload: Dict[str,
     # The card's lifecycle lock (``_CARD_LOCKS``): an expiry edit already on the wire
     # lands first, then this answer re-reads the stored card and settles it last.
     async with card_lock(token):
-        record = quiz_for_token(api, token) or record
+        record = quiz_for_token(api, client.bot_id, token) or record
         facts = merge_answer_facts(record, fact)
         edit = lifecycle_edit(record, fact, lang)
         message_id = int(record.get("message_id") or 0)
         if edit is None:
             return True, facts
-        remember_state(api, token, record, "answered", facts)
+        remember_state(api, client.bot_id, token, record, "answered", facts)
         if not message_id:
             return True, facts
         settled = await client.edit_message_text_with_inline_keyboard(
@@ -599,12 +656,12 @@ async def _tell_outcome(api, client, record: Dict[str, Any], status: int, payloa
 
 
 async def answer_from_callback(
-    api, client, cb_data: str, *, cb_id: str, update_id: int, lang: str, post: HostPost,
+    api, client, cb_data: str, *, cb_id: str, request_key: str, lang: str, post: HostPost,
 ) -> None:
     """A tapped option → the decision ingress; the toast and the card tell the host's record, and a
     problem also gets its one message, as a text answer does (``_tell_outcome``)."""
     parts = str(cb_data or "").split(":")
-    record = quiz_for_token(api, parts[1]) if len(parts) == 3 else None
+    record = _tapped_card(api, client.bot_id, parts[1]) if len(parts) == 3 else None
     try:
         index = int(parts[2]) if len(parts) == 3 else -1
     except ValueError:
@@ -613,12 +670,13 @@ async def answer_from_callback(
     if record is None or not 0 <= index < len(options):
         await client.answer_callback_query(cb_id, text=_texts(lang)["gone"])
         return
-    status, payload = await _deliver(api, post, record, option_index=index, comment="", update_id=update_id)
+    status, payload = await _deliver(api, post, record, option_index=index, comment="", request_key=request_key,
+                                     bot=client.bot_id)
     outcome = _outcome(status, payload, {"answered_index": index})
     late = payload.get("answered_after_terminal") is True
     if outcome == "accepted":
         token = mint_token(str(record.get("task_id") or ""), str(record.get("quiz_id") or ""))
-        toast = "✅ " + _receipt(merge_answer_facts(quiz_for_token(api, token) or record, payload), late, lang)
+        toast = "✅ " + _receipt(merge_answer_facts(quiz_for_token(api, client.bot_id, token) or record, payload), late, lang)
     else:
         texts = _texts(lang)
         toast = (texts["already"] if outcome == "conflict" else texts["closed"] if outcome == "closed"
@@ -630,10 +688,18 @@ async def answer_from_callback(
 
 async def answer_from_reply(
     api, client, record: Dict[str, Any], answer_text: str, *,
-    chat_id: int, update_id: int, lang: str, post: HostPost,
+    chat_id: int, request_key: str, lang: str, post: HostPost,
 ) -> None:
     """A reply to the card → the owner's own verbatim answer (comment-only). The settled card is
-    its receipt; one message comes only for a problem (``_tell_outcome``)."""
-    status, payload = await _deliver(api, post, record, option_index=None, comment=answer_text, update_id=update_id)
+    its receipt; one message comes only for a problem (``_tell_outcome``). A reply to a secret
+    request is answered here and posted nowhere."""
+    if record.get("secret"):
+        await client.send_message(chat_id, _texts(lang)["secret_reply"], parse_mode="")
+        return
+    if record.get("ambiguous"):
+        await client.send_message(chat_id, _texts(lang)["reply_held"], parse_mode="")
+        return
+    status, payload = await _deliver(api, post, record, option_index=None, comment=answer_text, request_key=request_key,
+                                     bot=client.bot_id)
     outcome = _outcome(status, payload, {"comment": answer_text} if answer_text else {})
     await _tell_outcome(api, client, record, status, payload, outcome, chat_id, lang)

@@ -63,6 +63,9 @@ class AdvisoryReviewState:
     last_stale_repo_key: str = ""
     # The task whose mutation or review wrote the marker; "" = not recorded.
     last_stale_task_id: str = ""
+    # last_stale_* is the newest marker; the markers of other scopes it displaced stay
+    # here, by checkout key ("" = unscoped): {"ts", "reason", "task_id"} (#2573).
+    earlier_stale_markers: Dict[str, Dict[str, str]] = field(default_factory=dict)
     # The debts the retired lane minted (``_is_archived_advisory_debt``), exactly as stored:
     # never current debt, verified or pruned, ids never reused; saved after the live debts.
     archived_advisory_debts: List[Dict[str, Any]] = field(default_factory=list)
@@ -109,18 +112,33 @@ class AdvisoryReviewState:
             attempt=attempt,
         )
 
-    def next_attempt_number(self, repo_key: str, tool_name: str, task_id: str = "") -> int:
+    def next_attempt_number(self, repo_key: str, tool_name: str, task_id: str = "", *, above: int = 0) -> int:
+        """The next number of this task's attempts, never one at or below ``above`` (a number the caller still holds)."""
         candidates = self.filter_attempts(repo_key=repo_key, tool_name=tool_name, task_id=task_id)
         latest = max((int(item.attempt or 0) for item in candidates), default=0)
-        return latest + 1
+        return max(latest, int(above or 0)) + 1
+
+    def _newest_stale_marker(self) -> Dict[str, str]:
+        return {"ts": self.last_stale_from_edit_ts, "reason": self.last_stale_reason,
+                "task_id": self.last_stale_task_id, "repo_key": self.last_stale_repo_key}
+
+    def _stale_markers(self) -> List[Dict[str, str]]:
+        """Every marker held, with its checkout key: the newest, then those it displaced
+        (a ``__new__``-built state has no factory default)."""
+        earlier = getattr(self, "earlier_stale_markers", None) or {}
+        rows = (self._newest_stale_marker(), *({**row, "repo_key": key} for key, row in earlier.items()))
+        return [row for row in rows if row.get("ts")]
+
+    def stale_marker(self, repo_key: str = "", look_ts: str = "") -> Dict[str, str]:
+        """The marker that invalidated ``repo_key``'s look recorded at ``look_ts`` (any
+        look when empty): the first written at or after it, scoped to that checkout or
+        unscoped (an unscoped marker applies to every checkout); ``{}`` when none was."""
+        rows = [row for row in self._stale_markers() if row["repo_key"] in ("", repo_key) and row["ts"] >= look_ts]
+        return min(rows, key=lambda row: row["ts"], default={})
 
     def marker_postdates(self, look_ts: str, repo_key: str = "") -> bool:
-        """Whether the stale marker already covers a look recorded at ``look_ts``
-        on ``repo_key``: written at or after the look and scoped to that checkout
-        (an unscoped marker applies to every checkout)."""
-        return bool(self.last_stale_from_edit_ts and look_ts
-                    and self.last_stale_repo_key in ("", repo_key)
-                    and self.last_stale_from_edit_ts >= look_ts)
+        """Whether a stale marker already covers a look recorded at ``look_ts`` on ``repo_key``."""
+        return bool(look_ts and self.stale_marker(repo_key, look_ts))
 
     def mark_look_stale(
         self, look_ts: str, *, reason_ts: str = "", reason: str = "", stale_repo_key: str = "", stale_task_id: str = "",
@@ -128,17 +146,25 @@ class AdvisoryReviewState:
         """Write the stale marker for a preflight look — a ``surface=preflight``
         review-ledger record (D5-002). The FIRST mutation after the look writes the
         marker and later ones keep it, so the marker names the mutation that
-        invalidated the look, never the latest editor. Returns whether this call wrote it."""
+        invalidated the look, never the latest editor. The newest marker of another
+        scope is displaced, not erased. Returns whether this call wrote it."""
         if not look_ts or self.marker_postdates(look_ts, stale_repo_key):
             return False
+        earlier = dict(getattr(self, "earlier_stale_markers", None) or {})
+        if self.last_stale_from_edit_ts and self.last_stale_repo_key != stale_repo_key:
+            earlier[self.last_stale_repo_key] = {"ts": self.last_stale_from_edit_ts, "reason": self.last_stale_reason,
+                                                 "task_id": self.last_stale_task_id}
+        earlier.pop(stale_repo_key, None)  # superseded: it does not cover this look
+        self.earlier_stale_markers = earlier
         self.last_stale_from_edit_ts = reason_ts or _rs()._utc_now()
         self.last_stale_reason = reason
         self.last_stale_repo_key = stale_repo_key
         self.last_stale_task_id = stale_task_id
         return True
 
-    def stale_marker_provenance(self, task_id: str = "") -> Dict[str, str]:
-        """Whose mutation or review wrote the stale marker, and for which checkout.
+    def stale_marker_provenance(self, task_id: str = "", *, marker: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        """Whose mutation or review wrote ``marker`` (a ``stale_marker`` row; by default the
+        newest marker), and for which checkout.
 
         Attribution, never scoping (#783, owner 6A): staleness is a fact about
         the checkout, so every task on it keeps seeing the marker; this only
@@ -148,16 +174,17 @@ class AdvisoryReviewState:
         An empty ``stale_repo_key`` is an ambiguous or unrecorded checkout scope,
         which is why that marker applies to every checkout.
         """
-        if not self.last_stale_from_edit_ts:
+        marker = self._newest_stale_marker() if marker is None else marker
+        if not marker.get("ts"):
             return {"stale_task_id": "", "stale_attribution": "", "stale_repo_key": ""}
-        writer, reader = str(self.last_stale_task_id or ""), str(task_id or "")
+        writer, reader = str(marker.get("task_id") or ""), str(task_id or "")
         relation = ("this_task" if writer == reader else "other_task") if writer and reader else "unknown"
         return {"stale_task_id": writer, "stale_attribution": relation,
-                "stale_repo_key": str(self.last_stale_repo_key or "")}
+                "stale_repo_key": str(marker.get("repo_key") or "")}
 
-    def stale_marker_attribution_note(self, task_id: str = "") -> str:
+    def stale_marker_attribution_note(self, task_id: str = "", *, marker: Optional[Dict[str, str]] = None) -> str:
         """Prose form of ``stale_marker_provenance`` for text surfaces ("invalidated by …")."""
-        provenance = self.stale_marker_provenance(task_id)
+        provenance = self.stale_marker_provenance(task_id, marker=marker)
         writer = provenance["stale_task_id"]
         note = {
             "this_task": f"this task ({writer})",
@@ -647,6 +674,7 @@ class AdvisoryReviewState:
             self.last_stale_reason = ""
             self.last_stale_repo_key = ""
             self.last_stale_task_id = ""
+            self.earlier_stale_markers = {}
             for debt in _rs()._commit_readiness_debts_view(self):
                 self._hydrate_commit_readiness_debt(debt)
                 if debt.status in _rs()._OPEN_COMMIT_READINESS_DEBT_STATUSES:
@@ -665,6 +693,8 @@ class AdvisoryReviewState:
             self.last_stale_reason = ""
             self.last_stale_repo_key = ""
             self.last_stale_task_id = ""
+        earlier = getattr(self, "earlier_stale_markers", None) or {}
+        self.earlier_stale_markers = {key: row for key, row in earlier.items() if key not in ("", repo_key)}
         self._sync_commit_readiness_debts(repo_key=repo_key)
 
     def expire_stale_attempts(

@@ -13,15 +13,17 @@ Two handler facts the description used to misstate or omit:
   census (``unsupported``) and a Docker backend's children live in its container;
   ``start_service`` is the path for work that must outlive the task.
 
-Issue #502 asks schemas to shrink, so the truthful words are paid for inside the
-same description: its length is pinned to the pre-change size plus a small
-allowance. Real children here belong to this test process; they are ended by the
+Issue #502 asked schemas to shrink, so the description's length is pinned to its
+measured size plus a small allowance; a new fact re-measures it (owner Q4,
+2026-11-09: tool descriptions stay full). A third fact rides the same schema: what
+a stop by pid or by a name pattern reaches (audit 08.11 item 12). Real children here belong to this test process; they are ended by the
 task end under test and, as a safety net, by exact pid.
 """
 from __future__ import annotations
 
 import os
 import pathlib
+import sys
 import time
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -31,8 +33,11 @@ import pytest
 from ouroboros import process_scope as ps
 from ouroboros.tools.shell import _SHELL_BUILTINS, _run_shell, get_tools
 from ouroboros.tools.shell_process import _active_subprocesses
+from tests._cases import case_folders
 
-_DESCRIPTION_CHARS_BEFORE = 481  # measured on ef33a0a956c2; T1 allowance ~80
+# measured on ef33a0a956c2 (481); re-measured after the process-stop fact of audit 08.11 item 12,
+# paid in part by dropping the string-array sentence the cmd parameter already states.
+_DESCRIPTION_CHARS_BEFORE = 714
 _ALLOWANCE = 80
 
 
@@ -114,10 +119,13 @@ def test_description_limits_the_task_end_to_local_posix_runs(monkeypatch):
     assert outcome["ended"] == [] and outcome["settled"] is False, "nothing is ended where no census runs"
 
 
-@pytest.mark.parametrize("builtin", sorted(_SHELL_BUILTINS))
-def test_handler_refuses_only_a_bare_builtin_as_cmd0(tmp_path, builtin):
-    result = _run_shell(_ctx(tmp_path), [builtin, "x"])
-    assert result.startswith("⚠️ SHELL_CMD_ERROR"), result
+def test_handler_refuses_only_a_bare_builtin_as_cmd0(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for builtin in sorted(_SHELL_BUILTINS):
+        tmp_path = next(case_paths)
+        with subtests.test(builtin=builtin):
+            result = _run_shell(_ctx(tmp_path), [builtin, "x"])
+            assert result.startswith("⚠️ SHELL_CMD_ERROR"), result
 
 
 @pytest.mark.skipif(os.name != "posix", reason="uses sh")
@@ -180,6 +188,40 @@ def test_detached_background_child_lives_until_the_task_ends(tmp_path):
         ps.wait_for_cleanups()
         assert _gone(pid), "the task end ends it"
         assert pid in load_task_result(tmp_path, "t-detached")["process_scope"]["ended"]
+    finally:
+        try:
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
+
+
+def test_description_states_what_a_process_stop_reaches():
+    """Audit 08.11 item 12: the schema carries the fact a mind needs before ending a process, as a fact,
+    not an authority rule. Text only: no guard, filter or safety policy changed with it. The argv shape
+    stays stated once, by the cmd parameter's own schema."""
+    description = _schema()["description"]
+    assert "A stop by pid reaches exactly that process" in description
+    assert "pkill -f" in description and "other tasks', the owner's and this installation's processes" in description
+    assert "cmd MUST be a string array" not in description
+    cmd = _schema()["parameters"]["properties"]["cmd"]
+    assert cmd["type"] == "array" and cmd["items"] == {"type": "string"}
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process tools")
+def test_a_stop_by_exact_pid_runs_through_run_command(tmp_path):
+    """The owner's question on item 12 («are flexible tools kept?»): the shell path refuses nothing new.
+    A child this test started is stopped by its exact pid through run_command (``kill`` is not a refused
+    builtin); the command class ``pkill``/``killall`` goes through the same safety check as before."""
+    ctx = _ctx(tmp_path, "t-stop")
+    with _bound(ctx):
+        started = _run_shell(ctx, ["sh", "-c", "/bin/sleep 60 >/dev/null 2>&1 & echo $!"], timeout_sec=5)
+    pid = int(next(line for line in started.splitlines() if line.strip().isdigit()).strip())
+    try:
+        assert ps.measure_birth(pid)
+        with _bound(ctx):
+            stopped = _run_shell(ctx, ["kill", str(pid)], timeout_sec=5)
+        assert "exit_code=0" in stopped and "BLOCKED" not in stopped, stopped
+        assert _gone(pid), "the exact-pid stop reached the child"
     finally:
         try:
             os.kill(pid, 9)

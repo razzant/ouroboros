@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from typing import Any, Callable, Dict, Iterable, Iterator, List, NamedTuple, Optional, Tuple
 
 from ouroboros import store, store_task_cards
@@ -255,6 +256,42 @@ def list_documents(root: Any, *, statuses: Optional[Iterable[str]] = None) -> Li
     return _decode(fetched)
 
 
+# (root, ``owes``) -> task id -> (stamp, document ``owes`` selected, or None for one it declined): this process's
+# memory of what a recurring pass read last, kept for the selected rows only.
+_SEEN: Dict[Tuple[str, Callable[[Dict[str, Any]], bool]], Dict[str, Tuple[tuple, Optional[Dict[str, Any]]]]] = {}
+_SEEN_LOCK = threading.Lock()
+
+
+def owing_documents(root: Any, statuses: Iterable[str], owes: Callable[[Dict[str, Any]], bool]) -> List[Dict[str, Any]]:
+    """The documents among STATUSES (``list_documents``' selection) that ``owes`` selects, in task-id order, each a
+    caller's own copy. A recurring pass asks with the same ``owes``: a row whose stamp (``write_seq``, ``updated_at``:
+    every write moves it) stands since this process last read it is not read again, so an unchanged selection costs
+    one indexed read of the stamps. ``owes`` is a pure function of the document; what only time or another process
+    can change is the caller's to judge on each row it gets. A read that fails keeps nothing."""
+    import copy
+
+    wanted = sorted({str(status) for status in statuses})
+    if not wanted:
+        return []
+    key = (str(root), owes)
+    with _SEEN_LOCK:
+        seen = dict(_SEEN.get(key) or {})
+    with open_store(root, write=False) as txn:
+        stamps = {record["task_id"]: (record["write_seq"], record["updated_at"]) for record in txn.conn.execute(
+            f"SELECT task_id, write_seq, updated_at FROM tasks WHERE unlikely(status IN ({','.join('?' * len(wanted))}))",
+            wanted)}
+        moved = sorted(task_id for task_id, stamp in stamps.items() if task_id not in seen or seen[task_id][0] != stamp)
+        fetched = _fetch(txn, "t.task_id IN (SELECT value FROM json_each(?))", (json.dumps(moved),)) if moved else []
+    kept = {task_id: seen[task_id] for task_id in stamps if task_id in seen and task_id not in moved}
+    kept.update((task_id, (stamps[task_id], None)) for task_id in moved)  # a row without a body owes no document
+    for task_id, document in _documents(fetched):
+        if task_id in stamps:
+            kept[task_id] = (stamps[task_id], document if owes(document) else None)
+    with _SEEN_LOCK:
+        _SEEN[key] = kept
+    return [copy.deepcopy(kept[task_id][1]) for task_id in sorted(kept) if kept[task_id][1] is not None]
+
+
 def filtered_list_candidates(root: Any, statuses: Iterable[str], limit: Optional[int]) -> List[Dict[str, Any]]:
     """Full documents only for the stable page and rows needing an effective overlay.
 
@@ -388,6 +425,39 @@ def documents_by_ids(root: Any, task_ids: Iterable[str]) -> Dict[str, Dict[str, 
     return dict(_documents(fetched))
 
 
+def origin_documents(root: Any, origin: str) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
+    """``(documents, faults)`` an owner message's operation may be: each row whose typed top-level origin is
+    ORIGIN (``<chat_id>:<client_message_id>``, ``store_hot_facts.task_columns``), and each row an older writer
+    left underived (NULL) whose stored body holds the client message id as a writer encodes it (the only way
+    its own origin could name it). The stored bodies (no handoff or card rows) are decoded after the read;
+    ``faults`` names each selected row whose body is missing or not its own task's object (``own_document``):
+    unknown, never absent. The key is discovery: the caller validates the complete origin of every document it
+    uses. Once every row derives its origin, unrelated rows cost nothing here."""
+    from ouroboros.store_hot_facts import ORIGIN_VERSION, own_document
+
+    client_message_id = str(origin).partition(":")[2]
+    needles = sorted({json.dumps(client_message_id, ensure_ascii=escaped) for escaped in (False, True)})
+    holds = " OR ".join("instr(b.body, ?) > 0" for _needle in needles)
+    with open_store(root, write=False) as txn:
+        if int(txn.meta("schema_version") or 1) >= ORIGIN_VERSION:
+            select, params = ("SELECT task_id FROM tasks INDEXED BY tasks_origin WHERE origin=? AND origin<>'' UNION "
+                              "SELECT t.task_id FROM tasks AS t INDEXED BY tasks_underived_origin JOIN task_bodies AS b "
+                              f"ON b.task_id=t.task_id WHERE t.origin IS NULL AND ({holds})"), (str(origin), *needles)
+        else:  # a store before the column: every row is underived
+            select, params = f"SELECT b.task_id FROM task_bodies AS b WHERE {holds}", tuple(needles)
+        ids = sorted(row[0] for row in capture(txn.conn, select, params, ("task_id",)).tuples())
+        pages = [page for _ids, page in _pages(txn, ids, _BODY_PAGE, ("task_id", "body", "body_hex"))]
+    documents: Dict[str, Dict[str, Any]] = {}
+    faults: Dict[str, str] = {}
+    for record in _with_bodies([{"task_id": task_id} for task_id in ids], pages):  # each selected id, body or None
+        document, fault = own_document(record["task_id"], record["body"])
+        if fault:
+            faults[record["task_id"]] = fault
+        else:
+            documents[record["task_id"]] = document
+    return documents, faults
+
+
 # A display read (``task_reads``: history cards; ``effective_task_result`` with
 # ``materialize_artifacts=False``, retry successors and child replicas included) takes every
 # stored key except the bulky evidence no such reader uses — 94 MB of heads for 1.46 GB of
@@ -402,7 +472,7 @@ DISPLAY_DROPPED: Tuple[str, ...] = (
     "governing_owner_words", "verification_ledger", "plan_review_state", "acceptance_debt",
     "mutation_evidence", "configured_subagent", "context", "continuation_narrative", "origin_message_text",
     "owner_mailbox", "subagent_availability", "plan_record", "review_status", "schedule_admission",
-    "task_acceptance_review_accounting",
+    "task_acceptance_review_accounting", "review_thread_releases", "delegated_result_taken",
     *(f"metadata.{key}" for key in (
         "task_contract", "main_routing_manifest", "governing_owner_words", "routing_contract",
         "configured_subagent", "continuation", "project_routing_manifest", "subagent_envelope", "owner_corpus",
@@ -503,6 +573,21 @@ def task_drive_status(root: Any, task_ids: Iterable[str]) -> Dict[str, Tuple[str
                            "drive_root) AS drive FROM tasks WHERE task_id IN (SELECT value FROM json_each(?))",
                            (json.dumps(ids),), ("task_id", "status", "drive"))
     return {str(task_id): (str(status or ""), str(drive or "")) for task_id, status, drive in captured.tuples()}
+
+
+def collection_flags(root: Any, task_ids: Iterable[str]) -> Dict[str, Tuple[Optional[bool], Optional[bool]]]:
+    """Each stored task's derived ``(review_collection_pending, plan_collection_pending)`` in ONE read, no body
+    decoded: what ``obligations.review_collection_pending`` and ``plan_record.collection_pending`` answered for its
+    stored body, ``None`` while the row is underived. An id the store does not hold is absent from the answer."""
+    ids = sorted({str(task_id) for task_id in task_ids if str(task_id or "").strip()})
+    if not ids:
+        return {}
+    with open_store(root, write=False) as txn:
+        captured = capture(txn.conn, "SELECT task_id, review_collection_pending, plan_collection_pending FROM tasks "
+                           "WHERE task_id IN (SELECT value FROM json_each(?))", (json.dumps(ids),),
+                           ("task_id", "review_collection_pending", "plan_collection_pending"))
+    return {str(task_id): (None if review is None else bool(review), None if plan is None else bool(plan))
+            for task_id, review, plan in captured.tuples()}
 
 
 def task_ids(root: Any) -> List[str]:

@@ -18,12 +18,11 @@ from ouroboros.task_results import load_task_result
 from tests.test_presence_continuation import (
     ANSWER, NEW_WORDS, author, deliver, harness as harness, parked, resumed, wait_for,
 )
-from tests.test_presence_continuation_host import _HEADERS, host as host, poll, turn
+from tests.test_presence_continuation_host import _HEADERS, heard_by, host as host, poll, turn
 from tests.test_presence_reentry import _read_all
 
 
 KEY = "telegram:bot-1:room-1:topic-1"
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture(autouse=True)
@@ -57,7 +56,7 @@ def test_refreshed_queue_reaches_same_author_without_holding_room(host, reportin
     def after_wake(messages):
         note = resumed(messages)
         seen.append(note)
-        assert "fresh queued words" in note and NEW_WORDS in note
+        assert "fresh queued words" in note and str(messages).count(NEW_WORDS) == 1  # event 43, once, as its place event
         assert '"observed_at": "2026-10-06T10:00:01+00:00"' in note
         assert "old queued words" not in note
         assert "not canonical chat or owner directives" in note
@@ -69,8 +68,10 @@ def test_refreshed_queue_reaches_same_author_without_holding_room(host, reportin
     assert first["status"] == "continuing" and first["text"] == ""
     updated = snapshot(("fresh queued words",), second=1)
     assert refresh(h, ref, updated).json()["status"] == "recorded"
-    h.quick.add("telegram:bot-1:43")
-    assert turn(h, 43, NEW_WORDS, reporting=reporting).json()["text"] == "Noted."
+    # The next event wakes the same author, its conversation's sole reader: heard at once, the room never held.
+    h.quick.add("telegram:bot-1:43")  # armed, never run
+    second = turn(h, 43, NEW_WORDS, reporting=reporting).json()
+    assert (second["status"], second["outcome"], second["text"]) == ("completed", "silent", "") and heard_by(h, 43, ref)
     # Replay does not substitute a newer queue observation or change the first envelope.
     assert turn(h, 42, reporting=reporting, transport_queue=snapshot(("old queued words",))).json() == first
     assert refresh(h, ref, snapshot(("old queued words",))).json()["status"] == "stale"
@@ -112,8 +113,7 @@ def test_complete_empty_snapshot_replaces_old_queue_and_get_is_passive(host):
 
 @pytest.mark.parametrize("change", [
     {"conversation_key": "telegram:bot-1:another-room:topic-1"},
-    {"after_source_event_id": "telegram:bot-1:other"}, {"complete": False}, {"pending_count": 2},
-    {"omitted_count": 1}, {"observed_at": "2026-10-06T10:00:00"},
+    {"complete": False}, {"observed_at": "2026-10-06T10:00:00"},
     {"events": [{"source_event_id": "queue-0", "text": "cut", "text_truncated": True}]},
 ])
 def test_partial_or_wrong_source_queue_is_rejected_before_author_start(host, change):

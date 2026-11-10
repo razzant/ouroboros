@@ -33,6 +33,9 @@ _ADDED_OWNERS = {
     "OWNER_RULES_KEY": safety_config,
     "_RULES_ADDRESS": safety_config,
     "owner_rules_section": safety_config,
+    # A managed deployment's organization rules ride the same section under their own provenance.
+    "organization_rules_section": safety_config,
+    "_owner_rules": safety_config,
     "WORKER_READY_CEILING_SEC": runtime_limits,
     # A spawned direct-Restart successor's bounded wait for its exiting parent's data-root admission.
     "SERVER_ADMISSION_WAIT_SEC": runtime_limits,
@@ -102,6 +105,8 @@ _ADDED_OWNERS = {
     "CLAUDEXOR_MODEL_POLL_INTERVAL_SEC": runtime_limits,
     "CLAUDEXOR_OPERATOR_STOP_TIMEOUT_SEC": runtime_limits,
     "CLAUDEXOR_STOP_EXIT_WAIT_SEC": runtime_limits,
+    # Thread-export and retirement responses may re-hash all named bytes before answering.
+    "CLAUDEXOR_WHOLE_BYTES_READ_SEC": runtime_limits,
     # The native platform build envelope is owned by the common runtime-limits leaf.
     "EXTERNAL_PLATFORM_UPDATE_TIMEOUT_SEC": runtime_limits,
     # Consciousness settings scaffolding: the alarm's SSOT default interval, the closed
@@ -129,12 +134,23 @@ _ADDED_OWNERS = {
     "defaults_for_settings_document": settings_scales,
     "_optional_bound_setting": runtime_limits,
     "get_max_rounds": runtime_limits,
-    "OPERATION_WINDOW_FALLBACK_SEC": runtime_limits,
-    "operation_window_sec": runtime_limits,
+    "IDLE_LEASE_MAX_SEC": runtime_limits,
     # #939: the numeric duration resolver is a leaf; config supplies its settings seam.
     "_CURRENT_TASK_CEILING": runtime_limits,
     "explicit_execution_timeout_sec": runtime_limits,
     "resolve_task_execution_timeout_sec": runtime_limits,
+    # MCP task sessions and their browser-policy callback: fixed structural bounds.
+    "MCP_TASK_SESSION_CLOSE_WAIT_SEC": runtime_limits,
+    "MCP_TASK_SESSION_RETURN_WAIT_SEC": runtime_limits,
+    "MCP_TASK_SESSION_IDLE_POLL_SEC": runtime_limits,
+    "MCP_BROWSER_GUARD_READ_SEC": runtime_limits,
+    "MCP_BROWSER_GUARD_LINE_BYTES": runtime_limits,
+    "MCP_BROWSER_GUARD_WORKERS": runtime_limits,
+    "MCP_BROWSER_GUARD_PENDING": runtime_limits,
+    "MCP_STDIO_STDERR_TAIL_BYTES": runtime_limits,
+    "MCP_STDIO_STDERR_NOTE_BYTES": runtime_limits,
+    "MCP_OAUTH_HTTP_TIMEOUT_SEC": runtime_limits,
+    "MCP_OAUTH_LOCK_WAIT_SEC": runtime_limits,
 }
 
 _MOVED_OWNERS = {
@@ -249,8 +265,6 @@ _MOVED_OWNERS = {
     "get_max_active_subagents_per_root": runtime_limits,
     "get_max_subagent_depth": runtime_limits,
     "get_max_workers": runtime_limits,
-    "get_per_call_timeout_ceiling_sec": runtime_limits,
-    "get_plan_task_deadline_min_sec": runtime_limits,
     "get_post_task_evolution_budget_usd": runtime_limits,
     "get_restart_drain_max_sec": runtime_limits,
     "get_safety_call_timeout_sec": runtime_limits,
@@ -395,6 +409,7 @@ def test_settings_extraction_size_bounds_have_meaningful_headroom():
     # saved-choice precedence the config read and persist seams share.
     # +7: independent Consciousness level, Supervisor model, owner rules and disk ownership.
     # +1: Main's Subagents mode (OUROBOROS_SUBAGENTS_MODE, default auto).
+    # +1: a build's suggested skill sources (OUROBOROS_SKILL_SOURCE_SUGGESTIONS, default none), one commented row.
     # +2: Main chat's model choice (OUROBOROS_MAIN_CHAT_MODEL) and its export exclusion.
-    assert counts["ouroboros.settings_defaults"] <= 570
+    assert counts["ouroboros.settings_defaults"] <= 571
     assert (PACKAGE / "config.py").is_file()

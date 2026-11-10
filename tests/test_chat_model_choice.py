@@ -193,38 +193,24 @@ def test_continue_and_a_same_room_start_task_keep_the_admitted_snapshot(room, mo
 
 
 def test_a_call_turn_keeps_its_engine_while_a_typed_turn_takes_the_rooms_choice(room, monkeypatch):
-    # A live call is admitted through the same direct door, already carrying its engine's route: the room's chat
-    # model never tags it, so nothing downstream reads the room's route as the one the call runs on.
-    import queue
-    import threading
-
-    from ouroboros import call_protocol as cp
-    from ouroboros.call_peers import close_hub, open_hub
-    from ouroboros.live_conversation import LiveConversationTurn
+    # A live call reaches the turn's first step already carrying its engine's route (the inline executor sets it on
+    # the seed before the lane admits it, ``inline_carrier``): the room's chat model never tags it, so nothing
+    # downstream reads the room's route as the one the call runs on.
     from supervisor import worker_chat_lane, workers
 
-    _root, client = room
+    root, client = room
     client.post("/api/owner/chat-model", json={"kind": "model", "model": ASTRA})
-    turn = object.__new__(LiveConversationTurn)  # no provider/configuration reads (test_call_task_lifecycle)
-    turn.spec = cp.CallSpec("room-call", 1, "synthetic", "synthetic")
-    turn.model, turn.request = "synthetic::voice", {"kind": "live_conversation", "call_id": "room-call"}
-    turn._lock, turn._closed = threading.Lock(), False
-    open_hub(turn.spec)
-    monkeypatch.setattr(workers, "repo_writer_admission_closed", lambda: "")
-    monkeypatch.setattr(workers, "get_event_q", queue.Queue)
-    monkeypatch.setattr(workers, "send_with_budget", lambda *args, **kwargs: None)
-    agent = types.SimpleNamespace(handle_task=lambda task=None: [])
-    try:
-        call = worker_chat_lane._admit_chat_task(agent, 1, "Opening", task_metadata={
-            "execution_transport": turn.request}, realtime_turn=turn)
-        assert call is not None and worker_chat_lane._execute_chat_task(call)
-        typed = worker_chat_lane._admit_chat_task(agent, 1, "Hello")
-        assert typed is not None and worker_chat_lane._execute_chat_task(typed)
-    finally:
-        close_hub(turn.spec.call_id, "fixture_cleanup")
-    assert call["task"]["model"] == "synthetic::voice"
-    assert route_choice.ROOM_ROUTE_KEY not in call["task"]["metadata"]
-    assert typed["task"]["metadata"][route_choice.ROOM_ROUTE_KEY] == CHOSEN
+    monkeypatch.setattr(workers, "DRIVE_ROOT", root)
+    call = worker_chat_lane._seed_task(1, "Opening", None, None, {
+        "execution_transport": {"kind": "live_conversation", "call_id": "room-call"}})
+    call["model"], call["use_local_model"] = "synthetic::voice", False
+    typed = worker_chat_lane._seed_task(1, "Hello", None, None, None)
+    for task in (call, typed):
+        task["_conversation_prepare"] = {"quiet": False}
+        worker_chat_lane.prepare_conversation_task(types.SimpleNamespace(), task, root)
+    assert call["model"] == "synthetic::voice"
+    assert route_choice.ROOM_ROUTE_KEY not in call["metadata"]
+    assert typed["metadata"][route_choice.ROOM_ROUTE_KEY] == CHOSEN
 
 
 def _ctx(metadata: dict) -> types.SimpleNamespace:

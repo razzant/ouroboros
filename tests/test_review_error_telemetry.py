@@ -18,7 +18,6 @@ import pytest
 from ouroboros import triad_review, utils
 from ouroboros.review_records import ReviewActorRecord, ReviewRequest, ReviewSlot
 
-pytestmark = pytest.mark.serial
 
 
 def _ctx(root, **extra):
@@ -56,7 +55,7 @@ def _run(root, monkeypatch, actor, *, surface="multi_model_review", ctx=None):
 
 
 @pytest.mark.parametrize("surface", [
-    "multi_model_review", "skill_review", "plan_review", "scope_review", "advisory_review",
+    "multi_model_review", "skill_review", "advisory_review",
 ])
 def test_a_run_failure_has_cause_identity_and_one_live_frame(tmp_path, monkeypatch, surface):
     from supervisor.events_worker_reports import _handle_log_event

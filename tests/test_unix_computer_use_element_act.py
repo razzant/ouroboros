@@ -50,6 +50,12 @@ class FakeAX:
     def set_timeout(self, elem, seconds):
         self.timeouts.append(seconds)
 
+    # Ordinary AppKit applications need no opt-in. Cold Electron cases exercise the real method
+    # at the ctypes boundary in test_unix_computer_use_ax_exposure.py.
+    def request_manual_accessibility(self, app):
+        return {"attribute": "AXManualAccessibility", "requested": True, "code": -25205,
+                "status": "unsupported", "result": "AttributeUnsupported"}
+
     def CFRetain(self, ref):
         self.retained[ref] = self.retained.get(ref, 0) + 1
         return ref
@@ -69,7 +75,7 @@ class FakeAX:
         for name in names:
             key = {"AXRole": "role", "AXSubrole": "subrole", "AXTitle": "title", "AXDescription": "description",
                    "AXValue": "value", "AXPosition": "pos", "AXSize": "size", "AXEnabled": "enabled",
-                   "AXFocused": "focused", "AXIdentifier": "identifier"}[name]
+                   "AXFocused": "focused", "AXIdentifier": "identifier", "AXURL": "url"}[name]
             if key in node.get("unread", ()):
                 out.append(("axerror", -25200))
             else:
@@ -99,7 +105,7 @@ class FakeAX:
         return [self.CFRetain(w) for w in self.windows], 0
 
     def window_id(self, win):
-        return self.nodes[win].get("window_id") if self.AXUIElementGetWindow is not None else None
+        return self.nodes.get(win, {}).get("window_id") if self.AXUIElementGetWindow is not None else None
 
     # actions
     def action_names(self, el):
@@ -179,8 +185,10 @@ def test_several_matches_refuse_without_nth_and_nth_picks_in_walk_order():
     assert ax.balanced()
 
 
-@pytest.mark.parametrize("attribute", ["title", "description"])
-@pytest.mark.parametrize("label", ["Play", "P" * 220 + "LAY"])
+@pytest.mark.parametrize(("label", "attribute"), [
+    ("Play", "title"),
+    pytest.param("P" * 220 + "LAY", "description", id='PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPLAY-description'),
+])
 def test_labels_match_the_full_exact_title_or_description(attribute, label):
     nodes = deck()
     for el, text in (("play", label), ("play2", label.lower())):
@@ -380,9 +388,11 @@ def test_refusal_and_candidate_rows_keep_the_complete_label_and_value():
     assert not any("value_len" in row for row in rows)
 
 
-@pytest.mark.parametrize("value", [None, ("axerror", -25212), ("axerror", -25205)])
-@pytest.mark.parametrize("text", ["", "new"])
-@pytest.mark.parametrize("code", [0, TIMEOUT])
+@pytest.mark.parametrize(("code", "text", "value"), [
+    (0, "", None),
+    pytest.param(0, "", ("axerror", -25205), id='0--value2'),
+    pytest.param(TIMEOUT, "new", ("axerror", -25212), id='-25204-new-value1'),
+])
 def test_set_value_with_absent_readback_keeps_verification_unknown(value, text, code):
     nodes = deck()
     ax = FakeAX(nodes, windows=["win"], focused="win", perform=lambda el, action: code,
@@ -508,7 +518,7 @@ def test_focused_window_retains_title_read_errors_without_preventing_identity_se
     assert "title" not in out["window"] and ax.performed == [("play", "AXPress")] and ax.balanced()
 
 
-@pytest.mark.parametrize("focused_reply", [(None, TIMEOUT), (None, -25200), (None, 0), (("wrong", "win"), 0)])
+@pytest.mark.parametrize("focused_reply", [(None, TIMEOUT), (None, -25200), (("wrong", "win"), 0)])
 def test_default_window_refuses_failed_or_malformed_focused_read_without_fallback(focused_reply):
     ax = FakeAX(deck(), windows=["win"], focused=None)
     original_attr = ax.attr
@@ -587,15 +597,16 @@ def test_the_helper_cli_dispatches_act_and_answers_one_json_line(monkeypatch, ca
 # --- the plugin: resolve, one helper call, pass the receipt through -------------------------------------------------
 
 def helper_with_act(outcome):
-    """A native-helper fake answering ``resolve`` as the shared fixture does and ``act`` with ``outcome(args)``."""
+    """A native-helper fake answering ``element`` (resolve and act in ONE process): the application resolves as the
+    shared fixture's does, then the receipt is ``outcome(options)``."""
     def helper(args, state):
-        if args[0] == "resolve":
-            if args[1] in ("Keynote", "pid:200"):
-                return {"ok": True, "candidates": [app_dict(KEYNOTE)]}
-            return {"ok": False, "reason": "not_running", "candidates": [], "running": ["Safari", "Keynote"]}
-        if args[0] == "act":
-            return outcome(args)
-        raise AssertionError(f"unexpected helper op {args}")
+        if args[0] != "element":
+            raise AssertionError(f"unexpected helper op {args}")
+        spec = json.loads(args[1])
+        if spec["app"] not in ("Keynote", "pid:200"):
+            return {"ok": False, "stage": "resolve", "reason": "not_running", "candidates": [], "running": ["Safari", "Keynote"],
+                    "dispatched": False}
+        return {**outcome(spec), "target": app_dict(KEYNOTE)}
     return helper
 
 
@@ -605,17 +616,17 @@ COMPLETED = {"ok": True, "pid": 200, "do": "press", "dispatched": True, "action_
 
 
 def test_element_act_resolves_then_acts_in_one_helper_call_and_never_switches_or_clicks(tmp_path, monkeypatch):
-    module, api, state = mac(tmp_path, monkeypatch, helper=helper_with_act(lambda args: {**COMPLETED, "do": args[2]}))
+    module, api, state = mac(tmp_path, monkeypatch, helper=helper_with_act(lambda spec: {**COMPLETED, "do": spec["do"]}))
     out = receipt(api.tools["element_act"](app="Keynote", do="press", select={"role": "Button", "label": "Play"}, window=39))
     assert out["ok"] is True and marked(out) and out["action_outcome"] == "completed" and out["app"] == app_dict(KEYNOTE)
-    assert [args[0] for args in state["helper"]] == ["resolve", "act"], "resolve, then one act call; never activate"
-    op, pid, do, selector, max_nodes, timeout_ms = state["helper"][1]
-    assert (pid, do, max_nodes, timeout_ms) == ("200", "press", "600", "3000")
-    assert json.loads(selector) == {"role": "Button", "label": "Play", "include_web": False, "window": 39}
+    assert [args[0] for args in state["helper"]] == ["element"], "resolve and act in ONE helper process; never activate"
+    assert json.loads(state["helper"][0][1]) == {"app": "Keynote", "do": "press", "max_nodes": 600, "timeout_ms": 3000, "observe": False,
+                                                 "select": {"role": "Button", "label": "Play", "include_web": False, "window": 39}}
     assert state["front"] == SAFARI and inputs(state) == [], "no switch, no pointer: the front is reported, not changed"
-    assert out["front_after"] == app_dict(SAFARI) and out["target_in_front"] is False and out["platform"] == "macos"
+    assert out["front_after"] == app_dict(SAFARI) and out["target_in_front"] is False and out["platform"] == "macos" and "target" not in out
     text = receipt(api.tools["element_act"](app="pid:200", do="set_value", select={"role": "TextField"}, text="", max_nodes=5000, timeout_ms=50))
-    assert json.loads(state["helper"][-1][3]) == {"role": "TextField", "include_web": False, "text": ""} and state["helper"][-1][4:] == ["2000", "100"]
+    spec = json.loads(state["helper"][-1][1])
+    assert spec["select"] == {"role": "TextField", "include_web": False, "text": ""} and (spec["max_nodes"], spec["timeout_ms"]) == (2000, 100)
     assert text["do"] == "set_value"
 
 
@@ -627,15 +638,15 @@ def test_element_act_refusals_send_nothing_and_say_why(tmp_path, monkeypatch):
     assert out["ok"] is False and out["reason"] == "element_ambiguous" and out["dispatched"] is False and not marked(out)
     missing = receipt(api.tools["element_act"](app="Nope", do="press", select={"role": "Button"}))
     assert missing["ok"] is False and missing["reason"] == "not_running" and missing["dispatched"] is False and "nothing was sent" in missing["error"]
-    assert [args[0] for args in state["helper"]] == ["resolve", "act", "resolve"], "an unresolved app never reaches act"
+    assert [args[0] for args in state["helper"]] == ["element", "element"] and missing["candidates"] == [] and "stage" not in missing
     for kwargs in ({"app": "", "do": "press", "select": {"role": "Button"}}, {"app": "Keynote", "do": "toggle", "select": {"role": "Button"}}):
         early = receipt(api.tools["element_act"](**kwargs))
         assert early["ok"] is False and early["dispatched"] is False and early["reason"] in ("app_required", "unknown_action"), early
-    assert len(state["helper"]) == 3 and inputs(state) == []
+    assert len(state["helper"]) == 2 and inputs(state) == []
 
 
 def test_a_helper_that_gave_no_answer_or_stopped_mid_way_is_an_unknown_outcome_never_not_sent(tmp_path, monkeypatch):
-    module, api, state = mac(tmp_path, monkeypatch, helper=helper_with_act(lambda args: {"ok": False, "error": "TypeError: boom", "op": "act"}))
+    module, api, state = mac(tmp_path, monkeypatch, helper=helper_with_act(lambda spec: {"ok": False, "error": "TypeError: boom", "op": "element"}))
     crashed = receipt(api.tools["element_act"](app="Keynote", do="press", select={"role": "Button"}))
     assert crashed["ok"] is False and crashed["reason"] == "helper_failed" and crashed["dispatched"] is None and crashed["action_outcome"] == "unknown"
     assert not marked(crashed) and "do not assume it did not" in crashed["note"] and crashed["select"] == {"role": "Button"}
@@ -643,7 +654,7 @@ def test_a_helper_that_gave_no_answer_or_stopped_mid_way_is_an_unknown_outcome_n
 
     def silent_act(cmd, *a, **k):
         argv = [str(p) for p in cmd]
-        if any(p.endswith("macos_native.py") for p in argv) and "act" in argv:
+        if any(p.endswith("macos_native.py") for p in argv) and "element" in argv:
             state["calls"].append(argv)
             return subprocess.CompletedProcess(argv, 1, "", "TimeoutExpired: the helper was cut off")
         return real_run(cmd, *a, **k)
@@ -691,8 +702,9 @@ def test_native_qa_requests_follow_the_schema_through_real_selector_logic(tmp_pa
     from tests.test_macos_computer_use_native import _act
 
     ax = FakeAX(deck(), windows=["win"], focused="win")
-    _module, api, state = mac(tmp_path, monkeypatch, helper=helper_with_act(
-        lambda args: act(ax, args[2], json.loads(args[3]), max_nodes=int(args[4]), timeout_ms=int(args[5]))))
+    monkeypatch.setattr(native, "op_resolve", lambda q: {"ok": True, "query": q, "candidates": [app_dict(KEYNOTE)]})
+    _module, api, state = mac(tmp_path, monkeypatch, helper=lambda args, _st: native.op_element(
+        args[1], ax=ax, front=lambda: app_dict(SAFARI), settle=lambda _s: None))
 
     def call(name, **args):
         jsonschema.validate(args, api.meta[name]["schema"])

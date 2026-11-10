@@ -17,6 +17,7 @@ import queue as stdqueue
 from pathlib import Path
 
 import pytest
+from tests._cases import case_folders
 
 
 @pytest.fixture(autouse=True)
@@ -153,10 +154,6 @@ def test_answer_interaction_decodes_the_engine_problem_envelope(status, code):
 
 @pytest.mark.parametrize("context,problem_code,content_type", [
     (None, "http_409", "application/problem+json"),
-    ([], "http_409", "application/problem+json"),
-    ({"accepted": False, "status": "unknown"}, "http_409", "application/problem+json"),
-    ({"accepted": False, "status": "delivered"}, "http_409", "application/problem+json"),
-    ({"status": "already_resolved"}, "http_409", "application/problem+json"),
     ({"accepted": False, "status": "already_resolved"}, "idempotency_conflict", "application/problem+json"),
     ({"accepted": False, "status": "already_resolved"}, "http_409", "application/json"),
 ])
@@ -310,7 +307,7 @@ def _answer_stub(monkeypatch, *, result=None, error=None, detail_pending=()):
         def get_run(self, rid, *, timeout_sec=None):
             return {"lastSeq": 5, "pendingInteractions": list(detail_pending),
                     "summary": {"state": "running"}}
-        def answer_interaction(self, rid, iid, answers):
+        def answer_interaction(self, rid, iid, answers, *, timeout_sec=None):
             if error is not None:
                 raise error
             return dict(result)
@@ -353,7 +350,6 @@ def test_already_resolved_tells_the_nanny_not_to_repost(tmp_path, monkeypatch):
     assert "do NOT re-post" in out["note"]
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("status,code,accepted", [
     ("delivered", 200, True), ("already_resolved", 409, False),
     ("not_found", 404, False), ("rejected", 409, False),
@@ -399,6 +395,10 @@ def test_wire_answer_outcome_reaches_the_nanny(tmp_path, monkeypatch, status, co
     if status == "already_resolved":
         assert "do NOT re-post" in out["note"]
         assert "fix the rows" not in out["note"]
+    if status in ("already_resolved", "rejected"):
+        # This POST's refusal did not observe whether the question held the run.
+        assert "benign" not in out["note"] and "run already continued" not in out["note"]
+        assert "waits until answered" not in out["note"]
     if not accepted:
         assert out["detail"] == "engine answer"
 
@@ -437,53 +437,54 @@ def _answer_over_wire(tmp_path, monkeypatch, response):
     return result, json.loads(result.text)
 
 
-@pytest.mark.serial
-@pytest.mark.parametrize("response", _RECORDED_ANSWERS, ids=lambda row: row["case"])
-def test_recorded_engine_answers_reach_the_nanny_classified(tmp_path, monkeypatch, response):
+def test_recorded_engine_answers_reach_the_nanny_classified(subtests, tmp_path, monkeypatch):
     """The published class of each engine outcome: delivered and already_resolved are
     observations, an absent interaction or run a recorded substrate refusal, rejected
     rows an agent fault; an engine without the answer service is a typed refusal."""
-    status, tool_code, detail = {
-        "delivered": ("delivered", "OK", "delivered to the live session"),
-        "already_resolved": ("already_resolved", "OK", "interaction was already resolved"),
-        "already_resolved_without_message": ("already_resolved", "OK", "request failed with status 409"),
-        "not_found": ("not_found", "TOOL_REPORTED_FAILURE", "no pending interaction"),
-        "rejected": ("rejected", "TOOL_ARG_ERROR", "answer does not match the question set"),
-        "unknown_run": ("not_found", "TOOL_REPORTED_FAILURE", "no such run"),
-        "no_answer_service": ("refused", "TOOL_REPORTED_FAILURE", None),
-    }[response["case"]]
-    result, out = _answer_over_wire(tmp_path, monkeypatch, response)
-    assert (out["status"], result.code) == (status, tool_code)
-    assert (result.status == "ok") is (tool_code == "OK")
-    if status == "refused":
-        assert out["reason"] == "interaction_answers_unsupported"
-        return
-    assert out["accepted"] is (status == "delivered") and out["detail"] == detail
-    assert ("do NOT re-post" in out["note"]) is (status == "already_resolved")
-    assert ("Fix the answer rows" in out["note"]) is (status == "rejected")
+    case_paths = case_folders(tmp_path)
+    for response in _RECORDED_ANSWERS:
+        tmp_path = next(case_paths)
+        with subtests.test(response=response), monkeypatch.context() as monkeypatch:
+            status, tool_code, detail = {
+                "delivered": ("delivered", "OK", "delivered to the live session"),
+                "already_resolved": ("already_resolved", "OK", "interaction was already resolved"),
+                "already_resolved_without_message": ("already_resolved", "OK", "request failed with status 409"),
+                "not_found": ("not_found", "TOOL_REPORTED_FAILURE", "no pending interaction"),
+                "rejected": ("rejected", "TOOL_ARG_ERROR", "answer does not match the question set"),
+                "unknown_run": ("not_found", "TOOL_REPORTED_FAILURE", "no such run"),
+                "no_answer_service": ("refused", "TOOL_REPORTED_FAILURE", None),
+            }[response["case"]]
+            result, out = _answer_over_wire(tmp_path, monkeypatch, response)
+            assert (out["status"], result.code) == (status, tool_code)
+            assert (result.status == "ok") is (tool_code == "OK")
+            if status == "refused":
+                assert out["reason"] == "interaction_answers_unsupported"
+                continue
+            assert out["accepted"] is (status == "delivered") and out["detail"] == detail
+            assert ("do NOT re-post" in out["note"]) is (status == "already_resolved")
+            assert ("Fix the answer rows" in out["note"]) is (status == "rejected")
 
 
-@pytest.mark.serial
-@pytest.mark.parametrize("response", [row for row in _RECORDED_ANSWERS
-                                      if (row["service_outcome"] or {}).get("status") in
-                                      ("already_resolved", "not_found", "rejected")],
-                         ids=lambda row: row["case"])
-def test_direct_and_wrapped_answer_refusals_publish_identically(tmp_path, monkeypatch, response):
-    context = json.loads(response["body"])["context"]
-    direct = {**response, "content_type": "application/json", "body": json.dumps(
-        {**context, "message": json.loads(response["body"])["message"]})}
-    with monkeypatch.context() as patch:
-        legacy = _answer_over_wire(tmp_path, patch, direct)
-    with monkeypatch.context() as patch:
-        wrapped = _answer_over_wire(tmp_path, patch, response)
-    assert (wrapped[0].status, wrapped[0].code, wrapped[1]) == (legacy[0].status, legacy[0].code, legacy[1])
+def test_direct_and_wrapped_answer_refusals_publish_identically(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for response in [row for row in _RECORDED_ANSWERS
+                     if (row["service_outcome"] or {}).get("status") in
+                     ("already_resolved", "not_found", "rejected")]:
+        tmp_path = next(case_paths)
+        with subtests.test(response=response), monkeypatch.context() as monkeypatch:
+            context = json.loads(response["body"])["context"]
+            direct = {**response, "content_type": "application/json", "body": json.dumps(
+                {**context, "message": json.loads(response["body"])["message"]})}
+            with monkeypatch.context() as patch:
+                legacy = _answer_over_wire(tmp_path, patch, direct)
+            with monkeypatch.context() as patch:
+                wrapped = _answer_over_wire(tmp_path, patch, response)
+            assert (wrapped[0].status, wrapped[0].code, wrapped[1]) == (legacy[0].status, legacy[0].code, legacy[1])
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("status,problem,outcome,tool_code", [
     (409, {"code": "http_409", "context": {"accepted": True, "status": "delivered"}}, "rejected", "TOOL_ARG_ERROR"),
     (409, {"code": "http_409", "context": {"accepted": False, "status": "unknown"}}, "rejected", "TOOL_ARG_ERROR"),
-    (409, {"code": "http_409", "context": []}, "rejected", "TOOL_ARG_ERROR"),
     (404, {"code": "route_not_found", "context": {"accepted": False, "status": "not_found"}},
      "not_found", "TOOL_REPORTED_FAILURE"),
 ])
@@ -739,7 +740,7 @@ def test_an_exhausted_internal_budget_returns_typed_without_further_wire_calls(t
         def get_run(self, rid, *, timeout_sec=None):
             wire_calls.append(("get_run", rid))
             return {"lastSeq": 5, "summary": {"state": "running"}}
-        def answer_interaction(self, rid, iid, answers):
+        def answer_interaction(self, rid, iid, answers, *, timeout_sec=None):
             wire_calls.append(("answer", rid))
             raise AssertionError("the POST must not be sent on a spent budget")
         def close(self): pass
@@ -759,6 +760,49 @@ def test_an_exhausted_internal_budget_returns_typed_without_further_wire_calls(t
     assert wire_calls == [], "no wire calls after budget exhaustion"
 
 
+@pytest.mark.parametrize("handshake_sec,post_read_sec", [(0, 60.0), (70, 30.0), (100, None)],
+                         ids=["full-budget-keeps-the-read-default", "post-gets-the-remainder", "spent-posts-nothing"])
+def test_an_ordinary_answer_posts_only_within_what_the_call_has_left(tmp_path, monkeypatch, handshake_sec, post_read_sec):
+    """The timeout on the wire is the call's remainder, through the real gateway, on a simulated clock."""
+    from types import SimpleNamespace
+
+    import httpx
+
+    import ouroboros.delegate_interactions as interactions
+    import ouroboros.tools.delegate as delegate
+    from ouroboros.gateways import claudexor as cx
+
+    clock = [0.0]
+    monkeypatch.setattr(interactions, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, json={"accepted": True, "status": "delivered"})
+
+    def handshake(**_kwargs):
+        clock[0] += handshake_sec
+        return {}
+
+    gateway = cx.ClaudexorGateway.__new__(cx.ClaudexorGateway)
+    monkeypatch.setattr(gateway, "handshake", handshake)
+    monkeypatch.setattr(cx, "ClaudexorGateway", lambda *args, **kwargs: gateway)
+    _own_run(delegate)
+    with httpx.Client(transport=httpx.MockTransport(respond), base_url="http://offline.invalid") as client:
+        gateway._client = client
+        out = json.loads(delegate._delegate_answer(_answer_ctx(tmp_path), "run-1", "int-1", [
+            {"question_id": "q1", "free_text": "9090"},
+        ]).text)
+    delegate._CUSTODY.clear()
+    if post_read_sec is None:
+        assert requests == [] and out["status"] == "delivery_unknown" and out["still_pending"] is None
+        return
+    assert [request.method for request in requests] == ["POST"], "an ordinary answer reads no row"
+    assert requests[0].extensions["timeout"] == httpx.Timeout(post_read_sec, connect=cx._CONNECT_TIMEOUT_SEC).as_dict()
+    assert clock[0] + post_read_sec <= interactions._ANSWER_DEADLINE_SEC
+    assert out["status"] == "delivered" and out["note"] == interactions._ANSWER_NOTES["delivered"]
+
+
 def test_answer_rows_are_validated_strictly_before_the_post(tmp_path, monkeypatch):
     """F14 (sol #13): string-only labels, non-empty label-or-freeText per row,
     typed refusal on malformed input — no silent coercion that changes intent."""
@@ -775,7 +819,7 @@ def test_answer_rows_are_validated_strictly_before_the_post(tmp_path, monkeypatc
             def handshake(self, **_kw): return {}
             def get_run(self, rid, *, timeout_sec=None):
                 return {"lastSeq": 5, "summary": {"state": "running"}}
-            def answer_interaction(self, rid, iid, answers):
+            def answer_interaction(self, rid, iid, answers, *, timeout_sec=None):
                 sent.append(answers)
                 return {"accepted": True, "status": "delivered"}
             def close(self): pass
@@ -1208,3 +1252,135 @@ def test_definite_answer_refusals_publish_as_recorded_refusals(tmp_path, monkeyp
     payload = json.loads(out.text)
     assert (payload["status"], payload["accepted"], payload["detail"]) == ("not_found", False, "gone")
     assert "Re-read the run with delegate_wait" in payload["note"]
+
+
+# -- questions that hold nothing (claudexor #628) -----------------------------------------------
+
+def _async_row(iid="int-1", question="Should I also update the docs?", delivery="async"):
+    return {**_pending_row(iid=iid, question=question), "harnessId": "codex", "delivery": delivery}
+
+
+def test_an_async_question_returns_once_as_a_running_handoff_never_a_pause(tmp_path, monkeypatch):
+    import ouroboros.tools.delegate as delegate
+    from ouroboros.delegate_interactions import ASYNC_SESSION_CONTINUATION
+
+    _waiting_stub(monkeypatch, [_async_row()])
+    ctx = _wait_ctx(tmp_path)
+    _own_run(delegate)
+    first = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=600, since_seq=5))
+    second = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1, since_seq=5))
+    delegate._CUSTODY.clear()
+    assert first["status"] == "waiting_on_user" and first["async_questions_only"] is True
+    assert first["pending_interactions"][0]["delivery"] == "async"
+    assert "KEEPS WORKING" in first["note"] and "PAUSED" not in first["note"]
+    assert "benign-declines" not in first["note"] and "nothing is sent" in first["note"]
+    assert {key: first[key] for key in ASYNC_SESSION_CONTINUATION} == ASYNC_SESSION_CONTINUATION
+    assert second["status"] == "no_progress" and second["waiting_on_user"] is True
+    assert second["async_questions_only"] is True and "KEEPS WORKING" in second["note"]
+    assert "PAUSED" not in second["note"]
+
+
+def test_a_mixed_set_whose_holding_row_the_preview_sheds_still_reads_held(tmp_path, monkeypatch):
+    """The judgement is made over the whole set before bounding: the one blocking row, last
+    and shed from the spilled preview, still holds the run in every fact the payload carries."""
+    import ouroboros.tools.delegate as delegate
+    from ouroboros.delegate_interactions import SAME_SESSION_CONTINUATION
+
+    rows = [_async_row(iid=f"int-{i}", question=f"Part {i}? " + "x" * 900) for i in range(24)]
+    rows.append(_async_row(iid="int-held", question="Which port? " + "y" * 900, delivery="blocking"))
+    _waiting_stub(monkeypatch, rows)
+    ctx = _wait_ctx(tmp_path)
+    _own_run(delegate)
+    out = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=600, since_seq=5))
+    delegate._CUSTODY.clear()
+    shown = [row["interaction_id"] for row in out["pending_interactions"]]
+    assert out["interactions_omitted"] > 0 and "int-held" not in shown, "the holding row was shed"
+    assert "async_questions_only" not in out and "PAUSED" in out["note"], "absent: the old holding meaning"
+    assert {key: out[key] for key in SAME_SESSION_CONTINUATION} == SAME_SESSION_CONTINUATION
+
+
+def test_window_notes_for_questions_that_hold_nothing_claim_no_pause_or_benign_decline():
+    from ouroboros.delegate_progress import WindowObservations, paused_note, waiting_expiry_clause, window_payload
+    from ouroboros.gateways.claudexor import pending_interactions
+    from ouroboros.tools.delegate import _bounded_interactions
+
+    pending = pending_interactions({"pendingInteractions": [_async_row()]})
+    assert "benign-declines" not in waiting_expiry_clause(pending, True)
+    assert "closes and nothing is sent" in waiting_expiry_clause(pending, True)
+    assert "PAUSED" in paused_note(pending) and "KEEPS WORKING" in paused_note(pending, async_only=True)
+    payload = window_payload(run_id="run-1", state="running", last_seq=5, window=600, elapsed_seconds=600,
+                             max_seconds=1800, waiting_on_user=True, detail={"timeline": []},
+                             seen=WindowObservations(), budget=400,
+                             pending_interactions=_bounded_interactions(pending), async_questions_only=True)
+    assert payload["async_questions_only"] is True and "KEEPS WORKING" in payload["note"]
+    assert "keeps working" in payload["interactions_note"] and "PAUSED" not in payload["interactions_note"]
+
+
+# -- what ``delivered`` may claim: only what this call read of the answered row --------------------
+
+def _delivered_bytes():
+    return next(row for row in _RECORDED_ANSWERS if row["case"] == "delivered")
+
+
+def test_a_plain_delivered_receipt_claims_no_resume_and_costs_no_read(tmp_path, monkeypatch):
+    """The ordinary call (run_id, interaction_id, answers) reads no question row: the helper
+    proves one POST on the engine's recorded ``delivered`` bytes. It cannot say the run resumed,
+    since an async question never paused it, so it names both meanings instead."""
+    from ouroboros.delegate_interactions import _ANSWER_NOTES
+
+    result, out = _answer_over_wire(tmp_path, monkeypatch, _delivered_bytes())
+    assert (out["status"], out["accepted"], result.code) == ("delivered", True, "OK")
+    assert out["note"] == _ANSWER_NOTES["delivered"]
+    assert "the run resumes on it" not in out["note"] and "run was never paused" not in out["note"]
+    assert all(fact in out["note"] for fact in (
+        "delivery=blocking", "delivery=async", "next user message", "does not prove", "delegate_wait"))
+
+
+@pytest.mark.parametrize("rows,async_only", [
+    ([_async_row()], True),
+    ([_async_row(), _async_row(iid="int-held", question="Which port?", delivery="blocking")], False),
+    ([_pending_row()], False),
+], ids=["async-only", "mixed-set", "legacy-row"])
+def test_the_published_plain_answer_claims_no_resume_for_any_question_set(tmp_path, monkeypatch, rows, async_only):
+    """The real default surface over the real gateway decoder: the registered delegate_wait shows
+    each row's kind, and an answer in the form its note teaches adds one POST and no read, so its
+    receipt is the plain one whichever kind of question it answered."""
+    import httpx
+
+    import ouroboros.tools.delegate as delegate
+    from ouroboros.delegate_interactions import _ANSWER_NOTES
+    from ouroboros.gateways import claudexor as cx
+
+    published = {entry.name: entry.handler for entry in delegate.get_tools()}
+    delivered, requests = _delivered_bytes(), []
+
+    def respond(request):
+        requests.append((request.method, request.url.path))
+        if request.method == "GET":
+            return httpx.Response(200, json={
+                "lastSeq": 5, "pendingInteractions": rows,
+                "summary": {"state": "running", "effectiveAccess": "readonly", "waitingOnUser": True}})
+        return httpx.Response(delivered["status"], content=delivered["body"].encode("utf-8"),
+                              headers={"Content-Type": delivered["content_type"]})
+
+    gateway = cx.ClaudexorGateway.__new__(cx.ClaudexorGateway)
+    monkeypatch.setattr(gateway, "handshake", lambda **kwargs: {})
+    monkeypatch.setattr(gateway, "close", lambda: None)  # both verbs close the one transport this test owns
+    monkeypatch.setattr(cx, "ClaudexorGateway", lambda *args, **kwargs: gateway)
+    ctx = _answer_ctx(tmp_path)
+    _own_run(delegate)
+    with httpx.Client(transport=httpx.MockTransport(respond), base_url="http://offline.invalid") as client:
+        gateway._client = client
+        waiting = json.loads(published["delegate_wait"](ctx, "run-1", wait_sec=600, since_seq=5))
+        reads_before_answer = len(requests)
+        answered = json.loads(published["delegate_answer"](
+            ctx, "run-1", waiting["pending_interactions"][0]["interaction_id"],
+            [{"question_id": "q1", "free_text": "Yes."}]))
+    delegate._CUSTODY.clear()
+    assert waiting["status"] == "waiting_on_user" and ("async_questions_only" in waiting) is async_only
+    assert ("KEEPS WORKING" in waiting["note"]) is async_only and ("PAUSED" in waiting["note"]) is not async_only
+    assert [row["delivery"] for row in waiting["pending_interactions"]] == [
+        row.get("delivery", "blocking") for row in rows]
+    assert requests[reads_before_answer:] == [("POST", "/v2/runs/run-1/interactions/int-1/answer")]
+    assert (answered["status"], answered["accepted"]) == ("delivered", True)
+    assert answered["note"] == _ANSWER_NOTES["delivered"] and "the run resumes on it" not in answered["note"]

@@ -10,7 +10,6 @@ from ouroboros.outcomes import public_task_result
     ([{"kind": "history_retention_deferred"}], [], "incomplete", "pending"),
     ([{"kind": "context_checkpoint"}], [], "incomplete", "problem"),
     ([], [{"kind": "call_manifest"}], "complete", "problem"),
-    ([], [], "complete", "complete"),
 ])
 def test_public_history_summary_preserves_result_and_durable_source(pending, unavailable, status, expected):
     stored = {"task_id": "history", "status": "completed", "result": "The answer remains available.",

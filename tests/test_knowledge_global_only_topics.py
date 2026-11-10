@@ -10,11 +10,11 @@ empty. Ordinary topics keep following the room they were written in.
 
 from __future__ import annotations
 
-import pytest
 
 from ouroboros import knowledge as store
 from ouroboros.tools import knowledge as tools
 from ouroboros.tools.registry import ToolContext
+from tests._cases import case_folders
 
 
 def project_ctx(tmp_path, project_id: str = "demo") -> ToolContext:
@@ -44,14 +44,17 @@ def test_the_former_register_keeps_its_one_global_home(tmp_path):
     assert "| x | 1 |" in tools._knowledge_read(ctx, tools.PATTERNS_TOPIC)
 
 
-@pytest.mark.parametrize("topic", sorted(tools.GLOBAL_ONLY_TOPICS))
-@pytest.mark.parametrize("scope", ["", "global", "project:demo"])
-def test_reserved_topics_resolve_globally_from_a_project_room(tmp_path, topic, scope):
-    address = tools._address(project_ctx(tmp_path), topic, scope)
+def test_reserved_topics_resolve_globally_from_a_project_room(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for topic in sorted(tools.GLOBAL_ONLY_TOPICS):
+        for scope in ["", "global", "project:demo"]:
+            tmp_path = next(case_paths)
+            with subtests.test(topic=topic, scope=scope):
+                address = tools._address(project_ctx(tmp_path), topic, scope)
 
-    assert address.scope == "global"
-    assert address.project_id == ""
-    assert address.path == tmp_path / "memory" / "knowledge" / f"{topic}.md"
+                assert address.scope == "global"
+                assert address.project_id == ""
+                assert address.path == tmp_path / "memory" / "knowledge" / f"{topic}.md"
 
 
 def test_ordinary_topic_still_follows_the_room(tmp_path):
@@ -117,6 +120,11 @@ def test_write_schema_states_the_rules_the_code_actually_enforces(tmp_path):
     assert "people and relationships" in props["scope"]["description"]
     assert "no scope prefixes" in props["topic"]["description"]
     assert "stays resident in the index" in schemas["knowledge_write"]["description"]
+    # Where a summary is in front of me: a global note's in every room and place, a project note's in its project
+    # (context_sections.knowledge_navigation_sections). The fact sits in the tool text, which direct OpenAI routes
+    # carry whole (test_openai_chat_custom_contract.test_actual_profile_catalogs_carry_every_tool_lead_whole).
+    audience = "(a global note's in every room and place I work in, a project note's in that project)"
+    assert audience in schemas["knowledge_write"]["description"]
 
     # …and the retained-frontmatter claim is true: a body-only overwrite keeps
     # the authored summary that the index renders.

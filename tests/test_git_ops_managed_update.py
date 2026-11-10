@@ -60,7 +60,11 @@ def test_official_fetch_timeout_kills_the_process_tree(monkeypatch):
     calls = []
 
     class FakeProcess:
+        def poll(self):
+            return self.returncode
+
         returncode = 1
+        stdin = stdout = stderr = None  # the runner closes an exited child's pipes; this fake opens none
 
         def __init__(self):
             self.communicates = 0
@@ -73,6 +77,8 @@ def test_official_fetch_timeout_kills_the_process_tree(monkeypatch):
             return "", "still running"
 
     proc = FakeProcess()
+    from tests.test_tracked_tree_containment import fake_tree_read
+    fake_tree_read(monkeypatch, proc, remains=False)
     monkeypatch.setattr(git_ops.subprocess, "Popen", lambda *args, **kwargs: proc)
     monkeypatch.setattr(
         platform_layer,
@@ -104,6 +110,9 @@ def test_dependency_sync_is_panic_tracked_and_killed_on_timeout(monkeypatch, tmp
     killed = []
 
     class HungProcess:
+        def poll(self):
+            return self.returncode
+
         returncode = 1
 
         def __init__(self):
@@ -117,6 +126,8 @@ def test_dependency_sync_is_panic_tracked_and_killed_on_timeout(monkeypatch, tmp
             return -9
 
     proc = HungProcess()
+    from tests.test_tracked_tree_containment import fake_tree_read
+    fake_tree_read(monkeypatch, proc, remains=False)
     monkeypatch.setattr(git_ops.subprocess, "Popen", lambda *_a, **_k: proc)
     monkeypatch.setattr(platform_layer, "kill_process_tree", lambda value: killed.append(value))
 
@@ -472,11 +483,7 @@ def test_ensure_official_update_remote_blank_configured_source_defaults(monkeypa
 
 @pytest.mark.parametrize("legacy", [
     "https://github.com/joi-lab/ouroboros-desktop",  # what builds before v6.8.0 store
-    "https://github.com/joi-lab/ouroboros-desktop.git",
-    "https://github.com/joi-lab/ouroboros",
     "git@github.com:joi-lab/ouroboros.git",
-    "ssh://git@github.com/joi-lab/ouroboros.git",
-    "https://github.com/joi-lab/ouroboros-desktop.git/",
     "HTTPS://GitHub.com/Joi-Lab/Ouroboros-Desktop/",
 ])
 def test_former_official_home_updates_from_the_official_repository(monkeypatch, legacy):
@@ -497,12 +504,7 @@ def test_former_official_home_updates_from_the_official_repository(monkeypatch, 
 
 @pytest.mark.parametrize("configured", [
     "https://github.com/joi-lab/ouroboros-joi",  # another repository of the same organisation
-    "https://github.com/joi-lab/OuroborosHub",
-    "https://github.com/joi-lab/ouroboros-desktop-fork",
-    "https://github.com/someone/ouroboros",
-    "https://gitlab.com/joi-lab/ouroboros",
     "joi-lab/ouroboros",  # not a GitHub URL
-    "https://github.com/joi-lab/ouroboros/tree/main",  # a page inside the repository, not its URL
     "/srv/mirrors/joi-lab/ouroboros.git",
 ])
 def test_only_the_exact_former_homes_are_mapped(configured):

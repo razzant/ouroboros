@@ -111,12 +111,11 @@ def _assignment_form(value: Any) -> str:
 def _assignment_reference(objective: str, task: Mapping[str, Any]) -> Dict[str, Any]:
     """The objective as a reference to the assignment as a request actually delivers it.
 
-    The first user turn carries the assignment whole, or, when the whole input cannot fit a
-    request, a pointer to its exact stored source: a wake's observation
-    (``loop_model_call._project_wake_input``), an owner-Nano input
-    (``context_input_selection.task_input_pointer``). This view is captured before either
-    decision, so the rule names both deliveries, and a wake whose observation is already
-    bound names that stored source itself (``consciousness_wake.bind_wake_observation``).
+    The first user turn carries the assignment whole or, after a physical nonfit, its exact
+    source pointer: a wake's observation (``context_input_selection.rescued_start`` at first
+    build, ``loop_model_call._project_wake_input`` later), or an owner-Nano input
+    (``context_input_selection.task_input_pointer``). This view precedes those decisions;
+    an already-bound wake names its source (``consciousness_wake.bind_wake_observation``).
     """
     from ouroboros.consciousness_wake import WAKE_OBSERVATION_KEY
 
@@ -175,6 +174,13 @@ def project_main_task_authority(task: Mapping[str, Any]) -> Dict[str, Any]:
             "ref": copy.deepcopy(dict(origin_ref)),
             **({"text": str(origin_text)} if isinstance(origin_text, str) and origin_text else {}),
         }
+    # A drafted objective (a start, a follow-up) shows the words of my human its drafter carried, beside it.
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
+    author = metadata.get("objective_author") if isinstance(metadata.get("objective_author"), Mapping) else {}
+    carried = [copy.deepcopy(dict(row)) for row in metadata.get("owner_corpus") or [] if isinstance(row, Mapping)
+               and str(row.get("content") or "").strip() and row.get("content") != origin_text]
+    if author.get("kind") == "task" and carried:
+        projection["task_owner_words"] = {"carried_by": str(author.get("task_id") or ""), "rows": carried}
     if isinstance(task.get("authority_historical_gaps"), list):
         projection["authority_historical_gaps"] = copy.deepcopy(task["authority_historical_gaps"])
     return projection
@@ -291,8 +297,10 @@ def late_answer_notes_message(task: Mapping[str, Any], *, drive_root: Any) -> Op
     ``_kept_notes``'s, except that a field the asker's latest fold cleared stays cleared. The
     header says whose dated account it is (``WORKING_NOTES_AT_FIELD``, the validated end in
     ``terminal_time``), that it may be intermediate, and how the asker's final result is read.
-    An unreadable source yields a typed gap row; an asker that kept no notes yields none.
+    An unreadable source yields a typed gap row; an asker that kept no notes yields none unless its
+    Continue is open (``owner_continue.continuation_offer``), which the lead names whenever it is.
     """
+    from ouroboros.owner_continue import continuation_offer
     from ouroboros.owner_quiz import late_answer_ref
     from ouroboros.task_results import load_task_result
     from ouroboros.terminal_time import terminal_time_fact
@@ -312,6 +320,9 @@ def late_answer_notes_message(task: Mapping[str, Any], *, drive_root: Any) -> Op
     except _SOURCE_ERRORS as exc:
         return row(f"{lead}; its stored result could not be read now ({type(exc).__name__}: {exc}), so whether "
                    f"it kept working notes is unknown and nothing was inferred. Its reader is {reader}.")
+    offer = continuation_offer(saved, asker) if saved else {}
+    if offer.get("eligible"):  # it stopped with work left: its Continue may still resume it
+        lead += f"; its Continue is open ({offer['cause']}; continue_task)"
     try:
         kept = _kept_notes(drive_root, asker, saved, cleared_is_final=True)
     except _SOURCE_ERRORS as exc:
@@ -323,7 +334,8 @@ def late_answer_notes_message(task: Mapping[str, Any], *, drive_root: Any) -> Op
                    f"({type(kept).__name__}: {kept}); nothing was inferred. Its complete stored record stays "
                    f"readable with {reader}.")
     if kept is None:
-        return None
+        return (row(f"{lead}. It kept no working notes; its complete stored record stays readable with {reader}.")
+                if offer.get("eligible") else None)
     texts, where = kept
     at = saved.get(WORKING_NOTES_AT_FIELD) if isinstance(saved.get(WORKING_NOTES_FIELD), Mapping) else None
     named = (f"named in its result at {at}" if isinstance(at, str) and at

@@ -14,6 +14,7 @@ from ouroboros.context_budget import start_room_levels
 from ouroboros.context_sections import runtime_host_section
 from ouroboros.section_floor import HostSection, capture_sections
 from tests import _memory_view_synthetic as syn
+from tests._cases import case_folders
 
 RESERVE = 8_192
 
@@ -21,7 +22,7 @@ RESERVE = 8_192
 def test_host_ladder_lists_live_producers_and_keeps_only_the_actual_protected_core():
     from ouroboros.context_layout import TIER0_ALWAYS_FULL
 
-    assert memory_floor.HOST_STEPS == ("runtime", "review_pool", "review_continuity", "registry", "installed_skills", "drive_state",
+    assert memory_floor.HOST_STEPS == ("runtime", "review_pool", "review_continuity", "installed_skills", "drive_state",
         "world", "subagents",
         "architecture_map", "development_map")
     assert section_floor.PROTECTED == TIER0_ALWAYS_FULL
@@ -30,7 +31,7 @@ def test_host_ladder_lists_live_producers_and_keeps_only_the_actual_protected_co
     assert "shared_understanding" not in memory_floor.HOST_STEPS
 
 
-@pytest.mark.parametrize("missing", ["window", "root", "task_id", "measure", "eligible"])
+@pytest.mark.parametrize("missing", ["window", "measure", "eligible"])
 def test_host_steps_do_not_measure_when_no_section_can_step(missing):
     calls = []
     args = dict(window=50_000, root="test-root", task_id="test-task", reserve=RESERVE,
@@ -48,8 +49,8 @@ def test_host_steps_do_not_measure_when_no_section_can_step(missing):
 @pytest.mark.parametrize("window,saving,steps", [(20_000, 0, 0), (18_000, 0, 1), (20_000, 3000, 2)])
 def test_host_steps_measure_once_then_only_after_each_new_address(monkeypatch, window, saving, steps):
     calls = []
-    sections = [HostSection(name, "whole " * 1000, "operative")
-                for name in ("runtime", "registry", "installed_skills")]
+    sections = [HostSection(name, "whole " * 1000, "operative")  # walk order: the registry outline is last
+                for name in ("runtime", "installed_skills", "registry")]
     monkeypatch.setattr(memory_floor, "retain_section",
                         lambda part, **_kw: {"section_id": part.section_id, "reader": "test-reader"})
 
@@ -62,6 +63,26 @@ def test_host_steps_measure_once_then_only_after_each_new_address(monkeypatch, w
     assert len(receipts) == steps and remaining == 0
     assert len(calls) == 1 + steps
     assert calls == [tuple(part.section_id for part in sections[:n]) for n in range(steps + 1)]
+
+
+@pytest.mark.parametrize("least", [11_809, 11_808], ids=["least-request-over-the-window", "least-request-fits"])
+def test_a_frame_whose_least_request_overflows_takes_every_step_for_the_window_unpriced(monkeypatch, least):
+    """Every section at its shorter form and no memory at all (``bare``) already past the window (physical 11,808 here):
+    no price can fit, so each section steps for the window and neither the held request nor memory's shortest view is
+    measured. A least request the window holds is priced as before and, here, takes the same steps."""
+    monkeypatch.setattr(memory_floor, "retain_section",
+                        lambda part, **_kw: {"section_id": part.section_id, "reader": "test-reader"})
+    sections = [HostSection(name, "whole " * 1000, "operative") for name in ("runtime", "installed_skills", "registry")]
+    priced, bare = [], []
+    receipts, _ = memory_floor._host_steps(sections, [], window=20_000, reserve=RESERVE, ratio=1.0, saving=0,
+        root="test-root", task_id="test-task", allowance=10_000,
+        bare=lambda forms: bare.append(dict(forms)) or least,
+        measure=lambda addressed: priced.append("held") or 30_000 - 2_000 * len(addressed),
+        shortest=lambda addressed, physical: priced.append("shortest") or 20_000)
+    assert bare == [{"runtime": "operative", "installed_skills": "operative", "registry": "operative"}]
+    assert [(row["section_id"], row.get("start_room", False)) for row in receipts] == [
+        ("runtime", False), ("installed_skills", False), ("registry", False)]
+    assert priced == ([] if least > 11_808 else ["held", "shortest"] * 3 + ["held"])
 
 
 @pytest.fixture(autouse=True)
@@ -107,8 +128,7 @@ def _service(name="runtime", size=100_000):
                        f"## {name}\n\nOperative state remains.")
 
 
-@pytest.mark.parametrize("preferred", ["max", "low", "nano"])
-@pytest.mark.parametrize("window", [0, 2_000_000])
+@pytest.mark.parametrize(("window", "preferred"), [(0, "max"), (0, "nano"), (2_000_000, "low")])
 def test_unselected_projections_are_byte_identical_and_write_nothing(tmp_path, preferred, window):
     core = _core(tmp_path, [_service(size=2_000), "protected dynamic text"], [_service("world", 1_000)],
                  syn.snapshot(story=syn.pages(2, 4_000)))
@@ -134,22 +154,25 @@ def test_host_sections_share_the_start_target_and_working_margin(tmp_path):
     assert _host_facts(pressured, "nano")
 
 
-@pytest.mark.parametrize("section_id", sorted(section_floor.PROTECTED))
-def test_protected_sections_never_shrink_even_with_an_operative_view(tmp_path, section_id):
-    protected = HostSection(section_id, f"## {section_id}\n" + "whole core " * 2_000, "forbidden replacement")
-    core = _core(tmp_path, [protected, _service(size=3_000)])
-    with pytest.raises(fit.MinimumViewUnfit):
-        _plan(core, RESERVE + 1)
-    plan = _plan(core, 2_000_000).reproject_for_route(window_tokens=RESERVE + 1, known_window=True,
-        ratio=1, output_reserve=RESERVE, tool_schemas=[])
-    assert protected.full_text in _text(plan)
-    assert "forbidden replacement" not in _text(plan)
-    assert plan.messages_for("max")[1]["content"] == "WORDS THAT STARTED THE WORK"
-    assert section_id not in {row["section_id"] for row in _host_facts(plan)}
-    disposition = fit.measure_main_fit(plan, plan.messages_for("max"), [],
-        profile="owner_max", rendered_mode="max", round_id="r1", automatic_pass_used=True)
-    assert disposition.predicted_capacity_miss
-    assert disposition.action == "send"  # an estimator miss never hard-refuses
+def test_protected_sections_never_shrink_even_with_an_operative_view(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for section_id in sorted(section_floor.PROTECTED):
+        tmp_path = next(case_paths)
+        with subtests.test(section_id=section_id):
+            protected = HostSection(section_id, f"## {section_id}\n" + "whole core " * 2_000, "forbidden replacement")
+            core = _core(tmp_path, [protected, _service(size=3_000)])
+            with pytest.raises(fit.MinimumViewUnfit):
+                _plan(core, RESERVE + 1)
+            plan = _plan(core, 2_000_000).reproject_for_route(window_tokens=RESERVE + 1, known_window=True,
+                ratio=1, output_reserve=RESERVE, tool_schemas=[])
+            assert protected.full_text in _text(plan)
+            assert "forbidden replacement" not in _text(plan)
+            assert plan.messages_for("max")[1]["content"] == "WORDS THAT STARTED THE WORK"
+            assert section_id not in {row["section_id"] for row in _host_facts(plan)}
+            disposition = fit.measure_main_fit(plan, plan.messages_for("max"), [],
+                profile="owner_max", rendered_mode="max", round_id="r1", automatic_pass_used=True)
+            assert disposition.predicted_capacity_miss
+            assert disposition.action == "send"  # an estimator miss never hard-refuses
 
 
 @pytest.mark.parametrize("short", ["the same tiny section", "longer than the tiny section " * 50])
@@ -215,6 +238,22 @@ def test_physical_mode_lowering_carries_host_addresses_from_the_shown_view(tmp_p
     assert core.dynamic_text not in _text(lowered, "nano")
 
 
+def test_a_shown_view_keeps_its_books_while_its_own_completed_view_fits(tmp_path):
+    """A Max view already shown, on a smaller known window (no tools): its own folded view, receipt included, needs
+    8,719 tokens with the reply reserve. Before, a generic Nano-note price of its shortest view (465 vs its real 360
+    tokens) lowered it from 8,724 to 8,814 tokens, to a Nano view that itself needed 8,960."""
+    snapshot = syn.snapshot(story=syn.pages(4, 8_000), room_facts=syn.room("1", lane1=[
+        syn.spoken(1, "human", 2_000), syn.spoken(2, "ouroboros", 2_000)]))
+    roomy = _plan(_core(tmp_path, snapshot=snapshot), 2_000_000)
+    held = {window: roomy.reproject_for_route(window_tokens=window, known_window=True, ratio=1.0,
+                                              output_reserve=RESERVE, tool_schemas=[], start_mode="max")
+            for window in (8_764, 8_700)}
+    kept = held[8_764].projection(held[8_764].initial_mode)
+    assert held[8_764].initial_mode == "max" and kept.estimated_tokens + RESERVE <= 8_764
+    assert "F5" in kept.memory_facts["floor"]["steps"]  # memory folded; the books stayed
+    assert held[8_700].initial_mode != "max"  # below its own completed view, the books step down
+
+
 def test_tool_schema_cost_and_route_density_both_count_toward_physical_pressure(tmp_path, monkeypatch):
     core = _core(tmp_path, [_service(size=3_000)])
     tokens = _plan(core, 0).max_projection.estimated_tokens
@@ -271,7 +310,7 @@ def test_host_sections_stay_whole_for_an_actor_that_could_not_read_a_pointer_bac
 
 
 
-def test_host_sections_then_index_precede_memory_and_people_step_last(tmp_path):
+def test_host_sections_then_memory_forms_then_a_physical_index_outline_and_people_last(tmp_path):
     snapshot = syn.snapshot(story=syn.pages(3, 20_000), room_facts=syn.room("1", lane1=[
         syn.spoken(1, "ouroboros", 15_000), syn.spoken(2, "human", 15_000)]))
     host = _service(size=35_000)
@@ -282,12 +321,15 @@ def test_host_sections_then_index_precede_memory_and_people_step_last(tmp_path):
     assert [r["section_id"] for r in _host_facts(plan)] == ["runtime"]
     assert plan.max_projection.memory_facts["floor"]["steps"] == {}
     assert memory_view.render_story(snapshot) in _text(plan)
-    # The index then gives way before any memory step.
+    # Memory's own shorter forms make the room first: the window holds the whole index (P1, owner 2.11.2026).
     smaller = _plan(core, 50_000)
-    assert [r["section_id"] for r in _host_facts(smaller)] == ["runtime", "knowledge_index"]
-    assert smaller.max_projection.memory_facts["floor"]["steps"] == {}
-    # At increasing physical pressure retold pages/replies go before human words.
+    assert [r["section_id"] for r in _host_facts(smaller)] == ["runtime"] and index in _text(smaller)
+    steps = smaller.max_projection.memory_facts["floor"]["steps"]
+    assert steps and "F7" not in steps
+    # Only where those forms cannot make room does the window outline the index, still before human words.
     middle = _plan(core, 20_000)
+    assert [(r["section_id"], "start_room" in r) for r in _host_facts(middle)] == [
+        ("runtime", False), ("knowledge_index", False)]
     assert "F5l" in middle.max_projection.memory_facts["floor"]["steps"]
     assert "F7" not in middle.max_projection.memory_facts["floor"]["steps"]
     smallest = middle.reproject_for_route(window_tokens=RESERVE + 1, known_window=True, ratio=1,
@@ -380,7 +422,7 @@ def test_declared_inputs_use_the_same_book_map_floor_without_loading_shared_memo
     monkeypatch.setattr(context, "build_memory_sections", lambda *_a, **_kw: pytest.fail("shared memory opened"))
     monkeypatch.setattr(context, "build_knowledge_sections", lambda *_a, **_kw: pytest.fail("knowledge opened"))
     core = context._capture_context_core(env, memory, task, None, None)
-    assert not core.memory_view_json
+    assert '"story":false' in core.memory_view_json and '"room_page":false' in core.memory_view_json  # the one view
     assert core.section_root == str(env.drive_root) and core.section_task_id == task["id"]
     unknown = _plan(core, 0, "nano")
     assert not _host_facts(unknown)

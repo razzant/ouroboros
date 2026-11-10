@@ -341,6 +341,44 @@ def test_edit_batch_sequential_edits_see_prior_results(ws):
     assert "def aaa(value):" in (ws.repo_dir / "s.py").read_text()
 
 
+def _typed(ctx, call):
+    """The handler's text and the typed result it published, read through the registry's own sidecar."""
+    from ouroboros.tools.tool_result import (
+        _install_tool_result_sidecar, _published_tool_result, _restore_tool_result_sidecar,
+    )
+
+    sentinel = object()
+    token = _install_tool_result_sidecar(ctx, sentinel)
+    try:
+        text, typed = call(), _published_tool_result(ctx, sentinel)
+    finally:
+        _restore_tool_result_sidecar(token)
+    return text, None if typed is sentinel else typed
+
+
+def test_patch_and_batch_leave_a_file_already_holding_their_bytes_untouched(ws):
+    """Owner, 8 Nov 2026: a target already holding exactly the bytes an edit would leave is not rewritten. A call that
+    changed nothing is the typed ``completed_no_effect`` (no effect reader counts it as production); a call that
+    changed other files names it in ``unchanged_paths``, which the result review leaves out of what was produced."""
+    target, other = ws.repo_dir / "s.py", ws.repo_dir / "t.py"
+    other.write_text("T = 1\n", encoding="utf-8")
+    stamp = target.stat().st_mtime_ns
+    same_patch = "*** Update File: s.py\n-def ddd(x):\n+def ddd(x):\n"
+    same_edit = {"path": "s.py", "old_str": "def ddd(x):", "new_str": "def ddd(x):", "count": 1}
+    for call in (lambda: edit_ops._apply_patch(ws, same_patch), lambda: edit_ops._edit_batch(ws, [same_edit])):
+        text, typed = _typed(ws, call)
+        assert text.startswith("✅ Unchanged: active_workspace:s.py already held exactly this content"), text
+        assert typed.code == "OK" and typed.meta["operation_outcome"] == "completed_no_effect"
+        assert target.stat().st_mtime_ns == stamp, "nothing was written"
+    mixed = (lambda: edit_ops._apply_patch(ws, same_patch + "*** Update File: t.py\n-T = 1\n+T = 2\n"),
+             lambda: edit_ops._edit_batch(ws, [same_edit, {"path": "t.py", "old_str": "T = 2", "new_str": "T = 3"}]))
+    for expected, call in zip(("T = 2\n", "T = 3\n"), mixed):
+        text, typed = _typed(ws, call)
+        assert other.read_text() == expected and target.stat().st_mtime_ns == stamp, text
+        assert typed.meta["unchanged_paths"] == ["s.py"] and "operation_outcome" not in typed.meta
+        assert "Unchanged, not rewritten (already held exactly this content): s.py" in text
+
+
 def test_registry_registration():
     names = {e.name for e in edit_ops.get_tools()}
     assert names == {"apply_patch", "edit_batch"}
@@ -492,8 +530,11 @@ def _protected_call(tool, path):
     return {"edits": [{"path": path, "old_str": "P1 honest", "new_str": "P1 loose"}]}
 
 
-@pytest.mark.parametrize("tool", ["edit_text", "apply_patch", "edit_batch"])
-@pytest.mark.parametrize("spelling", ["canonical", "absolute", "root_basename"])
+@pytest.mark.parametrize(("spelling", "tool"), [
+    ("canonical", "edit_text"),
+    ("absolute", "apply_patch"),
+    ("root_basename", "edit_batch"),
+])
 def test_protected_path_blocked_in_every_spelling(tmp_path, tool, spelling):
     """A protected path is refused however it is SPELLED.
 

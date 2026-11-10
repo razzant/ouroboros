@@ -69,7 +69,6 @@ def _consumed(drive, run_id="run-canonical"):
     return custody.replay(drive)[run_id].output_consumed
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("partial", [False, True], ids=["whole-large", "measured-head-tail"])
 def test_main_credits_the_canonical_source_by_its_actual_projection(main_loop, monkeypatch, partial):
     from ouroboros.tools.core import _read_file
@@ -122,7 +121,6 @@ def test_main_credits_the_canonical_source_by_its_actual_projection(main_loop, m
     assert rows[0]["reader_task_id"] == TASK
 
 
-@pytest.mark.serial
 def test_main_runtime_data_read_of_the_same_exact_source_is_credited(main_loop, monkeypatch):
     from tests.test_main_result_ingress import _observe_measurements
 

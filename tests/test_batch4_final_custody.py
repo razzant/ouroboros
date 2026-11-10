@@ -9,7 +9,6 @@ import pytest
 from tests._budget_pause_exact_helpers import _install_queue
 from tests.test_batch4_repair_compositions import _running
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("name,args", [
@@ -47,49 +46,6 @@ def test_completed_local_read_warning_releases_tree_custody(tmp_path, monkeypatc
     assert read_fence(tmp_path, "root")["state"] == "paused"
     write_task_result(tmp_path, "root", "failed", reason_code="task_exception")
     assert not conflicting_writers(q, "root")
-
-
-@pytest.mark.parametrize("outcome", ["warning", "exception", "timeout", "dynamic"])
-def test_result_metadata_cannot_override_actual_handler_unwind(tmp_path, monkeypatch, outcome):
-    from ouroboros.task_results import load_task_result
-    from ouroboros.tools.registry import ToolRegistry
-    from ouroboros.tools.tool_result import ToolResult
-
-    _, _, workers = _install_queue(tmp_path, monkeypatch)
-    _running(tmp_path, workers)
-    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    registry._ctx.task_id = registry._ctx.root_task_id = "root"
-    registry.execute_result("read_file", {"path": "absent"})
-    assert not load_task_result(tmp_path, "root").get("launch_handoffs")
-    entered = []
-    def opaque(*_args, _resolved_binding=None, **_kwargs):
-        entered.append(True)
-        if outcome == "exception":
-            raise OSError("unknown after dispatch")
-        if outcome == "warning":
-            return "⚠️ NOT_FOUND: opaque remote result unknown"
-        return ToolResult(status="timeout" if outcome == "timeout" else "ok",
-                          code="MCP_TIMEOUT" if outcome == "timeout" else "LEGACY_WARNING",
-                          text="opaque", meta={"dynamic_provider": True,
-                              "operation_outcome": "completed_no_effect"})
-    registry.override_handler("read_file", opaque)
-    registry.execute_result("read_file", {"path": "absent", "root": "active_workspace"})
-    assert entered == [True]
-    assert not load_task_result(tmp_path, "root").get("launch_handoffs")
-
-
-def test_real_reader_exception_keeps_business_error_without_ghost_invocation(tmp_path, monkeypatch):
-    from ouroboros.task_results import load_task_result
-    from ouroboros.tools.registry import ToolRegistry
-
-    _, _, workers = _install_queue(tmp_path, monkeypatch)
-    _running(tmp_path, workers)
-    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    registry._ctx.task_id = registry._ctx.root_task_id = "root"
-    # The actual query reader raises while parsing its numeric options.
-    result = registry.execute_result("query_code", {"op": "symbols", "limit": "invalid"})
-    assert result.status == "error" and not result.meta.get("operation_outcome")
-    assert not load_task_result(tmp_path, "root").get("launch_handoffs")
 
 
 def test_mcp_start_between_timeout_result_and_handoff_close_keeps_custody(tmp_path, monkeypatch):

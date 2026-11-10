@@ -115,7 +115,7 @@ def _controls(drive):
 def test_the_cascade_stop_cancels_a_settled_trees_open_run(qenv, monkeypatch):
     _ended_tree(qenv.drive)
     engine = _engine(monkeypatch)
-    assert _controls(qenv.drive) == [[("stop", ROOT)]], "the run's work offers the Stop its door takes"
+    assert _controls(qenv.drive) == [[("pause", ROOT), ("stop", ROOT)]], "the run's work offers the doors that take it"
     response = _stop(qenv.drive)
     assert (response.status_code, response.json()) == (200, {"ok": True, "task_id": ROOT, "cascade": True})
     assert engine.cancels == [("run-1", "owner_task_gone")]

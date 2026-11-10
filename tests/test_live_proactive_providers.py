@@ -10,6 +10,7 @@ from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
 from tests.test_live_conversation import ENGINES, VoiceWire, packages as packages
 from tests.test_live_provider_boundaries import selected
 from tests.test_live_conversation_driver import Host, Batch, until
+from tests._cases import chosen_rows
 
 
 class SilentWire(VoiceWire):
@@ -30,7 +31,7 @@ class SilentWire(VoiceWire):
             await super().send(raw)
 
 
-@pytest.mark.parametrize('name,engine', ENGINES)
+@pytest.mark.parametrize('name,engine', chosen_rows(ENGINES, 0, 2))
 @pytest.mark.parametrize('look', [False, True])
 def test_attend_silent_or_look_continues_through_driver_and_native_session(packages, tmp_path, name, engine, look):
     from dataclasses import replace
@@ -40,6 +41,9 @@ def test_attend_silent_or_look_continues_through_driver_and_native_session(packa
         host, wires = Host(), []
         host.state['greeted'] = True
         host.model = replace(host.model, vision=engine != 'grok')
+        async def fits(rows, tools):
+            return True  # ample room in this port fake; boundary tests use the real serving measure
+        host.delivery_fits = fits
         feature_tools = {t.name: t for t in call_tools(tmp_path)}
         tool = feature_tools['attend']
         host.schemas = [{'type':'function', 'function': {'name':tool.name, 'description':tool.description,

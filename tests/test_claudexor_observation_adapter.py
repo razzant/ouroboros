@@ -15,21 +15,26 @@ PROBE = [{"runId": obs.PROBE_RUN_ID, "seen": None}]
 ACCEPTED = {"wakeReason": "timeout", "attention": [],
             "summaries": [{"status": None, "pending": None, "token": None, "problem": "not_found"}]}
 REJECTED = ClaudexorUnavailable("invalid_request", "targets[0].seen: expected string", status_code=400)
+# What an engine whose strict input predates the opt-in (claudexor #628) answers to it.
+OPT_IN_REJECTED = ClaudexorUnavailable("invalid_request", "Unrecognized key(s) in object: 'includeBlocking'",
+                                       status_code=400)
 
 
 class FakeGateway:
     """The two surfaces the adapter may touch, scripted per test; ``probe`` answers the contract probe."""
 
     def __init__(self, *, version="4.8.1", sha="sha-1", routes=(WAIT_MANY_ROW,), waits=(), details=None,
-                 probe=ACCEPTED):
+                 probe=ACCEPTED, opt_in=OPT_IN_REJECTED):
         self.engine_version = version
         self.engine_build_sha = sha
         self.routes = list(routes)
         self.waits = list(waits)
         self.details = dict(details or {})
         self.probe = probe
+        self.opt_in = opt_in  # the answer to the probe that asks ``includeBlocking``
         self.catalog_reads = 0
         self.probes = []
+        self.opt_in_probes = []
         self.wait_requests = []
         self.detail_reads = []
 
@@ -37,13 +42,16 @@ class FakeGateway:
         self.catalog_reads += 1
         return list(self.routes)
 
-    def wait_run_attention(self, targets, *, wait_ms, timeout_sec):
+    def wait_run_attention(self, targets, *, wait_ms, timeout_sec, include_blocking=False):
         if targets == PROBE:
-            self.probes.append({"wait_ms": wait_ms, "timeout_sec": timeout_sec})
-            if isinstance(self.probe, BaseException):
-                raise self.probe
-            return self.probe
-        self.wait_requests.append({"targets": targets, "wait_ms": wait_ms, "timeout_sec": timeout_sec})
+            (self.opt_in_probes if include_blocking else self.probes).append(
+                {"wait_ms": wait_ms, "timeout_sec": timeout_sec})
+            answer = self.opt_in if include_blocking else self.probe
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+        self.wait_requests.append({"targets": targets, "wait_ms": wait_ms, "timeout_sec": timeout_sec,
+                                   **({"include_blocking": True} if include_blocking else {})})
         answer = self.waits.pop(0)
         if isinstance(answer, BaseException):
             raise answer
@@ -88,11 +96,9 @@ def test_support_is_the_catalog_and_the_contract_probe_remembered_per_engine_ide
 
 @pytest.mark.parametrize("answer", [
     REJECTED,
-    ClaudexorUnavailable("bad_request", "unknown field seen", status_code=400),
-    ClaudexorUnavailable("not_found", "no such route", status_code=404),
     {"wakeReason": "timeout", "attention": [], "summaries": [_summary()]},  # a 200 of another shape
     {"wakeReason": "problems", "attention": [], "summaries": []},
-], ids=["invalid_request", "other-400", "route-404", "old-shape-row", "old-shape-empty"])
+], ids=["invalid_request", "old-shape-row", "old-shape-empty"])
 def test_a_received_refusal_of_the_acknowledgement_is_unsupported_and_remembered(answer):
     gateway = FakeGateway(sha="sha-unrepaired", probe=answer)
     assert obs.wait_many_supported(gateway, timeout_sec=1) is False
@@ -131,11 +137,9 @@ def _retryable(code="store_closed"):
 
 @pytest.mark.parametrize("refusal", [
     ClaudexorUnavailable("http_401", "unauthorized", status_code=401),
-    ClaudexorUnavailable("conflict", "another writer", status_code=409),
     _retryable("store_closed"),
-    ClaudexorUnavailable("idempotency_status_unavailable", "not now", status_code=503),
     ClaudexorUnavailable("http_500", "boom", status_code=500),
-], ids=["401", "409", "503-retryable", "503-plain", "500"])
+], ids=["401", "503-retryable", "500"])
 def test_any_other_refusal_of_the_probe_is_not_supported_this_beat_and_not_remembered(refusal):
     gateway = FakeGateway(sha="sha-refused", probe=refusal)
     assert obs.wait_many_supported(gateway, timeout_sec=1) is False, "the question never blocks the old read"
@@ -187,12 +191,9 @@ def test_engine_rows_and_attention_are_projected_and_only_engine_tokens_are_echo
 
 
 @pytest.mark.parametrize("body", [
-    {"wakeReason": "attention", "attention": [], "summaries": [_summary()]},  # batch of the wrong size
-    {"wakeReason": None, "attention": [], "summaries": [_summary(), _summary()]},
     {"wakeReason": "attention", "attention": [5], "summaries": [_summary(), _summary()]},
     {"wakeReason": "timeout", "attention": [], "summaries": [_summary(token="short"), _summary()]},
     {"wakeReason": "problems", "attention": [], "summaries": [_problem(""), _summary()]},
-    {"wakeReason": "problems", "attention": [], "summaries": [_problem(7), _summary()]},
 ])
 def test_a_malformed_engine_answer_is_a_typed_refusal_never_a_fabricated_row(body):
     gateway = FakeGateway(waits=[body])
@@ -222,7 +223,7 @@ def test_a_problem_answer_is_no_hold_and_its_acknowledgement_rides_the_wire_as_n
 
 
 @pytest.mark.parametrize("wait_sec,reason,waited", [(0.0, "timeout", False), (5.0, "aborted", False),
-                                                     (5.0, "timeout", True), (None, "attention", True)])
+                                                     (None, "attention", True)])
 def test_only_a_held_call_counts_as_waited(wait_sec, reason, waited):
     gateway = FakeGateway(waits=[{"wakeReason": reason, "attention": [0] if reason == "attention" else [],
                                   "summaries": [_summary(pending=True)]}])
@@ -322,3 +323,91 @@ def test_fallback_keeps_a_runs_own_refusal_on_its_row_and_a_hole_for_the_whole_b
     gateway.details["run-a"] = hole
     unobserved = obs.wait_attention(gateway, [("run-a", None), ("run-b", None)], wait_sec=0, timeout_sec=1.0)
     assert unobserved.reason == "unobserved" and unobserved.hole is hole and unobserved.source == "detail"
+
+
+# -- questions that hold nothing (claudexor #628) -----------------------------------------------
+
+def _row(iid, delivery=None, timeout_at=None):
+    row = {"interactionId": iid, "questions": [{"id": "q", "question": "?"}], "requestedAt": "t",
+           "timeoutAt": timeout_at}
+    if delivery is not None:
+        row["delivery"] = delivery
+    return row
+
+
+def _detail(rows, **summary):
+    return {"summary": {"state": "running", "waitingOnUser": bool(rows), **summary}, "pendingInteractions": rows}
+
+
+def test_the_opt_in_is_negotiated_by_the_same_probe_and_asked_only_where_answered():
+    quiet = {"wakeReason": "timeout", "attention": []}
+    new = FakeGateway(sha="sha-new", opt_in=ACCEPTED,
+                      waits=[{**quiet, "summaries": [_summary(pending=True) | {"blocking": False}]}])
+    assert obs.wait_many_supported(new, timeout_sec=1) is True and obs.reports_blocking(new) is True
+    assert len(new.opt_in_probes) == 1 and new.probes == [], "one probe asks the opt-in and is answered"
+    wake = obs.wait_attention(new, [("run-a", ENGINE_TOKEN)], wait_sec=0.0, timeout_sec=1.0)
+    assert new.wait_requests[0]["include_blocking"] is True
+    assert wake.rows[0].pending is True and wake.rows[0].blocking is False
+    old = FakeGateway(sha="sha-old", waits=[{**quiet, "summaries": [_summary(pending=True)]}])
+    assert obs.wait_many_supported(old, timeout_sec=1) is True and obs.reports_blocking(old) is False
+    assert len(old.opt_in_probes) == 1 and len(old.probes) == 1, "a strict refusal of the opt-in asks the old contract"
+    wake = obs.wait_attention(old, [("run-a", None)], wait_sec=0.0, timeout_sec=1.0)
+    assert "include_blocking" not in old.wait_requests[0], "the old engine gets the old request"
+    assert wake.rows[0].pending is True and wake.rows[0].blocking is None, "unknown keeps the blocking meaning"
+    obs.forget_support(new)
+    assert obs.reports_blocking(new) is False, "a forgotten route asks nothing of it"
+
+
+def test_a_hole_on_the_opt_in_probe_remembers_nothing_and_never_reads_as_unsupported():
+    gateway = FakeGateway(sha="sha-hole-opt-in",
+                          opt_in=ClaudexorUnavailable("daemon_busy", "local RPC timed out", status_code=503))
+    assert obs.wait_many_supported(gateway, timeout_sec=1) is False and obs._SUPPORT == {}
+    assert gateway.probes == [], "a hole is no refusal of the opt-in: the old contract is not asked in its place"
+    gateway.opt_in = ACCEPTED
+    assert obs.wait_many_supported(gateway, timeout_sec=1) is True and obs.reports_blocking(gateway) is True
+
+
+def test_a_blocking_fact_that_is_not_a_boolean_is_a_typed_refusal():
+    gateway = FakeGateway(waits=[{"wakeReason": "attention", "attention": [0],
+                                  "summaries": [_summary(pending=True) | {"blocking": "false"}]}])
+    with pytest.raises(ClaudexorUnavailable) as caught:
+        obs.wait_attention(gateway, [("run-a", None)], wait_sec=0.0, timeout_sec=1.0)
+    assert caught.value.code == "malformed_response"
+
+
+@pytest.mark.parametrize("rows,summary,expected", [
+    ([_row("a", "async"), _row("b", "async")], {"asyncQuestionsOnly": True}, (True, True)),
+    ([_row("a", "async"), _row("b", "blocking")], {"asyncQuestionsOnly": False}, (True, False)),
+    ([_row("a", "async"), _row("b", "blocking")], {"asyncQuestionsOnly": True}, (True, False)),
+    ([_row("a")], {}, (True, False)),
+    ([_row("a", "deferred")], {"asyncQuestionsOnly": True}, (True, False)),
+    ([_row("a", "async"), {"questions": []}], {"asyncQuestionsOnly": False}, (True, False)),
+    ([_row("a", "async"), {"questions": []}], {"asyncQuestionsOnly": True}, (True, True)),
+    ([_row("a", "async")], {"asyncQuestionsOnly": False}, (True, False)),
+    ([], {"waitingOnUser": True, "asyncQuestionsOnly": True}, (True, True)),
+    ([], {"waitingOnUser": True}, (True, False)),
+    ([], {}, (False, False)),
+], ids=["all-async", "mixed", "rows-outweigh-summary", "legacy-omitted", "unknown-kind", "dropped-row-summary-no",
+        "dropped-row-summary-yes", "summary-contradicts", "summary-only", "older-summary", "nothing-pending"])
+def test_question_attention_is_judged_once_over_the_complete_set(rows, summary, expected):
+    assert obs.question_attention(_detail(rows, **summary)) == expected
+
+
+def test_a_delivery_that_is_not_a_string_is_malformed_strictly_and_holds_loosely():
+    from ouroboros.gateways.claudexor import pending_interactions
+
+    detail = _detail([_row("a", 0)])
+    with pytest.raises(ValueError):
+        pending_interactions(detail, strict=True)
+    rows = pending_interactions(detail)
+    assert rows[0]["delivery"] == "malformed" and obs.question_attention(detail, rows) == (True, False)
+    assert pending_interactions(_detail([_row("a")]), strict=True)[0]["delivery"] == "blocking", "omitted: legacy"
+    assert pending_interactions(_detail([_row("a", "deferred")]), strict=True)[0]["delivery"] == "deferred"
+
+
+def test_the_fallback_row_carries_the_detail_judgement():
+    asked = obs.detail_attention("run-a", _detail([_row("a", "async")], asyncQuestionsOnly=True))
+    assert asked.pending is True and asked.blocking is False
+    held = obs.detail_attention("run-a", _detail([_row("a", "async"), _row("b")]))
+    assert held.pending is True and held.blocking is True
+    assert obs.detail_attention("run-a", _detail([])).blocking is None

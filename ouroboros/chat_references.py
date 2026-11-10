@@ -30,6 +30,19 @@ def projection_fields(row: dict) -> dict:
     return fields
 
 
+def _snippet(text) -> str:
+    """A Reply's one-line preview: at most 160 characters, a longer text visibly cut; the address reads it all."""
+    words = " ".join(str(text or "").split())
+    return words if len(words) <= 160 else words[:159].rstrip() + "…"
+
+
+def _preview(text) -> dict:
+    """``snippet`` and, when it cuts the text, ``chars``: the whole text's length, which only the model's reading of
+    the reference states (``dialogue_provenance.relation_text``); the stored snippet stays the contract's."""
+    full = str(text or "")
+    return {"snippet": _snippet(full), **({"chars": len(full)} if len(" ".join(full.split())) > 160 else {})}
+
+
 def reference_from_row(row: dict) -> dict:
     kind = str(row.get("type") or "message")
     # A lifecycle row carrying an authored answer is that answer in Ouroboros's
@@ -46,7 +59,7 @@ def reference_from_row(row: dict) -> dict:
     return {"address": format_address(row_address(row)), "chat_id": int(row.get("chat_id", 1)),
             "role": role, "author_label": (str(row.get("sender_label") or "You") if role == "user"
                                              else {"assistant": "Ouroboros", "system": "System"}[role]),
-            "kind": kind, "snippet": " ".join(str(answer or row.get("text") or row.get("caption") or "").split())[:160],
+            "kind": kind, **_preview(answer or row.get("text") or row.get("caption")),
             "ts": str(row.get("ts") or ""), "task_id": str(row.get("task_id") or ""),
             "target_home": reply_target_home(row)}
 
@@ -64,7 +77,7 @@ def resolve_reply(root, address: str) -> dict:
         if task:
             return {"address": address, "chat_id": int(task.get("chat_id") or 1), "role": "assistant",
                     "author_label": "Ouroboros", "kind": "work_card",
-                    "snippet": " ".join(str(task.get("title") or task.get("text") or "").split())[:160],
+                    **_preview(task.get("title") or task.get("text")),
                     "ts": str(task.get("updated_at") or task.get("started_at") or ""), "task_id": task_id,
                     "target_home": "work"}
     else:
@@ -148,6 +161,7 @@ def history_row_destination(root, row, thread_id, project_ids, source_refs, room
     task and the reference's old chat label cannot supply a home. Unreadable authority raises.
     """
     from ouroboros.chat_chain import _row_chat_id
+    from ouroboros.presence_owner_contact import private_main_row
     from ouroboros.project_admission import reserved_project_for_chat
     from ouroboros.project_dialogue import bound_room_chat, room_membership
 
@@ -161,8 +175,8 @@ def history_row_destination(root, row, thread_id, project_ids, source_refs, room
         work = bound_room_chat(rooms, row)
         candidates = {1, written, work} & {1, *project_ids}
         homes = [chat for chat in candidates if belongs(chat, [])]
-        if len(homes) > 1 and work in homes:  # work speech shown where it was written too: its work's room is home
-            homes = [work]
+        if len(homes) > 1 and work in homes:  # work speech shown where it was written too: its work's room is home,
+            homes = [1 if private_main_row(dict(row)) else work]  # private contact's is Main, its address
         if len(homes) != 1:
             return {"state": "ambiguous" if homes else "unavailable"}
         home = homes[0]

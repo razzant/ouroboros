@@ -82,7 +82,6 @@ def _supervisor_rows(root: pathlib.Path, kind: str) -> list:
     return [row for row in rows if row.get("type") == kind]
 
 
-@pytest.mark.serial
 def test_daemon_fixture_serves_without_reverse_dns():
     """The fixture daemon binds a numeric loopback address, so it must start and answer
     while ``socket.getfqdn`` raises: that lookup costs about 35 s per bind on macOS CI."""
@@ -140,7 +139,6 @@ def worker_with_daemon(tmp_path, monkeypatch):
 
 
 @_POSIX
-@pytest.mark.serial
 def test_worker_tree_kill_spares_the_daemon_and_a_new_manager_stops_it(tmp_path, monkeypatch, worker_with_daemon):
     from supervisor.worker_pool_lifecycle import kill_worker_tree
 
@@ -170,7 +168,6 @@ def test_worker_tree_kill_spares_the_daemon_and_a_new_manager_stops_it(tmp_path,
 
 
 @_POSIX
-@pytest.mark.serial
 def test_cancel_and_timeout_kill_spares_the_daemon_beside_kept_services(tmp_path, monkeypatch, worker_with_daemon):
     from supervisor.worker_pool_lifecycle import kill_worker_tree
 
@@ -181,7 +178,6 @@ def test_cancel_and_timeout_kill_spares_the_daemon_beside_kept_services(tmp_path
 
 
 @_POSIX
-@pytest.mark.serial
 def test_stop_and_sparing_refuse_a_row_whose_live_identity_does_not_match(tmp_path, monkeypatch):
     """A live pid under a daemon row is not a daemon: the recorded command hash must match."""
     import ouroboros.config as config_mod
@@ -210,7 +206,6 @@ def test_stop_and_sparing_refuse_a_row_whose_live_identity_does_not_match(tmp_pa
 
 
 @_POSIX
-@pytest.mark.serial
 def test_stop_needs_measured_identity_and_an_owned_home(tmp_path, monkeypatch):
     """The reaper's permissive keep is never stop authority, and a foreign home stops nothing."""
     import ouroboros.config as config_mod
@@ -287,7 +282,7 @@ def test_every_supervisor_worker_tree_kill_is_the_shared_one():
     }
     assert direct == {"worker_pool_lifecycle.py"}
     for module, name, keep in (
-        ("workers", "kill_workers", False),
+        ("workers", "_tear_down_slots", False),  # kill_workers' teardown of the doomed slots
         ("worker_pool_lifecycle", "_kill_survivors", False),
         ("worker_pool_lifecycle", "kill_workers_for_update", False),
         ("worker_pool_lifecycle", "_replace_unready_slot", False),
@@ -300,7 +295,7 @@ def test_every_supervisor_worker_tree_kill_is_the_shared_one():
         assert "kill_worker_tree(" in source, name
         assert ("keep_services=True" in source) is keep, name
     respawn = _function_source(root / "supervisor" / "worker_pool_lifecycle.py", "respawn_worker")
-    assert "return _spawn_worker_slot(wid, old, ready_attempt=ready_attempt)" in respawn
+    assert 'return _spawn_worker_slot(wid, old, ready_attempt=ready_attempt, lane=getattr(old, "lane", LANE_PROJECT))' in respawn
 
 
 def test_retained_purpose_never_rescues_a_stale_identity(tmp_path, monkeypatch):
@@ -354,7 +349,6 @@ def test_both_server_sweeps_preserve_legacy_daemon_records(tmp_path, monkeypatch
 
 
 @_POSIX
-@pytest.mark.serial
 @pytest.mark.parametrize("evidence", ["missing_marker", "malformed_marker", "foreign_token"])
 def test_attached_stop_requires_marker_and_authenticated_endpoint(worker_with_daemon, evidence):
     worker, child = worker_with_daemon
@@ -373,7 +367,6 @@ def test_attached_stop_requires_marker_and_authenticated_endpoint(worker_with_da
 
 
 @_POSIX
-@pytest.mark.serial
 def test_worker_teardown_retains_a_legacy_session_daemon(tmp_path, worker_with_daemon):
     from supervisor.worker_pool_lifecycle import kill_worker_tree
     worker, child = worker_with_daemon

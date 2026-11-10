@@ -1,19 +1,25 @@
 """One host service for owner HTTP and authorized native CLI-maintenance tools.
 
 Claudexor owns vendor version selection, installation, custody and job state.
-The host may prepare its Node/npm runtime before submission and ask for the
-owner's header Restart. Accepted operations and engine refusals pass through;
-the host never stores or retries a job.
+The host may prepare its Node/npm runtime before submission and ask the owner to
+restart the engine (Restart Claudexor in Accounts; the header Restart keeps the
+engine). Accepted operations and engine refusals pass through; the host never
+stores or retries a job.
 """
 from __future__ import annotations
 
 import copy
 import os
+import re
 from contextlib import ExitStack
 
 from ouroboros.claudexor_daemon import ensure_owned_gateway, read_owned_gateway
 from ouroboros.gateways.claudexor import ClaudexorUnavailable
 from ouroboros.gateways.claudexor_maintenance import maintenance_request_id
+from ouroboros.utils import utc_now_iso
+
+_REPORTED_SPAWN_MISSING = re.compile(r"spawn (.+) ENOENT")
+_REPORTED_EXECUTABLE_MISSING = "reported_executable_missing"
 
 
 def maintenance_problem(error: Exception) -> tuple[int, dict]:
@@ -47,13 +53,54 @@ def _authority(ctx, *, mutate=False, network=False):
                                   "This task may not request that CLI maintenance action", status_code=403)
 
 
+def _explain_missing_executable(error: ClaudexorUnavailable, gateway) -> None:
+    """Add what this host sees now to a current inventory failure; the engine's words stay.
+
+    Only for inventory GETs: a retained operation's problem is history, and its path
+    stays missing after a healthy replacement, so it must never source this advice.
+    "Reported" is deliberate: neither a path nor a version proves whose executable it
+    is or why it went. Restarting the engine is the owner's choice, so requiredActions stay as received.
+    """
+    from ouroboros.review_run_isolation import attach_home
+
+    received = getattr(error, "problem", None)
+    if not isinstance(received, dict) or received.get("code") != "ENOENT":
+        return
+    match = _REPORTED_SPAWN_MISSING.fullmatch(str(received.get("message") or ""))
+    if match is None or not os.path.isabs(match.group(1)):
+        return
+    if attach_home() is not None or os.environ.get("OUROBOROS_CLAUDEXOR_BIN"):
+        return  # A selected external engine is not this host's to restart.
+    try:
+        os.stat(match.group(1))
+        return
+    except FileNotFoundError:  # Including a symlink whose target went.
+        pass
+    except OSError:
+        return
+    context = received.get("context")
+    error.problem = {**copy.deepcopy(received), "context": {
+        **(copy.deepcopy(context) if isinstance(context, dict) else {}),
+        "observation": _REPORTED_EXECUTABLE_MISSING, "observedAt": utc_now_iso(),
+        "engineVersion": getattr(gateway, "engine_version", "") or None,
+        "engineBuildSha": getattr(gateway, "engine_build_sha", "") or None,
+        "remedy": ("The executable reported by this inspection is no longer present. If the app was moved "
+                   "or replaced, Restart Claudexor in Accounts may help; it ends every run on the engine, "
+                   "and success is not guaranteed."),
+    }}
+
+
 def inspect_harnesses(harnesses=(), *, fresh=False, check_latest=False, ctx=None) -> dict:
     _authority(ctx, network=check_latest)
     if (not isinstance(harnesses, (list, tuple)) or any(not isinstance(item, str) or not item for item in harnesses)
             or type(fresh) is not bool or type(check_latest) is not bool):
         raise ValueError("harnesses must be names and fresh/check_latest must be booleans")
     with read_owned_gateway() as gateway:
-        return gateway.maintenance_harnesses(harnesses, fresh=fresh, check_latest=check_latest)
+        try:
+            return gateway.maintenance_harnesses(harnesses, fresh=fresh, check_latest=check_latest)
+        except ClaudexorUnavailable as exc:
+            _explain_missing_executable(exc, gateway)
+            raise
 
 
 def inspect_operation(operation_id: str, *, ctx=None) -> dict:
@@ -97,7 +144,7 @@ def _prepare_update(gateway, request: dict, request_id: str) -> None:
         return
     row = next((item for item in checked.get("harnesses", []) if item.get("harness") == harness), {})
     if (row.get("availableProblem") or {}).get("code") != "embedded_npm_missing":
-        return  # Unknown or other failures are not evidence that Restart is needed.
+        return  # Unknown or other failures are not evidence that an engine restart is needed.
     from ouroboros.review_run_isolation import attach_home
     from ouroboros.claudexor_runtime import ClaudexorRuntimeError, get_runtime_manager
 
@@ -107,14 +154,14 @@ def _prepare_update(gateway, request: dict, request_id: str) -> None:
         node = get_runtime_manager().prepare_node_toolchain()
         code, preparation = "maintenance_restart_required", "ready"
         message = ("Environment preparation complete; CLI update not started. "
-                   "Use Restart in the chat header, then repeat Update. Restart interrupts engine sessions; "
-                   "saved work follows the existing recovery rules.")
+                   "Use Restart Claudexor in Accounts, then repeat Update. It ends every run on the engine; "
+                   "its confirmation says how many and whose.")
         cause = None
     except ClaudexorRuntimeError as exc:
         node, code, preparation, cause = "", "maintenance_preparation_failed", "failed", exc.code
         message = f"Environment preparation failed; this attempt did not submit a CLI update: {exc}"
     error = ClaudexorUnavailable(code, message, status_code=409)
-    error.problem = {"code": code, "message": message, "requiredActions": ["restart"] if node else [],
+    error.problem = {"code": code, "message": message, "requiredActions": ["restart_claudexor"] if node else [],
                      "context": {"requestId": request_id, "acceptance": "not_submitted", "scope": "this_attempt",
                                  "preparation": preparation, "restartRequired": bool(node),
                                  "node": node or None, "cause": cause}}

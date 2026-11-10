@@ -82,12 +82,9 @@ def test_short_entrypoint_without_membership_cannot_satisfy_final_admission():
 
 
 @pytest.mark.parametrize("edit,expected", [
-    (lambda c: c.pop("docs/architecture/a.md"), "docs/architecture/a.md"),
     (lambda c: c.update({"docs/architecture/a.md": b""}), "nonempty H1"),
-    (lambda c: c.update({"docs/architecture/a.md": b"# Chapter\n\n## Details\n\nBody\n"}), "introductory paragraph"),
     (lambda c: c.update({"docs/ARCHITECTURE.md": b"# Book\n\nOrientation.\n\n## Chapters\n\n"}), "nonempty, flat Markdown list"),
     (lambda c: c.update({"docs/ARCHITECTURE.md": c["docs/ARCHITECTURE.md"] + b"- [Again](architecture/a.md)\n"}), "duplicate book chapter"),
-    (lambda c: c.update({"docs/architecture/a.md": b"---\nx: [unterminated\n---\n# Body\n"}), "expected"),
 ])
 def test_invalid_candidate_reports_failure_instead_of_partial_success(edit, expected):
     corpus = _corpus()

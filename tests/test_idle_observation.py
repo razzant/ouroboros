@@ -27,7 +27,6 @@ def host(tmp_path, monkeypatch):
     monkeypatch.setattr(workers, "get_event_q", lambda **kwargs: bus)
     monkeypatch.setattr(queue, "load_state", lambda: {})
     monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 900.0)
-    monkeypatch.setattr(queue, "get_per_call_timeout_ceiling_sec", lambda: 1800.0)
     monkeypatch.setattr(queue, "get_task_abs_ceiling_sec", lambda: None)
     monkeypatch.setattr(queue, "FINALIZATION_GRACE_SEC", 120)
     monkeypatch.setattr(queue, "persist_queue_snapshot", lambda **kwargs: True)
@@ -66,7 +65,6 @@ def _put_call(endpoint):
     endpoint.put(_call())
 
 
-@pytest.mark.serial
 def test_spawned_call_behind_real_manager_backlog_reaches_the_same_idle_owner(host, monkeypatch):
     monkeypatch.setitem(events.EVENT_HANDLERS, "noise", lambda *args: None)
     context = multiprocessing.get_context("spawn")
@@ -148,8 +146,7 @@ def test_pending_child_progress_affects_only_its_current_ancestors(host, descend
     assert bool(host.meta.get("silence_attention")) is not descendant
 
 
-@pytest.mark.parametrize("rail", ["deadline", "absolute_ceiling"])
-@pytest.mark.parametrize("unreadable", [False, True])
+@pytest.mark.parametrize(("unreadable", "rail"), [(False, "deadline"), (True, "absolute_ceiling")])
 def test_pending_or_unreadable_observation_never_spares_hard_axes(host, monkeypatch, rail, unreadable):
     if rail == "deadline":
         host.meta["task"]["deadline_at"] = "1970-01-01T01:00:00+00:00"
@@ -177,6 +174,17 @@ def test_pending_observation_defers_attention_but_only_folded_progress_resolves(
     assert host.meta["last_progress_at"] == host.clock[0]
     assert _controls(host) == [] and "finalization_requested_at" not in host.meta
     assert host.meta["silence_attention"]["state"] == "progress_observed"
+
+
+@pytest.mark.parametrize("silent_sec, dated", [(899.0, False), (901.0, True)])
+def test_the_configured_window_itself_dates_silence(host, silent_sec, dated):
+    """Owner 30 Oct (A): the silence window is Idle Timeout itself (900 s here), no longer floored at
+    the retired per-call ceiling plus 120 s (1920 s by default). Attention is a fact: nothing
+    finalizes, reaps or leaves the pool."""
+    host.meta["last_progress_at"] = host.clock[0] - silent_sec
+    host.tick()
+    assert bool(host.meta.get("silence_attention")) is dated
+    assert _controls(host) == [] and queue._reap_queue.empty() and host.running["root"] is host.meta
 
 
 def test_unknown_observation_does_not_invent_progress(host):

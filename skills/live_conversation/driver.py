@@ -1,9 +1,10 @@
 """The recovered call event loop over the admitted host port.
 
 Audio remains realtime speech-to-speech. Tools run on the ordinary serialized
-host lane beside media; their completion, provider close and row writes all join
-before this consumer returns. A provider-requested renewal asks the host to fit
-the whole transcript again; transport loss continues through that same fitted history.
+host lane beside media; a running tool holds no fit or reconnection, since its
+request is a host fact in every fit, and only the engine's own open call holds a
+live switch. A provider-requested renewal asks the host to fit the whole
+transcript again; transport loss continues through that same fitted history.
 """
 from __future__ import annotations
 
@@ -23,7 +24,8 @@ from ouroboros.utils import read_json_dict, update_json_locked, utc_now_iso
 
 
 # A transport bound, not a judgment: a session that keeps dropping before an answer completes or is interrupted is
-# resumed this many times, then the call ends with a typed reason instead of reconnecting forever.
+# resumed this many times, then the call ends with a typed reason instead of reconnecting forever. A close the
+# engine announced with `renew` is an expiry, not a drop.
 UNPROVEN_RESUMES = 3
 
 CALL_ENDING_GUIDANCE = (
@@ -178,6 +180,26 @@ async def run(host: LiveHost, *, state_dir=None):
     await _Call(host).run()
 
 
+NO_ROOM = "This room's context and working reserve do not fit this engine's window."
+ROOM_POINTER = ("[Host fact; not owner words] New room context is in the fitted history. "
+                "You may answer, act or stay silent.")
+
+
+class _Owed:
+    """An answer the call still owes (see ``_Call.answer_due``). ``mark`` is where the asked connection's delivery
+    record stood; only a row held after it that asks for this answer delivers it, and ``at`` is the first such row."""
+
+    def __init__(self, session, *, ids=(), rows=(), pointers=(), room=False):
+        self.ids, self.rows, self.room, self.pointers = tuple(sorted(ids)), tuple(rows), room, list(pointers)
+        self.mark = len(getattr(session, 'held_context_rows', None) or ())
+        self.at, self.delivered, self.answering = None, False, set()
+
+    def asks(self, row):
+        if self.room:  # its own words, or the pointer to them in a fit
+            return row.get('content') == ROOM_POINTER or any(row == ask for ask in self.rows)
+        return row.get('tool_call_id') in self.ids or not set(self.ids).isdisjoint(row.get('_tool_answer') or ())
+
+
 class _Call:
     """Media evidence and work belong to the call, including between connections."""
 
@@ -211,10 +233,36 @@ class _Call:
         self.preparing = None
         self.preparing_options = None
         self.failed_preparation_revision = None
+        # What waits for a connection, in order: one connection-owned worker sends it (delivery).
         self.deferred_tool_outputs = []
         self.pending_context_rows = []
+        self.delivery_due = asyncio.Event()
+        self.delivering = False
         self.delivered_catalog = None
         self.preparing_revision = None
+        self.resume_revision = 0
+        self.resume_tool_output = None
+        # A fresh session starts a new provider conversation; a native resume continues it. Calls not yet
+        # answered natively: id -> (conversation that issued it, resume_revision at its arrival).
+        self.conversation, self.issued = 0, {}
+        # Paused input is retained and replayed; words spoken into a lost connection may not be.
+        self.expiry_announced = self.lost_while_speaking = False
+        # An ordinary result handed to the session owes its answer (answer_due), and so does a typed room request
+        # (room_due). Only a response begun after the adapter delivered it settles that, once it finishes without
+        # continuing and, where the adapter records each response's end, holding it there. Speech, transcript tails
+        # and receipts carry no answer identity. A response begun before delivery that speaks on is talk-over for
+        # OpenAI and Grok (which write results only between responses) and for ordinary Gemini (a WHEN_IDLE result
+        # waits for idle); extended thinking, unscheduled, may instead continue the call's own turn. Nothing native
+        # tells which, so that answer stays owed: a fresh session's neutral pointer leaves the choice to the mind and
+        # its history. That pointer carries the call ids (``_tool_answer``), or is the room pointer, and re-arms the
+        # same obligation on its session, so a fresh session lost before answering owes the next one again.
+        self.answer_due = self.room_due = None
+        self.looked_calls = set()  # a look's fresh pointer asks for pixels its fit may lack, however it comes to be owed
+        # The owner's newest words, from their start: the responses begun since (None: nothing owed) and whether what is
+        # owed was recognised. One of those responses completing answers them; one cut short does not, so barge-in and a
+        # request that crossed new speech stay owed, and a transcript landing after the answer finds nothing to owe.
+        # A fresh fit holds recognised words, so a fresh switch owes them as room words; other words stay the gap fact's.
+        self.spoken_answers, self.spoken_known = None, False
 
     async def run(self):
         writer = self.writer = asyncio.create_task(self.save_rows())
@@ -276,37 +324,71 @@ class _Call:
             if lease is not None and self.preparing_options != session_options(self.host, handle):
                 await lease.close()
                 lease = None  # promised options changed: one sequential fit with current values
-            if lease is not None:
-                try:
-                    result = await lease.run(self.consume)
-                    if result or self.preparing is None or not self.preparation_ready():
-                        await lease.close()  # native resumption/sequential replacement drains the old socket first
-                except RealtimeSetupError as exc:
-                    await lease.close()
-                    if exc.code != 'prepared_stale':
-                        raise
+            opening = self.session_ended
+            try:
+                if lease is not None:
+                    try:
+                        result = await lease.run(self.consume)
+                        if result or self.preparing is None or not self.preparation_ready():
+                            await lease.close()  # native resumption/sequential replacement drains the old socket first
+                    except RealtimeSetupError as exc:
+                        await lease.close()
+                        if exc.code != 'prepared_stale':
+                            raise
+                        lease = None
+                if lease is None:
                     result = await self.host.session(self.consume, session_options(self.host, handle))
-            else:
-                result = await self.host.session(self.consume, session_options(self.host, handle))
+            except RealtimeSetupError as exc:
+                if exc.code != 'prepared_stale' or not handle:
+                    raise
+                # History moved while the resume opened and its handle is spent: a fresh fit holds the unit.
+                self.resume, handle = False, ''
+                continue
+            except (OSError, asyncio.TimeoutError) as exc:  # includes a stale prepared lease's replacement
+                if not self.conversation or self.session_ended is not opening:
+                    raise  # a first open, or a connection's own lifetime, keeps its ending
+                raise RealtimeSetupError('reconnect_failed', 'the voice connection could not be reopened') from exc
             if result is None:
                 return
             handle = result
 
     async def consume(self, session):
         self.session = self.last_session = session
+        self.resume_tool_output = None
+        self.expiry_announced = False
         if not self.resume:
             self.delivered_catalog = None
+            self.conversation += 1  # calls an earlier conversation issued can no longer be answered natively
         self.connection_resumed = self.resume
         self.session_ended = asyncio.Event()
         if not self.resume:
+            # Nothing here answers what the last conversation awaited. Unreceipted reservations remain host-owned.
+            self.active_responses.clear()
+            self.tool_responses.clear()
+            self.response_open = False
+            if self.answer_due is not None:  # its result reaches this session only in history, still owed
+                ids = self.answer_due.ids
+                self.offer_tool_answer(ids, looked=not self.looked_calls.isdisjoint(ids))
+            if self.room_due is not None or self.spoken_known:  # so are the room's words and the owner's recognised ones
+                self.owe_room_answer()
+            self.spoken_answers, self.spoken_known = None, False
+            for output, _ in self.deferred_tool_outputs:
+                if output is not None:
+                    self.retire_calls(output.messages)
             self.deferred_tool_outputs.clear()  # completed effects are in this adopted fresh prefix
             self.pending_context_rows.clear()
             if self.host.model.vision:
                 self.attention.seen.clear()  # pixels are transport state; blind frame facts are already in the fit
                 self.attention.include_images(getattr(self.host, "fitted_frame_rows", lambda: ())())
             self.refit_offers()
+        # Words drained around a cancelled worker, owed like any request. A fresh fit holds them. A native resume continues
+        # a conversation that never saw them, so they take the worker's lane, ahead of their pointer.
+        cancelled_mail = getattr(self.host, 'take_mail_rows', list)()
         if getattr(self.host, 'take_mail_answer', lambda: False)():
-            self.pending_offers.append(self.room_answer_pointer())
+            if self.resume and cancelled_mail:
+                await self.context_update(cancelled_mail, request=True)
+            else:
+                self.owe_room_answer()
         self.renewing = self.resume = self.provider_closed = False
         self.renewal_deadline = None
         self.input_rate = self.output_rate = 0
@@ -314,7 +396,7 @@ class _Call:
         resumed = replacing = False
         peers = asyncio.create_task(self.peers())
         provider = asyncio.create_task(self.provider())
-        children = [provider, peers, asyncio.create_task(self.mailbox())]
+        children = [provider, peers, asyncio.create_task(self.mailbox()), asyncio.create_task(self.delivery())]
         boundary = asyncio.create_task(self.refit_boundary())
         children.append(boundary)
         try:
@@ -348,16 +430,15 @@ class _Call:
                         children.append(boundary)
                     continue
                 break
-            if self.tool_refit.is_set():
-                # Finish already-requested effects before fitting their rows.
-                # The withheld native result never participates in this wait.
-                await self.tool_queue.join()
-                if self.hub.ended_by_ouroboros:
-                    await peers  # a queued end_call still owns goodbye playback
-                    self.renewing = False
-                elif not self.resume or not self.host.state.get("resume_handle"):
-                    self.resume = False
-                    self.request_renewal()  # a capacity/catalog obligation needs a fresh fit
+            # Queued and running calls need no wait: their requests are host facts in the fit.
+            if self.tool_refit.is_set() and self.hub.ended_by_ouroboros:
+                await peers  # a queued end_call still owns goodbye playback
+                self.renewing = False
+            elif (self.tool_refit.is_set() and not self.resume) or (self.renewing and self.resume and not (
+                    self.hub.closed or self.hub.ended_by_owner or self.hub.ended_by_ouroboros) and not self.resume_allowed()):
+                # A capacity/catalog obligation needs a fresh fit; so does a handle the reader withdrew during the join.
+                self.resume = False
+                self.request_renewal()
             replacing = self.renewing
             resumed = replacing and self.resume
             return (self.host.state.get("resume_handle", "") if resumed else "") if self.renewing else None
@@ -372,38 +453,37 @@ class _Call:
             if not resumed:
                 await joined(self.finalize())
 
-    async def send(self, command):
-        # A tool may finish after the old socket closes or while setup is in
-        # flight. Only the replacement's ready event releases its outputs.
-        failed = False
-        while True:
-            await self.connected.wait()
-            session, ended = self.session, self.session_ended
-            if failed and not self.connection_resumed and isinstance(command, (ToolOutputs, ContextUpdate)):
-                # These effects/mail were canonical before the failed write.
-                # The fresh fit already holds them; only their answer is owed.
-                ordinary = not isinstance(command, ToolOutputs) or any(
-                    row.get('tool_call_id') not in command.silent for row in command.messages if row.get('role') == 'tool')
-                self.response_open = False
-                if ordinary:
-                    self.pending_offers.append({'role': 'user', 'content':
-                        '[Host fact; not owner words] The new facts and completed work are in the fitted history. '
-                        'You may answer, act or stay silent.'})
-                return
-            try:
-                result = await session.send(command)
-                if isinstance(command, ToolOutputs):
-                    self.delivered_catalog = command.tools
-                    delivered = getattr(self.host, 'tool_results_delivered', None)
-                    if delivered is not None:
-                        delivered(getattr(session, "held_context_rows", ()))
-                return result
-            except ConnectionClosed:
-                # The writer saw the closed socket before the native reader, which
-                # owns the outcome: a resume releases this output to the replacement,
-                # a typed close ends the call and cancels this wait. The effect ran once.
-                await ended.wait()
-                failed = True
+    @staticmethod
+    def owed_calls(output):
+        return {row.get('tool_call_id') for row in output.messages
+                if row.get('role') == 'tool' and row.get('tool_call_id') not in output.silent}
+
+    async def send(self, output):
+        """One native write of a tool output with its delivery record. A closed socket raises to the caller, which keeps
+        the output in custody: the reader classifies the loss, a resume is owed the same output, and a fresh switch asks
+        for its answer with one pointer. The effect ran once."""
+        session, current = self.session, self.conversation
+        owed = self.owed_calls(output)
+        resume_revision = self.resume_revision
+        self.arm_answer(owed, session)  # a newer result is answered only after its own delivery; an older debt joins it
+        result = await session.send(output)
+        self.sent_unrecorded(session, output.messages)
+        self.retire_calls(output.messages)  # answered natively
+        if self.conversation == current:  # a replacement records its own deliveries
+            # Adapters may distinguish native response writes from pixels
+            # and queue acceptance. Older sessions keep send-boundary order.
+            if getattr(session, 'resume_after_tool_response', False) is not None:
+                previous = self.resume_tool_output
+                self.resume_tool_output = (resume_revision, bool(previous and previous[1]) or bool(owed))
+            self.delivered_catalog = output.tools
+            delivered = getattr(self.host, 'tool_results_delivered', None)
+            if delivered is not None:
+                delivered(getattr(session, "held_context_rows", ()))
+        return result
+
+    def retire_calls(self, rows):
+        for row in rows:
+            self.issued.pop(row.get('tool_call_id'), None)
 
     def refit_offers(self):
         """A fresh fit already holds every canonical fact; keep transport-only rows and one pointer to the facts."""
@@ -420,33 +500,40 @@ class _Call:
         self.pending_offers[:] = [row for row in self.pending_offers if not row.get("_requested_look")]
 
     @staticmethod
-    def room_answer_pointer():
+    def tool_answer_pointer():
         return {"role": "user", "content":
-            "[Host fact; not owner words] New room context is in the fitted history. You may answer, act or stay silent."}
+            "[Host fact; not owner words] The requested tool batch returned; its results are in the fitted history. "
+            "You may continue from them, act or stay silent; completed effects stay done."}
 
-    async def context_update(self, rows):
+    @staticmethod
+    def room_answer_pointer():
+        return {"role": "user", "content": ROOM_POINTER}
+
+    async def context_update(self, rows, *, request=False):
         # Mailbox and peer rows are already canonical on the host. Check the
         # resulting fit before adding them to this connection; a refit includes
-        # them in its selected input instead.
+        # them in its selected input instead. A room request stays owed past its write.
         pointer = self.room_answer_pointer()
         self.pending_offers.append(pointer)  # owns the answer before a write can yield or be cancelled
-        self.pending_context_rows.extend(rows)
-        if not self.connected.is_set():
+        if request:
+            self.owe_room_answer(rows, pointer)
+        fit_due = self.host.renewal_due() or self.renewing or self.host.state.get("refit")
+        if fit_due or self.pending_context_rows or not self.connected.is_set():
+            self.pending_context_rows.extend(rows)  # behind older mail, for the worker or the coming fit
+            if self.connected.is_set() and (not fit_due or self.request_renewal() is False):
+                self.delivery_due.set()
             return
-        if self.host.renewal_due() or self.renewing or self.host.state.get("refit"):
-            if self.request_renewal() is False:
-                await self.release_serving()
-        else:
-            # A failed/cancelled write leaves the pointer call-owned. The native
-            # reader classifies a closed socket before consume retires this worker.
-            self.response_open = True
-            try:
-                await self.session.send(ContextUpdate(tuple(rows)))
-            except BaseException:
-                self.response_open = bool(self.active_responses)
-                raise
-            self.pending_context_rows[:] = [row for row in self.pending_context_rows if all(row is not old for old in rows)]
-            self.pending_offers[:] = [row for row in self.pending_offers if row is not pointer]
+        # Typed words go at once and only this write holds them. A failed or cancelled one returns them, the pointer still
+        # call-owned, before consume can start another connection; the native reader classifies a closed socket.
+        session, self.response_open = self.session, True
+        try:
+            await session.send(ContextUpdate(tuple(rows)))
+        except BaseException:
+            self.response_open = bool(self.active_responses)
+            self.pending_context_rows[:0] = rows
+            raise
+        self.pending_offers[:] = [row for row in self.pending_offers if row is not pointer]
+        self.sent_unrecorded(session, rows)
 
     def timing(self, phase):
         record = getattr(self.host, "timing_event", None)
@@ -505,7 +592,7 @@ class _Call:
             return
         self.host.state.pop('refit', None)
         self.tool_refit.clear()
-        await self.release_serving()
+        self.delivery_due.set()
 
     def serving_catalog(self):
         if self.delivered_catalog is None:
@@ -516,30 +603,69 @@ class _Call:
     async def guard_serving(self, rows):
         check = getattr(self.host, 'delivery_fits', None)
         if check is None or not await check(rows, self.serving_catalog()):
-            raise RealtimeSetupError('context_capacity',
-                "This room's context and working reserve do not fit this engine's window.")
+            raise RealtimeSetupError('context_capacity', NO_ROOM)
+
+    async def delivery(self):
+        """This connection's one sender of what waited for it. It dies with the connection, so nothing it was measuring
+        can land on a successor: what it has not written stays in custody for a native resume, or is held by a fresh fit.
+        The reader and audio never wait on its measures. A closed socket raises to consume, whose reader classifies it."""
+        while True:
+            await self.delivery_due.wait()
+            await self.connected.wait()
+            self.delivery_due.clear()
+            if not self.hub.ended_by_ouroboros:  # a goodbye needs only playback
+                await self.release_serving()
+
+    def fit_on_its_way(self):
+        return self.renewing and not self.resume
+
+    async def custody_write(self, write):
+        # Quiet waits for this: a planned switch must not cancel a write and then have to guess what it did.
+        self.delivering = True
+        try:
+            await write
+        finally:
+            self.delivering = False
 
     async def release_serving(self):
-        # Obligations leave custody only after a successful fitting delivery.
-        while self.deferred_tool_outputs:
+        # Only delivery() runs this. Obligations leave custody only after a successful fitting delivery. A refit obligation
+        # withholds them from this retiring connection, and a refusal counts only if no fresh fit is coming to hold them.
+        while self.deferred_tool_outputs and not self.tool_refit.is_set():
             output, offers = self.deferred_tool_outputs[0]
-            try:
-                await self.guard_serving(output.messages)
-            except RealtimeSetupError:
-                fallback = getattr(self.host, 'tool_result_fallback', None)
-                rows = await fallback(output.messages, self.serving_catalog()) if fallback else None
-                if rows is None:
-                    raise
-                output = ToolOutputs(tuple(rows), self.serving_catalog(), silent=output.silent)
-            if any(row.get('tool_call_id') not in output.silent for row in output.messages if row.get('role') == 'tool'):
+            if output is None:  # no native lane: only a fit can hold this unit, and none is coming once one was refused
+                if self.fit_on_its_way() or self.host.state.get("refit"):
+                    return
+                raise RealtimeSetupError('context_capacity', NO_ROOM)
+            rows = output.messages
+            if offers is not None:  # withheld for a fit; an admitted output needs no measure and left no offers
+                try:
+                    await self.guard_serving(rows)
+                except RealtimeSetupError:
+                    if self.fit_on_its_way():
+                        return
+                    fallback = getattr(self.host, 'tool_result_fallback', None)
+                    shortened = await fallback(rows, self.serving_catalog()) if fallback else None
+                    if shortened is None:
+                        raise
+                    rows = tuple(shortened)
+            await self.connected.wait()
+            if self.owed_calls(output):
                 self.response_open = True
-            await self.send(ToolOutputs(output.messages, self.serving_catalog(), silent=output.silent))
+            tools = output.tools if offers is None else self.serving_catalog()
+            await self.custody_write(self.send(ToolOutputs(rows, tools, silent=output.silent)))
             self.deferred_tool_outputs.pop(0)
-            self.pending_offers[:] = [row for row in self.pending_offers if all(row is not offer for offer in offers)]
-        if self.pending_context_rows and self.connected.is_set():
-            rows = tuple(self.pending_context_rows)
-            await self.guard_serving(rows)
-            await self.session.send(ContextUpdate(rows, respond=False))
+            self.pending_offers[:] = [row for row in self.pending_offers if all(row is not offer for offer in offers or ())]
+        rows = tuple(self.pending_context_rows)
+        if rows and not self.tool_refit.is_set():
+            try:
+                await self.guard_serving(rows)
+            except RealtimeSetupError:
+                if self.fit_on_its_way():
+                    return
+                raise
+            await self.connected.wait()
+            await self.custody_write(self.session.send(ContextUpdate(rows, respond=False)))
+            self.sent_unrecorded(self.session, rows)
             self.pending_context_rows[:] = [row for row in self.pending_context_rows if all(row is not old for old in rows)]
 
     async def close_preparation(self):
@@ -563,8 +689,14 @@ class _Call:
                 return
 
     def refit_ready(self):
-        return (self.preparation_ready() and not self.input_open and not (self.active_responses - self.tool_responses)
-                and not self.tools_running and self.tool_queue.empty() and not self.pending_spoken and not self.unheard())
+        return (self.preparation_ready() and not self.input_unsettled()
+                and not (self.active_responses - self.tool_responses)
+                and not self.pending_spoken and not self.unheard() and not self.delivering)
+
+    def input_unsettled(self):
+        """Words being said or awaiting recognition, by the adapter's own fact where it has one: a VAD edge or an older
+        utterance's transcript moves ``input_open``. Read apart from ``renewal_ready``, which an open call also holds."""
+        return self.input_open or bool(getattr(self.session, 'input_pending', False))
 
     def audio_duration(self, item):
         return int(self.audio_ms.get(item, 0))
@@ -582,8 +714,7 @@ class _Call:
 
     def quiet_blockers(self):
         blocked = [name for name, active in (
-            ("response_open", self.response_open), ("input_open", self.input_open),
-            ("tools_running", self.tools_running), ("tool_queue", not self.tool_queue.empty()),
+            ("response_open", self.response_open), ("input_open", self.input_open), ("delivering", self.delivering),
             ("pending_spoken", bool(self.pending_spoken)), ("unheard", self.unheard())) if active]
         if self.session is None:
             blocked.append("connection")
@@ -608,7 +739,10 @@ class _Call:
         speaker, item = data["speaker"], data["item_id"]
         text = ("[Partial transcript] " if data.get("incomplete") else "") + data["text"]
         if speaker == "owner":
-            self.input_open = not data["final"]
+            # A transcript closes its own words, never newer ones its adapter still reports as being said.
+            self.input_open = not data["final"] or (self.input_open
+                                                    and bool(getattr(self.session, 'input_pending', False)))
+            self.spoken_known |= bool(data["final"] and data["text"] and self.spoken_answers is not None)
         self.hub.send_caption(speaker, text, data["final"], item, replace=bool(data.get("replace")))
         if data["final"]:
             heard = speaker == "owner" and (self.meeting_audio or any(
@@ -628,7 +762,12 @@ class _Call:
         while True:
             row = await self.rows.get()
             try:
-                await self.host.caption(**row)
+                if "tool_request" in row:  # ordered with the captions that led to it
+                    requested = getattr(self.host, "tool_requested", None)
+                    if requested is not None:
+                        await requested(row["tool_request"])
+                else:
+                    await self.host.caption(**row)
             finally:
                 self.rows.task_done()
 
@@ -658,45 +797,71 @@ class _Call:
             self.hub.send_activity("working", ", ".join(call["function"]["name"] for call in calls))
             try:
                 await self.rows.join()
+                if self.hub.closed or self.hub.ended_by_owner:
+                    continue  # End starts nothing queued; the request stays a host fact and records as not run
                 changes = await self.host.tool_batch(calls)
+                if self.hub.closed or self.hub.ended_by_owner:
+                    continue  # the batch is history, whatever End left unstarted; an ending call delivers nothing more
                 images, silent = self.attention.tool_outputs(calls, changes)
                 for image in images:
                     await self.host.observe_context(image)  # exact requested pixels survive a fresh engine projection
+                completed_in = self.conversation  # a session adopted before its last row lacks it and is refitted below
                 if not self.tool_refit.is_set():
                     await self.connected.wait()
+                owed = [call["id"] for call in calls if call["id"] not in silent]
+                ordinary = bool(owed)
+                looked = any(call["function"]["name"] == "attend" and call["id"] not in silent for call in calls)
+                if looked:
+                    self.looked_calls.update(owed)
+                # Native outputs answer only the issuing conversation. A session fitted after this batch
+                # completed holds its unit in setup; any other gets a fresh one, never an orphan result.
+                native = {self.issued.get(call["id"], (completed_in,))[0] for call in calls} == {self.conversation}
                 # 28.10: Gemini cannot change a live session's declarations; a call that enabled desktop
                 # tools kept asking for tools it never received. Such an engine renews at this boundary.
                 offline_tools = getattr(self.session, "tools_need_renewal", None)
-                needs_fit = (self.host.state.get("refit") or self.host.renewal_due()
+                needs_fit = (not native or self.host.state.get("refit") or self.host.renewal_due()
                              or (offline_tools is not None and offline_tools(tuple(self.host.schemas))))
+                if not needs_fit and (self.resume or images):
+                    # Fresh projection can collapse a prior frame that this socket
+                    # still holds. Price the complete native delivery, images too.
+                    needs_fit = not await self.host.delivery_fits(
+                        tuple(changes) + tuple(images), self.serving_catalog())
+                # Ownership is read after every wait above: a session adopted meanwhile holds the unit in its fit.
+                if not native or self.conversation != completed_in:
+                    for call in calls:
+                        self.issued.pop(call["id"], None)
+                if self.conversation != completed_in:
+                    if ordinary and not self.hub.ended_by_ouroboros:
+                        self.offer_tool_answer(owed, looked=looked)
+                    continue
+                output = ToolOutputs(tuple(changes) + tuple(images), tuple(self.host.schemas), silent=silent)
                 if (self.renewing and not self.resume) or self.tool_refit.is_set() or needs_fit:
-                    if not self.hub.ended_by_ouroboros:
+                    if not self.hub.ended_by_ouroboros and (native or ordinary):
                         # Results and execution receipts are already canonical.
                         # Waiting for quiet would deadlock on the withheld result.
                         offers = []
-                        if any(call["id"] not in silent for call in calls):
-                            offers = [*({**image, "_canonical": True} for image in images), {"role": "user", "content":
-                                "[Host fact; not owner words] The requested tool batch returned; its results are in the fitted history. "
-                                "You may continue from them, act or stay silent; completed effects stay done."}]
+                        if ordinary:
+                            offers = [{**image, "_canonical": True} for image in images]
                             self.pending_offers.extend(offers)
+                            offers.append(self.offer_tool_answer(owed, looked=looked))  # leaves custody with a withheld output
                         if needs_fit or not self.renewing:
                             self.request_renewal()
                         self.tool_refit.set()
-                        self.deferred_tool_outputs.append((ToolOutputs(tuple(changes) + tuple(images),
-                            tuple(self.host.schemas), silent=silent), offers))
+                        # A unit no native write can deliver waits for its fit here too, its pointer behind it.
+                        self.deferred_tool_outputs.append((output if native else None, offers))
                         if not self.renewing:
                             self.tool_refit.clear()
-                            await self.release_serving()
+                            self.delivery_due.set()
                     # A deliberate goodbye needs only playback, no further
                     # native result or connection that could cut it short.
                 else:
-                    if any(call["id"] not in silent for call in calls):
+                    if ordinary:
                         # An ordinary result requests continuation. Between the
                         # write and its native answer, quiet must not reopen the
                         # session and swallow the opening's first spoken words.
                         self.response_open = True
-                    await self.send(ToolOutputs(tuple(changes) + tuple(images), tuple(self.host.schemas), silent=silent))
-                if len(silent) == len(calls) and not self.active_responses:
+                    await self.write_admitted(output, completed_in)
+                if len(silent) == len(calls) and not self.active_responses and self.conversation == completed_in:
                     self.response_open = False
             finally:
                 for _ in calls:
@@ -704,15 +869,51 @@ class _Call:
                 self.tools_running = False
                 self.hub.send_activity("idle")
 
+    async def write_admitted(self, output, conversation):
+        """An output that needs no fit, written at most once here. If it must wait, behind an earlier output or for a
+        connection, or if the socket closes, it joins the queue already admitted (no offers, no measure): the worker of a
+        resumed connection writes it; a fresh fit holds it, and consume carries its armed answer."""
+        session = self.session
+        if self.connected.is_set() and not self.deferred_tool_outputs:
+            try:
+                await self.send(output)
+                return
+            except ConnectionClosed:
+                if self.conversation != conversation:
+                    self.retire_calls(output.messages)
+                    return
+                if self.session is session:  # its reader is about to classify this; the next ready delivers it
+                    self.deferred_tool_outputs.append((output, None))
+                    return
+        else:
+            self.arm_answer(self.owed_calls(output), session)
+        self.deferred_tool_outputs.append((output, None))
+        self.delivery_due.set()
+
+    async def reader_wrote(self, write):
+        """The reader's own write meeting a closed socket never stops it reading: its next receive classifies that loss."""
+        try:
+            await write
+        except ConnectionClosed:
+            return False
+        return True
+
     async def interrupt(self):
-        self.hub.flush()
-        await self.session.send(Interrupt("", 0))
+        self.hub.flush()  # the page drops this audio whatever the socket can still be told
+        writable = await self.reader_wrote(self.session.send(Interrupt("", 0)))
         for item in tuple(self.audio_ms):
             if item in self.interrupted or self.heard(item):
                 continue
             self.interrupted.add(item)
-            await self.session.send(Interrupt(item, min(self.played.get(item, 0), int(self.audio_ms[item]))))
+            if writable:
+                played = min(self.played.get(item, 0), int(self.audio_ms[item]))
+                writable = await self.reader_wrote(self.session.send(Interrupt(item, played)))
             await self.finish_spoken(item, interrupted=True)
+
+    async def input_frames(self):
+        frames = await self.attention.deliver(self.session)
+        if frames:
+            await self.context_update(frames)
 
     async def provider(self):
         while True:
@@ -727,11 +928,16 @@ class _Call:
                     raise RealtimeSetupError('provider_closed', detail) from exc
                 self.lost_connection(resuming=False)
                 return
+            # This batch was converted before anything delivered later: only then may a response begin an answer.
+            settles = [due for due in (self.answer_due, self.room_due) if self.delivered(due)]
             for event in events:
                 data = event.data
                 if refusal is not None and not (event.kind == "response_done"
                         or (event.kind == "caption" and data.get("final"))):
                     continue
+                if event.kind == 'audio' or event.kind == 'caption' and data['speaker'] == 'ouroboros':
+                    # Refit must wait for speech to finish; continuation custody is unchanged.
+                    self.tool_responses.difference_update(self.active_responses)
                 if event.kind == "ready":
                     if self.tool_refit.is_set():
                         continue  # a late ready cannot release work to the retiring connection
@@ -740,11 +946,16 @@ class _Call:
                     self.hub.set_engine_rates(self.input_rate, self.output_rate)
                     self.hub.send_state(cp.STATE_LIVE)
                     if not self.host.state.get("greeted"):
+                        if not await self.reader_wrote(self.session.send(Respond(self.host.opening))):
+                            continue  # never greeted: the replacement does it
                         self.host.state["greeted"] = True
-                        await self.session.send(Respond(self.host.opening))
                     self.connected.set()
-                    if self.connection_resumed:
-                        await self.release_serving()  # mail received while disconnected precedes its answer pointer
+                    if self.lost_while_speaking and not self.connection_resumed:
+                        await self.offer_fact("Someone was speaking when the voice connection was lost; words said just "
+                            "before this reconnection may not have been heard, and the transcript holds only what "
+                            "was recognised. You may ask for a repeat, continue or stay silent.")
+                    self.lost_while_speaking = False
+                    self.delivery_due.set()  # what waited for a connection, mail before its answer pointer
                 elif event.kind == "audio":
                     if data["rate"] != self.output_rate:
                         raise RealtimeSetupError("audio_rate", "provider changed its output rate")
@@ -767,9 +978,8 @@ class _Call:
                     await self.interrupt()
                 elif event.kind == "input_started":
                     self.input_open = True
-                    frames = await self.attention.deliver(self.session)
-                    if frames:
-                        await self.context_update(frames)
+                    self.spoken_answers = {data["response_id"]} if data.get("response_id") else set()
+                    await self.reader_wrote(self.input_frames())
                 elif event.kind == "input_done":
                     self.input_open = False
                 elif event.kind == "response_started":
@@ -784,6 +994,11 @@ class _Call:
                             refusal = exc
                             continue
                         self.started_responses.add(response)
+                        for due in settles:
+                            if due is self.answer_due or due is self.room_due:
+                                due.answering.add(response)
+                        if self.spoken_answers is not None:
+                            self.spoken_answers.add(response)
                     if response not in self.receipts:
                         self.active_responses.add(response)
                     self.response_open = bool(self.active_responses) or self.response_open
@@ -792,6 +1007,10 @@ class _Call:
                     response = data["response_id"]
                     if data['status'] in {'completed', 'interrupted'}:
                         self.unproven_resumes = 0
+                        if not data.get('continues'):
+                            self.answered(response)
+                            if data['status'] == 'completed' and response in (self.spoken_answers or ()):
+                                self.spoken_answers, self.spoken_known = None, False
                     receipt = {key: data[key] for key in ("usage", "raw_usage", "status")}
                     if self.receipts.get(response) != receipt:
                         self.host.response_done(response, **receipt)
@@ -801,28 +1020,35 @@ class _Call:
                     self.hub.send_turn(cp.TURN_AWAITING if self.response_open or self.tools_running else cp.TURN_IDLE)
                 elif event.kind == "tool_call":
                     self.tool_responses.update(self.active_responses)
-                    await self.tool_queue.put({"id": data["call_id"], "type": "function", "function": {
-                        "name": data["name"], "arguments": data["arguments"]}})
+                    call = {"id": data["call_id"], "type": "function", "function": {
+                        "name": data["name"], "arguments": data["arguments"]}}
+                    self.issued[call["id"]] = (self.conversation, self.resume_revision)
+                    await self.rows.put({"tool_request": call})  # a host fact before its effect, queued or not
+                    await self.tool_queue.put(call)
                 elif event.kind == "renew":
+                    self.expiry_announced = True
                     self.request_renewal(resuming=data["resume"], within=data["within_s"])
                 elif event.kind == "resumable":
+                    self.resume_revision += 1
                     self.host.state["resume_handle"] = data["handle"]
                 elif event.kind == "closed":
-                    resuming = bool(data.get('resumable') and self.host.state.get('resume_handle'))
-                    if not resuming and not data.get('transport_loss'):
+                    resumable = bool(data.get('resumable') and self.host.state.get('resume_handle'))
+                    if not resumable and not data.get('transport_loss'):
                         # The engine's own close words (code and sentence) are the owner's reason (R15-4).
                         raise RealtimeSetupError("provider_closed", data.get("detail") or "provider ended the live connection")
-                    self.lost_connection(resuming=resuming)
+                    self.lost_connection(resuming=resumable and self.resume_allowed())
                     return
             if refusal is not None:
                 raise refusal
 
     def lost_connection(self, *, resuming):
-        self.unproven_resumes += 1
-        if self.unproven_resumes > UNPROVEN_RESUMES:
-            raise RealtimeSetupError('reconnect_failed', 'the voice connection kept dropping before it answered again')
+        if not self.expiry_announced:
+            self.unproven_resumes += 1
+            if self.unproven_resumes > UNPROVEN_RESUMES:
+                raise RealtimeSetupError('reconnect_failed', 'the voice connection kept dropping before it answered again')
         self.provider_closed = True
         self.connected.clear()
+        self.lost_while_speaking |= self.input_unsettled()
         self.input_open = False  # the dead transport cannot deliver another VAD boundary
         if not self.renewing:
             self.timing('requested')
@@ -831,6 +1057,81 @@ class _Call:
             self.active_responses.clear()
             self.response_open = False
         self.hub.send_state(cp.STATE_RECONNECTING, 'provider_renewal')
+
+    def answer_delivered(self):
+        return self.delivered(self.answer_due)
+
+    def delivered(self, due):
+        """What asks for this answer reached the provider: its adapter holds those rows, or the pointer asking for their
+        answer, only after a successful native write."""
+        if due is not None and not due.delivered:
+            held = getattr(self.session, 'held_context_rows', None) or ()
+            due.at = next((index for index in range(due.mark, len(held)) if due.asks(held[index])), None)
+            due.delivered = due.at is not None
+        return due is not None and due.delivered
+
+    def sent_unrecorded(self, session, rows):
+        """An older session keeps no delivery record: its send boundary stands for one."""
+        if session is self.session and getattr(session, 'held_context_rows', None) is None:
+            for due in (self.answer_due, self.room_due):
+                if due is not None and any(due.asks(row) for row in rows):
+                    due.delivered = True
+
+    def answered(self, response):
+        """A response begun after delivery has finished. It answers what it also ended holding: an adapter that writes
+        queued updates as a turn ends records what each response held before them."""
+        ended = getattr(self.session, 'response_context_rows', {}).get(response)
+        for due in (self.answer_due, self.room_due):
+            if due is None or response not in due.answering or (ended is not None and due.at is not None
+                                                                and len(ended) <= due.at):
+                continue
+            if due is self.answer_due:
+                self.answer_due = None
+            else:  # already-answered words offer nothing more
+                self.room_due = None
+                self.pending_offers[:] = [row for row in self.pending_offers if all(row is not p for p in due.pointers)]
+
+    def resume_allowed(self):
+        """A native resume needs a handle published after every call this conversation still owes natively
+        and after its last native result; a read update is not published until the reader converts it."""
+        if not self.host.state.get('resume_handle') or any(
+                conversation == self.conversation and revision >= self.resume_revision
+                for conversation, revision in self.issued.values()):
+            return False
+        if self.resume_tool_output is None:
+            return True
+        return bool(getattr(self.session, 'resume_after_tool_response', self.resume_tool_output[0] != self.resume_revision))
+
+    def offer_tool_answer(self, ids=(), *, looked=False):
+        """One pointer, whichever batches owe it. With call ids it carries their answer onto this session: only a
+        response begun after the adapter holds that pointer settles it. A look answered "already visible" holds no
+        row: its frame was transport state of an earlier socket, so the pointer asks for it again."""
+        pointer = self.tool_answer_pointer()
+        offered = next((row for row in self.pending_offers if row.get("content") == pointer["content"]), None)
+        if offered is None:
+            self.pending_offers.append(offered := pointer)
+        if looked:
+            offered["_requested_look"] = True
+        if ids:
+            offered["_tool_answer"] = sorted({*offered.get("_tool_answer", ()), *ids})
+            self.arm_answer(ids, self.session)
+        return offered
+
+    def arm_answer(self, ids, session):
+        if ids:
+            self.answer_due = _Owed(session or self.last_session, ids=ids)
+
+    def owe_room_answer(self, rows=(), pointer=None):
+        """Room words, or the pointer to them, carry their answer onto this session as a result's pointer does. A room
+        pointer already pending asks for them too."""
+        previous = self.room_due.pointers if self.room_due is not None else ()
+        pending = [offer for offer in previous if any(offer is row for row in self.pending_offers)]
+        if pointer is None and not pending:
+            pointer = next((row for row in self.pending_offers if row.get("content") == ROOM_POINTER), None)
+            if pointer is None:
+                self.pending_offers.append(pointer := self.room_answer_pointer())
+        pointers = [*pending, *([pointer] if pointer is not None else [])]
+        self.room_due = _Owed(self.session or self.last_session, rows=rows, pointers=pointers, room=True)
 
     async def peers(self):
         # The host's independent control watcher owns Stop/Panic/budget reads.
@@ -868,13 +1169,19 @@ class _Call:
                 if self.renewing:
                     if self.quiet() and (self.resume or self.preparation_ready()):
                         self.timing("quiet")
-                        if self.resume and not self.host.state.get("resume_handle"):
-                            raise RealtimeSetupError("resume_unavailable", "provider has not supplied a resume handle")
+                        if self.resume and not self.resume_allowed():
+                            # No current handle covers this conversation: a fresh fit continues it.
+                            self.resume = False
+                            if self.resume_tool_output is not None and self.resume_tool_output[1]:
+                                self.offer_tool_answer()  # always, even if the old socket spoke
+                            self.request_renewal()
+                            continue  # adopt the fresh result-bearing fit before offering its pointer
                         self.hub.send_state(cp.STATE_RECONNECTING, "provider_renewal")
                         return
                     if self.renewal_deadline is not None and time.monotonic() >= self.renewal_deadline:
-                        if self.resume and not self.host.state.get("resume_handle"):
-                            raise RealtimeSetupError("renewal_pending_work", "session expired while work was pending")
+                        if self.resume and not self.resume_allowed():
+                            self.resume = False
+                            self.request_renewal()  # prepare a fresh successor before the engine closes
                         # 28.10: a Gemini call ended mid-sentence when the talk left no quiet moment
                         # within 30 s of an audio-span renewal. The renewal waits for the next quiet
                         # moment; a provider that closes first is resumed from its handle.
@@ -933,7 +1240,9 @@ class _Call:
                     self.attention.revisit_at = None  # one shot, even if the offer must await a refit
                     await self.offer_fact("This is the look you asked to be offered after the time you named. "
                                           "You may speak, act or stay silent.", requested_look=True)
-                if self.pending_offers:
+                # A deferred output in custody asks for its own answer, and pending mail precedes its answer pointer.
+                # Pointers speak once those are written, or once a fresh fit retires them.
+                if self.pending_offers and not self.deferred_tool_outputs and not self.pending_context_rows:
                     await self.offer_pending()
             self.track_offer_wait()
             await asyncio.sleep(.01)
@@ -942,7 +1251,8 @@ class _Call:
         row = {"role": "user", "content": "[Host fact; not owner words]\n" + text, "_canonical": True}
         if requested_look:
             row["_requested_look"] = True
-        await self.host.observe_context(row)
+        record = getattr(self.host, "record_fact", None)
+        await (record(text) if record is not None else self.host.observe_context(row))
         self.pending_offers.append(row)
 
     async def share_fact(self, event):
@@ -986,6 +1296,7 @@ class _Call:
         except BaseException:
             self.pending_offers = [*rows, *self.pending_offers]
             raise
+        self.sent_unrecorded(self.session, rows)
         self.response_open = True
 
     async def mailbox(self):
@@ -993,5 +1304,5 @@ class _Call:
             mail = await self.host.mailbox()
             if mail:
                 getattr(self.host, 'take_mail_answer', lambda: False)()
-                await self.context_update(mail)
+                await self.context_update(mail, request=True)
             await asyncio.sleep(.25)

@@ -4,7 +4,7 @@ import {
     createHarnessMaintenanceController, harnessMaintenanceMarkup,
     maintenanceOperationLine, maintenanceOperationPending, maintenanceVersionLine,
 } from '../modules/harness_maintenance.js';
-import { harnessFamilyMarkup } from '../modules/harness_accounts.js';
+import { harnessFamilyMarkup, serviceBannerLine } from '../modules/harness_accounts.js';
 import {
     harnessMaintenanceInventory, startHarnessMaintenance,
     harnessMaintenanceOperation, cancelHarnessMaintenance,
@@ -53,6 +53,13 @@ test('selected version and release baseline stay independent, including external
         'a failed selected-program probe cannot borrow the managed package version');
     assert.match(maintenanceVersionLine(entry(), { inspectionError: 'offline' }), /Last known/);
     assert.match(harnessMaintenanceMarkup(entry()), /Bundled baseline<\/dt><dd>1\.0\.0/);
+    // A program that is not installed has no version to name and is installed, not updated (typed kind, no words guessed).
+    const missing = entry({ selection: { kind: 'missing', binary: null, version: null }, targets: ['latest'] });
+    assert.equal(maintenanceVersionLine(missing), 'Not installed · Latest not checked');
+    assert.match(harnessMaintenanceMarkup(missing), /data-maintenance-action="latest"[^>]*>Install</);
+    assert.doesNotMatch(harnessMaintenanceMarkup(missing), />Update</);
+    assert.equal(maintenanceOperationLine({ state: 'failed' }, { missing: true }), 'Install failed');
+    assert.equal(maintenanceOperationLine({ state: 'failed' }), 'Update failed');
 });
 
 test('engine facts alone determine buttons for all harnesses and unknown future ones', () => {
@@ -387,7 +394,7 @@ test('disposed view retains late acceptance without rendering or refreshing unre
 
 
 function preparationError(status = 409) {
-    return Object.assign(new Error('Environment preparation complete; CLI update not started. Use Restart in the chat header, then repeat Update.'), {
+    return Object.assign(new Error('Environment preparation complete; CLI update not started. Use Restart Claudexor in Accounts, then repeat Update.'), {
         status, body: { error: { code: 'maintenance_restart_required', context: {
             acceptance: 'not_submitted', scope: 'this_attempt', preparation: 'ready', restartRequired: true,
         } } },
@@ -406,7 +413,7 @@ test('preparation-only result enables a later explicit Update and never claims a
     assert.equal(view.request, null);
     assert.equal(view.operation, null);
     assert.notEqual(view.unknownCurrent, true);
-    assert.match(harnessMaintenanceMarkup(entry(), view), /preparation complete.*Use Restart in the chat header/);
+    assert.match(harnessMaintenanceMarkup(entry(), view), /preparation complete.*Use Restart Claudexor in Accounts/);
     assert.match(harnessMaintenanceMarkup(entry(), view), />Update</);
     assert.doesNotMatch(harnessMaintenanceMarkup(entry(), view), /Cancel update|Operation completed|acceptance unconfirmed/);
     assert.equal(calls.filter(([kind]) => kind === 'read' || kind === 'cancel').length, 0);
@@ -505,4 +512,392 @@ test('the state row is concise; exact engine text, the update note and version f
     const open = harnessMaintenanceMarkup(entry(), { expanded: true });
     assert.match(open, /aria-expanded="true"/);
     assert.match(open, /id="harness-maintenance-details-fixture">/);
+});
+
+// ---- A current inspection whose reported executable is gone (#2461) ----
+const MISSING = '/Applications/Moved.app/Contents/Frameworks/node-standalone/bin/node';
+const spawnError = (extra = {}) => Object.assign(new Error(`spawn ${MISSING} ENOENT`), { status: 500, body: { error: {
+    code: 'ENOENT', message: `spawn ${MISSING} ENOENT`, retryable: false, requiredActions: [],
+    context: { observation: 'reported_executable_missing', observedAt: '2026-11-04T01:30:00Z', engineVersion: '5.0.1',
+        engineBuildSha: 'f10efc2f', remedy: 'host words for tools' }, ...extra,
+} } });
+const OBSERVED = '2026-10-09T12:00:00Z';
+const readyStore = () => ({
+    snapshot: { daemon: { state: 'running', engine_version: '5.0.1', runtime: { state: 'ready' } } },
+    reads: { catalog: 'ok', accounts: 'ok', quota: 'ok' }, everSettled: true,
+});
+// Answers `failing` to a current read, and otherwise the daemon's cache, like the captured pinned engine.
+function engine() {
+    const world = { failing: true, reads: [] };
+    world.api = {
+        harnessMaintenanceInventory: async (query) => {
+            world.reads.push(query);
+            if ((query.fresh || query.checkLatest) && world.failing) throw spawnError();
+            return { observedAt: '2026-11-04T01:31:00Z', harnesses: [entry({ observedAt: OBSERVED })] };
+        },
+    };
+    return world;
+}
+
+test('a failed fresh inspection stays one dated section fact, through a cached read and a remount, until a real fresh success', async () => {
+    const world = engine(), intents = new Map();
+    let bannerPaints = 0;
+    const controller = createHarnessMaintenanceController({ api: world.api, intents, onInspectionProblem: () => { bannerPaints++; } });
+    await controller.refresh();
+    assert.equal(controller.inspectionProblem, null);
+    await controller.refresh({ fresh: true });
+    assert.equal(bannerPaints, 1);
+    assert.equal(controller.inspectionProblem.message, `spawn ${MISSING} ENOENT`);
+    await controller.refresh();
+    assert.equal(controller.inspectionProblem?.code, 'ENOENT', 'a cached success proves nothing current');
+    assert.ok(controller.view('fixture').inventoryError);
+    controller.dispose();
+    const remount = createHarnessMaintenanceController({ api: world.api, intents });
+    await remount.refresh();
+    assert.equal(remount.inspectionProblem?.code, 'ENOENT', 'survives the remount and its first cached read');
+    world.failing = false;
+    await remount.refresh({ fresh: true });
+    assert.equal(remount.inspectionProblem, null);
+    assert.equal(remount.view('fixture').inventoryError, '');
+    assert.equal(remount.view('fixture').entry.observedAt, OBSERVED);
+});
+
+test('any failed fresh inspection outlives a cached read; a failed cached read never outlives one', async () => {
+    let answer = () => { throw new Error('child timed out'); };
+    const { controller } = setup({ harnessMaintenanceInventory: async () => answer() });
+    await controller.refresh({ harness: 'fixture', fresh: true });
+    assert.match(controller.view('fixture').inspectionError, /child timed out/);
+    assert.equal(controller.inspectionProblem, null, 'an unclassified failure earns no recovery advice');
+    answer = () => { throw new Error('cached read lost'); };
+    await controller.refresh({ harness: 'fixture' });
+    assert.match(controller.view('fixture').inspectionError, /child timed out/);
+    answer = () => ({ harnesses: [entry()] });
+    await controller.refresh({ harness: 'fixture' });
+    assert.match(controller.view('fixture').inspectionError, /child timed out/);
+    await controller.refresh({ harness: 'fixture', fresh: true });
+    assert.equal(controller.view('fixture').inspectionError, '');
+    answer = () => { throw new Error('cached read lost'); };
+    await controller.refresh({ harness: 'fixture' });
+    answer = () => ({ harnesses: [entry()] });
+    await controller.refresh({ harness: 'fixture' });
+    assert.equal(controller.view('fixture').inspectionError, '', 'a cached failure is still healed by a cached answer');
+});
+
+test('an empty fresh answer spawned nothing and clears nothing; a later generic fresh failure replaces the advice', async () => {
+    const world = engine();
+    const controller = createHarnessMaintenanceController({ api: world.api, intents: new Map() });
+    await controller.refresh({ fresh: true });
+    world.api.harnessMaintenanceInventory = async () => ({ harnesses: [] });
+    await controller.refresh({ fresh: true });
+    assert.equal(controller.inspectionProblem?.code, 'ENOENT');
+    world.api.harnessMaintenanceInventory = async () => { throw new Error('engine stopped'); };
+    await controller.refresh({ fresh: true });
+    assert.equal(controller.inspectionProblem, null, 'the newest current read did not observe a missing file');
+    assert.match(controller.view('fixture').inventoryError, /engine stopped/);
+});
+
+test('one family press that proves a child can spawn clears the engine-wide fact, not an unrelated failure', async () => {
+    const world = engine();
+    const controller = createHarnessMaintenanceController({ api: world.api, intents: new Map() });
+    await controller.refresh({ harness: 'other', fresh: true });
+    assert.equal(controller.inspectionProblem?.code, 'ENOENT');
+    world.failing = false;
+    await controller.refresh({ harness: 'fixture', fresh: true });
+    assert.equal(controller.inspectionProblem, null);
+    assert.equal(controller.view('other').inspectionError, '');
+});
+
+test('a fresh request cannot become success by joining a cached read in flight', async () => {
+    const cached = deferred(), asked = [];
+    const { controller } = setup({ harnessMaintenanceInventory: async (query) => {
+        asked.push(query);
+        if (!query.fresh) return cached.promise;
+        throw spawnError();
+    } });
+    const first = controller.refresh();
+    const stronger = controller.refresh({ fresh: true });
+    assert.notEqual(first, stronger);
+    assert.equal(controller.refresh(), first, 'an equal or weaker read still joins');
+    await flush();
+    assert.equal(asked.length, 1);
+    cached.resolve({ harnesses: [entry()] });
+    await stronger;
+    assert.deepEqual(asked.map((query) => query.fresh), [false, true]);
+    assert.equal(controller.inspectionProblem?.code, 'ENOENT');
+});
+
+test('a latest check does not join a fresh read that will not check latest; a fresh one joins it', async () => {
+    const running = deferred(), asked = [];
+    const { controller } = setup({ harnessMaintenanceInventory: async (query) => {
+        asked.push(query);
+        return asked.length === 1 ? running.promise : { harnesses: [entry()] };
+    } });
+    const fresh = controller.refresh({ harness: 'fixture', fresh: true });
+    assert.equal(controller.refresh({ harness: 'fixture', fresh: true }), fresh);
+    const latest = controller.refresh({ harness: 'fixture', fresh: true, checkLatest: true });
+    running.resolve({ harnesses: [entry()] });
+    await latest;
+    assert.deepEqual(asked.map((query) => query.checkLatest), [false, true]);
+});
+
+test('a released view leaves a late failed answer to its successor', async () => {
+    const late = deferred(), intents = new Map();
+    const api = { harnessMaintenanceInventory: async () => late.promise };
+    const controller = createHarnessMaintenanceController({ api, intents });
+    const read = controller.refresh({ fresh: true });
+    controller.dispose();
+    late.reject(spawnError());
+    await read;
+    assert.equal(createHarnessMaintenanceController({ api, intents }).inspectionProblem, null);
+});
+
+test('the row says Last known with the row\'s own date, and no paragraph or diagnostic repeats per family', async () => {
+    const world = engine();
+    const controller = createHarnessMaintenanceController({ api: world.api, intents: new Map() });
+    await controller.refresh();
+    await controller.refresh({ fresh: true });
+    const view = controller.view('fixture');
+    const row = entry({ observedAt: OBSERVED });
+    const line = maintenanceVersionLine(row, { inspectionError: view.inventoryError });
+    assert.match(line, /Program 2\.0\.0 · Managed · Latest not checked · Last known /);
+    assert.match(line, /2026/);
+    assert.doesNotMatch(line, /T12:00:00Z|2026-11/, 'human-readable, and never the top inventory time');
+    assert.equal(maintenanceVersionLine(entry(), { inspectionError: 'offline' }).endsWith('· Last known'), true);
+    const html = harnessMaintenanceMarkup(row, { inspectionProblem: controller.inspectionProblem, inspectionError: view.inventoryError });
+    assert.doesNotMatch(html, /ENOENT|no longer present|Restart|Program inspection unavailable/);
+    assert.match(html, /data-maintenance-action="inspect"/, 'the current check stays available');
+    assert.doesNotMatch(html, /data-maintenance-action="latest"/, 'a failed inspection offers no update, as before');
+});
+
+test('an unclassified failure keeps its exact sentence on its own row', () => {
+    const html = harnessMaintenanceMarkup(entry(), { inspectionError: 'Program inspection unavailable: spawn node ENOENT' });
+    assert.match(html, /Program inspection unavailable: spawn node ENOENT/);
+});
+
+test('the banner explains once, conditionally, with the exact text under Diagnostics', () => {
+    const problem = spawnError().body.error;
+    const line = serviceBannerLine(readyStore(), { programProblem: problem });
+    assert.equal(line.tone, 'warn');
+    assert.match(line.text, /^Claudexor running · The executable reported by the last program inspection is no longer present\./);
+    assert.match(line.text, /Versions below are last known\./);
+    assert.match(line.text, /If the app was moved or replaced, Restart Claudexor in Accounts may help; it ends every run on the engine, and success is not guaranteed\./);
+    assert.doesNotMatch(line.text, /chat header/, 'the header Restart keeps the engine');
+    assert.doesNotMatch(line.text, /ENOENT|Moved\.app/);
+    const facts = Object.fromEntries(line.facts);
+    assert.match(facts['Last program inspection'], new RegExp(`ENOENT: spawn ${MISSING} ENOENT$`));
+    assert.match(facts['Last program inspection'], /2026/);
+    assert.equal(facts['Inspected by engine'], '5.0.1 · f10efc2f');
+    assert.equal(serviceBannerLine(readyStore()).text, 'Claudexor ready');
+    assert.deepEqual(serviceBannerLine({}, { wakeBusy: true, programProblem: problem }), { tone: 'muted', text: 'Starting the agent daemon…' });
+    assert.match(serviceBannerLine(readyStore(), { wakeError: 'refused', programProblem: problem }).text, /^Could not start/);
+});
+
+test('a retained failed operation after a healthy replacement advises nothing and keeps its custody facts', async () => {
+    const failed = operation({ state: 'failed', phase: 'settled', mutation: 'unknown', termination: 'unconfirmed',
+        finishedAt: '2026-10-09T12:00:00Z', problem: { code: 'ENOENT', message: `spawn ${MISSING} ENOENT`, retryable: false } });
+    // The replacement fixture engine answers healthy, its row still pointing at the retained failure.
+    const row = entry({ observedAt: '2026-10-09T12:05:00Z', selection: { kind: 'managed', version: '3.1.0' },
+        operation: { id: failed.id, state: failed.state, phase: failed.phase, finishedAt: failed.finishedAt } });
+    const asked = [], keys = [];
+    let settles = 0;
+    const api = {
+        harnessMaintenanceInventory: async (query) => {
+            asked.push(query);
+            return { harnesses: [asked.length === 1 ? entry() : row] };
+        },
+        startHarnessMaintenance: async (_body, key) => { keys.push(key); return operation(); },
+        harnessMaintenanceOperation: async () => failed,
+    };
+    const controller = createHarnessMaintenanceController({ api, intents: new Map(), newKey: () => 'same-key', onSettled: () => { settles++; } });
+    await controller.refresh();
+    await controller.start('fixture', { kind: 'latest' });
+    await controller.readOperation('fixture'); await flush();
+    assert.deepEqual(keys, ['same-key']);
+    const view = controller.view('fixture');
+    assert.equal(controller.inspectionProblem, null);
+    assert.equal(settles, 1);
+    assert.deepEqual(asked.at(-1), { harness: 'fixture', fresh: true, checkLatest: false }, 'the existing settled read supplies current evidence');
+    assert.equal(view.operation.mutation, 'unknown');
+    assert.equal(view.operation.termination, 'unconfirmed');
+    const html = harnessMaintenanceMarkup(row, view);
+    assert.match(html, /Update failed · Installer may still be running/);
+    assert.match(html, /Exact message: <code>spawn .* ENOENT<\/code>/);
+    assert.doesNotMatch(html, /Restart|no longer present/);
+    assert.doesNotMatch(serviceBannerLine(readyStore(), { programProblem: controller.inspectionProblem }).text, /Restart/);
+});
+
+test('a retained failed operation with the engine still broken keeps its history beside the current fact', async () => {
+    const failed = operation({ state: 'failed', phase: 'settled', mutation: 'none', termination: 'confirmed',
+        finishedAt: '2026-10-09T12:00:00Z', problem: { code: 'ENOENT', message: `spawn ${MISSING} ENOENT` } });
+    let reads = 0;
+    const api = {
+        harnessMaintenanceInventory: async () => {
+            if (++reads > 1) throw spawnError();
+            return { harnesses: [entry({ observedAt: OBSERVED })] };
+        },
+        startHarnessMaintenance: async () => operation(),
+        harnessMaintenanceOperation: async () => failed,
+    };
+    const controller = createHarnessMaintenanceController({ api, intents: new Map(), newKey: () => 'key' });
+    await controller.refresh();
+    await controller.start('fixture', { kind: 'latest' });
+    assert.equal(controller.inspectionProblem, null);
+    await controller.readOperation('fixture'); await flush();
+    assert.equal(controller.inspectionProblem?.code, 'ENOENT', 'the current read, not the old problem, is the source');
+    assert.equal(controller.view('fixture').operation.problem.message, `spawn ${MISSING} ENOENT`);
+});
+
+test('a lost POST keeps its key and its retry through a failed fresh inspection', async () => {
+    const sent = [];
+    const world = engine();
+    world.failing = false;
+    const api = { ...world.api, startHarnessMaintenance: async (body, key) => {
+        sent.push({ body, key });
+        if (sent.length === 1) throw new Error('Lost POST');
+        return operation();
+    } };
+    const controller = createHarnessMaintenanceController({ api, intents: new Map(), newKey: () => 'same-key' });
+    await controller.refresh();
+    await controller.start('fixture', { kind: 'latest' });
+    world.failing = true;
+    await controller.refresh({ harness: 'fixture', fresh: true });
+    const view = controller.view('fixture');
+    assert.match(harnessMaintenanceMarkup(view.entry, { ...view, inspectionProblem: controller.inspectionProblem }), /Retry same request/);
+    await controller.act('fixture', 'rejoin');
+    assert.deepEqual(sent, [sent[0], sent[0]]);
+    assert.equal(controller.view('fixture').operation.id, 'operation-1');
+});
+
+// ---- Answers that cross (#2461, round 2): the later-asked read stands, whichever answers last ----
+test('a released view\'s late answer, success or failure, never changes what its successor read', async () => {
+    for (const successorFails of [true, false]) {
+        const late = deferred(), intents = new Map();
+        let answer = () => late.promise;
+        const api = { harnessMaintenanceInventory: async () => answer() };
+        const released = createHarnessMaintenanceController({ api, intents });
+        const read = released.refresh({ fresh: true });
+        await flush();
+        released.dispose();
+        answer = async () => {
+            if (successorFails) throw spawnError();
+            return { harnesses: [entry({ observedAt: OBSERVED })] };
+        };
+        const successor = createHarnessMaintenanceController({ api, intents });
+        await successor.refresh({ fresh: true });
+        const reading = () => ({ problem: successor.inspectionProblem?.code || null,
+            error: successor.view('fixture').inventoryError });
+        const seen = reading();
+        assert.equal(seen.problem, successorFails ? 'ENOENT' : null);
+        if (successorFails) late.resolve({ harnesses: [entry({ observedAt: OBSERVED })] });
+        else late.reject(spawnError());
+        await read; await flush();
+        assert.deepEqual(reading(), seen, `the released view's late ${successorFails ? 'success' : 'failure'} is older`);
+    }
+});
+
+const answerOf = {
+    ok: () => ({ harnesses: [entry({ observedAt: OBSERVED })] }),
+    missing: () => spawnError(),
+    timeout: () => Object.assign(new Error('inspection child timed out'), { status: 502 }),
+    offline: () => new Error('offline'),
+};
+// Asks a whole and a family read in the given order, answers them in order or reversed, and returns what
+// the section and the fixture row then say.
+async function crossing({ first, whole, family, cachedWhole = false, reversed }) {
+    const pending = [deferred(), deferred()];
+    let asked = 0;
+    const controller = createHarnessMaintenanceController({ intents: new Map(),
+        api: { harnessMaintenanceInventory: async () => pending[asked++].promise } });
+    const scopes = first === 'whole' ? ['whole', 'family'] : ['family', 'whole'];
+    const reads = scopes.map((scope) => controller.refresh(scope === 'family'
+        ? { harness: 'fixture', fresh: true } : { fresh: !cachedWhole }));
+    await flush();
+    assert.equal(asked, 2, 'both reads are asked before either answers');
+    for (const index of reversed ? [1, 0] : [0, 1]) {
+        const answer = answerOf[scopes[index] === 'whole' ? whole : family]();
+        if (answer instanceof Error) pending[index].reject(answer);
+        else pending[index].resolve(answer);
+        await flush();
+    }
+    await Promise.all(reads);
+    const view = controller.view('fixture');
+    return { problem: controller.inspectionProblem?.code || null,
+        standing: view.inspectionError || view.inventoryError || controller.inspectionProblem?.message || '' };
+}
+
+for (const first of ['whole', 'family']) {
+    for (const failure of ['missing', 'timeout']) {
+        test(`crossing current reads, ${first} asked first, ${failure}: failure→success and success→failure end as asked`, async () => {
+            const later = first === 'whole' ? 'family' : 'whole';
+            for (const [older, newer] of [[failure, 'ok'], ['ok', failure]]) {
+                const label = `${first} ${older}, then ${later} ${newer}`;
+                const answers = { [first]: older, [later]: newer };
+                const inOrder = await crossing({ first, ...answers, reversed: false });
+                const crossed = await crossing({ first, ...answers, reversed: true });
+                assert.deepEqual(crossed, inOrder, `${label}: arrival order decides nothing`);
+                if (newer === 'ok') assert.deepEqual(crossed, { problem: null, standing: '' }, label);
+                else {
+                    assert.equal(crossed.problem, failure === 'missing' ? 'ENOENT' : null, label);
+                    assert.match(crossed.standing, failure === 'missing' ? /ENOENT/ : /timed out/, label);
+                }
+            }
+        });
+    }
+}
+
+test('the cached whole read asked on mount crosses a family check without arrival deciding', async () => {
+    const offline = 'Program inspection unavailable: offline';
+    const missingLine = `Program inspection unavailable: spawn ${MISSING} ENOENT`;
+    for (const [first, whole, family, expected] of [
+        ['whole', 'offline', 'ok', { problem: null, standing: '' }],
+        ['family', 'offline', 'ok', { problem: null, standing: offline }],
+        ['whole', 'missing', 'ok', { problem: null, standing: '' }],
+        ['family', 'missing', 'ok', { problem: 'ENOENT', standing: missingLine }],
+        // A cached success proves nothing current: a fresh failure stands whichever was asked later.
+        ['whole', 'ok', 'missing', { problem: 'ENOENT', standing: missingLine }],
+        ['family', 'ok', 'missing', { problem: 'ENOENT', standing: missingLine }],
+    ]) {
+        for (const reversed of [false, true]) {
+            assert.deepEqual(await crossing({ first, whole, family, cachedWhole: true, reversed }), expected,
+                `${first} asked first, whole ${whole}, family ${family}, ${reversed ? 'reversed' : 'in order'}`);
+        }
+    }
+});
+
+test('Checking… answers the check the owner asked for, never the cached read a mount starts', async () => {
+    const reads = [];
+    const { controller } = setup({ harnessMaintenanceInventory: (query) => {
+        const pending = deferred();
+        reads.push({ query, pending });
+        return pending.promise;
+    } });
+    const mount = controller.refresh();
+    assert.equal(controller.view('fixture').inspectionPending, false, 'a cached read of every program relabels no card');
+    await flush();
+    reads[0].pending.resolve({ harnesses: [entry()] });
+    await mount;
+    const own = controller.act('fixture', 'inspect');
+    assert.equal(controller.view('fixture').inspectionPending, true, "the pressed card's own check");
+    assert.equal(controller.view('other').inspectionPending, false, 'a neighbour keeps its words');
+    await flush();
+    reads[1].pending.resolve({ harnesses: [entry()] });
+    await own;
+    const all = controller.refresh({ fresh: true });
+    assert.equal(controller.view('other').inspectionPending, true, 'Refresh checks every program');
+    await flush();
+    reads[2].pending.resolve({ harnesses: [entry()] });
+    await all;
+    assert.equal(controller.view('fixture').inspectionPending, false);
+    controller.dispose();
+});
+
+test('a program read the transport lost is said in owner words; an engine sentence stays as it is', async () => {
+    const { controller } = setup({ harnessMaintenanceInventory: async () => { throw new TypeError('Load failed'); } });
+    await controller.refresh({ fresh: true });
+    assert.equal(controller.view('fixture').inventoryError, "Program inspection unavailable: Couldn't reach Ouroboros.");
+    assert.doesNotMatch(controller.view('fixture').inventoryError, /Load failed/);
+    const engine = setup({ harnessMaintenanceInventory: async () => { throw Object.assign(new Error('child timed out'), { status: 502 }); } });
+    await engine.controller.refresh({ fresh: true });
+    assert.equal(engine.controller.view('fixture').inventoryError, 'Program inspection unavailable: child timed out');
+    controller.dispose(); engine.controller.dispose();
 });

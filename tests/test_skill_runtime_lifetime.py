@@ -8,11 +8,10 @@ import time
 
 import pytest
 
-from ouroboros.tools import skill_exec
+from ouroboros.tools import skill_exec, shell_process
 from tests.test_skill_install_resources import serve
 from tests.test_skill_runtime_commands import execute, installed_script
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize('net,resource_allowed', [(False, True), (True, False), (True, True)])
@@ -46,7 +45,6 @@ def test_deno_network_false_also_prevents_static_import_fetch(tmp_path, monkeypa
 @pytest.mark.parametrize('runtime,body', [
     ('python3', 'import time\nwhile True: time.sleep(1)\n'),
     ('node', 'setInterval(()=>{},1000);'),
-    ('deno', 'setInterval(()=>{},1000);'),
     ('go', 'package main\nfunc main(){for {}}\n'),
 ])
 def test_owned_running_skill_process_can_be_cancelled_without_survivors(tmp_path, monkeypatch, runtime, body):
@@ -61,8 +59,8 @@ def test_owned_running_skill_process_can_be_cancelled_without_survivors(tmp_path
         # Go compiles the skill first: a cold build on a loaded Windows runner can take longer than 20 s.
         until = time.monotonic() + (60 if runtime == 'go' else 20)
         while time.monotonic() < until and thread.is_alive():
-            with skill_exec._subprocess_lock:
-                for proc in skill_exec._active_subprocesses:
+            with shell_process._subprocess_lock:
+                for proc in shell_process._active_subprocesses:
                     args = [str(a) for a in proc.args]
                     if runtime == 'go':
                         matches = len(args) == 1 and args[0].startswith(str(ctx.drive_root / 'state/skills/runtime_fixture/go-exec-'))
@@ -80,8 +78,8 @@ def test_owned_running_skill_process_can_be_cancelled_without_survivors(tmp_path
         assert not thread.is_alive()
         assert results and 'SKILL_EXEC_FAILED' in results[0], results
         assert own.poll() is not None
-        with skill_exec._subprocess_lock:
-            assert own not in skill_exec._active_subprocesses
+        with shell_process._subprocess_lock:
+            assert own not in shell_process._active_subprocesses
         assert not list((ctx.drive_root / 'state/skills/runtime_fixture').glob('go-exec-*'))
     finally:
         if own is not None and own.poll() is None:

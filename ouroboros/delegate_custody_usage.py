@@ -7,7 +7,12 @@ import logging
 import pathlib
 import time
 from contextlib import contextmanager
-from typing import Any, Dict, Literal, Optional, Tuple, TypedDict
+from typing import Any, Dict, Literal, Optional, Tuple
+
+try:  # Python 3.11+
+    from typing import NotRequired, TypedDict  # type: ignore[attr-defined]
+except ImportError:  # pragma: no cover - CI supports Python 3.10.
+    from typing_extensions import NotRequired, TypedDict  # type: ignore[assignment]
 
 from ouroboros._usage_response import provider_cost_value
 
@@ -15,17 +20,25 @@ log = logging.getLogger(__name__)
 
 
 class CostCustody(TypedDict):
-    """Execution coverage for the amount's scope; never another monetary store."""
+    """Execution coverage for the amount's scope; never another monetary store.
+
+    ``unrecorded_run_ids`` names every run without a matching receipt. Its subset
+    ``closed_unrecorded_run_ids`` names those whose custody already closed (settled or
+    closed absent): no collector writes for them, so their cost is unknown, not pending.
+    Records written before that field lack it; absence keeps their earlier reading.
+    """
 
     status: Literal["available", "unavailable"]
     open_run_ids: list[str]
     unrecorded_run_ids: list[str]
+    closed_unrecorded_run_ids: NotRequired[list[str]]
     pending_invocation_ids: list[str]
 
 
 def unavailable_cost_custody() -> CostCustody:
     """A failed coverage read is unknown, even when no run identity is readable."""
-    return {"status": "unavailable", "open_run_ids": [], "unrecorded_run_ids": [], "pending_invocation_ids": []}
+    return {"status": "unavailable", "open_run_ids": [], "unrecorded_run_ids": [], "closed_unrecorded_run_ids": [],
+            "pending_invocation_ids": []}
 
 
 @contextmanager
@@ -111,6 +124,15 @@ def disclosed_spend(summary: Dict[str, Any], *, attempt_execution: Any = None) -
     return facts["cost_usd"], facts["cost_usd"] is not None and not facts["cost_final"]
 
 
+def model_identity_delta(requested: str, applied: str) -> Dict[str, Any]:
+    """The one record of a delegated session that names its model differently from the request (a review
+    seat's and a delegate run's): the engine writes its own alias, so the note says what was not compared."""
+    return {"kind": "capability_delta", "requested": f"model {requested}", "effective": f"model {applied}",
+            "reason": "session_route_resolves_its_own_model",
+            "note": "The engine names the model it ran by its own alias; the names differ, capabilities were "
+                    "not compared. A disclosure, not a failure."}
+
+
 def session_attempt_id(session_id: str) -> str:
     """The existing one-shot ledger identity, also used by coverage readers."""
     return "session-" + hashlib.sha256(str(session_id or "").strip().encode("utf-8")).hexdigest()[:24]
@@ -156,6 +178,10 @@ def cost_coverage(snapshot, txn, root) -> dict:
     Counts/dollars stay ledger-owned. Even SETTLED/LEDGER_RECORDED is only a
     custody claim until its actual one-shot receipt belongs to this scope.
     Cleanup holds (patches, output, project retirement) are not monetary holds.
+    A settled run without that receipt is ``closed_unrecorded``: its custody is over
+    (SETTLED or CLOSED_ABSENT, whatever ``ledger_recorded`` claims) and no collection
+    follows, so no money will arrive. An unsettled run, terminal or not, may still
+    be collected and stays unrecorded only.
     """
     from ouroboros.delegate_custody import TERMINAL_STATES
 
@@ -174,6 +200,7 @@ def cost_coverage(snapshot, txn, root) -> dict:
         if not matching:
             missing.add(rid)
     return {**snapshot, "unrecorded": missing,
+            "closed_unrecorded": {rid for rid in missing if snapshot["runs"][rid].settled},
             "open": {rid for rid, entry in snapshot["runs"].items()
                      if not entry.settled and entry.terminal_state not in TERMINAL_STATES}}
 
@@ -187,6 +214,7 @@ def with_cost_coverage(summary, joined, *, task_id="", root_task_id=""):
     coverage: CostCustody = {
         "status": joined["status"], "open_run_ids": sorted(runs & joined["open"]),
         "unrecorded_run_ids": sorted(runs & joined["unrecorded"]),
+        "closed_unrecorded_run_ids": sorted(runs & joined["closed_unrecorded"]),
         "pending_invocation_ids": sorted({str(p["invocation_id"]) for p in joined["pending"]
                                           if selected(p.get("task_id"), p.get("root_task_id"))}),
     }
@@ -197,9 +225,19 @@ def with_cost_coverage(summary, joined, *, task_id="", root_task_id=""):
 
 
 def cost_coverage_open(summary) -> bool:
+    """Coverage leaves the amount incomplete: unreadable, live, uncollected or closed without a receipt."""
     coverage = summary.get("cost_custody") or {}
     return bool(coverage.get("status", "available") != "available"
                 or coverage.get("open_run_ids") or coverage.get("unrecorded_run_ids")
+                or coverage.get("pending_invocation_ids"))
+
+
+def cost_coverage_pending(summary) -> bool:
+    """Coverage may still bring money: as ``cost_coverage_open`` minus runs closed without a receipt."""
+    coverage = summary.get("cost_custody") or {}
+    closed = set(coverage.get("closed_unrecorded_run_ids") or ())
+    return bool(coverage.get("status", "available") != "available"
+                or coverage.get("open_run_ids") or set(coverage.get("unrecorded_run_ids") or ()) - closed
                 or coverage.get("pending_invocation_ids"))
 
 

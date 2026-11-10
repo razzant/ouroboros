@@ -309,29 +309,35 @@ def workspace_repair_hint(
     )
 
 
-def room_chat_lens_dir(drive_root: Any, project_id: str) -> tuple[str, str]:
+def room_chat_lens_dir(drive_root: Any, project_id: str, *, basis: Any = None) -> tuple[str, str]:
     """The selected folder for a direct conversation, with an availability note.
 
     Ordinary folders need no Git admission. A missing folder keeps its selected
     address so tools cannot fall back to the system repository; an unreadable
-    registry instead returns a note without inventing an address.
+    registry instead returns a note without inventing an address. A turn's carried
+    admission ``basis`` names the folder it was admitted with (``admitted_folder``),
+    so resumed work keeps it; without one the room's current row decides.
     """
     pid = str(project_id or "").strip()
     if not pid:
         return "", ""
-    try:
-        from ouroboros.projects_registry import get_reserved_project
+    from ouroboros.project_admission import admitted_folder
 
-        # Strict: an unreadable registry is a note, never a folderless room (#1315).
-        project = get_reserved_project(drive_root, pid, strict=True) or {}
-        if str(project.get("lifecycle") or "active") != "active":
-            project = {}
-        raw = str(project.get("working_dir") or "").strip()
-    except Exception as exc:
-        return "", (
-            f"project {pid!r} registry entry is unreadable ({type(exc).__name__}: {exc}) — "
-            "cannot determine the room's repository"
-        )
+    raw = admitted_folder(basis, pid)
+    if raw is None:
+        try:
+            from ouroboros.projects_registry import get_reserved_project
+
+            # Strict: an unreadable registry is a note, never a folderless room (#1315).
+            project = get_reserved_project(drive_root, pid, strict=True) or {}
+            if str(project.get("lifecycle") or "active") != "active":
+                project = {}
+            raw = str(project.get("working_dir") or "").strip()
+        except Exception as exc:
+            return "", (
+                f"project {pid!r} registry entry is unreadable ({type(exc).__name__}: {exc}) — "
+                "cannot determine the room's repository"
+            )
     if not raw:
         return "", ""
     try:

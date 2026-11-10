@@ -7,8 +7,15 @@ the ``context_memory_view`` receipt in ``logs/events.jsonl`` carries them as ``s
 ``sections_cpu_ms``, with ``total``: the build's own time up to that receipt, so time no marked section
 covers shows as the difference. Wall time far above CPU time is waiting (a lock, the disk, the
 interpreter's other threads), so a slow start is read from the log instead of sampled. Spans are inclusive
-and only for the marked builders. Outside a measured build a marked builder costs one variable lookup and
+and only for the marked builders; a dotted name (``memory_view.story``) is a span inside its parent, the time the
+next reading must not sum in with it. Outside a measured build a marked builder costs one variable lookup and
 records nothing.
+
+``counted`` is the same receipt for work instead of time: the host adds what it did (a render, a parsed
+record, a scanned character) to the window it runs in, and work done again on the same key also adds to
+``<verb>_again``, so "done once" reads as a zero in the log and an equality in a test. ``section_spans``
+carries the counts as ``work`` beside the two time maps. A window opens around any block that owes one
+receipt (a context build, a round's preparation); windows nest and never mix.
 """
 
 from __future__ import annotations
@@ -16,11 +23,14 @@ from __future__ import annotations
 import contextlib
 import contextvars
 import functools
+import gc
+import threading
 import time
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Hashable, Iterator, List, Optional, Set, Tuple
 
 _SPANS: contextvars.ContextVar[Optional[Dict[str, List[float]]]] = contextvars.ContextVar("context_section_spans", default=None)
 _STARTED: contextvars.ContextVar[Optional[Tuple[float, float]]] = contextvars.ContextVar("context_build_started", default=None)
+_WORK: contextvars.ContextVar[Optional[Tuple[Dict[str, int], Set[Tuple[str, Hashable]]]]] = contextvars.ContextVar("context_build_work", default=None)
 TOTAL = "total"
 
 
@@ -48,23 +58,64 @@ def timed(name: str, builder: Callable[..., Any], *args: Any, **kwargs: Any) -> 
     return timed_section(name)(builder)(*args, **kwargs)
 
 
+def counted(verb: str, n: int = 1, key: Optional[Hashable] = None) -> None:
+    """Add ``n`` to ``verb`` of the window being measured, if any; a ``key`` this verb already saw in that
+    window adds ``n`` to ``<verb>_again`` as well."""
+    window = _WORK.get()
+    if window is None:
+        return
+    work, seen = window
+    work[verb] = work.get(verb, 0) + n
+    if key is None:
+        return
+    if (verb, key) in seen:
+        work[f"{verb}_again"] = work.get(f"{verb}_again", 0) + n
+    seen.add((verb, key))
+
+
 @contextlib.contextmanager
 def measured_sections() -> Iterator[None]:
-    """Measure the sections of the context build inside this block."""
-    token, started = _SPANS.set({}), _STARTED.set((time.perf_counter(), time.thread_time()))
+    """Measure the marked sections and count the work of this block: one window, one receipt."""
+    token, started, work = _SPANS.set({}), _STARTED.set((time.perf_counter(), time.thread_time())), _WORK.set(({}, set()))
     try:
         yield
     finally:
+        _WORK.reset(work)
         _STARTED.reset(started)
         _SPANS.reset(token)
 
 
+_REST = threading.Lock()
+_rest = [0, False]  # context builds resting the collector now; whether it ran when the first of them began
+
+
+@contextlib.contextmanager
+def collector_rests() -> Iterator[None]:
+    """The cyclic collector waits while a context build runs and resumes in ``finally``: the build allocates millions of
+    short-lived objects and creates no cycles, so each collection only walks the process's long-lived heap again.
+    Builds overlap in one process (the server's inline turns), so the rest is counted: the last one out restores it.
+    Measured on a copy of the owner's data: peak RSS +32…+119 MB during a build, CPU −0.1…−2.5 s."""
+    with _REST:
+        _rest[0] += 1
+        if _rest[0] == 1:
+            _rest[1] = gc.isenabled()
+            gc.disable()
+    try:
+        yield
+    finally:
+        with _REST:
+            _rest[0] -= 1
+            if not _rest[0] and _rest[1]:
+                gc.enable()
+
+
 def section_spans() -> Dict[str, Dict[str, int]]:
-    """``sections_ms`` and ``sections_cpu_ms`` of the build being measured (with its ``total`` so far),
-    or nothing outside one."""
-    spans, started = _SPANS.get(), _STARTED.get()
-    if spans is None or started is None:
+    """``sections_ms`` and ``sections_cpu_ms`` of the window being measured (with its ``total`` so far) and
+    its counted ``work``, or nothing outside one."""
+    spans, started, window = _SPANS.get(), _STARTED.get(), _WORK.get()
+    if spans is None or started is None or window is None:
         return {}
     now = {TOTAL: [time.perf_counter() - started[0], time.thread_time() - started[1]]}
     return {"sections_ms": {name: round(span[0] * 1000) for name, span in {**spans, **now}.items()},
-            "sections_cpu_ms": {name: round(span[1] * 1000) for name, span in {**spans, **now}.items()}}
+            "sections_cpu_ms": {name: round(span[1] * 1000) for name, span in {**spans, **now}.items()},
+            "work": dict(window[0])}

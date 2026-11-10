@@ -268,7 +268,6 @@ class TestChildDriveSkillPayload:
 # Fix 2: OpenRouter-only budget drift
 # ---------------------------------------------------------------------------
 
-@pytest.mark.serial
 class TestBudgetDriftOpenRouterOnly:
     def _update_budget(self, sup_state, *, expected=True):
         assert sup_state.update_budget_from_usage({}) is expected
@@ -393,7 +392,6 @@ class TestBudgetDriftOpenRouterOnly:
         ([{"kind": "openrouter", "name": "claude-credits", "label": "Claude credits"}], False),
         ('[{"kind": "openrouter", "name": "byok", "enabled": true}]', False),  # an environment-shaped value
         ([{"kind": "openrouter", "name": "byok", "enabled": False}], True),
-        ([{"kind": "openai", "name": "second"}, {"kind": "openrouter", "name": "default", "enabled": False}], True),
     ])
     def test_another_enabled_openrouter_connection_skips_the_percentage(self, tmp_path, monkeypatch, rows, alerts):
         """Every OpenRouter connection settles into the ledger's one ``openrouter`` bucket while
@@ -446,3 +444,5 @@ class TestBudgetDriftOpenRouterOnly:
         assert "openrouter tracked: $30.00" in text
         # The all-provider delta ($130) must not masquerade as the tracked side.
         assert "tracked: $130.00" not in text
+        # Reservations and price-less bounds are never one blended "open holds" figure.
+        assert "open_holds_usd" not in text

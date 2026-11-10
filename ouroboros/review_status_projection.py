@@ -57,7 +57,7 @@ def build_review_projection(
     )
     # Without a preflight look nothing is fresh or stale: a stale marker no look precedes
     # was written by the retired advisory lane and stays history in the file (owner decision).
-    stale_from_edit, effective_status, stale_ts, stale_reason, marker_attributed = False, "none", None, None, False
+    stale_from_edit, effective_status, stale_ts, stale_reason, marker = False, "none", None, None, {}
     look = _preflight_look(state, drive_root_path, repo_dir_path, repo_filter or "")
     if look is not None:
         # The author's preflight is the checkout's look (D5-002): a
@@ -65,11 +65,10 @@ def build_review_projection(
         # since the look does, with the editor named when a mutation was recorded.
         stale_from_edit = bool(look["stale_from_edit"])
         effective_status = "unknown" if look.get("unreadable") else "stale" if stale_from_edit else "fresh"
-        marker_attributed = bool(look["marked"])
-        stale_ts = (state.last_stale_from_edit_ts if look["marked"]
-                    else ("now (worktree moved)" if look["tree_moved"] else None))
-        stale_reason = (state.last_stale_reason if look["marked"]
-                        else (_TREE_MOVED_REASON if look["tree_moved"] else None))
+        # The marker that invalidated this checkout's look, never another scope's newer one.
+        marker = state.stale_marker(repo_filter or "", str(look.get("ts") or "")) if look["marked"] else {}
+        stale_ts = marker["ts"] if marker else ("now (worktree moved)" if look["tree_moved"] else None)
+        stale_reason = marker["reason"] if marker else (_TREE_MOVED_REASON if look["tree_moved"] else None)
     open_obligations = state.get_open_obligations(repo_key=repo_filter)
     open_debts = state.get_open_commit_readiness_debts(repo_key=repo_filter)
     try:
@@ -93,8 +92,7 @@ def build_review_projection(
         "stale_from_edit_ts": stale_ts,
         "stale_reason": stale_reason,
         # Attribution of the marker only; stale_from_edit/freshness above never read it.
-        **{key: value if marker_attributed else "" for key, value in
-           state.stale_marker_provenance(reader_task_id).items()},
+        **state.stale_marker_provenance(reader_task_id, marker=marker),
         "preflight": look,
         "open_obligations": open_obligations,
         "open_debts": open_debts,
@@ -164,7 +162,7 @@ def _preflight_look(state: Any, drive_root: pathlib.Path, repo_dir: pathlib.Path
 
         record = latest_preflight_record(drive_root, repo_key=repo_key)
     except Exception as exc:
-        marked = bool(state.last_stale_from_edit_ts and state.last_stale_repo_key in ("", repo_key))
+        marked = bool(state.stale_marker(repo_key))
         return {"unreadable": f"{type(exc).__name__}: {exc}", "marked": marked, "tree_moved": False,
                 "stale_from_edit": marked}
     if not record:
@@ -217,20 +215,23 @@ def build_review_status_payload(projection: Dict[str, Any], *, next_step: str, i
         "status_summary": _review_status_message(projection),
         "next_step": next_step,
     }
-    if selected_attempt is not None and selected_attempt.phase in {"review_only", "late_wait"}:
+    # A bound settled record (``selected_settled``, read by the caller) offers the same reference before a consumer
+    # repairs the row's own projection; this read-only diagnostic writes nothing.
+    settled = bool(projection.get("selected_settled"))
+    if selected_attempt is not None and (settled or selected_attempt.phase in {"review_only", "late_wait"}):
         from ouroboros.config import get_review_enforcement
         from ouroboros.review_records import review_outcome_received
 
-        received = review_outcome_received(
+        received = settled or review_outcome_received(
             [*selected_attempt.triad_raw_results, selected_attempt.scope_raw_result],
             findings=[*selected_attempt.critical_findings, *selected_attempt.advisory_findings],
             terminal=selected_attempt.phase == "review_only" and selected_attempt.status == "reviewed",
         )
         if get_review_enforcement() == "advisory" and received:
             payload["review_reference"] = {"surface": "commit", **{key: getattr(selected_attempt, key) for key in
-                ("repo_key", "task_id", "tool_name", "attempt", "pre_review_fingerprint")}}
-            payload["next_step"] = ("Read the returned findings. You may revise and request another permitted review, stop, or call "
-                "commit_reviewed with this review_reference and an explicit author_disposition/rationale to commit the current attributed candidate without a new panel. Independent checks still apply.")
+                ("repo_key", "task_id", "tool_name", "attempt", "pre_review_fingerprint", "review_record_id")}}
+            payload["next_step"] = ("Read the returned findings. You may revise and request another permitted review, stop, or collect the whole outcome at $0 with "
+                "commit_reviewed, this review_reference and no author_disposition; the review_reference that call returns, with an explicit author_disposition/rationale, commits the current bytes of the paths it reviewed (or the paths you name) without a new panel. Independent checks still apply.")
     if projection.get("canonical_attempts_unreadable"):
         payload["canonical_attempts_unreadable"] = projection["canonical_attempts_unreadable"]
     if projection.get("advisory_run_archive"):

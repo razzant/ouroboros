@@ -9,6 +9,7 @@
 // light model into a tag and a profile (the gateway answers `language_needs_model` when
 // no model is configured, and the note says so).
 import { apiClient } from './api_client.js';
+import { settingsSection } from './settings_controls.js';
 import { showToast } from './toast.js';
 import { applyPayload, currentLanguage, currentPayload, englishTag, fmt, isEnglish, localeDirection, pendingBootRead, pluralSelectMap, setLanguage, tr } from './i18n.js';
 
@@ -32,11 +33,13 @@ export function languageBlockHtml({ onboarding = false } = {}) {
            until it is translated.
            <br><strong>For the whole installation, unlike the theme below:</strong> every device and
            Telegram follow this one choice.`;
-    return `
-        <div class="form-section" data-i18n-settings>
-            <h3>Language</h3>
-            <div class="settings-section-copy">${lead}</div>
-            <div class="settings-effort-card">
+    return settingsSection({
+        title: 'Language',
+        attrs: 'data-i18n-settings',
+        card: !onboarding,  // setup's step is the card already
+        lead: onboarding ? lead : 'The language of this installation\'s interface, on every device.',
+        details: onboarding ? '' : lead,
+        body: `<div class="settings-effort-card">
                 <div class="form-field ui-field">
                     <label for="ui-language-select">Interface language</label>
                     <select id="ui-language-select" class="ui-control" data-i18n-select data-i18n-skip aria-describedby="ui-language-help"></select>
@@ -57,8 +60,8 @@ export function languageBlockHtml({ onboarding = false } = {}) {
                     <button type="button" class="btn btn-default btn-sm" data-i18n-export>Export</button>
                     <button type="button" class="btn btn-default btn-sm" data-i18n-regenerate>Regenerate</button>`}
                 </div>
-            </div>
-        </div>`;
+            </div>`,
+    });
 }
 
 function displayName(tag, fallback = tag) {

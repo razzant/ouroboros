@@ -255,8 +255,8 @@ def test_ui_smoke_nested_cards_are_one_identity_row_and_text_selects(direct_serv
                 assert "Agent model: gpt-5.6-sol" in first_planner["factsText"]
                 assert "Agent model: gemini-3.6-flash" in second_planner["factsText"]
                 assert "gpt-5.6-sol" in first_planner["metaText"] and "gemini-3.6-flash" in second_planner["metaText"]
-                # A child's review count stays in its own foot while collapsed, like the root's (the action row under
-                # its metadata line), never a band of the summary.
+                # A child's review count stays docked in its own foot while collapsed (the action row under its
+                # metadata line; a root's is Details' twin in its head), never a band of the summary.
                 _emit_ws_frame(page, {**child_frame, "task_id": "nest-review", "subagent_task_id": "nest-review",
                                       "subagent_role": "reviewer", "subagent_event": "completed",
                                       "content": "reviewer re-read the candidate and filed a long note " + "word " * 40,

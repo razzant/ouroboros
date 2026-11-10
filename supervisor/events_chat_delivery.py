@@ -599,7 +599,10 @@ def _send_message(evt: Dict[str, Any], ctx: Any) -> Any:
                 "terminal_projection_token": publication_token,
                 "routing": {"basis": "terminal_sender_bound_project", "intended_chat_id": int(evt["chat_id"]),
                             "routed_chat_id": chat_id} if bound_chat == chat_id or chat_id != int(evt["chat_id"]) else None}
-            _DELIVERED_MESSAGE_IDS.append((memory_id, {k: v for k, v in emitted.items() if k != "text"}))
+            if isinstance(evt.get("presence_delivery"), dict):  # its conversation's own delivery, for the receipt
+                emitted["presence_delivery"] = evt["presence_delivery"]
+            _DELIVERED_MESSAGE_IDS.append((memory_id, {k: v for k, v in emitted.items()
+                                                       if k not in ("text", "presence_delivery")}))
             # Retain the physical-send fact before slower capture/ack. A failed registry
             # write is covered by the existing bounded in-process dedupe until replay.
             _defer_delivery(ctx, {**evt, "emitted": emitted, "transport_failed": False})
@@ -803,10 +806,10 @@ def _handle_send_quiz(evt: Dict[str, Any], ctx: Any) -> None:
         )
         if not ok:
             record_quiz_delivery_failure(ctx.DRIVE_ROOT, tid, qid, "publication_send_failed")
-            _log_error(ctx, "send_quiz_error", chat_id=chat_id, error=err)
+            _log_error(ctx, "send_quiz_error", task_id=tid, quiz_id=qid, chat_id=chat_id, error=err)
     except Exception as exc:
         record_quiz_delivery_failure(ctx.DRIVE_ROOT, tid, qid, "publication_write_failed")
-        _log_error(ctx, "send_quiz_event_error", error=repr(exc))
+        _log_error(ctx, "send_quiz_event_error", task_id=tid, quiz_id=qid, error=repr(exc))
 
 
 @_on_consumer
@@ -860,8 +863,16 @@ def _handle_send_quiz_state(evt: Dict[str, Any], ctx: Any) -> None:
                 frame = (f"[Owner question closed without answer] quiz {qid} — "
                          f"closed {block['closed_at']}. Reason: {block['closed_reason']}\n"
                          "This closes the question; no option was chosen and no approval was given.")
+                secret = {}
+                if (block.get("secret_outcome") or {}).get("event") == "secret_cancelled":
+                    from ouroboros.secret_requests import cancelled_frame
+
+                    frame = cancelled_frame(block)  # the distinct secret_cancelled message
+                    # The existing typed snapshot: readers keep the host frame apart from the owner's act.
+                    secret = {"quiz_delivery": {"task_id": tid, "quiz_id": qid, "canonical_root": str(ctx.DRIVE_ROOT),
+                                                "answer_snapshot": dict(block)}}
                 if not write_owner_message(_task_drive_for_task(task, tid), frame, tid,
-                                           msg_id=f"quiz_closed:{qid}", kind=KIND_QUIZ_CLOSED):
+                                           msg_id=f"quiz_closed:{qid}", kind=KIND_QUIZ_CLOSED, **secret):
                     record_quiz_delivery_failure(ctx.DRIVE_ROOT, tid, qid, "mailbox_write_failed")
                     return
                 mark_quiz_history_written(ctx.DRIVE_ROOT, tid, qid, receipt="mailbox_at")
@@ -873,7 +884,8 @@ def _handle_send_quiz_state(evt: Dict[str, Any], ctx: Any) -> None:
                                   closed_at=block.get("closed_at"), closed_actor=block.get("closed_actor"),
                                   closed_request_id=block.get("closed_request_id"),
                                   closed_by_task_id=block.get("closed_by_task_id"),
-                                  question_delivery=question_delivery_projection(block))
+                                  question_delivery=question_delivery_projection(block),
+                                  **({"secret_outcome": block["secret_outcome"]} if block.get("secret_outcome") else {}))
     except Exception:
         record_quiz_delivery_failure(ctx.DRIVE_ROOT, tid, qid, "closure_write_failed")
         raise

@@ -29,8 +29,13 @@ def _fail(item, severity="critical", **extra):
 
 
 def test_the_policy_names_every_checklist_item_and_the_default():
-    from ouroboros.tools.review_skill import SKILL_REVIEW_ITEMS
+    import re
 
+    from ouroboros.tools.review_checklist import load_checklist_section
+    from ouroboros.tools.review_skill import SKILL_CHECKLIST_SECTION, SKILL_REVIEW_ITEMS
+
+    table = re.findall(r"^\| \d+ \| (\w+) \|", load_checklist_section(SKILL_CHECKLIST_SECTION), re.MULTILINE)
+    assert tuple(table) == SKILL_REVIEW_ITEMS, "the closed list a finding may name is the checklist's table"
     policy = skill_severity_policy("script")
     assert set(SKILL_REVIEW_ITEMS) >= HARD_CRITICAL_ITEMS | SEVERITY_DRIVEN_ITEMS
     assert all(policy[item] == "critical" for item in HARD_CRITICAL_ITEMS)
@@ -63,6 +68,8 @@ def test_status_blockers_on_a_hard_item_whatever_the_seat_said(severity):
 def test_status_warnings_on_an_advisory_only_item():
     assert status_from_findings([_fail("timeout_and_output_discipline", "critical")], "script") == "warnings"
     assert status_from_findings([_fail("error_handling", "critical")], "script") == "warnings"
+    # A working credential stored in the payload is advice after delivery, whatever severity the seat wrote.
+    assert status_from_findings([_fail("payload_credentials", "critical")], "extension") == "warnings"
 
 
 def test_status_follows_the_seat_on_a_severity_driven_item():

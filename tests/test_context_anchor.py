@@ -45,21 +45,28 @@ def _settled(usage: dict, *, prompt: int, estimate: int, provider: str = "claude
     return usage
 
 
+def _accept(usage: dict, plan, **kwargs) -> None:
+    """The dispatch's call. Without image preparation the bytes sent count what the transcript counts (B = P);
+    ``test_the_density_is_learned_on_the_sent_bytes_and_the_input_carried_forward`` separates them."""
+    record_input_anchor(usage, plan, estimate_tokens=usage["_context_raw_input_tokens"], **kwargs)
+
+
 def test_an_accepted_request_becomes_the_anchor_and_raises_the_floor():
     plan, usage = _plan(), {}
-    record_input_anchor(_settled(usage, prompt=874_829, estimate=795_458, cached=873_216), plan, round_idx=1481)
+    _accept(_settled(usage, prompt=874_829, estimate=795_458, cached=873_216), plan, round_idx=1481)
     anchor, floor = main_input_anchor(usage, plan, rewrite_epoch=0)
-    assert anchor == InputAnchor(input_tokens=874_829, estimate_tokens=795_458, round=1481, rewritten=False)
+    assert anchor == InputAnchor(input_tokens=874_829, estimate_tokens=795_458, round=1481, rewritten=False,
+                                 transcript_tokens=795_458)
     assert floor == 874_829
     # A later, smaller accepted request moves the anchor but never lowers the floor.
-    record_input_anchor(_settled(usage, prompt=600_000, estimate=550_000), plan, round_idx=1490)
+    _accept(_settled(usage, prompt=600_000, estimate=550_000), plan, round_idx=1490)
     anchor, floor = main_input_anchor(usage, plan, rewrite_epoch=0)
     assert anchor.input_tokens == 600_000 and floor == 874_829
 
 
 def test_an_account_rotation_and_another_model_have_no_anchor():
     plan, usage = _plan(), {}
-    record_input_anchor(_settled(usage, prompt=500_000, estimate=480_000), plan, round_idx=3)
+    _accept(_settled(usage, prompt=500_000, estimate=480_000), plan, round_idx=3)
     rotated = SimpleNamespace(model=plan.model, provider=plan.provider)  # a new route fingerprint, same model
     assert main_input_anchor(usage, rotated, rewrite_epoch=0) == (None, None)
     other = SimpleNamespace(model="anthropic/claude-opus-5.5", provider="openrouter")
@@ -70,8 +77,8 @@ def test_each_model_keeps_its_own_anchor_so_a_return_after_a_fallback_stays_meas
     """Both directions: a fallback's acceptance is its own anchor and never erases the primary's."""
     primary, usage = _plan(), {}
     fallback = _plan(model="claudexor::codex/gpt-6.1-sol")
-    record_input_anchor(_settled(usage, prompt=874_829, estimate=795_458), primary, round_idx=10)
-    record_input_anchor(_settled(usage, prompt=120_000, estimate=100_000), fallback, round_idx=11)
+    _accept(_settled(usage, prompt=874_829, estimate=795_458), primary, round_idx=10)
+    _accept(_settled(usage, prompt=120_000, estimate=100_000), fallback, round_idx=11)
     assert main_input_anchor(usage, primary, rewrite_epoch=0)[0].input_tokens == 874_829
     assert main_input_anchor(usage, fallback, rewrite_epoch=0)[0].input_tokens == 120_000
     assert len(usage[INPUT_ANCHOR_KEY]) == 2
@@ -79,33 +86,33 @@ def test_each_model_keeps_its_own_anchor_so_a_return_after_a_fallback_stays_meas
 
 def test_a_substituted_answer_or_unknown_cache_semantics_leave_the_anchor_unchanged():
     plan, usage = _plan(), {}
-    record_input_anchor(_settled(usage, prompt=400_000, estimate=380_000), plan, round_idx=2)
-    record_input_anchor(_settled(usage, prompt=900_000, estimate=380_000,
+    _accept(_settled(usage, prompt=400_000, estimate=380_000), plan, round_idx=2)
+    _accept(_settled(usage, prompt=900_000, estimate=380_000,
                                  substituted=[{"requested": "a", "observed": "b"}]), plan, round_idx=3)
     assert main_input_anchor(usage, plan, rewrite_epoch=0)[0].input_tokens == 400_000  # a substitute teaches nothing
     unknown = _plan(model="gigachat/max", provider="gigachat")
-    record_input_anchor(_settled(usage, prompt=50_000, estimate=40_000, provider="gigachat", cached=30_000),
+    _accept(_settled(usage, prompt=50_000, estimate=40_000, provider="gigachat", cached=30_000),
                         unknown, round_idx=4)
     assert main_input_anchor(usage, unknown, rewrite_epoch=0) == (None, None)
-    record_input_anchor(_settled(usage, prompt=50_000, estimate=40_000, provider="gigachat"), unknown, round_idx=5)
+    _accept(_settled(usage, prompt=50_000, estimate=40_000, provider="gigachat"), unknown, round_idx=5)
     assert main_input_anchor(usage, unknown, rewrite_epoch=0)[0].input_tokens == 50_000  # no cache: a total
 
 
 def test_a_count_that_cannot_be_this_requests_input_teaches_nothing():
     plan, usage = _plan(), {}
-    record_input_anchor(_settled(usage, prompt=20, estimate=20_000), plan, round_idx=1)  # a delta or a stub
+    _accept(_settled(usage, prompt=20, estimate=20_000), plan, round_idx=1)  # a delta or a stub
     assert main_input_anchor(usage, plan, rewrite_epoch=0) == (None, None)
-    record_input_anchor(_settled(usage, prompt=31_000, estimate=20_000), plan, round_idx=2)  # a dense tokenizer
+    _accept(_settled(usage, prompt=31_000, estimate=20_000), plan, round_idx=2)  # a dense tokenizer
     assert main_input_anchor(usage, plan, rewrite_epoch=0)[0].input_tokens == 31_000
 
 
 def test_a_gateway_that_counts_the_cache_read_twice_teaches_nothing():
     """Both directions: 2 x cached (+-1) is the gateway's double count, an honest cached row is a total."""
     plan, usage = _plan(model="openrouter::google/gemini-3.6-flash", provider="openrouter"), {}
-    record_input_anchor(_settled(usage, prompt=2 * 300_000 - 1, estimate=310_000, provider="openrouter",
+    _accept(_settled(usage, prompt=2 * 300_000 - 1, estimate=310_000, provider="openrouter",
                                  cached=300_000), plan, round_idx=4)
     assert main_input_anchor(usage, plan, rewrite_epoch=0) == (None, None)  # no anchor, no inflated floor
-    record_input_anchor(_settled(usage, prompt=320_000, estimate=310_000, provider="openrouter", cached=300_000),
+    _accept(_settled(usage, prompt=320_000, estimate=310_000, provider="openrouter", cached=300_000),
                         plan, round_idx=5)
     assert main_input_anchor(usage, plan, rewrite_epoch=0)[0].input_tokens == 320_000
 
@@ -114,7 +121,7 @@ def test_a_rewrite_since_the_anchor_is_named():
     from ouroboros.transcript_prefix import rewrite_epoch, sanction_rewrite
 
     plan, usage, slot = _plan(), {}, SimpleNamespace()
-    record_input_anchor(_settled(usage, prompt=300_000, estimate=290_000), plan, round_idx=9,
+    _accept(_settled(usage, prompt=300_000, estimate=290_000), plan, round_idx=9,
                         rewrite_epoch=rewrite_epoch(slot))
     assert main_input_anchor(usage, plan, rewrite_epoch=rewrite_epoch(slot))[0].rewritten is False
     sanction_rewrite(slot, "compaction")
@@ -140,6 +147,31 @@ def test_measurement_uses_this_conversations_anchor_before_other_witnesses(monke
     assert measured.measurement.estimated_input_tokens == -(-raw * 874_829 // 795_458)
     assert measured.measurement.measurement_basis == "fresh_route_usage"
     assert (measured.measurement.anchor_input_tokens, measured.measurement.anchor_round) == (874_829, 1481)
+
+
+def test_the_density_is_learned_on_the_sent_bytes_and_the_input_carried_forward(monkeypatch):
+    """3 Nov 2026 witness: an image the send captioned left the transcript's estimate P at 101,406 while the
+    bytes the provider counted (U = 130,326) had the estimator count B = 130,326. Dividing by P taught 1.285, and
+    the next admission multiplied it onto captioned bytes again. The density is U / B; the round's estimate stays
+    U plus the transcript's growth since, ``U + (P' - P) * U / B``, so no caption-sized room appears either."""
+    from ouroboros import capability_evidence
+    from ouroboros.context_fit import estimate_context_prompt_tokens, measure_main_fit
+
+    monkeypatch.setattr(capability_evidence, "resolve_main_token_density", lambda *_a, **_kw: (1.0, "cold_estimate"))
+    plan, usage = _plan(window=200_000), {}
+    record_input_anchor(_settled(usage, prompt=130_326, estimate=101_406), plan, round_idx=1, estimate_tokens=130_326)
+    anchor, floor = main_input_anchor(usage, plan, rewrite_epoch=0)
+    assert (anchor.density, anchor.transcript_tokens, floor) == (1.0, 101_406, 130_326)
+    messages = [*plan.messages_for("max"), {"role": "user", "content": "w" * 4 * 101_700}]
+    raw = estimate_context_prompt_tokens(messages, [], provider=plan.provider)
+    fit = measure_main_fit(plan, messages, [], profile="owner_max", rendered_mode="max", round_id="r", anchor=anchor)
+    assert fit.measurement.measurement_density == 1.0  # the final admission's multiplier of the sent bytes
+    assert fit.measurement.estimated_input_tokens == 130_326 + raw - 101_406 and raw > 101_406
+    _settled(usage, prompt=140_000, estimate=110_000)
+    record_input_anchor(usage, plan, round_idx=2, estimate_tokens=None)  # no receipt named the bytes it answered
+    assert main_input_anchor(usage, plan, rewrite_epoch=0) == (anchor, floor)  # unknown stays unknown
+    usage[INPUT_ANCHOR_KEY][next(iter(usage[INPUT_ANCHOR_KEY]))].pop("transcript_tokens")
+    assert main_input_anchor(usage, plan, rewrite_epoch=0)[0].transcript_tokens == 130_326  # an older row: P = B
 
 
 def test_an_accepted_input_raises_a_known_planning_window():
@@ -184,7 +216,7 @@ def test_acceptance_records_the_planned_reserve_separately_from_the_wire(tmp_pat
     plan, usage = _plan(), {"_context_reply_allowance_tokens": 1_234}
     if reserve is not None:
         usage["_context_response_reserve_tokens"] = reserve
-    record_input_anchor(_settled(usage, prompt=100_000, estimate=100_000), plan, round_idx=1)
+    _accept(_settled(usage, prompt=100_000, estimate=100_000), plan, round_idx=1)
     [row] = ce._load(tmp_path)["main_windows"][plan.route_fp]["observations"]
     assert row["accepted"] == 100_000 and row["transmitted"] == 1_234
     assert row["reserve"] == (plan.output_reserve_tokens if reserve is None else reserve)

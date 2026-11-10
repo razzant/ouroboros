@@ -3,7 +3,7 @@
 On a real server in Chromium and WebKit: the capsule `Effort <recommended level>` after Subagents and Context
 and the context capsule (closed, no range in words) opens inline into the strip — by hover (an
 accelerator) and by press (which pins) on a desktop with a mouse, by press alone on a phone; the
-mouse may drift within 32 px and the strip closes a second after it leaves that zone; Esc closes
+mouse may drift a few px and the strip closes ~300 ms after it leaves that zone; Esc closes
 and returns focus, an outside press closes. The open strip never takes a second line and stays
 inside its row: beside the others on a wide screen, alone while they step aside on a 390 px phone
 and in a ~440 px Project pane, scrolling inside itself on a 320 px phone; the pill covers its word
@@ -25,7 +25,7 @@ import pytest
 from tests import test_subscription_role_routes_browser as roles
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture import
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 subscription_ui = roles.subscription_ui
 role_ui = roles.role_ui
 
@@ -179,15 +179,24 @@ def test_desktop_hover_opens_press_pins_escape_and_outside_close(direct_server_w
             assert opened["recTabIndex"] == 0, opened
             _assert_strip_geometry(opened)
             _shot(page, tmp_path, f"composer-open-{engine}-dark")
-            # The mouse may drift within the 32 px zone: the strip stays open.
-            page.mouse.move(opened["right"] + 20, opened["top"] + opened["height"] / 2)
-            page.wait_for_timeout(1300)
+            # The mouse may drift a few px off the capsule: the strip stays open.
+            page.mouse.move(opened["right"] + 4, opened["top"] + opened["height"] / 2)
+            page.wait_for_timeout(700)
             assert _facts(page)["open"] == "true", "the zone keeps the strip open"
-            # Leaving the zone closes it about a second later, not at once.
+            # Leaving the zone closes it ~300 ms later, not at once: measured in the page, so a slow runner cannot
+            # read it early or late.
+            page.evaluate("""sel => {
+                const el = document.querySelector(sel);
+                addEventListener('pointermove', () => { window.__left = performance.now(); }, { once: true, capture: true });
+                new MutationObserver((_records, watcher) => {
+                    if (el.dataset.open === 'false') { window.__closed = performance.now(); watcher.disconnect(); }
+                }).observe(el, { attributes: true, attributeFilter: ['data-open'] });
+            }""", CONTROL)
             page.mouse.move(20, 200)
-            page.wait_for_timeout(500)
-            assert _facts(page)["open"] == "true", "not before the delay"
             _wait(page, "el.dataset.open === 'false'", timeout=3_000)
+            page.wait_for_function("() => window.__closed !== undefined && window.__left !== undefined")
+            delay = page.evaluate("() => window.__closed - window.__left")
+            assert 250 <= delay <= 1_000, ("closes about 300 ms after leaving the zone", delay)
             # A mouse press on a level of a hover-opened strip does not hold it open afterwards.
             page.hover(HEAD)
             _wait(page, "el.dataset.open === 'true'")
@@ -201,7 +210,7 @@ def test_desktop_hover_opens_press_pins_escape_and_outside_close(direct_server_w
             _wait(page, "el.dataset.open === 'true'")
             page.click(HEAD)
             page.mouse.move(20, 200)
-            page.wait_for_timeout(1300)  # longer than the 1 s close an unpinned strip would get
+            page.wait_for_timeout(1300)  # far longer than the close an unpinned strip would get
             assert _facts(page)["open"] == "true", "pinned: leaving does not close"
             # Esc closes and returns focus to the button.
             page.keyboard.press("Escape")

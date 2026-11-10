@@ -14,6 +14,13 @@ from typing import Any
 from starlette.routing import BaseRoute, Route, WebSocketRoute
 
 
+def _kept_service_routes() -> list[BaseRoute]:
+    """Activity › Background: the services tasks kept running and the owner's Stop of one launch."""
+    from ouroboros.gateway.kept_services import kept_service_routes
+
+    return kept_service_routes()
+
+
 def _ui_client_routes() -> list[BaseRoute]:
     """Installation-wide owner UI preferences and the install's
     interface language with its translation memory (``/api/ui/*``)."""
@@ -44,12 +51,16 @@ def _ui_client_routes() -> list[BaseRoute]:
 
 
 def _owner_answer_routes() -> list[BaseRoute]:
-    """The owner's answers: decision cards (``/api/decisions``, every family) and the
-    living cards Ouroboros shows in its messages (``/api/cards/*``: reads, pins)."""
+    """The owner's answers: decision cards (``/api/decisions``, every family), the protected
+    form of an integration-secret request whose values never pass through that ingress
+    (``/api/decisions/secret``), and the living cards Ouroboros shows in its messages
+    (``/api/cards/*``: reads, pins)."""
     from ouroboros.gateway.cards import card_routes
+    from ouroboros.gateway.secret_decision import api_secret_decision
     from ouroboros.gateway.task_decision import api_decision_answer
 
-    return [Route("/api/decisions", endpoint=api_decision_answer, methods=["POST"]), *card_routes()]
+    return [Route("/api/decisions", endpoint=api_decision_answer, methods=["POST"]),
+            Route("/api/decisions/secret", endpoint=api_secret_decision, methods=["POST"]), *card_routes()]
 
 
 def collect_routes(
@@ -87,7 +98,7 @@ def collect_routes(
         file_browser_routes,
     )
     from ouroboros.gateway.history import make_chat_history_endpoint, make_cost_breakdown_endpoint
-    from ouroboros.gateway.logs import api_logs_tail
+    from ouroboros.gateway.logs import api_logs_raw, api_logs_tail
     from ouroboros.gateway.storage import storage_routes
     from ouroboros.gateway.marketplace import (
         api_hub_installed,
@@ -106,6 +117,7 @@ def collect_routes(
         api_claudexor_login,
         api_claudexor_login_job,
         api_claudexor_login_job_reconcile,
+        api_claudexor_restart,
         api_claudexor_status,
         api_claudexor_wake,
     )
@@ -296,10 +308,11 @@ def collect_routes(
         Route("/api/update/description", endpoint=api_update_description, methods=["POST"]),
         Route("/api/update/apply", endpoint=api_update_apply, methods=["POST"]),
         Route("/api/cost-breakdown", endpoint=make_cost_breakdown_endpoint(data_dir)),
-        *storage_routes(data_dir),
+        *storage_routes(data_dir), *_kept_service_routes(),
         Route("/api/evolution-data", endpoint=api_evolution_data),
         Route("/api/chat/history", endpoint=make_chat_history_endpoint(data_dir)),
         Route("/api/logs/{name}", endpoint=api_logs_tail, methods=["GET"]),
+        Route("/api/logs/{name}/raw", endpoint=api_logs_raw, methods=["GET"]),
         Route("/api/chat/upload", endpoint=api_chat_upload, methods=["POST"]),
         Route("/api/chat/upload", endpoint=api_chat_upload_delete, methods=["DELETE"]),
         Route("/api/openai-compatible/models", endpoint=api_openai_compatible_models, methods=["POST"]),
@@ -323,6 +336,7 @@ def collect_routes(
         *harness_maintenance_routes(),
         Route("/api/claudexor/quota/refresh", endpoint=api_claudexor_quota_refresh, methods=["POST"]),
         Route("/api/claudexor/wake", endpoint=api_claudexor_wake, methods=["POST"]),
+        Route("/api/claudexor/restart", endpoint=api_claudexor_restart, methods=["GET", "POST"]),
         Route("/api/claudexor/login", endpoint=api_claudexor_login, methods=["POST"]),
         Route(
             "/api/claudexor/login/{job_id}",

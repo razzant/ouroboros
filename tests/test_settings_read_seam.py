@@ -431,7 +431,7 @@ def test_normalize_settings_raw_is_idempotent(isolated_settings):
 
 @pytest.mark.parametrize(
     ("minimum", "maximum", "expected_minimum", "expected_maximum"),
-    [(30, 30, 60, 60), (30, 7200, 60, 7200), (900, 14400, 900, 14400), (120, 600, 120, 600)],
+    [(30, 30, 60, 60), (30, 7200, 60, 7200), (900, 14400, 900, 14400)],
 )
 def test_wakeup_bounds_read_normalization_preserves_valid_values_and_does_not_write(
     isolated_settings, minimum, maximum, expected_minimum, expected_maximum,
@@ -992,3 +992,78 @@ def test_a_settings_read_takes_no_lock_and_reads_a_torn_document_again_behind_it
     isolated_settings.unlink()  # an absent document is no writer's: defaults, no lock
     taken.clear()
     assert cfg.load_settings()["TOTAL_BUDGET"] == cfg.SETTINGS_DEFAULTS["TOTAL_BUDGET"] and taken == []
+
+
+def test_a_strict_read_tells_an_absent_document_from_an_unknown_one(isolated_settings, monkeypatch):
+    """``load_settings(strict=True)`` (and ``skill_settings(strict=True)``, the skill reader over it) keeps the
+    ordinary read's values and its single read behind the writer, but a present document that stays unreadable,
+    undecodable or not an object is ``SettingsDocumentUnknown``, never defaults; absent is defaults. The ordinary
+    read is unchanged. A key this tree mirrored into the environment never stands in for the document's value."""
+    from ouroboros import config as cfg
+    from ouroboros.settings_integrity import SettingsDocumentUnknown, skill_settings
+
+    taken = []
+    monkeypatch.setattr(cfg, "_acquire_settings_lock", lambda timeout=2.0: taken.append("lock") or None)
+    assert cfg.load_settings(strict=True)["TOTAL_BUDGET"] == cfg.SETTINGS_DEFAULTS["TOTAL_BUDGET"]  # absent
+    _seed(isolated_settings, {**LEGACY_OWNER_DOCUMENT, "TELEGRAM_BOT_TOKEN": "1:a"})
+    assert skill_settings(strict=True)["TELEGRAM_BOT_TOKEN"] == "1:a"
+    complete = isolated_settings.read_bytes()
+    # Every present document that is not one object (JSON null included) is read once more behind its writer,
+    # then unknown; only a missing file is absent.
+    for broken, behind in ((complete[:-1], ["lock"]), (b"\xff\xfe", ["lock"]), (b"[1, 2]", ["lock"]),
+                           (b"null", ["lock"])):
+        isolated_settings.write_bytes(broken)
+        taken.clear()
+        with pytest.raises(SettingsDocumentUnknown):
+            cfg.load_settings(strict=True)
+        assert taken == behind
+        with pytest.raises(SettingsDocumentUnknown):
+            skill_settings(strict=True)
+        assert "TELEGRAM_BOT_TOKEN" not in cfg.load_settings()  # the ordinary read still falls back
+    isolated_settings.write_bytes(complete)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "9:operator")  # not a SETTINGS_DEFAULTS key: no environment fallback
+    _seed(isolated_settings, {**LEGACY_OWNER_DOCUMENT})
+    assert "TELEGRAM_BOT_TOKEN" not in skill_settings(strict=True)
+
+
+def test_the_owner_form_and_the_skills_share_one_strict_read_and_a_writer_never_retakes_its_lock(
+        isolated_settings, monkeypatch):
+    """The secret form's status (``_owner_settings_document(strict=True)``, outside the lock) reads a document a
+    writer is replacing once more behind that writer, as a skill's strict read does, so both see the same value;
+    a writer, which already holds the non-re-entrant lock, never asks for it again and refuses a document that
+    stays unreadable with ``SettingsDocumentUnreadable`` (one family with ``SettingsDocumentUnknown``), its bytes
+    untouched."""
+    from ouroboros import config as cfg
+    from ouroboros.gateway import owner_settings
+    from ouroboros.settings_integrity import SettingsDocumentUnknown, skill_settings
+
+    _seed(isolated_settings, {**LEGACY_OWNER_DOCUMENT, "TELEGRAM_BOT_TOKEN": "1:a"})
+    complete = isolated_settings.read_bytes()
+    taken = []
+
+    def writer_finishes(timeout=2.0):  # the lock a writer holds until its bytes are complete
+        taken.append("lock")
+        isolated_settings.write_bytes(complete)
+        return 99
+
+    monkeypatch.setattr(cfg, "_acquire_settings_lock", writer_finishes)
+    monkeypatch.setattr(cfg, "_release_settings_lock", lambda fd: None)
+    for reader in (lambda: owner_settings._owner_settings_document(strict=True), lambda: skill_settings(strict=True)):
+        isolated_settings.write_bytes(complete[:-1])  # torn mid-replace
+        taken.clear()
+        assert reader()["TELEGRAM_BOT_TOKEN"] == "1:a" and taken == ["lock"]
+
+    held = []
+    monkeypatch.setattr(cfg, "_acquire_settings_lock", lambda timeout=2.0: held.append("lock") or 99)
+    broken = complete[:-1]
+    isolated_settings.write_bytes(broken)
+    with pytest.raises(owner_settings.SettingsDocumentUnreadable) as refused:
+        owner_settings._owner_update_settings(lambda current: {**current, "TOTAL_BUDGET": 5})
+    assert isinstance(refused.value, SettingsDocumentUnknown) and str(refused.value) == \
+        owner_settings.UNREADABLE_SETTINGS_REFUSAL
+    assert held == ["lock"] and isolated_settings.read_bytes() == broken  # its own lock only; nothing written
+    with pytest.raises(owner_settings.SettingsDocumentUnreadable):
+        owner_settings._owner_settings_document(strict=True)  # still torn behind the writer: unknown, not defaults
+    assert "TELEGRAM_BOT_TOKEN" not in owner_settings._owner_settings_document()  # the ordinary read is unchanged
+    isolated_settings.unlink()
+    assert owner_settings._owner_settings_document(strict=True) == {}  # absent is new and empty

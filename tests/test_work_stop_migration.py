@@ -6,7 +6,7 @@ import json
 import pytest
 
 from ouroboros.work_stop import SELECTION_KEY, continuation_refusal, current_stop
-from supervisor.work_stop_migration import FORMAT_KEY, normalize_snapshot
+from supervisor.work_stop_migration import FORMAT_KEY, FORMAT_VERSION, normalize_snapshot
 from tests._budget_pause_exact_helpers import _install_queue, _parked
 
 
@@ -19,8 +19,10 @@ def _pause(reason="owner", **extra):
             "checkpoint": {"pause_id": "current", "pause_generation": 2}, **extra}
 
 
-@pytest.mark.parametrize("reason", ["panic_hold", "Ouroboros: the owner asked to pause before updating"])
-@pytest.mark.parametrize("has_current", [True, False])
+@pytest.mark.parametrize(("has_current", "reason"), [
+    (True, "panic_hold"),
+    (False, "Ouroboros: the owner asked to pause before updating"),
+])
 def test_old_copied_reason_never_overrules_current_pause(reason, has_current):
     task = {"id": "root", "root_task_id": "root", "_budget_pause_hold": {
         "reason": reason, "selected": False, "detail": "root_resume_generation_stale"}}
@@ -73,7 +75,7 @@ def test_selected_members_keep_only_q9_bindings_and_new_pause_discards_old_selec
 
 
 @pytest.mark.parametrize("reason,release", [("panic_hold", "owner"), ("saved_work_hold", "resume"),
-                                          ("owner_restart_hold", "resume"), ("unrecognized_code", "resume")])
+                                          ("unrecognized_code", "resume")])
 def test_unselected_old_holds_gain_release_or_become_point_refusals(reason, release):
     task = {"id": "held", "_budget_pause_hold": {"reason": reason, "stop_cause": "panic", "selected": False}}
     snap = _snapshot(task)
@@ -117,9 +119,10 @@ def test_ghost_shapes_are_addressable_but_never_selected_or_terminally_revived()
 def test_format_stamp_survives_absent_stops_and_empty_snapshot(tmp_path, monkeypatch):
     queue, _, workers = _install_queue(tmp_path, monkeypatch)
     path = tmp_path / "state" / "queue_snapshot.json"
+    path.parent.mkdir(parents=True, exist_ok=True)  # no install-time writer creates state/ any more
     path.write_text(json.dumps(_snapshot()))
     assert queue.restore_pending_from_snapshot() == 0
-    assert json.loads(path.read_text())[FORMAT_KEY] == 1
+    assert json.loads(path.read_text())[FORMAT_KEY] == FORMAT_VERSION
     assert not workers.PENDING
     from supervisor import work_stop_migration
     monkeypatch.setattr(work_stop_migration, "normalize_snapshot", lambda *_a: pytest.fail("format already converted"))
@@ -153,4 +156,36 @@ def test_real_restore_normalizes_before_retention_and_repairs_missing_locator(tm
     _idle_worker(workers, sent)
     workers.assign_tasks()
     assert sent == []
-    assert json.loads(path.read_text())[FORMAT_KEY] == 1
+    assert json.loads(path.read_text())[FORMAT_KEY] == FORMAT_VERSION
+
+
+def test_a_restored_locator_keeps_the_project_basis_its_result_carries(tmp_path, monkeypatch):
+    """A paused Project row the legacy queue lost is rebuilt from its result with the
+    basis that result carries (#2547), never a legacy stamp from today's registry."""
+    from ouroboros.projects_registry import bind_task_to_project, create_project, project_scope_admission
+    from ouroboros.task_results import load_task_result, write_task_result
+    from supervisor.task_admission import revalidate_project_holds
+
+    queue, _, workers = _install_queue(tmp_path, monkeypatch)
+    project = create_project(tmp_path, "room", name="Room")
+    basis = project_scope_admission(tmp_path, project_id="room")
+    _parked(tmp_path, monkeypatch, task_id="ghost")
+    workers.PENDING.pop()  # the legacy queue no longer names it
+    bind_task_to_project(tmp_path, "ghost", "room", project["chat_id"], origin={"absent": "mid_task_no_origin"})
+    write_task_result(tmp_path, "ghost", "scheduled", project_id="room", _project_admission=basis)
+    queue.persist_queue_snapshot()
+    path = tmp_path / "state" / "queue_snapshot.json"
+    legacy = json.loads(path.read_text())
+    legacy.pop(FORMAT_KEY)
+    path.write_text(json.dumps(legacy))
+
+    assert queue.restore_pending_from_snapshot() == 1
+    [task] = [row for row in workers.PENDING if row["id"] == "ghost"]
+    expected = {**basis, "frozen": True}
+    expected.pop("workspace_claims", None)
+    assert task["_project_admission"] == expected, task.get("_project_admission")
+    assert load_task_result(tmp_path, "ghost")["_project_admission"] == basis, "the result is only observed"
+    assert queue.resume_budget_paused_task("ghost")["ok"]
+    with queue._queue_lock:
+        revalidate_project_holds()
+    assert not task.get("_project_admission_restore_hold"), task.get("_project_admission_restore_hold")

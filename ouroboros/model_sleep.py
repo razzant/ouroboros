@@ -5,6 +5,12 @@ model's choice, never a duration threshold. It selects senders, readable task
 terminals, own run terminals, own service exits (warm only) and/or a wake time.
 Without selectors, any addressed mail wakes it. Owner words/controls and typed
 descendant escalations bypass sender filters; ordinary unselected mail waits.
+A sleeping ``wait_task``/``wait_tasks`` adds its descriptor (``task_wait``,
+``native_task_wait``): its all/any mode decides the task terminal over the effective
+result its answer reads, a selected child's unseen attention beacon wakes it too and
+a selected source lost after arming wakes it as unknown.
+A place arrival's typed ``place_arrival.wake`` decides for itself (``owner_mailbox.place_arrival_wake``):
+``True`` wakes its author past any selector, ``False`` never wakes, not even any mail; without it, mail.
 New questions from any ordinary run THIS author owns also wake it, never a
 foreign run or reviewer custody. Exact question sources reach its transcript;
 exposure is remembered per run/interaction only after delivery, never an answer.
@@ -350,12 +356,10 @@ def acknowledge_hold_delivery(ctx: Any, text: str, order: int | None = None) -> 
 def credit_hold_source(ctx: Any, row: Dict[str, Any], view: Dict[str, Any]) -> None:
     """A result that showed holds but reached the transcript shortened keeps its complete text as an exact
     source (``view['result_source_ref']``). Its holds count as shown once what was delivered of that one source
-    covers every character: the shortened view's own head and tail, then ``read_file`` windows that opened that
-    very file at its exact bytes (``read_view`` target and ``source_revision``), merged by the reading ledger
-    staged delegated outputs use (``delegate_output``). A cut window or a skipped middle credits only what was
-    shown; another file credits nothing, whatever its text claims. The holds are then read from the retained
-    source itself and recorded at the place its shortened view arrived (``order``, ``_record_holds``): a task a
-    later view or park notice showed keeps that newer record.
+    covers every character (``delegate_output.credit_exact_source``: the shortened view's own head and tail, then
+    ``read_file`` windows of that very file at its exact bytes; another file credits nothing, whatever its text
+    claims). The holds are then read from the retained source itself and recorded at the place its shortened view
+    arrived (``order``, ``_record_holds``): a task a later view or park notice showed keeps that newer record.
 
     ``row`` is the executed call and ``view`` its delivered view. A pending source leaves only once read whole:
     a later wait may select other tasks, so no later view stands in for it, and its few hundred bytes sit beside
@@ -363,50 +367,22 @@ def credit_hold_source(ctx: Any, row: Dict[str, Any], view: Dict[str, Any]) -> N
     that returned the same text keep two files, each completed only by what was delivered of it, at its own place.
     Pending sources and the records' places ride the continuation; the ledger is this process's, so a restarted
     worker proves its coverage again by reading."""
+    from ouroboros.delegate_output import credit_exact_source
+
     published = (row.get("result_meta") or {}).get("tool_result_meta") or {}
-    sources, read_view = dict(getattr(ctx, "_held_dependency_sources", None) or {}), published.get("read_view")
+    sources, key = dict(getattr(ctx, "_held_dependency_sources", None) or {}), None
     if published.get(HOLD_NOTICE):
-        ref, read_view = view.get("result_source_ref"), None
+        ref = view.get("result_source_ref")
         if not isinstance(ref, dict) or not ref.get("sha256"):
             return  # no exact source was kept: nothing can complete this view, so the next wait shows it again
-        key, ref = f"{ref.get('path')}|{ref['sha256']}", {**ref, "order": _next_order(ctx)}
-        ctx._held_dependency_sources = {**sources, key: ref}
-    elif not isinstance(read_view, dict) or not (named := [(key, ref) for key, ref in sources.items() if (
-            isinstance(ref, dict) and ref.get("sha256") and ref["sha256"] == read_view.get("source_revision"))]):
+        key = f"{ref.get('path')}|{ref['sha256']}"
+        sources[key] = {**ref, "order": _next_order(ctx)}
+        ctx._held_dependency_sources = sources
+    elif not isinstance(published.get("read_view"), dict):
         return
-    import hashlib
-
-    from ouroboros.artifacts import read_actor_source_bytes, task_artifact_dir_path, task_id_for_artifacts
-    from ouroboros.delegate_output import _covered_whole, _delivered_source_ranges
-    from ouroboros.tool_result_delivery import RESULT_VIEW_BASIS, reader_text
-
-    drive, owner, complete = pathlib.Path(ctx.drive_root), task_id_for_artifacts(ctx), False
-    try:
-        if read_view is not None:
-            store = task_artifact_dir_path(drive, owner)
-            target = pathlib.Path(str(read_view.get("target") or "")).resolve(strict=False)
-            key, ref = next(((key, ref) for key, ref in named if store.joinpath(
-                *pathlib.PurePosixPath(str(ref.get("path"))).parts).resolve(strict=False) == target), (None, None))
-            if ref is None:
-                return  # the same bytes under another name are not this source
-        content = reader_text(read_actor_source_bytes(drive, owner, ref).decode("utf-8"))
-        if read_view is not None:
-            ranges = _delivered_source_ranges(read_view, str(row.get("result") or ""), view, content)
-        else:  # the shortened view itself: its head and tail address this same text
-            shown = view.get("result_source_view") or {}
-            ranges = shown.get("shown_ranges") if (
-                shown.get("range_basis") == RESULT_VIEW_BASIS and shown.get("complete_chars") == len(content)
-                and shown.get("complete_sha256") == hashlib.sha256(content.encode("utf-8")).hexdigest()) else None
-            if not isinstance(ranges, list) or not all(
-                    isinstance(span, list) and len(span) == 2 and all(type(n) is int for n in span)
-                    and 0 <= span[0] <= span[1] <= len(content) for span in ranges):
-                return
-        for start, end in ranges or ():
-            complete = _covered_whole(f"held:{ctx.task_id}|{key}", start, end, len(content))
-    except Exception:  # crediting never breaks delivery: unread or unmatched, its holds stay unshown
-        log.warning("Held-dependency source of %s not credited; its holds stay unshown", ctx.task_id, exc_info=True)
-        return
-    if complete:
+    done = credit_exact_source(ctx, row, view, sources, "held", key)
+    if done:
+        key, ref, content = done
         acknowledge_hold_delivery(ctx, content, _place(ref.get("order")))
         ctx._held_dependency_sources = {other: value for other, value in (
             getattr(ctx, "_held_dependency_sources", None) or {}).items() if other != key}
@@ -468,6 +444,8 @@ def terminal_readiness(ctx: Any, chosen: Dict[str, Any], seen: Any = (), *, ordi
             identity = f"task:{task_id}"
             if status in SETTLED_STATUSES and identity not in delivered:
                 ready.append({"id": identity, "reason": f"{identity}:{status}"})
+        if (chosen.get("task_wait") or {}).get("mode") == "all_terminal" and len(ready) < len(chosen.get("tasks") or ()):
+            ready = []  # a native all_terminal wait wakes once every selected task settled
     except Exception as exc:
         errors.append(exc)
     try:
@@ -494,7 +472,8 @@ def wake_reason(ctx: Any, chosen: Dict[str, Any], *, seen: Any = (), review_entr
                 wake_fact: Dict[str, Any] | None = None) -> str:
     """Why the sleep is ready now (``""`` = not yet). Owner input is never filtered."""
     from ouroboros.deadline_utils import parse_deadline_ts, utc_now
-    from ouroboros.owner_mailbox import KIND_CARD_INPUT, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE
+    from ouroboros.owner_mailbox import (KIND_CARD_INPUT, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED,
+                                         KIND_TASK_MESSAGE, place_arrival_wake)
     from ouroboros.owner_wait import _wait_entries
     first_error = None
     if wake_fact is not None:
@@ -523,6 +502,11 @@ def wake_reason(ctx: Any, chosen: Dict[str, Any], *, seen: Any = (), review_entr
         if kind != KIND_TASK_MESSAGE:
             return f"control:{kind}"  # finalize_now, hurry, owner_pause, ... always wake
         source = str(entry.get("source_task_id") or "")
+        place_wake = place_arrival_wake(entry)  # the host's typed fact; without one, ordinary mail
+        if place_wake is not None:
+            if place_wake:
+                return f"mail:{source or 'unknown'}"  # its author's wake, whatever it selected
+            continue  # context only: unread, the next drain delivers it
         attention = entry.get("work_attention")
         attention = attention if isinstance(attention, dict) else {}
         if (entry.get("provenance") == "system" and attention.get("kind") == "silence"
@@ -541,11 +525,22 @@ def wake_reason(ctx: Any, chosen: Dict[str, Any], *, seen: Any = (), review_entr
         shown = set(interactions.get(run_id) or ()) | set((chosen.get("interaction_seen") or {}).get(run_id) or ())
         if _pending_question(run) and set(run.pending_interaction_ids) - shown:
             return f"run_question:{run_id}"
-    ready = read_source(terminal_readiness, ctx, chosen, seen, review_entries=review_entries)
+    native, effective, lost = isinstance(chosen.get("task_wait"), dict), {}, {}
+    if native:  # a sleeping task wait's terminal is the effective one its own answer reads
+        from ouroboros.native_task_wait import observe, unseen_beacon
+
+        tasks = chosen.get("tasks") or ()
+        rows, lost, contended = read_source(observe, ctx, tasks) or ({}, dict.fromkeys(tasks, "source_unreadable"), None)
+        first_error = first_error or contended
+        effective = {"task_results": rows}
+    ready = read_source(terminal_readiness, ctx, chosen, seen, review_entries=review_entries, **effective)
     if ready:
         if wake_fact is not None:
             wake_fact.update(actor_id=ready[0].get("actor_id", ready[0]["id"]))
         return ready[0]["reason"]
+    if native:  # a waited child's beacon ends the sleep as it ends an in-slot wait
+        if beacon := read_source(unseen_beacon, ctx, chosen["task_wait"]):
+            return beacon
     for pin in chosen.get("services") or ():
         observed = _service_wake(pin)  # already returns an unknown wake on a read failure
         if observed:
@@ -553,6 +548,8 @@ def wake_reason(ctx: Any, chosen: Dict[str, Any], *, seen: Any = (), review_entr
     wake_at = parse_deadline_ts(chosen.get("wake_at") or "")
     if wake_at is not None and utc_now() >= wake_at and f"time:{chosen.get('wake_at')}" not in seen:
         return "timeout"
+    if lost:  # nothing else is ready: a lost selected source wakes as unknown, never a silent sleep
+        return f"task_wait:unknown:{next(iter(lost))}"
     if first_error is not None:
         raise first_error
     return ""
@@ -574,10 +571,7 @@ def cold_blockers(ctx: Any, *, chosen: Dict[str, Any] | None = None, allow_trans
     from ouroboros.model_detach import is_detach
 
     chosen = chosen if chosen is not None else (getattr(ctx, "_model_sleep", None) or {})
-    detach = is_detach(chosen)
-    allow_transfer = allow_transfer and not detach
-    if detach:
-        transferred = ()
+    detach = is_detach(chosen)  # a detach transfers its exact bound runs to the body like any cold sleep
     blockers: List[Dict[str, str]] = []
     try:
         observed = observe_task_runs(custody.custody_root(ctx), str(ctx.task_id), reason="cold_sleep_check",
@@ -609,12 +603,21 @@ def cold_blockers(ctx: Any, *, chosen: Dict[str, Any] | None = None, allow_trans
     from ouroboros.owner_pause import (tree_member_results, tree_model_requests, current_tool_operation,
                                        _member_coordinates)
     from ouroboros.delegate_custody_current import tree_task_ids
-    from ouroboros import process_custody as pc
-    from ouroboros.platform_layer import pid_is_alive
 
     root = _canonical_root(ctx)
     tree_id = _member_coordinates(ctx)[1]
     dependencies = set(chosen.get("tasks", []) + chosen.get("senders", []))
+    if isinstance(chosen.get("task_wait"), dict):  # a native wait depends on who answers for the ids it selected
+        from ouroboros.native_task_wait import observe
+
+        rows, _lost, contended = observe(ctx, chosen.get("tasks") or ())
+        if contended is not None:
+            blockers.append({"kind": "tree_custody_unreadable", "detail": str(contended)[:200]})
+        for task_id, row in rows.items():
+            dependencies.add(str(row.get("task_id") or task_id))  # a retry successor the root fence would hold
+            if row.get("pre_first_result") and str(row.get("root_task_id") or task_id) == tree_id:  # no census row
+                blockers.append({"kind": "running_member" if row.get("status") == "running" else "queued_member",
+                                 "detail": task_id})
     members, links_known = {str(ctx.task_id)}, True  # a row is unlinked only once every link source answered
     try:
         members.update(tree_task_ids(root, tree_id))  # the store answers or raises: unreadable is a blocker
@@ -645,8 +648,8 @@ def cold_blockers(ctx: Any, *, chosen: Dict[str, Any] | None = None, allow_trans
                 # including a child whose terminal/mail was selected as our wake.
                 blockers.append({"kind": "queued_member", "detail": task_id})
             own_sleep = ""
-            if own:
-                sleep_tools = ("continue_in_background",) if detach else ("await_messages",)
+            if own:  # the in-flight call arming this very sleep (a native task wait too) is no custody
+                sleep_tools = ("continue_in_background",) if detach else ("await_messages", "wait_task", "wait_tasks")
                 own_sleep = next((operation for tool in sleep_tools
                                   if (operation := current_tool_operation(ctx, tool))), "")
             from ouroboros.tool_custody import retained_tool_custody
@@ -661,13 +664,11 @@ def cold_blockers(ctx: Any, *, chosen: Dict[str, Any] | None = None, allow_trans
                 blockers.append({"kind": "member_custody", "detail": member})
         from ouroboros.tool_custody import task_process_blockers
         blockers.extend(task_process_blockers(root, members))
-        complete, processes = pc._read_ledger_strict(root)
-        if not complete:
-            raise OSError("process_custody_unreadable")
-        for record in processes:
-            if str(record.get("owner_task") or "") in members and (
-                    pid_is_alive(int(record.get("pid") or 0)) or pc._service_group_survives_leader(record)):
-                blockers.append({"kind": "owned_process", "detail": str(record.get("pid"))})
+        from ouroboros.launch_custody import unsettled_rows
+        for record, state in unsettled_rows(root, members):
+            pid = record.get("pid")
+            blockers.append({"kind": "owned_process", "detail": str(pid)} if state == "live" else
+                            {"kind": "tree_custody_unreadable", "detail": f"launch of process {pid} unobserved"})
     except Exception as exc:
         blockers.append({"kind": "tree_custody_unreadable", "detail": str(exc)[:200]})
     return blockers
@@ -713,7 +714,8 @@ def request_sleep(ctx: Any, chosen: Dict[str, Any], mode: str) -> Dict[str, Any]
         if holds:
             return {"reason": "dependency_held", "slept": False, "mode": mode, "held": holds, "note": HOLD_NOTE}
     from ouroboros.sleep_custody import transferable_pairs
-    retains_lane = mode == MODE_WARM
+    from ouroboros.task_carrier import LANE_CONVERSATION, execution_owner
+    retains_lane = mode == MODE_WARM and execution_owner(ctx).get("lane") != LANE_CONVERSATION  # a turn holds none
     if mode == MODE_COLD:
         try:
             _pairs, retains_lane = transferable_pairs(_canonical_root(ctx), str(ctx.task_id))
@@ -725,13 +727,20 @@ def request_sleep(ctx: Any, chosen: Dict[str, Any], mode: str) -> Dict[str, Any]
         project_id = str(getattr(ctx, "project_id", "") or (getattr(ctx, "task_metadata", None) or {}).get("project_id") or "")
         from ouroboros.owner_pause import _member_coordinates
         tree_id = _member_coordinates(ctx)[1]
-        for selected in set(chosen.get("tasks", []) + chosen.get("senders", [])):
-            row = load_task_result(_canonical_root(ctx), selected, strict=True) or {}
+        if isinstance(chosen.get("task_wait"), dict):  # who answers needs the lane: a queued retry too
+            from ouroboros.native_task_wait import lane_rows
+
+            selected_rows = lane_rows(ctx, chosen.get("tasks") or ()) if project_id else {}
+        else:
+            selected_rows = {selected: load_task_result(_canonical_root(ctx), selected, strict=True) or {}
+                             for selected in set(chosen.get("tasks", []) + chosen.get("senders", []))}
+        for selected, row in selected_rows.items():
             if (project_id and row.get("project_id") == project_id
                     and str(row.get("root_task_id") or selected) != tree_id
                     and row.get("status") in {"requested", "scheduled"}):
-                raise ValueError("this sleep retains the project lane needed by the selected queued root; "
-                                 "choose another source or finish the external writer before releasing its lane")
+                raise ValueError("this sleep retains the project lane needed by the selected queued root, so it cannot "
+                                 "start while you wait for it here: wait on another source or end this turn; a cold "
+                                 "sleep releases the lane unless your bound external runs keep it")
     gaps: List[Dict[str, str]] = []
     if mode == MODE_COLD:
         blockers = cold_blockers(ctx, chosen=chosen, allow_transfer=True, gaps=gaps)
@@ -856,17 +865,37 @@ def in_slot_wait(ctx: Any, window_sec: float, target: str = "mail", *, task_ids=
         end_in_slot_wait(ctx, key)
 
 
-def wake_notice(chosen: Dict[str, Any], outcome: str, slept: float | None) -> Dict[str, Any]:
+def resumer_words(by: Any) -> str:
+    """An explicit Resume named from its grant's ``by`` (``budget_resume``); '' when it names nobody."""
+    actor = str(by.get("actor") or "") if isinstance(by, dict) else ""
+    if actor == "owner":
+        return "an explicit Resume by your human"
+    if actor != "ouroboros":
+        return ""
+    reason = " ".join(str(by.get("text") or "").split())  # whole: a resumer's reason is never cut
+    return ("an explicit Resume by Ouroboros" + (f" (task {by['task_id']})" if by.get("task_id") else "")
+            + (f', saying "{reason}"' if reason else ""))
+
+
+def wake_notice(chosen: Dict[str, Any], outcome: str, slept: float | None, by: Any = None) -> Dict[str, Any]:
     """Host facts for the woken model: what woke it — a fact, never a verdict.
 
-    ``slept`` is ``None`` when no sleep start was recorded: no duration is claimed."""
+    ``slept`` is ``None`` when no sleep start was recorded: no duration is claimed. ``by`` is the declared actor of
+    the Resume grant that ended a cold sleep (``budget_resume``); it names that Resume instead of an unnamed control."""
+    native = isinstance(chosen.get("task_wait"), dict)  # its result follows in a host notice (``native_task_wait``)
     what = {
         "timeout": "the wake time you chose",
     }.get(outcome, "")
     if not what:
         if outcome.startswith("task:"):
             _prefix, task_id, status = (outcome.split(":", 2) + ["", ""])[:3]
-            what = f"task {task_id} reaching {status} — read its result; settled is not success"
+            what = (f"task {task_id} reaching {status}" + (" for the task wait you chose" if native else
+                    " — read its result") + "; settled is not success")
+        elif outcome.startswith("beacon:"):
+            what = f"an attention beacon from task {outcome[7:]}"
+        elif outcome.startswith("task_wait:unknown:"):
+            what = (f"task {outcome[18:]} of the task wait you chose having no readable record or queue row; "
+                    "its state is unknown, not success")
         elif outcome.startswith("run:"):
             what = f"delegated run {outcome[4:]} reaching an engine terminal state — inspect its outcome; collection may remain owed"
         elif outcome.startswith("run_question:"):
@@ -884,11 +913,14 @@ def wake_notice(chosen: Dict[str, Any], outcome: str, slept: float | None) -> Di
             what = "the owner's message or control"
         else:
             what = outcome or "an unconfirmed input"
+    if (resumer := resumer_words(by)) and (not outcome or outcome.startswith("control:")):
+        what = resumer
     return {"role": "user", "content": (
         "[SYSTEM NOTICE]\nYou slept" + ("" if slept is None else f" {slept:.0f}s")
         + f" ({chosen.get('mode') or 'warm'}) and were woken by {what}. "
         "Mail you did not select stayed unread and reaches you now with everything else pending. "
-        "The sleep did not count as execution time; an explicit deadline did not move."
+        + ("The task wait's current result follows in a separate notice. " if native else "")
+        + "The sleep did not count as execution time; an explicit deadline did not move."
         + (" A cold sleep ended your previous process: its browser and task-local services are gone; "
            "re-read files before building on them." if chosen.get("mode") == "cold" else ""))}
 

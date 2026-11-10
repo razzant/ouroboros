@@ -42,11 +42,11 @@ response-assembly truth is covered transitively by the next round's
 | Existing mechanism | Where | Role in the invariant |
 |---|---|---|
 | Canonical digest of the exact send copy (`canonical_json_v1`: sort_keys, compact separators, `ensure_ascii=False`, `allow_nan=False`, `default=str`) | `llm_attempt._attempt_request` / `_canonical_candidate_bytes` | The canonical form and its versioned basis (`candidate_measurement_kind`) |
-| Pre-dispatch identity re-check: digests re-derived from the closed-over candidate and compared with the reservation's expected identity; drift refuses dispatch (`PhysicalAttemptPreparationFailed: physical candidate changed before dispatch`) | `llm_attempt._candidate_before_dispatch` | The forward gate's skeleton — a digest compare of two in-memory copies |
-| Durable candidate manifest + redacted CAS blob, written before dispatch, with two labelled digest domains (`canonical_json_v1_pre_redaction` facts vs `observability_json_v1_post_default_redaction_cas` blob) | `observability.persist_physical_candidate` / `persist_call` | The sealed record carrier |
+| Pre-dispatch identity re-check: digests re-derived from the closed-over candidate and compared with the reservation's expected identity; drift refuses dispatch (`PhysicalAttemptPreparationFailed: physical candidate changed before dispatch`) | `llm_attempt._candidate_before_dispatch` | Exact raw/context comparison without rebuilding token, clock or image observations; Claudexor uploads the validated canonical bytes with their measured hash and length |
+| Durable candidate manifest + redacted CAS blob, written before dispatch, with two labelled digest domains (`canonical_json_v1_pre_redaction` facts vs `observability_json_v1_post_default_redaction_cas` blob); the blob is a request view stored once — its messages and tool schemas are parts, its skeleton placement is spliced back into the exact whole on read (`shared_values`, PERSISTENCE observability row), so the CAS digest and size are the whole's | `observability.persist_physical_candidate` / `persist_call` | The sealed record carrier |
 | Attempt lifecycle `reserved → dispatched → settled|unresolved` / `reserved → released`, short-lock append + sequence replay | `usage_accounting` | The join target for the reverse direction |
 | Anthropic native custody projection (opaque provider-native content replaced before persistence; disclosed as `anthropic_native_custody_projected`) | `anthropic_native_custody.physical_custody_projection` | Prototype of a typed exclusion |
-| Secret redaction with per-hit `RedactionRecord`s | `observability._redact_text` + rules | Prototype of a typed exclusion |
+| Secret redaction with per-hit `RedactionRecord`s, worked out once per part of a request view and reused by the task's other records (`redaction.part_fact`) | `redaction._redact_text` + rules | Prototype of a typed exclusion |
 
 An identity gate that compares only two **in-memory** serializations cannot
 establish whether the durable record matches either copy.
@@ -54,6 +54,12 @@ establish whether the durable record matches either copy.
 **reconstructing from the durable record** and byte-comparing that
 reconstruction against the wire-bound serialization, emitting a **typed durable
 fact** on any inequality (§3.2 — a fact, not a refusal).
+
+### Claudexor
+
+The pre-dispatch gate compares exact raw/context identities without repeating token, clock or image measurement. Claudexor uploads those validated canonical bytes with their measured hash and length; the defensive send copy remains, and mutation after measurement refuses dispatch. Claudexor acceptance merges the operation identity and capture facts into its existing operational request manifest without rereading or serializing the payload. Raw/projection references and prior metadata survive; the separate pre-dispatch physical manifest and send seal remain immutable.
+
+A released Claudexor prepare failure repeats on the primary within `max_retries` (three sends, 4 s then 8 s) only with `ClaudexorModelNotDispatched`, provider `claudexor`, an empty operation ID and gateway code `daemon_unreachable`, `daemon_not_answering`, `daemon_starting` or `daemon_descriptor_changed`. The configured-route walk follows a spent bound. An open transport wait or held unknown-repeat record still prevents a new burst. Direct-API connect failures, undated credential-pool refusals and local slot refusals retain one attempt; a lost create reply remains unknown and rejoins the same invocation.
 
 ## 3. The contract
 
@@ -78,7 +84,11 @@ The existing physical-candidate manifest carries a
 The send seam holds one frozen request representation, verifies its in-memory
 identity and persists one durable pre-send record. It never calls
 `verify_sealed_candidate` or reads that record back. Persistence remains a
-precondition of dispatch.
+precondition of dispatch. Its redaction scans only parts the task has not met:
+`redaction.part_fact` keeps each part's result by its bytes, in their key order,
+and its parent's flags (`observability.task_parts`, shared with the logical request,
+the Claudexor request and the working checkpoint), re-roots its records where the
+part stands, and the stored bytes and exclusion rows equal the whole walk's.
 
 The explicit audit compares the manifest's raw digest and size with the
 attempt's recorded digest and size, checks serializer/exclusion metadata and
@@ -125,7 +135,7 @@ violation.
 
 | class | what | why excluded | disclosure |
 |---|---|---|---|
-| `secret_redaction` | Secret VALUES masked in the CAS blob by the observability redaction rules | The durable copy must not carry live credentials; equality is digest-anchored instead (pre-redaction sha256) | existing `RedactionRecord`s → `{class, path}` rows |
+| `secret_redaction` | Secret VALUES masked in the CAS blob by the observability redaction rules; a tool schema's parameter names and shapes are not values (under a credential-named parameter all but its notes are) | The durable copy must not carry live credentials; equality is digest-anchored instead (pre-redaction sha256) | existing `RedactionRecord`s → `{class, path}` rows |
 | `provider_native_custody` | Provider-owned opaque content (e.g. encrypted reasoning replay items) projected before persistence | Bytes are provider property; replay semantics are server-side | existing `anthropic_native_custody_projected` flag → per-item `{class, path, opaque_sha256}` |
 | `transport_envelope` | HTTP headers, auth, SDK-added transport fields (user-agent, idempotency keys, `stream` flag where the SDK owns it) | Below the seam by construction; carries secrets and transport identity, not model-visible content | class-level row (no per-call enumeration) |
 | `provider_side_transform` | Server-side effects the host cannot observe pre-flight: prompt-cache application, provider truncation/normalization | Not host-controlled; the seam is the LAST host-controlled point, not the last point | class-level row |
@@ -211,3 +221,33 @@ from "our two copies agree" to "the durable record agrees with the wire".
   non-blocking dispatch and reverse joins. History folded before the usage store
   existed is resolved through the retained evidence described in
   [Usage store](USAGE_STORE.md#8-explicit-history-audit).
+
+## 8. Round receipt
+
+Each round's `llm_round` carries what the host did to prepare its request
+(`llm_observability.round_window` around the model call; `round_starts` marks
+the batch's end). When the round's own call fails, its recovery (a configured
+fallback, an owner-wait resend) runs in a window of its own: the answer's row
+carries the recovery's facts from its start, without `round_top`, its
+`model_call` step including the choice and fit of the route. Facts for the log
+only; nothing decides by them.
+
+- `work` (`context_timing.counted`): `secret_scan`, bytes of request-view parts
+  the redaction worked out (once per part per task, §3.2); `new_parts`, bytes
+  of shared parts the CAS stored for the first time (`observability.write_part`).
+  R1 (`tests/test_cost_round.py`): round 2 scans exactly the bytes it adds, at
+  any start size. A scan is keyed by the part's own key order and the CAS by its
+  sorted bytes, so a part met in two orders is scanned twice and stored once.
+- `host_steps.steps`: `[wall ms, thread CPU ms]` between marks: `round_top`
+  (the batch's end to the model call), `model_call` (to the first record),
+  `request_record`, `physical_candidate`, `daemon_upload`, `create_operation`
+  (CPU null: it ends on the model sender's thread).
+- `host_steps.sections_ms`: wall ms of each record's `redact`, `blobs`,
+  `lock_wait` and `manifest_write`; `context_facts`;
+  `daemon.gateway|operations|upload|create`; `event_put`; `total` (the window).
+- `host_steps.rusage`: the process's voluntary and involuntary context
+  switches, major faults and block writes since the batch's end; absent on
+  Windows.
+
+About a kilobyte a round lands in the events archive kept for good (~14 MB a
+day at the 14,000 rounds a busy install made on 09.11).

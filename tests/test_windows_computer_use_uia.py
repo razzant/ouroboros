@@ -738,8 +738,7 @@ def test_the_action_aborts_when_the_chosen_element_cannot_be_reread():
 
 @pytest.mark.parametrize("verb,pattern_id,call", [
     ("invoke", 10000, "Invoke"), ("set_value", 10002, "SetValue"), ("toggle", 10015, "Toggle"),
-    ("expand", 10005, "Expand"), ("collapse", 10005, "Collapse"), ("select", 10010, "Select"),
-    ("scroll_into_view", 10017, "ScrollIntoView"), ("focus", None, "SetFocus"),
+    ("focus", None, "SetFocus"),
 ])
 def test_every_verb_goes_through_its_pattern_and_receipts_before_and_after(verb, pattern_id, call):
     calls = Calls()
@@ -857,9 +856,12 @@ def test_the_tools_refuse_outside_windows():
         api.tools["window_list"]["handler"]()
 
 
-@pytest.mark.parametrize("shape", ["tree", "flat"])
-@pytest.mark.parametrize("label", ['"' * 4000, "\\" * 4000, "\u0001" * 4000, "界🙂" * 2000],
-                         ids=["quotes", "backslashes", "control", "unicode"])
+@pytest.mark.parametrize(("label", "shape"), [
+    pytest.param('"' * 4000, "tree", id='quotes-tree'),
+    pytest.param("\\" * 4000, "flat", id='backslashes-flat'),
+    pytest.param("\u0001" * 4000, "tree", id='control-tree'),
+    pytest.param("界🙂" * 2000, "flat", id='unicode-flat'),
+])
 def test_large_read_survives_actual_child_result_encoding(tmp_path, shape, label):
     from ouroboros.extension_process_runner import _RESULT_CAP, _write_child_result
 

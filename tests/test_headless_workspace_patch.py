@@ -8,7 +8,9 @@ vetoes, and the acting-base-sha manifest contract.
 from __future__ import annotations
 
 import json
+import pathlib
 import subprocess
+import time
 
 import pytest
 
@@ -22,6 +24,7 @@ from ouroboros.headless import (
     write_workspace_patch_artifacts,
 )
 from ouroboros.task_results import write_task_result
+from ouroboros.utils import utc_now_iso
 
 
 from tests._headless_cli_shared import (  # noqa: F401  (autouse fixture applies on import)
@@ -29,6 +32,54 @@ from tests._headless_cli_shared import (  # noqa: F401  (autouse fixture applies
     _managed_worker_pool_available,
 )
 from tests._store_shared import read_result
+
+
+def test_received_ignored_paths_use_original_basis_and_exactly_one_lane(tmp_path):
+    from ouroboros.workspace_file_outputs import file_output_changes
+    from tests.test_workspace_file_outputs import git, repository, commit
+
+    root = repository(tmp_path / "received")
+    (root / ".gitignore").write_text("*.ignored\n")
+    (root / "tracked.ignored").write_bytes(b"original\n")
+    git(root, "add", "-f", ".gitignore", "tracked.ignored")
+    commit(root)
+    base = git(root, "rev-parse", "HEAD").decode().strip()
+    task = {"metadata": {"workspace_preflight": {"git": {"head": base}}},
+            "received_file_outputs": {path: {"run_id": "late"} for path in
+                                      ["new.ignored", "tracked.ignored", "gone.ignored"]}}
+    (root / "tracked.ignored").write_bytes(b"late\n")
+    (root / "new.ignored").write_bytes(b"new\n")
+    for index in range(2):
+        cap = tmp_path / f"capture-{index}"
+        _, manifest = write_workspace_patch_artifacts(root, cap, task=task)
+        rows = {row["path"]: row for row in file_output_changes(manifest, cap)}
+        assert set(rows) == {"new.ignored", "tracked.ignored"}
+        assert rows["new.ignored"]["before"] is None
+        assert rows["tracked.ignored"]["before"]["size"] == len(b"original\n")
+        assert manifest["patch_size"] == 0
+        if index == 0:
+            assert git(root, "ls-files", "new.ignored") == b""
+            git(root, "add", "-f", "new.ignored")
+    (root / "tracked.ignored").write_bytes(b"original\n")
+    (root / "new.ignored").unlink()
+    _, reverted = write_workspace_patch_artifacts(root, tmp_path / "reverted", task=task)
+    assert reverted["status"] == "ready_no_changes" and not reverted.get("file_output_changes")
+    (root / "tracked.ignored").unlink()
+    (root / "new.ignored").symlink_to("tracked.ignored")
+    cap = tmp_path / "deleted-and-link"
+    _, manifest = write_workspace_patch_artifacts(root, cap, task=task)
+    rows = {row["path"]: row for row in file_output_changes(manifest, cap)}
+    assert rows["tracked.ignored"]["after"] is None
+    assert rows["new.ignored"]["after"]["kind"] == "symlink" and manifest["patch_size"] == 0
+
+
+def test_received_paths_with_unavailable_original_base_are_named(tmp_path):
+    from tests.test_workspace_file_outputs import repository
+    root = repository(tmp_path / "received")
+    task = {"task_constraint": {"mode": "acting_subagent", "surface": "self_worktree", "write_root": str(root),
+                                "base_sha": "f" * 40}, "received_file_outputs": {"new.ignored": {"run_id": "late"}}}
+    _, manifest = write_workspace_patch_artifacts(root, tmp_path / "capture", task=task)
+    assert manifest["status"] == "failed" and manifest["errors"][0]["paths"] == ["new.ignored"]
 
 
 def test_workspace_patch_includes_tracked_and_untracked_files(tmp_path):
@@ -511,3 +562,177 @@ def test_an_untracked_symlink_loop_never_fails_the_capture(tmp_path):
         assert manifest["status"] == ARTIFACT_STATUS_READY_WITH_CHANGES, (name, manifest.get("errors"))
         patch = (artifacts / "workspace.patch").read_text(encoding="utf-8")
         assert "kept.txt" in patch and "new file mode 120000" in patch, name
+
+
+# --- #2711: the copy's evidence folder is held out of every capture by one name and retained once ---
+
+def _git(repo, *args):
+    return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+
+
+def _evidence_copy(tmp_path, *, tracked_evidence=False):
+    """A task's own copy holding a product change and a session's test runs under ``.review-evidence/``."""
+    repo = tmp_path / "repo"
+    _init_repo_with_file(repo)
+    if tracked_evidence:
+        (repo / ".review-evidence").mkdir()
+        (repo / ".review-evidence" / "keep.txt").write_text("the project's own file\n", encoding="utf-8")
+        _git(repo, "add", ".review-evidence")
+        _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "tracked evidence")
+    head = _git(repo, "rev-parse", "HEAD")
+    (repo / "feature.py").write_text("VALUE = 1\n", encoding="utf-8")
+    run = repo / ".review-evidence" / "safe-test-evidence" / "run-1"
+    run.mkdir(parents=True)
+    expected = {".review-evidence/safe-test-evidence/run-1/result.json": b'{"returncode": 0}\r\n',
+                ".review-evidence/safe-test-evidence/run-1/trace.bin": b"\x7fELF\x00\x01" + bytes(range(256)) * 8}
+    for name, payload in expected.items():
+        (repo / name).write_bytes(payload)
+    task = {"id": "task-evidence", "workspace_root": str(repo), "metadata": {"workspace_preflight": {"git": {"head": head}}}}
+    return repo, task, expected
+
+
+def _retained_files(summary_path):
+    root = pathlib.Path(summary_path).parent / "files"
+    return {path.relative_to(root).as_posix(): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
+
+
+def test_the_copys_evidence_folder_is_retained_once_and_held_out_of_the_patch_and_file_outputs(tmp_path):
+    """#2711: at task finalization the session's test runs under ``.review-evidence/`` reach the task record once,
+    as retained evidence files, never again inside ``workspace.patch`` (text) and a file-outputs zip (binaries);
+    a second finalization of the unchanged copy copies nothing again."""
+    from ouroboros.workspace_patch_rules import NAMED_EVIDENCE_EXCLUSION
+    from ouroboros.workspace_patch_capture import _held_named_evidence
+
+    parent = tmp_path / "data"
+    parent.mkdir()
+    repo, task, expected = _evidence_copy(tmp_path)
+    task["metadata"]["host_evidence"] = "old-evidence"  # stale run metadata cannot rename task evidence
+    delegated = "nested/.review-evidence/run/log"
+    held, summary = _held_named_evidence(repo, "nested/.review-evidence", set(expected) | {delegated}, set(), None, None)
+    assert held == {delegated} and summary is None  # a delegated run still uses its own folder
+    write_task_result(parent, task["id"], "completed", workspace_root=str(repo), artifact_status="finalizing")
+    finalize_task_artifacts(parent, task)
+    result = read_result(parent, task["id"])
+    assert result["artifact_status"] == ARTIFACT_STATUS_READY_WITH_CHANGES
+    kinds = [row["kind"] for row in result["artifacts"]]
+    assert kinds.count("named_evidence_manifest") == 1 and "workspace_file_outputs" not in kinds, kinds
+    base = task_artifacts_dir(parent, task["id"])
+    manifest = json.loads((base / "workspace_patch.json").read_text(encoding="utf-8"))
+    assert {row["path"]: row["reason"] for row in manifest["untracked_excluded"]} == dict.fromkeys(expected, NAMED_EVIDENCE_EXCLUSION)
+    assert manifest["untracked_included"] == ["feature.py"] and manifest["file_outputs"] == []
+    patch = (base / "workspace.patch").read_text(encoding="utf-8")
+    assert "feature.py" in patch and ".review-evidence" not in patch
+    evidence = manifest["named_evidence"]
+    assert (evidence["status"], evidence["files"], evidence["gaps"]) == ("retained", 2, 0)
+    assert _retained_files(evidence["summary_path"]) == expected
+    [row] = [row for row in result["artifacts"] if row["kind"] == "named_evidence_manifest"]
+    assert row["path"] == evidence["summary_path"] and row["files"] == 2 and row.get("sha256")
+    witness = json.loads(pathlib.Path(evidence["summary_path"]).read_text(encoding="utf-8"))["witness"]
+    stamps = {path: path.lstat().st_mtime_ns for path in (pathlib.Path(evidence["summary_path"]).parent / "files").rglob("*")}
+    finalize_task_artifacts(parent, {**task, **read_result(parent, task["id"])})  # the copy is unchanged
+    again = json.loads((base / "workspace_patch.json").read_text(encoding="utf-8"))["named_evidence"]
+    assert again["summary_path"] == evidence["summary_path"] and _retained_files(again["summary_path"]) == expected
+    assert json.loads(pathlib.Path(again["summary_path"]).read_text(encoding="utf-8"))["witness"] == witness
+    assert {path: path.lstat().st_mtime_ns for path in (pathlib.Path(again["summary_path"]).parent / "files").rglob("*")} == stamps
+    assert len(list(base.glob("**/named_evidence*"))) == 1  # one copy, never two
+    assert [row["kind"] for row in read_result(parent, task["id"])["artifacts"]].count("named_evidence_manifest") == 1
+
+
+
+def test_a_baseline_tracked_path_under_the_evidence_name_stays_product_and_is_not_retained(tmp_path):
+    """A path the recorded baseline holds there (Git, or a supplied ``file_baseline``) is the project's own:
+    edited, it stays in the patch; only a file new since the baseline is evidence (astra R3's reverse test)."""
+    from hashlib import sha256
+
+    parent = tmp_path / "data"
+    parent.mkdir()
+    repo, task, expected = _evidence_copy(tmp_path, tracked_evidence=True)
+    (repo / ".review-evidence" / "keep.txt").write_text("the project's own file, edited\n", encoding="utf-8")
+    (repo / ".gitignore").write_text("*.csv\n", encoding="utf-8")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "ignore csv")
+    task["metadata"]["workspace_preflight"]["git"]["head"] = _git(repo, "rev-parse", "HEAD")
+    before = b"a,b\n1,2\n"
+    (repo / ".review-evidence" / "supplied.csv").write_bytes(before)  # a copied input under the evidence name
+    supplied = {"kind": "file", "size": len(before), "sha256": sha256(before).hexdigest(), "mode": 0o644}
+    task["metadata"]["file_baseline"] = {".review-evidence/supplied.csv": supplied}
+    (repo / ".review-evidence" / "supplied.csv").write_bytes(before + b"3,4\n")
+    write_task_result(parent, task["id"], "completed", workspace_root=str(repo), artifact_status="finalizing")
+    finalize_task_artifacts(parent, task)
+    base = task_artifacts_dir(parent, task["id"])
+    manifest = json.loads((base / "workspace_patch.json").read_text(encoding="utf-8"))
+    assert ".review-evidence/keep.txt" in manifest["tracked_changed"]
+    assert {row["path"] for row in manifest["untracked_excluded"]} == set(expected)
+    assert [row["path"] for row in manifest["file_output_changes"]] == [".review-evidence/supplied.csv"]
+    patch = (base / "workspace.patch").read_text(encoding="utf-8")
+    assert "edited" in patch and "safe-test-evidence" not in patch
+    assert _retained_files(manifest["named_evidence"]["summary_path"]) == expected  # neither product path is evidence
+
+
+def test_a_failed_evidence_retention_keeps_the_files_in_the_capture(tmp_path, monkeypatch):
+    """Never zero copies: when the folder cannot be retained, its files ride the patch and the outputs as before,
+    and the manifest says why."""
+    from ouroboros import delegate_named_evidence
+
+    parent = tmp_path / "data"
+    parent.mkdir()
+    repo, task, expected = _evidence_copy(tmp_path)
+
+    def refused(*_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(delegate_named_evidence, "retain_named_evidence", refused)
+    write_task_result(parent, task["id"], "completed", workspace_root=str(repo), artifact_status="finalizing")
+    finalize_task_artifacts(parent, task)
+    result = read_result(parent, task["id"])
+    base = task_artifacts_dir(parent, task["id"])
+    manifest = json.loads((base / "workspace_patch.json").read_text(encoding="utf-8"))
+    assert manifest["named_evidence"]["status"] == "capture_failed" and "No space left" in manifest["named_evidence"]["error"]
+    assert ".review-evidence/safe-test-evidence/run-1/result.json" in manifest["untracked_included"]
+    assert ".review-evidence/safe-test-evidence/run-1/trace.bin" in [row["path"] for row in manifest["file_output_changes"]]
+    assert "named_evidence_manifest" not in [row["kind"] for row in result["artifacts"]]
+    assert not list(base.glob("**/named_evidence*")) and not list(base.glob("**/.named_evidence*"))
+
+
+def test_a_direct_folders_evidence_folder_is_retained_once_beside_its_direct_capture(tmp_path):
+    """#2711 for an ordinary folder (no Git): its direct capture retains the session's new ``.review-evidence/``
+    files once, as a copy's capture does, while a supplied ``file_baseline`` path there stays the folder's own;
+    a folder with no new evidence retains nothing, and an unchanged one is not copied again."""
+    from hashlib import sha256
+
+    parent, folder = tmp_path / "data", tmp_path / "folder"
+    (folder / ".review-evidence").mkdir(parents=True)
+    parent.mkdir()
+    before = b"a,b\n1,2\n"
+    (folder / ".review-evidence" / "supplied.csv").write_bytes(before)  # a copied input under the evidence name
+    supplied = {"kind": "file", "size": len(before), "sha256": sha256(before).hexdigest(), "mode": 0o644}
+    task = {"id": "task-direct", "workspace_root": str(folder), "metadata": {"file_baseline": {".review-evidence/supplied.csv": supplied}}}
+    write_task_result(parent, task["id"], "completed", workspace_root=str(folder), artifact_status="finalizing")
+    finalize_task_artifacts(parent, task)
+    base = task_artifacts_dir(parent, task["id"])
+    manifest = json.loads((base / "workspace_patch.json").read_text(encoding="utf-8"))
+    assert manifest["capture_kind"] == "directory_direct" and "named_evidence" not in manifest
+    assert "named_evidence_manifest" not in [row["kind"] for row in read_result(parent, task["id"])["artifacts"]]
+    expected = {".review-evidence/safe-test-evidence/run-1/result.json": b'{"returncode": 0}\r\n'}
+    for name, payload in expected.items():
+        (folder / name).parent.mkdir(parents=True, exist_ok=True)
+        (folder / name).write_bytes(payload)
+    finalize_task_artifacts(parent, {**task, **read_result(parent, task["id"])})
+    manifest = json.loads((base / "workspace_patch.json").read_text(encoding="utf-8"))
+    evidence = manifest["named_evidence"]
+    assert manifest["capture_kind"] == "directory_direct" and (evidence["status"], evidence["files"]) == ("retained", 1)
+    assert _retained_files(evidence["summary_path"]) == expected  # the supplied path is no evidence
+    assert [row["kind"] for row in read_result(parent, task["id"])["artifacts"]].count("named_evidence_manifest") == 1
+    assert (folder / ".review-evidence" / "supplied.csv").read_bytes() == before and (folder / next(iter(expected))).is_file()
+    finalize_task_artifacts(parent, {**task, **read_result(parent, task["id"])})  # the folder is unchanged
+    assert json.loads((base / "workspace_patch.json").read_text(encoding="utf-8"))["named_evidence"]["summary_path"] == evidence["summary_path"]
+    assert len(list(base.glob("**/named_evidence*"))) == 1  # one copy, never two
+    assert [row["kind"] for row in read_result(parent, task["id"])["artifacts"]].count("named_evidence_manifest") == 1
+    time.sleep(0.05)  # a later task on the same folder starts after the first one's files were written
+    later = {"id": "task-later", "workspace_root": str(folder), "started_at": utc_now_iso()}
+    time.sleep(0.05)
+    (folder / ".review-evidence" / "later.txt").write_bytes(b"mine\n")
+    write_task_result(parent, later["id"], "completed", workspace_root=str(folder), artifact_status="finalizing")
+    finalize_task_artifacts(parent, later)
+    mine = json.loads((task_artifacts_dir(parent, later["id"]) / "workspace_patch.json").read_text(encoding="utf-8"))["named_evidence"]
+    assert _retained_files(mine["summary_path"]) == {".review-evidence/later.txt": b"mine\n"}, "the first task's evidence stays its own"

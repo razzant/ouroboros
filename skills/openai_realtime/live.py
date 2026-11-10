@@ -129,6 +129,10 @@ class OpenAISession(JsonSession):
             or self.outstanding or self.tool_update is not None or self.waiting_tools or self.truncations
             or self.requested_deletions)
 
+    @property
+    def input_pending(self):
+        return self.speech_active or bool(self.input_transcripts)
+
     def final_captions(self):
         events = [LiveEvent("caption", {"speaker": "ouroboros", "item_id": item, "text": text,
                   "final": True, "replace": True, "incomplete": True}) for item, text in self.text.items() if text]

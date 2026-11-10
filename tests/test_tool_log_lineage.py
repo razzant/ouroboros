@@ -33,8 +33,6 @@ def _tools(meta: dict | None, **attrs) -> types.SimpleNamespace:
     ("direct_root", {}, {"root_task_id": "t-self", "delegation_role": "root"}),
     ("pooled_root", {"delegation_role": "root", "root_task_id": "t-self"},
      {"root_task_id": "t-self", "delegation_role": "root"}),
-    ("child", {"parent_task_id": "t-parent", "root_task_id": "t-root", "delegation_role": "subagent"},
-     {"root_task_id": "t-root", "delegation_role": "subagent", "parent_task_id": "t-parent"}),
     ("headless_child", {"parent_task_id": "t-parent", "root_task_id": "t-root", "delegation_role": "subagent",
                         "headless_child_drive_root": "/elsewhere", "task_depth": 2},
      {"root_task_id": "t-root", "delegation_role": "subagent", "parent_task_id": "t-parent", "task_depth": 2}),

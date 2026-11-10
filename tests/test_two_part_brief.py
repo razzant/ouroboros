@@ -88,7 +88,7 @@ def test_retrieving_seat_gets_both_parts_and_contract_b(tmp_path):
     assert brief["user"] == TRIAD_USER_TURN
     system = brief["system"]
     assert "## Part 1 — The change" in system and "## Part 2" in system
-    assert "### Staged diff" in system and "return 2" in system
+    assert "## Staged diff" in system and "return 2" in system
     assert COUPLING_CHECKLIST_SECTION.split(" / ")[0] in system or "coupling" in system.lower()
     # Contract B is the answer format of a seat asked both questions.
     assert REVIEW_TWO_PART_OBJECT_CONTRACT.strip() in system

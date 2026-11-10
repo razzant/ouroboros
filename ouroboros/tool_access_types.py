@@ -84,6 +84,8 @@ class ResolvedResourceBinding:
     state_drive_root: pathlib.Path
     logical_base_path: pathlib.Path | None = None
     repository_path: pathlib.Path | None = None
+    # The address a READ asked for when a re-anchor opened ``target_path`` elsewhere: its policy holds too.
+    requested_path: pathlib.Path | None = None
 
 
 _ALL_ROOTS: frozenset[str] = frozenset({

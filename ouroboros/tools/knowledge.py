@@ -123,7 +123,6 @@ def _residency(note: knowledge_store.KnowledgeNote, delta: dict | None = None) -
     if note.state == "archived":
         return "Residency: archived, so it is not in the active knowledge index; knowledge_read still opens it."
     body = note.source.text_at(note.source.body_span) if note.source else note.text
-    loaders = "Main, tasks, wakes and Presence; helpers do not load it"
     if note.address.scope == "global" and note.address.topic == OVERVIEW_TOPIC:
         before = (delta or {}).get('old_body_chars', len(body))
         after = len(body)
@@ -132,12 +131,16 @@ def _residency(note: knowledge_store.KnowledgeNote, delta: dict | None = None) -
                 f"delta {(after - before) / 4:+.2f} tokens (chars/4). "
                 "Effect applies at the next context build; an accepted session keeps its earlier capture. "
                 "Current route room: unknown here; compact_context inspects its actual observation.")
-    where = (f"the global knowledge index ({loaders})" if note.address.scope == "global"
-             else f"the {note.address.scope} knowledge index, loaded in that project's contexts")
+    project = f"the {note.address.scope} knowledge index, loaded in that project's contexts"
     tail = f"the body ({len(body)} chars) is read on demand with knowledge_read."
-    if isinstance(note.summary, str) and note.summary.strip():
-        return f"Residency: its summary ({len(note.summary)} chars) is shown in {where}; {tail}"
-    return f"Residency: it has no summary, so {where} shows only its title, marked (no summary); {tail}"
+    if not (isinstance(note.summary, str) and note.summary.strip()):
+        where = "the global knowledge index" if note.address.scope == "global" else project + ","
+        return f"Residency: it has no summary, so {where} shows its address and title, and its whole view marks it (no summary); {tail}"
+    loaders = ("Main, tasks, wakes and Presence, and the outline a tight window, a helper and a session start with"
+               if knowledge_store.outline_keeps_summary(note.metadata.get("type"))
+               else "Main, tasks, wakes and Presence; a tight window and a helper's or session's start show only its address and title")
+    where = f"the global knowledge index ({loaders})" if note.address.scope == "global" else project
+    return f"Residency: its summary ({len(note.summary)} chars) is shown in {where}; {tail}"
 
 
 def _capture_previous(ctx: ToolContext, note: knowledge_store.KnowledgeNote) -> dict:
@@ -181,9 +184,9 @@ def _knowledge_write(
                              "or omit summary to keep the current one")
         if mode != "edit" and old_str is not None:
             raise ValueError("old_str is used only with mode=edit")
-        if mode != "edit" and summary is not None:
-            raise ValueError(f"summary is used only with mode=edit, not mode={mode}; revise it with "
-                             "mode=edit, or in the frontmatter of an overwrite's content")
+        if mode not in ("edit", "append") and summary is not None:
+            raise ValueError(f"summary is used only with mode=edit or mode=append, not mode={mode}; "
+                             "revise it with one of them, or in the frontmatter of an overwrite's content")
         if mode != "edit" and not lifecycle and content is None:
             raise ValueError(f"mode={mode} requires content")
         if lifecycle and content is None:
@@ -276,15 +279,15 @@ def get_tools() -> List[ToolEntry]:
         }, _knowledge_read),
         ToolEntry("knowledge_write", {
             "name": "knowledge_write",
-            "description": "Create, revise, append or reversibly archive durable Markdown understanding. YAML carries type, optional title and an authored summary; unknown metadata survives. Each active summary stays resident in the index's whole view; body text never replaces it. Under physical window pressure, the outline names every active topic and keeps type person summaries; others remain readable with knowledge_list. Archive hides default navigation rows; direct reads and explicit Presence topics stay available. Restore removes even malformed archive metadata from readable YAML in CURRENT text, including later edits. Ordinary writes preserve the lifecycle-owned archive field. Legacy index prose stays until an authored global overview retires it.",
+            "description": "Create, revise, append or reversibly archive durable Markdown understanding. YAML carries type, optional title and an authored summary; unknown metadata survives. Each active summary stays resident in the index's whole view (a global note's in every room and place I work in, a project note's in that project); body text never replaces it. Under physical window pressure, the outline names every active topic and keeps type person summaries; others remain readable with knowledge_list. Archive hides default navigation rows; direct reads and explicit Presence topics stay available. Restore removes even malformed archive metadata from readable YAML in CURRENT text, including later edits. Ordinary writes preserve the lifecycle-owned archive field. Legacy index prose stays until an authored global overview retires it.",
             "parameters": {"type": "object", "properties": {
                 "topic": topic, "scope": scope,
                 "content": {"type": "string", "description": "Markdown, optionally with YAML frontmatter; supplied fields merge with retained ones. Required except for a summary-only edit; omit for archive/restore. No summary is generated from the body."},
-                "mode": {"type": "string", "enum": ["overwrite", "append", "edit", "archive", "restore"], "description": "overwrite replaces the body; append adds text; edit replaces one exact old_str and/or summary. archive/restore preserve body bytes and require a current revision; archive requires reason. The overview always stays active. Missing notes are created by overwrite/append only."},
+                "mode": {"type": "string", "enum": ["overwrite", "append", "edit", "archive", "restore"], "description": "overwrite replaces the body; append adds text, optionally with summary; edit replaces one exact old_str and/or summary. archive/restore preserve body bytes and require a current revision; archive requires reason. The overview always stays active. Missing notes are created by overwrite/append only."},
                 "reason": {"type": "string", "description": "Required non-empty explanation for archive only; no automatic classification or summarization occurs."},
                 "old_str": {"type": "string", "description": "Non-empty exact body substring for mode=edit; it must occur once. content is the replacement, including empty text for a justified deletion. Omit both to change only the summary."},
-                "summary": {"type": "string", "description": "mode=edit only: the new authored summary, alone or beside the old_str replacement, in the same revision-checked write."},
-                "expected_revision": {"type": "string", "description": "Source revision returned by knowledge_read. Required for overwrite/edit of existing notes and archive/restore. Omit or pass empty only to create a missing note; drift returns the current source without replacing it."},
+                "summary": {"type": "string", "description": "mode=edit or append: the new authored summary, in the same revision-checked write as the old_str replacement or the appended text, or alone with mode=edit."},
+                "expected_revision": {"type": "string", "description": "Source revision returned by knowledge_read. Required for overwrite/edit of existing notes, an append with summary, and archive/restore. Omit or pass empty only to create a missing note; drift returns the current source without replacing it."},
             }, "required": ["topic"]},
         }, _knowledge_write),
         ToolEntry("knowledge_list", {

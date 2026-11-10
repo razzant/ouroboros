@@ -66,12 +66,19 @@ def _initiate_presence(
 ) -> str:
     """Start one reviewed presence cycle from owner/background cognition."""
 
+    import concurrent.futures
+    import functools
+
     from ouroboros.loop import _resolve_loop_max_rounds
     from ouroboros.model_wait import dispatch_deadline_remaining_sec
     from ouroboros.presence_admission import admit_presence_turn
     from ouroboros.presence_bindings import conversation_key, list_presence_bindings
-    from ouroboros.presence_continuation import CONTINUATION_VERSION, start_proactive_turn
-    from ouroboros.presence_runner import PresenceTurnEvent
+    from ouroboros.presence_carrier import dispatch_presence_turn
+    from ouroboros.presence_continuation import CONTINUATION_VERSION
+    from ouroboros.presence_runner import (
+        PROACTIVE_TURNS, PresenceTurnError, PresenceTurnEvent, PresenceTurnResult, _retry_target,
+        presence_event_identity, presence_turn_task_id,
+    )
     from ouroboros.tool_access import canonical_data_root
 
     root = canonical_data_root(ctx)
@@ -102,28 +109,45 @@ def _initiate_presence(
     # within its own operation bound, and the turn never inherits that bound as its lifetime.
     # This call is the turn's version-1 consumer; delivery reporting is negotiated apart.
     remaining = dispatch_deadline_remaining_sec()
-    result = start_proactive_turn(
-        admission=admission,
-        event=PresenceTurnEvent(
-            source_event_id=source_event_id,
-            provider=endpoint.transport,
-            account_id=endpoint.account_id,
-            conversation_id=endpoint.conversation_id,
-            thread_id=endpoint.thread_id,
-            conversation_key=conversation_key(
-                endpoint.transport, endpoint.account_id, endpoint.conversation_id, endpoint.thread_id,
-            ),
-            actor={"id": "ouroboros", "display_name": "Ouroboros", "kind": "proactive_initiation"},
-            conversation={"kind": "configured_presence_destination"},
-            message={"kind": "proactive_initiation"},
-            text=prompt,
-            continuation_version=CONTINUATION_VERSION,
+    event = PresenceTurnEvent(
+        source_event_id=source_event_id,
+        provider=endpoint.transport,
+        account_id=endpoint.account_id,
+        conversation_id=endpoint.conversation_id,
+        thread_id=endpoint.thread_id,
+        conversation_key=conversation_key(
+            endpoint.transport, endpoint.account_id, endpoint.conversation_id, endpoint.thread_id,
         ),
-        repo_dir=ctx.repo_dir,
-        drive_root=root,
-        event_queue=getattr(ctx, "event_queue", None),
-        wait_sec=None if remaining is None else max(0.0, remaining - _INITIATION_MARGIN_SEC),
+        actor={"id": "ouroboros", "display_name": "Ouroboros", "kind": "proactive_initiation"},
+        conversation={"kind": "configured_presence_destination"},
+        message={"kind": "proactive_initiation"},
+        text=prompt,
+        continuation_version=CONTINUATION_VERSION,
     )
+    # The initiated turn is a conversation-lane turn like a Host's (one execution model): this call admits it
+    # through the lane's door and is its version-1 consumer, waiting for the first envelope within its own bound.
+    # The carrier re-admits from the durable bindings and the event payload, takes the gate and runs the body.
+    payload = {"source_event_id": event.source_event_id, "provider": event.provider, "account_id": event.account_id,
+               "conversation_id": event.conversation_id, "thread_id": event.thread_id,
+               "conversation_key": event.conversation_key, "actor": dict(event.actor),
+               "conversation": dict(event.conversation), "message": dict(event.message), "text": event.text}
+    turn_id = presence_turn_task_id(admission.binding_id, event.source_event_id)
+    identity = presence_event_identity(admission.binding_id, event)
+    execution, _started = PROACTIVE_TURNS.start_or_dispatch(
+        turn_id, identity=identity, reserve=lambda: True, release=lambda: None,
+        dispatch=functools.partial(dispatch_presence_turn, drive_root=root, skill_name=selected.transport_skill,
+                                   admission=admission, event=event, event_payload=payload, staged_files=[],
+                                   gate_wait=True))
+    wait_sec = None if remaining is None else max(0.0, remaining - _INITIATION_MARGIN_SEC)
+    try:
+        result = execution.initial.result(timeout=wait_sec)
+    except concurrent.futures.TimeoutError:
+        try:  # the physical task a lost-and-retried attempt moved to, read without claiming it
+            physical = _retry_target(root, turn_id, identity)
+        except PresenceTurnError:
+            physical = turn_id
+        result = PresenceTurnResult(outcome="", text="", task_id=physical, status="running",
+                                    continuation_ref=physical, continuation_version=CONTINUATION_VERSION)
     # One shape for completed, continuing and running: the refs a caller follows are always named.
     return json.dumps(
         {

@@ -182,7 +182,6 @@ def test_timeout_reaper_does_not_clone_over_unreadable_cancel_authority(
     monkeypatch.setattr(queue, "DRIVE_ROOT", tmp_path)
     monkeypatch.setattr(queue, "FINALIZATION_GRACE_SEC", 0.0)
     monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 60.0)
-    monkeypatch.setattr(queue, "get_per_call_timeout_ceiling_sec", lambda: 0.0)
     monkeypatch.setattr(queue, "get_task_abs_ceiling_sec", lambda: 10_000_000.0)
     monkeypatch.setattr(queue, "_ensure_reaper_started", lambda: None)
     monkeypatch.setattr(queue, "persist_queue_snapshot", lambda reason="": True)
@@ -404,9 +403,9 @@ def test_steering_is_refused_while_a_cancel_intent_is_active(tmp_path, monkeypat
 
     ci.request_cancel(tmp_path, "steerme", reason="tearing down")
     receipts: list = []
-    monkeypatch.setattr(
+    monkeypatch.setattr(  # no bridge hands an ACK over, so the receipt selects the System row
         events_mod, "_emit_routing_receipt",
-        lambda ctx, evt, **kw: receipts.append(kw) or {},
+        lambda ctx, evt, **kw: receipts.append(kw) or {"routing_notice_carrier": "system"},
     )
     sent: list = []
     ctx = types.SimpleNamespace(

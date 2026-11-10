@@ -15,7 +15,7 @@ import json
 import logging
 import pathlib
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, Dict, NamedTuple, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Tuple
 
 from ouroboros import delegate_custody as custody
 from ouroboros.delegate_custody import RunCustody as _RunCustody
@@ -255,6 +255,7 @@ class _RetryBinding(NamedTuple):
     max_seconds_basis: str
     continuation: Any   # delegate_continuation.ContinuationStart: the recorded lineage
     prompt_cache_ttl: Dict[str, Any]
+    input_files: Optional[List[Dict[str, Any]]]  # the original selection receipt, never reread or recopied
 
 
 def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token: str, text: str, *,
@@ -344,7 +345,9 @@ def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token
             # (the baseline commit is gone with its ref): typed refusal.
             from ouroboros.subagent_worktrees import find_execution_snapshot
             snap_entry = find_execution_snapshot(snapshot_id)
-            if snap_entry is None or not pathlib.Path(str(snap_entry.get("path") or "")).exists():
+            from ouroboros import work_domain  # a work copy's presence through the confined descent
+
+            if snap_entry is None or not work_domain.exists(pathlib.Path(str(snap_entry.get("path") or ""))):
                 return None, _fail(
                     "delegate_start", "execution_snapshot_missing",
                     "This retry replays a MUTATING invocation whose private "
@@ -388,6 +391,7 @@ def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token
         max_seconds_basis=str(record.get("max_seconds_basis") or ""),
         continuation=replayed_custody(record),
         prompt_cache_ttl=deepcopy(record.get("prompt_cache_ttl") if isinstance(record.get("prompt_cache_ttl"), dict) else {}),
+        input_files=deepcopy(record["input_files"]) if isinstance(record.get("input_files"), list) else None,
     ), None
 
 
@@ -412,7 +416,9 @@ def _provision_snapshot(ctx: ToolContext, drive: pathlib.Path, target_root: str,
 
     task_id = str(getattr(ctx, "task_id", "") or "")
     try:
-        folder = pathlib.Path(start or target_root).resolve().relative_to(pathlib.Path(target_root).resolve())
+        from ouroboros import work_domain  # a work root by its spelling: the container resolves it
+
+        folder = work_domain.settle(start or target_root).relative_to(work_domain.settle(target_root))
         handle = provision_execution_snapshot(target_root=target_root, task_id=task_id, snapshot_id=invocation_id)
     except Exception as exc:
         return None, _fail(
@@ -421,7 +427,10 @@ def _provision_snapshot(ctx: ToolContext, drive: pathlib.Path, target_root: str,
             f"({type(exc).__name__}: {exc}). The run was NOT started: a mutating "
             "delegated run executes only in its own snapshot, never in the shared tree.",
             target_root=target_root, definitely_unrun=True)
-    if folder.parts and not (pathlib.Path(handle.path) / folder).is_dir():
+    from ouroboros import work_domain
+
+    inside = pathlib.Path(handle.path) / folder
+    if folder.parts and not ((work_domain.kind(inside) == "dir") if work_domain.is_work(inside) else inside.is_dir()):
         # Unclaimed; custody GC retries a failed release once the owning task is proven over.
         try:
             remove_execution_snapshot(handle.snapshot_id)
@@ -689,7 +698,9 @@ def _restored_from_pin(entry: _RunCustody, record: Dict[str, Any]) -> bool:
     except Exception:
         log.warning("Restoring run %s's checkout from its pinned result failed", entry.run_id, exc_info=True)
         return False
-    return pathlib.Path(entry.execution_root).exists()
+    from ouroboros import work_domain
+
+    return work_domain.exists(pathlib.Path(entry.execution_root))
 
 
 def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=None,
@@ -712,7 +723,10 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
         return None  # the review owner compares against its frozen subject, never a product baseline
     from ouroboros.delegate_directory import in_place_block, is_in_place_run
     if is_in_place_run(entry):
-        return in_place_block(entry)  # its edits are already in its starter's folder: nothing to capture
+        from ouroboros.headless import refresh_in_place_native_capture
+        note = refresh_in_place_native_capture(drive, entry)
+        block = in_place_block(entry)  # no run patch, disposition or fictitious apply
+        return {**block, "native_capture": note} if note else block
 
     def finish(block, transport=None):
         return retain_run_evidence(drive, entry, block, transport) if retain_investigation and publish else block
@@ -722,9 +736,10 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
     if is_directory_run(entry):
         owned_gateway = None
         try:
-            if gateway is None:
+            if gateway is None:  # the run's own engine (``execution_domain``)
                 from ouroboros.claudexor_daemon import read_owned_gateway
-                owned_gateway = gateway = read_owned_gateway()
+                from ouroboros.execution_domain import run_gateway
+                owned_gateway = gateway = run_gateway(entry, read_owned_gateway)
             block = directory_capture_block(drive, entry, capture_directory_result(drive, entry, gateway, publish=publish))
             return finish(block, gateway)
         except Exception as exc:
@@ -765,8 +780,10 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
             return finish(_capture_block(entry, cap_dir, manifest))
     from ouroboros.subagent_worktrees import find_execution_snapshot
     snapshot = find_execution_snapshot(entry.snapshot_id) or {}
+    from ouroboros import work_domain  # a work copy's presence through the confined descent
+
     exec_root, saved = pathlib.Path(entry.execution_root), {}
-    if not exec_root.exists():
+    if not work_domain.exists(exec_root):
         saved = manifest if manifest_path.exists() else {}
         if (str(saved.get("status") or "") in ready and saved.get("result_commit")
                 and saved.get("result_commit") == snapshot.get("result_sha")):
@@ -777,7 +794,7 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
                                               sha256=str(saved.get("sha256") or ""),
                                               patch_size=saved.get("patch_size"), capture_dir=str(cap_dir))
             return finish(_capture_block(entry, cap_dir, saved))
-    if not exec_root.exists() and not _restored_from_pin(entry, snapshot):
+    if not work_domain.exists(exec_root) and not _restored_from_pin(entry, snapshot):
         # A legacy capture saves file outputs before its diff: a later failure keeps them (#1651).
         kept = len(saved.get("file_output_changes") or []) if saved.get("status") == "failed" else 0
         return {
@@ -802,8 +819,12 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
         if entry.authority_source == "skill_payload":
             # The payload-specific adapter over the skill-loader inventory (R1
             # items 5/6): the generic workspace capture's junk/lockfile filters
-            # would silently omit legitimate loader-visible files.
-            manifest = _write_payload_patch_artifacts(exec_root, cap_dir, entry)
+            # would silently omit legitimate loader-visible files. A work copy's tree is exported first: the
+            # capture then reads only the service's own bytes (``work_skill_payloads.capture_work_payload``).
+            from ouroboros.work_skill_payloads import capture_work_payload
+
+            manifest = (capture_work_payload(exec_root, cap_dir, entry, _write_payload_patch_artifacts)
+                        if work_domain.is_work(exec_root) else _write_payload_patch_artifacts(exec_root, cap_dir, entry))
         else:
             from ouroboros.delegate_start_instructions import EVIDENCE_DIRNAME
             # A Git-subdirectory investigation runs in a folder of its copy; the
@@ -897,13 +918,17 @@ def _gone_checkout_holds(repo: pathlib.Path, copy: pathlib.Path, baseline: str) 
     if common.returncode:
         return (f"its repository {repo} could not name its Git directory ({common.stderr.strip()[:200]}); "
                 "call again once it can")
+    from ouroboros import work_domain  # a work repository's admin files are read through the confined intake
+
     root = pathlib.Path(common.stdout.strip())
+    folder = (root if root.is_absolute() else repo / root).joinpath("worktrees")
     try:
-        entries = sorted((root if root.is_absolute() else repo / root).joinpath("worktrees").iterdir())
+        entries = (sorted(folder / name for name, kind in work_domain.entries(folder) if kind == "dir")
+                   if work_domain.is_work(folder) else sorted(folder.iterdir()))
     except FileNotFoundError:
         return ""
     for admin in entries:
-        if (admin / (admin / "gitdir").read_text(encoding="utf-8").strip()).parent.resolve(strict=False) != copy:
+        if work_domain.settle((admin / work_domain.read_text(admin / "gitdir").strip()).parent) != work_domain.settle(copy):
             continue
         entry, again = f"Git's entry for the gone checkout ({admin})", "; call again once it can be read"
         remove = way("git", "-C", repo, "worktree", "remove", "--force", "--force", copy)
@@ -914,7 +939,7 @@ def _gone_checkout_holds(repo: pathlib.Path, copy: pathlib.Path, baseline: str) 
         if (moved := head.stdout.strip()) != baseline:
             return (f"{entry} still names commit {moved[:12]}, not its baseline: keep it if needed "
                     f"({way('git', '-C', repo, 'branch', '<name>', moved)}), {give_up}")
-        if (admin / "index").exists():
+        if work_domain.exists(admin / "index"):
             staged = _git(repo, f"--git-dir={admin}", "diff-index", "--cached", "--quiet", baseline, check=False)
             if staged.returncode == 1:  # --binary --full-index keeps a staged binary file's bytes, not "differ"
                 keep = way("git", f"--git-dir={admin}", "diff", "--cached", "--binary", "--full-index", baseline,
@@ -926,7 +951,8 @@ def _gone_checkout_holds(repo: pathlib.Path, copy: pathlib.Path, baseline: str) 
         present = {}
         for name in ("ORIG_HEAD", "logs/HEAD"):
             with contextlib.suppress(FileNotFoundError):
-                present[name] = (admin / name).read_bytes()
+                present[name] = (work_domain.read_bytes(admin / name) if work_domain.is_work(admin)
+                                 else (admin / name).read_bytes())
         orig = _git(repo, f"--git-dir={admin}", "rev-parse", "--verify", "--quiet", "ORIG_HEAD", check=False)
         if orig.returncode and "ORIG_HEAD" in present:
             return f"{entry}'s HEAD history could not be read (its ORIG_HEAD names no commit){again}"
@@ -969,6 +995,7 @@ def result_loss(drive: Any, entry: _RunCustody) -> Tuple[Dict[str, Any], str]:
     reject contracts."""
     import os
 
+    from ouroboros import work_domain
     from ouroboros.delegate_directory import is_directory_run
     from ouroboros.subagent_worktrees import _RESULT_REF_PREFIX, _git, _records, _safe_name
     from ouroboros.workspace_file_outputs import file_output_changes
@@ -983,8 +1010,8 @@ def result_loss(drive: Any, entry: _RunCustody) -> Tuple[Dict[str, Any], str]:
         return {}, f"{what}; call again once what it names is restored or readable"
 
     manifest = custody.delegated_capture_dir(drive, entry.task_id, custody.capture_key(entry)) / "workspace_patch.json"
-    try:
-        os.lstat(entry.execution_root)
+    try:  # a work copy's own metadata through the confined descent
+        work_domain.lstat(entry.execution_root)
         return kept(f"its private copy {entry.execution_root} is present")
     except FileNotFoundError:
         pass
@@ -1015,7 +1042,9 @@ def result_loss(drive: Any, entry: _RunCustody) -> Tuple[Dict[str, Any], str]:
                     f"capture of its own, so that pin may be its predecessor {entry.continuation_of}'s result: it is "
                     "kept, neither restored as this run's result nor released. Closing this run here would discard "
                     "it, so repeating this call fails the same way")
-    if record and (record.get("result_sha") or os.path.lexists(str(record.get("path") or ""))):
+    recorded_path = str(record.get("path") or "") if record else ""
+    if record and (record.get("result_sha") or (recorded_path and (
+            work_domain.exists(recorded_path) if work_domain.is_work(recorded_path) else os.path.lexists(recorded_path)))):
         return kept(f"its copy record still names result {record.get('result_sha') or record.get('path')}")
     lost = {"execution_root": entry.execution_root, "saved_capture": "failed" if saved else "none",
             **({"saved_files": len(files)} if files else {}), "copy_record": "without_result" if record else "absent"}
@@ -1024,7 +1053,7 @@ def result_loss(drive: Any, entry: _RunCustody) -> Tuple[Dict[str, Any], str]:
     if not str(repo).strip("."):
         return kept(f"no repository is recorded to rule out the result pin {ref}")
     try:
-        os.lstat(repo)
+        work_domain.lstat(repo)
     except FileNotFoundError:
         return lost, ""
     except OSError as exc:
@@ -1035,7 +1064,7 @@ def result_loss(drive: Any, entry: _RunCustody) -> Tuple[Dict[str, Any], str]:
             return {}, f"its repository {repo} could not be read ({pin.stderr.strip()[:200]}); call again once it can be read"
         if pin.stdout.strip():
             return kept(f"the result pin {ref} still names {pin.stdout.strip()[:12]} in {repo}")
-        held = _gone_checkout_holds(repo, pathlib.Path(entry.execution_root).resolve(strict=False), entry.baseline_sha)
+        held = _gone_checkout_holds(repo, work_domain.settle(entry.execution_root), entry.baseline_sha)
     except (OSError, ValueError) as exc:  # no git, the repository went meanwhile, undecodable metadata
         return unread(f"its repository {repo}", exc)
     return ({}, held) if held else (lost, "")
@@ -1134,8 +1163,8 @@ def payload_host_instructions(text: str, skill_name: str) -> str:
     explicit, truthful permission block is appended.
     """
     adjusted = text.replace(
-        "do not touch the host's runtime controls or memory, or modify its skills",
-        "do not touch the host's runtime controls or memory")
+        "do not touch the host's runtime controls, or modify its memory or skills;",
+        "do not touch the host's runtime controls, or modify its memory;")
     return adjusted + (
         "\nPAYLOAD ASSIGNMENT: this working tree is a PRIVATE standalone copy of "
         f"the installed skill payload '{skill_name}'. Editing its user-authored "
@@ -1148,11 +1177,13 @@ def payload_host_instructions(text: str, skill_name: str) -> str:
 
 
 def claimed_start_request(drive: pathlib.Path, *, actor_ctx: Any = None,
-                          initial_bootstrap: bool = False, **request_row: Any) -> Tuple[bool, Dict[str, Any]]:
+                          initial_bootstrap: bool = False, serving_store_id: Any = "",
+                          **request_row: Any) -> Tuple[bool, Dict[str, Any]]:
     """The pre-POST custody decision; each private capture has its own admission."""
     from ouroboros.delegate_start_claims import claimed_start_request as claim
 
-    return claim(drive, actor_ctx=actor_ctx, initial_bootstrap=initial_bootstrap, **request_row)
+    return claim(drive, actor_ctx=actor_ctx, initial_bootstrap=initial_bootstrap,
+                 serving_store_id=serving_store_id, **request_row)
 
 
 def _payload_mutation_authority(
@@ -1256,6 +1287,7 @@ def _provision_payload_snapshot(
     intent is recorded. On success the record's ``resource_ref.payload_hash``
     is filled with the pre-copy loader hash (the CAS baseline).
     """
+    from ouroboros import work_domain
     from ouroboros.subagent_worktrees import provision_payload_snapshot
 
     task_id = str(getattr(ctx, "task_id", "") or "")
@@ -1263,6 +1295,10 @@ def _provision_payload_snapshot(
         handle = provision_payload_snapshot(
             target_root=record["target_root"], task_id=task_id,
             snapshot_id=invocation_id)
+        if work_domain.managed():  # the run's private copy is the work domain's; its baseline the service built
+            from ouroboros.work_skill_payloads import materialize_payload_snapshot
+
+            handle = materialize_payload_snapshot(handle)
     except Exception as exc:
         return None, _fail(
             "delegate_start", "execution_snapshot_failed",

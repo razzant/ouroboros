@@ -251,7 +251,6 @@ def test_a_sealed_answer_is_a_seal_without_consulting_the_mailbox(tmp_path):
     assert ctx._task_acceptance_fence_generation_mismatch is False
 
 
-@pytest.mark.serial
 def test_lost_generation_mismatch_ack_cannot_produce_a_blind_seal(monkeypatch, tmp_path, short_wait):
     """#406: the first ``end(terminal)`` is applied as ``released + generation_mismatch`` and
     its ack is lost; the re-send finds no row. Owner mail is durably written before the

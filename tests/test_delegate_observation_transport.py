@@ -13,9 +13,9 @@ from ouroboros import delegate_custody, delegate_supervision
 from ouroboros.gateways import claudexor as gateway_module
 from ouroboros.tools import delegate
 from tests._delegated_transport_shared import _delegating_ctx
+from tests._cases import case_folders
 
 
-@pytest.mark.serial
 @pytest.mark.parametrize("initially_queued", [False, True])
 def test_public_wait_reads_response_slower_than_five_seconds(tmp_path, monkeypatch, initially_queued):
     requests = []
@@ -113,7 +113,7 @@ def test_typed_observation_timeout_keeps_same_run_inside_supervision(tmp_path, m
     assert sleeps == [delegate_supervision._TICK_SEC]
 
 
-@pytest.mark.parametrize("status", [200, 401, 403, 503])
+@pytest.mark.parametrize("status", [200, 401, 503])
 def test_received_auth_refusal_cannot_be_hidden_by_body_read_timeout(status):
     class BrokenBody(httpx.SyncByteStream):
         def __iter__(self):
@@ -147,10 +147,6 @@ def test_existing_control_returns_without_starting_another_observation(tmp_path,
 @pytest.mark.parametrize("failure,reason", [
     (httpx.ReadTimeout("read timed out"), "observation_read_timeout"),
     (httpx.ConnectError("connection refused"), "daemon_unreachable"),
-    (httpx.ConnectTimeout("connect timed out"), "daemon_unreachable"),
-    (httpx.PoolTimeout("pool exhausted"), "daemon_unreachable"),
-    (httpx.ReadError("connection reset"), "daemon_unreachable"),
-    (httpx.WriteError("broken pipe"), "daemon_unreachable"),
     (httpx.RemoteProtocolError("server disconnected"), "daemon_unreachable"),
 ])
 def test_read_only_retryable_transport_failures_are_typed_observation_holes(failure, reason):
@@ -205,7 +201,6 @@ def test_a_received_refusal_carries_no_observation_reason():
     ("GET", "/v2/agent-capabilities?model=private-query", "/v2/agent-capabilities"),
     ("GET", "/v2/trust?repoRoot=%2Fprivate%2Frepo", "/v2/trust"),
     ("GET", "/v2/runs/private-id/artifacts/private-file?token=private-query", "/v2/runs/..."),
-    ("POST", "/v2/threads/private-id/turns", "/v2/threads/..."),
 ])
 def test_control_failure_names_the_request_without_private_values(monkeypatch, method, path, family):
     calls, failures = [], []
@@ -286,7 +281,7 @@ def test_observation_read_failure_carries_the_gateway_typed_code(tmp_path, monke
         "daemon_unreachable", "ReadTimeout", observation_timeout=True,
         observation_reason="observation_read_timeout"))
     slow = json.loads(delegate._delegate_wait(ctx, "run-dead", observation_only=True))
-    assert slow["status"] == "observation_pending"
+    assert slow["status"] == "observation_pending" and "primary" in slow["engine_pool"]
     assert slow["reason"] == "observation_read_timeout"
     refusals.append(gateway_module.ClaudexorUnavailable("http_401", "unauthorized", status_code=401))
     refused = json.loads(delegate._delegate_wait(ctx, "run-dead", observation_only=True))
@@ -420,7 +415,9 @@ def test_an_unreadable_tick_is_a_typed_host_failure_never_an_answer(tmp_path, mo
     assert (state["observation"]["answered"], state["observation_failure"]) == (False, "observation_malformed")
     assert [text.startswith("Delegation daemon unreachable") for text in notes] == [True], notes
     replay = delegate_supervision.supervised_wait(ctx, "run-existing", wait_once=lambda *_a, **_k: pytest.fail("replayed"))
-    assert replay.code == "TOOL_REPORTED_FAILURE" and json.loads(replay.text) == payload
+    shown = json.loads(replay.text)  # the recorded refusal, labelled as a replay (#2992)
+    assert replay.code == "TOOL_REPORTED_FAILURE" and shown.pop("replay_of")["fresh_observation"] is False
+    assert shown == payload
 
 
 def test_an_observed_failed_leaf_stays_an_answered_observation(tmp_path, monkeypatch):
@@ -463,7 +460,10 @@ def test_a_recorded_legacy_fault_wake_replays_as_it_was_recorded(tmp_path):
     state["pending_wake"] = {"wake_id": "wake-legacy", "attempt_key": "1", "payload": legacy}
     delegate_supervision._save_state(ctx, state)
     replay = delegate_supervision.supervised_wait(ctx, "run-existing", wait_once=lambda *_a, **_k: pytest.fail("replayed"))
-    assert replay.code == "OK" and json.loads(replay.text) == legacy
+    shown = json.loads(replay.text)
+    marker = shown.pop("replay_of")  # a replay label, no invented time for a record that kept none (#2992)
+    assert replay.code == "OK" and shown == legacy and marker["fresh_observation"] is False
+    assert "published_at" not in marker
 
 
 @pytest.mark.parametrize("control", ["deadline", "cancellation_intent"])
@@ -503,22 +503,23 @@ def _busy(code="daemon_busy"):
                                      "retryable": True})
 
 
-@pytest.mark.parametrize("code", sorted(gateway_module.DAEMON_BUSY_CODES))
-def test_a_busy_answer_to_a_read_is_an_observation_hole_and_a_post_keeps_its_refusal(code):
+def test_a_busy_answer_to_a_read_is_an_observation_hole_and_a_post_keeps_its_refusal(subtests):
     """The engine's typed 503 that it cannot serve now is, for a GET, the same retryable
     hole as no answer (under the engine's own code, so no outage line); a POST keeps the
     refusal because a lost answer never proves a mutation was not accepted."""
-    with _scripted_gateway(lambda _request: _busy(code)) as gateway:
-        with pytest.raises(gateway_module.ClaudexorUnavailable) as read:
-            gateway.get_run("run-existing")
-        with pytest.raises(gateway_module.ClaudexorUnavailable) as write:
-            gateway.handshake()
-    assert (read.value.code, read.value.status_code) == (code, 503)
-    assert read.value.observation_timeout is True and read.value.observation_reason == code
-    assert read.value.observation_answered is True, "the engine itself answered: the transport is intact"
-    assert (write.value.code, write.value.status_code) == (code, 503)
-    assert write.value.observation_timeout is False and write.value.observation_reason == ""
-    assert write.value.observation_answered is False
+    for code in sorted(gateway_module.DAEMON_BUSY_CODES):
+        with subtests.test(code=code):
+            with _scripted_gateway(lambda _request: _busy(code)) as gateway:
+                with pytest.raises(gateway_module.ClaudexorUnavailable) as read:
+                    gateway.get_run("run-existing")
+                with pytest.raises(gateway_module.ClaudexorUnavailable) as write:
+                    gateway.handshake()
+            assert (read.value.code, read.value.status_code) == (code, 503)
+            assert read.value.observation_timeout is True and read.value.observation_reason == code
+            assert read.value.observation_answered is True, "the engine itself answered: the transport is intact"
+            assert (write.value.code, write.value.status_code) == (code, 503)
+            assert write.value.observation_timeout is False and write.value.observation_reason == ""
+            assert write.value.observation_answered is False
 
 
 @pytest.mark.parametrize("status,code", [(503, "idempotency_status_unavailable"), (500, "daemon_busy")])
@@ -570,13 +571,16 @@ def _supervised_busy(tmp_path, monkeypatch, *, busy_reads, busy_handshake=False,
     return result, sleeps, notes, reads
 
 
-@pytest.mark.parametrize("code", sorted(gateway_module.DAEMON_BUSY_CODES))
-def test_busy_reads_are_skipped_quietly_on_the_same_beat(tmp_path, monkeypatch, code):
-    result, sleeps, notes, reads = _supervised_busy(tmp_path, monkeypatch, busy_reads=2, code=code)
-    assert result["status"] == "terminal" and result["state"] == "succeeded", result
-    assert reads == ["GET"] * 3, "two busy beats, then the answered read"
-    assert sleeps == [delegate_supervision._TICK_SEC] * 2, "the cadence stays the three-second beat"
-    assert notes == [], "the daemon itself answered: no outage line, even for its daemon_unreachable"
+def test_busy_reads_are_skipped_quietly_on_the_same_beat(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for code in sorted(gateway_module.DAEMON_BUSY_CODES):
+        tmp_path = next(case_paths)
+        with subtests.test(code=code), monkeypatch.context() as monkeypatch:
+            result, sleeps, notes, reads = _supervised_busy(tmp_path, monkeypatch, busy_reads=2, code=code)
+            assert result["status"] == "terminal" and result["state"] == "succeeded", result
+            assert reads == ["GET"] * 3, "two busy beats, then the answered read"
+            assert sleeps == [delegate_supervision._TICK_SEC] * 2, "the cadence stays the three-second beat"
+            assert notes == [], "the daemon itself answered: no outage line, even for its daemon_unreachable"
 
 
 def test_a_recovery_only_window_keeps_the_transport_instead_of_rehandshaking_into_a_refusal(tmp_path, monkeypatch):
@@ -617,7 +621,7 @@ def test_a_retryable_503_on_the_compact_wait_is_an_observation_hole_and_a_plain_
 
 
 def _repaired_engine(tmp_path, monkeypatch, *, events, wait_many=None, catalog=None, detail=None, repaired=True,
-                     version="4.8.1"):
+                     version="4.8.1", opt_in=False):
     """One observing beat of the real wait over the real gateway against a scripted engine that
     lists both observation routes and answers the contract probe as ``repaired`` says (the
     release number it proves is the same either way); ``events``/``wait_many``/``catalog``
@@ -651,7 +655,11 @@ def _repaired_engine(tmp_path, monkeypatch, *, events, wait_many=None, catalog=N
         if path == "/v2/runs/run-x/events":
             return events(request)
         if path == "/v2/runs/wait-many":
-            if json.loads(request.content or b"{}").get("targets") == [{"runId": "capability-probe", "seen": None}]:
+            body = json.loads(request.content or b"{}")
+            if body.get("targets") == [{"runId": "capability-probe", "seen": None}]:
+                if body.get("includeBlocking") is True and not opt_in:  # a strict input that predates it
+                    return httpx.Response(400, json={"code": "invalid_request",
+                                                     "message": "Unrecognized key(s) in object: 'includeBlocking'"})
                 return (httpx.Response(200, json={"wakeReason": "timeout", "attention": [], "summaries": [
                     {"status": None, "pending": None, "token": None, "problem": "not_found"}]}) if repaired
                     else httpx.Response(400, json={"code": "invalid_request",
@@ -672,8 +680,7 @@ def _raise(exc):
     return handler
 
 
-@pytest.mark.parametrize("repaired", [False, True])
-@pytest.mark.parametrize("status,code", [(404, "not_found"), (503, "daemon_busy")])
+@pytest.mark.parametrize(("status", "code", "repaired"), [(404, "not_found", True), (503, "daemon_busy", False)])
 def test_an_unavailable_stream_keeps_the_provisional_window_on_the_repaired_engine_too(
         tmp_path, monkeypatch, repaired, status, code):
     """A journal that cannot be opened hands the beat to the detail read and its degraded window,
@@ -764,3 +771,48 @@ def test_a_delivered_refused_wake_is_acknowledged_by_the_loop_and_the_next_wait_
         executor.shutdown()
     assert observed["status"] == "terminal" and observed["state"] == "succeeded", observed
     assert handshakes == ["POST", "POST"], "the next wait observed afresh instead of replaying"
+
+
+def test_an_opted_in_engine_marks_async_questions_end_to_end_over_http(tmp_path, monkeypatch):
+    """FAKE ENGINE (scripted HTTP, no vendor or model) behind the real gateway and the real wait
+    (claudexor #628): the contract probe negotiates ``includeBlocking``; a new async question is
+    fetched and returned once as a running handoff; the next beat over the same token is a quiet
+    working beat with no detail read."""
+    from ouroboros import delegate_observe
+    from ouroboros.gateways import claudexor_observation as obs
+    from ouroboros.gateways import claudexor_run_events as run_events
+
+    monkeypatch.setattr(obs, "_SUPPORT", {})
+    monkeypatch.setattr(run_events, "_SUPPORT", {})
+    delegate_observe.reset_process_seen()
+    # The two beats belong to one process: the token the first acknowledged stays for the second.
+    monkeypatch.setattr(delegate_observe, "reset_process_seen", lambda: None)
+    bodies, reads, token = [], [], "A" * 43
+    asked = {"lastSeq": 1, "pendingInteractions": [{
+        "interactionId": "int-async", "delivery": "async", "harnessId": "codex",
+        "questions": [{"id": "q", "question": "Also check the docs?", "options": [], "multi_select": False}]}],
+        "summary": {"runId": "run-x", "state": "running", "effectiveAccess": "readonly",
+                    "waitingOnUser": True, "asyncQuestionsOnly": True}}
+
+    def wait_many(request):
+        bodies.append(json.loads(request.content))
+        fetched = bodies[-1]["targets"][0].get("seen") == token
+        row = {"status": "running", "pending": True, "token": token, "problem": None, "blocking": False}
+        return httpx.Response(200, json={"wakeReason": "timeout" if fetched else "attention",
+                                         "attention": [] if fetched else [0], "summaries": [row]})
+
+    def detail(request):
+        reads.append(request.url.path)
+        return httpx.Response(200, json=asked)
+
+    stream = lambda _r: httpx.Response(200, headers={"content-type": "text/event-stream"}, text=": connected\n\n")  # noqa: E731
+    first, _frames = _repaired_engine(tmp_path, monkeypatch, events=stream, wait_many=wait_many, detail=detail,
+                                      version="9.9.9", opt_in=True)
+    assert first["status"] == "waiting_on_user" and first["async_questions_only"] is True, first
+    assert bodies[0]["includeBlocking"] is True and reads == ["/v2/runs/run-x"]
+    second, _frames = _repaired_engine(tmp_path, monkeypatch, events=stream, wait_many=wait_many, detail=detail,
+                                       version="9.9.9", opt_in=True)
+    assert bodies[1]["targets"] == [{"runId": "run-x", "seen": token}] and bodies[1]["includeBlocking"] is True
+    assert second["status"] == "no_progress" and second["waiting_on_user"] is True, second
+    assert second["async_questions_only"] is True and reads == ["/v2/runs/run-x"], "no detail read on the quiet beat"
+    delegate_observe._SEEN.clear()

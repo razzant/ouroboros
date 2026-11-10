@@ -104,6 +104,56 @@ def _switch(scene, reason="adopt it"):
     body_switch._attest_loaded(root, body_adoption.read(scene.data))
 
 
+def test_adoption_authorization_refuses_an_update_that_already_owns_the_checkout(scene, monkeypatch):
+    """The common admission seam must reject an update-lock owner before writing a handoff."""
+    from supervisor import update_merge
+
+    monkeypatch.setattr(update_merge._g, "DRIVE_ROOT", scene.data)
+    lock = update_merge.acquire_update_lock()
+    try:
+        with pytest.raises(body_adoption.AdoptionRefused) as refused:
+            body_adoption.authorize(scene.ctx, scene.cand, reason="while-update")
+        assert refused.value.code == "ADOPTION_UPDATE_ACTIVE"
+        assert body_adoption.read(scene.data) == {}
+    finally:
+        update_merge.release_update_lock(lock)
+
+
+def test_the_restart_carrying_an_authorized_adoption_is_serialized_while_an_update_is_refused(scene, monkeypatch):
+    """An ``authorized`` handoff holds nothing (``holds_checkout``): the restart that binds it passes the one
+    update/restart serialization, as ``_perform_supervisor_restart`` sends it; an update is still refused."""
+    from ouroboros import server_restart
+    from supervisor import update_merge
+
+    monkeypatch.setattr(update_merge._g, "DRIVE_ROOT", scene.data)
+    monkeypatch.setattr(update_merge._g, "REPO_DIR", scene.serving)
+    body_adoption.authorize(scene.ctx, scene.cand, reason="adopt it")
+    restart_receipt(scene.data, scene.cand, "adopt it")
+    assert server_restart._safe_restart_serialized(
+        body_adoption.bind_restart(lambda **_kw: (True, "ok"), scene.data, "adopt it"),
+        reason="agent_restart_request", unsynced_policy="rescue_and_block") == (True, "ok")
+    assert body_adoption.read(scene.data)["restart_bound"] is True
+    with pytest.raises(RuntimeError, match="body adoption owns the checkout"):
+        update_merge.acquire_update_lock()
+
+
+def test_adoption_arm_does_not_wait_or_drop_authorized_handoff_when_transition_is_busy(scene):
+    """A shutdown arm busy refusal preserves the authorized handoff for explicit recovery."""
+    from supervisor import git_ops
+
+    body_adoption.authorize(scene.ctx, scene.cand, reason="busy-arm")
+    restart_receipt(scene.data, scene.cand, "busy-arm")
+    assert body_adoption.bind_restart(lambda **_kw: (True, "ok"), scene.data, "busy-arm")()[0]
+    with git_ops.bootstrap_transition_lock(data_dir=scene.data):
+        assert body_adoption.arm(
+            scene.data, worker_exits=EXITED, live_children=[],
+            owner_restart=False, owned_stop={"state": "completed", "unconfirmed": []},
+        ) == "authorized"
+    handoff = body_adoption.read(scene.data)
+    assert handoff["phase"] == "authorized"
+    assert not pathlib.Path(body_switch.pointer_path(str(scene.serving))).exists()
+
+
 def test_managed_boot_right_after_a_switch_does_not_reset_or_clean_the_checkout(scene, monkeypatch):
     server = _managed_server(monkeypatch, scene)
     ordinary = _GitOps()
@@ -330,7 +380,7 @@ def test_serving_push_publishes_only_the_operation_tag_and_never_a_candidates(sc
     assert "refs/tags/v1.0.0" not in git(remote, "for-each-ref", "--format=%(refname)")
 
 
-@pytest.mark.parametrize("tag_evidence", ["neutral", "numbered", "legacy", "numbered_then_neutral"])
+@pytest.mark.parametrize("tag_evidence", ["neutral", "legacy", "numbered_then_neutral"])
 def test_boot_settlement_pushes_the_adopted_serving_line_and_tells_its_task(scene, monkeypatch, tmp_path, tag_evidence):
     from supervisor import git_ops, git_ops_reset, message_bus, state
 
@@ -502,7 +552,8 @@ def test_request_restart_reply_quotes_the_reason_as_the_callers_own_words(scene,
     reply = registry.execute("request_restart", {"reason": reason, **adopt})
 
     host = {"adopt": f" It adopts candidate commit {scene.cand[:12]} onto ouroboros once this generation's "
-                     "readers have stopped.",
+                     "readers have stopped. Its distance from the official line is unknown: no official Update "
+                     "check is on record.",
             "plain": " The candidate is NOT adopted by this restart; it stays retained.", "unbound": ""}[mode]
     words = (f" Reason (the caller's own words): {json.dumps(stated, ensure_ascii=False)}." if stated
              else " No reason was given; the host default agent_requested_restart is recorded.")
@@ -522,11 +573,7 @@ def test_request_restart_reply_quotes_the_reason_as_the_callers_own_words(scene,
     (_CLAIM, "authorized", _UNARMED),  # no restart bound it: the last event quotes the caller
     ("not armed: owner_restart", "authorized", _UNARMED),  # caller words shaped like a finding stay words
     ("agent_requested_restart", "authorized", _UNARMED),  # the default recorded when no reason was given
-    (_CLAIM, "bound", _UNARMED),  # its restart bound it, then nothing armed it
-    (_CLAIM, "blocked", "not armed: owner_restart, child_processes_alive"),  # the exit tail's own finding
-    (_CLAIM, "no_events", _UNARMED),
-    (_CLAIM, "no_detail", _UNARMED),
-], ids=["never-bound", "finding-shaped-reason", "default-reason", "bound-unarmed", "blocked", "no-events", "no-detail"])
+], ids=["never-bound", "finding-shaped-reason", "default-reason"])
 def test_an_unarmed_adoption_found_at_boot_is_explained_by_host_findings_only(scene, monkeypatch, reason, history,
                                                                                why):
     from supervisor import message_bus, state

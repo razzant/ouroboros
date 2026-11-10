@@ -30,8 +30,15 @@ SKILLS = ('live_conversation', 'gemini_live', 'openai_realtime', 'grok_realtime'
 PROVIDERS = {'gemini': 'gemini_live:gemini', 'openai': 'openai_realtime:openai', 'grok': 'grok_realtime:grok'}
 
 
-def install(root):
+def install(root, monkeypatch):
+    from ouroboros import config
+
     settings = {key: 'synthetic-unused-key' for key in ('OPENAI_API_KEY', 'GEMINI_API_KEY', 'XAI_API_KEY')}
+    # Gemini's and xAI's keys are custom secrets: saved in the owner's document, as Settings saves them, they are
+    # requested and their grants recorded (OpenAI's is a core key, and a model credential the stack's routes would see).
+    document = root.parent / 'owner-settings.json'
+    document.write_text(json.dumps({key: settings[key] for key in ('GEMINI_API_KEY', 'XAI_API_KEY')}), encoding='utf-8')
+    monkeypatch.setattr(config, 'SETTINGS_PATH', document)
     for name in SKILLS:
         result = install_builtin_skill(name, drive_root=root, seed_dir=ROOT / 'skills', turn_on_when_ready=True)
         assert result['ok'], result
@@ -44,6 +51,22 @@ def install(root):
         assert extension_loader.load_extension(skill, lambda: settings, drive_root=root) is None
     from ouroboros.live_conversation import loaded_feature
     return loaded_feature('live_conversation:call')
+
+
+def owed_state(call):
+    """What the call still owes, for a failure message: each owed answer (call ids or room words, delivered, the
+    responses answering it), the responses begun since the owner's newest words, and the queued offers."""
+    if call is None:
+        return None
+
+    def owed(due):
+        return None if due is None else {'ids': list(due.ids), 'room': due.room, 'delivered': due.delivered,
+                                         'answering': sorted(map(str, due.answering))}
+    answers = getattr(call, 'spoken_answers', None)
+    return {'answer_due': owed(getattr(call, 'answer_due', None)), 'room_due': owed(getattr(call, 'room_due', None)),
+            'spoken_answers': None if answers is None else sorted(map(str, answers)),
+            'pending_offers': len(getattr(call, 'pending_offers', ())),
+            'deferred_outputs': len(getattr(call, 'deferred_tool_outputs', ()))}
 
 
 class Stack:
@@ -67,6 +90,7 @@ class Stack:
             await asyncio.wait_for(pending(), timeout)
         except asyncio.TimeoutError:
             raise AssertionError({'boundary': 'timed out', 'blockers': self.call.quiet_blockers() if self.call else None,
+                'owed': owed_state(self.call),
                 'connections': len(self.provider.connections), 'renewing': self.call.renewing if self.call else None,
                 'refit': self.host.state.get('refit') if self.host else None,
                 'last_native': [list(v) if self.engine == 'gemini' else v.get('type')
@@ -81,11 +105,14 @@ class Stack:
                         and not self.host.state.get('refit'))
 
     async def owner_says(self, text):
-        before = len(self.wire.audio)
+        # One serving socket for the whole utterance. A renewal's prepared successor can be accepted while the owner
+        # speaks, and `self.wire` would then name a socket that serves nothing: the call keeps serving this one until quiet.
+        wire = self.wire
+        before = len(wire.audio)
         item = f'owner-{len(self.page.controls)}'
-        self.wire.input_start(item)
-        await self.wait(lambda: len(self.wire.audio) >= before + 960)
-        self.wire.input_end(item, text)
+        wire.input_start(item)
+        await self.wait(lambda: len(wire.audio) >= before + 960)
+        wire.input_end(item, text)
         await self.wait(lambda: any(r.get('text') == text and r.get('final') for r in self.page.controls))
 
     async def tool(self, cid, name, args):
@@ -127,7 +154,7 @@ async def stack(state, monkeypatch, engine, *, thinking=False, languages=False):
     monkeypatch.setenv('OUROBOROS_TRUST_NATIVE_SEEDED_SKILLS', 'true')
     run = Stack(state, engine)
     run.provider.thinking = thinking
-    feature = install(run.root)
+    feature = install(run.root, monkeypatch)
     config = LiveConfig(enabled=True, provider=PROVIDERS[engine],
         model='gemini-3.8-live-extended-thinking' if thinking else '', search=False, interruptions=True,
         instructions='Synthetic owner call instruction, kept verbatim.')

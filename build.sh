@@ -71,9 +71,11 @@ uv pip install --python python-standalone/bin/python3 -q -r "$DESKTOP_REQUIREMEN
 echo "--- Fetching exact Claudexor runtime seed ---"
 python-standalone/bin/python3 scripts/fetch_claudexor_runtime.py --output-dir claudexor-runtime
 
-echo "--- Installing Chromium for browser tools (bundled into python-standalone) ---"
-# Full Chromium app bundle breaks nested-bundle codesign on arm64 runners.
-PLAYWRIGHT_BROWSERS_PATH=0 python-standalone/bin/python3 -m playwright install --only-shell chromium
+echo "--- Installing the pinned Chromium for browser tools (bundled into python-standalone) ---"
+# The Chrome for Testing headless shell ouroboros/chromium_runtime.py pins, verified and
+# unpacked into Playwright's .local-browsers; a full Chromium app bundle would break
+# nested-bundle codesign on arm64 runners.
+PLAYWRIGHT_BROWSERS_PATH=0 python-standalone/bin/python3 -m ouroboros.chromium_runtime install
 
 echo "--- Skipping bundled WebKit on macOS ---"
 # Playwright WebKit contains nested .framework/.xpc bundles and .tbd stubs that
@@ -81,7 +83,7 @@ echo "--- Skipping bundled WebKit on macOS ---"
 # simple embedded payload. WebKit remains available through browser.py's managed
 # Playwright cache on first engine=webkit use; Chromium stays bundled.
 
-echo "--- Removing stale WebKit, debug-symbol and test payloads from macOS package tree ---"
+echo "--- Removing stale WebKit, Playwright Chromium, debug-symbol and test payloads from macOS package tree ---"
 python3 - <<'PY'
 import pathlib
 import shutil
@@ -89,13 +91,16 @@ import shutil
 root = pathlib.Path("python-standalone")
 removed = 0
 for local_browsers in root.rglob(".local-browsers"):
-    for webkit_payload in local_browsers.glob("webkit-*"):
-        if webkit_payload.is_dir():
-            shutil.rmtree(webkit_payload)
+    # Browser tools launch only the pinned headless shell; an earlier build's
+    # Playwright Chromium in a reused tree is dead weight.
+    for stale in (*local_browsers.glob("webkit-*"), *local_browsers.glob("chromium-*"),
+                  *local_browsers.glob("chromium_headless_shell-*")):
+        if stale.is_dir():
+            shutil.rmtree(stale)
         else:
-            webkit_payload.unlink(missing_ok=True)
+            stale.unlink(missing_ok=True)
         removed += 1
-print(f"Removed {removed} stale WebKit browser payload(s) from python-standalone")
+print(f"Removed {removed} stale WebKit/Playwright Chromium payload(s) from python-standalone")
 
 # pyobjc's own test suite: test extensions nothing imports at runtime.
 tests = list(root.glob("lib/python*/site-packages/PyObjCTest"))

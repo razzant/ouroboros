@@ -8,7 +8,7 @@ from tests.ui_chat_viewport_smoke import _emit_ws_frame
 
 
 direct_server_with_data = _server
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def _vector(control, label):

@@ -1,14 +1,12 @@
 """A repaired native read gap cannot rebind or invalidate sibling selections."""
 import copy
 
-import pytest
 
 from ouroboros import task_results
 from supervisor import events_budget, queue, workers
 from tests.test_native_wait_readgap_resume import _held
 from tests.test_owner_wait_restart import restart_case as restart_case
 
-pytestmark = pytest.mark.serial
 
 
 def test_native_read_gap_resume_leaves_sibling_selections_untouched(restart_case, monkeypatch):

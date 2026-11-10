@@ -36,7 +36,7 @@ HOST_ONLY_MESSAGE_KEYS = frozenset({
     REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY, STABLE_PREFIX_BLOCKS_KEY,
     "cache_control", "_context_capsule", "_evicted_image", "_caption", "_source_path", "_source_sha256",
     "_review_image_id", "_original_image_url", "acceptance_observation", "_acceptance_observation", "review_feedback",
-    "_capture_source", "_canonical", "_requested_look", "_call_frame_source", "_call_frame_digest",
+    "_capture_source", "_canonical", "_requested_look", "_tool_answer", "_call_frame_source", "_call_frame_digest",
 })
 DELIVERY_MESSAGE_KEYS = frozenset({"_call_frame_source", "_call_frame_digest"})
 
@@ -107,8 +107,9 @@ def split_leading_system_prefix(
     (OpenRouter's translation for OpenAI): the leading blocks that already carry their own
     ``cache_control`` after the declared ones stay separate system items too, since the
     breakpoint ending each one is written and looked up on its own. Without explicit
-    breakpoints only the end of the leading system group is a lookup boundary, so a
-    changed knowledge block kept there would also lose the governance prefix before it.
+    breakpoints the lookup points are item ends: on Codex each leading item's end is one
+    (measured 04.10 and 06.10.2026), so a changed knowledge block kept inside the governance
+    item would also lose the governance prefix before it.
     """
     if placement not in SYSTEM_PREFIX_SPLIT_PLACEMENTS:
         raise ValueError(f"unknown system prefix placement: {placement!r}")

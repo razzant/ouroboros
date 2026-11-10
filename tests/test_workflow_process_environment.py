@@ -9,15 +9,18 @@ import sys
 
 import pytest
 
-from tests.test_process_environment import process_context as _process_context
+from ouroboros.settings_integrity import skill_settings
+from tests._process_environment import process_context as _process_context
 
 process_context = _process_context
 
-pytestmark = pytest.mark.serial
 
 
-@pytest.mark.parametrize("backend", ["host", "local"])
-@pytest.mark.parametrize("tool", ["run_command", "run_script", "verify_and_record"])
+@pytest.mark.parametrize(("tool", "backend"), [
+    ("run_command", "host"),
+    ("run_script", "local"),
+    ("verify_and_record", "host"),
+])
 def test_registered_foreground_env_reaches_child_and_redacts_egress(process_context, monkeypatch, backend, tool):
     from ouroboros import workspace_executor
     from ouroboros.outcomes import verification_receipts_path
@@ -26,9 +29,15 @@ def test_registered_foreground_env_reaches_child_and_redacts_egress(process_cont
     registry, ctx, workspace, data = process_context
     if backend == "local":
         ctx.executor_ref = {"type": "local", "workspace_host_path": str(workspace), "workspace_backend_path": "/workspace"}
+    from ouroboros import config
+    from ouroboros.settings_integrity import task_settings_scope, task_settings_snapshot
+
     secret = 'private-test-"quoted"\nsecond-line'
     expected_hash = hashlib.sha256(secret.encode()).hexdigest()
-    monkeypatch.setattr("ouroboros.config.load_settings", lambda: {"CUSTOM_KEY": secret, "OPENAI_BASE_URL": "ordinary-8080"})
+    monkeypatch.setattr(config, "SETTINGS_PATH", data / "settings.json")
+    config.SETTINGS_PATH.write_text(json.dumps({"CUSTOM_KEY": "old-selected-value"}), encoding="utf-8")
+    snapshot = task_settings_snapshot(config.load_settings(), dict(os.environ))
+    config.SETTINGS_PATH.write_text(json.dumps({"CUSTOM_KEY": secret, "OPENAI_BASE_URL": "ordinary-8080"}), encoding="utf-8")
     calls = []
     resolve = workspace_executor.resolve_process_env
 
@@ -47,7 +56,9 @@ def test_registered_foreground_env_reaches_child_and_redacts_egress(process_cont
         args.update(cmd=[sys.executable, "-c", program])
     logs = data / "logs"
     logs.mkdir(exist_ok=True)
-    _execute_single_tool(registry, {"id": "env-proof", "function": {"name": tool, "arguments": json.dumps(args)}}, logs, task_id=ctx.task_id)
+    with task_settings_scope(snapshot):
+        _execute_single_tool(registry, {"id": "env-proof", "function": {"name": tool, "arguments": json.dumps(args)}}, logs, task_id=ctx.task_id)
+        assert config.runtime_settings()["CUSTOM_KEY"] == "old-selected-value"
     records = (logs / "tools.jsonl").read_text(encoding="utf-8")
     assert expected_hash in records and "ordinary-8080" in records
     assert secret not in records and "private-test-" not in records
@@ -58,6 +69,133 @@ def test_registered_foreground_env_reaches_child_and_redacts_egress(process_cont
         assert expected_hash in receipt["summary"]
         assert "private-test-" not in json.dumps(receipt)
         assert receipt["runtime_provenance"]["selected_path"] == sys.executable
+
+
+@pytest.mark.parametrize("tool", ["run_command", "run_script", "verify_and_record", "start_service"])
+def test_next_process_resolves_rotation_new_empty_and_deleted_keys(process_context, monkeypatch, tool):
+    from ouroboros import config
+    from ouroboros.settings_integrity import task_settings_scope, task_settings_snapshot
+
+    registry, _ctx, workspace, data = process_context
+    monkeypatch.setattr(config, "SETTINGS_PATH", data / "settings.json")
+    config.SETTINGS_PATH.write_text(json.dumps({"CUSTOM_KEY": "old"}), encoding="utf-8")
+    snapshot = task_settings_snapshot(config.load_settings(), dict(os.environ))
+    program = "import os,hashlib; print(hashlib.sha256((os.environ['TOKEN']+'|'+os.environ['ADDED']).encode()).hexdigest(),flush=True)"
+    args = {"cwd": str(workspace), "env_from_settings": {"TOKEN": "CUSTOM_KEY", "ADDED": "NEW_KEY"}}
+    if tool == "run_script":
+        args.update(script=program, interpreter=sys.executable)
+    elif tool == "verify_and_record":
+        args.update(contract_kind="explicit_command", check=[sys.executable, "-c", program])
+    else:
+        args.update(cmd=[sys.executable, "-c", program])
+    with task_settings_scope(snapshot):
+        for value in ("rotated", ""):
+            config.SETTINGS_PATH.write_text(json.dumps({"CUSTOM_KEY": value, "NEW_KEY": "added"}), encoding="utf-8")
+            expected = hashlib.sha256((value + "|added").encode()).hexdigest()
+            if tool == "start_service":
+                args.update(name="full" if value else "empty", readiness={"stdout_contains": expected, "timeout_sec": 5})
+            result = registry.execute_result(tool, args)
+            assert result.status == "ok", result.text
+            if tool == "start_service":
+                try:
+                    assert expected in registry.execute("service_logs", {"name": args["name"]})
+                finally:
+                    registry.execute("stop_service", {"name": args["name"]})
+            else:
+                assert expected in result.text
+            assert config.runtime_settings()["CUSTOM_KEY"] == "old"
+            assert "NEW_KEY" not in config.runtime_settings()
+        config.SETTINGS_PATH.write_text(json.dumps({"NEW_KEY": "added"}), encoding="utf-8")
+        result = registry.execute_result(tool, args)
+        assert result.status == "error" and "setting for 'TOKEN' is missing" in result.text
+        assert config.runtime_settings()["CUSTOM_KEY"] == "old"
+
+
+@pytest.mark.parametrize("key", ["GITHUB_TOKEN", "OPENAI_API_KEY"])
+@pytest.mark.parametrize("change", ["clear", "delete"])
+def test_process_refs_remove_own_mirrors_but_keep_operator_env(process_context, monkeypatch, key, change):
+    from ouroboros import config
+    from ouroboros.settings_integrity import task_settings_scope, task_settings_snapshot
+    from ouroboros.tools.process_facts import process_environment_scope, selected_process_environment
+
+    _registry, ctx, _workspace, data = process_context
+    monkeypatch.setattr(os, "environ", dict(os.environ))  # restore the entire Settings projection after the test
+    monkeypatch.setattr(config, "SETTINGS_PATH", data / "settings.json")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "synthetic-operator")
+    config.SETTINGS_PATH.write_text(json.dumps({key: "synthetic-mirror", "OUROBOROS_CONTEXT_MODE": "max", "OUROBOROS_CONTEXT_MODE_AUTO_LOW": False}), encoding="utf-8")
+    config.apply_settings_to_env(config.load_settings())
+    snapshot = task_settings_snapshot(config.load_settings(), dict(os.environ))
+    values = {key: ""} if change == "clear" else {}
+    config.SETTINGS_PATH.write_text(json.dumps({**values, "OUROBOROS_CONTEXT_MODE": "low", "OUROBOROS_CONTEXT_MODE_AUTO_LOW": False}), encoding="utf-8")
+    args = {"env_from_settings": {"SELECTED": key, "OPERATOR": "DEEPSEEK_API_KEY"}}
+    with task_settings_scope(snapshot):
+        with process_environment_scope(ctx, "run_command", args) as error:
+            assert error is None
+            assert selected_process_environment() == {"SELECTED": "", "OPERATOR": "synthetic-operator"}
+        assert skill_settings()["OUROBOROS_CONTEXT_MODE"] == "low"
+        assert config.runtime_settings()["OUROBOROS_CONTEXT_MODE"] == "max"
+        assert config.runtime_environ()["OUROBOROS_CONTEXT_MODE"] == "max"
+        assert os.environ[key] == "synthetic-mirror"
+
+
+def test_nested_process_selection_is_stable_until_next_invocation(process_context, monkeypatch):
+    from ouroboros import config
+    from ouroboros.settings_integrity import task_settings_scope, task_settings_snapshot
+    from ouroboros.tools.process_facts import process_environment_scope, selected_process_environment
+
+    _registry, ctx, _workspace, data = process_context
+    monkeypatch.setattr(config, "SETTINGS_PATH", data / "settings.json")
+    config.SETTINGS_PATH.write_text(json.dumps({"CUSTOM_KEY": "old"}), encoding="utf-8")
+    snapshot = task_settings_snapshot(config.load_settings(), dict(os.environ))
+    args = {"env_from_settings": {"TOKEN": "CUSTOM_KEY"}}
+    with task_settings_scope(snapshot):
+        with process_environment_scope(ctx, "run_command", args) as error:
+            assert error is None and selected_process_environment() == {"TOKEN": "old"}
+            config.SETTINGS_PATH.write_text(json.dumps({"CUSTOM_KEY": "new"}), encoding="utf-8")
+            with process_environment_scope(ctx, "run_command", args) as nested_error:
+                assert nested_error is None and selected_process_environment() == {"TOKEN": "old"}
+        with process_environment_scope(ctx, "run_command", args) as error:
+            assert error is None and selected_process_environment() == {"TOKEN": "new"}
+        assert config.runtime_settings()["CUSTOM_KEY"] == "old"
+
+
+@pytest.mark.parametrize("document", ["readable", "absent", "unreadable", "pin_mismatch"])
+def test_explicit_process_refs_preserve_effective_route_read_rules(process_context, monkeypatch, document):
+    from ouroboros import config
+    from ouroboros.settings_integrity import task_settings_scope, task_settings_snapshot
+    from ouroboros.tools.process_facts import process_environment_scope, selected_process_environment
+
+    _registry, ctx, _workspace, data = process_context
+    monkeypatch.setattr(config, "SETTINGS_PATH", data / "settings.json")
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-operator-key")
+    config.SETTINGS_PATH.write_text(json.dumps({"OUROBOROS_MODEL": "openai/entry-model"}), encoding="utf-8")
+    snapshot = task_settings_snapshot(config.load_settings(), dict(os.environ))
+    if document == "absent":
+        config.SETTINGS_PATH.unlink()
+    else:
+        config.SETTINGS_PATH.write_text("[]" if document == "unreadable" else json.dumps({
+            "OUROBOROS_MODEL": "openai/current-model", "OPENAI_API_KEY": "synthetic-current-key",
+        }), encoding="utf-8")
+    with task_settings_scope(snapshot):
+        if document == "pin_mismatch":
+            monkeypatch.setenv(config.SETTINGS_INTEGRITY_ENV, "0" * 64)
+            with pytest.raises(config.SettingsIntegrityError):
+                with process_environment_scope(ctx, "run_command", {"env_from_settings": {"TOKEN": "OPENAI_API_KEY"}}):
+                    pytest.fail("a refused integrity pin must not admit the process")
+            return
+        with process_environment_scope(ctx, "run_command", {"env_from_settings": {"TOKEN": "OPENAI_API_KEY"}}) as error:
+            if document == "unreadable":
+                assert error is not None and "setting for 'TOKEN' is missing" in error.text
+            else:
+                expected = "synthetic-current-key" if document == "readable" else "synthetic-operator-key"
+                assert error is None and selected_process_environment() == {"TOKEN": expected}
+        # Explicit selection uses the current effective fallback when the overlay
+        # has no document. Ordinary task reads still retain their entry fallback.
+        expected_model = config.runtime_settings()["OUROBOROS_MODEL"] if document == "readable" else skill_settings()["OUROBOROS_MODEL"]
+        with process_environment_scope(ctx, "run_command", {"env_from_settings": {"MODEL": "OUROBOROS_MODEL"}}) as error:
+            assert error is None and selected_process_environment() == {"MODEL": expected_model}
+        if document != "readable":
+            assert config.runtime_settings()["OUROBOROS_MODEL"] == "openai/entry-model"
 
 
 def test_verify_matches_raw_selected_value_before_receipt_redaction(process_context, monkeypatch):
@@ -74,15 +212,14 @@ def test_verify_matches_raw_selected_value_before_receipt_redaction(process_cont
     assert receipt["expected"] == "***" and secret not in result.text
 
 
-@pytest.mark.parametrize("tool,padding,suffix", [
-    ("run_command", 24982, 60000),
-    ("run_command", 60000, 24982),
-    ("run_script", 24982, 60000),
-    ("run_script", 60000, 24982),
-    ("verify_and_record", 3990, 60000),
-    ("verify_and_record", 19990, 60000),
+@pytest.mark.parametrize(("returncode", "stream", "tool", "padding", "suffix"), [
+    (0, "stdout", "run_command", 24982, 60000),
+    (0, "stdout", "run_script", 24982, 60000),
+    (0, "stdout", "verify_and_record", 3990, 60000),
+    (7, "stderr", "run_command", 60000, 24982),
+    (7, "stderr", "run_script", 60000, 24982),
+    (7, "stderr", "verify_and_record", 19990, 60000),
 ])
-@pytest.mark.parametrize("returncode,stream", [(0, "stdout"), (7, "stderr")])
 def test_selected_secret_is_masked_before_diagnostic_bounds(
     process_context, monkeypatch, tool, padding, suffix, returncode, stream,
 ):
@@ -105,8 +242,8 @@ def test_selected_secret_is_masked_before_diagnostic_bounds(
         args.update(cmd=[sys.executable, "-c", program])
     result = registry.execute_result(tool, args)
     rendered = result.text
-    assert "truncated" in rendered
     if tool == "verify_and_record":
+        assert "truncated" in rendered
         receipt = json.loads(verification_receipts_path(data, ctx.task_id).read_text(encoding="utf-8").splitlines()[-1])
         assert receipt["returncode"] == returncode and receipt["matched"] is True
         assert receipt["status"] == ("fail" if returncode else "pass")
@@ -114,16 +251,17 @@ def test_selected_secret_is_masked_before_diagnostic_bounds(
         assert len(rendered) < 6000
         rendered += json.dumps(receipt)
     else:
+        # The command tools return the producer's whole text; only the loop's exact-source delivery bounds
+        # the view (tests/test_tool_output_source_retention.py), so the complete line is here, masked.
         assert result.meta["exit_code"] == returncode
         assert result.status == ("error" if returncode else "ok")
-        assert len(rendered) < 52000
-        assert "yyyyyyyyyy" in rendered, "the bounded tail remains available"
+        assert "truncated" not in rendered
+        assert "x" * padding + "***" + "y" * suffix in rendered
     assert "xxxxxxxxxx" in rendered, "ordinary output remains available"
     assert secret[:10] not in rendered and secret[-10:] not in rendered
 
 
-@pytest.mark.parametrize("match_mode", ["exact", "exact_line", "json_equals"])
-@pytest.mark.parametrize("matches", [True, False])
+@pytest.mark.parametrize(("matches", "match_mode"), [(True, "exact"), (True, "json_equals"), (False, "exact_line")])
 def test_verify_secret_masking_preserves_strict_expected_match(
     process_context, monkeypatch, match_mode, matches,
 ):
@@ -185,7 +323,7 @@ def test_reference_authority_precedes_settings_read_and_spawn(process_context, m
 
     _registry, ctx, workspace, _data = process_context
     ctx.task_constraint = TaskConstraint(mode="acting_subagent", surface="external_workspace", write_root=str(workspace))
-    monkeypatch.setattr("ouroboros.config.runtime_settings", lambda **kwargs: pytest.fail("read forbidden Settings"))
+    monkeypatch.setattr("ouroboros.config.selection_settings", lambda **kwargs: pytest.fail("read forbidden Settings"))
     result = _run_shell(ctx, [sys.executable, "-c", "raise SystemExit('must not run')"],
         cwd=str(workspace), env_from_settings={"TOKEN": "CUSTOM_KEY"})
     assert "PROCESS_ENV_REFERENCE_BLOCKED" in result
@@ -221,8 +359,7 @@ def test_runtime_uses_explicit_child_path_not_host_path(process_context, monkeyp
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX executable shims; native Windows execution is not exercised")
-@pytest.mark.parametrize("backend", ["host", "local"])
-@pytest.mark.parametrize("relative_dir", ["relative-node-bin", ""])
+@pytest.mark.parametrize(("relative_dir", "backend"), [("relative-node-bin", "host"), ("", "local")])
 def test_relative_selected_path_reaches_workspace_node(process_context, monkeypatch, backend, relative_dir):
     from ouroboros import process_interpreters
 

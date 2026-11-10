@@ -1,14 +1,16 @@
 """An owner turn leaves one ``direct_turn`` receipt: its wait from the canonical acceptance, each
 start phase's seconds, the dispatch basis and its own store counts.
 
-The receipt rides the turn's first dispatch frame by value; the supervisor's events consumer writes
-the one journal row off the turn thread and keeps it in the serving process's bounded ring. A turn
-that never dispatches writes ``dispatch: not_observed`` from its unregister. Two concurrent turns
-keep their own meters."""
+The receipt rides the turn's first dispatch frame by value (the carrier's ``CarrierTurn`` seeds it
+from the admission's clock); the supervisor's events consumer writes the one journal row off the
+carrier and keeps it in the serving process's bounded ring. An inline executor's turn that never
+dispatches writes ``dispatch: not_observed`` from its unregister. Two concurrent turns, each in its
+own carrier, keep their own meters."""
 from __future__ import annotations
 
 import datetime
 import json
+import os
 import queue
 import threading
 import time
@@ -69,6 +71,7 @@ def test_the_receipt_rides_the_first_dispatch_frame_and_the_consumer_records_it_
     # Order, not a tick: two reads of a coarse clock (Windows) can be equal.
     assert receipt["census"] == {"direct_turns_at_entry": 1} and receipt["dispatched_at"] >= receipt["entered_at"]
     assert (receipt["chat_id"], receipt["task_id"], receipt["execution_id"]) == (1, "owner", execution.execution_id)
+    assert (receipt["worker_id"], receipt["pid"]) == (None, os.getpid())  # no carrier named a slot: unknown, not 0
 
     ctx = SimpleNamespace(RUNNING={"a": {}}, PENDING=[1, 2], DRIVE_ROOT=tmp_path)
     events._handle_main_llm_call_state(sent, ctx)
@@ -109,6 +112,17 @@ def test_a_wake_leaves_no_receipt_on_its_frame():
     frames.get_nowait()
     turn.put(_frame("observed", task_id="wake", model_activity={"phase": "dispatching"}))
     assert execution.phase == "dispatched" and "direct_turn" not in frames.get_nowait()
+
+
+def test_a_pooled_review_operation_advances_past_preparing_without_a_main_call():
+    execution = TurnExecution(chat_id=0, task_id="deep-review", owner_turn=False)
+
+    execution.observe("cognitive_operation", {
+        "task_id": "deep-review", "operation_id": "review-1", "kind": "review", "phase": "started",
+    })
+
+    assert execution.phase == "requested"
+    assert [phase for phase, _ in execution.marks] == ["accepted", "context_built", "requested"]
 
 
 def test_a_turn_that_never_dispatches_records_not_observed_from_its_unregister(monkeypatch):
@@ -163,14 +177,16 @@ def test_the_ring_keeps_the_newest_hundred_by_value(monkeypatch):
 
 
 def test_two_concurrent_owner_turns_keep_their_own_meters(monkeypatch, tmp_path):
-    """Through the real direct lane: each turn's thread meters its own store reads inside the
-    scope the lane opens; the receipts on their dispatch frames carry different counts."""
-    from ouroboros import agent as agent_module
+    """Through the real lane: the server admits each owner turn to its own carrier (the two lane spares),
+    each carrier's thread meters its own store reads inside the scope the worker body opens, and the
+    receipts on their dispatch frames carry different counts."""
     from ouroboros.task_results import load_task_result, write_task_result
-    from supervisor import workers
+    from supervisor import worker_chat_lane, workers
+    from tests.conversation_carrier_support import carry, isolate_lane_pool
     from tests.test_direct_turn_phase_stall import _Actor, _lane
 
     out = _lane(monkeypatch, tmp_path)
+    spares = isolate_lane_pool(monkeypatch, tmp_path, spares=2, event_q=out.bus)
     write_task_result(tmp_path, "seed", "running")
     both_inside = threading.Barrier(2, timeout=10)
 
@@ -188,27 +204,30 @@ def test_two_concurrent_owner_turns_keep_their_own_meters(monkeypatch, tmp_path)
             return [{"type": "send_message", "chat_id": task["chat_id"], "text": "the answer", "task_id": task["id"]}]
         return behave
 
-    actors = [_Actor(reading()), _Actor(reading())]
-    monkeypatch.setattr(agent_module, "make_agent", lambda **kwargs: actors.pop(0))
     stamp = _iso(time.time())
 
     def origin(chat_id: int) -> dict:
         return {"client_message_id": f"m-{chat_id}", "origin_message_ref": {
             "chat_id": chat_id, "client_message_id": f"m-{chat_id}", "ts": stamp, "text_sha256": "0" * 64}}
 
-    threads = [threading.Thread(target=workers.handle_chat_direct, args=(chat_id, "hello"),
-                                kwargs={"task_metadata": origin(chat_id)}, daemon=True) for chat_id in (1, 2)]
-    for thread in threads:
+    for chat_id in (1, 2):
+        worker_chat_lane.handle_chat_direct(chat_id, "hello", task_metadata=origin(chat_id))
+    assert all(slot.busy_task_id for slot in spares), "each turn holds its own carrier"
+    carriers = [threading.Thread(target=carry, args=(workers, slot, _Actor(reading())), kwargs={"out_q": out.bus},
+                                 daemon=True) for slot in spares]
+    for thread in carriers:
         thread.start()
-    for thread in threads:
+    for thread in carriers:
         thread.join(timeout=15)
-    assert not any(thread.is_alive() for thread in threads)
+    assert not any(thread.is_alive() for thread in carriers)
     frames = []
     while not out.bus.empty():
         frames.append(out.bus.get_nowait())
     receipts = {frame["chat_id"]: frame["direct_turn"] for frame in frames if "direct_turn" in frame}
     assert set(receipts) == {1, 2}
-    assert receipts[1]["meter"]["current.read"] == 1 and receipts[2]["meter"]["current.read"] == 4
+    # The carrier's first step reads the same for both; the bodies differ by three reads.
+    first_step = receipts[1]["meter"]["current.read"] - 1
+    assert first_step >= 0 and receipts[2]["meter"]["current.read"] == first_step + 4
     assert all(receipt["accepted_at"] == stamp and receipt["dispatch"] == "observed_send" for receipt in receipts.values())
     ctx = SimpleNamespace(RUNNING={}, PENDING=[], DRIVE_ROOT=tmp_path)
     for frame in frames:

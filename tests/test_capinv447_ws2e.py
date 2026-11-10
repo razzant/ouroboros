@@ -369,7 +369,7 @@ def test_list_tools_follows_next_cursor(monkeypatch):
     calls = []
 
     @asynccontextmanager
-    async def fake_stdio(params):
+    async def fake_stdio(params, **_kwargs):
         yield "read", "write"
 
     class Session:

@@ -4,16 +4,18 @@ The existing shell server supplies assets and non-project APIs. Project list/upd
 requests exercise the real gateway and registry in a private TestClient drive.
 Pin and Unpin are the first actions of a row's menu (its ⋯ under a mouse, a long press on touch); pinned rows lead
 the one keyed list and one step of air parts them from the rest, with no caption, glyph or column.
+Find a project and Show more reach every room beyond the feed; a reference opens its own room by its id.
 """
 import json
-from urllib.parse import urlparse
+from datetime import datetime, timedelta, timezone
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
 
 from ouroboros.gateway.router import collect_routes
-from ouroboros import projects_registry as registry
+from ouroboros import projects_registry as registry, room_messages
 from tests.test_subscription_setup_browser import subscription_ui  # noqa: F401
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 from tests._shared import producer_evidence_dir
@@ -49,17 +51,24 @@ def pins_ui(request, monkeypatch, tmp_path):
     app = Starlette(routes=collect_routes(data_dir=root))
     app.state.drive_root = root
     control = {"fail": False, "hold": False, "held": [], "hold_writes": False, "held_writes": [],
-               "writes": [], "unread": set(), "activities": []}
+               "writes": [], "unread": set(), "activities": [], "fail_lookup": False, "hold_lookups": False,
+               "held_lookups": [], "fail_list": False, "hold_lists": False, "held_lists": [],
+               "shared_cursors": False, "null_project_count": False, "sent": [], "sockets": []}
     pages = []
     with TestClient(app) as client:
         def forward(route, path, body):
             response = client.post(path, json=body)
             route.fulfill(status=response.status_code, content_type="application/json", body=response.text)
 
+        def forward_get(route):
+            url = urlparse(route.request.url)
+            response = client.get(url.path + (f"?{url.query}" if url.query else ""))
+            route.fulfill(status=response.status_code, content_type="application/json", body=response.text)
+
         def respond(route):
             path = urlparse(route.request.url).path
             if path == "/api/state":
-                rows = registry.projects_summary(root, include_pinned=True)
+                rows = registry.projects_summary(root, include_pinned=True, by_message=True)  # as gateway/state.py
                 for project in rows:
                     if project['id'] in control['unread']:
                         project['visible_revision'] = 2
@@ -67,7 +76,11 @@ def pins_ui(request, monkeypatch, tmp_path):
                 state = with_work_fields({"sha": "pin-fixture", "supervisor_ready": True,
                                           "active_chat_activities_complete": True,
                                           "active_chat_activities": control['activities'], "projects": rows,
-                                          "project_chat_ids": [p["chat_id"] for p in rows]})
+                                          "project_messages_revision": room_messages.project_revision(root, registry.list_sidebar_projects(root)),
+                                          "project_listable_count": None if control["null_project_count"]
+                                          else len(registry.list_sidebar_projects(root)),
+                                          # Every reserved room, as gateway/state.py answers: rooms beyond the feed too.
+                                          "project_chat_ids": sorted(registry.reserved_project_chat_ids(root))})
                 if control["hold"]:
                     control["held"].append((route, json.dumps(state)))
                     return
@@ -82,16 +95,39 @@ def pins_ui(request, monkeypatch, tmp_path):
                 else:
                     forward(route, path, body)
             elif path == "/api/projects":
-                response = client.get(path)
-                route.fulfill(status=response.status_code, content_type="application/json", body=response.text)
+                query = parse_qs(urlparse(route.request.url).query)
+                if "id" in query and control["fail_lookup"]:
+                    route.fulfill(status=503, content_type="application/json", body='{"error":"Synthetic lookup outage"}')
+                elif "id" in query and control["hold_lookups"]:
+                    control["held_lookups"].append(route)
+                elif query.get("all") == ["1"] and control["fail_list"]:
+                    route.fulfill(status=503, content_type="application/json", body='{"error":"Synthetic list outage"}')
+                elif query.get("all") == ["1"] and control["hold_lists"]:
+                    response = client.get('/api/projects?all=1')
+                    control["held_lists"].append((route, response.text))
+                else:
+                    forward_get(route)
+            elif path == "/api/ui/preferences" and control["shared_cursors"]:
+                # The real shared read cursors, for a case where another client reads a room.
+                if route.request.method == "POST":
+                    forward(route, path, route.request.post_data_json)
+                else:
+                    forward_get(route)
             else:
                 route.fallback()
+
+        def socket(ws):
+            # A quiet socket that keeps what the page sends (a composer's frame names its room).
+            control["sockets"].append(ws)
+            ws.on_message(lambda message: control["sent"].append(message))
+            ws.send(json.dumps({"type": "heartbeat"}))
 
         def new_page(height=900):
             page = ui["new_page"](viewport={"width": width, "height": height}, has_touch=width < 720)
             pages.append(page)
             page.add_init_script(f"localStorage.setItem('ouroboros.theme', {json.dumps(theme)})")
             page.route("**/api/**", respond)
+            page.route_web_socket("**/ws", socket)
             page.clock.install()
             page.goto(ui["url"])
             page.locator('.nav-project-item').first.wait_for()
@@ -101,7 +137,7 @@ def pins_ui(request, monkeypatch, tmp_path):
         page = new_page()
         try:
             yield {**ui, "page": page, "make_page": new_page, "root": root, "control": control, "forward": forward,
-                   "width": width, "engine": engine, "theme": theme, "client": client,
+                   "forward_get": forward_get, "width": width, "engine": engine, "theme": theme, "client": client,
                    "tag": f"{engine}-{width}-{theme}"}
         finally:
             # Stop route callbacks and polling before their TestClient drive closes.
@@ -265,6 +301,33 @@ def test_menu_pin_reorders_keyed_rows_without_opening_or_reading_across_reload_a
     assert response.status_code == 200 and response.json()["project"]["pinned"] is False
     refresh(page)
     expect()(row(page, "older").locator('.nav-row-label')).to_have_text("Renamed")
+
+
+def test_pointer_pin_of_first_visible_row_preserves_the_reading_place(pins_ui, tmp_path):
+    """A saved pin mutates app.js's row; the last painted ordering key must stay independent of it."""
+    ui, page, root = pins_ui, pins_ui["page"], pins_ui["root"]
+    for index in range(35):
+        registry.create_project(root, f"passage-{index:02}", name=f"Passage project {index:02}", origin="owner_ui")
+    refresh(page)
+    expect()(page.locator('.nav-project-item')).to_have_count(37)
+    target, neighbor = row(page, "passage-15"), row(page, "passage-14")
+    target.evaluate("el => el.scrollIntoView({block: 'start'})")
+    first = page.evaluate("""() => {
+        const list = document.getElementById('nav-projects-list'), top = list.getBoundingClientRect().top;
+        return [...list.children].find(el => el.dataset.navProjectId
+            && el.getBoundingClientRect().bottom > top).dataset.navProjectId;
+    }""")
+    assert first == "passage-15"
+    before = neighbor.bounding_box()["y"]
+    evidence = producer_evidence_dir(tmp_path, "pin-reading-place", env="OUROBOROS_BROWSER_EVIDENCE_OUT")
+    page.locator('#primary-sidebar').screenshot(path=str(evidence / f'before-{ui["tag"]}.png'))
+    open_menu(page, "passage-15")
+    menu(page).locator('[data-prm="pin"]').click()
+    expect()(target).to_have_attribute("data-pinned", "")
+    settle(page)
+    page.locator('#primary-sidebar').screenshot(path=str(evidence / f'after-{ui["tag"]}.png'))
+    assert neighbor.bounding_box()["y"] == pytest.approx(before, abs=1)
+    no_read_acknowledged(ui)
 
 
 def test_collapsed_list_keeps_pins_and_unpins_in_place(pins_ui, tmp_path):
@@ -451,8 +514,8 @@ def test_many_pins_order_within_groups_long_names_and_short_windows(pins_ui, tmp
     ui["control"]["unread"].update({"p1", "p8"})
     refresh(page)
     expect()(row(page, "p7")).to_have_attribute("data-pinned", "")
-    # Pins lead; unread, then recency orders within each group.
-    expected = ["p1", "p7", "p4", "p8", "newer", "p9", "p6", "p5", "p3", "p2", "p0", "older"]
+    # Pins lead; recency orders within each group, unread only marks a row (owner 2026-11-07).
+    expected = ["p7", "p4", "p1", "newer", "p9", "p8", "p6", "p5", "p3", "p2", "p0", "older"]
     assert order(page) == expected
     groups = page.evaluate(GROUPS)
     assert [g["id"] for g in groups] == expected
@@ -467,7 +530,7 @@ def test_many_pins_order_within_groups_long_names_and_short_windows(pins_ui, tmp
     page.locator('#nav-projects-toggle').click()
     expect()(page.locator('#nav-projects-count')).to_have_text("4")  # two rooms, two unread messages each
     collapsed = page.evaluate(GROUPS)
-    assert [g["id"] for g in collapsed] == ["p1", "p7", "p4"]
+    assert [g["id"] for g in collapsed] == ["p7", "p4", "p1"]
     assert_one_boundary(collapsed)
     page.locator('#nav-projects-toggle').click()
     # A short window keeps the boundary in the whole column's scroll, rows compacted only under a fine pointer.
@@ -489,7 +552,9 @@ def test_menu_repositions_after_a_hidden_pin_is_revealed(pins_ui, tmp_path):
     expect()(row(page, "older")).to_be_hidden()
     anchor = open_menu(page, "newer")
     original_anchor, original_popup = anchor.bounding_box(), menu(page).bounding_box()
-    # Another window pins the older room, which has new messages: it is revealed above this row.
+    # Another window pins the older room, which has spoken since (this fixture's store is not dated yet: activity
+    # orders it): it is revealed above this row.
+    registry.update_project(ui["root"], "older", last_active_at="2099-01-01T00:00:00Z")
     control["unread"].add("older")
     response = ui["client"].post('/api/projects/older/update', json={"pinned": True})
     assert response.status_code == 200
@@ -591,3 +656,60 @@ def test_local_pin_reveal_respects_input_and_visible_scroll_region(pins_ui, heig
         allowance = row(page, "older").evaluate("el => el.getBoundingClientRect().height + parseFloat(getComputedStyle(el).getPropertyValue('--space-2')) + 3")
         assert max(abs(a - b) for a, b in zip(before, page.evaluate(scroll))) <= allowance, "pointer pin must not jump the list"
     expect()(page.locator('#toast-stack').filter(has_text="Could not save project pin")).to_have_count(0)
+
+
+# ---- Rooms beyond the feed: Find a project, Show more and a reference's own room --------------------------------
+
+TOPICS = ("garden irrigation", "reading list", "bicycle repairs", "language practice", "kitchen shelves",
+          "photo archive", "travel notes", "household budget", "chess openings", "piano practice")
+
+
+def seed_archive(root, count=498):
+    """``count`` invented rooms older than the fixture's two, written once beside them: one pinned, one closed, one
+    deleting, one tombstoned and one with a Unicode name. Returns every listable id, newest first."""
+    path = root / "state/projects.json"
+    data = json.loads(path.read_text())
+    template = next(row for row in data["projects"] if row["id"] == "older")
+    start = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    for i in range(count):
+        data["projects"].append({**template, "id": f"archive-{i:03}", "chat_id": 40000 + i, "pinned": i == 100,
+                                 "name": f"Archive {i:03} · {TOPICS[i % len(TOPICS)]}",
+                                 "last_active_at": (start + timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M:%SZ")})
+    rows = {row["id"]: row for row in data["projects"]}
+    rows["archive-010"]["closed"] = {"at": "2026-02-01T00:00:00Z", "by": "owner", "note": "Closed by owner."}
+    rows["archive-003"]["lifecycle"] = "deleting"
+    rows["archive-004"]["lifecycle"] = "tombstoned"
+    rows["archive-001"]["name"] = "Ünïcode Café — Плановые Работы"
+    path.write_text(json.dumps(data))
+    return [row["id"] for row in registry.projects_summary(root, limit=None)]
+
+
+def shown_ids(page):
+    return [pid for pid in order(page) if pid]
+
+
+def reads_of(reads, path, **query):
+    """The requests to ``path`` whose query names every given parameter with that value."""
+    return [url for url in reads if urlparse(url).path == path
+            and all(parse_qs(urlparse(url).query).get(key) == [value] for key, value in query.items())]
+
+
+def no_read_acknowledged(ui):
+    return not [body for path, body in ui["posts"] if path == "/api/ui/preferences" and "project_seen_revision" in (body or {})]
+
+
+def click_reference(page, project):
+    """A Project reference as project_reference.js builds it ({id, name} only), pressed by a key."""
+    page.evaluate("""async (project) => {
+        const { projectReference } = await import('/static/modules/project_reference.js');
+        const button = projectReference({ id: project.id, name: project.name });
+        document.body.append(button);
+        button.click();
+        button.remove();
+    }""", {"id": project["id"], "name": project["name"]})
+
+
+def settle(page):
+    """Let the shell's motion and its frame callbacks run under the installed clock."""
+    page.clock.run_for(1000)
+    page.evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")

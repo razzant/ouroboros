@@ -179,8 +179,9 @@ def test_room_source_signs_old_outgoing_rows_by_the_activation_lineage_epoch(tmp
         return [row["author"] for row in read_room_source(tmp_path, 1)["rows"]]
 
     human, child = authors()[0], "child kid00003 of root0002"
-    assert authors() == [human, "Ouroboros", "Ouroboros", "Ouroboros", child, "Ouroboros"]
+    assert authors() == [human, "Ouroboros (task kid00001)", "Ouroboros (task kid00002)", "Ouroboros (task root0001)",
+                         child, "Ouroboros (task root0002)"]
     assert not (tmp_path / "memory" / "chronicle").exists()  # the reader never creates the chronicle
     assert ChronicleStore(tmp_path).ensure_activated()["metadata"]["lineage_epoch"]["pos"] == 4
-    assert authors() == [human, "outgoing, author not recorded", "child kid00002 of root0001", "Ouroboros", child,
-                         "Ouroboros"]
+    assert authors() == [human, "outgoing, author not recorded", "child kid00002 of root0001",
+                         "Ouroboros (task root0001)", child, "Ouroboros (task root0002)"]

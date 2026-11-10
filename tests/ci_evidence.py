@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from datetime import datetime, timezone
 import hashlib
 import json
 import math
@@ -35,10 +36,11 @@ if str(Path(__file__).resolve().parents[1]) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.ci_verdicts import (  # noqa: E402 -- stdlib only, as everything above `import pytest` below
-    DURATIONS_ENV, PHASES as _PHASES, ROUND_DIR as _ROUND_DIR, SECTIONS as _SECTIONS, attempt_text as _attempt,
-    cell as _cell, durations_command, error_text as _error, final as _final, journal_rows as _journal_rows,
-    run_verdict_command, system_of as _system, valid as _valid,
-    verdict_counts as _verdict_counts, verdict_file as _verdict_file, verdict_passes as _verdict_passes, write_json,
+    DURATIONS_ENV, PHASES as _PHASES, ROUND_DIR as _ROUND_DIR, SECTIONS as _SECTIONS, TEST_DURATIONS_ENV,
+    attempt_text as _attempt, cell as _cell, durations_command, error_text as _error,
+    expected_failures as _expected_failures, final as _final, journal_rows as _journal_rows, record_session_durations,
+    run_verdict_command, system_of as _system, valid as _valid, verdict_counts as _verdict_counts,
+    verdict_file as _verdict_file, verdict_passes as _verdict_passes, write_json,
 )
 
 
@@ -48,6 +50,8 @@ def output_dir(config) -> Path | None:
 
 
 def _case_outcomes(reports: list[dict]) -> dict[str, str]:
+    """Each node's case: failed, skipped, xfailed (it ran and failed as its marker expects), passed or not_run."""
+    expected = _expected_failures(reports)
     cases = {}
     for row in reports:
         node = row["nodeid"]
@@ -56,9 +60,9 @@ def _case_outcomes(reports: list[dict]) -> dict[str, str]:
             cases[node] = "failed"
         elif cases.get(node) != "failed":
             if status == "skipped":
-                cases[node] = "skipped"
+                cases[node] = "xfailed" if node in expected else "skipped"
             elif row["phase"] == "call":
-                if cases.get(node) != "skipped":
+                if cases.get(node) not in ("skipped", "xfailed"):
                     cases[node] = "passed"
             else:
                 cases.setdefault(node, "not_run")
@@ -161,7 +165,8 @@ def render_summary(root: Path, *, producer_outcome: str, artifact_outcome: str,
                          f"attempt {_cell(identity.get('run_attempt', 'unknown'))}.")
         counts = Counter(_case_outcomes(data["reports"]).values())
         lines.append("Cases: " + ", ".join(f"{name}={counts[name]}" for name in
-                                         ("passed", "failed", "skipped", "not_run")) + ".")
+                                         ("passed", "failed", "skipped", "not_run"))
+                     + (f", xfailed={counts['xfailed']}" if counts["xfailed"] else "") + ".")
         lines.append(f"Observed pytest session exit: {_cell(data.get('session_exit_code', 'unknown'))}.")
         collected = data.get("tests_collected")
         if isinstance(collected, int) and collected > sum(counts.values()):
@@ -680,6 +685,9 @@ except ModuleNotFoundError as error:
 def pytest_addoption(parser):
     parser.addoption("--ci-evidence-dir", default=None,
                      help="Dedicated public projection directory; raw JUnit must be elsewhere.")
+    parser.addoption("--ci-listed", default=None, metavar="FILE",
+                     help="Node ids, one per line: run only the collected tests they name (a module, class, function "
+                          "or its parametrizations); results.json `listed` keeps those whose collected module holds none.")
 
 
 def pytest_configure(config):
@@ -690,6 +698,8 @@ def pytest_configure(config):
         config.option.ci_evidence_dir = handed
     if output_dir(config) is not None:
         config.pluginmanager.register(_Results(config), "ci_safe_results")
+    elif getattr(config.option, "ci_listed", None):
+        raise pytest.UsageError("--ci-listed needs --ci-evidence-dir: the ids it finds no test for are exported there")
 
 
 @pytest.hookimpl(optionalhook=True)
@@ -725,8 +735,9 @@ def _timeout_callback(directory, report):
 def pytest_collection_finish(session):  # noqa: ARG001
     """The run's weight table shaped this session's own lanes, which are collected now
     (tests/default_lane.py, tests/browser_lane.py). The sessions its tests start are
-    other lanes: none of them inherits it."""
+    other lanes: none of them inherits it, nor the owner's table this session updates."""
     os.environ.pop(DURATIONS_ENV, None)
+    os.environ.pop(TEST_DURATIONS_ENV, None)
 
 
 def _redact(value, secrets):
@@ -759,11 +770,22 @@ class _Results:
         self.config = config
         self.reports = []
         self.collection_failures = []
+        self.collection_skips = []  # collectors that skipped at collection: no failure, and nothing they hold ran
+        self.durations = os.environ.get(TEST_DURATIONS_ENV, "")  # the owner's table; the env is dropped at collection
         self.secrets = tuple(os.environ[key] for key in MASKED_SECRET_SETTING_KEYS if os.environ.get(key))
         self.safe_text = {}
         self.started_at = monotonic()
         self.journal = None
         self.lanes = {}  # Lane blocks an xdist worker handed over at collection.
+        self.listed, self.unmatched = None, None  # `--ci-listed`: the ids, then those no collected test matched
+        self.unsettled = []  # with `--ci-listed`: the collectors that did not collect, as the projection spells them
+        self.selected_nodeids = None  # the tests left to run after every filter; None where this process collected none
+        if getattr(config.option, "ci_listed", None):
+            try:
+                self.listed = {line for line in Path(config.option.ci_listed).read_text(encoding="utf-8").splitlines()
+                               if line}
+            except (OSError, UnicodeError) as error:
+                raise pytest.UsageError(f"--ci-listed is unreadable ({type(error).__name__})") from None
         if not hasattr(config, "workerinput"):  # xdist re-emits worker events on the controller.
             try:
                 path = output_dir(config) / "events.jsonl"
@@ -785,26 +807,52 @@ class _Results:
             diagnostics_incomplete(type(error).__name__)
             print(f"CI_DIAGNOSTICS_INCOMPLETE: incremental journal disabled ({type(error).__name__})")
 
+    def _public(self, text: str) -> str:
+        """A text as the projection keeps it: redacted on its first use; the cache keeps that to once per text."""
+        if text not in self.safe_text:
+            self.safe_text[text] = _redact(text, self.secrets)
+        return self.safe_text[text]
+
     def _event(self, event, nodeid, **facts):
         if self.journal is None:
             return
         try:
-            # A parametrized nodeid can carry a secret: every value is redacted
-            # before its first write; the cache keeps that to once per distinct text.
+            # A parametrized nodeid can carry a secret: every value is redacted before its first write.
             row = {"event": event, "nodeid": nodeid,
                    "elapsed_seconds": monotonic() - self.started_at, **facts}
             for key, value in row.items():
-                if not isinstance(value, str):  # Only approved numeric timing facts bypass redaction.
-                    continue
-                if value not in self.safe_text:
-                    self.safe_text[value] = _redact(value, self.secrets)
-                row[key] = self.safe_text[value]
+                if isinstance(value, str):  # Only approved numeric timing facts bypass redaction.
+                    row[key] = self._public(value)
             self.journal.write((json.dumps(row) + "\n").encode("ascii"))
         except Exception as error:
             self._journal_off(error)
 
     def pytest_unconfigure(self):
         self._journal_off()  # A session that never reached sessionfinish still releases the file.
+
+    @pytest.hookimpl(hookwrapper=True, tryfirst=True)
+    def pytest_collection_modifyitems(self, config, items):
+        """`--ci-listed`: before a lane or `-m` deselects anything, keep only the tests the ids name, matched as the
+        projection spells them, and the ids that a module holding collected tests holds none for (a renamed test, a
+        parameter that left). A module that collected nothing (an import error, a skip at collection) settles none, nor
+        does a collector inside one (a class skipped or broken at collection) for the ids at or beneath it. Once every
+        filter has run, the tests left are this session's selection (results.json `selected_nodeids`)."""
+        if self.listed is not None:
+            keep, drop, named, modules = [], [], set(), set()
+            for item in items:
+                public = self._public(item.nodeid)
+                parts = public.split("[", 1)[0].split("::")
+                hit = ({"::".join(parts[:end]) for end in range(1, len(parts) + 1)} | {public}) & self.listed
+                named |= hit
+                modules.add(parts[0])
+                (keep if hit else drop).append(item)
+            if drop:
+                items[:] = keep
+                config.hook.pytest_deselected(items=drop)
+            self.unmatched = sorted(node for node in self.listed - named if node.split("::", 1)[0] in modules and not any(
+                node == part or node.startswith((part + "::", part + "[")) for part in self.unsettled))
+        yield
+        self.selected_nodeids = [item.nodeid for item in items]
 
     @pytest.hookimpl(tryfirst=True)
     def pytest_collection_finish(self, session):
@@ -929,6 +977,12 @@ class _Results:
             "error_type": "WorkerCrash" if crashed else getattr(report, "ci_error_type", ""),
             "canary_id": getattr(report, "ci_canary_id", ""),
         }
+        # pytest's raw outcome stays: an XFAIL is "skipped" and an XPASS "passed", each with its marker's reason in
+        # `wasxfail`. Every skipped row says which it was (None: a real skip), so a reader tells an expected failure
+        # from a skip, and both from a row written before this field (tests/ci_verdicts.py expected_failures).
+        if report.outcome == "skipped" or hasattr(report, "wasxfail"):
+            reason = getattr(report, "wasxfail", None)
+            row["wasxfail"] = None if reason is None else str(reason)
         cause = {}
         if crashed:  # The dead worker: the commit gate matches it to worker_crash (ouroboros/preflight_runner.py).
             row["worker"] = cause["worker"] = getattr(getattr(getattr(report, "node", None), "gateway", None), "id", "")
@@ -942,11 +996,33 @@ class _Results:
         self.reports.append(row)
         self._event("report", row["nodeid"], phase=row["phase"], outcome=row["outcome"],
                     error_type=row["error_type"], duration_seconds=row["duration_seconds"],
-                    is_subtest=row["is_subtest"], **cause)
+                    is_subtest=row["is_subtest"], **cause,
+                    **({"wasxfail": row["wasxfail"]} if "wasxfail" in row else {}))
+
+    def _record_durations(self, session):
+        """Fold this session's whole file times into the owner's table (ouroboros.test_evidence.durations_path for the
+        gate, the evidence parent's for scripts/run_tests.py). A session that measured no whole file writes nothing:
+        one narrowed by `-k`, `--deselect`, `--ci-listed` or `--lf`, or one that stopped before its end."""
+        option = self.config.option
+        if not self.durations or getattr(option, "keyword", "") or getattr(option, "deselect", None) \
+                or getattr(option, "ci_listed", None) \
+                or getattr(option, "lf", False) or session.exitstatus in (
+                    pytest.ExitCode.INTERRUPTED, pytest.ExitCode.USAGE_ERROR, pytest.ExitCode.NO_TESTS_COLLECTED):
+            return
+        problem = record_session_durations(
+            self.durations, self.reports, system=platform.system(), rootpath=self.config.rootpath,
+            run_id=f"session {datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
+            sha=os.environ.get("GITHUB_SHA", ""))
+        if problem:
+            print(f"DURATIONS_NOT_RECORDED {problem}")
 
     def pytest_collectreport(self, report):
         if report.failed:
             self.collection_failures.append({"nodeid": report.nodeid, "outcome": "failed"})
+        elif report.skipped:
+            self.collection_skips.append(report.nodeid)
+        if not report.passed and self.listed is not None:  # reported before the items reach modifyitems
+            self.unsettled.append(self._public(report.nodeid))
 
     @pytest.hookimpl(hookwrapper=True, tryfirst=True)
     def pytest_sessionfinish(self, session, exitstatus):
@@ -958,6 +1034,7 @@ class _Results:
                 "format": 1, "session_exit_code": int(session.exitstatus),
                 "tests_collected": session.testscollected, "reports": self.reports,
                 "collection_failures": self.collection_failures,
+                "collection_skips": self.collection_skips,
                 "environment": {"python": platform.python_version(), "platform": platform.system(),
                                 "pytest": pytest.__version__, "machine": _machine()},
                 "raw_exception_text": "omitted",
@@ -967,10 +1044,15 @@ class _Results:
             # The complete lane, and this session's shard and slice: the workers' final word,
             # else what one handed over at collection (an aborted controller never gets the former).
             facts.update({**self.lanes, **_lanes(self.config)})
+            if self.selected_nodeids is not None:  # an xdist controller collects nothing: its selection stays unknown
+                facts["selected_nodeids"] = self.selected_nodeids
+            if self.unmatched is not None:  # this process collected (never an xdist controller)
+                facts["listed"] = {"unmatched": self.unmatched}
             crash = getattr(self.config, "_ouroboros_worker_crash", None)
             if crash:
                 facts["worker_crash"] = crash
             write_json(output_dir(self.config) / "results.json", _redact(facts, self.secrets))
+            self._record_durations(session)
         except Exception as error:
             # Diagnostics alone never alter session.exitstatus or expose a body.
             from ouroboros.test_evidence import diagnostics_incomplete

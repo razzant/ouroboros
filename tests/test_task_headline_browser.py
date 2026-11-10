@@ -20,7 +20,7 @@ from tests.test_ui_smoke_playwright import direct_server_with_data as direct_ser
 from tests.ui_chat_viewport_smoke import _emit_ws_frame
 from tests.ui_console_errors import PageErrors
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.mark.parametrize("engine,theme", [("webkit", "light"), ("chromium", "dark")])

@@ -77,6 +77,9 @@ _REGISTERED_DIALECT_TRANSITIONS = frozenset({
     ("tool", "openai_chat_custom", "function"),
 })
 
+# The provider refused the VALUE of the host's optional temperature hint: the host may
+# withdraw its preference; the field is not thereby unsupported, nor an explicit value removable.
+HINT_WITHDRAWAL_REASON = "provider_refused_hint_value"
 WIRE_REASON_CODES = frozenset({
     "requested_wire_form",
     "provider_recovery_succeeded",
@@ -86,6 +89,7 @@ WIRE_REASON_CODES = frozenset({
     "provider_rejected_tool_dialect",
     "provider_metadata_constraint",
     "task_local_availability_fallback",
+    HINT_WITHDRAWAL_REASON,
 })
 
 WIRE_SEMANTIC_KINDS = frozenset({
@@ -599,7 +603,8 @@ def validate_wire_action(action: Any) -> Dict[str, Any]:
         if not isinstance(raw_fields, (list, tuple)) or not raw_fields:
             return {}
         fields = [str(value).strip() for value in raw_fields]
-        if any(not value or value not in DROP_FIELDS for value in fields):
+        droppable = ("temperature",) if reason_code == HINT_WITHDRAWAL_REASON else DROP_FIELDS
+        if any(value not in droppable for value in fields):
             return {}
         return {
             "kind": kind,
@@ -673,11 +678,7 @@ def validate_wire_action_for_profile(
     if fields.intersection(ANTHROPIC_REASONING_FIELDS):
         if carrier == "anthropic.adaptive":
             fields.update(ANTHROPIC_REASONING_FIELDS)
-        elif carrier == "anthropic.disabled" and fields == {"thinking"}:
-            pass
-        elif carrier.startswith("anthropic.") and fields == {"thinking"}:
-            pass
-        else:
+        elif not (carrier.startswith("anthropic.") and fields == {"thinking"}):
             return {}
     normalized["fields"] = sorted(fields)
     return normalized
@@ -823,11 +824,13 @@ def wire_action_identity(action: Mapping[str, Any]) -> str:
     A newer observation for the same effort source supersedes an older one;
     keeping contradictory historical targets would manufacture a conflict
     after provider drift instead of learning the latest successful contract.
+    A hint withdrawal and a field drop are different evidence: neither replaces the other.
     """
     if action.get("kind") == "set_value":
         return f"set:{action.get('field')}:{action.get('from')}"
     if action.get("kind") == "drop_field":
-        return "drop:" + ",".join(action.get("fields") or [])
+        kind = "hint" if action.get("reason_code") == HINT_WITHDRAWAL_REASON else "drop"
+        return f"{kind}:" + ",".join(action.get("fields") or [])
     return f"dialect:{action.get('axis')}:{action.get('from')}"
 
 
@@ -927,11 +930,7 @@ def _commit_wire_compatibility_at(
         action = validate_durable_wire_action_for_profile(item.profile, item.action)
         if not action:
             return WireStoreCommitResult(False, "invalid_pending_action")
-        current = grouped.get(item.profile.fingerprint)
-        if current is None:
-            grouped[item.profile.fingerprint] = (item.profile, [action])
-        else:
-            current[1].append(action)
+        grouped.setdefault(item.profile.fingerprint, (item.profile, []))[1].append(action)
     if not grouped:
         return WireStoreCommitResult(True)
     result: Dict[str, Tuple[Dict[str, Any], ...]] = {}

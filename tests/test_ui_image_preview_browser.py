@@ -26,7 +26,7 @@ from tests.test_ui_document_reader_browser import (
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture import
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, set_viewport
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def _png(width, height, cell=200):
@@ -57,6 +57,7 @@ PREVIEW_STATE = """() => {
     const body = dialog.querySelector('.document-reader-body');
     const image = body.querySelector('.document-reader-image');
     const views = dialog.querySelector('.document-reader-views');
+    const zoom = dialog.querySelector('.document-reader-zoom');
     const box = image?.getBoundingClientRect(), area = body.getBoundingClientRect(), rect = dialog.getBoundingClientRect();
     return {
         title: dialog.querySelector('.document-reader-title').textContent,
@@ -65,6 +66,7 @@ PREVIEW_STATE = """() => {
         status: body.querySelector('.document-reader-status')?.textContent || '',
         retry: Boolean(body.querySelector('[data-reader-action="retry"]')),
         views: views.hidden ? [] : [...views.querySelectorAll('[data-reader-view]')].map((b) => [b.textContent, b.getAttribute('aria-pressed')]),
+        zoom: zoom.hidden ? [] : [...zoom.querySelectorAll('[data-reader-zoom]')].map((b) => [b.textContent, b.getAttribute('aria-label')]),
         src: image?.getAttribute('src') ?? null,
         natural: image ? [image.naturalWidth, image.naturalHeight] : null,
         shown: box ? [box.width, box.height] : null,
@@ -129,28 +131,31 @@ def _tab_to_region(page, limit=12):
 
 def _check_fit(state, natural):
     assert state["natural"] == list(natural) and state["label"] == "Image" and state["busy"] == "false", state
-    assert state["views"] == [["Fit", "true"], ["Actual size", "false"]], state["views"]
+    assert state["views"] == [], state["views"]
+    assert state["zoom"] == [["−", "Zoom out"], ["Reset", None], ["+", "Zoom in"]], state["zoom"]
     assert state["inside"] and state["overflow"][0] <= 1 and state["overflow"][1] <= 1, state
     width, height = state["shown"]
     assert width <= natural[0] + 0.5 and height <= natural[1] + 0.5, "Fit never enlarges"
     assert abs(width / height - natural[0] / natural[1]) < 0.02, "Fit keeps the image's own ratio"
 
 
-def _check_actual_and_keys(page, natural, *, arrows=True):
-    """Actual size, then the keyboard scrolls the region. Playwright's WebKit moves a focused
-    scroller only with PageDown/Space, never an arrow key (a plain overflow div alike), so
-    ``arrows=False`` there proves the vertical page key alone."""
-    page.locator('dialog.document-reader [data-reader-view="actual"]').click()
-    state = _state(page)
-    assert [round(value) for value in state["shown"]] == list(natural), state
-    assert state["views"] == [["Fit", "false"], ["Actual size", "true"]]
-    assert state["overflow"][0] > 0 and state["overflow"][1] > 0, "Actual size scrolls the region both ways"
+def _check_zoom_and_reset(page, natural):
+    """The image scene zooms through its visible controls and restores Fit."""
+    initial = _state(page)
+    page.locator('dialog.document-reader [data-reader-zoom="in"]').click()
+    zoomed = _state(page)
+    assert zoomed["src"] == initial["src"] and zoomed["shown"][0] > initial["shown"][0] + 1, zoomed
+    assert zoomed["shown"][1] > initial["shown"][1] + 1, zoomed
     _tab_to_region(page)
-    for key in ("PageDown", *(("ArrowRight",) * 3 if arrows else ())):
-        page.keyboard.press(key)
-    page.wait_for_function("arrows => { const b = document.querySelector('.document-reader-body');"
-                           " return b.scrollTop > 0 && (!arrows || b.scrollLeft > 0); }", arg=arrows)
-    return _state(page)
+    page.keyboard.press("+")
+    page.keyboard.press("0")
+    page.wait_for_function("() => { const i = document.querySelector('.document-reader-image');"
+                           " const b = i?.getBoundingClientRect(); const body = document.querySelector('.document-reader-body');"
+                           " return i && b && body && b.width <= body.clientWidth + 1; }")
+    reset = _state(page)
+    assert reset["src"] == initial["src"] and reset["inside"] and reset["overflow"][0] <= 1 and reset["overflow"][1] <= 1, reset
+    assert reset["shown"][0] <= natural[0] + 0.5 and reset["shown"][1] <= natural[1] + 0.5, reset
+    return reset
 
 
 def _deliver(page, monkeypatch, paths, calls, *, tool, captions=None, replies):
@@ -165,7 +170,6 @@ def _deliver(page, monkeypatch, paths, calls, *, tool, captions=None, replies):
 
 
 @pytest.mark.ui_browser
-@pytest.mark.serial
 def test_image_preview_in_main_live_and_after_reload(direct_server_with_data, monkeypatch, tmp_path):  # noqa: F811
     from playwright.sync_api import sync_playwright
 
@@ -216,9 +220,8 @@ def test_image_preview_in_main_live_and_after_reload(direct_server_with_data, mo
             _check_fit(state, (2400, 1600))
             assert state["active"], "the image region takes focus so keys scroll it at once"
             page.screenshot(path=str(evidence / "chromium-wide-dark-photo-fit.png"))
-            actual = _check_actual_and_keys(page, (2400, 1600))
-            page.screenshot(path=str(evidence / "chromium-wide-dark-photo-actual.png"))
-            assert actual["scroll"][0] > 0 and actual["scroll"][1] > 0
+            _check_zoom_and_reset(page, (2400, 1600))
+            page.screenshot(path=str(evidence / "chromium-wide-dark-photo-zoom-reset.png"))
             _escape(page)
             assert page.evaluate(FOCUSED_TILE) == "Wide chart", "focus is back on the tile"
             assert abs(_feed_scroll(page) - state["opening_scroll"]) <= 1, "the chat keeps its place"
@@ -305,8 +308,8 @@ def test_image_preview_in_main_live_and_after_reload(direct_server_with_data, mo
             assert state["opened"] == [] and state["title"] == "Wide chart"
             _check_fit(state, (2400, 1600))
             page.screenshot(path=str(evidence / "webkit-wide-light-photo-fit.png"))
-            _check_actual_and_keys(page, (2400, 1600), arrows=False)
-            page.screenshot(path=str(evidence / "webkit-wide-light-photo-actual.png"))
+            _check_zoom_and_reset(page, (2400, 1600))
+            page.screenshot(path=str(evidence / "webkit-wide-light-photo-zoom-reset.png"))
             _escape(page)
             assert page.evaluate(FOCUSED_TILE) == "Wide chart"
             assert abs(_feed_scroll(page) - state["opening_scroll"]) <= 1
@@ -360,7 +363,6 @@ def _half_visible(page, opener, feed="#chat-messages"):
 
 
 @pytest.mark.ui_browser
-@pytest.mark.serial
 def test_owner_upload_preview_in_a_project_room_closes_with_back_and_navigation(direct_server_with_data, tmp_path):  # noqa: F811
     """The owner's uploaded screenshot in a Project room previews from its upload route; Back closes
     the preview and keeps the room; leaving the room closes it and leaves no modal behind."""
@@ -501,6 +503,7 @@ HEAD_STATE = """() => {
     return {
         viewport: [innerWidth, innerHeight], dialog: rect(dialog), head: rect(dialog.querySelector('.document-reader-head')),
         identity: rect(dialog.querySelector('.document-reader-identity')), title: rect(title),
+        scene: dialog.classList.contains('is-image-scene'), chromeHidden: dialog.querySelector('.document-reader-head').hidden,
         body: rect(dialog.querySelector('.document-reader-body')), name: title.textContent,
         cut: title.scrollWidth > title.clientWidth + 1 || title.scrollHeight > title.clientHeight + 1,
         wrap: getComputedStyle(title).whiteSpace,
@@ -527,8 +530,12 @@ def _check_head(state, name, labels, where):
     identity = state["identity"][2] - state["identity"][0]
     assert identity >= 200, f"{where}: the actions wrap before the name is squeezed ({identity:.0f}px): {state}"
     body = state["body"][3] - state["body"][1]
-    assert state["body"][1] >= state["head"][3] - 0.5 and body >= 0.4 * (state["dialog"][3] - state["dialog"][1]), \
-        f"{where}: the reading region stays reachable under a long name: {state}"
+    if state["scene"]:
+        assert body >= 0.4 * (state["dialog"][3] - state["dialog"][1]), \
+            f"{where}: the image stage remains reachable beneath its overlay: {state}"
+    else:
+        assert state["body"][1] >= state["head"][3] - 0.5 and body >= 0.4 * (state["dialog"][3] - state["dialog"][1]), \
+            f"{where}: the reading region stays reachable under a long name: {state}"
 
 
 def _upload(page, files, count):
@@ -638,7 +645,7 @@ def test_owner_files_and_photos_read_in_place_with_a_head_that_wraps(direct_serv
                     where = f"{engine}-{viewport['width']}-{scheme}-owner-photo"
                     state = page.evaluate(HEAD_STATE)
                     record[where] = state
-                    _check_head(state, PORTRAIT, ["Fit", "Actual size", "Copy", "Open", "Download", "Close"], where)
+                    _check_head(state, PORTRAIT, ["−", "Reset", "+", "Copy", "Open", "Download", "Close"], where)
                     page.screenshot(path=str(evidence / f"{where}-head.png"))
             _escape(page)
 
@@ -725,6 +732,13 @@ def test_owner_files_and_photos_read_in_place_with_a_head_that_wraps(direct_serv
                 touch.locator('.chat-photo-menu:not([hidden]) [data-photo-action="view"]').tap()
                 touch.wait_for_function("() => document.querySelector('dialog.document-reader[open] .document-reader-image')?.naturalWidth > 0")
                 assert touch.evaluate(PREVIEW_STATE)["title"] == TINY
+                touch.locator('dialog.document-reader .document-reader-body').tap()
+                assert touch.locator('dialog.document-reader .document-reader-head').get_attribute('hidden') == ''
+                # A second tap inside the double-tap window zooms the photo (#2838, event.detail >= 2); the owner's
+                # separate tap comes after it and brings the head back.
+                touch.wait_for_timeout(1000)
+                touch.locator('dialog.document-reader .document-reader-body').tap()
+                assert touch.locator('dialog.document-reader .document-reader-head').get_attribute('hidden') is None
                 touch.screenshot(path=str(evidence / f"{engine}-390-light-touch-tiny-view.png"))
                 touch.locator('dialog.document-reader [data-reader-action="close"]').tap()
                 touch.locator("dialog.document-reader").wait_for(state="detached")

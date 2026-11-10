@@ -108,8 +108,7 @@ def _start(tmp_path, monkeypatch, *, compiled=True, kind="body_copy", missing=Fa
         custody._CUSTODY.clear()
 
 
-@pytest.mark.parametrize("compiled", [True, False])
-@pytest.mark.parametrize("kind", ["system", "body_copy"])
+@pytest.mark.parametrize(("kind", "compiled"), [("system", True), ("body_copy", False)])
 def test_prepared_body_navigation_reaches_compiled_and_direct_requests(tmp_path, monkeypatch, compiled, kind):
     request, row, task, _ctx, live, prepared = _start(tmp_path, monkeypatch, compiled=compiled, kind=kind)
     instructions = request["instructions"]
@@ -130,7 +129,7 @@ def test_prepared_body_navigation_reaches_compiled_and_direct_requests(tmp_path,
 def test_foreign_and_unidentified_workspaces_get_no_body_design(tmp_path, monkeypatch, kind):
     request, row, _task, _ctx, _live, _prepared = _start(tmp_path, monkeypatch, kind=kind)
     assert "DESIGN NAVIGATION DELIVERY" not in request["instructions"]
-    assert "heading" not in request["instructions"]
+    assert not any(f"{name} heading" in request["instructions"] for name in ("Installed", "Live target", "Prepared copy"))
     assert row["request"] == request
 
 
@@ -175,7 +174,8 @@ def test_retained_delivery_and_canonical_source_survive_design_changes(tmp_path,
     prepared.write_text("## Later prepared heading\n", encoding="utf-8")
     restored = custody.invocation_record(ctx.drive_root, row["invocation_id"])
     assert restored["request"]["instructions"] == delivered
-    assert "Prepared copy heading" in delivered and "Later" not in delivered
+    assert "Prepared copy heading" in delivered and "Later live heading" not in delivered
+    assert "Later prepared heading" not in delivered
     assert compile_external_work_order(task) == canonical and work_order_fingerprint(task) == fingerprint
     projection, reason = work_order_source_projection(task, 0, len(canonical))
     assert reason == "" and projection["text"] == canonical

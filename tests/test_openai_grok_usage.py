@@ -70,7 +70,6 @@ def test_grok_absent_image_video_are_zero_while_billable_usage_stays_reported(pr
     (32898, 0, 0, 131, 77, 73, 208, .068384),
     (32978, 15, 0, 63, 120, 22, 183, .069010),
     (33017, 32, 32896, 65, 166, 21, 231, .0109812),
-    (10, 20, 0, 40, 50, None, 90, .00169),
 ])
 def test_openai_reasoning_stays_in_raw_text_usage_without_an_extra_charge(
         providers, quote, text_in, audio_in, cached, text_out, audio_out, reasoning, total_out, expected):

@@ -12,7 +12,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.background import BackgroundTask
 
-from ouroboros import get_version
+from ouroboros import deployment_policy as _deployment_policy, get_version
 from ouroboros.gateway._helpers import json_error, json_exception, request_drive_root, request_json_or, request_repo_dir
 from ouroboros.gateway.ws import broadcast_ws_sync
 from ouroboros.gateway import update_progress
@@ -75,6 +75,7 @@ def _managed_update_payload(*, fetch: bool, include_tags: bool) -> dict[str, Any
             "phase": str(tx.get("phase") or ""),
             "task_id": str(tx.get("task_id") or ""),
             "restart_required": bool(tx.get("restart_required")),
+            **({"attempt_id": str(tx["attempt_id"])} if tx.get("attempt_id") else {}),
             **({"local_work_recovery": True} if tx.get("stash_restore")
                or tx.get("gate_blocked_reason") == "rollback_restart_pending" else {}),
         }
@@ -100,6 +101,7 @@ def _managed_update_payload(*, fetch: bool, include_tags: bool) -> dict[str, Any
         "update_progress": update_progress.snapshot(tx),
         "letter": letter,
         **status,
+        **({"managed_by_deployment": _deployment_policy.BODY_STATUS} if _body_refusal() else {}),
     }
 
 
@@ -187,7 +189,7 @@ async def api_command(request: Request) -> JSONResponse:
             panic_evidence = source_evidence(request, kind, client_surface=surface)
 
         if not isinstance(body.get("reply_to", ""), str):
-            return json_error("reply_to must be an address string", 400)
+            return json_error("reply_to must be an address string", 400, accepted=False)
         if cmd:
             from supervisor.message_bus import get_bridge, log_chat
 
@@ -202,6 +204,21 @@ async def api_command(request: Request) -> JSONResponse:
                                  startup_owner_command=getattr(request.app.state, "startup_owner_command", None)):
                     return JSONResponse({"status": "ok"})
                 return json_error("Panic emergency owner is unavailable.", 503)
+            if "if_boot" in body:
+                from ouroboros.server_liveness import BOOT
+
+                expected = body["if_boot"]
+                if not isinstance(expected, str) or not expected:
+                    return json_error("if_boot must be a non-empty boot.since string", 400, accepted=False)
+                if expected != BOOT.snapshot(jobs=False)["since"]:
+                    return json_error("Ouroboros restarted before this command arrived.", 409,
+                                      accepted=False, reason_code="boot_changed")
+            from supervisor.message_ingress import ui_control_fact
+
+            try:  # the producer that composed this command from a control names it; typed text never does
+                control = ui_control_fact(body.get("ui_control"), pressed_at=utc_now_iso(), command=str(cmd))
+            except ValueError as exc:
+                return json_error(str(exc), 400, accepted=False)
             visible_text = str(body.get("visible_text") or "").strip()
             task_constraint = body.get("task_constraint") if isinstance(body.get("task_constraint"), dict) else None
             visible_task_id = str(body.get("visible_task_id") or "").strip()
@@ -222,7 +239,8 @@ async def api_command(request: Request) -> JSONResponse:
             # SPA heal/repair posts) would otherwise masquerade as ordinary web
             # frames. The honest stamp names the ENDPOINT — the host cannot know
             # the true caller here (disclosed non-goal).
-            send_kwargs["task_metadata"] = {"client_surface": {"channel": "api_command"}, "reply_to": body.get("reply_to", "")}
+            send_kwargs["task_metadata"] = {"client_surface": {"channel": "api_command"}, "reply_to": body.get("reply_to", ""),
+                                            **({"ui_control": control} if control else {})}
             # Publication precedes readiness. Bind the independent owner, keeping
             # this transport's metadata if the supervisor becomes ready meanwhile.
             if bridge is None or str(cmd).strip().lower() == "/restart":
@@ -231,7 +249,7 @@ async def api_command(request: Request) -> JSONResponse:
                 if action is not None:
                     return JSONResponse({"status": "ok"}, background=BackgroundTask(action))
             if bridge is None:
-                return json_error("Complete provider setup before sending this command.", 409)
+                return json_error("Complete provider setup before sending this command.", 409, accepted=False)
             bridge.ui_send(cmd, **send_kwargs)
             if visible_task_id:
                 _RECENT_VISIBLE_COMMANDS[visible_task_id] = time.monotonic()
@@ -292,6 +310,16 @@ async def api_git_log(_request: Request) -> JSONResponse:
 _ROLLBACK_REASONS = {"ui_rollback": "ui_rollback", "vcs_rollback": "agent_rollback_tool"}
 
 
+def _body_refusal() -> dict:
+    """A managed deployment's typed refusal of a door that would replace the serving program, before any lock,
+    fetch, writer fence or restart (``deployment_policy.body_replacement_refusal``); ``{}`` unmanaged."""
+    from ouroboros.deployment_policy import body_replacement_refusal
+    from ouroboros.gateway.owner_settings import MANAGED_BY_DEPLOYMENT
+
+    refusal = body_replacement_refusal()
+    return {"error": refusal, "code": MANAGED_BY_DEPLOYMENT} if refusal else {}
+
+
 def rollback_through_door(target: str, *, door: str, request_restart: Callable[[], bool]) -> tuple[int, dict]:
     """The one Rollback procedure (the UI button; the agent's ``vcs_rollback``, P4-S): lock,
     resolve, stop every writer (other tasks are interrupted at once), then either record the
@@ -304,6 +332,8 @@ def rollback_through_door(target: str, *, door: str, request_restart: Callable[[
     from ouroboros.store_switch import switch_or_reset
 
     reason = _ROLLBACK_REASONS[door]
+    if managed := _body_refusal():
+        return 403, managed
     refusal = _index_lock_precondition()
     if refusal is not None:
         return refusal.status_code, json.loads(refusal.body)
@@ -367,6 +397,8 @@ async def api_git_rollback(request: Request) -> JSONResponse:
 
 async def api_git_promote(request: Request) -> JSONResponse:
     """Promote the current dev branch to the runtime's stable branch."""
+    if managed := _body_refusal():
+        return JSONResponse(managed, status_code=403)
     try:
         lock_fh, lock_error = _acquire_repo_mutation_lock()
         if lock_error is not None:
@@ -888,9 +920,36 @@ def _unwind_stashed_update(tx: dict, context: str) -> str:
 
     result = restore_stash_with_marker(tx, context)
     note = result.note
-    if result.complete and not clear_update_tx():
-        note = (note + "; " if note else "") + "the update transaction marker could not be cleared"
+    if result.complete:
+        cleared = clear_update_tx()
+        if cleared is None:
+            note = (note + "; " if note else "") + "the update transaction marker remains while another transition is active"
+        elif not cleared:
+            note = (note + "; " if note else "") + "the update transaction marker could not be cleared"
     return note
+
+
+def _assisted_update_pays() -> bool:
+    """Whether an assisted update needs paid admission, all a reached global limit refuses: its resolver
+    (a root task, opening on Main) or a seat of the commit-review wave it asks for. The API rows of the
+    review pool are answered at the global axis by ``review_wave_admission`` (the reservation's own rule);
+    session rows ride subscriptions. An unknown answer pays; every send still meets its reservation."""
+    from ouroboros.review_execution import ReviewRouteKind
+    from ouroboros.reviewer_slot_config import review_pool_slots
+    from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET
+    from ouroboros.tools.review_multi_model import _review_output_budget
+    from ouroboros.usage_admission import review_wave_admission
+    from supervisor import state
+    from supervisor.worker_assignment import needs_paid_admission
+
+    if needs_paid_admission({"metadata": {}}):
+        return True
+    models = [row.model for row in review_pool_slots() if row.model
+              and str(getattr(row.route, "value", row.route) or "") != ReviewRouteKind.AGENT_SESSION.value]
+    return bool(models) and review_wave_admission(
+        drive_root=state.DRIVE_ROOT, root_task_id="managed-update-admission", models=models,
+        prompt_chars=int(REVIEW_PROMPT_TOKEN_BUDGET) * 4, max_completion_tokens=int(_review_output_budget()),
+        global_limit_usd=float(state.TOTAL_BUDGET_LIMIT or 0.0)).get("fits") is not True
 
 
 def _start_assisted_merge_fenced(plan: dict, tx: dict) -> JSONResponse:
@@ -937,7 +996,7 @@ def _start_assisted_merge_fenced(plan: dict, tx: dict) -> JSONResponse:
              **({"stash_note": note} if note else {})},
             status_code=409,
         )
-    if remaining <= 0:
+    if remaining <= 0 and _assisted_update_pays():
         note = _unwind_stashed_update(tx, "assisted_admission_failed")
         _respawn_workers_after_failed_update()
         return JSONResponse(
@@ -947,8 +1006,9 @@ def _start_assisted_merge_fenced(plan: dict, tx: dict) -> JSONResponse:
         )
     # Money admission is the known-spend rule every reviewer seat's reservation
     # applies (#1487), checked just above: known spend below TOTAL_BUDGET admits
-    # the update, and a review that later reaches the limit pauses on its own
-    # fences. One commit-gate wave over the review pool's paid seats is still
+    # the update, a reached limit only one whose every actor is free, and a review
+    # that later reaches the limit pauses on its own fences. One commit-gate wave
+    # over the review pool's paid seats is still
     # priced at the review packs' own worst-case caps by the one explicit
     # estimator (``review_admission.managed_update_wave_estimate``), but as
     # DISCLOSURE, never a second, earlier refusal: a prospective wave larger
@@ -1427,7 +1487,9 @@ async def _apply_replace_recovery(
 
 async def api_update_apply(request: Request) -> JSONResponse:
     """Apply an exact managed plan; replacement is an explicit recovery only."""
-    body = await request_json_or(request, {}, exceptions=(Exception,))
+    if managed := _body_refusal():
+        return JSONResponse(managed, status_code=403)
+    body = await request_json_or(request, {})
     if not isinstance(body, dict):
         return json_error("JSON body must be an object.", 400)
     # Executable gateway ABI (ABI-3, Q7=A): UpdateApplyRequest declares

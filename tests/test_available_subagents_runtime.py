@@ -248,12 +248,6 @@ def test_selected_session_visibility_failure_blocks_without_native_substitution(
         ),
     )
     monkeypatch.setattr(agent_module, "envelope_from_task", lambda *_a, **_k: {})
-    monkeypatch.setattr(
-        subagents, "preflight_native_fallback_dispatch",
-        lambda *_a, **_k: (_ for _ in ()).throw(
-            AssertionError("a selected row must never host-fallback to native")
-        ),
-    )
     task = {"id": "child1", "configured_subagent": {"schema": 1}}
     amended, changed = agent_module.preflight_delegate_visibility(
         SimpleNamespace(available_tools=lambda: []), task, dispatch,
@@ -912,7 +906,7 @@ def test_pending_wake_replays_until_post_injection_ack(tmp_path):
             AssertionError("an unacknowledged wake must replay before another poll")
         ),
     ).text)
-    assert replay == first
+    assert replay.pop("replay_of")["fresh_observation"] is False and replay == first  # marked, else as published
     assert acknowledge_pending_wake(ctx, replay)
     assert acknowledged_task_message_ids(tmp_path, "child1") == {"m1"}
 

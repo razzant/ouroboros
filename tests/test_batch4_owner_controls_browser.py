@@ -1,8 +1,8 @@
 """Batch4 owner controls through the REAL server, worker pool and SPA (browser consumers).
 
 Each test runs the shared ``direct_server_with_data`` fixture (a copied candidate
-checkout, a disposable data root, the in-process mock model) with ONE worker and
-managed roots seeded as a queued snapshot, the way a previous server generation
+checkout, a disposable data root, the in-process mock model) with ONE project worker
+(beside the conversation lane's ready spare, #2654) and managed roots seeded as a queued snapshot, the way a previous server generation
 leaves them when the application was quit. Accepted work survives that stop
 under its own id and waits for the owner's explicit Resume (owner S1, quiz
 a524d73f), so each test first resumes the roots it drives. The mock model is
@@ -60,12 +60,13 @@ import time
 import pytest
 
 from ouroboros import dialogue_store
+from ouroboros.test_evidence import keep_startup_log
 from tests import test_ui_smoke_playwright as smoke
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
 
 direct_server_with_data = smoke.direct_server_with_data
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 ALPHA, BRAVO, CHARLIE, DELTA = "b4-alpha", "b4-bravo", "b4-charlie", "b4-delta"
 _TEXT = {ALPHA: "ALPHA-7Q: inventory the available tools, then report.",
@@ -288,6 +289,19 @@ def _tool_names(data_dir, task_id):
     return [str(row.get("tool") or "") for row in rows if row.get("task_id") == task_id]
 
 
+def _carriers(data_dir):
+    """``[(task id, pid)]`` for every published RUNNING row a worker slot holds: the slot
+    (``worker_id``) named in the supervisor's own process ledger. A pool also keeps the
+    conversation lane's ready spare (#2654), so the live worker set is not the task's."""
+    from ouroboros.queue_observation import load_queue_document
+    from tests._shared import live_worker_slots
+
+    slots = live_worker_slots(data_dir)
+    rows = load_queue_document(data_dir, fresh=True).get("running") or []
+    return [(str(row.get("id")), slots.get(int(row["worker_id"]))) for row in rows
+            if isinstance(row, dict) and row.get("worker_id") is not None]
+
+
 def _fence(data_dir, task_id):
     from ouroboros.owner_pause import read_fence
 
@@ -350,6 +364,12 @@ def _restart_dialog(page, opener):
             dialog.locator(".marketplace-modal-body p").inner_text())
 
 
+def _restart_policy(dialog):
+    """The policy the confirmation's one line leaves to its Details, read the way the owner opens it."""
+    dialog.locator(".confirm-dialog-details > summary").click()
+    return dialog.locator(".confirm-dialog-detail-list").inner_text()
+
+
 def _open_chat(page, url):
     page.goto(url, wait_until="domcontentloaded", timeout=30_000)
     page.wait_for_selector("#page-chat", timeout=30_000)
@@ -370,14 +390,17 @@ def _evidence_dir(data_dir, name):
 
 
 def _owner_restart(page, url, data_dir):
-    """Confirm the header Restart and wait for the re-executed generation to serve."""
+    """Confirm the header Restart and wait for the re-executed generation to serve.
+
+    This wait bypasses the fixture's start_server, so on failure it keeps the server's own log itself."""
     boots = len(_events(data_dir, "startup_verification"))
-    page.locator(".confirm-dialog [data-confirm-ok]").click()
-    page.wait_for_function("window.__restartSends === 1", timeout=10_000)
-    _wait(lambda: len(_events(data_dir, "startup_verification")) > boots, 120, "the restarted generation")
-    smoke._wait_health(url, 60)
-    smoke._wait_supervisor_ready(url, 60)
-    page.wait_for_function("() => window.__testSockets?.some(s => s.readyState === 1)", timeout=60_000)
+    with keep_startup_log(data_dir.parent, "server-stdio.log"):
+        page.locator(".confirm-dialog [data-confirm-ok]").click()
+        page.wait_for_function("window.__restartSends === 1", timeout=10_000)
+        _wait(lambda: len(_events(data_dir, "startup_verification")) > boots, 120, "the restarted generation")
+        smoke._wait_health(url, 60)
+        smoke._wait_supervisor_ready(url, 60)
+        page.wait_for_function("() => window.__testSockets?.some(s => s.readyState === 1)", timeout=60_000)
 
 
 def _launch(pw):
@@ -444,8 +467,11 @@ def test_pause_restart_retention_and_resume(direct_server_with_data, monkeypatch
                 # 3) The ONE shared Restart confirmation, from both surfaces.
                 dialog, title, body = _restart_dialog(page, page.locator('[data-chat-command="restart"]'))
                 assert title == "Restart agent"
-                assert "Tasks already paused stay paused" in body
-                assert "Runnable queued tasks return to the queue" in body
+                # One line says what happens; the retention policy is behind the dialog's Details.
+                assert body == "Running tasks stop and continue after the restart."
+                policy = _restart_policy(dialog)
+                assert "Tasks already paused stay paused" in policy
+                assert "Runnable ones return to the queue" in policy
                 assert "still pausing" not in body and "could not be read" not in body
                 shot("02-header-restart-confirm")
                 dialog.locator(".marketplace-modal-actions [data-confirm-cancel]").click()
@@ -457,7 +483,8 @@ def test_pause_restart_retention_and_resume(direct_server_with_data, monkeypatch
                 page.locator("#btn-save-settings").click()
                 expect(page.locator("#btn-restart-now")).to_be_visible(timeout=30_000)
                 dialog, s_title, s_body = _restart_dialog(page, page.locator("#btn-restart-now"))
-                assert (s_title, s_body) == (title, body), "header and Settings must open the SAME confirmation"
+                assert (s_title, s_body, _restart_policy(dialog)) == (title, body, policy), \
+                    "header and Settings must open the SAME confirmation"
                 shot("03-settings-restart-confirm")
                 dialog.locator(".marketplace-modal-actions [data-confirm-cancel]").click()
                 expect(dialog).to_be_hidden()
@@ -655,17 +682,26 @@ def test_continue_after_a_crash_rejoins_a_lost_answer_and_survives_reload(direct
                 _wait(lambda: model.main_calls("DELTA") == 2, 90, "DELTA resumed under its own id")
                 assert _task(page, url, DELTA)["status"] == "running"
 
-                # Its worker process dies (SIGKILL) while the application stays up: the
-                # existing policy keeps a signal death terminal, so Continue is its manual path.
+                # Its worker process dies (SIGKILL) while the application stays up. A signal death takes
+                # the task's one retry, and this resumed run already is DELTA's retry (its first attempt
+                # died with the application), so the death is terminal and Continue is its manual path.
+                # The pool's other live worker is the conversation lane's ready spare (#2654):
+                # the kill names DELTA's own carrier, never "the" worker of the pool.
                 from tests._shared import live_worker_pids
+                carriers = _wait(lambda: (lambda rows: rows if any(task == DELTA and pid for task, pid in rows)
+                                          else None)(_carriers(data_dir)), 30, "DELTA's carrier in its RUNNING row")
                 workers = live_worker_pids(data_dir)
-                assert len(workers) == 1, workers
-                os.kill(next(iter(workers)), signal.SIGKILL)
+                record["workers"] = {"carriers": carriers, "live": sorted(workers)}
+                # One row, one live carrier: never a second actor for DELTA, nothing else running.
+                assert [task for task, _pid in carriers] == [DELTA], record["workers"]
+                carrier = carriers[0][1]
+                assert carrier in workers, record["workers"]
+                os.kill(carrier, signal.SIGKILL)
                 delta = _wait(lambda: (lambda t: t if t["status"] == "failed" else None)(_task(page, url, DELTA)),
                               120, "DELTA settled by its worker's death")
                 record["delta"] = {key: delta.get(key) for key in ("status", "reason_code", "cancel_origin",
                                                                    "continuation_offer")}
-                assert delta["reason_code"] == "worker_crash_signal", record["delta"]
+                assert delta["reason_code"] == "worker_crash_retry_exhausted", record["delta"]
                 assert (delta.get("continuation_offer") or {}).get("eligible") is True
                 # Opened afresh, as after a reboot: the settled card is rebuilt from its
                 # history rows, which carry the offer.

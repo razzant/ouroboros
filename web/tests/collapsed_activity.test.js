@@ -6,7 +6,7 @@ import {
     boundActivityPreview,
     clearStickyCardState,
     projectCollapsedActivity,
-} from '../modules/chat.js';
+} from '../modules/chat_activity.js';
 import { summarizeChatLiveEvent } from '../modules/log_events.js';
 import { bindContentButton, plainActivityText, selectionInside, subagentIdentityTitle, subagentTwin } from '../modules/chat_activity.js';
 
@@ -109,7 +109,9 @@ test('the collapsed projection is whitespace-normalized, bounded and explicit', 
     assert.equal(out.length, COLLAPSED_ACTIVITY_MAX);
     assert.ok(out.endsWith('…'), 'the cut is visible, never silent');
     assert.equal(boundActivityPreview('  Reading\n  the   ledger  '), 'Reading the ledger');
-    assert.equal(projectCollapsedActivity({ suggestedName: 'X', headline: long }), out);
+    // A child's line is that bounded preview; an ordinary root's line is whole (owner 30.10, B; root_full_text.test.js).
+    assert.equal(projectCollapsedActivity({ isSubagent: true, body: long }), out);
+    assert.equal(projectCollapsedActivity({ suggestedName: 'X', headline: long }), long);
 });
 
 test('root progress keeps a bounded activity preview and a complete timeline companion', () => {

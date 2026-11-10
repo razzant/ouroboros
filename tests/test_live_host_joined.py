@@ -7,7 +7,7 @@ import pytest
 
 from ouroboros.live_conversation import ConversationHost
 from ouroboros.realtime_session import joined
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 @pytest.mark.parametrize('cancel', [False, True])
@@ -82,6 +82,61 @@ def test_real_mailbox_joins_drain_retains_rows_and_propagates_cancel(monkeypatch
                 assert await task == [row]
             assert host.messages == [row] and checkpoints == ['ready']
             assert host._pending_mail_answer, 'a committed drain owns its answer even when its waiter was cancelled'
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('cancel', [False, True])
+@pytest.mark.parametrize('stop', [False, True])
+def test_cancelled_mailbox_keeps_drained_control_for_the_call(host_world, monkeypatch, cancel, stop):
+    """The real typed drain consumes a control before its waiter is cancelled; the call's control check still sees it."""
+    import queue
+    from ouroboros import loop_round_limits
+    from ouroboros.contracts.realtime import RealtimeSetupError
+    from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, write_owner_message
+
+    host = host_world.host
+    host.incoming = queue.Queue()
+    entered, release = threading.Event(), threading.Event()
+    original = loop_round_limits._drain_incoming_messages
+    if stop:
+        assert write_owner_message(host.ctx.drive_root, 'synthetic finalize', host.ctx.task_id,
+                                   msg_id='joined-stop', kind=KIND_FINALIZE_NOW)
+
+    def drain(*args, **kwargs):
+        controls = original(*args, **kwargs)
+        assert bool(controls.get('finalize_now')) == stop
+        entered.set()
+        assert release.wait(30)
+        return controls
+
+    monkeypatch.setattr(loop_round_limits, '_drain_incoming_messages', drain)
+
+    async def run():
+        task = asyncio.create_task(host.mailbox())
+        try:
+            assert await asyncio.to_thread(entered.wait, 30)
+            if stop:
+                assert 'joined-stop' in host.owner_seen
+            if cancel:
+                task.cancel()
+                await asyncio.sleep(0)
+            release.set()
+            if cancel:
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            elif stop:
+                with pytest.raises(RealtimeSetupError, match='owner_stop'):
+                    await task
+            else:
+                assert await task == []
+            if cancel and stop:
+                with pytest.raises(RealtimeSetupError, match='owner_stop'):
+                    await host.check()
+            elif not stop:
+                await host.check()
         finally:
             release.set()
             await asyncio.gather(task, return_exceptions=True)

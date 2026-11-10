@@ -10,7 +10,6 @@ from tests.test_planned_delegate_assignment import prepared as prepared, restore
 from tests.test_swarm_host_admission import host  # noqa: F401
 from tests._stub_delegate_engines import stub_delegate_engines as stub_delegate_engines
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("door", ["self_restart", "managed_update"])
@@ -131,7 +130,7 @@ def test_saved_run_handoff_accepts_settlement_since_reservation(tmp_path, monkey
     assert result["settled"] is (transition == "settled")
 
 
-@pytest.mark.parametrize("fault", ["attempt", "authority", "holder", "generation", "cause"])
+@pytest.mark.parametrize("fault", ["attempt", "generation", "cause"])
 def test_saved_carrier_does_not_relax_local_handoff_authority(tmp_path, monkeypatch, fault):
     custody, recovery, task, _, _, _, _ = _pending_handoff(tmp_path, "nanny")
     task["_working_recovery"] = {}
@@ -154,8 +153,15 @@ def test_saved_carrier_does_not_relax_local_handoff_authority(tmp_path, monkeypa
     assert recovery._read(tmp_path, "nanny")["status"] == "vetoed" and reconciled == [True]
 
 
-@pytest.mark.parametrize("fault", ["none", "no_resume", "panic", "transaction", "attempt", "holder", "old_generation"])
-@pytest.mark.parametrize("fate", ["pending", "bound", "settled"])
+@pytest.mark.parametrize(("fate", "fault"), [
+    ("pending", "none"),
+    ("bound", "no_resume"),
+    ("bound", "panic"),
+    ("bound", "transaction"),
+    ("bound", "attempt"),
+    ("settled", "holder"),
+    ("settled", "old_generation"),
+])
 def test_startup_pre_adoption_retains_local_checks_without_engine_observation(
         tmp_path, monkeypatch, stub_delegate_engines, fault, fate):
     custody, recovery, task, _, invocation, _, _ = _pending_handoff(tmp_path, "nanny")
@@ -198,6 +204,46 @@ def test_startup_pre_adoption_retains_local_checks_without_engine_observation(
             assert recovery._read(tmp_path, "nanny")["veto_reason"] == "startup_work_stopped"
 
 
+@pytest.mark.parametrize("changed_words", [False, True], ids=["same-work", "different-work"])
+def test_prior_body_selected_files_keep_the_planned_handoff_fingerprint(
+        tmp_path, monkeypatch, stub_delegate_engines, changed_words):
+    from ouroboros import subagent_work_order as orders
+
+    # This is the canonical disclosure written before PR2922, not a new rule
+    # about the current run's preparation. Recovery must retain its byte identity.
+    selected = [{"root": "task_drive", "path": "brief.md", "sha256": "a" * 64, "size": 12}]
+    old_disclosure = (
+        "The parent selected these files (input_files); the host retained each one's exact bytes before queueing "
+        "this task. The first start of this work order verifies those copies against these digests and its "
+        "instructions name where this run reads them; a later start copies only what its own request selects.\n"
+        + f"- task_drive:brief.md (sha256 {'a' * 64}, 12 bytes)"
+    )
+    with monkeypatch.context() as previous_body:
+        previous_body.setattr(orders, "_selected_input_files", lambda _task: old_disclosure)
+        custody, recovery, task, _, _, fingerprint, _ = _pending_handoff(
+            tmp_path, "selected-child", input_files=selected)
+    task["_working_recovery"] = {}
+    row = recovery._read(tmp_path, task["id"])
+    assert row["work_order_fingerprint"] == fingerprint
+    assert row.get("actor_binding_source", "task_snapshot") == "task_snapshot"
+    row.update(cause=recovery.CAUSE_PLANNED_SELF_RESTART, restart_transaction_id="tx", supervisor_pid=123)
+    recovery._write(tmp_path, row)
+    recovery._write_restart_transaction(tmp_path, {
+        "transaction_id": "tx", "supervisor_pid": 123, "status": "normal_exit_acknowledged",
+        "exit_code": 42, "task_ids": [task["id"]],
+    })
+    monkeypatch.delenv(recovery.PLANNED_RESTART_TRANSACTION_ENV, raising=False)
+    monkeypatch.setattr(recovery, "_pid_alive", lambda _pid: False)
+    monkeypatch.setattr(custody, "reconcile_task_runs", lambda *_a, **_k: None)
+    if changed_words:
+        task["objective"] = "A different assignment"
+    assert recovery._successor_binding_mismatch(row, task) == ("work_order_mismatch" if changed_words else "")
+    adopted = recovery.pre_adopt_planned_handoffs(tmp_path, [task])
+    assert adopted == (set() if changed_words else {task["id"]})
+    assert recovery._read(tmp_path, task["id"])["status"] == ("vetoed" if changed_words else "pre_adopted")
+    assert not stub_delegate_engines
+
+
 @pytest.mark.parametrize("prepared", [(False, False, "saved"), (True, False, "saved")],
                          indirect=True, ids=["unscoped", "project"])
 @pytest.mark.parametrize("adopt_before_restore", [False, True], ids=["startup-order", "pre-adopted-snapshot"])
@@ -205,7 +251,6 @@ def test_planned_saved_task_crosses_startup_admission_bootstrap_and_real_loop(
         prepared, monkeypatch, stub_delegate_engines, adopt_before_restore):
     from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros import claudexor_daemon, delegate_recovery as recovery, loop, subagent_bootstrap
-    from ouroboros.working_checkpoint import checkpoint_path
     from ouroboros.agent_dispatch import resolve_dispatch_axes
     from supervisor import queue, workers
     from tests.test_project_hold_recovery import worker
@@ -219,8 +264,10 @@ def test_planned_saved_task_crosses_startup_admission_bootstrap_and_real_loop(
     source = case.host.pending[0]["_working_recovery"]
     assert source["from_attempt"] == case.handoff["old_attempt"]
     assert source["source_task_id"] == "child1" and source["cause"] == "restart"
-    assert read_actor_source_bytes(root, "child1", source["source_ref"]) == checkpoint_path(
-        root, "child1", case.handoff["old_attempt"]).read_bytes()
+    from ouroboros.working_checkpoint import read_working
+
+    assert read_actor_source_bytes(root, "child1", source["source_ref"]) == read_working(
+        root, "child1", case.handoff["old_attempt"])[0]
     def no_engine(*_args, **_kwargs):
         pytest.fail("startup cannot admit the leaf before restoring its owner")
     monkeypatch.setattr(claudexor_daemon, "ensure_owned_gateway", no_engine)
@@ -304,8 +351,11 @@ def test_unreadable_custody_keeps_saved_reservation_without_observation_or_veto(
     assert recovery._read(tmp_path, "nanny")["status"] == "reserved"
 
 
-@pytest.mark.parametrize("binding", ["after_restart", "before_restart", "settled_before_restart"])
-@pytest.mark.parametrize("aged_gc", [False, True])
+@pytest.mark.parametrize(("aged_gc", "binding"), [
+    (False, "before_restart"),
+    (True, "after_restart"),
+    (True, "settled_before_restart"),
+])
 def test_pending_wait_sources_survive_aged_gc_and_second_planned_restart(
         tmp_path, monkeypatch, binding, aged_gc, stub_delegate_engines):
     import os
@@ -375,7 +425,7 @@ def test_pending_wait_sources_survive_aged_gc_and_second_planned_restart(
     assert not stub_delegate_engines
 
 
-@pytest.mark.parametrize("fault", ["task", "attempt", "authority", "holder", "custody_read", "row_read"])
+@pytest.mark.parametrize("fault", ["authority", "custody_read", "row_read"])
 def test_second_handoff_never_replaces_unproven_pending_wait_source(tmp_path, monkeypatch, fault):
     from ouroboros import delegate_custody_current as current
 

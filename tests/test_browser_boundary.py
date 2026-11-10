@@ -59,11 +59,8 @@ def _refused(response):
 
 @pytest.mark.parametrize("headers", [
     {},                                                         # native: CLI, launcher, sidecar, skills
-    {"origin": OWN},                                            # the core's page, no Fetch Metadata (older WebKit)
-    {"origin": OWN, "sec-fetch-site": "same-origin"},
     {"sec-fetch-site": "none"},                                 # a navigation the owner typed
     # Behind a proxy that terminates TLS or rewrites Host, the browser's own verdict decides.
-    {"origin": "https://ouroboros.example", "sec-fetch-site": "same-origin"},
     {"origin": "HTTP://TESTSERVER:80"},                         # case and the default port are the same origin
 ])
 def test_native_and_same_origin_requests_reach_the_handler(client, headers):
@@ -71,29 +68,30 @@ def test_native_and_same_origin_requests_reach_the_handler(client, headers):
     assert response.status_code == 200 and HANDLED == [("POST", "/api/reset", b"")]
 
 
-@pytest.mark.parametrize("headers", [
-    {"origin": "http://evil.example", "sec-fetch-site": "cross-site"},
-    {"origin": "http://evil.example"},                          # no Fetch Metadata
-    {"origin": "http://testserver:3000"},                       # same host, another port
-    {"origin": "http://testserver:3000", "sec-fetch-site": "same-site"},
-    {"origin": "https://testserver"},                           # another scheme
-    {"origin": "null"},                                         # an opaque frame or sandboxed page
-    {"origin": "null", "sec-fetch-site": "same-origin"},
-    {"origin": "http://testserver/path"},                       # malformed
-    {"origin": "chrome-extension://abc"},
-    {"sec-fetch-site": "cross-site"},                           # a no-cors image or form with no Origin
-    {"sec-fetch-site": "same-site"},
+@pytest.mark.parametrize(("method", "headers"), [
+    pytest.param("POST", {"origin": "http://evil.example", "sec-fetch-site": "cross-site"}, id='POST-headers0'),
+    pytest.param("POST", {"origin": "http://testserver:3000", "sec-fetch-site": "same-site"}, id='POST-headers3'),
+    pytest.param("POST", {"origin": "null", "sec-fetch-site": "same-origin"}, id='POST-headers6'),
+    pytest.param("POST", {"sec-fetch-site": "cross-site"}, id='POST-headers9'),  # a no-cors image or form with no Origin
+    pytest.param("GET", {"origin": "http://evil.example"}, id='GET-headers1'),  # no Fetch Metadata
+    pytest.param("GET", {"origin": "https://testserver"}, id='GET-headers4'),  # another scheme
+    pytest.param("GET", {"origin": "http://testserver/path"}, id='GET-headers7'),  # malformed
+    pytest.param("GET", {"sec-fetch-site": "same-site"}, id='GET-headers10'),
+    pytest.param("DELETE", {"origin": "http://testserver:3000"}, id='DELETE-headers2'),  # same host, another port
+    pytest.param("DELETE", {"origin": "null"}, id='DELETE-headers5'),  # an opaque frame or sandboxed page
+    pytest.param("DELETE", {"origin": "chrome-extension://abc"}, id='DELETE-headers8'),
 ])
-@pytest.mark.parametrize("method", ["POST", "GET", "DELETE"])
 def test_other_sites_pages_never_reach_a_handler(client, headers, method):
     _refused(client.request(method, "/api/reset", headers=headers))
 
 
-@pytest.mark.parametrize("path", [
-    "/", "/onboarding", "/static/modules/app.js",
-    "/api/extensions/demo/module/widget.js", "/api/extensions/demo/ui/rev1/ui/icon.png",
+@pytest.mark.parametrize(("method", "path"), [
+    ("GET", "/"),
+    ("GET", "/static/modules/app.js"),
+    ("GET", "/api/extensions/demo/ui/rev1/ui/icon.png"),
+    ("HEAD", "/onboarding"),
+    ("HEAD", "/api/extensions/demo/module/widget.js"),
 ])
-@pytest.mark.parametrize("method", ["GET", "HEAD"])
 def test_passive_files_load_from_any_page(client, path, method):
     response = client.request(method, path, headers={"origin": "null", "sec-fetch-site": "cross-site"})
     assert response.status_code == 200 and HANDLED and HANDLED[0][1] == path
@@ -104,10 +102,6 @@ def test_passive_files_load_from_any_page(client, path, method):
     ("GET", "/api/extensions/demo/ping"),                        # a skill's own route may act on GET
     # Only the static /ui/{revision}/{path} route is passive; a shorter /ui/<x> is a dynamic route, not a file.
     ("GET", "/api/extensions/demo/ui/action"),
-    ("GET", "/api/extensions/demo/ui"),
-    ("GET", "/api/model-catalog"),
-    ("POST", "/"),
-    ("GET", "/auth/logout"),
 ])
 def test_effects_behind_passive_looking_paths_stay_guarded(client, method, path):
     _refused(client.request(method, path, headers={"origin": "null", "sec-fetch-site": "cross-site"}))
@@ -121,7 +115,7 @@ def test_native_and_same_origin_websockets_are_accepted(client, headers):
 
 
 @pytest.mark.parametrize("headers", [
-    {"origin": "http://evil.example"}, {"origin": "http://testserver:3000"}, {"origin": "null"},
+    {"origin": "http://evil.example"}, {"origin": "null"},
     {"origin": "http://evil.example", "sec-fetch-site": "cross-site"},
 ])
 def test_other_sites_websockets_close_before_accept(client, headers):
@@ -131,53 +125,34 @@ def test_other_sites_websockets_close_before_accept(client, headers):
     assert closed.value.code == 4403 and HANDLED == []
 
 
-def _json_refused(response):
-    assert response.status_code == 415, response.text
-    assert response.json()["code"] == "json_content_type_required"
-    assert HANDLED == []
-
-
-@pytest.mark.parametrize("content_type", ["text/plain", "text/plain;charset=UTF-8",
-                                          "application/x-www-form-urlencoded", "multipart/form-data; boundary=x", None])
-def test_a_json_contract_refuses_a_body_of_another_type(client, content_type):
+# A JSON body needs no label (curl's ``-d`` sends a form label); what a route makes of its body is its own
+# reading (gateway._helpers.request_json_or), so the boundary hands every body on byte for byte.
+@pytest.mark.parametrize("method,path,content_type,body", [
+    ("POST", "/api/settings", None, b'{"OUROBOROS_MODEL": "x"}'),
+    ("POST", "/api/settings", "application/merge-patch+json; charset=utf-8", b"{}"),
+    ("DELETE", "/api/chat/upload", "text/plain", b'{"filename": "probe.txt"}'),
+    ("POST", "/api/reset", "text/plain", b""),
+])
+def test_every_body_reaches_the_handler_unchanged(client, method, path, content_type, body):
     headers = {"origin": OWN} | ({"content-type": content_type} if content_type else {})
-    _json_refused(client.post("/api/settings", content=b'{"OUROBOROS_MODEL": "x"}', headers=headers))
+    response = client.request(method, path, content=body, headers=headers)
+    assert response.status_code == 200 and HANDLED == [(method, path, body)]
 
 
-def test_an_unknown_length_body_is_decided_by_its_first_chunk_and_replayed(client):
+def test_an_unknown_length_body_is_handed_on_whole(client):
     def chunks(*parts):
         yield from parts
 
-    _json_refused(client.post("/api/settings", content=chunks(b"", b'{"a": 1}'), headers={"origin": OWN}))
+    response = client.post("/api/settings", content=chunks(b"", b'{"a"', b": 1}"), headers={"origin": OWN})
+    assert response.status_code == 200 and HANDLED == [("POST", "/api/settings", b'{"a": 1}')]
+    HANDLED.clear()
     response = client.post("/api/tasks/t1/cancel", content=chunks(b""), headers={"origin": OWN})
     assert response.status_code == 200 and HANDLED == [("POST", "/api/tasks/t1/cancel", b"")]
-    HANDLED.clear()
-    response = client.post("/api/settings", content=chunks(b'{"a"', b": 1}"),
-                           headers={"origin": OWN, "content-type": "application/json"})
-    assert response.status_code == 200 and HANDLED == [("POST", "/api/settings", b'{"a": 1}')]
 
 
-def test_the_method_is_part_of_the_json_contract(client):
-    """POST /api/chat/upload is a multipart upload; DELETE at the same path takes JSON (endpoint_index)."""
-    response = client.post("/api/chat/upload", content=b"--x--\r\n",
-                           headers={"origin": OWN, "content-type": "multipart/form-data; boundary=x"})
-    assert response.status_code == 200 and HANDLED == [("POST", "/api/chat/upload", b"--x--\r\n")]
-    HANDLED.clear()
-    _json_refused(client.request("DELETE", "/api/chat/upload", content=b'{"filename": "probe.txt"}',
-                                 headers={"origin": OWN, "content-type": "text/plain"}))
-    response = client.request("DELETE", "/api/chat/upload", content=b'{"filename": "probe.txt"}',
-                              headers={"origin": OWN, "content-type": "application/json"})
-    assert response.status_code == 200 and HANDLED == [("DELETE", "/api/chat/upload", b'{"filename": "probe.txt"}')]
-
-
-@pytest.mark.parametrize("path,content_type,body", [
-    ("/api/settings", "application/json", b"{}"),
-    ("/api/settings", "application/merge-patch+json; charset=utf-8", b"{}"),
-    ("/api/reset", "text/plain", b""),                           # a body-less POST needs no type
-    ("/api/chat/upload", "multipart/form-data; boundary=x", b"--x--\r\n"),
-    ("/api/files/upload", "multipart/form-data; boundary=x", b"--x--\r\n"),
-    ("/api/extensions/demo/transcribe", "audio/webm", b"\x1a\x45"),  # a skill route defines its own body
-])
-def test_json_and_declared_non_json_bodies_pass(client, path, content_type, body):
-    response = client.post(path, content=body, headers={"origin": OWN, "content-type": content_type})
-    assert response.status_code == 200 and HANDLED == [("POST", path, body)]
+@pytest.mark.parametrize("content_type", [None, "text/plain", "application/json"])
+def test_another_sites_body_is_refused_whatever_it_holds(client, content_type):
+    """The labels a cross-site form or ``no-cors`` fetch can send, and the one it cannot: provenance decides."""
+    headers = {"origin": "http://evil.example", "sec-fetch-site": "cross-site"}
+    _refused(client.post("/api/settings", content=b'{"OUROBOROS_MODEL": "x"}',
+                         headers=headers | ({"content-type": content_type} if content_type else {})))

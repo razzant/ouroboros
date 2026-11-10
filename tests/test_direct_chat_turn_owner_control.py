@@ -1,18 +1,21 @@
-"""Owner-control addressability of the in-process direct-chat turn.
+"""Owner-control addressability of a direct-chat turn an INLINE EXECUTOR runs in the server process.
 
-The class (rc.7 QA regress, item 010): a self-modification typed into the
-chat runs as a DIRECT-CHAT TURN — minted by ``worker_chat_lane.py`` with an
-8-hex id and executed on the long-lived chat agent inside the supervisor,
-never through the queue. ``agent.py`` writes its ordinary durable
-``running`` row, so ``GET /api/tasks?status=running`` listed it while every
-queue-keyed owner control (cancel, hurry, decisions) answered 404 "task not
+The class (rc.7 QA regress, item 010): a self-modification typed into the chat ran as a
+DIRECT-CHAT TURN on an actor inside the supervisor, never through the queue. ``agent.py``
+writes its ordinary durable ``running`` row, so ``GET /api/tasks?status=running`` listed
+it while every queue-keyed owner control (cancel, hurry, decisions) answered 404 "task not
 found or not active" and the spend kept growing until ``/restart``.
 
-The contract pinned here: ``supervisor.workers.direct_chat_turn`` is the ONE
-reader every ingress, the ownership predicate and the graceful-stop episode
-resolve a live direct turn through — so a turn the task list shows as
-running is addressable, and custody stops it COOPERATIVELY (the finalize
-control on the canonical owner mailbox; there is no worker process to kill).
+Today an owner turn is carried by a conversation-lane worker and its Stop is the pooled
+custody of its RUNNING row (``tests/test_conversation_lane_laws.py``, E9). A registered
+in-process actor remains the shape of the two disclosed inline executors — a live
+realtime call (``executor=inline_call``) and the degraded carrier (``inline_degraded``) —
+which run the worker body on a thread of the server and register their actor in the
+``DirectActivityRegistry``. The contract pinned here is theirs: ``supervisor.workers.direct_chat_turn``
+is the ONE reader every ingress, the ownership predicate and the graceful-stop episode
+resolve such a turn through — so a turn the task list shows as running is addressable,
+and custody stops it COOPERATIVELY (``inline_carrier.stop_direct_chat_turn``: the finalize
+control on the canonical owner mailbox, armed under the actor's admission lock).
 
 The two ``orphan`` cases at the top pin the Stop of a durable running row
 that NOTHING owns (no queue row, no worker, no live chat turn): the intent is
@@ -23,6 +26,7 @@ as the agent's ``cancel_task`` does — never a 404 that leaves it running.
 from __future__ import annotations
 
 import json
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -73,8 +77,8 @@ def _write_snapshot(tmp_path, running_ids=()):
 
 
 def _live_chat_agent(monkeypatch, task_id=TURN_ID, *, accepting=True, chat_id=0):
-    """The chat agent mid-turn, shaped exactly as agent.py leaves it (the
-    fields steering.py and workers.chat_turn_liveness read)."""
+    """An inline executor's actor mid-turn, shaped exactly as agent.py leaves it (the fields
+    steering.py and workers.chat_turn_liveness read), registered as ``start_inline_turn`` registers it."""
 
     import threading
 
@@ -865,3 +869,79 @@ def test_cascade_stop_now_during_the_inflight_synthesis_keeps_the_intent_open_an
     assert checkpoint["post_task_stop_reason"] == (
         "owner_stopped:skipped=promotion"), checkpoint
     assert not active_intent(tmp_path, TURN_ID)
+
+
+def _windows_shell_processes() -> list:
+    """Windows only, for the ``sh`` stimulus's failure text: every shell and sleep alive, whatever their parent chain."""
+    if os.name != "nt":
+        return []
+    import psutil
+
+    return sorted((process.info["pid"], process.info["ppid"], process.info["name"])
+                  for process in psutil.process_iter(["pid", "ppid", "name"])
+                  if process.info["name"] in {"sh.exe", "bash.exe", "sleep.exe"})
+
+
+@pytest.mark.parametrize("stimulus", ["native tree", "sh"])
+def test_stop_now_ends_a_command_the_direct_turn_is_running_through_its_open_intent(tmp_path, monkeypatch, stimulus):
+    """R4: the direct turn's Stop control is drained only at a round boundary, so a command the turn was running
+    kept its whole wait. The real public Stop now leaves the intent open for a turn still inside a step (202); the
+    turn's own command wait reads it, kills the command's process group within a poll and keeps the output so far.
+    Its boundary then ends the turn as before (the control stays in the mailbox).
+
+    ``native tree``: two interpreters on every host, the root waiting on a child that holds the same pipes, so only
+    the whole group's (Windows: tree's) kill closes them before the 5 s output bound. It says nothing about a shell.
+    ``sh``: the original stimulus. UNRESOLVED on Windows, not fixed by the other case: a Git-for-Windows ``sh`` tree
+    kept the pipes past Stop now's ``taskkill /F /T`` (CI 41634598146, job 125912568384: 5.2 s and 5.3 s, its reader
+    threads leaked), cause not established natively. Its failure there names the shells still alive."""
+    import sys
+    import threading
+    import time
+
+    import ouroboros.config as config
+    from ouroboros.cancel_intents import active_intent
+    from ouroboros.model_wait import task_model_wait_scope
+    from ouroboros.tools.shell import _run_shell
+
+    _isolate_queue(monkeypatch, tmp_path)
+    _live_chat_agent(monkeypatch)
+    write_task_result(tmp_path, TURN_ID, "running", chat_id=0, description="modify yourself")
+    _write_snapshot(tmp_path, running_ids=())
+    monkeypatch.setattr(config, "get_direct_turn_stop_wait_sec", lambda: 0.5)
+    work = tmp_path / "work"
+    work.mkdir()
+    ran = {}
+    ready = work / "tree.ready"
+    child = f"import pathlib, time; pathlib.Path({str(ready)!r}).touch(); time.sleep(25)"
+    command = ["sh", "-c", "echo started; sleep 25; echo finished"] if stimulus == "sh" else [
+        sys.executable, "-c", f"import subprocess, sys; print('started', flush=True); subprocess.run("
+        f"[sys.executable, '-c', {child!r}], stdout=sys.stdout, stderr=sys.stderr); print('finished', flush=True)"]
+
+    def turn_runs_a_command():
+        task = {"id": TURN_ID, "type": "task", "_is_direct_chat": True, "chat_id": 0, "_attempt": 1}
+        with task_model_wait_scope(task=task, drive_root=tmp_path, event_queue=None, worker_slot_held=False) as owner:
+            ctx = SimpleNamespace(repo_dir=work, drive_root=tmp_path, drive_logs=lambda: tmp_path, task_id=TURN_ID,
+                                  model_wait_context=owner)
+            ran["started"] = time.monotonic()
+            ran["text"] = _run_shell(ctx, command, timeout_sec=60)
+            ran["ended"] = time.monotonic()
+
+    turn = threading.Thread(target=turn_runs_a_command, name="direct-turn-command", daemon=True)
+    turn.start()
+    time.sleep(1.5)  # the command is inside its wait
+    ready_by = time.monotonic() + 120  # an interpreter's start on a loaded host, not the bound under test
+    while stimulus != "sh" and not ready.exists():
+        assert turn.is_alive() and time.monotonic() < ready_by, ran
+        time.sleep(0.02)
+    shells = _windows_shell_processes()
+    with _client(tmp_path) as client:
+        pressed = time.monotonic()
+        cancel = client.post(f"/api/tasks/{TURN_ID}/cancel", json={"stop_policy": "immediate"})
+    turn.join(40)
+
+    assert not turn.is_alive()
+    assert cancel.status_code == 202 and cancel.json()["cancel_state"] == "pending", cancel.text
+    assert ran["ended"] - pressed < 5, (f"the command ended {ran['ended'] - pressed:.1f}s after Stop now; "
+                                        f"shells before it {shells}, after {_windows_shell_processes()}")
+    assert "started" in ran["text"] and "finished" not in ran["text"]
+    assert "finalize_now" in _mailbox_kinds(tmp_path) and active_intent(tmp_path, TURN_ID)

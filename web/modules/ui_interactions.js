@@ -23,7 +23,8 @@ function focusable(root) {
  * Tab presses are intercepted, leaving native editing/radio behavior intact.
  * onEscape belongs to the caller's result contract (confirm/input/Project).
  * `preventScroll` returns focus without scrolling its container, for an opener
- * in a scrolled feed whose place must not move.
+ * in a scrolled feed whose place must not move. `returnFocus` may be a function
+ * read at close, for an opener a repaint may replace while the dialog is open.
  */
 export function bindDialogFocus(dialog, {
     initialFocus,
@@ -65,7 +66,8 @@ export function bindDialogFocus(dialog, {
         dialog.removeEventListener('keydown', onKey);
         const ownedFocus = dialog.contains(doc.activeElement) || doc.activeElement === doc.body;
         if (originalTabIndex === null) dialog.removeAttribute('tabindex');
-        if (restoreFocus && ownedFocus && returnFocus && available(returnFocus)) returnFocus.focus({ preventScroll });
+        const target = typeof returnFocus === 'function' ? returnFocus() : returnFocus;
+        if (restoreFocus && ownedFocus && target && available(target)) target.focus({ preventScroll });
     };
 }
 
@@ -110,10 +112,12 @@ export function bindPopoverPosition(popup, { anchor, point, align = 'start', onA
         if (disposed || !popup.isConnected || (anchor && !anchor.isConnected)) return;
         const viewport = win.visualViewport;
         const margin = 8;
+        // Below the screen's top inset (ui.css --ui-popup-inset-top; 0 where unregistered or none).
+        const inset = parseFloat(win.getComputedStyle?.(popup)?.getPropertyValue?.('--ui-popup-inset-top')) || 0;
         const leftEdge = (viewport?.offsetLeft || 0) + margin;
-        const topEdge = (viewport?.offsetTop || 0) + margin;
+        const topEdge = (viewport?.offsetTop || 0) + inset + margin;
         const width = Math.max(0, (viewport?.width || win.innerWidth) - margin * 2);
-        const height = Math.max(0, (viewport?.height || win.innerHeight) - margin * 2);
+        const height = Math.max(0, (viewport?.height || win.innerHeight) - inset - margin * 2);
         const target = anchor?.getBoundingClientRect();
         popup.style.setProperty('--ui-popup-max-width', `${width}px`);
         popup.style.setProperty('--ui-popup-max-height', `${height}px`);

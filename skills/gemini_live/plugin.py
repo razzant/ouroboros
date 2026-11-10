@@ -239,6 +239,8 @@ class GeminiSession(JsonSession):
         self.read_task = None
         self.pending_event = asyncio.Event()
         self.resume_handle = options.resume_handle
+        self.resume_revision = 0
+        self.tool_response_revision = None
         self.resume_requested = bool(options.resume_handle)
         now = time.monotonic()
         for key, (expiry, _) in tuple(RESUMPTIONS.items()):
@@ -248,6 +250,12 @@ class GeminiSession(JsonSession):
         if saved:
             for name, value in saved[1].items():
                 setattr(self, name, value)
+
+    @property
+    def resume_after_tool_response(self):
+        if self.tool_response_revision is None:
+            return None
+        return self.resume_revision > self.tool_response_revision
 
     @property
     def renewal_ready(self):
@@ -433,7 +441,10 @@ class GeminiSession(JsonSession):
                 if speaker == 'owner' and not self.input_pending:
                     self.input_pending = True
                     self.input_final = False
-                    result.append(LiveEvent('input_started'))
+                    # No native VAD start came first and transcription order is not guaranteed:
+                    # a response already under way belongs to these words.
+                    result.append(LiveEvent('input_started', {'response_id': self.response}
+                                            if self.response and not self.response_complete else {}))
                 elif speaker == 'ouroboros':
                     if self.output_final:
                         # A native completion can precede a transcription tail. Revise the same
@@ -529,6 +540,7 @@ class GeminiSession(JsonSession):
                     await self.send(command)
         if 'sessionResumptionUpdate' in event:
             update = event['sessionResumptionUpdate']
+            self.resume_revision += 1
             self.resume_handle = update.get('newHandle', '') if update.get('resumable') else ''
             result.append(LiveEvent('resumable', {'handle': self.resume_handle}))
         if 'goAway' in event:
@@ -594,7 +606,8 @@ class GeminiSession(JsonSession):
                 elif not message.get('tool_calls'):
                     other.append(message)
             if responses:
-                await self.write({'toolResponse': {'functionResponses': responses}})
+                self.tool_response_revision = await self.write({'toolResponse': {'functionResponses': responses}},
+                                                               snapshot=lambda: self.resume_revision)
                 ids = {r['id'] for r in responses}
                 self.hold_context([row for row in command.messages if row.get('tool_call_id') in ids
                                    or any(c.get('id') in ids for c in row.get('tool_calls', ()))])
@@ -640,8 +653,12 @@ class GeminiSession(JsonSession):
                     text = 'Host context update; preserve each original role and trust boundary:\n' + canonical_json(records)
                     if images:
                         self.input_modalities.add('image')
-                await self.write({'clientContent': {'turns': [{'role': 'user', 'parts': [{'text': text}, *images]}],
-                    'turnComplete': respond}})
+                try:
+                    await self.write({'clientContent': {'turns': [{'role': 'user', 'parts': [{'text': text}, *images]}],
+                        'turnComplete': respond}})
+                except BaseException:
+                    self.turn_busy = False  # no turn was asked for: a resumed session must not wait for one to end
+                    raise
                 if isinstance(command, ContextUpdate):
                     self.hold_context(command.messages)
         else:

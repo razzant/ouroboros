@@ -283,9 +283,9 @@ class WindowObservations:
 # metadata with a hard expiry (no background thread holds anything): the worker
 # grants it for one window, bounded by min(task deadline, the run's own
 # maxSeconds horizon, this absolute ceiling), and releases it when the wait
-# returns. The ceiling exceeds the delegate_wait ToolEntry timeout (2100s, which
-# DELEGATE_WAIT_CEILING_SEC equals) by +300 headroom so a full window plus its
-# own teardown never draws silence attention mid-hold.
+# returns. The ceiling exceeds one hold's bound (DELEGATE_WAIT_CEILING_SEC, 2100s:
+# the 1800s max window plus its teardown) by +300 headroom so a full window never
+# draws silence attention mid-hold; the call's own outer bound is the task lifetime.
 DELEGATE_WAIT_LEASE_GRACE_SEC = 120
 EXTERNAL_WAIT_LEASE_CEILING_SEC = DELEGATE_WAIT_CEILING_SEC + 300
 
@@ -347,6 +347,50 @@ def emit_external_wait_lease(ctx: Any, run_id: str, until_ts: float,
         })
     except Exception:
         log.debug("external-wait lease emission failed", exc_info=True)
+
+
+class HoldLease:
+    """ONE idle-rail lease for a whole supervising hold (``delegate_supervision.supervised_wait``),
+    spoken only when it changes.
+
+    The hold observes its run(s) every three seconds through ``_delegate_wait(observation_only)``,
+    which used to grant, re-grant and release a fresh lease on every beat: three control events
+    per beat per held run (``external_wait_lease`` reached 788 a minute on 01.11), each a bus
+    round trip, a dispatch and a frame, restating a fact that had not changed. The hold now grants
+    one lease (one ``lease_id``) before its first observation, renews it only once less than the
+    teardown grace remains (so a beat bounded by the read window can never outlive it), and
+    releases it once when the hold ends. The bound is the same ``external_wait_lease_until`` over
+    the observed run's own timing (read once per run: a run's start and cap never change); a
+    renewal that would not move the expiry later (a run at its own horizon, a spent deadline)
+    is not spoken.
+    """
+
+    def __init__(self, ctx: Any) -> None:
+        import uuid
+
+        self._ctx, self._lease_id, self._until, self._run_id = ctx, uuid.uuid4().hex, 0.0, ""
+        self._timing: Dict[str, Any] = {}
+
+    def renew(self, run_id: str) -> None:
+        if self._until - time.time() > DELEGATE_WAIT_LEASE_GRACE_SEC:
+            return
+        from ouroboros import delegate_custody as custody
+        from ouroboros.deadline_utils import parse_deadline_ts, window_within_deadline
+        from ouroboros.gateways.claudexor import _READ_TIMEOUT_SEC
+
+        if run_id not in self._timing:
+            started, max_seconds = custody.run_timing(custody.custody_root(self._ctx), run_id)
+            self._timing[run_id] = (parse_deadline_ts(started), max_seconds)
+        until = external_wait_lease_until(
+            self._ctx, window_within_deadline(self._ctx, int(_READ_TIMEOUT_SEC)), *self._timing[run_id])
+        if until > self._until:
+            self._until, self._run_id = until, run_id
+            emit_external_wait_lease(self._ctx, run_id, until, lease_id=self._lease_id)
+
+    def release(self) -> None:
+        if self._until:
+            emit_external_wait_lease(self._ctx, self._run_id, 0.0, lease_id=self._lease_id)
+            self._until = 0.0
 
 
 def poll_bound(seconds_left: float, *, strict: bool = False) -> float:
@@ -484,15 +528,27 @@ def expiring_poll(
         return None
 
 
-def waiting_expiry_clause(pending: Optional[List[Dict[str, Any]]]) -> str:
+def waiting_expiry_clause(pending: Optional[List[Dict[str, Any]]], async_only: bool = False) -> str:
     """The honest expiry clause for a waiting note, keyed on the rows' own
     ``timeout_at`` (R2-7e). The engine benign-declines an unanswered question
     only when the row carries a ``timeout_at``; a null one means NO automatic
     expiry, and a note promising a benign decline there teaches the nanny to
     wait for a timeout that never comes. Claimed only when EVERY visible row
     carries one; rows absent entirely (a bare ``waitingOnUser`` flag) prove no
-    expiry either."""
+    expiry either. ``async_only`` is the caller's whole-set fact: such a question
+    closes at its timeout with nothing sent and resumes nothing, since nothing
+    was held. Otherwise only the rows that may hold the run speak for the run."""
     rows = [row for row in (pending or []) if isinstance(row, dict)]
+    if not async_only:
+        rows = [row for row in rows if row.get("delivery") != "async"]
+    if not rows or any("timeout_at" not in row for row in rows):
+        return "expiry details are unavailable in this observation; no deadline or absence of one is established"
+    if async_only:
+        if rows and all(str(row.get("timeout_at") or "").strip() for row in rows):
+            return ("at each row's timeout_at an unanswered async question closes and nothing "
+                    "is sent; the agent keeps working without an answer")
+        return ("timeout_at is null here, so the question stays open while the agent keeps "
+                "working; silence answers nothing")
     if rows and all(str(row.get("timeout_at") or "").strip() for row in rows):
         return ("the engine timeout benign-declines it (each row's timeout_at; "
                 "the run then continues on stated assumptions)")
@@ -532,7 +588,10 @@ def _fitted_pending(payload: Dict[str, Any], pending: List[Dict[str, Any]],
     payload["interactions_omitted"] = len(pending)
     payload["interactions_note"] = (
         "the pending question set could not fit this payload even one row at a "
-        "time; the run is still PAUSED on it — the full set was delivered by the "
+        + ("time; the questions are still pending and the run keeps working"
+           if payload.get("async_questions_only") is True else
+           "time; the run is still PAUSED on it")
+        + " — the full set was delivered by the "
         "immediate waiting_on_user return (staged to the task drive when it "
         "spilled), or re-read it with delegate_wait"
     )
@@ -670,11 +729,11 @@ def emit_stream(ctx: Any, run_id: str, read: Any, *, after_seq: int) -> None:
     to the live progress surface, each frame committed once handed over; a broken channel
     never aborts the wait."""
     fn = getattr(ctx, "emit_progress_fn", None)
-    if not callable(fn):
-        return
     from ouroboros import delegate_activity
     try:
         for activity, commit in delegate_activity.stream_observations(ctx, run_id, read, after=after_seq):
+            if not callable(fn):
+                return  # retained, not delivered; the detail/terminal path can retry the pending frame
             fn(delegate_activity.progress_text(activity), delegated_activity=activity)
             commit()
     except Exception:
@@ -695,10 +754,19 @@ def emit_retained(ctx: Any, run_id: str) -> None:
         log.debug("retained delegated progress emit failed", exc_info=True)
 
 
-def paused_note(pending_interactions: Optional[List[Dict[str, Any]]]) -> str:
+def paused_note(pending_interactions: Optional[List[Dict[str, Any]]], async_only: bool = False) -> str:
     """The note of a run PAUSED on its own question(s): never "stuck" (owner 7=A /
     F13). Shared by the per-window payload and the supervising wake, which keeps it
-    when it drops the per-tick keep-watching/cancel note."""
+    when it drops the per-tick keep-watching/cancel note. ``async_only`` (the whole
+    set's fact, judged before any preview) names a run that keeps working instead."""
+    if async_only:
+        return ("The run is alive and KEEPS WORKING; the question(s) it asked are attention "
+                "only and hold nothing (async_questions_only; see pending_interactions). "
+                "Answer with delegate_answer when an answer would help — it reaches the "
+                "agent as its next user message in this session —, escalate an "
+                "above-authority question with the escalate verb (parent-first), or keep "
+                f"waiting (call again) — {waiting_expiry_clause(pending_interactions, True)}. "
+                "Do not cancel a run merely because it asked a question.")
     return ("The run is alive and PAUSED on the question(s) it already asked "
             "(waiting_on_user; see pending_interactions). Decide: answer with "
             "delegate_answer, escalate an above-authority question with the "
@@ -755,8 +823,13 @@ def window_payload(
     seen: WindowObservations,
     budget: int,
     pending_interactions: Optional[List[Dict[str, Any]]] = None,
+    async_questions_only: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """What the model is handed when the window expires without a terminal state.
+
+    ``async_questions_only`` is the fact about the WHOLE pending set; omitted, it is
+    judged on the full ``detail`` (``claudexor_observation.question_attention``), never
+    on ``pending_interactions``, a bounded preview that may shed the only blocking row.
 
     ``pending_interactions`` is the caller's BOUNDED question projection (B4): a
     known question the model chose not to answer keeps riding every expiry payload
@@ -778,6 +851,13 @@ def window_payload(
         "max_seconds": max_seconds,
         "waiting_on_user": waiting_on_user,
     }
+    if async_questions_only is None:
+        from ouroboros.gateways.claudexor_observation import question_attention
+
+        async_questions_only = waiting_on_user and question_attention(detail)[1]
+    held = waiting_on_user and not async_questions_only
+    if waiting_on_user and async_questions_only:
+        payload["async_questions_only"] = True  # absent keeps the old meaning: a question holds the run
     if waiting_on_user:
         # The re-wait of a question the model already saw rides the same flat route
         # fact as the immediate waiting payload (whose note carries the cost clause;
@@ -791,7 +871,7 @@ def window_payload(
         # generic delegate_cancel hint invited cancelling a run that is simply
         # waiting to be answered. The waiting state gets its own note.
         payload["note"] = (
-            paused_note(pending_interactions) if waiting_on_user else
+            paused_note(pending_interactions, async_only=not held) if waiting_on_user else
             ("The run is alive but silent. Decide: keep waiting (call again), "
              "or delegate_cancel if it is stuck."))
         _fitted_pending(payload, list(pending_interactions or []), budget)
@@ -844,7 +924,14 @@ def window_payload(
         "Call delegate_wait again with since_seq=last_seq to keep watching; "
         "`quiet_for_sec` is how long it has been silent at the end of the window."
     )
-    if waiting_on_user:
+    if waiting_on_user and not held:
+        payload["note"] += (
+            " The run KEEPS WORKING with question(s) pending that hold nothing: answer "
+            "when useful (delegate_answer; it reaches the agent as its next user message), "
+            "raise one with the escalate verb (parent-first) if it is above your authority, "
+            f"or keep waiting — {waiting_expiry_clause(pending_interactions, True)}."
+        )
+    elif waiting_on_user:
         # F13: the paused state earns its own instruction here too — never the
         # generic keep-watching line alone while a question sits unanswered.
         # The expiry claim is keyed on the rows' own timeout_at (R2-7e).

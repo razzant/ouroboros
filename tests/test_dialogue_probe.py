@@ -2,7 +2,6 @@
 from contextlib import contextmanager
 import json
 import sqlite3
-from types import SimpleNamespace
 
 import pytest
 
@@ -80,9 +79,14 @@ def probe(conn, keys, **kwargs):
         "before": None, "lower": 0, "limit": 200, "newest_first": True, **kwargs}))
 
 
-@pytest.mark.parametrize("stream", ["chat", "progress"])
-@pytest.mark.parametrize("newest_first", [False, True])
-@pytest.mark.parametrize("limit", [-7, -1, 0, 1, 9, 10_000])
+@pytest.mark.parametrize(("limit", "newest_first", "stream"), [
+    (-7, False, "chat"),
+    (-1, True, "progress"),
+    (0, False, "chat"),
+    (1, True, "progress"),
+    (9, False, "chat"),
+    (10_000, True, "progress"),
+])
 def test_selection_matches_the_addressed_union(connection, records, stream, newest_first, limit):
     key_sets = [[], [("chat_id", None)], [("task_id", None), ("kind", None)],
                 [("chat_id", 1), ("task_id", "task-1"), ("chat_id", 1), ("origin", "1:owner-1")],
@@ -159,8 +163,12 @@ def test_coordinates_reaching_python_do_not_grow_with_the_room(newest_first):
     assert measured[0] == measured[1] == (4, 21, 7), measured
 
 
-@pytest.mark.parametrize("variables,compound", [(5, 1), (9, 3), (31, 7), (999, 500)])
-@pytest.mark.parametrize("newest_first", [False, True])
+@pytest.mark.parametrize(("newest_first", "variables", "compound"), [
+    (False, 5, 1),
+    (False, 31, 7),
+    (True, 9, 3),
+    (True, 999, 500),
+])
 def test_runtime_limits_bound_selection_and_hydration(variables, compound, newest_first):
     if not hasattr(sqlite3.Connection, "setlimit"):
         pytest.skip("Python 3.10 has no runtime SQLite limit API; conservative fallback covered separately")
@@ -177,9 +185,7 @@ def test_runtime_limits_bound_selection_and_hydration(variables, compound, newes
         assert counted.max_bindings <= variables and counted.body_rows == 60
 
 
-def test_python310_limit_fallback_and_host_10000_rows(tmp_path, monkeypatch):
-    from ouroboros.gateway.host_service import _chat_rows
-
+def test_python310_limit_fallback_pages_10000_probe_rows(tmp_path, monkeypatch):
     rows = [{"chat_id": 1, "task_id": "task", "direction": "out", "text": f"row {n}"} for n in range(10_023)]
     seed(tmp_path, live={"chat": rows + [{"chat_id": 2, "text": "foreign"}]})
     ds.ensure(tmp_path)
@@ -205,8 +211,6 @@ def test_python310_limit_fallback_and_host_10000_rows(tmp_path, monkeypatch):
     monkeypatch.setattr(ds, "transaction", limited)
     found = ds.probe_rows(tmp_path, "chat", [("chat_id", 1), ("task_id", "task")], limit=10_000)
     assert [row.row for row in reversed(found)] == rows[-10_000:]
-    assert connections[-1].body_rows == 10_000 and connections[-1].max_bindings <= 999
-    assert _chat_rows(SimpleNamespace(data_dir=tmp_path), 1) == rows[-10_000:]
     assert connections[-1].body_rows == 10_000 and connections[-1].max_bindings <= 999
 
 

@@ -18,7 +18,7 @@ from tests.test_emoji_free_browser import _browser, _open, _server
 from tests.ui_chat_viewport_smoke import _emit_ws_frame
 
 direct_server_with_data = _server
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def _dispatch(monkeypatch, scenario, emit):

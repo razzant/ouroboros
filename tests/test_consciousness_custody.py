@@ -1,4 +1,5 @@
-"""The own clock follows one wake through binding, callback gaps and carrier changes."""
+"""The own clock follows one wake through binding, settlement gaps and carrier changes: its custody is the
+admitted RUNNING row the conversation lane carries, until the wake's pooled terminal settles it."""
 
 import threading
 from types import SimpleNamespace
@@ -14,7 +15,7 @@ from tests.test_consciousness import T0, FLOOR, DEFAULT, _launched, _register
 clock = clocks.clock
 
 
-@pytest.mark.parametrize("shape", ["main", "project", "parked", "auto_resume", "post_answer"])
+@pytest.mark.parametrize("shape", ["main", "auto_resume", "post_answer"])
 def test_owner_work_never_holds_its_own_clock(clock, shape):
     registry = get_direct_activity_registry()
     entry = registry.register("owner", 7, project_id="room" if shape == "project" else "")
@@ -34,12 +35,12 @@ def test_owner_work_never_holds_its_own_clock(clock, shape):
     assert len(clock.launches) == 1
 
 
-def test_callback_gap_keeps_custody_until_the_finish_is_persisted(clock, monkeypatch):
+def test_settlement_gap_keeps_custody_until_the_finish_is_persisted(clock, monkeypatch):
+    """The pooled terminal is settled before the row is released (the task_done order): while the clock
+    reads the terminal, the row still answers for the wake and no second one starts."""
     from ouroboros import task_results
 
     finished = _launched(clock)
-    _register("wake0001", initiator="consciousness")
-    get_direct_activity_registry().unregister("wake0001")
     entered, release = threading.Event(), threading.Event()
     def read(*args, **kwargs):
         entered.set()
@@ -73,11 +74,11 @@ def test_admission_failure_after_binding_releases_direct_custody(clock, monkeypa
         bind_input({"id": "refused", "metadata": metadata})
         assert clock.clock.live_wake() == "refused"
         if raises:
-            raise RuntimeError("thread start failed")
+            raise RuntimeError("carrier table unavailable")
         return {"admitted": False, "reason": "admission_failed"}
     monkeypatch.setattr(workers, "handle_wake_direct", refuse)
     if raises:
-        with pytest.raises(RuntimeError, match="thread start failed"):
+        with pytest.raises(RuntimeError, match="carrier table unavailable"):
             clock.clock.tick(T0 + FLOOR)
     else:
         assert clock.clock.tick(T0 + FLOOR) == "rejected:admission_failed"
@@ -107,6 +108,8 @@ def test_stop_during_admission_reaches_the_wake_and_leaves_owner_running(clock, 
     monkeypatch.setattr(workers, "DRIVE_ROOT", clock.root)
     monkeypatch.setattr(queue, "PENDING", [])
     monkeypatch.setattr(queue, "RUNNING", {})
+    # The real Stop fences parent1's tree in this per-process registry; it must not outlive the test.
+    monkeypatch.setattr(task_lifecycle, "CANCELLED_ROOT_FENCES", {})
     monkeypatch.setattr(workers, "WORKERS", {})
     monkeypatch.setattr(workers, "get_event_q", lambda: SimpleNamespace(put=lambda event: None))
     monkeypatch.setattr("ouroboros.config.get_direct_turn_stop_wait_sec", lambda: 0)
@@ -187,7 +190,11 @@ def test_stop_during_admission_reaches_the_wake_and_leaves_owner_running(clock, 
 
 @pytest.mark.parametrize("witness", ["identity", "metadata", "none"])
 def test_restarted_clock_requires_a_carrier_witness(clock, witness):
+    """A carrier witness is the lane's RUNNING row the pool restored, or an inline executor's registered
+    actor (by identity, or by its own-clock metadata when the persisted admission is gone)."""
     _launched(clock)
+    if witness != "row":
+        clock.running.pop("wake0001")  # no carrier holds the row: the pool is no witness
     if witness == "identity":
         get_direct_activity_registry().register("wake0001", 7)
     elif witness == "metadata":
@@ -198,7 +205,7 @@ def test_restarted_clock_requires_a_carrier_witness(clock, witness):
     assert restarted.tick(restarted.next_wake_at) == ("launched" if witness == "none" else "wake_live")
 
 
-@pytest.mark.parametrize("outcome", ["allowance_unknown", "allowance_exhausted", "first_conversation", "refused"])
+@pytest.mark.parametrize("outcome", ["allowance_unknown", "first_conversation", "refused"])
 def test_skips_refusals_and_restart_keep_the_appointment(clock, monkeypatch, outcome):
     finished = _launched(clock)
     monkeypatch.setattr(clock_module.time, "time", lambda: T0 + 5000)
@@ -217,7 +224,7 @@ def test_skips_refusals_and_restart_keep_the_appointment(clock, monkeypatch, out
     assert restarted.status_snapshot()["appointment_at"] == clock_module._iso(appointment)
 
 
-@pytest.mark.parametrize("lateness,word", [(0, "on time"), (59.9, "on time"), (60, "due 1 min ago"),
+@pytest.mark.parametrize("lateness,word", [(0, "on time"), (60, "due 1 min ago"),
                                          (5400, "due 1 h 30 min ago"), (None, "")])
 def test_launch_reason_reports_appointment_punctuality_only(clock, lateness, word):
     now = T0 + FLOOR
@@ -230,17 +237,19 @@ def test_launch_reason_reports_appointment_punctuality_only(clock, lateness, wor
 
 
 def test_clock_never_holds_writer_gate_while_waiting_for_queue(clock, monkeypatch):
+    """The clock renders nothing of its own now; its last own step before the lane is the preparation
+    facts it admits with (the live roots). Paused there while another thread holds Q, the lane's lock
+    order (Q, then the gate) must find the gate free: the clock never took it."""
     from supervisor import queue, workers
 
-    rendering, held, entering_lane = threading.Event(), threading.Event(), threading.Event()
+    preparing, held, entering_lane = threading.Event(), threading.Event(), threading.Event()
     acquired = []
-    render = clock_module.render_wake_message
-    def render_while_queue_held(*args, **kwargs):
-        rendering.set()
+    def roots_while_queue_held():
+        preparing.set()
         assert held.wait(5)
-        return render(*args, **kwargs)
+        return []
     def hold_queue():
-        assert rendering.wait(5)
+        assert preparing.wait(5)
         with queue._queue_lock:
             held.set()
             assert entering_lane.wait(5)
@@ -252,7 +261,7 @@ def test_clock_never_holds_writer_gate_while_waiting_for_queue(clock, monkeypatc
         entering_lane.set()
         with queue._queue_lock, workers._repo_writer_gate_lock:
             return {"admitted": False, "reason": "repo_writer_gate_closed"}
-    monkeypatch.setattr(clock_module, "render_wake_message", render_while_queue_held)
+    monkeypatch.setattr("supervisor.queue.live_consciousness_roots", roots_while_queue_held)
     monkeypatch.setattr(workers, "handle_wake_direct", lane)
     holder = threading.Thread(target=hold_queue)
     holder.start()

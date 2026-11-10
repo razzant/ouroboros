@@ -9,7 +9,6 @@ import pytest
 
 from tests.test_delegate_body_collection import _until, started, terminal
 
-pytestmark = pytest.mark.serial
 
 
 def test_lifespan_collects_without_cognitive_supervisor_and_stops_exact_generation(tmp_path, monkeypatch):

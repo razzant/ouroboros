@@ -1,5 +1,6 @@
 """The Max room of a start: one fact beside whole books, its cause and the words that carry it."""
 import dataclasses
+import json
 import math
 
 import pytest
@@ -85,6 +86,25 @@ def test_a_route_whose_window_cannot_hold_the_books_floor_is_a_disclosed_fact(mo
     assert "; Low, a disclosed fact of this route: folding memory or dropping tool schemas cannot make room here" in line
 
 
+def test_a_directly_required_book_at_the_max_boundary_never_lowers_the_start(monkeypatch):
+    """The first window holding this start's Max, where the required handbook's own room note once chose Low alone
+    (Astra's counterexample): the book joins that Max with its room told after every choice, never inside one."""
+    core = dataclasses.replace(_core(), development_md="# Development\n\n## Review\n\n" + "rule " * 2_000)
+    lo, hi = 100_000, 2_000_000
+    while lo < hi:
+        mid = (lo + hi) // 2
+        try:
+            lo, hi = (lo, mid) if _start(core, mid, monkeypatch).initial_mode == "max" else (mid + 1, hi)
+        except cf.MinimumViewUnfit:
+            lo = mid + 1
+    plain, held = (_start(dataclasses.replace(core, development_required=flag), hi, monkeypatch) for flag in (False, True))
+    assert plain.initial_mode == held.initial_mode == "max"
+    assert held.max_projection.memory_facts["floor"] == plain.max_projection.memory_facts["floor"]
+    blocks = [block["text"] for block in json.loads(held.max_projection.system_content_json)]
+    assert any(text.startswith("## DEVELOPMENT.md\n") for text in blocks)
+    assert "Start room is smaller than requested: this task's directly required handbook takes" in blocks[-1]
+
+
 def test_no_fact_without_a_known_window_or_the_owners_max(tmp_path, monkeypatch):
     from tests.test_memory_view_modes import _built
 
@@ -104,10 +124,10 @@ def test_the_settled_fact_names_cause_cuts_and_gap(mode, floor_need, cause):
     fact = {"window": 1_000, "allowance": 0, "floor_need": floor_need, "schemas": 200, "zero_need": 1_100,
             "need": 1_230, "story": 60, "room": 70, "unfolded": 20, "levels": 1, "room_id": "1", "reserve": 10,
             "work": 125, "folds": 0, "parts": [["books", 600], ["core", 40]]}
-    facts = {"floor": {"steps": {"F1": 2, "F1b": 1, "F6a": 3, "F2": 4}}}
+    facts = {"floor": {"steps": {"F1": 2, "F6w": 5, "F6a": 1, "F2": 4}}}
     settled = mf.with_max_room(facts, fact, mode)["max_room"]
     assert settled["cause"] == cause and settled["short"] == 230 and "headroom" not in settled
-    assert settled["cuts"] == (["F6a", "F2"] if cause == "held" else [])
+    assert settled["cuts"] == (["F6w", "F2", "F6a"] if cause == "held" else [])  # the ladder's order, F6a last
     assert mf.with_max_room(facts, None, mode) == facts
     # Memory took the books' room only when everything else fits: here the tool schemas tip it (zero_need > window).
     assert not mf.crowded_by_memory(settled) and not mf.crowded_by_memory(None)

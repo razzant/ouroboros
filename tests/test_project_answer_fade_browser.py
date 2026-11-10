@@ -10,7 +10,7 @@ import pytest
 from tests.test_project_work_card_browser import _evidence_dir
 from tests.test_project_work_card_browser import project_chat as project_chat
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 ANSWER = """Вечерний GitHub-проход завершён. Семь ответов опубликованы от `ouroboros-agent`; каждый независимо перечитан по тексту, автору и адресу.
 

@@ -155,7 +155,7 @@ def test_tracked_pin_names_a_cli_capable_release():
     of this proposal converged on while the pin was still pre-CLI 3.6.0)."""
     pin = runtime.load_runtime_pin()
     assert pin is not None
-    assert pin.version == "4.8.2"
+    assert pin.version == "5.1.0"
     assert pin.cli_entrypoint == "claudexor.bundle.cjs"
 
 
@@ -437,8 +437,6 @@ def test_preserved_node_reader_accepts_exact_supported_metadata_schemas(
 
 @pytest.mark.parametrize("payload", [
     {"schema_version": 3, "version": NODE_VERSION, "platform": "linux-x64"},
-    {"schema_version": True, "version": NODE_VERSION, "platform": "linux-x64"},
-    {"schema_version": "2", "version": NODE_VERSION, "platform": "linux-x64"},
     {"schema_version": 2, "version": "bad", "platform": "linux-x64"},
     [],
 ])

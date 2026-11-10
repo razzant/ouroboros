@@ -33,6 +33,9 @@ for (const [zone, past, future] of [['UTC', '11:30', '13:00'], ['Europe/Moscow',
             assert.equal(deadlineWords({ ...snapshot, status: 'allowance_exhausted', allowanceResetsAt }, now),
                 allowanceResetsAt.includes('13:00') ? future : '', 'an expired reset is not a coming check');
         }
+        // a changed daily limit moved the next attempt before the reset: that sooner check is the time shown
+        assert.equal(deadlineWords({ ...snapshot, status: 'allowance_exhausted', nextWakeAt: '2027-01-15T13:00:00Z',
+            allowanceResetsAt: '2027-01-16T13:00:00Z' }, now), future);
         const localMidnight = Date.parse(zone === 'UTC' ? '2027-01-15T00:01:00Z' : '2027-01-14T21:01:00Z');
         const appointmentAt = new Date(localMidnight - 120000).toISOString();
         const previousDay = new Date(appointmentAt).toLocaleDateString([], { month: 'short', day: 'numeric' });
@@ -41,7 +44,8 @@ for (const [zone, past, future] of [['UTC', '11:30', '13:00'], ['Europe/Moscow',
         const tomorrow = new Date(localMidnight + 86400000).toISOString();
         const nextDay = new Date(tomorrow).toLocaleDateString([], { month: 'short', day: 'numeric' });
         assert.equal(deadlineWords({ ...snapshot, nextWakeAt: tomorrow }, localMidnight), `${nextDay} 00:01`);
-        assert.equal(deadlineWords({ ...snapshot, status: 'allowance_exhausted', allowanceResetsAt: tomorrow }, localMidnight), `${nextDay} 00:01`);
+        assert.equal(deadlineWords({ ...snapshot, status: 'allowance_exhausted', allowanceResetsAt: tomorrow, nextWakeAt: tomorrow },
+            localMidnight), `${nextDay} 00:01`);
     });
 }
 

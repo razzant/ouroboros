@@ -222,6 +222,27 @@ def _accept_receipt_exhibits(receipts: list) -> list:
     } for idx, r in enumerate(x for x in (receipts or []) if isinstance(x, dict))]
 
 
+def marks_in_force(ctx: Any, task_id: str) -> List[Dict[str, Any]]:
+    """The marks in force at a result ask, as a reviewer's readings beside the rows they target: the work's room
+    (Main's for a tree outside every Project) and the global ones, each with its ``id``, ``scope``, ``text``, its
+    author (``who``: ``chronicle_store.draft_signer`` for the mind, else the author's kind), its ``date`` and
+    whether the work under review set it itself (``own``). Raises what the store raised: the caller names it."""
+    from ouroboros.chronicle_store import ChronicleStore, draft_signer
+    from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+    from ouroboros.projects_registry import project_chat_for_task_tree
+
+    meta, store = getattr(ctx, "task_metadata", None) or {}, ChronicleStore(ctx.drive_root)
+    room = project_chat_for_task_tree(ctx.drive_root, task_id, meta.get("parent_task_id"), meta.get("root_task_id"))
+    readings = []
+    for mark in store.active_marks(str(room or WEB_UI_CHAT_ID)) if store.log_path.exists() else []:
+        author = mark.get("author") if isinstance(mark.get("author"), dict) else {}
+        readings.append({"id": mark.get("id"), "scope": mark.get("scope") or "room", "text": mark.get("text") or "",
+                         "who": draft_signer(author) if author.get("kind") == "mind" else author.get("kind") or "not recorded",
+                         "date": str(mark.get("ts") or "")[:10] or "date not recorded",
+                         "own": str(author.get("task_id") or "") == task_id})
+    return readings
+
+
 def _accept_effective_claims(
     ctx: Any, contract: Dict[str, Any], drive_root: Any, task_id: str,
 ) -> tuple[list, str, Dict[str, Any]]:
@@ -286,19 +307,55 @@ def _owner_content_projection(content: Any) -> str:
     return "\n".join(parts)
 
 
-def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Dict[str, str]]:
-    """Collect the task-local canonical owner corpus without semantic inference."""
-    rows: List[Dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
+def renders_exactly(entry: Any, content: Any, drive_roots: Any, task_id: str) -> bool:
+    """Whether ``content``, a corpus row recorded before ``words`` (#2941), is byte for byte the projection an earlier
+    drain recorded for this exact mailbox ``entry``: its own text, then every image it rendered as a caption beside a
+    block of verified pixels, composed again here by the drain's own composer from the task's own store. The text is
+    never parsed. A moved store, changed or missing bytes, a manifest without captured identities, an error line or a
+    failed composition proves nothing, so a mismatch stays a conflict. Composing a mailbox row writes nothing: only an
+    inline image (``image_base64``/``image_source_ref``, never on such a row) would retain a copy, and is refused."""
+    if not (isinstance(entry, dict) and isinstance(entry.get("text"), str) and isinstance(content, str)) or any(
+            key in entry for key in ("image_base64", "image_source_ref")):
+        return False
+    from ouroboros.artifacts import resolve_attachment_manifest
+    from ouroboros.context import build_incoming_user_content
 
-    def add(source: str, content: Any, msg_id: str = "", origin: Any = None) -> None:
+    for drive in drive_roots:
+        try:
+            rows = resolve_attachment_manifest(drive, task_id, entry)
+            rendered = build_incoming_user_content(entry, drive, task_id)
+        except Exception:  # noqa: BLE001 - a source this store cannot compose proves nothing
+            continue
+        images = rendered[1:] if isinstance(rendered, list) else []
+        paired = len(images) >= 2 and len(images) % 2 == 0 and all(
+            text.get("type") == "text" and image.get("type") == "image_url" and image.get("_caption") == text.get("text")
+            for text, image in zip(images[::2], images[1::2]))
+        verified = all(row.get("sha256") for row in rows if row.get("is_image") and row.get("status") == "staged")
+        if paired and verified and _owner_content_projection(rendered) == content:
+            return True
+    return False
+
+
+def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Dict[str, Any]]:
+    """Collect the task-local canonical owner corpus without semantic inference."""
+    rows: List[Dict[str, Any]] = []
+    seen_ids: set[tuple[str, ...]] = set()
+    seen_texts: set[str] = set()
+
+    def add(source: str, content: Any, msg_id: str = "", origin: Any = None, reply_to: Any = None,
+            exact: Any = ()) -> None:
         text = _owner_content_projection(content)
         if not text.strip():
             return
-        key = (str(msg_id or ""), text)
-        if key in seen or (not key[0] and any(existing[1] == text for existing in seen)):
+        # One source is one row: an identified row repeats only a row of one of its ids (a mailbox msg_id, a chat
+        # message's room and client id), never another message in the same words; a row with no id repeats words.
+        client = str((origin or {}).get("client_message_id") or "")
+        ids = {("msg", str(msg_id))} if msg_id else set()
+        ids |= {("client", str((origin or {}).get("chat_id") or ""), client)} if client else set()
+        if ids & seen_ids or (not ids and text in seen_texts):
             return
-        seen.add(key)
+        seen_ids.update(ids)
+        seen_texts.add(text)
         row = {"source": source, "content": text}
         if msg_id:
             row["msg_id"] = str(msg_id)
@@ -306,6 +363,9 @@ def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Di
         # the sibling it was relayed from, an owner answer's card) travels with the row:
         # every reader of this one corpus sees a relayed proposal as such, without inferring it from the text.
         row.update({key: str(value) for key, value in (origin or {}).items() if value})
+        if isinstance(reply_to, dict) and reply_to:  # the message these words reply to, never counted as them
+            row["reply_to"] = dict(reply_to)
+        row.update(exact)  # ``words``: the exact text a rendered row was delivered as, kept as its recorder wrote it
         rows.append(row)
 
     recorded = getattr(ctx, "_owner_directives", None)
@@ -316,7 +376,11 @@ def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Di
                     str(item.get("source") or "task_local"),
                     item.get("content"),
                     str(item.get("msg_id") or ""),
-                    {key: item.get(key) for key in ("source_task_id", "relayed_from_task_id", "quiz_id")},
+                    {key: item.get(key) for key in ("source_task_id", "relayed_from_task_id", "quiz_id",
+                                                    "client_message_id", "chat_id",
+                                                    # a schedule's text keeps its schedule, field and supplier
+                                                    "schedule_id", "field", "supplier", "supplier_task_id", "supplied_at")},
+                    item.get("reply_to"), {key: item[key] for key in ("words",) if key in item},
                 )
 
     messages = getattr(ctx, "messages", None)

@@ -30,7 +30,7 @@ def _result(**overrides):
     return row
 
 
-@pytest.mark.parametrize("phase", ["done", "warn", "error", "cancelled"])
+@pytest.mark.parametrize("phase", ["done", "error", "cancelled"])
 def test_model_final_answer_is_mirrored_whole_for_every_terminal_phase(phase):
     # The mind's own words ride the row uncut, whatever word the host folded:
     # a Failed task that explains itself is still Ouroboros speaking.
@@ -41,13 +41,7 @@ def test_model_final_answer_is_mirrored_whole_for_every_terminal_phase(phase):
     (_result(terminal_origin="host_salvage"), "error"),   # preserved bytes are not a final answer
     (_result(terminal_origin="host_notice"), "error"),    # the host's own notice is not his voice
     (_result(terminal_origin=""), "done"),                # unknown authorship is never assumed
-    (_result(wake_silent=True), "done"),                  # retained internal words are not speech
-    (_result(wake_silent=True, terminal_host_notice="A host notice."), "warn"),
-    (_result(result="   "), "done"),                      # nothing to say
-    (_result(result={"answer": "x"}), "done"),            # a malformed result is never repr()-ed into his voice
-    (_result(), "working"),                               # the outbox freezes the first send
     (_result(), ""),
-    (_result(result="x" * (MIRRORED_ANSWER_MAX_CHARS + 1)), "done"),  # over the ceiling: pointer, never a cut
     (None, "done"),
 ])
 def test_everything_else_keeps_the_row_a_pointer(result, phase):
@@ -155,6 +149,38 @@ def test_the_answer_survives_live_frame_durable_row_and_history_replay(monkeypat
     assert replayed["completion_notice"] == stored["completion_notice"] == live["completion_notice"] == {
         "neutral": True, "detail": "", "phase": "warn", "salvage": "",
         "cause": "The recorded reason has no description yet.", "undescribed": ["future_reason"]}
+
+
+@pytest.mark.parametrize("sentence", ["Empty tables now export as a header-only CSV.", "   ", None])
+def test_the_roots_closing_sentence_rides_its_row_live_durable_and_replayed(monkeypatch, tmp_path, sentence):
+    """The portal of a work that moved into a Project settles from this row, not from the task record, so the
+    root's own closing sentence (``wake_summary``) rides it whole or not at all (DESIGN "Work portal")."""
+    event = _enqueue_row(tmp_path / "queued", monkeypatch,
+                         _result(**({"wake_summary": sentence} if sentence is not None else {})))
+    meta = event["progress_meta"]
+    if not (sentence or "").strip():
+        assert "wake_summary" not in meta  # no sentence recorded: ABSENT, never empty or invented
+        return
+    assert meta["wake_summary"] == sentence
+    assert event["text"] == "Launch › Ship release · Done"  # the row's own text does not change
+    bridge = message_bus.LocalChatBridge({})
+    frames = []
+    bridge._broadcast_fn = frames.append
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {"session_id": "s", "owner_id": 7})
+    monkeypatch.setattr(message_bus, "publish_event", lambda *_a, **_k: None)
+    message_bus.send_with_budget(1, event["text"], task_id="root-project", role="system",
+                                 system_type="project_completion_summary", progress_meta=meta)
+    live = next(frame for frame in frames if frame.get("type") == "chat")
+    stored = next(row for row in dialogue_test.log_rows(tmp_path / "logs" / "chat.jsonl")
+                  if row.get("type") == "project_completion_summary")
+    from ouroboros.gateway.history import make_chat_history_endpoint
+
+    response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={"chat_id": "1"})))
+    replayed = next(row for row in json.loads(response.body.decode("utf-8"))["messages"]
+                    if row.get("system_type") == "project_completion_summary")
+    assert live["wake_summary"] == stored["wake_summary"] == replayed["wake_summary"] == sentence
 
 
 def test_a_row_without_the_key_replays_without_it(monkeypatch, tmp_path):

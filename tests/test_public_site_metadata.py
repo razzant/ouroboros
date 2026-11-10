@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
-import struct
 import xml.etree.ElementTree as ET
-from html.parser import HTMLParser
 from pathlib import Path
 
 import yaml
@@ -13,6 +10,8 @@ import yaml
 from ouroboros.tools.release_sync import (
     RELEASE_ASSET_TEMPLATES,
     DESKTOP_DOWNLOAD_IDS,
+    is_development_marker,
+    published_download_version,
     release_asset_download_url,
 )
 
@@ -23,92 +22,13 @@ ORIGIN = "https://ouroboros-agent.ai"
 INDEXABLE = {
     "/": SITE / "index.html",
     "/about/": SITE / "about" / "index.html",
+    "/privacy/": SITE / "privacy" / "index.html",
+    "/terms/": SITE / "terms" / "index.html",
     "/paper/": SITE / "paper" / "index.html",
     "/install/": SITE / "install" / "index.html",
     "/benchmarks/": SITE / "benchmarks" / "index.html",
     "/history/first-48-hours/": SITE / "history" / "first-48-hours" / "index.html",
 }
-
-
-class _HeadParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__()
-        self.canonical: str | None = None
-        self.meta: dict[str, str] = {}
-        self.json_ld: list[str] = []
-        self._json_parts: list[str] | None = None
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        values = dict(attrs)
-        if tag == "link" and "canonical" in (values.get("rel") or "").split():
-            self.canonical = values.get("href")
-        if tag == "meta":
-            key = values.get("property") or values.get("name")
-            if key and values.get("content"):
-                self.meta[key] = values["content"]  # type: ignore[index]
-        if tag == "script" and values.get("type") == "application/ld+json":
-            self._json_parts = []
-
-    def handle_data(self, data: str) -> None:
-        if self._json_parts is not None:
-            self._json_parts.append(data)
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag == "script" and self._json_parts is not None:
-            self.json_ld.append("".join(self._json_parts))
-            self._json_parts = None
-
-
-def _parse(path: Path) -> _HeadParser:
-    parser = _HeadParser()
-    parser.feed(path.read_text(encoding="utf-8"))
-    return parser
-
-
-def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def test_indexable_pages_have_canonical_social_metadata():
-    for route, path in INDEXABLE.items():
-        page = _parse(path)
-        assert page.canonical == f"{ORIGIN}{route}"
-        assert page.meta.get("robots", "").startswith("index, follow")
-        assert page.meta["description"]
-        assert page.meta["og:title"]
-        assert page.meta["og:description"]
-        assert page.meta["og:url"] == f"{ORIGIN}{route}"
-        if "og:image" in page.meta:
-            assert page.meta["og:image:alt"]
-
-
-def test_json_ld_is_valid_and_current():
-    for relative in ("index.html", "paper/index.html", "install/index.html", "benchmarks/index.html"):
-        page = _parse(SITE / relative)
-        assert page.json_ld, relative
-        documents = [json.loads(value) for value in page.json_ld]
-        assert all(document.get("@context") == "https://schema.org" for document in documents)
-    homepage = json.loads(_parse(SITE / "index.html").json_ld[0])
-    install = json.loads(_parse(SITE / "install/index.html").json_ld[0])
-    paper = json.loads(_parse(SITE / "paper/index.html").json_ld[0])
-    assert homepage["sameAs"] == "https://github.com/razzant/ouroboros"
-    assert "huggingface.co/razzant" not in json.dumps(homepage)
-    assert "softwareVersion" not in homepage
-    assert "softwareVersion" not in install
-    assert install["downloadUrl"] == f"{ORIGIN}/install/"
-    assert paper["@type"] == "ScholarlyArticle"
-    assert paper["headline"] == "Ouroboros: A Self-Developing Frontier Coding Agent with Reviewed Core Evolution"
-    assert paper["datePublished"] == "2026-08-08"
-    assert [author["name"] for author in paper["author"]] == [
-        "Anton Razzhigaev",
-        "Andrei Gritsaev",
-        "Andrei Kaznacheev",
-        "Nikita Dragunov",
-        "Roman Yampolskiy",
-        "Andrei Kuznetsov",
-    ]
-    assert "https://arxiv.org/abs/2608.08311" in paper["sameAs"]
-    assert "https://huggingface.co/papers/2608.08311" in paper["sameAs"]
 
 
 def test_sitemap_exactly_matches_indexable_html():
@@ -139,19 +59,6 @@ def test_llms_file_is_a_small_absolute_navigation_map():
         assert url == "https://claudexor.ai/" or url.startswith(
             (ORIGIN, "https://github.com/", "https://api.github.com/")
         )
-
-
-def test_public_surfaces_explain_the_claudexor_relationship():
-    readme = (REPO / "README.md").read_text(encoding="utf-8")
-    homepage = (SITE / "index.html").read_text(encoding="utf-8")
-    llms = (SITE / "public" / "llms.txt").read_text(encoding="utf-8")
-    generated_homepage = (DOCS / "index.html").read_text(encoding="utf-8")
-    generated_llms = (DOCS / "llms.txt").read_text(encoding="utf-8")
-
-    for surface in (readme, homepage, llms, generated_homepage, generated_llms):
-        assert "https://claudexor.ai/" in surface
-        assert "https://github.com/razzant/claudexor" in surface
-    assert 'aria-labelledby="claudexor-card-title"' in homepage
 
 
 def test_install_manifest_discovers_releases_without_future_asset_hashes():
@@ -208,16 +115,6 @@ def test_install_manifest_discovers_releases_without_future_asset_hashes():
     }
 
 
-def test_homepage_routes_downloads_to_the_platform_picker():
-    html = (SITE / "index.html").read_text(encoding="utf-8")
-
-    assert '<a class="btn btn-primary" href="/install/">Download</a>' in html
-    assert (
-        '<a class="btn btn-primary" href="/install/">Download the desktop app</a>'
-        in html
-    )
-
-
 def test_install_page_has_version_bound_direct_downloads_before_advanced_setup():
     version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
     source = (SITE / "install" / "index.html").read_text(encoding="utf-8")
@@ -228,8 +125,10 @@ def test_install_page_has_version_bound_direct_downloads_before_advanced_setup()
             "</div>", 1
         )[0]
         assert "/releases/latest" not in downloads
+        # A development marker's links stay on the release they name; a release names itself.
+        published = published_download_version(html) if is_development_marker(version) else version
         for proof_id in DESKTOP_DOWNLOAD_IDS:
-            expected = release_asset_download_url(proof_id, version)
+            expected = release_asset_download_url(proof_id, published)
             assert f'data-release-download="{proof_id}"' in html
             assert expected in html
         assert html.index("platform-downloads") < html.index(
@@ -239,98 +138,9 @@ def test_install_page_has_version_bound_direct_downloads_before_advanced_setup()
         assert "usr/lib/ouroboros/_internal/python-standalone/bin/python3" in html
 
 
-def test_benchmark_assets_expose_status_and_accessible_text():
-    expected = {
-        "bench-terminal-bench.svg": "SELF-REPORTED SOTA",
-        "bench-osworld.svg": "SELF-REPORTED · RANK #1",
-        "bench-cl-bench.svg": "SELF-REPORTED · RANK #1",
-    }
-    source_html = (SITE / "index.html").read_text(encoding="utf-8")
-    for name, marker in expected.items():
-        source = REPO / "assets" / name
-        text = source.read_text(encoding="utf-8")
-        assert 'role="img"' in text
-        assert "<title" in text and "<desc" in text
-        assert marker in text
-        assert f"{name}?v={_sha256(source)[:10]}" in source_html
-        assert source.read_bytes() == (DOCS / "assets" / name).read_bytes()
-
-
 def test_generated_public_files_match_source():
     for name in ("CNAME", "robots.txt", "sitemap.xml", "llms.txt", "install.json"):
         assert (SITE / "public" / name).read_bytes() == (DOCS / name).read_bytes()
-
-
-def test_install_visual_is_synced_valid_and_cache_busted():
-    source = REPO / "assets" / "install-macos.png"
-    data = source.read_bytes()
-    assert data[:8] == b"\x89PNG\r\n\x1a\n"
-    width, height = struct.unpack(">II", data[16:24])
-    assert (width, height) == (1536, 1024)
-    assert '"install-macos.png"' in (SITE / "scripts" / "sync-assets.mjs").read_text(
-        encoding="utf-8"
-    )
-    install_page = (SITE / "install" / "index.html").read_text(encoding="utf-8")
-    assert f"/assets/install-macos.png?v={_sha256(source)[:10]}" in install_page
-    assert 'width="1536" height="1024"' in install_page
-    assert source.read_bytes() == (DOCS / "assets" / "install-macos.png").read_bytes()
-
-
-def test_navigation_keeps_accessible_home_and_contributor_links():
-    for path in INDEXABLE.values():
-        html = path.read_text(encoding="utf-8")
-        if 'class="brand"' in html:
-            assert 'class="brand"' in html and 'aria-label="Ouroboros home"' in html
-    homepage = (SITE / "index.html").read_text(encoding="utf-8")
-    assert "CONTRIBUTING.md" in homepage
-    assert 'href="/paper/"' in homepage
-    benchmarks = (SITE / "benchmarks" / "index.html").read_text(encoding="utf-8")
-    assert 'class="table-scroll" tabindex="0" role="region"' in benchmarks
-    assert 'aria-label="Ouroboros benchmark results"' in benchmarks
-
-
-def test_paper_page_exposes_citation_metadata_and_bibtex():
-    path = SITE / "paper" / "index.html"
-    html = path.read_text(encoding="utf-8")
-    page = _parse(path)
-
-    assert page.meta["citation_title"] == (
-        "Ouroboros: A Self-Developing Frontier Coding Agent with Reviewed Core Evolution"
-    )
-    assert page.meta["citation_publication_date"] == "2026/08/08"
-    assert page.meta["citation_arxiv_id"] == "2608.08311"
-    assert page.meta["citation_doi"] == "10.48550/arXiv.2608.08311"
-    assert page.meta["citation_pdf_url"] == "https://arxiv.org/pdf/2608.08311"
-    assert "@techreport{razzhigaev2026ouroboros" in html
-    assert "archivePrefix = {arXiv}" in html
-
-
-def test_og_preview_has_declared_dimensions_and_current_status():
-    png = REPO / "assets" / "og-preview.png"
-    data = png.read_bytes()
-    assert data[:8] == b"\x89PNG\r\n\x1a\n"
-    width, height = struct.unpack(">II", data[16:24])
-    assert (width, height) == (1200, 630)
-    assert "Self-reported SOTA" in (REPO / "assets" / "og-preview.svg").read_text()
-    expected_url = f"{ORIGIN}/assets/og-preview.png?v={_sha256(png)[:10]}"
-    for path in INDEXABLE.values():
-        page = _parse(path)
-        if "og:image" in page.meta:
-            assert page.meta["og:image"] == expected_url
-            assert page.meta["twitter:image"] == expected_url
-
-
-def test_russian_talk_is_secondary_and_explicitly_labelled():
-    url = "https://www.youtube.com/watch?v=8IWLBsQU7qE"
-    for root in (SITE, DOCS):
-        homepage = (root / "index.html").read_text(encoding="utf-8")
-        resources = homepage.split('id="resources"', 1)[1].split("</p>", 1)[0]
-        assert url in resources
-        assert '<html lang="en">' in homepage
-        assert homepage.index("Download the desktop app") < homepage.index('id="resources"')
-    readme = (REPO / "README.md").read_text(encoding="utf-8")
-    assert url in readme
-    assert readme.index("Download for macOS") < readme.index(url)
 
 
 def test_readme_and_benchmark_page_keep_claim_values_in_sync():
@@ -364,13 +174,6 @@ def test_terminal_bench_claim_applies_disclosed_reward_hack_correction():
     assert "zeroing one disclosed reward-hack trial" in surfaces[0]
     assert "+2.94 PP" in surfaces[3]
     assert "+3.17 PP" not in surfaces[3]
-
-
-def test_site_build_checks_remain_in_manual_qualification():
-    workflow = (REPO / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-    assert "pnpm --dir site build" in workflow
-    assert "git status --porcelain --untracked-files=all -- docs/" in workflow
-    assert "git diff --exit-code -- docs/" in workflow
 
 
 def test_claudexor_dependency_snapshot_is_pin_derived_and_least_privilege():

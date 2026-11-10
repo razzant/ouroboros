@@ -10,12 +10,16 @@ from typing import Any, Dict, Optional, Tuple
 
 from .telegram_api import (
     TELEGRAM_RETRY_INITIAL_SEC,
+    TelegramBindingChanged,
     TelegramClient,
     TelegramRequestRejected,
+    TelegramTokenMissing,
     TelegramTransportError,
     next_telegram_retry_delay,
     _LOCALIZED_TEXTS,
 )
+from .telegram_poll_binding import bot_id
+from .telegram_token import accepted_token, binding_for
 from .telegram_state import (
     _data_dir,
     _jsonl_tail,
@@ -25,7 +29,7 @@ from .telegram_state import (
     _state_file,
     _mirror_options,
 )
-from ..scripts.telegram_settings import telegram_proxy
+from ..scripts.telegram_settings import telegram_api_base, telegram_files_dir, telegram_proxy
 from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID, is_project_chat_id
 from ouroboros import i18n_memory as _memory
 from ouroboros.project_dialogue import OUTCOME_PHASE_HEADLINE, routing_option_label
@@ -72,15 +76,29 @@ async def _push_notification(
     recovered transition warning (which carries the exception) is the one
     owner-visible line per episode.
     """
-    protected = api.get_settings(["TELEGRAM_BOT_TOKEN"])
-    client = TelegramClient(
-        protected.get("TELEGRAM_BOT_TOKEN", ""), trust_env=trust_env,
-        proxy=telegram_proxy(Path(api.get_state_dir())),
-        **(_mirror_options(api, event, chat_id) if event is not None else {}),
-    )
+    binding = binding_for(api)
+    accepted_token(api)
+    token, generation = binding.snapshot()  # one identity: its references and its requests are one bot's
+    state_dir = Path(api.get_state_dir())
     try:
+        client = TelegramClient(
+            token, trust_env=trust_env,
+            proxy=telegram_proxy(state_dir),
+            **(_mirror_options(api, bot_id(token), event, chat_id) if event is not None else {}),
+            api_base_url=telegram_api_base(state_dir),
+            files_dir=telegram_files_dir(state_dir),
+            binding=binding, generation=generation,
+        )
         await client.send_message(int(chat_id), text, parse_mode="")
         return "sent", None
+    except TelegramTokenMissing as exc:
+        # The token was cleared after the loop looked: this notification waits unsent, like a transient
+        # one, so the batch keeps what was already delivered and nothing is sent twice.
+        return "transient", exc
+    except TelegramBindingChanged as exc:
+        # Before a part, or a part's failure answered after the change: parts the old bot already took stay
+        # there and are not resent through the new one; a notification it never took is sent next cycle by the new token's client.
+        return ("skipped" if exc.accepted else "transient"), exc
     except TelegramTransportError as exc:
         api.log("debug", f"Telegram notify failed: {exc}")
         return "transient", exc
@@ -291,8 +309,9 @@ def _cost_text(presentation: Any, lang: str) -> str:
         return ""
     if not math.isfinite(amount):
         return ""
-    # ``toFixed(2)``: the exact binary value, a tie going up, as the card rounds it.
-    money = str(Decimal(amount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    # ``toFixed``: the exact binary value, a tie going up, as the card rounds it; under a cent keeps four places.
+    places = Decimal("0.0001") if 0 < amount < 0.01 else Decimal("0.01")
+    money = str(Decimal(amount).quantize(places, rounding=ROUND_HALF_UP))
     texts = _NOTIFY[lang]
     cost = texts.format("cost_final" if presentation.get("tracked_final") else "cost_up_to", amount=money)
     return texts.format("cost_tracked", cost=cost) if presentation.get("has_unpriced") else cost
@@ -398,7 +417,8 @@ def _make_notifier(api, *, trust_env: bool = False):
         degraded_cause = ""
         while True:
             settings = _load_settings(api)
-            chat_id = _pinned_chat_id(settings)
+            # No accepted token: wait without sending or spending restart budget; nothing is marked seen.
+            chat_id = _pinned_chat_id(settings) if accepted_token(api) else 0
             transient: Optional[BaseException] = None
             delivered = False
             # Both lanes self-gate. Keep observing task IDs while OFF so enabling
@@ -419,6 +439,11 @@ def _make_notifier(api, *, trust_env: bool = False):
                     )
                     delivered = delivered or tasks_delivered
                 _save_notif_state(api, state)
+            if isinstance(transient, (TelegramTokenMissing, TelegramBindingChanged)):
+                # The token was cleared or replaced mid-batch: a wait, not a degraded transport. The next
+                # cycle sends what is left with the accepted token, or waits quietly for one.
+                await asyncio.sleep(TELEGRAM_RETRY_INITIAL_SEC)
+                continue
             if transient is not None:
                 # Transition logging: one warning entering degraded, one info
                 # on recovery; per-attempt failures stay at debug while the

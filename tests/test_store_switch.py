@@ -35,7 +35,10 @@ def git(repo: pathlib.Path, *args: str) -> str:
 
 @pytest.fixture
 def target_repo(tmp_path):
-    """``old``: a tree without the store modules (a pin file included); ``new``: with them."""
+    """``old``: a tree without the store modules (a pin file included); ``new``: with them, its dialogue
+    store naming the thread format it reads (``dialogue_store.THREAD_FORMAT``)."""
+    from ouroboros.dialogue_store import THREAD_FORMAT
+
     repo = tmp_path / "repo"
     (repo / "ouroboros").mkdir(parents=True)
     git(repo, "init", "-q")
@@ -46,6 +49,7 @@ def target_repo(tmp_path):
     old = git(repo, "rev-parse", "HEAD")
     for name in ("store.py", "usage_store.py", "dialogue_store.py"):
         (repo / "ouroboros" / name).write_text("# new\n", encoding="utf-8")
+    (repo / "ouroboros" / "dialogue_store.py").write_text(f"THREAD_FORMAT = {THREAD_FORMAT!r}\n", encoding="utf-8")
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", "new")
     return repo, old, git(repo, "rev-parse", "HEAD")
@@ -106,8 +110,13 @@ def test_the_intent_is_write_once_and_typed(tmp_path):
 
 def test_needs_and_the_engine_pin_come_from_the_target_tree(target_repo):
     repo, old, new = target_repo
-    assert store_switch.switch_needs(repo, old) == {"facts": True, "money": True, "handles": True, "dialogue": True}
-    assert store_switch.switch_needs(repo, new) == {"facts": False, "money": False, "handles": True, "dialogue": False}
+    assert store_switch.switch_needs(repo, old) == {"facts": True, "money": True, "handles": True, "dialogue": True,
+                                                    "threads": True}
+    assert store_switch.switch_needs(repo, new) == {"facts": False, "money": False, "handles": True, "dialogue": False,
+                                                    "threads": False}
+    (repo / "ouroboros" / "dialogue_store.py").write_text("# a dialogue store that reads no reference\n", encoding="utf-8")
+    git(repo, "commit", "-q", "-am", "older dialogue store")
+    assert store_switch.switch_needs(repo, git(repo, "rev-parse", "HEAD"))["threads"] is True
     pin = store_switch.next_engine_pin(repo, old)
     assert pin is not None and pin.version == json.loads(
         (REPO / "ouroboros" / "claudexor_runtime_pin.json").read_text(encoding="utf-8"))["release"]["version"]
@@ -199,11 +208,12 @@ def test_the_seam_exports_consumes_the_intent_retires_the_store_and_only_then_sw
     assert seen["receipt"]["steps"]["money"]["status"] == "completed"
     assert seen["receipt"]["steps"]["handles"] == {"status": "no_packs", "handles": 0, "bytes": 0, "packs": 0}
     assert seen["receipt"]["steps"]["dialogue"] == {}, "the export step ran; this fixture root holds no dialogue store"
+    assert seen["receipt"]["steps"]["threads"] == {}, "so did the expansion of rows held by reference"
     assert len(seen["retired_facts"]) == 1 and len(seen["retired_money"]) == 1
     assert snapshot(root) == expected  # the files the old body reads are the ones the store imported
     assert receipt(root)["switched"]["ok"] is True
     phases = [row["phase"] for row in rows(root / "logs" / "supervisor.jsonl", "storage_switch")]
-    assert phases == ["preflight", "exporting", "money", "handles", "dialogue", "switching", "switched"]
+    assert phases == ["preflight", "exporting", "money", "handles", "threads", "dialogue", "switching", "switched"]
     assert json.loads((root / store_switch.PROGRESS_REL).read_text(encoding="utf-8"))["phase"] == "switched"
     assert store_switch.resume_pending_switch(root, repo_dir=repo) == {"status": "nothing_pending"}
     # the child drive's store and its own child's were retired with the canonical one
@@ -680,3 +690,27 @@ def test_a_death_inside_the_facts_export_resumes_from_the_intent(switch_root, ta
     owner = Owner(repo)
     assert store_switch.resume_pending_switch(root, repo_dir=repo, owner=owner)["status"] == "switched"
     assert len(owner.calls) == 1 and receipt(root)["attempts"] == 2
+
+
+def test_store_roundtrip_preserves_discovery_of_managed_releases(switch_root, target_repo):
+    from ouroboros import delegate_custody_current as current, maintenance_jobs, maintenance_retirement
+    from ouroboros import review_thread_retention as rt
+    from tests.test_managed_document_imports import _owe, ReleaseEngine
+    from tests.test_review_thread_retention import _row, _publish_queue
+
+    root, (repo, old, _new) = switch_root, target_repo
+    owner = "managed-owner"
+    _row(root, owner, "running", tree=owner)
+    _owe(root, "k-restored", task=owner)
+    _row(root, owner, "completed", tree=owner)
+    intent(root, old)
+    assert store_switch.run_switch_seam(root, repo_dir=repo, owner=Owner(repo))["status"] == "switched"
+    assert ensure_current_store(root)["status"] == "completed"
+    assert current.marks(root, owner)["managed_imports"]["k-restored"]["state"] == "ready"
+    job = maintenance_jobs.job(root, maintenance_retirement.JOB) or {}
+    assert maintenance_retirement.due(root, job, {}, False)
+    _publish_queue(root)  # A missing queue is deliberately unknown, not proof this tree ended.
+    report = rt.retire_finished_review_threads(root, engine=ReleaseEngine(), live=lambda _task: False, census=set())
+    assert any(row.get("import_key") == "k-restored" and row["outcome"] == "released"
+               for row in report.get("observed", [])), repr(report)
+    assert not current.marks(root, owner).get("managed_imports")

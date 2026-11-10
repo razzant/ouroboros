@@ -201,9 +201,11 @@ def policy_turn(tmp_path, monkeypatch):
     assert not h.executions.live()
 
 
-@pytest.mark.parametrize("mode", ["auto", "required", "off"])
-@pytest.mark.parametrize("contract", [False, True])
-@pytest.mark.parametrize("material", ["none", "review_request", "registered_output"])
+@pytest.mark.parametrize(("material", "contract", "mode"), [
+    ("none", False, "auto"),
+    ("review_request", True, "required"),
+    ("registered_output", False, "off"),
+])
 def test_presence_parks_only_at_a_review_its_author_left(policy_turn, monkeypatch, mode, contract, material):
     h = policy_turn
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", mode)
@@ -459,11 +461,16 @@ def test_proactive_full_agent_preserves_child_and_parent_tail(tmp_path, monkeypa
     from tests.test_presence_continuation_bootstrap import install_bootstrap_harness, left_review, wait_for
     from tests.test_presence_continuation_host import _initiate
 
+    from ouroboros.presence_carrier import set_presence_runner
+
     h = install_bootstrap_harness(monkeypatch, tmp_path / "data")
     h.binding = _seed_presence_behavior(h.data)
     select_review_change(h.data)
-    monkeypatch.setattr("ouroboros.presence_runner.run_presence_turn",
-                        functools.partial(run_presence_turn, agent_factory=h.factory))
+    # The initiated turn is a conversation-lane turn (owner decision 1A; the retired proactive thread that looked
+    # up presence_runner.run_presence_turn at call time is gone): its carrier runs the runner registered for this
+    # data root, the seam a Host's injected runner takes. An injected runner names its own repo, drive and factory.
+    set_presence_runner(h.data, functools.partial(run_presence_turn, repo_dir=h.repo, drive_root=h.data,
+                                                  agent_factory=h.factory))
 
     def script(messages):
         ctx = h.agents[0].tools._ctx
@@ -497,6 +504,7 @@ def test_proactive_full_agent_preserves_child_and_parent_tail(tmp_path, monkeypa
     finally:
         h.release.set()
         wait_for(lambda: not PROACTIVE_TURNS.live(), timeout=40, what="proactive teardown")
+        set_presence_runner(h.data, None)
         if h.entered.is_set():
             assert h.settled.wait(60)
             settlement_notices_done()

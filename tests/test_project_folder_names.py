@@ -52,7 +52,6 @@ def _provision(tmp_path, name, task_id):
                                      dir_name=name)
 
 
-@pytest.mark.serial  # Real Git and Python subprocesses.
 def test_unicode_folder_is_created_committed_and_passed_as_a_process_cwd(tmp_path):
     handle = _provision(tmp_path, "ТЗ-1 — отзывчивый хост", "t1")
     path = pathlib.Path(handle.path)
@@ -70,7 +69,6 @@ def test_unicode_folder_is_created_committed_and_passed_as_a_process_cwd(tmp_pat
     assert handle.task_id == "t1" and handle.base_sha
 
 
-@pytest.mark.serial  # Real Git subprocesses.
 def test_worktree_git_decodes_unicode_output_independently_of_locale(tmp_path, monkeypatch):
     import hashlib
 

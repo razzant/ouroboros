@@ -139,7 +139,8 @@ def test_snapshot_hash_parity_and_full_public_control_views(tmp_path):
         snapshot.skill = "other"  # type: ignore[misc]
 
 
-def test_environment_template_roundtrips_import_list_review_and_publish(tmp_path, monkeypatch):
+@pytest.mark.parametrize("name", [".env.example", "credentials.json", "id_rsa"])
+def test_environment_file_roundtrips_import_list_review_and_publish(tmp_path, monkeypatch, name):
     from ouroboros.marketplace.fetcher import stage
     from ouroboros.skill_review_packs import frozen_payload_files, payload_pack
     from ouroboros.tools.registry import ToolContext
@@ -148,7 +149,7 @@ def test_environment_template_roundtrips_import_list_review_and_publish(tmp_path
 
     drive = tmp_path / "drive"
     payload = _write_skill(drive / "skills" / "external" / "demo")
-    template = payload / ".env.example"
+    template = payload / name
     content = b"APP_NAME=example\nAPI_TOKEN=\n"
     template.write_bytes(content)
     loaded = _reviewed_skill(payload, drive)
@@ -158,20 +159,21 @@ def test_environment_template_roundtrips_import_list_review_and_publish(tmp_path
     row = json.loads(_handle_list_skills(ctx, name="demo"))["skills"][0]
     assert not row["load_error"] and row["content_hash"] == loaded.content_hash
     pack = payload_pack(frozen_payload_files(payload))
-    assert "### .env.example" in pack
+    assert f"### {name}\n" in pack
     assert content.decode() in pack
-    touched, omitted = build_touched_file_pack(payload, [".env.example"])
-    assert not omitted and "APP_NAME=example" in touched
+    if name == ".env.example":  # the generic commit-review file pack keeps its own policy
+        touched, omitted = build_touched_file_pack(payload, [name])
+        assert not omitted and "APP_NAME=example" in touched
     snapshot = capture_skill_publish_snapshot(loaded)
-    assert snapshot.file(".env.example").content == content
-    assert ".env.example" in {item.path for item in snapshot.public_files}
+    assert snapshot.file(name).content == content
+    assert name in {item.path for item in snapshot.public_files}
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, "w") as packed:
         for item in snapshot.public_files:
             packed.writestr(item.path, item.content)
     staged = stage(archive.getvalue(), slug="demo", version="1.2.3")
     try:
-        assert (staged.staging_dir / ".env.example").read_bytes() == content
+        assert (staged.staging_dir / name).read_bytes() == content
         assert compute_content_hash(staged.staging_dir) == snapshot.content_hash
     finally:
         staged.cleanup()
@@ -319,17 +321,15 @@ def test_snapshot_oversized_public_stream_reads_only_remaining_plus_one(tmp_path
     assert returned[0] < payload_size
 
 
-def test_snapshot_fails_closed_on_sensitive_or_unreadable_payload(tmp_path, monkeypatch):
+def test_snapshot_captures_credential_like_names_and_fails_closed_on_unreadable_payload(tmp_path, monkeypatch):
     drive_root = tmp_path / "drive"
-    sensitive = _write_skill(drive_root / "skills" / "external" / "sensitive")
-    (sensitive / ".env").write_bytes(b"fixture")
-    loaded = load_skill(sensitive, drive_root)
-    assert loaded is not None and loaded.load_error
-    loaded.load_error = ""
-    loaded.review = SkillReviewState(status="clean", content_hash="irrelevant")
-    with pytest.raises(SkillPublishSnapshotError) as caught:
-        capture_skill_publish_snapshot(loaded)
-    assert caught.value.reason_code == "snapshot_payload_unreadable"
+    named = _write_skill(drive_root / "skills" / "external" / "named")
+    (named / ".env").write_bytes(b"fixture")
+    loaded = _reviewed_skill(named, drive_root)
+    assert not loaded.load_error
+    snapshot = capture_skill_publish_snapshot(loaded)
+    assert snapshot.file(".env").content == b"fixture"
+    assert ".env" in {item.path for item in snapshot.public_files}
 
     unreadable = _write_skill(drive_root / "skills" / "external" / "unreadable")
     payload = unreadable / "payload.txt"

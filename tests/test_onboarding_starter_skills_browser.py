@@ -13,7 +13,7 @@ import pytest
 
 from tests.test_subscription_setup_browser import capture, subscription_ui as subscription_ui
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 STARTER = json.loads((Path(__file__).resolve().parents[1] / "web/tests/fixtures/skills_v4/onboarding_starter_skills.json")
                      .read_text(encoding="utf-8"))
 

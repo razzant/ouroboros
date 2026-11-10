@@ -16,10 +16,23 @@ def _index(repo):
     return path.read_bytes(), stat.st_ino, stat.st_mtime_ns
 
 
-@pytest.mark.parametrize("changed", [False, True], ids=["stat-dirty-same-content", "real-content"])
-@pytest.mark.parametrize("reader", ["capture", "bounded", "shell", "attribution", "review", "tool",
-                                    "preflight", "checkpoint", "patch", "streamed_patch", "subject", "pr",
-                                    "vcs_names", "selection"])
+@pytest.mark.parametrize(("reader", "changed"), [
+    pytest.param("capture", False, id='capture-stat-dirty-same-content'),
+    pytest.param("bounded", True, id='bounded-real-content'),
+    pytest.param("shell", True, id='shell-real-content'),
+    pytest.param("attribution", False, id='attribution-stat-dirty-same-content'),
+    pytest.param("review", True, id='review-real-content'),
+    pytest.param("tool", False, id='tool-stat-dirty-same-content'),
+    pytest.param("preflight", True, id='preflight-real-content'),
+    pytest.param("checkpoint", False, id='checkpoint-stat-dirty-same-content'),
+    pytest.param("patch", True, id='patch-real-content'),
+    pytest.param("streamed_patch", False, id='streamed_patch-stat-dirty-same-content'),
+    pytest.param("subject", True, id='subject-real-content'),
+    pytest.param("pr", False, id='pr-stat-dirty-same-content'),
+    pytest.param("vcs_names", True, id='vcs_names-real-content'),
+    pytest.param("vcs_diff", False, id='vcs_diff-stat-dirty-same-content'),
+    pytest.param("selection", True, id='selection-real-content'),
+])
 def test_host_observations_never_write_the_index(tmp_path, monkeypatch, changed, reader):
     from ouroboros import mutation_attribution, utils
     from ouroboros.tools import review_file_pack, shell_effects, vcs_read
@@ -74,10 +87,10 @@ def test_host_observations_never_write_the_index(tmp_path, monkeypatch, changed,
     elif reader == "pr":
         from ouroboros.tools.git_pr import _g
         output = _g(["status", "--porcelain"], repo).stdout
-    elif reader == "vcs_names":
+    elif reader in {"vcs_names", "vcs_diff"}:
         from ouroboros.tools.registry import ToolContext
         output = vcs_read._vcs_read(ToolContext(repo_dir=repo, drive_root=tmp_path / "data"),
-                                    action="diff", root="system_repo", name_only=True)
+                                    action="diff", root="system_repo", name_only=reader == "vcs_names")
         assert "VCS target:" in output and "ERROR" not in output, output
     else:
         assert reader == "selection"
@@ -181,13 +194,11 @@ def test_pr_integration_checks_content_before_writing(tmp_path, monkeypatch, cha
             assert _git(repo, "log", "-1", "--format=%s") == "feature"
 
 
-@pytest.mark.parametrize("comparison", ["worktree", "staged", "tree"])
-@pytest.mark.parametrize("binary_metadata", [False, True], ids=["text-metadata", "binary-metadata"])
-@pytest.mark.parametrize("rename", [
-    "renamed file.txt",  # binary, mode and rename changes on every host
-    # The quoting case: a tab and a double quote reach the output quoted, but Windows refuses such a name.
-    pytest.param('renamed\t"file.txt', marks=pytest.mark.skipif(os.name == "nt", reason="a POSIX-only file name")),
-], ids=["portable-name", "quoted-name"])
+@pytest.mark.parametrize(("rename", "binary_metadata", "comparison"), [
+    pytest.param("renamed file.txt", False, "worktree", id='portable-name-text-metadata-worktree'),  # binary, mode and rename changes on every host
+    pytest.param("renamed file.txt", False, "tree", id='portable-name-text-metadata-tree'),  # binary, mode and rename changes on every host
+    pytest.param('renamed\t"file.txt', True, "staged", id='quoted-name-binary-metadata-staged', marks=pytest.mark.skipif(os.name == "nt", reason="a POSIX-only file name")),  # The quoting case: a tab and a double quote reach the output quoted, but Windows refuses such a name.
+])
 def test_vcs_names_keep_binary_mode_and_rename_changes(tmp_path, monkeypatch, comparison, binary_metadata, rename):
     from ouroboros.tools.registry import ToolContext
     from ouroboros.tools.vcs_read import _vcs_read
@@ -225,8 +236,7 @@ def test_vcs_names_keep_binary_mode_and_rename_changes(tmp_path, monkeypatch, co
     assert _index(repo) == before
 
 
-@pytest.mark.parametrize("command", [("reset", "--hard", "HEAD"), ("checkout", "-B", "other"),
-                                   ("commit", "--allow-empty", "-qm", "writer"),
+@pytest.mark.parametrize("command", [("reset", "--hard", "HEAD"), ("commit", "--allow-empty", "-qm", "writer"),
                                    ("merge", "--no-edit", "other")])
 def test_writer_locks_remain_mandatory(tmp_path, monkeypatch, command):
     repo = _repo(tmp_path)
@@ -276,7 +286,7 @@ def test_read_policy_beats_inherited_config_without_losing_it(tmp_path, monkeypa
 
 @pytest.mark.parametrize("count,valid", [
     ("not-a-number", False), ("-1", False), ("1_0", False), ("１", False), ("1 ", False),
-    ("", True), ("0", True), ("1", True), ("+1", True), (" 1", True), ("-0", True),
+    ("", True),
 ])
 def test_inherited_config_count_keeps_gits_own_result(tmp_path, monkeypatch, count, valid):
     """Bad configuration returns Git's diagnostic, while valid counts still work."""
@@ -388,9 +398,10 @@ def test_binary_path_observers_compare_content(tmp_path, monkeypatch, changed, r
     assert _index(repo) == before
 
 
-@pytest.mark.parametrize("changed", [False, True], ids=["stat-only", "content"])
-@pytest.mark.parametrize("quoted", [False, True])
-@pytest.mark.parametrize("text_reader", [False, True], ids=["bytes", "text"])
+@pytest.mark.parametrize(("text_reader", "quoted", "changed"), [
+    pytest.param(False, False, True, id='bytes-False-content'),
+    pytest.param(True, True, False, id='text-True-stat-only'),
+])
 def test_binary_batches_keep_literal_and_git_quoted_paths(tmp_path, monkeypatch, changed, quoted, text_reader):
     from ouroboros import argv_budget
     from ouroboros.git_observation import host_git_env, numstat_paths

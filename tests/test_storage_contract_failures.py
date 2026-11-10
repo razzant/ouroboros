@@ -18,7 +18,6 @@ from ouroboros.force_remove import force_rmtree
 from ouroboros.test_environment import declare_scratch
 from tests.test_test_storage import _repo
 
-pytestmark = pytest.mark.serial
 
 
 def _git(repo, *args, **kwargs):

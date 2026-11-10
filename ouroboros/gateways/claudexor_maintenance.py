@@ -2,7 +2,8 @@
 
 The engine owns installation and job facts. This mixin only negotiates the four
 routes, preserves their bodies and marks an unconfirmed create for same-key rejoin;
-the retention record's read is a fifth, read-only route.
+the retention record's read is a fifth, read-only route, and the project list's strict read
+(``project_registrations``, for the historical walk) a sixth.
 """
 from __future__ import annotations
 
@@ -105,3 +106,17 @@ class ClaudexorMaintenanceGateway:
                 or (operation_id is not None and body["id"] != operation_id)):
             raise ClaudexorUnavailable("malformed_response", "Claudexor maintenance operation identity is invalid")
         return body
+
+    def project_registrations(self) -> list:
+        """``GET /v2/projects`` read strictly (``ControlProjectListResponse``): every row an object with a nonempty
+        string ``id`` and ``root``, no id twice; an empty list is a valid answer. Any other body raises
+        ``malformed_response`` instead of reading as "no projects" (``find_project_id`` keeps its lenient read)."""
+        from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+        body = self._request("GET", "/v2/projects")
+        rows = body.get("projects") if isinstance(body, dict) else None
+        ids = [row.get("id") for row in rows] if isinstance(rows, list) and all(isinstance(r, dict) for r in rows) else None
+        if (ids is None or not all(isinstance(value, str) and value for value in ids) or len(set(ids)) != len(ids)
+                or not all(isinstance(row.get("root"), str) and row["root"] for row in rows)):
+            raise ClaudexorUnavailable("malformed_response", "Claudexor project list is malformed")
+        return rows

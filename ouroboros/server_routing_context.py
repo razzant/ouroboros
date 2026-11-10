@@ -102,6 +102,35 @@ def _active_direct_roots(ctx: Any) -> list:
     return roots
 
 
+def _moved_presence_readers(ctx: Any) -> list:
+    """Live inline Presence authors a move bound to a Project, while their loop takes mail: addressable there like a
+    direct turn. One in this process answers under its admission lock (``author_intake_open``); one its conversation
+    lane carries in another process by its durable intake fact (``author_intake_accepting``), which the delivery
+    re-checks under the mail lock. An unmoved author reads no room, and a closed intake or another author's
+    unreadable facts never hide a reader; a reader's own unreadable facts are the snapshot's gap."""
+    from ouroboros.conversation_lease import author_intake_accepting, author_intake_open, resolved_presence_turns
+    from ouroboros.projects_registry import project_id_for_task
+    from ouroboros.room_reader import is_reading
+
+    roots = []
+    for fact in resolved_presence_turns(ctx.DRIVE_ROOT)["roots"]:
+        task_id, row = fact["task_id"], fact["row"]
+        reading = (author_intake_open(ctx.DRIVE_ROOT, task_id) if fact["local"]
+                   else author_intake_accepting(ctx.DRIVE_ROOT, task_id))
+        project_id = project_id_for_task(ctx.DRIVE_ROOT, task_id, strict=True) if reading else ""
+        if not project_id:
+            continue
+        if fact["state"] == "unreadable":
+            raise OSError(f"live author {task_id}: {fact['error']}")
+        if fact["state"] == "running":
+            roots.append({"task_id": task_id, "status": "running", "project_id": project_id,
+                          "title": _clip_marked(row.get("suggested_name") or row.get("title"), 120),
+                          "objective": "", "chat_id": row.get("chat_id"), "started_at": row.get("started_at"),
+                          "steerable": True, "inline_presence": True,
+                          "room_reader": is_reading(ctx.DRIVE_ROOT, task_id, row, running=True)})
+    return roots
+
+
 def addressable_roots(ctx: Any) -> RootSnapshot:
     """The roots one owner message may address, without choosing a target (``RootSnapshot``).
 
@@ -110,10 +139,14 @@ def addressable_roots(ctx: Any) -> RootSnapshot:
     lag): RUNNING can mean only paid post-work remains, and a terminal result cannot drain a
     new owner or peer message, so it is never suggested as steerable. The running roots'
     owner-Pause fences are read in one statement per store and handed to each reader check.
+    A carried Presence turn's lane row is its place's conversation, never a steerable root (#2604):
+    a moved author, in this process or the lane carrier's, is addressed as ``_moved_presence_readers``
+    says (``steer_task`` still offers another process's author nothing: ``presence_author_elsewhere``).
     """
     try:
         from ouroboros.room_reader import is_reading
         from ouroboros.store_hot_facts import snapshot as hot_facts
+        from ouroboros.task_carrier import execution_kind
         from ouroboros.task_status import SETTLED_STATUSES
         from ouroboros.task_store import task_drive_status
 
@@ -123,7 +156,8 @@ def addressable_roots(ctx: Any) -> RootSnapshot:
                   *((row.get("id"), row, "pending", row.get("queued_at"))
                     for row in list(getattr(ctx, "PENDING", []) or []) if isinstance(row, dict))]
         roots = [(str(tid or "").strip(), task, status, started) for tid, task, status, started in queued
-                 if str(tid or "").strip() and isinstance(task, dict) and task.get("delegation_role") != "subagent"]
+                 if str(tid or "").strip() and isinstance(task, dict) and task.get("delegation_role") != "subagent"
+                 and execution_kind(task) != "presence"]
         canonical = pathlib.Path(ctx.DRIVE_ROOT) if roots else None  # no root, no store read
         stored = task_drive_status(canonical, [root[0] for root in roots])
         drives = [pathlib.Path(str(task.get("child_drive_root") or task.get("drive_root") or "").strip()
@@ -150,7 +184,8 @@ def addressable_roots(ctx: Any) -> RootSnapshot:
                     "started_at": started_at,
                     "steerable": True, "room_reader": reader, **_late_input_author(task),
                 }, _task_chats(ctx, tid, task)))
-        pairs += [(row, _task_chats(ctx, row["task_id"], row)) for row in _active_direct_roots(ctx)]
+        pairs += [(row, _task_chats(ctx, row["task_id"], row))
+                  for row in [*_active_direct_roots(ctx), *_moved_presence_readers(ctx)]]
         return RootSnapshot(tuple(pairs))
     except Exception as exc:
         log.warning("Addressable roots are unavailable to this routing read", exc_info=True)

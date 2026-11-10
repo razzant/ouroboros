@@ -82,7 +82,7 @@ def _agents_panel_typing_reads_draft(page) -> None:
         """() => [...document.querySelectorAll('[data-subagent-status]')]
             .every((el) => !el.textContent.includes('·'))
             && document.querySelector('[data-subagents-intent]')?.textContent === ''
-            && !document.querySelector('#settings-unsaved-indicator')?.hidden
+            && document.querySelector('.settings-footer')?.dataset.draft === 'dirty'
             && document.activeElement === document.querySelector(
                 '.available-subagent-row [data-subagent-field="recommended_use"]')""",
         timeout=5_000,
@@ -434,11 +434,18 @@ def test_ui_smoke_list_editor_remove_hands_the_caret_on(direct_server_with_data,
             remove(fallbacks, 0, "[data-model-add]")
 
             page.click('[data-settings-tab="advanced"]')
+            # A saved server is a row; its headers are in the form behind its Edit.
+            page.locator('[data-mcp-index="0"] [data-mcp-edit] > summary').click()
             headers = page.locator("[data-mcp-header-remove]")
             remove(headers, 0, '[data-mcp-header-field="name"]', "X-B")
             remove(headers, 0, "[data-mcp-header-add]")
             servers = page.locator("[data-mcp-remove]")
-            remove(servers, 2, '[data-mcp-field="id"]', "beta")
+            # The entry now in that place takes the caret in its first field while its form is open, else on the
+            # Edit that opens it.
+            remove(servers, 2, "[data-mcp-edit] > summary")
+            expect(page.locator("[data-mcp-card]:has(summary:focus) .mcp-server-card-title strong")).to_have_text("beta")
+            page.keyboard.press("Enter")
+            expect(page.locator('[data-mcp-index="1"] [data-mcp-edit]')).to_have_attribute("open", "")
             remove(servers, 0, '[data-mcp-field="id"]', "beta")
             remove(servers, 0, "#btn-mcp-add-server")
 

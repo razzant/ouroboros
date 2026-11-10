@@ -2,9 +2,7 @@ import { tr, fmt } from './i18n.js';
 import { taskPresentation } from './log_events.js';
 import { taskCostMeta } from './chat_activity.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
-
-/** The relay and wake note lead: the author's whole text; the surface alone fits its first words. */
-export const noteLeadText = (text) => String(text ?? '').trim();
+import { formatUsd } from './storage_format.js';
 
 /** The same account stamp on wake and delivery rows; account names remain authored. */
 export function sendsAsHtml(sender) {
@@ -17,12 +15,7 @@ export function sendsAsHtml(sender) {
 // Stored values never change: only these words do, so a relabel is one line here. Pure data and pure
 // helpers over host facts; nothing here reads the network or the page.
 
-/** Consciousness autonomy: stored observe / act / full. */
-export const AUTONOMY_LEVELS = Object.freeze([
-    { value: 'observe', label: 'Advises', note: 'On its own it studies, keeps its memory and tells you; it changes nothing outside.' },
-    { value: 'act', label: 'Acts', note: 'Also acts on its own: starts work, runs commands, speaks and acts in places. It does not change itself.' },
-    { value: 'full', label: 'Evolves', note: 'Also changes itself: its own code, its settings, connecting new places.' },
-]);
+export { AUTONOMY_LEVELS, autonomyOf } from './consciousness_autonomy.js';
 
 /** Place state: stored active / silent / paused. `word` is the row's status word. */
 export const PLACE_STATES = Object.freeze([
@@ -79,7 +72,6 @@ export const CHECK_CHIPS = Object.freeze({
 });
 
 export const placeStateOf = (value) => PLACE_STATES.find((state) => state.value === value) || null;
-export const autonomyOf = (value) => AUTONOMY_LEVELS.find((level) => level.value === value) || null;
 export const safetyLevelOf = (value) => SAFETY_LEVELS.find((level) => level.value === value) || null;
 
 /** «a», «a and b», «a, b and c». */
@@ -109,36 +101,37 @@ export function heardFactWord(fact, labels = null) {
 export const signalLabels = (facts) => Object.fromEntries((Array.isArray(facts) ? facts : [])
     .filter((item) => item && typeof item === 'object' && item.id && item.label).map((item) => [item.id, item.label]));
 
-/** Lower an initial capital only in an otherwise lowercase first word; keep GitHub and PR intact. */
-export const sentenceLabel = (label) => /^\p{Lu}\p{Ll}+(?!\p{L})/u.test(label)
-    ? label[0].toLowerCase() + label.slice(1) : label;
-
-/** «wakes for direct messages, mentions and replies», or '' when nothing wakes it here. */
-export function wakesForText(wakes = [], declared = null, labels = null) {
-    const facts = [...new Set(wakes.map((item) => item?.fact).filter(Boolean))];
-    const kinds = facts.filter((fact) => fact !== 'from_bot');
-    const named = { ...signalLabels(declared), ...labels };
-    const word = (fact) => named[fact] ? sentenceLabel(named[fact]) : wakeFactWord(fact);
-    return [kinds.length ? fmt('wakes for {kinds}', { kinds: listWords(kinds.map(word)) }) : '',
-        facts.includes('from_bot') ? word('from_bot') : ''].filter(Boolean).join(' · ');
-}
-
 export const authorWord = (author) => AUTHOR_WORDS[author] || (author ? `added by ${author}` : '');
 
 /** The row's status word for a stored state; an unknown state says so instead of guessing. */
 export const placeStateWord = (state) => placeStateOf(state)?.word || tr('places.state.unknown', 'state unknown');
 
-/**
- * A place row's one status sentence: «active · wakes for direct messages, mentions and replies». A Silent place
- * keeps its list (it still wakes there to read and think; what it would say or change is held); a Paused place
- * says only its state. The count is open focus turns, not owed replies.
- */
-export function placeStatusText(place) {
-    const parts = [placeStateWord(place?.state)];
-    if (place?.state === 'active' || place?.state === 'silent') parts.push(wakesForText(place.wakes, place.facts, place.labels));
-    if (Number.isInteger(place?.unanswered) && place.unanswered > 0) parts.push(fmt('{n} open turns', { n: place.unanswered }));
-    return parts.filter(Boolean).join(' · ');
+/** Who wrote a circle's words or a description, and who placed a place in its circle (the stored author). */
+export const writtenByWord = (author) => (author === 'owner' || author === 'migration'
+    ? tr('places.written.owner', 'written by you') : tr('places.written.ouroboros', 'written by Ouroboros'));
+export const placedByWord = (author) => (author === 'owner' || author === 'migration'
+    ? tr('places.placed.owner', 'placed here by you') : tr('places.placed.ouroboros', 'placed here by Ouroboros'));
+
+const TITLE_SEP = ' · ';
+/** Two labels that read the same, case and spacing aside: «FRONT/OFFICE» and «Front / Office». */
+export const sameWords = (a, b) => String(a || '').toLowerCase().replace(/\s+/g, '') === String(b || '').toLowerCase().replace(/\s+/g, '');
+/** The service a place is on, as its row and its sheet name it quietly. */
+export const placeService = (place) => String(place.serviceLabel || place.provider || '');
+/** One title for a place's row and its sheet: its label without the service it is on and without its circle's own
+ *  name; a whole-account place with nothing left takes the account's name from its connector's status; the service
+ *  itself is the last resort. */
+export function placeTitle(place, { circle = null, status = null } = {}) {
+    const service = placeService(place);
+    let parts = String(place.label || '').split(TITLE_SEP).map((part) => part.trim()).filter(Boolean);
+    if (parts.length > 1 && sameWords(parts[0], service)) parts = parts.slice(1);
+    if (circle && parts.length > 1 && sameWords(parts[parts.length - 1], circle.name)) parts = parts.slice(0, -1);
+    if (circle && parts.length > 1 && sameWords(parts[0], circle.name)) parts = parts.slice(1);
+    let title = parts.join(TITLE_SEP);
+    if (!title || sameWords(title, service)) title = String(status?.workspace_name || status?.team_name || status?.account_label || '');
+    return title || service;
 }
+/** The instance a place is bound to (its conversation, else its account): what tells two same-titled rows apart. */
+export const placeInstance = (place) => String(place.conversationId || place.accountId || '');
 
 // The identifier a service knows its people by, for «Add mine» (from the place's provider).
 const ACCOUNT_ID_WORDS = Object.freeze({ slack: 'your member ID (U…)', telegram: 'your numeric user ID' });
@@ -160,12 +153,39 @@ export function placeScopeText(place) {
     return 'everything this connector serves';
 }
 
-/** A dollar amount as Costs writes it; an absent amount is the dash, never $0.00. */
-export function usdText(value) {
-    if (value === null || value === undefined || value === '') return '—';
-    const number = Number(value);
-    if (!Number.isFinite(number)) return '—';
-    return `$${number < 0.01 && number > 0 ? number.toFixed(4) : number.toFixed(2)}`;
+/** A dollar amount as Costs writes it (grouped); an absent amount is the dash, never $0.00. */
+export const usdText = formatUsd;
+
+/** The money line of the chip's Shade and the Dashboard's headline card: «$1.50 of $20.00 in the last 24 hours»; a
+ *  floor (≥) while some calls have no price; '' when either amount is unknown. */
+export function allowanceText(snapshot) {
+    const { spentUsd, dailyUsd } = snapshot;
+    if (spentUsd === null || dailyUsd === null) return '';
+    const floor = snapshot.unknownUnmetered > 0 ? '≥ ' : '';
+    const degraded = snapshot.integrityDegraded ? ' (ledger integrity degraded)' : '';
+    return `${floor}${formatUsd(spentUsd)} of ${formatUsd(dailyUsd)} in the last 24 hours${degraded}`;
+}
+
+// The owner's move (DESIGN "Status marks", amber): consciousness stopped by its spending limit or waiting for a first
+// conversation. A failure is an outcome's red dot, an unconfirmed outcome a ring, a paused wake two bars, a due wake
+// the still mark.
+const OWNER_MOVE = new Set(['allowance_exhausted', 'waiting_for_first_conversation']);
+const FAILED = new Set(['wake_failed', 'wake_rejected', 'stopped']);
+const UNCONFIRMED = new Set(['wake_outcome_unknown', 'allowance_unknown']);
+
+/** The one status mark of a consciousness state, for the bar's chip and the Dashboard's headline alike; `owner` adds
+ *  an owner's move the caller knows of (an Evolution campaign that waits for the owner). */
+export function consciousnessMark(snapshot, { owner = false } = {}) {
+    const off = snapshot.enabled === false;
+    const unknown = snapshot.enabled === null;
+    const status = snapshot.status;
+    if (owner || (!off && !unknown && OWNER_MOVE.has(status))) return { shape: 'dot', hue: 'owner' };
+    if (status === 'thinking') return { shape: 'moving', hue: 'ink' };
+    if (off) return { shape: 'none', hue: 'ink' };
+    if (FAILED.has(status)) return { shape: 'dot', hue: 'failed' };
+    if (unknown || UNCONFIRMED.has(status)) return { shape: 'ring', hue: 'ink' };
+    if (status === 'wake_paused') return { shape: 'pause', hue: 'ink' };
+    return status === 'due' ? { shape: 'still', hue: 'ink' } : { shape: 'none', hue: 'ink' };
 }
 
 /** «12:40» in the viewer's clock, or '' for an absent or unreadable instant. */
@@ -180,8 +200,10 @@ export function deadlineWords(snapshot, now = Date.now()) {
     if (snapshot.liveWakeTaskId || snapshot.liveWakeHeld || snapshot.enabled === false || snapshot.enabled === null) {
         return '';
     }
-    const nextAt = snapshot.status === 'allowance_exhausted'
-        ? snapshot.allowanceResetsAt || snapshot.nextWakeAt : snapshot.nextWakeAt;
+    // An exhausted allowance is checked at its reset, or sooner once a changed daily limit moved the next attempt.
+    const wake = Date.parse(snapshot.nextWakeAt);
+    const nextAt = snapshot.status === 'allowance_exhausted' && snapshot.allowanceResetsAt
+        && !(wake > now && wake < Date.parse(snapshot.allowanceResetsAt)) ? snapshot.allowanceResetsAt : snapshot.nextWakeAt;
     const next = Date.parse(nextAt);
     if (!Number.isFinite(next)) return '';
     const due = next <= now;
@@ -244,10 +266,20 @@ export function wakeCheckText(check) {
     return !named && check.tool && text.startsWith(check.tool) ? text : capitalized(text);
 }
 
-/** Keep the card's scoped cost projection; word openness and unknown without a false zero. */
+/** A warning chip on the wake row says what the Safety Supervisor did in words; a tool it names in words stays, a raw
+ *  tool id waits in the row's Details (wakeCheckText). */
+export function wakeCheckChip(check) {
+    if (!check.tool || ['place_reply', 'send_user_message'].includes(check.tool)) return wakeCheckText(check);
+    const words = { checked: 'Safety Supervisor checked a step', warned: 'Safety Supervisor warned about a step',
+        held: 'Safety Supervisor held a step', sent_despite: 'A step was sent despite the check', not_checked: 'Not checked' };
+    return words[check.chip] ? tr(`consciousness.chip.${check.chip}`, words[check.chip]) : '';
+}
+
+/** Keep the card's scoped cost projection and its words; openness is said, and an unknown cost leaves the row for its
+ *  Details ('' here, never a false zero). */
 export function wakeCostText(wake) {
     const meta = taskCostMeta(wake.cost)[0];
-    if (!meta || meta === 'Cost unknown' || meta === 'cost unavailable') return tr('consciousness.spend_unknown', 'spend unknown');
+    if (!meta || meta === 'Cost unknown' || meta === 'Cost pending' || meta === 'Cost not priced' || meta === 'cost unavailable') return '';
     // These are the card's closed presentation templates, never authored text.
     const words = meta.startsWith('Tracked: up to ') ? fmt('Tracked: up to {amount}', { amount: meta.slice(15) })
         : meta.startsWith('Tracked: ') ? fmt('Tracked: {amount}', { amount: meta.slice(9) })

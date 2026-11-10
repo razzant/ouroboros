@@ -48,7 +48,7 @@ def test_compacting_safe_repeats_counts_every_omitted_verdict(supervisor, monkey
 def test_safe_history_compacts_but_flagged_speech_stays_mandatory(supervisor, monkeypatch):
     h = supervisor
     monkeypatch.setattr(h.module, "_SAFETY_PRIOR_BYTE_BUDGET", 1000)
-    h.replies.append({"status": "DANGEROUS", "reason": "Keep this flagged reason"})
+    h.replies.append({"status": "SUSPICIOUS", "reason": "Keep this flagged reason"})  # the mind may re-issue it
     assert not h.module.check_safety("place_reply", {"text": "flagged"}, ctx=h.ctx)[0]
     for n in range(12):
         h.replies.append({"status": "SAFE", "reason": "An ordinary checked action" * 3})
@@ -59,6 +59,7 @@ def test_safe_history_compacts_but_flagged_speech_stays_mandatory(supervisor, mo
     history = h.module._PRIOR_VERDICTS["work"]
     assert history.omitted_safe > 0 and len(json.dumps(history).encode()) <= 1000
     count = len(h.calls)
+    h.later()
     assert h.module.check_safety("place_reply", {"text": "flagged"}, ctx=h.ctx)[0]
     assert len(h.calls) == count  # compaction did not discard the deliberate reissue
     for n in range(10):
@@ -69,17 +70,18 @@ def test_safe_history_compacts_but_flagged_speech_stays_mandatory(supervisor, mo
             break
     else:
         raise AssertionError("Flagged history must hold when decisive evidence does not fit")
-    assert "Retry when review is available" not in message
+    # Judged, though its verdict cannot be kept: refused with that verdict said, never as an unjudged wait.
+    assert "judged" in message and "DANGEROUS — Decisive flagged evidence" in message and "wait until a check" not in message
     count = len(h.calls)
     h.replies.append({"status": "DANGEROUS", "reason": "Decisive flagged evidence" * 3})
     assert not h.module.check_safety("place_reply", {"text": f"flag-{n}"}, ctx=h.ctx)[0]
-    assert len(h.calls) == count + 1  # a hold did not earn speech retry authority
+    assert len(h.calls) == count + 1  # an unkept verdict earned no speech retry authority
 
 
 def test_root_limit_evicts_retry_authority_without_holding_new_work(supervisor):
     h = supervisor
     h.ctx.task_id = "old-flag"
-    h.replies.append({"status": "DANGEROUS", "reason": "Flagged"})
+    h.replies.append({"status": "SUSPICIOUS", "reason": "Flagged"})
     assert not h.module.check_safety("place_reply", {"text": "same"}, ctx=h.ctx)[0]
     for n in range(512):
         h.ctx.task_id = f"root-{n}"
@@ -88,7 +90,8 @@ def test_root_limit_evicts_retry_authority_without_holding_new_work(supervisor):
     h.ctx.task_id = "root-0"
     assert h.module.check_safety("write_remote", {"step": "touch"}, ctx=h.ctx)[0]
     h.ctx.task_id = "old-flag"
-    h.replies.append({"status": "DANGEROUS", "reason": "Flagged again"})
+    h.replies.append({"status": "SUSPICIOUS", "reason": "Flagged again"})
     assert not h.module.check_safety("place_reply", {"text": "same"}, ctx=h.ctx)[0]
     assert "root-0" in h.module._PRIOR_VERDICTS and "root-1" not in h.module._PRIOR_VERDICTS
+    h.later()
     assert h.module.check_safety("place_reply", {"text": "same"}, ctx=h.ctx)[0]

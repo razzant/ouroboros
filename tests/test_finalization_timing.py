@@ -154,7 +154,9 @@ def test_finalization_records_one_ordered_tail_on_every_task_surface(completed_t
             "release_task_runs", "custody_reconcile", "custody_audit", "sender"} <= phases.keys()
     assert "acceptance" not in phases, "review mode off buys no panel"
     assert "custody_daemon_request" not in phases and "custody_run" not in phases
-    assert phases["child_lookup"]["count"] >= 8
+    # Each wait-free finalization segment and the post-loop pass read their children once
+    # (``finalization_child_scope``); every reducer used to read for itself, eight times or more.
+    assert 3 <= phases["child_lookup"]["count"] < 8
     assert phases["source_ack"]["finished_sec"] <= phases["admission_wait"]["started_sec"]
     assert phases["admission_wait"]["finished_sec"] <= phases["admission_close"]["started_sec"]
     assert phases["admission_close"]["finished_sec"] <= phases["cleanup"]["started_sec"]
@@ -467,7 +469,7 @@ def test_release_counts_actual_runs_and_daemon_requests(tmp_path, failed_read):
 def test_buffered_worker_handoff_stamps_a_value_snapshot(tmp_path, monkeypatch, pooled):
     import sys
     from ouroboros import observability as obs
-    from supervisor import worker_chat_lane, worker_process, workers
+    from supervisor import worker_process
 
     with obs.task_timing_scope():
         usage = {}
@@ -495,11 +497,14 @@ def test_buffered_worker_handoff_stamps_a_value_snapshot(tmp_path, monkeypatch, 
         incoming.put(None)
         worker_process.worker_main(1, incoming, outgoing, str(tmp_path), str(tmp_path))
     else:
-        monkeypatch.setattr(workers, "get_event_q", lambda: outgoing)
-        released = []
-        assert worker_chat_lane._execute_chat_task({"task": task, "agent": agent, "chat_id": 1,
-                                                   "registry": SimpleNamespace(unregister=released.append)})
-        assert released == ["buffered"]
+        # The conversation carrier runs the same body (``run_worker_task``) with the lane's facts.
+        from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION
+
+        lane_task = {**task, "_is_direct_chat": True,
+                     "_execution_owner": {"kind": "direct", "lane": LANE_CONVERSATION, "executor": EXECUTOR_WORKER},
+                     "_conversation_prepare": {"quiet": False, "reply_expected": True}}
+        worker_process.run_worker_task(agent, lane_task, wid=1, out_q=outgoing, repo_dir=str(tmp_path),
+                                       drive_root=str(tmp_path))
     emitted, = [row for row in list(outgoing.queue) if row["type"] == "send_message"]
     assert emitted["text"] == event["text"]
     assert emitted["_finalization_timing"]["enqueued_sec"] >= 0

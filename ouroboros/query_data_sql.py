@@ -25,6 +25,11 @@ from ouroboros import store
 MAX_BYTES = 8 * 1024 * 1024
 HEAP_BYTES = 134217728
 PRAGMAS = {"table_info", "table_xinfo", "table_list", "index_list", "index_info"}
+# db=current READ admits rows of these tables (plus the table-valued forms of the PRAGMAS below); the
+# authorizer and the failed-statement hint share the one list (task bodies and cards: op=json kind=task_result).
+CURRENT_TABLES = ("tasks", "sqlite_master", "sqlite_schema")
+# pragma_table_info('t') and its siblings read exactly what the admitted PRAGMAs read.
+_PRAGMA_TABLES = frozenset("pragma_" + name for name in PRAGMAS)
 # Executor lifecycle allowances, never SQL phase budgets. After the operation deadline the parent
 # waits FINISH_SEC while the child may still hold its source, so a stuck reader is reaped promptly;
 # once the child has released it, RESPONSE_SEC lets a contended host deliver the typed answer.
@@ -78,6 +83,15 @@ def database_path(root: Path, db: str) -> Path:
     from ouroboros import evidence_packs
     return {"current": store.store_path(root), "money": root / "state" / "usage.sqlite",
             "packs": evidence_packs.packs_dir(root) / evidence_packs.INDEX_NAME}[db]
+
+
+def schema_hint(db: str) -> str:
+    """How a failed statement's author learns the real schema, with reads the authorizer already admits
+    (a fact of the whole class "this SQL failed", never read from SQLite's message)."""
+    if db == "current":
+        return (f"db=current SQL reads rows of {', '.join(CURRENT_TABLES)} only; columns: PRAGMA table_info(tasks) "
+                "or SELECT * FROM pragma_table_info('tasks'); task bodies and cards: op=json kind=task_result")
+    return "tables: PRAGMA table_list; columns: PRAGMA table_info(<table>)"
 
 
 @contextlib.contextmanager
@@ -146,7 +160,7 @@ def _authorizer(db):
     def authorize(action, first, second, database, origin):
         allowed = action in {sqlite3.SQLITE_SELECT, sqlite3.SQLITE_RECURSIVE}
         if action == sqlite3.SQLITE_READ:
-            allowed = db != "current" or first in {"tasks", "sqlite_master", "sqlite_schema"}
+            allowed = db != "current" or first in CURRENT_TABLES or str(first).lower() in _PRAGMA_TABLES
         elif action == sqlite3.SQLITE_FUNCTION:
             allowed = str(second).lower() != "load_extension"
         elif action == sqlite3.SQLITE_PRAGMA:
@@ -157,6 +171,17 @@ def _authorizer(db):
 
 def _fetch(conn, request):
     conn.execute("PRAGMA query_only=ON").close()
+    # Older SQLite (3.37.0 and 3.40.1 seen; 3.51.0 no longer) authorizes a connection's first use of a
+    # pragma table as an UPDATE of sqlite_master, which the authorizer refuses. Declaring the admitted
+    # ones first lets their table-valued forms read on every SQLite. Only a pragma table this SQLite
+    # lacks is passed over (the query then gets SQLite's own answer); a busy store or the deadline's
+    # interrupt stops the read here as it would stop the query.
+    for name in sorted(_PRAGMA_TABLES):
+        try:
+            conn.execute(f"SELECT * FROM {name} LIMIT 0").close()
+        except sqlite3.OperationalError as exc:
+            if not str(exc).startswith("no such table"):
+                raise
     conn.set_authorizer(_authorizer(request["db"]))
     cursor = conn.cursor()
     try:
@@ -255,6 +280,20 @@ def _communicate(proc, scratch, seconds, *, source_seconds=None):
             pass
 
 
+def _interpreter(env):
+    """The interpreter the child runs as ITSELF, so the deadline's kill and reap reach the reader.
+
+    A Windows venv's ``python.exe`` is a redirector that runs the base interpreter as its child: reaped,
+    it would leave the reader to die on its own after ``run_sql`` returned, still holding its source (a
+    WAL store's shared memory, which the next opener then cannot reset). As ``multiprocessing`` does
+    (bpo-35797), start the base interpreter and name the venv in ``__PYVENV_LAUNCHER__``."""
+    base = getattr(sys, "_base_executable", None) or sys.executable
+    if os.name == "nt" and os.path.normcase(base) != os.path.normcase(sys.executable):
+        env["__PYVENV_LAUNCHER__"] = sys.executable
+        return base
+    return sys.executable
+
+
 def run_sql(ctx, root, *, db, query, max_rows, max_bytes, snapshot, timeout_sec):
     """Only host-resolved sources cross the process boundary, never an SQL path."""
     from ouroboros.process_containment import CONTAINMENT_ENV_PREFIX
@@ -267,6 +306,7 @@ def run_sql(ctx, root, *, db, query, max_rows, max_bytes, snapshot, timeout_sec)
            or key.startswith(CONTAINMENT_ENV_PREFIX)}
     env.update(PYTHONDONTWRITEBYTECODE="1", PYTHONPATH=str(repo),
                OUROBOROS_DATA_DIR=str(root), OUROBOROS_REPO_DIR=str(repo), **lifeline_parent_env())
+    python = _interpreter(env)
     with tempfile.TemporaryDirectory(prefix="query-data-") as scratch:
         request = dict(root=str(root), db=db, query=query, max_rows=max_rows, max_bytes=max_bytes,
                        snapshot=snapshot, timeout_sec=timeout_sec, scratch=scratch, supervised=True)
@@ -275,7 +315,7 @@ def run_sql(ctx, root, *, db, query, max_rows, max_bytes, snapshot, timeout_sec)
         request_path = Path(scratch, "request.json")
         request_path.write_text(json.dumps(request), encoding="utf-8")
         proc = spawn_supervised(
-            [sys.executable, "-m", "ouroboros.query_data_sql", current_custody_session_id(), str(request_path)],
+            [python, "-m", "ouroboros.query_data_sql", current_custody_session_id(), str(request_path)],
             drive_root=Path(ctx.drive_root), purpose="query_data", scope="task",
             owner_task_id=str(ctx.task_id or ""), cwd=str(repo), env=env,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)

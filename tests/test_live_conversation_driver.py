@@ -421,9 +421,10 @@ def test_tool_finishing_during_resume_goes_to_the_new_session():
         task, first = await started(host)
         try:
             first.emit('ready', input_rate=24000, output_rate=24000)
-            first.emit('resumable', handle='tool-continuation')
             first.emit('tool_call', call_id='work', name='slow_tool', arguments='{}')
             await running.wait()
+            # Published after the call, this handle resumes a conversation that holds it.
+            first.emit('resumable', handle='tool-continuation')
             first.emit('closed', resumable=True, reason='transport_lost')
             await until(lambda: len(host.sessions) == 2)
             release.set()
@@ -573,29 +574,52 @@ def test_final_caption_writer_failure_does_not_leave_teardown_waiting():
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('source', ['host', 'provider'])
-@pytest.mark.parametrize('barrier', ['response', 'input', 'tools', 'playback', 'caption', 'native'])
+@pytest.mark.parametrize('speaker', ['owner', 'ouroboros'])
+def test_malformed_final_cannot_poison_valid_teardown_words(speaker):
+    from ouroboros.call_peers import LiveCallHub
+    from skills.live_conversation.driver import _Call
+
+    async def scenario():
+        host = Host()
+        host.hub = LiveCallHub(cp.CallSpec('malformed-caption', 1, 'synthetic', 'synthetic'))
+        async def store_caption(**row):
+            # Like the dialogue store, persistence cannot carry an unpaired surrogate.
+            row['text'].encode('utf-8')
+            host.captions.append(row)
+        host.caption = store_caption
+        call, session = _Call(host), Session()
+        session.final_captions = lambda: [LiveEvent('caption', {
+            'speaker': 'ouroboros', 'item_id': 'valid', 'text': 'Valid teardown words.', 'final': True})]
+        call.last_session = session
+        call.writer = asyncio.create_task(call.save_rows())
+        try:
+            with pytest.raises(UnicodeEncodeError):
+                await call.caption({'speaker': speaker, 'item_id': 'malformed', 'text': '\ud800', 'final': True})
+            await asyncio.wait_for(call.finalize(), 2)
+            assert [(row['speaker'], row['text'], row['item_id']) for row in host.captions] == [
+                ('ouroboros', 'Valid teardown words.', 'valid')]
+        finally:
+            call.writer.cancel()
+            await asyncio.gather(call.writer, return_exceptions=True)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(("barrier", "source"), [
+    ('response', 'host'),
+    ('input', 'provider'),
+    ('playback', 'host'),
+    ('caption', 'provider'),
+    ('native', 'host'),
+])
 def test_fresh_renewal_waits_for_every_quiet_barrier(source, barrier):
     async def scenario():
         host = Host()
-        released, running = asyncio.Event(), asyncio.Event()
-        batches = []
-        async def batch(calls):
-            batches.append(calls)
-            running.set()
-            await released.wait()
-            return Batch(silent=[call['id'] for call in calls])
-        host.tool_batch = batch
         task, first = await started(host)
         try:
             first.emit('ready', input_rate=24000, output_rate=24000)
             first.emit('resumable', handle='must-not-refit-with-this')
             if barrier == 'response': first.emit('response_started', response_id='busy')
             if barrier == 'input': first.emit('input_started')
-            if barrier == 'tools':
-                first.emit('tool_call', call_id='one', name='work', arguments='{}')
-                await running.wait()
-                first.emit('tool_call', call_id='two', name='work', arguments='{}')
             if barrier == 'playback': first.emit('audio', item_id='spoken', rate=24000, pcm=b'\0' * 48000)
             if barrier == 'caption': first.emit('caption', speaker='ouroboros', item_id='spoken', text='Waiting for audio', final=True)
             if barrier == 'native': first.renewal_ready = False
@@ -606,7 +630,6 @@ def test_fresh_renewal_waits_for_every_quiet_barrier(source, barrier):
             assert len(host.sessions) == 1
             if barrier == 'response': first.emit('response_done', response_id='busy', usage={}, raw_usage={}, status='completed', continues=False)
             if barrier == 'input': first.emit('input_done')
-            if barrier == 'tools': released.set()
             if barrier == 'caption': first.emit('audio', item_id='spoken', rate=24000, pcm=b'\0' * 48000)
             if barrier in {'caption', 'playback'}:
                 # A peer can acknowledge only PCM the driver has delivered.
@@ -616,15 +639,13 @@ def test_fresh_renewal_waits_for_every_quiet_barrier(source, barrier):
             if barrier == 'native': first.renewal_ready = True
             await until(lambda: len(host.sessions) == 2)
             assert host.options[1].resume_handle == ''
-            if barrier == 'tools': assert [c['id'] for batch in batches for c in batch] == ['one', 'two']
         finally:
-            released.set()
             host.hub.ended_by_owner = True
             if not task.done(): await asyncio.wait_for(task, 2)
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('reason', ['audio_span', 'audio_drop', 'tools', 'languages'])
+@pytest.mark.parametrize('reason', ['audio_span', 'tools', 'languages'])
 def test_refit_reasons_never_reuse_a_resumption_handle(reason):
     async def scenario():
         host = Host()
@@ -652,17 +673,21 @@ def test_goaway_without_a_current_handle_does_not_claim_a_resume(revoked):
             session.emit('resumable', handle='stale')
             session.emit('resumable', handle='')
         session.emit('renew', within_s=2, resume=True, reason='go_away')
-        with pytest.raises(RealtimeSetupError, match='resume_unavailable'):
-            await asyncio.wait_for(task, 2)
-        assert len(host.sessions) == 1
+        try:
+            # The engine cannot resume this conversation: a fresh fit continues it instead of ending the call.
+            await until(lambda: len(host.sessions) == 2 or task.done())
+            assert not task.done() and host.options[1].resume_handle == ''
+        finally:
+            host.hub.ended_by_owner = True
+            if not task.done(): await asyncio.wait_for(task, 2)
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('trigger', ['host', 'provider', 'provider_resume_with_handle', 'provider_resume_without_handle'])
-def test_a_renewal_waits_for_quiet_past_its_deadline_unless_nothing_can_resume(trigger):
+@pytest.mark.parametrize('trigger', ['host', 'provider', 'provider_resume_without_handle'])
+def test_a_renewal_waits_for_quiet_past_its_deadline(trigger):
     """28.10: a Gemini call ended mid-sentence ("session expired while work was pending") when the talk
-    left no quiet moment within 30 s of an audio-span renewal. Only a provider renewal that nothing can
-    resume ends the call at its deadline; every other renewal waits for the next quiet moment."""
+    left no quiet moment within 30 s of an audio-span renewal. Every renewal waits for the next quiet
+    moment; a requested resume that no handle can serve becomes a fresh one instead of ending the call."""
     async def scenario():
         host = Host()
         task, first = await started(host)
@@ -682,19 +707,15 @@ def test_a_renewal_waits_for_quiet_past_its_deadline_unless_nothing_can_resume(t
                        reason='audio_span' if trigger == 'provider' else 'go_away')
         try:
             await asyncio.sleep(.06)
-            if trigger == 'provider_resume_without_handle':
-                with pytest.raises(RealtimeSetupError, match='renewal_pending_work'): await asyncio.wait_for(task, 2)
-                assert len(host.sessions) == 1
-            else:
-                assert not task.done() and len(host.sessions) == 1
-                first.emit('input_started')
-                await asyncio.sleep(.03)
-                first.renewal_ready = True
-                await asyncio.sleep(.03)
-                assert not task.done() and len(host.sessions) == 1, 'expired deadline cannot cut owner speech'
-                first.emit('input_done')
-                await until(lambda: len(host.sessions) == 2)
-                assert host.options[1].resume_handle == ('kept' if trigger == 'provider_resume_with_handle' else '')
+            assert not task.done() and len(host.sessions) == 1
+            first.emit('input_started')
+            await asyncio.sleep(.03)
+            first.renewal_ready = True
+            await asyncio.sleep(.03)
+            assert not task.done() and len(host.sessions) == 1, 'expired deadline cannot cut owner speech'
+            first.emit('input_done')
+            await until(lambda: len(host.sessions) == 2)
+            assert host.options[1].resume_handle == ('kept' if trigger == 'provider_resume_with_handle' else '')
             if trigger == 'provider_resume_with_handle':
                 assert host.options[1].resume_handle == 'kept'  # the engine's own session goes on
             else:
@@ -838,7 +859,7 @@ def test_response_refusal_drains_received_accounting_and_final_captions(refused)
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('configured', ['', 'low', 'obsolete', 'none', 'high'])
+@pytest.mark.parametrize('configured', ['', 'obsolete', 'high'])
 def test_grok_feature_options_put_the_lowest_default_on_the_wire(configured):
     from ouroboros.contracts.realtime import RealtimeInput
     from skills.grok_realtime.plugin import CATALOG, GrokSession
@@ -1155,8 +1176,11 @@ def test_a_silent_batch_that_finds_renewal_due_after_speech_asks_nothing_more(tm
             session.emit('ready', input_rate=24000, output_rate=24000)
             session.emit('audio', item_id='greeting', rate=24000, pcm=b'\0' * 4800)
             session.emit('response_done', response_id='greeting', usage={}, raw_usage={}, status='completed', continues=True)
+            # A page reports playback only of audio it was sent: wait for the driver to take the item, then for it to
+            # consume the receipt (a receipt that comes first is clamped to 0 ms and the item is never heard).
+            await until(lambda: host.hub.audio)
             host.hub.events.append(cp.PeerControl('peer', cp.PEER_OWNER, {'type': 'played', 'item_id': 'greeting', 'played_ms': 100}))
-            await asyncio.sleep(.05)
+            await until(lambda: not host.hub.events)
             host.due = True  # capacity: the batch takes the renewal branch
             session.emit('tool_call', call_id='lang', name='set_call_languages', arguments='{"languages":["ru-RU"]}')
             await until(lambda: len(host.sessions) == 2)

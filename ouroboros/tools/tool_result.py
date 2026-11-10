@@ -189,6 +189,13 @@ TOOL_CODE_SPECS: Mapping[str, ToolCodeSpec] = MappingProxyType(
             "warning",
             "use the reviewed protected-write path",
         ),
+        "MANAGED_BY_DEPLOYMENT": _code_spec(  # the serving checkout or a required extension (deployment_policy)
+            "blocked",
+            "protected_blocked",
+            "warning",
+            "author in a body candidate or another workspace; the administrator deploys the serving program "
+            "and the extensions it requires",
+        ),
         # The two demanded roots are DISTINCT codes and the merged `ROOT_REQUIRED`
         # parent is retired: the recovery walk credits a retry only when the write
         # lands on the root the redirect named, so a merged code makes that branch
@@ -453,6 +460,12 @@ TOOL_CODE_SPECS: Mapping[str, ToolCodeSpec] = MappingProxyType(
             "unavailable",
             "warning",
             "enable or repair the MCP provider",
+        ),
+        "MCP_AUTH_REQUIRED": _code_spec(
+            "unavailable",
+            "unavailable",
+            "warning",
+            "the owner signs in (Settings → MCP, or a link from remote_mcp_sign_in)",
         ),
         "EXTENSION_UNAVAILABLE": _code_spec(
             "unavailable",
@@ -883,6 +896,7 @@ def _wrap_run_script_process_result(
 _EXACT_IDENTIFIER_CODES = MappingProxyType(
     {
         "ACCESS_DENIED": "ACCESS_BLOCKED",
+        "MCP_AUTH_REQUIRED": "MCP_AUTH_REQUIRED",
         "TOOL_ACCESS_BLOCKED": "ACCESS_BLOCKED",
         "ACTING_NO_WORKSPACE_BLOCKED": "ACCESS_BLOCKED",
         "ACTING_SUBAGENT_BLOCKED": "ACCESS_BLOCKED",
@@ -890,6 +904,7 @@ _EXACT_IDENTIFIER_CODES = MappingProxyType(
         "LOCAL_READONLY_SUBAGENT_BLOCKED": "ACCESS_BLOCKED",
         "MUTATIVE_SUBAGENTS_DISABLED": "ACCESS_BLOCKED",
         "CORE_PROTECTION_BLOCKED": "CORE_PROTECTION_BLOCKED",
+        "MANAGED_BY_DEPLOYMENT": "MANAGED_BY_DEPLOYMENT",
         "ROOT_REQUIRED_USER_FILES": "ROOT_REQUIRED_USER_FILES",
         "ROOT_REQUIRED_ACTIVE_WORKSPACE": "ROOT_REQUIRED_ACTIVE_WORKSPACE",
         "USER_FILES_PATH_BLOCKED": "USER_FILES_PATH_BLOCKED",
@@ -930,7 +945,7 @@ _EXACT_IDENTIFIER_CODES = MappingProxyType(
         # hung-session backlog refusal is browser unavailability.
         "BROWSER_SESSION_RETIRED": "TOOL_TIMEOUT",
         "BROWSER_ACTION_OUTCOME_UNKNOWN": "TOOL_ERROR",
-        "BROWSER_BACKLOG_RETIRED_SESSIONS": "LEGACY_UNAVAILABLE",
+        "BROWSER_BACKLOG_RETIRED_SESSIONS": "LEGACY_UNAVAILABLE", "BROWSER_PREPARING": "LEGACY_UNAVAILABLE",
         # imagegen typed markers: the same no-blind-retry contract as the
         # browser unknown-outcome marker, with the rate window its own lane.
         "IMAGE_RATE_LIMITED": "IMAGE_RATE_LIMITED",

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import json
 import os
 from pathlib import Path
@@ -16,7 +15,6 @@ subscription_ui = setup_browser.subscription_ui
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_settings_complete_draft_validation_and_local_stop(direct_server_with_data, engine):
@@ -73,8 +71,7 @@ def test_settings_complete_draft_validation_and_local_stop(direct_server_with_da
             key = new_row.locator('[data-custom-secret-key]')
             value = new_row.locator('[data-custom-secret-value]')
             expect(key).to_be_focused()
-            expect(page.locator("#settings-unsaved-indicator")).to_have_class(
-                re.compile("is-visible"))
+            expect(page.locator(".settings-footer")).to_have_attribute("data-draft", "dirty")
             page.evaluate("window.dispatchEvent(new CustomEvent('ouro:settings-updated', {detail: {source: 'test'}}))")
             expect(page.locator('[data-custom-secret-row]')).to_have_count(2)
             key.fill("bad!")
@@ -192,19 +189,24 @@ def test_settings_complete_draft_validation_and_local_stop(direct_server_with_da
             if evidence:
                 page.screenshot(path=str(Path(evidence) / f"settings-stop-{engine}.png"))
 
-            # Confirmed page leave also discards the catalog editor (reviewers included), before any future GET.
+            # Leaving keeps the catalog editor's draft (reviewers included) for the return, still unsaved
+            # (owner 2026-11-03); Reload, which replaces the draft, still asks and then discards it.
             page.click('[data-settings-tab="agents"]')
             description = page.locator('[data-subagent-field="recommended_use"]').first
             saved_use = description.input_value()
             description.fill("Unsaved description.")
             page.click('[data-nav-page="chat"]')
+            expect(page.locator('#page-chat')).to_be_visible()
+            page.click('[data-nav-page="settings"]')
+            expect(page.locator('[data-settings-tab="agents"]')).to_have_attribute('aria-selected', 'true')
+            expect(description).to_have_value("Unsaved description.")
+            page.click("#btn-reload-settings")
             page.locator('[data-confirm-ok]').click()
             expect(description).to_have_value(saved_use)
         finally:
             browser.close()
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 def test_initial_settings_document_survives_early_edit_while_enrichment_waits(subscription_ui):
     """Hold actual optional reads until after an edit; no timing race or runtime."""
@@ -228,12 +230,13 @@ def test_initial_settings_document_survives_early_edit_while_enrichment_waits(su
     assert pending["reviewers"], "the review pool read must still be pending"
     assert pending["status"], "the status read must still be pending"
     assert page.locator('#btn-save-settings').is_enabled(), "the known document can be saved before enrichment"
+    assert 'Your edits are kept' not in page.locator('#settings-status').inner_text(), "no edit has been made yet"
     source = main.locator('[data-model-role-source]')
     source.select_option("api:openrouter")
     model = main.locator('[data-model-role-model]')
     model.fill("owner-kept-model")
     model.evaluate("element => { window.__earlyModel = element; element.setSelectionRange(4, 4); }")
-    expect(page.locator('#settings-unsaved-indicator')).to_have_class(re.compile('is-visible'))
+    expect(page.locator('.settings-footer')).to_have_attribute('data-draft', 'dirty')
 
     page.unroute("**/api/review-pool")
     page.unroute("**/api/claudexor/status*")
@@ -252,13 +255,12 @@ def test_initial_settings_document_survives_early_edit_while_enrichment_waits(su
     expect(model).to_have_value("owner-kept-model")
     assert source.input_value() == "api:openrouter"
     assert model.evaluate("element => element === window.__earlyModel && element.selectionStart === 4")
-    expect(page.locator('#settings-unsaved-indicator')).to_have_class(re.compile('is-visible'))
+    expect(page.locator('.settings-footer')).to_have_attribute('data-draft', 'dirty')
     expect(page.locator('#btn-save-settings')).to_be_enabled()
     expect(page.locator('#settings-status')).to_contain_text('Your edits are kept')
     assert not any(path == '/api/settings' for path, _ in ui['posts'])
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 def test_mcp_local_json_errors_hold_whole_settings_save(subscription_ui):
     from playwright.sync_api import expect
@@ -349,7 +351,6 @@ def test_older_failed_settings_reload_cannot_disable_newer_success(subscription_
     expect(page.locator('#settings-status')).to_contain_text('current read failed')
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_stored_zero_allowance_survives_an_unrelated_settings_save(direct_server_with_data, engine):
@@ -401,8 +402,105 @@ def test_stored_zero_allowance_survives_an_unrelated_settings_save(direct_server
             open_settings_tab("behavior")  # a full reload reads the saved document back
             expect(allowance).to_have_value("0")
             allowance.scroll_into_view_if_needed()
-            screenshot = diagnostic_directory(settings_path.parent, "settings-drafts") / f"settings-zero-saved-{engine}.png"
+            screenshot = diagnostic_directory(settings_path.parent, "settings-drafts", publish=True) / f"settings-zero-saved-{engine}.png"
             page.screenshot(path=str(screenshot), full_page=True)
             print(f"ZERO_SETTINGS_SCREENSHOT {screenshot}")
+        finally:
+            browser.close()
+
+
+@pytest.mark.ui_browser
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_a_kept_settings_draft_is_said_kept_on_return_and_changed_elsewhere_only_on_a_signal(direct_server_with_data, engine):
+    """Revisiting Settings with an unsaved draft says the draft is kept; only a change signalled meanwhile (another page's
+    settings write, an extension lifecycle frame) says Settings changed elsewhere. The draft is never replaced."""
+    from playwright.sync_api import expect, sync_playwright
+    from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _emit_ws_frame
+
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch()
+        try:
+            page = browser.new_page(viewport={"width": 1280, "height": 900})
+            page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
+            page.goto(direct_server_with_data["url"], wait_until="domcontentloaded")
+            page.wait_for_function("() => window.__testSockets?.some(s => s.readyState === 1)", timeout=30_000)
+            status, footer = page.locator("#settings-status"), page.locator(".settings-footer")
+            page.click('[data-nav-page="settings"]')
+            expect(page.locator("#btn-save-settings")).to_be_enabled(timeout=30_000)
+            expect(status).to_have_text("Settings refreshed", timeout=30_000)  # the page-show read has landed
+            page.click('[data-settings-tab="advanced"]')
+            repo = page.locator("#s-gh-repo")
+
+            def leave_and_return(signal=None):
+                page.click('[data-nav-page="chat"]')
+                expect(page.locator("#page-chat")).to_be_visible()
+                if signal:
+                    signal()
+                page.click('[data-nav-page="settings"]')
+                expect(page.locator("#page-settings")).to_be_visible()
+
+            repo.fill("owner/kept-draft")
+            expect(footer).to_have_attribute("data-draft", "dirty")
+            leave_and_return()
+            expect(status).to_have_text("Your unsaved draft is kept.")
+            expect(status).to_have_attribute("data-tone", "muted")
+            expect(repo).to_have_value("owner/kept-draft")
+            expect(footer).to_have_attribute("data-draft", "dirty")
+            leave_and_return()
+            page.wait_for_timeout(300)
+            expect(status).not_to_contain_text("changed externally")
+            evidence = os.environ.get("OUROBOROS_UI_EVIDENCE_OUT") or os.environ.get("OUROBOROS_UI_EVIDENCE_DIR")
+            if evidence:
+                Path(evidence).mkdir(parents=True, exist_ok=True)
+                page.screenshot(path=str(Path(evidence) / f"settings-kept-draft-{engine}.png"))
+
+            # Another page wrote settings while this draft was away: said on the return, the draft left as typed.
+            leave_and_return(lambda: page.evaluate("""() => window.dispatchEvent(new CustomEvent('ouro:settings-updated',
+                {detail: {reason: 'budget saved', source: 'costs'}}))"""))
+            expect(status).to_have_text("Settings changed externally (budget saved). Reload after saving or discarding your draft.")
+            expect(status).to_have_attribute("data-tone", "warn")
+            expect(repo).to_have_value("owner/kept-draft")
+            if evidence:
+                page.screenshot(path=str(Path(evidence) / f"settings-changed-elsewhere-{engine}.png"))
+            # A new baseline ends that: the reloaded page, a new draft and an extension frame while it is away.
+            page.click("#btn-reload-settings")
+            page.locator("[data-confirm-ok]").click()
+            expect(footer).to_have_attribute("data-draft", "clean")
+            expect(repo).not_to_have_value("owner/kept-draft")
+            page.wait_for_function("() => document.getElementById('settings-status').dataset.owner !== 'load'")
+            page.click('[data-settings-tab="advanced"]')
+            repo.fill("owner/second-draft")
+            leave_and_return()
+            expect(status).to_have_text("Your unsaved draft is kept.")
+            leave_and_return(lambda: _emit_ws_frame(page, {"type": "extension_lifecycle", "action": "skill enabled"}))
+            expect(status).to_have_text("Settings changed externally (skill enabled). Reload after saving or discarding your draft.")
+            expect(repo).to_have_value("owner/second-draft")
+
+            # Another client saved while this draft was away, with no signal this page hears (Opus review, 6 Nov): the
+            # return reads the document again and says so; the draft stays as typed and nothing is applied over it.
+            page.click("#btn-reload-settings")
+            page.locator("[data-confirm-ok]").click()
+            expect(footer).to_have_attribute("data-draft", "clean")
+            page.wait_for_function("() => document.getElementById('settings-status').dataset.owner !== 'load'")
+            page.click('[data-settings-tab="advanced"]')
+            repo.fill("owner/third-draft")
+
+            def save_from_another_client():
+                other = browser.new_page(viewport={"width": 1280, "height": 900})
+                try:
+                    other.goto(direct_server_with_data["url"], wait_until="domcontentloaded")
+                    other.click('[data-nav-page="settings"]')
+                    expect(other.locator("#btn-save-settings")).to_be_enabled(timeout=30_000)
+                    other.click('[data-settings-tab="advanced"]')
+                    other.locator("#s-gh-repo").fill("owner/saved-elsewhere")
+                    other.click("#btn-save-settings")
+                    expect(other.locator("#settings-status")).to_contain_text("Settings saved", timeout=30_000)
+                finally:
+                    other.close()
+            leave_and_return(save_from_another_client)
+            expect(status).to_have_text("Settings changed externally (saved elsewhere). Reload after saving or discarding your draft.")
+            expect(repo).to_have_value("owner/third-draft")
+            if evidence:
+                page.screenshot(path=str(Path(evidence) / f"settings-saved-elsewhere-{engine}.png"))
         finally:
             browser.close()

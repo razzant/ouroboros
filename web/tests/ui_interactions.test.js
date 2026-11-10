@@ -311,6 +311,16 @@ test('a removed trigger is never focused on close; nested dialog owns its own ke
     assert.equal(doc.activeElement, input);
 });
 
+test('a returnFocus function is read at close: an opener a repaint replaced is still given focus', () => {
+    const { doc, node, trigger, dialog, input } = dialogFixture();
+    let current = trigger;
+    const dispose = bindDialogFocus(dialog, { initialFocus: input, returnFocus: () => current });
+    trigger.isConnected = false;  // the page under the dialog repainted its rows
+    current = node('button'); doc.body.append(current);
+    dispose();
+    assert.equal(doc.activeElement, current);
+});
+
 function menuFixture() {
     const { doc, node } = environment();
     const anchor = node('button');
@@ -464,6 +474,36 @@ test('a resized page cannot make an offscreen input grant more popup height than
         assert.equal(popup.css.get('--ui-popup-max-height'), '224px');
         assert.equal(popup.css.get('--ui-popup-top'), '8px');
     }
+    binding.destroy();
+});
+
+test('a popup opening above its anchor stays below the screen\'s top inset and scrolls within what is left', () => {
+    // Telegram fullscreen over a short keyboard (this PR): a 250 px visual viewport whose top 93 px are the device's and
+    // Telegram's band (ui.css --ui-popup-inset-top resolves it); "+" stands near the bottom.
+    const { doc, node } = environment();
+    doc.defaultView.visualViewport = Object.assign(new Events(), { offsetLeft: 0, offsetTop: 0, width: 390, height: 250 });
+    const style = doc.defaultView.getComputedStyle;
+    let inset = '93px';
+    doc.defaultView.getComputedStyle = (element) => ({ ...style(element),
+        getPropertyValue: (name) => (name === '--ui-popup-inset-top' ? inset : '') });
+    const plus = node('button');
+    plus.rect = { left: 36, right: 80, top: 204, bottom: 248, width: 44, height: 44 };
+    const menu = node('div', { role: 'menu' });
+    menu.rect = { width: 200, height: 170 };
+    doc.body.append(plus, menu);
+    const binding = bindPopoverPosition(menu, { anchor: plus });
+    assert.equal(menu.css.get('--ui-popup-max-height'), '99px', 'what lies between the band and "+"');
+    menu.rect.height = 99;  // the stylesheet's max-height: it scrolls inside
+    binding.reposition();
+    assert.equal(menu.css.get('--ui-popup-top'), '101px', 'band 93 + margin 8, never inside the band');
+    // No inset (a browser, expanded Telegram): the same place it always had.
+    inset = '0px';
+    menu.rect.height = 170;
+    binding.reposition();
+    assert.equal(menu.css.get('--ui-popup-max-height'), '192px');
+    menu.rect.height = 170;
+    binding.reposition();
+    assert.equal(menu.css.get('--ui-popup-top'), '30px');
     binding.destroy();
 });
 

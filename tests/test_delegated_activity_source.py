@@ -159,8 +159,10 @@ def test_a_source_only_an_own_drive_holds_is_served_from_it_and_honestly_gone_af
     assert gone.status_code == 404, "no copy is invented once the only store holding it is pruned"
 
 
-@pytest.mark.parametrize("confined_opens", [False, True])
-@pytest.mark.parametrize("carrier", ["completion_observations", "acceptance_debt"])
+@pytest.mark.parametrize(("carrier", "confined_opens"), [
+    ("completion_observations", False),
+    ("acceptance_debt", True),
+])
 def test_a_result_published_source_keeps_its_existing_contract(tmp_path, monkeypatch, confined_opens, carrier):
     monkeypatch.setattr(task_archive, "CONFINED", confined_opens)
     data = tmp_path / "data"

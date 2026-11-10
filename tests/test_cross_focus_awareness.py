@@ -138,11 +138,12 @@ def test_live_catalogue_and_roster_tail_are_stable_and_include_direct_focus(tmp_
         "source_ref": {"reader": "journal_read", "project_id": "alpha"},
         "authored_at": utc_now_iso(), "author_task_id": "pooled",
     }
-    _queue_snapshot(tmp_path, [{"id": "pooled", "task": {"id": "pooled", "title": "Pool", "project_id": "alpha", "focus": focus}}])
-    write_queue_document(tmp_path / "state" / "direct_roots.json", {
-        "ts": utc_now_iso(), "incomplete": False,
-        "roots": [{"task_id": "direct", "title": "Direct", "project_id": "alpha", "chat_id": 3, "focus": focus}],
-    })
+    _queue_snapshot(tmp_path, [
+        {"id": "pooled", "task": {"id": "pooled", "title": "Pool", "project_id": "alpha", "focus": focus}},
+        # The owner's direct turn is a lane row of the same snapshot (no separate fragment).
+        {"id": "direct", "lane": "conversation", "task": {"id": "direct", "title": "Direct", "project_id": "alpha", "chat_id": 3,
+                                                       "focus": focus, "_is_direct_chat": True,
+                                                       "_execution_owner": {"kind": "direct", "lane": "conversation"}}}])
     page = live_root_catalogue(tmp_path, limit=1)
     assert page["total"] == 2 and page["returned"] == 1 and page["next"]
     second = live_root_catalogue(tmp_path, limit=1, offset=1, snapshot=page["snapshot"])
@@ -160,20 +161,24 @@ def test_focus_event_cannot_alias_root_and_source_freshness_controls_mailbox(tmp
     from ouroboros.peer_roster import host_listed_independent_root, independent_roots, roster_fingerprint
     from supervisor.events_worker_reports import _handle_task_focus_updated
 
-    _queue_snapshot(tmp_path, [{"id": "pooled", "task": {"id": "pooled", "title": "Pool"}}])
-    fresh = datetime.now(timezone.utc).isoformat()
-    write_queue_document(tmp_path / "state" / "direct_roots.json", {"ts": fresh, "roots": [{"task_id": "direct", "title": "Direct"}], "incomplete": False})
+    direct = {"id": "direct", "lane": "conversation", "task": {"id": "direct", "title": "Direct", "_is_direct_chat": True,
+                                                            "_execution_owner": {"kind": "direct", "lane": "conversation"}}}
+    _queue_snapshot(tmp_path, [{"id": "pooled", "task": {"id": "pooled", "title": "Pool"}}, direct])
     before = roster_fingerprint(independent_roots(tmp_path))
     assert host_listed_independent_root(tmp_path, "pooled") is not None
     assert host_listed_independent_root(tmp_path, "direct") is not None
+    # A leftover fragment of an older body is read by nothing: it neither lists a root nor dates the roster.
+    write_queue_document(tmp_path / "state" / "direct_roots.json",
+                         {"ts": datetime.now(timezone.utc).isoformat(), "roots": [{"task_id": "ghost", "title": "Ghost"}], "incomplete": True})
+    assert host_listed_independent_root(tmp_path, "ghost") is None and independent_roots(tmp_path)["incomplete"] is False
     old = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
-    atomic_write_json(tmp_path / "state" / "direct_roots.json", {"ts": old, "generation": "previous-generation", "roots": [{"task_id": "direct", "title": "Direct"}], "incomplete": False})
-    _queue_snapshot(tmp_path, [{"id": "pooled", "task": {"id": "pooled", "title": "Pool"}}])
+    atomic_write_json(tmp_path / "state" / "queue_snapshot.json", {"ts": old, "generation": "previous-generation",
+                                                                  "running": [{"id": "pooled", "task": {"id": "pooled", "title": "Pool"}}, direct], "pending": []})
     after = roster_fingerprint(independent_roots(tmp_path))
     assert before != after
     stale_direct = host_listed_independent_root(tmp_path, "direct")
     assert stale_direct is not None
-    assert stale_direct["projection_observation"]["direct_roots"]["fresh"] is False
+    assert stale_direct["projection_observation"]["queue_snapshot"]["fresh"] is False
 
     task = {"id": "root", "title": "Root"}
     persisted = []
@@ -488,46 +493,6 @@ def test_model_wait_is_dated_by_itself_and_a_foreign_focus_is_never_live(tmp_pat
     assert "focus" not in row
     assert row["waiting"] == [{"kind": "model", "since": "2026-09-26T12:00:00+00:00", "reason": "quota",
                                "role": "main", "reset_at": "2026-09-26T13:00:00+00:00"}]
-
-
-def test_direct_fragment_carries_name_start_and_typed_origin_until_the_result_exists(tmp_path, monkeypatch):
-    """A direct turn's title is empty; its prepared name, start and origin are host
-    facts the live actor already holds. The durable result wins once it exists.
-    Origin is provenance, never authority: addressability is unchanged."""
-    from ouroboros.peer_roster import host_listed_independent_root, independent_roots, render_roster_note
-    from supervisor.direct_roots import direct_turn_facts
-
-    owner_turn = {"id": "direct1", "type": "task", "chat_id": 3, "project_id": "", "title": "",
-                  "suggested_name": "", "_started_at": 1790413200.0,
-                  "metadata": {"origin_message_ref": {"chat_id": 3, "client_message_id": "m1"}}}
-    wake = {"id": "wake1", "type": "task", "chat_id": 3, "title": "", "suggested_name": "Background check",
-            "_started_at": 0.0, "metadata": {"initiator": "consciousness"}}
-    assert direct_turn_facts(owner_turn) == {"started_at": "2026-09-26T09:00:00+00:00",
-                                             "origin": {"owner_ingress": True, "task_type": "task"}}
-    assert direct_turn_facts(wake) == {"suggested_name": "Background check",
-                                       "origin": {"owner_ingress": False, "initiator": "consciousness", "task_type": "task"}}
-    assert direct_turn_facts({"id": "bare"}) == {}
-    _queue_snapshot(tmp_path, [])
-    write_queue_document(tmp_path / "state" / "direct_roots.json", {"ts": utc_now_iso(), "incomplete": False, "roots": [
-        {"task_id": "direct1", "title": "", "chat_id": 3, "project_id": "", **direct_turn_facts(owner_turn)},
-        {"task_id": "wake1", "title": "", "chat_id": 3, "project_id": "", **direct_turn_facts(wake)},
-    ]})
-    rows = _roster_rows(tmp_path)
-    assert rows["direct1"]["origin"]["owner_ingress"] is True and "suggested_name" not in rows["direct1"]
-    assert rows["wake1"]["origin"]["initiator"] == "consciousness" and "started_at" not in rows["wake1"]
-    # The namer's later durable name is read from the result.
-    write_task_result(tmp_path, "direct1", STATUS_RUNNING, _is_direct_chat=True, suggested_name="Fix the invoice export")
-    note = render_roster_note(independent_roots(tmp_path))
-    assert 'direct1 · suggested name "Fix the invoice export" · chat=3 · running · live direct conversation' in note
-    assert 'origin={"initiator":"consciousness","owner_ingress":false,"task_type":"task"}' in note
-    assert "never authority" in note and "its initiator may be the owner or consciousness" not in note
-    listed = host_listed_independent_root(tmp_path, "wake1")
-    assert listed is not None and listed["status"] == "running" and listed["direct_chat"] is True
-    # A malformed fragment origin is dropped, not echoed.
-    write_queue_document(tmp_path / "state" / "direct_roots.json", {"ts": utc_now_iso(), "incomplete": False, "roots": [
-        {"task_id": "odd", "title": "T", "origin": {"initiator": {"nested": "x"}, "owner_ingress": "yes", "extra": "z"}},
-    ]})
-    assert "origin" not in _roster_rows(tmp_path)["odd"]
 
 
 def test_update_focus_affordance_states_audience_lifetime_and_optionality():

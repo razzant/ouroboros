@@ -4,7 +4,7 @@
 the host's auto-attach) publish ``ok/LEGACY_WARNING`` for a well-formed request to an
 absent path only after every admission guard. A denial, an escape, an invalid query
 and a bad image keep their error meaning, and a miss creates no image, copy or VLM call.
-Relative image paths keep their process-working-directory meaning.
+What a relative image path means: ``tests/test_relative_image_paths.py``.
 """
 from __future__ import annotations
 
@@ -190,23 +190,6 @@ def test_an_image_symlink_escape_precedes_the_miss(tmp_path, monkeypatch, target
 
     _assert_refused(result, "TOOL_ARG_ERROR", target, "FILE_NOT_FOUND")
     assert registry._ctx.messages == []
-
-
-def test_relative_image_paths_keep_the_process_working_directory(tmp_path, monkeypatch):
-    registry, uploads = _vision_registry(tmp_path, monkeypatch)
-    (uploads / "chart.png").write_bytes(_real_png_bytes())
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-
-    monkeypatch.chdir(uploads)
-    assert registry.execute_result("view_image", {"path": "chart.png"}).status == "ok"
-    assert len(_blocks(registry)) == 1
-    miss = registry.execute_result("view_image", {"path": "missing.png"})
-    assert miss.code == "LEGACY_WARNING" and f"(resolved: {(uploads / 'missing.png').resolve()})" in miss.text
-    monkeypatch.chdir(elsewhere)  # outside every admitted root: a refusal, never a quiet miss
-    refused = registry.execute_result("view_image", {"path": "missing.png"})
-    assert (refused.status, refused.code) == ("error", "TOOL_ARG_ERROR"), refused
-    assert len(_blocks(registry)) == 1
 
 
 def test_host_auto_attach_of_an_absent_image_attaches_nothing(tmp_path, monkeypatch):

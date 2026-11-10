@@ -35,7 +35,8 @@ marker a client holds keeps seeing new arrivals.
 ``export_for_older_body(root)`` appends every row the files do not hold yet (``seq >= files_seq``)
 back to ``logs/<stream>.jsonl`` in the exact line format. Its coordinate map preserves store
 identity when revised bodies change physical spans; ``store_switch`` calls it before a root
-is handed to such a body.
+is handed to such a body. ``expand_for_older_body(root)`` writes every row held with its thread by
+reference as its exact line again, in the store, for a body that reads the file but not references.
 """
 
 from __future__ import annotations
@@ -51,7 +52,7 @@ import time
 from typing import Any, Callable, Dict, Iterator, List, NamedTuple, Optional, Tuple
 
 from ouroboros import dialogue_store as ds
-from ouroboros import store, store_journal
+from ouroboros import room_messages, store, store_journal
 from ouroboros.store import StoreBusy
 from ouroboros.utils import jsonl_append_lock_path, utc_now_iso
 
@@ -376,12 +377,21 @@ def _plan(root: pathlib.Path, stream: str, plan: List[Dict[str, Any]]) -> Dict[s
             # All live files were rotated before planning. Entries past their actual end
             # belong to an unwritten/torn batch, not to a future file at that offset.
             ds._set_meta(conn, f"export:{stream}", {**export, "coordinates": []})
+        if planned:
+            from ouroboros.room_appearances import owe_restored_targets
+
+            owe_restored_targets(conn)  # either stream may restore a saved Reply target
         if planned and stream == "chat":  # this body derives them as it imports; an older body would not
             ds._set_meta(conn, ds.APPEARANCES_AWAITING, sorted({*(ds._meta(conn, ds.APPEARANCES_AWAITING) or []), *planned}))
             # Planned segments are tracked by awaiting, including on first cutover. Cross only a
             # previously derived prefix, never older-body live rows still below the frontier.
-            conn.execute("UPDATE meta SET value=? WHERE key=? AND value=?",
-                         (json.dumps(end), ds.APPEARANCES_MARK, json.dumps(int(marks["next_seq"]))))
+            moved = [conn.execute("UPDATE meta SET value=? WHERE key=? AND value=?",
+                                  (json.dumps(end), key, json.dumps(int(marks["next_seq"])))).rowcount
+                     for key in (ds.APPEARANCES_MARK, ds.APPEARANCES_COVERED)]
+            if moved[1]:  # covered by plan alone: owed until this body's rule derives them (its import)
+                from ouroboros.room_appearances import owe_planned
+
+                owe_planned(conn, int(marks["next_seq"]), end)
         conn.execute("UPDATE streams SET next_seq=max(next_seq, ?), files_seq=max(files_seq, ?), "
                      "cutover_seq=coalesce(cutover_seq, ?) WHERE stream=?",
                      (end, total if not shifted else files_seq, total, stream))
@@ -401,7 +411,7 @@ def _continues_store(root: pathlib.Path, conn: Any, stream: str, segment: Dict[s
                           (stream, segment["base"])).fetchone()
     line = next(iter(segment_rows(first, segment["base"])), None)
     return (stored is not None and line is not None and line.row is not None
-            and line.length == stored["length"] and line.row == ds.decode(stored["body"]))
+            and line.length == stored["length"] and line.row == ds.whole_body(conn, stored["body"]))
 
 
 # --- importing segments ----------------------------------------------------------------------
@@ -439,6 +449,9 @@ def record_imported(conn: Any, keys: List[Tuple[str, int]], lower: int, upper: i
     awaiting = ds._meta(conn, ds.APPEARANCES_AWAITING) or []
     if segment in awaiting:
         ds._set_meta(conn, ds.APPEARANCES_AWAITING, [entry for entry in awaiting if entry != segment])
+    from ouroboros.room_appearances import imported_here
+
+    imported_here(conn, lower, upper)  # this body's rule derived them: what planning owed the pass for them ends
 
 
 def import_segment(root: Any, stream: str, name: str) -> Dict[str, Any]:
@@ -448,6 +461,8 @@ def import_segment(root: Any, stream: str, name: str) -> Dict[str, Any]:
     when this segment completes the archive. A segment already imported (by this process or
     another) is left alone; one whose size is not the ledger's is recorded ``mismatch`` and
     skipped."""
+    from ouroboros.room_appearances import write_facts
+
     root = pathlib.Path(root)
     with ds.transaction(root, write=False) as conn:
         ledger = conn.execute("SELECT * FROM import_ledger WHERE stream=? AND name=?", (stream, name)).fetchone()
@@ -466,6 +481,7 @@ def import_segment(root: Any, stream: str, name: str) -> Dict[str, Any]:
     gen = _gen(data)
     parsed, addresses, skipped = [], [], []
     touched: Dict[int, Tuple[Optional[int], str]] = {}
+    dated: List[Tuple[Any, str]] = []
     objects = stream_rows = 0
     mapped = {entry[0]: entry for entry in coordinates or []}
     exported = set()
@@ -499,6 +515,18 @@ def import_segment(root: Any, stream: str, name: str) -> Dict[str, Any]:
             last_seq, last_ts = touched.get(columns["chat_id"], (None, ""))
             touched[columns["chat_id"]] = (max(last_seq or -1, line.seq) if stream == "chat" else last_seq,
                                            max(last_ts, columns["ts"]))
+    if stream == "chat":
+        from ouroboros.projects_registry import RoomResolver
+
+        try:
+            messages = room_messages.classified((line.row for line, *_ in parsed), RoomResolver(root, strict=True))
+        except store.StoreError:
+            # The task-store bootstrap itself can import dialogue (upgrade receipts). It cannot
+            # answer lineage yet; preserve the import and leave its message coverage to maintenance.
+            messages = []
+            log.debug("Imported message lineage left to maintenance", exc_info=True)
+        for row in messages:
+            dated.extend((chat, str(row.get("ts") or "")) for chat in (ds.facts(row)["chat_id"], *write_facts(root, row)[1]))
     # Imported rows are derived as they land (``room_appearances.import_keys``): the mark may then pass them.
     shown = import_keys(root, [line for line, *_rest in parsed]) if stream == "chat" else None
     with ds.transaction(root, write=True) as conn:
@@ -521,6 +549,7 @@ def import_segment(root: Any, stream: str, name: str) -> Dict[str, Any]:
             record_imported(conn, shown, int(ledger["base"]), int(ledger["base"]) + int(ledger["size"]), int(ledger["id"]))
         for chat_id, (last_seq, last_ts) in touched.items():
             ds.touch_room(conn, chat_id, last_seq, last_ts, 0)
+        room_messages.note(conn, dated)
         conn.execute("UPDATE import_ledger SET state='done', rows=?, stream_rows=?, bad=?, gen=?, imported_at=? "
                      "WHERE stream=? AND name=?",
                      (objects, stream_rows if stream == "chat" else None, len(skipped), gen or None, utc_now_iso(), stream, name))
@@ -758,12 +787,14 @@ def _export_stream(root: pathlib.Path, stream: str) -> Dict[str, Any]:
             # line its skipped interval): the record is stale and this export starts afresh.
             begun = None
         upper = int(begun["to"]) if begun else int(marks["next_seq"])
-        # The rows the files do not hold: appended after ``files_seq`` and not inside an imported segment.
-        records = conn.execute(
+        # The rows the files do not hold: appended after ``files_seq`` and not inside an imported segment, each
+        # as the exact line it was written as (a provider thread held once is spliced back: ``ds.whole_line``).
+        records = [{"seq": record["seq"], "length": record["length"], "line": ds.whole_line(conn, record["body"])}
+                   for record in conn.execute(
             "SELECT seq, length, body FROM dialogue WHERE stream=? AND seq>=? AND seq<? AND NOT EXISTS (SELECT 1 FROM import_ledger "
             "WHERE import_ledger.stream=dialogue.stream AND state='done' AND base<=seq AND seq<base+size) ORDER BY seq",
-            (stream, marks["files_seq"], upper)).fetchall()
-    data = b"".join(record["body"].encode("utf-8") + b"\n" for record in records)
+            (stream, marks["files_seq"], upper)).fetchall()]
+    data = b"".join(record["line"].encode("utf-8") + b"\n" for record in records)
     live = root / ds.LIVE_REL[stream]
     if records:
         live.parent.mkdir(parents=True, exist_ok=True)
@@ -793,7 +824,7 @@ def _export_stream(root: pathlib.Path, stream: str) -> Dict[str, Any]:
                     generation = _gen(data)
                 coordinates = []
                 for record in records:
-                    raw = record["body"].encode("utf-8") + b"\n"
+                    raw = record["line"].encode("utf-8") + b"\n"
                     coordinates.append([offset, record["seq"], record["length"], len(raw), hashlib.sha256(raw).hexdigest()])
                     offset += len(raw)
                 with ds.transaction(root, write=True) as conn:
@@ -831,3 +862,46 @@ def _export_stream(root: pathlib.Path, stream: str) -> Dict[str, Any]:
         report = {**later, "from": report["from"], "rows": report["rows"] + later["rows"],
                   "bytes": report["bytes"] + later.get("bytes", 0)}
     return report
+
+
+def expand_for_older_body(root: Any, *, batch: int = 200) -> Dict[str, Any]:
+    """Store every row held with its provider thread by reference as its exact line again (``ds.whole_line``), root
+    and every descendant drive with a store: a body whose ``dialogue_store`` does not name ``ds.THREAD_FORMAT``
+    reads ``dialog.sqlite`` but no reference. Only a drive whose every such row is whole gets its header back to
+    the version that body opens (``ds.release_shared_version``); a failure before leaves the one it refuses. Run
+    with the writers stopped (the switch seam); ``shared`` stays."""
+    from ouroboros.store_import import descendant_drives
+
+    root = pathlib.Path(root)
+    report: Dict[str, Any] = {}
+    for drive in (root, *descendant_drives(root)):
+        if ds.present(drive):
+            report[str(drive)] = {stream: _expand_stream(drive, stream, batch) for stream in ds.STREAMS}
+            ds.release_shared_version(drive)
+    return report
+
+
+def _expand_stream(root: pathlib.Path, stream: str, batch: int) -> Dict[str, Any]:
+    """The rows from the stream's ``ds.SHARED_FROM`` mark on, one write transaction per ``batch`` of rows naming the
+    identity key: each held by reference becomes its whole line (``length`` already is the whole row's). The mark
+    follows each batch and goes once the stream's end is reached, so a death resumes where it stopped and a stream
+    with no mark holds no such row. A part the store does not hold is ``StoreLost``: its batch rolls back, and no
+    row is ever stored shorter."""
+    key, needle, rows, more = ds.SHARED_FROM + stream, f'"{ds.ROW_SHA_KEY}": "', 0, True
+    while more:
+        with ds.transaction(root, write=True) as conn:
+            lower = ds._meta(conn, key)
+            records = [] if lower is None else conn.execute(
+                "SELECT seq, body FROM dialogue WHERE stream=? AND seq>=? AND instr(body, ?) > 0 ORDER BY seq LIMIT ?",
+                (stream, int(lower), needle, batch)).fetchall()
+            for record in records:
+                line = ds.whole_line(conn, record["body"])
+                if line != record["body"]:
+                    conn.execute("UPDATE dialogue SET body=? WHERE stream=? AND seq=?", (line, stream, record["seq"]))
+                    rows += 1
+            more = len(records) == batch
+            if more:
+                ds._set_meta(conn, key, records[-1]["seq"] + 1)
+            elif lower is not None:
+                conn.execute("DELETE FROM meta WHERE key=?", (key,))
+    return {"rows": rows}

@@ -78,6 +78,34 @@ def test_live_census_carries_the_rows_current_custody_debt(tmp_path, activity_qu
         assert row["delegated_runs_unreconciled"] == debt
 
 
+def test_a_running_root_a_worker_holds_says_its_start_step_and_a_child_adds_no_census_scope(tmp_path, activity_queue):
+    """#2862: the pooled RUNNING row's frame-fed ``turn_phase`` reaches the root's census row with the worker that
+    holds it, and the work says Preparing with its step; a child's row (never a census row) carries neither."""
+    from ouroboros.gateway import work_status
+
+    activity_queue.RUNNING["root"] = {"task": {"id": "root", "root_task_id": "root", "chat_id": 1}, "started_at": 1,
+                                      "attempt": 1, "worker_id": 2, "turn_phase": "context_building"}
+    activity_queue.RUNNING["child"] = {"task": {"id": "child", "root_task_id": "root", "parent_task_id": "root",
+                                                "delegation_role": "subagent", "chat_id": 1},
+                                       "started_at": 1, "attempt": 1, "worker_id": 3, "turn_phase": "context_building"}
+    owners = []
+    rows = {row["activity_id"]: row for row in gateway_state._chat_activities_snapshot_safe(
+        tmp_path, direct_turns=[], decision_owners=owners)}
+    root = rows["root"]
+    assert (root["phase"], root["carrier"], root["turn_phase"]) == ("working", "worker", "context_building")
+    state = work_status.classify_member(root)
+    assert (state["call"], state["reasons"]) == ("preparing", [{"code": "turn_context_building",
+                                                                "text": "Building context"}])
+    child = next(row for row in owners if row["activity_id"] == "child")  # the work's member, never a census row
+    assert "child" not in rows and not {"turn_phase", "carrier"} & set(child)
+    # Its own call started: the step ends there. A row no worker holds is said by no carrier.
+    activity_queue.RUNNING["root"]["turn_phase"] = "requested"
+    activity_queue.RUNNING["root"]["worker_id"] = None
+    root = next(row for row in gateway_state._chat_activities_snapshot_safe(tmp_path, direct_turns=[])
+                if row["activity_id"] == "root")
+    assert "carrier" not in root and work_status.classify_member(root)["call"] == "working"
+
+
 def test_census_result_memo_refreshes_without_inventing_a_missing_outcome(tmp_path, activity_queue, monkeypatch):
     from ouroboros import task_store
 
@@ -174,7 +202,8 @@ def test_project_work_name_survives_real_outbox_bus_live_and_history(tmp_path, m
 @pytest.mark.parametrize("fields,expected", [
     ({"title": "**Current › title**", "suggested_name": "Other title"}, "Current › title"),
     ({"suggested_name": "**Suggested › title**"}, "Suggested › title"),
-    ({}, "Task"),
+    # Nameless work of a Project is called by that Project, never a bare "Task" (audit 05.11, U012).
+    ({}, "Project"),
 ])
 def test_legacy_work_name_uses_cached_structured_result_and_preserves_recorded_name(tmp_path, activity_queue, monkeypatch, fields, expected):
     from ouroboros import task_status

@@ -1,6 +1,8 @@
 """Interleaved waits, deliveries and migration preserve each selected run."""
 from types import SimpleNamespace
 import json
+import errno
+import os
 
 import pytest
 
@@ -143,3 +145,74 @@ def test_child_projection_reads_each_runs_own_observation(tmp_path):
     facts = {item["run_id"]: item["supervision"] for item in _delegated_run_facts(tmp_path, CHILD)}
     assert facts["run-a"]["journal_cursor"] == 11 and facts["run-a"]["observation_failure"] == ""
     assert facts["run-b"]["journal_cursor"] == 23 and facts["run-b"]["observation_failure"] == "daemon_unreachable"
+
+
+def _wait_stage(view):
+    """Identify the save from state, without depending on the diagnostic's stage argument."""
+    base = view.get("_base") or {}
+    if view.get("status") == "wake_pending" and view.get("pending_wake") != base.get("pending_wake"):
+        return "wake_publication"
+    if int(view.get("quiet_renewals") or 0) > int(base.get("quiet_renewals") or 0):
+        return "quiet_renewal"
+    return "wait_entry" if view.get("status") == "sleeping" and base.get("status") != "sleeping" else ""
+
+
+@pytest.mark.parametrize("stage,first_status", [
+    ("wait_entry", "waiting_on_user"), ("wake_publication", "waiting_on_user"), ("quiet_renewal", "progress"),
+])
+def test_unsaved_wait_names_its_stage_and_platform_cause_without_deciding_custody(tmp_path, monkeypatch, stage, first_status):
+    from ouroboros import delegate_custody as custody
+    from ouroboros.gateways import claudexor as cx
+    from ouroboros.tools import delegate
+    from tests.test_builtin_refusal_results import _delegate_registry
+    from tests.test_delegate_body_collection import started
+
+    registry = _delegate_registry(tmp_path, monkeypatch)
+    entry = started(tmp_path, tid=registry._ctx.task_id, daemon_store_id="store-a")
+    monkeypatch.setattr(cx, "ClaudexorGateway", lambda *a, **k: pytest.fail("reached real engine"))
+    monkeypatch.setattr(supervision, "_loop_gateway", lambda: SimpleNamespace(close=lambda: None))
+    statuses = [first_status, "waiting_on_user"]
+
+    def observe(_ctx, rid, *_a, **_k):
+        asks = {"pending_interactions": [{"interaction_id": "q-1"}]} if statuses[0] == "waiting_on_user" else {}
+        return json.dumps({"status": statuses[0], "run_id": rid, "last_seq": 5, **asks})
+
+    monkeypatch.setattr(delegate, "_delegate_wait", observe)
+    before = [row["type"] for row in custody.custody_rows(tmp_path)]
+    real_save, real_open, armed, fired = checkpoints.save_view, os.open, [], []
+
+    def create(path, flags, *args, **kwargs):
+        if (armed and "delegate_actor_claims" in str(path) and str(path).endswith(".lock")
+                and flags & os.O_CREAT and flags & os.O_EXCL):
+            fired.append(armed.pop())
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC), str(path))
+        return real_open(path, flags, *args, **kwargs)
+
+    def save(path, drive, task_id, view, *rest):
+        if _wait_stage(view) == stage and not fired and not armed:
+            armed.append(stage)
+        return real_save(path, drive, task_id, view, *rest)
+
+    monkeypatch.setattr(os, "open", create)
+    monkeypatch.setattr(checkpoints, "save_view", save)
+    text = registry.execute("delegate_wait", {"run_id": entry.run_id})
+    assert fired == [stage]
+    assert "errno 28 ENOSPC" in text and os.strerror(errno.ENOSPC) in text, text
+    assert "supervision_state_unsaved" in text and f"The {stage} save did not land" in text, text
+    if stage == "wake_publication":
+        assert "Nothing was cancelled" not in text
+        assert '"observed_payload"' in text and '"waiting_on_user"' in text
+    saved = supervision.supervision_checkpoint(registry._ctx)["runs"].get(entry.run_id, {})
+    if stage == "wait_entry":
+        assert saved.get("status") != "sleeping"
+    else:
+        assert not saved.get("pending_wake") and not saved.get("quiet_renewals")
+        assert int(saved.get("journal_cursor") or 0) == 0
+    after = [row["type"] for row in custody.custody_rows(tmp_path)]
+    assert after[:len(before)] == before
+    assert all(kind.startswith("delegate_supervision_") for kind in after[len(before):])
+    assert not custody.replay(tmp_path)[entry.run_id].settled
+    statuses.pop(0)
+    again = registry.execute("delegate_wait", {"run_id": entry.run_id})
+    assert "waiting_on_user" in again and "supervision_wake_id" in again, again
+    assert "supervision_state_unsaved" not in again

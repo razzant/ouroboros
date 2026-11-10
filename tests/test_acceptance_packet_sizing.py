@@ -4,8 +4,9 @@ Every refusal that sent nothing is recorded as a typed ``not_dispatched`` actor
 carrying its own cause, and a panel of such rows projects ``not_dispatched``,
 never a synthetic verdict or a provider error. The acceptance-packet sizing this
 module also pinned (the packet ceiling, the per-slot fit backstop over it and the
-partial-source refusal) is gone with the task-acceptance machine; a spent owner
-deadline is the refusal that remains.
+partial-source refusal) is gone with the task-acceptance machine; a spent review
+window (the owner deadline or the task's execution window) is the refusal that
+remains, and it starts no paid dispatch.
 """
 
 from __future__ import annotations
@@ -62,7 +63,7 @@ def test_a_refused_panel_projects_not_dispatched_on_rows_and_panel(tmp_path):
     assert panel["coverage"]["transport_success"] == 0
     # The CAUSE leads the degraded reasons and therefore the owner line.
     assert result.degraded_reasons[0].startswith("slot_1:")
-    assert "Owner deadline exhausted" in result.degraded_reasons[0]
+    assert "No review window remains" in result.degraded_reasons[0]
     # Disclosed residual: `_error_actor` leaves raw_text empty and the shared
     # aggregator's parse of "" also appends a bare `slot_N:degraded`. Collapsing
     # it needs a control-flow change in the aggregator shared with commit, plan
@@ -72,6 +73,7 @@ def test_a_refused_panel_projects_not_dispatched_on_rows_and_panel(tmp_path):
 
 def test_a_spent_owner_deadline_row_projects_not_dispatched_not_a_provider_error(tmp_path):
     llm = FakeLLM()
+    paid: list = []
     result = run_review_request(
         ReviewRequest(
             surface="task_acceptance", goal="verify", subject="done",
@@ -81,14 +83,15 @@ def test_a_spent_owner_deadline_row_projects_not_dispatched_not_a_provider_error
         slots=[ReviewSlot(slot_id="slot_1", model="wide-1", effort="high")],
         drive_root=tmp_path,
         llm=llm,
+        usage_ctx=SimpleNamespace(_review_paid_stamp=lambda: paid.append(True)),
     )
 
-    assert llm.calls == []
+    assert llm.calls == [] and paid == [], "no physical send and no paid stamp"
     row = result.actors[0]
     assert row["status"] == "not_dispatched"
     assert row["transport_status"] == "not_dispatched"
-    assert "Owner deadline exhausted" in row["error"]
-    assert "Owner deadline exhausted" in "\n".join(result.degraded_reasons)
+    assert "No review window remains (owner deadline or task execution window spent)" in row["error"]
+    assert "No review window remains" in "\n".join(result.degraded_reasons)
 
 
 def test_a_really_sent_row_still_projects_its_own_transport_state(tmp_path):

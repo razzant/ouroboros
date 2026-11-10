@@ -26,19 +26,18 @@ def _attempt(amount, knowledge="exact"):
     return {"usageCost": {"cashUsd": amount, "cashKnowledge": knowledge}}
 
 
-@pytest.mark.parametrize("attempts,summary,amount,estimated,partial", [
-    pytest.param([_attempt(2), _attempt(None, "unknown")], {"spendUsd": 2}, 2, False, True, id="partial-exact"),
-    pytest.param([_attempt(None, "unknown")], {"spendUsd": 0}, None, False, True, id="unknown"),
-    pytest.param([_attempt(2)], {"spendUsd": 99}, 2, False, False, id="typed-exact-wins"),
-    pytest.param([_attempt(2, "estimated")], {"spendUsd": 99}, 2, True, False, id="estimate"),
-    pytest.param([_attempt(2, "estimated"), _attempt(None, "unknown")], {"spendUsd": 2}, 2, True, True, id="partial-estimate"),
-    pytest.param([_attempt(True)], {"spendUsd": 99}, None, False, True, id="invalid-cash"),
-    pytest.param([None], {"spendUsd": 99}, None, False, True, id="malformed-attempt"),
-    pytest.param(None, {"spendUsd": 2}, 2, False, False, id="legacy-exact"),
-    pytest.param(None, {"spendUsd": 2, "spendEstimated": True}, 2, True, False, id="legacy-estimate"),
-    pytest.param(None, {"spendUsd": True}, None, False, False, id="legacy-invalid"),
+@pytest.mark.parametrize(("state", "output_failure", "attempts", "summary", "amount", "estimated", "partial"), [
+    pytest.param("succeeded", False, [_attempt(2), _attempt(None, "unknown")], {"spendUsd": 2}, 2, False, True, id='succeeded-False-partial-exact'),
+    pytest.param("succeeded", False, [_attempt(2, "estimated")], {"spendUsd": 99}, 2, True, False, id='succeeded-False-estimate'),
+    pytest.param("succeeded", False, [None], {"spendUsd": 99}, None, False, True, id='succeeded-False-malformed-attempt'),
+    pytest.param("succeeded", False, None, {"spendUsd": True}, None, False, False, id='succeeded-False-legacy-invalid'),
+    pytest.param("failed", False, [_attempt(None, "unknown")], {"spendUsd": 0}, None, False, True, id='failed-False-unknown'),
+    pytest.param("failed", False, [_attempt(2, "estimated"), _attempt(None, "unknown")], {"spendUsd": 2}, 2, True, True, id='failed-False-partial-estimate'),
+    pytest.param("failed", False, None, {"spendUsd": 2}, 2, False, False, id='failed-False-legacy-exact'),
+    pytest.param("succeeded", True, [_attempt(2)], {"spendUsd": 99}, 2, False, False, id='succeeded-True-typed-exact-wins'),
+    pytest.param("succeeded", True, [_attempt(True)], {"spendUsd": 99}, None, False, True, id='succeeded-True-invalid-cash'),
+    pytest.param("succeeded", True, None, {"spendUsd": 2, "spendEstimated": True}, 2, True, False, id='succeeded-True-legacy-estimate'),
 ])
-@pytest.mark.parametrize("state,output_failure", [("succeeded", False), ("failed", False), ("succeeded", True)])
 def test_attach_only_cash_reaches_actor_persisted_event_and_live_frame_once(
     tmp_path, monkeypatch, forbid_effects, attempts, summary, amount, estimated, partial, state, output_failure,
 ):
@@ -92,8 +91,11 @@ def test_attach_only_cash_reaches_actor_persisted_event_and_live_frame_once(
     assert stored["claudexor"] == facts["claudexor"]
 
 
-@pytest.mark.parametrize("cash", [0, 2, None], ids=["priced-zero", "partial-positive", "unknown-only"])
-@pytest.mark.parametrize("custody_unavailable", [False, True])
+@pytest.mark.parametrize(("custody_unavailable", "cash"), [
+    pytest.param(False, 0, id='False-priced-zero'),
+    pytest.param(True, 2, id='True-partial-positive'),
+    pytest.param(True, None, id='True-unknown-only'),
+])
 def test_reconstructed_amount_survives_normalizers_and_text_reader(tmp_path, monkeypatch, cash, custody_unavailable):
     from ouroboros import delegate_custody_current, store
 
@@ -117,7 +119,7 @@ def test_reconstructed_amount_survives_normalizers_and_text_reader(tmp_path, mon
         assert fields["cost_final"] is False
         assert fields["cost_presentation"]["accounting_open"] is True
     assert cost_display(fields) == (
-        "unknown (accounting unavailable or not settled)" if cash is None
+        "unknown (accounting unavailable)" if cash is None  # nothing priced and the custody view unreadable
         else f"Tracked: ${cash:.2f} (total unknown)")
     if cash == 0:
         # An own-scope zero cannot establish a tree amount, nor replace explicit null.

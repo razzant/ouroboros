@@ -14,7 +14,6 @@ import pytest
 
 # This suite executes real shell subprocesses through ``_run_shell``; keep it
 # in the dedicated serial pytest lane so xdist workers cannot crash or race it.
-pytestmark = pytest.mark.serial
 
 from ouroboros.tool_access import (
     active_tool_profile,
@@ -387,7 +386,7 @@ def test_external_workspace_deliverables_guard_maps_executor_paths(tmp_path, mon
     from ouroboros.tools.shell import _run_shell
     from ouroboros.workspace_executor import ExecutorResult, executor_ref_from_ctx, map_backend_path
 
-    def fake_execute(fake_ctx, fake_cmd, _cwd, _timeout_sec, env_overlay=None):
+    def fake_execute(fake_ctx, fake_cmd, _cwd, _timeout_sec, env_overlay=None, stop=None):
         destination = map_backend_path(
             executor_ref_from_ctx(fake_ctx),
             fake_cmd[-1],

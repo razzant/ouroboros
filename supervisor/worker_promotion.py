@@ -127,6 +127,10 @@ def _canonical_promoted_repair_constraint(value: Any) -> tuple[Optional[dict], s
         return None, "invalid_skill_repair_constraint"
     if not payload_dir.is_dir():
         return None, "skill_repair_payload_missing"
+    from ouroboros.deployment_extensions import change_refusal, payload_write_refusal
+
+    if change_refusal(canonical.skill_name, "repair") or payload_write_refusal(payload_dir, data_root=_pool().DRIVE_ROOT):
+        return None, "managed_by_deployment"  # a required package is its administrator's: no repair task starts
     # X3 (owner 11=B): the repair is admitted against ONE exact payload state.
     # An unreadable payload cannot anchor a hash chain — fail closed here, not
     # after the task has already spent rounds.
@@ -375,6 +379,7 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
         "context_requires_self_body_docs": evt.get("context_requires_self_body_docs", False),
         **({"context_requires_development": evt["context_requires_development"]}
            if isinstance(evt.get("context_requires_development"), bool) else {}),
+        **({"review_answer": True} if evt.get("review_answer") is True else {}),  # task_contract.review_answer
         **({"reasoning_effort": evt["reasoning_effort"]} if evt.get("reasoning_effort") else {}),  # explicit start only
         "objective_author": dict(evt.get("objective_author") or {}),
         "owner_corpus": list(evt.get("owner_corpus") or []),
@@ -451,6 +456,8 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     # top-level key — and metadata may not exist yet.
     if isinstance(evt.get("client_surface"), dict) and evt.get("client_surface"):
         task.setdefault("metadata", {})["client_surface"] = dict(evt["client_surface"])
+    if isinstance(evt.get("ui_control"), dict) and evt.get("ui_control"):
+        task.setdefault("metadata", {})["ui_control"] = dict(evt["ui_control"])  # the press that started it
     pid = str(evt.get("project_id") or "").strip()
     rejection = _admit_project_scope(evt, task, tid, pid, attachment_manifest)
     if rejection is not None:
@@ -494,6 +501,12 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
             task["task_contract"].update(authority)
     # Popped BEFORE the row is built/queued so the announce fact never rides it.
     announce_project = task.pop("_announce_project", None)
+    # The direct handbook answer is this start's own, on its contract, after any Presence authority: a copied one,
+    # true or false, stays with the work that started this. The row's copy keeps its older meaning in Max.
+    if isinstance(task.get("task_contract"), dict):
+        task["task_contract"].pop("context_requires_development", None)
+    if isinstance(evt.get("context_requires_development"), bool):
+        task.setdefault("task_contract", {})["context_requires_development"] = evt["context_requires_development"]
     from ouroboros.consciousness_authority import is_consciousness_origin
 
     if (not _presence_promotion(evt) and task.get("actor_id") != "consciousness"
@@ -521,10 +534,13 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     if announce_project is not None:
         _pool()._announce_created_project(announce_project, tid, task=task)
     # A positive promote confirmation is allowed only after the durable queue
-    # projection exists.  The event handler writes the scheduled task result
-    # after the routing receipt; keeping that last step outside this function
-    # makes the result itself the cross-process admission receipt.
-    persist_snapshot = getattr(ctx, "persist_queue_snapshot", None)
+    # projection exists: the BARRIER, never the mark (a mark answers None while the tick
+    # publishes). The event handler writes the scheduled task result after the routing
+    # receipt; keeping that last step outside this function makes the result itself the
+    # cross-process admission receipt.
+    from supervisor.queue_publication import barrier_of
+
+    persist_snapshot = barrier_of(ctx)
     if not callable(persist_snapshot):
         return _pool()._reject_promoted_after_attachment_stage({
             "status": "needs_manual_target",
@@ -533,7 +549,7 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
             "admission_started": True,
         }, attachment_manifest)
     try:
-        persisted = persist_snapshot(reason="promote_chat_to_task") is not False
+        persisted = persist_snapshot(reason="promote_chat_to_task") is True
     except Exception:
         log.warning("promote: queue snapshot persist failed for %s", tid, exc_info=True)
         persisted = False

@@ -5,8 +5,14 @@
 // send exactly the contract's request keys.
 import { extensionRoutePath, extensionRoutePrefix, fetchJson, jsonPost, readStateJson } from './api_client.js';
 import { tr } from './i18n.js';
+import { errorWords } from './ui_primitives.js';
 
-/** Raised on window after a place write the server confirmed: `{place}` or `{placeId, removed: true}`. */
+/** A read or write that never reached Ouroboros in owner words (errorWords); a server's answer keeps its own words. */
+export const failureText = (error) => (error instanceof TypeError && error.response === undefined
+    ? errorWords(error).text : error?.message || String(error));
+
+/** Raised on window after a place or circle write the server confirmed: `{place}`, `{placeId, removed: true}`,
+ *  `{circle}` or `{circleId, removed: true, detached}`. */
 export const PLACES_CHANGED_EVENT = 'ouro:places-changed';
 
 const text = (value) => (value === null || value === undefined ? '' : String(value));
@@ -62,6 +68,8 @@ export function normalizePlace(raw) {
         label: text(place.label),
         revision: count(place.revision),
         state: text(place.state),
+        // The host's derived fact: consciousness is off (or Panic) and the place is not Paused, so it only hears.
+        onlyHears: place.only_hears === true,
         destination: text(place.destination),
         icon: normalizeIcon(place.icon),
         wakes: list(place.wakes).map((item) => ({ fact: text(item?.fact), author: text(item?.author) }))
@@ -73,6 +81,11 @@ export function normalizePlace(raw) {
         ownerAccounts: list(place.owner_accounts).map((account) => ({
             actorId: text(account?.platform_actor_id), label: text(account?.label), confirmedAt: text(account?.confirmed_at),
             accountId: text(account?.account_id),
+        })).filter((account) => account.actorId),
+        // Confirmed in another place of the same bot or app: they count here too, removed where they were confirmed.
+        sharedOwnerAccounts: list(place.shared_owner_accounts).map((account) => ({
+            actorId: text(account?.platform_actor_id), label: text(account?.label), confirmedAt: text(account?.confirmed_at),
+            accountId: text(account?.account_id), placeLabel: text(account?.place_label),
         })).filter((account) => account.actorId),
         // People the place has seen, offered for «This is me» when the server lists them (not in contract v1).
         accountCandidates: list(place.account_candidates).map((account) => ({
@@ -89,7 +102,20 @@ export function normalizePlace(raw) {
         unanswered: count(place.unanswered),
         lastActivityAt: text(place.last_activity_at),
         spent24hUsd: amount(place.spent_24h_usd),
+        // Its circle and who placed it there (the words are the circle's, in the list's `circles`), and its short
+        // purpose line with who wrote it; absent stays null.
+        circle: object(place.circle) && text(place.circle.circle_id) ? { id: text(place.circle.circle_id),
+            placedBy: text(place.circle.placed_by), placedAt: text(place.circle.placed_at) } : null,
+        description: object(place.description) && text(place.description.text) ? { text: text(place.description.text),
+            author: text(place.description.author), at: text(place.description.at) } : null,
     };
+}
+
+/** One CircleSummary: its name, its whole words and who wrote them, its revision. */
+export function normalizeCircle(raw) {
+    const circle = object(raw) || {};
+    return { id: text(circle.circle_id), name: text(circle.name), text: text(circle.text),
+        textAuthor: text(circle.text_author), textAt: text(circle.text_at), revision: count(circle.revision) };
 }
 
 /** An installed connector with a valid place declaration (`GET /api/places` `connectors`). */
@@ -118,6 +144,8 @@ export function normalizePlacesResponse(raw) {
         places: list(data.places).map(normalizePlace).filter((place) => place.id).map((place) => ({ ...place,
             serviceLabel: connectors.find((connector) => connector.connector === place.connector)?.label || place.provider })),
         connectors,
+        // Each circle once, in the owner's order; null from a server without circles (not "no circle").
+        circles: Array.isArray(data.circles) ? data.circles.map(normalizeCircle).filter((circle) => circle.id) : null,
         // Old connections the places migration could not move (absent on a server without the migration).
         migrationProblems: list(data.migration_problems).map((problem) => ({
             bindingId: text(problem?.binding_id), code: text(problem?.code), detail: text(problem?.detail),
@@ -128,14 +156,14 @@ export function normalizePlacesResponse(raw) {
 const WAKE_COST_KEYS = ['accounted_upper_bound_usd', 'accounted_upper_bound_usd_with_children',
     'cost_presentation', 'cost_accounting_status', 'cost_accounting_error', 'cost_final',
     'cost_with_children_partial', 'unknown_unmetered', 'non_final_rows', 'reserved_usd',
-    'unresolved_upper_bound_usd', 'ledger_integrity_degraded'];
+    'unresolved_upper_bound_usd', 'ledger_integrity_degraded', 'cost_custody'];
 
 /** Frozen RecentWake: phases and terminality are server facts, never timestamp guesses. */
 export function normalizeWake(raw) {
     const wake = object(raw) || {};
     return {
         taskId: text(wake.task_id), chatId: count(wake.chat_id), cause: text(wake.cause),
-        placeLabel: text(wake.place_label), conversation: text(wake.conversation),
+        placeLabel: text(wake.place_label), placeId: text(wake.place_id), conversation: text(wake.conversation),
         as: object(wake.as),
         startedAt: text(wake.started_at), endedAt: text(wake.ended_at), firstReplyAt: text(wake.first_reply_at),
         live: wake.live === true, phase: text(wake.phase), quiet: wake.quiet === true,
@@ -220,8 +248,13 @@ export async function readPlaceConnector(connector, init = {}) {
     const route = url.startsWith(prefix) ? url.slice(prefix.length) : '';
     const path = route && extensionRoutePath(connector.connector, route);
     if (!path || path !== url) throw new Error(tr('places.status.route_unavailable', 'The connector status route could not be read.'));
-    const data = await fetchJson(path, { ...init, cache: 'no-store' }, { rejectOkFalse: true });
+    const account = text(connector.accountId);
+    const statusPath = account ? extensionRoutePath(connector.connector, route, new URLSearchParams({ account_id: account })) : path;
+    const data = await fetchJson(statusPath, { ...init, cache: 'no-store' }, { rejectOkFalse: true });
     if (!object(data) || data.error) throw new Error(tr('places.status.unavailable', 'The connector status could not be read.'));
+    if (account && Object.hasOwn(data, 'account_id') && data.account_id !== account) {
+        throw new Error(tr('places.status.account_mismatch', 'The connector returned a different account.'));
+    }
     return data;
 }
 
@@ -252,12 +285,17 @@ function placeAnswer(data) {
     return place;
 }
 
-/** Connect a place from an installed connector's declaration; no id is typed. */
-export async function connectPlace({ connector, accountId = '', conversationId = '', label = '' }) {
+/** Connect a place from an installed connector's declaration; no id is typed. An Add's `note`, `description` and
+ *  `circleId` land with a new place in the same write; a place connected already answers 409 `place_exists`. */
+export async function connectPlace({ connector, accountId = '', conversationId = '', label = '', note = '',
+    description = '', circleId = '' }) {
     const body = { connector };
     if (accountId) body.account_id = accountId;
     if (conversationId) body.conversation_id = conversationId;
     if (label) body.label = label;
+    if (note) body.note = note;
+    if (description) body.description = description;
+    if (circleId) body.circle_id = circleId;
     return placeAnswer(await jsonPost('/api/places', body));
 }
 
@@ -267,6 +305,42 @@ export async function connectPlace({ connector, accountId = '', conversationId =
  */
 export async function updatePlace(placeId, change) {
     return placeAnswer(await jsonPost(`/api/places/${encodeURIComponent(placeId)}`, change));
+}
+
+// ---- circle writes (owner-authored on the server; the places view re-reads after each) ----------------------------
+function circleAnswer(data, what) {
+    if (!data || data.ok !== true || !object(data.circle)) {
+        throw Object.assign(new Error(text(data?.error) || `${what} was not saved.`), { body: data });
+    }
+    return normalizeCircle(data.circle);
+}
+
+/** A new circle, last in the order: `{name, text}`. */
+export async function createCircle({ name, text: words = '' }) {
+    const circle = circleAnswer(await jsonPost('/api/circles', { name, text: words }), 'The circle');
+    announce({ circle });
+    return circle;
+}
+
+/** Rename or reword one circle: `change` holds `name` and/or `text`; the revision guards a concurrent edit. */
+export async function updateCircle(circleId, change, expectedRevision) {
+    const body = { ...change, ...(expectedRevision === null || expectedRevision === undefined ? {} : { expected_revision: expectedRevision }) };
+    const circle = circleAnswer(await jsonPost(`/api/circles/${encodeURIComponent(circleId)}`, body), 'The circle');
+    announce({ circle });
+    return circle;
+}
+
+/** Delete one circle; its places stay connected. The answer holds the removed circle (its words) and the places it
+ *  detached: there is nothing to restore it from. */
+export async function deleteCircle(circleId, expectedRevision) {
+    const data = await fetchJson(`/api/circles/${encodeURIComponent(circleId)}`, {
+        method: 'DELETE', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expected_revision: expectedRevision }),
+    });
+    const circle = circleAnswer(data, 'The circle');
+    const detached = list(data.detached).map((row) => ({ placeId: text(row?.place_id), label: text(row?.label) }));
+    announce({ circleId, removed: true, detached });
+    return { circle, detached };
 }
 
 export async function disconnectPlace(placeId, expectedRevision) {
@@ -287,14 +361,15 @@ function ownerAnswer(data, what) {
     return data;
 }
 
-/** A safety level for one kind (`your_work`, the frozen request without `kind`, or `consciousness`). */
-export async function saveSafetyLevel(level, kind = 'your_work') {
+/** A safety level for one kind (`your_work`, the frozen request without `kind`, or `consciousness`). Each owner
+ *  safety write takes the caller's declared origin as `headers` (`api_client.APP_SETTINGS_ORIGIN` from Settings). */
+export async function saveSafetyLevel(level, kind = 'your_work', { headers } = {}) {
     const body = kind === 'consciousness' ? { mode: level, kind } : { mode: level };
-    return ownerAnswer(await jsonPost('/api/owner/safety-mode', body), 'The safety level');
+    return ownerAnswer(await jsonPost('/api/owner/safety-mode', body, { headers }), 'The safety level');
 }
 
-export async function saveSafetyRules(rules) {
-    return ownerAnswer(await jsonPost('/api/owner/safety-rules', { rules: String(rules ?? '') }), 'Your rules');
+export async function saveSafetyRules(rules, { headers } = {}) {
+    return ownerAnswer(await jsonPost('/api/owner/safety-rules', { rules: String(rules ?? '') }, { headers }), 'Your rules');
 }
 
 /**
@@ -311,9 +386,9 @@ export const SAFETY_MODEL_KEYS = Object.freeze([
 
 /** One owner transaction for any of SAFETY_MODEL_KEYS; a refusal throws the server's sentence. A roster that
  *  leaves no reviewer saves only with the owner's confirmation, sent beside the settings as the generic save does. */
-export async function saveCheckerSettings(settings, { allowEmptyReviewPool = false } = {}) {
+export async function saveCheckerSettings(settings, { allowEmptyReviewPool = false, headers } = {}) {
     const body = allowEmptyReviewPool ? { settings, allow_empty_review_pool: true } : { settings };
-    return ownerAnswer(await jsonPost('/api/owner/safety-model', body), 'The change');
+    return ownerAnswer(await jsonPost('/api/owner/safety-model', body, { headers }), 'The change');
 }
 
 /** The Agents roster as saved (`OUROBOROS_SUBAGENTS`, a JSON string or object), or null when unreadable. */

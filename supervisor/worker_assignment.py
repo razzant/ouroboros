@@ -16,6 +16,7 @@ import uuid
 from typing import Any, Dict, Optional
 
 from ouroboros.model_wait import budget_paused_seconds, native_sleep_started_at, settle_execution_carry
+from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION, LANE_PROJECT
 from supervisor.events_budget import budget_fence_selected, budget_hold_fact
 from ouroboros.work_stop import continuation_refusal
 from supervisor.queue import _queue_lock
@@ -24,8 +25,8 @@ from supervisor.queue import _queue_lock
 def _pool():
     """The parent module, read at call time.
 
-    The pool owns the repo/drive roots, its size, the worker table, the shared
-    PENDING/RUNNING refs and the crash clock, and ``init`` REBINDS them.
+    The pool owns the repo/drive roots, its size, the worker table and the shared
+    PENDING/RUNNING refs, and ``init`` REBINDS them.
     Reading them through the module is what keeps one binding: a from-import
     here would freeze the value this module saw at import time (the
     owner-approved D18/D33 mechanical exception).
@@ -146,13 +147,18 @@ def _mirror_assigned_running_status(task: Dict[str, Any]) -> None:
     too: both orphan healers key on the STORED status, so a root that exists only
     in memory and the snapshot is a ghost a stale or absent snapshot leaves
     forever. Never raises: a task that runs without its mirror is better than an
-    assignment tick that stops."""
+    assignment tick that stops. A returned owner turn, which only the conversation
+    lane's carrier takes (``_assign_returned_turns``), keeps its direct origin,
+    stamped as an admission stamps it."""
     try:
         from ouroboros.task_results import STATUS_RUNNING, write_task_result
         from ouroboros.task_status import execution_owner_record
+        from supervisor.conversation_lane import resumes_on_lane
 
-        task["_execution_owner"] = execution_owner_record(
-            task.get("budget_drive_root") or _pool().DRIVE_ROOT, task, "pooled")
+        root = task.get("budget_drive_root") or _pool().DRIVE_ROOT
+        task["_execution_owner"] = ({**execution_owner_record(root, task, "direct"), "lane": LANE_CONVERSATION,
+                                     "executor": EXECUTOR_WORKER} if resumes_on_lane(task)
+                                    else execution_owner_record(root, task, "pooled"))
         if not str(task.get("drive_root") or ""):
             return  # no fork mirror: the actual native start publishes RUNNING
         _is_subagent = str(task.get("delegation_role") or "") == "subagent"
@@ -310,11 +316,11 @@ def _commit_launch(queue, candidate, unsubmitted=None):
         prior = candidate.get("admitted_dispatch")
         if not projections:
             candidate["admitted_dispatch"] = "possible"
-            if queue.persist_queue_snapshot(reason="worker_launch_claimed") is not True:
+            if queue.publish_queue_snapshot(reason="worker_launch_claimed") is not True:  # durable before the put
                 candidate["admitted_dispatch"] = prior
                 return None
             return []
-        if queue.persist_queue_snapshot(reason="worker_launch_locator") is not True:
+        if queue.publish_queue_snapshot(reason="worker_launch_locator") is not True:
             return None
         committed = commit_dispatch_marks(candidate, projections)
         if committed is False:
@@ -323,7 +329,7 @@ def _commit_launch(queue, candidate, unsubmitted=None):
         witness = _COMMITTED_UNSENT[task_id] = {"row": candidate, "attempt": candidate.get("_attempt"),
                                                 "projections": projections, "unsubmitted": unsubmitted}
         if committed is None:  # it may have landed: never replayable, retried here before any put
-            queue.persist_queue_snapshot(reason="worker_launch_unknown")
+            queue.publish_queue_snapshot(reason="worker_launch_unknown")
             return None
     else:
         from ouroboros.task_results import load_task_result
@@ -333,7 +339,7 @@ def _commit_launch(queue, candidate, unsubmitted=None):
             recommitted = commit_dispatch_marks(candidate, witness["projections"])
             if recommitted is not True:  # refused now (terminal, Stop, owner hold) or unresolved: no put;
                 return recommitted       # the row stays in custody
-    if queue.persist_queue_snapshot(reason="worker_launch_claimed") is not True:
+    if queue.publish_queue_snapshot(reason="worker_launch_claimed") is not True:  # durable before the put
         return None
     return witness["projections"]
 
@@ -446,8 +452,12 @@ def _launch_job(queue, candidate, worker, token: str, generation) -> None:
 
 def _started_projection() -> list:
     """Under Q: RUNNING plus launches reserved on the admission lane; caps and leases count both,
-    as when the inline launch bound RUNNING before the next choice."""
-    return list(_pool().RUNNING.values()) + [{"task": row} for row in _pool().PENDING if row.get(_LAUNCH_CLAIM)]
+    as when the inline launch bound RUNNING before the next choice (a returned turn's, as its lane's row)."""
+    from supervisor.conversation_lane import resumes_on_lane
+
+    return list(_pool().RUNNING.values()) + [{"task": row, **({"lane": LANE_CONVERSATION} if resumes_on_lane(row)
+                                                               else {})}
+                                             for row in _pool().PENDING if row.get(_LAUNCH_CLAIM)]
 
 
 def _release_launch(queue, candidate, worker, token: str) -> None:
@@ -493,23 +503,9 @@ def _launch_attempt(queue, candidate, worker, token: str, *, lane: bool, generat
     from supervisor.followup_policy import scheduled_start
     from supervisor.queue_schedules import automatic_acquisitions
     from supervisor.queue_timeouts import _pending_continuation, _deadline_launch_claim, pending_deadline_expirable
-    from ouroboros.work_diagnostics import control_reason
 
     witness = _unsent(candidate)
     with automatic_acquisitions():
-        diagnostic_stop = control_reason(candidate, _pool().DRIVE_ROOT, before_handoff=True)
-        if diagnostic_stop:
-            with queue._queue_lock:
-                held = (_launch_claim_held(queue, candidate, worker, token) if lane
-                        else any(row is candidate for row in _pool().PENDING))
-            if held and diagnostic_stop == "cancelled" and (candidate.get("admitted_dispatch") == "none" or witness is not None):
-                # This launch owner proves it never entered the put. A recovered
-                # source may have published while we held its diagnostic claim.
-                from ouroboros.cancel_intents import request_cancel
-
-                request_cancel(_pool().DRIVE_ROOT, candidate["id"], reason="Diagnostic source authority ended before dispatch",
-                               source="silence_resolved", requested_by="supervisor", scope="single")
-            return False
         # The schedule owner's control (origin Stop, hold, binding) is read before any durable
         # step, under its own short table hold; the put re-reads it inside that hold below.
         with scheduled_start(queue.DRIVE_ROOT, candidate) as allowed:
@@ -579,6 +575,10 @@ def _launch_attempt(queue, candidate, worker, token: str, *, lane: bool, generat
                     return None  # committed, row mark unwritten: the same process retries it
                 continuation = candidate.get("_owner_wait_resume") or candidate.get("_budget_pause_resume") or candidate.get("_working_recovery") or {}
                 launched = _settled_running_task(candidate, continuation)
+                # Each physical handoff gets a fresh phase-generation token.  Attempt and
+                # worker identity can both be reused by Resume, so they cannot fence a
+                # buffered phase frame from the previous execution.
+                launched["_phase_generation"] = uuid.uuid4().hex
                 # The handoff boundary: from here this worker may hold the task.
                 _COMMITTED_UNSENT.pop(str(candidate.get("id") or ""), None)
                 worker.quiescence_token = ""
@@ -598,12 +598,16 @@ def _launch_attempt(queue, candidate, worker, token: str, *, lane: bool, generat
 
 
 def _bind_running(queue, task, worker) -> None:
-    """Under Q, after the put: the row leaves PENDING, the worker and RUNNING own it, the snapshot says so."""
+    """Under Q, after the put: the row leaves PENDING, the worker and RUNNING own it, the snapshot says so.
+    A conversation carrier's row takes the lane's facts (``conversation_lane.returned_row_facts``)."""
+    from supervisor.conversation_lane import returned_row_facts
+
     _pool().PENDING[:] = [row for row in _pool().PENDING if row is not task]
     worker.busy_task_id = task["id"]
     now_ts = time.time()
     resume = task.get("_owner_wait_resume") or task.get("_budget_pause_resume") or task.get("_working_recovery") or {}
     sleeping = resume.get("sleep_exclusion_since") or native_sleep_started_at(task.get("_owner_wait_resume"))
+    lane = returned_row_facts(task) if getattr(worker, "lane", LANE_PROJECT) == LANE_CONVERSATION else {}
     _pool().RUNNING[task["id"]] = {
         "task": _settled_running_task(task, resume), "worker_id": worker.wid,
         "started_at": float(resume.get("started_at") or now_ts), "last_heartbeat_at": now_ts,
@@ -615,7 +619,8 @@ def _bind_running(queue, task, worker) -> None:
         # ``paused_duration_sec``, an owner-wait restart ``budget_paused_sec``.
         "budget_paused_sec": budget_paused_seconds(resume),
         **({"sleep_parked_at": float(sleeping)} if sleeping is not None else {}),
-        "soft_sent": False, "attempt": int(task.get("_attempt") or 1),
+        "soft_sent": False, "attempt": int(task.get("_attempt") or 1), **lane,
+        "phase_generation": str(task.get("_phase_generation") or ""),
     }
     # A started task publishes no row: its own card says so (the agent's `task_started` live event).
     queue.persist_queue_snapshot(reason="assign_task")
@@ -642,6 +647,37 @@ def _foreign_roots_refused(candidate) -> bool:
     return True
 
 
+def needs_paid_admission(task: Dict[str, Any]) -> bool:
+    """Owner 2A at the queue: whether a row's next attempt needs PAID admission, which alone a reached
+    global limit refuses (``usage_accounting.paid_admission`` before any price is known). The worker's own
+    opening rules name the route (``route_choice``) over what its dispatch resolves: a delegated child's frozen
+    row selects its route (``subagent_runtime.configured_actor_route``), never Main. A continuation saved on
+    another route, or a subscription route whose receipts carried cash, is admitted here and refused by its
+    first reservation, which is the authority. An unresolvable route keeps the money stop."""
+    from types import SimpleNamespace
+    from ouroboros import route_choice
+    from ouroboros.provider_models import provider_for_model
+    from ouroboros.usage_accounting import paid_admission
+
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    try:
+        actor = task.get("configured_subagent")
+        if str(task.get("delegation_role") or "").lower() == "subagent" and isinstance(actor, dict):
+            from ouroboros.subagent_runtime import configured_actor_route, validate_subagent_snapshot
+            from ouroboros.supervisor_route import validate_cognitive_route
+
+            model, local = configured_actor_route(validate_subagent_snapshot(actor),
+                                                  validate_cognitive_route(task.get("parent_cognitive_route")))
+            metadata = {**metadata, "model": model, "use_local_model": local}
+        ctx = SimpleNamespace(task_metadata=metadata, primary_route=None)
+        route_choice.bind_task_route(ctx, metadata, presence=bool(task.get("_presence_turn")))
+        model, use_local, _choice = route_choice.open_route(ctx, None)
+    except Exception:
+        log.warning("Route of queued %s unresolved; the money stop holds it", task.get("id"), exc_info=True)
+        return True
+    return paid_admission("local" if use_local else provider_for_model(model), None)
+
+
 def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), refused=(), cold_holders=None,
                           leased=None, unresolved_invalid_id_set=(), own_claim: str = "") -> bool:
     """The chooser's gates over one queued row; also the launch's revalidation under Q (``own_claim``:
@@ -651,7 +687,6 @@ def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), 
     from ouroboros.project_placement import refresh_pending_placement
     from ouroboros.config import get_max_active_subagents_per_root
     from supervisor.events_budget import budget_resume_dispatch_allowed
-    from supervisor.state import EVOLUTION_BUDGET_RESERVE
     from supervisor.task_lifecycle import root_cancellation_fenced
     from supervisor.consciousness_carriers import autonomous_work_enabled
 
@@ -665,11 +700,15 @@ def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), 
         return True
     if not autonomous_work_enabled(candidate, _pool().DRIVE_ROOT):
         return True
-    if remaining <= 0 and not candidate.get("_owner_wait_resume"):
-        return True
+    if remaining <= 0 and not candidate.get("_owner_wait_resume") and needs_paid_admission(candidate):
+        return True  # owner 2A: $0 work keeps running at the limit; its every send still meets reserve_attempt
     if _pool()._invalid_depth_deferred(candidate, set(unresolved_invalid_id_set)):
         return True
     if not _pool().repo_writer_task_allowed(candidate):
+        return True
+    from ouroboros.deployment_extensions import queue_held
+
+    if queue_held():  # a deployment's hold: queued work waits for its required extensions; the carrier rechecks
         return True
     if (isinstance(candidate.get("_budget_pause"), dict) or budget_hold_fact(candidate) is not None
             or continuation_refusal(candidate)):
@@ -679,6 +718,10 @@ def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), 
     if _direct_actor_still_registered(task_id):
         # The direct actor that parked this id has not released its registry entry yet:
         # no second live actor for one id.
+        return True
+    if candidate.get("_presence_turn") and not claim and any(
+            w.busy_task_id == task_id for w in _pool().WORKERS.values()):
+        # The carrier that parked this Presence turn still holds its slot until its own settlement (#2566).
         return True
     if root_cancellation_fenced(candidate, root_task_id or task_id):
         return True
@@ -690,13 +733,13 @@ def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), 
             # One member explicitly selected against THIS fence is admitted; the latch stays up for the rest (Q9).
             and not budget_fence_selected(candidate, queue.BUDGET_ROOT_FENCES.get(root_task_id))):
         return True
-    if str(candidate.get("type") or "") == "evolution" and remaining < EVOLUTION_BUDGET_RESERVE:
-        return True
     if not refresh_pending_placement(_pool().DRIVE_ROOT, candidate):
         return True
+    from supervisor.conversation_lane import resumes_on_lane
+
     cold = cold_holders if cold_holders is not None else cold_project_holders(_pool().PENDING)
-    if not candidate_is_leasable(candidate, leased if leased is not None else running_project_ids(running),
-                                 cold_holders=cold):
+    if not resumes_on_lane(candidate) and not candidate_is_leasable(  # a lane turn holds no project lease
+            candidate, leased if leased is not None else running_project_ids(running), cold_holders=cold):
         return True
     if str(candidate.get("delegation_role") or "") == "subagent":
         if (_pool()._running_subagent_count(root_task_id, running) >= get_max_active_subagents_per_root()
@@ -705,14 +748,16 @@ def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), 
     return False
 
 
-def _choose_candidate(queue, remaining, unresolved_invalid_id_set, refused_this_pass, running, selected):
+def _choose_candidate(queue, remaining, unresolved_invalid_id_set, refused_this_pass, running, selected, *,
+                      lane: str = LANE_PROJECT):
     """One side-effecting chooser, including stale grant repair with no idle worker.
 
     `running` is either current custody or a local projection for a bounded batch.
     Selection never claims dispatch, consumes a grant, or creates RUNNING custody.
+    `lane` chooses among that lane's queued rows (``conversation_lane.resumes_on_lane``).
     """
     from ouroboros.project_lease import cold_project_holders, running_project_ids
-    from supervisor.state import EVOLUTION_BUDGET_RESERVE
+    from supervisor.conversation_lane import resumes_on_lane
 
     leased = running_project_ids(running)
     while True:
@@ -723,6 +768,8 @@ def _choose_candidate(queue, remaining, unresolved_invalid_id_set, refused_this_
             from ouroboros.server_restart import agent_restart_holds
             from supervisor.events_budget import budget_resume_dispatch_allowed
 
+            if resumes_on_lane(candidate) != (lane == LANE_CONVERSATION):
+                continue
             if _unsent(candidate) is None and agent_restart_holds(candidate):
                 continue
 
@@ -761,12 +808,7 @@ def _choose_candidate(queue, remaining, unresolved_invalid_id_set, refused_this_
             chosen_idx = i
             break
         if chosen_idx is None:
-            # Project-leased rows wait; evolution rows below the reserve are cleaned.
-            # At zero the pause block already parked or settled each row: keep it.
-            if 0 < remaining < EVOLUTION_BUDGET_RESERVE:
-                dropped_ids = _pool()._drop_assignable_evolution_tasks(unresolved_invalid_id_set)
-                if dropped_ids:
-                    queue.persist_queue_snapshot(reason="evolution_dropped_budget")
+            # Ineligible rows wait in custody; at zero the pause block parked or settled each.
             return None, False
         task = _pool().PENDING[chosen_idx]
         depth_error = _pool()._normalize_pending_task_depth(task)
@@ -791,12 +833,63 @@ def _choose_candidate(queue, remaining, unresolved_invalid_id_set, refused_this_
         return chosen_idx, False
 
 
+def _assign_returned_turns(queue, remaining, unresolved_invalid_id_set, refused_this_pass, deferred_this_pass) -> bool:
+    """Under Q: my human's returned turns take the conversation lane's idle carriers, never a project slot.
+
+    The chooser, launch and revalidation of queued work (holds, money, Stop, placement, dispatch marks, the
+    barrier), without what binds the project pool alone: its fence, ``MAX_WORKERS`` and the project lease.
+    A dispatchable turn left without an idle carrier is the lane's to start one for. False: the chooser blocked."""
+    from supervisor.conversation_lane import note_returns_waiting, ready_idle_carrier, resumes_on_lane
+
+    waiting: set = set()
+    while any(resumes_on_lane(task) for task in _pool().PENDING):  # none queued: queued work keeps its one chooser pass
+        chosen_idx, blocked = _choose_candidate(queue, remaining, unresolved_invalid_id_set, refused_this_pass,
+                                                _started_projection(), waiting, lane=LANE_CONVERSATION)
+        if blocked:
+            return False
+        if chosen_idx is None:
+            break
+        task, carrier = _pool().PENDING[chosen_idx], ready_idle_carrier(for_owner=True)
+        if carrier is None:
+            waiting.add(str(task.get("id") or ""))
+            continue
+        outcome = _claim_worker_launch(queue, task, carrier, deferred=deferred_this_pass)
+        if outcome is False:
+            refused_this_pass.add(str(task.get("id") or ""))
+        elif outcome is True:  # the inline path put it; bind it here under the same Q hold
+            _bind_running(queue, task, carrier)
+    note_returns_waiting(len(waiting))
+    return True
+
+
+def _forecast_or_unknown(assign):
+    """One assignment pass. A pass that ends before growth recorded its forecast (a busy serializer,
+    a fenced pool, unreadable authority, an exception) leaves that forecast unknown: an older
+    value is never published as this pass's."""
+    @functools.wraps(assign)
+    def one_pass() -> None:
+        from supervisor.worker_pool_lifecycle import demand_forecast_passes, record_demand_forecast
+
+        passes = demand_forecast_passes()
+        try:
+            assign()
+        finally:
+            if demand_forecast_passes() == passes:
+                record_demand_forecast(None, reason="pool_disabled" if _pool()._WORKER_POOL_DISABLED_REASON
+                                       else "assignment_pass_incomplete")
+
+    return one_pass
+
+
+@_forecast_or_unknown
 def assign_tasks() -> None:
     from supervisor import queue
-    from supervisor.state import budget_remaining, EVOLUTION_BUDGET_RESERVE
+    from supervisor.state import budget_remaining
     from supervisor.worker_owner_wait import maintain_owner_wait_capacity
-
-    from supervisor.worker_pool_lifecycle import _WORKER_LIFECYCLE_LOCK, reconcile_worker_capacity, worker_ready
+    from supervisor.conversation_lane import reconcile_under_project_fence
+    from supervisor.worker_pool_lifecycle import (
+        _WORKER_LIFECYCLE_LOCK, is_project_slot, reconcile_worker_capacity, worker_ready,
+    )
 
     # The loop never waits behind an off-loop respawn or generation stop holding the lifecycle
     # serializer (teardowns kill and join outside it): the whole turn defers to the next tick, so
@@ -805,6 +898,8 @@ def assign_tasks() -> None:
         return
     try:
         maintain_owner_wait_capacity()
+        if _pool()._WORKER_POOL_DISABLED_REASON:
+            reconcile_under_project_fence()
     finally:
         _WORKER_LIFECYCLE_LOCK.release()
     _tick_parked_work(queue)  # custody observation may wait on a remote operation
@@ -830,27 +925,30 @@ def assign_tasks() -> None:
                 "Invalid-depth rows deferred until terminal custody is available; continuing assignment for other tasks: %s",
                 ", ".join(unresolved_invalid_ids),
             )
-        if _pool()._WORKER_POOL_DISABLED_REASON:
+        from supervisor.conversation_lane import note_returns_waiting, resumes_on_lane
+
+        fenced = bool(_pool()._WORKER_POOL_DISABLED_REASON)  # the project pool's fence, never the lane's
+        if fenced and not any(resumes_on_lane(task) for task in _pool().PENDING):
+            note_returns_waiting(0)
             return
         try:  # every loop tick: ride the snapshot; a refusal re-reads exactly, reserve_attempt is the gate
-            evolution_queued = any(str(row.get("type") or "") == "evolution" for row in _pool().PENDING)
-            remaining = budget_remaining(  # this tick refuses at zero AND, for evolution, at its reserve
-                st, strict=True, allow_stale=True,
-                refuse_below=EVOLUTION_BUDGET_RESERVE if evolution_queued else 0.0)
+            remaining = budget_remaining(st, strict=True, allow_stale=True)  # this tick refuses at zero
         except Exception:
             log.error("Task assignment blocked: monetary authority unavailable")
             return
         if remaining <= 0:
             planned = []
             for task in _pool().PENDING:
-                if _pool()._invalid_depth_deferred(task, unresolved_invalid_id_set):
-                    continue
+                if fenced and not resumes_on_lane(task) or _pool()._invalid_depth_deferred(task, unresolved_invalid_id_set):
+                    continue  # (a fenced pool's own rows wait for Restart)
                 if isinstance(task.get("_budget_pause"), dict):
                     continue
                 if budget_hold_fact(task) is not None or continuation_refusal(task):
                     continue  # Held, not paused: no second pause row over the hold.
                 if task.get("_owner_wait_resume"):
                     continue  # Restore the checkpoint; the loop still owns its budget stop.
+                if not needs_paid_admission(task):
+                    continue  # owner 2A: $0 work is neither paused nor stripped of its grant at the limit
                 if isinstance(task.get("_budget_pause_resume"), dict):
                     # Money vanished between the grant and this dispatch: the
                     # single-use grant returns to its exact pause, never to a
@@ -868,27 +966,35 @@ def assign_tasks() -> None:
                 if cost_fields.get("cost_accounting_status") != "available":
                     log.error("Budget pause blocked: task attempt history unavailable for %s", task_id)
                     return
+                from supervisor.restart_retention import returned_before_body
+
+                seed = bool((returned_before_body(task) or {}).get("seed_return"))  # D5: its given-back attempt never put
                 retry_lineage = bool(
-                    int(task.get("_attempt") or 1) > 1
+                    int(task.get("_attempt") or 1) > 1 and not seed
                     or task.get("original_task_id") or task.get("timeout_retry_from")
                 )
                 replay_safe = (
-                    (task.get("admitted_dispatch") == "none" or _unsent(task) is not None)  # never put here
+                    (task.get("admitted_dispatch") == "none" or _unsent(task) is not None or seed)  # never put here
                     and int(cost_fields.get("total_rounds") or 0) == 0
                     and not bool(cost_fields.get("ledger_integrity_degraded"))
                     and not retry_lineage
                 )
+                # Owner 4A: a row that already dispatched is HELD, nonterminal, when it carries saved work to
+                # continue (its Resume and launch revalidate that source). Holding grants no replay: a row with
+                # nothing saved keeps the honest terminal below.
+                held = not replay_safe and "_working_recovery" in task
                 pause = {
-                    "status": "paused_before_dispatch" if replay_safe else "resource_limited",
+                    "status": "paused_before_dispatch" if replay_safe or held else "resource_limited",
                     "scope": "global",
                     "physical_calls": int(cost_fields.get("total_rounds") or 0),
                     "replay_safe": replay_safe,
+                    **({"continuation": "working"} if held else {}),
                     "auto_resume": False,
-                    "resume_policy": "manual_same_generation" if replay_safe else "cancel_or_new_run",
+                    "resume_policy": "manual_same_generation" if replay_safe or held else "cancel_or_new_run",
                     "paused_at": _pool().utc_now_iso(),
                 }
                 planned.append((task, pause, cost_fields))
-            newly_paused, terminal_ids = [], []
+            newly_paused, held_ids, terminal_ids = [], [], []
             for task, pause, cost_fields in planned:
                 task_id = str(task.get("id") or "")
                 result_root = pathlib.Path(task.get("budget_drive_root") or _pool().DRIVE_ROOT)
@@ -901,6 +1007,16 @@ def assign_tasks() -> None:
                         write_task_result(
                             result_root, task_id, STATUS_SCHEDULED,
                             reason_code="budget_exhausted", resource_limit=pause,
+                        )
+                    elif pause.get("continuation"):
+                        task["_budget_pause"] = pause
+                        held_ids.append(task_id)
+                        write_task_result(
+                            result_root, task_id, STATUS_SCHEDULED,
+                            reason_code="budget_exhausted", resource_limit=pause,
+                            result=("Budget limit reached after prior dispatch; the saved work is held and an "
+                                    "explicit Resume continues the same task."),
+                            **cost_fields,
                         )
                     else:
                         write_task_result(
@@ -919,14 +1035,15 @@ def assign_tasks() -> None:
             if terminal_ids:
                 terminal = set(terminal_ids)
                 _pool().PENDING[:] = [task for task in _pool().PENDING if str(task.get("id") or "") not in terminal]
-            if newly_paused or terminal_ids:
+            if newly_paused or held_ids or terminal_ids:
                 _pool().append_jsonl(
                     _pool().DRIVE_ROOT / "logs" / "events.jsonl",
                     {
                         "ts": _pool().utc_now_iso(),
                         "type": "budget_tasks_paused",
                         "scope": "global",
-                        "task_ids": newly_paused,
+                        "task_ids": newly_paused + held_ids,
+                        "held_saved_work_task_ids": held_ids,
                         "resource_limited_task_ids": terminal_ids,
                         "auto_resume": False,
                     },
@@ -934,8 +1051,9 @@ def assign_tasks() -> None:
                 if st.get("owner_chat_id"):
                     _pool().send_with_budget(
                         int(st["owner_chat_id"]),
-                        "🚫 Model budget reached. Queued tasks are paused before dispatch; "
-                        "raising the limit does not resume them automatically.",
+                        "🚫 Model budget reached. Queued tasks that need paid model calls are paused before "
+                        "dispatch; subscription and local work continues. Raising the limit does not resume "
+                        "them automatically: Resume continues each one.",
                         role="system", system_type="budget_notice")
                 queue.persist_queue_snapshot(reason="budget_paused_before_dispatch")
             # Selection still runs (and repairs stale grants); quiescent capacity
@@ -945,7 +1063,7 @@ def assign_tasks() -> None:
         # chokepoint too: a task restored from a snapshot or created before the
         # mode switch must never actually run. Cancel them terminally.
         from supervisor.evolution_lifecycle import evolution_block_reason
-        evo_block = evolution_block_reason()
+        evo_block = "" if fenced else evolution_block_reason()
         blocked_ids = _pool()._drop_assignable_evolution_tasks(unresolved_invalid_id_set) if evo_block else []
         if blocked_ids:
             from ouroboros.task_results import STATUS_CANCELLED, write_task_result
@@ -963,8 +1081,13 @@ def assign_tasks() -> None:
 
         refused_this_pass = set()  # failed physical claims are not residual demand,
         deferred_this_pass = set()  # unless contention deferred them: the same work retries
+        if not _assign_returned_turns(queue, remaining, unresolved_invalid_id_set, refused_this_pass,
+                                      deferred_this_pass) or fenced:
+            return
         for w in _pool().WORKERS.values():
-            while (w.busy_task_id is None and worker_ready(w) and not getattr(w, "resume_hold", "")
+            # Other queued work goes to project slots only; routing admits the conversation lane's carriers.
+            while (is_project_slot(w) and w.busy_task_id is None and worker_ready(w)
+                    and not getattr(w, "resume_hold", "")
                     and getattr(w, "active_capacity", True) and _pool().PENDING):
                 chosen_idx, blocked = _choose_candidate(
                     queue, remaining, unresolved_invalid_id_set, refused_this_pass, _started_projection(), set())

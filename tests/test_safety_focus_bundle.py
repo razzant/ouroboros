@@ -44,14 +44,14 @@ def checker(monkeypatch):
     safety._PRIOR_VERDICTS.clear()
 
 
-def _focus_task(root, *, text="hello there", thread="", staged=()):
+def _focus_task(root, *, text="hello there", thread="", staged=(), conversation=None, message=None):
     """One admitted event's focus task from the presence producer, and the first user content it frames."""
     from ouroboros.context import build_user_content
 
     key = conversation_key("chat", "a", "r", thread)
     event = PresenceTurnEvent("event-" + hashlib.sha256(f"{thread}:{text}".encode()).hexdigest()[:8], "chat", "a",
-                              "r", thread, key, {"platform_actor_id": "person", "display_name": "Person"}, {}, {},
-                              text, facts=("mention",))
+                              "r", thread, key, {"platform_actor_id": "person", "display_name": "Person"},
+                              conversation or {}, message or {}, text, facts=("mention",))
     admission = admit_presence_turn(drive_root=root, authenticated_transport_skill="bridge", provider="chat",
                                     account_id="a", conversation_id="r", thread_id=thread)
     task = _build_task(replace(admission, allowance={"status": "available", "remaining_usd": 2,
@@ -62,12 +62,12 @@ def _focus_task(root, *, text="hello there", thread="", staged=()):
 
 
 def _reply_bundle(root, monkeypatch, prompts, *, thread="", before_reply=None, typed=True, staged=(), extra_rows=(),
-                  text="hello there"):
+                  text="hello there", conversation=None, message=None):
     """Admit an event, build its focus task, record its first row, then check the reply."""
     from ouroboros.loop_messages import _initialize_owner_directives
     from ouroboros.place_reply import prepare_focus_reply
 
-    task, content = _focus_task(root, text=text, thread=thread, staged=staged)
+    task, content = _focus_task(root, text=text, thread=thread, staged=staged, conversation=conversation, message=message)
     if not typed:  # a task retained before the typed event existed
         task["metadata"]["presence"].pop("observed_text")
     ctx = SimpleNamespace(task_metadata=task["metadata"], task_id=task["id"], drive_root=root)
@@ -83,6 +83,119 @@ def _reply_bundle(root, monkeypatch, prompts, *, thread="", before_reply=None, t
     return ctx, bundle, prompt
 
 
+@pytest.mark.parametrize("status", ["SUSPICIOUS", "SAFE"])
+def test_a_flagged_reply_returns_once_and_its_later_send_leaves_a_note(focus, monkeypatch, checker, status):
+    """A SUSPICIOUS reply returns unsent; the mind's finish from a later model call posts it, and that decision with
+    the check's reason stays in the room's record beside it, where the next round in this place reads it. A SAFE
+    reply is posted at once and leaves no note."""
+    from ouroboros import dialogue_store, safety
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.place_reply import _reply_digest, prepare_focus_reply, reply_carrier
+    from ouroboros.places import conversation_chat_id
+
+    def call(**kwargs):
+        checker.append(kwargs["user_prompt"])
+        return {"content": json.dumps({"status": status, "reason": "names a colleague the note keeps out"})}, {}
+    monkeypatch.setattr(safety, "_safety_model_call", call)
+    root, _place, _admission, _event = focus
+    task, content = _focus_task(root)
+    ctx = SimpleNamespace(task_metadata=task["metadata"], task_id=task["id"], drive_root=root,
+                          _current_llm_call_meta={"llm_call_id": "round-1"})
+    _initialize_owner_directives(ctx, [{"role": "user", "content": content}])
+    monkeypatch.setattr("ouroboros.presence_context.confirmed_delivery_receipts", lambda _ctx: frozenset())
+    ok, message = prepare_focus_reply(ctx, "A short reply")
+    assert ok is (status == "SAFE") and ("Message not sent" in message) is (status == "SUSPICIOUS")
+    if status == "SUSPICIOUS":
+        ctx._current_llm_call_meta = {"llm_call_id": "round-2"}
+        assert prepare_focus_reply(ctx, "A short reply")[0] and len(checker) == 1
+    carrier = reply_carrier(ctx.task_metadata)
+    client_id = f"place-notice:{ctx.task_id}:{_reply_digest(carrier, 'A short reply')}:safety-note"
+    rows = dialogue_store.rows_by_client_id(root, client_id, chat_id=conversation_chat_id(carrier["conversation_key"]))
+    assert [(r.row["direction"], "names a colleague the note keeps out" in r.row["text"]) for r in rows] == (
+        [("system", True)] if status == "SUSPICIOUS" else [])
+
+
+def test_an_owner_answer_reaches_the_supervisor_with_the_card_it_answers(focus, monkeypatch, checker, tmp_path):
+    """The Supervisor reads an owner's answer together with what it answers (audit 05.11 item 37): the row the drain
+    records for a delivered answer reaches the bundle with the card beside my human's words, never inside them."""
+    import queue
+
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.owner_mailbox import KIND_QUIZ_ANSWER, write_owner_message
+
+    card = {"quiz_id": "q7", "question": "Publish exactly this reply?\n> Thanks, taking it up.", "state": "answered",
+            "options": ["Publish it", "Not now"], "answered_index": 0}
+    assert write_owner_message(tmp_path, "[Owner quiz answer] quiz q7", task_id="root", msg_id="qa-7",
+                               kind=KIND_QUIZ_ANSWER, quiz_delivery={"task_id": "asker", "quiz_id": "q7",
+                                                                     "answer_snapshot": card})
+    drained = SimpleNamespace(_owner_directives=[])
+    _drain_incoming_messages([], queue.Queue(), tmp_path, "root", None, set(), owner_ctx=drained)
+    root, _place, _admission, _event = focus
+    _ctx, bundle, _prompt = _reply_bundle(root, monkeypatch, checker, extra_rows=tuple(drained._owner_directives))
+    [shown] = [source for source in bundle["occasion"]["sources"] if source.get("quiz_id") == "q7"]
+    assert shown["content"] == "1. Publish it" and "> Thanks, taking it up." in shown["reply_to"]["text"]
+
+
+def test_a_helper_reads_the_words_carried_to_its_work_and_never_a_siblings(checker, tmp_path):
+    """A helper's Supervisor reads my human's later words the host carried to its work, shaped as the corpus rows it
+    already reads and with the card they answer; a row held as context because it went to a sibling stays out. A
+    helper scheduled after those words arrived holds them only in its inherited field, and its Supervisor reads
+    them from there, with the same card; a quote its corpus already holds is not listed twice."""
+    import queue
+
+    from ouroboros import dialogue_store, safety
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.owner_relay import owner_quote, write_relay
+    from ouroboros.owner_words import FIELD, governing_words_for_schedule
+    from ouroboros.tools.registry import ToolContext
+
+    def sources_of(ctx):
+        prompt = safety._build_check_prompt("run_command", {"cmd": ["echo", "hello"]}, ctx=ctx)
+        return prompt, json.loads(prompt.split("Host evidence (provenance is not consent):\n", 1)[1]
+                                  .split("\nProposed tool call:", 1)[0])["occasion"]["sources"]
+
+    card = {"quiz_id": "q7", "question": "Publish exactly this reply?", "state": "answered", "answered_index": 0,
+            "options": ["Publish it", "Not now"], "answered_after_terminal": True}
+    answer = {"chat_id": 1, "direction": "in", "ts": "2026-10-04T06:00:00+00:00", "client_message_id": "owner-answer",
+              "text": "1. Publish it", "late_answer": {"task_id": "asker", "quiz_id": "q7",
+                                                       "answer_snapshot": {"task_id": "asker", "quiz": card}}}
+    elsewhere = {"chat_id": 1, "direction": "in", "ts": "2026-10-04T06:01:00+00:00",
+                 "client_message_id": "for-sibling", "text": "The sibling should use the March figures."}
+    helper = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, current_task_type="task")
+    helper.task_id, helper.event_queue, helper._owner_directives = "helper", queue.Queue(), []
+    helper.task_metadata = {"delegation_role": "subagent", "root_task_id": "root", "parent_task_id": "root"}
+    addresses = {}
+    for row, went_to in ((answer, ""), (elsewhere, "sibling")):
+        dialogue_store.append(tmp_path, "chat", row)
+        addresses[went_to] = address = format_address(row_address(row))
+        write_relay(tmp_path, "helper", relay_id=f"{'carry-context' if went_to else 'carry'}:{address}", note="",
+                    quotes=[owner_quote(tmp_path, row, address=address)], chat_id=1, teller_task_id="root",
+                    canonical_root=tmp_path, host_carried={"went_to": went_to})
+    _drain_incoming_messages([], queue.Queue(), tmp_path, "helper", None, set(), owner_ctx=helper)
+    assert not helper._owner_directives  # carried words stay outside the helper's corpus
+    assert {key: row["carried"]["went_to"] for key, row in helper._held_owner_messages.items()} == {
+        addresses[""]: "", addresses["sibling"]: "sibling"}
+    prompt, sources = sources_of(helper)
+    card_reply = {"address": "quiz q7 of task asker", "author": "Ouroboros, task asker",
+                  "text": "Publish exactly this reply?\n1. Publish it\n2. Not now\n(host record: my human pressed option 1)"}
+    assert sources == [{"source": "owner_mailbox", "content": "1. Publish it", "msg_id": addresses[""], "reply_to": card_reply}]
+    assert addresses["sibling"] not in prompt and "March figures" not in prompt
+    # The helper schedules a helper of its own: the answer rides in that helper's field, and its Supervisor reads it.
+    later = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, current_task_type="task")
+    later.task_id, later._owner_directives = "later", [{"source": "initial_text", "content": "Ship the release notes."}]
+    later.task_metadata = {"delegation_role": "subagent", "root_task_id": "root", "parent_task_id": "helper",
+                           **governing_words_for_schedule(helper)}
+    assert [row["ref"] for row in later.task_metadata[FIELD]] == ["chat 1 / owner-answer", "quiz q7 of task asker"]
+    prompt, sources = sources_of(later)
+    assert sources == [{"source": "initial_text", "content": "Ship the release notes."}, {
+        "source": "owner_mailbox", "content": "1. Publish it", "msg_id": "chat 1 / owner-answer", "reply_to": card_reply}]
+    assert addresses["sibling"] not in prompt and "March figures" not in prompt
+    later._owner_directives.append({"source": "owner_mailbox", "content": "1. Publish it", "msg_id": addresses[""],
+                                    "chat_id": "1", "client_message_id": "owner-answer", "carried": True})
+    assert [row.get("msg_id") for row in sources_of(later)[1]] == [None, addresses[""]]  # the corpus row, once
+
+
 def test_each_source_projection_appears_once_and_the_event_is_typed(focus, monkeypatch, checker):
     root, place, _admission, _event = focus
     p.edit_place(root, place.place_id, "add_note", author="owner", text="OWNER NOTE: reply in Russian here.")
@@ -90,14 +203,14 @@ def test_each_source_projection_appears_once_and_the_event_is_typed(focus, monke
     ctx, bundle, prompt = _reply_bundle(root, monkeypatch, checker)
 
     retained = ctx._owner_directives[0]
-    assert retained["source"] == "initial_text" and "allowance known spend" in retained["content"]
+    assert retained["source"] == "initial_text" and "counted_roots" in retained["content"]
     source = bundle["occasion"]["sources"][0]
     assert source["message_text"] == "hello there" and source["event"]["conversation_key"] == "chat:a:r:0"
     assert source["work_here"] == "Already started: task1" and "content" not in source
     assert "notes_at_event" not in source  # the same note versions are read now
     for text in ("OWNER NOTE", "MIND NOTE", RULES.splitlines()[0], "hello there"):
         assert prompt.count(text) == 1, text
-    for frame_only in ("allowance known spend", "root-a", "Place facts (context only)"):
+    for frame_only in ("counted_roots", "root-a", "Place facts (context only)"):
         assert frame_only not in prompt
     notes = bundle["standing_delegation"]["place_notes"]
     assert [(n["author"], n["standing_delegation"], bool(n["at"])) for n in notes] == [
@@ -142,8 +255,10 @@ def test_reply_route_names_the_thread_it_answers(focus, monkeypatch, checker, th
 
 
 @pytest.mark.parametrize("kind", ["file", "unreadable_image", "image"])
-def test_a_frame_the_records_cannot_reproduce_stays_whole(focus, monkeypatch, checker, tmp_path, kind):
-    """The producer adds an attachment manifest, image notes or blocks; the typed records hold none of them."""
+def test_a_frame_with_attachments_rerenders_from_its_records(focus, monkeypatch, checker, tmp_path, kind):
+    """The producer adds an attachment manifest and image blocks to the frame: re-rendered with them byte for byte,
+    the frame becomes its typed records, the manifest kept and each image as facts whose pixels are not assessed.
+    A frame the records cannot reproduce (a pixels-unavailable note) stays whole."""
     root, place, _admission, _event = focus
     if kind == "file":
         source = tmp_path / "brief.txt"
@@ -159,13 +274,49 @@ def test_a_frame_the_records_cannot_reproduce_stays_whole(focus, monkeypatch, ch
     retained = ctx._owner_directives[0]
     frame = retained["content"] if isinstance(retained["content"], str) else retained["content"][0]["text"]
     assert "[ATTACHMENTS]" in frame and source.name in frame
-    assert bundle["occasion"]["sources"] == ctx._owner_directives  # the recorded row, whole
-    assert "[ATTACHMENTS]" in prompt
+    shown = bundle["occasion"]["sources"][0]
     if kind == "unreadable_image":
+        assert bundle["occasion"]["sources"] == ctx._owner_directives  # the recorded row, whole
         assert "Pixels unavailable" in frame and "Pixels unavailable" in prompt
+        return
+    assert "content" not in shown and shown["message_text"] == "hello there"
+    assert shown["attachments"].startswith("[ATTACHMENTS]") and source.name in shown["attachments"]
+    assert prompt.count("[ATTACHMENTS]") == 1 and "base64," not in prompt
     if kind == "image":
-        assert [block["type"] for block in retained["content"]] == ["text", "image_url"]
-        assert bundle["occasion"]["sources"][0]["content"][1]["image_url"] == retained["content"][1]["image_url"]
+        [facts] = shown["images"]
+        assert facts["pixels"] == "not assessed" and facts["media_type"].startswith("image/")
+        assert len(facts["sha256"]) == 64 and facts["bytes"] > 0
+    else:
+        assert "images" not in shown
+
+
+def test_a_large_image_raw_payload_and_thread_fit_with_the_text_once(focus, monkeypatch, checker, tmp_path):
+    """A 2 MB screenshot, the provider's raw message and the thread history (the 04.11 TOO_LARGE class): the bundle
+    carries no base64, the correspondent's text once (the thread points at it) and fits the budget."""
+    import os
+    from ouroboros import safety
+    image = pytest.importorskip("PIL.Image")
+    source = tmp_path / "screen.png"
+    image.frombytes("RGB", (1000, 700), os.urandom(1000 * 700 * 3)).save(source)
+    assert source.stat().st_size > 2_000_000
+    root, _place, _admission, _event = focus
+    text = "On the two screenshots the banner texts differ; which one ships? " * 30
+    conversation = {"thread_history": {"status": "available", "data": {"complete": True, "messages": [
+        {"user": "U2", "ts": "1700000000.0", "text": "Banner review thread"},
+        {"user": "person", "ts": "1700000001.0", "text": text}]}}}
+    message = {"message_id": "1700000001.0", "raw": {"type": "message", "text": text, "blocks": [{"type": "rich_text",
+                                                                                                 "text": text}]}}
+    ctx, bundle, prompt = _reply_bundle(root, monkeypatch, checker, staged=[source], text=text,
+                                        conversation=conversation, message=message)
+    assert len(json.dumps(ctx._owner_directives).encode()) > 2_000_000  # the mind saw the pixels
+    assert "base64," not in prompt and len(prompt.encode("utf-8")) < safety._SAFETY_BUNDLE_BYTE_BUDGET
+    assert prompt.count(text.strip()) == 1
+    shown = bundle["occasion"]["sources"][0]
+    assert "raw" not in shown["event"]["message"]
+    assert shown["event"]["conversation"]["thread_history"]["lines"] == [
+        'U2 at 2023-11-14T22:13:20Z: "Banner review thread"',
+        "person at 2023-11-14T22:13:21Z: [this message: its text is message_text]"]
+    assert shown["images"][0]["pixels"] == "not assessed" and shown["images"][0]["bytes"] > 0
 
 
 def test_each_retained_row_is_matched_to_its_own_event(focus, monkeypatch, checker):
@@ -211,3 +362,82 @@ def test_source_place_and_wake_authorship_survive_a_nonplace_call(focus, monkeyp
     assert source["matched_wakes"] == [w for w in captured["wakes"]
         if w["fact"] in task["metadata"]["focus"]["matched_wakes"]]
     assert source["matched_wakes"] and all(w["author"] for w in source["matched_wakes"])
+
+
+def _in_circle(root, place, *, text="CIRCLE WORDS: keep my projects out of this chat.", placed_by="owner"):
+    circle = p.create_circle(root, name="Friends", text=text, author="owner")
+    p.edit_place(root, place.place_id, "set_circle", author=placed_by, circle_id=circle["circle_id"])
+    return circle
+
+
+def test_circle_words_reach_the_frame_replay_and_bundle_once_with_both_origins(focus, monkeypatch, checker):
+    """A saved circle and placement reach the admitted frame (the event-time record), re-render byte for byte from the
+    typed records, and reach the Supervisor once, as standing delegation only through my human's own placement."""
+    from ouroboros.presence_context import focus_frame_sources, frame_focus_content
+    root, place, _admission, _event = focus
+    _in_circle(root, place)
+    task, content = _focus_task(root)
+    frame = content[0]["text"] if isinstance(content, list) else content
+    circle = task["metadata"]["presence"]["circle"]
+    assert (circle["name"], circle["text_author"], circle["placed_by"]) == ("Friends", "owner", "owner")
+    assert '- its circle\'s words, shared by every place in it' in frame and frame.count("CIRCLE WORDS") == 1
+    typed = focus_frame_sources(task["metadata"], frame_focus_content(task, task["metadata"]["presence"]["observed_text"]))
+    assert typed["circle_at_event"]["text"].startswith("CIRCLE WORDS")
+    _ctx, bundle, prompt = _reply_bundle(root, monkeypatch, checker)
+    assert "circle_at_event" not in bundle["occasion"]["sources"][0]  # the same words are read now
+    [entry] = [n for n in bundle["standing_delegation"]["place_notes"] if "circle" in n]
+    assert (entry["circle"], entry["author"], entry["placed_by"], entry["standing_delegation"]) == (
+        "Friends", "owner", "owner", True)
+    assert prompt.count("CIRCLE WORDS") == 1
+
+
+@pytest.mark.parametrize("change", ["reworded", "deleted"])
+def test_circle_words_changed_after_the_event_keep_the_events_words_beside_todays(focus, monkeypatch, checker, change):
+    root, place, _admission, _event = focus
+    circle = _in_circle(root, place, text="EARLIER: you may discuss my projects here.")
+
+    def later():
+        if change == "reworded":
+            p.edit_circle(root, circle["circle_id"], author="owner", text="NOW: keep my projects out of this chat.")
+        else:
+            p.delete_circle(root, circle["circle_id"])
+    _ctx, bundle, prompt = _reply_bundle(root, monkeypatch, checker, before_reply=later)
+    source = bundle["occasion"]["sources"][0]
+    assert source["circle_at_event"]["text"] == "EARLIER: you may discuss my projects here."
+    now = [n["text"] for n in bundle["standing_delegation"]["place_notes"] if "circle" in n]
+    assert now == (["NOW: keep my projects out of this chat."] if change == "reworded" else [])
+    assert prompt.count("EARLIER") == 1
+
+
+def test_a_frame_recorded_before_circles_renders_as_it_did(focus):
+    """FOCUS.md has no circle field: the circle's words ride one more line after the place's own notes only when the
+    event-time record has them, so a frame recorded before circles re-renders byte for byte and still replays."""
+    from ouroboros.presence_context import PLACEHOLDERS, focus_frame_sources, frame_focus_content
+    root, place, _admission, _event = focus
+    task, content = _focus_task(root)
+    frame = content[0]["text"] if isinstance(content, list) else content
+    assert "circle" not in task["metadata"]["presence"] and "its circle" not in frame
+    assert "circle_line" not in PLACEHOLDERS
+    assert frame_focus_content(task, task["metadata"]["presence"]["observed_text"]) == frame
+    assert focus_frame_sources(task["metadata"], frame) is not None
+    _in_circle(root, place)
+    with_circle, framed = _focus_task(root, text="another message")
+    framed = framed[0]["text"] if isinstance(framed, list) else framed
+    notes_line = next(line for line in framed.splitlines() if line.startswith("- notes with their authors:"))
+    following = framed.splitlines()[framed.splitlines().index(notes_line) + 1]
+    assert following.startswith("- its circle's words") and "CIRCLE WORDS" in following
+    assert "(your human's words restrict this place, and consent here only when your human placed it)" in following
+
+
+def test_a_placement_i_made_carries_my_humans_words_as_labelled_restriction_into_a_refusal(focus, monkeypatch, checker):
+    from ouroboros import safety
+    root, place, _admission, _event = focus
+    _in_circle(root, place, placed_by="ouroboros")
+    _ctx, bundle, _prompt = _reply_bundle(root, monkeypatch, checker)
+    [entry] = [n for n in bundle["standing_delegation"]["place_notes"] if "circle" in n]
+    assert entry["placed_by"] == "ouroboros" and entry["standing_delegation"] is False  # words kept, not filtered
+    lines = safety._destination_lines({"place": bundle["subject"]["place"], "notes": bundle["standing_delegation"]["place_notes"]})
+    assert len(lines) == 1 and "its circle \"Friends\"'s words, by your human, placed there by you" in lines[0]
+    # Their restriction still binds there; only consent needs their own placement (prompts/SAFETY.md).
+    assert "(they still restrict here; consent needs your human's placement)" in lines[0] and "CIRCLE WORDS" in lines[0]
+    assert "context" not in lines[0]

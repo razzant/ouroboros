@@ -44,10 +44,10 @@ def test_reclaim_low_water_divisor_is_one_constant_read_at_call_time(monkeypatch
 
     assert "RECLAIM_LOW_WATER_DIVISOR" in inspect.getsource(context_fit.reclaim_low_water_margin)
     assert "/ 8" not in inspect.getsource(context_fit.measure_main_fit)
-    assert [field.name for field in dataclasses.fields(context_fit.MainFitMeasurement)][-12:] == [
+    assert [field.name for field in dataclasses.fields(context_fit.MainFitMeasurement)][-15:] == [
         "low_water_margin_tokens", "raw_input_tokens", "reply_allowance_tokens", "anchor_input_tokens",
         "anchor_round", "anchor_rewritten", "accepted_input_tokens", "window_reading_tokens", "view_kind", "window_witness_bound",
-        "window_observation_fp", "window"]
+        "window_observation_fp", "window", "required_book_tokens", "preferred_mode", "mode_cause"]
     assert context_fit.reclaim_low_water_margin(250_000, 500_000) == 31_250  # target binds
     assert context_fit.reclaim_low_water_margin(None, 70_000) == 8_750  # capacity alone
     assert context_fit.reclaim_low_water_margin(None, None) == 0  # nothing known

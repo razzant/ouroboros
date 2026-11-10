@@ -190,7 +190,6 @@ def test_a_cascade_digest_is_debt_while_custody_notice_main_mirror_and_incident_
 
 # ------------------------------------------------------------------ the writers owe BEFORE their terminal row
 
-@pytest.mark.serial
 def test_running_cancel_owes_the_salvage_before_its_terminal_row_and_the_card_follows_the_answer(qenv, monkeypatch):
     """A settle landing right after the cancelled row is written sees "not yet": the salvage
     is already owed. After the real send the card is published behind the salvage paragraph."""
@@ -247,7 +246,6 @@ def test_running_cancel_owes_the_salvage_before_its_terminal_row_and_the_card_fo
     assert card["outcome_phase"] == "cancelled"
 
 
-@pytest.mark.serial
 def test_pending_deadline_expiry_owes_the_salvage_before_its_terminal_row(host, clock, monkeypatch):  # noqa: F811
     """The queue_timeouts writer: the deadline salvage is owed before the failed row exists;
     a settle right after the write defers; the card follows the delivered salvage."""

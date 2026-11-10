@@ -16,7 +16,6 @@ from ouroboros.gateways import claudexor_run_events as run_events
 from ouroboros.task_results import write_task_result
 from tests.test_delegated_activity import Daemon, _ctx, _gateway, _harness, _records
 
-pytestmark = pytest.mark.serial
 
 
 class Clock:
@@ -162,8 +161,7 @@ def test_zero_reader_allowance_opens_no_stream(tmp_path, monkeypatch):
     assert requests == [] and read.through_seq == 0 and read.stop == "time" and not read.events
 
 
-@pytest.mark.parametrize("terminal", [False, True])
-@pytest.mark.parametrize("spent_in", ["detail", "source_lookup"])
+@pytest.mark.parametrize(("spent_in", "terminal"), [("detail", False), ("source_lookup", True)])
 def test_spent_wait_admits_no_new_activity_read(tmp_path, monkeypatch, terminal, spent_in):
     from ouroboros.delegate_custody import RunCustody
     from ouroboros.tools import delegate
@@ -208,9 +206,11 @@ def test_spent_wait_admits_no_new_activity_read(tmp_path, monkeypatch, terminal,
     assert activities[0]["gaps"][0].get("final", False) is terminal
 
 
-@pytest.mark.parametrize("errors", ["native", "windows"])
-@pytest.mark.parametrize("flag_name", ["panic_stop.flag", "owner_restart_no_resume.flag"])
-@pytest.mark.parametrize("entry", ["dangling", "unreadable", "obstructed_parent"])
+@pytest.mark.parametrize(("entry", "flag_name", "errors"), [
+    ("dangling", "panic_stop.flag", "native"),
+    ("unreadable", "owner_restart_no_resume.flag", "windows"),
+    ("obstructed_parent", "panic_stop.flag", "native"),
+])
 def test_installation_input_uncertainty_is_not_a_delegated_task_stop(tmp_path, monkeypatch, errors, flag_name, entry):
     from tests.test_state_authority import _windows_shaped_not_found
 

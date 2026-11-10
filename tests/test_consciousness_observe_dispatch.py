@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import json
 
-import pytest
 
 from ouroboros import consciousness_authority as ca
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests.test_consciousness_authority import _registry, _wake_task
+from tests._cases import case_folders
 
 
 _MUTATING_SHAPES = [
@@ -29,16 +29,63 @@ _MUTATING_SHAPES = [
     ("write_file", {"path": "server.py", "content": "no"}),
     ("edit_text", {"root": "active_workspace", "path": "x.py", "old": "a", "new": "b"}),
     ("manage_schedules", {"action": "update", "schedule_id": "s1", "reason": "change time", "cron": "0 9 * * *"}),
+    ("configure_presence", {"action": "set_state", "place_id": "p1", "state": "paused"}),
 ]
 
 
-@pytest.mark.parametrize(("name", "args"), _MUTATING_SHAPES)
-def test_observe_refuses_a_mutating_shape_of_a_tool_it_still_sees(tmp_path, monkeypatch, name, args):
+def test_observe_refuses_a_mutating_shape_of_a_tool_it_still_sees(subtests, tmp_path, monkeypatch):
     """The negative half: the name is dispatchable, the mutating ARGUMENTS are not."""
+    case_paths = case_folders(tmp_path)
+    for name, args in _MUTATING_SHAPES:
+        tmp_path = next(case_paths)
+        with subtests.test(name=name, args=args), monkeypatch.context() as monkeypatch:
+            monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+            wake = _registry(tmp_path, _wake_task("observe")["metadata"])
+            assert wake.get_schema_by_name(name) is not None
+            assert "RESOURCE_CONSTRAINT_BLOCKED" in wake.execute(name, args)
+
+
+_PLACE_EDITS = [("connect", {"connector": "bridge"}), ("disconnect", {}), ("set_state", {"state": "paused"}),
+                ("add_wake", {"fact": "mention"}), ("remove_wake", {"fact": "mention"}), ("add_note", {"text": "x"}),
+                ("remove_note", {"note_id": "n"}), ("set_working_folder", {"working_folder": "/tmp"}),
+                ("set_model", {"model": "m"}), ("confirm_owner_account", {"platform_actor_id": "a"}),
+                ("revoke_owner_account", {"platform_actor_id": "a"}), ("update", {}), ("List", {}), ("list ", {}),
+                ("", {})]
+
+
+def test_every_level_below_full_reads_places_and_changes_none(tmp_path, monkeypatch):
+    """A wake below Full lists and inspects places; every other ``configure_presence`` action is refused.
+
+    The two reads are the one reader of every room a place captured, which the wake's places block counts
+    and names (16.09 withheld the whole name with the owner's place configuration). Both halves at the
+    guard's seam: without the narrowing Act and Observe are refused ``list`` by name; without the refusal an
+    edit reaches the place writer. Full, an owner turn and a child of an Act wake are pinned beside them.
+    """
+    from ouroboros import places
+    from tests._safety_fixtures import disable_safety
+
+    disable_safety(monkeypatch)
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
-    wake = _registry(tmp_path, _wake_task("observe")["metadata"])
-    assert wake.get_schema_by_name(name) is not None
-    assert "RESOURCE_CONSTRAINT_BLOCKED" in wake.execute(name, args)
+    monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _root: [])
+    for level, folder in zip(("observe", "act"), case_folders(tmp_path)):
+        wake = _registry(folder, _wake_task(level)["metadata"])
+        place = places.connect_place(folder / "drive", connector="bridge", provider="chat", conversation_id="c",
+                                     label="Inbox", state="silent")
+        listed = json.loads(wake.execute("configure_presence", {"action": "list"}))
+        assert listed["ok"] and [row["place_id"] for row in listed["places"]] == [place.place_id], level
+        inspected = json.loads(wake.execute("configure_presence", {"action": "inspect", "place_id": place.place_id}))
+        assert inspected["ok"] and inspected["place"]["rooms"] == [], level
+        for action, extra in _PLACE_EDITS:
+            refused = wake.execute("configure_presence", {"action": action, "place_id": place.place_id, **extra})
+            assert refused.startswith("⚠️ RESOURCE_CONSTRAINT_BLOCKED: below Full"), (level, action, refused)
+        assert places.get_place(folder / "drive", place.place_id) == place  # nothing changed
+    act = _wake_task("act")["metadata"]
+    child = {**ca.consciousness_origin_metadata(act), "task_id": "child-1"}
+    edit = {"action": "set_state", "place_id": "p", "state": "paused"}
+    assert ca.observe_argument_refusal(child, "configure_presence", edit).startswith("⚠️")
+    assert ca.observe_argument_refusal(_wake_task("full")["metadata"], "configure_presence", edit) == ""
+    assert ca.observe_argument_refusal({"work_kind": "owner"}, "configure_presence", edit) == ""
+    assert "configure_presence" not in ca.disabled_tools_for("act") + ca.disabled_tools_for("observe")
 
 
 def test_observe_keeps_its_own_research_and_notes(tmp_path, monkeypatch):
@@ -361,8 +408,7 @@ def _probe_handler(reg, name, calls):
         reg._scoped_entries[name] = projected
 
 
-@pytest.mark.parametrize(("name", "args"), _DISPOSITION_SHAPES)
-def test_observe_cannot_dispose_any_captured_patch_at_dispatch(tmp_path, monkeypatch, name, args):
+def test_observe_cannot_dispose_any_captured_patch_at_dispatch(subtests, tmp_path, monkeypatch):
     """Fable scope B1: ``orphan_disposition_status`` lets a live TOP-LEVEL task
     dispose a foreign terminal owner's capture, and the payload apply rebinds
     the skill through the caller's profile — so a wake's read-only-children rule
@@ -371,24 +417,28 @@ def test_observe_cannot_dispose_any_captured_patch_at_dispatch(tmp_path, monkeyp
     (Git root or installed payload) and its owner cannot make the call succeed,
     because the call never reaches the handler that would consult them.
     """
-    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")  # the widest install still refuses
-    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
-    assert name in ca.OBSERVE_DISABLED
-    calls: list = []
-    wake = _registry(tmp_path, _wake_task("observe")["metadata"], task_id="wake-1")
-    _probe_handler(wake, name, calls)
-    assert wake.get_schema_by_name(name) is not None  # dispatch-only: the schema stays
-    result = wake.execute(name, args)
-    assert "RESOURCE_CONSTRAINT_BLOCKED" in result and name in result
-    assert calls == [], "the disposition handler must never run under Observe"
-    # The same verb from an Act wake DOES reach the handler: the refusal above is
-    # the level's gate, not a broken tool.
-    act_calls: list = []
-    act = _registry(tmp_path, _wake_task("act")["metadata"], task_id="wake-2")
-    _probe_handler(act, name, act_calls)
-    # The independent Safety assessment is disabled; this checks the autonomy boundary.
-    assert act.execute(name, args).startswith("PROBE_REACHED_HANDLER")
-    assert act_calls == [(name, args)]
+    case_paths = case_folders(tmp_path)
+    for name, args in _DISPOSITION_SHAPES:
+        tmp_path = next(case_paths)
+        with subtests.test(name=name, args=args), monkeypatch.context() as monkeypatch:
+            monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")  # the widest install still refuses
+            monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")
+            assert name in ca.OBSERVE_DISABLED
+            calls: list = []
+            wake = _registry(tmp_path, _wake_task("observe")["metadata"], task_id="wake-1")
+            _probe_handler(wake, name, calls)
+            assert wake.get_schema_by_name(name) is not None  # dispatch-only: the schema stays
+            result = wake.execute(name, args)
+            assert "RESOURCE_CONSTRAINT_BLOCKED" in result and name in result
+            assert calls == [], "the disposition handler must never run under Observe"
+            # The same verb from an Act wake DOES reach the handler: the refusal above is
+            # the level's gate, not a broken tool.
+            act_calls: list = []
+            act = _registry(tmp_path, _wake_task("act")["metadata"], task_id="wake-2")
+            _probe_handler(act, name, act_calls)
+            # The independent Safety assessment is disabled; this checks the autonomy boundary.
+            assert act.execute(name, args).startswith("PROBE_REACHED_HANDLER")
+            assert act_calls == [(name, args)]
 
 
 def test_evolution_stats_artifact_write_is_withheld_from_observe(tmp_path, monkeypatch):

@@ -206,3 +206,34 @@ test('Read opens an answer as Markdown and a failure note as plain text, never r
     ]);
     assert.equal(controller.groups.size, 0);
 });
+
+test('a review Ouroboros itself stopped leads with that sentence and Read of its note; its words stay in Record facts', () => {
+    const note = { block_reason: 'infra_failure', reported_cause: '⚠️ REVIEW_BLOCKED: durable review custody could not be reserved before dispatch — disk full',
+        source: { seat_id: 'panel', role: 'failure', part: '', status: 'retained', sha256: 'c'.repeat(64), size: 900, chars: 880 } };
+    const unsent = { slot_id: 'seat-four', model: '', requested_model: 'same/model', observed_model: '', transport_status: 'not_dispatched', parse_status: 'none' };
+    const lost = { slot_id: 'seat-five', model: '', requested_model: 'same/model', observed_model: '', operation_state: 'custody_lost', parse_status: 'none' };
+    const silent = { slot_id: 'seat-six', model: 'same/model', observed_model: 'same/model', transport_status: 'error', parse_status: 'none' };
+    const html = open(reviewGroupsFromTaskDetail(detail({ aggregate_signal: 'NOT_DISPATCHED', reason: 'nothing_dispatched',
+        actors: [unsent, lost, silent, panel.actors[1]], wave_failures: [note] })));
+    const lead = rows(html).match(/<div class="review-seat-line" data-review-wave-failure="[^"]+">[\s\S]*?<\/button><\/div>/)?.[0] || '';
+    assert.match(lead, /<span class="review-line-text">Ouroboros could not complete this review; its note says which step failed\.<\/span>/);
+    const url = taskReviewSourceUrl('task-a', 'record-a', 'panel', { role: 'failure', part: '', sha256: 'c'.repeat(64) });
+    assert.ok(lead.includes(`data-review-read-url="${url.replaceAll('&', '&amp;')}"`), lead);
+    assert.match(lead, /data-review-read-kind="text" aria-label="Read Ouroboros failure note">Read<svg/);
+    // It leads the seats; a seat it never sent or whose outcome it lost adds nothing, a seat that failed by itself
+    // still says what it recorded, and one with its own cause keeps it.
+    assert.ok(rows(html).indexOf('data-review-wave-failure') < rows(html).indexOf('data-review-opinion='));
+    assert.doesNotMatch(seat(html, 'seat-four'), /No cause was recorded|review-seat-line/);
+    assert.doesNotMatch(seat(html, 'seat-five'), /No cause was recorded|review-seat-line/);
+    assert.match(seat(html, 'seat-six'), /No cause was recorded\./);
+    assert.match(seat(html, 'seat-two'), /Engine report: <\/span><span class="review-line-text">Turn too long/);
+    assert.doesNotMatch(visible(html), /REVIEW_BLOCKED|infra_failure|disk full/);
+    assert.ok(states(html).every((word) => word !== 'rejected'), String(states(html)));
+    assert.match(facts(html), /<dt>Wave failure<\/dt><dd>infra_failure · ⚠️ REVIEW_BLOCKED: durable review custody could not be reserved before dispatch — disk full<\/dd>/);
+    assert.match(facts(html), /<dt>Saved wave failure note<\/dt><dd>status=retained · sha256=c{64} · size=900 · chars=880<\/dd>/);
+    assert.match(formatReviewProjection({ panels: [{ ...panel, wave_failures: [note] }] }), /\nWave failure: infra_failure · ⚠️ REVIEW_BLOCKED/);
+    // A record without a note keeps its old reading, the quiet "no cause" line included.
+    const plain = open(reviewGroupsFromTaskDetail(detail({ aggregate_signal: 'NOT_DISPATCHED', actors: [unsent] })));
+    assert.doesNotMatch(plain, /data-review-wave-failure|Wave failure/);
+    assert.match(seat(plain, 'seat-four'), /No cause was recorded\./);
+});

@@ -13,6 +13,9 @@ from urllib.parse import urlencode
 
 import httpx
 import pytest
+import websockets
+from websockets.exceptions import ConnectionClosedError
+from websockets.frames import Close
 
 SIDECAR_PATH = Path(__file__).parents[1] / "skills" / "telegram" / "scripts" / "sidecar.py"
 SPEC = importlib.util.spec_from_file_location("telegram_miniapp_poc_sidecar", SIDECAR_PATH)
@@ -648,6 +651,88 @@ def test_open_websocket_stops_forwarding_after_owner_revocation() -> None:
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("error, expected_code", [
+    (ConnectionClosedError(None, Close(1009, "frame too large")), 1009),
+    (ConnectionClosedError(Close(1000, "peer close"), Close(1009, "frame too large"), False), 1009),
+    (ConnectionClosedError(Close(1011, "upstream failed"), Close(1011, "upstream failed"), True), 1011),
+    (ConnectionClosedError(Close(1005, ""), None), 1011),
+    (ConnectionClosedError(None, None), 1011),
+    (RuntimeError("private upstream detail"), 1011),
+])
+@pytest.mark.parametrize("direction", ["receive", "send"])
+def test_websocket_does_not_report_upstream_failure_as_normal(error, expected_code, direction):
+    async def scenario():
+        class FailingUpstream(_FakeUpstreamWebSocket):
+            async def __anext__(self):
+                if direction != "receive":
+                    return await super().__anext__()
+                raise error
+
+            async def send(self, value):
+                if direction != "send":
+                    return await super().send(value)
+                raise error
+
+        upstream = FailingUpstream()
+        gateway = sidecar_module.TelegramProxySidecar(
+            BOT_TOKEN, OWNER_ID, 8765,
+            seams=sidecar_module.SidecarSeams(websocket_connect=_FakeConnector(upstream)),
+        )
+        gateway.set_public_url(PUBLIC_URL)
+        token, _session = gateway._issue_session()
+        try:
+            messages = await asyncio.wait_for(_invoke_websocket(
+                gateway, cookie=token,
+                client_messages=[{"type": "websocket.receive", "text": "from-client"}] if direction == "send" else [],
+            ), 5)
+            assert messages[-1] == {"type": "websocket.close", "code": expected_code, "reason": ""}
+            assert upstream.exited
+            assert gateway.diagnostics()["active_websockets"] == 0
+        finally:
+            await gateway.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("size_delta", [0, 1])
+def test_real_upstream_size_boundary_preserves_close_cause(size_delta):
+    async def scenario():
+        payload = "x" * (sidecar_module._MAX_WS_MESSAGE_BYTES + size_delta)
+        closed = asyncio.Event()
+        observed_codes = []
+
+        async def core(upstream):
+            try:
+                await upstream.send(payload)
+                if not size_delta:
+                    await upstream.send("following event")
+                    await upstream.close()
+                else:
+                    await upstream.wait_closed()
+                observed_codes.append(upstream.close_code)
+            finally:
+                closed.set()
+
+        async with websockets.serve(core, "127.0.0.1", 0, compression=None) as server:
+            port = server.sockets[0].getsockname()[1]
+            gateway = sidecar_module.TelegramProxySidecar(BOT_TOKEN, OWNER_ID, port)
+            gateway.set_public_url(PUBLIC_URL)
+            token, _session = gateway._issue_session()
+            try:
+                messages = await asyncio.wait_for(_invoke_websocket(gateway, cookie=token), 10)
+                await asyncio.wait_for(closed.wait(), 5)
+                delivered = [row.get("text") for row in messages if row["type"] == "websocket.send"]
+                assert delivered == ([] if size_delta else [payload, "following event"])
+                expected = 1009 if size_delta else 1000
+                assert messages[-1] == {"type": "websocket.close", "code": expected, "reason": ""}
+                assert observed_codes == [expected]
+                assert gateway.diagnostics()["active_websockets"] == 0
+            finally:
+                await gateway.aclose()
+
+    asyncio.run(scenario())
+
+
 def test_websocket_closes_at_fixed_session_expiry() -> None:
     async def scenario() -> None:
         upstream = _FakeUpstreamWebSocket()
@@ -692,5 +777,314 @@ def test_websocket_disables_proxy_when_connector_supports_it() -> None:
         )
         assert connector.proxy_values == [None]
         await gateway.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_proxy_start_send_failure_closes_upstream_once() -> None:
+    async def run() -> None:
+        closed: list[bool] = []
+
+        async def body():
+            yield b"module"
+
+        async def close() -> None:
+            closed.append(True)
+
+        async def send(_message: dict[str, Any]) -> None:
+            raise OSError("downstream disconnected before headers")
+
+        async def receive() -> dict[str, Any]:  # an ASGI server that raises at the headers reports nothing here
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        response = sidecar_module._ProxyStreamResponse(200, [], body(), close)
+        with pytest.raises(OSError):
+            await response({}, receive, send)
+        assert closed == [True]
+
+    asyncio.run(run())
+
+
+class _LoopbackCore:
+    """A real loopback HTTP/1.1 core: it counts the connections it holds open and answers one request per connection
+    once `release` is set (at once when `held` is False), then closes it; `keep_open` leaves the closing to the client,
+    so a response the client never closes keeps its socket."""
+
+    def __init__(self, *, held: bool, keep_open: bool = False) -> None:
+        self.release = asyncio.Event()
+        self.keep_open = keep_open
+        if not held:
+            self.release.set()
+        self.open = self.peak = self.accepted = 0
+        self.paths: list[str] = []
+        self.handlers: set[asyncio.Task] = set()
+
+    async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        self.handlers.add(task)
+        self.open += 1
+        self.peak = max(self.peak, self.open)
+        try:
+            head = await reader.readuntil(b"\r\n\r\n")
+            self.accepted += 1
+            self.paths.append(head.split(b" ", 2)[1].decode("ascii"))
+            await self.release.wait()
+            closing = b"" if self.keep_open else b"Connection: close\r\n"
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: 2\r\n" + closing + b"\r\nok")
+            await writer.drain()
+            if self.keep_open:
+                await reader.read()  # until the client lets the connection go
+        except (asyncio.IncompleteReadError, ConnectionError):
+            pass
+        finally:
+            self.open -= 1
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except (ConnectionError, OSError):
+                pass
+            self.handlers.discard(task)
+
+    async def settle(self, accepted: int) -> None:
+        while self.accepted < accepted:
+            await asyncio.sleep(0.01)
+
+
+async def _owner_session(gateway: Any) -> tuple[httpx.AsyncClient, str]:
+    browser = httpx.AsyncClient(transport=httpx.ASGITransport(app=gateway), base_url=PUBLIC_ORIGIN)
+    assert (await _authenticate(browser, auth_date=int(time.time()))).status_code == 204
+    token = browser.cookies.get(sidecar_module.SESSION_COOKIE)
+    assert token
+    return browser, token
+
+
+async def _stop(server: asyncio.AbstractServer, core: _LoopbackCore, gateway: Any, *jobs: asyncio.Task) -> None:
+    core.release.set()
+    for job in jobs:
+        if not job.done():
+            job.cancel()
+    await asyncio.gather(*jobs, return_exceptions=True)
+    await gateway.aclose()
+    server.close()
+    await server.wait_closed()
+    if core.handlers:
+        await asyncio.wait_for(asyncio.gather(*list(core.handlers), return_exceptions=True), 5)
+
+
+def test_sidecar_route_queues_a_finite_burst_past_its_32_sockets_and_a_cancelled_wait_never_reaches_the_core() -> None:
+    """The real pool behind the real route: the former 3 s acquisition bound turned this burst's tail into 502s."""
+    async def scenario() -> None:
+        core = _LoopbackCore(held=True)
+        server = await asyncio.start_server(core.handle, "127.0.0.1", 0)
+        gateway = sidecar_module.TelegramProxySidecar(BOT_TOKEN, OWNER_ID, server.sockets[0].getsockname()[1])
+        gateway.set_public_url(PUBLIC_URL)
+        browser, _token = await _owner_session(gateway)
+        jobs: list[asyncio.Task] = []
+        try:
+            jobs = [asyncio.create_task(browser.get(f"/static/modules/m{index}.js")) for index in range(40)]
+            await asyncio.wait_for(core.settle(32), 5)
+            waiter = asyncio.create_task(browser.get("/static/modules/cancelled.js"))
+            await asyncio.sleep(0.1)
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+            await asyncio.sleep(3.2)
+            assert (core.accepted, core.peak) == (32, 32), "the 32 sockets bound the burst"
+            assert not any(job.done() for job in jobs), "a finite burst expired while it waited for a socket"
+            core.release.set()
+            responses = await asyncio.wait_for(asyncio.gather(*jobs), 10)
+            assert [response.status_code for response in responses] == [200] * 40
+            assert all(response.content == b"ok" for response in responses)
+            assert core.accepted == 40 and core.peak <= 32
+            assert "/static/modules/cancelled.js" not in core.paths, "a cancelled wait never reaches the core"
+        finally:
+            await browser.aclose()
+            await _stop(server, core, gateway, *jobs)
+
+    asyncio.run(scenario())
+
+
+def test_a_phone_gone_before_the_headers_releases_its_socket_so_an_unbounded_wait_cannot_starve() -> None:
+    """With no acquisition deadline a leaked upstream response would hold its socket for good: 34 deliveries that fail
+    at the headers are followed by an ordinary request that must still get through."""
+    async def scenario() -> None:
+        core = _LoopbackCore(held=False, keep_open=True)
+        server = await asyncio.start_server(core.handle, "127.0.0.1", 0)
+        gateway = sidecar_module.TelegramProxySidecar(BOT_TOKEN, OWNER_ID, server.sockets[0].getsockname()[1])
+        gateway.set_public_url(PUBLIC_URL)
+        browser, token = await _owner_session(gateway)
+        try:
+            def receiver() -> Any:
+                # As an ASGI server does: the (empty) body once, then nothing until the client goes.
+                sent = []
+
+                async def receive() -> dict[str, Any]:
+                    if not sent:
+                        sent.append(True)
+                        return {"type": "http.request", "body": b"", "more_body": False}
+                    await asyncio.Event().wait()
+                    raise AssertionError("unreachable")
+                return receive
+
+            async def gone(message: dict[str, Any]) -> None:
+                if message["type"] == "http.response.start":
+                    raise OSError("the phone left before the headers")
+
+            for index in range(34):
+                path = f"/static/modules/gone{index}.js"
+                scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "GET",
+                         "scheme": "https", "path": path, "raw_path": path.encode(), "query_string": b"",
+                         "headers": [(b"host", b"quiet-river-42.trycloudflare.com"),
+                                     (b"cookie", f"{sidecar_module.SESSION_COOKIE}={token}".encode())],
+                         "client": ("127.0.0.1", 50000 + index), "server": ("127.0.0.1", 443)}
+                with pytest.raises(OSError):
+                    await asyncio.wait_for(gateway(scope, receiver(), gone), 5)
+            assert core.accepted == 34
+            ordinary = await asyncio.wait_for(browser.get("/static/modules/after.js"), 5)
+            assert (ordinary.status_code, ordinary.content) == (200, b"ok")
+            assert core.peak <= 32
+        finally:
+            await browser.aclose()
+            await _stop(server, core, gateway)
+
+    asyncio.run(scenario())
+
+
+def test_closing_the_gateway_settles_every_request_it_holds() -> None:
+    """Observed shutdown, not a cancellation claim: requests on held sockets answer 502 at once; queued ones are not
+    dropped by the close, they go on to fresh sockets and settle when the core answers."""
+    async def scenario() -> None:
+        core = _LoopbackCore(held=True)
+        server = await asyncio.start_server(core.handle, "127.0.0.1", 0)
+        gateway = sidecar_module.TelegramProxySidecar(BOT_TOKEN, OWNER_ID, server.sockets[0].getsockname()[1])
+        gateway.set_public_url(PUBLIC_URL)
+        browser, _token = await _owner_session(gateway)
+        held: list[asyncio.Task] = []
+        queued: list[asyncio.Task] = []
+        try:
+            held = [asyncio.create_task(browser.get(f"/static/modules/held{index}.js")) for index in range(32)]
+            await asyncio.wait_for(core.settle(32), 5)
+            queued = [asyncio.create_task(browser.get(f"/static/modules/queued{index}.js")) for index in range(4)]
+            await asyncio.sleep(0.2)
+            await asyncio.wait_for(gateway.aclose(), 5)
+            answered = await asyncio.wait_for(asyncio.gather(*held), 5)
+            assert {(response.status_code, response.text) for response in answered} == {(502, "Ouroboros is unavailable.")}
+            await asyncio.wait_for(core.settle(36), 5)
+            core.release.set()
+            later = await asyncio.wait_for(asyncio.gather(*queued), 5)
+            assert [response.status_code for response in later] == [200] * 4
+        finally:
+            await browser.aclose()
+            await _stop(server, core, gateway, *held, *queued)
+
+    asyncio.run(scenario())
+
+
+class _StreamingCore:
+    """A loopback core: `/stream…` answers with an endless chunked body, as a stream widget's EventSource stays open;
+    any other path answers `ok` at once. It counts the connections it holds and the paths it was asked for."""
+
+    def __init__(self) -> None:
+        self.open = 0
+        self.paths: list[str] = []
+
+    async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        self.open += 1
+        try:
+            head = await reader.readuntil(b"\r\n\r\n")
+            path = head.split(b" ", 2)[1].decode("ascii")
+            self.paths.append(path)
+            if path.startswith("/stream"):
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+                while not reader.at_eof():
+                    writer.write(b"c\r\ndata: tick\n\n\r\n")
+                    await writer.drain()
+                    await asyncio.sleep(0.05)
+            else:
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                await writer.drain()
+        except (asyncio.IncompleteReadError, ConnectionError):
+            pass
+        finally:
+            self.open -= 1
+            writer.close()
+
+
+def test_under_the_shipped_uvicorn_streams_whose_phones_left_give_back_every_socket() -> None:
+    """The shipped starter (companion.start_sidecar: uvicorn) over real loopback TCP. uvicorn reports a gone client only
+    to receive() (ASGI 2.3: its send() then returns quietly) and never cancels the request. 32 endless upstream streams
+    take every socket and a 33rd waits; all 33 phones leave, half by RST and half by FIN. Each stream must stop and give
+    its socket back, the queued one ends at its body read without an ASGI error, and a later request gets a socket.
+    Without the receive() race the core kept all 32 streams and the later request starved."""
+    import logging
+    import types
+
+    scripts = str(SIDECAR_PATH.parent)
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    import companion
+
+    async def until(check: Callable[[], bool]) -> None:
+        while not check():
+            await asyncio.sleep(0.02)
+
+    async def scenario() -> None:
+        core = _StreamingCore()
+        server = await asyncio.start_server(core.handle, "127.0.0.1", 0)
+        gateway = companion.TelegramProxySidecar(BOT_TOKEN, OWNER_ID, server.sockets[0].getsockname()[1])
+        gateway.set_public_url(PUBLIC_URL)
+        seen: list[str] = []
+
+        async def observed(scope: dict[str, Any], receive: Any, send: Any) -> None:  # records, changes nothing
+            async def tap() -> dict[str, Any]:
+                message = await receive()
+                seen.append(message["type"])
+                return message
+            await gateway.app(scope, tap, send)
+
+        uv, uv_task, port = await companion.start_sidecar(types.SimpleNamespace(app=observed))
+        errors: list[logging.LogRecord] = []
+        handler = logging.Handler(level=logging.ERROR)
+        handler.emit = errors.append  # type: ignore[method-assign]
+        logging.getLogger("uvicorn.error").addHandler(handler)
+        host = PUBLIC_URL.split("//", 1)[1].rstrip("/")
+        phones: list[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = []
+        try:
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", headers={"Host": host}) as http:
+                auth = await http.post(sidecar_module.AUTH_PATH, headers={"Origin": PUBLIC_ORIGIN},
+                                       json={"init_data": signed_init_data(auth_date=int(time.time()))})
+                assert auth.status_code == 204
+                cookie = auth.headers["set-cookie"].split(";", 1)[0]
+
+                async def phone(path: str) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+                    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+                    writer.write(f"GET {path} HTTP/1.1\r\nHost: {host}\r\nCookie: {cookie}\r\n\r\n".encode())
+                    await writer.drain()
+                    return reader, writer
+
+                phones = [await phone(f"/stream/{index}") for index in range(32)]
+                for reader, _writer in phones:
+                    assert b" 200 " in await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
+                phones.append(await phone("/stream/queued"))
+                await asyncio.sleep(0.3)
+                assert core.open == 32 and "/stream/queued" not in core.paths, "live phones keep their streams"
+                for index, (_reader, writer) in enumerate(phones):
+                    (writer.transport.abort if index % 2 == 0 else writer.close)()
+                await asyncio.wait_for(until(lambda: core.open == 0), 5)
+                await asyncio.wait_for(until(lambda: seen.count("http.disconnect") >= 33), 5)
+                later = await asyncio.wait_for(http.get("/ok", headers={"Cookie": cookie}), 5)
+                assert (later.status_code, later.text) == (200, "ok")
+                assert errors == [], [record.getMessage() for record in errors]
+        finally:
+            logging.getLogger("uvicorn.error").removeHandler(handler)
+            for _reader, writer in phones:
+                writer.close()
+            uv.should_exit = True
+            await asyncio.wait_for(uv_task, 10)
+            await gateway.aclose()
+            server.close()
+            await server.wait_closed()
 
     asyncio.run(scenario())

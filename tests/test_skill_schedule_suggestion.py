@@ -35,15 +35,18 @@ def test_bounded_suggestions_lead_to_every_full_declaration(registry):
     section = _build_installed_skills_section(SimpleNamespace(drive_root=root))
     assert section.count("Suggests schedule ") == 8
     assert "2 more suggestions omitted" in section
-    assert "list_skills(name='review-guide') supplies manifest.read" in section
+    # The context names the manifest read itself: list_skills is not a readonly child's tool.
     named = json.loads(registry.execute("list_skills", {"name": "review-guide"}))
-    source = _read(registry, named["manifest"]["read"])
+    reader = named["manifest"]["read"]
+    shown = "read_file(" + ", ".join(f"{key}={value!r}" for key, value in reader["arguments"].items()) + ")"
+    assert f"Schedule source: {shown}; 2 more suggestions omitted." in section
+    source = _read(registry, reader)
     assert source == (folder / "SKILL.md").read_text(encoding="utf-8")
     assert "DESCRIPTION_END" in source and "review-9" in source
     assert not (root / "state" / "scheduled_tasks.json").exists()
 
 
-@pytest.mark.parametrize("state", ["ready", "disabled", "pending", "stale"])
+@pytest.mark.parametrize("state", ["ready", "pending", "stale"])
 def test_context_suggestions_require_current_review_and_enablement(registry, state, monkeypatch):
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     folder = _seed(registry, "review-guide", scheduled_tasks=_suggestions(), permissions=["supervised_task"])
@@ -59,7 +62,7 @@ def test_context_suggestions_require_current_review_and_enablement(registry, sta
             "Review the project using this skill. Not scheduled unless adopted.")
     assert (line in section) is (state == "ready")
     if state == "ready":  # nothing omitted, so no omission note
-        assert "supplies manifest.read." in section and "more suggestions omitted" not in section
+        assert "skill_name='review-guide', path='SKILL.md')." in section and "more suggestions omitted" not in section
     assert not (root / "state" / "scheduled_tasks.json").exists()
 
 

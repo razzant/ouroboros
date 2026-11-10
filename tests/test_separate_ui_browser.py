@@ -28,6 +28,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 import shutil
 import socket
 import ssl
@@ -60,7 +61,7 @@ from tests.separate_ui_support import (
     wait_until,
 )
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 CORE_PREFIXES = ("/api", "/auth", "/onboarding", "/ws")
 
@@ -758,9 +759,14 @@ def test_widgets_and_the_author_kit_run_through_the_proxy_under_the_password(sta
             probe = page.frame_locator(f'{card(PROBE + ":probe")} iframe')
             for key, value in (("data", "separate-ui"), ("module", "blob-module-ok"), ("blob-image", "1")):
                 probe.locator(f'#root[data-{key}="{value}"]').wait_for(timeout=30_000)
-            # A load that bypasses the bridge: its outcome is the engine's cookie policy (compared below).
+            # A load that bypasses the bridge and the lease: the frame's own policy admits images from its lease only
+            # (compared below).
             probe.locator("#root[data-passive]").wait_for(timeout=30_000)
             passive = probe.locator("#root").get_attribute("data-passive")
+            # The owner sees that policy refuse it on the card itself.
+            blocked = page.locator(f'{card(PROBE + ":probe")} [data-widget-status][data-widget-fault]')
+            blocked.wait_for(timeout=30_000)
+            blocked_text = blocked.inner_text()
             fault = page.locator(f'{card(PROBE + ":fault")} [data-widget-status][data-widget-fault]')
             fault.wait_for(timeout=30_000)
             fault_text = fault.inner_text()
@@ -785,22 +791,37 @@ def test_widgets_and_the_author_kit_run_through_the_proxy_under_the_password(sta
         finally:
             session.close()
     stack.extra["widgets"] = {"toggles": toggles, "fault": fault_text, "preview": preview, "page_src": frame_src,
-                              "hits": hits, "passive_load": passive}
+                              "hits": hits, "passive_load": passive, "passive_banner": blocked_text}
     # The fault reaches its card in both engines; WebKit masks the frame's message as "Script error.".
     assert fault_text.startswith("Widget script error: "), fault_text
     assert "separate-ui deliberate fault" in fault_text or browser_name == "webkit", fault_text
     assert preview == "My notes: List, enabled", preview
-    assert frame_src == "/api/extensions/author_ui_kit/page"
+    # A route frame loads from its mount's route lease (docs/WIDGET_HOST_PROTOCOL.md "Route leases"): an absolute URL on
+    # the one TLS origin the page was served from, never the core's own address and never the skill's un-leased route.
+    leased = re.fullmatch(rf"{re.escape(stack.url)}(/api/widget-resources/[A-Za-z0-9_-]{{43}}/)page", frame_src)
+    assert leased, frame_src
+    lease_uri = f"{leased.group(1)}page"
     routed = stack.routed()
-    statuses = {(r["uri"], r["status"]) for r in routed if r["uri"].startswith("/api/extensions/")}
-    # Chromium sends no session from the sandboxed frame (401, refused); WebKit was observed to send it.
-    passive_status = {"refused": 401, "loaded": 200}[passive]
+    prefixes = ("/api/extensions/", "/api/widget-resources/", "/api/widgets/")
+    statuses = {(r["uri"], r["status"]) for r in routed if r["uri"].startswith(prefixes)}
     for expected in ((f"/api/extensions/{PROBE}/data", 200), (f"/api/extensions/{PROBE}/lib", 200),
-                     (f"/api/extensions/{PROBE}/logo", 200), (f"/api/extensions/{PROBE}/logo?passive=1", passive_status),
-                     (f"/api/extensions/{PROBE}/disposed", 200), ("/api/extensions/author_ui_kit/author-kit", 200),
-                     ("/api/extensions/author_ui_kit/page", 200), (f"/api/extensions/{PROBE}/module/widget.js", 200)):
+                     (f"/api/extensions/{PROBE}/logo", 200), (f"/api/extensions/{PROBE}/disposed", 200),
+                     ("/api/extensions/author_ui_kit/author-kit", 200), (f"/api/extensions/{PROBE}/module/widget.js", 200),
+                     ("/api/widgets/asset-leases", 200), (lease_uri, 200)):
         assert expected in statuses, (expected, sorted(statuses))
-    assert {r["role"] for r in routed if r["uri"].startswith("/api/extensions/")} == {"core"}
+    # The page was asked for only after the signed-in session minted its lease through the proxy.
+    asked = next(i for i, r in enumerate(routed) if r["uri"] == lease_uri)
+    assert any(r["method"] == "POST" and r["uri"] == "/api/widgets/asset-leases" and r["status"] == 200
+               for r in routed[:asked])
+    # Everything that bypasses the bridge and the lease is refused by the frame's own policy before it is sent (WebKit
+    # too): the passive image of the skill's raw route and the route page's raw address never reach the proxy.
+    assert passive == "refused", passive
+    assert blocked_text.startswith("Widget blocked by frame policy: "), blocked_text
+    assert blocked_text.endswith(f"/api/extensions/{PROBE}/logo?passive=1"), blocked_text
+    bypassing = [r["uri"] for r in routed if r["uri"].startswith(f"/api/extensions/{PROBE}/logo?")
+                 or r["uri"] == "/api/extensions/author_ui_kit/page"]
+    assert not bypassing, bypassing
+    assert {r["role"] for r in routed if r["uri"].startswith(prefixes)} == {"core"}
     assert not [p for p in stack.interface_paths() if p.startswith(("/api", "/auth", "/ws", "/onboarding"))]
 
 
@@ -892,8 +913,10 @@ def test_a_fresh_install_is_set_up_without_a_key_through_the_proxy(tmp_path, req
             before = session.api("GET", "/api/onboarding/bootstrap", None)
             wizard = page.frame_locator("#onboarding-overlay iframe.onboarding-frame")
             wizard.locator('[data-collapse="api-access"] > summary').click(timeout=30_000)
-            wizard.locator('[data-collapse="more-providers"] > summary').click()
-            wizard.locator("#openai-compatible-url").fill(core.model.base_url)
+            # A keyless endpoint is the compatible card's own Default key (docs/DESIGN.md §7: a key is a row of its
+            # provider's card), and the card opens by its own head, apart from the "More options" disclosure.
+            wizard.locator('[data-provider-card="compatible"] [data-provider-toggle]').click()
+            wizard.locator("#s-openai-compatible-base-url").fill(core.model.base_url)
             session.shot("1-setup-provider")
             wizard.locator("#next-btn").click()
             wizard.locator('[data-model-role="main"] [data-model-role-model]').fill("openai-compatible::mock-model")

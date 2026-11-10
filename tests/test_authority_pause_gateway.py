@@ -8,7 +8,7 @@ from ouroboros.gateway.tasks import api_task_resume
 
 
 @pytest.mark.parametrize("kind,action,phrase", [
-    ("unreadable", "fix_billing_authority_then_resume", "could not be read"),
+    ("unreadable", "fix_billing_authority_then_resume", "still could not be read. You can try Resume again later."),
     ("refused", "cancel_or_new_run", "does not authorize"),
 ])
 def test_resume_authority_refusal_is_conflict_not_missing_task(monkeypatch, kind, action, phrase):
@@ -24,6 +24,7 @@ def test_resume_authority_refusal_is_conflict_not_missing_task(monkeypatch, kind
     assert body["reason_code"] == "synthetic_authority_cause" and body["action"] == action
     assert phrase in body["error"] and "budget exhaustion was not established" in body["error"]
     assert "increase" not in body["error"].lower()
+    assert "fix that cause" not in body["error"].lower()  # the owner cannot diagnose an unreadable record (#1911)
 
 
 @pytest.mark.parametrize("refusal", [
@@ -44,7 +45,6 @@ def test_resume_preserves_the_same_ordinary_refusal_as_the_mind(monkeypatch, ref
         assert response.json()["blockers"] == outcome["blockers"]
 
 
-@pytest.mark.serial
 def test_actual_authority_resume_success_matches_python_and_browser_contract(tmp_path, monkeypatch):
     import pathlib
     from typing import get_type_hints

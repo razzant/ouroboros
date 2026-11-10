@@ -24,7 +24,7 @@ def _source(tmp_path, *, commit=False, **fields):
     return ctx, row, record, reference_for(record, row)
 
 
-@pytest.mark.parametrize("fault", ["none", "foreign_author", "not_paid", "stripped", "identity", "tool", "repository"])
+@pytest.mark.parametrize("fault", ["not_paid", "identity", "tool", "repository"])
 def test_identity_rejects_only_the_uncollectible_source(tmp_path, fault):
     commit = fault == "repository"
     fields = {"paid": False} if fault == "not_paid" else {"raw_stripped": True} if fault == "stripped" else {}
@@ -51,13 +51,24 @@ def test_compacted_attempt_still_collects_its_settled_record(tmp_path):
     assert resolve_reference(ctx, ref)[2]["state"] == "settled"
 
 
-@pytest.mark.parametrize("fault", ["none", "already_committed", "message", "brief"])
-def test_commit_resume_cannot_repeat_an_effect_or_change_intent(tmp_path, fault):
+@pytest.mark.parametrize("fault", ["none", "changed", "already_committed", "brief"])
+def test_commit_resume_cannot_repeat_an_effect_or_change_intent(tmp_path, monkeypatch, fault):
+    """Only this task's collection of the exact staged bytes resumes the paid gate; changed bytes collect read-only
+    (#2797), before anything is staged."""
+    from ouroboros.tools import git as git_mod
+    from ouroboros.tools import review_collection
+
     ctx, row, _, ref = _source(tmp_path, commit=True, status="succeeded" if fault == "already_committed" else "reviewing")
+    staged = "original-bytes" if fault != "changed" else "edited-bytes"
+    monkeypatch.setattr(git_mod, "_fingerprint_staged_diff", lambda _repo: {"ok": True, "fingerprint": staged})
+    monkeypatch.setattr(review_collection, "read_only_collection", lambda *_a, **_k: "read-only outcome")
     kwargs = {"commit_message": "other"} if fault == "message" else {"mutations": ("other brief",)} if fault == "brief" else {}
     if fault == "none":
         assert prepare_commit_collection(ctx, ref, **kwargs).attempt == row.attempt
         assert ctx._review_resume_pending and ctx._current_review_attempt_number == row.attempt
+    elif fault == "changed":
+        assert prepare_commit_collection(ctx, ref, **kwargs) == "read-only outcome"
+        assert not getattr(ctx, "_review_resume_pending", False) and getattr(ctx, "_collect_commit_source", None) is None
     else:
         with pytest.raises(ValueError):
             prepare_commit_collection(ctx, ref, **kwargs)

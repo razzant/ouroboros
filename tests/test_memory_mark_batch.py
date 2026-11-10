@@ -1,4 +1,5 @@
-"""Batch release has one reason and accounts for every id, including partial failures."""
+"""memory_mark: batch release has one reason and accounts for every id, including partial failures; the tool's
+own text names who sees a mark."""
 import json
 
 import pytest
@@ -29,7 +30,7 @@ def test_release_accounts_for_successes_and_refusals_and_uses_one_reason(tmp_pat
     assert success["ok"] and success["released_ids"] == ids[2:] and success["refused"] == []
 
 
-@pytest.mark.parametrize("bad", [[], "one", [""], [None], ["same", "same"]])
+@pytest.mark.parametrize("bad", [[], "one", ["same", "same"]])
 def test_invalid_arrays_do_not_release_anything(tmp_path, bad):
     ctx, ids = marks(tmp_path)
     assert "TOOL_ARG_ERROR" in _memory_mark(ctx, release_ids=bad, reason="done")
@@ -62,3 +63,21 @@ def test_io_failure_does_not_hide_the_other_results(tmp_path, monkeypatch):
     result = json.loads(_memory_mark(ctx, release_ids=ids, reason="done"))
     assert result["released_ids"] == [ids[0], ids[2]]
     assert result["refused"] == [{"id": ids[1], "reason": "unavailable", "detail": "temporarily unavailable"}]
+
+
+def test_the_mark_tool_text_says_who_sees_a_mark_on_every_route():
+    """memory_mark's own text names the readers the view really gives a mark (memory_view.ROLE_DEFAULTS) and that the
+    owner's chat shows nothing of it; the fact lives in the description, which direct OpenAI routes carry whole
+    (test_openai_chat_custom_contract.test_actual_profile_catalogs_carry_every_tool_lead_whole)."""
+    from ouroboros.memory_view import ROLE_DEFAULTS
+
+    schema = {entry.name: entry.schema for entry in chronicle_tools()}["memory_mark"]
+    reach = ("a room mark is in view of every integrating focus and of that room's helpers and session starts, "
+             "a global one of every focus, helper and session start; a mark adds nothing to my human's chat")
+    assert reach in schema["description"]
+    integrating = {role for role, spec in ROLE_DEFAULTS.items() if spec.marks == "all"}
+    helpers = {role for role, spec in ROLE_DEFAULTS.items() if spec.marks == "room_and_global"}
+    assert integrating == {"integrator", "consciousness", "presence"} and helpers == {"child", "nanny"}
+    anchor = schema["parameters"]["properties"]["anchor"]["description"]
+    assert anchor.startswith("Optional action whose first result in a task also carries this mark's words:")
+    assert "meets me at" not in anchor

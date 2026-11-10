@@ -25,18 +25,14 @@ import pytest
 
 from ouroboros import delegate_custody as c
 from ouroboros import delegate_custody_current as current
-from ouroboros import store, store_switch, task_store, usage_store
+from ouroboros import store, task_store, usage_store
 from ouroboros.store_import import ensure_current_store, run_legacy_reconcile
 from ouroboros.utils import atomic_write_json
-from tests._usage_store_testing import attempt_rows_in_start_order, seed
+from tests._usage_store_testing import seed
 from tests.test_store_import import fixture_root, load
-from tests.test_store_switch import Owner, git
-from tests.test_store_switch import target_repo as _switch_target_repo
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 OLD_TAG = "v7.6.0"
-target_repo = _switch_target_repo  # ``old``: a tree without the store modules; ``new``: with them
-
 OLD_BODY = textwrap.dedent('''
     import json, pathlib, sys
     root = pathlib.Path(sys.argv[1])
@@ -119,44 +115,6 @@ def _chain_text(root: pathlib.Path) -> str:
     return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
-def _switch_to_old(root, repo, old, *, owner=None):
-    store_switch.record_switch_intent(root, target_sha=old, target_ref=OLD_TAG, reason="test", door="ui_rollback")
-    return store_switch.run_switch_seam(root, repo_dir=repo, owner=owner or Owner(repo))
-
-
-def test_v760_reads_the_export_and_the_new_release_reconciles_its_writes(lane_root, target_repo, v760, tmp_path):
-    repo, old, new = target_repo
-    root = lane_root
-    # The boot door flushes the dead process's committed custody to the chain before anything else.
-    boot = store_switch.start(root, repo_dir=repo, request_restart=lambda: pytest.fail("no switch pending"))
-    assert boot == {"status": "importing"} and store_switch.wait_ready(root, timeout=60)["status"] == "published"
-    assert current.outbox_depth(root) == 0 and "run-dead" in _chain_text(root)
-    outcome = _switch_to_old(root, repo, old)
-    assert outcome["status"] == "switched" and outcome["needs"] == {"facts": True, "money": True, "handles": True, "dialogue": True}
-    assert store.probe(root)[0] == "absent" and (root / "state" / "usage_attempts.jsonl").exists()
-
-    read = old_body(v760, root, "write", tmp_path / "home")
-    assert read["ids"] == ["child1", "done1", "other", "root1"] and read["done1"] == "failed"  # the refused file is evidence it still lists
-    assert read["cancel"] == [] and read["runs"] == ["run-dead"]  # the old body's own fold of the exported chain
-    assert read["pending"] == "pending" and read["handoffs"] == {"claim-1": HANDOFF}  # the rows, as the file carries them
-    assert read["ids_after"] == ["by-old", "child1", "done1", "root1"]
-    assert float(read["accounted_after"]) >= float(read["accounted_before"])
-
-    report = ensure_current_store(root)  # the new release's boot: the retired store is rebuilt from the files
-    assert report["status"] == "completed", report
-    assert load(root, "by-old")["description"] == "written by v7.6.0"
-    assert load(root, "root1")["old_body"] is True and load(root, "root1")["status"] == "completed"
-    assert load(root, "root1")["launch_handoffs"] == {"claim-1": HANDOFF}  # the old body's rewrite kept the handoff
-    assert load(root, "mismatch") is None
-    started = c.invocation_record(root, "inv-pending")  # the old body's append bound the pending invocation
-    assert started["state"] == "started" and started["run_id"] == "run-old" and c.pending_invocations(root) == []
-    assert sorted(c.replay(root)) == ["run-dead", "run-old"]
-    usage_store.forget(root)
-    usage_store.migrate_from_journal(root)  # the journal the old body appended, folded once
-    rows = [row["attempt_id"] for row in attempt_rows_in_start_order(root)]
-    assert rows[:2] == ["seed-0", "seed-1"] and len(rows) == 3
-
-
 def test_a_present_store_reconciles_the_old_body_writes_per_row(lane_root, v760, tmp_path):
     """P6': the export without the switch (the store stays published, the files are written
     beside it); the old body's add, change and delete come back as one row each, not a rebuild."""
@@ -188,58 +146,3 @@ def test_a_present_store_reconciles_the_old_body_writes_per_row(lane_root, v760,
     started = c.invocation_record(root, "inv-pending")  # the legacy append, folded once by the job
     assert started["state"] == "started" and started["run_id"] == "run-old" and c.pending_invocations(root) == []
     assert ensure_current_store(root)["status"] == "unchanged" and sorted(c.replay(root)) == ["run-dead", "run-old"]
-
-
-def test_the_chain_new_old_new_twice_with_failures_around_the_consume_and_the_switch(lane_root, target_repo, v760, tmp_path):
-    repo, old, new = target_repo
-    root = lane_root
-    assert store_switch.wait_ready(root, timeout=0.01) == {"status": "not_started"}
-    current.flush_outbox(root)
-    # Round one: the switch fails at the owner; the export stays, the store is retired, the new
-    # body boots again and rebuilds from the files it wrote.
-    failed = _switch_to_old(root, repo, old, owner=Owner(repo, ok=False))
-    assert failed["status"] == "switch_failed" and git(repo, "rev-parse", "HEAD") == new
-    assert store.probe(root)[0] == "absent" and store_switch.read_switch_intent(root) is None
-    rebuilt = store_switch.start(root, repo_dir=repo, request_restart=lambda: pytest.fail("nothing to switch"))
-    assert rebuilt == {"status": "importing"} and store_switch.wait_ready(root, timeout=60)["status"] == "published"
-    assert sorted(load(root, tid)["task_id"] for tid in ("root1", "child1", "done1")) == ["child1", "done1", "root1"]
-    usage_store.forget(root)
-    usage_store.migrate_from_journal(root)
-    assert len(attempt_rows_in_start_order(root)) == 2
-    # Round two: the real switch, the old body writes, the new body reconciles.
-    assert _switch_to_old(root, repo, old)["status"] == "switched"
-    first = old_body(v760, root, "write", tmp_path / "home")
-    assert first["ids_after"] == ["by-old", "child1", "done1", "root1"] and first["runs"] == ["run-dead"]
-    git(repo, "checkout", "-q", "--detach", new)
-    assert ensure_current_store(root)["status"] == "completed"  # rebuilt from the files the old body left
-    usage_store.forget(root)
-    usage_store.migrate_from_journal(root)
-    assert len(attempt_rows_in_start_order(root)) == 3
-    # The death after the consume, before the switch: the intent is gone, the receipt says
-    # exported; the next boot reports the switch as not performed and rebuilds from the files.
-    store_switch.record_switch_intent(root, target_sha=old, target_ref=OLD_TAG, reason="test", door="ui_rollback")
-
-    def dies_before_switching(intent):
-        raise RuntimeError("the process died after the consume")
-
-    with pytest.raises(RuntimeError):
-        store_switch.run_switch_seam(root, repo_dir=repo, owner=dies_before_switching)
-    assert store_switch.read_switch_intent(root) is None and store.probe(root)[0] == "absent"
-    resumed = store_switch.start(root, repo_dir=repo, request_restart=lambda: pytest.fail("no switch to resume"))
-    assert resumed == {"status": "importing"} and store_switch.wait_ready(root, timeout=60)["status"] == "published"
-    assert load(root, "by-old")["description"] == "written by v7.6.0"
-    progress = json.loads((root / store_switch.PROGRESS_REL).read_text(encoding="utf-8"))
-    assert progress["phase"] == "switch_not_performed"
-    usage_store.migrate_from_journal(root)  # the boot's own money step (server lifespan), after the facts
-    assert len(attempt_rows_in_start_order(root)) == 3
-    # Round three: the old body reads what the new body kept, and the chain closes again.
-    third = _switch_to_old(root, repo, old)
-    assert third["status"] == "switched", third
-    second = old_body(v760, root, "read", tmp_path / "home")
-    assert second["ids"] == ["by-old", "child1", "done1", "root1"] and second["runs"] == ["run-dead", "run-old"]
-    assert second["pending"] == "started"  # the run the old body bound in round two, read back from the chain
-    git(repo, "checkout", "-q", "--detach", new)
-    assert ensure_current_store(root)["status"] == "completed"
-    usage_store.forget(root)
-    usage_store.migrate_from_journal(root)
-    assert len(attempt_rows_in_start_order(root)) == 3

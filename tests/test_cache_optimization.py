@@ -220,7 +220,7 @@ def test_build_memory_sections_partition_modes():
     stable = build_memory_sections(memory, partition="stable")
     volatile = build_memory_sections(memory, partition="volatile")
     all_sections = build_memory_sections(memory, partition="all")
-    registry_digest = __import__("ouroboros.context", fromlist=["_build_registry_digest"])._build_registry_digest(env)
+    registry = __import__("ouroboros.context", fromlist=["_build_registry_section"])._build_registry_section(env)
 
     assert any(section.startswith("## Identity") for section in stable)
     assert not any(section.startswith("## Scratchpad") for section in stable)
@@ -229,7 +229,7 @@ def test_build_memory_sections_partition_modes():
     assert not any(section.startswith(("## Dialogue Summary", "## Dialogue History", "## Legacy Dialogue"))
                    for section in [*stable, *volatile, *all_sections])
     assert not any(section.startswith("## Memory Registry") for section in volatile)
-    assert registry_digest.startswith("## Memory Registry (what I know / don't know)")
+    assert registry.startswith("## Memory Registry (what I know / don't know)")
     assert any(section.startswith("## Identity") for section in all_sections)
     assert any(section.startswith("## Scratchpad") for section in all_sections)
 
@@ -275,10 +275,11 @@ def test_llm_round_event_exposes_cache_hit_rate(tmp_path):
     assert llm_round["prompt_cache_ttl"] == "default"
 
 
-def test_llm_round_event_flags_cache_cold_restart_with_gap(tmp_path):
-    """W3 telemetry: a later round that re-wrote (almost) the whole prompt is a
-    cold restart — flagged from the round's own facts, with the gap since the
-    previous successful round. No dollar accumulator (counterfactual)."""
+def test_llm_round_event_records_cache_facts_with_gap_and_no_cold_restart_verdict(tmp_path):
+    """W3 telemetry: each round records its provider-reported cache share and the gap
+    since the previous successful round, the datum that separates a TTL expiry from a
+    prefix rewrite. No verdict is derived from them (a Codex route reports no cache
+    writes, so "cold restart" never fired there) and no dollar accumulator."""
     import json
 
     from ouroboros.loop_llm_call import call_llm_with_retry
@@ -317,9 +318,9 @@ def test_llm_round_event_flags_cache_cold_restart_with_gap(tmp_path):
     ]
     assert [r["round"] for r in rounds] == [1, 2]
     first, second = rounds
-    assert first["cache_cold_restart"] is False  # round 1 always writes; not a RE-start
+    assert (first["cache_hit_rate"], second["cache_hit_rate"]) == (0.9, 0.0)
+    assert "cache_cold_restart" not in first and "cache_cold_restart" not in second
     assert first["gap_since_prev_round_sec"] is None
-    assert second["cache_cold_restart"] is True
     assert isinstance(second["gap_since_prev_round_sec"], float)
     assert second["gap_since_prev_round_sec"] >= 0.0
     # The applied TTL fact is recorded for the wait-tool disclosure to read.
@@ -544,4 +545,4 @@ def test_supervising_wake_horizon_fires_only_past_the_applied_ttl(tmp_path):
     assert "cache_horizon_note" not in _wake("", 10_000)[1]
     replay = json.loads(supervised_wait(_ctx, "run-h", wait_once=lambda *_a: (_ for _ in ()).throw(
         AssertionError("an unacknowledged wake replays before any new observation"))).text)
-    assert replay == past
+    assert replay.pop("replay_of")["fresh_observation"] is False and replay == past  # marked, else as recorded

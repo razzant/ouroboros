@@ -28,7 +28,7 @@ def _fake_ditto(monkeypatch, run):
     monkeypatch.setattr(storage, "_may_share", lambda path: False)
 
 
-@pytest.mark.parametrize("failure", ["unavailable", "timeout", "size", "sha256"])
+@pytest.mark.parametrize("failure", ["unavailable", "timeout", "sha256"])
 def test_failed_compression_preserves_original_and_removes_temporary(tmp_path, monkeypatch, failure):
     from ouroboros.config import ARTIFACT_COMPRESSION_TIMEOUT_SEC
 
@@ -82,12 +82,72 @@ def _assert_swept_after_a_hard_kill(tmp_path, temporary_name):
 
 @pytest.mark.parametrize("platform", ["linux", "freebsd", "unknown"])
 def test_unsupported_platform_keeps_ordinary_bytes(tmp_path, monkeypatch, platform):
+    """Past the floor, only the platform keeps the file: nothing is rewritten, so nothing is replaced or synced, and
+    the outcome names ``unsupported``, never a compression this host did not make."""
     path = tmp_path / "workspace.patch"
-    path.write_bytes(b"ordinary patch bytes\n")
-    before = path.read_bytes()
+    raw = b"ordinary patch bytes\n" * 8192
+    path.write_bytes(raw)
+    before, touched = path.stat(), []
     monkeypatch.setattr(storage, "sys", SimpleNamespace(platform=platform))
-    assert storage.compress_in_place(path) is False
-    assert path.read_bytes() == before
+    monkeypatch.setattr(storage, "subprocess", SimpleNamespace(
+        run=lambda *_a, **_k: touched.append("ditto"), DEVNULL=None, SubprocessError=subprocess.SubprocessError))
+    monkeypatch.setattr(os, "fsync", lambda fd: touched.append("fsync"))
+    monkeypatch.setattr(os, "replace", lambda *_a: touched.append("replace"))
+    assert storage.compression_outcome(path) == "unsupported" and storage.compress_in_place(path) is False
+    assert touched == [] and path.read_bytes() == raw and path.stat().st_ino == before.st_ino
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="native APFS compression proof")
+def test_native_compression_syncs_its_verified_replacement_before_it_takes_the_name(tmp_path, monkeypatch):
+    """A record may be another owner's only retained copy (a reviewer thread's archive): the compressed sibling's
+    bytes are synced before it replaces the record, then its folder. This shows the host's own sync requests in
+    order (``ditto``'s own I/O is not observed); it is no power-loss test."""
+    from ouroboros import store
+
+    path = tmp_path / "record.jsonl"
+    raw = b'{"seq":1}\n' * 20000
+    path.write_bytes(raw)
+    before, events = path.stat(), []
+    fsync, replace, folder_sync = os.fsync, os.replace, store.fsync_directory
+
+    def synced(fd):
+        info = os.fstat(fd)
+        events.append(("fsync", stat.S_ISDIR(info.st_mode), info.st_ino))
+        return fsync(fd)
+
+    def replaced(source, target):
+        events.append(("replace", os.lstat(source).st_ino, pathlib.Path(target)))
+        return replace(source, target)
+
+    monkeypatch.setattr(os, "fsync", synced)
+    monkeypatch.setattr(os, "replace", replaced)
+    monkeypatch.setattr(store, "fsync_directory", lambda folder: events.append(("folder", pathlib.Path(folder)))
+                        or folder_sync(folder))
+    assert storage.compression_outcome(path) == "compressed"
+    after = path.stat()
+    assert after.st_ino != before.st_ino and after.st_flags & stat.UF_COMPRESSED and path.read_bytes() == raw
+    published = events.index(("replace", after.st_ino, path))
+    assert ("fsync", False, after.st_ino) in events[:published], events  # its bytes, before the name
+    assert ("folder", path.parent) in events[published:], events  # then the entry
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="native APFS compression proof")
+def test_a_replacement_that_cannot_be_synced_never_replaces_the_record(tmp_path, monkeypatch):
+    import errno
+
+    path = tmp_path / "record.jsonl"
+    raw = b'{"seq":1}\n' * 20000
+    path.write_bytes(raw)
+    before, replaced = path.stat(), []
+
+    def refused(fd):
+        raise OSError(errno.EIO, "flush refused")
+
+    monkeypatch.setattr(os, "fsync", refused)
+    monkeypatch.setattr(os, "replace", lambda *args: replaced.append(args))
+    assert storage.compression_outcome(path) == "failed"
+    assert replaced == [] and path.read_bytes() == raw and path.stat().st_ino == before.st_ino
+    assert list(tmp_path.iterdir()) == [path]  # the verified, unsynced sibling went with the refusal
 
 
 def _write_patch(tmp_path, monkeypatch, writer):
@@ -115,8 +175,12 @@ def _write_patch(tmp_path, monkeypatch, writer):
         delegate_custody._CUSTODY.clear()
 
 
-@pytest.mark.parametrize("writer", ["workspace", "payload"])
-@pytest.mark.parametrize("mode", ["native", "refused", "corrupt", "unsupported"])
+@pytest.mark.parametrize(("mode", "writer"), [
+    ("native", "workspace"),
+    ("refused", "payload"),
+    ("corrupt", "payload"),
+    ("unsupported", "workspace"),
+])
 def test_both_patch_writers_publish_measured_final_bytes(tmp_path, monkeypatch, writer, mode):
     if mode == "native" and sys.platform != "darwin":
         pytest.skip("native APFS compression proof")

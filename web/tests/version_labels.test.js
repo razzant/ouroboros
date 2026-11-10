@@ -42,14 +42,14 @@ test('one uncached health read writes the sidebar runtime version and the About 
     const shown = labels();
     const reads = await readOnce({ status: 'ok', version: '7.8.1', runtime_version: '7.8.1', app_version: '7.7.0' });
     assert.deepEqual(reads.map((read) => [read.url, read.init.cache]), [['/api/health', 'no-store']]);
-    assert.deepEqual(shown(), ['v7.8.1', 'app 7.7.0 | rt 7.8.1']);
+    assert.deepEqual(shown(), ['v7.8.1', 'App 7.7.0 · Runtime 7.8.1']);
 });
 
 test('an app version that is absent, empty or not a string shows the runtime version in its place', async () => {
     for (const app_version of [undefined, '', '   ', 42, null, { v: '1' }]) {
-        const shown = labels({ nav: 'v7.0.0', about: 'app 7.0.0 | rt 7.0.0' });
+        const shown = labels({ nav: 'v7.0.0', about: 'App 7.0.0 · Runtime 7.0.0' });
         await readOnce({ runtime_version: '7.8.1', version: '7.8.1', app_version });
-        assert.deepEqual(shown(), ['v7.8.1', 'app 7.8.1 | rt 7.8.1'], String(app_version));
+        assert.deepEqual(shown(), ['v7.8.1', 'App 7.8.1 · Runtime 7.8.1'], String(app_version));
     }
 });
 
@@ -57,11 +57,11 @@ test('the legacy version field stands in for an absent or invalid runtime versio
     for (const runtime_version of [undefined, '', '  ', 7.8, null, ['7.9.0']]) {
         const shown = labels();
         await readOnce({ runtime_version, version: '7.6.0', app_version: '7.6.2' });
-        assert.deepEqual(shown(), ['v7.6.0', 'app 7.6.2 | rt 7.6.0'], String(runtime_version));
+        assert.deepEqual(shown(), ['v7.6.0', 'App 7.6.2 · Runtime 7.6.0'], String(runtime_version));
     }
     const shown = labels();
     await readOnce({ version: ' 7.6.0 ' });
-    assert.deepEqual(shown(), ['v7.6.0', 'app 7.6.0 | rt 7.6.0'], 'an old core reports only the legacy field');
+    assert.deepEqual(shown(), ['v7.6.0', 'App 7.6.0 · Runtime 7.6.0'], 'an old core reports only the legacy field');
 });
 
 test('an answer without a usable version leaves the labels as they are and never says "?"', async () => {
@@ -72,7 +72,7 @@ test('an answer without a usable version leaves the labels as they are and never
         [{ error: 'unauthorized', runtime_version: '9.9.9' }, { status: 401 }],
         [undefined, { malformed: true }],  // a 200 page that is not JSON reads as an error object
     ];
-    for (const [known, before] of [[true, ['v7.8.0', 'app 7.8.0 | rt 7.8.0']], [false, ['', '']]]) {
+    for (const [known, before] of [[true, ['v7.8.0', 'App 7.8.0 · Runtime 7.8.0']], [false, ['', '']]]) {
         for (const [body, options] of answers) {
             const shown = labels(known ? { nav: before[0], about: before[1] } : {});
             await readOnce(body, options);
@@ -88,20 +88,20 @@ test('an answer without a usable version leaves the labels as they are and never
 });
 
 test('an older answer that lands after a newer one changes nothing', async () => {
-    const shown = labels({ nav: 'v7.8.0', about: 'app 7.8.0 | rt 7.8.0' });
+    const shown = labels({ nav: 'v7.8.0', about: 'App 7.8.0 · Runtime 7.8.0' });
     const health = scriptFetch();
     const older = loadVersion();
     const newer = loadVersion();
     health.respond(1, { runtime_version: '7.8.1', app_version: '7.8.1' });
     await newer;
-    assert.deepEqual(shown(), ['v7.8.1', 'app 7.8.1 | rt 7.8.1']);
+    assert.deepEqual(shown(), ['v7.8.1', 'App 7.8.1 · Runtime 7.8.1']);
     health.respond(0, { runtime_version: '7.8.0', app_version: '7.8.0' });
     await older;
-    assert.deepEqual(shown(), ['v7.8.1', 'app 7.8.1 | rt 7.8.1'], 'the late old answer is dropped');
+    assert.deepEqual(shown(), ['v7.8.1', 'App 7.8.1 · Runtime 7.8.1'], 'the late old answer is dropped');
 });
 
 test('a newer read that fails drops the older pending one too, so the labels keep their last text', async () => {
-    for (const before of [['v7.8.0', 'app 7.8.0 | rt 7.8.0'], ['', '']]) {
+    for (const before of [['v7.8.0', 'App 7.8.0 · Runtime 7.8.0'], ['', '']]) {
         for (const failNewer of [(health) => health.fail(1), (health) => health.respond(1, null, { malformed: true }),
             (health) => health.respond(1, { error: 'starting' }, { status: 503 })]) {
             const shown = labels({ nav: before[0], about: before[1] });
@@ -128,7 +128,7 @@ test('a label that is not in the page is skipped and the other is still written'
     assert.deepEqual(shown(), ['v7.8.1', '']);
     shown = labels({ present: ['about-version'] });
     await readOnce({ runtime_version: '7.8.1', app_version: '7.7.0' });
-    assert.deepEqual(shown(), ['', 'app 7.7.0 | rt 7.8.1']);
+    assert.deepEqual(shown(), ['', 'App 7.7.0 · Runtime 7.8.1']);
 });
 
 class FakeSocket {
@@ -170,7 +170,7 @@ test('every socket open re-reads the labels without holding up its state read, s
         answer(fetches.reads[1], { sha: 'abc1234', served_ui: { source: 'builtin' } });
         answer(health(0), { runtime_version: '7.8.0' });
         await settle();
-        assert.deepEqual(shown(), ['v7.8.0', 'app 7.8.0 | rt 7.8.0']);
+        assert.deepEqual(shown(), ['v7.8.0', 'App 7.8.0 · Runtime 7.8.0']);
 
         first.readyState = 3;
         first.onclose();
@@ -190,7 +190,7 @@ test('every socket open re-reads the labels without holding up its state read, s
         assert.deepEqual(replaced, [], 'an unmarked page keeps itself under a core that reports served_ui');
         answer(health(1), { runtime_version: '7.8.1', app_version: '7.8.1' });
         await settle();
-        assert.deepEqual(shown(), ['v7.8.1', 'app 7.8.1 | rt 7.8.1']);
+        assert.deepEqual(shown(), ['v7.8.1', 'App 7.8.1 · Runtime 7.8.1']);
         assert.equal(reads('/api/health'), 2, 'one read per open, no polling');
     } finally {
         ws._clearUiRecoveryTimer();

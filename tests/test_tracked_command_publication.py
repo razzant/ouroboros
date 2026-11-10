@@ -29,7 +29,6 @@ from tests.test_store_switch import git
 from tests.test_store_switch import switch_root as _switch_root
 from tests.test_store_switch import target_repo as _switch_target_repo
 
-pytestmark = pytest.mark.serial
 switch_root, target_repo = _switch_root, _switch_target_repo  # real store roots; ``old`` lacks the stores
 
 SLEEP = [sys.executable, "-c", "import time; time.sleep(60)"]
@@ -68,6 +67,9 @@ def registry(monkeypatch, tmp_path):
         if proc.poll() is None:
             proc.kill()
         proc.wait(timeout=10)
+        # Settled only once its containment measures empty, never at the root's exit: a Windows venv python.exe is a
+        # redirector whose interpreter child ends a moment after it (``_tree_remains``).
+        _wait(lambda proc=proc: shell_process.retire_tracked(proc), why=lambda proc=proc: f"tree of {proc.pid} still runs")
     shell_process._active_subprocesses.clear()
     shell_process._active_subprocesses.update(saved)
 
@@ -80,12 +82,14 @@ def _wait(predicate, timeout=10.0, why=lambda: ""):
 
 
 def _producer(reg, hold=None, cmd=SLEEP, scope=contextlib.nullcontext):
-    """A minimal tracked producer: count, Popen, optionally pause before publishing, publish."""
+    """A minimal tracked producer: count, Popen (born contained, as every producer's child is), optionally pause
+    before publishing, publish."""
     def run():
         try:
             with scope(), shell_process.tracked_start() as publish:
-                proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.DEVNULL, **subprocess_new_group_kwargs())
+                proc = shell_process.contained_popen(subprocess.Popen, cmd, stdin=subprocess.DEVNULL,
+                                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                                     **subprocess_new_group_kwargs())
                 reg.started.append(proc)
                 if hold is not None:
                     assert hold.wait(30), "the test never released the publication"
@@ -155,30 +159,31 @@ def test_a_start_still_inside_popen_at_the_deadline_keeps_the_outcome_unconfirme
     hold.set()
     producer.join(10)
     assert _stopped(child), "the late publication meets the stop and its starter ends the child"
-    assert shell_process.unsettled_tracked_children() is None
+    _wait(lambda: shell_process.unsettled_tracked_children() is None,
+          why=lambda: f"its tree is still unsettled: {shell_process.unsettled_tracked_children()}")
     joined = owned_shutdown.stop_owned_work(registry.data)  # a later door joins; it never claims completion
     assert joined["state"] == "unconfirmed"
 
 
 def test_a_publication_during_the_kill_loop_keeps_its_name_until_its_exit(registry, monkeypatch):
     """The witnessed erasure: a child published after the snapshot was dropped by a registry-wide clear."""
-    early = subprocess.Popen(SLEEP, **subprocess_new_group_kwargs())
+    early = shell_process.contained_popen(subprocess.Popen, SLEEP, **subprocess_new_group_kwargs())
     registry.started.append(early)
     shell_process._active_subprocesses.add(early)
     hold = threading.Event()
     producer = _producer(registry, hold)
     _wait(lambda: len(registry.started) == 2 and shell_process._spawning_subprocesses == 1)
     late = registry.started[1]
-    kill, entered = shell_process._kill_process_group, []
+    end, entered = shell_process._end_tree, []
 
-    def kill_then_let_the_late_start_publish(proc):
-        kill(proc)
+    def end_then_let_the_late_start_publish(proc):
+        end(proc)  # the stop's per-child end: a POSIX group kill, or a Windows child's own Job
         if proc is early and not entered:
             entered.append(proc)
             hold.set()  # the late child is published while this loop still runs
             _wait(lambda: late in shell_process._active_subprocesses)
 
-    monkeypatch.setattr(shell_process, "_kill_process_group", kill_then_let_the_late_start_publish)
+    monkeypatch.setattr(shell_process, "_end_tree", end_then_let_the_late_start_publish)
     outcome = owned_shutdown.stop_owned_work(registry.data)
     producer.join(10)
     assert entered == [early] and _stopped(early) and _stopped(late)
@@ -188,10 +193,10 @@ def test_a_publication_during_the_kill_loop_keeps_its_name_until_its_exit(regist
 
 def test_an_unconfirmed_kill_keeps_its_handle_and_says_so(registry, monkeypatch):
     monkeypatch.setattr(owned_shutdown, "_stop_budget_sec", lambda: 0.4)
-    child = subprocess.Popen(SLEEP, **subprocess_new_group_kwargs())
+    child = shell_process.contained_popen(subprocess.Popen, SLEEP, **subprocess_new_group_kwargs())
     registry.started.append(child)
     shell_process._active_subprocesses.add(child)
-    monkeypatch.setattr(shell_process, "_kill_process_group", lambda proc: None)  # a request that ends nothing
+    monkeypatch.setattr(shell_process, "_end_tree", lambda proc: None)  # a request that ends nothing, POSIX group or Job
     report = shell_process.kill_all_tracked_subprocesses(deadline=time.monotonic() + 0.3)
     assert report == {"state": "unconfirmed", "pids": [child.pid], "unpublished": 0}
     assert child in shell_process._active_subprocesses and child.poll() is None, "a sent request is no exit proof"
@@ -205,12 +210,12 @@ def test_an_unconfirmed_kill_keeps_its_handle_and_says_so(registry, monkeypatch)
 def test_a_failed_spawn_settles_its_count_and_keeps_its_own_error(registry):
     with pytest.raises(FileNotFoundError):
         with shell_process.tracked_start() as publish:
-            publish(subprocess.Popen([str(registry.data / "missing-binary")]))
+            publish(shell_process.contained_popen(subprocess.Popen, [str(registry.data / "missing-binary")], **subprocess_new_group_kwargs()))
     assert shell_process._spawning_subprocesses == 0 and not shell_process._active_subprocesses
 
 
 def test_panic_requests_never_wait_for_a_start_or_any_registry_lock(registry):
-    child = subprocess.Popen(SLEEP, **subprocess_new_group_kwargs())
+    child = shell_process.contained_popen(subprocess.Popen, SLEEP, **subprocess_new_group_kwargs())
     registry.started.append(child)
     shell_process._active_subprocesses.add(child)
     hold = threading.Event()
@@ -328,8 +333,95 @@ def test_the_nine_producers_publish_only_through_the_shared_start():
                  git_ops._run_git_process_bounded, git_ops_reset.sync_runtime_dependencies)
     for function in producers:
         source = textwrap.dedent(inspect.getsource(function))
-        assert calls_function(ast.parse(source), "tracked_start"), function.__qualname__
+        for seam in ("tracked_start", "contained_popen", "retire_tracked"):
+            assert calls_function(ast.parse(source), seam), (function.__qualname__, seam)
+        assert "_active_subprocesses.discard(" not in source
         assert "_active_subprocesses.add(" not in source, function.__qualname__
+
+
+@pytest.mark.parametrize("remains", [False, True, None], ids=["empty", "live", "unknown"])
+@pytest.mark.parametrize("producer", [*sorted(PRODUCERS), "skill_callback_failure"])
+def test_every_producer_retires_only_an_empty_tree(registry, monkeypatch, tmp_path, producer, remains):
+    """Run each real owner/consumer around an explicit Popen+containment double."""
+    import io
+    import json
+    from tests.test_claudexor_owned_daemon import _install_receipt
+    from ouroboros import claudexor_runtime, tool_custody
+
+    confirmed = []
+    monkeypatch.setattr(tool_custody, "external_handoff", lambda kind: lambda: confirmed.append(kind))
+
+    class Child:
+        pid = 765432
+        returncode = 0
+        args = ["test-owned-command"]
+        stdin = None
+        stdout = io.BytesIO(json.dumps(_install_receipt()).encode())
+        stderr = io.BytesIO()
+        def poll(self):
+            return self.returncode
+        def wait(self, timeout=None):
+            return self.returncode
+        def communicate(self, **kwargs):
+            return ("output", "") if producer in ("run_command", "git", "update_smoke") else (b"output", b"")
+
+    child = Child()
+    state = {"remains": remains}
+    read = shell_process._tree_remains
+    monkeypatch.setattr(shell_process, "_tree_remains", lambda p: state["remains"] if p is child else read(p))
+    # Patch the birth seam only. No global Popen replacement can intercept a census or unrelated subprocess.
+    for module in (shell_process, skill_exec, skill_preflight, extension_process_runner):
+        monkeypatch.setattr(module, "contained_popen", lambda *a, **kw: child)
+    monkeypatch.setattr(skill_exec, "_kill_process_group", lambda p: None)
+    monkeypatch.setattr(git_ops, "REPO_DIR", tmp_path)
+    monkeypatch.setattr(git_ops, "DRIVE_ROOT", registry.data)
+    monkeypatch.setattr(claudexor_runtime, "get_runtime_manager", lambda: SimpleNamespace(
+        ensure_cli_command=lambda: ["test-node", "test-cli"]))
+    try:
+        if producer == "run_command":
+            result = shell_process._tracked_subprocess_run(["test"], text=True)
+            assert (result.returncode, result.stdout) == (0, "output")
+        elif producer in ("skill_exec", "skill_callback_failure"):
+            def failed():
+                raise RuntimeError("callback failed")
+            kwargs = dict(cwd=str(tmp_path), env={}, timeout_sec=5, stdout_cap=4096, stderr_cap=4096)
+            if producer == "skill_callback_failure":
+                with pytest.raises(RuntimeError, match="callback failed"):
+                    skill_exec._run_skill_subprocess(["test"], on_spawn=failed, **kwargs)
+            else:
+                assert skill_exec._run_skill_subprocess(["test"], **kwargs)[0] == 0
+        elif producer == "extension":
+            with extension_process_runner._child_process({"skill_name": "retirement"}, skill_dir=tmp_path,
+                    drive_root=registry.data, repo_dir=tmp_path, env={}) as handle:
+                assert handle.proc is child
+        elif producer == "skill_preflight":
+            assert skill_preflight._run_check(["test"], tmp_path)["returncode"] == 0
+        elif producer == "isolated_deps":
+            assert isolated_deps._run(["test"], cwd=tmp_path, env={}, timeout_sec=5)["returncode"] == 0
+        elif producer == "harness_install":
+            claudexor_harness_install.install_missing_harness_cli("cursor")
+        elif producer == "update_smoke":
+            assert update_merge._run_update_smoke(["test"])["ok"]
+        elif producer == "git":
+            assert git_ops._run_git_process_bounded(["test"], timeout=5, cwd=tmp_path) == (0, "output", "")
+        else:
+            req = tmp_path / "requirements-runtime.lock"
+            req.write_text("test==1\n")
+            monkeypatch.delenv("OUROBOROS_PYTEST_ACTIVE")
+            assert git_ops_reset.sync_runtime_dependencies("retirement")[0]
+        assert (child in shell_process._active_subprocesses) is (remains is not False)
+        if producer in ("run_command", "skill_exec", "skill_callback_failure", "extension"):
+            assert bool(confirmed), "root receipts settle independently of retained tree custody"
+        if remains is not False:
+            from ouroboros.tool_custody import local_producers_settled
+            assert not local_producers_settled(), "worker retirement must keep its process/Job handles"
+        state["remains"] = False
+        assert shell_process.retire_tracked(child)
+        if producer in ("run_command", "skill_exec", "skill_callback_failure", "extension"):
+            assert len(confirmed) == 1, "settlement discharges the original receipt once"
+    finally:
+        state["remains"] = False
+        assert shell_process.retire_tracked(child)
 
 
 def _bound(data, name, target):
@@ -339,6 +431,74 @@ def _bound(data, name, target):
     source = SimpleNamespace(task_id="ob1656-task", drive_root=str(data), task_metadata={}, task_lifecycle_bound=False)
     with owner_pause.tool_handoff(source, name):
         return target()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="native POSIX witness; Windows Job branches are simulated separately")
+@pytest.mark.parametrize("producer", sorted(PRODUCERS))
+def test_every_real_producer_preserves_a_redirected_background_child(registry, monkeypatch, tmp_path, producer):
+    import json
+    from tests.test_claudexor_owned_daemon import _install_receipt
+    from ouroboros import claudexor_runtime
+    from ouroboros.tools import shell as shell_facade
+
+    pid_file = tmp_path / "child.pid"
+    script = ("import pathlib,subprocess,sys; "
+        "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'],"
+        "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(p.pid)); "
+        f"print({json.dumps(_install_receipt())!r},flush=True)")
+    born = []
+    original = shell_process.contained_popen
+
+    def spawn(popen_cls, _argv, **kwargs):
+        proc = original(popen_cls, [sys.executable, "-c", script], **kwargs)
+        born.append(proc)
+        return proc
+
+    for module in (shell_process, skill_exec, skill_preflight, extension_process_runner):
+        monkeypatch.setattr(module, "contained_popen", spawn)
+    monkeypatch.setattr(git_ops, "REPO_DIR", tmp_path)
+    monkeypatch.setattr(git_ops, "DRIVE_ROOT", registry.data)
+    monkeypatch.setattr(claudexor_runtime, "get_runtime_manager", lambda: SimpleNamespace(
+        ensure_cli_command=lambda: ["test-node", "test-cli"]))
+    try:
+        if producer == "run_command":
+            assert shell_process._tracked_subprocess_run(["test"], timeout=5).returncode == 0
+        elif producer == "skill_exec":
+            assert skill_exec._run_skill_subprocess(["test"], cwd=str(tmp_path), env=dict(os.environ),
+                timeout_sec=5, stdout_cap=4096, stderr_cap=4096)[0] == 0
+        elif producer == "extension":
+            with extension_process_runner._child_process({"skill_name": "retirement"}, skill_dir=tmp_path,
+                    drive_root=registry.data, repo_dir=tmp_path, env=dict(os.environ)) as handle:
+                assert handle.proc.wait(timeout=5) == 0
+        elif producer == "skill_preflight":
+            assert skill_preflight._run_check(["test"], tmp_path)["returncode"] == 0
+        elif producer == "isolated_deps":
+            assert isolated_deps._run(["test"], cwd=tmp_path, env=dict(os.environ), timeout_sec=5)["returncode"] == 0
+        elif producer == "harness_install":
+            claudexor_harness_install.install_missing_harness_cli("cursor")
+        elif producer == "update_smoke":
+            assert update_merge._run_update_smoke(["test"])["ok"]
+        elif producer == "git":
+            assert git_ops._run_git_process_bounded(["test"], timeout=5, cwd=tmp_path)[0] == 0
+        else:
+            (tmp_path / "requirements-runtime.lock").write_text("test==1\n")
+            monkeypatch.delenv("OUROBOROS_PYTEST_ACTIVE")
+            assert git_ops_reset.sync_runtime_dependencies("retirement")[0]
+        [proc] = born
+        child = int(pid_file.read_text())
+        assert proc.returncode == 0 and proc in shell_process._active_subprocesses
+        assert shell_process._tree_remains(proc) is True
+        assert not wait_test_child_stop(child, timeout_sec=0.1)["child_stopped"]
+        # The public shell facade and ordinary stop consume the same retained owner.
+        assert proc in shell_facade._active_subprocesses
+        assert shell_process.kill_all_tracked_subprocesses(deadline=time.monotonic() + 5) is None
+        assert wait_test_child_stop(child, timeout_sec=5)["child_stopped"]
+    finally:
+        for proc in born:
+            shell_process._end_tree(proc)  # only the waitable, identity-matched child/group
+            proc.wait(timeout=5)
+            assert shell_process.retire_tracked(proc)
 
 
 def _held_popen(monkeypatch, marker, hold, seen):
@@ -365,8 +525,9 @@ def test_a_real_producer_published_into_the_stop_is_ended_by_its_starter(registr
     if producer == "extension":  # only the runner's own child argv becomes the sleeper; its owner code is real
         popen = subprocess.Popen
 
-        def runner_child(argv, **kwargs):
-            return popen(cmd if "ouroboros.extension_process_runner" in argv else argv, **kwargs)
+        def runner_child(argv, **kwargs):  # the stdlib class through the producers' own door, born contained
+            return (shell_process.contained_popen(popen, cmd, **kwargs)
+                    if "ouroboros.extension_process_runner" in argv else popen(argv, **kwargs))
 
         monkeypatch.setattr(runner.subprocess, "Popen", runner_child)
     data = registry.data
@@ -507,16 +668,21 @@ def test_panic_after_the_restart_exit_rescue_refuses_the_final_reset(registry, s
 
 def test_panic_never_waits_for_an_unbounded_git_start_and_its_starter_ends_it(registry, monkeypatch, tmp_path):
     """``git_capture`` without a timeout still starts through ``tracked_start``: Panic while that Git is
-    admitted but inside its Popen takes no lock or wait, and the late publication hands the tree to the kill."""
+    admitted but inside its Popen takes no lock or wait, and the late publication hands the tree to the kill. The
+    alias's shell already runs when Panic comes, so only a kill of the whole tree releases the capture's pipes.
+
+    UNRESOLVED on Windows, a product failure rather than a fixture's (CI 41634598146, job 125912568384): without a Job
+    the request ends the published root alone, its settle pass addresses a root already gone, and the capture waits."""
     marker = "ob-late-panic-git"
     hold, seen, results = threading.Event(), [], []
     _held_popen(monkeypatch, marker, hold, seen)
     monkeypatch.setattr(git_ops, "REPO_DIR", tmp_path)
     capture = threading.Thread(target=lambda: results.append(git_ops.git_capture(
-        ["git", "-c", f"alias.{marker}=!sleep 60", marker])), name="unbounded-git", daemon=True)
+        ["git", "-c", f"alias.{marker}=!touch tree.ready; sleep 60", marker])), name="unbounded-git", daemon=True)
     capture.start()
     try:
         _wait(lambda: seen)
+        _wait(lambda: (tmp_path / "tree.ready").exists(), timeout=120.0)  # Git's own start, not the bound under test
         child = seen[0]
         registry.started.append(child)
         assert shell_process._spawning_subprocesses == 1, "the unbounded Git start is admitted and counted"
@@ -542,7 +708,7 @@ def test_only_the_finalizing_thread_starts_after_the_stop_and_its_child_stays_na
     refused = []
     with shell_process.exit_finalization():
         with shell_process.tracked_start() as publish:  # admitted and published, never handed to the stop
-            child = publish(subprocess.Popen(SLEEP, **subprocess_new_group_kwargs()))
+            child = publish(shell_process.contained_popen(subprocess.Popen, SLEEP, **subprocess_new_group_kwargs()))
             registry.started.append(child)
         assert child.poll() is None and child in shell_process._active_subprocesses
         code, out, _err = _git_version(tmp_path)  # the rescue's own bounded runner settles and forgets its child
@@ -562,7 +728,7 @@ def test_a_failed_finalizing_start_settles_and_names_nothing(registry, tmp_path)
     with shell_process.exit_finalization():
         with pytest.raises(FileNotFoundError):
             with shell_process.tracked_start() as publish:
-                publish(subprocess.Popen([str(tmp_path / "missing-binary")]))
+                publish(shell_process.contained_popen(subprocess.Popen, [str(tmp_path / "missing-binary")], **subprocess_new_group_kwargs()))
         code, _out, err = git_ops._run_git_process_bounded(["git", "status"], timeout=30, cwd=tmp_path / "gone")
     assert code == 127 and err, "no Git process started"
     assert shell_process._spawning_subprocesses == 0 and not shell_process._active_subprocesses
@@ -586,7 +752,7 @@ def test_panic_refuses_a_finalizing_start_before_its_popen(registry, monkeypatch
 def test_panic_never_waits_for_a_finalizing_start_and_ends_what_it_published(registry):
     _restart_exit_census(registry.data)
     with shell_process.exit_finalization(), shell_process.tracked_start() as publish:
-        running = publish(subprocess.Popen(SLEEP, **subprocess_new_group_kwargs()))
+        running = publish(shell_process.contained_popen(subprocess.Popen, SLEEP, **subprocess_new_group_kwargs()))
         registry.started.append(running)
     hold = threading.Event()
     _producer(registry, hold, scope=shell_process.exit_finalization)  # admitted, held inside its Popen

@@ -23,11 +23,13 @@ def _fixture(root):
     stamp = utc_now_iso()
     write_queue_document(root / "state/queue_snapshot.json", {"ts": stamp,
         "running": [{"id": "moved", "attempt": 1, "task": {"id": "moved", "chat_id": 1}},
-                    {"id": "child", "task": {"id": "child", "parent_task_id": "moved"}}],
+                    {"id": "child", "task": {"id": "child", "parent_task_id": "moved"}},
+                    # The owner's direct head: a conversation-lane row of the same snapshot, never a separate fragment.
+                    {"id": "native", "attempt": 1, "lane": "conversation", "task": {
+                        "id": "native", "chat_id": 1, "title": "A direct head", "_is_direct_chat": True,
+                        "_execution_owner": {"kind": "direct", "lane": "conversation", "executor": "worker"}}}],
         "pending": [{"id": "sleeper", "attempt": 1, "task": {"id": "sleeper", "chat_id": 1,
             "_project_admission_restore_hold": {"reason": "project_dispatch_unconfirmed"}}}]})
-    write_queue_document(root / "state/direct_roots.json", {"ts": stamp, "incomplete": False,
-        "roots": [{"task_id": "native", "chat_id": 1, "title": "A direct head", "started_at": stamp}]})
     return project, focus
 
 
@@ -144,15 +146,17 @@ def test_roster_keeps_available_facts_when_project_store_is_busy(tmp_path, monke
 
 
 def test_roster_discloses_both_unreadable_task_and_project_enrichment(tmp_path, monkeypatch):
-    from ouroboros import projects_registry, task_results
+    from ouroboros import projects_registry
     from ouroboros.peer_roster import independent_roots
     from ouroboros.store import StoreBusy
 
     _fixture(tmp_path)
     def busy(*_args, **_kwargs):
         raise StoreBusy("busy")
+    from ouroboros import task_store
+
     monkeypatch.setattr(projects_registry, "project_binding_for_task", busy)
-    monkeypatch.setattr(task_results, "load_task_result", busy)
+    monkeypatch.setattr(task_store, "documents_by_ids", busy)  # the roster's one read of every root's result
     roster = independent_roots(tmp_path)
     assert roster["incomplete"] is True
     assert all(row["unavailable"] == {"task_result": "StoreBusy", "project": "StoreBusy"}

@@ -145,6 +145,70 @@ def test_catalog_search_and_detail(env):
     assert missing.status_code == 404
 
 
+def _with_clawhub(hub, monkeypatch):
+    rows = [*hub.rows(), {"id": "clawhub", "name": "ClawHub", "kind": "registry", "trust": "review", "confirmed": True}]
+    monkeypatch.setenv("OUROBOROS_SKILL_SOURCES", json.dumps(rows))
+
+
+def _clawhub_summary(slug):
+    from ouroboros.marketplace import clawhub
+
+    return clawhub._summary_from_record({"name": slug, "summary": f"{slug} does things.", "stats": {"downloads": 9}})
+
+
+def test_a_named_registry_with_no_query_answers_one_page(env, monkeypatch):
+    client, _drive, hub, _tmp = env
+    from ouroboros.marketplace import clawhub
+
+    _with_clawhub(hub, monkeypatch)
+    asked = []
+
+    def fake_search(query, **kwargs):
+        asked.append((query, kwargs["sort"], kwargs["cursor"], kwargs["limit"]))
+        return {"results": [_clawhub_summary("first"), _clawhub_summary("second")], "next_cursor": "page-2"}
+
+    monkeypatch.setattr(clawhub, "search", fake_search)
+    first = client.get("/api/skill-catalog/search", params={"q": "", "source": "clawhub"})
+    assert assert_bound("GET /api/skill-catalog/search", first) == "SkillCatalogSearchResponse"
+    assert [item["id"] for item in first.json()["items"]] == ["clawhub/first", "clawhub/second"]
+    assert first.json()["next_cursor"] == "page-2"
+    assert asked == [("", "popular", None, 24)], "popular by default, one bounded request"
+    following = client.get("/api/skill-catalog/search", params={"source": "clawhub", "sort": "updated", "cursor": "page-2"})
+    assert following.status_code == 200 and asked[-1] == ("", "updated", "page-2", 24)
+    monkeypatch.setattr(clawhub, "search", lambda *_a, **_k: {"results": [_clawhub_summary("last")], "next_cursor": ""})
+    last = client.get("/api/skill-catalog/search", params={"source": "clawhub", "cursor": "page-9"})
+    assert assert_bound("GET /api/skill-catalog/search", last) and "next_cursor" not in last.json()
+
+
+def test_a_registry_is_asked_only_when_named_or_searched(env, monkeypatch):
+    client, _drive, hub, _tmp = env
+    from ouroboros.marketplace import clawhub
+
+    _with_clawhub(hub, monkeypatch)
+    asked = []
+    monkeypatch.setattr(clawhub, "search", lambda query, **kw: (asked.append(query), {"results": [], "next_cursor": ""})[1])
+    for params in ({"q": ""}, {"q": "", "source": ""}, {"q": "", "source": "ouroboros"}, {"sort": "popular", "cursor": "x"}):
+        assert client.get("/api/skill-catalog/search", params=params).status_code == 200
+    assert asked == [], "All sources and a local source never wait on the registry"
+    client.get("/api/skill-catalog/search", params={"q": "weather"})
+    assert asked == ["weather"], "a text search is unchanged"
+
+
+def test_a_registry_that_cannot_answer_is_not_an_empty_list(env, monkeypatch):
+    client, _drive, hub, _tmp = env
+    from ouroboros.marketplace import clawhub
+
+    _with_clawhub(hub, monkeypatch)
+
+    def refuse(*_a, **_k):
+        raise clawhub.ClawHubClientError("HTTP 503 from registry")
+
+    monkeypatch.setattr(clawhub, "search", refuse)
+    answer = client.get("/api/skill-catalog/search", params={"source": "clawhub"})
+    assert assert_bound("GET /api/skill-catalog/search", answer)
+    assert answer.json() == {"items": [], "registry_error": "ClawHub: HTTP 503 from registry"}
+
+
 def test_install_answers_the_job_at_once_and_refuses_a_taken_name(env, monkeypatch):
     client, drive, _hub, _tmp = env
     reviews = []
@@ -272,11 +336,12 @@ def test_frozen_hub_installed_endpoint_includes_hub_records_and_legacy_bucket(en
 
 def test_http_source_probe_exposes_the_encryption_warning(env, monkeypatch):
     client, _drive, _hub, _tmp = env
-    monkeypatch.setattr("ouroboros.skill_source_git.fetch_tree", lambda target, *_a: write_skill(target, "sample"))
+    monkeypatch.setattr("ouroboros.skill_source_git.fetch_tree",
+                        lambda target, *_a: write_skill(target, "sample") and "c" * 40)
     response = client.post("/api/skill-sources/probe", json={"url": "http://git.example.invalid/team/skills"})
     assert response.status_code == 200
     assert assert_bound("POST /api/skill-sources/probe", response) == "SkillSourceProbeResponse"
-    assert response.json()["warning"] == "not_encrypted"
+    assert (response.json()["warning"], response.json()["commit"]) == ("not_encrypted", "c" * 40)
 
 
 def test_update_without_review_is_owner_http_replace_only(env, monkeypatch):
@@ -293,3 +358,42 @@ def test_update_without_review_is_owner_http_replace_only(env, monkeypatch):
     assert result.status_code == 200 and assert_bound("POST /api/skills/{skill}/update", result)
     assert _wait(lambda: (read_install_record(drive, "notes") or {}).get("basis") == "owner_skip")
     assert not reviews
+
+
+def test_probe_and_add_carry_a_revision_and_folder_and_the_list_offers_suggestions(env, monkeypatch):
+    from tests._skill_source_fixtures import commit_all, git
+
+    client, _drive, _hub, tmp_path = env
+    work, bare = tmp_path / "team", tmp_path / "team.git"
+    work.mkdir()
+    git("init", "-q", cwd=work)
+    write_skill(work / "pack", "gamma")
+    commit_all(work, "first")
+    git("checkout", "-q", "-b", "stable", cwd=work)
+    write_skill(work / "pack", "delta")
+    commit = commit_all(work, "stable")
+    git("init", "-q", "--bare", str(bare), cwd=tmp_path)
+    git("push", "-q", str(bare), "HEAD:refs/heads/stable", cwd=work)
+    view = {"url": str(bare), "revision": "stable", "subfolder": "pack"}
+    probe = client.post("/api/skill-sources/probe", json=view)
+    assert assert_bound("POST /api/skill-sources/probe", probe) == "SkillSourceProbeResponse"
+    assert probe.json()["commit"] == commit and sorted(probe.json()["found"]) == ["delta", "gamma"]
+    missing = client.post("/api/skill-sources/probe", json={**view, "subfolder": "nowhere"}).json()
+    assert missing["error"] == f"{bare} has no folder nowhere at stable."
+    added = client.post("/api/skill-sources", json={**view, "name": "Team", "trust": "review"})
+    assert assert_bound("POST /api/skill-sources", added) == "SkillSourceChangeResponse"
+    assert {key: added.json()["source"].get(key) for key in ("ref", "path")} == {"ref": "stable", "path": "pack"}
+    folder = client.post("/api/skill-sources", json={"path": str(work), "revision": "stable", "name": "W",
+                                                     "trust": "review"})
+    assert folder.status_code == 400 and folder.json()["code"] == "unreadable_source"
+    listed = client.get("/api/skill-sources")
+    assert assert_bound("GET /api/skill-sources", listed) == "SkillSourcesResponse"
+    assert listed.json()["suggestions"] == []
+    monkeypatch.setenv("OUROBOROS_SKILL_SOURCE_SUGGESTIONS", json.dumps([
+        {"name": "Team", "url": str(bare), "ref": "stable", "path": "pack"},
+        {"name": "Team next", "url": str(bare), "ref": "next", "about": "Unreleased"}]))
+    before = (tmp_path / "settings.json").read_text(encoding="utf-8")
+    listed = client.get("/api/skill-sources")
+    assert assert_bound("GET /api/skill-sources", listed) == "SkillSourcesResponse"
+    assert [(s["name"], s["connected"]) for s in listed.json()["suggestions"]] == [("Team", True), ("Team next", False)]
+    assert (tmp_path / "settings.json").read_text(encoding="utf-8") == before, "a suggestion connects nothing"

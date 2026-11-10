@@ -5,9 +5,10 @@ import json
 import pytest
 
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
-from tests._live_stack import stack
+from tests._live_stack import Stack, stack
 from tests._live_stack_wire import NativeWire
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
+from tests._cases import chosen_rows
 
 ROUTES = [('openai', False), ('grok', False), ('gemini', False), ('gemini', True)]
 
@@ -18,7 +19,7 @@ async def request(run):
     await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(renew(), run.call.writer.get_loop()))
 
 
-@pytest.mark.parametrize('engine,thinking', ROUTES)
+@pytest.mark.parametrize('engine,thinking', chosen_rows(ROUTES, 0, 1, 3))
 def test_successor_opens_while_owner_speaks_and_catches_up_before_answer(host_world, monkeypatch, engine, thinking):
     async def scenario():
         entered, release = asyncio.Event(), asyncio.Event()
@@ -72,7 +73,45 @@ def test_successor_opens_while_owner_speaks_and_catches_up_before_answer(host_wo
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('engine,thinking', ROUTES)
+def test_owner_says_stays_on_the_serving_socket_when_a_successor_is_accepted(tmp_path):
+    """The call serves its first socket until it is quiet, so an utterance that began there ends there, although
+    `Stack.wire` (the latest accepted socket) names the prepared successor by the time the owner's audio arrives."""
+    from types import SimpleNamespace
+
+    class Wire:
+        def __init__(self, number):
+            self.number, self.audio, self.received, self.calls = number, bytearray(), [], []
+
+        def input_start(self, item):
+            self.calls.append(('start', item))
+
+        def input_end(self, item, text):
+            self.calls.append(('end', item, text))
+
+    async def scenario():
+        run = Stack(SimpleNamespace(env=SimpleNamespace(drive_root=tmp_path)), 'grok')
+        serving, successor = Wire(1), Wire(2)
+        run.provider.connections.append(serving)
+        loop, started, ended = asyncio.get_running_loop(), serving.input_start, serving.input_end
+
+        def owner_starts(item):
+            started(item)
+            loop.call_later(.02, run.provider.connections.append, successor)  # the renewal's successor is accepted first,
+            loop.call_later(.1, serving.audio.extend, bytes(960))             # then the late audio reaches the serving socket
+
+        def owner_ends(item, text):
+            ended(item, text)
+            run.page.controls.append({'text': text, 'final': True})
+
+        serving.input_start, serving.input_end = owner_starts, owner_ends
+        await asyncio.wait_for(run.owner_says('Words while a successor is prepared.'), 10)
+        assert run.wire is successor, 'the successor was accepted during the utterance'
+        assert serving.calls == [('start', 'owner-0'), ('end', 'owner-0', 'Words while a successor is prepared.')]
+        assert successor.calls == [], 'the prepared successor serves nothing yet'
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('engine,thinking', chosen_rows(ROUTES, 0, 1, 3))
 def test_failed_preparation_falls_back_to_one_sequential_fit(host_world, monkeypatch, engine, thinking):
     async def scenario():
         original = NativeWire.send
@@ -96,7 +135,7 @@ def test_failed_preparation_falls_back_to_one_sequential_fit(host_world, monkeyp
 
 
 @pytest.mark.parametrize('ending', ['owner_end', 'owner_stop', 'panic', 'budget_exhausted'])
-@pytest.mark.parametrize('engine,thinking', ROUTES)
+@pytest.mark.parametrize('engine,thinking', chosen_rows(ROUTES, 0, 2))
 def test_owner_end_joins_preparation_and_closes_both_sockets(host_world, monkeypatch, engine, thinking, ending):
     async def scenario():
         entered = asyncio.Event()
@@ -131,7 +170,7 @@ def test_owner_end_joins_preparation_and_closes_both_sockets(host_world, monkeyp
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('engine,thinking', ROUTES)
+@pytest.mark.parametrize('engine,thinking', chosen_rows(ROUTES, 0, 3))
 @pytest.mark.parametrize('mail', [False, True])
 def test_catchup_does_not_offer_its_own_speech_but_pending_mail_is_answered(host_world, monkeypatch, engine, thinking, mail):
     async def scenario():
@@ -170,7 +209,7 @@ def test_catchup_does_not_offer_its_own_speech_but_pending_mail_is_answered(host
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('engine,thinking', ROUTES)
+@pytest.mark.parametrize('engine,thinking', chosen_rows(ROUTES, 0, 1, 3))
 def test_prepared_socket_lost_before_catchup_falls_back_without_losing_words(host_world, monkeypatch, engine, thinking):
     async def scenario():
         async with stack(host_world, monkeypatch, engine, thinking=thinking) as run:

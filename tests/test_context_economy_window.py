@@ -35,6 +35,12 @@ from tests.test_tool_result_delivery import _ctx, _deliver, _row, _source_ref, _
 setup, live_wait, main_call = gateway_fixture, wait_fixture, main_call_fixture
 TARGET, RESERVE = 40_000, 5_000
 OWNER = {"role": "user", "content": "Owner, while the batch ran: keep the old API alive. " * 60}
+_LONG_TAIL_CONTENT = "LATER REAL MATERIAL " * 30_000
+_GIANT_LINE_COUNT = 20_000
+_GIANT_MODULE_OF = "".join(f"row {n:07d} of the giant module: payload payload payload\n" for n in range(_GIANT_LINE_COUNT)) \
+    + "LAST LINE: keep the old API alive\n"
+_GIANT_MODULE_COLON = "".join(f"row {n:07d}: payload payload payload payload payload\n" for n in range(_GIANT_LINE_COUNT)) \
+    + "LAST LINE: keep the old API alive\n"
 
 
 def _batch(tmp_path, *, window, read_args=None, read_chars=240_000):
@@ -188,6 +194,10 @@ def test_the_facts_line_names_window_room_and_target_excess_apart(monkeypatch):
                                    "_context_measurement_basis": "fresh_model_usage"},
                      _context_capacity_total_tokens=500_000)
     assert "predicted free ~134,464" in witness and "fresh same-model" in witness
+    # A size refusal's own density counts every candidate its passes change: an estimate, never a stated count.
+    refused = _facts(monkeypatch, **base, _context_measurement_basis="refused_input", _context_capacity_total_tokens=500_000)
+    assert ("input ~300,000 before this line (host estimate at the density of the size-refused request: its "
+            "provider-stated input over its estimate)") in refused and "input of this refused request" not in refused
 
 
 # --- #1728: a technical rebind keeps the sent view while it fits -----------------------------------
@@ -205,7 +215,7 @@ def _wire(monkeypatch, messages):
     return [m for m in payload["messages"] if m["role"] == "system"]
 
 
-def _rebind(monkeypatch, root, plan, messages, *, window, ratio=1.0, status="asserted", usage=None):
+def _rebind(monkeypatch, root, plan, messages, *, window, ratio=1.0, status="asserted", usage=None, facts=None):
     import ouroboros.context
     from ouroboros import context_fit
     from ouroboros.loop_model_call import _rebind_context_fit_plan
@@ -214,7 +224,8 @@ def _rebind(monkeypatch, root, plan, messages, *, window, ratio=1.0, status="ass
     root.mkdir(parents=True, exist_ok=True)
     registry = ToolRegistry(repo_dir=root, drive_root=root)
     registry._ctx._accumulated_usage = usage
-    evidence = SimpleNamespace(route_fp=f"r-{window}", status=status, stale=status != "asserted", window_tokens=window)
+    evidence = SimpleNamespace(route_fp=f"r-{window}", status=status, stale=status != "asserted", window_tokens=window,
+                               route_facts=facts or {})  # a declared window's RouteFacts (its units)
     monkeypatch.setattr(ouroboros.context, "_context_fit_route", lambda *_a, **_kw: ({"model": "m2", "provider": "p"}, evidence))
     monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a, **_kw: ratio)
     rebound, mode = _rebind_context_fit_plan(plan, registry, messages, model="m2", use_local=False, start_mode="low",
@@ -227,7 +238,7 @@ def _long_tail(plan):
     return plan.messages_for("low") + [
         {"role": "assistant", "content": "", "tool_calls": [{"id": "big", "type": "function", "function": {
             "name": "read_file", "arguments": json.dumps({"path": "big.py", "start_line": 1, "max_lines": 9_000})}}]},
-        {"role": "tool", "tool_call_id": "big", "content": "LATER REAL MATERIAL " * 30_000}]  # ~150K: past the Low target
+        {"role": "tool", "tool_call_id": "big", "content": _LONG_TAIL_CONTENT}]  # ~150K: past the Low target
 
 
 def test_a_rebind_keeps_the_sent_view_on_a_smaller_fitting_window_and_unfolds_nothing(tmp_path, monkeypatch):
@@ -291,7 +302,7 @@ def test_a_rebind_uses_only_the_exact_routes_accepted_lower_bound(tmp_path, monk
     usage = {"_last_round_cache_usage": {"prompt_tokens": accepted, "provider": "p"},
              "_context_raw_input_tokens": accepted}
     record_input_anchor(usage, SimpleNamespace(model="m2", provider="p", output_reserve_tokens=65_536,
-        route_fp=f"r-{tight}" if same_route else "another-account"), round_idx=7)
+        route_fp=f"r-{tight}" if same_route else "another-account"), round_idx=7, estimate_tokens=accepted)
     old = low.projection("low").memory_facts["floor"]
     rebound, mode, event = _rebind(monkeypatch, tmp_path / "n", low, messages, window=tight, usage=usage)
     assert mode == "low" and event["view_kept"] is same_route
@@ -301,10 +312,55 @@ def test_a_rebind_uses_only_the_exact_routes_accepted_lower_bound(tmp_path, monk
     assert bool(rebound.projection("low").memory_facts.get("host_sections_addressed")) is not same_route
 
 
+@pytest.mark.parametrize("route,prepared,slack", [
+    ("same", 30_000, 15_000), ("same", -5_000, -2_500), ("same", -5_000, -10_000)],
+    ids=["caption-added", "image-withheld", "image-withheld-narrow"])
+def test_a_rebind_keeps_a_view_exactly_when_the_rounds_carried_input_fits_it(tmp_path, monkeypatch, route, prepared,
+                                                                             slack):
+    """Review rl-20261104T011620, on a hand-written anchor (no VLM, caption model or provider runs): the accepted
+    send's preparation put ``prepared`` estimator tokens between its bytes (B = U) and its transcript's P, as a
+    caption longer than the image proxy (+30,000) or a withheld image or shorter caption (-5,000) would. The rebind
+    sized the view at P' * U / B: it kept a Low view the round's own U + (P' - P) * U / B overfilled by 15,006, or
+    lowered Low to Nano where that estimate fits. A view is kept exactly when the round's measurement of it fits, and
+    what is sent fits; an added caption stays tokens at U / B, never a density. Another account's anchor, an
+    estimator window (raw, as the round) and an unknown window change nothing."""
+    from ouroboros import capability_evidence as ce, loop
+    from ouroboros.context_anchor import record_input_anchor
+    from tests.test_memory_view_modes import _built
+
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path / "evidence")
+    _core, plan = _built(tmp_path / "w", monkeypatch)
+    low = plan(1_000_000, preferred="low", tool_schemas=[])
+    messages = _long_tail(low)
+    shown = copy.deepcopy(messages)
+    raw = low.reproject_for_route(window_tokens=1_000_000, known_window=True, ratio=1.0, output_reserve=65_536, tool_schemas=[],
+                                  start_mode="low", current_messages=messages).projection("low").estimated_tokens
+    window = 0 if route == "unknown" else raw + 65_536 + slack  # between the shown bytes and the input carried
+    usage = {"_last_round_cache_usage": {"prompt_tokens": raw + prepared, "provider": "p"}, "_context_raw_input_tokens": raw}
+    record_input_anchor(usage, SimpleNamespace(model="m2", provider="p", output_reserve_tokens=65_536, route_fp=(
+        "another-account" if route == "another-account" else f"r-{window}")), round_idx=7, estimate_tokens=raw + prepared)
+    rebound, mode, event = _rebind(monkeypatch, tmp_path / "n", low, messages, window=window, usage=usage,
+                                   status="failed" if route == "unknown" else "asserted",
+                                   facts={"basis": "estimator"} if route == "estimator" else None)
+
+    def round_fit(transcript, rendered):  # the loop's own measurement of a round on the rebound route
+        return loop._measure_round_main_fit(SimpleNamespace(
+            context_fit_plan=rebound, active_context_mode=rendered, active_model="m2", messages=transcript, tool_schemas=[],
+            active_effort="", accumulated_usage=copy.deepcopy(usage), tools=SimpleNamespace(_ctx=None), round_idx=8),
+            automatic_pass_used=False)
+
+    kept, sent = round_fit(shown, "low"), round_fit(messages, mode)
+    assert kept.predicted_capacity_miss is (route == "same" and prepared > slack)
+    assert event["view_kept"] is not kept.predicted_capacity_miss and not sent.predicted_capacity_miss
+    assert (sent.measurement.capacity_total_tokens is None) is (route == "unknown")
+    if route == "same":
+        # Preparation changes the input by a signed offset, not the learned tokenizer density.
+        assert rebound.projection(mode).calibration_ratio == sent.measurement.measurement_density == 1.0
+
+
 @pytest.mark.parametrize("owner,ran,mode", [
-    ("low", None, "low"), ("max", "low", "low"), ("max", "nano", "nano"), ("low", "nano", "nano"),
-    ("max", "unknown", "max"), ("low", "max", "low")],
-    ids=["owner-low", "max-task-local-low", "max-task-local-nano", "low-task-local-nano", "unknown-mode", "owner-lowered"])
+    ("low", None, "low"), ("max", "nano", "nano"), ("max", "unknown", "max")],
+    ids=["owner-low", "max-task-local-nano", "unknown-mode"])
 def test_a_cold_restore_sends_the_new_capture_at_its_own_level_not_refolded_to_the_restored_tail(tmp_path, monkeypatch,
                                                                                                   owner, ran, mode):
     """The production owner-wait cold restore (the saved route restored onto the task, then its rebind). The new
@@ -338,6 +394,67 @@ def test_a_cold_restore_sends_the_new_capture_at_its_own_level_not_refolded_to_t
     assert messages[0] == fresh.projection(mode).system_message()  # the new capture, never the old bytes
     assert (messages[0] == fresh.projection("max").system_message()) is (mode == "max")  # Max books only in Max
     assert rebound.projection(mode).memory_facts == fresh.projection(mode).memory_facts
+
+
+def test_a_cold_restore_keeps_the_tasks_own_start_not_the_restore_fit(tmp_path, monkeypatch):
+    """A task that started in Max and was rebound to Low is parked and cold-restored where the new capture's own fit
+    starts Low (``ContextFitPlan.start`` of a fresh plan). The continuation serializer carries the task's start beside
+    its model role, an exact Resume's checkpoint keeps the source's (written before the rebind), and the restore lays
+    it onto the new plan before every rebind: the restored task still started in Max, so its Low is ``after_start``.
+    A source written before the start was carried (an old checkpoint right after Update) has no known start: it is
+    ``UNKNOWN_START`` through every later checkpoint and restore, its Low names no cause and the next-start read says
+    the original start is not known; nothing is reread and the restore's own fit never becomes the task's start."""
+    import ouroboros.context
+    import ouroboros.loop
+    from ouroboros import context_fit, memory_floor as mf, memory_view as mv, owner_wait, working_checkpoint
+    from ouroboros.context_fit import UNKNOWN_START
+    from ouroboros.context_measurement import mode_cause
+    from ouroboros.owner_wait import resume_native_loop
+    from ouroboros.tools.registry import ToolRegistry
+    from tests.test_memory_view_modes import _built
+
+    _core, plan = _built(tmp_path / "w", monkeypatch)
+    started = plan(1_000_000, tool_schemas=[])  # the source task's own start
+    fresh = next(candidate for window in (200_000, 150_000, 120_000, 100_000, 90_000, 80_000, 70_000, 60_000)
+                 if (candidate := plan(window, tool_schemas=[])).initial_mode == "low" and candidate.start[1])
+    assert started.start == ("max", "") and fresh.start[0] == "low" and fresh.start[1]
+    source = ToolRegistry(repo_dir=tmp_path / "s", drive_root=tmp_path / "s")
+    source._ctx.context_fit_plan = dataclasses.replace(started, initial_mode="low")  # rebound to Low after its start
+    saved = json.loads(json.dumps(owner_wait.continuation_state(source._ctx, [], {}, {}, 3, [], set())))
+    assert saved["context_start"] == ["max", ""]
+    evidence = SimpleNamespace(route_fp="r", status="asserted", stale=False, window_tokens=1_000_000)
+    monkeypatch.setattr(ouroboros.context, "_context_fit_route", lambda *_a, **_kw: ({"model": "m", "provider": "p"}, evidence))
+    monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+    monkeypatch.setattr(ouroboros.loop, "get_context_mode", lambda: "max")
+    for name, carried, expected, cause in (("carried", saved["context_start"], ("max", ""), "after_start"),
+                                           ("legacy", None, UNKNOWN_START, "")):
+        registry = ToolRegistry(repo_dir=tmp_path / name, drive_root=tmp_path / name)
+        registry._ctx.context_fit_plan, registry._ctx.owner_wait_resume = fresh, {}
+        registry._ctx.owner_wait_callback, registry._ctx.task_id = (lambda *_a: None), "restored-" + name
+        state = {"messages": copy.deepcopy(_long_tail(fresh)), "trace": {}, "usage": {}, "seen": [],
+                 "owner_directives": [], "delivery": {}, "acceptance": {}, "context_model_role": "main",
+                 "route": {"active_model": "m", "active_effort": "high", "active_use_local": False,
+                           "active_context_mode": "low"}, "tool_schemas": [], "round_idx": 3,
+                 **({"context_start": carried} if carried is not None else {})}
+        # An exact Resume's checkpoint is written before the rebind: it keeps the source's start, not the new fit's.
+        working_checkpoint.save_resumed(registry, state, copy.deepcopy(state["messages"]), {}, {}, set())
+        _bytes, written = working_checkpoint.read_working(working_checkpoint._root(registry._ctx), "restored-" + name,
+                                                          int(getattr(registry._ctx, "task_attempt", None) or 1))
+        assert written["context_start"] == list(expected), name
+        *_route, active, _round, rebound = resume_native_loop(registry, state, [], {}, {}, set())
+        assert active == "low" == rebound.initial_mode and rebound.start == expected != fresh.start, name
+        assert registry._ctx.context_fit_plan.start == expected and mode_cause(rebound, "low") == cause, name
+        # The next checkpoint carries what the restore holds; a second cold restore keeps it, unknown included.
+        again = json.loads(json.dumps(owner_wait.continuation_state(registry._ctx, [], {}, {}, 4, [], set())))
+        assert again["context_start"] == list(expected), name
+        assert context_fit.restored_start(fresh, again["context_start"]).start == expected, name
+        lines = "\n".join(mf.counterfactual_lines(mf.counterfactual_starts(
+            rebound, {"as captured": mv.snapshot_from_json(rebound.core.memory_view_json)})))
+        assert ("This task's original start is not known: its continuation did not carry it." in lines) is (
+            name == "legacy") and ("This task started in max" in lines) is (name == "carried"), name
+        assert "This task started in low" not in lines, name
+    for malformed in (["", ""], ["huge", ""], ["low", "after_start"], ["low"], "max", {"mode": "max"}):
+        assert context_fit.restored_start(fresh, malformed).start == UNKNOWN_START, malformed
 
 
 def _native(main_call, monkeypatch, tmp_path, *, task_text="hi", owner_mode="low", view=None, books=0):
@@ -490,7 +607,8 @@ def _unfolded(plan, addressed, message):
 
     sent = json.dumps(message, ensure_ascii=False)
     return [(step, ident) for step, ident, whole, _short in mf.floor_elements(snapshot_from_json(plan.core.memory_view_json))
-            if (step, ident) in addressed and json.dumps(whole, ensure_ascii=False)[1:-1] in sent]
+            if (step, ident) in addressed and whole and json.dumps(whole, ensure_ascii=False)[1:-1] in sent]  # a list
+    # form (F5a, F6a, F7a, F8a) has no whole text of its own: it is a form of elements already addressed
 
 
 def _shown_low(main_call, monkeypatch, tmp_path, cut):
@@ -520,7 +638,9 @@ def _shown_low(main_call, monkeypatch, tmp_path, cut):
     whole_view = {"story": render_story(actor), "room": render_room(actor)}  # the unfloored source, not an unsent mode
     addressed = _addressed(built, "low")
     assert addressed and not _unfolded(built, addressed, ctx.messages[0])
-    assert set(_unfolded(built, addressed, whole_view)) == {pair for pair in addressed if pair[0] != "F3"}
+    from ouroboros.memory_floor import _LIST_FORMS
+    assert set(_unfolded(built, addressed, whole_view)) == {pair for pair in addressed if pair[0] != "F3"
+                                                            and pair[0] not in _LIST_FORMS}
     return ctx, tools, events, windows, built
 
 
@@ -740,12 +860,44 @@ def test_an_actual_refusal_narrows_memory_even_when_the_estimate_fits(tmp_path, 
     # Each narrowing is the fact the task keeps (read back as a memory shortage); a rung that changes nothing keeps it.
     tool_ctx, trace = ctx.tools._ctx, ctx.tools._ctx._execution_trace
     assert tool_ctx.memory_view_facts == trace[VIEW_TRACE_KEY] == mf.trace_facts(second.memory_facts)
-    everything = sum(whole for _step, _ident, whole, _short in mf.degradable_elements(snapshot))
+    # The rung spends a saving on host producers before memory, and which of them still have a shorter form is the
+    # process's (the runtime facts read review and delegation history from the shared data root): everything is both.
+    everything = (sum(whole for _step, _ident, whole, _short in mf.degradable_elements(snapshot))
+                  + sum(mf.view_tokens(part) for part in (*core.semi_stable_sections, *core.dynamic_head_sections,
+                                                          *core.dynamic_sections)))
     assert _coarsen_memory_view(ctx, fit, saving=everything) is True
     kept = tool_ctx.memory_view_facts
     assert kept == trace[VIEW_TRACE_KEY] == mf.trace_facts(ctx.context_fit_plan.projection("max").memory_facts)
     assert _coarsen_memory_view(ctx, fit, saving=everything) is False  # every element is already an address
     assert tool_ctx.memory_view_facts is kept and trace[VIEW_TRACE_KEY] == kept
+
+
+def test_memory_pays_a_presend_overflow_it_can_answer_and_max_keeps_its_books(main_call, monkeypatch, tmp_path):
+    """06.11, the other side of the low fold below: when memory's detail can pay what the owner's words passed the
+    window by (20,000, the numbers that lowered the books before memory paid in the first pass), memory alone
+    narrows and Max keeps its whole books (29.10)."""
+    from ouroboros import memory_floor as mf
+    from ouroboros.memory_view import snapshot_json
+    from ouroboros.tool_policy import initial_tool_schemas
+    from tests import _memory_view_synthetic as syn
+
+    ctx, gateway, tools, events, plan, windows = _native(main_call, monkeypatch, tmp_path, owner_mode="max",
+                                                         view=snapshot_json(syn.actor("main")), books=120_000)
+    roomy = plan(10_000_000)
+    full = roomy.projected_tokens_with_tools("max", initial_tool_schemas(tools, context_mode="max"))
+    windows["account-a"] = window = math.ceil((full + roomy.output_reserve_tokens) * 4 / 3) + 4_000
+    built = plan(window)
+    words = "Owner, while you worked: keep the old API alive. "
+    owner = {"role": "user", "content": words * math.ceil((window - full - roomy.output_reserve_tokens + 20_000) * 4 / len(words))}
+    ctx.messages[:] = [*built.messages_for("max"), owner]
+    gateway.results = [_answer(ROUTE, {"role": "assistant", "content": "Kept."})]
+    gateway.dispatch = ["response_received"]
+    tools._ctx.memory_view_facts = mf.trace_facts(built.projection("max").memory_facts)
+    text, _usage, _trace = _run(ctx, tools, events, built)
+    rows = _drained(events)
+    assert text == "Kept." and len(gateway.creates) == 1 and tools._ctx.active_context_mode == "max"
+    assert [row.get("effective_mode") for row in rows if row.get("checkpoint_kind") == "context_memory_coarsened"] == ["max"]
+    assert "context_fit_low_retry" not in [row.get("checkpoint_kind") for row in rows]
 
 
 def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
@@ -759,15 +911,17 @@ def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
     from tests import _memory_view_synthetic as syn
 
     ctx, gateway, tools, events, plan, windows = _native(main_call, monkeypatch, tmp_path, owner_mode="max",
-                                                         view=snapshot_json(syn.actor("main")), books=120_000)
+                                                         view=snapshot_json(syn.actor("main")), books=400_000)
     roomy = plan(10_000_000)
     full = roomy.projected_tokens_with_tools("max", initial_tool_schemas(tools, context_mode="max"))
-    # A window that holds Max with all of my memory and both working margins; the owner's words then pass it by 20,000.
+    # A window that holds Max with all of my memory and both working margins.
     windows["account-a"] = window = math.ceil((full + roomy.output_reserve_tokens) * 4 / 3) + 4_000
     built = plan(window)
     assert built.initial_mode == "max" and not built.projection("max").memory_facts["floor"]["steps"]  # startup: whole
     words = "Owner, while you worked: keep the old API alive. "
-    owner = {"role": "user", "content": words * math.ceil((window - full - roomy.output_reserve_tokens + 20_000) * 4 / len(words))}
+    # The owner's words pass the window by 90,000: more than my memory's detail can give (06.11: memory pays in the
+    # first pass), so its floor lowers the books itself, the physical fact BIBLE P1 names; no second pass runs.
+    owner = {"role": "user", "content": words * math.ceil((window - full - roomy.output_reserve_tokens + 90_000) * 4 / len(words))}
     ctx.messages[:] = [*built.messages_for("max"), owner]
     full_low = built.reproject_transcript(ctx.messages, "low")
     assert context_fit.estimate_context_prompt_tokens(full_low, initial_tool_schemas(tools, context_mode="low")) + \
@@ -779,16 +933,23 @@ def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
     text, _usage, trace = _run(ctx, tools, events, built)
 
     [low] = [payload["messages"] for payload, _key in gateway.uploads]
-    kinds = [row.get("checkpoint_kind") for row in _drained(events)]
+    rows = _drained(events)
+    kinds = [row.get("checkpoint_kind") for row in rows]
     assert text == "Kept." and len(gateway.creates) == 1 and tools._ctx.active_context_mode == "low"
-    assert kinds.index("context_memory_coarsened") < kinds.index("context_fit_low_retry")  # one pass: memory, then books
+    # Memory folded first and, unable to make room, its own floor lowered the books in that same pass.
+    assert [row.get("effective_mode") for row in rows if row.get("checkpoint_kind") == "context_memory_coarsened"] == ["low"]
+    assert "context_fit_low_retry" not in kinds
 
     def shows(sent, whole):
         return json.dumps(whole, ensure_ascii=False)[1:-1] in json.dumps(sent, ensure_ascii=False)
 
     elements = mf.floor_elements(snapshot_from_json(built.core.memory_view_json))
     narrowed = {(step, ident) for step, ident, whole, _short in elements if shows(first, whole) and not shows(low, whole)}
-    assert {step for step, _ident in narrowed} >= {"F1", "F1b"}  # the deficit took more than one element
+    # The deficit took more than one rung: beside the task lines here the room records (F4); this room's replies,
+    # folded before them, came back in the walk's give-back, which the coarser F4 cuts left room for (both pinned in
+    # test_memory_view_floor).
+    folded = {step for step, _ident in narrowed}
+    assert "F1" in folded and folded - {"F1"}
     # Max sends [books, handbook, story, rooms notice, turns...]; Low [book navigation, story, rooms notice, turns...].
     assert len(json.dumps(low[0])) < len(json.dumps(first[0]))
     from ouroboros.transcript_prefix import message_digest
@@ -800,8 +961,9 @@ def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
     # what the request actually showed only by address.
     sent_fact = mf.trace_facts(tools._ctx.context_fit_plan.projection("low").memory_facts)
     assert trace[VIEW_TRACE_KEY] == tools._ctx.memory_view_facts == sent_fact
-    assert sent_fact["floor"]["mode"] == "low" and sent_fact["floor"]["steps"].keys() >= {"F1", "F1b"}
-    assert shortage_from_trace(trace).kind == "open_rows"  # open conversation now survives beyond the late note cuts
+    assert sent_fact["floor"]["mode"] == "low" and sent_fact["floor"]["steps"].keys() >= folded
+    rows = sent_fact["floor"]["steps"].keys() & {"F2", "F7"}  # this room's rows by address name the shortage, else its
+    assert shortage_from_trace(trace).kind == ("open_rows" if rows else "narrative")  # old narrative; never the notes
     # A later fitting route keeps this historical note and every address without reasserting a new shortage.
     after = tools._ctx.context_fit_plan
     rebound = after.reproject_for_route(window_tokens=window * 2, known_window=True, ratio=1.0,
@@ -826,8 +988,7 @@ def test_a_chosen_read_above_target_reaches_the_model_inside_the_known_window(
     windows["account-a"] = 1_000_000
     built = plan(windows["account-a"])
     ctx.messages[:] = built.messages_for(owner_mode)
-    giant = "".join(f"row {n:07d} of the giant module: payload payload payload\n" for n in range(20_000))
-    giant += "LAST LINE: keep the old API alive\n"
+    giant = _GIANT_MODULE_OF
     (ctx.drive_root / "giant.txt").write_text(giant, encoding="utf-8")
     read = {"id": "chosen-read", "type": "function", "function": {"name": "read_file", "arguments": json.dumps(
         {"path": "giant.txt", "start_line": 1, "max_lines": 30_000})}}
@@ -842,7 +1003,7 @@ def test_a_chosen_read_above_target_reaches_the_model_inside_the_known_window(
     second = gateway.uploads[1][0]["messages"]
     shown = next(row["content"] for row in second if row.get("tool_call_id") == "chosen-read")
     header, *rows = shown.rstrip("\n").split("\n")
-    assert "lines 1–20001 of 20001" in header
+    assert f"lines 1–{_GIANT_LINE_COUNT + 1} of {_GIANT_LINE_COUNT + 1}" in header
     assert "".join(row.split("\t", 1)[1] + "\n" for row in rows) == giant
     assert all(any(task_text in json.dumps(row, ensure_ascii=False) for row in payload["messages"])
                for payload, _key in gateway.uploads)
@@ -866,8 +1027,7 @@ def test_a_window_bounded_chosen_read_survives_next_host_rows_and_source_shrink(
     windows.update({"account-a": window, "account-b": 1_000_000})
     built = plan(window)
     ctx.messages[:] = built.messages_for(owner_mode)
-    giant = "".join(f"row {n:07d}: payload payload payload payload payload\n" for n in range(20_000))
-    giant += "LAST LINE: keep the old API alive\n"
+    giant = _GIANT_MODULE_COLON
     path = ctx.drive_root / "giant.txt"
     path.write_text(giant, encoding="utf-8")
     read_file, originals = tools._entries["read_file"].handler, []
@@ -923,8 +1083,7 @@ def test_a_chosen_read_on_an_unknown_window_stays_whole_after_an_unmeasured_engi
     windows.update({"account-a": 0, "account-b": 1_000_000})
     built = plan(0)
     ctx.messages[:] = built.messages_for("low")
-    giant = "".join(f"row {n:07d} of the giant module: payload payload payload\n" for n in range(20_000))
-    giant += "LAST LINE: keep the old API alive\n"
+    giant = _GIANT_MODULE_OF
     (ctx.drive_root / "giant.txt").write_text(giant, encoding="utf-8")
     runs, read_file = [], tools._entries["read_file"].handler
 
@@ -951,7 +1110,8 @@ def test_a_chosen_read_on_an_unknown_window_stays_whole_after_an_unmeasured_engi
     assert delivery["status"] == "capacity_unknown" and delivery["whole_tokens"] > OWNER_LOW_TARGET_TOKENS
     assert delivery["whole_tokens"] - delivery["minimum_tokens"] > delivery["free_tokens"]
     header, *rows = shown.rstrip("\n").split("\n")  # the numbered view, row by row: the file itself, unchanged
-    assert "lines 1–20001 of 20001" in header and "".join(row.split("\t", 1)[1] + "\n" for row in rows) == giant
+    assert f"lines 1–{_GIANT_LINE_COUNT + 1} of {_GIANT_LINE_COUNT + 1}" in header \
+        and "".join(row.split("\t", 1)[1] + "\n" for row in rows) == giant
     # The pre-send measurement saw the target deficit (no window to fit) and concealed nothing for it.
     facts = [row["content"] for row in refused if str(row["content"]).startswith("[CONTEXT_FACTS]")][-1]
     assert "window unknown" in facts and "free unknown" in facts and "over target" in facts

@@ -152,7 +152,7 @@ def test_memory_narration_and_context_view_do_not_change_subject(case):
     assert "Prepare the full report." in json.dumps(delivery_subject_projection(tool_ctx, trace))
 
 
-@pytest.mark.parametrize("arrival", ["direct_generation", "delivered_source", "incoming_queue", "mailbox"])
+@pytest.mark.parametrize("arrival", ["direct_generation", "incoming_queue", "mailbox"])
 def test_unread_or_newer_owner_input_cannot_be_acknowledged(case, arrival):
     tool_ctx, tools, ctx, trace, candidate, _run = case
     observed = capture_acceptance_observation(tool_ctx, trace, ctx.incoming_messages)

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import {
-    apiConnections, apiProviderLabel, changeRouteChoice, composeModelSource, configuredApiProviders,
+    apiConnections, apiProviderLabel, changeRouteChoice, composeModelSource, configuredApiProviders, connectionDefaults,
     decodeRouteChoice, encodeRouteChoice, parseModelSource, routeChoiceGroups, routeModelFields,
     routeModelInputHtml, routeModelSuggestions, routeSupportsAccount, routeTargetFromModel, sourceIdentityLabel,
 } from '../modules/route_editor_primitives.js';
@@ -152,6 +152,13 @@ test("a route names its key in the owner's words: the chip, and the task card's 
         };
         assert.match(card('openrouter@claude-credits::anthropic/claude-opus-5.5'), /claude-opus-5\.5 · Claude credits/);
         assert.doesNotMatch(card('anthropic/claude-opus-5.5'), /·\s*(Default|OpenRouter)/, 'the built-in key adds nothing');
+        // Audit 05.11 (U007): a Claudexor route names its model, never its stored spelling `codex=…`.
+        assert.match(card('claudexor::codex=gpt-6-astra'), /gpt-6-astra/);
+        assert.doesNotMatch(card('claudexor::codex=gpt-6-astra'), /codex=|claudexor/);
+        const unobserved = { finished: true, metaEl: { innerHTML: '', isConnected: true },
+            modelExecution: { source: 'none', requested_model: 'claudexor::codex=gpt-6-astra' } };
+        renderLiveCardMeta(unobserved);
+        assert.match(unobserved.metaEl.innerHTML, /Requested gpt-6-astra · execution not observed/);
         // An observed execution names the key it actually used, not the requested one.
         const record = { finished: true, metaEl: { innerHTML: '', isConnected: true }, modelExecution: {
             source: 'usable_solve_response', requested_model: 'anthropic/claude-opus-5.5',
@@ -178,7 +185,9 @@ test('Accounts renders one card per provider with its Default row, and an added 
     const secrets = html.slice(html.indexOf('data-settings-panel="secrets"'), html.indexOf('data-settings-panel="models"'));
     for (const key of PROVIDER_SECRET_KEYS) assert.doesNotMatch(secrets, new RegExp(`data-secret-setting="${key}"`), key);
     assert.match(secrets, /data-secret-setting="GITHUB_TOKEN"/);
-    assert.match(secrets, /data-secret-setting="OUROBOROS_NETWORK_PASSWORD"/);
+    // The network password has one field, beside the bind host it guards (Accounts › Network Gate), not a second one here.
+    assert.doesNotMatch(secrets, /OUROBOROS_NETWORK_PASSWORD/);
+    assert.equal(html.split('data-secret-setting="OUROBOROS_NETWORK_PASSWORD"').length - 1, 1);
 
     const compatible = PROVIDER_CARDS.find((card) => card.kind === 'openai-compatible');
     const row = connectionRowHtml(compatible, { uid: 'compatible-7', name: 'gigaagent', label: 'GigaAgent', enabled: false,
@@ -213,6 +222,16 @@ test('a row says what is true of its key now: status, use, and who provides it',
     assert.deepEqual(connectionRowFacts({ enabled: true, configured: false, usedBy: ['Light'] }),
         { tone: 'neutral', label: 'No key', meta: 'Used by Light' });
     assert.deepEqual(connectionRowFacts({ draft: true, usedBy: ['Main'] }), { tone: 'neutral', label: 'Not saved', meta: '' });
+    // A built-in compatible row served by the legacy pair names that address and where it is edited.
+    const legacyAddress = 'http://127.0.0.1:8080/v1';
+    assert.deepEqual(connectionRowFacts({ configured: true, usedBy: ['Main'], legacyAddress }), { tone: 'ok', label: 'Ready',
+        meta: 'Legacy OpenAI Base URL http://127.0.0.1:8080/v1 with the OpenAI API key · change the address in Settings → Accounts · used by Main' });
+    assert.deepEqual(connectionRowFacts({ configured: false, usedBy: ['Main'], legacyAddress }), { tone: 'neutral', label: 'No key',
+        meta: 'Legacy OpenAI Base URL http://127.0.0.1:8080/v1 with the OpenAI API key · change the address in Settings → Accounts · used by Main' });
+    assert.equal(connectionRowFacts({ configured: true, source: 'environment', legacyAddress }).meta,
+        'Provided by environment · not used by any role');
+    assert.equal(connectionRowFacts({ enabled: false, legacyAddress }).label, 'Disabled');
+    assert.equal(connectionRowFacts({ draft: true, legacyAddress }).meta, '', 'an edited row says nothing it cannot vouch for');
 
     const usage = connectionUsage({ ...SETTINGS, OUROBOROS_SUBAGENTS: { items: [
         { route: { kind: 'api_model', target_id: 'openrouter@claude-credits::openai/gpt-6' } },
@@ -280,4 +299,25 @@ test('a wizard draft lists named endpoints without saved metadata, keeping ident
     assert.equal(apiConnections({ OPENAI_COMPATIBLE_BASE_URL: 'http://127.0.0.1:41001/v1',
         OUROBOROS_CONNECTIONS: [{ kind: 'openai-compatible', name: 'default', enabled: false }] })
         .find((entry) => entry.id === 'openai-compatible').enabled, false);
+});
+
+// #2969: the wizard proposes on the key a draft has — every direct provider's own defaults (none falls back to
+// OpenRouter), on its only named key, or its built-in key first; several named keys wait for Main's choice.
+test('every direct provider the wizard knows proposes on the key a draft has', () => {
+    const { modelDefaults } = JSON.parse(readFileSync(new URL('./fixtures/onboarding_bootstrap.json', import.meta.url)));
+    const direct = ['openai', 'anthropic', 'cloudru', 'gigachat', 'minimax', 'deepseek', 'zai'];
+    for (const kind of direct) {
+        assert.ok(modelDefaults[kind]?.main?.startsWith(`${kind}::`), `${kind} has wizard defaults of its own`);
+        const named = { _meta: { connections: [entry(kind, 'corp')] } };
+        const { defaults, choice } = connectionDefaults(modelDefaults, kind, named, contract.providerProfiles);
+        assert.equal(defaults.main, modelDefaults[kind].main.replace(`${kind}::`, `${kind}@corp::`), kind);
+        assert.deepEqual(choice, []);
+        const both = { _meta: { connections: [entry(kind, ''), entry(kind, 'corp')] } };
+        assert.equal(connectionDefaults(modelDefaults, kind, both, contract.providerProfiles).defaults.main, modelDefaults[kind].main);
+        const two = { _meta: { connections: [entry(kind, 'corp'), entry(kind, 'home')] } };
+        assert.deepEqual(connectionDefaults(modelDefaults, kind, two, contract.providerProfiles, modelDefaults[kind].main).choice,
+            [`${kind}@corp`, `${kind}@home`]);
+        assert.equal(connectionDefaults(modelDefaults, kind, two, contract.providerProfiles, `${kind}@home::x`).defaults.main,
+            modelDefaults[kind].main.replace(`${kind}::`, `${kind}@home::`));
+    }
 });

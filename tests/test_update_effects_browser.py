@@ -14,7 +14,7 @@ from ouroboros.test_evidence import diagnostic_directory
 from tests.test_update_letter_browser import BOOT, WEB
 from tests.ui_console_errors import PageErrors
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.mark.parametrize("engine,width", [("chromium", 1360), ("chromium", 390), ("webkit", 390)])
@@ -92,7 +92,7 @@ def test_apply_discloses_before_post_and_applied_card_restores_locally(engine, w
                     assert len([path for path, _body in calls if path == "/api/update/apply"]) == before
                     page.locator(button).click()
                     dialog.wait_for()
-                    output = diagnostic_directory(tmp_path, "update-effects") / f"{strategy}-{engine}-{width}.png"
+                    output = diagnostic_directory(tmp_path, "update-effects", publish=True) / f"{strategy}-{engine}-{width}.png"
                     page.screenshot(path=str(output), full_page=True)
                     print(f"UPDATE_EFFECTS_SCREENSHOT={output}")
                     dialog.locator("[data-confirm-ok]").click()

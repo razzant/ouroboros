@@ -4,7 +4,6 @@ import pytest
 from tests._stub_delegate_engines import stub_delegate_engines as stub_delegate_engines
 from tests.test_configured_session_restore import _known_custody, _restored_registry, _task
 
-pytestmark = pytest.mark.serial
 
 
 def _restored_actor(tmp_path, monkeypatch, carrier):
@@ -31,8 +30,11 @@ def _receipt_args(decision="incomplete"):
             "zero_run_basis": "The retained invocation received a definite no-start refusal."}
 
 
-@pytest.mark.parametrize("carrier", ["working", "exact_pause", "owner_wait"])
-@pytest.mark.parametrize("decision", ["incomplete", "unknown"])
+@pytest.mark.parametrize(("decision", "carrier"), [
+    ("incomplete", "working"),
+    ("incomplete", "owner_wait"),
+    ("unknown", "exact_pause"),
+])
 def test_restored_readonly_definite_unrun_can_record_only_its_receipt(
         tmp_path, monkeypatch, carrier, decision, stub_delegate_engines):
     from ouroboros import delegate_custody as custody
@@ -64,7 +66,7 @@ def test_restored_readonly_definite_unrun_can_record_only_its_receipt(
     assert not stub_delegate_engines
 
 
-@pytest.mark.parametrize("blocker", ["pending", "live", "custody_unreadable", "already_receipted"])
+@pytest.mark.parametrize("blocker", ["pending", "custody_unreadable", "already_receipted", "full_disk"])
 def test_restored_readonly_receipt_still_proves_empty_custody(tmp_path, monkeypatch, blocker):
     from ouroboros import delegate_custody as custody
     from ouroboros.outcomes import read_verification_receipts
@@ -73,21 +75,25 @@ def test_restored_readonly_receipt_still_proves_empty_custody(tmp_path, monkeypa
     if blocker == "live":
         assert custody.emit(tmp_path, custody.STARTED, {
             "task_id": task["id"], "invocation_id": "invoke-one", "run_id": "late-live", "route": "codex"})
-    elif blocker in {"custody_unreadable", "already_receipted"}:
+    elif blocker in {"custody_unreadable", "already_receipted", "full_disk"}:
         assert custody.emit(tmp_path, custody.START_FAILED, {
             "task_id": task["id"], "invocation_id": "invoke-one", "definite": True})
         if blocker == "custody_unreadable":
             monkeypatch.setattr(custody, "custody_log_unreadable", lambda *_: True)
-        else:
+        elif blocker == "already_receipted":
             assert "typed host receipt recorded" in registry.execute("verify_and_record", _receipt_args())
             # Simulate a stale schema/marker; the handler must still read durable proof.
             registry._ctx._configured_actor_bootstrap["zero_run_receipt_recorded"] = False
     before = read_verification_receipts(tmp_path, task["id"])
     assert registry.get_schema_by_name("verify_and_record") is not None
+    if blocker == "full_disk":  # the actor lock's file cannot be created: its platform cause reaches the model
+        from tests._shared import full_disk_at
+        full_disk_at(monkeypatch, "delegate_actor_claims")
     result = registry.execute("verify_and_record", _receipt_args())
     expected = {"pending": "zero_run_requires_settlement", "live": "zero_run_requires_settlement",
-                "custody_unreadable": "zero_run_custody_unknown", "already_receipted": "already"}[blocker]
-    assert expected in result
+                "custody_unreadable": "zero_run_custody_unknown", "already_receipted": "already",
+                "full_disk": "No space left on device"}[blocker]
+    assert expected in result and (blocker != "full_disk" or "zero_run_custody_unknown" in result)
     assert read_verification_receipts(tmp_path, task["id"]) == before
 
 

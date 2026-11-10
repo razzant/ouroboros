@@ -202,6 +202,19 @@ def test_api_task_with_a_malformed_chat_id_is_still_a_typed_400(admission):
     assert "chat_id must be a JSON integer" in response.text
 
 
+def test_nameless_project_work_is_called_by_its_project_and_named_work_keeps_both(tmp_path):
+    """Audit 05.11 (U012): a Project's work with no title, name or request line read «Nova › Task»."""
+    from ouroboros.projects_registry import create_project, task_presentation_snapshot
+
+    create_project(tmp_path, "nova", name="Nova")
+    nameless = task_presentation_snapshot(tmp_path, "n1", task={"id": "n1", "project_id": "nova"}, project_id="nova")
+    assert (nameless["task_name"], nameless["target_label"]) == ("Nova", "Nova")
+    named = task_presentation_snapshot(tmp_path, "n2", task={"id": "n2", "project_id": "nova", "title": "Ship it"},
+                                       project_id="nova")
+    assert named["target_label"] == "Nova › Ship it"
+    assert task_presentation_snapshot(tmp_path, "m1", task={"id": "m1"})["target_label"] == "Task"
+
+
 def test_derived_project_id_is_scoped_but_never_announced_in_main(tmp_path, monkeypatch):
     """Owner decision 3A: no room, no Main row.
 

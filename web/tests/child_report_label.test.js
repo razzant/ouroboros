@@ -51,6 +51,34 @@ test('another ending, or a child whose line states a stop cause, keeps the neutr
     assert.deepEqual(['completed', 'failed', 'cancelled', ''].map(childReportLabel), ['Report to parent', '', '', '']);
 });
 
+test('a helper the host could not start leads its line with the cause; the notice to its parent stays in Details', () => {
+    const notice = '⚠️ SUBAGENT_UNAVAILABLE: this subagent could not start: its route cannot run: daemon_unreachable. '
+        + 'The task was NOT run and spent nothing; the host did not substitute another model, route or substrate.';
+    for (const [code, cause] of [
+        ['subagent_executor_unavailable', 'This helper could not start because its route was unavailable; it spent nothing'],
+        ['delegate_tools_invisible',
+            'This helper could not start because the tools that run its session are hidden from it; it spent nothing'],
+        ['delegate_visibility_unverified', 'This helper could not start because its tools could not be checked; it spent nothing'],
+    ]) {
+        const refused = summarizeChatLiveEvent(child({ subagent_event: 'failed', status: 'failed', result: notice,
+            reason_code: code, executor_route: 'claude' }));
+        assert.equal(refused.phase, 'error', code);
+        assert.equal(refused.activityPreview, cause, code);
+        assert.equal(refused.body, cause, code);
+        assert.ok(!refused.activityLead, code);
+        assert.match(refused.fullBody, /\[RESULT\]\n⚠️ SUBAGENT_UNAVAILABLE: this subagent could not start/, code);
+        assert.ok(refused.fullBody.endsWith(cause), refused.fullBody);
+        // The route its configured row named (restored on the terminal frame) reads as refused, never "outcome unknown".
+        assert.equal(refused.executorChip.label, 'Claude Code · blocked', code);
+    }
+    // Another failure keeps its own words on the line; its cause stays in Details.
+    const partial = 'Two of three sources were read before the provider stopped answering.';
+    const other = summarizeChatLiveEvent(child({ subagent_event: 'failed', status: 'failed', result: partial,
+        reason_code: 'provider_unavailable' }));
+    assert.equal(other.activityPreview, partial);
+    assert.ok(other.fullBody.endsWith('The task could not get a usable model answer, so it could not finish'), other.fullBody);
+});
+
 test('the expanded line leads with the label on its own line, as a timeline label (semibold, then a copyable break)', () => {
     const view = summarizeChatLiveEvent(child());
     const priorDocument = globalThis.document;

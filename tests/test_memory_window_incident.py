@@ -1,4 +1,4 @@
-"""Incident 062f199a replay, also runnable unchanged against the base revision."""
+"""Incident 062f199a replay: a wake's start beside my story, its own room and my other conversations."""
 import dataclasses
 import json
 
@@ -10,12 +10,10 @@ from tests import _memory_view_synthetic as syn
 def _incident(tmp_path, monkeypatch):
     task = {"id": "incident01", "usage_category": "consciousness", "chat_id": 1}
     spec = mv.view_spec_for_task(task, tmp_path)
-    rooms = [syn.live_room(i, words=1) for i in range(164)]
-    if spec.live_rooms == "directory":
-        rooms = [{**room, "directory": True, "words": [], "notes": []} for room in rooms]
+    rooms = [syn.conversation(i, words=1) for i in range(164)]
     snap = dataclasses.replace(syn.snapshot(role="consciousness", story=syn.pages(103, 200),
         room_facts=syn.room(lane1=[syn.spoken(i, "ouroboros", 8_000) for i in range(100)], lane2=359),
-        live=rooms), spec=spec)
+        conversations=rooms), spec=spec)
     core = cf.ContextCore("Required core", "Constitution", "b" * 1_440_000, "", "Identity",
         "f" * 500_000, '"Assignment"', False, memory_view_json=mv.snapshot_json(snap))
     monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0581)

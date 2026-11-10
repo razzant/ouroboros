@@ -5,6 +5,15 @@ transferred: a parked worker cannot dispatch model work until an idle active
 slot is retired and its original input queue receives the correlated grant.
 The ordinary supervisor assignment tick performs this maintenance; there is no
 second scheduler, queue, or durable wait store.
+
+Q spans memory only here: a park and a grant are decided under Q, written to the
+task result outside it (``set_owner_wait``: the store is the restore authority
+every reader takes the wait from, ``restart_retention``, ``queue_snapshot``,
+``working_checkpoint.live_park``), then applied to memory under Q again after
+revalidating the stack, and MARKED on the queue (``persist_queue_snapshot``),
+never published under Q: the tick publishes the row. A crash between the store
+commit and that publication restores from the store (kill-after-each-step:
+``tests/test_queue_publication_revision.py``).
 """
 
 from __future__ import annotations
@@ -19,8 +28,8 @@ from ouroboros.owner_wait import set_owner_wait
 from ouroboros.store import acquisition_budget
 from supervisor.queue import _queue_lock
 from supervisor.worker_pool_lifecycle import (
-    _serialized_worker_lifecycle, request_worker_quiescence, retire_or_replace_worker,
-    retire_quiescent_worker, retire_worker, worker_ready,
+    _serialized_worker_lifecycle, is_project_slot, is_worker_slot, project_slots, request_worker_quiescence,
+    retire_or_replace_worker, retire_quiescent_worker, retire_worker, worker_ready,
 )
 
 log = logging.getLogger(__name__)
@@ -89,8 +98,20 @@ def retry_pending_owner_waits(ctx: Any) -> None:
         handle_owner_wait(request["event"], ctx)
 
 
+def _park_request_held(ctx: Any, task_id: str, meta: dict, worker: Any, attempt: int, pending: Any) -> bool:
+    """Under Q: the park request the handler left Q with is still the one this stack owes."""
+    return (ctx.RUNNING.get(task_id) is meta and ctx.WORKERS.get(worker.wid) is worker
+            and meta.get(_PENDING_PARK) is pending and meta.get("worker_id") == worker.wid
+            and meta.get("attempt") == attempt and worker.busy_task_id == task_id
+            and not getattr(worker, "reaping", False))
+
+
 def handle_owner_wait(event: dict, ctx: Any) -> None:
-    """Acknowledge only the current physical attempt's durable park or wake."""
+    """Acknowledge only the current physical attempt's durable park or wake.
+
+    The park is decided under Q, written to the store outside it and applied under Q again
+    (``_park_request_held`` revalidates the stack); the queue is marked, never published here.
+    """
     from ouroboros.store import acquisition_budget, StoreBusy
     from supervisor import queue
 
@@ -104,7 +125,8 @@ def handle_owner_wait(event: dict, ctx: Any) -> None:
         worker = ctx.WORKERS.get(wid)
         if (not wait_id or not isinstance(meta, dict) or worker is None
                 or meta.get("worker_id") != wid or meta.get("attempt") != attempt
-                or worker.busy_task_id != task_id or worker.proc.pid != pid
+                or worker.busy_task_id != task_id
+                or (worker.proc.pid != pid and is_worker_slot(worker))  # an inline carrier has no pid of its own
                 or getattr(worker, "reaping", False)):
             return
         current = meta.get("owner_wait") or {}
@@ -154,34 +176,20 @@ def handle_owner_wait(event: dict, ctx: Any) -> None:
             elif cold_interval:
                 meta.pop("sleep_parked_at", None)
             pending["clock_projected"] = True
-        park_written = False
-        try:
-            # A contended write rolls back before the next tick. Never hold Q or
-            # the event loop waiting for SQLite; the physical request stays owned.
-            with acquisition_budget(0):
-                wait = set_owner_wait(ctx.DRIVE_ROOT, task_id, wait,
-                                      expected_wait_id=current.get("wait_id"),
-                                      expected_state=current.get("state"))
-            park_written = True
-            if cold_interval:
-                from supervisor.events_budget import finish_resume_clock
-
-                # The committed park retires only the old clock marker. Explicit
-                # Resume selection and the truthful new open interval stay intact.
-                finish_resume_clock(meta, float(paused))
-                if parked_at is not None:
-                    meta["sleep_parked_at"] = parked_at
-            meta["owner_wait"] = wait
-            # A spent exact-budget carrier still on this row is retired by the
-            # revocation seam's ``_owner_wait_resume`` branch when the restart
-            # reads the durable grant as consumed (#1196, F3); it decides nothing
-            # while the task stays RUNNING here.
-            worker.active_capacity = False
-            if not queue.persist_queue_snapshot(reason="owner_wait_parked"):
-                raise RuntimeError("owner wait queue snapshot was not persisted")
-        except Exception as exc:
-            if (not park_written and isinstance(exc, StoreBusy) and exc.reason == "contention"
-                    and getattr(exc, "rollback_confirmed", None) is not False):
+        expected_wait_id, expected_state = current.get("wait_id"), current.get("state")
+        root_id = str(meta["task"].get("root_task_id") or task_id)
+    try:
+        # Outside Q: the durable park. A contended write rolls back before the next tick. Never hold
+        # Q or the event loop waiting for SQLite; the physical request stays owned (``_PENDING_PARK``).
+        with acquisition_budget(0):
+            written = set_owner_wait(ctx.DRIVE_ROOT, task_id, wait,
+                                     expected_wait_id=expected_wait_id, expected_state=expected_state)
+    except Exception as exc:
+        if (isinstance(exc, StoreBusy) and exc.reason == "contention"
+                and getattr(exc, "rollback_confirmed", None) is not False):
+            return
+        with _queue_lock:
+            if not _park_request_held(ctx, task_id, meta, worker, attempt, pending):
                 return
             pending["refused"] = str(exc) or type(exc).__name__
             worker.active_capacity = True
@@ -189,9 +197,35 @@ def handle_owner_wait(event: dict, ctx: Any) -> None:
             # The worker is still in this wait until it receives the refusal.
             # Keep its known clock/checkpoint facts, without a parked ACK or retry.
             _command(worker, task_id, wait, "refused", reason=str(exc))
+        return
+    with _queue_lock:
+        if not _park_request_held(ctx, task_id, meta, worker, attempt, pending):
+            # The park stands in the store (saved work a recovery reads); the stack it was for moved on.
+            log.info("Owner wait park of %s written but its stack changed meanwhile; no acknowledgement", task_id)
             return
+        if cold_interval:
+            from supervisor.events_budget import finish_resume_clock
+
+            # The committed park retires only the old clock marker. Explicit
+            # Resume selection and the truthful new open interval stay intact.
+            finish_resume_clock(meta, float(paused))
+            if parked_at is not None:
+                meta["sleep_parked_at"] = parked_at
+        meta["owner_wait"] = written
+        # A spent exact-budget carrier still on this row is retired by the
+        # revocation seam's ``_owner_wait_resume`` branch when the restart
+        # reads the durable grant as consumed (#1196, F3); it decides nothing
+        # while the task stays RUNNING here.
+        worker.active_capacity = False
+        # A mark, not a barrier: the store's ``waiting`` row is the park's restore authority; the
+        # tick publishes the row (a crash before it restores from the store all the same).
+        queue.persist_queue_snapshot(reason="owner_wait_parked")
+        if written.get("reason") == "owner_pause":  # it may be the tree's last member; no census follows a warm park
+            from supervisor.owner_pause_control import mark_tree_changed
+
+            mark_tree_changed(root_id)
         meta.pop(_PENDING_PARK, None)
-        _command(worker, task_id, wait, "parked")
+        _command(worker, task_id, written, "parked")
 
 
 def _resume_memory_allowed(task_id: str, meta: dict, worker: Any) -> bool:
@@ -246,10 +280,10 @@ def _grant_resume(
 
     Under Q only memory decides (the attempt, the worker, the replacement slot) and the claim is
     taken; the lane reads the durable authorities, writes the wait ``resumed`` (a CAS on its id),
-    re-takes Q, revalidates memory only and hands the capacity back with the grant command
-    (``_resume_attempt``). A refusal or failure after the write rewrites ``waiting`` outside Q and
-    restores the clock facts. True only on the historical inline path (no generation) once granted;
-    on the lane this returns False and the caller's hold stands until the grant lands or lapses.
+    re-takes Q, revalidates memory only, marks the queue and hands the capacity back with the grant
+    command (``_resume_attempt``). A refusal or failure after the write rewrites ``waiting`` outside
+    Q and restores the clock facts. True only on the historical inline path (no generation) once
+    granted; on the lane this returns False and the caller's hold stands until the grant lands or lapses.
     """
     from supervisor import workspace_preparation
 
@@ -309,7 +343,8 @@ def _resume_claim_held(task_id: str, meta: dict, worker: Any, token: str) -> boo
 
 
 def _active_slots() -> int:
-    return sum(1 for slot in _pool().WORKERS.values() if getattr(slot, "active_capacity", True))
+    """Project slots holding active capacity: the only ones ``MAX_WORKERS`` bounds."""
+    return sum(1 for slot in project_slots() if getattr(slot, "active_capacity", True))
 
 
 def _resume_attempt(task_id: str, meta: dict, worker: Any, token: str, replacement: Any,
@@ -318,7 +353,8 @@ def _resume_attempt(task_id: str, meta: dict, worker: Any, token: str, replaceme
 
     On the lane a closed generation refuses before the durable write; a grant written while it was
     open finishes its put, which without a replacement needs a free active slot: the reservation lent
-    nothing, so a slot taken meanwhile leaves the park standing.
+    nothing, so a slot taken meanwhile leaves the park standing. The second hold is memory only: the
+    queue is marked (the store's ``resumed`` row is the grant's restore authority), never published here.
     """
     from ouroboros.owner_wait import OwnerWaitSuperseded
     from supervisor import queue
@@ -351,7 +387,8 @@ def _resume_attempt(task_id: str, meta: dict, worker: Any, token: str, replaceme
                 log.info("Owner wait resume of %s refused after its durable grant: the stack, its worker "
                          "or the replacement slot changed; the park stands", task_id)
                 return False
-            if generation is not None and replacement is None and _active_slots() >= _pool().MAX_WORKERS:
+            if (generation is not None and replacement is None and is_project_slot(worker)
+                    and _active_slots() >= _pool().MAX_WORKERS):
                 log.info("Owner wait resume of %s waits: no active slot is free; the park stands", task_id)
                 return False
             if replacement is not None:
@@ -362,8 +399,7 @@ def _resume_attempt(task_id: str, meta: dict, worker: Any, token: str, replaceme
             meta["budget_paused_sec"] = paused
             meta.pop("sleep_parked_at", None)
             try:
-                if not queue.persist_queue_snapshot(reason="owner_wait_resumed"):
-                    raise RuntimeError("owner wait resume snapshot was not persisted")
+                queue.persist_queue_snapshot(reason="owner_wait_resumed")  # a mark: the tick publishes the row
                 _command(worker, task_id, resumed, "resume_granted")
             except Exception:
                 worker.active_capacity = False
@@ -439,7 +475,7 @@ def _resume_original_stacks(holds: dict) -> None:
     with _queue_lock:
         waiting = [(tid, meta) for tid, meta in pool.RUNNING.items()
                    if meta.get("owner_wait_resume_requested")]
-        freeing = sum(1 for w in pool.WORKERS.values()
+        freeing = sum(1 for w in project_slots()
                       if getattr(w, "active_capacity", True) and getattr(w, "retiring", False))
     for task_id, meta in waiting:
         with _queue_lock:
@@ -457,14 +493,15 @@ def _resume_original_stacks(holds: dict) -> None:
             if not _resume_memory_allowed(task_id, meta, worker):
                 continue
             holds[worker.wid] = task_id  # authorized this tick: owed its lent capacity back
-            active = [w for w in pool.WORKERS.values() if getattr(w, "active_capacity", True)]
+            active = [w for w in project_slots() if getattr(w, "active_capacity", True)]
             # A grant still on the lane counts as the slot it will take (its worker is not active yet).
             granting = sum(1 for other in pool.RUNNING.values() if other is not meta and other.get(_RESUME_CLAIM))
             exhausted = next((w for w in active
                               if getattr(w, "readiness_exhausted", False)
                               and not w.proc.is_alive()), None)
             idle = [w for w in active if w.busy_task_id is None and worker_ready(w)]
-            if len(active) + granting >= pool.MAX_WORKERS and exhausted is None:
+            # A conversation carrier's park lent no project capacity: its Resume is never gated by MAX_WORKERS.
+            if is_project_slot(worker) and len(active) + granting >= pool.MAX_WORKERS and exhausted is None:
                 for slot in idle:
                     request_worker_quiescence(slot)
                 quiet = next((slot for slot in idle if slot.quiescence_confirmed), None)

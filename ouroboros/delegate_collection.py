@@ -7,6 +7,7 @@ child prepares heavy captures. The server rechecks custody before publishing the
 """
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -15,6 +16,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Any, NamedTuple
 
 from ouroboros import delegate_custody as c
 from ouroboros import delegate_custody_current as current
@@ -23,6 +25,7 @@ from ouroboros.delegate_capture_attempt import (collection_due, record_attempt, 
                                                 capture_required, legacy_cap)
 from ouroboros.delegate_directory import is_in_place_run
 from ouroboros.delegate_named_evidence import saved_named_evidence
+from ouroboros.execution_domain import EngineClients, run_gateway
 from ouroboros._usage_rows import REVIEW_ATTRIBUTION_KEYS
 
 log = logging.getLogger(__name__)
@@ -265,11 +268,12 @@ def collect_terminal(root, run_id: str, *, gateway=None, detail: dict | None = N
     entry = current.run(root, run_id)
     if entry is None or not entry.terminal_source:
         return {"status": "pending", "reason": "terminal_not_observed"}
-    lock = c.disposition_lock_path(root, entry)
+    lock, held = c.disposition_lock_path(root, entry), {}
     lock.parent.mkdir(parents=True, exist_ok=True)
-    fd = acquire_exclusive_file_lock(lock, timeout_sec=0, owner_aware_stale=True)
-    if fd is None:
-        return {"status": "pending", "reason": "collection_in_progress"}
+    fd = acquire_exclusive_file_lock(lock, timeout_sec=0, owner_aware_stale=True, outcome=held)
+    if fd is None:  # only contention is another collector; any other refusal keeps the platform's cause
+        return ({"status": "pending", "reason": "collection_in_progress"} if held.get("reason") == "contention"
+                else {"status": "pending", "reason": "collection_lock_unavailable", "lock_outcome": dict(held)})
     capture = None
     transient = False
     retention = {}
@@ -291,8 +295,8 @@ def collect_terminal(root, run_id: str, *, gateway=None, detail: dict | None = N
             or (output_attempt.get("retry") == "transient" and output_attempt.get("generation") != generation))
         if (gateway is None and gateway_factory is not None
                 and (retry_output or (not background and capture_required(entry)))):
-            try:
-                owned_gateway = gateway = gateway_factory()
+            try:  # the run's own engine (``execution_domain``), else the caller's discovery
+                owned_gateway = gateway = run_gateway(entry, gateway_factory)
             except Exception:
                 pass  # Retained output, local capture and money do not require transport.
         retry_capture = recapture or legacy_cap(entry) or (entry.collection_attempt.get("generation") != generation
@@ -485,6 +489,15 @@ _RUNTIMES: dict[str, "BodyRuntime"] = {}
 _RUNTIME_LOCK = threading.RLock()
 
 
+class _Held(NamedTuple):
+    """One held run as the body last read it, with what it owes the body, judged once per stamp."""
+    stamp: Any  # the custody row's (``write_seq``, ``updated_at``); None for a run read for this tick alone
+    entry: Any
+    observe: bool  # no terminal source while it runs or after its terminal: an engine read is due
+    collect: bool  # mechanical collection is due in ``generation`` (``collection_due``)
+    generation: str
+
+
 class BodyRuntime:
     """One generation's owned physical jobs. No background job grants actor authority."""
     def __init__(self, root, *, stop_event=None, gateway_factory=None, max_workers=None, collection_ready=None):
@@ -513,11 +526,16 @@ class BodyRuntime:
         # unchanged question or terminal does not wake the pass again; set only AFTER the fetch.
         self.seen: dict[str, str] = {}
         self._watched: set[str] = set()
+        # The held set as this tick last listed it (run id -> ``_Held``), and the instant and this process's custody
+        # writes at that listing (``_held``).
+        self._held_entries: dict[str, _Held] = {}
+        self._listed: tuple | None = None
         # Whether the observed engine serves the compact wait, learned from its catalog on the
         # first read; until then (and on engines without it) every held run is read as before.
         self._compact_wait = False
         self._observing = None
         self._connecting = None
+        self._work = EngineClients()  # a work engine's runs are observed through their own engine
         self.thread = threading.Thread(target=self._drive, name="delegated-body", daemon=True)
         try:
             self.thread.start()
@@ -558,10 +576,12 @@ class BodyRuntime:
         from ouroboros.claudexor_daemon import read_owned_gateway
         return read_owned_gateway()
 
-    def _observer_gateway(self):
-        """One observation client; discovery and handshake never hold the runtime lock."""
+    def _observer_gateway(self, entry=None):
+        """One observation client per engine; discovery and handshake never hold the runtime lock."""
         from ouroboros.gateways.claudexor_metadata import endpoint_generation
 
+        if getattr(entry, "engine_ref", None):
+            return self._work.get(entry)
         with self.lock:
             gateway = self._observing
         endpoint = getattr(gateway, "_endpoint", None)
@@ -590,12 +610,14 @@ class BodyRuntime:
     def _observation_key(self, entry):
         from ouroboros.gateways.claudexor_metadata import endpoint_generation
 
-        gateway = self._observing
+        gateway = self._work.held(entry) if entry.engine_ref else self._observing
         endpoint = getattr(gateway, "_endpoint", None)
         generation = endpoint_generation(endpoint) if endpoint is not None else id(gateway)
         return generation, entry.invocation_id, entry.daemon_store_id
 
     def _drop_observer_gateway(self, gateway=None):
+        if self._work.drop(gateway) and gateway is not None:
+            return
         with self.lock:
             if gateway is not None and self._observing is not gateway:
                 return
@@ -612,7 +634,7 @@ class BodyRuntime:
         is "not supported this beat", nothing is cached, and the old read runs regardless."""
         from ouroboros.gateways import claudexor_observation as observation
         from ouroboros.gateways.claudexor import SHORT_POLL_TIMEOUT_SEC, ClaudexorUnavailable
-        gateway = self._observer_gateway()
+        gateway = self._observer_gateway(entry)
         try:
             supported = observation.wait_many_supported(gateway, timeout_sec=SHORT_POLL_TIMEOUT_SEC)
         except ClaudexorUnavailable:
@@ -635,7 +657,7 @@ class BodyRuntime:
         if c.daemon_says_absent(exc) and entry.terminal_source:
             return True  # Retention loss cannot erase a terminal fact, including an in-flight publication.
         if c.daemon_says_absent(exc, gateway=gateway, run=entry):
-            c.close_absent_run(self.root, gateway, entry, "body_observation_absent")
+            c.close_absent_run(self.root, gateway, entry, "body_observation_absent", absence=exc)
             return True
         if c.daemon_says_absent(exc):
             c.record_containment_fault(self.root, entry, "run_absence_identity_unproven",
@@ -755,15 +777,20 @@ class BodyRuntime:
         (``gateway/reply_preparation.py``), including a received HTTP refusal; ``row`` is the
         compact wait's answer for a run whose detail this pass did not need."""
         from ouroboros.delegate_supervision import run_activity
+        from ouroboros.gateways.claudexor_observation import question_attention
 
         summary = c.summary_of(detail) if detail is not None else {}
+        waiting, async_only = question_attention(detail) if detail is not None else (False, False)
         if row is not None:
-            summary = {"state": row.status or "", "waitingOnUser": bool(row.pending)}
+            # The compact row says the same as the detail would: an opted-in engine marks a row
+            # whose questions are all async ``blocking: false``; unknown keeps the blocking meaning.
+            summary = {"state": row.status or ""}
+            waiting, async_only = bool(row.pending), bool(row.pending) and row.blocking is False
         fact = {"run_id": entry.run_id, "task_id": entry.task_id, "invocation_id": entry.invocation_id,
                 "answered": detail is not None or row is not None or bool(getattr(error, "status_code", 0)),
                 "error_code": str(getattr(error, "code", "")), "http_status": getattr(error, "status_code", 0),
                 "run_state": str(summary.get("state") or ""),
-                "waiting_on_user": bool(summary.get("waitingOnUser") or (detail or {}).get("pendingInteractions")),
+                "waiting_on_user": waiting, "async_questions_only": async_only,
                 "at": time.monotonic()}  # dated on this process's clock, like every in-process reader
         with self.lock:
             previous, self.observed[entry.run_id] = self.observed.get(entry.run_id), fact
@@ -780,10 +807,39 @@ class BodyRuntime:
         return collect_terminal(self.root, run_id, gateway_factory=self._gateway, stopped=lambda: not self.active,
                                 failures=failures, recapture=recapture, generation=self.runtime_id, background=True)
 
+    def _owing(self, stamp, entry) -> _Held:
+        return _Held(stamp, entry, not entry.review_owned and not entry.terminal_source
+                     and (not entry.settled or bool(entry.terminal_state)),
+                     collection_due(entry, generation=self.runtime_id), self.runtime_id)
+
+    def _held(self) -> dict:
+        """The held runs this tick looks at, each with what it owes the body. The set is listed once per tick period
+        by this body's clock, or at once after this process wrote custody (its own jobs' effects); another process's
+        write is seen at the next period, as every tick saw it before. A row is decoded only when its stamp moved, and
+        what it owes is judged again only then or in a new generation (a transient collection retries in one): a
+        settled run that keeps its patch costs a tick nothing while it stands."""
+        from ouroboros.delegate_supervision import _TICK_SEC
+
+        now, writes, generation = time.monotonic(), current.local_writes(), self.runtime_id
+        if self._listed is not None and now - self._listed[0] < _TICK_SEC and self._listed[1:] == (writes, generation):
+            return dict(self._held_entries)
+        stamped = current.held_stamped(self.root)
+        if stamped is None:  # below the stamped schema: every row, every tick, as before
+            self._listed = None
+            self._held_entries = {rid: self._owing(None, entry) for rid, entry in current.held_runs(self.root).items()}
+            return dict(self._held_entries)
+        kept, fresh = self._held_entries, {}
+        for rid, (stamp, facts) in stamped.items():
+            old = kept.get(rid) if rid in kept and kept[rid].stamp == stamp else None
+            fresh[rid] = (old if old.generation == generation else self._owing(stamp, old.entry)) if old is not None \
+                else self._owing(stamp, current._decode(facts))
+        self._held_entries, self._listed = fresh, (now, writes, generation)
+        return dict(fresh)
+
     def tick(self):
         if not self.active:
             return
-        entries = current.held_runs(self.root)
+        held = self._held()
         with self.lock:
             for jobs in (self.reads, self.collections):
                 for rid, future in list(jobs.items()):
@@ -792,36 +848,36 @@ class BodyRuntime:
                             log.debug("Body operation for %s remains owed: %s", rid, future.exception())
                         del jobs[rid]  # Completed history is not an in-flight registry.
             requested, self.requested = self.requested, set()
-        for rid in requested - entries.keys():
+        for rid in requested:  # an explicit request (sleep custody hands its runs over) reads its run now
             entry = current.run(self.root, rid)
             if entry is not None:
-                entries[rid] = entry
+                held[rid] = self._owing(None, entry)
         with self.lock:
-            for rid in set(self.observed) - set(entries):
+            for rid in set(self.observed) - set(held):
                 del self.observed[rid]  # a run no longer held has no current execution fact
                 self.observation_gaps.pop(rid, None)
                 self.seen.pop(rid, None)
                 self._watched.discard(rid)
         with self.lock:
             for rid in list(self.collection_failures):
-                if rid not in self.collections and not collection_pending(entries.get(rid)):
+                if rid not in self.collections and not collection_pending(held[rid].entry if rid in held else None):
                     self.collection_failures.pop(rid, None)
-        watch = []
+        watch, ready = [], None
         with self.lock:
             compact = self._compact_wait
-        for entry in entries.values():
-            if entry.review_owned or not self.active:
+        for run in held.values():
+            if not (run.observe or run.collect) or not self.active:
                 continue
+            entry = copy.deepcopy(run.entry)  # every job its own entry: what this body read stays as read
             with self.lock:
-                if not entry.terminal_source and (not entry.settled or entry.terminal_state):
-                    if self.observation_gaps.get(entry.run_id) != self._observation_key(entry):
-                        if compact:
-                            watch.append(entry)
-                        else:
-                            previous = self.reads.get(entry.run_id)
-                            if previous is None or previous.done():
-                                self.reads[entry.run_id] = self.observers.submit(self._observe, entry)
-                if self.collection_ready() and collection_due(entry, generation=self.runtime_id):
+                if run.observe and self.observation_gaps.get(entry.run_id) != self._observation_key(entry):
+                    if compact and not entry.engine_ref:  # one compact wait per pass holds the owned engine's runs
+                        watch.append(entry)
+                    else:
+                        previous = self.reads.get(entry.run_id)
+                        if previous is None or previous.done():
+                            self.reads[entry.run_id] = self.observers.submit(self._observe, entry)
+                if run.collect and (ready if ready is not None else (ready := bool(self.collection_ready()))):
                     previous = self.collections.get(entry.run_id)
                     if previous is None or previous.done():
                         self.collections[entry.run_id] = self.observers.submit(self._collect, entry.run_id)

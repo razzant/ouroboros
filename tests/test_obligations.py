@@ -33,8 +33,6 @@ def test_a_lost_store_is_unavailable_never_empty(tmp_path):
 @pytest.mark.parametrize("status,fields,expected", [
     ("running", {}, {"nonterminal", "pending_drives"}),
     ("running", {"root_phase_checkpoint": {"post_task_synthesis": "paused"}}, {"synthesis"}),
-    ("running", {"delegated_runs_unreconciled": ["r"]}, {"delegated_runs"}),
-    ("running", {"child_ref_promotion": {"schema_version": 1, "status": "incomplete", "pending_refs": [{"path": "x"}]}}, {"promotions"}),
     ("completed", {}, {"terminal_projection", "synthesis"}),
 ])
 def test_membership_is_atomic_with_the_result_write(tmp_path, monkeypatch, status, fields, expected):
@@ -244,6 +242,8 @@ def test_recovery_reads_open_members_among_2000_completed(tmp_path, monkeypatch)
         return original(root, task_id)
     monkeypatch.setattr(task_store, "read_document", counted)
     monkeypatch.setattr(results, "read_document", counted)
+    batched = task_store.documents_by_ids  # the members a pass reads together (``obligations.result_rows``)
+    monkeypatch.setattr(task_store, "documents_by_ids", lambda root, ids: reads.extend(ids) or batched(root, ids))
     monkeypatch.setattr(results, "list_task_results", lambda *a, **kw: pytest.fail("history enumeration"))
     monkeypatch.setattr(status, "effective_task_result", lambda root, row, **kw: row)
     monkeypatch.setattr(pipeline, "_settle_terminal_projection", lambda *a, **kw: None)

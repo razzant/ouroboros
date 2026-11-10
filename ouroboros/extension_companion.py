@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import pathlib
@@ -10,8 +11,9 @@ import subprocess
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass, field, replace
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
 from ouroboros.platform_layer import (
     IS_WINDOWS,
@@ -123,6 +125,24 @@ def _port_is_available(port: int) -> bool:
     return True
 
 
+def _setting_text(value: Any) -> bytes:
+    return ("" if value is None else str(value)).strip().encode("utf-8")
+
+
+def _carries(env: Mapping[str, str], expected: Mapping[str, Any]) -> bool:
+    """Whether ``env`` holds each value the caller read (``expected``).
+
+    Surrounding blanks aside, an empty value is an absent one, as ``get_settings_state`` reports it missing; the
+    values compare in constant time and nothing here names them."""
+    return all(hmac.compare_digest(_setting_text(env.get(key)), _setting_text(value))
+               for key, value in expected.items())
+
+
+def _as_read(outcome: str, env: Dict[str, str], expected: Optional[Mapping[str, Any]]) -> str:
+    """``outcome``, or ``settings_changed`` when ``env`` lacks a value the caller read (``expected``)."""
+    return outcome if expected is None or _carries(env, expected) else "settings_changed"
+
+
 class CompanionSupervisor:
     """Owns process lifecycle for extension companions in the server process."""
 
@@ -131,6 +151,13 @@ class CompanionSupervisor:
         self._lock = threading.RLock()
         self._runtimes: Dict[str, CompanionRuntime] = {}
         self._restart_history: Dict[str, List[float]] = {}
+        # The descriptor each companion last started with, kept past a crash so a settings refresh can compare
+        # against it; an explicit stop or Panic forgets it, so nothing stopped by a lifecycle control is revived.
+        self._last_descriptors: Dict[str, CompanionDescriptor] = {}
+        # Companions a settings refresh stopped and has not replaced (its read failed, the spawn was refused, the
+        # stop is unconfirmed): the next refresh starts one even when Settings read as before. Any start or
+        # lifecycle stop forgets it; an absence a crash left stays the monitor's.
+        self._unreplaced: set[str] = set()
         self._panic_requested = False
 
     def _key(self, skill_name: str, name: str) -> str:
@@ -234,9 +261,115 @@ class CompanionSupervisor:
                 )
             except Exception:
                 log.debug("Failed to clear companion terminal health", exc_info=True)
+            self._last_descriptors[key] = descriptor
+            self._unreplaced.discard(key)
             self._start_monitor(key, runtime)
             self._write_runtime_snapshot()
             return True
+
+    def refresh_blocker(self, skill_name: str, name: str, expected: Optional[Mapping[str, Any]] = None) -> str:
+        """The answer a refresh gives from what this supervisor holds, or "" when it must read settings.
+
+        ``panic``, ``not_started``, ``retained``; with ``expected`` (the caller's read of every compared key) also
+        ``unchanged`` while the running companion carries it and ``not_running`` while one a crash left carries
+        it (restarting that is the monitor's). A companion a refresh stopped and has not replaced never answers
+        here."""
+        key = self._key(skill_name, name)
+        with self._lock:
+            if self._panic_requested:
+                return "panic"
+            runtime = self._runtimes.get(key)
+            if runtime is None and key not in self._last_descriptors:
+                return "not_started"
+            if runtime is not None and runtime.retiring and runtime.process.poll() is None:
+                return "retained"
+            if expected is None:
+                return ""
+            if runtime is not None:
+                alive = not runtime.retiring and runtime.process.poll() is None
+                return "unchanged" if alive and _carries(runtime.descriptor.env, expected) else ""
+            if key in self._unreplaced:
+                return ""
+            return "not_running" if _carries(self._last_descriptors[key].env, expected) else ""
+
+    def refresh(
+        self,
+        skill_name: str,
+        name: str,
+        build_env: Callable[[], Dict[str, str]],
+        *,
+        compare_keys: Iterable[str],
+        still_valid: Callable[[], bool],
+        admission: AbstractContextManager[Any] = nullcontext(),
+        expected: Optional[Mapping[str, Any]] = None,
+        timeout_sec: float = 5.0,
+        _attempts: int = 2,
+    ) -> str:
+        """Respawn one companion whose settings-derived environment changed; otherwise do nothing.
+
+        Only ``compare_keys`` (the manifest's ``env_from_settings``) decide a change: the Host Service token,
+        PATH, PYTHONPATH and other service values never restart a companion. A retained or unconfirmed
+        runtime is never replaced. The old process's death is observed before the environment is built
+        again from the settings as they read then and the new one starts, so a save made while it stopped
+        is the one applied. ``still_valid``, that environment, Panic and the start are one step inside
+        ``admission`` (the caller's lock its owner-state writers take), never the stop: an Off saved during
+        the stop is read there, one saved later finds a process to stop. Nothing here holds the supervisor's
+        lock while waiting. ``expected`` holds the values its caller read: when the environment this refresh kept or
+        started carries others, Settings moved after that read and the outcome is ``settings_changed`` (the newer
+        read is the one applied; read again). A companion this refresh stopped stays owed a start until one
+        succeeds, so a later refresh starts it even when Settings read as the stopped one carried them.
+        Outcomes: ``unchanged``, ``not_running``, ``not_started``, ``restarted``, ``started``, ``settings_changed``,
+        ``retained``, ``stop_unconfirmed``, ``refused``, ``panic``.
+        """
+        key = self._key(skill_name, name)
+        keys = tuple(dict.fromkeys(str(item) for item in compare_keys))
+        with self._lock:
+            if self._panic_requested:
+                return "panic"
+            runtime = self._runtimes.get(key)
+            baseline = runtime.descriptor if runtime is not None else self._last_descriptors.get(key)
+        if baseline is None:
+            return "not_started"
+        if runtime is not None and runtime.retiring:
+            if not self._settle_runtime(key, runtime):
+                return "retained"
+            runtime = None
+        env = build_env()
+        running = runtime is not None and runtime.process.poll() is None
+        with self._lock:
+            unreplaced = key in self._unreplaced
+        if [env.get(k) for k in keys] == [baseline.env.get(k) for k in keys] and (running or not unreplaced):
+            return _as_read("unchanged" if running else "not_running", env, expected)
+        if runtime is not None:
+            with self._lock:
+                runtime.retiring = runtime.retiring or "settings refresh"
+                self._unreplaced.add(key)
+            try:
+                self._terminate_runtime(runtime, timeout_sec=timeout_sec)
+            finally:
+                settled = self._settle_runtime(key, runtime)
+                self._write_runtime_snapshot()
+            if not settled:
+                return "stop_unconfirmed"
+        with admission:
+            if not still_valid():
+                return "refused"
+            env = build_env()
+            with self._lock:
+                if self._panic_requested:
+                    return "panic"
+            if not self.start(replace(baseline, env=dict(env))):
+                return "panic" if self._panic_requested else "not_started"
+        with self._lock:
+            current = self._runtimes.get(key)
+        if current is not None and [current.descriptor.env.get(k) for k in keys] != [env.get(k) for k in keys]:
+            # A crash restart of the previous environment won the start: replace it once more.
+            if _attempts > 1:
+                return self.refresh(skill_name, name, build_env, compare_keys=keys, still_valid=still_valid,
+                                    admission=admission, expected=expected, timeout_sec=timeout_sec,
+                                    _attempts=_attempts - 1)
+            return "stop_unconfirmed"
+        return _as_read("restarted" if running else "started", env, expected)
 
     def _start_monitor(self, key: str, runtime: CompanionRuntime) -> None:
         threading.Thread(
@@ -356,7 +489,11 @@ class CompanionSupervisor:
         if should_restart:
             time.sleep(0.5)
             try:
-                self.start(descriptor)
+                with self._lock:
+                    # A refresh or stop may have superseded this monitor during its backoff.
+                    # Check and start together; an older crash must not replace a newer registration.
+                    if self._last_descriptors.get(key) is descriptor:
+                        self.start(descriptor)
             except Exception:
                 log.warning("failed to restart companion %s/%s", descriptor.skill_name, descriptor.name, exc_info=True)
 
@@ -364,6 +501,8 @@ class CompanionSupervisor:
         """Terminate the exact runtime; its owner is removed only after observed death."""
         key = self._key(skill_name, name)
         with self._lock:
+            self._last_descriptors.pop(key, None)
+            self._unreplaced.discard(key)
             runtime = self._runtimes.get(key)
             if runtime is None:
                 return
@@ -376,16 +515,26 @@ class CompanionSupervisor:
             self._write_runtime_snapshot()
 
     def stop_skill(self, skill_name: str, timeout_sec: float = 5.0) -> None:
+        with self._lock:
+            for key, descriptor in list(self._last_descriptors.items()):
+                if descriptor.skill_name == skill_name:
+                    self._last_descriptors.pop(key, None)
+                    self._unreplaced.discard(key)
         for runtime in list(self.snapshot().values()):
             if runtime.get("skill_name") == skill_name:
                 self.stop(skill_name, str(runtime.get("name") or ""), timeout_sec=timeout_sec)
 
     def stop_all(self, timeout_sec: float = 5.0) -> None:
+        with self._lock:
+            self._last_descriptors.clear()
+            self._unreplaced.clear()
         for runtime in list(self.snapshot().values()):
             self.stop(str(runtime["skill_name"]), str(runtime["name"]), timeout_sec=timeout_sec)
 
     def panic_kill_all(self, *, request_only: bool = False) -> list[dict[str, Any]] | None:
         self._panic_requested = True
+        self._last_descriptors.clear()
+        self._unreplaced.clear()
         if request_only:
             return [request_process_tree_kill(runtime.process, job_handle=runtime.job_handle)
                     for runtime in self._runtimes.copy().values()]
@@ -480,6 +629,7 @@ __all__ = [
 def companion_spawn_env(
     spec: Dict[str, Any], token: str, *, env_allow: Any, granted_upper: Any,
     skill: str, skill_dir: Optional[pathlib.Path], state_dir: pathlib.Path,
+    settings: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, str]:
     """The env one staged companion is spawned with (fix-round-6).
 
@@ -492,6 +642,7 @@ def companion_spawn_env(
     computational.
     """
     from ouroboros.contracts.plugin_api import FORBIDDEN_SKILL_SETTINGS
+    from ouroboros.deployment_policy import child_policy_env, fixed_settings
     from ouroboros.extension_isolated_deps import _isolated_python_site_dirs
     from ouroboros.gateway.host_service import DEFAULT_HOST_SERVICE_HOST, host_service_port
     from ouroboros.node_runtime import prepend_skill_node_emergency_path, skill_manifest_owns_path
@@ -504,11 +655,13 @@ def companion_spawn_env(
     # undefined winner. Same contract as the executor-local service lane.
     from ouroboros.workspace_executor import overlay_env
 
-    reserved = set(FORBIDDEN_SKILL_SETTINGS) | {"HOST_SERVICE_TOKEN", "HOST_SERVICE_URL", PARENT_PID_ENV}
+    # Under a deployment policy, a manifest's env never stands in for a value it fixes, or for its file and pin.
+    reserved = set(FORBIDDEN_SKILL_SETTINGS) | {"HOST_SERVICE_TOKEN", "HOST_SERVICE_URL", PARENT_PID_ENV,
+                                                *child_policy_env(), *fixed_settings()}
     env = overlay_env(
         _scrub_env(
             list(env_allow), state_dir, skill,
-            granted_keys=list(granted_upper),
+            granted_keys=list(granted_upper), settings=settings,
         ),
         {
             str(key): str(value)

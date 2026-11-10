@@ -20,8 +20,9 @@ def test_schema_cost_and_all_typed_bindings():
     raw = json.dumps(schema, ensure_ascii=False)
     # 4,271 after the nano pass, plus the two owner-approved phrases the compaction test pins and the four
     # working_note phrases test_main_authored_context pins (future reader, within those sources, unaffected
-    # branches, invent no detail), which the nano pass had dropped.
-    assert 3800 <= len(raw) <= 4360
+    # branches, invent no detail), which the nano pass had dropped. +~110 for the C2 consensus correction
+    # (06.11.2026): the route-qualified price of a rewrite and keep_last_n keeping earlier notes.
+    assert 3800 <= len(raw) <= 4470
     print(json.dumps({'before_chars': 5978, 'after_chars': len(raw), 'before_chars_div_4': 1494.5,
                       'after_chars_div_4': len(raw) / 4, 'before_server_tokens': 1495,
                       'after_server_tokens': estimate_tokens(raw)}, sort_keys=True))

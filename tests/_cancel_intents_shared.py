@@ -122,11 +122,10 @@ class DeliveryBus(_DeliveryMembership, __import__("queue").Queue):
 class _LiveProc:
     """A REAL OS process behind the worker-proc surface custody expects.
 
-    Tests spawning these belong to the SERIAL lane (`@pytest.mark.serial`,
-    tests/conftest policy: real-subprocess tests flake or crash xdist workers
-    under `-n auto`) and every spawn is registered so the autouse reaper below
-    terminates AND waits it even when the test fails before its own kill path
-    runs — a leaked 120s sleeper must never outlive its test (GR2-10).
+    Each test owns its sleeper, so it runs in the xdist pass and marks nothing (an owned
+    child is parallel-safe, CHECKLISTS Self-Check 18); every spawn is registered so the
+    autouse reaper below terminates AND waits it even when the test fails before its own
+    kill path runs — a leaked 120s sleeper must never outlive its test (GR2-10).
     """
 
     _SPAWNED: list = []

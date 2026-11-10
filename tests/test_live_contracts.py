@@ -138,33 +138,39 @@ def test_built_in_engines_declare_labelled_dated_windows(skill, window, credenti
     assert catalog.privacy
 
 
-def test_plugin_api_2_3_unites_memory_and_voice_without_losing_prior_minimums():
+def test_plugin_api_2_4_keeps_memory_voice_and_every_prior_minimum():
     from ouroboros.contracts.plugin_api import (PLUGIN_API_SURFACE_FINGERPRINTS, PLUGIN_API_VERSION,
                                                 VALID_EXTENSION_PERMISSIONS, negotiate_plugin_api, plugin_api_surface_fingerprint)
 
-    # The target memory reader and branch voice additions share one additive host generation.
-    assert PLUGIN_API_VERSION == "2.3"
+    # 2.3 united the memory reader and voice; 2.4 adds settings state and a companion refresh beside them.
+    assert PLUGIN_API_VERSION == "2.4"
     assert PLUGIN_API_SURFACE_FINGERPRINTS == {
         "2.0": "03fabdf4334e6b2bde217b4cb83a80faaebc773ddce870546dd2108b75de17ca",
         "2.1": "7e288212fd5bcaaa5de961bde9180ca8669e45c00bbfa8d59ffbccccf9442cdb",
         "2.2": "46ee2d134ca3c3957adef9366b326b97a84abaae757e8e9d18030a7838329506",
-        "2.3": plugin_api_surface_fingerprint(),
+        "2.3": "bd1062f96b99607b4651ba319e74f9620a5bae08ad1aa0d5dcb106d8ad542d12",
+        "2.4": plugin_api_surface_fingerprint(),
     }
     assert {"realtime_provider", "live_conversation", "call_peer"} <= VALID_EXTENSION_PERMISSIONS
 
     from types import SimpleNamespace
-    for minimum in ("2.0", "2.1", "2.2", "2.3"):
+    for minimum in ("2.0", "2.1", "2.2", "2.3", "2.4"):
         for capabilities in (["read_memory"], ["register_realtime_provider", "register_live_conversation"]):
             result = negotiate_plugin_api(SimpleNamespace(plugin_api={"version": minimum, "capabilities": capabilities}))
-            assert result.ok and result.generation == "2.3", result
+            assert result.ok and result.generation == "2.4", result
 
 
 def test_new_fit_ports_keep_old_host_defaults():
     import asyncio
     from ouroboros.contracts.live_conversation import LiveHost
+    observed = []
     class OldHost(LiveHost):
-        pass
+        async def observe_context(self, row):
+            observed.append(row)
     old = OldHost()
+    asyncio.run(old.record_fact('A peer joined.'))
+    assert observed == [{'role': 'user', 'content': '[Host fact; not owner words]\nA peer joined.'}], (
+        'a call fact is never silently lost on a host without its own record')
     assert old.fitted_frame_rows() == ()
     assert asyncio.run(old.delivery_fits([], [])) is False
     assert asyncio.run(old.tool_result_fallback([], [])) is None

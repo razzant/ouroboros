@@ -128,9 +128,10 @@ def test_route_reprojection_keeps_working_room_and_declared_units(tmp_path, basi
     assert smaller.window_tokens == window - 1
 
 
-@pytest.mark.parametrize("basis", ["provider", "estimator"])
-@pytest.mark.parametrize("accepted", [20_000, 100_000])
-@pytest.mark.parametrize("anchored", [False, True])
+@pytest.mark.parametrize(("anchored", "accepted", "basis"), [
+    (False, 20_000, "provider"),
+    (True, 100_000, "estimator"),
+])
 def test_measurement_keeps_conversation_capacity_and_uses_its_counter(
         tmp_path, monkeypatch, basis, accepted, anchored):
     window = 50_000
@@ -166,8 +167,7 @@ def test_ordinary_measurement_keeps_reserve_and_density_with_accepted_input_lowe
     assert measure.capacity_total_tokens == capacity
 
 
-@pytest.mark.parametrize("mode", ["max", "low", "nano"])
-@pytest.mark.parametrize("window", [0, 50_000, 2_000_000])
+@pytest.mark.parametrize(("window", "mode"), [(0, "max"), (50_000, "low"), (2_000_000, "nano")])
 def test_ordinary_projection_matches_equivalent_declared_route(tmp_path, monkeypatch, mode, window):
     """The same units and reserve use one ladder, including a soft start-room shortfall."""
     monkeypatch.setattr(fit, "_route_calibration_ratio", lambda *_a, **_kw: 1.5)

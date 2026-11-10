@@ -81,11 +81,12 @@ def test_a_gone_connection_walks_the_chain_then_waits_for_the_owner_instead_of_f
 
     def owner_switches(self, llm, error, kwargs, caller_cancel=None):
         asked.append((model_wait.model_wait_reason(error), kwargs["model"], kwargs["model_role"], getattr(error, "reason", "")))
+        before_card.extend(notes)
         self.overrides[kwargs["model_role"]] = {"model": HEALTHY, "use_local": False, "model_account_override": ""}
         return {**kwargs, **self.overrides[kwargs["model_role"]]}
 
     monkeypatch.setattr(model_wait.TaskModelWait, "wait", owner_switches)
-    llm, notes = _RouteLLM(data_root, gone={PRIMARY, FALLBACK}), []
+    llm, notes, before_card = _RouteLLM(data_root, gone={PRIMARY, FALLBACK}), [], []
     text, usage, _trace, registry = _run(tmp_path, llm, notes=notes)
 
     assert text == f"answer from {HEALTHY}"
@@ -94,6 +95,12 @@ def test_a_gone_connection_walks_the_chain_then_waits_for_the_owner_instead_of_f
     assert usage.get("execution_status") != RESULT_INFRA_FAILED and not usage.get("resource_refusal")
     assert registry._ctx.route_choice == {"kind": "explicit", "source": "wait_card"}
     assert any("Fallback:" in note and "refusal before any provider was reached" in note for note in notes)
+    # The walk's end reports the last attempt before the card; no row adopts or rules out a route.
+    refused = "a refusal before any provider was reached (a connection that is unavailable, or a policy)"
+    assert [note for note in before_card if "Fallback:" in note] == [
+        f"⚡ Fallback: trying {FALLBACK} after {refused} on {PRIMARY}.",
+        f"⚡ Fallback: the last attempt, on {FALLBACK}, ended without a usable reply after {refused}."]
+    assert not any("is now the active route" in note or "back on the primary" in note for note in notes)
 
 
 def test_without_configured_routes_the_card_opens_on_the_refusal_itself(data_root, tmp_path, monkeypatch):

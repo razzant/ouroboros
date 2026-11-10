@@ -61,7 +61,7 @@ def attach_own_dialogue(ctx: Any, root: pathlib.Path, manifest: dict,
     Room growth is evidence for the next changed author request. It cannot
     itself mint another paid plan envelope. Health/roster/cycle rails stay with
     the existing engine, which still decides whether any dispatch is earned.
-    The owner's words that caused the work follow the same rule: a replay takes
+    My human's words for the work follow the same rule: a replay takes
     the recorded section (a wave recorded without one stays without), a fresh
     request takes the run's words now (``owner_words_text``).
     """
@@ -202,6 +202,10 @@ def _quiz_text(row: dict, *, provenance: bool = False) -> str:
     if row.get("type") == "quiz_closed":
         actor = "owner" if quiz.get("closed_actor") == "owner" else f"task {quiz.get('closed_by_task_id')}"
         return f"[question closed without answer {qid}] by {actor}: {quiz.get('closed_reason') or ''}. No approval recorded."
+    if row.get("type") == "quiz_answer" and quiz.get("secret_request") and isinstance(quiz.get("secret_outcome"), dict):
+        from ouroboros.owner_quiz import secret_outcome_summary
+
+        return f"[secret request {qid}] {secret_outcome_summary(quiz)}"  # host metadata: plugin and field ids, never a value
     if row.get("type") == "quiz_answer":
         index = quiz.get("answered_index")
         # The choice is my human's; an offered option's words are the asking task's, never theirs.
@@ -221,6 +225,9 @@ def _quiz_text(row: dict, *, provenance: bool = False) -> str:
 def _line(number: int, row: dict) -> str:
     body = _quiz_text(row, provenance=True) if row.get("type") in {"quiz", "quiz_answer", "quiz_closed"} and isinstance(row.get("quiz"), dict) \
         else str(row.get("text") or "")
+    reaction = row.get("reaction") if isinstance(row.get("reaction"), dict) else {}
+    fact = str(reaction.get("words") or "")  # a reaction's labelled fact, beside the row's own words, never in them
+    body = f"{body}\n{fact}" if body and fact else body or fact
     names = [next((str(a[k]) for k in _ATTACHMENT_NAME_KEYS if a.get(k)), "")
              for a in (row.get("attachments") or []) if isinstance(a, dict)]
     body = body.replace("\n", "\n  ") + (f" [attachments: {', '.join(n for n in names if n)}]" if any(names) else "")
@@ -331,7 +338,7 @@ def fit_dialogue_view(packet: str, own: dict, capacity_chars: int, *, measure=le
 
 def session_input_limits(slots: list) -> dict:
     """Read engine ASK budgets once for fresh delivery, never for paid replay."""
-    from ouroboros.claudexor_daemon import ensure_owned_gateway
+    from ouroboros.execution_domain import native_gateway
     from ouroboros.review_execution import session_route_for_review_slot
     from ouroboros.tools.plan_review_runtime import slot_is_session
 
@@ -346,7 +353,7 @@ def session_input_limits(slots: list) -> dict:
         return {}
     gateway = None
     try:
-        gateway = ensure_owned_gateway()
+        gateway = native_gateway()  # where the seats will run: the domain's work engine, else the owned one
         limits = gateway.ask_input_limits()
         return {sid: dict(limits[route]) for sid, route in routes.items() if route in limits}
     except Exception:
@@ -370,7 +377,7 @@ def dialogue_slot_inputs(slots: list, *, system_prompt: str, user_content: str,
     Each slot's fit lands in ``dialogue_delivery``; a session slot with an engine bound also
     records ``input_limit`` (the bound, the measured ``prompt_chars``, ``fits``).
     """
-    from ouroboros.tools.plan_review_runtime import PLAN_REVIEW_MAX_TOKENS, slot_retrieves, slot_is_session
+    from ouroboros.tools.plan_review_runtime import PLAN_REVIEW_MAX_TOKENS, ROOM_SNAPSHOT_ROLE, slot_retrieves, slot_is_session
     from ouroboros.tools.review_synthesis import build_plan_review_messages, per_slot_input_token_limits
     from ouroboros.tools.plan_packet import plan_user_stable_len
     from ouroboros.tools.scope_required_sources import source_text_identity
@@ -387,10 +394,10 @@ def dialogue_slot_inputs(slots: list, *, system_prompt: str, user_content: str,
     api = [slot for slot in slots if not slot_retrieves(slot)]
     limits = per_slot_input_token_limits([s.model for s in api], output_reserve=PLAN_REVIEW_MAX_TOKENS,
                                        tokenizer_margin=155_000, slots=api)
-    # What each session reviewer may read of the room: the snapshot declared as an OBSERVED
-    # source (never a required manifest, which would order multi-MB reads), so the harness
-    # journal fold records per-reviewer coverage as a fact (`review_session_reads`).
-    observed = ([{"root": "artifact_store", "path": own["source_ref"]["path"], "file": own["file"],
+    # What each retrieving reviewer may read of the room: the snapshot declared as an OBSERVED
+    # source (never a required manifest, which would order multi-MB reads), so the host's or
+    # the harness journal's fold records per-reviewer coverage as a fact.
+    observed = ([{"root": "artifact_store", "path": own["source_ref"]["path"], "file": own["file"], "observed_role": ROOM_SNAPSHOT_ROLE,
                   **source_text_identity(str(own.get("text") or "").encode("utf-8"))}]
                 if own.get("source_ref") and own.get("file") else [])
     for slot in slots:

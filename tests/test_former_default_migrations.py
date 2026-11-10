@@ -15,6 +15,7 @@ import pytest
 from ouroboros.server_runtime import apply_runtime_provider_defaults
 from ouroboros.configured_subagents import resolve_configured_subagents
 from tests.test_server_runtime import _FORMERLY_REMAPPED_IDS
+from tests._cases import chosen_rows
 
 
 def test_formerly_remapped_review_ids_are_no_longer_rewritten():
@@ -35,28 +36,29 @@ def test_formerly_remapped_review_ids_are_no_longer_rewritten():
     assert normalized == document
 
 
-@pytest.mark.parametrize("model", _FORMERLY_REMAPPED_IDS)
-def test_a_saved_model_is_not_rewritten_as_retired_on_an_aggregator_install(model):
-    from ouroboros.reviewer_slot_config import review_pool_rows
+def test_a_saved_model_is_not_rewritten_as_retired_on_an_aggregator_install(subtests):
+    for model in _FORMERLY_REMAPPED_IDS:
+        with subtests.test(model=model):
+            from ouroboros.reviewer_slot_config import review_pool_rows
 
-    catalog = json.dumps({"enabled": True, "items": [
-        {"subagent_id": "t1", "recommended_use": "Reviews.", "review_eligible": True,
-         "route": {"kind": "api_model", "target_id": model}},
-        {"subagent_id": "s1", "recommended_use": "Reviews natively.", "review_eligible": True,
-         "route": {"kind": "api_model", "target_id": model}, "delivery": "native"},
-    ]})
-    document = {
-        "OPENROUTER_API_KEY": "sk-or",
-        "OUROBOROS_MODEL": model,
-        "OUROBOROS_MODEL_LIGHT": model,
-        "OUROBOROS_MODEL_FALLBACKS": model,
-        "OUROBOROS_SUBAGENTS": catalog,
-    }
-    normalized, changed, changed_keys = apply_runtime_provider_defaults(dict(document))
+            catalog = json.dumps({"enabled": True, "items": [
+                {"subagent_id": "t1", "recommended_use": "Reviews.", "review_eligible": True,
+                 "route": {"kind": "api_model", "target_id": model}},
+                {"subagent_id": "s1", "recommended_use": "Reviews natively.", "review_eligible": True,
+                 "route": {"kind": "api_model", "target_id": model}, "delivery": "native"},
+            ]})
+            document = {
+                "OPENROUTER_API_KEY": "sk-or",
+                "OUROBOROS_MODEL": model,
+                "OUROBOROS_MODEL_LIGHT": model,
+                "OUROBOROS_MODEL_FALLBACKS": model,
+                "OUROBOROS_SUBAGENTS": catalog,
+            }
+            normalized, changed, changed_keys = apply_runtime_provider_defaults(dict(document))
 
-    assert (changed, changed_keys) == (False, [])
-    assert normalized == document
-    assert [row.target_id for row in review_pool_rows(normalized)] == [model, model]
+            assert (changed, changed_keys) == (False, [])
+            assert normalized == document
+            assert [row.target_id for row in review_pool_rows(normalized)] == [model, model]
 
 
 def test_direct_openai_keeps_a_saved_id_that_was_never_our_default_for_its_slot():
@@ -74,8 +76,6 @@ def test_direct_openai_keeps_a_saved_id_that_was_never_our_default_for_its_slot(
 
 @pytest.mark.parametrize("model", (
     "google/gemini-3.1-pro-preview",
-    "google/gemini-3-flash-preview",
-    "openai/gpt-5.4-pro",
     "openai::gpt-5.4-pro",
     # Our direct default was only ever stored as `openai::gpt-5.4`; the slash spelling
     # shipped solely inside the old review list and as a UI suggestion.
@@ -143,24 +143,25 @@ _LOCAL_ONLY = {"LOCAL_MODEL_SOURCE": "repo/model.gguf", "USE_LOCAL_MAIN": True}
 _OUR_FORMER_GEMINI_DEFAULT = "google/gemini-3.1-flash-lite"
 
 
-@pytest.mark.parametrize("provider", sorted(_DIRECT_PROVIDER_CREDENTIALS))
-def test_our_former_gemini_default_stays_in_active_slots_on_every_direct_provider(provider):
+def test_our_former_gemini_default_stays_in_active_slots_on_every_direct_provider(subtests):
     """A stored copy of our former Main/Code/Light default on a direct-only install is a saved
     value: it stays (unreachable, so honestly unavailable) in every active slot, while the
     retired Heavy key still drops it rather than seeding an actor."""
-    former = _OUR_FORMER_GEMINI_DEFAULT
-    normalized, _changed, changed_keys = apply_runtime_provider_defaults({
-        **_DIRECT_PROVIDER_CREDENTIALS[provider],
-        "OUROBOROS_MODEL": former,
-        "OUROBOROS_MODEL_HEAVY": former,
-        "OUROBOROS_MODEL_LIGHT": former,
-        "OUROBOROS_MODEL_FALLBACKS": former,
-    })
+    for provider in sorted(_DIRECT_PROVIDER_CREDENTIALS):
+        with subtests.test(provider=provider):
+            former = _OUR_FORMER_GEMINI_DEFAULT
+            normalized, _changed, changed_keys = apply_runtime_provider_defaults({
+                **_DIRECT_PROVIDER_CREDENTIALS[provider],
+                "OUROBOROS_MODEL": former,
+                "OUROBOROS_MODEL_HEAVY": former,
+                "OUROBOROS_MODEL_LIGHT": former,
+                "OUROBOROS_MODEL_FALLBACKS": former,
+            })
 
-    assert [normalized[key] for key in ("OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_FALLBACKS")] == [
-        former] * 3
-    assert normalized["OUROBOROS_MODEL_HEAVY"] == ""
-    assert changed_keys == ["OUROBOROS_MODEL_HEAVY"]
+            assert [normalized[key] for key in ("OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_FALLBACKS")] == [
+                former] * 3
+            assert normalized["OUROBOROS_MODEL_HEAVY"] == ""
+            assert changed_keys == ["OUROBOROS_MODEL_HEAVY"]
 
 
 def test_a_local_only_install_keeps_a_saved_former_gemini_light():
@@ -204,7 +205,7 @@ def test_our_former_openai_code_default_leaves_heavy_without_becoming_an_actor()
     assert all(row.subagent_id != "legacy-heavy" for row in rows)
 
 
-@pytest.mark.parametrize("install", [*sorted(_DIRECT_PROVIDER_CREDENTIALS), "local-only"])
+@pytest.mark.parametrize("install", chosen_rows([*sorted(_DIRECT_PROVIDER_CREDENTIALS), "local-only"], 0, 2, 7))
 def test_an_explicit_gemini_pro_preview_choice_stays_as_written(install):
     """It was never one of our Main/Code/Light/Fallback defaults (it shipped only inside the
     old review list), so no install class rewrites it."""

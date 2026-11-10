@@ -455,7 +455,6 @@ def _s28_fixture(n: dict) -> dict:
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s28_native_peers_exchange_addressed_turns_and_the_planner_receives_selected_originals(
         e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
@@ -721,7 +720,6 @@ def _s29_fixture(n: dict, gate: dict) -> dict:
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s29_session_run_resumes_twice_with_exact_relayed_originals_and_codex_twin_starts_new_run(
         e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)

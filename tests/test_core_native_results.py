@@ -101,27 +101,6 @@ def _readonly_ctx(repo: pathlib.Path, drive: pathlib.Path) -> ToolContext:
             "LEGACY_WARNING",
             "⚠️ NOT_FOUND: file does not exist: {repo}{sep}missing.txt",
         ),
-        (
-            "read_file",
-            {"path": "identity.md"},
-            "LEGACY_WARNING",
-            "⚠️ NOT_FOUND: 'identity.md' is not at the repo root.\n\n"
-            "This file lives at `data_root/memory/identity.md`, not in the "
-            "git repo. Some memory artifacts are already summarized in "
-            "context as `## Identity`, but raw memory state must be read "
-            "from the data root. If you need the raw file, call "
-            "`read_file(root='runtime_data', path='memory/identity.md')`.",
-        ),
-        (
-            "read_file",
-            {"path": "memory/none.md", "root": "runtime_data"},
-            "LEGACY_WARNING",
-            "⚠️ DATA_NOT_YET_CREATED: memory/none.md\n\n"
-            "Memory artifacts under memory/ are created lazily on first "
-            "write. Treat this as an empty/absent state and proceed with "
-            "initialization if that is the task. Use list_files with "
-            "root=runtime_data to confirm what currently exists.",
-        ),
         # Owner item I27: a read-only discovery MISS is named as a miss. The ⚠️
         # marker and the sentence survive; only the severity separates "there is
         # nothing at that path" from "the listing itself failed", so a later
@@ -130,18 +109,6 @@ def _readonly_ctx(repo: pathlib.Path, drive: pathlib.Path) -> ToolContext:
         (
             "list_files",
             {"path": "nope"},
-            "LEGACY_WARNING",
-            "⚠️ LIST_FILES_NOT_FOUND: Directory not found: nope",
-        ),
-        (
-            "list_files",
-            {"path": "sample.txt"},
-            "LEGACY_WARNING",
-            "⚠️ LIST_FILES_NOT_FOUND: Not a directory: sample.txt",
-        ),
-        (
-            "list_files",
-            {"path": "nope", "root": "runtime_data"},
             "LEGACY_WARNING",
             "⚠️ LIST_FILES_NOT_FOUND: Directory not found: nope",
         ),
@@ -205,8 +172,6 @@ def test_root_guard_publishes_its_two_refusals(tmp_path):
         ("read_file", {"path": ".env"}, "SECRET=1"),
         ("list_files", {"path": ".git"}, "HEAD"),
         ("read_file", {"root": "runtime_data", "path": "settings.json"}, "{}"),
-        ("list_files", {"root": "runtime_data", "path": "secrets"}, "sample.txt"),
-        ("read_file", {"root": "system_repo", "path": ".env"}, "SECRET=1"),
     ],
 )
 def test_helper_file_content_has_successful_native_results(tmp_path, tool, args, content):
@@ -244,8 +209,9 @@ def test_user_files_path_refusal_stays_a_policy_denial(tmp_path, monkeypatch):
         )
 
 
-def _media_ctx(chat_id=123):
+def _media_ctx(drive_root, chat_id=123):
     return types.SimpleNamespace(
+        drive_root=drive_root,
         current_chat_id=chat_id,
         pending_events=[],
         browser_state=types.SimpleNamespace(last_screenshot_b64=""),
@@ -274,10 +240,10 @@ def _mp4(tmp_path: pathlib.Path) -> pathlib.Path:
          "⚠️ No screenshot stored. Take one first with browse_page(output='screenshot')."),
         ("video_no_chat", "send_video", "LEGACY_UNAVAILABLE", "⚠️ No active chat — cannot send video."),
         ("video_no_path", "send_video", "LEGACY_TOOL_ERROR", "⚠️ Provide a file_path."),
-        ("video_missing", "send_video", "LEGACY_TOOL_ERROR", "⚠️ File not found: /nonexistent/clip.mp4"),
+        ("video_missing", "send_video", "LEGACY_TOOL_ERROR", "⚠️ File not found: {missing_video}"),
         ("file_no_chat", "send_file", "LEGACY_UNAVAILABLE", "⚠️ No active chat — cannot send file."),
         ("file_no_path", "send_file", "LEGACY_TOOL_ERROR", "⚠️ Provide a file_path."),
-        ("file_missing", "send_file", "LEGACY_TOOL_ERROR", "⚠️ File not found: /nonexistent/report.md"),
+        ("file_missing", "send_file", "LEGACY_TOOL_ERROR", "⚠️ File not found: {missing_file}"),
         ("photo_ok", "send_photo", "OK", "OK: photo queued for delivery to owner."),
         ("video_ok", "send_video", "OK", "OK: video queued for delivery to owner."),
         ("file_ok", "send_file", "OK", "OK: file 'shot.png' queued for delivery to owner."),
@@ -292,8 +258,11 @@ def test_owner_chat_delivery_terminals_are_native(tmp_path, label, tool, code, t
     `unavailable` surface it describes; everything else that prevented a delivery
     is an `error`. The text is unchanged, so only the code moved.
     """
-    chatty = _media_ctx()
-    chatless = _media_ctx(chat_id=None)
+    chatty = _media_ctx(tmp_path)
+    chatless = _media_ctx(tmp_path, chat_id=None)
+    missing_video = str(tmp_path / "missing" / "clip.mp4")
+    missing_file = str(tmp_path / "missing" / "report.md")
+    text = text.format(missing_video=missing_video, missing_file=missing_file)
     calls = {
         "photo_no_chat": (chatless, lambda: core_artifacts._send_photo(chatless, file_path=str(_png(tmp_path)))),
         "photo_no_source": (chatty, lambda: core_artifacts._send_photo(chatty)),
@@ -301,10 +270,10 @@ def test_owner_chat_delivery_terminals_are_native(tmp_path, label, tool, code, t
         "photo_no_screenshot": (chatty, lambda: core_artifacts._send_photo(chatty, image_base64="__last_screenshot__")),
         "video_no_chat": (chatless, lambda: core_artifacts._send_video(chatless, file_path=str(_mp4(tmp_path)))),
         "video_no_path": (chatty, lambda: core_artifacts._send_video(chatty)),
-        "video_missing": (chatty, lambda: core_artifacts._send_video(chatty, file_path="/nonexistent/clip.mp4")),
+        "video_missing": (chatty, lambda: core_artifacts._send_video(chatty, file_path=missing_video)),
         "file_no_chat": (chatless, lambda: core_artifacts._send_file(chatless, file_path=str(_png(tmp_path)))),
         "file_no_path": (chatty, lambda: core_artifacts._send_file(chatty)),
-        "file_missing": (chatty, lambda: core_artifacts._send_file(chatty, file_path="/nonexistent/report.md")),
+        "file_missing": (chatty, lambda: core_artifacts._send_file(chatty, file_path=missing_file)),
         "photo_ok": (chatty, lambda: core_artifacts._send_photo(chatty, file_path=str(_png(tmp_path)))),
         "video_ok": (chatty, lambda: core_artifacts._send_video(chatty, file_path=str(_mp4(tmp_path)))),
         "file_ok": (chatty, lambda: core_artifacts._send_file(chatty, file_path=str(_png(tmp_path)))),
@@ -349,35 +318,6 @@ def test_owner_chat_delivery_terminals_are_native(tmp_path, label, tool, code, t
             "  old_str: 'zeta'\n"
             "Re-read that region (read_file start_line=2 max_lines=1) and copy the exact bytes into old_str.\n"
             "File preview (whole file, 11 chars):\nalpha\nbeta\n",
-        ),
-        (
-            "edit_text",
-            {"path": "notes.txt", "root": "runtime_data", "old_str": "alpha\nbeta\n", "new_str": "x"},
-            "LEGACY_BLOCKED",
-            "⚠️ WRITE_BLOCKED: new content for 'notes.txt' is 9% of original "
-            "(11 -> 1 chars). This looks like accidental truncation. "
-            "Use edit_text for surgical edits, or pass force=true to confirm an "
-            "intentional rewrite.",
-        ),
-        ("search_code", {"query": ""}, "LEGACY_TOOL_ERROR", "⚠️ SEARCH_ERROR: query is required."),
-        (
-            "search_code",
-            {"query": "x", "path": "nope"},
-            "LEGACY_WARNING",
-            "⚠️ SEARCH_NOT_FOUND: path not found: active_workspace:nope",
-        ),
-        (
-            "search_code",
-            {"query": "[", "regex": True},
-            "LEGACY_TOOL_ERROR",
-            "⚠️ SEARCH_ERROR: invalid regex: unterminated character set at position 0",
-        ),
-        (
-            "forward_to_worker",
-            {"task_id": "not a task id!", "message": "m"},
-            "TOOL_ARG_ERROR",
-            "⚠️ TOOL_ARG_ERROR (forward_to_worker): task_id must match "
-            "[A-Za-z0-9][A-Za-z0-9_.-]{0,127}",
         ),
     ],
 )

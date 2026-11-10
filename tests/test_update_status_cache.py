@@ -162,6 +162,12 @@ def test_payload_carries_minimal_update_tx_projection(monkeypatch):
         "active": True, "phase": "assisted_running",
         "task_id": "task-77", "restart_required": False,
     }
+    monkeypatch.setattr(
+        update_merge, "active_update_tx",
+        lambda: {"phase": "rolling_back", "attempt_id": "attempt-9"},
+    )
+    payload = control._managed_update_payload(fetch=False, include_tags=False)
+    assert payload["update_tx"]["attempt_id"] == "attempt-9"  # what update_progress.tx_attempt_id binds to
     monkeypatch.setattr(update_merge, "active_update_tx", lambda: {})
     payload = control._managed_update_payload(fetch=False, include_tags=False)
     assert payload["update_tx"] == {"active": False}
@@ -296,12 +302,11 @@ def test_fetching_payload_writes_the_letter_through_the_one_seam(monkeypatch):
     assert payload["letter"] is None and payload["latest_version"] == "6.87.5"
 
 
-@pytest.mark.parametrize("fetch", [False, True])
-@pytest.mark.parametrize("facts", [
-    {},  # unchecked/consumed: absence is not an invented "no local changes"
-    {"local_changes": "absent", "local_changes_base": CURRENT},
-    {"local_changes": "present", "local_changes_base": CURRENT},
-    {"local_changes": "unknown", "local_changes_base": "", "local_changes_reason": "several_bases"},
+@pytest.mark.parametrize(("facts", "fetch"), [
+    pytest.param({}, False, id='facts0-False'),  # unchecked/consumed: absence is not an invented "no local changes"
+    pytest.param({"local_changes": "absent", "local_changes_base": CURRENT}, True, id='facts1-True'),
+    pytest.param({"local_changes": "present", "local_changes_base": CURRENT}, False, id='facts2-False'),
+    pytest.param({"local_changes": "unknown", "local_changes_base": "", "local_changes_reason": "several_bases"}, True, id='facts3-True'),
 ])
 def test_gateway_preserves_optional_local_content_facts(monkeypatch, fetch, facts):
     import ouroboros.update_letter as update_letter

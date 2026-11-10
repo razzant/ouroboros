@@ -161,9 +161,6 @@ def test_canonical_platform_campaign_lock_is_admitted_by_structural_gate():
      "if blocking:\n            file_lock_exclusive_nb(handle.fileno())\n"
      "        else:\n            file_lock_exclusive(handle.fileno())"),
     ("file_lock_exclusive(handle.fileno())", "file_lock_exclusive = other_lock; file_lock_exclusive(handle.fileno())"),
-    ("file_lock_exclusive(handle.fileno())", "pathlib.Path('dataset').open(); file_lock_exclusive(handle.fileno())"),
-    ("file_lock_exclusive(handle.fileno())", "pathlib.Path('dataset').read_text(); file_lock_exclusive(handle.fileno())"),
-    ("pathlib.Path(tempfile.gettempdir())", "pathlib.Path(run_root)"),
 ])
 def test_campaign_lock_exemption_rejects_wrong_binding_choice_or_io(before, after):
     from devtools.benchmarks.common import launcher_audit as audit

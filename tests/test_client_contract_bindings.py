@@ -103,6 +103,14 @@ def test_the_project_journey_answers_its_published_shapes(client):
     listed = client.get("/api/projects")
     assert assert_bound("GET /api/projects", listed) == "ProjectListResponse"
     assert [row["id"] for row in listed.json()["projects"]] == [project["id"]]
+    # The complete list and the exact id answer the same published rows.
+    complete = client.get("/api/projects?all=1")
+    assert assert_bound("GET /api/projects", complete) == "ProjectListResponse"
+    assert complete.json() == listed.json()
+    exact = client.get(f"/api/projects?id={project['id']}")
+    assert assert_bound("GET /api/projects", exact) == "ProjectListResponse"
+    assert [row["chat_id"] for row in exact.json()["projects"]] == [project["chat_id"]]
+    assert client.get("/api/projects?id=nope").json() == {"projects": []}
     renamed = client.post(f"/api/projects/{project['id']}/update", json={"name": "Trip"})
     assert assert_bound("POST /api/projects/{project_id}/update", renamed) == "ProjectUpdateResponse"
     missing = client.post("/api/projects/nope/update", json={"name": "x"})
@@ -179,6 +187,14 @@ def test_account_routes_refuse_malformed_input_in_their_published_shapes(client)
     assert set(status.json()["reads"]) == {"catalog", "accounts", "quota"}
     quota = client.get("/api/claudexor/status?view=quota")
     assert assert_bound("GET /api/claudexor/status", quota) == "ClaudexorQuotaResponse"
+    preview = client.get("/api/claudexor/restart")
+    assert assert_bound("GET /api/claudexor/restart", preview) == "ClaudexorRestartPreview"
+    assert preview.json()["engine"]["state"] == "not_started" and preview.json()["runs"]["total"] == 0
+    tokenless = client.post("/api/claudexor/restart", json={})
+    assert tokenless.status_code == 400 and assert_bound("POST /api/claudexor/restart", tokenless) == "ErrorResponse"
+    stale = client.post("/api/claudexor/restart", json={"token": "not this preview"})
+    assert stale.status_code == 409 and assert_bound("POST /api/claudexor/restart", stale) == "ClaudexorRestartProblem"
+    assert stale.json()["code"] == "restart_preview_stale" and stale.json()["preview"]["token"] == preview.json()["token"]
     refresh = client.post("/api/claudexor/quota/refresh", json={"target": {"harness": ""}})
     assert refresh.status_code == 400 and assert_bound("POST /api/claudexor/quota/refresh", refresh) == "ErrorResponse"
     keyless = client.post("/api/claudexor/account-resets",
@@ -213,6 +229,13 @@ def test_model_mcp_and_control_routes_answer_their_published_shapes(client, monk
     assert catalog.status_code == 400 and assert_bound("GET /api/model-catalog", catalog)
     queued = client.post("/api/command", json={"cmd": ""})
     assert assert_bound("POST /api/command", queued) == "CommandResponse" and queued.json() == {"status": "ok"}
+    # A refusal before enqueue says so on the shape its status is bound to (#1603); no queue exists here.
+    monkeypatch.setattr("supervisor.message_bus._BRIDGE", None)
+    for body, reason in (({"cmd": "/bg start", "if_boot": "an-earlier-boot"}, "boot_changed"), ({"cmd": "/bg start"}, None)):
+        refused = client.post("/api/command", json=body)
+        assert refused.status_code == 409 and assert_bound("POST /api/command", refused) == "CommandRefusal"
+        assert refused.json()["accepted"] is False and refused.json().get("reason_code") == reason
+    assert {"accepted", "reason_code"} <= _declared("CommandRefusal")
     resumed = client.post("/api/tasks/nothing-here/resume")
     assert resumed.status_code in {404, 409} and assert_bound("POST /api/tasks/{task_id}/resume", resumed)
     rollback = client.post("/api/git/rollback", json={})
@@ -246,7 +269,7 @@ def _owned_names() -> dict:
     return names
 
 
-@pytest.mark.parametrize("outcome", ["unlisted", "listed", "failed", "unpublished"])
+@pytest.mark.parametrize("outcome", ["unlisted", "failed", "unpublished"])
 def test_mcp_listing_evidence_matches_published_contracts(client, monkeypatch, tmp_path, outcome):
     from ouroboros import config, mcp_catalog, mcp_client
     from ouroboros.gateway import mcp as api
@@ -360,11 +383,12 @@ def test_recent_wake_rows_match_the_typed_contract(client, monkeypatch, with_sum
     assert row["cost_presentation"] == document["cost_presentation"]
     assert row["note"] == document["result"]
     assert ("summary" in row) is with_summary and ("said_owner" in row) is with_summary
-    assert panel["recent_wakes_coverage"] == "wakes that reached a model call in the last 48 h"
+    assert panel["recent_wakes_coverage"] == "Wakes that reached a model call in the last 48 h"
     history = {key: panel[key] for key in _declared("RecentWakesView")}
     assert not validate_ingress(history, contract_typed_dict("RecentWakesView"))
+    assert not validate_ingress({**row, "place_id": "mail"}, shape), "a focus wake's place id is declared"
     for field, invalid in (("live", "false"), ("phase", "completed"), ("cause", "own_clock"), ("ended_at", 7),
-                           ("tool_calls", "16"), ("checks", [{"chip": "checked", "tool": 7}]),
+                           ("place_id", 7), ("tool_calls", "16"), ("checks", [{"chip": "checked", "tool": 7}]),
                            ("cost_presentation", {"scope": "root_tree"})):
         assert validate_ingress({**row, field: invalid}, shape), field
     assert validate_ingress({key: value for key, value in row.items() if key != "task_id"}, shape)
@@ -419,7 +443,17 @@ def test_place_request_shapes_cover_the_owner_journey(client, monkeypatch):
     monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _root: [{
         "skill": "bridge", "id": "chat", "destination": "vendor:chat", "label": "Test chat", "wakes": ["mention"],
     }])
-    connect = {"connector": "bridge", "account_id": "account", "conversation_id": "room", "label": "Room"}
+    made = {"name": "Team", "text": "Help the team by the facts."}
+    assert BY_TOKEN["POST /api/circles"]["request"]["schemas"] == ["CircleCreateRequest"]
+    assert _declared("CircleCreateRequest") == set(made) and not validate_ingress(made, contract_typed_dict("CircleCreateRequest"))
+    created = client.post("/api/circles", json=made)
+    assert created.status_code == 200, created.text
+    circle = created.json()["circle"]
+    assert not validate_ingress(circle, contract_typed_dict("CircleSummary")) and set(circle) == _declared("CircleSummary")
+    assert circle["text_author"] == "owner" and circle["name"] == "Team"
+    connect = {"connector": "bridge", "account_id": "account", "conversation_id": "room", "label": "Room",
+               "note": "The team's room: answer when asked.", "description": "Where the team asks",
+               "circle_id": circle["circle_id"]}
     assert BY_TOKEN["POST /api/places"]["request"]["schemas"] == ["PlaceConnectRequest"]
     assert _declared("PlaceConnectRequest") == set(connect)
     connect_type = contract_typed_dict("PlaceConnectRequest")
@@ -432,6 +466,15 @@ def test_place_request_shapes_cover_the_owner_journey(client, monkeypatch):
     assert place["label"] == "Test chat · Room" and place["state"] == "silent"
     assert not validate_ingress(place, contract_typed_dict("PlaceSummary"))
     assert set(place) <= _declared("PlaceSummary") and "connector_label" not in place
+    # The derived «only hears» fact is an optional boolean: present, it validates; any other type does not.
+    assert not validate_ingress({**place, "only_hears": True}, contract_typed_dict("PlaceSummary"))
+    assert validate_ingress({**place, "only_hears": "consciousness_off"}, contract_typed_dict("PlaceSummary"))
+    assert [(n["text"], n["author"]) for n in place["notes"]] == [(connect["note"], "owner")]
+    assert place["circle"]["circle_id"] == circle["circle_id"] and place["circle"]["placed_by"] == "owner"
+    assert not validate_ingress(place["circle"], contract_typed_dict("PlaceCircleChoice"))
+    assert place["description"]["text"] == "Where the team asks" and place["description"]["author"] == "owner"
+    again = client.post("/api/places", json=connect)  # a repeated Add writes nothing twice
+    assert again.status_code == 409 and again.json()["code"] == "place_exists" and again.json()["place"] == place
     path = f"/api/places/{place['place_id']}"
     change = {
         "state": "silent", "wakes": ["direct_message"], "add_note": "Owner choice",
@@ -448,20 +491,86 @@ def test_place_request_shapes_cover_the_owner_journey(client, monkeypatch):
     assert changed.status_code == 200, changed.text
     place = changed.json()["place"]
     assert place["state"] == "silent" and place["wakes"] == [{"fact": "direct_message", "author": "owner"}]
-    assert place["notes"][0]["text"] == "Owner choice" and place["notes"][0]["author"] == "owner"
+    assert place["notes"][1]["text"] == "Owner choice" and place["notes"][1]["author"] == "owner"
     assert place["working_folder"] == change["working_folder"] and place["model"] == change["model"]
     assert place["owner_accounts"][0]["platform_actor_id"] == "person"
-    remove = {"remove_note": place["notes"][0]["note_id"], "revoke_owner_account": "person",
-              "expected_revision": place["revision"]}
+    remove = {"remove_note": place["notes"][1]["note_id"], "revoke_owner_account": "person",
+              "circle_id": "", "description": "", "expected_revision": place["revision"]}
     assert _declared("PlaceUpdateRequest") == set(change) | set(remove)
     assert not validate_ingress(remove, update_type)
     removed = client.post(path, json=remove)
     assert removed.status_code == 200, removed.text
-    assert removed.json()["place"]["notes"] == removed.json()["place"]["owner_accounts"] == []
+    assert [n["text"] for n in removed.json()["place"]["notes"]] == [connect["note"]]
+    assert removed.json()["place"]["owner_accounts"] == [] and removed.json()["place"]["circle"] is None
+    assert removed.json()["place"]["description"] is None
     conflict = client.post(path, json=change)
     assert conflict.status_code == 409 and conflict.json()["code"] == "place_revision_conflict"
     assert conflict.json()["place"] == removed.json()["place"]
+    placed = client.post(path, json={"circle_id": circle["circle_id"], "expected_revision": removed.json()["place"]["revision"]})
+    assert placed.status_code == 200 and placed.json()["place"]["circle"]["placed_by"] == "owner"
+    reword = {"name": "Team room", "text": "New words", "expected_revision": circle["revision"]}
+    assert BY_TOKEN["POST /api/circles/{circle_id}"]["request"]["schemas"] == ["CircleUpdateRequest"]
+    assert _declared("CircleUpdateRequest") == set(reword) and not validate_ingress(reword, contract_typed_dict("CircleUpdateRequest"))
+    circle_path = f"/api/circles/{circle['circle_id']}"
+    reworded = client.post(circle_path, json=reword)
+    assert reworded.status_code == 200 and reworded.json()["circle"]["name"] == "Team room"
+    stale = client.post(circle_path, json=reword)
+    assert stale.status_code == 409 and stale.json()["code"] == "circle_revision_conflict"
+    assert stale.json()["circle"] == reworded.json()["circle"]
+    assert BY_TOKEN["DELETE /api/circles/{circle_id}"]["request"]["schemas"] == ["CircleDeleteRequest"]
+    gone = {"expected_revision": reworded.json()["circle"]["revision"]}
+    assert not validate_ingress(gone, contract_typed_dict("CircleDeleteRequest"))
+    deleted = client.request("DELETE", circle_path, json=gone)
+    assert deleted.status_code == 200 and deleted.json()["circle"]["text"] == "New words"
+    assert deleted.json()["detached"] == [{"place_id": place["place_id"], "label": place["label"]}]
+    listed = client.get("/api/places").json()
+    assert listed["circles"] == [] and listed["places"][0]["circle"] is None
+    assert [n["text"] for n in listed["places"][0]["notes"]] == [connect["note"]]  # the place keeps its own words
     assert BY_TOKEN["DELETE /api/places/{place_id}"]["request"]["schemas"] == ["PlaceDisconnectRequest"]
-    disconnect = {"expected_revision": removed.json()["place"]["revision"]}
+    disconnect = {"expected_revision": listed["places"][0]["revision"]}
     assert not validate_ingress(disconnect, contract_typed_dict("PlaceDisconnectRequest"))
     assert client.request("DELETE", path, json=disconnect).status_code == 200
+
+
+def test_place_conflict_lookup_keeps_its_id_after_handler_cancellation(client, monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from starlette.requests import Request
+    from ouroboros.gateway import places_api
+
+    monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _root: [{
+        "skill": "bridge", "id": "chat", "destination": "vendor:chat", "label": "Test chat", "wakes": ["mention"],
+    }])
+    connect = {"connector": "bridge", "account_id": "account", "conversation_id": "room", "note": "Help here."}
+    created = client.post("/api/places", json=connect)
+    assert created.status_code == 200, created.text
+    place = created.json()["place"]
+
+    async def exercise():
+        queued = asyncio.Event()
+        pending = []
+
+        async def delayed_read(function):
+            # A read worker can outlive its cancelled HTTP waiter.
+            pending.append(function)
+            queued.set()
+            await asyncio.Event().wait()
+
+        async def receive():
+            return {"type": "http.request", "body": json.dumps(connect).encode(), "more_body": False}
+
+        # Keep the mutation helper's real executor; control only this route's read dispatch.
+        monkeypatch.setattr(places_api, "asyncio", SimpleNamespace(to_thread=delayed_read))
+        request = Request({"type": "http", "method": "POST", "path": "/api/places",
+                           "path_params": {}, "app": client.app}, receive=receive)
+        handler = asyncio.create_task(places_api.api_places(request))
+        try:
+            await asyncio.wait_for(queued.wait(), timeout=10)
+        finally:
+            handler.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await handler
+        current, = pending
+        assert json.loads(json.dumps(current())) == place
+
+    asyncio.run(exercise())

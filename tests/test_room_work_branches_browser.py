@@ -39,7 +39,7 @@ from tests import test_room_work_browser as rw
 
 subscription_ui = rw.subscription_ui
 direct_server_with_data = backend.direct_server_with_data
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 REPO = Path(__file__).resolve().parents[1]
 FULL_MENU = ["finalize", "hurry", "pause", "stop_now"]
@@ -251,8 +251,14 @@ TARGETS = """(scope) => {
     const min = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--touch-target-min')) || 0;
     const visible = (el) => Boolean(el) && !el.hidden && el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
     const box = (el) => { const r = el.getBoundingClientRect(); return { w: Math.round(r.width * 10) / 10, h: Math.round(r.height * 10) / 10 }; };
+    // A control that looks smaller reaches the minimum through the shared hit area (DESIGN "Touch and containment"),
+    // judged as tests/test_design_system_gate_browser.py does: its centre ±(min/2 - 1) px each way lands on it.
+    const at = (x, y) => document.elementFromPoint(Math.min(Math.max(x, 0), innerWidth - 1), Math.min(Math.max(y, 0), innerHeight - 1));
+    const reached = (el) => { const r = el.getBoundingClientRect(), cx = r.left + r.width / 2, cy = r.top + r.height / 2, d = min / 2 - 1;
+        return min > 0 && [[cx - d, cy], [cx + d, cy], [cx, cy - d], [cx, cy + d]].every(([x, y]) => {
+            const hit = at(x, y); return Boolean(hit) && (hit === el || el.contains(hit)); }); };
     const of = (sel, kind) => [...root.querySelectorAll(sel)].filter(visible)
-        .map((el) => ({ kind, id: el.closest('.rw-row')?.dataset.id || '', ...box(el) }));
+        .map((el) => ({ kind, id: el.closest('.rw-row')?.dataset.id || '', ...box(el), reached: reached(el) }));
     const scrollLatest = root.querySelector('.chat-scroll-bottom-btn');
     return { coarse: matchMedia('(pointer: coarse)').matches, hoverNone: matchMedia('(hover: none)').matches, min,
         targets: [...of('.rw-trigger', 'trigger'), ...of('.rw-main[tabindex="0"]', 'row'), ...of('.rw-more', 'more'),
@@ -367,6 +373,7 @@ def test_translated_chrome_long_names_coarse_pointer(branch_ui, width, theme):
         problems.append(f"opening moved a neighbouring target: {moved}")
     small = [t for t in out["open_targets"]["targets"]
              if t["kind"] in {"trigger", "more", "pill"} and min(t["w"], t["h"]) < out["open_targets"]["min"] - 0.5
+             and not t["reached"]
              or t["kind"] == "row" and t["h"] < out["open_targets"]["min"] - 0.5]
     if small:
         problems.append(f"targets under --touch-target-min {out['open_targets']['min']}px: {small}")
@@ -432,7 +439,8 @@ def test_translated_chrome_long_names_coarse_pointer(branch_ui, width, theme):
     if not shade["reachable"]:
         problems.append("a Shade target is not the element hit at its centre")
     small = [t for t in out["shade_targets"]["targets"]
-             if t["kind"] in {"trigger", "more", "pill"} and min(t["w"], t["h"]) < out["shade_targets"]["min"] - 0.5]
+             if t["kind"] in {"trigger", "more", "pill"} and min(t["w"], t["h"]) < out["shade_targets"]["min"] - 0.5
+             and not t["reached"]]
     if small:
         problems.append(f"Shade targets under --touch-target-min: {small}")
     for name in out["shade_names"]:
@@ -976,9 +984,12 @@ def test_offline_http_across_a_socket_reopen_keeps_stale_actions_withdrawn(branc
 
 _SLEEP_ON_HELD = {"state": "waiting", "reason": "sleep", "task_attempt": 1,
                   "sleep": {"mode": "warm", "tasks": ["rw-child"], "senders": ["rw-child"]}}
-_HELD_LINE = "Sleeping until it is woken · 1 helper it waits for is paused until Ouroboros resumes it"
+# The chosen helper's census row carries no name, so the sleep counts it rather than name it by its id; its mail,
+# chosen too, is said as a message.
+_HELD_LINE = ("Sleeping until the task it chose finishes or a message arrives · 1 helper it waits for is paused until "
+              "Ouroboros resumes it")
 # A Continue episode holds no request door for its predecessor's helper: no releaser is named.
-_COLD_LINE = "Sleeping until it is woken · 1 helper it waits for is paused"
+_COLD_LINE = "Sleeping until the task it chose finishes · 1 helper it waits for is paused"
 # Whether a status line shows whole where it is drawn: inside the viewport, nothing cut, nothing covering it.
 _LINE_FIT = """(el) => {
     const r = el.getBoundingClientRect();

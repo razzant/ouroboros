@@ -43,13 +43,18 @@ starts, counted up to the turn's first model request, where the driver refuses t
 history it must not reread (tests/_turn_shapes.py) is the old memory folded by parts, the archived dialogue sealed
 by pages and rooms sealed after the frontier, met in the steady state a long-lived install keeps (the tail facts
 stored, the OpenRouter catalogue recorded). L1: a project room's turn does the same work at k=1 and k=30; L2:
-Main's turns make the same round trips and decode the same rows (their payload is free: Main shows its story);
+Main's turns make the same round trips and decode the same rows (their payload is delivered once: Main shows its story);
 L3/L4 (k=1): after 40 live rooms and 10 running roots, 650 open rows, or 40 archived knowledge notes and old
 rescue snapshots, only the dialogue's page reads may grow, by B9's allowance per page (their statements by the
 lease's per transaction); L5: each turn reaches its request and nothing it does reaches the network; L6: the
-request carries the newest open row. A breach in today's code is a ``TURN_GAPS`` row (tests/_turn_law.py): a
+request carries the newest open row; L7 (the build's own equalities, on a window where both sizes walk Max -> Low):
+no piece or whole render of the view and no form of the request is produced twice, whole renders of the view equal the
+texts delivered (the walk builds a piece's text once per key to price it and keeps only its length), whole-request
+serializations equal the request's forms at every size, a capture reads what it shows and what is new, a chronicle
+record is parsed once. A breach in today's code is a ``TURN_GAPS`` row (tests/_turn_law.py): a
 strict xfail with its numbers, its remover or why it has none, and a ceiling its growth may not pass.
-The first turn's census of the host's processes is the host's, not the history's: tests/test_cost_host.py.
+The first turn's census of the host's processes is the host's, not the history's: tests/test_cost_host.py. The law's second axis,
+every recurring pass against the live set rather than history, is tests/test_cost_live_set.py.
 """
 
 from __future__ import annotations
@@ -62,20 +67,18 @@ import os
 import pathlib
 import sqlite3
 import sys
-from typing import Any, Callable, Dict, Hashable, Iterable, List, Tuple
+from typing import Any, Callable, Dict, Hashable, Iterable, Iterator, List, Tuple
 
 import pytest
 
-from tests._cost_driver import ACTIVITIES
+from tests._cost_driver import ACTIVITIES, name_owed, refused, schedule_child_job
 from tests._cost_meter import EXECUTION, HISTORY, VM_STEP, CostMeter, tagged
-from tests._scale_root import worktree_root
-from tests._turn_law import hold_turn_law, readers_of, turn_gap
+from tests._stand_cache import STAND_MARKS, measuring
+from tests._turn_law import TURN_GAPS, TurnLawBreach, hold_turn_law, hold_work_equal, readers_of, turn_gap
 
-pytestmark = pytest.mark.scale
+pytestmark = [pytest.mark.scale, *STAND_MARKS]
 
-REPO = pathlib.Path(__file__).resolve().parents[1]
 K_SMALL = 1
-CHILD_TIMEOUT_SEC = 900  # a transport bound for one child, not a judgment about the boot
 LOCATIONS = ("root", *HISTORY, EXECUTION)
 # Counted per location; lock files (``lock``) are left out: how often a lock is probed and retried
 # follows the contention between this process's threads at that instant, not the history. Its
@@ -109,51 +112,44 @@ def vm_allowance(large: int, small: int = K_SMALL) -> int:
 def _gap(table: Dict[Any, str], name: Hashable) -> tuple:
     """A known breach named in a gap table is driven and measured all the same: a strict xfail that flips
     (XPASS) the moment its cause is gone, so the marker is removed instead of forgotten."""
-    return (pytest.mark.xfail(strict=True, reason=table[name]),) if name in table else ()
+    return (pytest.mark.xfail(strict=True, raises=AssertionError, reason=table[name]),) if name in table else ()
+
+
+class KnownBreach(AssertionError):
+    """A room gap's breach as measured: only the counters its cause grows, by no more than its row records."""
+
+
+# A room read's known breach: its cause, and the k=1 -> k=30 growth of each counter it grows on this fixture's
+# drives (one causal pair, measured by the exact meter: 2f8ebe37's report). A precondition, an answer that differs,
+# any other counter, or more growth fails as a plain AssertionError; no growth at all is a strict XPASS.
+ROOM_GAPS: Dict[str, Tuple[str, Dict[str, int]]] = {"R_late": (
+    "The tool-call evidence a late task's card replays (tool_call_log.replay_evidence -> Memory.read_task_recent) "
+    "reads up to the three newest tools.jsonl archives, newest first, before it reaches the task's own rows; the "
+    "tools log stays a rotated file in this change (k=1 -> k=30: one more tools segment, about 39 KB).",
+    {"dir_entries:archive": 203, "json_chars": 39044, "json_loads": 150, "read_bytes:archive": 39190})}
 
 
 # ---- measurement -------------------------------------------------------------------------------
 
-def _child(module: str, args: List[str], env: Dict[str, str], log: pathlib.Path) -> None:
-    """One fresh interpreter; a timeout or an interrupt stops its whole process tree (tests/group_run.py)."""
-    from tests.group_run import run_in_group
-
-    done = run_in_group([sys.executable, "-m", module, *args], timeout=CHILD_TIMEOUT_SEC, cwd=REPO, env=env)
-    log.write_text(done.stdout + done.stderr, encoding="utf-8")
-    assert done.returncode == 0, f"{module} exited {done.returncode}:\n{(done.stdout + done.stderr)[-6000:]}"
-
-
-def measure(base: pathlib.Path, k: int) -> Dict[str, Any]:
-    """Build the k-root in one interpreter, then boot and query it in another (cold)."""
-    home = base / f"k{k:03d}"
-    root, repo = home / "data", home / "repo"
-    root.mkdir(parents=True)
-    repo.mkdir()
-    # The delegated copies live under the worktree root the build and the boot both name (tests/_scale_root.py).
-    env = {**os.environ, "OUROBOROS_DATA_DIR": str(root), "OUROBOROS_SETTINGS_PATH": str(root / "settings.json"),
-           "OUROBOROS_REPO_DIR": str(repo), "OUROBOROS_HOST_SERVICE_PORT": "0",
-           "OUROBOROS_SUBAGENT_WORKTREE_ROOT": str(worktree_root(root))}
-    facts_path, spec_path, out_path = home / "facts.json", home / "spec.json", home / "measured.json"
-    _child("tests._scale_root", [str(root), str(k), str(facts_path)], env, home / "build.log")
-    facts = json.loads(facts_path.read_text(encoding="utf-8"))
-    spec_path.write_text(json.dumps({"root": str(root), "facts": facts}), encoding="utf-8")
-    _child("tests._cost_driver", [str(spec_path), str(out_path)], env, home / "drive.log")
-    measured = json.loads(out_path.read_text(encoding="utf-8"))
-    assert not measured["errors"], f"k={k}: the driver failed:\n" + "\n".join(measured["errors"])
-    measured["root"] = str(root)
-    return measured
+@pytest.fixture(scope="module")
+def built_small() -> Dict[str, Any]:
+    """The first drive of the stand, over the build itself where this module comes first, as it does in collection order."""
+    with measuring(K_SMALL) as counted:
+        return counted
 
 
 @pytest.fixture(scope="module")
-def small(tmp_path_factory) -> Dict[str, Any]:
-    return measure(tmp_path_factory.mktemp("cost"), K_SMALL)
+def small(built_small) -> Iterator[Dict[str, Any]]:
+    with measuring(K_SMALL) as counted:
+        yield counted
 
 
 @pytest.fixture(scope="module", params=[pytest.param(30, id="k30"),
                                         pytest.param(100, id="k100", marks=pytest.mark.integration)])
-def measured(request, small, tmp_path_factory) -> Dict[int, Dict[str, Any]]:
+def measured(request, small) -> Iterator[Dict[Any, Any]]:
     large = request.param
-    return {K_SMALL: small, large: measure(tmp_path_factory.mktemp("cost"), large), "large": large}
+    with measuring(large) as counted:
+        yield {K_SMALL: small, large: counted, "large": large}
 
 
 # ---- the comparison ----------------------------------------------------------------------------
@@ -169,6 +165,19 @@ def contract_breaches(small: Dict[str, int], large: Dict[str, int], k_large: int
     if large.get("vm_steps", 0) > small.get("vm_steps", 0) + allowed:
         breaches["vm_steps"] = (small.get("vm_steps", 0), large.get("vm_steps", 0), f"allowance {allowed}")
     return breaches
+
+
+def test_a_restored_stand_measures_what_its_build_measured(built_small, small):
+    """``small`` drives what ``_restore`` (tests/_stand_cache.py) put back. Were that a copy, the boot would meet new inodes under
+    the recorded file identities and list the history they exist to spare, and the count would say so here. A turn's counts
+    (``T:``) differ between any two drives, even of two fresh builds; B10 holds them to its own law."""
+    if small["root"] != built_small["root"]:
+        pytest.skip("a focused run spread this module over workers: these are two private roots, not one restored")
+    tags = [tag for tag, entry in small.items() if isinstance(entry, dict) and "counts" in entry and not tag.startswith("T:")]
+    assert {"B1", "B2_ready", "B3", "B5", "R_late"} <= set(tags)
+    for tag in tags:
+        assert not contract_breaches(built_small[tag]["counts"], small[tag]["counts"], K_SMALL), tag
+        assert not contract_breaches(small[tag]["counts"], built_small[tag]["counts"], K_SMALL), tag
 
 
 def boundary(measured: Dict[Any, Any], tag: str, k: int) -> Dict[str, Any]:
@@ -211,7 +220,9 @@ def assert_publication_flat(measured: Dict[Any, Any], tag: str) -> None:
     assert_flat(measured, tag)
 
 
-def assert_flat(measured: Dict[Any, Any], tag: str) -> None:
+def assert_flat(measured: Dict[Any, Any], tag: str, gap: Dict[str, int] | None = None) -> None:
+    """`tag` does not grow from k=1 to the large root; with a room `gap`, it grows exactly as that gap
+    records (KnownBreach), scaled to the large root's history as the gap's k=30 growth is."""
     large = measured["large"]
     answers = [{key: value for key, value in (measured[k].get("responses", {}).get(tag) or {}).items()
                 if key in ("status", "echo")} for k in (K_SMALL, large)]
@@ -223,8 +234,14 @@ def assert_flat(measured: Dict[Any, Any], tag: str) -> None:
     growing = sorted(((source, amount - little.get("callers", {}).get(source, 0))
                       for source, amount in big.get("callers", {}).items()
                       if amount > little.get("callers", {}).get(source, 0)), key=lambda item: -item[1])[:8]
+    if gap is not None:
+        excused = {key: value for key, value in breaches.items()
+                   if key in gap and value[1] - value[0] <= gap[key] * (large - K_SMALL) / 29}
+        breaches = {key: value for key, value in breaches.items() if key not in excused}
     assert not breaches, (f"{tag} grows with unrelated history (k={K_SMALL} -> k={large}): {breaches}; "
                           f"history touched at k={large}: {touched}; growing readers: {growing}")
+    if gap is not None and excused:
+        raise KnownBreach(f"{tag} grows as its gap records (k={K_SMALL} -> k={large}): {excused}")
 
 
 # ---- B1-B5 and the room ------------------------------------------------------------------------
@@ -289,15 +306,36 @@ def test_b5_stop_of_a_tree_is_flat(measured):
     assert_flat(measured, "B5")
 
 
-@pytest.mark.parametrize("tag", ["R_active", pytest.param("R_late", marks=pytest.mark.xfail(strict=True, reason=(
-    "The tool-call evidence a late task's card replays (tool_call_log.replay_evidence -> Memory.read_task_recent) "
-    "reads up to the three newest tools.jsonl archives, newest first, before it reaches the task's own rows; the "
-    "tools log stays a rotated file in this change (k=1 -> k=30: one more tools segment, about 39 KB)."))),
-    "R_activew"])
+@pytest.mark.parametrize("tag", [pytest.param(tag, marks=(pytest.mark.xfail(
+    strict=True, raises=KnownBreach, reason=ROOM_GAPS[tag][0]),) if tag in ROOM_GAPS else ())
+    for tag in ("R_active", "R_late", "R_activew")])
 def test_room_history_is_flat(measured, tag):
     for k in (K_SMALL, measured["large"]):  # a page, never the import window's refusal
         assert measured[k]["import"]["state"] == "done" and measured[k]["responses"][tag]["status"] == 200, k
-    assert_flat(measured, tag)
+    assert_flat(measured, tag, ROOM_GAPS[tag][1] if tag in ROOM_GAPS else None)
+
+
+def test_a_room_gap_excuses_only_its_own_counters_within_their_recorded_growth():
+    """The refusals of `assert_flat` with a gap, on synthetic counts: only exactly the recorded breach is known."""
+    gap = ROOM_GAPS["R_late"][1]
+
+    def measured(grown, answer=200, large=30):
+        root = {key: 1000 for key in (*gap, "json_loads", "stat:root")}
+        return {"large": large, K_SMALL: {"R_late": {"counts": root}, "responses": {"R_late": {"status": 200}}},
+                large: {"R_late": {"counts": {**root, **{key: root[key] + amount for key, amount in grown.items()}}},
+                        "responses": {"R_late": {"status": answer}}}}
+    with pytest.raises(KnownBreach):
+        assert_flat(measured(gap), "R_late", gap)
+    with pytest.raises(KnownBreach):  # a smaller history grows proportionally less
+        assert_flat(measured({key: amount * 14 // 29 for key, amount in gap.items()}, large=15), "R_late", gap)
+    for grown in ({**gap, "stat:root": 29}, {**gap, "json_loads": gap["json_loads"] + 1}):
+        with pytest.raises(AssertionError, match="grows with unrelated history") as caught:
+            assert_flat(measured(grown), "R_late", gap)
+        assert not isinstance(caught.value, KnownBreach), grown
+    with pytest.raises(AssertionError, match="answered differently") as caught:
+        assert_flat(measured(gap, answer=500), "R_late", gap)
+    assert not isinstance(caught.value, KnownBreach)
+    assert assert_flat(measured({}), "R_late", gap) is None  # cause gone: the strict xfail XPASSes and fails
 
 
 # ---- B9: the memory's addressed reads ------------------------------------------------------------
@@ -348,12 +386,15 @@ def test_b10_an_integrating_turn_makes_the_same_round_trips_at_every_size(measur
     """L2. An integrating turn makes the same round trips and decodes the same dialogue rows at k=1 and k=30:
     Main's (the process's first, the next one, one after activity elsewhere) and a project room's direct turn,
     which integrates as a root task does (BIBLE P1: the whole horizon stays resident there, so its view holds
-    every room's story and a line per live room). Its payload is free: an integrating view shows its story."""
+    every room's story and a line per live room). Its payload is delivered once: an integrating view shows its story. The
+    transactions ``COUNT_JITTER`` lets come and go (which thread first remembers a turn's own lineage is timing)
+    bring their statements, as in L3; a read per unit of history still adds 29 transactions."""
     large = measured["large"]
     little, big = at_request(measured, tag, K_SMALL), at_request(measured, tag, large)
     keys = (*ROUND, "rows_decoded")
-    hold_turn_law("L2", tag, _growth(little, big, keys), dict.fromkeys(keys, COUNT_JITTER), readers_of(little, big),
-                  scale=(large - K_SMALL) / 29)
+    per_begin = little["counts"].get("statements", 0) / max(1, little["counts"].get("begins", 0))
+    allowed = {**dict.fromkeys(keys, COUNT_JITTER), "statements": math.ceil(per_begin * COUNT_JITTER)}
+    hold_turn_law("L2", tag, _growth(little, big, keys), allowed, readers_of(little, big), scale=(large - K_SMALL) / 29)
 
 
 @pytest.mark.parametrize("law, tag, before, step", [
@@ -365,7 +406,7 @@ def test_b10_main_s_turn_reads_pages_not_rooms_roots_or_rows(measured, law, tag,
     or 40 archived knowledge notes and 40 old rescue snapshots (L3, the turn after the one that met them), only
     the dialogue's own page reads may grow: read transactions by B9's allowance per page of rows the step added
     (one page more when they cross a page edge), statements by as many transactions of the turn before's
-    statements per transaction; every other round trip stays within ``COUNT_JITTER``. Payload is free."""
+    statements per transaction; every other round trip stays within ``COUNT_JITTER``. Payload is delivered once."""
     earlier, later = at_request(measured, before, K_SMALL), at_request(measured, tag, K_SMALL)
     rows = measured[K_SMALL]["turn_shapes"][step]["rows"]
     pages = -(-rows // ROWS_PER_PAGE) + bool(rows)
@@ -394,13 +435,143 @@ def test_b10_main_s_turn_carries_the_newest_open_row(measured):
     assert at_request(measured, "T:main:rows", K_SMALL)["carries"] == [needle], needle
 
 
+# ---- L7: one build does each piece of work once, and delivers what it did ------------------------
+# The equalities the build owes on the branch a live install walks (Max -> Low, a window tight for both sizes): what the
+# host rendered whole, serialized, read and parsed is what it delivered, and a piece of the view is built once per key
+# to be priced. Each stands beside a turn's own receipt
+# (``context_memory_view.work``); a breach in today's code is a ``TURN_GAPS`` row with its numbers.
+
+WORK_TURNS = ("T:main", "T:mainw")  # Main's first turn of the process and the next one, at both sizes
+
+
+def _build_work(measured: Dict[Any, Any], tag: str) -> Dict[int, Dict[str, int]]:
+    """Each size's build work of this turn; the laws speak of the Max -> Low branch, so a turn that kept Max is a broken precondition."""
+    views = {k: at_request(measured, tag, k)["view"] for k in (K_SMALL, measured["large"])}
+    for k, view in views.items():
+        assert view["mode_switch"] == {"from": "max", "to": "low"}, (
+            f"{tag} k={k}: the build laws are about the live branch Max -> Low; this turn ran {view['mode']} "
+            f"(window {view['window_tokens']}, switch {view['mode_switch']})")
+    return {k: view["work"] for k, view in views.items()}
+
+
+def _pairs(works: Dict[int, Dict[str, int]], verb: str, delivered: Callable[[Dict[str, int]], int]) -> Dict[str, Tuple[int, int]]:
+    return {f"{verb}(k={k})": (work.get(verb, 0), delivered(work)) for k, work in works.items()}
+
+
+@pytest.mark.parametrize("tag", [pytest.param(tag, marks=turn_gap("L7a", tag)) for tag in WORK_TURNS])
+def test_b10_a_build_never_repeats_a_view_form_or_a_request_form(measured, tag):
+    """L7a. No piece of the view is built twice, no form of it is rendered whole twice and no form of the request is
+    serialized twice in one build: every ``_again`` is zero. A repeated piece is the class of 222 story renders per
+    build, in one equality. A delivered form is built twice by design, once as a piece and once whole (L7b)."""
+    works = _build_work(measured, tag)
+    hold_work_equal("L7a", tag, {**_pairs(works, "view_renders_again", lambda _work: 0),
+                                 **_pairs(works, "view_pieces_again", lambda _work: 0),
+                                 **_pairs(works, "request_serializations_again", lambda _work: 0)})
+
+
+@pytest.mark.parametrize("tag", [pytest.param(tag, marks=turn_gap("L7b", tag)) for tag in WORK_TURNS])
+def test_b10_a_build_renders_the_view_it_delivers(measured, tag):
+    """L7b. Whole renders of the view equal the texts this start delivers (a story and a room for the projection it
+    ships). The walk prices a form by its pieces: each piece's text is built once per key to take its length and is
+    dropped (``view_pieces``, L7a), and only the delivered texts are built whole (``view_renders``)."""
+    hold_work_equal("L7b", tag, _pairs(_build_work(measured, tag), "view_renders", lambda work: work.get("view_texts_kept", 0)))
+
+
+@pytest.mark.parametrize("tag", [pytest.param(tag, marks=turn_gap("L7c", tag)) for tag in WORK_TURNS])
+def test_b10_a_build_serializes_the_request_once_per_form_at_every_size(measured, tag):
+    """L7c. The whole request is serialized once for each of its forms and the number of forms does not grow with the
+    history: a form is a frame's shape (mode, schemas, whether memory is present), never a probe of the walk."""
+    works = _build_work(measured, tag)
+    hold_work_equal("L7c", tag, {**_pairs(works, "request_serializations", lambda work: work.get("request_forms", 0)),
+                                 "request_serializations(k=30 vs k=1)": (works[measured["large"]].get("request_serializations", 0),
+                                                                         works[K_SMALL].get("request_serializations", 0))})
+
+
+@pytest.mark.parametrize("tag", [pytest.param(tag, marks=turn_gap("L7d", tag)) for tag in WORK_TURNS])
+def test_b10_a_capture_reads_what_it_shows_and_what_is_new(measured, tag):
+    """L7d. The capture reads what it shows and what is new: every row of the tail read is open somewhere or arrived
+    since the stored facts. The one named debt of this class (``TURN_GAPS``): whole tail reads stay until the exact
+    skip of sealed rows is designed."""
+    works = _build_work(measured, tag)
+    hold_work_equal("L7d", tag, _pairs(works, "rows_read", lambda work: work.get("rows_open", 0) + work.get("rows_new", 0)),
+                    scale=(measured["large"] - K_SMALL) / 29)
+
+
+@pytest.mark.parametrize("tag", [pytest.param(tag, marks=turn_gap("L7e", tag)) for tag in WORK_TURNS])
+def test_b10_a_capture_parses_each_record_once(measured, tag):
+    """L7e. A chronicle record is parsed once per snapshot: ``records_parsed_again`` is zero."""
+    hold_work_equal("L7e", tag, _pairs(_build_work(measured, tag), "records_parsed_again", lambda _work: 0))
+
+
+def test_the_work_law_fails_a_breach_no_gap_names_and_excuses_only_its_own(monkeypatch):
+    """``hold_work_equal`` both ways, on synthetic counts: equal work passes; a breach without a row fails for real
+    (a plain AssertionError); a row excuses only the pairs it names, within their recorded work."""
+    assert hold_work_equal("Lx", "tag", {"verb(k=1)": (3, 3)}) is None
+    with pytest.raises(AssertionError, match="unexcused") as plain:
+        hold_work_equal("Lx", "tag", {"verb(k=1)": (4, 3)})
+    assert not isinstance(plain.value, TurnLawBreach)
+    monkeypatch.setitem(TURN_GAPS, ("Lx", "tag"), ("known", {"verb": 9}))
+    with pytest.raises(TurnLawBreach):
+        hold_work_equal("Lx", "tag", {"verb(k=1)": (9, 3)})
+    for pairs in ({"verb(k=1)": (10, 3)}, {"other(k=1)": (2, 1)}):  # past its ceiling; a pair it does not name
+        with pytest.raises(AssertionError, match="unexcused") as caught:
+            hold_work_equal("Lx", "tag", pairs)
+        assert not isinstance(caught.value, TurnLawBreach)
+
+
 # ---- B6: the rest law of the named maintenance jobs ---------------------------------------------
 
+
+@pytest.mark.parametrize("growth", ["other-rooms", "destination"])
+def test_message_dating_reads_indexed_candidates_and_only_the_binding_delta(tmp_path, growth):
+    """No ANALYZE statistics: unrelated dialogue cannot grow a room probe, and previously admitted
+    conversation cannot grow a new binding's dating. Count the real boundary, including its SQL VM work."""
+    from ouroboros import dialogue_store as ds, projects_registry as registry, room_messages, store
+    from tests._dialogue import import_all, seed
+
+    measured = {}
+    for count in (20, 4000):
+        root = tmp_path / str(count)
+        room = registry.create_project(root, "cost", name="Cost")["chat_id"]
+        # Fixture bindings: real saves, but before the dialogue exists, so setup does no dating.
+        for index in range(12 if count == 20 or growth == "other-rooms" else 100):
+            registry.bind_task_to_project(root, f"old-{index}", "cost", room, origin={"absent": "system"})
+        rows = [{"chat_id": room, "ts": "2020-01-01T06:00:00Z", "direction": "in", "text": "Room question"}]
+        rows += [{"chat_id": room if growth == "destination" else 1, "ts": "2020-01-01T05:00:00Z",
+                  "direction": "out", "task_id": "old-0" if growth == "destination" else "unrelated",
+                  "text": f"Old row {index}"} for index in range(count)]
+        rows += [{"chat_id": 1, "ts": "2020-01-01T09:00:00Z", "direction": "out",
+                  "task_id": "incoming", "text": "Work before binding"}]
+        seed(root, archives={"chat_20200101T000000.jsonl": rows})
+        import_all(root)
+        room_messages.run(root, lambda: False)
+        with ds.transaction(root, write=False) as conn:
+            assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='sqlite_stat1'").fetchone()
+        store.close_connections_under(root)  # the meter installs callbacks on freshly opened handles
+        with CostMeter(root) as meter:
+            if growth == "other-rooms":
+                assert tagged("newest", lambda: room_messages.newest(root, room)) == "2020-01-01T06:00:00Z"
+            tagged("binding", lambda: registry.bind_task_to_project(
+                root, "incoming", "cost", room, origin={"absent": "system"}))
+        assert room_messages.read(root)[0][room] == "2020-01-01T09:00:00Z"
+        tags = ["newest", "binding"] if growth == "other-rooms" else ["binding"]
+        measured[count] = {tag: meter.snapshot(tag)["counts"] for tag in tags}
+    for tag in measured[20]:
+        small, large = measured[20][tag], measured[4000][tag]
+        assert small.get("vm_steps", 0) > 0 and large.get("vm_steps", 0) > 0, measured
+        assert large.get("vm_steps", 0) <= small.get("vm_steps", 0) + vm_allowance(200), measured
+        assert large.get("rows_decoded", 0) <= small.get("rows_decoded", 0), measured
+        assert large.get("statements:dialog", 0) <= small.get("statements:dialog", 0) + 2, measured
+    print("MESSAGE_DATING_COST " + json.dumps({"growth": growth, "counts": measured}, sort_keys=True))
+
 def second_run(run: Callable[[pathlib.Path], Any], root: pathlib.Path) -> Dict[str, int]:
-    """The counters of a job's second run over the inputs its first run left."""
-    run(root)
+    """The counters of a job's second run over the inputs its first run left. Each run returns its report, read
+    outside the count: a refused run did nothing, so no count of it is a rest (``refused``; #2465)."""
+    first = run(root)
+    assert not refused(first), ("the first run", refused(first), first)
     with CostMeter(root) as meter:
-        tagged("rest", lambda: run(root))
+        second = tagged("rest", lambda: run(root))
+    assert not refused(second, rest=True), ("the second run", refused(second, rest=True), second)
     return meter.snapshot("rest")["counts"]
 
 
@@ -429,14 +600,30 @@ JOB_NAMES = tuple(getattr(_maintenance(), "JOBS", {}))
 
 
 def job_runner(name: str) -> Callable[[pathlib.Path], Any]:
-    """One named job's run in this process: ``maintenance.run_job(root, name)``."""
+    """One named job's run in this process (``maintenance.run_job``), reported as the child's pass reports it."""
     from tests._store_shared import as_install
 
     maintenance = _maintenance()
 
     def run(root: pathlib.Path) -> Any:
         with as_install(root):  # the maintenance child runs as the install it maintains
-            return maintenance.run_job(root, name, should_stop=lambda: False)
+            outcome = maintenance.run_job(root, name, should_stop=lambda: False)
+        return {"status": "completed", "jobs": {} if outcome is None else {name: outcome}}
+    return run
+
+
+def pass_runner() -> Callable[[pathlib.Path], Any]:
+    """The child's whole pass in this process (``maintenance.run``), as the install it maintains, like a job: from
+    any other install every job is refused (``StoreForeign``) and the pass costs almost nothing (#2465)."""
+    from tests._store_shared import as_install
+
+    maintenance = _maintenance()
+    if maintenance is None or not callable(getattr(maintenance, "run", None)):
+        pytest.skip("the maintenance child's pass does not exist on this tree yet")
+
+    def run(root: pathlib.Path) -> Any:
+        with as_install(root):
+            return maintenance.run(root, should_stop=lambda: False)
     return run
 
 
@@ -451,15 +638,17 @@ def _rests_at_every_size(measured: Dict[Any, Any], run: Callable[[pathlib.Path],
 def run_after_activity(run: Callable[[pathlib.Path], Any], root: pathlib.Path, what: str, phase: str,
                        k: int) -> Dict[str, int]:
     """The counters of a job's run after it rested and one ordinary activity nobody here owns happened
-    (``ACTIVITIES[phase]``, the driver's own shapes, as the install it maintains)."""
+    (``ACTIVITIES[phase]``, the driver's own shapes, as the install it maintains); reports read as ``second_run``'s."""
     from tests._store_shared import as_install
 
-    run(root)
-    run(root)
+    for before in (run(root), run(root)):  # it rested
+        assert not refused(before), (phase, what, "before the activity", refused(before), before)
     with as_install(root):
         ACTIVITIES[phase](root, f"job-{what}", k)
     with CostMeter(root) as meter:
-        tagged(phase, lambda: run(root))
+        after = tagged(phase, lambda: run(root))
+    assert not refused(after), (phase, what, refused(after), after)
+    name_owed(f"{phase} after {what}", after)  # owed work left pending: not refused, debt the next pass inherits
     return meter.snapshot(phase)["counts"]
 
 
@@ -476,10 +665,19 @@ def test_b6_each_job_rests_on_its_second_run(measured, name):
 
 
 def test_b6_the_maintenance_pass_rests_on_its_second_run(measured):
-    maintenance = _maintenance()
-    if maintenance is None or not callable(getattr(maintenance, "run", None)):
-        pytest.skip("the maintenance child's pass does not exist on this tree yet")
-    _rests_at_every_size(measured, lambda root: maintenance.run(root, should_stop=lambda: False), "maintenance.run")
+    """The whole pass, as a job: its first run does the work a seeded due job owes (the child's own scheduled job,
+    ``schedule_child_job``), whose row keeps it done (read outside the count); its second run rests, so it did not."""
+    from ouroboros import maintenance_jobs
+    from tests._store_shared import as_install
+
+    roots = [pathlib.Path(measured[k]["root"]) for k in (K_SMALL, measured["large"])]
+    for root in roots:
+        with as_install(root):
+            seeded = schedule_child_job(root)
+    _rests_at_every_size(measured, pass_runner(), "maintenance.run")  # each run's own report is read there
+    for root in roots:
+        with as_install(root):
+            assert (maintenance_jobs.job(root, seeded) or {}).get("state") == "done", (root, seeded)
 
 
 # The install is never idle: between two passes one ordinary activity nobody here owns happens
@@ -504,10 +702,7 @@ def test_b6_each_job_costs_the_same_after_unrelated_activity(measured, phase, na
 
 @pytest.mark.parametrize("phase,name", _activity_params(ACTIVITY_JOB_GAPS, ("maintenance.run",)))
 def test_b6_the_maintenance_pass_costs_the_same_after_unrelated_activity(measured, phase, name):
-    maintenance = _maintenance()
-    if maintenance is None or not callable(getattr(maintenance, "run", None)):
-        pytest.skip("the maintenance child's pass does not exist on this tree yet")
-    _same_cost_after_activity(measured, lambda root: maintenance.run(root, should_stop=lambda: False), name, phase)
+    _same_cost_after_activity(measured, pass_runner(), name, phase)
 
 
 # ---- B7: the rest law of every recurring pass; B8: the producer and loop boundaries --------------------
@@ -546,14 +741,12 @@ COMPANION_COUNTERS = {
     "question_delivery_replay": ("writes",),
     "terminal_delivery_replay": ("open",),
     "cancel_intent_sweep": ("writes",),
-}
-COMPANIONS_NOT_BUILT = {
-    "pause_notice_replay": "a pause notice obligation needs a parked episode's fence and its notice row",
-    "post_task_synthesis_recovery": "a pending root synthesis dispatches a model turn (refused here)",
-    "held_continuation_recheck": "a writer-held Continue needs a pending continuation under queue custody",
-    "cold-custody": "sleep custody needs a live actor in the queue or the direct registry",
-    "owner_pause_settlement": "a requested owner pause stops members through the daemon (absent here)",
-    "schedule-admission": "a due schedule admits a task into the queue the held supervisor never serves",
+    "owner_pause_settlement": ("writes",),
+    "cold-custody": ("writes",),
+    "schedule-admission": ("writes",),
+    "held_continuation_recheck": ("writes",),
+    "pause_notice_replay": ("writes",),
+    "post_task_synthesis_recovery": ("writes",),
 }
 
 
@@ -562,6 +755,14 @@ def _duty_pass(measured: Dict[Any, Any], name: str, k: int, phase: str) -> Dict[
     assert entry is not None, f"{name} was not driven at k={k}"
     snapshot = entry.get(phase)
     assert snapshot is not None, f"{name} has no {phase} pass at k={k} (companion: {entry.get('companion')!r})"
+    # Each child reports under its pass's tag (``_drain``): refused, that pass measured nothing (#2465); pending is owed
+    # work, refused in the counted rest, named elsewhere. The rest answers for its preparation's refusals, not pending.
+    reports = measured[k].get("child_reports", {})
+    tags = [phase, *(p for p in entry if phase == "rest" and (p == "first" or p.startswith("settle")))]
+    children = [(f"D:{name}:{tag}", lines) for tag in tags for report in reports.get(f"D:{name}:{tag}", [])
+                if (lines := refused(report, rest=tag == "rest"))]
+    assert not children, (name, k, children)
+    name_owed(f"D:{name}:{phase} at k={k}", *reports.get(f"D:{name}:{phase}", []))
     return snapshot
 
 
@@ -578,6 +779,7 @@ def _growing(little: Dict[str, Any], big: Dict[str, Any]) -> List[tuple]:
 
 def _companion_counter(measured: Dict[Any, Any], name: str, k: int, phase: str, counter: Any) -> int:
     if counter == "child_spawn":  # the child's spawn is recorded under the boundary that requested the look
+        _duty_pass(measured, name, k, phase)  # and the child did that pass's jobs
         return measured[k].get("child_spawns", []).count(f"D:{name}:{phase}")
     if isinstance(counter, tuple):  # one kind of work reached through several doors
         return sum(_companion_counter(measured, name, k, phase, door) for door in counter)
@@ -617,9 +819,8 @@ def test_b7_each_duty_works_again_when_its_input_changes(measured, name):
             assert work > rest, (name, k, counter, rest, work, measured[k]["duties"][name].get("companion"))
 
 
-def test_b7_every_duty_has_a_companion_or_a_named_reason():
-    assert set(DUTY_NAMES) == set(COMPANION_COUNTERS) | set(COMPANIONS_NOT_BUILT)
-    assert not set(COMPANION_COUNTERS) & set(COMPANIONS_NOT_BUILT)
+def test_b7_every_duty_has_a_companion():
+    assert set(DUTY_NAMES) == set(COMPANION_COUNTERS)
 
 
 @pytest.mark.parametrize("tag", [pytest.param(tag, marks=_gap(BOUNDARY_GAPS, tag)) for tag in BOUNDARIES])
@@ -728,12 +929,21 @@ def test_the_contract_catches_a_history_sized_listing_made_in_one_call(tmp_path,
     assert (counted[K_SMALL]["dir_entries:archive"], counted[30]["dir_entries:archive"]) == expected
 
 
-@pytest.mark.parametrize("look_ends", ["inside_the_pass", "during_the_drain"])
-def test_the_driver_measures_the_child_a_pass_spawned_whenever_its_look_ends(tmp_path, monkeypatch, look_ends):
+@pytest.mark.parametrize(("look_ends", "story", "refusing"), [
+    ("inside_the_pass", "done done done", ""),
+    ("inside_the_pass", "pending done pending", ""),
+    ("inside_the_pass", "raised done done", "first rest"),
+    ("during_the_drain", "done pending done", "rest"),
+    ("during_the_drain", "failed done done", "first rest"),
+])
+def test_the_driver_measures_the_child_a_pass_spawned_whenever_its_look_ends(tmp_path, monkeypatch, recwarn, look_ends,
+                                                                             story, refusing):
     """A pass whose look spawned the child owns the child's jobs: the driver runs them under the pass's
     tag whether the look's thread ended inside the pass (its spawn recorded before the drain began) or
     ends while the drain joins it. A spawn baseline read after the pass takes the early spawn for an
-    old one and measures no child jobs, with no error to show for it."""
+    old one and measures no child jobs, with no error to show for it. B7 reads what each pass's child (``story``:
+    first, rest, unrelated) reported on that pass alone: a refusal fails it and the rest it prepared; pending fails
+    the counted rest only, elsewhere it is owed work, named, that a later pass may do."""
     import threading
     import time
     from types import SimpleNamespace
@@ -742,8 +952,14 @@ def test_the_driver_measures_the_child_a_pass_spawned_whenever_its_look_ends(tmp
     from tests._cost_driver import _measured_pass
     from tests._cost_meter import tag_of
 
-    runs: List[str] = []
-    monkeypatch.setattr(maintenance, "run", lambda _root, **_kwargs: runs.append(tag_of()))
+    runs, states = [], dict(zip(("D:duty:first", "D:duty:rest", "D:duty:unrelated"), story.split()))
+
+    def run(_root, **_kwargs):
+        runs.append(tag_of())
+        if states[runs[-1]] == "raised":
+            raise RuntimeError("the child's pass died")
+        return {"status": "completed", "jobs": {"custody_trash": {"state": states[runs[-1]], "items": 0}}}
+    monkeypatch.setattr(maintenance, "run", run)
     monkeypatch.setattr(maintenance, "child", SimpleNamespace(owed=lambda: False))
     dispatcher = SimpleNamespace(_DELIVERY_WAKE=threading.Event(), _tick_maintenance_child=lambda: None)
     result: Dict[str, Any] = {"errors": [], "child_spawns": ["D:earlier:first"], "_started": time.monotonic()}
@@ -758,12 +974,23 @@ def test_the_driver_measures_the_child_a_pass_spawned_whenever_its_look_ends(tmp
             threading.Thread(target=lambda: (time.sleep(0.2), spawn()), name="maintenance-child").start()
 
     with CostMeter(tmp_path) as meter:
-        _measured_pass(meter, "D:duty:first", look, dispatcher, tmp_path, threading.Event(), result)
-    assert result["errors"] == [] and runs == ["D:duty:first"], (look_ends, runs, result["child_spawns"])
+        passes = {tag.split(":")[-1]: _measured_pass(meter, tag, look, dispatcher, tmp_path, threading.Event(), result)
+                  for tag in states}
+    assert result["errors"] == [] and runs == list(states), (look_ends, runs, result["child_spawns"])
+    for phase, state in zip(passes, story.split()):
+        named, refuses = len(recwarn), phase in refusing.split()
+        with pytest.raises(AssertionError, match="custody|Runtime") if refuses else contextlib.nullcontext():
+            _duty_pass({K_SMALL: {**result, "duties": {"duty": passes}}}, "duty", K_SMALL, phase)  # as B7 reads it
+        assert (len(recwarn) > named) is (state == "pending" and phase != "rest"), (phase, [*map(str, recwarn)])
 
 
-@pytest.mark.parametrize("extra", ["none", "sql", "body", "legacy_scan", "missing_headers"])
-@pytest.mark.parametrize("mode", ["PERSIST", "WAL"])
+@pytest.mark.parametrize(("mode", "extra"), [
+    ("PERSIST", "none"),
+    ("PERSIST", "body"),
+    ("PERSIST", "missing_headers"),
+    ("WAL", "sql"),
+    ("WAL", "legacy_scan"),
+])
 def test_child_header_allowance_rejects_history_work(tmp_path, monkeypatch, extra, mode):
     from ouroboros import store, store_journal
     from tests.test_store import document, publish
@@ -864,12 +1091,12 @@ def test_the_rest_law_catches_a_job_that_redoes_its_work(tmp_path, rests):
     done = tmp_path / "state" / "job.done"
     done.parent.mkdir()
 
-    def job(root: pathlib.Path) -> None:
-        if rests and done.exists():
-            return
-        with open(root / "archive" / "chat_0001.jsonl", encoding="utf-8") as handle:
-            [json.loads(line) for line in handle]
-        done.write_text("done", encoding="utf-8")
+    def job(root: pathlib.Path) -> Dict[str, Any]:  # reported as a job is (``job_runner``)
+        if not (rests and done.exists()):
+            with open(root / "archive" / "chat_0001.jsonl", encoding="utf-8") as handle:
+                [json.loads(line) for line in handle]
+            done.write_text("done", encoding="utf-8")
+        return {"status": "completed", "jobs": {}}
 
     assert bool(rest_breaches(second_run(job, tmp_path))) is not rests
 

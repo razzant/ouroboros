@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en" class="ouro-ui">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Connect account · Ouroboros</title>
+  <script src="./theme.js"></script>
+  <link rel="icon" href="./favicon.png" type="image/png">
+  <link rel="stylesheet" href="./ui.css">
+  <link rel="stylesheet" href="./provider-return.css">
+</head>
+<body class="provider-return-page">
+  <main class="provider-return-card" data-provider-return>
+    <p class="provider-return-brand">Ouroboros</p>
+    <h1>Connect account</h1>
+    <p class="ui-status" data-return-status data-tone="muted" role="status" aria-live="polite">Completing sign-in…</p>
+    <p class="provider-return-account" data-return-account data-i18n-authored hidden></p>
+    <p class="provider-return-detail" data-return-detail>Waiting for the connector to confirm this account.</p>
+    <a class="btn btn-default" data-return-home href="../../">Return to Ouroboros</a>
+    <noscript>JavaScript is required to finish connecting this account. Return to Ouroboros to start again.</noscript>
+  </main>
+  <script type="module" src="./modules/provider_return.js"></script>
+</body>
+</html>

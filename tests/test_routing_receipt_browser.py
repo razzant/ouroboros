@@ -18,7 +18,7 @@ from tests.test_sidebar_activity_browser import FRAMES, activity, mount_sidebar
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
 
 subscription_ui = setup.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 TITLE = "Fix duplicate posts in the RSS import"
 WORDS = "Keep the old feed address and add a redirect from /feed.xml."
 LINE = """cmid => {

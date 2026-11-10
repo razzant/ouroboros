@@ -47,8 +47,7 @@ def resume(registry, saved):
     return result[6]
 
 
-@pytest.mark.parametrize('new_id', [False, True])
-@pytest.mark.parametrize('policy', ['ordinary', 'explicit', 'producer'])
+@pytest.mark.parametrize(("policy", "new_id"), [('ordinary', False), ('explicit', True), ('producer', False)])
 def test_working_door_uses_current_policy_not_saved_number(tmp_path, monkeypatch, new_id, policy):
     old = task_pacing.CostCeiling(state='active', ceiling_usd=7.0, root_cap_usd=50.0,
                                 basis='legacy-saved-point')

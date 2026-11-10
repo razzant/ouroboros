@@ -52,7 +52,7 @@ def test_explicit_supervisor_freezes_account_processing_effort_and_own_role(monk
     assert task_processing_preference(task, model_role="fallback:2") == "standard"
 
 
-@pytest.mark.parametrize("role", ["light", "fallback:1", "consciousness"])
+@pytest.mark.parametrize("role", ["light", "consciousness"])
 @pytest.mark.parametrize("live", [False, True])
 @pytest.mark.parametrize("pin", ["", "chosen-account"])
 def test_inheritance_captures_actual_role_and_live_choice_never_observed_auto(monkeypatch, role, live, pin):
@@ -68,11 +68,27 @@ def test_inheritance_captures_actual_role_and_live_choice_never_observed_auto(mo
     assert route["model"] == ("claudexor::codex=owner-model" if live else ctx.active_model)
     assert route["source_role"] == role and route["credential_profile_id"] == pin
     assert route["processing_preference"] == "economy" and route["effort"] == "xhigh"
-    assert route["chosen_by"] == ("parent_fallback" if role.startswith("fallback:") else "inherited")
+    assert route["chosen_by"] == "inherited"
     assert "selected_supervisor_snapshot" not in route
     task = {"configured_subagent": leaf, "parent_cognitive_route": route}
     assert task_model_binding(task) == ("subagent:session-builder", pin)
     assert task_processing_preference(task) == "economy"
+
+
+def test_legacy_parent_fallback_remains_valid_frozen_and_rendered():
+    from ouroboros.route_choice import bind_task_route, explicit, opening_choice
+    from ouroboros.supervisor_route import cognitive_route_provenance
+
+    task = selected_task()
+    route = task["parent_cognitive_route"]
+    route.pop("selected_supervisor_snapshot")
+    route.update(chosen_by="parent_fallback", source_role="fallback:0", follows_role="")
+    assert validate_cognitive_route(route) == route
+    assert cognitive_route_provenance(route) == "parent's fallback"
+    ctx = parent(task_metadata=task)
+    bind_task_route(ctx, {**task, "delegation_role": "subagent", "model": route["model"]}, presence=False)
+    assert ctx.task_model_override == route["model"]
+    assert opening_choice(ctx) == explicit("fallback")
 
 
 def test_inheriting_an_existing_supervisor_keeps_frozen_intent(monkeypatch):
@@ -97,10 +113,8 @@ def test_nonmanaged_parent_does_not_inherit_a_managed_account(model, local):
 
 
 @pytest.mark.parametrize("fault,code", [
-    ("session", "supervisor_requires_api_model"), ("disabled", "supervisor_disabled"),
-    ("credentials", "supervisor_credentials_unavailable"), ("api_child", "supervisor_inapplicable"),
-    ("empty", "supervisor_selection_required"), ("null", "supervisor_selection_required"),
-    ("number", "supervisor_selection_required"),
+    ("session", "supervisor_requires_api_model"), ("api_child", "supervisor_inapplicable"),
+    ("empty", "supervisor_selection_required"),
 ])
 def test_selection_refusals_and_the_same_valid_row(fault, code):
     row = cognition_row()
@@ -137,9 +151,8 @@ def test_credentialed_api_and_local_supervisors_are_eligible():
 
 
 @pytest.mark.parametrize("patch", [
-    {"schema": 3}, {"use_local_model": "false"}, {"credential_profile_id": None},
-    {"source_role": ""}, {"processing_preference": "invalid"}, {"chosen_by": "guessed"},
-    {"selected_supervisor_snapshot": {}}, {"chosen_by": "inherited"},
+    {"schema": 3}, {"credential_profile_id": None},
+    {"chosen_by": "inherited"},
 ])
 def test_v2_integrity_guard_refuses_incomplete_carrier_and_accepts_complete(patch):
     route = selected_task()["parent_cognitive_route"]

@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { historyNodeIsProtected } from '../modules/chat_history_replay.js';
-import { createProjectReadReceipt, isAtNewestMessage } from '../modules/project_read_state.js';
+import { createProjectReadReceipt, isAtNewestMessage, newestMessageOffset } from '../modules/project_read_state.js';
 import { ElementStub } from './chat_dom_fixture.js';
 import { TS, row, late, room, placeAtTop, until, quiet } from './project_read_state_fixture.js';
 
@@ -311,6 +311,27 @@ test('a named newest message is read where it is on screen, and only there', () 
     assert.equal(at(-40, true), false, 'above the fold at the bottom of the conversation');
     assert.equal(at(100, true), true);
     assert.equal(at(100, false), true, 'on screen with taller rows below it: nowhere else can it be read');
+});
+
+// The landing moves the feed by the named message's distance in the feed's own pixels: a room scaled while it moves
+// (the phone drawer's handover, about 0.93) shows that distance smaller on screen than the scroll it takes.
+test('the distance to the named message is the feed\'s own, also while the room is scaled', () => {
+    const el = (top, bottom, offsetHeight) => ({ isConnected: true, getClientRects: () => [{}], offsetHeight,
+        getBoundingClientRect: () => ({ top, bottom, height: bottom - top }), closest: () => null });
+    const offset = (scale) => newestMessageOffset({ history_id: 'chat:9', out_of_order: false }, {
+        delivered: () => true, nodes: () => [el(-200 * scale, -180 * scale)], viewport: el(0, 300 * scale, 300) });
+    assert.equal(offset(1), -200, 'at full size the distance on screen is the scroll');
+    assert.equal(Math.round(offset(0.9312)), -200, 'scaled, it still takes the feed\'s own 200 px');
+    // A real feed reports its own fractional height (getComputedStyle, border-box): offsetHeight rounds it to whole
+    // pixels, which would read a fractional feed as scaled, and a scale near 1 as none.
+    const styled = (top, bottom, own) => ({ ...el(top, bottom, Math.round(own)),
+        ownerDocument: { defaultView: { getComputedStyle: () => ({ height: `${own}px` }) } } });
+    const exact = (scale, own, distance) => newestMessageOffset({ history_id: 'chat:9', out_of_order: false }, {
+        delivered: () => true, nodes: () => [el(-distance * scale, (20 - distance) * scale)],
+        viewport: styled(0, own * scale, own) });
+    assert.equal(exact(1, 300.4, 200), -200, 'a fractional height at full size is no scale');
+    assert.ok(Math.abs(exact(0.9312, 300.4, 5000) + 5000) < 1e-6, 'a fractional height mid-motion: the feed\'s own 5000 px');
+    assert.ok(Math.abs(exact(0.999, 300, 99720) + 99720) < 1e-6, 'a scale near 1 is a scale');
 });
 
 // A page loaded while the reader stays put (a short room, `Load older`) can bring

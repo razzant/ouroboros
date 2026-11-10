@@ -39,8 +39,8 @@ from ouroboros.platform_layer import (
 from ouroboros.skill_loader import find_skill, grant_status_for_skill, skill_state_dir
 from ouroboros.tools.process_facts import publish_process_facts
 from ouroboros.tools.registry import ToolContext
-from ouroboros.tools.shell import _active_subprocesses, _kill_process_group, _subprocess_lock
-from ouroboros.tools.shell_process import tracked_start
+from ouroboros.tools.shell import _kill_process_group
+from ouroboros.tools.shell_process import contained_popen, retire_tracked, tracked_start
 from ouroboros.tools.skill_exec import _scrub_env
 from ouroboros.usage_accounting import current_usage_scope, record_unmetered_external_dispatch
 from ouroboros.utils import sanitize_tool_result_for_log
@@ -63,6 +63,18 @@ class ExtensionProcessError(RuntimeError):
     def __init__(self, message: str, *, failure_kind: str = "error") -> None:
         super().__init__(message)
         self.failure_kind = failure_kind
+
+
+# A tool call's child found another payload than the one its host bound (descriptor ``content_hash``); no handler ran.
+PAYLOAD_REPLACED = "payload_replaced"
+
+
+def _require_bound_payload(skill_name: str, expected: str, found: Any) -> None:
+    if expected and str(found or "") != expected:
+        raise ExtensionProcessError(
+            f"extension {skill_name!r} payload changed after this call was bound "
+            f"(bound {expected[:12]}, found {str(found or '')[:12] or 'none'}); call it again",
+            failure_kind=PAYLOAD_REPLACED)
 
 
 def _format_child_returncode(returncode: int) -> str:
@@ -268,6 +280,7 @@ def _child_env(
     skill_dir: pathlib.Path,
     env_allowlist: List[str],
     granted_keys: List[str],
+    host_access: bool = True,
 ) -> Dict[str, str]:
     env = _scrub_env(env_allowlist, skill_state_dir(drive_root, skill_name), skill_name, granted_keys=granted_keys)
     from ouroboros.config import resolve_app_root
@@ -284,6 +297,9 @@ def _child_env(
     for key in _RUNTIME_MODE_ENV_KEYS:
         if os.environ.get(key):
             env[key] = str(os.environ[key])
+    from ouroboros.deployment_policy import child_policy_env
+
+    env.update(child_policy_env())  # its settings reads see this generation's policy; a changed file refuses there
     # WA6: carry bytecode suppression into the scrubbed child env so an extension
     # subprocess running the embedded python never writes __pycache__/*.pyc into a
     # signed+notarized macOS .app bundle (which would break the codesign seal).
@@ -295,20 +311,24 @@ def _child_env(
         pythonpath = os.pathsep.join([pythonpath, env["PYTHONPATH"]])
     env["PYTHONPATH"] = pythonpath
     env["PYTHONUNBUFFERED"] = "1"
-    # Host Service loopback access so an out-of-process child/companion can relay
-    # WS progress (send_ws_message) and subscribe to host events. Reserved and
-    # non-overridable by the skill; token is per-skill, content-hash bound.
+    return {**env, **_host_service_access(drive_root, skill_name, skill_dir)} if host_access else env
+
+
+def _host_service_access(drive_root: pathlib.Path, skill_name: str, skill_dir: pathlib.Path) -> Dict[str, str]:
+    """Host Service loopback access so an out-of-process child/companion can relay WS progress
+    (send_ws_message) and subscribe to host events: reserved, non-overridable by the skill; the token is
+    per-skill and bound to the content hash. Empty when no token can be minted."""
     try:
         from ouroboros.extension_loader import mint_skill_token
         from ouroboros.gateway.host_service import DEFAULT_HOST_SERVICE_HOST, host_service_port
 
         token = mint_skill_token(skill_state_dir(drive_root, skill_name), skill_name, skill_dir)
         if token:
-            env["HOST_SERVICE_TOKEN"] = token
-            env["HOST_SERVICE_URL"] = f"http://{DEFAULT_HOST_SERVICE_HOST}:{host_service_port()}"
+            return {"HOST_SERVICE_TOKEN": token,
+                    "HOST_SERVICE_URL": f"http://{DEFAULT_HOST_SERVICE_HOST}:{host_service_port()}"}
     except Exception:
         pass
-    return env
+    return {}
 
 
 def _drain(pipe: Any, cap: int, out: bytearray, overflow: Dict[str, bool], label: str, *, discard_excess: bool = False) -> None:
@@ -473,7 +493,7 @@ def _child_process(
         from ouroboros.owner_pause import operation_start
         confirmed = external_handoff("extension_process")
         with tracked_start() as publish, operation_start():
-            proc = subprocess.Popen(cmd, **kwargs)  # noqa: S603 - argv is host-constructed
+            proc = contained_popen(subprocess.Popen, cmd, **kwargs)  # noqa: S603 - argv is host-constructed
             publish(proc)
     except BaseException as exc:
         if proc is not None:
@@ -519,8 +539,7 @@ def _child_process(
                 pass
             if proc.poll() is not None:
                 confirmed()
-            with _subprocess_lock:
-                _active_subprocesses.discard(proc)
+            retire_tracked(proc)  # a running root, or a dead root's live or unknown tree, stays named
             try:
                 input_path.unlink(missing_ok=True)
             except OSError:
@@ -583,8 +602,11 @@ def _run_child(
         if overflow["stdout"] or overflow["stderr"]:
             raise ExtensionProcessError("extension child output exceeded safety cap")
         if proc.returncode != 0:
+            from ouroboros.deployment_extensions import discloses_failure, WITHHELD
+
             stderr_text = stderr.decode("utf-8", errors="replace").strip()
-            safe_stderr = sanitize_tool_result_for_log(stderr_text)[-2000:] if stderr_text else ""
+            safe_stderr = (sanitize_tool_result_for_log(stderr_text)[-2000:] if stderr_text else ""
+                           ) if discloses_failure(payload.get("skill_name")) else WITHHELD
             code_detail = _format_child_returncode(int(proc.returncode or 0))
             detail = f"{code_detail}; {safe_stderr}" if safe_stderr else code_detail
             raise ExtensionProcessError(f"extension child exited abnormally: {detail}")
@@ -601,7 +623,8 @@ def _run_child(
         _publish_child_facts(proc, child_started_ts, ws_relay_failures=result.get("ws_relay_failures"),
                              skill_name=str(payload.get("skill_name") or ""))
         if result.get("ok") is not True:
-            raise ExtensionProcessError(str(result.get("error") or "extension child failed"))
+            kind = PAYLOAD_REPLACED if result.get("failure_kind") == PAYLOAD_REPLACED else "error"
+            raise ExtensionProcessError(str(result.get("error") or "extension child failed"), failure_kind=kind)
         return dict(result)
 
 
@@ -677,15 +700,22 @@ def disclose_inprocess_extension_dispatch(
     )
 
 
-def _base_env_for_skill(skill: Any, drive_root: pathlib.Path, repo_dir: pathlib.Path) -> Dict[str, str]:
-    return _child_env(
-        drive_root=drive_root,
-        repo_dir=repo_dir,
-        skill_name=skill.name,
-        skill_dir=skill.skill_dir,
-        env_allowlist=[],
-        granted_keys=[],
-    )
+def _base_env_for_skill(skill: Any, drive_root: pathlib.Path, repo_dir: pathlib.Path, *,
+                        host_access: bool = True) -> Dict[str, str]:
+    return _child_env(drive_root=drive_root, repo_dir=repo_dir, skill_name=skill.name, skill_dir=skill.skill_dir,
+                      env_allowlist=[], granted_keys=[], host_access=host_access)
+
+
+def _readable_settings(skill: Any, drive_root: pathlib.Path, settings: Dict[str, Any], grants: Dict[str, Any]) -> dict:
+    """What the skill's PluginAPI lets it read of ``settings``: its allowlist, under its grants and ``read_settings``."""
+    from ouroboros.extension_plugin_api import PluginAPIImpl, _PluginAPIConfig
+
+    api = PluginAPIImpl(_PluginAPIConfig(
+        skill_name=skill.name, permissions=skill.manifest.permissions, env_allowlist=skill.manifest.env_from_settings,
+        state_dir=skill_state_dir(drive_root, skill.name), settings_reader=lambda: settings,
+        granted_keys=grants.get("granted_keys") or [],
+    ))
+    return api.get_settings(skill.manifest.env_from_settings)
 
 
 def _operator_settings_for_child(skill: Any, drive_root: pathlib.Path) -> dict | None:
@@ -694,20 +724,12 @@ def _operator_settings_for_child(skill: Any, drive_root: pathlib.Path) -> dict |
     it otherwise. Never a document value: the child reads the document itself on every read, so a save during a
     long call reaches its next read. Grants filter here and in the child."""
     from ouroboros.config import SETTINGS_DEFAULTS
-    from ouroboros.extension_plugin_api import PluginAPIImpl, _PluginAPIConfig
     from ouroboros.settings_integrity import _TASK_SETTINGS, skill_environ
 
     if _TASK_SETTINGS.get() is None:
         return None
     environ = {key: value for key, value in skill_environ().items() if key in SETTINGS_DEFAULTS}
-    grants = grant_status_for_skill(drive_root, skill)
-    api = PluginAPIImpl(_PluginAPIConfig(
-        skill_name=skill.name, permissions=skill.manifest.permissions,
-        env_allowlist=skill.manifest.env_from_settings,
-        state_dir=skill_state_dir(drive_root, skill.name), settings_reader=lambda: environ,
-        granted_keys=grants.get("granted_keys") or [],
-    ))
-    return api.get_settings(skill.manifest.env_from_settings)
+    return _readable_settings(skill, drive_root, environ, grant_status_for_skill(drive_root, skill))
 
 
 def _extension_has_model_credentials(skill: Any, drive_root: pathlib.Path) -> bool:
@@ -732,18 +754,18 @@ def _extension_has_model_credentials(skill: Any, drive_root: pathlib.Path) -> bo
 
 
 def _catalog_context(skill, drive_root, repo_dir, settings_reader=None):
+    """A catalog child's inputs and their identity (``extension_import_staging.catalog_identity``): its environment
+    without the Host Service access a run adds (a credential bound to the content hash the key holds, not a
+    registration input) and the fixed settings it reads: the declared keys, else all its PluginAPI may read."""
     from ouroboros.extension_import_staging import catalog_identity, declared_catalog_inputs
     from ouroboros.settings_integrity import skill_settings
 
-    env = _base_env_for_skill(skill, pathlib.Path(drive_root), pathlib.Path(repo_dir))
-    declaration = declared_catalog_inputs(skill)
-    settings = None
-    identity = None
-    if declaration is not None:
-        current = skill_settings(settings_reader)
-        settings = {k: current[k] for k in declaration["settings"] if k in current}
-        identity = catalog_identity(skill, settings, env, grant_status_for_skill(drive_root, skill))
-    return identity, env, settings
+    env = _base_env_for_skill(skill, pathlib.Path(drive_root), pathlib.Path(repo_dir), host_access=False)
+    declaration, current = declared_catalog_inputs(skill), skill_settings(settings_reader)
+    grants = grant_status_for_skill(drive_root, skill)
+    settings = ({k: current[k] for k in declaration["settings"] if k in current} if declaration is not None
+                else _readable_settings(skill, pathlib.Path(drive_root), current, grants))
+    return catalog_identity(skill, settings, env, grants), env, settings
 
 
 def extension_catalog_identity(skill, drive_root, settings_reader=None):
@@ -752,21 +774,38 @@ def extension_catalog_identity(skill, drive_root, settings_reader=None):
 
 def catalog_extension_surfaces(skill: Any, *, drive_root: pathlib.Path, repo_dir: pathlib.Path,
                                skills_repo_path: pathlib.Path | None = None, settings_reader=None) -> Dict[str, Any]:
+    """The skill's surfaces. ``extension_catalog.json`` keeps the last dry run's result with its identity, and only a
+    worker with the same identity takes it instead of running the child: every other load (the server's boot,
+    reconcile, enable, reload) runs the child and replaces the record, which is how a registration reading past the key
+    is run anew. Concurrent loads share one run. A run is recorded only when it loaded the key's bytes with Host Service
+    access; a failed run leaves no earlier result to take, and a busy record or a load without identity runs its own."""
+    from contextlib import ExitStack, suppress
+
+    from ouroboros.context_timing import counted
     from ouroboros.extension_import_staging import extension_cache_lock
-    from ouroboros.utils import atomic_write_json, read_json_dict
+    from ouroboros.utils import atomic_write_json, in_worker_process, read_json_dict
 
     identity, env, settings = _catalog_context(skill, drive_root, repo_dir, settings_reader)
     state_dir = skill_state_dir(drive_root, skill.name)
-    if identity is None:
-        return _catalog_child(skill, drive_root, repo_dir, skills_repo_path, env, settings)
-    # One durable result per skill; concurrent workers share the same child run.
-    with extension_cache_lock(state_dir, "catalog"):
-        path = state_dir / "extension_catalog.json"
-        cached = read_json_dict(path) or {}
-        if cached.get("identity") == identity and isinstance(cached.get("catalog"), dict):
+    path, recorded = state_dir / "extension_catalog.json", identity is not None
+    with ExitStack() as held:
+        try:
+            if recorded:
+                held.enter_context(extension_cache_lock(state_dir, "catalog"))
+        except RuntimeError:  # another load holds the record past the wait
+            recorded = False
+        cached = (read_json_dict(path) or {}) if recorded else {}
+        if recorded and in_worker_process() and cached.get("identity") == identity and isinstance(cached.get("catalog"), dict):
+            counted("catalog_reused", key=skill.name)
             return {**cached["catalog"], "_cache_identity": identity}
-        catalog = _catalog_child(skill, drive_root, repo_dir, skills_repo_path, env, settings)
-        atomic_write_json(path, {"identity": identity, "catalog": catalog})
+        access = _host_service_access(pathlib.Path(drive_root), skill.name, skill.skill_dir)
+        counted("catalog_child", key=skill.name)
+        if recorded:
+            with suppress(OSError):  # a file in use (a Windows share violation): the write below replaces it
+                path.unlink(missing_ok=True)
+        catalog = _catalog_child(skill, drive_root, repo_dir, skills_repo_path, {**env, **access}, settings)
+        if recorded and access and catalog.get("content_hash") == skill.content_hash:
+            atomic_write_json(path, {"identity": identity, "catalog": catalog})
         return {**catalog, "_cache_identity": identity}
 
 
@@ -831,6 +870,7 @@ def dispatch_extension_tool_subprocess(ext_tool: Dict[str, Any], ctx: ToolContex
             "drive_root": str(dispatch_drive_root),
             "repo_dir": str(repo_dir),
             "skills_repo_path": str(ext_tool.get("skills_repo_path") or repo_dir),
+            "content_hash": str(ext_tool.get("content_hash") or ""),
         },
         skill_dir=skill.skill_dir,
         drive_root=dispatch_drive_root,
@@ -934,25 +974,27 @@ def _skill_for_dispatch(skill_name: str, drive_root: pathlib.Path, skills_repo_p
     return skill
 
 
-def _load_child_extension(skill_name: str, drive_root: pathlib.Path, repo_dir: pathlib.Path, skills_repo_path: pathlib.Path, *, operator_settings: dict | None = None, catalog_settings: dict | None = None) -> Any:
+def _load_child_extension(skill_name: str, drive_root: pathlib.Path, repo_dir: pathlib.Path, skills_repo_path: pathlib.Path, *, operator_settings: dict | None = None, catalog_settings: dict | None = None, expected_content_hash: str = "") -> Any:
+    """Load the skill in this child; a bound tool call (``expected_content_hash``) loads only that payload."""
     from ouroboros.config import load_settings
     from ouroboros.extension_loader import load_extension
     from ouroboros.settings_integrity import settings_read_environ
     from ouroboros.skill_loader import discover_skill_identity
 
-    def settings_reader():
-        # Opted-in catalogs run against the exact declared inputs named by their
-        # cache key. Ordinary dispatch continues reading current settings.
+    def settings_reader(*, strict: bool = False):
+        # A catalog runs against the exact settings its key names; ordinary dispatch reads current settings.
         if catalog_settings is not None:
             return catalog_settings
         # The document as it reads now; the dispatching task's operator variables stand in where it is unset.
+        # ``strict`` (``get_settings_state``): a present document that cannot be read is unknown, never defaults.
         with settings_read_environ({**os.environ, **(operator_settings or {})}):
-            return load_settings()
+            return load_settings(strict=True) if strict else load_settings()
 
     skills = discover_skill_identity(drive_root, skill_name, repo_path=str(skills_repo_path))
     skill = next((item for item in skills if item.name == skill_name), None)
     if skill is None:
         raise ExtensionProcessError(f"extension skill {skill_name!r} is missing")
+    _require_bound_payload(skill_name, expected_content_hash, skill.content_hash)  # nothing of a replacement imported
     err = load_extension(
         skill,
         settings_reader,
@@ -962,14 +1004,26 @@ def _load_child_extension(skill_name: str, drive_root: pathlib.Path, repo_dir: p
     )
     if err:
         raise ExtensionProcessError(err)
+    if expected_content_hash:  # the hash the load itself computed, review-gated and published, before any handler
+        _require_bound_payload(skill_name, expected_content_hash, _loaded_content_hash(skill_name))
     return skill
 
 
-def _surface_catalog() -> Dict[str, Any]:
+def _loaded_content_hash(skill_name: str) -> str:
+    """The content hash this process's load of ``skill_name`` computed and published, or ``""``."""
+    from ouroboros.extension_registry_state import _extensions, _lock
+
+    with _lock:
+        bundle = _extensions.get(skill_name)
+        return str(bundle.content_hash or "") if bundle is not None else ""
+
+
+def _surface_catalog(skill_name: str) -> Dict[str, Any]:
     from ouroboros.extension_loader import get_tool, list_companion_names, list_routes, list_ws_handlers, snapshot
 
     snap = snapshot()
     return {
+        "content_hash": _loaded_content_hash(skill_name),  # the bytes this catalog describes
         "companions": list_companion_names(),
         "tools": [
             {
@@ -1129,14 +1183,15 @@ def _child_main(input_path: str) -> None:
     channel = None
     if mode == "route":
         from ouroboros.extension_route_stream import ChildResponseChannel
-        channel = ChildResponseChannel()
+        channel = ChildResponseChannel(skill_name)
     _bootstrap_quiet_child_crash_reporting()
     try:
         skill = _load_child_extension(skill_name, drive_root, repo_dir, skills_repo_path,
                                       operator_settings=payload.get("operator_settings"),
-                                      catalog_settings=payload.get("catalog_settings") if mode == "catalog" else None)
+                                      catalog_settings=payload.get("catalog_settings") if mode == "catalog" else None,
+                                      expected_content_hash=str(payload.get("content_hash") or "") if mode == "tool" else "")
         if mode == "catalog":
-            result = _surface_catalog()
+            result = _surface_catalog(skill_name)
         elif mode == "tool":
             result = {"result": _json_safe(asyncio.run(_call_tool(str(payload.get("surface") or ""), dict(payload.get("args") or {}), drive_root, repo_dir, dict(payload.get("ctx") or {}))))}
         elif mode == "route":
@@ -1154,7 +1209,10 @@ def _child_main(input_path: str) -> None:
             except OSError:
                 pass
         else:
-            outcome = {"ok": False, "error": sanitize_tool_result_for_log(f"{type(exc).__name__}: {exc}")}
+            from ouroboros.deployment_extensions import failure_words
+
+            outcome = {"ok": False, "error": sanitize_tool_result_for_log(failure_words(skill_name, exc)),
+                       **({"failure_kind": exc.failure_kind} if isinstance(exc, ExtensionProcessError) else {})}
     finally:
         try:
             from ouroboros.extension_loader import unload_extension

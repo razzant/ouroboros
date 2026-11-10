@@ -36,16 +36,30 @@ def _direct(monkeypatch, turns):
 
 @pytest.mark.parametrize("order", list(itertools.permutations(["own", "focus", "child"])))
 def test_only_admitted_clock_actor_finishes_once_in_any_order(clock, monkeypatch, order):
+    """The boundary the carrier accepted rides the launched task; only the admitted clock actor's own
+    terminal lays it in the store (``_settle_wake`` reads the carrier's row), and only once."""
+    from ouroboros.task_results import write_task_result
+
     _launched(clock)
-    boundary = clock.store[OBSERVATION_STATE_KEY]
+    launched = clock.launches[-1]["task"]
+    boundary = launched["metadata"]["wake_observation"]["accepted_boundary"]
+    assert OBSERVATION_STATE_KEY not in clock.store  # accepted in the carrier, persisted at the terminal
+    write_task_result(clock.root, "wake0001", "failed", chat_id=7, _is_direct_chat=True,
+                      metadata=launched["metadata"], execution_owner=launched["_execution_owner"])
     before = clock.clock.next_wake_at
     monkeypatch.setattr(clock_module.time, "time", lambda: T0 + 5000)
     for cause in order:
         task_id, metadata = {"own": ("wake0001", OWN), "focus": ("focus1", FOCUS),
                              "child": ("kid1", STARTED)}[cause]
-        clock.clock._wake_finished(task_id, False, metadata=metadata)
-        assert clock.clock.next_wake_at == (T0 + 5000 + DEFAULT * 2 if "own" in order[:order.index(cause) + 1] else before)
-        assert clock.store[OBSERVATION_STATE_KEY] == boundary
+        if cause == "own":
+            clock.clock._wake_finished(task_id, False, metadata=metadata)  # the live row keeps custody: no settle
+            assert clock.clock.next_wake_at == before
+            clock.finish(task_id, False)  # the carrier's terminal row, the pooled settlement, the row's release
+        else:
+            clock.clock._wake_finished(task_id, False, metadata=metadata)
+        own_done = "own" in order[:order.index(cause) + 1]
+        assert clock.clock.next_wake_at == (T0 + 5000 + DEFAULT * 2 if own_done else before)
+        assert (clock.store.get(OBSERVATION_STATE_KEY) == boundary) is own_done
     settled = clock.clock.next_wake_at
     clock.clock._wake_finished("wake0001", False, metadata=OWN)
     clock.clock._wake_finished("wake0001", True, metadata=FOCUS)  # id alone is insufficient
@@ -180,17 +194,24 @@ def test_counted_roots_are_exactly_autonomous_independent_roots(tmp_path, monkey
 
 def test_stop_reaches_direct_pool_children_and_lent_focus_but_leaves_owner(clock, monkeypatch):
     from supervisor import queue
-    from ouroboros import conversation_lease
+    from ouroboros import conversation_lease, places
     turns = {"own": _task("own", OWN), "focus": _task("focus", FOCUS), "owner": _task("owner", OWNER),
              "commissioned": _task("commissioned", {**STARTED, "work_kind": "owner"})}
     _direct(monkeypatch, turns)
-    monkeypatch.setattr(queue, "PENDING", [_task("started", STARTED), _task("kid", STARTED), _task("owner-root", OWNER)])
+    monkeypatch.setattr(queue, "PENDING", [_task("started", STARTED, title="Triage the inbox"), _task("kid", STARTED),
+                                           _task("owner-root", OWNER)])
     monkeypatch.setattr(queue, "RUNNING", {})
     monkeypatch.setattr(conversation_lease, "live_authors", lambda **kw: ["focus", "lent"])
+    places.connect_place(clock.root, place_id="mail", connector="bridge", provider="chat", label="Slack · Acme",
+                         state="active")
     stopped = []
     monkeypatch.setattr(clock.clock, "_stop_live_wake", stopped.append)
     monkeypatch.setattr(clock_module.threading, "Thread", lambda *, target, args, **kw: SimpleNamespace(start=lambda: target(*args)))
-    assert clock.clock.stop().startswith("Background consciousness disabled")
+    # Each live item it ends is named from memory (owner 09.11, variant A): its wake-up, a reply in a place (the
+    # place's label from the one store read; a lent author with no row in hand is «a place»), an autonomous task by
+    # its queue title, else its id. The owner's work is neither stopped nor named.
+    assert clock.clock.stop() == ("Consciousness off: no own wakes, and 1 place only hears until Start. Stopping now: its "
+                                  "wake-up, a reply in Slack · Acme, a reply in a place, «Triage the inbox» and «kid».")
     assert sorted(stopped) == ["focus", "kid", "lent", "own", "started"]
     assert clock.clock.enabled is False
 

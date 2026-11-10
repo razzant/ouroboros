@@ -20,7 +20,7 @@ from tests.test_design_system_gate_browser import seed_page
 from tests.test_shell_interactions_browser import DRAWER, boot, chromium_ui, evidence, saved_history
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 __all__ = ['chromium_ui', 'subscription_ui']
 
 ROW = """sel => { const row = document.querySelector(sel); const r = row.getBoundingClientRect();

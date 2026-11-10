@@ -160,6 +160,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
                         help="finite reservation required for a paid injected executor")
     parser.add_argument("--timeout-sec", type=float, default=DEFAULT_TIMEOUT_SEC)
     parser.add_argument("--max-rounds", type=float, default=DEFAULT_MAX_ROUNDS, help="per-task Ouroboros round ceiling (recorded in applied settings)")
+    # The measured task's own result review (recorded in applied settings); the stock run keeps it Off.
+    parser.add_argument("--task-review-mode", choices=("off", "auto", "required"), default="off")
+    parser.add_argument("--review-enforcement", choices=("advisory", "blocking"), default="advisory")
+    parser.add_argument("--review-max-cycles", default="2", help="paid result-review waves per root task, or unlimited")
     parser.add_argument(
         "--per-task-cost-usd",
         type=float,
@@ -335,6 +339,9 @@ def _validate_launcher_values(args: argparse.Namespace) -> None:
     args.max_rounds = validate_positive_integral(
         getattr(args, "max_rounds", DEFAULT_MAX_ROUNDS), field="max_rounds"
     )
+    cycles = str(getattr(args, "review_max_cycles", "2") or "2").strip().lower()
+    if cycles != "unlimited" and not (cycles.isdigit() and int(cycles) >= 1):
+        raise ValueError("review_max_cycles must be a positive integer or unlimited")
     dry_run = getattr(args, "dry_run", False)
     raw_per_task_cost = getattr(args, "per_task_cost_usd", None)
     if raw_per_task_cost is None:
@@ -930,11 +937,11 @@ def _prepare_applied_settings(
         "OUROBOROS_PER_TASK_COST_USD": per_task_cost_usd,
         "TOTAL_BUDGET": budget_usd,
         "OUROBOROS_TASK_ABS_CEILING_SEC": timeout_sec,
-        # The measured task does not spend model calls on a result review: Off
-        # refuses one at $0, whether the host or the model asks for it.
-        "OUROBOROS_TASK_REVIEW_MODE": "off",
-        "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
-        "OUROBOROS_REVIEW_MAX_CYCLES": "2",
+        # The measured task's own result review, as selected (stock: Off, which refuses one at $0 whether the host
+        # or the model asks): Required reviews its observed production before delivery.
+        "OUROBOROS_TASK_REVIEW_MODE": str(getattr(args, "task_review_mode", "off") or "off"),
+        "OUROBOROS_REVIEW_ENFORCEMENT": str(getattr(args, "review_enforcement", "advisory") or "advisory"),
+        "OUROBOROS_REVIEW_MAX_CYCLES": str(getattr(args, "review_max_cycles", "2") or "2").strip().lower(),
         "OUROBOROS_POST_TASK_EVOLUTION": "false",
         "OUROBOROS_POST_TASK_EVOLUTION_CADENCE": "off",
         # Keep internet access explicit and auditable.  Exact-model OpenRouter
@@ -1033,6 +1040,8 @@ def _prepare_applied_settings(
         "requested_model": model,
         "model": applied_model,
         "runtime_mode": str(applied.get("OUROBOROS_RUNTIME_MODE") or ""),
+        "result_review": {key: str(applied.get(name) or "") for key, name in (("mode", "OUROBOROS_TASK_REVIEW_MODE"), (
+            "enforcement", "OUROBOROS_REVIEW_ENFORCEMENT"), ("max_cycles", "OUROBOROS_REVIEW_MAX_CYCLES"))},
         "max_rounds": max_rounds,
         "per_task_cost_usd": per_task_cost_usd,
         "workers": workers,

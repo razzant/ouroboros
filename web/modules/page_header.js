@@ -12,7 +12,7 @@ function classAttr(parts) {
 // The shell's ☰: one of the shell's icon controls (style.css .shell-icon-control), shown in the stack layout. A
 // page's header carries it in its leading slot, where the drawer's × then sits; a room (Main, a Project) carries it
 // as the composer row's first control instead, under the thumb (owner 19.10, 1A), as tall as the capsules beside it
-// with the touch minimum as its finger target (tests/test_shell_drawer_static.py). Its status dot says what waits
+// with the touch minimum as its finger target. Its status dot says what waits
 // behind it, in the drawer the ☰ opens (app.js paints it and the name's words).
 export function renderMobileNavToggle({ inComposer = false } = {}) {
     const classes = inComposer ? 'shell-icon-control mobile-nav-toggle composer-menu ui-hit-area' : 'shell-icon-control mobile-nav-toggle';
@@ -101,8 +101,10 @@ export function bindPageHeader(header, { lead = null, actions = null } = {}) {
             node.before(home);
             return { node, bar, how, home };
         });
-    if (!moves.length) return () => {};
-    const toolbar = header.querySelector('.app-page-toolbar');
+    const toolbar = header?.querySelector('.app-page-toolbar');
+    // A bar whose actions are already in it (Circles) still lays out as the desk band of every named page; only a
+    // header with no bar and nothing to move has nothing to do here.
+    if (!moves.length && !toolbar) return () => {};
     let docked = null;
     const place = (layout) => {
         // Navigation competes with both moved actions (Files) and actions already in the bar (Skills).

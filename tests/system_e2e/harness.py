@@ -149,6 +149,8 @@ SCENARIOS = {
     # #1729/#1730 in real processes: the owner's doors on one live task that keeps its id (no retry exists since #1376).
     "S40": ("owner Pause / Resume / Stop on one live task, same id: after a Pause and a consumed Resume (and without them) the same id runs again and continues its saved work; a Pause of the running task fences its logical root, a model write served after the acceptance never lands while one before it did, one Resume reopens the tree and Stop ends it Cancelled with no late effect and no successor row", LANE_MOCK),
     "S41": ("live skill-smoke adapter: ordinary author, one independent rebuttal, immutable payload, true/unknown criticism red, tool-policy and identity controls", LANE_MOCK),
+    "S42": ("direct Project turn across an application stop: a WS turn in a Project room writes in the room, the tree is SIGTERMed while its next model round is held, the next boot restores the same id with its saved working state, one owner Resume over HTTP releases the stop hold and the Project verification, and a worker continues the saved loop to a completed result carrying the continuation's answer; in a folderless room the resumed write still lands in the turn's task drive after a sibling start_task gives the room its first folder (#2547)", LANE_MOCK),
+    "S43": ("the production-shaped stand, real half (tests/_stand.py; its counted half: tests/test_stand_counts.py): a root restored with paused trees, pending rows, held runs, schedules, markers, rooms and a story; real tasks, owner turns and a Presence burst held at the model; no server stack runs cognition (E1), the door and the controls answer and Panic ends the whole tree under load (E5, E9), the owner is answered with no pool: a worker storm, a refused spawn, a marker window (E7), Stop finalizes then kills a carrier (E9); WAL and PERSIST (E10)", LANE_MOCK),
 }
 
 MOCK_SLUG = "openai-compatible::mock-model"
@@ -1432,6 +1434,16 @@ class ArtifactOracle:
             if isinstance(row, dict)
         }
 
+    def running_row(self, task_id: str) -> dict:
+        """The published RUNNING row of ``task_id``, or ``{}`` when the snapshot names none."""
+        return next((row for row in (self.queue_snapshot().get("running") or [])
+                     if isinstance(row, dict) and str(row.get("id") or "") == str(task_id)), {})
+
+    def pending_rows(self, task_id: str) -> list:
+        """Every published PENDING row of ``task_id``: a task id owns at most one queue row."""
+        return [row for row in (self.queue_snapshot().get("pending") or [])
+                if isinstance(row, dict) and str(row.get("id") or "") == str(task_id)]
+
     # -- boot surface ---------------------------------------------------------
 
     def server_port(self) -> int:
@@ -1481,6 +1493,38 @@ def submit_running(server: IsolatedServer, description: str, *,
     running = wait_until(lambda: task_id in oracle.running_ids(), timeout)
     assert running, f"task {task_id} never reached the RUNNING set"
     return task_id
+
+
+def conversation_turn_row(oracle: ArtifactOracle, task_id: str, *, timeout: float = 30) -> dict:
+    """The RUNNING row of an owner Main/room turn, held by a conversation-lane worker carrier.
+
+    Since #2654 an owner turn is not an in-process actor without a queue row: routing
+    admits it to a ``WORKERS`` slot with ``lane="conversation"``
+    (``supervisor/conversation_lane.py``), publishing its RUNNING row first and never
+    PENDING, outside ``MAX_WORKERS`` and the project leases, with ``_execution_owner``
+    naming its origin (``direct``) and carrier (``worker``); a ready carrier process
+    holds it. Fails by name on a missing row (the retired in-process actor), a PENDING
+    row, a project-lane or pooled row, a disclosed inline executor, or a slot no live
+    custodied worker process backs. Returns the row with ``carrier_pid`` added.
+    """
+    from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION
+    from tests._shared import live_worker_slots
+
+    def held() -> dict:
+        row = oracle.running_row(task_id)
+        return row if row.get("worker_id") is not None else {}
+
+    row = wait_until(held, timeout) or oracle.running_row(task_id)
+    assert row, f"the turn {task_id} has no RUNNING row: {oracle.queue_snapshot().get('running')}"
+    assert not oracle.pending_rows(task_id), f"the turn {task_id} is also PENDING: {oracle.pending_rows(task_id)}"
+    owner = (row.get("task") or {}).get("_execution_owner") or {}
+    assert (owner.get("kind"), owner.get("lane"), owner.get("executor")) == (
+        "direct", LANE_CONVERSATION, EXECUTOR_WORKER), f"not a conversation-lane worker turn: {row}"
+    assert row.get("worker_id") is not None, f"no carrier holds the turn {task_id}: {row}"
+    slots = live_worker_slots(oracle.data_root)
+    carrier = slots.get(int(row["worker_id"]))
+    assert carrier, f"slot {row['worker_id']} of {task_id} has no live custodied worker process: {slots}"
+    return {**row, "carrier_pid": carrier}
 
 
 def wait_durable_result(oracle: ArtifactOracle, task_id: str, *, timeout: float = 180) -> dict:

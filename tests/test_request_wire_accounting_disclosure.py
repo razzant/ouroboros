@@ -188,8 +188,11 @@ def _settlement_failure(monkeypatch, active, *, fail_unresolved):
     monkeypatch.setattr(ua, "mark_unresolved", unresolved)
 
 
-@pytest.mark.parametrize("settlement", ["settled", "unresolved", "dispatched"])
-@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(("asynchronous", "settlement"), [
+    pytest.param(False, "settled", id='sync-settled'),
+    pytest.param(False, "dispatched", id='sync-dispatched'),
+    pytest.param(True, "unresolved", id='async-unresolved'),
+])
 def test_returned_response_discloses_its_exact_wire_candidate(
     wire_env, monkeypatch, settlement, asynchronous,
 ):

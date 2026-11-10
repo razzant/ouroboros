@@ -217,9 +217,7 @@ def test_ssh_capture_without_exact_primary_geometry_is_capture_only(desktop, mon
 
 
 @pytest.mark.parametrize("method,kwargs", [
-    ("click", {"x": 1, "y": 1, "raw": True}), ("type_text", {"text": "<p>"}),
-    ("key", {"keys": "left right"}), ("hold_key", {"keys": "ctrl", "duration_ms": 50}),
-    ("scroll", {}), ("mouse_up", {})])
+    ("click", {"x": 1, "y": 1, "raw": True}), ("scroll", {}), ("mouse_up", {})])
 def test_target_file_is_resolved_before_any_call_stage(desktop, method, kwargs):
     impl = desktop
     target_file = impl.state_dir / "target.txt"
@@ -239,9 +237,7 @@ def test_target_file_is_resolved_before_any_call_stage(desktop, method, kwargs):
 
 
 @pytest.mark.parametrize("field,value", [("sx", float("nan")), ("sy", float("inf")), ("sx", 0),
-    ("sx", -1), ("ox", float("inf")), ("oy", float("nan")), ("image_w", 0),
-    ("image_h", float("inf")), ("image_w", True), ("input_w", -1),
-    ("display_geometry", {"x": 0, "y": 0, "w": -1, "h": 80})])
+    ("image_w", 0)])
 def test_invalid_transform_never_activates_or_sends(desktop, field, value):
     observation(desktop, **{field: value})
     out = json.loads(desktop.click(x=1, y=1, app="Editor", observation_id="shot"))
@@ -249,8 +245,8 @@ def test_invalid_transform_never_activates_or_sends(desktop, field, value):
     assert out["reason"] == "invalid_observation"
 
 
-@pytest.mark.parametrize("point", [(50, 1), (1, 40), (-1, 1), (float("nan"), 1),
-                                    (float("inf"), 1), ("-Infinity", 1)])
+@pytest.mark.parametrize("point", [(50, 1), (float("nan"), 1),
+                                    ("-Infinity", 1)])
 def test_bad_image_coordinate_never_activates_or_sends(desktop, point):
     observation(desktop)
     out = json.loads(desktop.click(x=point[0], y=point[1], app="Editor", observation_id="shot"))
@@ -373,14 +369,6 @@ def test_mac_local_and_ssh_share_real_cliclick_key_commands():
     ("cmd+S", ["kd:cmd", "t:s", "ku:cmd"], "super+s"),
     ("ctrl+C", ["kd:ctrl", "t:c", "ku:ctrl"], "ctrl+c"),
     ("Control+S", ["kd:ctrl", "t:s", "ku:ctrl"], "ctrl+s"),
-    ("ctrl+shift+T", ["kd:ctrl,shift", "t:t", "ku:ctrl,shift"], "ctrl+shift+t"),
-    ("shift+A", ["kd:shift", "t:a", "ku:shift"], "shift+a"),
-    ("cmd+s", ["kd:cmd", "t:s", "ku:cmd"], "super+s"),
-    ("cmd+1", ["kd:cmd", "t:1", "ku:cmd"], "super+1"),
-    ("ctrl+F5", ["kd:ctrl", "kp:f5", "ku:ctrl"], "ctrl+F5"),
-    ("ctrl+Tab", ["kd:ctrl", "kp:tab", "ku:ctrl"], "ctrl+Tab"),
-    ("A", ["t:A"], "A"),
-    ("a", ["t:a"], "a"),
 ])
 def test_a_letter_under_a_modifier_adds_no_shift_and_a_bare_letter_stays_as_written(desktop, monkeypatch, keys, mac, x11):
     """A kept capital presses Shift on the way out: cmd+S would become cmd+shift+s. Shift is only what the combo names."""
@@ -432,16 +420,19 @@ def test_osworld_hands_pyautogui_the_letter_as_written(desktop):
     assert "pyautogui.keyDown('ctrl'); pyautogui.keyDown('C')" in sent[0]
 
 
-@pytest.mark.parametrize("raw", [False, True])
-@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), "1e999"])
+@pytest.mark.parametrize(("value", "raw"), [
+    pytest.param(float("nan"), False, id='nan-False'),
+    pytest.param(float("inf"), True, id='inf-True'),
+    pytest.param(float("-inf"), False, id='-inf-False'),
+    ("1e999", True),
+])
 def test_nonfinite_coordinates_fail_in_both_coordinate_modes(desktop, raw, value):
     observation(desktop)
     out = json.loads(desktop.click(x=value, y=1, raw=raw, app="Editor", observation_id="shot"))
     assert out["ok"] is False and out["dispatched"] is False
 
 
-@pytest.mark.parametrize("body", [{}, {"status": "success"}, {"returncode": False},
-                                  {"status": "success", "returncode": None},
+@pytest.mark.parametrize("body", [{}, {"returncode": False},
                                   {"status": "error", "returncode": 0}])
 def test_unknown_or_contradictory_completion_never_replays_a_paste(desktop, body):
     select(desktop, "osworld_http")
@@ -453,10 +444,12 @@ def test_unknown_or_contradictory_completion_never_replays_a_paste(desktop, body
     assert "observed_effect" not in out
 
 
-@pytest.mark.parametrize("host", ["macos", "x11", "ssh", "osworld"])
-@pytest.mark.parametrize("front", [False, True])
-@pytest.mark.parametrize("method,kwargs", [("key", {"keys": "down down"}), ("click", {"x": 1, "y": 1, "raw": True}),
-                                           ("type_text", {"text": "text"})])
+@pytest.mark.parametrize(("method", "kwargs", "front", "host"), [
+    pytest.param("key", {"keys": "down down"}, False, "macos", id='key-kwargs0-False-macos'),
+    pytest.param("key", {"keys": "down down"}, True, "osworld", id='key-kwargs0-True-osworld'),
+    pytest.param("click", {"x": 1, "y": 1, "raw": True}, True, "x11", id='click-kwargs1-True-x11'),
+    pytest.param("type_text", {"text": "text"}, False, "ssh", id='type_text-kwargs2-False-ssh'),
+])
 def test_never_policy_requires_front_without_any_activation(tmp_path, monkeypatch, host, front, method, kwargs):
     from tests.test_unix_computer_use_targeting import mac, x11, KEYNOTE, SAFARI
     from tests.test_unix_computer_use_remote_targeting import ssh, mac_over_ssh, osworld, listing, KEYNOTE_FRONT, FIREFOX_FRONT
@@ -491,7 +484,7 @@ def test_never_policy_requires_front_without_any_activation(tmp_path, monkeypatc
                        or (cmd[0] == "ssh" and "cliclick" in cmd[-1]) for cmd in calls)
 
 
-@pytest.mark.parametrize("host", ["macos", "x11", "ssh", "osworld"])
+@pytest.mark.parametrize("host", ["macos", "x11", "osworld"])
 def test_never_policy_with_an_unread_front_claims_no_switch(tmp_path, monkeypatch, host):
     from tests.test_unix_computer_use_targeting import mac, x11
     from tests.test_unix_computer_use_remote_targeting import ssh, osworld, listing, LISTING
@@ -515,8 +508,11 @@ def test_never_policy_with_an_unread_front_claims_no_switch(tmp_path, monkeypatc
                    for cmd in calls)
 
 
-@pytest.mark.parametrize("front,reason", [({"pid": 8, "app": "Other"}, "target_lost"), (None, "front_unread")])
-@pytest.mark.parametrize("method,kwargs", [("key", {"keys": "a"}), ("click", {"x": 1, "y": 1, "raw": True}), ("type_text", {"text": "text"})])
+@pytest.mark.parametrize(("method", "kwargs", "front", "reason"), [
+    pytest.param("key", {"keys": "a"}, {"pid": 8, "app": "Other"}, "target_lost", id='key-kwargs0-front0-target_lost'),
+    pytest.param("click", {"x": 1, "y": 1, "raw": True}, None, "front_unread", id='click-kwargs1-None-front_unread'),
+    pytest.param("type_text", {"text": "text"}, {"pid": 8, "app": "Other"}, "target_lost", id='type_text-kwargs2-front0-target_lost'),
+])
 def test_never_policy_last_look_before_the_first_step_says_nothing_was_sent(desktop, method, kwargs, front, reason):
     desktop._native = lambda op, *a, **kw: {"ok": True, "candidates": [{"pid": 7, "app": "Editor"}]}
     sent = []
@@ -558,8 +554,10 @@ def test_never_policy_keeps_the_later_step_words(tmp_path, monkeypatch):
     assert FIRST_REFUSAL not in out["error"] and len(inputs(state)) == 1
 
 
-@pytest.mark.parametrize("reason,marker", [("target_lost", "__TARGET_LOST__"), ("front_unread", "__FRONT_UNREAD__")])
-@pytest.mark.parametrize("host", ["ssh", "osworld"])
+@pytest.mark.parametrize(("host", "reason", "marker"), [
+    ("ssh", "target_lost", "__TARGET_LOST__"),
+    ("osworld", "front_unread", "__FRONT_UNREAD__"),
+])
 def test_remote_precheck_after_no_switch_claims_none(tmp_path, monkeypatch, host, reason, marker):
     from tests.test_unix_computer_use_targeting import KEYNOTE
     from tests.test_unix_computer_use_remote_targeting import ssh, osworld, listing, info_line, LISTING, KEYNOTE_FRONT

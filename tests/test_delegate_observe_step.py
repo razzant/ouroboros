@@ -51,10 +51,12 @@ class Engine:
     routes = ROUTES
 
     repaired = True  # the route accepts the problem acknowledgement (the contract probe's answer)
+    blocking_opt_in = False  # the route also answers the ``includeBlocking`` opt-in (claudexor #628)
 
     def __init__(self, *, streams=(), wakes=(), details=(), catalog=None, probe_answer=None):
         self.streams, self.wakes, self.details = list(streams), list(wakes), list(details)
         self.stream_opens, self.requests, self.detail_reads, self.probes = [], [], [], []
+        self.opt_in_probes = []
         self.catalog, self.probe_answer = catalog, probe_answer
 
     def operations(self, *, timeout_sec=None):
@@ -69,15 +71,18 @@ class Engine:
             raise answer
         return contextlib.nullcontext(answer if isinstance(answer, _Stream) else _Stream(answer))
 
-    def wait_run_attention(self, targets, *, wait_ms, timeout_sec):
+    def wait_run_attention(self, targets, *, wait_ms, timeout_sec, include_blocking=False):
         if targets == [{"runId": obs.PROBE_RUN_ID, "seen": None}]:
-            self.probes.append(wait_ms)
+            (self.opt_in_probes if include_blocking else self.probes).append(wait_ms)
             if isinstance(self.probe_answer, BaseException):
                 raise self.probe_answer
+            if include_blocking and not self.blocking_opt_in:  # a strict input that predates the opt-in
+                raise ClaudexorUnavailable("invalid_request", "Unrecognized key(s): 'includeBlocking'", status_code=400)
             if not self.repaired:
                 raise ClaudexorUnavailable("invalid_request", "targets[0].seen: expected string", status_code=400)
             return _wake("timeout", [{"status": None, "pending": None, "token": None, "problem": "not_found"}])
-        self.requests.append({"targets": targets, "wait_ms": wait_ms})
+        self.requests.append({"targets": targets, "wait_ms": wait_ms,
+                              **({"include_blocking": True} if include_blocking else {})})
         answer = self.wakes.pop(0)
         if isinstance(answer, BaseException):
             raise answer
@@ -155,13 +160,61 @@ def test_a_hole_on_the_attention_read_raises_the_gateways_typed_hole(ctx):
     assert caught.value is hole
 
 
-@pytest.mark.parametrize("failure", [httpx.ConnectError("refused"), _Stream("", 503, "daemon_busy"),
-                                     _Stream("", 503, "daemon_stopping"), _Stream("", 404, "not_found")],
-                         ids=["connect", "busy", "stopping", "absent"])
+@pytest.mark.parametrize("failure", [httpx.ConnectError("refused"), _Stream("", 503, "daemon_stopping"), _Stream("", 404, "not_found")],
+                         ids=["connect", "stopping", "absent"])
 def test_a_journal_that_could_not_be_read_hands_the_beat_to_the_detail_read(ctx, failure):
     gateway = Engine(streams=[failure], wakes=[_wake("timeout", [_summary()])])
     assert delegate_observe.step(ctx, gateway, "run-s", window=1.0, since_seq=0, read_window=lambda: 30.0) is None
     assert gateway.requests == [], "the detail beat decides this one, with its own hole rules and degraded window"
+
+
+@pytest.mark.parametrize(("served", "retryable"), [([(1, "hello"), (2, "world")], False), ([], True)],
+                         ids=["partial-then-reclaimed", "refused-at-once"])
+def test_a_refused_journal_shows_what_it_served_and_hands_the_beat_to_the_detail_read(ctx, served, retryable):
+    from tests.test_delegated_activity import LoopbackEngine, _refusal
+
+    code = "run_event_not_found" if retryable else "run_expired_by_retention"
+    engine = LoopbackEngine([_speech(seq, text)[1] for seq, text in served], tail=_refusal(code, retryable),
+                            run_id="run-s")
+    with engine.serving() as gateway:
+        assert delegate_observe.step(ctx, gateway, "run-s", window=3.0, since_seq=0, read_window=lambda: 30.0) is None
+    through = served[-1][0] if served else 0
+    assert [meta["delegated_activity"]["through_seq"] for _text, meta in ctx.frames] == ([through] if served else [])
+    assert all(text in "\n".join(frame for frame, _meta in ctx.frames) for _seq, text in served)
+    assert delegate_activity.shown_cursor(ctx, ctx.task_id, "run-s", 0) == through, "the detail beat reads on from here"
+    assert engine.stream_reads() == ["0"] and not [
+        body for method, path, body in engine.requests if path == "/v2/runs/wait-many" and body["targets"][0]["runId"] == "run-s"
+    ], "the refused beat reads no attention and acknowledges no token: the detail read decides"
+
+
+@pytest.mark.parametrize("channel", ["raises", "missing"])
+def test_words_a_failed_frame_left_reach_the_owner_before_a_refusal_for_good_passes_their_range(ctx, channel):
+    """The refused beat's frame failed: the detail beat shows the words it read first, then the
+    gap, and never asks the engine again for a journal it said reconnecting cannot deliver."""
+    from types import SimpleNamespace
+
+    from tests.test_delegated_activity import LoopbackEngine, _refusal
+
+    engine = LoopbackEngine([_speech(1, "hello")[1], _speech(2, "world")[1]],
+                            tail=_refusal("run_expired_by_retention", False), run_id="run-s")
+    delivered = ctx.emit_progress_fn
+    ctx.emit_progress_fn = (None if channel == "missing" else
+                            lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("progress channel closed")))
+    with engine.serving() as gateway:
+        assert delegate_observe.step(ctx, gateway, "run-s", window=3.0, since_seq=0, read_window=lambda: 30.0) is None
+        engine.journal = []  # what the engine still holds now: nothing
+        ctx.emit_progress_fn = delivered
+        for record, commit in delegate_activity.observations(ctx, gateway, "run-s", SimpleNamespace(seq=5, events=[]),
+                                                             after_seq=0, read_sec=2.0):
+            ctx.emit_progress_fn(delegate_activity.progress_text(record), delegated_activity=record)
+            commit()
+        assert delegate_observe.step(ctx, gateway, "run-s", window=3.0, since_seq=5, read_window=lambda: 30.0) is None
+    shown = [meta["delegated_activity"] for _text, meta in ctx.frames]
+    assert [part["text"] for part in shown[0]["parts"]] == ["hello", "world"], "the undelivered words come first"
+    assert shown[1]["gaps"] == [{"after_seq": 2, "through_seq": 5, "reason": "stream_error:run_expired_by_retention",
+                                 "retryable": False}]
+    assert delegate_activity.shown_cursor(ctx, ctx.task_id, "run-s", 0) == 5
+    assert engine.stream_reads() == ["0"], "a journal refused for good is not read again"
 
 
 def test_a_problem_row_hands_the_beat_back_to_the_detail_read(ctx):
@@ -213,3 +266,73 @@ def test_an_engine_whose_route_rejects_the_acknowledgement_keeps_the_detail_beat
     gateway.repaired = False
     assert delegate_observe.step(ctx, gateway, "run-s", window=1.0, since_seq=0, read_window=lambda: 30.0) is None
     assert gateway.probes == [0] and gateway.stream_opens == [] and gateway.requests == []
+
+
+def test_refusal_without_new_events_publishes_availability_for_the_already_shown_range(ctx, monkeypatch):
+    from ouroboros import delegate_progress
+    from ouroboros.subagent_messages import delegated_activity_meta
+    from tests.test_delegated_activity import LoopbackEngine, _refusal
+
+    monkeypatch.setattr(delegate_activity, "_persist", lambda *_a: {})
+    # The earlier preview was shown but its full source could not be saved locally.
+    gateway = Engine(streams=[_frames([_speech(1, "earlier words " * 1000)])], wakes=[_wake("timeout", [_summary()])])
+    assert delegate_observe.step(ctx, gateway, "run-s", window=3, since_seq=0, read_window=lambda: 30) is not None
+    assert len(ctx.frames) == 1 and ctx.frames[0][1]["delegated_activity"]["source"]["retained"] is False
+    refused = LoopbackEngine([], tail=_refusal("run_expired_by_retention", False), run_id="run-s")
+    with refused.serving() as gateway:
+        assert delegate_observe.step(ctx, gateway, "run-s", window=3, since_seq=1, read_window=lambda: 30) is None
+    assert len(ctx.frames) == 2, "availability changes must reach live/history even without another event"
+    metadata = ctx.frames[-1][1]["delegated_activity"]
+    assert delegated_activity_meta(metadata, task_id=ctx.task_id) == metadata
+    assert (metadata["after_seq"], metadata["through_seq"]) == (0, 1)
+    assert metadata["source"]["kind"] == "timeline_window" and metadata["source"]["retryable"] is False
+    assert not metadata["parts"] and not metadata.get("gaps"), "this reports availability, not new or missing speech"
+    assert delegate_activity.shown_cursor(ctx, ctx.task_id, "run-s", 1) == 1
+    delegate_progress.emit_retained(ctx, "run-s")
+    assert len(ctx.frames) == 2, "the delivered metadata does not repeat"
+
+
+# -- questions that hold nothing (claudexor #628) -----------------------------------------------
+
+def _async_detail(*deliveries, seq=3):
+    rows = [{"interactionId": f"i-{index}", "delivery": delivery,
+             "questions": [{"id": "q", "question": "?", "options": [], "multi_select": False}]}
+            for index, delivery in enumerate(deliveries)]
+    summary = {"state": "running", "waitingOnUser": True,
+               "asyncQuestionsOnly": all(delivery == "async" for delivery in deliveries)}
+    return {"summary": summary, "lastSeq": seq, "pendingInteractions": rows}
+
+
+def _marked(blocking, token=TOKEN_B):
+    return {**_summary(pending=True, token=token), "blocking": blocking}
+
+
+def test_a_fetched_async_question_leaves_the_working_run_quiet_without_a_detail_read(ctx):
+    asked = _async_detail("async")
+    gateway = Engine(streams=["", "", ""], details=[asked, asked], wakes=[
+        _wake("attention", [_marked(False)], [0]),
+        _wake("timeout", [_marked(False)]),
+        _wake("attention", [_marked(False, token=TOKEN_A)], [0]),
+    ])
+    gateway.blocking_opt_in = True
+    first = delegate_observe.step(ctx, gateway, "run-s", window=1.0, since_seq=0, read_window=lambda: 30.0)
+    assert first.detail is asked and gateway.detail_reads == ["run-s"], "a new question is fetched before its ACK"
+    quiet = delegate_observe.step(ctx, gateway, "run-s", window=1.0, since_seq=3, read_window=lambda: 30.0)
+    assert gateway.requests[1] == {"targets": [{"runId": "run-s", "seen": TOKEN_B}], "wait_ms": 0, "include_blocking": True}
+    assert quiet.detail is None and gateway.detail_reads == ["run-s"], "no three-second detail read for it"
+    payload = json.loads(quiet.payload)
+    assert payload["status"] == "no_progress" and payload["waiting_on_user"] is True
+    assert payload["async_questions_only"] is True and payload["answered"] is True
+    changed = delegate_observe.step(ctx, gateway, "run-s", window=1.0, since_seq=3, read_window=lambda: 30.0)
+    assert changed.detail is asked and gateway.detail_reads == ["run-s"] * 2, "a changed token is fetched again"
+
+
+@pytest.mark.parametrize("row", [_marked(True), _summary(pending=True, token=TOKEN_B)], ids=["holding", "unknown"])
+def test_a_holding_or_unknown_question_is_never_a_quiet_beat(ctx, row):
+    held = _async_detail("async", "blocking")
+    gateway = Engine(streams=["", ""], details=[held, held],
+                     wakes=[_wake("attention", [row], [0]), _wake("timeout", [row])])
+    gateway.blocking_opt_in = True
+    delegate_observe.step(ctx, gateway, "run-s", window=1.0, since_seq=0, read_window=lambda: 30.0)
+    again = delegate_observe.step(ctx, gateway, "run-s", window=1.0, since_seq=3, read_window=lambda: 30.0)
+    assert again.detail is held and gateway.detail_reads == ["run-s"] * 2, "the old detail beat, as before"

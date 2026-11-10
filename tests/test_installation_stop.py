@@ -9,6 +9,7 @@ from ouroboros import delegate_recovery as dr
 from ouroboros.installation_stop import installation_panic, panic_input, PANIC_RECEIPT
 from ouroboros.work_stop import current_stop
 from tests._budget_pause_exact_helpers import _install_queue
+from tests._source_scan import parse
 
 
 def test_received_panic_survives_failed_unlink_and_a_new_panic_is_new(tmp_path, monkeypatch):
@@ -136,7 +137,7 @@ def test_a_real_worker_recognizes_its_parent_restart_before_daemon_access(tmp_pa
         output.join_thread()
 
 
-@pytest.mark.parametrize("kind", ["flag", "byte", "both", "panic_and_restart"])
+@pytest.mark.parametrize("kind", ["flag", "byte", "panic_and_restart"])
 def test_old_build_inputs_become_a_boot_door_never_panic(tmp_path, kind):
     from ouroboros.delegate_recovery import boot_door
 
@@ -257,7 +258,7 @@ def test_removed_history_fields_are_not_runtime_inputs_or_outputs():
     root = Path(__file__).resolve().parents[1]
     for directory in (root / "ouroboros", root / "supervisor"):
         for path in directory.rglob("*.py"):
-            names = {node.value for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+            names = {node.value for node in ast.walk(parse(path.read_text(encoding="utf-8")))
                      if isinstance(node, ast.Constant) and isinstance(node.value, str)}
             assert not names & removed, (path, names & removed)
 

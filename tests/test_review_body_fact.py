@@ -110,6 +110,18 @@ def test_a_remote_at_the_configured_managed_url_is_the_body_whatever_its_spellin
     assert layer_for(fact) == "body"
 
 
+def test_a_source_install_managed_remote_is_used_without_a_manifest(system, tmp_path):
+    """A source checkout's maintained managed remote is the configured source."""
+    _git(system, "remote", "add", "managed", MANAGED_URL)
+    official = _repo(tmp_path / "official-source-clone", remote=MANAGED_URL)
+
+    fact = body_fact(official, system_repo=system)
+
+    assert (fact.body, fact.how) == ("true", "managed_remote")
+    foreign = _repo(tmp_path / "foreign-source-clone", remote=FOREIGN_URL)
+    assert body_fact(foreign, system_repo=system).body == "false"
+
+
 def test_the_managed_url_is_the_installs_configured_source_not_a_fixed_official_one(system, tmp_path):
     mirror = _repo(tmp_path / "mirror-clone", remote="https://mirror.example.org/forks/ouro.git")
 
@@ -156,6 +168,114 @@ def test_an_install_without_a_managed_url_is_still_the_body_by_dir_and_common_gi
 
     assert _fact(system, system, manifest={}).how == "dir"
     assert _fact(worktree, system, manifest={}).how == "git_common_dir"
+
+
+def test_a_real_partial_clone_is_the_body_through_its_annotated_remote(system, tmp_path, monkeypatch):
+    """#3004: ``git remote -v`` shows a partial clone's fetch URL as ``<url> (fetch) [blob:none]``. The predicate
+    reads the remote's configured URL, so that display hides neither a local chain nor the configured source."""
+    monkeypatch.setenv("GIT_ALLOW_PROTOCOL", "file")  # nothing here may reach a network
+    _git(system, "config", "uploadpack.allowFilter", "true")
+    partial = tmp_path / "partial"
+    _git(tmp_path, "clone", "-q", "--filter=blob:none", system.as_uri(), str(partial))
+    _git(partial, "remote", "set-url", "origin", str(system))
+    major, minor = map(int, _git(tmp_path, "--version").split()[2].split(".")[:2])
+    shown = " [blob:none]" if (major, minor) >= (2, 37) else ""  # Git writes the filter there since 2.37
+    assert f"origin\t{system} (fetch){shown}" in _git(partial, "remote", "-v").splitlines()
+    chained = _fact(partial, system)
+    assert (chained.body, chained.how) == ("true", "remote_chain")
+    _git(partial, "remote", "set-url", "origin", MANAGED_URL)
+    fact = _fact(partial, system)
+    assert (fact.body, fact.how) == ("true", "managed_remote") and MANAGED_URL in fact.detail
+
+
+def _filtered(root: pathlib.Path, name: str = "origin") -> None:
+    """The partial-clone filter Git shows after the fetch URL in ``git remote -v`` (``[blob:none]``)."""
+    _git(root, "config", f"remote.{name}.partialclonefilter", "blob:none")
+
+
+def _body_clone(root: pathlib.Path, system: pathlib.Path) -> None:
+    _git(root, "clone", "-q", str(system), str(root / "origin"))  # a folder named like the remote
+
+
+def _shape(name: str, root: pathlib.Path, system: pathlib.Path, monkeypatch) -> None:
+    if name == "foreign":
+        _git(root, "remote", "add", "origin", FOREIGN_URL)
+        _filtered(root)
+    elif name == "body_beside_plain_foreign":
+        _git(root, "remote", "add", "acme", FOREIGN_URL)
+        _git(root, "remote", "add", "origin", MANAGED_URL)
+        _filtered(root)
+    elif name == "insteadof":
+        _git(root, "remote", "add", "origin", "gh:razzant/ouroboros")
+        _git(root, "config", "url.https://github.com/.insteadOf", "gh:")
+        _filtered(root)
+    elif name == "first_url_decides":
+        _git(root, "remote", "add", "origin", FOREIGN_URL)
+        _git(root, "config", "--add", "remote.origin.url", MANAGED_URL)
+        _git(root, "config", "remote.origin.pushurl", MANAGED_URL)
+        _filtered(root)
+    elif name in ("push_only_name_rewritten", "reset_url_name_rewritten"):
+        if name == "push_only_name_rewritten":
+            _git(root, "config", "remote.origin.pushurl", MANAGED_URL)
+        else:
+            _git(root, "config", "remote.origin.url", FOREIGN_URL)
+            _git(root, "config", "--add", "remote.origin.url", "")  # an empty value clears the list
+        _git(root, "config", f"url.{MANAGED_URL}.insteadOf", "origin")  # Git's fallback would name the body
+    elif name == "push_only_beside_body_folder":
+        _body_clone(root, system)
+        _git(root, "config", "remote.origin.pushurl", FOREIGN_URL)
+    elif name == "same_name_local_url":
+        _body_clone(root, system)
+        _git(root, "remote", "add", "origin", "origin")
+        _filtered(root)
+    elif name == "dotted_name":
+        _git(root, "remote", "add", "team/my.fork", MANAGED_URL)
+        _filtered(root, "team/my.fork")
+    elif name == "slash_name_git_skips":  # named like the path of a body clone; Git skips the remote (warning)
+        clone = root.parent / f"{root.name}-body"
+        _git(root.parent, "clone", "-q", str(system), str(clone))
+        _git(root, "config", f"remote./{clone.as_posix().lstrip('/')}.url", FOREIGN_URL)
+    elif name == "former_home":
+        _git(root, "remote", "add", "origin", "https://github.com/joi-lab/ouroboros-desktop")
+        _filtered(root)
+    elif name == "global_only":
+        config = root.parent / f"{root.name}.gitconfig"
+        config.write_text(f'[remote "upstream"]\n\turl = {MANAGED_URL}\n\tpartialclonefilter = blob:none\n',
+                          encoding="utf-8")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+
+
+FETCH_URL_SHAPES = {
+    "foreign": ("false", "remote_chain"),  # a filtered foreign remote is foreign, not unknown
+    "body_beside_plain_foreign": ("true", "managed_remote"),  # a hidden body remote no longer leaves `false`
+    "insteadof": ("true", "managed_remote"),  # Git's url.<base>.insteadOf rewrite applies
+    "first_url_decides": ("false", "remote_chain"),  # the first URL fetches; later URLs and the pushurl do not
+    "push_only_name_rewritten": ("unknown", "unknown"),  # Git's own-name fallback is never a fetch URL
+    "reset_url_name_rewritten": None,  # as the installed Git reads its empty last URL, below
+    "push_only_beside_body_folder": ("unknown", "unknown"),  # ... nor a folder followed under that name
+    "same_name_local_url": ("true", "remote_chain"),  # an explicit URL equal to its name is followed
+    "dotted_name": ("true", "managed_remote"),  # a name keeps its dots and inner slash
+    "slash_name_git_skips": ("unknown", "unknown"),  # never the name answered as a URL and followed
+    "former_home": ("true", "managed_remote"),
+    "global_only": ("true", "managed_remote"),  # every config scope Git reads, as `git remote -v` lists
+}
+
+
+@pytest.mark.parametrize("shape", list(FETCH_URL_SHAPES))
+def test_a_remote_is_judged_by_its_fetch_url_as_git_resolves_it(system, tmp_path, monkeypatch, shape):
+    """Each row is one shape of real Git configuration; the filtered ones would show ``[blob:none]``."""
+    root = _repo(tmp_path / shape)
+    _shape(shape, root, system, monkeypatch)
+    fact = _fact(root, system)
+    expected = FETCH_URL_SHAPES[shape]
+    if expected is None:  # Git 2.46+ clears the list at the empty value; an older Git keeps the URL before it,
+        kept = f"{FOREIGN_URL} (fetch)" in _git(root, "remote", "-v")  # and only then lists it as the fetch URL
+        expected = ("false", "remote_chain") if kept else ("unknown", "unknown")
+    assert (fact.body, fact.how) == expected, fact.detail
+    if shape == "dotted_name":
+        assert "remote team/my.fork " in fact.detail
+    if expected[0] == "unknown":
+        assert "has no remote" in fact.detail
 
 
 def test_a_registered_copy_is_judged_by_its_recorded_source(system, tmp_path):
@@ -218,10 +338,14 @@ def test_a_repository_without_remote_or_copy_origin_is_unknown(system, tmp_path)
     assert "no remote" in fact.detail and "no copy origin" in fact.detail
 
 
-def test_a_git_failure_is_unknown_never_false(system, tmp_path, monkeypatch):
+@pytest.mark.parametrize("failing", ["", "config", "ls-remote"])  # every call, or either call that reads the remotes
+def test_a_git_failure_is_unknown_never_false(system, tmp_path, monkeypatch, failing):
     root = _repo(tmp_path / "timeout", remote=FOREIGN_URL)
+    real_run = subprocess.run
 
-    def _timeout(*_args, **_kwargs):
+    def _timeout(argv, *args, **kwargs):
+        if failing and argv[1] != failing:
+            return real_run(argv, *args, **kwargs)
         raise subprocess.TimeoutExpired(cmd="git", timeout=rbf.GIT_TIMEOUT_SEC)
 
     monkeypatch.setattr(rbf.subprocess, "run", _timeout)
@@ -269,3 +393,9 @@ def test_the_vocabulary_is_closed():
     assert set(rbf.HOW_VALUES) == {"dir", "git_common_dir", "remote_chain", "managed_remote",
                                    "install_fork", "copy_origin", "unknown"}
     assert rbf.CHECKLIST_LAYERS == ("core", "body")
+
+
+def test_a_name_the_filesystem_refuses_is_a_failed_probe_not_an_error(tmp_path):
+    # An over-long component or an embedded NUL is a failed probe (None), never an exception (#2918).
+    assert rbf.repository_root(tmp_path / ("x" * 300) / "new.py") is None
+    assert rbf.repository_root(str(tmp_path / "bad\x00name.py")) is None

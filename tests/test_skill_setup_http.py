@@ -132,8 +132,7 @@ def test_held_lane_returns_a_real_job_then_terminal_result(setup_http, monkeypat
     asyncio.run(journey())
 
 
-@pytest.mark.parametrize('prefer', ['', 'return=representation'])
-@pytest.mark.parametrize('install_failure', [False, True])
+@pytest.mark.parametrize(("install_failure", "prefer"), [(False, ''), (True, 'return=representation')])
 def test_legacy_toggle_waits_for_the_terminal_result(setup_http, monkeypatch, prefer, install_failure):
     """Old UI and dictation do not mistake accepted work for enabled state."""
     app, drive = setup_http

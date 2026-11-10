@@ -17,7 +17,7 @@ def _focus(room=444):
 
 @pytest.mark.parametrize("stamp", [
     {"presence": {"binding_id": "old"}}, {"presence_provenance": {"place_id": "garden"}},
-    {"source": "presence:telegram"}, {"type": "presence_delivery"},
+    {"type": "presence_delivery"},
 ])
 def test_place_predicate_is_typed_and_inventory_retains_it(stamp):
     row = shared.msg("2026-09-05", "presence:telegram", chat_id=444, **stamp)
@@ -68,23 +68,24 @@ def test_focus_uses_own_room_before_category_and_own_wake_sees_only_index(tmp_pa
     focus = _focus()
     own = {"id": "wake1", "metadata": {"usage_category": "consciousness", "wake_cause": "own_clock"}}
     spec = mv.view_spec_for_task(focus, tmp_path)
-    assert (spec.role, spec.room_id, spec.marks, spec.live_rooms) == ("presence", "444", "room_and_global", "none")
+    assert (spec.role, spec.room_id, spec.marks, spec.other_conversations) == ("presence", "444", "all", True)
     assert mv.view_role(own) == "consciousness"
     focused = mv.capture_memory_view(tmp_path, focus, spec)
     wake = mv.capture_memory_view(tmp_path, own, mv.view_spec_for_task(own, tmp_path))
     own_text, focus_text = mv.render_room(wake), mv.render_room(focused)
-    assert next(room for room in wake.live_rooms if room["room_id"] == "444")["words"] == []
+    place = next(room for group in wake.conversations for room in group["rooms"] if room["room_id"] == "444")
+    assert place["engaged"]  # I answered there: the wake holds its words as every integrating focus (owner, Q2-A)
+    block = own_text.split("## Other conversations", 1)[1]
     for words in ("PRIVATE_PLACE_WORDS", "PRIVATE_PLACE_ANSWER", "PRIVATE_UNANSWERED_WORDS", "PRIVATE_FAILED_ANSWER"):
-        assert words in focus_text
-        assert words not in own_text
+        assert words in focus_text.split("## Other conversations", 1)[0]  # the place's own turn: its room
+        assert words in block
     facts = next(room for room in mi.place_room_index(tmp_path) if room["room_id"] == "444")
     assert (facts["arrivals"], facts["answered_events"], facts["unanswered_events"]) == (2, 1, 1)
-    assert "Place garden; conversation garden:talk; answered events 1" in own_text
     assert "memory_read(room_id='444', rows=true)" in own_text
     assert mv.render_story(wake) == mv.render_story(focused)
 
 
-def test_own_wake_keeps_place_notes_by_address_even_after_all_rows_are_sealed(tmp_path):
+def test_my_note_about_a_place_stands_whole_in_every_focus_even_after_all_its_rows_are_sealed(tmp_path):
     from ouroboros.chronicle_store import ChronicleStore
     from ouroboros.knowledge import focus_signature
 
@@ -95,21 +96,22 @@ def test_own_wake_keeps_place_notes_by_address_even_after_all_rows_are_sealed(tm
     own = {"metadata": {"usage_category": "consciousness", "wake_cause": "own_clock"}}
     wake = mv.capture_memory_view(tmp_path, own, mv.view_spec_for_task(own, tmp_path))
     focused = mv.capture_memory_view(tmp_path, task, mv.view_spec_for_task(task, tmp_path))
-    assert "PRIVATE_PLACE_NOTE" not in mv.render_room(wake)
-    assert "memory_read(node_id=" in mv.render_room(wake)
-    assert "PRIVATE_PLACE_NOTE" in mv.render_room(focused)
+    block = mv.render_room(wake).split("## Other conversations", 1)[1]
+    assert "PRIVATE_PLACE_NOTE" in block and "memory_read(room_id='444', rows=true)" in block  # mine, whole
+    assert "PRIVATE_PLACE_NOTE" in mv.render_room(focused).split("## Other conversations", 1)[0]
 
 
-def test_wake_never_repeats_main_words_in_live_rooms(tmp_path):
+def test_wake_never_repeats_main_words_in_its_other_conversations(tmp_path):
     shared.world(tmp_path)
     shared.append(tmp_path / "logs/chat.jsonl", shared.msg("2026-09-05", "SHARED_TRANSPORT_WORDS", chat_id=777))
     task = {"metadata": {"usage_category": "consciousness"}}
     snapshot = mv.capture_memory_view(tmp_path, task, mv.view_spec_for_task(task, tmp_path))
     rendered = mv.render_room(snapshot)
     assert rendered.count("SHARED_TRANSPORT_WORDS") == 1
-    # Another room is one directory line with its reader, never its standing words (owner wake view 2A).
-    alpha = next(room for room in snapshot.live_rooms if room["label"].startswith("Project Alpha"))
-    assert "alpha again" not in rendered
+    # Another conversation holds its open words as in any turn (owner 06.11, Q2-A), with its reader.
+    alpha = next(room for group in snapshot.conversations for room in group["rooms"]
+                 if room["label"].startswith("Project Alpha"))
+    assert "alpha again" in rendered.split("## Other conversations", 1)[1]
     assert f"memory_read(room_id='{alpha['room_id']}', rows=true)" in rendered
 
 

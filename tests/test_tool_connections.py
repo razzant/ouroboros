@@ -41,8 +41,10 @@ def _isolate_manager(tmp_path, monkeypatch):
     mcp_client.reset_manager_for_tests()
 
 
-def _servers(*, slack_pinned=True, listing=None):
-    listing = listing if listing is not None else {"gitlab": GITLAB, "slack": SLACK}
+def _servers(*, slack_pinned=True, listing=None, extra=()):
+    """The remote gitlab and slack servers, plus ``extra`` entries listing SLACK's one tool."""
+    if listing is None:
+        listing = {"gitlab": GITLAB, "slack": SLACK, **{row["id"]: SLACK for row in extra}}
 
     async def list_tools(cfg, timeout):
         rows = listing[cfg.id]
@@ -55,14 +57,14 @@ def _servers(*, slack_pinned=True, listing=None):
     servers = [{"id": "gitlab", "name": "GitLab", "enabled": True, "transport": "streamable_http",
                 "url": "https://gitlab.example/mcp"},
                {"id": "slack", "name": "Slack", "enabled": True, "transport": "streamable_http",
-                "url": "https://slack.example/mcp", "schemas_at_start": slack_pinned}]
+                "url": "https://slack.example/mcp", "schemas_at_start": slack_pinned}, *extra]
     from ouroboros import config
 
     settings = {"MCP_ENABLED": True, "MCP_SERVERS": servers}
     config.SETTINGS_PATH.write_text(json.dumps(settings), encoding="utf-8")
     mcp_client.reconfigure_from_settings(settings)
-    for server in ("gitlab", "slack"):
-        manager.refresh_server(server)
+    for server in servers:
+        manager.refresh_server(server["id"])
     return manager
 
 
@@ -102,6 +104,25 @@ def test_an_unpinned_server_starts_on_demand_in_every_mode_and_the_map_names_its
         assert "\n  Server instructions: Use numeric project ids, never names." in compact
 
 
+def test_a_stdio_header_names_the_process_lifetime_its_configuration_gives(registry):
+    """#2914: a per-call stdio server starts a new process for every call, so a page it opened is gone by the next
+    call; with ``task_session`` a task's calls share one process until a timeout, a Settings change or a server exit
+    replaces it. A remote server's lifetime is its own."""
+    _servers(extra=[{"id": "files", "name": "Files", "enabled": True, "transport": "stdio", "command": "node"},
+                    {"id": "browser", "enabled": True, "transport": "stdio", "command": "node", "task_session": True}])
+    full, nano = connection_views(registry, helper=False)
+    helper, _ = connection_views(registry, helper=True)
+    for text, lead in ((full, "\n### "), (nano, "\n- "), (helper, "\n- ")):
+        assert f"{lead}mcp_files (Files): 1 tool, call schemas ≈" in text
+        assert ("on demand; a new process per call, so in-memory state such as open pages does not carry over; "
+                "callable as mcp_files__<name>") in text
+        assert f"{lead}mcp_browser: 1 tool," in text
+        assert ("on demand; calls in a task share one process; a call timeout, a Settings change or a server exit "
+                "starts a new one; callable as mcp_browser__<name>") in text
+        assert "on demand; callable as mcp_gitlab__<name>" in text  # remote: no lifetime words
+    assert full.count("process") == helper.count("process") == 2  # nor on the pinned remote slack
+
+
 @pytest.mark.parametrize("disabled", [(), ("enable_tools",), ("enable_tools", "list_available_tools")])
 def test_the_map_names_only_the_selectors_this_actor_can_call(registry, disabled):
     _servers()
@@ -137,12 +158,76 @@ def test_shared_text_factors_only_whole_sentences_every_description_repeats():
     assert shared_text(["Only one tool."]) == ("", "")
 
 
+def test_main_shows_mcp_schemas_for_the_gateway_and_its_request_tools_keep_their_bytes(registry, monkeypatch):
+    """Main carries call_mcp_tool: enable_tools shows an on-demand server's schemas in its result while the
+    request's tools (the prompt cache's leading unit) stay as they were, and a gateway call is the inner MCP
+    tool's own dispatch: its safety check, its arguments, its result."""
+    from ouroboros import loop as loop_module, safety
+    from ouroboros.tools.tool_result import ToolResult
+
+    _servers()
+    resident = initial_tool_schemas(registry)
+    loop_module._setup_dynamic_tools(registry, resident, [], gateway=True)
+    before = _names(resident)
+    receipt = registry.execute("enable_tools", {"tools": "mcp_gitlab"})
+    assert "call_mcp_tool" in before and _names(resident) == before
+    assert "Call schemas for call_mcp_tool(name, arguments): mcp_gitlab (all 2 tools)" in receipt
+    assert '"description": "Issue title"' in receipt and "[not read-only]" in receipt
+    assert registry.execute_result("enable_tools", {"tools": "mcp_nowhere"}).code == "UNKNOWN_TOOL"
+    checked, sent = [], []
+
+    def checked_safety(name, args, *, declared_policy="", **_kwargs):
+        if declared_policy == safety.POLICY_SKIP:
+            return True, ""
+        checked.append((name, dict(args)))
+        return (False, "refused by the fixture") if name.endswith("get_merge_request") else (True, "")
+
+    monkeypatch.setattr(safety, "check_safety", checked_safety)
+    monkeypatch.setattr(mcp_client, "_call_mcp_tool_result", lambda name, args, _ctx=None: sent.append(
+        (name, dict(args))) or ToolResult(status="ok", code="OK", text="issue created"))
+    created = registry.execute_result("call_mcp_tool", {"name": "mcp_gitlab__create_issue", "arguments": {"title": "T"}})
+    assert "issue created" in created.text and sent == checked == [("mcp_gitlab__create_issue", {"title": "T"})]
+    refused = registry.execute_result("call_mcp_tool", {"name": "mcp_gitlab__get_merge_request", "arguments": "{}"})
+    assert refused.code == "SAFETY_VIOLATION" and len(sent) == 1
+    assert registry.execute_result("call_mcp_tool", {"name": "write_file"}).code == "TOOL_ARG_ERROR" and len(sent) == 1
+
+
+def test_a_gateway_envelope_runs_as_its_mcp_call_and_a_typed_error_carries_the_schema(registry):
+    """The executor resolves call_mcp_tool to the MCP call it names (``via`` records the envelope); an envelope that
+    names no MCP tool, or is not JSON, and any other call stay as sent. A typed MCP or argument error of that call
+    carries the tool's catalog schema; a success does not."""
+    from ouroboros.tools.tool_discovery import resolve_gateway_call, with_gateway_schema
+    from ouroboros.tools.tool_result import ToolResult
+
+    _servers()
+
+    def envelope(arguments):
+        return {"id": "c", "function": {"name": "call_mcp_tool", "arguments": arguments}}
+
+    resolved = resolve_gateway_call(envelope(json.dumps({"name": "mcp_gitlab__create_issue", "arguments": {"title": "T"}})))
+    assert resolved["function"]["name"] == "mcp_gitlab__create_issue" and resolved["via"] == "call_mcp_tool"
+    assert json.loads(resolved["function"]["arguments"]) == {"title": "T"}
+    nested = resolve_gateway_call(envelope(json.dumps({"name": "mcp_gitlab__create_issue", "arguments": '{"title": "T"}'})))
+    assert json.loads(nested["function"]["arguments"]) == {"title": "T"}
+    for kept in (envelope(json.dumps({"name": "write_file", "arguments": {}})), envelope("{not json"),
+                 {"id": "c", "function": {"name": "read_file", "arguments": "{}"}}):
+        assert resolve_gateway_call(kept) is kept
+    failed = with_gateway_schema(registry, "mcp_gitlab__create_issue",
+                                 ToolResult(status="error", code="MCP_ERROR", text="bad call"))
+    assert failed.text.startswith("bad call") and "Call schemas for call_mcp_tool" in failed.text
+    assert '"description": "Issue title"' in failed.text
+    done = ToolResult(status="ok", code="OK", text="done")
+    assert with_gateway_schema(registry, "mcp_gitlab__create_issue", done) is done
+
+
 def test_enable_tools_loads_a_whole_server_and_says_what_the_next_request_carries(registry):
+    """Any binding but Main's text loop loads (a voice session, Nano, a narrowed child), the gateway resident or not."""
     from ouroboros import loop as loop_module
 
     _servers()
     resident = initial_tool_schemas(registry)
     loop_module._setup_dynamic_tools(registry, resident, [])
+    assert "call_mcp_tool" in _names(resident)
     receipt = registry.execute("enable_tools", {"tools": "mcp_gitlab"})
     assert "Call schemas loaded (≈" in receipt and "mcp_gitlab (all 2 tools)" in receipt
     assert {"mcp_gitlab__create_issue", "mcp_gitlab__get_merge_request"} <= set(_names(resident))
@@ -158,7 +243,7 @@ def test_a_load_goes_first_under_a_route_ceiling_after_selectors_and_history(reg
     from ouroboros import loop as loop_module, provider_models
 
     _servers()
-    resident = initial_tool_schemas(registry)
+    resident = [schema for schema in initial_tool_schemas(registry) if schema["function"]["name"] != "call_mcp_tool"]
     loop_module._setup_dynamic_tools(registry, resident, [])
     registry._ctx.active_model, registry._ctx.active_use_local = "openai::gpt-fixture", False
     from ouroboros.tool_capabilities import CORE_TOOL_NAMES, META_TOOL_NAMES

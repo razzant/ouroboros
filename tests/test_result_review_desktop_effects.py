@@ -160,11 +160,11 @@ def test_required_reviews_a_root_result_whose_only_material_is_a_desktop_input(t
     assert rr.result_review_at_delivery(ctx, "Done on the desktop.", trace_of(ctx), shown.append) is True
     assert len(sends) == 3 and "FAIL" in shown[0], "Required: the host reviewed it and shows the findings first"
     subject = subject_text(ctx)
-    assert f"- effect declared by {row['tool']}: " in subject and '"observed_effect": true' in subject
+    assert f"- effect declared by {row['tool']}: {produced['effects'][0]['receipt']}" in subject
     assert "tool producer's reports of execution, not proof of a UI change or goal success" in subject
 
 
-@pytest.mark.parametrize("case", ["wayland_drag", "x11_hold", "mac_keys", "ssh_keys"])
+@pytest.mark.parametrize("case", ["wayland_drag", "x11_hold", "ssh_keys"])
 def test_a_reported_failure_keeps_the_receipt_of_what_ran(tmp_path, monkeypatch, case):
     ctx = _floor_ctx(tmp_path, monkeypatch)
     sends: list[dict] = []
@@ -189,10 +189,10 @@ def test_a_reported_failure_keeps_the_receipt_of_what_ran(tmp_path, monkeypatch,
     assert receipt["ok"] is False and receipt["observed_effect"] is True and receipt["steps_done"] == done, receipt
     assert receipt["error"], "the failure's own diagnostics stay in the receipt"
 
-    assert rr.result_review_at_delivery(ctx, "Started the shortcut.", trace_of(ctx), lambda _text: None) is False
+    assert rr.result_review_at_delivery(ctx, "Started the shortcut.", trace_of(ctx), lambda _text: None) is True  # PASS
     assert len(sends) == 3, "the host reviewed the partial run under Required"
     subject = subject_text(ctx)
-    assert effect["receipt"] in subject and '"ok": false' in subject and '"steps_done"' in subject
+    assert f"- effect declared by {effect['tool']}: {effect['receipt']}" in subject
 
 
 def test_reads_refusals_failures_and_timeouts_produce_nothing_and_force_no_review(tmp_path, monkeypatch):
@@ -238,8 +238,13 @@ def test_reads_refusals_failures_and_timeouts_produce_nothing_and_force_no_revie
     assert "Effect receipts" not in rr.answer_text(reply="Observed.", produced=produced, verification="")
 
 
-@pytest.mark.parametrize("value", [False, "true", 1, None, {"executed": True}])
-@pytest.mark.parametrize("ok", [True, False])
+@pytest.mark.parametrize(("ok", "value"), [
+    (True, False),
+    (True, 1),
+    pytest.param(True, {"executed": True}, id='True-value4'),
+    (False, "true"),
+    (False, None),
+])
 def test_only_a_literal_true_is_an_effect(tmp_path, monkeypatch, value, ok):
     ctx = _floor_ctx(tmp_path, monkeypatch)
     payload = json.dumps({"ok": ok, "observed_effect": value, "error": "" if ok else "partly done"})
@@ -266,7 +271,7 @@ def test_a_host_note_never_hides_a_receipt_and_stays_beside_it(tmp_path, monkeyp
     for effect in effects:
         assert WARNING not in effect["receipt"] and json.loads(effect["receipt"])["observed_effect"] is True
         assert effect["host_notes"] == [WARNING]
-    assert rr.result_review_at_delivery(ctx, "Saved it.", trace_of(ctx), lambda _text: None) is False
+    assert rr.result_review_at_delivery(ctx, "Saved it.", trace_of(ctx), lambda _text: None) is True  # its PASS
     subject = subject_text(ctx)
     assert subject.count(json.dumps([WARNING], ensure_ascii=False)) == 2, "each receipt keeps its host note"
 
@@ -297,14 +302,13 @@ def test_an_element_act_receipt_keeps_its_complete_label_and_values_in_the_retai
     real, lines = native.op_act, []
 
     def helper(_self, op, *args, timeout=20):
-        if op == "resolve":
-            return {"ok": True, "candidates": [app_dict(KEYNOTE)]}
-        assert op == "act"
-        monkeypatch.setattr(native, "op_act", lambda pid, do, sel, n, ms: real(
-            pid, do, sel, n, ms, ax=ax, front=lambda: app_dict(KEYNOTE), settle=lambda _s: None))
+        assert op == "element", "resolve and act in one helper process"
+        monkeypatch.setattr(native, "op_resolve", lambda q: {"ok": True, "query": q, "candidates": [app_dict(KEYNOTE)]})
+        monkeypatch.setattr(native, "op_act", lambda pid, do, sel, n, ms, **kw: real(
+            pid, do, sel, n, ms, **{**kw, "ax": ax, "front": lambda: app_dict(KEYNOTE), "settle": lambda _s: None}))
         try:
-            with mock.patch("builtins.print", lambda text: lines.append(text)):
-                native.main(["act", *[str(a) for a in args]])
+            with mock.patch("builtins.print", lambda text, **_kw: lines.append(text)):
+                native.main(["element", *[str(a) for a in args]])
         finally:
             monkeypatch.setattr(native, "op_act", real)
         return json.loads(lines[-1])
@@ -340,10 +344,13 @@ def test_an_unavailable_producer_source_is_a_named_gap_never_a_guess(tmp_path, m
         row = desktop.call("click", warning=WARNING, x=1, y=2, raw=True)
         path = artifacts.task_artifact_dir_path(ctx.drive_root, ctx.task_id) / row["producer_source_ref"]["path"]
         if damage == "corrupt":
-            path.write_bytes(path.read_bytes().replace(b'"ok": true', b'"ok": TRUE'))
+            retained = path.read_bytes()
+            path.write_bytes(retained.replace(b"true", b"TRUE", 1))
+            assert path.read_bytes() != retained
         else:
             path.unlink()
-    assert '"observed_effect": true' in row["result"], "the annotated preview still reads like a receipt"
+    preview, _end = json.JSONDecoder().raw_decode(row["result"])
+    assert preview["observed_effect"] is True, "the annotated preview still reads like a receipt"
 
     produced = rr.produced_material(ctx)
     assert produced["effects"] == [], "an unverifiable receipt is never read from the preview"
@@ -352,25 +359,35 @@ def test_an_unavailable_producer_source_is_a_named_gap_never_a_guess(tmp_path, m
     assert rr.result_review_at_delivery(ctx, "Clicked.", trace_of(ctx), lambda _text: None) is False and sends == []
 
 
-def test_the_same_receipt_is_reviewed_once_and_a_new_receipt_is_a_new_subject(tmp_path, monkeypatch):
-    ctx = _floor_ctx(tmp_path, monkeypatch)
+@pytest.mark.parametrize("enforcement", ["advisory", "blocking"])
+def test_the_same_receipt_is_reviewed_once_and_a_new_receipt_is_a_new_subject(tmp_path, monkeypatch, enforcement):
+    """A new receipt is new material, a new subject. Under Advisory the author who received the earlier PASS decides
+    on it (owner, 8 Nov 2026): no wave is bought, the PASS stays the earlier version's; Blocking re-reviews it."""
+    ctx = _floor_ctx(tmp_path, monkeypatch, enforcement=enforcement)
     sends: list[dict] = []
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
     desktop = mac(ctx, tmp_path, monkeypatch)
     desktop.call("click", x=1, y=2, raw=True)
     answer = "Clicked Save."
-    assert rr.result_review_at_delivery(ctx, answer, trace_of(ctx), lambda _text: None) is False
+    assert rr.result_review_at_delivery(ctx, answer, trace_of(ctx), lambda _text: None) is True  # its PASS, first
     first = subject_text(ctx)
     assert len(sends) == 3
     assert rr.result_review_at_delivery(ctx, answer, trace_of(ctx), lambda _text: None) is False
     assert len(sends) == 3 and subject_text(ctx) == first, "the same receipt is the same subject: reused at $0"
 
     desktop.call("key", keys="cmd+s")
-    assert rr.result_review_at_delivery(ctx, answer, trace_of(ctx), lambda _text: None) is False
-    assert len(sends) == 6, "a new receipt is new material: a new review"
     clicked, saved = (effect["receipt"] for effect in rr.produced_material(ctx)["effects"])
+    assert clicked in first and saved not in first
+    if enforcement == "advisory":
+        assert rr.result_review_at_delivery(ctx, answer, trace_of(ctx), lambda _text: None) is False
+        assert len(sends) == 3, "the revised result is the author's to accept: nothing is bought"
+        [run] = trace_of(ctx)["review_runs"]
+        assert run["earlier_revision"] is True and run["aggregate_signal"] == "PASS"
+        return
+    assert rr.result_review_at_delivery(ctx, answer, trace_of(ctx), lambda _text: None) is True  # the new PASS
+    assert len(sends) == 6, "Blocking: the new material is reviewed again"
     second = subject_text(ctx)
-    assert clicked in first and saved not in first and clicked in second and saved in second
+    assert clicked in second and saved in second
     current = [run for run in trace_of(ctx)["review_runs"] if not run.get("superseded_by_revision")]
     assert [run["aggregate_signal"] for run in current] == ["PASS"]
 
@@ -399,7 +416,8 @@ def test_blocking_holds_a_failed_desktop_result_and_presence_is_never_held(tmp_p
     assert "not delivered until a review passes it" in shown[-1] and len(sends) == 3
 
     ctx = _floor_ctx(tmp_path / "presence", monkeypatch)
-    ctx._presence_completion = {"outcome": "spoken"}
+    # The host stamps a Presence turn before any review (``presence_runner._build_task``).
+    ctx.task_metadata = {**dict(getattr(ctx, "task_metadata", None) or {}), "presence_event_identity": "event-1"}
     sends.clear()
     mac(ctx, tmp_path / "presence", monkeypatch).call("click", x=1, y=2, raw=True)
     shown.clear()

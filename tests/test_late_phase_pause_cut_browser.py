@@ -2,7 +2,7 @@
 
 The real SPA (served static) talks to the REAL history and Pause endpoints and the
 real activity census; the upkeep is the real post-task coordinator and its fallback-draft
-stage (a two-send Light operation since the scratchpad pass is retired, #918) with the
+stage (two Light sends since the scratchpad pass is retired, #918) with the
 deterministic Light transport of ``test_late_phase_pause_cut``.
 Screenshots: ``OUROBOROS_UI_EVIDENCE_DIR``, else ``<tmp>/screenshots`` (retained by
 ``scripts/safe_test.py``).
@@ -27,7 +27,7 @@ from tests.test_late_phase_pause_cut import late as late  # noqa: F401 — fixtu
 from tests.test_subscription_setup_browser import subscription_ui as subscription_ui  # noqa: F401 — fixture
 from tests._work_projection_shared import state_fields
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def _capture(page, root: pathlib.Path, name: str) -> None:

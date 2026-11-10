@@ -7,9 +7,11 @@ cheap reads instead: the journal read IS the wait (it returns as events arrive, 
 window's end, and every event it carries reaches the owner's live stream exactly as before),
 then one body-free present-state read says whether a question or a terminal is due. Only then
 is the run's detail read — the addressed read the attention earned — and the engine's token
-acknowledged as ``seen`` after it, never before. An engine without either surface keeps the
-detail beat (``tools/delegate._delegate_wait``), as do a problem row and a route that vanished
-mid-call, so the old path and its semantics decide everything this step does not understand.
+acknowledged as ``seen`` after it, never before. A run whose pending questions the engine
+reports as async and whose token was already fetched stays a quiet working beat. An engine
+without either surface keeps the detail beat (``tools/delegate._delegate_wait``), as do a
+refused journal, a problem row and a route that vanished mid-call, so the old path and its
+semantics decide everything this step does not understand.
 """
 from __future__ import annotations
 
@@ -54,8 +56,10 @@ def step(ctx: Any, gateway: Any, run_id: str, *, window: float, since_seq: Optio
          read_window: Callable[[], float], elapsed_seconds: Optional[int] = None,
          max_seconds: Optional[int] = None) -> Optional[Step]:
     """``None`` when this engine has no compact wait or no event stream, or when the journal
-    could not be read this beat: the caller reads detail, with its hole rules and its degraded
-    window. ``elapsed_seconds``/``max_seconds`` are the run's timing facts the quiet payload
+    could not be read this beat (a hole before the stream opened, or the engine's refusal
+    inside it once the events it served are shown): the caller reads detail, with its hole
+    rules and its degraded window, and its own journal read names the refusal in the
+    timeline. ``elapsed_seconds``/``max_seconds`` are the run's timing facts the quiet payload
     carries, as the window payload does, against a nanny's premature cancel."""
     from ouroboros import delegate_activity, delegate_progress
     from ouroboros.gateways import claudexor_observation as observation
@@ -63,8 +67,8 @@ def step(ctx: Any, gateway: Any, run_id: str, *, window: float, since_seq: Optio
     from ouroboros.gateways.claudexor_run_events import read_run_events, run_events_supported
 
     bound = min(max(0.0, float(read_window())), SHORT_POLL_TIMEOUT_SEC)
-    if bound <= 0:
-        return None
+    if bound <= 0 or delegate_activity._memo(str(getattr(ctx, "task_id", "") or ""), str(run_id)).refused is not None:
+        return None  # no window, or a journal refused for good: the detail beat, which reads it no more
     try:
         if not observation.wait_many_supported(gateway, timeout_sec=bound) \
                 or not run_events_supported(gateway, timeout_sec=bound):
@@ -81,6 +85,8 @@ def step(ctx: Any, gateway: Any, run_id: str, *, window: float, since_seq: Optio
     except ClaudexorUnavailable:
         return None  # a transport before the stream opened, busy, stopping, a refused or absent stream
     delegate_progress.emit_stream(ctx, run_id, read, after_seq=after)
+    if read.problem is not None:
+        return None  # the engine refused the rest of the journal (``event: error``): the detail beat decides
     # 2. Attention: the present state, body-free. A hole raises the gateway's own typed hole
     # (``observation_timeout``), which the wait already reports as a quiet observation hole.
     with _SEEN_LOCK:
@@ -93,9 +99,11 @@ def step(ctx: Any, gateway: Any, run_id: str, *, window: float, since_seq: Optio
         return Step(detail=row.detail)  # the route vanished: this call read the detail, the old path takes it
     if row.problem is not None or row.error is not None:
         return None  # the engine could not place the run: the addressed read decides what it is
-    if wake.needs_attention(0) or read.ended or row.pending:
+    if wake.needs_attention(0) or read.ended or (row.pending and row.blocking is not False):
         # A run waiting on its person is never a quiet beat: the question's projection (the
         # pending interactions, the paused note, the continuation) comes from fresh detail.
+        # Only questions the engine itself calls async (claudexor #628), already fetched under
+        # this token, leave a working run quiet: nothing about them changed, nothing holds it.
         detail = delegate_progress.bounded_poll(gateway, run_id, read_window())
         _acknowledge(key, row.token)  # acknowledged only once the rows it stands for were fetched
         return Step(detail=detail)
@@ -103,5 +111,6 @@ def step(ctx: Any, gateway: Any, run_id: str, *, window: float, since_seq: Optio
     payload = {"status": "progress" if read.events else "no_progress", "run_id": str(run_id),
                "state": row.status or "", "last_seq": cursor, "waited_sec": int(time.monotonic() - started),
                "elapsed_seconds": elapsed_seconds, "max_seconds": max_seconds,
-               "waiting_on_user": False, "answered": True}
+               "waiting_on_user": bool(row.pending), **({"async_questions_only": True} if row.pending else {}),
+               "answered": True}
     return Step(payload=json.dumps(payload, ensure_ascii=False))

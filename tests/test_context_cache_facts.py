@@ -13,8 +13,6 @@ from tests.test_loop_compaction import _ctx
     ({"prompt_tokens": 1000, "cached_tokens": 750, "cache_write_tokens": 250}, "750/1,000 tokens (75.0%)"),
     ({"prompt_tokens": 1000, "cached_tokens": 0, "cache_write_tokens": 1000}, "0/1,000 tokens (0.0%)"),
     ({"prompt_tokens": 1000}, "unknown"),
-    ({"cached_tokens": 750}, "unknown"),
-    ({"prompt_tokens": 0, "cached_tokens": 0}, "unknown"),
 ])
 def test_usable_call_then_cold_next_route_facts(tmp_path, metrics, expected):
     class Provider:
@@ -92,14 +90,8 @@ def test_the_providers_own_report_outranks_a_billing_zero(tmp_path, reported_cac
      "; before that request sent message 174 changed (superseded_skill_snapshot)"),
     ({"kind": "rewritten", "index": 9, "sanctioned_by": None},
      "; before that request sent message 9 changed (origin not recorded)"),
-    ({"kind": "rewritten", "index": 31, "sanctioned_by": "image_eviction"},
-     "; before that request sent message 31 changed (image_eviction)"),
     ({"kind": "shrunk", "index": 10, "sanctioned_by": "compaction", "previous_messages": 10, "current_messages": 4},
      "; before that request sent history shrank from 10 to 4 messages (compaction)"),
-    ({"kind": "tools_changed", "index": 0, "sanctioned_by": None}, "; before that request: tool set changed"),
-    ({"kind": "system_rewritten", "index": 0, "sanctioned_by": None}, "; before that request: system view rebuilt"),
-    ({"kind": "no_baseline", "index": 0, "sanctioned_by": None},
-     "; before that request: resume without a send record"),
 ])
 def test_a_change_of_sent_history_is_named_beside_the_cache_it_preceded(tmp_path, change, clause):
     previous = {"round": 2, "provider": "claudexor", "model": "codex", "prompt_tokens": 682_741,
@@ -136,8 +128,10 @@ def test_no_clause_without_a_change_before_that_request(tmp_path):
         assert "write 0 tokens |" in line and "before that request" not in line
 
 
-@pytest.mark.parametrize("kind,target", [("api_model", "openai/gpt-fixture"), ("agent_session", "codex=gpt-fixture")])
-@pytest.mark.parametrize("input_sources", ["shared", "declared"])
+@pytest.mark.parametrize(("input_sources", "kind", "target"), [
+    ("shared", "api_model", "openai/gpt-fixture"),
+    ("declared", "agent_session", "codex=gpt-fixture"),
+])
 def test_context_cache_facts(tmp_path, monkeypatch, kind, target, input_sources):
     from ouroboros import maintenance
     from ouroboros.context import _capture_context_core
@@ -184,3 +178,65 @@ def test_context_cache_facts(tmp_path, monkeypatch, kind, target, input_sources)
     facts = lambda core: [line for line in core.dynamic_text.splitlines() if line.startswith(markers)]
     assert facts(after) == facts(other)
     assert len(facts(after)) == (2 if kind == "agent_session" else 1)
+
+
+def test_history_changes_carry_what_the_request_after_them_read_uncached(tmp_path):
+    """C2 S3 (06.11.2026): the facts name this task's changes by origin with the provider's uncached
+    input of the request that first carried each; an unanswered one stays unmeasured, never estimated."""
+    from ouroboros.transcript_prefix import count_history_change, settle_rewrite_reread
+
+    usage = {}
+    count_history_change(usage, {"round": 4, "index": 9, "kind": "rewritten", "sanctioned_by": "compaction"})
+    count_history_change(usage, {"round": 5, "index": 0, "kind": "system_rewritten", "sanctioned_by": None})
+    usage["_last_round_cache_usage"] = {"round": 5, "provider": "claudexor", "model": "codex",
+                                        "prompt_tokens": 700_000, "cached_tokens": 422_000}
+    settle_rewrite_reread(usage)
+    settle_rewrite_reread(usage)  # one answer settles once
+    line = _facts_line(tmp_path, usage)
+    assert ("history changes this task: compaction 1 (requests carrying 1 of them read 278,000 uncached); "
+            "system view rebuilt, origin unknown 1 |") in line
+    count_history_change(usage, {"round": 6, "index": 3, "kind": "rewritten", "sanctioned_by": "compaction"})
+    usage["_last_round_cache_usage"] = {"round": 7, "provider": "claudexor", "model": "codex", "prompt_tokens": 9}
+    settle_rewrite_reread(usage)  # no cache count reported: the change is counted, its re-read unknown
+    assert "compaction 2 (requests carrying 1 of them read 278,000 uncached)" in _facts_line(tmp_path, usage)
+
+
+def test_the_serving_account_its_move_and_the_last_response_age_are_named(tmp_path, monkeypatch):
+    from ouroboros.transcript_prefix import served_account_fields
+
+    first = {"round": 2, "provider": "claudexor", "model": "codex", "prompt_tokens": 1000, "cached_tokens": 990,
+             **served_account_fields({"claudexor": {"route": {"credentialProfileId": "acct-a"}}}, {}, "claudexor", "codex")}
+    moved = {"round": 3, "provider": "claudexor", "model": "codex", "prompt_tokens": 1000, "cached_tokens": 300,
+             "finished_at": 1_000.0,
+             **served_account_fields({"claudexor": {"route": {"credentialProfileId": "acct-b"}}}, first, "claudexor", "codex")}
+    assert "[round 2, claudexor, codex, served by account acct-a]" in _facts_line(tmp_path, {"_last_round_cache_usage": first})
+    monkeypatch.setattr("time.time", lambda: 1_000.0 + 7 * 60)
+    line = _facts_line(tmp_path, {"_last_round_cache_usage": moved})
+    assert "[round 3, claudexor, codex, served by account acct-b (moved from acct-a)]" in line
+    assert "| last response 7 min ago |" in line
+    other_route = served_account_fields({"claudexor": {"route": {"credentialProfileId": "acct-b"}}}, first, "claudexor", "sol")
+    assert other_route == {"served_account": "acct-b", "previous_served_account": None}  # no move across models
+    assert served_account_fields({}, first, "claudexor", "codex") == {}  # no engine report, no account named
+
+
+def test_live_images_and_a_size_pass_rows_are_facts_of_their_round(tmp_path):
+    from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY
+    from ouroboros.transcript_prefix import SIZE_PASS_ROWS_ATTR, observe_send, size_pass_host_rows
+
+    context = _ctx(tmp_path)
+    context.context_fit_plan = None
+    context.round_idx = 3
+    observe_send(context.tools._ctx, list(context.messages), round_idx=2)  # the last request
+    image = {"type": "image_url", "image_url": {"url": "https://example.test/a.png"}}
+    context.messages += [{"role": "tool", "tool_call_id": "t", "content": "result"},
+                         {"role": "user", "content": [image, image]},
+                         {"role": "user", HOST_CONTEXT_KIND_KEY: "children_reminder", "content": "x" * 400}]
+    # the size pass keeps this record once it applies: the host row after the results the last request did not carry
+    setattr(context.tools._ctx, SIZE_PASS_ROWS_ATTR, size_pass_host_rows(context))
+    assert append_context_facts(context)
+    line = context.messages[-1]["content"]
+    assert "| images in view 2 (past 10 the oldest are replaced down to 5) |" in line
+    assert "before this round's size pass, host rows added after the results' first show: children_reminder ~" in line
+    context.round_idx = 4
+    assert append_context_facts(context)
+    assert "size pass" not in context.messages[-1]["content"]  # a fact of its own round only

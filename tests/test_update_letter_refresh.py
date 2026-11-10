@@ -1,12 +1,10 @@
 """Running-generation ranges, same-range reuse, and the origin of a shown text versus a failed read."""
 import json
 
-import pytest
 
 from ouroboros import server_process, update_letter as ul
 from tests.test_update_letter import _capture_for, _commit, _git, _record, _status, history_repo  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def test_server_baseline_is_captured_once_even_when_initial_identity_is_unknown(tmp_path, monkeypatch):

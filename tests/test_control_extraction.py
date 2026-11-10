@@ -78,7 +78,6 @@ _MOVED_OWNERS = {
     "requested_child_effort": control_subagent_spec,
     "_record_scheduled_subagent": control_scheduling,
     "_emit_swarm_fanout": control_scheduling,
-    "_subagent_slot_note": control_scheduling,
     "_capability_mismatch_message": control_scheduling,
     "_finalize_schedule_emission": control_scheduling,
     "_build_acting_constraint": control_scheduling,

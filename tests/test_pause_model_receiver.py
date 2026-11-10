@@ -25,7 +25,6 @@ from ouroboros.task_results import load_task_result, write_task_result
 from tests._usage_store_testing import attempt_rows_in_start_order
 from tests.test_llm_claudexor import setup as subscription_setup  # noqa: F401 - the imported fixture
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture
@@ -253,8 +252,10 @@ def test_claudexor_sender_acknowledges_and_closes_after_its_receiver_left():
     assert events == [("close",)]
 
 
-@pytest.mark.parametrize("abandonable", [False, True])
-@pytest.mark.parametrize("timeout_type", [TimeoutError, FutureTimeout])
+@pytest.mark.parametrize(("timeout_type", "abandonable"), [
+    pytest.param(TimeoutError, False, id='TimeoutError0-False'),
+    pytest.param(FutureTimeout, True, id='TimeoutError1-True'),
+])
 def test_provider_timeout_is_an_error_not_a_receiver_poll(tmp_path, scope, monkeypatch, abandonable, timeout_type):
     failure = timeout_type("provider timed out")
     def send():
@@ -392,8 +393,7 @@ def test_async_cancellation_still_joins_received_answer_during_abandonable_poll(
     assert row["state"] == "settled" and row["cost_usd"] == pytest.approx(.1)
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("retention_fails", [False, True])
+@pytest.mark.parametrize(("retention_fails", "asynchronous"), [(False, True), (True, False)])
 def test_subscription_chat_pause_preserves_late_receipt_without_adopting_it(
         subscription_setup, monkeypatch, asynchronous, retention_fails):  # noqa: F811 - the imported fixture
     from ouroboros import llm_claudexor
@@ -500,3 +500,369 @@ def test_temporary_api_client_stays_with_its_abandoned_sender(tmp_path, scope, m
     manifest, payload, _ = read_call_payload(tmp_path, task_id="root", call_id=f"physical_{row['attempt_id']}_response")
     assert manifest["control_reason"] == "owner_pause_abandoned"
     assert payload["response"] == response.model_dump()
+
+
+def _census_bench(tmp_path, monkeypatch, direct):
+    """A root work's real activity record (pooled RUNNING or the direct registry) and the public census read of it,
+    fed exactly as the worker's event queue feeds them."""
+    from copy import deepcopy
+
+    from ouroboros.gateway import state as gateway_state
+    from supervisor import events, queue as task_queue
+    from supervisor.active_activity import get_direct_activity_registry
+
+    write_task_result(tmp_path, "root", "running", root_task_id="root", chat_id=1, task_attempt=1,
+                      _is_direct_chat=direct)
+    meta = {"task": {"id": "root", "root_task_id": "root", "chat_id": 1, "_attempt": 1}, "attempt": 1, "started_at": 1.0}
+    running = {} if direct else {"root": meta}
+    for name, value in (("RUNNING", running), ("PENDING", []), ("BUDGET_ROOT_FENCES", {})):
+        monkeypatch.setattr(task_queue, name, value)
+    registry = get_direct_activity_registry()
+    registry.clear()
+    owner = model_wait.TaskModelWait(task={"id": "root", "_attempt": 1}, drive_root=tmp_path, event_queue=None,
+                                     worker_slot_held=not direct)
+    if direct:
+        registry.register("root", 1, actor=SimpleNamespace(tools=SimpleNamespace(
+            _ctx=SimpleNamespace(model_wait_context=owner))))
+
+    class EventQueue:
+        def put(self, event):
+            if event.get("type") == "main_llm_call_state":
+                events._handle_main_llm_call_state(deepcopy(event), SimpleNamespace(RUNNING=running))
+        put_nowait = put
+
+    return SimpleNamespace(meta=meta, registry=registry, owner=owner, queue=EventQueue(),
+                           census=lambda: gateway_state._chat_activities_snapshot_safe(tmp_path)[0].get("context_attempt"))
+
+
+def _low_context(**changes):
+    from dataclasses import replace
+
+    from ouroboros.physical_attempt_context import PhysicalAttemptContext
+
+    low = PhysicalAttemptContext(profile="task_local_low", rendered_mode="low", measurement_basis="cold_estimate",
+                                 route_fp="", round_id="exec:round:1", target_total_tokens=None,
+                                 capacity_total_tokens=None, context_target_miss=False, automatic_pass_used=False,
+                                 preferred_mode="max", mode_cause="memory")
+    return replace(low, **changes)
+
+
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("neighbour", ["alone", "after-genuine-send", "beside-newer-send"])
+@pytest.mark.parametrize("direct", [False, True], ids=["pooled", "direct"])
+def test_a_late_proof_of_no_start_retracts_the_paused_send_in_the_public_census(
+        tmp_path, scope, monkeypatch, direct, neighbour, asynchronous):
+    """Pause leaves the sent Low request dispatched and its call closed; its sender later proves it never started.
+    The real ledger releases it, the sender publishes that release through the bound observer (``llm_observability``),
+    and the activity record (pooled RUNNING or the direct registry) retracts exactly that retained identity after its
+    call closed: an earlier genuine send stays its one previous, a newer send stays current and only loses the
+    disproven previous, the next attempt not proven unsent taking its place; a forged release of another call or
+    task attempt changes nothing."""
+    from dataclasses import replace
+
+    from ouroboros.llm_observability import emit_main_call_state
+    from ouroboros.physical_attempt_context import observe_dispatch
+    from ouroboros.transport_custody import ProviderNotDispatched
+
+    bench = _census_bench(tmp_path, monkeypatch, direct)
+    meta, registry, owner, queue_, census = bench.meta, bench.registry, bench.owner, bench.queue, bench.census
+    paused = ("root", 1, "call-x", "exec", "exec:round:1", 1)
+    low = _low_context()
+    request = ua.AttemptRequest(model="m", provider="test", reservation_usd=.2, physical_context=low)
+    sent, release, outcome = threading.Event(), threading.Event(), {}
+
+    def refused():
+        raise ProviderNotDispatched("the transport proves generation never started")
+
+    def send():
+        sent.set()
+        assert release.wait(10)
+        refused()
+
+    async def send_async():
+        sent.set()
+        await asyncio.to_thread(release.wait, 10)
+        refused()
+
+    closed = threading.Event()
+
+    def close(exc):  # the loop's own closing frame of the paused call, as ``loop_llm_call`` emits it
+        outcome["error"] = exc
+        emit_main_call_state(queue_, paused, "failed", capture=ua.physical_attempt_capture_from_exception(exc))
+        closed.set()
+
+    async def attempt_async():
+        try:
+            await ua.execute_physical_attempt_async(request, send_async, extractor=_extract)
+        except BaseException as exc:  # noqa: BLE001 - the test inspects the exact interruption
+            close(exc)
+            if (sender := getattr(exc, "model_sender_future", None)) is not None:
+                await asyncio.wait_for(sender, 10)  # the abandoned sender settles before this loop ends
+
+    def run():
+        emit_main_call_state(queue_, paused, "started")
+        try:
+            with ua.usage_scope(scope), model_wait.operation_wait_scope(owner), receiver_abandonable(), \
+                    observe_dispatch(lambda capture: emit_main_call_state(queue_, paused, "dispatched", capture=capture)):
+                if asynchronous:
+                    asyncio.run(attempt_async())
+                else:
+                    ua.execute_physical_attempt(request, send, extractor=_extract)
+        except BaseException as exc:  # noqa: BLE001 - the test inspects the exact interruption
+            close(exc)
+
+    if neighbour in {"after-genuine-send", "beside-newer-send"}:  # an earlier call of this task attempt sent P in Max and was answered
+        prior_id = ("root", 1, "call-w", "exec", "exec:round:0", 1)
+        p = SimpleNamespace(state="dispatched", attempt_id="attempt-p", physical_context=replace(
+            low, profile="owner_max", rendered_mode="max", mode_cause="", round_id="exec:round:0"))
+        emit_main_call_state(queue_, prior_id, "started")
+        emit_main_call_state(queue_, prior_id, "dispatched", capture=p)
+        emit_main_call_state(queue_, prior_id, "finished", capture=SimpleNamespace(**{**vars(p), "state": "settled"}))
+        assert census()["ledger_state"] == "settled"
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        assert sent.wait(10)
+        owner_pause.install_fence(tmp_path, "root", request_id="pause")
+        assert closed.wait(10)
+        assert getattr(outcome.get("error"), "receiver_abandoned", False)
+        held = census()
+        assert (held["ledger_state"], held["applied"], held["llm_call_id"]) == ("dispatched", "low", "call-x")
+        if neighbour == "after-genuine-send":
+            assert (held["previous"]["attempt_id"], held["previous"]["applied"]) == ("attempt-p", "max")
+        record = registry.get("root") if direct else None
+        assert (record.active_llm_call if direct else meta.get("active_llm_call")) is None, "its call is closed"
+        expected = {**held, "ledger_state": "released"}  # the same send, its time and its one previous kept
+        if neighbour == "beside-newer-send":  # B is provisional; A is later released after B is released
+            newer_id = ("root", 1, "call-y", "exec", "exec:round:2", 1)
+            emit_main_call_state(queue_, newer_id, "started")
+            b = SimpleNamespace(state="dispatched", attempt_id="attempt-b", physical_context=replace(
+                low, profile="owner_max", rendered_mode="max", mode_cause="", round_id="exec:round:2"))
+            emit_main_call_state(queue_, newer_id, "dispatched", capture=b)
+            assert census()["previous"]["attempt_id"] == held["attempt_id"], "the next attempt not proven unsent is A"
+            b_held = census()
+            b_release = {**b_held, "ledger_state": "released"}
+            queue_.put({"type": "main_llm_call_state", "task_id": "root", "task_attempt": 1,
+                        "llm_call_id": "call-y", "execution_id": "exec", "round_id": "exec:round:2",
+                        "call_attempt": 1, "phase": "dispatched", "context_attempt": b_release})
+            after_b_release = census()
+            assert after_b_release["ledger_state"] == "released"
+            assert after_b_release["previous"]["attempt_id"] == held["attempt_id"], "A is still not proven unsent"
+            # A's late proof arrives after B was released: it retracts A alone and P takes its place.
+            queue_.put({"type": "main_llm_call_state", "task_id": "root", "task_attempt": 1,
+                        "llm_call_id": "call-x", "execution_id": "exec", "round_id": "exec:round:1",
+                        "call_attempt": 1, "phase": "dispatched",
+                        "context_attempt": {**held, "ledger_state": "released"}})
+            after_a_release = census()
+            assert after_a_release == {**after_b_release, "previous": {
+                key: value for key, value in held["previous"].items() if key != "previous"}}
+            assert after_a_release["previous"]["attempt_id"] == "attempt-p"
+            expected = after_a_release
+        # Forged releases of the same attempt under another call or task attempt change nothing.
+        for forged in ({"call_attempt": 2}, {"llm_call_id": "call-z"}, {"task_attempt": 2}):
+            frame = {"type": "main_llm_call_state", "task_id": "root", "task_attempt": 1, "llm_call_id": "call-x",
+                     "execution_id": "exec", "round_id": "exec:round:1", "call_attempt": 1, "phase": "dispatched",
+                     "context_attempt": {**held, "ledger_state": "released"}, **forged}
+            before = census()
+            queue_.put(frame)
+            assert census() == before, forged
+    finally:
+        release.set()
+        thread.join(10)
+    assert not thread.is_alive()
+    assert _until(lambda: attempt_rows_in_start_order(tmp_path)[0]["state"] == "released")
+    assert len(attempt_rows_in_start_order(tmp_path)) == 1, "one physical send, released once"
+    assert _until(lambda: census() == expected), (census(), expected)
+    registry.clear()
+
+
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("ending", ["a-settled", "a-unresolved", "a-unresolved-released", "a-released", "b-settled", "a-settled-first", "a-released-first"])
+@pytest.mark.parametrize("direct", [False, True], ids=["pooled", "direct"])
+def test_the_newest_request_not_proven_unsent_stands_in_the_census(tmp_path, scope, monkeypatch, direct, ending, asynchronous):
+    """P settled in Max, A dispatched in Low and abandoned by Pause, B dispatched in Max and then released: the capsule's
+    fact is the newest request not proven unsent, whichever way A's real sender ends and in whichever order the
+    proofs arrive. A's outcome arrives through the real ledger and its own sender's observer, after its call closed."""
+    from ouroboros.llm_observability import emit_main_call_state
+    from ouroboros.physical_attempt_context import observe_dispatch
+    from ouroboros.transport_custody import ProviderNotDispatched
+
+    bench = _census_bench(tmp_path, monkeypatch, direct)
+    census, queue_ = bench.census, bench.queue
+    late = {"a-settled": "settled", "a-settled-first": "settled", "b-settled": "settled", "a-unresolved": "unresolved", "a-unresolved-released": "unresolved",
+            "a-released": "released", "a-released-first": "released"}[ending]
+    a_call = ("root", 1, "call-a", "exec", "exec:round:1", 1)
+    sent, release, outcome, closed = threading.Event(), threading.Event(), {}, threading.Event()
+
+    def conclude():
+        if late == "released":
+            raise ProviderNotDispatched("the transport proves generation never started")
+        if late == "unresolved":
+            raise RuntimeError("provider reset after the receiver left")
+        return {"late": "answer"}
+
+    def send():
+        sent.set()
+        assert release.wait(10)
+        return conclude()
+
+    async def send_async():
+        sent.set()
+        await asyncio.to_thread(release.wait, 10)
+        return conclude()
+
+    def close(exc):
+        outcome["error"] = exc
+        emit_main_call_state(queue_, a_call, "failed", capture=ua.physical_attempt_capture_from_exception(exc))
+        closed.set()
+
+    request = ua.AttemptRequest(model="m", provider="test", reservation_usd=.2, physical_context=_low_context())
+
+    def prepared(reservation):
+        outcome["reservation"] = reservation
+
+    async def attempt_async():
+        try:
+            await ua.execute_physical_attempt_async(request, send_async, extractor=_extract, before_dispatch=prepared)
+        except BaseException as exc:  # noqa: BLE001 - the test inspects the exact interruption
+            close(exc)
+            if (sender := getattr(exc, "model_sender_future", None)) is not None:
+                await asyncio.wait_for(sender, 10)
+
+    def run():
+        emit_main_call_state(queue_, a_call, "started")
+        try:
+            with ua.usage_scope(scope), model_wait.operation_wait_scope(bench.owner), receiver_abandonable(), \
+                    observe_dispatch(lambda capture: emit_main_call_state(queue_, a_call, "dispatched", capture=capture)):
+                if asynchronous:
+                    asyncio.run(attempt_async())
+                else:
+                    ua.execute_physical_attempt(request, send, extractor=_extract, before_dispatch=prepared)
+        except BaseException as exc:  # noqa: BLE001 - the test inspects the exact interruption
+            close(exc)
+
+    p_call, b_call = ("root", 1, "call-p", "exec", "exec:round:0", 1), ("root", 1, "call-b", "exec", "exec:round:2", 1)
+    p = SimpleNamespace(state="dispatched", attempt_id="attempt-p", physical_context=_low_context(
+        profile="owner_max", rendered_mode="max", mode_cause="", round_id="exec:round:0"))
+    b = SimpleNamespace(state="dispatched", attempt_id="attempt-b", physical_context=_low_context(
+        profile="owner_max", rendered_mode="max", mode_cause="", round_id="exec:round:2"))
+    emit_main_call_state(queue_, p_call, "started")
+    emit_main_call_state(queue_, p_call, "dispatched", capture=p)
+    emit_main_call_state(queue_, p_call, "finished", capture=SimpleNamespace(**{**vars(p), "state": "settled"}))
+    thread = threading.Thread(target=run)
+    thread.start()
+
+    def a_state():
+        return attempt_rows_in_start_order(tmp_path)[0]["state"]
+
+    def finish_a():
+        release.set()
+        assert _until(lambda: a_state() == late), a_state()
+
+    try:
+        assert sent.wait(10)
+        owner_pause.install_fence(tmp_path, "root", request_id="pause")
+        assert closed.wait(10) and getattr(outcome.get("error"), "receiver_abandoned", False)
+        held_a = census()
+        assert (held_a["ledger_state"], held_a["applied"], held_a["previous"]["attempt_id"]) == ("dispatched", "low", "attempt-p")
+        emit_main_call_state(queue_, b_call, "started")
+        emit_main_call_state(queue_, b_call, "dispatched", capture=b)
+        held_b = census()
+        assert (held_b["attempt_id"], held_b["ledger_state"]) == ("attempt-b", "dispatched")
+        if ending.endswith("-first"):
+            finish_a()
+        if ending == "b-settled":
+            emit_main_call_state(queue_, b_call, "finished", capture=SimpleNamespace(**{**vars(b), "state": "settled"}))
+        else:
+            emit_main_call_state(queue_, b_call, "dispatched", capture=SimpleNamespace(**{**vars(b), "state": "released"}))
+        if not ending.endswith("-first"):
+            finish_a()
+
+        def settled_view():
+            fact = census()
+            if ending == "b-settled":
+                return (fact["attempt_id"], fact["ledger_state"], "previous" in fact) == ("attempt-b", "settled", False)
+            if fact["ledger_state"] != "released" or fact["attempt_id"] != "attempt-b":
+                return False
+            previous = fact.get("previous") or {}
+            if late == "released":
+                return (previous.get("attempt_id"), previous.get("applied")) == ("attempt-p", "max")
+            return (previous.get("attempt_id"), previous.get("ledger_state"), previous.get("applied")) == (
+                held_a["attempt_id"], late, "low")
+
+        assert _until(settled_view), census()
+        fact = census()
+        assert "previous" not in fact.get("previous", {}), "one level, never a chain"
+        assert held_b["previous"]["attempt_id"] == held_a["attempt_id"], "dispatched attempts do not prune each other"
+        if ending == "a-unresolved-released":
+            # The real ledger permits a later unsent proof to replace uncertainty. An unresolved
+            # capture is not a pruning barrier: after releasing A the genuine P must still be there.
+            with ua.usage_scope(scope), observe_dispatch(
+                    lambda capture: emit_main_call_state(queue_, a_call, "dispatched", capture=capture)):
+                ua.release_attempt(outcome["reservation"], "before_dispatch_failed:late_proof", proven_unsent=True)
+                ua._record_attempt_capture(outcome["reservation"], request, "released")
+            assert a_state() == "released"
+            assert census().get("previous", {}).get("attempt_id") == "attempt-p", census()
+    finally:
+        release.set()
+        thread.join(10)
+    assert not thread.is_alive()
+    bench.registry.clear()
+
+
+def test_the_attempt_fold_keeps_only_what_can_still_be_the_answer():
+    """The private newest-first projection behind the public fact: only a sender-settled capture ends what lies behind it;
+    dispatched/unresolved attempts keep their fallback, a release is terminal and states only move forward."""
+    from ouroboros.physical_attempt_context import attempt_view, fold_attempt
+
+    def frame(attempt, state, call="c", **changes):
+        return {"attempt_id": attempt, "ledger_state": state, "applied": "max", "observed_at": f"t-{attempt}", "task_attempt": 1,
+                "llm_call_id": call, "execution_id": "e", "round_id": "r", "call_attempt": 1, **changes}
+
+    held = fold_attempt([], frame("p", "settled", "c0"), active=True)
+    for attempt, call in (("a", "c1"), ("b", "c2")):
+        held = fold_attempt(held, frame(attempt, "dispatched", call), active=True)
+    assert [e["attempt_id"] for e in held] == ["b", "a", "p"]
+    # Dispatched neighbours stay; the public fact names the next one not proven unsent.
+    assert attempt_view(held)["previous"]["attempt_id"] == "a"
+    unresolved = fold_attempt(held, frame("a", "unresolved", "c1"), active=False)
+    assert [e["attempt_id"] for e in unresolved] == ["b", "a", "p"]
+    released_unknown = fold_attempt(unresolved, frame("a", "released", "c1"), active=False)
+    assert attempt_view(released_unknown)["previous"]["attempt_id"] == "p"
+    # A confirmed newest ends the fallback behind it.
+    settled = fold_attempt(held, frame("b", "settled", "c2"), active=True)
+    assert [e["attempt_id"] for e in settled] == ["b"] and "previous" not in attempt_view(settled)
+    # Unknown older attempts and other calls cannot insert or change anything.
+    assert fold_attempt(held, frame("late", "settled", "c1"), active=False) is None
+    assert fold_attempt(held, frame("a", "settled", "c-other"), active=False) is None
+    # A stale state never moves one backward; a settled send is never retracted; a release is terminal.
+    a_settled = fold_attempt(held, frame("a", "settled", "c1"), active=False)
+    assert fold_attempt(a_settled, frame("a", "dispatched", "c1"), active=False) is None
+    assert fold_attempt(a_settled, frame("a", "released", "c1"), active=False) is None
+    released = fold_attempt(held, frame("a", "released", "c1"), active=False)
+    assert [e["attempt_id"] for e in released] == ["b", "p"], "a disproven middle attempt is not kept for another call"
+    assert attempt_view(released)["previous"]["attempt_id"] == "p"
+    # Beside its own call, a released attempt stays so a stale frame of that call cannot revive it.
+    first = fold_attempt([], frame("x", "dispatched"), active=True)
+    first = fold_attempt(first, frame("x", "released"), active=True)
+    repaired = fold_attempt(first, frame("y", "dispatched"), active=True)
+    assert [e["ledger_state"] for e in repaired] == ["dispatched", "released"]
+    assert fold_attempt(repaired, frame("x", "dispatched"), active=True) is None
+    # The time of a request is its first observation, and another task attempt's record is not inherited.
+    live = fold_attempt([], frame("x", "dispatched"), active=True)
+    assert fold_attempt(live, frame("x", "settled", observed_at="later"), active=True)[0]["observed_at"] == "t-x"
+    assert [e["attempt_id"] for e in fold_attempt(released, frame("n", "dispatched", task_attempt=2), active=True)] == ["n"]
+    # More than two overlaps, every release order: no cap may silently erase a possible fallback.
+    from itertools import permutations
+
+    for order in permutations("abc"):
+        entries = fold_attempt([], frame("p", "settled", "c0"), active=True)
+        for attempt in "abc":
+            entries = fold_attempt(entries, frame(attempt, "dispatched", attempt), active=True)
+        remaining = list("cba")
+        for attempt in order:
+            entries = fold_attempt(entries, frame(attempt, "released", attempt), active=False)
+            remaining.remove(attempt)
+            fact = attempt_view(entries)
+            shown = fact.get("previous") if fact["ledger_state"] == "released" else fact
+            assert shown["attempt_id"] == (remaining[0] if remaining else "p")

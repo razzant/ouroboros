@@ -42,19 +42,19 @@ test('the chip says the next wake, Off or Evolving, beside one mark of the statu
     assert.equal(sleeping.said, 'Consciousness: Sleeping until 14:20.', 'the host\'s own sentence (consciousness_view.py)');
     const thinking = chipView(answer({ status: 'thinking', detail: 'Wake-up wake-1 is running.', live_wake_task_id: 'wake-1' }));
     assert.deepEqual([thinking.word, shapeOf(thinking)], ['', 'moving/ink'], 'awake: the moving dots, never a breathing glyph');
-    const off = chipView(answer({ status: 'disabled', detail: 'Background consciousness is off.' }, { bg_consciousness_enabled: false }));
+    const off = chipView(answer({ status: 'disabled', detail: 'Off: no own wakes; 2 places only hear.' }, { bg_consciousness_enabled: false }));
     assert.deepEqual([off.word, shapeOf(off), off.off], ['Off', 'none/ink', true]);
     // Evolving replaces the time while a campaign runs, even with consciousness off.
-    const evolvingOff = chipView(answer({ status: 'disabled', detail: 'Background consciousness is off.' },
+    const evolvingOff = chipView(answer({ status: 'disabled', detail: 'Off: no own wakes.' },
         { bg_consciousness_enabled: false, evolution_enabled: true }));
     assert.deepEqual([evolvingOff.word, evolvingOff.off, evolvingOff.evolving], ['Evolving', true, true]);
-    assert.equal(evolvingOff.said, 'Consciousness: Background consciousness is off. · evolution campaign running');
+    assert.equal(evolvingOff.said, 'Consciousness: Off: no own wakes. · evolution campaign running');
     assert.equal(chipView(answer({}, { evolution_enabled: true })).word, 'Evolving');
     assert.equal(shapeOf(chipView(answer({ status: 'thinking', live_wake_task_id: 'w' }, { evolution_enabled: true }))), 'moving/ink');
 });
 
 test('amber only for the owner\'s move; a failure is the outcome\'s red dot, an unconfirmed state a ring', () => {
-    const spent = chipView(answer({ status: 'allowance_exhausted', allowance_resets_at: at(15, 5),
+    const spent = chipView(answer({ status: 'allowance_exhausted', allowance_resets_at: at(15, 5), next_wake_at: at(15, 5),
         detail: 'Daily allowance spent ($20.00 of $20.00 in the last 24 h); next check at 15:05.' }));
     assert.deepEqual([spent.word, shapeOf(spent)], ['15:05', 'dot/owner'], 'stopped by its spending limit: the time it frees');
     assert.match(spent.said, /next check at 15:05\. · waits for you$/);
@@ -152,7 +152,8 @@ test('the chip opens its Shade and switches nothing; the Shade reads the wakes o
         assert.deepEqual(doors.map((door) => [door.textContent, door.hidden]), [['Dashboard ›', false], ['Evolution ›', true]]);
 
         toggle.click();
-        assert.deepEqual(sent, [{ type: 'command', cmd: '/bg stop' }], 'Stop is the Dashboard\'s own command');
+        assert.deepEqual(sent, [{ type: 'command', cmd: '/bg stop', ui_control: { name: 'consciousness_toggle' } }],
+            'Stop is the Dashboard\'s own command, not typed owner text');
         assert.equal(toggle.disabled, true, 'it waits for the readback');
         await new Promise((resolve) => setTimeout(resolve, 450));
         assert.equal(refreshed, 1, 'the room\'s state clock is asked again');
@@ -170,6 +171,64 @@ test('the chip opens its Shade and switches nothing; the Shade reads the wakes o
         status.destroy();
         assert.equal(bar.children.includes(status.chip), false, 'its nodes go with it');
     } finally {
+        restoreDom(env.prior);
+    }
+});
+
+test('a wake in a place is a door to that place\'s sheet, read at the press; a failed read keeps it, a place gone disables it', async () => {
+    // Owner 06.11: pausing one Slack took four presses in another section; the Shade's row is one press from its sheet.
+    const env = installDom();
+    let status;
+    try {
+        const bar = document.createElement('div');
+        const opened = [];
+        let places = [{ id: 'slack-1', label: 'Slack · Acme' }];
+        let fail = false;
+        status = createConsciousnessStatus({ bar,
+            read: async () => normalizeConsciousness({ recent_wakes: [
+                { cause: 'focus', place_id: 'slack-1', place_label: 'Slack · Acme', summary: 'Answered Ann',
+                    started_at: at(13, 5), phase: 'done', ended_at: at(13, 6) },
+                { cause: 'focus', place_label: 'Mail', summary: 'Read the inbox', started_at: at(12, 0), phase: 'done', ended_at: at(12, 1) },
+                { cause: 'own', place_id: 'slack-1', summary: 'Own time', started_at: at(11, 0), phase: 'done', ended_at: at(11, 1) },
+            ] }),
+            readPlacesFn: async () => { if (fail) throw new Error('offline'); return { places }; },
+            openSheet: (place, { returnFocus }) => opened.push([place.id, returnFocus === status.chip]),
+        });
+        status.update(answer());
+        status.chip.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        let doors = status.shade.querySelectorAll('.cx-wake-door');
+        assert.equal(doors.length, 1, 'only a place wake that names its place is a door; an own wake never is');
+        assert.equal(doors[0].getAttribute('aria-label'), 'Open Slack · Acme: 13:05 · Answered Ann · Done');
+        assert.deepEqual(doors[0].children.map((cell) => cell.textContent), ['13:05', 'Answered Ann', 'Done'], 'it keeps its words');
+
+        fail = true;
+        doors[0].click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.deepEqual(opened, []);
+        assert.equal(status.isOpen(), true);
+        assert.equal(status.shade.querySelector('.cx-wakes-coverage').textContent, 'Places could not be read: offline');
+        assert.equal(doors[0].disabled, false, 'a failed read keeps the door for another try');
+
+        fail = false;
+        doors[0].click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.deepEqual(opened, [['slack-1', true]], 'the place as it stands now, focus returning to the chip');
+        assert.equal(status.isOpen(), false, 'the Shade gives way to the sheet');
+
+        places = [];
+        status.chip.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        doors = status.shade.querySelectorAll('.cx-wake-door');
+        doors[0].focus();
+        doors[0].click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.deepEqual(opened, [['slack-1', true]]);
+        assert.equal(doors[0].disabled, true, 'a place gone since is no door');
+        assert.equal(document.activeElement, status.shade.querySelector('.cx-wakes-coverage'), 'its focus moves to the line saying why');
+        assert.equal(status.shade.querySelector('.cx-wakes-coverage').textContent, 'This place is disconnected.');
+    } finally {
+        status?.destroy();
         restoreDom(env.prior);
     }
 });

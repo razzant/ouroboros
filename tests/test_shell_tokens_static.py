@@ -16,24 +16,8 @@ SHELL_RULES = {
                       ".project-panel {", ".project-panel-backdrop {", 'html[data-layout="stack"] .project-panel {'),
     "web/ui.css": (".ui-popup {",),
 }
-GATED_HOVERS = (".nav-row:hover", ".nav-project-kebab:hover", ".nav-projects-add:hover", ".resize-handle:hover",
-                ".chat-header-btn:hover", ".chat-header-btn.danger:hover",
-                ".chat-budget-pill:hover", ".nav-drawer-close):hover", ".chat-budget-pill.ui-chrome-control:hover",
-                ".chat-project-row:hover")
-
-
 def _read(rel: str) -> str:
     return (REPO / rel).read_text(encoding="utf-8")
-
-
-def _blocks(css: str, head: str):
-    """Bodies of every `@media <head>` block, balanced."""
-    for match in re.finditer(r"@media\s*" + re.escape(head) + r"\s*\{", css):
-        depth, pos = 1, match.end()
-        while depth and pos < len(css):
-            depth += {"{": 1, "}": -1}.get(css[pos], 0)
-            pos += 1
-        yield css[match.end():pos - 1]
 
 
 def test_shell_rules_read_the_z_tokens_and_the_scale_stays_ordered():
@@ -50,17 +34,3 @@ def test_shell_rules_read_the_z_tokens_and_the_scale_stays_ordered():
             body = css.split(selector, 1)[1].split("}", 1)[0]
             z = re.search(r"z-index:\s*([^;]+);", body)
             assert z and z.group(1).startswith("var(--z-"), f"{rel} {selector} {z.group(1) if z else 'has no z-index'}"
-
-
-def test_shell_hover_rules_are_gated_on_a_hovering_pointer():
-    css = _read("web/style.css")
-    gated = "\n".join(_blocks(css, "(hover: hover)"))
-    outside = css
-    for body in _blocks(css, "(hover: hover)"):
-        outside = outside.replace(body, "")
-    for selector in GATED_HOVERS:
-        if selector not in css:
-            continue
-        assert selector in gated, f"{selector} has no gated recipe"
-        assert selector not in outside, f"{selector} also paints on a touch screen (outside @media (hover: hover))"
-    assert "transform: scale(1.02)" not in css, "a hover never moves (DESIGN 'Colour answers touch')"

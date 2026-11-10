@@ -59,9 +59,11 @@ def test_replay_learns_subagent_lineage_before_merging_card_rows():
     assert history.index(lineage_pass) < history.index("admitCardMetadata(msg)")
     # A page may contain a child whose parent is already represented elsewhere.
     # Keep those bindings during replay; only final instance disposal clears them.
+    disposal = src[src.index("destroy() {"):]
+    cleared = disposal[disposal.index("for (const held of ["):disposal.index("]) held.clear();")]
     for collection in ("subagentChildParents", "subagentTerminalChildren"):
-        assert f"{collection}.clear();" not in history
-        assert f"{collection}.clear();" in src[src.index("destroy() {"):]
+        assert f"{collection}.clear()" not in history and "held.clear()" not in history
+        assert f"{collection}," in cleared  # destroy's one release of the buffered collections
     fanout = src[src.index("onWs('chat'"):src.index("onWs('message_annotation'")]
     # Live lineage must be known before progress or a final can resolve a
     # child card; ephemeral registration now lives in the early reference seam.
@@ -80,26 +82,3 @@ def test_replay_learns_subagent_lineage_before_merging_card_rows():
     assert "const replayTerminal = msg.task_terminal_status && taskDoneIsTerminal(msg);" in src
     assert "if (replayTerminal || ['completed', 'completed_warn', 'failed', 'cancelled', 'rejected'].includes(event)) {" in src
     assert "subagentTerminalChildren.add(childId);" in src
-
-
-def test_progress_dedup_uses_full_array_not_last_item():
-    """applyLiveCardState must dedup a progress line against the WHOLE card, not
-    just the last item — otherwise a background syncHistory re-feeds historical
-    progress and the 'Notes' count grows without bound (BUGREPORT-panic-working-notes).
-    """
-    chat = _read("web/modules/chat.js")
-    assert "updateLiveTimelineItem(record, summary," in chat
-    source = _read("web/modules/chat_render_batch.js")
-    src = source[source.index("export function updateLiveTimelineItem"):]
-    # full-array dedup
-    assert ("const existingIdx = record.items.findIndex((it) => it.dedupeKey === syntheticKey"
-            " || it.occurrenceKey === syntheticKey);") in src
-    # the old last-item-only check is gone
-    assert "record.items[lastIdx].dedupeKey === syntheticKey ? lastIdx : -1" not in src
-    # a historical re-feed (found, not the last item) is skipped, not re-appended
-    assert "timelineUpdate = 'duplicate-skip';" in src
-    # Historical frames use their physical source identities and independently
-    # reject replayed duplicates before creating another item.
-    history = _read("web/modules/chat_history_replay.js")
-    assert "entry.dedupeKey === key" in history
-    assert "if (item?.historyId === identity) return false;" in history

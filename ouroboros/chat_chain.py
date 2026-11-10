@@ -22,6 +22,7 @@ from ouroboros.deadline_utils import parse_deadline_ts
 
 _TEXT_ADDRESS = re.compile(r"row:(-?\d+)@(.*)#([0-9a-f]{12,64})")
 _DIGEST = re.compile(r"[0-9a-f]{12,64}")
+_FULL_DIGEST = re.compile(r"[0-9a-f]{64}")
 _HINT_FIELDS = ("task_id", "client_message_id", "type")
 _ADDRESS_PAGE = 500  # rows whose ordinals and legacy hints one read looks up (``dp.ordinals_of`` pages at 500)
 _LINEAGE_FIELDS = ("task_id", "parent_task_id", "root_task_id")
@@ -47,10 +48,15 @@ class RowAddressError(LookupError):
 
 
 def source_row_id(row: Dict[str, Any]) -> str:
-    """Identity of an original raw chat row, before any room/view projection adds fields."""
+    """Identity of an original raw chat row, before any room/view projection adds fields. A row stored with
+    its provider thread by reference carries the identity of its whole row (``dialogue_store.ROW_SHA_KEY``),
+    so every address of it is the one its whole row (and an older body's exported line) has, unexpanded."""
     from ouroboros.place_arrivals import SourceProjection
     if isinstance(row, SourceProjection):
         row = row.source_body
+    stored = row.get(ds.ROW_SHA_KEY)
+    if isinstance(stored, str) and _FULL_DIGEST.fullmatch(stored):
+        return stored
     payload = json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -95,6 +101,36 @@ def _normalized(address: Any) -> Dict[str, Any]:
     if not _DIGEST.fullmatch(wanted["row_sha256"]):
         raise ValueError("row_sha256 is 12 to 64 lowercase hex characters")
     return wanted
+
+
+# The context recorded with an inbound row is the row itself, never a copy: a non-focus Presence event's row
+# names it so (``presence_runner._log_dialogue``), an admitted or author-mailed arrival in its dedup record
+# (``place_arrivals.retain_focus_source``); every row reader shows it as the row's exact address
+# (``place_arrivals.project_source``), which ``memory_read(source_ref=…)`` reads (``recorded_context``).
+ROW_CONTEXT = {"kind": "chat_row"}
+
+
+def context_address(row: Dict[str, Any]) -> Dict[str, Any]:
+    """The exact address by which ``memory_read(source_ref=…)`` reads the context recorded with ``row``."""
+    return {"kind": "chat_row", "chat_id": _row_chat_id(row), "ts": str(row.get("ts") or ""),
+            "row_sha256": source_row_id(row)}
+
+
+def recorded_context(root: Any, address: Any) -> Tuple[Dict[str, Any], bytes]:
+    """``(stored address, document)``: the context recorded with the row at ``address``, its provider thread
+    whole, as the document a per-event copy held (``recorded_at``, ``source_event_id`` -- the Presence event's,
+    else the row's client id -- ``text``, ``transport``; sorted keys, compact). ``RowAddressError`` when the
+    address resolves to no row."""
+    from ouroboros.place_arrivals import SourceProjection
+
+    row, found = resolve_row(root, address)
+    if row is None:
+        raise RowAddressError(found)
+    whole = ds.whole_row(root, row.source_body if isinstance(row, SourceProjection) else row)
+    event = whole.get("presence_provenance") if isinstance(whole.get("presence_provenance"), dict) else {}
+    document = {"recorded_at": whole.get("ts"), "source_event_id": event.get("source_event_id") or whole.get("client_message_id"),
+                "text": whole.get("text"), "transport": whole.get("transport")}
+    return found["address"], json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def stored_address(root: Any, entry: ds.Row) -> Dict[str, Any]:
@@ -325,20 +361,23 @@ def _reached(conn: Any, tasks: Iterable[str]) -> set:
     return {str(task) for task in json.loads(conn.execute(_REACH, (json.dumps(sorted(tasks)),)).fetchone()[0] or "[]")}
 
 
-def room_rows(root: Any, room_id: Any, *, stream: str = "chat", lower: int = 0,
-              upper: Optional[int] = None, gaps: Optional[set] = None) -> Iterator[ds.Row]:
-    """Indexed candidate union for the canonical room rule, including late task bindings. ``gaps`` collects
-    what a Project's chat rows read so may lack (``room_appearances.read_gaps``) once the read starts."""
+def room_keys(root: Any, room_id: Any, *, stream: str = "chat", lower: int = 0, upper: Optional[int] = None,
+              gaps: Optional[set] = None, binding: Optional[dict] = None) -> Tuple[list, Dict[int, ds.Row], Callable[[Any], bool], int]:
+    """The canonical room rule's indexed candidates, including late task bindings: ``(probe keys, the rows a binding
+    names by chat and time, whether a candidate row is the room's, the frozen upper)``. ``gaps`` collects what a
+    Project's chat rows read so may lack (``room_appearances.read_gaps``) once the read starts.
+    ``binding`` restricts the candidates to what that binding newly admits: its tree and origin."""
     from ouroboros.project_dialogue import room_membership, source_refs_for_project
     from ouroboros.projects_registry import list_reserved_projects, RoomResolver
     from ouroboros.store import open_store, store_path
 
     chat = int(room_id)
     projects = {int(project["chat_id"]) for project in list_reserved_projects(root)}
-    refs = source_refs_for_project(root, chat) if chat in projects else []
+    refs = ([binding["source_ref"]] if isinstance(binding.get("source_ref"), dict) else []) if binding is not None else (
+        source_refs_for_project(root, chat) if chat in projects else [])
     resolver = RoomResolver(root)
     member = room_membership(chat, projects, refs, resolver)
-    keys = [("chat_id", chat)]
+    keys = [] if binding is not None else [("chat_id", chat)]
     identities = {}
     upper = ds.stream_end(root, stream) if upper is None else upper
     if chat == 1 and chat not in projects:
@@ -346,14 +385,14 @@ def room_rows(root: Any, room_id: Any, *, stream: str = "chat", lower: int = 0,
                 if room["chat_id"] not in projects and room["chat_id"] >= 0]
         keys.append(("chat_id", None))
     if chat in projects:
-        tasks = {str(tid) for tid, binding in resolver.bindings.items()
-                 if int(binding.get("project_chat_id") or 0) == chat}
+        tasks = {str(binding["task_id"])} if binding is not None else {
+            str(tid) for tid, bound in resolver.bindings.items() if int(bound.get("project_chat_id") or 0) == chat}
         if tasks and store_path(root).exists():
             with open_store(root, write=False) as txn:
                 tasks.update(_reached(txn.conn, tasks))
         keys.extend((field, tid) for tid in sorted(tasks) for field in _LINEAGE_FIELDS)
         if stream == "chat":  # rows written elsewhere this room also shows (``room_membership.appearance_keys``)
-            shown = [f"room:{chat}", *(f"task:{tid}" for tid in sorted(tasks))]
+            shown = ([] if binding is not None else [f"room:{chat}"]) + [f"task:{tid}" for tid in sorted(tasks)]
             keys.extend(("appearance", key) for key in shown)
             if gaps is not None:
                 from ouroboros.room_appearances import read_gaps
@@ -373,13 +412,20 @@ def room_rows(root: Any, room_id: Any, *, stream: str = "chat", lower: int = 0,
                 keys.append(("chat_id", int(ref.get("chat_id") or 1)))
                 if int(ref.get("chat_id") or 1) == 1:
                     keys.append(("chat_id", None))
+    return keys, identities, lambda row: member(_row_chat_id(row), row), upper
+
+
+def room_rows(root: Any, room_id: Any, *, stream: str = "chat", lower: int = 0,
+              upper: Optional[int] = None, gaps: Optional[set] = None) -> Iterator[ds.Row]:
+    """The room's rows by the canonical room rule (``room_keys``), oldest first."""
+    keys, identities, admits, upper = room_keys(root, room_id, stream=stream, lower=lower, upper=upper, gaps=gaps)
     candidates = ds.iter_probes(root, stream, keys, lower=lower, upper=upper)
     previous = None
     for entry in heapq.merge(candidates, sorted(identities.values(), key=lambda row: row.seq), key=lambda row: row.seq):
         if entry.seq == previous:
             continue
         previous = entry.seq
-        if member(_row_chat_id(entry.row), entry.row):
+        if admits(entry.row):
             yield entry
 
 

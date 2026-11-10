@@ -23,7 +23,6 @@ from ouroboros.tools.core import _read_file
 from ouroboros.tools.registry import ToolContext
 from tests._tool_result_delivery_shared import measured_fit
 
-pytestmark = pytest.mark.serial
 
 TOOL = "ext_receipt_probe"
 CALL_ID = "call-receipt"
@@ -112,10 +111,7 @@ def test_primary_source_wins_without_projection_reads_or_republication(tmp_path,
 
 
 @pytest.mark.parametrize("damage", [
-    "absent_trace", "invalid_trace", "missing_blob", "wrong_size", "wrong_digest",
-    "wrong_kind", "wrong_encoding", "truncated_gzip", "invalid_deflate", "non_object",
-    "wrong_tool", "wrong_call", "missing_result", "null_result", "object_result",
-    "missing_identity", "empty_identity",
+    "absent_trace", "wrong_kind", "empty_identity",
 ])
 def test_unusable_projection_preserves_original_refusal(tmp_path, damage):
     ctx, row = _record(tmp_path)

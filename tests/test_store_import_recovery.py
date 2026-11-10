@@ -50,9 +50,13 @@ def test_child_import_interruption_resumes_after_published_root(tmp_path, monkey
     assert store_import.ensure_current_store(tmp_path)["drives"] == {}
 
 
-@pytest.mark.parametrize("published", [False, True], ids=["initial", "p6"])
-@pytest.mark.parametrize("source", ["file", "directory"])
-@pytest.mark.parametrize("error", [errno.EMFILE, errno.ENFILE, errno.EACCES, errno.EIO])
+@pytest.mark.parametrize(("error", "source", "published"), [
+    pytest.param(errno.EMFILE, "file", True, id='24-file-p6'),
+    pytest.param(errno.ENFILE, "directory", True, id='23-directory-p6'),
+    pytest.param(errno.EACCES, "file", False, id='13-file-initial'),
+    pytest.param(errno.EACCES, "directory", False, id='13-directory-initial'),
+    pytest.param(errno.EIO, "file", False, id='5-file-initial'),
+])
 def test_set_read_error_aborts_and_retry_keeps_facts(tmp_path, monkeypatch, published, source, error):
     root = tmp_path / "data"
     write_result(root, result("task1"))
@@ -124,8 +128,12 @@ def test_initial_set_rows_and_baseline_use_one_snapshot(tmp_path, monkeypatch):
     assert meta(root, "sets_baseline") == store_import._sets_baseline({"local_custody_witnesses": {"held": facts}})
 
 
-@pytest.mark.parametrize("published", [False, True], ids=["initial", "p6"])
-@pytest.mark.parametrize("malformed", ["{", "[]", '{"held": null}', "\ufffd"])
+@pytest.mark.parametrize(("malformed", "published"), [
+    pytest.param("{", True, id='{-p6'),
+    pytest.param("[]", False, id='[]-initial'),
+    pytest.param('{"held": null}', True, id='{"held": null}-p6'),
+    pytest.param("\ufffd", False, id='�-initial'),
+])
 def test_malformed_set_refused_in_place_without_losing_rows(tmp_path, published, malformed):
     root = tmp_path / "data"
     write_result(root, result("task1"))

@@ -3,6 +3,7 @@ from collections import Counter
 from types import MappingProxyType
 
 from ouroboros.chronicle_store import is_late_review_mark
+from ouroboros.late_review_marks import SURFACE_NAMES
 
 
 WAITING_CLASSES = MappingProxyType({
@@ -21,6 +22,11 @@ WAITING_CLASSES = MappingProxyType({
                  "reader": "list_projects(closed=false, oldest_first=true)",
                  "act": "close_project(project_id=..., note=...)",
                  "focus": "integrating", "moment": "when folding"},
+    "conversations": {"subject": "conversations whose words no page holds", "action": "chronicle_write",
+                      "parameter": ("covers", "conversation"),
+                      "reader": "memory_read(room_id='conversations', start=0)",
+                      "act": "chronicle_write(kind='page', room_id=..., covers={'to': ..., 'conversation': true})",
+                      "focus": "integrating", "moment": "when folding"},
 })
 
 
@@ -32,20 +38,27 @@ def mind_notes(notes):
     return [(room, note) for room, items in notes.items() for note in items if note.get("author_kind") == "mind"]
 
 
-def measure(marks, notes, projects):
-    """Captured active marks, unsealed notes and registry view (None when its census is unavailable)."""
-    reviews, unsealed = late_reviews(marks), mind_notes(notes)
+def measure(marks, notes, projects, conversations=()):
+    """Captured active marks, unsealed notes, registry view (None when its census is unavailable) and my other
+    conversations (``memory_view_conversations.capture``'s groups: what of them no page holds, no extra read)."""
+    from ouroboros.memory_view_conversations import owed
+
+    reviews, unsealed, debts = late_reviews(marks), mind_notes(notes), owed(conversations)
 
     def facts(items, date):
         stamps = [str(date(item) or "") for item in items]
         return {"count": len(items), "oldest": min(stamps) if stamps and all(stamps) else "unknown" if stamps else "none"}
 
     rooms = Counter(room for room, _note in unsealed)
-    return {"late_reviews": facts(reviews, lambda mark: mark.get("ts")),
+    return {"late_reviews": {**facts(reviews, lambda mark: mark.get("ts")),  # how many rooms hold them: a count of the
+                             "in_rooms": len({str(mark.get("room_id")) for mark in reviews})},  # set, never a pick
             "notes": {**facts(unsealed, lambda item: item[1].get("date")),
                       "rooms": sorted(rooms.items(), key=lambda item: (-item[1], item[0]))[:3]},
             "projects": (facts(projects, lambda project: project.get("last_active_at")) if projects is not None
-                         else {"count": "unknown", "oldest": "unknown"})}
+                         else {"count": "unknown", "oldest": "unknown"}),
+            "conversations": {**facts(debts, lambda item: str(item["earliest"])[:10]),
+                              "largest": [[item["group"]["label"], item["chars"]] for item in  # JSON-stable pairs
+                                          sorted(debts, key=lambda item: -item["chars"])[:3]]}}
 
 
 def text(waiting):
@@ -53,18 +66,41 @@ def text(waiting):
         return ""
     lines = []
     for name, cls in WAITING_CLASSES.items():
-        facts = waiting[name]
-        rooms = ", ".join(f"room {room}: {count}" for room, count in facts.get("rooms", ()))
-        lines.append(f"{cls['subject']} {facts['count']}, oldest {facts['oldest']}"
+        facts = waiting.get(name)
+        if facts is None:  # a view captured before this class existed
+            continue
+        rooms = ", ".join([*(f"room {room}: {count}" for room, count in facts.get("rooms", ())),
+                           *(f"{label} ~{chars} chars" for label, chars in facts.get("largest", ()))])
+        held = facts.get("in_rooms")  # absent in a view captured before the count existed
+        where = f" in {held} room{'' if held == 1 else 's'}" if held else ""
+        lines.append(f"{cls['subject']} {facts['count']}{where}, oldest {facts['oldest']}"
                      + (f", most in {rooms}" if rooms else "") + f"; {cls['reader']}; act {cls['act']}")
     return "; waiting for me at the start: " + " | ".join(lines)
 
 
-def listing(kind, marks, notes):
-    """Exact ids and dates for the existing memory_read's paged list modes; no source prose."""
-    rows = ([{"id": m["id"], "room": str(m.get("room_id")), "date": str(m.get("ts") or "unknown")}
-             for m in late_reviews(marks)] if kind == "late_reviews" else
-            [{"id": n["id"], "room": room, "date": str(n.get("date") or "unknown")} for room, n in mind_notes(notes)])
+def listing(kind, marks, notes, label=None):
+    """Exact ids and dates for the existing memory_read's paged list modes; no source prose. Late reviews are grouped
+    by the room of their work, the room with the oldest first (``label`` names a room), each with the review it is
+    (``late_review_marks.SURFACE_NAMES``), its work, its date and its exact reader: what a wake once held as one
+    pointer per mark is read here by choice."""
+    if kind == "late_reviews":
+        rows = [{"id": m["id"], "room": str(m.get("room_id")), "date": str(m.get("ts") or "unknown"),
+                 "task": str((m.get("review") or {}).get("task_id") or "unknown"),
+                 "review": SURFACE_NAMES.get(str((m.get("author") or {}).get("surface") or ""),
+                                             str((m.get("author") or {}).get("surface") or "review"))}
+                for m in late_reviews(marks)]
+        rows.sort(key=lambda row: (row["date"], row["id"]))
+        rooms = {}
+        for row in rows:
+            rooms.setdefault(row["room"], []).append(row)
+        lines = []
+        for room, items in sorted(rooms.items(), key=lambda item: (item[1][0]["date"], item[0])):
+            lines.append(f"room {room}" + (f" ({label(room)})" if label else "") + f": {len(items)}")
+            lines += [f"  - {row['date']}; {row['review']} of task {row['task']}; memory_read(node_id='{row['id']}')"
+                      for row in items]
+        return (f"{WAITING_CLASSES[kind]['subject']}: {len(rows)} in {len(rooms)} room{'' if len(rooms) == 1 else 's'}",
+                "\n".join(lines))
+    rows = [{"id": n["id"], "room": room, "date": str(n.get("date") or "unknown")} for room, n in mind_notes(notes)]
     rows.sort(key=lambda row: (row["date"], row["id"]))
     return (f"{WAITING_CLASSES[kind]['subject']}: {len(rows)}",
             "\n".join(f"{row['id']}; room {row['room']}; {row['date']}; memory_read(node_id='{row['id']}')" for row in rows))

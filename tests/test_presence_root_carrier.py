@@ -52,25 +52,30 @@ def test_one_carrier_is_produced_for_new_roots_and_read_back_everywhere(tmp_path
 
 
 def test_only_a_matching_host_late_answer_snapshot_attributes_new_roots():
+    """Work a late answer starts is the owner's own, related to the asking binding (#2482), never its authority."""
     from copy import deepcopy
     from ouroboros.dialogue_provenance import (
-        presence_binding_authority_metadata, presence_metadata_binding, presence_root_carrier,
+        presence_binding_authority_metadata, presence_metadata_binding, presence_metadata_relation,
+        presence_root_carrier, presence_root_relation,
     )
 
     block = {"quiz_id": "question", "state": "answered", "answered_after_terminal": True,
              "presence_contact": {"task_id": "source", "binding_id": BINDING, "source_event_id": "event"}}
     owner = {"late_answer": {"task_id": "source", "quiz_id": "question",
                             "answer_snapshot": {"task_id": "source", "quiz": block}}}
-    assert presence_metadata_binding(owner) is None
+    relation = {"presence_binding_relation": {"binding_id": BINDING}}
+    # The answering turn itself is the owner's, neither related nor narrowed.
+    assert presence_metadata_binding(owner) is None and presence_metadata_relation(owner) is None
     assert presence_binding_authority_metadata(owner) == {}, "the owner's delegates retain owner authority"
-    assert presence_root_carrier(owner) == {"presence_binding_authority": {"binding_id": BINDING}}
+    assert presence_root_carrier(owner) == {} and presence_root_relation(owner) == relation
     for path, value in [("quiz_id", "other"), ("state", "open"), ("answered_after_terminal", False)]:
         changed = deepcopy(owner)
         changed["late_answer"]["answer_snapshot"]["quiz"][path] = value
-        assert presence_root_carrier(changed) == {}
+        assert presence_root_carrier(changed) == presence_root_relation(changed) == {}
     lost = deepcopy(owner)
     lost["late_answer"]["answer_snapshot"]["quiz"]["presence_contact"]["task_id"] = "other"
-    assert presence_root_carrier(lost) == {}
+    assert presence_root_carrier(lost) == presence_root_relation(lost) == {}
+    # A legacy ceiling keeps narrowing whatever the answer relates.
     assert presence_root_carrier(owner, task_contract={"capability_ceiling": {}}) == {
         "presence_binding_authority": {"binding_id": ""}}
 
@@ -127,7 +132,7 @@ def test_a_presence_childs_promote_and_follow_up_stay_its_bindings_work_under_th
     )
 
     out = _start_task(child_ctx, "Compile the full audit", title="Full audit", project_name="Widened",
-                                workspace_root=str(tmp_path / "elsewhere"), source="api")
+                                workspace_root=str(tmp_path / "elsewhere"), source="api", destination="place")
 
     authority = {"binding_id": BINDING}
     [evt], [root] = emitted, pending

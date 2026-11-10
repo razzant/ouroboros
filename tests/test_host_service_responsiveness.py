@@ -24,6 +24,13 @@ from ouroboros.gateway.host_service import create_host_service_app
 from ouroboros.presence_runner import PresenceTurnError, PresenceTurnGate
 from tests.test_host_service_api import _seed_presence_behavior, _seed_token
 
+@pytest.fixture(autouse=True)
+def _host_lane_roots(tmp_path, monkeypatch):
+    """A Host-only process: its turns run on the disclosed degraded executor in this process (no pool generation)."""
+    from tests.conversation_carrier_support import host_lane
+
+    host_lane(monkeypatch, tmp_path)
+
 TOKEN = "presence-token"
 BUDGET = "telegram-bot:presence"
 
@@ -33,6 +40,13 @@ def _isolated_gates(monkeypatch):
     """The configured-gate cache is process-global; each test gets its own, at two active turns."""
     monkeypatch.setattr(presence_runner, "_GATES", {})
     monkeypatch.setenv("OUROBOROS_PRESENCE_MAX_ACTIVE", "2")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_presence_runner(monkeypatch):
+    """The injected-runner registry is process-global; keep each test's own out of the next."""
+    from ouroboros import presence_carrier
+    monkeypatch.setattr(presence_carrier, "_RUNNERS", {})
 
 
 def _event(source_event_id: str, conversation_id: str = "room-1") -> dict:
@@ -60,6 +74,8 @@ def _presence_app(tmp_path: pathlib.Path, runner, *, account_wide: bool = False)
                 manifest_permissions=["presence"])
     binding_id = _seed_presence_behavior(tmp_path, account_wide=account_wide)
     app = create_host_service_app(tmp_path, presence_runner=runner)
+    from ouroboros.presence_carrier import set_presence_runner
+    set_presence_runner(tmp_path, runner)  # the conversation-lane carrier's body is this test's runner
     return app, binding_id, app.state.host_service_context
 
 
@@ -97,7 +113,8 @@ async def _until(predicate, timeout: float = 15.0) -> None:
 
 
 def _turn_threads() -> list[threading.Thread]:
-    return [thread for thread in threading.enumerate() if thread.name.startswith("presence-turn-")]
+    """The disclosed degraded executors of this Host-only process: one thread per live turn body."""
+    return [thread for thread in threading.enumerate() if thread.name.startswith("inline_degraded-")]
 
 
 def test_queued_and_executing_turns_leave_the_default_executor_free(tmp_path, monkeypatch):
@@ -125,7 +142,7 @@ def test_queued_and_executing_turns_leave_the_default_executor_free(tmp_path, mo
             await asyncio.sleep(0.2)
             assert len(entered) == 2, "the gate admits two turns; two stay queued"
             assert len(ctx.presence_turns.live()) == 4
-            assert len(_turn_threads()) == 2, "a queued turn holds no thread"
+            assert len(_turn_threads()) == 4, "every live turn holds its own carrier; a queued one waits in it"
             assert await asyncio.wait_for(asyncio.to_thread(lambda: "free"), 2) == "free"
             identity = await asyncio.wait_for(host_service._api_identity(_request(app)), 5)
             assert identity.status_code == 200
@@ -156,14 +173,14 @@ def test_retries_join_turns_whose_waiters_were_cancelled_even_at_full_budget(tmp
     # A retry joins only while its turn is live, and this runner leaves no durable row for a late
     # retry to replay. The turns are released once both retries have joined, never after a fixed
     # sleep a loaded runner's preparation reads outlast (a late retry would run its event again).
-    outcomes, start_or_join = [], ctx.presence_turns.start_or_join
+    outcomes, start_or_dispatch = [], ctx.presence_turns.start_or_dispatch
 
     def recording(turn_id, **kwargs):
-        outcome = start_or_join(turn_id, **kwargs)
+        outcome = start_or_dispatch(turn_id, **kwargs)
         outcomes.append((turn_id, *outcome))
         return outcome
 
-    monkeypatch.setattr(ctx.presence_turns, "start_or_join", recording)
+    monkeypatch.setattr(ctx.presence_turns, "start_or_dispatch", recording)
 
     async def scenario():
         # One conversation: e-0 executes, e-1..e-4 queue behind it; five turns fill the budget.
@@ -205,38 +222,36 @@ def test_retries_join_turns_whose_waiters_were_cancelled_even_at_full_budget(tmp
     assert ctx.presence_turns.live() == [] and not any(ctx._inflight.values())
 
 
-def test_turn_thread_carries_the_admitting_request_context(tmp_path):
-    """A raw thread starts with an empty context; the turn must see what to_thread carried."""
-    from ouroboros.config import runtime_setting, task_settings_scope
-    from ouroboros.settings_integrity import TaskSettingsSnapshot
-
+def test_the_turn_body_runs_on_its_carrier_outside_the_requests_context(tmp_path):
+    """The body is the carrier's (here the disclosed degraded executor's thread): it re-admits from the
+    task's durable facts and never sees the admitting request's context variables."""
     probe = contextvars.ContextVar("tz3_probe", default="lost")
     seen = {}
 
     def runner(**kwargs):
-        seen.update(probe=probe.get(), setting=runtime_setting("OUROBOROS_TZ3_CONTEXT_PROBE"),
-                    thread=threading.current_thread().name)
+        seen.update(probe=probe.get(), thread=threading.current_thread().name)
         return _answer(**kwargs)
 
     app, binding_id, _ctx = _presence_app(tmp_path, runner)
 
     async def scenario():
         probe.set("carried")
-        with task_settings_scope(TaskSettingsSnapshot(settings={}, environ={"OUROBOROS_TZ3_CONTEXT_PROBE": "task"})):
-            return await _turn(app, binding_id, "e-ctx")
+        return await _turn(app, binding_id, "e-ctx")
 
     assert asyncio.run(scenario()).status_code == 200
-    assert seen["thread"].startswith("presence-turn-")
-    assert seen["probe"] == "carried" and seen["setting"] == "task"
+    assert seen["thread"].startswith("inline_degraded-")
+    assert seen["probe"] == "lost"
 
 
 def test_a_thread_that_cannot_start_returns_capacity_gate_and_identity(tmp_path, monkeypatch):
+    from supervisor import workers
+
     calls = []
     app, binding_id, ctx = _presence_app(tmp_path, lambda **kwargs: calls.append(1) or _answer(**kwargs))
     start = threading.Thread.start
 
     def refuse_turn_threads(thread):
-        if thread.name.startswith("presence-turn-"):
+        if thread.name.startswith("inline_degraded-"):
             raise RuntimeError("can't start new thread")
         return start(thread)
 
@@ -245,11 +260,38 @@ def test_a_thread_that_cannot_start_returns_capacity_gate_and_identity(tmp_path,
     assert refused.status_code == 503
     assert json.loads(refused.body)["error"] == "presence turn thread could not start"
     assert calls == [] and ctx.presence_turns.live() == [] and not any(ctx._inflight.values())
+    assert workers.RUNNING == {} and workers.WORKERS == {}, "nothing ran: no lane row and no pseudo-slot remain"
 
     monkeypatch.setattr(threading.Thread, "start", start)
     # The gate lease went back too: the same conversation admits at once.
     retried = asyncio.run(asyncio.wait_for(_turn(app, binding_id, "e-1"), 5))
     assert retried.status_code == 200 and calls == [1]
+
+
+def test_an_unarmed_server_returns_a_typed_retry_without_starting_the_host_turn(tmp_path, monkeypatch):
+    """The server's boot/whole-table-stop window is distinct from the standalone Host fixture."""
+    import os
+
+    from supervisor import conversation_lane, queue, workers
+
+    calls = []
+    app, binding_id, ctx = _presence_app(tmp_path, lambda **kwargs: calls.append(1) or _answer(**kwargs))
+    monkeypatch.setattr(queue, "INITIALIZED", True)
+    monkeypatch.setattr(queue, "OWNER_PID", os.getpid())
+    assert queue.owns_live_queue(tmp_path) and not conversation_lane.armed()
+    saved = {"pending": [{"id": "saved-work", "task": {"id": "saved-work"}}], "running": []}
+    queue.QUEUE_SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    queue.QUEUE_SNAPSHOT_PATH.write_text(json.dumps(saved), encoding="utf-8")
+    before = queue.QUEUE_SNAPSHOT_PATH.read_bytes()
+
+    for _ in range(2):  # an unchanged retry remains unstarted, with no retained in-flight reservation
+        refused = asyncio.run(_turn(app, binding_id, "boot-event"))
+        payload = json.loads(refused.body)
+        assert refused.status_code == 503
+        assert payload["code"] == "presence_turn_not_started" and payload["disposition"] == "retry"
+        assert calls == [] and ctx.presence_turns.live() == [] and not any(ctx._inflight.values())
+        assert workers.RUNNING == {} and workers.WORKERS == {}
+        assert queue.QUEUE_SNAPSHOT_PATH.read_bytes() == before
 
 
 @pytest.mark.parametrize("outcome", ["answered", "refused"])
@@ -390,7 +432,7 @@ def test_blocking_checks_run_off_the_event_loop(tmp_path, monkeypatch):
         return identity.status_code, turn.status_code
 
     assert asyncio.run(scenario()) == (200, 200)
-    assert calls == ["auth", "auth", "admit"]
+    assert calls == ["auth", "auth", "admit", "admit"], "the Host's admission, then the carrier's re-admission"
 
 
 def test_coroutine_admission_keeps_the_cross_process_gate_contract(tmp_path):

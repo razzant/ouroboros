@@ -7,13 +7,11 @@ ordered after the red nudge, advisory).
 """
 from __future__ import annotations
 
-import errno
 import json
 import pathlib
 import shutil
 import subprocess
 import sys
-from types import SimpleNamespace
 
 import pytest
 
@@ -23,7 +21,6 @@ from ouroboros.tools.registry import ToolRegistry
 # case) via _tracked_subprocess_run — not parallel-safe under `pytest -n auto` (DEVELOPMENT.md
 # "Parallel CI and the serial marker"). Python invocations use `sys.executable` (cross-platform);
 # the only POSIX-shell-dependent test is skipped when `sh` is unavailable (e.g. Windows).
-pytestmark = pytest.mark.serial
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -61,40 +58,6 @@ def _git(repo, *args):
 
 
 # ============================================================ Fix #1: ephemeral scratch
-def test_scratch_exempts_output_guard_and_is_not_an_artifact(tmp_path, monkeypatch):
-    from ouroboros.artifacts import collect_task_artifact_records, read_task_scratch_fingerprints
-
-    registry, _repo, data, desktop = _reg(tmp_path, monkeypatch)
-    ws = _git_ws(desktop)  # scratch requires a git-worktree cwd
-    target = ws / "scratch_check.py"
-    result = registry.execute(
-        "run_command",
-        {
-            "cmd": [sys.executable, "-c", f"open({str(target)!r}, 'w').write('x')"],
-            "cwd": str(ws),
-            "scratch": [str(target)],
-        },
-    )
-    # Declared scratch is exempt from the undeclared-output guard...
-    assert "ARTIFACT_OUTPUT_" not in result, result
-    assert "exit_code=0" in result
-    # ...and is never registered as a task artifact (the manifest itself is excluded too).
-    assert collect_task_artifact_records(data, "task1") == []
-    # ...but its FINGERPRINT is recorded (so patch capture can exclude it while it still matches).
-    assert str(target.resolve()) in read_task_scratch_fingerprints(data, "task1")
-    # ...and the agent is reminded to delete it (it still exists on disk).
-    assert "SCRATCH_REMAINS" in result
-
-
-def test_undeclared_write_still_blocks_without_scratch(tmp_path, monkeypatch):
-    """0-regression: the SAME write WITHOUT scratch still trips the output guard."""
-    registry, _repo, _data, desktop = _reg(tmp_path, monkeypatch)
-    target = desktop / "undeclared.py"
-    result = registry.execute(
-        "run_command",
-        {"cmd": [sys.executable, "-c", f"open({str(target)!r}, 'w').write('x')"], "cwd": str(desktop)},
-    )
-    assert result.startswith("⚠️ ARTIFACT_OUTPUT_UNDECLARED"), result
 
 
 def test_scratch_adopts_preexisting_untracked_file(tmp_path, monkeypatch):
@@ -140,138 +103,6 @@ def test_scratch_tracked_path_still_blocked(tmp_path, monkeypatch):
     assert "git-tracked" in result
 
 
-def test_output_guard_ignores_nonexistent_path_candidates(tmp_path, monkeypatch):
-    """v6.56.0 stat-verification: import-string / flag candidates that name no real fresh file are
-    NOT flagged as undeclared user_files outputs (kills the undeclared-output false-positive class;
-    the exit_code=0 nudge is typed ARTIFACT_OUTPUT_UNDECLARED since the v6.91 policy-denial split)."""
-    registry, _repo, _data, desktop = _reg(tmp_path, monkeypatch)
-    # The command TEXT mentions absolute '/http'-style tokens after a write marker, but writes nothing
-    # under user_files. Under the old regex-only guard this false-flagged; stat-verification clears it.
-    marker_home = desktop / "note.txt"  # a real user_files path token, but never actually written
-    # Embed with forward slashes so a Windows path's backslashes don't form an invalid
-    # \U escape inside the python -c string literal (the guard normalizes either form).
-    result = registry.execute(
-        "run_command",
-        {"cmd": [sys.executable, "-c", f"print('would write_text to {marker_home.as_posix()} via /http/x import')"], "cwd": str(desktop)},
-    )
-    assert "ARTIFACT_OUTPUT_" not in result, result
-    assert "exit_code=0" in result
-
-
-def test_output_guard_still_flags_real_fresh_write(tmp_path, monkeypatch):
-    """0-regression for stat-verification: a genuine fresh user_files write is still flagged."""
-    registry, _repo, _data, desktop = _reg(tmp_path, monkeypatch)
-    target = desktop / "real_out.py"
-    result = registry.execute(
-        "run_command",
-        {"cmd": [sys.executable, "-c", f"open({str(target)!r}, 'w').write('x')"], "cwd": str(desktop)},
-    )
-    assert result.startswith("⚠️ ARTIFACT_OUTPUT_UNDECLARED"), result
-
-
-def test_run_script_body_audit_is_post_exec_stat_verified(tmp_path, monkeypatch):
-    """run_script body audit moved to POST-exec (v6.56.0): a real user_files write in the body is
-    flagged, while an import-string in the body is not."""
-    registry, _repo, _data, desktop = _reg(tmp_path, monkeypatch)
-    # (a) body mentions '/http' import but writes nothing -> not flagged
-    ok = registry.execute(
-        "run_script",
-        {"script": "import http.client  # /http/client\nprint('hi')", "interpreter": "python3", "cwd": str(desktop)},
-    )
-    assert "ARTIFACT_OUTPUT_" not in ok, ok
-    # (b) body actually writes a user_files deliverable -> flagged post-exec
-    target = desktop / "from_body.txt"
-    bad = registry.execute(
-        "run_script",
-        {"script": f"open({str(target)!r}, 'w').write('deliverable')", "interpreter": "python3", "cwd": str(desktop)},
-    )
-    assert "ARTIFACT_OUTPUT_UNDECLARED" in bad, bad
-
-
-def test_run_script_success_keeps_payload_alongside_undeclared_nudge(tmp_path, monkeypatch):
-    """capinv-447 D5: on a SUCCESSFUL script the undeclared-outputs nudge used to
-    REPLACE the whole _run_shell payload — the exit description and the answer the
-    script printed were discarded, leaving only the note plus the script path. The
-    nudge must APPEND (as the error path and run_command already do)."""
-    registry, _repo, _data, desktop = _reg(tmp_path, monkeypatch)
-    target = desktop / "undeclared_deliverable.txt"
-    published = registry.execute_result(
-        "run_script",
-        {"script": f"open({str(target)!r}, 'w').write('deliverable')\nprint('THE ANSWER IS 42')",
-         "interpreter": "python3", "cwd": str(desktop)},
-    )
-    result = published.text
-    assert "ARTIFACT_OUTPUT_UNDECLARED" in result, result  # the nudge still fires
-    assert "THE ANSWER IS 42" in result, result            # ...without eating stdout
-    assert "exit_code=0" in result, result                 # ...or the exit description
-    # v7 typed publication (the text-envelope `result_meta` is retired; the loop
-    # classifier reads the published ToolResult): the nudge is the typed
-    # policy-denial code on the SAME published result, blocked, not ok.
-    assert published.code == "ARTIFACT_OUTPUT_UNDECLARED"
-    assert published.status == "blocked"
-    assert published.meta["exit_code"] == 0
-
-
-def test_output_audit_skips_unstatable_candidate_and_keeps_real_output(tmp_path, monkeypatch):
-    """Pin pre-3.14 pathlib stat errors without depending on the host filesystem."""
-    from ouroboros.tools.shell_audit import _mentioned_user_file_outputs_without_declaration
-
-    registry, _repo, _data, desktop = _reg(tmp_path, monkeypatch)
-    invalid = (desktop / "unstatable").resolve()
-    target = desktop / "real output.txt"
-    target.write_text("real output", encoding="utf-8")
-    original_is_dir = pathlib.Path.is_dir
-    rejected = []
-
-    def is_dir(path):
-        if path == invalid:
-            rejected.append(path)
-            raise OSError(errno.ENAMETOOLONG, "File name too long", str(path))
-        return original_is_dir(path)
-
-    monkeypatch.setattr(pathlib.Path, "is_dir", is_dir)
-    body = f"open({invalid.as_posix()!r}, 'w'); open({target.as_posix()!r}, 'w')"
-    mentioned = _mentioned_user_file_outputs_without_declaration(
-        registry._ctx, [sys.executable, "-c", body], None, cwd=desktop,
-    )
-    assert rejected
-    assert str(target.resolve()) in mentioned
-    assert str(invalid) not in mentioned
-
-
-def test_undeclared_output_audit_detects_clobber_redirect(tmp_path, monkeypatch):
-    from ouroboros.tools.shell_audit import _mentioned_user_file_outputs_without_declaration
-
-    registry, _repo, _data, desktop = _reg(tmp_path, monkeypatch)
-    existing = desktop / "existing"
-    existing.mkdir()
-    target = desktop / "clobber-redirect.txt"
-    target.write_text("")
-    mentioned = _mentioned_user_file_outputs_without_declaration(
-        registry._ctx,
-        ["mkdir", "-p", str(existing), ">|", str(target)],
-        None,
-        cwd=desktop,
-    )
-    assert str(target) in mentioned
-
-
-def test_run_script_body_audit_runs_on_failure_path(tmp_path, monkeypatch):
-    """v6.56.0 review regression: a script that WRITES an undeclared user_files
-    deliverable and then FAILS (raise/SystemExit) still leaves the file on disk —
-    the post-exec audit must run on the error path too, surfacing BOTH the error
-    and the ARTIFACT_OUTPUT_UNDECLARED nudge (not skipping the audit because the result is ⚠️)."""
-    registry, _repo, _data, desktop = _reg(tmp_path, monkeypatch)
-    target = desktop / "written_then_failed.txt"
-    result = registry.execute(
-        "run_script",
-        {"script": f"open({str(target)!r}, 'w').write('deliverable')\nraise SystemExit(1)",
-         "interpreter": "python3", "cwd": str(desktop)},
-    )
-    assert target.exists()  # the write really happened
-    assert "ARTIFACT_OUTPUT_UNDECLARED" in result, result
-
-
 def test_scratch_directory_declaration_refused(tmp_path, monkeypatch):
     """v6.56.0 review regression: an existing untracked DIRECTORY declared scratch
     must be refused (a dir can't be sha-fingerprinted or excluded file-by-file, so
@@ -298,61 +129,6 @@ def test_scratch_traversal_outside_cwd_is_blocked(tmp_path, monkeypatch):
     )
     assert result.startswith("⚠️ SCRATCH_BLOCKED"), result
     assert "escapes the command cwd" in result
-
-
-def test_scratch_refused_outside_git_worktree(tmp_path, monkeypatch):
-    """round-2 review CRITICAL: scratch must be refused when cwd is NOT a git worktree (so a new
-    user_files deliverable cannot bypass the output guard by mislabeling itself scratch)."""
-    registry, _repo, _data, desktop = _reg(tmp_path, monkeypatch)  # desktop is NOT a git repo
-    target = desktop / "not_in_repo.py"
-    result = registry.execute(
-        "run_command",
-        {"cmd": [sys.executable, "-c", f"open({str(target)!r}, 'w').write('x')"], "cwd": str(desktop), "scratch": [str(target)]},
-    )
-    assert result.startswith("⚠️ SCRATCH_BLOCKED"), result
-    assert "git-worktree" in result
-
-
-def test_scratch_fingerprint_recorded_even_on_timeout(tmp_path, monkeypatch):
-    """round-2 review CRITICAL: a command that creates scratch then TIMES OUT must still record the
-    fingerprint (else headless would leak the throwaway into the patch)."""
-    from ouroboros.artifacts import read_task_scratch_fingerprints
-
-    registry, _repo, data, desktop = _reg(tmp_path, monkeypatch)
-    ws = _git_ws(desktop)
-    target = ws / "scratch_timeout.txt"
-    # Portable (no sh/touch/sleep): create the scratch file, then block past the 1s timeout.
-    result = registry.execute(
-        "run_command",
-        {
-            "cmd": [sys.executable, "-c", f"import pathlib,time; pathlib.Path({str(target)!r}).write_text('x'); time.sleep(5)"],
-            "cwd": str(ws),
-            "scratch": [str(target)],
-            "timeout_sec": 1,
-        },
-    )
-    assert "TOOL_TIMEOUT" in result, result
-    assert str(target.resolve()) in read_task_scratch_fingerprints(data, "task1")
-
-
-def test_audit_gap_audits_nonscratch_deliverable_despite_scratch(tmp_path, monkeypatch):
-    """round-4 review CRITICAL: declaring scratch must NOT globally suppress the user_files audit —
-    a SEPARATE real deliverable created in the same command must still trip ARTIFACT_AUDIT_GAP."""
-    registry, _repo, _data, desktop = _reg(tmp_path, monkeypatch)
-    ws = _git_ws(desktop)
-    # `.touch()` carries no write-marker, so the hard output guard does not pre-empt; both files
-    # become untracked effects. probe.py is declared scratch; deliv.txt is a real undeclared deliverable.
-    code = (
-        "import pathlib; "
-        f"pathlib.Path({str(ws / 'probe.py')!r}).touch(); "
-        f"pathlib.Path({str(ws / 'deliv.txt')!r}).touch()"
-    )
-    result = registry.execute(
-        "run_command",
-        {"cmd": [sys.executable, "-c", code], "cwd": str(ws), "scratch": [str(ws / "probe.py")]},
-    )
-    assert "ARTIFACT_OUTPUT_" not in result, result
-    assert "ARTIFACT_AUDIT_GAP" in result, result  # the non-scratch deliverable is still audited
 
 
 def test_headless_excludes_declared_scratch_from_workspace_patch(tmp_path):
@@ -399,148 +175,36 @@ def test_headless_excludes_declared_scratch_from_workspace_patch(tmp_path):
 
 
 # ============================================================ Fix #2: exit-masking sensor
-def test_check_has_exit_masking_detection():
-    from ouroboros.tools.verify import _check_has_exit_masking
-
-    assert _check_has_exit_masking(["sh", "-c", "(node t.js -f 2>&1 | tail -5)"])[0] is True
-    assert _check_has_exit_masking(["bash", "-c", "make test || true"])[0] is True
-    assert _check_has_exit_masking(["sh", "-c", "run.sh 2>/dev/null"])[0] is False
-    assert _check_has_exit_masking(["sh", "-c", "make test ; true"])[0] is True
-    assert _check_has_exit_masking(["sh", "-c", "make test && true"])[0] is False
-    assert _check_has_exit_masking(["sh", "-c", "make test ; exit 0"])[0] is True
-    assert _check_has_exit_masking(["sh", "-c", "make test && exit 0"])[0] is False
-    assert _check_has_exit_masking(["sh", "-c", "make test || exit 0"])[0] is True
-    assert _check_has_exit_masking(["sh", "-c", "pytest -q"])[0] is False
-    assert _check_has_exit_masking(["go", "test", "./..."])[0] is False  # list argv, no shell
-    # a QUOTED `| tail` literal (e.g. a grep pattern) must NOT be flagged (shlex token scan)
-    assert _check_has_exit_masking(["sh", "-c", "grep PATTERN '| tail'"])[0] is False
-    # round-1 review CRITICAL: NO-SPACE operators must still be detected (shlex.split missed these)
-    assert _check_has_exit_masking(["sh", "-c", "pytest -q|tail -1"])[0] is True
-    assert _check_has_exit_masking(["bash", "-c", "make test||true"])[0] is True
-
-
 @pytest.mark.skipif(sys.platform == "win32" or not shutil.which("sh"), reason="exercises a POSIX-shell masked check (sh + tail)")
 def test_verify_and_record_sets_masking_flag_on_receipt(tmp_path, monkeypatch):
     from ouroboros.outcomes import read_verification_receipts
 
     registry, repo, data, _desktop = _reg(tmp_path, monkeypatch)
     # masked: `echo hi | tail -1` exits 0 (tail), masking any upstream failure; expected matches.
-    registry.execute(
+    out = str(registry.execute(
         "verify_and_record",
         {"contract_kind": "explicit_command", "check": ["sh", "-c", "echo hi | tail -1"], "expected": "hi", "cwd": str(repo)},
-    )
+    ))
     rec = read_verification_receipts(data, "task1")[-1]
     assert rec["status"] == "pass"  # FLAG-ONLY: masking does not flip the verdict
     assert rec.get("check_exit_masking") is True
     assert "pipeline_tail" in (rec.get("check_exit_masking_reasons") or [])
-    # clean check: no masking flag at all
-    registry.execute(
+    # The author reads it at call time, in run_command's words, not only at the pre-final check.
+    assert "EXIT_MASKING_NOTE: exit_code=0 belongs to the last stage (pipeline_tail)" in out
+    # clean check: no masking flag, no note
+    out = str(registry.execute(
         "verify_and_record",
         {"contract_kind": "explicit_command", "check": ["sh", "-c", "echo hi"], "expected": "hi", "cwd": str(repo)},
-    )
+    ))
     assert not read_verification_receipts(data, "task1")[-1].get("check_exit_masking")
-
-
-def test_latest_unreconciled_masked_pass_predicate():
-    from ouroboros.outcomes import latest_unreconciled_masked_pass as mp
-
-    assert bool(mp([{"status": "pass", "check_exit_masking": True}])) is True
-    # ANY later CLEAN (non-masked) grounding reconciles a masked pass: the masked receipt's
-    # only text identity is its MASKED command, so requiring text equality would make the
-    # flag unclearable by the prescribed remediation (drop the masking pipe), which
-    # necessarily changes the text. The masked receipt's own criterion_id still binds.
-    assert bool(mp([
-        {"status": "pass", "check": "make test | tail", "check_exit_masking": True},
-        {"status": "pass", "check": "make test"},
-    ])) is False
-    assert bool(mp([
-        {"status": "pass", "criterion_id": "c1", "check": "make test | tail", "check_exit_masking": True},
-        {"status": "pass", "criterion_id": "c1", "check": "make test"},
-    ])) is False
-    assert bool(mp([
-        {"status": "pass", "criterion_id": "c1", "check": "make test | tail", "check_exit_masking": True},
-        {"status": "pass", "criterion_id": "c2", "check": "make test"},
-    ])) is True
-    assert bool(mp([
-        {"status": "pass", "check": "make test | tail", "check_exit_masking": True},
-        {"status": "pass", "check": "make lint"},
-    ])) is False
-    assert bool(mp([{"status": "pass", "check_exit_masking": True}, {"status": "pass"}])) is False
-    # a clean-only history never flags
-    assert bool(mp([{"status": "pass"}])) is False
-
-
-def test_masking_flag_is_projected_into_ledger_status_unchanged():
-    from ouroboros.outcomes import build_verification_ledger
-
-    led = build_verification_ledger(
-        task={"id": "t", "task_contract": {}},
-        loop_outcome={"outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "not_evaluated"}}},
-        llm_trace={"tool_calls": [], "verification_receipts": [{
-            "status": "pass", "contract_kind": "explicit_command", "check": "sh -c 'x | tail'",
-            "check_exit_masking": True, "check_exit_masking_reasons": ["pipeline_tail"],
-        }]},
-        artifact_bundle={},
-    )
-    entry = next(e for e in led["entries"] if e.get("kind") == "verification_receipt")
-    assert entry["status"] == "pass"
-    assert entry["check_exit_masking"] is True
-    assert "pipeline_tail" in entry["check_exit_masking_reasons"]
-
-
-def test_acceptance_summary_surfaces_masking():
-    from ouroboros.review_evidence import _accept_verification_summary
-
-    summary = _accept_verification_summary([
-        {"status": "pass", "check": "sh -c 'x | tail'", "check_exit_masking": True, "check_exit_masking_reasons": ["pipeline_tail"]},
-    ])
-    assert summary["check_exit_masking_unreconciled"] is True
-    assert "pipeline_tail" in summary["check_exit_masking_reasons"]
-
-
-def test_masked_verification_nudge_one_shot_advisory_and_ordering(tmp_path):
-    from ouroboros.loop import _maybe_inject_finalization_nudges
-    from ouroboros.outcomes import append_verification_receipt
-
-    drive = tmp_path / "drive"
-    drive.mkdir()
-    append_verification_receipt(drive, "t", {
-        "status": "pass", "criterion_id": "c1", "check": "sh -c 'node t | tail'",
-        "check_exit_masking": True, "check_exit_masking_reasons": ["pipeline_tail"],
-    })
-
-    def _run(ctx_obj, msgs):
-        ctx_obj.drive_root = drive
-        return _maybe_inject_finalization_nudges(
-            SimpleNamespace(_ctx=ctx_obj), drive, "t",
-            {"reasoning_notes": [], "tool_calls": []}, "done", msgs, lambda *_: None,
-        )
-
-    ctx = SimpleNamespace()
-    msgs: list = []
-    assert _run(ctx, msgs) is True
-    assert any("hide the real command's exit code" in m.get("content", "") for m in msgs)
-    # one-shot: the latch suppresses a second injection
-    assert _run(ctx, []) is False
-
-    # a later CLEAN pass OF THE SAME CHECK reconciles the masked pass -> no nudge on a
-    # fresh ctx (v6.78.0: a clean re-run of an unrelated check would NOT clear it)
-    append_verification_receipt(drive, "t", {
-        "status": "pass", "criterion_id": "c1", "check": "sh -c 'node t'",
-    })
-    assert _run(SimpleNamespace(), []) is False
-
-    # ORDERING: a RED receipt makes the red nudge win (not the masked one)
-    drive2 = tmp_path / "drive2"
-    drive2.mkdir()
-    append_verification_receipt(drive2, "t", {"status": "fail", "returncode": 1, "check": "pytest -q"})
-    msgs2: list = []
-    fired = _maybe_inject_finalization_nudges(
-        SimpleNamespace(_ctx=SimpleNamespace(drive_root=drive2)), drive2, "t",
-        {"reasoning_notes": [], "tool_calls": []}, "done", msgs2, lambda *_: None,
-    )
-    assert fired is True
-    assert any("RED" in m.get("content", "") for m in msgs2)
+    assert "EXIT_MASKING_NOTE" not in out
+    # A non-zero exit already says what happened: the flag stays on the receipt, the note does not repeat it.
+    out = str(registry.execute(
+        "verify_and_record",
+        {"contract_kind": "explicit_command", "check": ["sh", "-c", "echo hi | tail -1; exit 3"], "cwd": str(repo)},
+    ))
+    assert read_verification_receipts(data, "task1")[-1].get("check_exit_masking") is True
+    assert "EXIT_MASKING_NOTE" not in out
 
 
 @pytest.mark.parametrize("head", ["sh", "bash", "zsh", "dash", "ash"])

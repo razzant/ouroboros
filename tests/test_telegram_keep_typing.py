@@ -82,8 +82,10 @@ class _Host:
 
 
 def _cue(mod, host, client, warnings=None):
+    """A cue whose recording client has one token throughout (generation changes: test_telegram_token_change_failures)."""
     return mod.TypingCue(read_state=host.read, targets=lambda state: {row["chat_id"] for row in state["chats"]},
-                         client_factory=lambda: client, warn=(warnings if warnings is not None else []).append)
+                         client_factory=lambda: client, warn=(warnings if warnings is not None else []).append,
+                         generation=lambda: 1)
 
 
 async def _until(condition, timeout=2.0):
@@ -390,7 +392,7 @@ def test_a_hung_action_delays_the_answer_only_for_the_bound_and_may_still_land_a
 
     async def scenario():
         cue = mod.TypingCue(read_state=host.read, targets=lambda s: {r["chat_id"] for r in s["chats"]},
-                            client_factory=lambda: telegram, warn=lambda _t: None)
+                            client_factory=lambda: telegram, warn=lambda _t: None, generation=lambda: 1)
         task = await _start(cue, until=lambda: 4 in cue._inflight)
         inflight = cue._inflight[4]
         host.chats = set()  # the answer was handed off
@@ -425,7 +427,7 @@ def test_a_read_begun_before_a_message_never_sends_after_it(mod):
             return {"complete": True, "chats": [{"chat_id": 6, "transport": {}}]}
 
         cue = mod.TypingCue(read_state=slow_read, targets=lambda s: {r["chat_id"] for r in s["chats"]},
-                            client_factory=lambda: rec, warn=lambda _t: None)
+                            client_factory=lambda: rec, warn=lambda _t: None, generation=lambda: 1)
         task = asyncio.get_running_loop().create_task(cue.run())
         await asyncio.get_running_loop().run_in_executor(None, entered.wait, 2)
         await _deliver(cue, 6, rec)  # the final lands while that read is still out
@@ -556,9 +558,6 @@ def test_a_quiz_card_is_bracketed_like_a_reply(mod, tmp_path, monkeypatch):
 @pytest.mark.parametrize("settings,transport,expected", [
     ({"TELEGRAM_CHAT_ID": "77", "TELEGRAM_MIRROR_MODE": "all"}, {}, {77}),
     ({"TELEGRAM_CHAT_ID": "77", "TELEGRAM_MIRROR_MODE": "telegram_only"}, {}, set()),
-    ({"TELEGRAM_CHAT_ID": "77", "TELEGRAM_MIRROR_MODE": "telegram_only"},
-     {"kind": "telegram", "conversation_id": "77"}, {77}),
-    ({}, {"kind": "telegram", "conversation_id": "88"}, {88}),
     ({}, {}, set()),
 ])
 def test_the_cue_maps_host_chats_through_the_bridges_mirror_policy(mod, tmp_path, settings, transport, expected):

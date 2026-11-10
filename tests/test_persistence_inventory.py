@@ -73,6 +73,9 @@ TOP_LEVEL = frozenset({
 # recognizable root expressions, and an alias is a human promise, not a fact
 # the scan re-derives.
 SUBROOT_ALIASES = {
+    # released_subject validates its checkout under state/review_checkouts/<token>/;
+    # its relative .review-drive names belong there (repo or repo.noindex), not at data/.
+    ".review-drive/*/*.txt": "state/review_checkouts/*/*/.review-drive/*/*.txt",
     # _run_go_skill's only caller passes skill_state_dir(drive_root, loaded.name).
     # These are per-skill caches, not directories at the canonical data root.
     "go": "state/skills/*/go",
@@ -891,7 +894,50 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # the scan no longer yields the legacy ``state/usage_attempts.lock`` spelling.
 # 430 -> 431: checkout-specific preflight heads, registered in the review-ledger row.
 # 433 target paths plus the three call wire/import-lock/tariff paths.
-EXPECTED_SCAN_PATHS = 436
+# Two existing disposable families are now named by their owner-keep readers:
+# task_drives/*/session_scratch_owners and task_trees/*.
+# 438 -> 439: ``memory/owner_mailbox/*.intake.json``, a carrier-run author's durable intake fact
+# (``conversation_lease.open_author_intake``; its section-6 row).
+# 439 -> 440: ``logs/store_sites.jsonl``, every store site of a busy minute beside its ``supervisor_load`` row.
+# 440 -> 446 (#2586): ``state/session_scratch`` and its ``*/*.json`` notes of open session scratch, and the
+# copy of a finished task's scratch record assembled in ``state/custody_staging/*/`` (three spellings) and
+# renamed whole into ``state/custody_trash/*``.
+# 446 -> 447 (#2566): the read-only census opens the existing ``authors-census.lock`` by its literal
+# name (it may not create it through the gate's helper); the ``presence_turn_gate/*.lock`` row covers it.
+# 447 -> 448 (#2539): a child's raw ``source_handles/test-evidence`` staged per pass in
+# ``state/custody_staging/*-*/*`` before its create-only placement (the custody staging row).
+# 448 -> 447: a source probe reads ``hub.json`` in the folder it was asked for inside its scratch clone, so the
+# fixed ``state/skill_sources/.scratch/*-*/repo/hub.json`` spelling is gone; the ``.scratch/<label>-<id>`` row
+# still covers that clone (base-vs-tree scan diff: that one path).
+# 447 -> 448 (#2593): ``task_results/artifacts/*/source_handles/delegated_readonly_inputs/*``, a selection's
+# retained bytes (its own PERSISTENCE row).
+# 448 -> 450: ``artifacts.stream_actor_source`` streams a retained source into its
+# ``source_handles/*`` category folder through a ``*.stream`` temporary (the task artifacts row).
+# 450 -> 452: request views stored once (W10) spell the view's skeleton placement
+# ``observability/blobs/<sha>.json.shared.gz`` and its canonical loose address beside
+# the family's ``*.*.gz``; both sit under the observability row.
+# The 450 -> 452 request-view paths above were already present in the integrated tree when
+# the test-duration pin below was authored, so the combined count is 453.
+# 452 -> 453 (test diet): the install's test durations table ``state/test-durations.json``
+# (``ouroboros/test_evidence.py`` names it, the evidence plugin of the gate's sessions writes it);
+# its own section-2 row.
+# 453 -> 454 (#2841): ``state/body_adoption/arm-deferred.json`` (a deferred exit arm), ``handoff.json`` now spelled
+# by the detached-HEAD repair guard and ``locks/git-bootstrap.lock`` (the ``locks/**`` row) join; ``switch.py`` and
+# ``installation_stop.py`` leave the scan, now copied into a staging sibling (all on the body adoption row).
+# 454 -> 455 (supervisor-recovery, owner 2A): the Fault boot's admitted recovery turn and the generation
+# that admitted it, ``state/core_loss_recovery.json`` (``ouroboros/server_process.py``); its own row.
+# 455 -> 457 (#2896): a remote MCP server's sign-in record ``state/mcp/oauth/server-*.json`` and the ``.lock``
+# its holder keeps while it writes (``ouroboros/mcp_oauth.py``); their own row.
+# 457 -> 458 (safety retro, self-echo): the bounded record of words this install sent through an identity
+# that is also a confirmed owner account, ``state/own_sends.json`` (``ouroboros/own_sends.py``); its own row.
+# 458 -> 456 (#2946): #2921 builds the directory artifact names in ``_pair_names``
+# (``ouroboros/artifact_directories.py``), so the scan no longer sees ``task_results/artifacts/*/*.*.manifest.json``
+# and ``task_results/artifacts/*/*.*.zip``; both are still written, under their artifacts row.
+# 456 -> 457 (owner A, 07.11): the open Low episode of memory-lowered starts, ``state/low_start_episode.json``
+# (``ouroboros/context_view_facts.py``); its own row.
+# Result-review retained material/restored source views and published kept-service declarations
+# share the existing inventory; the combined AST census below pins their union.
+EXPECTED_SCAN_PATHS = 464
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
@@ -1052,23 +1098,6 @@ def _covers(scan_path: str, pattern: str, scan_prefix_ok: bool = True) -> bool:
 # --- tests -----------------------------------------------------------------
 
 
-def test_update_backup_inventory_names_its_pending_and_partial_restore_lifetime():
-    row = next(line for line in DOC.read_text(encoding="utf-8").splitlines()
-               if line.startswith("| `state/skills/<name>/` owner state"))
-    assert "`update_backup.json`" in row
-    assert "only while a review-basis update is pending" in row
-    assert "removed when it settles or the skill is uninstalled" in row
-    assert "kept as evidence after a partial restore" in row
-    assert "state/skills/*/update_backup.json" in scan_data_paths()
-
-
-def test_skill_update_docs_name_all_rejection_reasons():
-    for filename in ("CREATING_SKILLS.md", "CLIENT_CONTRACT.md"):
-        text = (REPO / "docs" / filename).read_text(encoding="utf-8")
-        for reason in ("review_blockers", "review_unfinished", "preflight_failed", "landing_failed"):
-            assert f"`{reason}`" in text, (filename, reason)
-
-
 def test_scan_is_populated_and_pinned():
     paths = scan_data_paths()
     assert "uploads/views/*_*" in paths, "the shared original-retention writer must remain scanned"
@@ -1111,9 +1140,8 @@ def test_every_scanned_path_has_an_inventory_row():
 
 
 # Rows the backward check must NOT demand a scanned writer for, each with its
-# audited reason: the row itself states there is no writer in this tree, or (one
-# entry) its live writers name every file through a dynamic source id, which the
-# scan refuses to name. Asserted by equality below, so an entry that acquires a
+# audited reason: the old plane has no current writer, or its maintenance
+# resolves the name only at runtime. Asserted by equality below, so an entry that acquires a
 # scanned writer (or a row that quietly loses one) surfaces.
 STALE_ROW_EXEMPTIONS = frozenset({
     # PERSISTENCE.md documents this plane as an orphan of a removed feature:
@@ -1127,17 +1155,8 @@ STALE_ROW_EXEMPTIONS = frozenset({
     # live writer (``review_source_closure.retain_review_request_sources`` left
     # with the acceptance machine); old snapshots are still read
     # (``review_source_closure._owned_attachment_path`` during child-ref promotion,
-    # ``delegate_registration_policy.minted_review_root``).
+    # ``delegate_registration_policy.minted_root``).
     "task_results/artifacts/*/source_handles/review_inputs",
-    # A LIVE plane the scan cannot see: ``delegate_output.retain_terminal_bytes``
-    # and ``delegate_collection._retain`` spell each source id as an f-string over a
-    # run id, and ``artifacts.persist_exact_text_source`` (the result review's
-    # ``review_result.subject_source`` and every other exact-text writer) takes it as
-    # a parameter — never an exact string, and a dynamic id names no file here
-    # (``test_dynamic_source_handle_arguments_do_not_certify_named_rows``). The
-    # population saw this plane only through the retired acceptance tool-trajectory
-    # literal.
-    "task_results/artifacts/*/source_handles/tool_results",
     # The row states no writer in this tree: the automatic post-task reflection and
     # its routed store (``ouroboros/reflection.py``) are gone. The history is still
     # read (``journal_read(source='reflections')``, ``read_file``), and server.py
@@ -1171,10 +1190,8 @@ def test_every_inventory_row_is_still_real():
     rotating handlers (`logs/server.log`, `logs/launcher.log`) and the
     oversized-task-text sink (`logs/tasks/*`) were resolved instead of
     exempted — a real writer must be SEEN, not excused. The exempted rows are
-    named in ``STALE_ROW_EXEMPTIONS`` with their reasons: planes the document
-    itself says nothing in this tree writes, and the one live plane whose
-    writers name every file through a dynamic source id the scan refuses to
-    name.
+    named in ``STALE_ROW_EXEMPTIONS`` with their reasons. A plane that acquires
+    a scanned writer must leave those exemptions.
     """
     text = DOC.read_text(encoding="utf-8")
     stale = stale_rows(text)

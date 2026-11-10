@@ -117,14 +117,13 @@ def test_smaller_route_addresses_memory_only_when_the_compact_request_exceeds_it
 
 def test_start_uses_one_floor_walk_and_calibrates_before_book_choice(tmp_path, monkeypatch):
     _, build = _built(tmp_path, monkeypatch, books=600_000, ratio=1)
-    walk = mf.fit_memory_view
-    calls = []
+    render, walks = mf.render_view_for_mode, []
     def measured(*args, **kwargs):
-        calls.append(1)
-        return walk(*args, **kwargs)
-    monkeypatch.setattr(mf, "fit_memory_view", measured)
+        walks.append(bool(kwargs.get("shortest") or kwargs.get("level")))  # True: a host step's price, never a chosen view
+        return render(*args, **kwargs)
+    monkeypatch.setattr(mf, "render_view_for_mode", measured)
     assert build(330_000).initial_mode == "max"
-    assert len(calls) == 1
+    assert walks == [False]  # a start whose room holds its request prices nothing and walks once
     monkeypatch.setattr("ouroboros.context_fit._route_calibration_ratio", lambda *_a, **_kw: 4 / 2.7)
     assert build(330_000).initial_mode == "low"
-    assert len(calls) == 2
+    assert walks.count(False) == 2  # calibrated before the book choice: Low's one walk, never a Max walk first

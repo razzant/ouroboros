@@ -252,6 +252,13 @@ def model_account_options(model: str, *, role: str = "", settings: Any = None,
     return options
 
 
+def evidence_model_route(evidence: Any, model: str) -> Dict[str, str]:
+    """The receipt-shaped route a Claudexor plan carries: the evidence's account and the native model."""
+    return {"source": str(getattr(evidence, "source_id", "") or ""), "model": str(model).partition("=")[2],
+            "credentialProfileId": str(getattr(evidence, "credential_profile_id", "") or ""),
+            "accountFingerprint": str(getattr(evidence, "account_fingerprint", "") or "")}
+
+
 # --- Persistence ---------------------------------------------------------------
 
 def canonical_evidence_root() -> pathlib.Path:
@@ -325,14 +332,22 @@ def _store_evidence(drive_root: Any, kind: str, fp: str, value: Dict[str, Any]) 
     """One ``_store_transaction`` writing one evidence entry of namespace ``kind``.
 
     It re-reads the CURRENT file inside the transaction, so no writer in any process saves a
-    stale snapshot over another's record; the network read runs OUTSIDE it. Returns whether
-    the entry was saved and never raises: a write that fails or finds the store busy leaves
-    the previous file as it was, including an older record of this key."""
+    stale snapshot over another's record; the network read runs OUTSIDE it. An entry the store
+    already holds as it is is not written again. Returns whether the entry is stored and never
+    raises: a write that fails or finds the store busy leaves the previous file as it was,
+    including an older record of this key. The measured window counts a write (``evidence_writes``)."""
+    from ouroboros.context_timing import counted
+
+    if (_read(drive_root).get(kind) or {}).get(fp) == value:
+        return True
     try:
         with _store_transaction(drive_root):
             data = _load(drive_root)
+            if data.get(kind, {}).get(fp) == value:
+                return True
             _drop_expired_probes(data)
             data.setdefault(kind, {})[fp] = value
+            counted("evidence_writes", key=(kind, fp))
             return _save(drive_root, data)
     except Exception:
         log.debug("capability evidence store failed (%s)", kind, exc_info=True)
@@ -608,7 +623,10 @@ def resolve_main_token_density(
 
     View kinds are exact: unclassified legacy rows never calibrate a classified
     focus, own wake or owner turn. When sizing a candidate, compare raw input with raw input (``prompt_chars / 4``),
-    within a factor of two. A small helper cannot calibrate a large conversation.
+    within a factor of two. A small helper cannot calibrate a large conversation. A Claudexor model's accounts share
+    one engine, serializer and tokenizer, and a witness is written under the account that served while a start asks
+    under the one advertised: without an exact-route witness the newest comparable one of the same model bucket,
+    view and basis serves (``fresh_model_usage``), a density estimate only, never a window or an account's anchor.
     """
     try:
         store = _read(drive_root).get("token_density", {}) or {}
@@ -618,15 +636,19 @@ def resolve_main_token_density(
             return str(item[0].get("view_kind") or "") == view_kind and (estimate_tokens is None
                 or estimate_tokens / 2 <= int(item[0]["prompt_chars"]) / 4 <= estimate_tokens * 2)
 
+        def newest(items):
+            return max(enumerate(items), key=lambda item: (*_density_recency_key(item[1][0]), item[0]))[1][1]
+
         route_pairs = [
             item for item in _fresh_density_pairs(store, basis=MAIN_DENSITY_BASIS)
             if route and str(item[0].get("route_fp") or "") == route and comparable(item)
         ]
         if route_pairs:
-            return max(
-                enumerate(route_pairs),
-                key=lambda item: (*_density_recency_key(item[1][0]), item[0]),
-            )[1][1], "fresh_route_usage"
+            return newest(route_pairs), "fresh_route_usage"
+        model_pairs = [item for item in _fresh_density_pairs(store, _normalized_density_model(model_id), basis=MAIN_DENSITY_BASIS)
+                       if str(model_id).startswith("claudexor::") and item[0].get("route_fp") and comparable(item)]
+        if model_pairs:
+            return newest(model_pairs), "fresh_model_usage"
     except Exception:
         pass
     # Empirical tokenizer classes (audit D8), never a per-model window table.
@@ -788,12 +810,14 @@ def _claudexor_metadata_evidence(model: str, base_url: str, headers: Any,
     an account fingerprint cannot reuse a prior account's cached capacity. The same
     read's output maximum is returned beside it and stored unless ``record`` is off.
     """
+    from ouroboros.context_timing import counted
     from ouroboros.llm import LLMClient
     from ouroboros.provider_models import parse_claudexor_model
 
     source, native_model = parse_claudexor_model(model)
     options = dict(options or {})
     requested_profile = str(options.get("credential_profile_id") or "")
+    counted("catalog_calls", key=(source, requested_profile, native_model))
     catalog = LLMClient.claudexor_model_catalog(source, requested_profile or None,
                                               requested_model=native_model)
     profile = str(catalog.get("credentialProfileId") or "")
@@ -1056,15 +1080,43 @@ def with_role_window(evidence: CapabilityEvidence, window: int) -> CapabilityEvi
                    source=SOURCE_USER_SETTING, stale=False, ts="", detail="role Window set by owner") if window else evidence
 
 
+def _pool_bound(drive_root: Any, evidence: CapabilityEvidence, route: Dict[str, Any]) -> Optional[CapabilityEvidence]:
+    """An unpinned Auto route whose catalog read failed: the smallest window this model's accounts stated within the
+    confirmed TTL, as one plan's bound (source ``pool``), never an account's witness: no account fields, nothing
+    stored, no server statement. A pin, even one without its fingerprint, is no Auto; no fresh statement: unknown."""
+    options = route.get("options") or {}
+    if route.get("provider") != "claudexor" or options.get("credential_profile_id") or options.get("account_fingerprint"):
+        return None
+    stated = [row for row in (_read(drive_root).get("probes") or {}).values() if isinstance(row, dict)
+              and row.get("provider") == "claudexor" and row.get("model") == route.get("model")
+              and row.get("account_fingerprint") and row.get("status") == STATUS_CONFIRMED
+              and int(row.get("window_tokens") or 0) > 0 and _age_seconds(str(row.get("ts") or "")) <= _CONFIRMED_TTL_SEC]
+    if not stated:
+        return None
+    newest = str(min(stated, key=lambda row: _age_seconds(str(row.get("ts") or ""))).get("ts") or "")
+    return CapabilityEvidence(min(int(row["window_tokens"]) for row in stated), STATUS_CONFIRMED, "pool",
+                              evidence.route_fp, evidence.model, evidence.provider, ts=newest, detail=(
+                                  f"smallest advertised capacity of {len(stated)} accounts, newest stated "
+                                  f"{newest.replace('T', ' ')[:16]} (catalog unavailable)"))
+
+
 def probe(drive_root: Any, **route) -> CapabilityEvidence:
-    """Resolve independent context and output facts; one owner's window ack cannot suppress output discovery."""
+    """Resolve independent context and output facts; one owner's window ack cannot suppress output discovery.
+
+    One catalog read serves both: a read that answered also states the output limit, and a read that failed (live, or
+    its ten-minute record) is named by it, so neither is repeated. After a failed read a fetching probe of an unpinned
+    Auto route plans by the pool's smallest fresh statement (``_pool_bound``); a reader that may not fetch keeps it unknown.
+    """
     from dataclasses import asdict, replace
     from ouroboros.response_limits import probe_response_limit
 
     evidence = _probe_window(drive_root, **route)
+    read_failed, read = evidence.status == STATUS_FAILED, dict(evidence.response_limit or {})
     if is_known(evidence, require_fresh=True):
         evidence.server_window = dict(tokens=evidence.window_tokens, kind=evidence.window_kind,
                                       source=evidence.source, observed_at=evidence.ts)
+    if read_failed and route.get("allow_fetch", True):  # after the server's word: the pool's bound is none
+        evidence = _pool_bound(drive_root, evidence, route) or evidence
     ack = _read(drive_root).get("owner_acks", {}).get(evidence.route_fp)
     options = {**(route.get("options") or {}), **{key: getattr(evidence, key) for key in (
         "source_id", "credential_profile_id", "account_fingerprint") if getattr(evidence, key)}}
@@ -1078,7 +1130,7 @@ def probe(drive_root: Any, **route) -> CapabilityEvidence:
             ts=str(ack.get("ts") or ""), detail=f"owner-ack by {ack.get('owner') or 'owner'}",
             **{key: str(options.get(key) or "") for key in (
                 "source_id", "credential_profile_id", "account_fingerprint")})
-    evidence.response_limit = asdict(probe_response_limit(drive_root, evidence, route))
+    evidence.response_limit = asdict(probe_response_limit(drive_root, evidence, route, read_failed=read_failed, read=read))
     return evidence
 
 

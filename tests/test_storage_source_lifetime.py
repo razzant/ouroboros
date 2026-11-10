@@ -13,7 +13,6 @@ import pytest
 from ouroboros.test_evidence import diagnostic_directory
 
 REPO = Path(__file__).resolve().parents[1]
-pytestmark = pytest.mark.serial
 
 
 def test_native_source_can_be_recovered_after_outer_launcher_release(tmp_path):

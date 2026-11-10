@@ -139,7 +139,7 @@ def test_mixed_delivery_keeps_full_file_and_exact_overflow_range(harness, monkey
     assert "OLDER " in delegated and "LATEST CHOICE" in delegated and "MANDATORY FULL READ" not in delegated
     assert coverage["delegated"] == {**coverage["large"], "delivery": "delegated_session", "window": "unknown", "file": own["file"]}
     assert delivery["request_policy"]["observed_sources"] == [{
-        "root": "artifact_store", "path": own["source_ref"]["path"], "file": own["file"],
+        "root": "artifact_store", "path": own["source_ref"]["path"], "file": own["file"], "observed_role": "own_room_snapshot",
         **source_text_identity(own["text"].encode("utf-8"))}]
     # Every slot's send ends with ITS OWN panel seat: a shared packet cannot say "your".
     last_user = {sid: user_text(delivery["slot_messages"][sid][-1]["content"]) for sid in ("small", "large")}
@@ -194,23 +194,37 @@ def test_a_session_with_a_resolved_window_is_fitted_and_without_one_is_whole(har
     assert "OLDER " in whole["slot_session_tasks"]["delegated"] and whole["dialogue_delivery"]["delegated"]["window"] == "unknown"
 
 
-def test_a_session_reviewers_room_read_rides_its_plan_row():
-    """The observed-source fold reaches the plan row a reply settles from as a fact: attestation
-    `harness_observed` and `room_read_coverage`; a session with no fold stays `unobserved`
-    with no coverage key."""
+def test_a_session_reviewers_room_read_rides_its_plan_row(tmp_path):
+    """The journal's fold over the declared snapshot reaches the plan row a reply settles from as a fact, attestation
+    `harness_observed` and `room_read_coverage`, exactly as a native seat's does. A session with no fold stays
+    `unobserved`, and so does a file that no longer hashes to the declared snapshot: whatever the harness read there
+    was not this revision, which is neither a read nor 0 of N. An undeclared source never answers for the room."""
     from ouroboros.review_execution import ReviewRouteKind
+    from ouroboros.review_session_reads import session_read_facts
     from ouroboros.review_substrate import ReviewSlot
-    from ouroboros.tools.plan_review_runtime import _plan_row_from_actor
+    from ouroboros.tools.plan_review_runtime import ROOM_SNAPSHOT_ROLE, _plan_row_from_actor
+    from ouroboros.tools.scope_required_sources import source_text_identity
+    from tests.test_review_session_reads import _claude_event, _journal
 
     slot = ReviewSlot(slot_id="s1", model="cursor=grok", route=ReviewRouteKind.AGENT_SESSION)
-    usage = {"read_provenance": "harness_observed", "native_read_coverage": {"status": "complete", "sources": [
-        {"root": "artifact_store", "path": "plan-dialogue-1.jsonl", "status": "complete", "covered_chars": 120, "complete_chars": 120}]}}
-    actor = {"slot_id": "s1", "model": "cursor=grok", "status": "ok", "raw_text": CLEAN, "usage": usage,
-             "operation_id": "op-s1", "operation_state": "settled"}
-    row = _plan_row_from_actor(actor, slot)
-    coverage = {"status": "complete", "covered_chars": 120, "complete_chars": 120, "provenance": "harness_observed"}
-    assert row["host_file_read_attestation"] == "harness_observed" and row["room_read_coverage"] == coverage
-    plain = _plan_row_from_actor({**actor, "usage": {}}, slot)
+    snapshot = tmp_path / "plan-dialogue-1.jsonl"
+    snapshot.write_text("first\nsecond\n", encoding="utf-8")
+    declared = {"root": "artifact_store", "path": snapshot.name, "file": str(snapshot), "observed_role": ROOM_SNAPSHOT_ROLE,
+                **source_text_identity(snapshot.read_bytes())}
+    _journal(tmp_path, _claude_event(str(snapshot)), run="run")
+
+    def row(policy):
+        usage = session_read_facts(str(tmp_path / "run"), policy, session_root=str(tmp_path))
+        return _plan_row_from_actor({"slot_id": "s1", "model": "cursor=grok", "status": "ok", "raw_text": CLEAN, "usage": usage,
+                                     "operation_id": "op-s1", "operation_state": "settled"}, slot)
+
+    read = row({"observed_sources": [declared]})
+    assert read["host_file_read_attestation"] == "harness_observed" and read["room_read_coverage"] == {
+        "status": "complete", "covered_chars": 13, "complete_chars": 13, "provenance": "harness_observed"}
+    assert "room_read_coverage" not in row({"observed_sources": [{key: value for key, value in declared.items() if key != "observed_role"}]})
+    snapshot.write_text("rewritten\n", encoding="utf-8")
+    assert "room_read_coverage" not in row({"observed_sources": [declared]})
+    plain = row({})
     assert plain["host_file_read_attestation"] == "unobserved" and "room_read_coverage" not in plain
 
 

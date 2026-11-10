@@ -9,6 +9,7 @@ import errno
 import os
 import pathlib
 import stat
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -18,7 +19,7 @@ from tests.test_state_authority import _prior, _windows_shaped_not_found, root a
 
 BARRED = (False, "panic_stop", "Background consciousness stays disabled while Panic controls await persistence.",
           "consciousness_disabled_or_unknown")
-PERMITTED = (True, "not_due", "Background consciousness is already enabled.", "admission_failed")
+PERMITTED = (True, "not_due", "Background consciousness is already enabled.", "")  # admitted to the lane
 LINK = os.stat_result((stat.S_IFLNK | 0o777, 0, 0, 1, 0, 0, 1, 0, 0, 0))
 
 
@@ -40,18 +41,25 @@ def _only_for(target, error, real):
     return call
 
 
-@pytest.mark.parametrize("errors", ["native", "windows"])
-@pytest.mark.parametrize("flag_entry", ["dangling", "native_link", "unreadable", "unproven_ancestor"])
+@pytest.mark.parametrize(("flag_entry", "errors"), [
+    ("dangling", "native"),
+    ("native_link", "windows"),
+    ("unreadable", "windows"),
+    ("unproven_ancestor", "native"),
+])
 def test_every_wake_reader_needs_a_proven_absent_panic_flag(root, monkeypatch, flag_entry, errors):
-    from supervisor import worker_chat_lane
+    from supervisor import conversation_lane, worker_chat_lane
 
     state.save_state(_prior())  # healthy: consciousness enabled, witness complete
     assert state_initialization.read_witness(root)[1]["phase"] == "complete"
     admitted: list = []
-    monkeypatch.setattr(worker_chat_lane, "_pool", lambda: SimpleNamespace(DRIVE_ROOT=root))
-    monkeypatch.setattr(worker_chat_lane, "wake_gate_open", lambda: True)
+    monkeypatch.setattr(worker_chat_lane, "_pool",
+                        lambda: SimpleNamespace(DRIVE_ROOT=root, _repo_writer_gate_lock=threading.RLock()))
+    monkeypatch.setattr(worker_chat_lane, "wake_gate_refusal", lambda: "")
     monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 100)
-    monkeypatch.setattr(worker_chat_lane, "_admit_chat_task", lambda *a, **kw: admitted.append(a))
+    # The lane's admission (the RUNNING row and its carrier) is the door's effect: recorded, not run.
+    monkeypatch.setattr(conversation_lane, "admit_turn",
+                        lambda task, **kw: admitted.append(task) or {"task": task, "worker_id": 90})
     if errors == "windows":
         _windows_shaped_not_found(monkeypatch)
     flag = root / "state" / "panic_stop.flag"

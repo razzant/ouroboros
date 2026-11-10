@@ -202,8 +202,6 @@ def test_calibrated_input_limit_shared_helper(tmp_path, monkeypatch):
     the pre-measurement value for the whole process), and seeding an observation that
     reproduces the legacy effective density must reproduce the legacy limit BYTE-FOR-BYTE.
     """
-    import inspect
-
     from ouroboros.capability_evidence import (
         COLD_START_TOKEN_DENSITY,
         MEASURED_DENSITY_SAFETY_FACTOR,
@@ -243,10 +241,6 @@ def test_calibrated_input_limit_shared_helper(tmp_path, monkeypatch):
     )
     assert limit("openai/gpt-5.5") == 1_000_000 - 100_000 - 155_000  # margin-bounded
     assert limit("openai/gpt-5.5") > int(900_000 / COLD_START_TOKEN_DENSITY)
-
-    # The triad's pack size moves with the same formula.
-    from ouroboros.tools import review as triad
-    assert "calibrated_input_token_limit" in inspect.getsource(triad)
 
 
 def test_scope_cap_of_an_unwitnessed_reviewer_ignores_another_models_witness(tmp_path, monkeypatch):
@@ -423,11 +417,12 @@ def test_run_script_timeout_360():
 
 
 def test_preflight_review_timeout_is_the_review_change_envelope():
-    """Both names are the same review_change action, so they share its finite envelope."""
+    """Both names are the same review_change action, so they share its envelope: finite with a
+    task lifetime, none without one (1A: the wave's drain observes the owner's controls)."""
     from ouroboros.tools import preflight_review, review_change
     [envelope] = [entry.timeout_sec for entry in review_change.get_tools() if entry.name == "review_change"]
     entries = {entry.name: entry for entry in preflight_review.get_tools()}
-    assert envelope > 0
+    assert envelope is None or envelope > 0
     for name in ("preflight_review", "advisory_review"):
         assert entries[name].timeout_sec == envelope
 

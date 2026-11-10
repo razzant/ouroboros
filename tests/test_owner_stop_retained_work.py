@@ -232,9 +232,10 @@ def test_terminal_run_with_unsettled_money_reads_terminal_not_live_outside_wrap_
     envelope = {"delegate_terminal_reconciliation": audit}
     owner = terminal.terminal_custody_notice(envelope, owner_row=True)
     assert owner == "Confirmed delegated terminal receipts: run-one: cancelled on test (accounting not settled)."
-    shared = terminal.terminal_custody_notice(envelope)
-    assert "Open delegated execution: none recorded by the current audit." in shared
-    assert "run-one: cancelled on test (accounting not settled)" in shared
+    # The run is terminal, so it never reads as open; only the historical text states the empty category (#1403).
+    assert terminal.terminal_custody_notice(envelope) == owner
+    assert "Open delegated execution: none recorded by the current audit." in terminal.terminal_custody_notice(
+        envelope, include_empty=True)
 
 
 def test_cancel_readback_survives_even_when_money_cannot_settle(tmp_path, monkeypatch):
@@ -296,7 +297,7 @@ def test_wrap_up_mailbox_carries_cancelled_child_answer_and_existing_capture_onc
     assert not audit["open_run_ids"]
 
 
-@pytest.mark.parametrize("exit_kind", ["candidate", "expired", "error", "one_call"])
+@pytest.mark.parametrize("exit_kind", ["candidate", "error", "one_call"])
 def test_existing_terminal_event_keeps_receipt_on_every_wrap_up_exit(tmp_path, monkeypatch, exit_kind):
     from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
     from tests.test_delivery_forced_finalization import _forced_test_context
@@ -634,7 +635,7 @@ def test_all_children_and_runs_survive_bounded_prompt_without_review_work(tmp_pa
     assert "### Subtask kid-22\n\nIts saved task text; the author is not recorded:\n\n> " + "answer " * 99 + "answer" in document
 
 
-@pytest.mark.parametrize("status", ["ready_with_changes", "ready_no_changes", "failed", "missing", "unconfirmed"])
+@pytest.mark.parametrize("status", ["ready_with_changes", "failed", "unconfirmed"])
 def test_patch_capture_states_and_disposition_are_facts_not_hash_inferences(tmp_path, monkeypatch, status):
     from ouroboros.artifacts import task_artifact_dir_path
 

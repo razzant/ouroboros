@@ -13,7 +13,6 @@ from ouroboros import dialogue_import, dialogue_store as ds
 from ouroboros.gateway import history
 from ouroboros.store import StoreError
 
-pytestmark = pytest.mark.serial  # every case installs module-global supervisor roots
 
 
 @pytest.fixture(autouse=True)

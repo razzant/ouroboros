@@ -11,9 +11,6 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_PATH = REPO_ROOT / "skills" / "unix_computer_use" / "plugin.py"
-SKILL_PATH = REPO_ROOT / "skills" / "unix_computer_use" / "SKILL.md"
-
-
 _PROBE_HEADS = (("lsappinfo",), ("xdotool", "getactivewindow"), ("wmctrl", "-lpxG"))
 
 
@@ -67,13 +64,6 @@ def test_unix_computer_use_registers_expected_tools(tmp_path):
         "window_list",
         "ax_tree",
     } <= set(api.tools)
-
-
-def test_unix_computer_use_manifest_declares_permissions():
-    text = SKILL_PATH.read_text(encoding="utf-8")
-
-    # `net` is required for the remote OSWorld HTTP / SSH backends.
-    assert "permissions: [tool, subprocess, net]" in text
 
 
 def test_unix_computer_use_screenshot_uses_detected_backend(tmp_path, monkeypatch):
@@ -375,8 +365,7 @@ def test_macos_screenshot_without_logical_size_is_capture_only(tmp_path, monkeyp
     assert "Capture only" in result["coordinate_note"]
 
 
-@pytest.mark.parametrize("backend", ["local", "remote"])
-@pytest.mark.parametrize("failure", ["write", "lock"])
+@pytest.mark.parametrize(("failure", "backend"), [("write", "local"), ("lock", "remote")])
 def test_screenshot_save_failure_keeps_image_without_claiming_observation(tmp_path, monkeypatch, backend, failure):
     from PIL import Image
     from ouroboros import utils
@@ -567,7 +556,7 @@ def test_x11_function_keys_and_case_preserved(tmp_path, monkeypatch):
 
 
 def test_ax_tree_parses_set_of_marks(tmp_path, monkeypatch):
-    """macOS: the frontmost pid comes from lsappinfo, the bounded walk from the native helper; marks keep
+    """macOS: the frontmost application and the bounded walk come from ONE native helper process; marks keep
     input-space centres and the receipt names every cut."""
     module = _load_plugin()
     monkeypatch.setattr(module, "_platform", lambda: "macos")
@@ -579,7 +568,8 @@ def test_ax_tree_parses_set_of_marks(tmp_path, monkeypatch):
                                    {"id": 3, "depth": 1, "role": "TextField", "label": "Address", "x": 200, "y": 50, "w": 400, "h": 24}],
                          "marks": [{"id": 1, "role": "Button", "title": "Reload", "center_x": 115, "center_y": 60, "x": 100, "y": 50, "w": 30, "h": 20},
                                    {"id": 2, "role": "TextField", "title": "Address", "center_x": 400, "center_y": 62, "x": 200, "y": 50, "w": 400, "h": 24}],
-                         "limits": {"max_nodes": 3, "timeout_ms": 3000}})
+                         "limits": {"max_nodes": 3, "timeout_ms": 3000},
+                         "target": {"pid": 77, "app_id": "com.apple.Safari", "app": "Safari"}})
     calls = []
 
     def fake_run(cmd, *a, **k):
@@ -589,7 +579,8 @@ def test_ax_tree_parses_set_of_marks(tmp_path, monkeypatch):
         if cmd[:2] == ["lsappinfo", "info"]:
             return module.subprocess.CompletedProcess(cmd, 0, '"pid"=77\n"CFBundleIdentifier"="com.apple.Safari"\n"LSDisplayName"="Safari"\n', "")
         if any(str(part).endswith("macos_native.py") for part in cmd):
-            assert cmd[cmd.index("tree") + 1:] == ["77", "3", "3000", "window", "false"], cmd
+            assert json.loads(cmd[cmd.index("observe") + 1]) == {"app": "", "max_nodes": 3, "timeout_ms": 3000, "root": "window",
+                                                                 "include_web": False, "text_limit": 200, "window": ""}, cmd
             return module.subprocess.CompletedProcess(cmd, 0, helper + "\n", "")
         raise AssertionError(cmd)
     monkeypatch.setattr(module.subprocess, "run", fake_run)

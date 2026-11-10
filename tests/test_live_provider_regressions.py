@@ -15,7 +15,9 @@ from pathlib import Path
 
 import pytest
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
-from tests.test_live_conversation import packages as packages, VoiceWire, host_world as host_world
+from tests._socket_seal import block_network_except_socketpair
+from tests._live_world import host_world as host_world
+from tests.test_live_conversation import packages as packages, VoiceWire
 
 from ouroboros import call_protocol as cp
 from ouroboros.contracts.live_conversation import Audio, LiveConfig, LiveEvent, LiveOptions, ToolBatch, ToolOutputs
@@ -26,7 +28,7 @@ from ouroboros.contracts.realtime import CatalogModel, RealtimeInput, RealtimeSe
 def deny_network(monkeypatch):
     def refused(*args, **kwargs):
         raise AssertionError("Focused voice QA may not open a network connection")
-    monkeypatch.setattr(socket.socket, "connect", refused)
+    block_network_except_socketpair(monkeypatch, refused)
     monkeypatch.setattr(socket, "create_connection", refused)
 
 
@@ -186,7 +188,7 @@ def test_ordinary_read_file_dedup_and_conflicting_identity(ordinary_host, eviden
 
 
 def test_ordinary_enable_tools_reaches_adapter(ordinary_host, evidence):
-    from tests.test_live_conversation import FakeSession
+    from tests._live_world import FakeSession
     host = ordinary_host.host
     before = tuple(host.schemas)
     resident = {s["function"]["name"] for s in before}

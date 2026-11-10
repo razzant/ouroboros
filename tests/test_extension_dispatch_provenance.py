@@ -183,6 +183,10 @@ def test_run_child_marks_only_post_popen_exceptions(tmp_path, monkeypatch):
         assert extension_process_runner.extension_child_was_spawned(exc) is False
 
     class _FakeProc:
+        def __init__(self):
+            from tests.test_tracked_tree_containment import fake_tree_read
+            fake_tree_read(monkeypatch, self, remains=False)
+
         pid = 4242
         returncode = 0
         stdin = None
@@ -207,7 +211,7 @@ def test_run_child_marks_only_post_popen_exceptions(tmp_path, monkeypatch):
         assert extension_process_runner.extension_child_was_spawned(exc) is True
 
 
-def _fake_proc_cls():
+def _fake_proc_cls(monkeypatch):
     import io
 
     class _FakeProc:
@@ -215,6 +219,8 @@ def _fake_proc_cls():
         returncode = 0
 
         def __init__(self):
+            from tests.test_tracked_tree_containment import fake_tree_read
+            fake_tree_read(monkeypatch, self, remains=False)
             self.stdin = None
             self.stdout = io.BytesIO(b"")
             self.stderr = io.BytesIO(b"")
@@ -238,7 +244,7 @@ def test_run_child_marks_registration_exceptions(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         extension_process_runner.subprocess, "Popen",
-        lambda *_a, **_k: _fake_proc_cls()(),
+        lambda *_a, **_k: _fake_proc_cls(monkeypatch)(),
     )
     monkeypatch.setattr(extension_process_runner, "_kill_process_group", lambda _p: None)
 
@@ -271,7 +277,7 @@ def test_run_child_cleanup_exception_over_a_marked_one_stays_marked(tmp_path, mo
 
     monkeypatch.setattr(
         extension_process_runner.subprocess, "Popen",
-        lambda *_a, **_k: _fake_proc_cls()(),
+        lambda *_a, **_k: _fake_proc_cls(monkeypatch)(),
     )
     monkeypatch.setattr(extension_process_runner, "_kill_process_group", lambda _p: None)
 
@@ -280,7 +286,6 @@ def test_run_child_cleanup_exception_over_a_marked_one_stays_marked(tmp_path, mo
             raise OSError("cleanup exploded")
 
     registry = _ExplodingSet()  # publication (tracked_start) and the runner's discard name one set, as in production
-    monkeypatch.setattr(extension_process_runner, "_active_subprocesses", registry)
     monkeypatch.setattr(shell_process, "_active_subprocesses", registry)
     try:
         extension_process_runner._run_child(

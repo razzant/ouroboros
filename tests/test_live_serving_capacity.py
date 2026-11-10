@@ -6,7 +6,7 @@ from dataclasses import replace
 import pytest
 
 from ouroboros.contracts.live_conversation import LiveOptions, ToolOutputs
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 def test_legacy_session_needs_no_private_tools_attribute_after_capacity_failure(host_world):
@@ -43,6 +43,8 @@ def test_legacy_session_needs_no_private_tools_attribute_after_capacity_failure(
                              tuple(host.schemas))
         call.deferred_tool_outputs.append((output, []))
         await call.check_preparation()
+        assert call.delivery_due.is_set()
+        await call.release_serving()  # the connection's delivery worker
         assert len(sent) == 1 and sent[0].messages == output.messages
         assert not call.renewing and not call.deferred_tool_outputs
     asyncio.run(run())
@@ -83,8 +85,10 @@ def test_failed_preparation_cannot_flush_a_result_known_not_to_fit_serving_conne
         assert isinstance(call.preparing.exception(), RealtimeSetupError)
         assert call.preparing.exception().code == 'context_capacity'
         call.deferred_tool_outputs.append((ToolOutputs(tuple(result_rows), tuple(host.schemas)), []))
+        await call.check_preparation()
+        assert call.delivery_due.is_set()
         with pytest.raises(RealtimeSetupError, match='context_capacity'):
-            await call.check_preparation()
+            await call.release_serving()  # the connection's delivery worker
         assert call.deferred_tool_outputs, 'the completed effect retains delivery custody'
         record_property('capacity_fallback', json.dumps({
             'window': host.model.facts.conversation_window_tokens,
@@ -179,7 +183,10 @@ def test_failed_fit_delivery_uses_serving_room_and_keeps_obligation(host_world, 
         host.schemas[:] = [{'type':'function', 'function':{'name':'later', 'description':'big '*100000}}]
         assert host.renewal_due()
         if kind == 'mail':
-            action = lambda: call.context_update(rows)
+            async def action():
+                await call.context_update(rows)
+                assert call.delivery_due.is_set()
+                await call.release_serving()  # the connection's delivery worker
         elif kind == 'offer':
             call.pending_offers.extend(rows)
             action = call.offer_pending
@@ -314,6 +321,9 @@ def test_native_resume_delivers_room_rows_before_answer_pointer(host_world, pend
             except StopIteration: raise asyncio.CancelledError
         call.session=SimpleNamespace(receive=receive, send=send, selected=SimpleNamespace(tools_json='[]'))
         with pytest.raises(asyncio.CancelledError): await call.provider()
+        assert call.delivery_due.is_set(), 'the reader only says so; it writes nothing and waits for nothing'
+        assert not sent
+        await call.release_serving()  # the connection's delivery worker
         assert not call.pending_context_rows
         assert [list(command.messages) for command in sent if isinstance(command,ContextUpdate)] == ([rows] if pending else [])
     asyncio.run(run())

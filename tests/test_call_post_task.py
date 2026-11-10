@@ -15,21 +15,26 @@ def test_admitted_calls_and_text_dispatch_the_same_post_task_work(direct_call, t
     calls = []
     monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *args, **kwargs: calls.append(kwargs))
     metadata = {"execution_transport": direct_call.turn.request} if call else {}
-    admitted = worker_chat_lane._admit_chat_task(SimpleNamespace(), 1, "Conversation", task_metadata=metadata,
-                                                realtime_turn=direct_call.turn if call else None)
-    assert admitted is not None
-    try:
-        pipeline.emit_task_results(
-            SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path), None, None, [], admitted["task"],
-            "Conversation ended.", {"rounds": 1}, {"tool_calls": [], "reasoning_notes": []}, 0.0, tmp_path / "logs")
-        assert len(calls) == 1
-        assert not admitted["task"].get("_skip_post_task_synthesis")
-    finally:
-        admitted["registry"].unregister(admitted["task"]["id"])
+    # The admitted seed (``handle_chat_direct`` mints it for a text turn and a live call alike; the call's
+    # transport rides its metadata): the post-task policy reads the task, never the carrier.
+    task = worker_chat_lane._seed_task(1, "Conversation", None, None, metadata)
+    if call:
+        task["model"], task["use_local_model"] = direct_call.turn.model, False  # as run_inline_turn stamps a call
+    pipeline.emit_task_results(
+        SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path), None, None, [], task,
+        "Conversation ended.", {"rounds": 1}, {"tool_calls": [], "reasoning_notes": []}, 0.0, tmp_path / "logs")
+    assert len(calls) == 1
+    assert not task.get("_skip_post_task_synthesis")
 
 
-@pytest.mark.parametrize("seam", ["recovery", "preparation"])
-@pytest.mark.parametrize("case", ["text", "live", "missing", "mismatched", "closed", "owner_stop"])
+@pytest.mark.parametrize(("case", "seam"), [
+    ("text", "recovery"),
+    ("live", "preparation"),
+    ("missing", "preparation"),
+    ("mismatched", "recovery"),
+    ("closed", "preparation"),
+    ("owner_stop", "preparation"),
+])
 def test_only_restart_refusals_add_a_synthesis_skip(direct_call, seam, case):
     from ouroboros.agent import OuroborosAgent
     from ouroboros.realtime_turn import recovery_refusal

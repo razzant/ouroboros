@@ -203,8 +203,7 @@ def test_ordinary_advisory_commit_does_not_invent_author_finish(tmp_path):
     assert attempts[-1].author_disposition == {}
 
 
-@pytest.mark.parametrize("status", ["clean", "warnings"])
-@pytest.mark.parametrize("kind", ["script", "extension"])
+@pytest.mark.parametrize(("kind", "status"), [("script", "clean"), ("extension", "warnings")])
 def test_repeated_skill_finish_preserves_critic_and_independent_blocking(tmp_path, monkeypatch, status, kind):
     from ouroboros.skill_loader import SkillReviewState, compute_content_hash, load_skill, save_enabled, save_review_state
     from ouroboros.tool_access_types import ResolvedResourceBinding

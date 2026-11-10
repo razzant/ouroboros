@@ -1,11 +1,7 @@
-"""The verbs a task uses to put something in front of a human.
-
-Photo, video and document delivery to the owner chat; link buttons; and
-``escalate``, the one question verb — an owner quiz card at the root, a
-parent mailbox frame below it. The payload validators for the two structured
-frames (link actions, quiz) live here with the verbs that emit them, because
-they define those wire shapes; ``supervisor.message_bus`` re-validates
-through the same functions on the delivery side.
+"""Task verbs that deliver material or questions to a human: photo/video/document,
+link buttons and ``escalate`` (owner quiz at the root, parent mailbox below).
+The link/quiz payload validators live with their emitting verbs, which own those
+wire shapes; ``supervisor.message_bus`` re-validates through the same functions.
 """
 
 from __future__ import annotations
@@ -24,6 +20,26 @@ from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
 
 
 _MAX_PHOTO_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+def _delivery_path(ctx: ToolContext, file_path: str) -> tuple[Optional[pathlib.Path], str]:
+    """The file a delivery verb names, or its published refusal. A relative path means the active workspace
+    (read_file's default root), never the process cwd, and refuses without one; absolute and ``~`` stay as is."""
+    fp = pathlib.Path(file_path).expanduser()
+    if not fp.is_absolute():
+        try:
+            from ouroboros.tools.registry import active_repo_dir_for
+            fp = pathlib.Path(active_repo_dir_for(ctx)).expanduser() / fp
+        except Exception as e:
+            text = f"⚠️ Relative file path {file_path!r} has no active workspace to resolve against: {e}. Name the file by its absolute path."
+            return None, _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=text))
+    return fp.resolve(), ""
+
+
+def _file_not_found(ctx: ToolContext, file_path: str, fp: pathlib.Path) -> str:
+    """A delivery miss; a relative request also names the workspace file it looked for."""
+    where = "" if pathlib.Path(file_path).expanduser().is_absolute() else f" (resolved: {fp})"
+    return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ File not found: {file_path}{where}"))
 
 
 def _detect_image_mime(data: bytes) -> str:
@@ -50,9 +66,11 @@ def _send_photo(ctx: ToolContext, file_path: str = "", image_base64: str = "",
     mime = "image/png"
 
     if file_path:
-        fp = pathlib.Path(file_path).expanduser().resolve()
+        fp, refusal = _delivery_path(ctx, file_path)
+        if fp is None:
+            return refusal
         if not fp.exists():
-            return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ File not found: {file_path}"))
+            return _file_not_found(ctx, file_path, fp)
         if fp.stat().st_size > _MAX_PHOTO_FILE_BYTES:
             return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ File too large ({fp.stat().st_size} bytes). Max: {_MAX_PHOTO_FILE_BYTES} bytes."))
         try:
@@ -74,16 +92,15 @@ def _send_photo(ctx: ToolContext, file_path: str = "", image_base64: str = "",
     if not actual_b64 or len(actual_b64) < 100:
         return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text="⚠️ Image data is empty or too short."))
 
-    from ouroboros.tools.owner_delivery import deliver_owner_event
-    mode = deliver_owner_event(ctx, {
+    from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt
+    event = {
         "type": "send_photo",
         "chat_id": _photo_chat_id,
         "image_base64": actual_b64,
         "mime": mime,
         "caption": caption or "",
-    })
-    text = "OK: photo accepted for delivery to owner chat." if mode == "live" else "OK: photo queued for delivery to owner."
-    return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text))
+    }
+    return publish_delivery_receipt(ctx, event, deliver_owner_event(ctx, event), "photo")
 
 
 _MAX_VIDEO_FILE_BYTES = 50 * 1024 * 1024  # 50 MB
@@ -109,9 +126,11 @@ def _send_video(ctx: ToolContext, file_path: str = "", caption: str = "") -> str
     if not file_path:
         return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text="⚠️ Provide a file_path."))
 
-    fp = pathlib.Path(file_path).expanduser().resolve()
+    fp, refusal = _delivery_path(ctx, file_path)
+    if fp is None:
+        return refusal
     if not fp.exists():
-        return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ File not found: {file_path}"))
+        return _file_not_found(ctx, file_path, fp)
     if fp.stat().st_size > _MAX_VIDEO_FILE_BYTES:
         return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ File too large ({fp.stat().st_size} bytes). Max: {_MAX_VIDEO_FILE_BYTES} bytes."))
 
@@ -122,16 +141,15 @@ def _send_video(ctx: ToolContext, file_path: str = "", caption: str = "") -> str
     except Exception as e:
         return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ Failed to read video file: {e}"))
 
-    from ouroboros.tools.owner_delivery import deliver_owner_event
-    mode = deliver_owner_event(ctx, {
+    from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt
+    event = {
         "type": "send_video",
         "chat_id": chat_id,
         "video_base64": actual_b64,
         "mime": mime,
         "caption": caption or "",
-    })
-    text = "OK: video accepted for delivery to owner chat." if mode == "live" else "OK: video queued for delivery to owner."
-    return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text))
+    }
+    return publish_delivery_receipt(ctx, event, deliver_owner_event(ctx, event), "video")
 
 
 _MAX_DOCUMENT_FILE_BYTES = 50 * 1024 * 1024  # 50 MB (Telegram bot sendDocument limit)
@@ -151,12 +169,14 @@ def _send_file(ctx: ToolContext, file_path: str = "", caption: str = "") -> str:
     if not file_path:
         return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text="⚠️ Provide a file_path."))
 
-    fp = pathlib.Path(file_path).expanduser().resolve()
+    fp, refusal = _delivery_path(ctx, file_path)
+    if fp is None:
+        return refusal
     if not fp.exists():
         from ouroboros.evidence_packs import materialize_path
         materialize_path(fp)  # a packed checkpoint handle is written back beside its name first
     if not fp.exists() or not fp.is_file():
-        return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ File not found: {file_path}"))
+        return _file_not_found(ctx, file_path, fp)
     mime = _detect_document_mime(str(fp))
     # Capture immutable, task-owned bytes before publishing a link. File delivery
     # stays available above the old inline limit without placing the file in RAM.
@@ -202,8 +222,8 @@ def _send_file(ctx: ToolContext, file_path: str = "", caption: str = "") -> str:
     except ValueError as exc:
         return _publish_tool_result(ctx, ToolResult(status="error", code="LEGACY_TOOL_ERROR", text=f"⚠️ Failed to capture file: {exc}"))
 
-    from ouroboros.tools.owner_delivery import deliver_owner_event
-    mode = deliver_owner_event(ctx, {
+    from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt
+    event = {
         "type": "send_document",
         "chat_id": chat_id,
         "file_base64": actual_b64,
@@ -213,10 +233,8 @@ def _send_file(ctx: ToolContext, file_path: str = "", caption: str = "") -> str:
         "download_url": download_url,
         "download_url_compat": compat_url,
         "file_ref": file_ref,
-    })
-    text = (f"OK: file '{fp.name}' accepted for delivery to owner chat." if mode == "live"
-            else f"OK: file '{fp.name}' queued for delivery to owner.")
-    return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text))
+    }
+    return publish_delivery_receipt(ctx, event, deliver_owner_event(ctx, event), f"file '{fp.name}'")
 
 
 _MAX_LINK_ACTIONS = 12
@@ -399,7 +417,9 @@ ESCALATE_TOOL_SCHEMA: Dict[str, Any] = {
         "Escalate one decision up the responsibility chain instead of guessing. "
         "A root task asks its human through a quiz card; a subagent asks its parent "
         "through a typed mailbox frame, which the parent answers with forward_to_worker "
-        "or escalates higher verbatim.\n\n"
+        "or escalates higher verbatim. From Presence work answering a place conversation, the card goes privately to Main. "
+        "In a private place conversation with your human, briefly tell them through its connector what you asked and where "
+        "before any requested wait, so they can find the question. In a shared conversation, judge what is appropriate for that audience.\n\n"
         "The card may be the only thing your human sees. It may be read later, outside "
         "this room, by someone who remembers the purpose of the work without remembering "
         "its mechanisms or your earlier discussion. Issue, specification and question "
@@ -419,7 +439,7 @@ ESCALATE_TOOL_SCHEMA: Dict[str, Any] = {
         "working; the card stays answerable and a late answer still arrives. Set "
         "wait_for_answer=true on a live root, including an ordinary conversation, when the "
         "next step is irreversible or costly to redo, or the choice belongs to the human; "
-        "your judgment decides. Waiting begins after the current tool batch, without model "
+        "your judgment decides. A requested wait begins after the current tool batch, without model "
         "calls. Waiting questions in one batch share one wait, ending on the first incoming "
         "message, not necessarily an owner answer. A plain-text clarification ends this "
         "turn; a waited question keeps it alive. How many decisions to raise and when "
@@ -464,8 +484,11 @@ ESCALATE_TOOL_SCHEMA: Dict[str, Any] = {
             "without a wait; may be empty when wait_for_answer=true. It is your assumption, "
             "not the human's answer.")},
         "wait_for_answer": {"type": "boolean", "default": False, "description": (
-            "Live roots: wait for addressed owner input before another model round. Default "
-            "false; an unanswered card remains answerable either way.")},
+            "Live roots: wait for addressed owner input before another model round. Waiting keeps "
+            "this work alive with what it holds — its browser, task-session connections, services "
+            "and, when it holds one, its project's lane — until the answer, the wait bound, a restart or "
+            "another ending. Default false: the card stays answerable while the work goes on under its stated "
+            "assumption.")},
         "max_wait_minutes": {"type": "integer", "description": (
             "Optional positive whole-minute bound for wait_for_answer, within the task's "
             "existing lifetime limit. On expiry, resume with a system notice; the card stays "
@@ -527,16 +550,14 @@ def _send_links(
 
         return _publish_tool_result(ctx, LegacyTextResultAdapter.from_text(
             "send_links", f"⚠️ {exc.code}: {exc} No links were sent."))
-    from ouroboros.tools.owner_delivery import deliver_owner_event
-    mode = deliver_owner_event(ctx, {
+    from ouroboros.tools.owner_delivery import deliver_owner_event, publish_delivery_receipt
+    event = {
         "type": "send_links",
         "chat_id": chat_id,
         "title": str(title or "")[:240],
         "actions": actions,
-    })
-    if mode == "live":
-        return "OK: link buttons accepted for delivery to owner chat."
-    return "OK: link buttons queued for delivery to owner."
+    }
+    return publish_delivery_receipt(ctx, event, deliver_owner_event(ctx, event), "link buttons")
 
 
 def _quiz_host_facts(ctx: ToolContext, canonical_root: pathlib.Path, task_id: str, chat_id: int) -> str:
@@ -679,6 +700,11 @@ def _escalate(
 
         if is_a2a_chat_id(getattr(ctx, "current_chat_id", None)):
             return "⚠️ ESCALATE_UNAVAILABLE: this machine-to-machine chat has no owner question delivery."
+        from ouroboros.native_task_wait import armed_conflict
+
+        if conflict := armed_conflict(ctx):  # checked before any card is recorded or sent
+            return (f"⚠️ ESCALATE_UNAVAILABLE: {conflict}. The quiz was not sent; ask with "
+                    "wait_for_answer=false now, or wait for the answer in a later turn.")
     if delegation_role not in ("", "root") and not parent_task_id:
         # A root has no parent. A child missing its lineage must not fall
         # through to the owner card path.

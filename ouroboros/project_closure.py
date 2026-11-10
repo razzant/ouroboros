@@ -7,27 +7,31 @@ from __future__ import annotations
 
 
 def apply_closed(project: dict, value: dict | None) -> bool:
-    """Compare and apply once; repeated closure preserves the first decision, lifecycle unchanged."""
+    """Compare and apply once; repeated closure preserves the first decision, lifecycle unchanged. A mind's close
+    also names the delivery of the System notice it posts in the room (``delivery``), whose row the record then holds
+    (``memory_sealing.closure_notices``); reopening removes it with the record."""
     if value is None:
         existed = "closed" in project
         project.pop("closed", None)
         return existed
-    if (not isinstance(value, dict) or set(value) != {"at", "by", "note"}
-            or any(not isinstance(value[key], str) for key in ("at", "by", "note"))
-            or not value["at"].strip() or not value["by"].strip()):
-        raise ValueError("closed must be None or {at, by, note} with string values and nonempty at/by")
+    keys = set(value) if isinstance(value, dict) else set()
+    if (not {"at", "by", "note"} <= keys <= {"at", "by", "note", "delivery"}
+            or any(not isinstance(value[key], str) for key in keys)
+            or not value["at"].strip() or not value["by"].strip() or not value.get("delivery", "-").strip()):
+        raise ValueError("closed must be None or {at, by, note[, delivery]} of strings, at/by/delivery nonempty")
     if "closed" in project:
         return False
     project["closed"] = dict(value)
     return True
 
 
-def select_projects(projects, *, closed: bool | None = None, oldest_first: bool = False) -> list[dict]:
-    """Filter before limiting; recency comes from the caller's captured room facts."""
+def select_projects(projects, *, closed: bool | None = None, oldest_first: bool = False,
+                    by: str = "last_active_at") -> list[dict]:
+    """Filter before limiting; recency (``by``: activity, or the newest message) comes from the caller's
+    captured room facts, then the id."""
     if closed is not None and type(closed) is not bool:
         raise ValueError("closed must be a boolean or None")
     if type(oldest_first) is not bool:
         raise ValueError("oldest_first must be a boolean")
     rows = [p for p in projects if closed is None or ("closed" in p) == closed]
-    return sorted(rows, key=lambda p: (str(p.get("last_active_at") or ""), str(p.get("id") or "")),
-                  reverse=not oldest_first)
+    return sorted(rows, key=lambda p: (str(p.get(by) or ""), str(p.get("id") or "")), reverse=not oldest_first)

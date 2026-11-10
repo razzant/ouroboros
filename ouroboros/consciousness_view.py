@@ -47,10 +47,12 @@ def _when(iso_value: Any) -> str:
     return ("due since " if parsed is not None and parsed.timestamp() <= time.time() else "at ") + _clock_of(iso_value)
 
 
-def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None) -> dict:
+def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None, *, supervisor_failed: bool = False) -> dict:
     """Project the alarm clock's snapshot into one honest status + detail line
     for the client headline (``None``: stored control is unknown, never off — #1307).
-    The appointment is the scheduled time; the next attempt is where skips and refusals moved it."""
+    The appointment is the scheduled time; the next attempt is where skips and refusals moved it.
+    Without a clock the server says why (``supervisor_failed``): a supervisor that failed to start
+    cannot wake it until a restart; otherwise Ouroboros is still starting (or waits for a provider)."""
     from ouroboros.deadline_utils import parse_deadline_ts
 
     outcome = str(snapshot.get("last_wake_outcome") or "")
@@ -59,10 +61,15 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None)
     wake = snapshot.get("live_wake_task_id")
     if requested_enabled is None:
         status, detail = "unknown", "The stored consciousness control is unknown: runtime state is unavailable or recovering."
-    elif not requested_enabled:
-        status, detail = "disabled", "Background consciousness is off."
+    elif not requested_enabled:  # the places it already read (a Paused one does not hear either); unread, as Stop says
+        hearing = sum(row.get("state") != "paused" for row in snapshot.get("places_brief") or [])
+        unread = "places_brief" in snapshot and snapshot["places_brief"] is None
+        status, detail = "disabled", (f"Off: no own wakes; {_hearing(hearing)}." if hearing else
+                                      "Off: no own wakes; its places only hear." if unread else "Off: no own wakes.")
+    elif not snapshot and supervisor_failed:
+        status, detail = "stopped", "Cannot wake: Ouroboros did not finish starting. Restart Ouroboros."
     elif not snapshot:
-        status, detail = "stopped", "Enabled in state, but the alarm clock was not constructed (supervisor init failed)."
+        status, detail = "starting", "Waits for Ouroboros to finish starting."
     elif wake and snapshot.get("live_wake_held"):
         status, detail = "wake_paused", (f"Wake-up {wake} is paused or waiting in the queue; its card shows why. "
                                          "The next wake-up follows it.")
@@ -75,8 +82,11 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None)
         status = "allowance_exhausted"
         at_least = "at least " if int(snapshot.get("unknown_unmetered") or 0) > 0 else ""
         degraded = "; ledger integrity degraded" if snapshot.get("integrity_degraded") else ""
+        # Checked at the reset, or sooner once a changed daily limit moved the next attempt (``consciousness._due_at``).
+        reset = parse_deadline_ts(str(snapshot.get("allowance_resets_at") or ""))
+        sooner = deadline is not None and reset is not None and time.time() < deadline.timestamp() < reset.timestamp()
         detail = (f"Daily allowance spent ({at_least}${float(spent or 0):.2f} of ${float(daily or 0):.2f} in the last 24 h{degraded}); "
-                  f"next check {_when(snapshot.get('allowance_resets_at')) if snapshot.get('allowance_resets_at') else next_at}.")
+                  f"next check {_when(snapshot.get('allowance_resets_at')) if snapshot.get('allowance_resets_at') and not sooner else next_at}.")
     elif outcome == "skipped:allowance_unknown":
         status, detail = "allowance_unknown", f"The usage ledger could not be read ({snapshot.get('last_error') or 'unknown error'}); retry {next_at}."
     elif outcome.startswith("rejected:"):
@@ -98,8 +108,51 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None)
     return {**snapshot, "enabled": requested_enabled, "status": status, "detail": detail}
 
 
+def _hearing(n: int) -> str:
+    return f"{n} place only hears" if n == 1 else f"{n} places only hear"
 
-def describe_consciousness(clock) -> dict:
+
+def off_sentence(places) -> str:
+    """The switch's first words as it turns consciousness off (owner 09.11, variant A). ``places`` is one read of the
+    place store, None when it could not be read; a Paused place does not hear either, so it is not counted."""
+    if places is None:
+        return "Consciousness off: no own wakes, and its places only hear until Start."
+    hearing = sum(place.state != "paused" for place in places)
+    return f"Consciousness off: no own wakes, and {_hearing(hearing)} until Start." if hearing else "Consciousness off: no own wakes."
+
+
+def stopping_words(task_ids, *, wake: str, rows: dict, authors, places) -> str:
+    """«Stopping now: …» naming each live item a stop ends, from what is in memory: its own wake-up, a reply in a
+    place (named from the place store read beside it, else «a place»), an autonomous task by its queue title, else
+    its id. ``rows`` maps a task id to its in-memory ``title`` and ``metadata``; ``authors`` are live place authors."""
+    from ouroboros.consciousness_authority import is_focus_wake, is_own_clock_wake
+    from ouroboros.place_projection import said_once
+
+    named: dict[str, str] = {}
+    for place in places or ():
+        for key in (place.place_id, *place.legacy_binding_ids):
+            named.setdefault(key, said_once(place.label or place.provider))
+    woke, replies, tasks = False, [], []
+    for task_id in task_ids:
+        row = rows.get(task_id) or {}
+        meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        focus, presence = (meta.get(key) if isinstance(meta.get(key), dict) else {} for key in ("focus", "presence"))
+        if task_id == wake or is_own_clock_wake(meta):
+            woke = True
+        elif task_id in authors or is_focus_wake(meta) or presence:
+            cause = str(meta.get("consciousness_cause") or "")
+            key = str(focus.get("place_id") or (cause.removeprefix("place:") if cause.startswith("place:") else "")
+                      or presence.get("binding_id") or "")
+            replies.append(f"a reply in {named.get(key) or 'a place'}")
+        else:
+            tasks.append(f"«{row.get('title') or task_id}»")
+    items = (["its wake-up"] if woke else []) + replies + tasks
+    if not items:
+        return ""
+    return "Stopping now: " + (items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}") + "."
+
+
+def describe_consciousness(clock, *, supervisor_failed: bool = False) -> dict:
     """Read the same stored control as /api/state, including unknown and no-clock boot states."""
     from supervisor.state import control_value, load_state
 
@@ -107,41 +160,76 @@ def describe_consciousness(clock) -> dict:
     requested = bool(enabled) if known else None
     if clock is not None:
         return clock.details_snapshot(requested)
-    return {**describe_consciousness_state({}, requested), "recent_wakes": []}
+    return {**describe_consciousness_state({}, requested, supervisor_failed=supervisor_failed), "recent_wakes": []}
 
 
 def place_views(drive_root, allowance=None) -> list[dict]:
-    """Stored PlaceSummary facts, using the caller's allowance without connector discovery."""
-    from ouroboros.place_projection import place_view
-    from ouroboros.places import load_places
+    """Stored PlaceSummary facts with each place's circle (one store read), the caller's allowance and one read of the
+    switch, no connector discovery."""
+    from ouroboros.place_projection import consciousness_off, place_view
+    from ouroboros.places import place_records
 
-    return [place_view(drive_root, place, allowance=allowance, brief=True) for place in load_places(drive_root)]
+    records = place_records(drive_root)
+    off = consciousness_off(drive_root)
+    return [place_view(drive_root, place, allowance=allowance, brief=True, records=records, off=off)
+            for place in records.places.values()]
 
 
 def places_text(drive_root, views) -> str:
-    from ouroboros.place_arrivals import recent_identity
-    from ouroboros.places import OwnerAccount, owner_account_matches
+    """The places as my own map: each circle once with its whole words and its places under it, then the places in
+    no circle. A place I put in a circle says so: there my human's words still restrict, but consent needs their
+    placement."""
+    from ouroboros.places import PlaceError, place_owner_accounts
     if views is None:
         return "unknown (place index unavailable)"
-    lines = []
+    try:
+        counted = place_owner_accounts(drive_root)  # one read: the accounts each place's connector account confirms
+    except PlaceError:
+        counted = {}
+    groups: dict[str, list] = {}
     for view in views:
-        identity = recent_identity(drive_root, view["place_id"])
-        sending = (identity or {}).get("sends_as") or {}
-        owner = sending.get("kind") == "user" and owner_account_matches(
-            (OwnerAccount(**a) for a in view.get("owner_accounts", [])), sending["id"], view.get("account_id", ""))
-        voice = ""
-        if sending:
-            voice = (f'; as Ouroboros (bot {sending["label"]})' if sending["kind"] == "bot"
-                     else f'; writes as {sending["label"]}' + (" (your human's own account)" if owner else ""))
-        count = view.get("unanswered")
-        addresses = [str(room.get("address") or f'chat_history(chat_id={int(room["room_chat_id"])})')
-                     for room in view.get("rooms") or []]
-        address = "; ".join(addresses) or ("no captured room" if view.get("rooms") == [] else "room address unknown")
-        lines.append(f'{view.get("label") or view["place_id"]} [{view["place_id"]}]: {view["state"]}; '
-                     f'open turns: {count if count is not None else "unknown"}; {address}{voice}')
-        for note in view.get("notes") or []:
-            lines.extend(f'  note ({note["author"]}): {line}' for line in note["text"].splitlines())
+        groups.setdefault((view.get("circle") or {}).get("circle_id", ""), []).append(view)
+    lines = []
+    for key in sorted(groups, key=lambda key: (not key, str((groups[key][0].get("circle") or {}).get("name", "")))):
+        indent = "  " if key or len(groups) > 1 else ""
+        if key:  # its words like a note's lines, with their author, once for every place in it
+            circle = groups[key][0]["circle"]
+            lines.append(f'circle {circle["name"]} [{key}]' + ("" if circle["text"] else ": no words yet"))
+            lines.extend(f'  words ({circle["text_author"]}): {line}' for line in circle["text"].splitlines())
+        elif indent:
+            lines.append("not in a circle:")
+        for view in groups[key]:
+            lines.extend(indent + line for line in _place_lines(drive_root, view, counted))
+    if lines:
+        lines.append("a place's rooms: configure_presence(action='inspect', place_id=<its id in brackets>)")
     return "\n  ".join(lines) if lines else "none"
+
+
+def _place_lines(drive_root, view, counted) -> list[str]:
+    from ouroboros.place_arrivals import recent_identity
+    from ouroboros.places import OWNER_VOICE, OwnerAccount, owner_account_matches
+    identity = recent_identity(drive_root, view["place_id"])
+    sending = (identity or {}).get("sends_as") or {}
+    owner = sending.get("kind") == "user" and owner_account_matches(
+        counted.get(view["place_id"]) or [OwnerAccount(**a) for a in view.get("owner_accounts", [])],
+        sending["id"], view.get("account_id", ""))
+    voice = ""
+    if sending:
+        voice = (f'; as Ouroboros (bot {sending["label"]})' if sending["kind"] == "bot"
+                 else f'; writes as {sending["label"]}' + (" (your human's own account)" if owner else ""))
+    count, rooms = view.get("unanswered"), view.get("rooms")
+    # A count; the closing line names the reader of every room, sealed ones included.
+    held = f"rooms: {len(rooms)}" if rooms else "no captured room" if rooms == [] else "rooms unknown"
+    circle = view.get("circle") or {}
+    placed = ""
+    if circle.get("text") and circle["placed_by"] not in OWNER_VOICE:  # words I wrote there stay my own record
+        placed = ("; you placed it in this circle: your human's words there still restrict it, but consent needs their "
+                  "placement" if circle.get("text_author") in OWNER_VOICE else "; you placed it in this circle")
+    lines = [f'{view.get("label") or view["place_id"]} [{view["place_id"]}]: {view["state"]}; '
+             f'open turns: {count if count is not None else "unknown"}; {held}{voice}{placed}']
+    for note in view.get("notes") or []:
+        lines.extend(f'  note ({note["author"]}): {line}' for line in note["text"].splitlines())
+    return lines
 
 
 def cause_views(rows, places) -> list[dict] | None:
@@ -296,6 +384,7 @@ def recent_wakes(drive_root, places, *, live_wake_task_id: str = "", now: float 
                      **({"as": {"label": sending["label"], "owner": bool(focus.get("identity_owner"))}} if sending else {}),
                      "chat_id": row.get("chat_id"), "conversation": str(focus.get("conversation_key") or ""),
                      "place_label": cause_label(f"place:{place_id}", places or ()) if place_id else "",
+                     **({"place_id": place_id} if place_id else {}),  # the Shade's door to that place's sheet
                      "started_at": row.get("started_at"),
                      **({"first_reply_at": first_reply_at(drive_root, task_id)} if cause == "focus" else {}),
                      "ended_at": terminal_time_fact(row)["occurred_at"],

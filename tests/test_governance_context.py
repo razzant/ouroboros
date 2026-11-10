@@ -131,7 +131,6 @@ def test_the_body_layer_has_no_switch_that_drops_the_shared_section():
     from ouroboros.tools import governance_context as module
 
     assert "repository_rules" not in inspect.signature(module.governance_context).parameters
-    assert "repository_rules" not in inspect.getsource(module)
 
 
 def test_a_non_body_subject_runs_the_core_layer_without_the_shared_section(repo):

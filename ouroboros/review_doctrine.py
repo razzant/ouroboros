@@ -64,8 +64,9 @@ AUTHOR_DISPOSITION_SCHEMA: Dict[str, Any] = {
     },
     "required": ["disposition", "rationale"],
     "description": (
-        "Explicitly accept the current attributed candidate after reading the referenced outcome. "
-        "Never overrides Blocking. Optional subagent_check is author evidence, not a seat and not a PASS."
+        "Explicitly accept the candidate this call stages (omitted paths: the paths the referenced review covered) "
+        "after reading the referenced outcome. Never overrides Blocking. Optional subagent_check is author evidence, "
+        "not a seat and not a PASS."
     ),
 }
 
@@ -211,6 +212,7 @@ def validate_evidence_snapshot(value: Any, *, subject_hash: str = "") -> Optiona
         "subject_hash": subject,
         "observed_at": observed,
         "seats": seats,
+        **({"unread_outcomes": True} if value.get("unread_outcomes") else {}),
     }
 
 
@@ -424,13 +426,26 @@ def validate_landing(value: Any, *, subject_hash: str = "") -> Optional[Dict[str
     }
 
 
+_DELTA_KEYS = ("relation", "reviewed_base", "reviewed_tree", "staged_base", "staged_tree", "text")
+
+
+def validate_subject_delta(value: Any, *, subject_hash: str = "") -> Optional[Dict[str, str]]:
+    """How the staged tree an author continuation landed differs from the reviewed one, as published before Git
+    (``review_collection.disclose_subject_delta``, #2680)."""
+    if (not isinstance(value, dict) or value.get("relation") not in {"same", "different", "unknown"}
+            or not all(isinstance(value.get(key, ""), str) for key in _DELTA_KEYS)):
+        return None
+    return {key: str(value.get(key) or "") for key in _DELTA_KEYS}
+
+
 def carry_recorded_doctrine(normalized: Dict[str, Any], record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Keep a valid fact, snapshot and landing. A bad attachment rejects the record."""
+    """Keep a valid fact, snapshot, landing and subject delta. A bad attachment rejects the record."""
     subject = str(normalized.get("subject_hash") or "")
     for key, checker in (
         (FACT_KIND, validate_replacement_fact),
         (EVIDENCE_KIND, validate_evidence_snapshot),
         (LANDING_KEY, validate_landing),
+        ("subject_delta", validate_subject_delta),
     ):
         if key not in record:
             continue
@@ -462,7 +477,8 @@ def enrich_author_commit(author: Dict[str, Any], *, actors: Any, prior_decision:
     return body
 
 
-_LEDGER_KEYS = ("subject_hash", "reviewer_signal", "enforcement", "recorded_at", "source", "action")
+_LEDGER_KEYS = ("subject_hash", "reviewer_signal", "enforcement", "recorded_at", "source", "action", "subject_delta",
+                "decided_by_task")  # the task that decided, distinct from the record's (a recorded Continue successor)
 
 
 def decision_for_ledger(decision: Any, record_id: str) -> Dict[str, Any]:
@@ -594,7 +610,8 @@ def doctrine_result_lines(decision: Any) -> List[str]:
         )
     snapshot = decision.get(EVIDENCE_KIND)
     if isinstance(snapshot, dict) and snapshot.get("feedback_at_decision"):
-        lines.append(f"evidence_at_decision: {snapshot['feedback_at_decision']}")
+        lines.append(f"evidence_at_decision: {snapshot['feedback_at_decision']}"
+                     + ("; the record held outcomes this decision did not read" if snapshot.get("unread_outcomes") else ""))
     lines.append("landing: this commit, recorded separately from the evidence at decision.")
     return lines
 

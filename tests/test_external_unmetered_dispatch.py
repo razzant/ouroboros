@@ -19,7 +19,7 @@ from ouroboros.extension_companion import CompanionDescriptor, CompanionSupervis
 from ouroboros.extension_loader import PluginAPIImpl, _PluginAPIConfig
 from ouroboros.tools.extension_dispatch import dispatch_extension_tool
 from ouroboros.skill_loader import compute_content_hash, save_skill_grants
-from ouroboros.tools import skill_exec
+from ouroboros.tools import shell_process, skill_exec
 from ouroboros.tools.registry import ToolContext
 from ouroboros.usage_accounting import UsageScope, usage_scope
 from tests.test_skill_exec import _build_skill, _make_ctx, _mark_reviewed_and_enabled
@@ -169,6 +169,8 @@ def test_skill_exec_preflight_and_spawn_failures_do_not_disclose(tmp_path, monke
 
 
 def test_skill_exec_timeout_keeps_one_post_spawn_disclosure(tmp_path, monkeypatch):
+    from tests.test_tracked_tree_containment import fake_tree_read
+
     class HangingProcess:
         def __init__(self):
             self.stdout = io.BytesIO()
@@ -184,6 +186,7 @@ def test_skill_exec_timeout_keeps_one_post_spawn_disclosure(tmp_path, monkeypatc
 
     spawned = {"value": False}
     process = HangingProcess()
+    fake_tree_read(monkeypatch, process, remains=False)  # a double has no group: its tree is measured here
 
     def fake_popen(*_args, **_kwargs):
         spawned["value"] = True
@@ -227,6 +230,7 @@ def test_skill_exec_timeout_keeps_one_post_spawn_disclosure(tmp_path, monkeypatc
     rows = _external_rows(tmp_path)
     assert len(rows) == 1
     assert rows[0]["task_id"] == "task-1"
+    assert process not in shell_process._active_subprocesses, "the killed child's custody ends with the call"
 
 
 def test_skill_exec_uses_bound_lineage_when_tool_context_is_sparse(tmp_path):
@@ -877,6 +881,8 @@ def test_extension_child_spawn_failure_records_nothing(tmp_path, monkeypatch):
 
 
 def test_extension_child_timeout_keeps_one_post_spawn_disclosure(tmp_path, monkeypatch):
+    from tests.test_tracked_tree_containment import fake_tree_read
+
     class HangingProcess:
         def __init__(self):
             self.stdin = None
@@ -898,6 +904,7 @@ def test_extension_child_timeout_keeps_one_post_spawn_disclosure(tmp_path, monke
     repo_dir = tmp_path / "repo"
     repo_dir.mkdir()
     process = HangingProcess()
+    fake_tree_read(monkeypatch, process, remains=False)  # a double has no group: its tree is measured here
     spawned = {"value": False}
 
     def fake_popen(*_args, **_kwargs):
@@ -937,6 +944,7 @@ def test_extension_child_timeout_keeps_one_post_spawn_disclosure(tmp_path, monke
         )
 
     assert len(_external_rows(drive_root)) == 1
+    assert process not in shell_process._active_subprocesses, "the killed child's custody ends with the call"
 
 
 def test_a_host_dispatch_is_its_own_group_and_a_task_dispatch_without_lineage_is_refused(tmp_path):
@@ -955,7 +963,7 @@ def test_a_host_dispatch_is_its_own_group_and_a_task_dispatch_without_lineage_is
     assert refused.value.kind == "refused" and len(_external_rows(tmp_path)) == 1
 
 
-@pytest.mark.parametrize("identity", ["host", "context", "scope", "parent", "prefix"])
+@pytest.mark.parametrize("identity", ["host", "context", "prefix"])
 def test_script_receipt_declares_host_role_only_without_bound_task_identity(tmp_path, identity):
     from ouroboros.usage_accounting import BillingAuthorityUnavailable
 

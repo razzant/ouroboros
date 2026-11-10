@@ -14,10 +14,10 @@ and WHERE its producers are, so neither half can drift without a failure.
 from __future__ import annotations
 
 import ast
+import json
 import pathlib
 import types
 
-import pytest
 
 from supervisor import event_taxonomy, events
 from supervisor.event_taxonomy import (
@@ -33,6 +33,7 @@ from supervisor.event_taxonomy import (
 )
 from supervisor.telemetry_events import TELEMETRY_EVENT_HANDLERS
 from tests.test_worker_event_registry import ALLOWLIST, _emitted_types
+from tests._cases import case_folders
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
@@ -165,23 +166,26 @@ def test_the_nested_tier_is_answered_inside_the_log_envelope():
     assert "task_checkpoint" in WORKER_LOG_SINK_SUPPRESSED_TYPES
 
 
-@pytest.mark.parametrize("event_type", sorted(_tier(TELEMETRY_ONLY)))
-def test_a_telemetry_only_event_is_recorded_rather_than_dropped(tmp_path, monkeypatch, event_type):
-    written = []
-    monkeypatch.setattr(
-        "supervisor.telemetry_events.append_jsonl",
-        lambda path, row: written.append((path, row)),
-    )
-    ctx = types.SimpleNamespace(
-        DRIVE_ROOT=tmp_path,
-        append_jsonl=lambda path, row: written.append((path, row)),
-    )
-    events.dispatch_event({"type": event_type, "task_id": "t1"}, ctx)
-    assert len(written) == 1
-    path, row = written[0]
-    assert path == tmp_path / "logs" / "events.jsonl"
-    assert row["type"] == event_type
-    assert row["task_id"] == "t1"
+def test_a_telemetry_only_event_is_recorded_rather_than_dropped(subtests, tmp_path, monkeypatch):
+    case_paths = case_folders(tmp_path)
+    for event_type in sorted(_tier(TELEMETRY_ONLY)):
+        tmp_path = next(case_paths)
+        with subtests.test(event_type=event_type), monkeypatch.context() as monkeypatch:
+            written = []
+            monkeypatch.setattr(
+                "supervisor.telemetry_events.append_jsonl",
+                lambda path, row: written.append((path, row)),
+            )
+            ctx = types.SimpleNamespace(
+                DRIVE_ROOT=tmp_path,
+                append_jsonl=lambda path, row: written.append((path, row)),
+            )
+            events.dispatch_event({"type": event_type, "task_id": "t1"}, ctx)
+            assert len(written) == 1
+            path, row = written[0]
+            assert path == tmp_path / "logs" / "events.jsonl"
+            assert row["type"] == event_type
+            assert row["task_id"] == "t1"
 
 
 def test_an_undeclared_event_is_still_reported_loudly_as_unknown(tmp_path):
@@ -216,3 +220,21 @@ def test_the_taxonomy_is_data_and_dispatches_nothing():
             imported.update(alias.name for alias in node.names)
     assert imported == {"__future__", "dataclasses", "typing"}
     assert event_taxonomy.disposition_for("nope") is None
+
+
+def test_a_crashing_handler_row_names_the_event_it_failed_on_without_its_content(tmp_path, monkeypatch):
+    """The handler-error row is attributable (the event's task ids and key names) and content-free
+    (no field values): the one row of 05–08.11 carried only ``repr(exc)``."""
+    written = []
+    ctx = types.SimpleNamespace(DRIVE_ROOT=tmp_path, append_jsonl=lambda path, row: written.append((path, row)))
+
+    def crash(_evt, _ctx):
+        raise RuntimeError("handler exploded")
+
+    monkeypatch.setitem(events.EVENT_HANDLERS, "probe_crash", crash)
+    events.dispatch_event({"type": "probe_crash", "task_id": "t1", "root_task_id": "r1", "text": "the owner's words"}, ctx)
+    [(path, row)] = written
+    assert path == tmp_path / "logs" / "supervisor.jsonl"
+    assert (row["type"], row["event_type"], row["task_id"], row["root_task_id"]) == ("worker_event_handler_error", "probe_crash", "t1", "r1")
+    assert "handler exploded" in row["error"] and "the owner's words" not in json.dumps(row)
+    assert set(row["event_keys"]) == {"type", "task_id", "root_task_id", "text"}

@@ -286,6 +286,34 @@ def test_deliver_final_message_live_registers_owed_before_enqueue(tmp_path):
     assert deliver_final_message_live(_CaptureQueue(), events2, "fin2", drive_root=tmp_path) is True
     assert td.pending_deliveries(tmp_path) == []
 
+def test_a_dead_bus_proxy_leaves_the_delivery_owed_and_fabricates_no_terminal(tmp_path, monkeypatch):
+    """A lost bus is no delivered terminal: an injected proxy whose manager died answers ``ENQUEUE_UNAVAILABLE``: the
+    owed row stays for the next generation's replay and no terminal is written for the task; without an endpoint the
+    lost server bus (``EventBusLost``) answers the same. A live bus answers ``queued`` (the quiet direction)."""
+    from ouroboros.task_results import load_task_result
+    from supervisor import terminal_delivery as td, workers
+
+    class _DeadProxy:
+        def put(self, _event):
+            raise ConnectionRefusedError("the manager process is gone")
+
+    event = {"type": "send_message", "chat_id": 3, "task_id": "dead1", "text": "the answer", "delivery_id": "d-dead1"}
+    assert td.enqueue_terminal_delivery_outcome(tmp_path, dict(event), event_queue=_DeadProxy()) == td.ENQUEUE_UNAVAILABLE
+    assert [row["delivery_id"] for row in td.pending_deliveries(tmp_path)] == ["d-dead1"]
+    assert load_task_result(tmp_path, "dead1") is None
+
+    def lost(*_a, **_k):
+        raise workers.EventBusLost(-15)
+
+    monkeypatch.setattr(workers, "get_event_q", lost)
+    assert td.enqueue_terminal_delivery_outcome(tmp_path, dict(event)) == td.ENQUEUE_UNAVAILABLE
+    assert [row["delivery_id"] for row in td.pending_deliveries(tmp_path)] == ["d-dead1"]
+
+    live = _CaptureQueue()
+    assert td.enqueue_terminal_delivery_outcome(tmp_path, dict(event), event_queue=live) == td.ENQUEUE_QUEUED
+    assert [sent["delivery_id"] for sent in live.events] == ["d-dead1"]
+
+
 def test_reaper_registers_the_salvage_before_task_done(qenv, monkeypatch):
     """AR2-5a crash order: the owed salvage delivery precedes the task_done
     enqueue, so a crash between them can no longer resolve the card while
@@ -340,8 +368,10 @@ def test_finalize_on_miss_delivers_the_unreviewed_salvage(qenv, monkeypatch):
     assert row["task_id"] == "miss-del"
     assert (row["outcome"], row["settled_status"]) == ("stopped", "cancelled")
 
-@pytest.mark.parametrize("fence", [False, True], ids=["owner_stop", "restore_fence"])
-@pytest.mark.parametrize("lane", ["miss", "kill"])
+@pytest.mark.parametrize(("lane", "fence"), [
+    pytest.param("miss", False, id='miss-owner_stop'),
+    pytest.param("kill", True, id='kill-restore_fence'),
+])
 def test_a_restore_fence_notice_names_why_the_task_stopped(qenv, monkeypatch, fence, lane):
     """19.10.2026: an update's restore cancelled running work and the owner read only "Task …
     was stopped." under his own quoted message, as if someone had pressed Stop. A fence the
@@ -443,7 +473,6 @@ def test_fast_settled_reentry_delivers_idempotently_and_settles_with_the_claim(
     )
 
 
-@pytest.mark.serial
 def test_one_cancel_leaves_exactly_one_salvaged_paragraph_in_the_chat(tmp_path, monkeypatch):
     """Owner item spam L: the stop receipt OWNS the preserved paragraph.
 
@@ -501,7 +530,6 @@ def test_one_cancel_leaves_exactly_one_salvaged_paragraph_in_the_chat(tmp_path, 
     assert row["text"].startswith("Stopped. Root task stopped-one.")
 
 
-@pytest.mark.serial
 def test_cascade_receipt_dedups_the_actual_destination_and_preserves_main(qenv, monkeypatch):
     """A settled root borrows child lineage, then send-time binding wins.
 
@@ -579,7 +607,6 @@ def test_cascade_receipt_dedups_the_actual_destination_and_preserves_main(qenv, 
     assert "Open the Project" not in summary["text"], "the row's Project reference is its door"
 
 
-@pytest.mark.serial
 def test_unsent_receipts_and_new_stop_episodes_do_not_inherit_delivery(tmp_path, monkeypatch):
     """An origin address, failed send and duplicate skip prove no new delivery."""
     from ouroboros.project_dialogue import _completion_excerpt, SALVAGE_EXCERPT_LABEL

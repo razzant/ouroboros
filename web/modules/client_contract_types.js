@@ -29,6 +29,7 @@
  * @property {Object=} client_surface
  * @property {"command"} type
  * @property {string} cmd
+ * @property {Object=} ui_control
  */
 /**
  * Emergency request accepted on this connection; does not prove process exit.
@@ -83,6 +84,7 @@
  * @property {string} note
  * @property {string} settingsInputId
  * @property {string} settingsToggleId
+ * @property {boolean} managed  // a deployment policy fixes it: shown, never edited or written
  */
 
 /**
@@ -155,6 +157,7 @@
  * (a configured secret reads as `secretPlaceholder`), `contract.budgetFields[].stateKey` and `contract.modelSlots[].stateKey`.
  * @typedef {Object} SetupInitialState
  * @property {Object[]} connections Masked OUROBOROS_CONNECTIONS rows, keyed by kind/name.
+ * @property {string} legacyCompatibleBaseUrl Saved OPENAI_BASE_URL, display only: completion never writes it.
  * @property {string} safetyModel
  * @property {string} providerProfile
  * @property {string} reviewEnforcement
@@ -171,6 +174,17 @@
  * @property {Object} modelContextWindows
  * @property {string} processingPreference
  * @property {Object} modelProcessingPreferences
+ * @property {string[]} automaticModels Model-slot stateKeys neither the document nor an operator's variable sets.
+ */
+
+/**
+ * `settings_setup_contract.consciousness_offer`: the Summary's optional, unticked Consciousness row.
+ * @typedef {Object} SetupConsciousnessOffer
+ * @property {boolean} offered  // setup has never completed on this install; a completed setup shows no row
+ * @property {?boolean} enabled  // the control as the state shows it; null = unknown
+ * @property {'observe'|'act'|'full'} autonomy
+ * @property {number} dailyUsd  // rolling-24h recorded-spend allowance; subscription quota is separate
+ * @property {number} maxTasks  // how many of its own tasks may run at once; 0 = it starts none
  */
 
 /**
@@ -186,6 +200,8 @@
  * @property {string} secretPlaceholder  // a prefilled credential that is configured holds this marker
  * @property {SetupContract} contract
  * @property {SetupInitialState} initialState
+ * @property {SetupConsciousnessOffer} consciousnessOffer  // display; a ticked row sends the ordinary Start after the save
+ * @property {?SettingsDeploymentPolicy} deployment  // Settings' `_meta.policy_state.deployment`; null unmanaged
  */
 
 /**
@@ -199,6 +215,66 @@
  * `GET /api/settings`: every effective setting with its (masked) value, plus `_meta`.
  * @typedef {Object} SettingsReadResponse
  * @property {import('./api_types.js').SettingsMeta=} _meta
+ */
+
+/**
+ * `_meta.policy_state`: configured versus effective Access, Supervisor and Review, plus what a managed
+ * deployment's policy file fixes.
+ * @typedef {Object} SettingsPolicyState
+ * @property {{configured:string,effective:string,current_process:string,next_task:string,restart_required:boolean,applies:string}} access
+ * @property {{configured:string,effective:string,current_process:string,next_task:string,pending:boolean,applies:string,active_task_snapshot:boolean}} supervisor
+ * @property {{configured:string,effective:string,current_process:string,next_task:string,pending:boolean,applies:string,active_task_snapshot:boolean}} review
+ * @property {boolean} running_task_snapshot
+ * @property {SettingsDeploymentPolicy=} deployment  // absent outside a managed deployment
+ */
+
+/**
+ * The organization's Safety Supervisor route; no connection value or secret.
+ * @typedef {Object} SettingsDeploymentChecker
+ * @property {string} model
+ * @property {string} account
+ * @property {string[]} fallbacks
+ * @property {string[]} connections  // the connections its routes use, by picker id (`kind` or `kind@name`)
+ * @property {string[]} fields  // the flat settings its built-in routes read now (a compatible lane's pair included)
+ * @property {boolean} local  // a route answers from the local model server
+ */
+
+/**
+ * One extension the policy requires: its pin and the custom settings it fixes, by name only; Settings and Skills
+ * add how the observing process sees it.
+ * @typedef {Object} SettingsDeploymentRequirement
+ * @property {string} name
+ * @property {string} path
+ * @property {string} content_hash
+ * @property {string[]} settings
+ * @property {"met"|"unmet"=} state
+ * @property {string=} reason  // running, missing, collision, elsewhere, changed, review, grants, load_error, ...
+ * @property {string=} detail  // the owner's sentence, with no fixed value in it
+ * @property {string=} observed_hash  // the digest of other bytes found at the path
+ * @property {Object=} process  // role, pid, started (birth token) and observed_at of the observer
+ */
+
+/**
+ * The policy's required extensions and what ordinary work does while one is not running ('' when none is); with an
+ * execution domain, `trusted` lists the only packages whose code the service runs.
+ * @typedef {Object} SettingsDeploymentExtensions
+ * @property {"hold"|"warn"|""} when_unmet
+ * @property {SettingsDeploymentRequirement[]} required
+ * @property {{name: string, path: string, content_hash: string}[]=} trusted
+ */
+
+/**
+ * What a managed deployment's policy file fixes.
+ * @typedef {Object} SettingsDeploymentPolicy
+ * @property {"deployment_policy"} source
+ * @property {number} version
+ * @property {string} digest  // the first 16 hex digits of the file's SHA-256 this server generation read
+ * @property {?string} access_max
+ * @property {?string} min_coverage
+ * @property {?SettingsDeploymentChecker} checker
+ * @property {string[]} allowed_exits  // agent repeat, human release after DANGEROUS, human unchecked release
+ * @property {boolean} organization_rules
+ * @property {?SettingsDeploymentExtensions} extensions
  */
 
 /**
@@ -339,6 +415,7 @@
  * @property {string=} author_label
  * @property {string=} kind
  * @property {string=} snippet
+ * @property {number=} chars  // the quoted text's whole length, present when snippet cuts it
  * @property {string=} ts
  * @property {string=} task_id
  * @property {'work'|'room'|'none'=} target_home  // what decides the quoted row's room; an older reference lacks it
@@ -394,6 +471,7 @@
  * @property {ChatHistoryCard=} card
  * @property {string=} summary_kind
  * @property {Object=} historical_terminal
+ * @property {Object=} current_outcome  // current terminal outcome projection, distinct from historical_terminal
  * @property {Object=} model_waits
  * @property {boolean=} lifecycle_virtual
  * @property {Object=} review_group
@@ -480,7 +558,7 @@
  */
 
 /**
- * Bounds of one history response. `latest_message` (Project rooms) names the latest eligible
+ * Bounds of one history response. `latest_message` (Main and Project rooms) names the latest eligible
  * non-owner standalone message by stored arrival, excluding card content; null means unknown.
  * `out_of_order`: it sorts above earlier arrivals or before the recent read. With a null message,
  * `latest_before` says the bounded search found none at or after that chat offset; older pages
@@ -616,6 +694,7 @@
  * @property {?number} chat_id
  * @property {'own'|'focus'} cause
  * @property {string} place_label
+ * @property {string=} place_id
  * @property {string} conversation
  * @property {?string} started_at
  * @property {?string=} first_reply_at
@@ -660,6 +739,7 @@
 /** @typedef {import('./place_contract_types.js').PlaceStatusPayload} PlaceStatusPayload */
 /** @typedef {import('./place_contract_types.js').PlaceHistoryAttention} PlaceHistoryAttention */
 /** @typedef {import('./place_contract_types.js').PlaceHistoryImport} PlaceHistoryImport */
+/** @typedef {import('./place_contract_types.js').PlaceHistoryReaction} PlaceHistoryReaction */
 /** @typedef {import('./place_contract_types.js').PlaceHistoryFacts} PlaceHistoryFacts */
 /** @typedef {import('./place_contract_types.js').PlaceDisconnectRequest} PlaceDisconnectRequest */
 /** @typedef {import('./place_contract_types.js').PlaceOwnerAccountRequest} PlaceOwnerAccountRequest */
@@ -667,6 +747,12 @@
 /** @typedef {import('./place_contract_types.js').PlaceRoomsCoverage} PlaceRoomsCoverage */
 /** @typedef {import('./place_contract_types.js').PlaceRoomsResponse} PlaceRoomsResponse */
 /** @typedef {import('./place_contract_types.js').PlaceUpdateRequest} PlaceUpdateRequest */
+/** @typedef {import('./place_contract_types.js').PlaceCircleChoice} PlaceCircleChoice */
+/** @typedef {import('./place_contract_types.js').PlaceDescription} PlaceDescription */
+/** @typedef {import('./place_contract_types.js').CircleSummary} CircleSummary */
+/** @typedef {import('./place_contract_types.js').CircleCreateRequest} CircleCreateRequest */
+/** @typedef {import('./place_contract_types.js').CircleUpdateRequest} CircleUpdateRequest */
+/** @typedef {import('./place_contract_types.js').CircleDeleteRequest} CircleDeleteRequest */
 
 /**
  * `POST /api/settings/secret`: exactly one selector, `{key}`, `{mcp_server_id}`, `{mcp_server_id,
@@ -697,7 +783,9 @@
  */
 
 /**
- * `GET /api/projects`: active and deleting projects, at most 200, most recently active first.
+ * `GET /api/projects`: active and deleting projects, at most 200, newest message first (`last_message_at`); `?all=1` lists
+ * every one of them. `?id=<project_id>` answers that project while active or deleting, `?chat_id=<n>` the active
+ * project of that room; either answers none otherwise.
  * @typedef {Object} ProjectListResponse
  * @property {import('./api_types.js').ProjectEntry[]} projects
  */
@@ -911,6 +999,8 @@
  * @property {string[]=} held_siblings
  * @property {string[]=} rebound_held_siblings
  * @property {string=} released_hold
+ * @property {boolean=} held  // a Continue back in its writer wait: it starts by itself once `blockers` settle
+ * @property {Array<Object>=} blockers
  * @property {{rows: Array<{task_id: string, reason: string}>, count: number}=} membership_gaps
  * @property {string=} message
  */
@@ -1211,4 +1301,43 @@
 /**
  * @typedef {Object} OwnerSafetyModelResponse
  * @property {boolean} ok
+ */
+
+/**
+ * Read-time "where did the money go" projection on GET /api/tasks/{task_id}
+ * (ROOT tasks only; computed from the physical-attempt ledger at read time,
+ * never persisted). own + children + unattributed == subtree (a null own counts
+ * as 0 there); children_usd and accounted_upper_bound_usd are null when the
+ * subtree's rows state no amount (subscription work). When the object
+ * is present every key is present; the WHOLE object is absent — never a
+ * confident $0 — when accounting is unavailable or holds no attributable row
+ * for the subtree, and on non-root task details. The root card's Details render
+ * by_purpose ("Spent on") and by_route ("Ran on"), two partitions of one subtree.
+ * @typedef {Object} TaskCostBreakdown
+ * @property {?number} own_usd  null when the root's own rows exist but none has a price
+ * @property {?number} children_usd
+ * @property {number} unattributed_usd
+ * @property {number} delegated_disclosed_usd
+ * @property {?number} accounted_upper_bound_usd
+ *   C2: the explicit subtree total under its honest name — an accounted UPPER
+ *   BOUND (own + children + unattributed), not a settled receipt.
+ * @property {number} subscription_sessions
+ * @property {number} unknown_unmetered
+ * @property {number} non_final_rows
+ * @property {boolean} cost_final
+ * @property {?import('./api_types.js').CostCustody} cost_custody
+ * @property {TaskCostSlice[]} by_purpose
+ * @property {TaskCostSlice[]} by_route
+ * @property {"physical_attempt_ledger"} authority
+ */
+
+/**
+ * One recorded value of an axis inside a root's tree (a usage category or a route): its money as the card's
+ * own carrier and its volume; tokens null when no row of the slice reported them.
+ * @typedef {Object} TaskCostSlice
+ * @property {string} key
+ * @property {?import('./api_types.js').CostPresentation} cost_presentation
+ * @property {number} model_calls
+ * @property {number} sessions
+ * @property {?number} tokens
  */

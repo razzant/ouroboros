@@ -16,7 +16,7 @@ import pytest
 from tests import test_subscription_setup_browser as setup_browser
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 VOICE_URL = "/api/extensions/voice/ui/r1/ui/tts.js"
 BROKEN_URL = "/api/extensions/broken/ui/r1/ui/panel.js"
@@ -176,9 +176,9 @@ def test_plus_lists_skill_sections_then_host_items_and_each_does_its_verb(subscr
     menu.wait_for()
     items = menu.locator("[role=menuitem]").all_inner_texts()
     assert [text.strip() for text in items] == [
-        "Attach file", "Explain simpler", "Add to list", "Add dictation…", "Make a button with Ouroboros…"], items
-    assert menu.locator(".chat-plus-label").all_inner_texts() == ["Templates", "Lists", "Ouroboros"], \
-        "each skill under its label, the host's own items last under Ouroboros's"
+        "Attach file", "Explain simpler", "Add to list", "Add dictation…", "Make a button…"], items
+    assert menu.locator(".chat-plus-label").all_inner_texts() == ["Templates", "Lists", "Add to composer"], \
+        "each skill under its label, the host's own items last under what they do"
     assert menu.locator("[data-plus-item='templates:simpler'] svg").count() == 1, "a skill's glyph from the host set"
     box = menu.bounding_box()
     assert box["x"] >= 0 and box["x"] + box["width"] <= width + 0.5, box

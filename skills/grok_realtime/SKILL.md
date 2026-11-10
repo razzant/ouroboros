@@ -1,7 +1,7 @@
 ---
 name: grok_realtime
 description: xAI Grok Voice provider for Live Conversation.
-version: 0.1.10
+version: 0.1.12
 type: extension
 runtime: python3
 entry: plugin.py
@@ -10,6 +10,8 @@ plugin_api:
   capabilities: [register_realtime_provider]
 permissions: [realtime_provider, net, read_settings]
 env_from_settings: [XAI_API_KEY]
+secret_fields:
+  apiKey: XAI_API_KEY
 ---
 
 Registers `grok_realtime:grok` for ordinary host-selected context and tools.

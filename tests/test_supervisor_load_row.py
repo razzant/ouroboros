@@ -83,6 +83,9 @@ def test_a_slow_handler_appears_with_its_count_and_max_in_the_next_row(monkeypat
     q = row["queue_lock"]
     assert q["count"] == 1 and q["hold_max_sec"] >= 0.02
     assert q["hold_max_site"].startswith("tests/test_supervisor_load_row.py:")
+    [(site, held)] = q["hold_by_site"].items()  # the per-site table rides the same section, one row per site
+    assert site == "tests/test_supervisor_load_row.py in test_a_slow_handler_appears_with_its_count_and_max_in_the_next_row"
+    assert held["count"] == 1 and held["hold_total_sec"] == q["hold_total_sec"] and held["hold_max_sec"] == q["hold_max_sec"]
     assert _rows(tmp_path) == [row]
     assert sl.BOOT.snapshot()["supervisor_load"] == {"ts": row["ts"], "max_event_lag_sec": row["max_event_lag_sec"]}
 
@@ -108,10 +111,13 @@ def test_the_row_reads_the_real_q_and_neither_it_nor_the_drain_waits_for_q(monke
     from supervisor import events as events_mod, queue
 
     sections = sl._load_sections()
-    assert set(sections) == {"queue_lock", "store_locks", "dialogue_retry"}
+    assert set(sections) == {"queue_lock", "store_locks", "dialogue_retry", "conversation_lane", "machine"}
+    assert sections["machine"] is loop_load.machine_load
     from ouroboros import dialogue_retry, store_timing
+    from supervisor import conversation_lane
 
     assert sections["store_locks"] is store_timing.drain and sections["dialogue_retry"] is dialogue_retry.snapshot
+    assert sections["conversation_lane"] is conversation_lane.carrier_vitals  # the lane's carriers and RSS (4A)
     assert {"rows", "bytes", "evicted", "max_rows"} <= set(sections["dialogue_retry"]())
     queue._queue_lock.drain()
     with queue._queue_lock:
@@ -201,3 +207,17 @@ def test_a_failing_row_write_never_stops_the_loop_or_a_delivery(monkeypatch, tmp
     assert attempts == ["supervisor_load", "supervisor_load"], "one row attempt per tick, both ticks finished"
     assert rec.stop.waits == [] and rec.alerts == [], "no tick crashed"
     assert sl.BOOT.snapshot()["supervisor_load"]["ts"], "the health headline does not depend on the journal"
+
+
+def test_the_row_names_the_machines_load_and_cores_and_a_system_without_load_averages_reads_unknown(monkeypatch):
+    """S11 (10.11.2026): a minute that waited reads against the machine: its 1-, 5- and 15-minute load averages and
+    logical cores. Where the OS keeps no load average (Windows) the averages are None, never 0, the cores still
+    answer and nothing raises into the row."""
+    import os
+
+    facts = loop_load.machine_load()
+    assert facts["cpus"] == os.cpu_count() and set(facts) == {"load_avg", "cpus"}
+    if hasattr(os, "getloadavg"):
+        assert len(facts["load_avg"]) == 3 and all(isinstance(value, float) for value in facts["load_avg"])
+    monkeypatch.delattr(os, "getloadavg", raising=False)
+    assert loop_load.machine_load() == {"load_avg": None, "cpus": os.cpu_count()}

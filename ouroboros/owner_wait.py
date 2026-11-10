@@ -31,12 +31,19 @@ from dataclasses import asdict
 from typing import Any
 
 from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_bytes
+from ouroboros.native_task_wait import cursors_json
 from ouroboros.transcript_prefix import OBSERVER_STATE_ATTRS as _SEND_OBSERVER_KEYS  # a resumed task keeps the send observer's state
+from ouroboros.transcript_prefix import sanction_rewrite
 from ouroboros.observability import without_finalization_timing
 from ouroboros.owner_mailbox import OwnerMailboxPeek
 from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, load_task_result
 from ouroboros.utils import utc_now_iso
 from ouroboros.task_store import patch_document
+
+# ``tools.review_result``'s facts of what its delivery step already showed (findings, a changed request asked
+# about, a refusal), each JSON at its owner; carried by value, never decided here.
+_RESULT_REVIEW_SHOWN = ("_result_review_shown", "_result_review_request_asked", "_result_review_refused",
+                        "_result_review_revision_asked")
 
 log = logging.getLogger(__name__)
 
@@ -54,7 +61,7 @@ def classify_wake(entries: list[dict], quiz_id: str) -> str:
     """
     from ouroboros.owner_mailbox import (
         KIND_CARD_INPUT, KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_PAUSE, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER,
-        KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE,
+        KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE, place_arrival_wake,
     )
 
     kinds = [str(row.get("kind") or KIND_OWNER_TEXT) for row in entries]
@@ -75,7 +82,7 @@ def classify_wake(entries: list[dict], quiz_id: str) -> str:
     if KIND_HURRY in kinds:
         return "hurry"
     for kind, row in zip(kinds, entries):
-        if kind == KIND_TASK_MESSAGE:  # the first mail is the one that woke the task
+        if kind == KIND_TASK_MESSAGE and place_arrival_wake(row) is not False:  # the first waking mail
             source = str(row.get("source_task_id") or "").strip()
             return f"mail:{source}" if source else "mail:unknown"
     return "mail:unknown" if entries else "unknown"
@@ -194,6 +201,8 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
             "_nanny_metered_progress", "_nanny_delegate_baseline",
         )},
         "context_model_role": getattr(getattr(ctx, "context_fit_plan", None), "model_role", ""),
+        # The task's own start (mode, cause): a restore's new fit is not it (``context_fit.restored_start``).
+        "context_start": list(getattr(getattr(ctx, "context_fit_plan", None), "start", None) or ("", "")),
         # Exposure facts gate automatic compaction; a resumed task keeps them.
         "context_observations": {key: getattr(ctx, key) for key in (
             "_last_context_observation", "_inspected_context_view", "_pending_compaction",
@@ -207,6 +216,11 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         "held_dependencies_seen": dict(getattr(ctx, "_held_dependencies_seen", None) or {}),
         "held_dependencies_order": dict(getattr(ctx, "_held_dependencies_order", None) or {}),
         "held_dependency_sources": dict(getattr(ctx, "_held_dependency_sources", None) or {}),
+        "wake_sources": dict(getattr(ctx, "_wake_sources", None) or {}),
+        # An armed or woken native task wait owes its result to the next request (``native_task_wait``),
+        # read against the beacon cursors the actor was shown.
+        "pending_task_wait": getattr(ctx, "_pending_task_wait", None) or None,
+        "wait_attention_cursors": cursors_json(getattr(ctx, "_wait_attention_cursors", None)),
         "held_owner_messages": dict(getattr(ctx, "_held_owner_messages", None) or {}),
         "open_relays": dict(getattr(ctx, "_open_relays", None) or {}),
         # Own routing acts still unconfirmed: a resumed turn reports their outcomes too.
@@ -227,13 +241,13 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
             "_delivery_candidate_revision", "_delivery_control_required",
             "_delivery_evidence_revision", "_delivery_evidence_fingerprint",
             "_delivery_effective_criteria", "_delivery_material_tool_indices",
-            "_acceptance_ack_source_sha256", "_completion_request", "_completion_selected",
+            "_acceptance_ack_source_sha256", "_completion_request", "_completion_conflict", "_completion_selected",
             "_completion_observation", "_completion_held_sha256", "_presence_completion",
             "_presence_completion_owner_revision", "_acceptance_observation",
             "_presence_forced_declaration", "_presence_forced_pending", "_presence_completion_accepted",
-            "_presence_selection_seq", "_presence_released",
-            "_task_acceptance_sealed_fence_token", "_task_acceptance_sealed_fence_generation", "_owner_reply_revision",
-            "_owner_message_sent",
+            "_presence_selection_seq", "_presence_released", "_presence_delivered", "_presence_covered",
+            "_swarm_handoff_attempt", "_task_acceptance_sealed_fence_token", "_task_acceptance_sealed_fence_generation",
+            "_owner_reply_revision", "_owner_message_sent",
         ) if getattr(ctx, key, None) is not None},
         # The block keeps its stored name; the task-acceptance flags it once carried are gone
         # (a pre-fold continuation still has them: ``restore_continuation_state`` ignores them).
@@ -245,6 +259,9 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
             # restored copy still has live custody in the resuming process.
             "_left_review_wait": (dict(getattr(ctx, "_left_review_wait", None))
                                   if isinstance(getattr(ctx, "_left_review_wait", None), dict) else None),
+            # What the result review already put before the mind, as its owner keeps it (JSON); a review
+            # still running is read again from its ledger, never carried.
+            **{key: getattr(ctx, key) for key in _RESULT_REVIEW_SHOWN if getattr(ctx, key, None)},
         },
     }
 
@@ -621,6 +638,11 @@ def park_owner_pause_warm(limit_ctx: Any, ctx: Any, *, fence: dict, detached: li
     is cancelled, bought or re-dispatched here. Returns the wake cause.
     """
     callback = getattr(ctx, "owner_wait_callback", None)
+    review = getattr(ctx, "review_wait_callback", None)
+    if not callable(callback) and callable(review):
+        # A moved Presence author parks through its qualified review wait (#2566): its own effects settle, then it
+        # lends the conversation and waits in its carrier's pooled wait; the generic capability stays closed.
+        callback = lambda wait_ctx, checkpoint: review(wait_ctx, checkpoint, limit_ctx.messages)  # noqa: E731
     if not callable(callback):
         raise RuntimeError("owner pause warm park has no worker continuation owner")
     messages, trace = limit_ctx.messages, limit_ctx.llm_trace if isinstance(limit_ctx.llm_trace, dict) else {}
@@ -667,8 +689,15 @@ def consume_warm_resume(ctx: Any) -> bool:
     Any other open fence (a cold root's own consumption released it) needs
     nothing. A fence closed again by a newer Pause returns False: the stack
     parks again. A write failure raises; the caller holds and retries.
+
+    A member that continues reads the stop it inherited from its root again,
+    as its cold restore would (``task_pacing.restore_cost_ceiling``: one read
+    of the root's row): the owner's own Resume of a moved Presence root moved
+    its whole tree off the producer allowance (#2566), whichever path woke
+    this member; its own explicit limit stays as it was.
     """
     from ouroboros.owner_pause import _member_coordinates, fence_closed, launch_lock, read_fence, set_fence_state
+    from ouroboros.task_pacing import CostCeiling, restore_cost_ceiling
 
     root_drive, root_task_id, task_id = _member_coordinates(ctx)
     with launch_lock(root_drive, root_task_id):
@@ -685,14 +714,20 @@ def consume_warm_resume(ctx: Any) -> bool:
                 set_fence_state(root_drive, root_task_id, fence_id=str(fence.get("fence_id") or ""),
                                 state=str(fence.get("state") or ""), expected_state=str(fence.get("state") or ""),
                                 selected_members=selected)
-            return True
-        grant = fence.get("resume_grant") if isinstance(fence.get("resume_grant"), dict) else {}
-        if (grant.get("warm") and task_id == root_task_id and not grant.get("consumed_at")
-                and not grant.get("revoked_at")):
-            set_fence_state(root_drive, root_task_id, fence_id=str(fence.get("fence_id") or ""),
-                            state=str(fence.get("state") or ""), expected_state=str(fence.get("state") or ""),
-                            resume_grant={**grant, **stamp})
-        return True
+        else:
+            grant = fence.get("resume_grant") if isinstance(fence.get("resume_grant"), dict) else {}
+            if (grant.get("warm") and task_id == root_task_id and not grant.get("consumed_at")
+                    and not grant.get("revoked_at")):
+                set_fence_state(root_drive, root_task_id, fence_id=str(fence.get("fence_id") or ""),
+                                state=str(fence.get("state") or ""), expected_state=str(fence.get("state") or ""),
+                                resume_grant={**grant, **stamp})
+                if grant.get("producer_allowance_lifted"):  # the owner's own Resume of a moved Presence turn (#2566)
+                    from ouroboros.presence_carrier import lift_live_allowance
+                    lift_live_allowance(ctx, grant["producer_allowance_lifted"])
+    held = getattr(ctx, "_cost_ceiling", None)
+    if task_id != root_task_id and isinstance(held, CostCeiling):
+        ctx._cost_ceiling = restore_cost_ceiling(ctx, asdict(held))
+    return True
 
 
 def owner_pause_resume_notice(ctx: Any, checkpoint: dict, outcome: str, *, cold: bool = False) -> dict:
@@ -708,7 +743,7 @@ def owner_pause_resume_notice(ctx: Any, checkpoint: dict, outcome: str, *, cold:
     pause = checkpoint.get("owner_pause") if isinstance(checkpoint.get("owner_pause"), dict) else {}
     if cold:
         return {"role": "user", "content": (
-            "[SYSTEM NOTICE]\nThe application stopped while this owner Pause was warm. "
+            "[SYSTEM NOTICE]\nThe application stopped while this Pause was warm. "
             "Detached review operations recorded at the pause: "
             + json.dumps(pause.get("detached_reviews") or [], ensure_ascii=False)
             + ". Their former process-local state is not current liveness or a verdict. "
@@ -730,7 +765,7 @@ def owner_pause_resume_notice(ctx: Any, checkpoint: dict, outcome: str, *, cold:
             "the provider may still have finished and charged them; any late answer was recorded but NOT used "
             "and its tools were not run. " if abandoned else "")
     return {"role": "user", "content": (
-        "[SYSTEM NOTICE]\nThe owner paused this task and has now resumed it. Reviewers you had already "
+        "[SYSTEM NOTICE]\nThis task was paused and has now been resumed. Reviewers you had already "
         f"launched kept running while you were paused:\n{reviews}\nWhat became of the delegated runs this Pause "
         f"stopped or observed (current custody; engine facts are evidence, never a grant):\n{runs}\n"
         "Your review tool returned a pending "
@@ -793,7 +828,7 @@ def direct_owner_wait(ctx: Any, checkpoint: dict) -> str:
         del ctx.pending_events[0]
     wait = set_owner_wait(root, ctx.task_id, {**checkpoint, "state": "waiting", "is_direct_chat": True})
     get_direct_activity_registry().mark_parked(ctx.task_id, wait, drive_root=root)
-    peek = OwnerMailboxPeek()
+    peek = OwnerMailboxPeek(waking_only=True)  # an inline author still hears place arrivals here
     deadline = parse_deadline_ts((checkpoint or {}).get("wait_deadline_at"))  # None = unbounded
     outcome = "unknown"
     warm_pause = checkpoint.get("reason") == REASON_OWNER_PAUSE_WARM
@@ -1102,7 +1137,7 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     """Rebind the saved cognition onto the live loop objects (shared by every
     same-ID continuation). Python handles (browser, executors, services) are
     NOT restored: they died with the previous process and stay invalidated."""
-    from ouroboros.loop_delivery import DeliveryCandidate
+    from ouroboros.loop_delivery import FRESH_ANSWER_CONTROLS, DeliveryCandidate
 
     from ouroboros.model_wait import adopt_handoff_clock, budget_paused_seconds
     from ouroboros.settings_integrity import restore_cognition
@@ -1132,6 +1167,9 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     ctx._held_dependencies_order = dict(state.get("held_dependencies_order") or {})
     # A shortened hold view's exact source stays readable to completion (``model_sleep.credit_hold_source``).
     ctx._held_dependency_sources = dict(state.get("held_dependency_sources") or {})
+    ctx._wake_sources = dict(state.get("wake_sources") or {})  # refs survive; read coverage is process-local
+    ctx._pending_task_wait = dict(state.get("pending_task_wait") or {}) or None  # a legacy state owes none
+    ctx._wait_attention_cursors = cursors_json(state.get("wait_attention_cursors"))
     ctx._owner_directives = state["owner_directives"]
     ctx._held_owner_messages = dict(state.get("held_owner_messages") or {})
     ctx._open_relays = dict(state.get("open_relays") or {})
@@ -1149,11 +1187,14 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     ctx._budget_paused_sec = budget_paused_seconds(adopt_handoff_clock(
         state.get("model_wait") or {}, getattr(ctx, "owner_wait_resume", None)))
     # A pre-fold continuation's ``acceptance`` block also carries the deleted task-acceptance
-    # flags (``_task_acceptance_pending`` and friends); they are not restored.
+    # flags (``_task_acceptance_pending`` and friends); they are not restored. A source older than the
+    # result review's shown facts cannot say what was shown: those findings are shown once more.
     review = {key: value for key, value in state["acceptance"].items()
-              if key in {"_acceptance_pending_review_choice", "_left_review_wait"}}
+              if key in {"_acceptance_pending_review_choice", "_left_review_wait", *_RESULT_REVIEW_SHOWN}}
     for key, value in {**state["route"], **state["delivery"], **review}.items():
         setattr(ctx, key, value)
+    if "_completion_request" in state["delivery"] and "_completion_conflict" not in state["delivery"]:
+        ctx._completion_conflict = None  # saved before this fact rode beside its request: unknown, not "no conflict"
     from ouroboros.route_choice import restored_choice
 
     ctx.route_choice = restored_choice(ctx, state)  # a saved choice, else the legacy classification (D5)
@@ -1163,7 +1204,7 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
         if key != "repair_attempted"}) if candidate else None
     if ctx._delivery_candidate is not None:
         value = ctx._delivery_candidate
-        if value.control_episode_seen or value.finalization_control not in {"candidate", "owner_revision_required"}:
+        if value.control_episode_seen or value.finalization_control not in {"candidate", *FRESH_ANSWER_CONTROLS}:
             ctx._delivery_control_required = True
             value.control_episode_seen = True
 
@@ -1177,8 +1218,10 @@ def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
     from ouroboros.memory_floor import MODES
     from ouroboros.model_slots import task_model_binding
     from ouroboros.continuation_tools import reconcile_restored_tools
+    from ouroboros.context_fit import restored_start
 
     ctx = tools._ctx
+    ctx.context_fit_plan = restored_start(ctx.context_fit_plan, state.get("context_start"))  # before every rebind
     model_wait = getattr(ctx, "model_wait_context", None)
     role, account = task_model_binding(
         {"model_role": state.get("context_model_role"), "task_metadata": ctx.task_metadata},
@@ -1195,6 +1238,9 @@ def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
         start_mode=ran if owner in MODES and ran in MODES[MODES.index(owner):] else None)
     if reconcile_restored_tools(tools, state, messages, mode):
         plan, mode = _rebind_context_fit_plan(plan, tools, messages, **route, start_mode=mode)
+        sanction_rewrite(ctx, "continuation_restored", scope="tools")
+    # This process captured its context again: the restored system row names that, not a route change.
+    sanction_rewrite(ctx, "continuation_restored", scope="system")
     return plan, mode
 
 
@@ -1213,7 +1259,11 @@ def resume_native_loop(tools: Any, state: dict, messages: list, trace: dict,
     if started is not None:
         model_sleep.begin(ctx, started_at=started)
     try:
-        outcome = ctx.owner_wait_callback(ctx, cold_checkpoint)
+        callback, review = getattr(ctx, "owner_wait_callback", None), getattr(ctx, "review_wait_callback", None)
+        if not callable(callback) and not callable(review):
+            raise RuntimeError("required owner wait has no worker continuation owner")
+        # A moved Presence author restores its qualified review or question park through that same seam (#2566).
+        outcome = callback(ctx, cold_checkpoint) if callable(callback) else review(ctx, cold_checkpoint, messages)
     finally:
         if started is not None:
             model_sleep.end(ctx)

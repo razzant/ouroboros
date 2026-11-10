@@ -29,6 +29,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterable, List, Tuple
 
+from ouroboros import work_domain
 from ouroboros.code_intelligence import CodeInventory, _resolve_relative_import
 
 DOMAIN_MANIFEST_RELPATH = "ouroboros/domains.toml"
@@ -72,7 +73,9 @@ class DomainManifest:
 def _read_carrier(repo_root: pathlib.Path, relpath: str) -> str:
     path = pathlib.Path(repo_root) / relpath
     try:
-        return path.read_text(encoding="utf-8")
+        return work_domain.read_text(path)
+    except work_domain.WorkDomainUnsettled:
+        raise
     except OSError as exc:
         raise ValueError(
             f"architecture carrier {relpath} is unreadable under {repo_root} "
@@ -93,6 +96,10 @@ def load_domain_manifest(repo_root: pathlib.Path) -> DomainManifest:
     except Exception as exc:
         raise ValueError(f"{DOMAIN_MANIFEST_RELPATH} does not parse as TOML: {exc}") from exc
     graph = data.get("graph") or {}
+    for path in data.get("modules") or {}:
+        pure = pathlib.PurePosixPath(path)
+        if pure.is_absolute() or ".." in pure.parts or "\\" in path:
+            raise ValueError("domain module paths must stay relative to their repository")
     return DomainManifest(
         domains={str(k): str(v) for k, v in (data.get("domains") or {}).items()},
         modules={str(k): str(v) for k, v in (data.get("modules") or {}).items()},
@@ -204,7 +211,7 @@ def _owner_lookup(
     outlined = {file.path for file in inventory.files
                 if file.disposition == "indexed" and not file.syntax_error}
     unread = tuple(path for path in sorted(manifest.modules)
-                   if path not in outlined and (pathlib.Path(repo_root) / path).is_file())
+                   if path not in outlined and work_domain.is_file(pathlib.Path(repo_root) / path))
     return tuple(_owner(path, "symbol_definition") for path in sorted(owners)), unread
 
 
@@ -290,9 +297,9 @@ def facade_reexports(
     facades: Dict[str, Dict[str, str]] = {}
     for path in sorted(manifest.modules):
         source_path = root / path
-        if not source_path.is_file():
+        if not work_domain.is_file(source_path):
             continue
-        source = source_path.read_text(encoding="utf-8")
+        source = work_domain.read_text(source_path)
         lines = source.splitlines()
         try:
             tree = ast.parse(source, filename=path)
@@ -370,10 +377,10 @@ def facade_consumers(
     rows: List[FacadeConsumer] = []
     for path in sorted(manifest.modules):
         source_path = root / path
-        if path in targets or not source_path.is_file():
+        if path in targets or not work_domain.is_file(source_path):
             continue
         try:
-            tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=path)
+            tree = ast.parse(work_domain.read_text(source_path), filename=path)
         except SyntaxError:
             continue
         for node in ast.walk(tree):

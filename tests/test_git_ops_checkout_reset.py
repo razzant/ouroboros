@@ -19,6 +19,22 @@ import supervisor.git_ops as git_ops
 
 from tests._git_ops_recovery_shared import _git
 
+_REAL_RUN = subprocess.run
+
+
+def _git_only(fake):
+    """``fake`` answers the git commands of this checkout; any other program runs for real.
+
+    A git child the tracked runner started (``git_capture``) is released only once a process-table
+    read proves its tree ended (``shell_process.retire_tracked``). That read is the host's own, never
+    this test's git double: a double that answered it would keep the child named, or raise.
+    """
+    def run(cmd, *args, **kwargs):
+        if list(cmd[:1]) != ["git"]:
+            return _REAL_RUN(cmd, *args, **kwargs)
+        return fake(cmd, *args, **kwargs)
+    return run
+
 
 def test_checkout_and_reset_retries_an_old_index_lock_without_removing_it(monkeypatch, tmp_path):
     """The lock's age proves no owner gone: the retry waits for its holder (here, released
@@ -61,7 +77,7 @@ def test_checkout_and_reset_retries_an_old_index_lock_without_removing_it(monkey
             return subprocess.CompletedProcess(cmd, 0, stdout="abc123\n", stderr="")
         raise AssertionError(cmd)
 
-    monkeypatch.setattr(git_ops.subprocess, "run", fake_run)
+    monkeypatch.setattr(git_ops.subprocess, "run", _git_only(fake_run))
 
     ok, message = git_ops.checkout_and_reset("ouroboros", unsynced_policy="ignore")
 
@@ -108,7 +124,7 @@ def test_checkout_and_reset_continues_when_fetch_fails(monkeypatch, tmp_path, fe
             return subprocess.CompletedProcess(cmd, 0, stdout="def456\n", stderr="")
         raise AssertionError(cmd)
 
-    monkeypatch.setattr(git_ops.subprocess, "run", fake_run)
+    monkeypatch.setattr(git_ops.subprocess, "run", _git_only(fake_run))
 
     ok, message = git_ops.checkout_and_reset("ouroboros", reason="restart", unsynced_policy="ignore")
 
@@ -155,7 +171,7 @@ def test_checkout_and_reset_blocks_when_rescue_snapshot_fails(monkeypatch, tmp_p
             reset_calls.append(cmd)
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(git_ops.subprocess, "run", fake_run)
+    monkeypatch.setattr(git_ops.subprocess, "run", _git_only(fake_run))
 
     ok, message = git_ops.checkout_and_reset(
         "ouroboros",
@@ -204,7 +220,7 @@ def test_checkout_and_reset_blocks_when_untracked_rescue_is_truncated(monkeypatc
             reset_calls.append(cmd)
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(git_ops.subprocess, "run", fake_run)
+    monkeypatch.setattr(git_ops.subprocess, "run", _git_only(fake_run))
 
     ok, message = git_ops.checkout_and_reset(
         "ouroboros",
@@ -430,7 +446,6 @@ def test_checkout_and_reset_blocks_when_status_read_is_unreadable(monkeypatch, t
     assert events[-1]["dirty_count"] == 0
     assert events[-1]["warnings"] == ["status_error:git status exited -9 without stderr"]
 
-@pytest.mark.serial
 def test_checkout_and_reset_blocks_clean_merge_in_linked_worktree(monkeypatch, tmp_path):
     """A linked worktree stores MERGE_HEAD outside its .git pointer file."""
     repo = tmp_path / "repo"
@@ -491,7 +506,7 @@ def test_checkout_and_reset_blocks_on_unreadable_merge_head(monkeypatch, tmp_pat
             return subprocess.CompletedProcess(cmd, 0, stdout="abc123\n", stderr="")
         raise AssertionError(cmd)
 
-    monkeypatch.setattr(git_ops.subprocess, "run", fake_run)
+    monkeypatch.setattr(git_ops.subprocess, "run", _git_only(fake_run))
 
     ok, message = git_ops.checkout_and_reset(
         "ouroboros", reason="restart", unsynced_policy="block",
@@ -531,7 +546,7 @@ def test_checkout_and_reset_blocks_on_merge_in_progress(monkeypatch, tmp_path):
             return subprocess.CompletedProcess(cmd, 0, stdout="abc123\n", stderr="")
         raise AssertionError(cmd)
 
-    monkeypatch.setattr(git_ops.subprocess, "run", fake_run)
+    monkeypatch.setattr(git_ops.subprocess, "run", _git_only(fake_run))
 
     ok, message = git_ops.checkout_and_reset(
         "ouroboros", reason="restart", unsynced_policy="block",

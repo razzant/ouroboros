@@ -2,12 +2,15 @@
 
 Each behaviour is checked in both directions where it can be: the page swaps variants in place and
 keeps the compared element still; measure.js reports each planted defect on `defects.html` and stays
-quiet on `clean.html`; a frozen page renders alone from an empty folder with nothing fetched.
+quiet on `clean.html`; a frozen page renders alone from an empty folder with nothing fetched, and keeps
+a var() shorthand CSSOM cannot serialize by copying its sheet's text, yet names it in `missing` whether
+copied or lost, since equal serialized rules do not prove that text still holds the live value.
 WebKit is the engine of the desktop app's window, Chromium the bundled one; a missing engine skips
 unless OUROBOROS_EXPECT_BROWSER_ENGINES is set.
 """
 from __future__ import annotations
 
+import io
 import os
 import threading
 from contextlib import contextmanager
@@ -19,7 +22,7 @@ import pytest
 
 from tests.test_design_skill_assets import FREEZE, MEASURE, compare_data, fill_compare
 
-pytestmark = [pytest.mark.browser, pytest.mark.serial]
+pytestmark = [pytest.mark.browser]
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "design_skills"
 ENGINES = ["webkit", "chromium"]
 LONG_NOTE = ("Two lines instead of four: who asks and from which project, then the state. The answer field takes "
@@ -59,6 +62,14 @@ def open_page(instance, url, width=900, height=800):
 
 def assert_nothing_fetched(page):
     assert all(url.startswith(("file:", "about:", "data:")) for url in page.requests), page.requests
+
+
+def rgba(locator):
+    """An element's pixels as exact RGBA bytes with their size: any changed pixel differs."""
+    from PIL import Image
+
+    image = Image.open(io.BytesIO(locator.screenshot())).convert("RGBA")
+    return image.size, image.tobytes()
 
 
 def _frame(variant: str, scene: str, spacer: int) -> str:
@@ -220,6 +231,14 @@ def served(folder: Path):
         thread.join(3)
 
 
+# pad.css, the page's <style> and an authored inline style each set a var() shorthand beside one of its longhands (#2576).
+PADDINGS = "['#pad', '#chip', '#inline'].map((selector) => getComputedStyle(document.querySelector(selector)).padding)"
+LIVE_PADDINGS = ["6px 13px 6px 2px", "3px 1px 3px 11px", "5px 5px 5px 1px"]
+LOST = "(a var() shorthand CSSOM cannot serialize)"
+COPIED = "(a var() shorthand CSSOM cannot serialize, copied from its sheet's text: compare it with the live page)"
+CHIP = "padding-top, padding-bottom, padding-left of .chip in inline CSS"   # padding-right overrides the shorthand
+
+
 @pytest.mark.parametrize("engine", ENGINES)
 def test_freeze_output_renders_alone_with_state_kept_and_scripts_gone(engine, tmp_path):
     with served(FIXTURES / "freeze_site") as base, browser(engine) as instance:
@@ -229,8 +248,11 @@ def test_freeze_output_renders_alone_with_state_kept_and_scripts_gone(engine, tm
         live.evaluate("document.getElementById('list').scrollTop = 120")
         live.screenshot()
         box = live.locator("#made").bounding_box()
+        assert live.evaluate(PADDINGS) == LIVE_PADDINGS
+        padded = rgba(live.locator("#pad"))
         frozen = live.evaluate(FREEZE.read_text(encoding="utf-8"))
-        assert frozen["missing"] == []
+        assert set(frozen["missing"]) == {f"padding-top, padding-right, padding-bottom of .pad in {base}pad.css {COPIED}",
+                                          f"{CHIP} {COPIED}"}, "copied, never called current; the inline style is exact"
         assert live.evaluate("document.querySelectorAll('script').length") == 1, "the live page is untouched"
         assert live.evaluate("document.getElementById('list').scrollTop") == 120
 
@@ -252,7 +274,231 @@ def test_freeze_output_renders_alone_with_state_kept_and_scripts_gone(engine, tm
         assert mark != hero and "marks/" not in frozen["html"], "dot.svg is never replaced inside marks/dot.svg"
         frozen_box = page.locator("#made").bounding_box()
         assert abs(frozen_box["x"] - box["x"]) <= 1 and abs(frozen_box["y"] - box["y"]) <= 1
+        assert page.evaluate(PADDINGS) == LIVE_PADDINGS, "a var() shorthand beside its longhand survives"
+        assert "data:image/svg+xml" in page.locator("#pad").evaluate("e => getComputedStyle(e).backgroundImage")
+        assert "pic.svg" not in frozen["html"] and "nowhere.svg" not in frozen["html"]
+        assert rgba(page.locator("#pad")) == padded, "the frozen element is pixel-identical to the live one"
         assert_nothing_fetched(page)
+
+
+def reopen_frame(instance, frozen, folder: Path):
+    """The frame opened the way a frame is delivered: alone, from an empty folder."""
+    folder.mkdir()
+    (folder / "frame.html").write_text(frozen["html"], encoding="utf-8")
+    return open_page(instance, (folder / "frame.html").as_uri(), width=800, height=600)
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_freeze_names_each_var_shorthand_a_changed_or_textless_source_loses(engine, tmp_path):
+    """After insertRule the linked sheet's own text is stale; a constructed sheet and a script-written inline style
+    have none. Rules stay (the inserted one too) and each emptied declaration is named as lost; the unchanged <style>
+    is copied and named as such."""
+    with served(FIXTURES / "freeze_site") as base, browser(engine) as instance:
+        live = open_page(instance, base + "index.html", width=800, height=600)
+        live.wait_for_selector("#made")
+        live.evaluate("""() => {
+            const pad = [...document.styleSheets].find((sheet) => sheet.href?.endsWith('/pad.css'));
+            pad.insertRule('#made { color: rgb(1, 2, 3); }', pad.cssRules.length);
+            const adopted = new CSSStyleSheet();
+            adopted.replaceSync('.chip { --chip-none: ; margin: var(--chip-gap, 4px); margin-left: 0px; }');
+            document.adoptedStyleSheets = [...document.adoptedStyleSheets, adopted];
+            const mark = document.getElementById('mark');
+            mark.style.padding = 'var(--chip-gap, 4px)';
+            mark.style.paddingLeft = '1px';
+        }""")
+        live.screenshot()
+        shape = "[...document.styleSheets, ...document.adoptedStyleSheets].map((sheet) => sheet.cssRules.length)"
+        before = live.evaluate(shape)
+        frozen = live.evaluate(FREEZE.read_text(encoding="utf-8"))
+        assert live.evaluate(shape) == before, "the live sheets are untouched"
+        assert set(frozen["missing"]) == {f"margin-top, margin-right, margin-bottom of .chip in inline CSS {LOST}",
+                                          f"padding-top, padding-right, padding-bottom of .pad in {base}pad.css {LOST}",
+                                          f"padding-top, padding-right, padding-bottom of the inline style of div#mark {LOST}",
+                                          f"{CHIP} {COPIED}"}
+
+        page = reopen_frame(instance, frozen, tmp_path / "frozen")
+        padding = "e => getComputedStyle(e).padding"
+        assert page.locator("#made").evaluate("e => getComputedStyle(e).color") == "rgb(1, 2, 3)", "the CSSOM edit stays"
+        assert page.evaluate(PADDINGS)[1:] == LIVE_PADDINGS[1:], "the copied <style> and the authored inline style hold"
+        assert page.locator("#pad").evaluate(padding) == "0px 0px 0px 2px", "named because really lost"
+        assert page.locator("#mark").evaluate(padding) == "0px 0px 0px 1px", "named because really lost"
+        assert "data:image/svg+xml" in page.locator("#pad").evaluate("e => getComputedStyle(e).backgroundImage")
+        assert_nothing_fetched(page)
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_freeze_copies_a_sheets_own_text_only_when_the_frame_can_carry_it(engine, tmp_path):
+    """An @import in the text (applied or since deleted), a URL only the rules spell as url() and a page in quirks
+    mode keep the rules and name their losses; the sheet behind the @import is copied and nothing is fetched."""
+    lossy = "padding: var(--x, 4px); padding-left: 1px;"
+    site = tmp_path / "site"
+    site.mkdir()
+    for name, text in {
+        "dot.svg": '<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8"/></svg>',
+        "child.css": f"@media (min-width: 1px) {{ .c {{ {lossy} }} }}",
+        "parent.css": f"@import url(child.css);\n.p {{ {lossy} }}",
+        "dropped.css": f"@import url(child.css);\n.d {{ {lossy} }}",
+        "image.css": f'.i {{ {lossy} height: 8px; background-image: image-set("dot.svg" 1x); }}',
+        "index.html": "<!doctype html>" + "".join(f'<link rel="stylesheet" href="{sheet}.css">' for sheet in ("parent", "dropped", "image"))
+                      + "".join(f'<div class="{name}" id="{name}">{name}</div>' for name in "cpdi"),
+        "quirks.html": f'<style>.q {{ {lossy} width: 10; }}</style><div class="q" id="q">q</div>',
+    }.items():
+        (site / name).write_text(text, encoding="utf-8")
+    script = FREEZE.read_text(encoding="utf-8")
+    padding, width = "e => getComputedStyle(e).padding", "e => getComputedStyle(e).width"
+    lost = "padding-top, padding-right, padding-bottom of"
+    with served(site) as base, browser(engine) as instance:
+        live = open_page(instance, base + "index.html", width=800, height=600)
+        live.screenshot()
+        live.evaluate("[...document.styleSheets].find((sheet) => sheet.href.endsWith('/dropped.css')).deleteRule(0)")
+        frozen = live.evaluate(script)
+        assert set(frozen["missing"]) == {f"{lost} .p in {base}parent.css {LOST}", f"{lost} .d in {base}dropped.css {LOST}",
+                                          f"{lost} .i in {base}image.css {LOST}", f"{lost} .c in {base}child.css {COPIED}"}
+        assert "@import" not in frozen["html"]
+        page = reopen_frame(instance, frozen, tmp_path / "frozen")
+        assert page.locator("#c").evaluate(padding) == "4px 4px 4px 1px", "the imported sheet's own text"
+        assert page.locator("#p").evaluate(padding) == "0px 0px 0px 1px", "named because really lost"
+        assert "data:image/svg+xml" in page.locator("#i").evaluate("e => getComputedStyle(e).backgroundImage")
+        assert_nothing_fetched(page)
+
+        live = open_page(instance, base + "quirks.html", width=800, height=600)
+        assert live.evaluate("document.compatMode") == "BackCompat"
+        assert live.locator("#q").evaluate(width) == "10px"
+        frozen = live.evaluate(script)
+        assert frozen["missing"] == [f"{lost} .q in inline CSS {LOST}"]
+        page = reopen_frame(instance, frozen, tmp_path / "frozen-quirks")
+        assert page.evaluate("document.compatMode") == "CSS1Compat"
+        assert page.locator("#q").evaluate(width) == "10px", "what quirks mode read stays in a standards frame"
+        assert_nothing_fetched(page)
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_freeze_names_a_copied_var_shorthand_whether_or_not_its_text_is_current(engine, tmp_path):
+    """Serialized rules omit a var() shorthand's tokens beside its longhand, so they cannot confirm the copied text:
+    after a CSSOM edit swapping only those tokens (in a <style> and in a linked sheet) and a linked file rebuilt in the
+    same shape, `missing` names the same declarations as before, and the frame keeps the text it could read. A var()
+    shorthand CSSOM writes back whole stays exact and unnamed; a page with only such rules freezes clean."""
+    lossy = "padding: var(--first); padding-left: 1px;"
+    whole = ".k { padding: var(--first); } .k2 { padding: var(--first) !important; padding-left: 1px; }"
+
+    def divs(*names):
+        return "".join(f'<div class="{name}" id="{name}">{name}</div>' for name in names)
+
+    site = tmp_path / "site"
+    site.mkdir()
+    for name, text in {
+        "linked.css": f".l {{ {lossy} }}",
+        "rebuilt.css": f".r {{ {lossy} }}",
+        "index.html": '<!doctype html><link rel="stylesheet" href="linked.css"><link rel="stylesheet" href="rebuilt.css">'
+                      f'<style>:root {{ --first: 4px; --second: 19px; }} .s {{ {lossy} }} {whole}</style>'
+                      f'<main id="m">{divs("s", "l", "r", "k", "k2")}</main>',
+        "whole.html": f"<!doctype html><style>:root {{ --first: 4px; }} {whole}</style>{divs('k', 'k2')}",
+    }.items():
+        (site / name).write_text(text, encoding="utf-8")
+    script = FREEZE.read_text(encoding="utf-8")
+    paddings = "[...document.querySelectorAll('div')].map((e) => getComputedStyle(e).padding)"
+    loaded, named = ["4px 4px 4px 1px"] * 3 + ["4px"] * 2, "padding-top, padding-right, padding-bottom of"
+    with served(site) as base, browser(engine) as instance:
+        live = open_page(instance, base + "index.html", width=800, height=600)
+        live.screenshot()
+        assert live.evaluate(paddings) == loaded
+        unchanged = live.evaluate(script)
+        assert set(unchanged["missing"]) == {f"{named} .s in inline CSS {COPIED}", f"{named} .l in {base}linked.css {COPIED}",
+                                             f"{named} .r in {base}rebuilt.css {COPIED}"}
+        page = reopen_frame(instance, unchanged, tmp_path / "unchanged")
+        assert page.evaluate(paddings) == loaded, "nothing changed, so the copied text holds the live value"
+        assert rgba(page.locator("#m")) == rgba(live.locator("#m"))
+        assert_nothing_fetched(page)
+
+        live.evaluate("""() => {
+            const rule = (selector) => [...document.styleSheets].flatMap((sheet) => [...sheet.cssRules])
+                .find((each) => each.selectorText === selector);
+            rule('.s').style.cssText = 'padding: var(--second); padding-left: 1px;';
+            rule('.l').style.setProperty('padding', 'var(--second)');
+            rule('.l').style.setProperty('padding-left', '1px');
+        }""")
+        (site / "rebuilt.css").write_text(f".r {{ {lossy.replace('--first', '--second')} }}", encoding="utf-8")
+        assert live.evaluate(paddings) == ["19px 19px 19px 1px"] * 2 + loaded[2:]
+        changed = live.evaluate(script)
+        assert set(changed["missing"]) == set(unchanged["missing"]), "the page cannot tell the change, so freeze names both"
+        page = reopen_frame(instance, changed, tmp_path / "changed")
+        frame = page.evaluate(paddings)
+        assert frame[:2] == loaded[:2], "the text's tokens, not the edited ones: why each is named"
+        assert frame[2] in (loaded[2], "19px 19px 19px 1px"), "the loaded or the rebuilt file, named either way"
+        assert frame[3:] == loaded[3:], "a var() shorthand CSSOM writes back whole stays exact"
+        assert_nothing_fetched(page)
+
+        live = open_page(instance, base + "whole.html", width=800, height=600)
+        clean = live.evaluate(script)
+        assert clean["missing"] == [], "nothing CSSOM cannot serialize: a clean capture"
+        page = reopen_frame(instance, clean, tmp_path / "whole")
+        assert page.evaluate(paddings) == ["4px", "4px"]
+        assert_nothing_fetched(page)
+
+
+@pytest.mark.parametrize("engine", ENGINES)
+def test_freeze_keeps_stylesheet_text_out_of_html(engine, tmp_path):
+    """CSS text is not HTML: raw fallback tails and literal CSS strings must not become document nodes.
+    Exercise copied linked CSS, dynamic/adopted sheets, and cloned styles without sheets, including in a template;
+    the actual CSS strings remain visible as content."""
+    site = tmp_path / "site"
+    site.mkdir()
+    literal = "</StYle><b id=injected-string>literal</b>"
+    adopted = "</STYLE><b id=injected-adopted>adopted</b>"
+    dynamic = "</style><b id=injected-dynamic>dynamic</b>"
+    css = ('.target { padding: var(--pad, 6px); padding-left: 1px; } '
+           f'.literal::before {{ content: "{literal}"; }}\n'
+           '</style><section id=injected-tail>inert</section>'
+           '<script type="application/json" id="injected-script">{}</script><style>')
+    (site / "linked.css").write_text(css, encoding="utf-8")
+    (site / "index.html").write_text(
+        '<!doctype html><link rel="stylesheet" href="linked.css">'
+        '<div class="target">Target</div><div class="literal"></div>'
+        '<div class="adopted"></div><div class="dynamic"></div>', encoding="utf-8")
+    content = "[...document.querySelectorAll('.literal, .adopted, .dynamic')].map(e => getComputedStyle(e, '::before').content)"
+    with served(site) as base, browser(engine) as instance:
+        live = open_page(instance, base + "index.html", width=800, height=600)
+        live.evaluate("""([adopted, dynamic]) => {
+            const sheet = new CSSStyleSheet();
+            sheet.replaceSync('.adopted::before { content: ' + JSON.stringify(adopted) + '; }');
+            document.adoptedStyleSheets = [sheet];
+            const style = document.createElement('style');
+            style.textContent = '.dynamic::before { content: ' + JSON.stringify(dynamic) + '; }';
+            document.head.append(style);
+            const inactive = document.createElement('style');
+            inactive.type = 'text/plain';
+            inactive.textContent = '</style><b id="injected-inactive">inert</b><style type="text/plain">';
+            document.head.append(inactive);
+            const template = document.createElement('template');
+            template.id = 'kept-template';
+            const nested = document.createElement('style');
+            nested.textContent = '</style></template><b id="injected-template">inert</b><template><style>';
+            template.content.append(nested);
+            document.body.append(template);
+            if (inactive.sheet || nested.sheet) throw new Error('the control must have no stylesheet');
+        }""", [adopted, dynamic])
+        live.screenshot()
+        expected = live.evaluate(content)
+        assert all(value in expected[index] for index, value in enumerate((literal, adopted, dynamic)))
+        assert live.locator('[id^="injected-"]').count() == 0
+        assert live.locator('.target').evaluate("e => getComputedStyle(e).padding") == "6px 6px 6px 1px"
+        frozen = live.evaluate(FREEZE.read_text(encoding="utf-8"))
+        assert any('.target' in item and COPIED in item for item in frozen["missing"])
+        page = reopen_frame(instance, frozen, tmp_path / "frozen")
+        assert page.locator('[id^="injected-"]').count() == 0, "stylesheet text introduced HTML after script removal"
+        assert page.locator('script').count() == 0
+        assert page.locator('#kept-template').count() == 1
+        assert page.evaluate(content) == expected, "escaping the HTML boundary must preserve CSS strings"
+        assert page.locator('.target').evaluate("e => getComputedStyle(e).padding") == "6px 6px 6px 1px"
+        assert_nothing_fetched(page)
+        host = open_page(instance, "about:blank", width=800, height=600)
+        host.evaluate("html => { const frame = document.createElement('iframe'); frame.srcdoc = html; document.body.append(frame); }", frozen["html"])
+        frame = host.frame_locator('iframe')
+        from playwright.sync_api import expect
+        expect(frame.locator('.target')).to_have_text('Target')
+        expect(frame.locator('[id^="injected-"]')).to_have_count(0)
+        expect(frame.locator('script')).to_have_count(0)
+        assert_nothing_fetched(host)
 
 
 @pytest.mark.parametrize("engine", ENGINES)

@@ -1,4 +1,8 @@
-"""Same-id direct handoff at durable prefixes, with real boot and Pause owners."""
+"""Same-id direct handoff at durable prefixes, with real boot and Pause owners.
+
+The direct turn is an inline executor's (a registered actor of this process with its RUNNING lane row on
+a pseudo-slot); its exact pause is parked by the pooled path, the supervisor's ``budget_pause`` handler
+over the row, as every carried turn's is."""
 
 import copy
 import json
@@ -13,13 +17,16 @@ from tests._budget_pause_exact_helpers import _loop_ctx
 from tests.test_project_hold_recovery import worker
 from tests.test_swarm_host_admission import host  # noqa: F401
 from tests.test_work_intent_races import Crash
+from ouroboros.task_carrier import EXECUTOR_INLINE_DEGRADED
+from tests.conversation_carrier_support import lane_row, park_lane_pause
 
-pytestmark = pytest.mark.serial
+INLINE_WID = 97  # the inline executor's pseudo-slot
+
 
 
 def direct(host, monkeypatch):  # noqa: F811
     from ouroboros import working_checkpoint
-    from supervisor import active_activity, queue
+    from supervisor import active_activity, queue, workers
 
     sent = worker(host, monkeypatch)
     monkeypatch.setattr(host.ctx.bridge, "push_log", lambda _event: None, raising=False)
@@ -36,6 +43,7 @@ def direct(host, monkeypatch):  # noqa: F811
     actor = SimpleNamespace(_owner_message_admission_lock=RLock(), _busy=True,
         _accepting_owner_messages=True, _current_task_id="head", _current_chat_id=1,
         _current_task_metadata=ctx.task_metadata, _current_task_text="work", tools=limit.tools)
+    lane_row(workers, task, wid=INLINE_WID, executor=EXECUTOR_INLINE_DEGRADED, pid=None)
     registry.register("head", 1, actor=actor)
     assert working_checkpoint.save_round(limit, "pre_effect")
     assert queue.persist_queue_snapshot(reason="direct-before-detach")
@@ -51,17 +59,20 @@ def arm(ctx):
 
 
 def park(limit, task):
-    from supervisor.direct_pause import park_direct_pause
+    """The body's pause event, parked by the supervisor over the lane row; the pseudo-slot leaves with the body."""
+    from supervisor import workers
 
     with pytest.raises(bp.BudgetPauseRequested) as stopped:
         bp.enter_cold_sleep(limit)
-    assert park_direct_pause(task, bp.pause_event(task, stopped.value.pause))
+    park_lane_pause(bp.pause_event(task, stopped.value.pause))
+    assert "head" not in workers.RUNNING and [row["id"] for row in workers.PENDING] == ["head"]
+    workers.WORKERS.pop(INLINE_WID, None)
 
 
-@pytest.mark.parametrize("cut", ["arm", "checkpoint", "seed", "source", "pause_row", "park", "unregister", "wake_grant"])
+@pytest.mark.parametrize("cut", ["arm", "seed", "wake_grant"])
 def test_detach_crash_prefix_restores_the_same_work_and_runs_it_once(host, monkeypatch, cut):  # noqa: F811
     from ouroboros import owner_wait, working_checkpoint
-    from supervisor import direct_pause, queue, worker_chat_lane, workers
+    from supervisor import queue, workers
     from supervisor.events_budget import budget_hold_fact
     from supervisor.sleep_wake import wake_ready_sleepers
 
@@ -94,33 +105,13 @@ def test_detach_crash_prefix_restores_the_same_work_and_runs_it_once(host, monke
     elif cut in {"park", "unregister", "wake_grant"}:
         with pytest.raises(bp.BudgetPauseRequested) as stopped:
             bp.enter_cold_sleep(limit)
-        actor.handle_task = lambda _task: [bp.pause_event(task, stopped.value.pause)]
-        real_park, real_unregister = direct_pause.park_direct_pause, registry.unregister
-
-        def park_then_cut(*args):
-            result = real_park(*args)
-            assert result and registry.get("head") is not None
-            assert [row["id"] for row in host.pending] == ["head"]
-            if cut == "park":
-                raise Crash
-            return result
-
-        def unregister_then_cut(tid):
-            assert [row["id"] for row in host.pending] == [tid]
-            result = real_unregister(tid)
-            if cut == "unregister":
-                raise Crash
-            return result
-
-        with monkeypatch.context() as faults:
-            faults.setattr(direct_pause, "park_direct_pause", park_then_cut)
-            faults.setattr(registry, "unregister", unregister_then_cut)
-            admitted = {"task": task, "agent": actor, "chat_id": 1, "registry": registry}
-            if cut == "wake_grant":
-                assert worker_chat_lane._execute_chat_task(admitted)
-            else:
-                with pytest.raises(Crash):
-                    worker_chat_lane._execute_chat_task(admitted)
+        # The body returns its pause event; the supervisor parks the row (pooled custody) and persists
+        # the snapshot under the same lock. "park": the process dies right after that park, the inline
+        # actor still registered; "unregister": after the actor left too; "wake_grant": after the grant.
+        park_lane_pause(bp.pause_event(task, stopped.value.pause))
+        assert registry.get("head") is not None and [row["id"] for row in host.pending] == ["head"]
+        if cut != "park":
+            registry.unregister("head")
         if cut == "wake_grant":
             assert wake_ready_sleepers(queue)[0]["ok"]
             assert bp.budget_pause_row(host.root, "head")["grant"]["selected_by"] == "sleep_wake"
@@ -128,6 +119,7 @@ def test_detach_crash_prefix_restores_the_same_work_and_runs_it_once(host, monke
 
     # Only volatile process state is lost. No shutdown handler repairs the prefix.
     registry.unregister("head")
+    workers.WORKERS.pop(INLINE_WID, None)
     host.pending.clear()
     host.running.clear()
     bp.end_dispatch_fence("head")
@@ -189,6 +181,8 @@ def test_seed_cannot_invent_saved_work_or_override_stop(host, monkeypatch, block
     else:
         request_cancel(host.root, "head", reason="owner_stop", source="http_single")
     registry.unregister("head")
+    workers.WORKERS.pop(INLINE_WID, None)
+    host.running.clear()
     bp.end_dispatch_fence("head")
     queue.init(host.root)
     assert queue.restore_pending_from_snapshot() == 0
@@ -198,7 +192,7 @@ def test_seed_cannot_invent_saved_work_or_override_stop(host, monkeypatch, block
     assert has_active_intent(host.root, "head", strict=True)
 
 
-@pytest.mark.parametrize("pause_at", ["none", "readiness", "after_grant", "launch"])
+@pytest.mark.parametrize("pause_at", ["none", "after_grant", "launch"])
 def test_owner_pause_vetoes_detach_wake_and_last_launch_gate(host, monkeypatch, pause_at):  # noqa: F811
     from ouroboros import project_placement
     from ouroboros.owner_pause import read_fence

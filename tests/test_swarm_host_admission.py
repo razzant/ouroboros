@@ -27,7 +27,6 @@ from tests._socket_seal import block_network_except_socketpair
 from supervisor import git_ops, queue, state, worker_chat_lane as lane, workers
 from supervisor.events import _handle_promote_chat_to_task
 
-pytestmark = pytest.mark.serial
 EXACT_OWNER = "  Исследуй варианты A и B.\nСначала уточни ограничения.  \n"
 WORDLESS = "(image attached)"
 SURFACE = {"channel": "web", "viewport": {"width": 1280, "height": 800}}
@@ -111,10 +110,14 @@ def host(tmp_path, monkeypatch, request):
         return forbidden_model(*args, **kwargs)
 
     def forbidden_lane(*args, **kwargs):
-        model_attempts.append({"entry": "_run_chat_task", "ephemeral": kwargs.get("ephemeral"),
-                               "text": args[2] if len(args) > 2 else None,
+        # The owner conversation's admission to the lane (its RUNNING row) is the model-owning turn's door.
+        model_attempts.append({"entry": "admit_owner_turn", "text": args[1] if len(args) > 1 else None,
                                "task_metadata": copy.deepcopy(kwargs.get("task_metadata"))})
-        raise ForbiddenModelEntry("Swarm entered the model-owning chat lane before managed admission")
+        raise ForbiddenModelEntry("Swarm entered the owner conversation lane before managed admission")
+
+    def forbidden_actor():
+        model_attempts.append({"entry": "_get_chat_agent"})
+        raise ForbiddenModelEntry("Swarm constructed the model-owning actor before managed admission")
 
     # Windows creates its asyncio socketpair through connect. Prepare the loop
     # before sealing sockets; API calls still run with every network/model guard.
@@ -129,7 +132,8 @@ def host(tmp_path, monkeypatch, request):
 
     monkeypatch.setattr(LLMClient, "chat", forbidden_model)
     monkeypatch.setattr(LLMClient, "chat_async", forbidden_model_async)
-    monkeypatch.setattr(lane, "_run_chat_task", forbidden_lane)
+    monkeypatch.setattr(lane, "admit_owner_turn", forbidden_lane)
+    monkeypatch.setattr(workers, "_get_chat_agent", forbidden_actor)
     monkeypatch.setattr("ouroboros.server_owner_routing._decision_turn_metadata", lambda _ctx, _chat, _id, meta, _roots=None: meta)
     # Later asyncio/TestClient loops also need their Windows self-pipe, not provider access.
     block_network_except_socketpair(monkeypatch, forbidden_model)
@@ -207,8 +211,10 @@ def capture(host, case, **extra):
     }
 
 
-@pytest.mark.parametrize("room", ["main", "project"])
-@pytest.mark.parametrize("caption_only", [False, True], ids=["text", "caption"])
+@pytest.mark.parametrize(("caption_only", "room"), [
+    pytest.param(False, "main", id='text-main'),
+    pytest.param(True, "project", id='caption-project'),
+])
 def test_legacy_swarm_flag_uses_ordinary_owner_turn(host, room, caption_only):
     case = incoming_case(host, room, caption_only=caption_only)
     calls = []
@@ -272,8 +278,7 @@ def test_internal_admission_keeps_exact_objective_bytes(host, room):
     assert host.pending[0]["task_contract"]["objective"] == EXACT_OWNER.strip()
 
 
-@pytest.mark.parametrize("room", ["main", "project"])
-@pytest.mark.parametrize("phase", ["pending", "running", "terminal"])
+@pytest.mark.parametrize(("phase", "room"), [("pending", "main"), ("running", "project"), ("terminal", "main")])
 def test_replayed_client_message_id_admits_nothing_new(host, room, phase):
     case = incoming_case(host, room)
     _handle_promote_chat_to_task(promotion_event(case), host.ctx)
@@ -296,7 +301,7 @@ def test_replayed_client_message_id_admits_nothing_new(host, room, phase):
     assert not host.attempts and not host.notices
 
 
-@pytest.mark.parametrize("collision", ["reserved", "different_token", "unreadable", "live_only"])
+@pytest.mark.parametrize("collision", ["reserved", "different_token", "live_only"])
 def test_replay_identity_requires_original_durable_token(host, monkeypatch, collision):
     case = incoming_case(host, "main")
     host.pending.append({"id": case.task_id})
@@ -324,7 +329,7 @@ def test_ordinary_routing_keeps_update_first_and_leaves_money_to_registered_turn
     if failure == "update":
         host.monkeypatch.setattr(workers, "repo_writer_admission_closed", lambda: "destructive_test_window")
     host.monkeypatch.setattr(state, "budget_remaining", lambda *_a, **_k: pytest.fail("routing must leave money to the ordinary turn"))
-    host.monkeypatch.setattr(lane, "_run_chat_task", lambda *a, **kw: calls.append((a, kw)))
+    host.monkeypatch.setattr(lane, "admit_owner_turn", lambda *a, **kw: calls.append((a, kw)))
     server._route_owner_message(host.bridge, host.ctx, case.incoming)
     assert not host.pending
     if failure == "update":

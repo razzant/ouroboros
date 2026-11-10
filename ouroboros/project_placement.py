@@ -116,14 +116,17 @@ def readmit_placement(drive_root: Any, task: dict, *, repo_dir: Any, running: An
     from ouroboros.project_admission import project_admission_basis, project_admission_guard
     from ouroboros.project_lease import candidate_is_leasable, cold_project_holders, running_project_ids
     from ouroboros.workspace_admission import validate_workspace_root
+    from supervisor.conversation_lane import resumes_on_lane
 
     binding = pending_placement(drive_root, task)
     if not binding:
         return True
     if not refresh_pending_placement(drive_root, task, binding=binding):
         return False
-    if not candidate_is_leasable(task, running_project_ids(running.values()),
-                                cold_holders=cold_project_holders(pending)):
+    # My human's returned turn holds no room lease, as on its lane (``resumes_on_lane``) and as a fresh turn: neither
+    # the room's running writer nor a cold retained one holds it; pooled work still serializes on both.
+    if not resumes_on_lane(task) and not candidate_is_leasable(
+            task, running_project_ids(running.values()), cold_holders=cold_project_holders(pending)):
         return False
     # Placement changes the room's default, never a separately selected resource: an explicit
     # folder or opt-out, or the candidate of body work. The registry holds that candidate when a
@@ -142,7 +145,9 @@ def readmit_placement(drive_root: Any, task: dict, *, repo_dir: Any, running: An
         if not pinned:
             folder = validate_workspace_root(project.get("working_dir"), system_repo_dir=repo_dir, drive_root=drive_root)
             workspace = {"root": str(folder or ""), "mode": "external" if folder else ""}
-        task.update(project_id=binding["project_id"], chat_id=project.get("chat_id"),
+        # A Presence turn keeps its source conversation's chat id: every room reader resolves its binding first.
+        task.update(project_id=binding["project_id"], chat_id=task.get("chat_id") if metadata.get(
+                        "presence_event_identity") else project.get("chat_id"),
                     workspace_root=workspace["root"], workspace_mode=workspace["mode"],
                     _project_admission=project_admission_basis(binding["project_id"], project, frozen=True),
                     placement_applied_at=binding["bound_at"])

@@ -1,7 +1,7 @@
 ---
 name: gemini_live
 description: Gemini native Live audio and image provider for Live Conversation.
-version: 0.1.14
+version: 0.1.21
 type: extension
 runtime: python3
 entry: plugin.py
@@ -10,6 +10,8 @@ plugin_api:
   capabilities: [register_realtime_provider]
 permissions: [realtime_provider, net, read_settings]
 env_from_settings: [GEMINI_API_KEY]
+secret_fields:
+  apiKey: GEMINI_API_KEY
 ---
 
 Registers `gemini_live:gemini`. It reuses the preserved Gemini Live transport

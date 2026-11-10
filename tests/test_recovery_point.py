@@ -13,6 +13,7 @@ import subprocess
 
 import pytest
 
+from ouroboros.dialogue_store import THREAD_FORMAT
 from supervisor import git_ops, git_ops_reset
 from tests._git_ops_recovery_shared import _git
 from tests.test_git_bootstrap_receipt import bootstrap  # noqa: F401 - the shared real-Git fixture
@@ -24,6 +25,7 @@ STORES = ("ouroboros/store.py", "ouroboros/usage_store.py", "ouroboros/evidence_
 def managed(bootstrap, monkeypatch):  # noqa: F811
     repo, drive, calls = bootstrap
     monkeypatch.setenv("OUROBOROS_MANAGED_BY_LAUNCHER", "1")
+    monkeypatch.setenv("OUROBOROS_MANAGED_REPO_DIR", str(repo))  # what the launcher passes (git_ops.launcher_managed_repo_matches)
     monkeypatch.setattr(git_ops_reset, "_SMOKED", {})  # one process: one generation
     first = _git(repo, "rev-list", "--max-parents=0", "HEAD")
     _git(repo, "branch", "ouroboros-stable", first)
@@ -53,7 +55,7 @@ def test_an_update_being_finalized_counts_though_its_receipt_stays_off(managed):
     assert git_ops.advance_recovery_point(True) == _git(repo, "rev-parse", "HEAD")
 
 
-@pytest.mark.parametrize("case", ["dirty", "other_branch", "unmanaged", "no_smoke_this_process"])
+@pytest.mark.parametrize("case", ["dirty", "other_branch", "no_smoke_this_process"])
 def test_only_a_clean_managed_dev_smoke_moves_it(managed, monkeypatch, case):
     repo, _drive, _calls, first = managed
     if case == "dirty":
@@ -142,18 +144,32 @@ def test_a_recovery_point_that_cannot_read_the_stores_is_never_started(managed, 
     assert _git(repo, "rev-parse", "--abbrev-ref", "HEAD") == "ouroboros"
 
 
-def _store_aware_point(repo):
-    """Move the recovery point to a commit that carries the store modules; dev HEAD and that commit."""
+def _store_aware_point(repo, *, reads_references=True):
+    """Move the recovery point to a commit that carries the store modules (its dialogue store naming the thread
+    format it reads, unless ``reads_references`` is false); dev HEAD and that commit."""
     dev_head = _git(repo, "rev-parse", "HEAD")
     _git(repo, "checkout", "-q", "ouroboros-stable")
     for rel in STORES:
         (repo / rel).parent.mkdir(parents=True, exist_ok=True)
         (repo / rel).write_text("# a store-aware release\n", encoding="utf-8")
+    if reads_references:
+        (repo / "ouroboros" / "dialogue_store.py").write_text(f"THREAD_FORMAT = {THREAD_FORMAT!r}\n", encoding="utf-8")
     _git(repo, "add", "ouroboros")
     _git(repo, "commit", "-qm", "store-aware recovery point")
     stable = _git(repo, "rev-parse", "HEAD")
     _git(repo, "checkout", "-q", "ouroboros")
     return dev_head, stable
+
+
+def test_a_recovery_point_whose_dialogue_store_reads_no_reference_is_never_started(managed, monkeypatch):
+    """Its body would read a thread held by reference as ``{"$shared": …}`` objects: only the switch seam a door's
+    restart runs writes those rows whole first, so the fallback refuses it as it refuses any other need."""
+    repo, _drive, _calls, _first = managed
+    dev_head, stable = _store_aware_point(repo, reads_references=False)
+    _failing_dev_smoke(monkeypatch, repo, dev_head)
+    ok, message = git_ops.safe_restart(reason="bootstrap")
+    assert not ok and message.startswith("recovery_point_predates_stores:") and stable[:12] in message, message
+    assert _git(repo, "rev-parse", "HEAD") == dev_head
 
 
 def test_a_recovery_point_that_reads_the_stores_is_handed_off_and_checked_out_dev_untouched(managed, monkeypatch):

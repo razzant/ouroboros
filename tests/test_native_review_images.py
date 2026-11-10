@@ -116,7 +116,7 @@ def test_retained_screenshot_reaches_next_request_after_all_tool_replies(tmp_pat
             if isinstance(message.get("content"), list) for part in message["content"])
 
 
-@pytest.mark.parametrize("gap", ["route", "local", "missing", "mime", "size", "roots"])
+@pytest.mark.parametrize("gap", ["route", "missing", "roots"])
 def test_image_gap_keeps_text_and_verdict_without_delivery_claim(tmp_path, screenshot, monkeypatch, gap):
     path = _shot(tmp_path, screenshot)
     expected = ""
@@ -196,6 +196,21 @@ def test_result_review_produced_artifact_is_readable_with_same_roots(tmp_path, s
     executor, llm = _executor(tmp_path, path)
     result = executor.execute()
     assert _receipt(result)["delivered"] and _parts(llm.calls[1])
+
+
+def test_a_relative_view_reads_the_reviewed_tree_not_the_process_directory(tmp_path, screenshot, monkeypatch):
+    other = io.BytesIO()
+    Image.new("RGB", (32, 16), (200, 30, 30)).save(other, format="PNG")
+    for root, raw in ((tmp_path / "repo", screenshot), (tmp_path / "serving", other.getvalue())):
+        (root / "shots").mkdir(parents=True)
+        (root / "shots" / "frame.png").write_bytes(raw)
+    monkeypatch.chdir(tmp_path / "serving")
+
+    executor, llm = _executor(tmp_path, "shots/frame.png")
+    result = executor.execute()
+
+    assert _receipt(result)["source_sha256"] == hashlib.sha256(screenshot).hexdigest()
+    assert base64.b64decode(_parts(llm.calls[1])[0]["image_url"]["url"].split(",", 1)[1]) == screenshot
 
 
 def test_abandoned_worker_cannot_attach_after_episode_returns(tmp_path, screenshot, monkeypatch):

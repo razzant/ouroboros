@@ -26,6 +26,7 @@ import sys
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
+from ouroboros.deployment_policy import BODY_STATUS, body_replacement_refusal
 
 
 def _go():
@@ -389,6 +390,8 @@ def _target_lacks_store(sha: str) -> bool:
 
 def checkout_and_reset(branch: str, reason: str = "unspecified",
                        unsynced_policy: str = "ignore") -> Tuple[bool, str]:
+    if refusal := body_replacement_refusal():  # the administrator's tree: no fetch, checkout, reset, clean or record
+        return False, refusal
     receipt = _bootstrap_receipt()
     if reason == "bootstrap" and receipt and receipt.get("branch") == branch:
         if receipt == _bootstrap_snapshot():
@@ -579,28 +582,26 @@ def _dependency_install_plan(repo_dir: pathlib.Path) -> Tuple[List[str], str, pa
 
 def runtime_dependency_command(repo_dir: pathlib.Path) -> Optional[List[str]]:
     """The same install command for a body switch that runs with no launcher; ``None`` where
-    this chokepoint installs nothing (a frozen bundle, an active test boundary)."""
-    if getattr(sys, 'frozen', False) or os.environ.get("OUROBOROS_PYTEST_ACTIVE") == "1":
-        return None
-    return _dependency_install_plan(pathlib.Path(repo_dir))[0]
+    this chokepoint installs nothing (``_installs_nothing``)."""
+    return None if _installs_nothing() else _dependency_install_plan(pathlib.Path(repo_dir))[0]
+
+
+def _installs_nothing() -> str:
+    """Why the one install chokepoint every caller reaches (bootstrap, managed update pre-restart, the reset fallbacks)
+    installs nothing here, else ``""``: a frozen bundle's packages are bundled, a managed deployment's interpreter is
+    its administrator's, and a verification run (tests/conftest.py's marker, re-injected into every scrubbed child
+    environment by ouroboros/test_environment.py) never mutates the interpreter, or fixture venv, it verifies."""
+    if getattr(sys, 'frozen', False):
+        return "frozen:bundled"
+    if body_replacement_refusal():
+        return "managed_by_deployment"
+    return "pytest:suppressed" if os.environ.get("OUROBOROS_PYTEST_ACTIVE") == "1" else ""
 
 
 def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
-    if getattr(sys, 'frozen', False):
-        log.info("Skipping pip install in frozen (PyInstaller) mode — deps are bundled.")
-        return True, "frozen:bundled"
-
-    # The one dependency-install chokepoint every caller reaches — bootstrap,
-    # managed update pre-restart and the reset fallbacks all route here — so the
-    # test boundary belongs on THIS line, not on one caller's local-dev branch.
-    # A verification run must never mutate the interpreter it is verifying (the
-    # operator's, or a fixture's dependency-only venv): the marker is set by
-    # tests/conftest.py and re-injected into every scrubbed child environment
-    # (ouroboros/test_environment.py), so a server started by a test inherits it.
-    # Production sets no such marker and keeps its install policy unchanged.
-    if os.environ.get("OUROBOROS_PYTEST_ACTIVE") == "1":
-        log.info("Skipping dependency sync under an active test boundary (%s).", reason)
-        return True, "pytest:suppressed"
+    if skipped := _installs_nothing():
+        log.info("Dependency sync installs nothing (%s; %s).", skipped, reason)
+        return True, skipped
 
     cmd, source, req_path = _dependency_install_plan(_go().REPO_DIR)
     try:
@@ -613,11 +614,11 @@ def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
         if synced == fingerprint:
             return True, "unchanged:" + source
         from ouroboros.platform_layer import kill_process_tree, subprocess_new_group_kwargs
-        from ouroboros.tools.shell_process import _active_subprocesses, _subprocess_lock, tracked_start
+        from ouroboros.tools.shell_process import contained_popen, retire_tracked, tracked_start
 
         with tracked_start() as publish:
-            proc = publish(subprocess.Popen(
-                cmd, cwd=str(_go().REPO_DIR), **subprocess_new_group_kwargs()
+            proc = publish(contained_popen(
+                subprocess.Popen, cmd, cwd=str(_go().REPO_DIR), **subprocess_new_group_kwargs()
             ))
         try:
             returncode = proc.wait(timeout=120)
@@ -626,8 +627,7 @@ def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
             proc.wait(timeout=10)
             raise
         finally:
-            with _subprocess_lock:
-                _active_subprocesses.discard(proc)
+            retire_tracked(proc)  # a running root, or a dead root's live or unknown tree, stays named
         if returncode != 0:
             raise subprocess.CalledProcessError(returncode, cmd)
         try:
@@ -788,26 +788,29 @@ def safe_restart(
 ) -> Tuple[bool, str]:
     """Checkout dev, sync deps, import-test, then fall back to stable if needed.
 
-    ``OUROBOROS_DISABLE_MANAGED_UPDATES=1`` is the stand lever: it keeps the deps
-    sync and the import test but skips the checkout, so a stand pinned to one sha
-    stays on it. This is the choke point EVERY unrequested tree move goes through
-    (bootstrap, owner restart, agent restart) — the local-dev bootstrap branch in
-    server.py only covered the first of the three. An explicit owner version
-    change (Update / Rollback) calls ``checkout_and_reset`` directly and is
-    deliberately still honoured: that one the operator asked for.
+    ``OUROBOROS_DISABLE_MANAGED_UPDATES=1`` is the stand lever: it keeps the deps sync and the import test but
+    skips the checkout, so a stand pinned to one sha stays on it. A deployment policy keeps only the import test:
+    its program and interpreter are the administrator's, so a failure is told, never repaired with another tree.
+    This is the choke point EVERY unrequested tree move goes through (bootstrap, owner restart, agent restart); an
+    explicit owner version change (Update / Rollback) calls ``checkout_and_reset``, which refuses one managed.
     """
-    if str(os.environ.get("OUROBOROS_DISABLE_MANAGED_UPDATES", "") or "").strip() == "1":
+    managed = body_replacement_refusal()
+    if managed or str(os.environ.get("OUROBOROS_DISABLE_MANAGED_UPDATES", "") or "").strip() == "1":
         _go().append_jsonl(
             _go().current_drive_root() / "logs" / "supervisor.jsonl",
-            {"ts": _go().utc_now_iso(), "type": "managed_checkout_disabled",
+            {"ts": _go().utc_now_iso(), "type": "managed_by_deployment" if managed else "managed_checkout_disabled",
              "reason": reason, "target_branch": _go().BRANCH_DEV},
         )
-        deps_ok, deps_msg = _go().sync_runtime_dependencies(reason=reason)
+        deps_ok, deps_msg = _go().sync_runtime_dependencies(reason=reason)  # managed: installs nothing
         if not deps_ok:
             return False, f"Failed deps with managed checkout disabled: {deps_msg}"
         t = _go().import_test()
         if t["ok"]:
-            return True, "OK: managed checkout disabled — staying on the current checkout"
+            return True, ("OK: the deployed program, unchanged" if managed
+                          else "OK: managed checkout disabled — staying on the current checkout")
+        if managed:  # an older recovery point is not the program this policy was deployed with
+            return False, (f"Import test failed (rc={t.get('returncode', -1)}); no other version or package was "
+                           f"tried. {BODY_STATUS}")
         return False, f"Import test failed with managed checkout disabled (rc={t.get('returncode', -1)})"
 
     ok, err = _checkout_outcome(_go().BRANCH_DEV, reason, unsynced_policy)
@@ -958,7 +961,6 @@ def _bootstrap_snapshot() -> Optional[dict]:
     import smoke; a failed or interrupted smoke certifies no later boot.
     """
     import json
-    from supervisor.update_merge import UPDATE_TX_MARKER_NAME
     from ouroboros.body_adoption import holds_checkout
 
     try:
@@ -972,10 +974,7 @@ def _bootstrap_snapshot() -> Optional[dict]:
             if rc or not path:
                 return None
             git_dir = pathlib.Path(path.strip())
-        if any((git_dir / name).exists() for name in
-               (_go().BOOTSTRAP_PIN_MARKER_NAME, _go().UPDATE_INTENT_MARKER_NAME,
-                UPDATE_TX_MARKER_NAME, "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD",
-                "rebase-apply", "rebase-merge", "sequencer")):
+        if any((git_dir / name).exists() for name in _go()._bootstrap_git_markers()):
             return None
         campaign_path = drive / "state" / "evolution_campaign.json"
         if campaign_path.exists():

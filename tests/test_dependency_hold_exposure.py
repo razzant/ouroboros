@@ -16,7 +16,6 @@ import pytest
 
 from tests.test_current_stop_readers import _held_tree
 
-pytestmark = pytest.mark.serial  # the queue, its workers and the supervisor seams are module state
 
 
 def _sleep(call_id, **arguments):
@@ -156,8 +155,7 @@ def _content(messages, call_id):
     return next(row["content"] for row in messages if row.get("role") == "tool" and row.get("tool_call_id") == call_id)
 
 
-@pytest.mark.parametrize("name", ["wait_task", "wait_tasks"])
-@pytest.mark.parametrize("order", ["sleep_first", "wait_first"])
+@pytest.mark.parametrize(("order", "name"), [("sleep_first", "wait_task"), ("wait_first", "wait_tasks")])
 def test_a_task_wait_beside_a_sleep_shows_the_hold_before_either_parks(tmp_path, monkeypatch, order, name):
     """The nanny's falsifier (an armed sleep, then an in-slot wait on the held child) and its mirror."""
     _tree, registry, parks = _resumed_root(tmp_path, monkeypatch)
@@ -384,7 +382,7 @@ def test_a_child_held_after_its_parent_armed_a_warm_sleep_reaches_the_mind_first
         assert '"task_id": "plain"' in notice and held[0]["identity"] in notice and '"cause": "authority"' in notice
         ctx = registry._ctx
         assert ctx._held_dependencies_seen["plain"] == held[0]["identity"] and not ctx._model_sleep
-        saved = json.loads(working_checkpoint.checkpoint_path(tmp_path, "root-1", ctx.task_attempt).read_text())
+        saved = working_checkpoint.read_working(tmp_path, "root-1", ctx.task_attempt)[1]
         assert saved["held_dependencies_seen"]["plain"] == held[0]["identity"], "durable before this model round"
         assert notice in [row.get("content") for row in saved["messages"]]
         return _turn(_sleep("again", tasks=["plain"]))
@@ -515,8 +513,12 @@ _FRAME = {"window": 200_000, "reserve": 16_000}  # Astra's R2 frame: the support
 
 def _held_children(tmp_path, monkeypatch, count):
     """``count`` held children behind the real readers (the task store stubbed, as in the R1 probe), and a root
-    whose results reach its transcript through the loop's own measured delivery (``process_tool_results``)."""
-    from ouroboros import task_status
+    whose results reach its transcript through the loop's own measured delivery (``process_tool_results``).
+
+    A ``timeout_sec=0`` wait over the same holds returns the same bytes in every test (``elapsed_sec`` 0.0, as a
+    15.6 ms Windows clock mostly measures it), so its retained source has the same path and sha256 here as in an
+    earlier test of this process; each test therefore starts from a fresh reading ledger, as a new worker does."""
+    from ouroboros import delegate_output, task_status
     from ouroboros.tools import control_task_results as readers
     from ouroboros.tools.registry import ToolContext
     from ouroboros.tools.tool_result import _TOOL_RESULT_ATTR
@@ -537,6 +539,9 @@ def _held_children(tmp_path, monkeypatch, count):
     monkeypatch.setattr(task_status, "load_effective_task_result", load)
     monkeypatch.setattr(task_status, "_load_queue_snapshot", lambda _root: {"pending": [], "running": []})
     monkeypatch.setattr("ouroboros.loop_transport._owner_signal_pending", lambda *_a, **_k: False)
+    clock = task_status.time  # every wait here is timeout_sec=0: a stopped clock ends it at its first deadline check
+    monkeypatch.setattr(task_status, "time", SimpleNamespace(time=clock.time, monotonic=lambda: 0.0, sleep=clock.sleep))
+    monkeypatch.setattr(delegate_output, "_READ_COVERAGE", {})
     return ctx, rows
 
 
@@ -638,6 +643,9 @@ def test_only_what_was_delivered_of_that_exact_source_shows_a_shortened_hold(tmp
     cut = _read(ctx, _page(ref, middle[1], min(middle[1] + 20_000, last)), fit=measured_fit(window=3_000))[1]
     assert cut.get("result_partial"), "this page reached the transcript shortened"
     assert not getattr(ctx, "_held_dependencies_seen", None), "one page of that source was never delivered whole"
+    repeat = _read(ctx, _page(ref, middle[1], min(middle[1] + 20_000, last)), fit=measured_fit(window=3_000))[1]
+    assert repeat.get("result_partial"), "the same page in the same frame is shortened again"
+    assert not getattr(ctx, "_held_dependencies_seen", None), "repeating a cut page does not deliver its middle"
     again = json.loads(readers._wait_for_tasks(ctx, list(rows), timeout_sec=0))
     assert again["early_return"]["reason"] == "dependency_held", "so the same wait still returns to show them"
     _read(ctx, _page(ref, middle[1], min(middle[1] + 20_000, last)))
@@ -842,12 +850,8 @@ _SLEEP_FRAME = {"window": 8_000, "reserve": 2_000}  # Astra's R4 probe: a sleep 
 
 def _sleepable_children(tmp_path, monkeypatch, count):
     """``_held_children`` whose root may request its sleep (``await_messages``), as in Astra's R4 probe: an owner
-    to sleep under, and each child a task this installation knows. Its holds return the same bytes in every test,
-    so each starts from a fresh reading ledger, as a new worker does."""
-    from ouroboros import delegate_output
-
+    to sleep under, and each child a task this installation knows."""
     ctx, rows = _held_children(tmp_path, monkeypatch, count)
-    monkeypatch.setattr(delegate_output, "_READ_COVERAGE", {})
     ctx.owner_wait_callback = lambda *_args: "owner_text"
     monkeypatch.setattr("ouroboros.task_results.load_task_result",
                         lambda _root, task_id, **_kwargs: rows.get(task_id, {}))

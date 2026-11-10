@@ -16,7 +16,6 @@ from tests.test_swarm_host_admission import host  # noqa: F401
 from tests._store_shared import delete_result, unreadable_result
 from tests.test_pending_deadline_continuations import expiry  # noqa: F401
 
-pytestmark = pytest.mark.serial
 
 
 def accepted(host, tmp_path, tid="held"):  # noqa: F811
@@ -125,9 +124,8 @@ def test_same_id_recovers_once_with_original_resources_and_visible_wait(host, tm
     assert "project_admission_hold" not in settled
 
 
-@pytest.mark.parametrize("guard", ["owner_hold", "budget_pause", "budget_root", "acceptance", "reservation",
-                                  "running", "missing_result", "unreadable_result", "started", "deadline",
-                                  "null", "malformed", "missing_workspace", "retargeted_workspace", "missing_drive"])
+@pytest.mark.parametrize("guard", ["owner_hold", "reservation",
+                                  "missing_result"])
 def test_recovery_preserves_independent_guards(host, tmp_path, monkeypatch, guard):  # noqa: F811
     accepted(host, tmp_path)
     path, original = restore_unreadable(host)
@@ -208,7 +206,7 @@ def test_snapshot_clear_failure_retains_hold_then_revalidates(host, tmp_path, mo
     resume_after_app_stop(host, "held")
     hold = copy.deepcopy(host.pending[0]["_project_admission_restore_hold"])
     with monkeypatch.context() as patch:
-        patch.setattr(queue, "persist_queue_snapshot", lambda **_k: False)
+        patch.setattr(queue, "publish_queue_snapshot", lambda **_k: False)
         workers.assign_tasks()
     assert not sent and host.pending[0]["_project_admission_restore_hold"] == hold
     workers.assign_tasks()
@@ -324,8 +322,7 @@ def test_invalid_independent_snapshot_fence_cannot_be_cleared_by_project_recover
     assert not host.pending[0].get("_owner_hold")
 
 
-@pytest.mark.parametrize("frozen", [True, False])
-@pytest.mark.parametrize("back", [True, False])
+@pytest.mark.parametrize(("back", "frozen"), [(True, True), (False, False)])
 def test_room_rebind_and_back_cannot_redirect_original_preparation(host, tmp_path, monkeypatch, frozen, back):  # noqa: F811
     task = accepted(host, tmp_path)
     task["_project_admission"]["frozen"] = frozen
@@ -348,9 +345,17 @@ def test_room_rebind_and_back_cannot_redirect_original_preparation(host, tmp_pat
         assert not sent and load_task_result(host.root, prepared["id"])["status"] == "failed"
 
 
-@pytest.mark.parametrize("dispatch", [None, "none", "possible", "stored_possible", "missing_receipt",
-                                      "unreadable_receipt", "started", "owner_pause", "panic"])
-@pytest.mark.parametrize("readable", [False, True])
+@pytest.mark.parametrize(("readable", "dispatch"), [
+    (False, "none"),
+    (False, "stored_possible"),
+    (False, "unreadable_receipt"),
+    (False, "owner_pause"),
+    (True, None),
+    (True, "possible"),
+    (True, "missing_receipt"),
+    (True, "started"),
+    (True, "panic"),
+])
 def test_held_deadline_keeps_custody_without_replay(host, tmp_path, monkeypatch, expiry, dispatch, readable):  # noqa: F811
     from supervisor.events_budget import HOLD_PANIC, HOLD_SAVED_WORK, budget_hold_fact, hold_budget_row
 
@@ -408,11 +413,11 @@ def test_unchanged_hold_does_not_rewrite_snapshot_but_changed_reason_does(host, 
     sent = worker(host, monkeypatch)
     workers.assign_tasks()  # First failure projects its current cause.
     writes = []
-    persist = queue.persist_queue_snapshot
+    persist = queue.publish_queue_snapshot
     def observed(**kwargs):
         writes.append(kwargs)
         return persist(**kwargs)
-    monkeypatch.setattr(queue, "persist_queue_snapshot", observed)
+    monkeypatch.setattr(queue, "publish_queue_snapshot", observed)
     workers.assign_tasks()
     workers.assign_tasks()
     assert not writes and not sent

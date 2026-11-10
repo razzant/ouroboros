@@ -21,7 +21,6 @@ import pytest
 
 from tests._budget_pause_exact_helpers import _fast_hold, _install_queue, _mock_pause_observation
 
-pytestmark = pytest.mark.serial
 
 ROOT, CHILD = "lineage-root", "lineage-child"
 

@@ -11,7 +11,8 @@ What is counted, per tag:
 
 - ``connect`` (and ``connect:<category>``): every ``sqlite3.connect``; each new connection gets
   a trace callback (``statements``, ``begins``, ``commits``, ``writes``) and a progress handler
-  that adds ``VM_STEP`` to ``vm_steps`` every ``VM_STEP`` SQLite virtual-machine instructions;
+  that adds one to ``vm_steps`` on every SQLite virtual-machine instruction (the count is exact;
+  ``VM_STEP`` is only the unit the allowances are written in);
 - ``stat`` / ``scandir`` / ``listdir`` (and per category): ``os.stat``, ``os.lstat``,
   ``os.scandir``, ``os.listdir`` and the ``pathlib`` accessor (Python 3.10 binds those at
   class creation, so they are wrapped separately), ``os.walk`` and ``glob`` included;
@@ -24,7 +25,14 @@ What is counted, per tag:
   exists only on POSIX); ``lock_acquired``: a lock file created by an exclusive ``os.open`` (every
   lock tier takes its name so), one per acquisition however contended, since a refused create raises;
 - ``json_loads`` and ``json_chars``: every ``json.loads``/``json.load`` and its input length;
-  ``rows_decoded``: the stored dialogue row bodies among them (``ROW_DECODER``);
+  ``rows_decoded``: the stored dialogue row bodies among them (``ROW_DECODER``); ``json_dumps`` and
+  ``json_dumps_chars``: every ``json.dumps`` and the text it made;
+- ``fsync`` and ``replace``: ``os.fsync`` and the ``os.replace`` that publishes a file, named by file in ``names``;
+- ``under_q:<kind>``: the same work done while the calling thread holds the supervisor's queue lock (``fsync``,
+  ``replace``, ``json_dumps_chars``): what an owner's control waits behind;
+- per store (``current``, ``dialog``, ``usage``, ``other``, from the connection's file name):
+  ``begins:<store>`` and ``statements:<store>``; ``task_body_reads``: a statement that selects from ``task_bodies``;
+  ``usage_row_reads``: one that selects a usage store's attempts or summaries (its marker and dirty set are no rows);
 - ``rows_crossed``: every row a statement hands to Python as a ``sqlite3.Row`` (the store's row factory),
   one SQLite-to-Python crossing each: a read that captures (``store_capture``) crosses once per statement;
 - ``popen`` (argv[0] names kept in ``popen_names``) and ``thread_start`` (thread names).
@@ -71,6 +79,12 @@ import urllib.parse
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 BOUNDARY: contextvars.ContextVar = contextvars.ContextVar("cost_boundary", default=None)
+# ``vm_steps`` counts every instruction (``_w_connect``). SQLite calls a progress handler of period N at multiples of
+# N of each prepared statement's own instruction count, a phase the statement carries across its executions, the
+# boundaries that run it and Python's statement cache: identical work counted in chunks of 100 read up to 100 apart per
+# statement, and a statement that runs fewer than 100 read 0 (#2691). ``VM_STEP`` stays the unit the allowances are
+# written in, one chunk of that former period (tests/test_cost_contract.py ``vm_allowance``,
+# tests/test_store_capture_readers.py): counting exactly changes none of them.
 VM_STEP = 100
 # Unrelated-history locations of a data root (POSIX separators, relative to the root).
 CATEGORIES = (("archive/", "archive"), ("state/headless_tasks/", "headless"),
@@ -94,13 +108,29 @@ _DOORS = ("tests._cost_meter", "subprocess", "pathlib", "os", "genericpath", "po
 
 def caller(depth: int = 2) -> str:
     """The nearest ``depth`` frames outside the meter and the standard library doors, innermost first."""
-    frame, found = sys._getframe(2), []
+    return _named(sys._getframe(2), depth)[1]
+
+
+def _named(frame: Any, depth: int) -> Tuple[tuple, str]:
+    """(the code of every frame walked out to the ``depth``-th outside the doors, with a trailing None where the stack
+    ended first; their names, innermost first): the names follow from those codes alone."""
+    codes, found = [], []
     while frame is not None and len(found) < depth:
+        codes.append(frame.f_code)
         name = frame.f_globals.get("__name__", "")
         if name not in _DOORS:
             found.append(f"{name}.{frame.f_code.co_name}")
         frame = frame.f_back
-    return " <- ".join(found) or "?"
+    return (*codes, None) if frame is None else tuple(codes), " <- ".join(found) or "?"
+
+
+def _walks(frame: Any, codes: tuple) -> bool:
+    """Whether the stack from ``frame`` runs through exactly ``codes`` (``_named``): then it names the same callers."""
+    for code in codes:
+        if frame is None or frame.f_code is not code:
+            return frame is None and code is None
+        frame = frame.f_back
+    return True
 
 
 def tag_of() -> str:
@@ -110,7 +140,11 @@ def tag_of() -> str:
     tag = getattr(_LOCAL, "tag", None)
     if tag is not None:
         return tag
-    return "bg:" + _DIGITS.sub("", threading.current_thread().name or "thread")
+    name = threading.current_thread().name or "thread"
+    kept = getattr(_LOCAL, "bg_tag", None)  # the name rule once per name: ``_progress`` asks on every instruction
+    if kept is None or kept[0] != name:
+        kept = _LOCAL.bg_tag = (name, "bg:" + _DIGITS.sub("", name))
+    return kept[1]
 
 
 def _forms(path: Any) -> List[str]:
@@ -140,6 +174,7 @@ class CostMeter:
         self.spawned: Dict[str, List[threading.Thread]] = collections.defaultdict(list)
         self._lock = threading.Lock()
         self._fd_category: Dict[int, str] = {}
+        self._fd_names: Dict[int, str] = {}
         self._rebound: List[Tuple[Any, str, Any]] = []
         self._patched: List[Tuple[Any, str, Any]] = []
 
@@ -176,6 +211,12 @@ class CostMeter:
                 return "root"
         return "outside"
 
+    def path_of(self, database: Any) -> str:
+        """A connection's file, a SQLite URI (``store.connect``) included."""
+        text = os.fspath(database)
+        text = text.decode("utf-8", "replace") if isinstance(text, bytes) else text
+        return urllib.parse.unquote(urllib.parse.urlsplit(text).path) if text.startswith("file:") else text
+
     def add(self, kind: str, amount: int = 1, *, path: Any = None, category: Optional[str] = None) -> str:
         tag = tag_of()
         if category is None and path is not None:
@@ -207,21 +248,34 @@ class CostMeter:
                 return text[len(root):]
         return text
 
-    def note_statement(self, statement: str) -> None:
+    def note_statement(self, statement: str, store: str = "other") -> None:
         head = statement.lstrip().split(None, 1)[0].upper() if statement.strip() else ""
         tag = tag_of()
         source = caller(4)
         with self._lock:
             counter = self.counts[tag]
             counter["statements"] += 1
+            counter[f"statements:{store}"] += 1
             self.callers[tag][f"statements <- {source}"] += 1
             if head in ("COMMIT", "END"):
                 counter["commits"] += 1
             elif head == "BEGIN":
                 counter["begins"] += 1
+                counter[f"begins:{store}"] += 1
             elif head in ("INSERT", "UPDATE", "DELETE", "REPLACE"):
                 counter["writes"] += 1
+            elif head == "SELECT" and "task_bodies" in statement:
+                counter["task_body_reads"] += 1
+                self.callers[tag][f"task_body_reads <- {source}"] += 1
+            elif head == "SELECT" and store == "usage" and (" FROM attempts" in statement or " FROM summaries" in statement):
+                counter["usage_row_reads"] += 1
+                self.callers[tag][f"usage_row_reads <- {source}"] += 1
             self.statements[tag][" ".join(statement.split())[:160]] += 1
+
+    def note_queue_held(self, kind: str, amount: int = 1) -> None:
+        """The same work again under ``under_q:<kind>`` when the calling thread holds the queue lock."""
+        if _queue_lock_held():
+            self.add(f"under_q:{kind}", amount)
 
     def note_name(self, kind: str, name: str) -> None:
         tag = tag_of()
@@ -274,6 +328,15 @@ class CostMeter:
 
 
 # ---- wrappers (module level so that aliases can be rebound to one object) ------------
+
+def _queue_lock_held() -> bool:
+    queue = sys.modules.get("supervisor.queue")
+    lock = getattr(queue, "_queue_lock", None)
+    try:
+        return bool(lock is not None and lock._is_owned())
+    except Exception:
+        return False
+
 
 def _w_stat(path, *args, **kwargs):
     meter = _ACTIVE
@@ -346,6 +409,8 @@ def _w_os_open(path, flags, *args, **kwargs):
         category = meter.category(path)
         meter.add("os_open", path=path, category=category)
         meter._fd_category[fd] = category
+        if not isinstance(path, int):
+            meter._fd_names[fd] = os.path.basename(os.fspath(path))
         if category == "lock" and flags & os.O_EXCL:
             meter.add("lock_acquired")
     return fd
@@ -375,7 +440,24 @@ def _w_os_close(fd, *args, **kwargs):
     meter = _ACTIVE
     if meter is not None:
         meter._fd_category.pop(fd, None)
+        meter._fd_names.pop(fd, None)
     return _ORIG["os.close"](fd, *args, **kwargs)
+
+
+def _w_fsync(fd):
+    meter = _ACTIVE
+    if meter is not None:
+        meter.note_name("fsync", meter._fd_names.get(fd, "fd") if isinstance(fd, int) else "file")
+        meter.note_queue_held("fsync")
+    return _ORIG["os.fsync"](fd)
+
+
+def _w_replace(src, dst, *args, **kwargs):
+    meter = _ACTIVE
+    if meter is not None:
+        meter.note_name("replace", os.path.basename(os.fspath(dst)))
+        meter.note_queue_held("replace")
+    return _ORIG["os.replace"](src, dst, *args, **kwargs)
 
 
 class _CountingFileIO(io.FileIO):
@@ -447,6 +529,16 @@ def _w_json_loads(s, *args, **kwargs):
     return _ORIG["json.loads"](s, *args, **kwargs)
 
 
+def _w_json_dumps(obj, *args, **kwargs):
+    text = _ORIG["json.dumps"](obj, *args, **kwargs)
+    meter = _ACTIVE
+    if meter is not None:
+        meter.add("json_dumps")
+        meter.add("json_dumps_chars", len(text))
+        meter.note_queue_held("json_dumps_chars", len(text))
+    return text
+
+
 class _CountedRow(sqlite3.Row):
     """``sqlite3.Row`` while a meter is installed (the store sets ``row_factory = sqlite3.Row`` at each
     connect): each row a statement hands to Python counts ``rows_crossed``."""
@@ -458,16 +550,29 @@ class _CountedRow(sqlite3.Row):
         return super().__new__(cls, cursor, data)
 
 
-def _trace(statement: str) -> None:
+def _trace(store: str, statement: str) -> None:
     meter = _ACTIVE
     if meter is not None:
-        meter.note_statement(statement)
+        meter.note_statement(statement, store)
 
 
 def _progress() -> int:
+    """One SQLite instruction under the tag of the thread running it, credited like ``add`` to the reader stack that
+    steps it. The thread keeps the codes that stack ran through and its names: an instruction whose stack runs through
+    the same codes names the same readers, so only another stack is named again (naming every instruction took about
+    twice the time in a measured scan). No frame is kept: a frame's address can serve another call once it returns, and
+    holding one would hold its locals, an open cursor among them."""
     meter = _ACTIVE
     if meter is not None:
-        meter.add("vm_steps", VM_STEP)
+        frame = sys._getframe(1)
+        reader = getattr(_LOCAL, "vm_reader", None)
+        if reader is None or not _walks(frame, reader[0]):
+            codes, names = _named(frame, 4)
+            reader = _LOCAL.vm_reader = (codes, "vm_steps <- " + names)
+        tag = tag_of()
+        with meter._lock:
+            meter.counts[tag]["vm_steps"] += 1
+            meter.callers[tag][reader[1]] += 1
     return 0
 
 
@@ -477,8 +582,10 @@ def _w_connect(database, *args, **kwargs):
     if meter is not None:
         meter.add("connect", path=database)
         try:
-            conn.set_trace_callback(_trace)
-            conn.set_progress_handler(_progress, VM_STEP)
+            name = os.path.basename(meter.path_of(database))
+            store = name.split(".", 1)[0] if name in ("current.sqlite", "dialog.sqlite", "usage.sqlite") else "other"
+            conn.set_trace_callback(functools.partial(_trace, store))
+            conn.set_progress_handler(_progress, 1)  # every instruction: ``VM_STEP``'s note
         except Exception:
             pass
     return conn
@@ -526,8 +633,10 @@ _MODULE_PATCHES = (
     (os, "scandir", "os.scandir", _w_scandir), (os, "listdir", "os.listdir", _w_listdir),
     (os, "open", "os.open", _w_os_open), (os, "read", "os.read", _w_os_read),
     (os, "pread", "os.pread", _w_os_pread), (os, "close", "os.close", _w_os_close),
+    (os, "fsync", "os.fsync", _w_fsync), (os, "replace", "os.replace", _w_replace),
     (io, "open", "io.open", _w_open), (builtins, "open", "builtins.open", _w_open),
-    (json, "loads", "json.loads", _w_json_loads), (sqlite3, "connect", "sqlite3.connect", _w_connect),
+    (json, "loads", "json.loads", _w_json_loads), (json, "dumps", "json.dumps", _w_json_dumps),
+    (sqlite3, "connect", "sqlite3.connect", _w_connect),
     (sqlite3, "Row", "sqlite3.Row", _CountedRow),
 )
 _ACCESSOR = getattr(pathlib, "_NormalAccessor", None)

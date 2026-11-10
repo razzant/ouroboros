@@ -207,6 +207,11 @@ def ssh(tmp_path, monkeypatch, script):
     return module, api, calls
 
 
+def is_input(command: str) -> bool:
+    """The remote input stage: a cliclick input, or the paste chord program (osascript JavaScript, #2589)."""
+    return "cliclick" in command or "osascript -l JavaScript" in command
+
+
 def mac_over_ssh(front, after=None, input_stderr=""):
     """Scripts: the listing reports ``front``; an activation ends with ``after`` (or ``front``) in front."""
     def script(command):
@@ -214,7 +219,7 @@ def mac_over_ssh(front, after=None, input_stderr=""):
             return 0, LISTING + "__FRONT__" + info_line(front)
         if "System Events" in command:
             return 0, f"__FRONT_BEFORE__{info_line(front)}\n__FRONT_AFTER__{info_line(after or front)}\n"
-        if "cliclick" in command:
+        if is_input(command):
             now = after or front
             stage = "__CLIPBOARD_WRITTEN__\n" if "pbcopy" in command else ""
             return 0, f"__FRONT_BEFORE__{info_line(now)}\n{stage}__FRONT_AFTER__{info_line(now)}\n", input_stderr
@@ -275,7 +280,12 @@ def test_ssh_paste_writes_the_remote_clipboard(tmp_path, monkeypatch):
     module, api, calls = ssh(tmp_path, monkeypatch, mac_over_ssh(SAFARI))
     out = receipt(api.tools["type_text"](text="Привет 'мир'", via="paste"))
     assert out["ok"] is True and out["method"] == "paste" and out["clipboard_replaced"] is True
-    assert "pbcopy" in calls[-1][-1] and "cliclick kd:cmd t:v ku:cmd" in calls[-1][-1]
+    remote = calls[-1][-1]
+    # One ssh call (#2589): front read, the clipboard told the bytes are UTF-8, the stage marker, the local chord
+    # program through the Mac's own osascript (never cliclick t:v), front read.
+    assert (remote.index("__FRONT_BEFORE__") < remote.index("LC_ALL=en_US.UTF-8 pbcopy") < remote.index("echo __CLIPBOARD_WRITTEN__")
+            < remote.index("osascript -l JavaScript -e") < remote.index("__FRONT_AFTER__")), remote
+    assert "cliclick kd:" not in remote and "t:v" not in remote and len([c for c in calls if is_input(c[-1])]) == 1
 
 
 def run_guest_program(command: list[str], *, fronts: list[str], raise_probe: bool = False) -> tuple[list[str], str, int]:
@@ -636,7 +646,7 @@ def test_ssh_a_reply_cut_short_is_an_unknown_outcome_never_a_withheld_input(tmp_
     """ssh exit 255 without the wrapper's completion marker: a refused connection or a channel broken after the input
     may have run; the receipt says unknown, keeps a received clipboard fact, and never says "not sent"."""
     def refused(command):
-        if "cliclick" in command:  # nothing of the wrapper's output came back
+        if is_input(command):  # nothing of the wrapper's output came back
             return 255, "", "ssh: connect to host mac.invalid port 22: Connection refused"
         return mac_over_ssh(SAFARI, KEYNOTE)(command)  # the switch itself succeeds
     module, api, calls = ssh(tmp_path, monkeypatch, refused)
@@ -650,7 +660,7 @@ def test_ssh_a_reply_cut_short_is_an_unknown_outcome_never_a_withheld_input(tmp_
     assert paste["dispatched"] is None and paste["reason"] == "ssh_failed" and "clipboard_replaced" not in paste and paste["method"] == "paste", paste
 
     def timed_out(command):  # the ssh call itself raised: the paste's method is kept, its clipboard stage makes no claim
-        if "cliclick" in command:
+        if is_input(command):
             raise subprocess.TimeoutExpired(command, 60)
         return mac_over_ssh(SAFARI)(command)
     module, api, calls = ssh(tmp_path, monkeypatch, timed_out)
@@ -658,7 +668,7 @@ def test_ssh_a_reply_cut_short_is_an_unknown_outcome_never_a_withheld_input(tmp_
     assert lost["transport_failed"] is True and lost["dispatched"] is None and lost["method"] == "paste" and "clipboard_replaced" not in lost, lost
 
     def cut_short(command):  # the input stage had started, then the channel broke: the clipboard stage is unknown
-        if "cliclick" in command:
+        if is_input(command):
             return 255, f"__FRONT_BEFORE__{info_line(SAFARI)}\n", "client_loop: send disconnect: Broken pipe"
         return mac_over_ssh(SAFARI)(command)
     module, api, calls = ssh(tmp_path, monkeypatch, cut_short)
@@ -667,7 +677,7 @@ def test_ssh_a_reply_cut_short_is_an_unknown_outcome_never_a_withheld_input(tmp_
     assert "started" in out["error"] and "unknown" in out["note"] and "not sent" not in out["note"]
 
     def cut_after_write(command):  # the clipboard marker came back before the break: a fact that is kept
-        if "cliclick" in command:
+        if is_input(command):
             return 255, f"__FRONT_BEFORE__{info_line(SAFARI)}\n__CLIPBOARD_WRITTEN__\n", "client_loop: send disconnect: Broken pipe"
         return mac_over_ssh(SAFARI)(command)
     module, api, calls = ssh(tmp_path, monkeypatch, cut_after_write)

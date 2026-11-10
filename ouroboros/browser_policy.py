@@ -2,6 +2,11 @@
 
 Playwright lifecycle and operations remain in tools.browser. This owner composes
 existing resource authority, concrete origins and live service identity.
+
+Owner control is admitted from the actual HTTP requests a page makes and three-valued
+service identity, not from JavaScript text, per-request LLMs or a second policy engine.
+Every browser surface (the Playwright tools, an MCP server through ``mcp_browser_guard``)
+asks these same predicates instead of carrying a script-text rule of its own.
 """
 from __future__ import annotations
 
@@ -86,6 +91,35 @@ def runtime_service_kind(url: str, ctx: Any = None) -> str:
         return SERVICE_IDENTITY_UNKNOWN
 
 
+def browser_runtime_mode(ctx: Any) -> str:
+    """The effective mode for owner-control browser operations: the boot mode, narrowed by the task's cap."""
+    try:
+        from ouroboros.config import get_runtime_mode
+        from ouroboros.consciousness_authority import effective_runtime_mode
+
+        return effective_runtime_mode(get_runtime_mode(), getattr(ctx, "task_metadata", None))
+    except Exception:
+        return "advanced"
+
+
+def browser_script_block_reason(ctx: Any) -> str:
+    """Whether this actor may run arbitrary page JavaScript (every browser surface asks here).
+
+    The broad restricted-subagent predicate stays the URL/install and secret/control
+    protection, not a JavaScript capability: acting children already have an isolated
+    write surface and may inspect the pages of their own work. Invalid or missing
+    delegated constraints resolve to local-readonly through ``active_tool_profile`` and
+    stay blocked; keeping the restricted predicate in the condition also fails closed
+    for a future restricted profile added without an explicit acting contract.
+    """
+    from ouroboros.tool_access import active_tool_profile
+    from ouroboros.tools.core import is_restricted_subagent_profile
+
+    if is_restricted_subagent_profile(ctx) and active_tool_profile(ctx) != "acting_subagent":
+        return "BROWSER_LOCAL_READONLY_BLOCKED: local-readonly subagents cannot run arbitrary browser JavaScript."
+    return ""
+
+
 def _task_allowed_origins(ctx: Any) -> list[str]:
     metadata = getattr(ctx, "task_metadata", None)
     metadata = metadata if isinstance(metadata, dict) else {}
@@ -148,7 +182,10 @@ def browser_request_block_reason(
 
     The owner POST shapes apply at a proven Ouroboros endpoint and at an expected
     one whose identity is unknown; an unrelated application reusing the pathname
-    on any other port keeps working."""
+    on any other port keeps working. A body-dependent shape whose body existed
+    but is unavailable (``_readable_body``) is not proof of an ordinary request:
+    it matches, so the owner's endpoint refuses what could not be read; a
+    genuinely absent or empty body stays ordinary."""
     reason = browser_url_block_reason(
         request.url, ctx, restricted=restricted, runtime_mode=runtime_mode)
     if reason or restricted:
@@ -219,6 +256,28 @@ def _is_metadata_blocked_browser_url(url: str) -> bool:
 
 
 
+def _readable_body(request: Any) -> Any:
+    """The request's body text (``""`` when it has none), or None when a body exists but is unavailable.
+
+    A genuinely absent or empty body stays an ordinary empty body. A body the transport saw but
+    could not hand over as text is not: ``body_present`` true (the MCP guard's fact), bytes in
+    ``post_data_buffer``, or a raise on reading (Playwright decodes strictly, so a binary body
+    raises). An owner shape judged on such a request would read missing data as ordinary."""
+    try:
+        text = request.post_data
+    except Exception:
+        return None
+    if isinstance(text, str):
+        return text
+    try:
+        buffered = getattr(request, "post_data_buffer", None)
+    except Exception:
+        return None
+    present = getattr(request, "body_present", None) is True or bool(buffered)
+    return "" if text is None and not present else None
+
+
+
 def _is_context_mode_owner_post(request: Any) -> bool:
     try:
         parsed = urlparse(str(request.url or ""))
@@ -266,7 +325,9 @@ def _is_model_wait_owner_post(request: Any) -> bool:
         path = urllib.parse.unquote(urllib.parse.unquote(urlparse(str(request.url)).path)).rstrip("/")
         if str(request.method).upper() != "POST" or path != "/api/decisions":
             return False
-        body = json.loads(request.post_data or "{}")
+        if (text := _readable_body(request)) is None:
+            return True
+        body = json.loads(text or "{}")
         return (isinstance(body, dict) and str(body.get("decision_id", "")).startswith("model_wait:")
                 and body.get("persist_role") is True)
     except (AttributeError, TypeError, ValueError):
@@ -279,7 +340,8 @@ def _is_review_enforcement_post(request: Any) -> bool:
     try:
         return (str(request.method).upper() == "POST"
                 and urlparse(str(request.url)).path.rstrip("/") == "/api/settings"
-                and "OUROBOROS_REVIEW_ENFORCEMENT" in json.loads(request.post_data or "{}"))
+                and ((text := _readable_body(request)) is None
+                     or "OUROBOROS_REVIEW_ENFORCEMENT" in json.loads(text or "{}")))
     except (AttributeError, TypeError, ValueError):
         return False
 
@@ -308,14 +370,16 @@ def _is_owner_settings_self_elevation_post(request: Any) -> bool:
         parsed = urlparse(str(request.url or ""))
         if parsed.path.rstrip("/") != "/api/settings":
             return False
-        body = str(request.post_data or "").lower()
     except Exception:
         return False
+    if (text := _readable_body(request)) is None:
+        return True
+    body = text.lower()
     from ouroboros import config
     from ouroboros.server_runtime import repropose_unedited_slots
     import json
     try:
-        proposed = json.loads(request.post_data or "{}")
+        proposed = json.loads(text or "{}")
         current = config.load_settings()
         candidate = {**current, **proposed}
         document = config._settings_integrity.read_settings_json_verified(config.SETTINGS_PATH) or {}

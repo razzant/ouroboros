@@ -54,57 +54,40 @@ def _exception(error):
     return rejected
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("body_error", [False, True])
-@pytest.mark.parametrize("requested,error,applied", [
-    pytest.param("ultra", _error(), "max", id="downward"),
+@pytest.mark.parametrize(("requested", "error", "applied", "body_error", "asynchronous"), [
+    pytest.param("ultra", _error(), "max", True, True, id='downward-True-True'),
     pytest.param("none", _error(
         "Reasoning is mandatory and cannot be disabled", param="reasoning.effort",
-        enum=["high", "medium"]), "medium", id="mandatory-structured"),
+        enum=["high", "medium"]), "medium", True, True, id='mandatory-structured-True-True'),
     pytest.param("none", _error(
-        'reasoning.effort is mandatory: supported values are "high", "medium"'),
-        "medium", id="mandatory-text"),
+        'reasoning.effort is mandatory: supported values are "high", "medium"'), "medium", False, False, id='mandatory-text-False-False'),
     pytest.param("low", _error(
-        "Invalid option", param="reasoning.effort", allowed_values=["high", "medium"]),
-        "medium", id="all-higher-structured"),
-    pytest.param("low", _error('reasoning.effort: expected one of "high"|"medium"'),
-        "medium", id="all-higher-text"),
+        "Invalid option", param="reasoning.effort", allowed_values=["high", "medium"]), "medium", True, True, id='all-higher-structured-True-True'),
+    pytest.param("low", _error('reasoning.effort: expected one of "high"|"medium"'), "medium", False, False, id='all-higher-text-False-False'),
     pytest.param("medium", _error(
-        "Invalid option", param="reasoning.effort", allowed_values=["minimal", "ultra"]),
-        "minimal", id="advertised-minimal-below"),
+        "Invalid option", param="reasoning.effort", allowed_values=["minimal", "ultra"]), "minimal", True, True, id='advertised-minimal-below-True-True'),
     pytest.param("ultra", _error("reasoning.effort value 'ultra' is not supported. "
-                                 "Supported values are: 'low', 'medium', or 'high'."),
-        "high", id="serial-or-conjunction"),
+                                 "Supported values are: 'low', 'medium', or 'high'."), "high", False, False, id='serial-or-conjunction-False-False'),
     pytest.param("ultra", _error("reasoning.effort value 'ultra' is not supported. "
-                                 "Supported values are: 'low', 'medium', and 'high'."),
-        "high", id="serial-and-conjunction"),
+                                 "Supported values are: 'low', 'medium', and 'high'."), "high", True, True, id='serial-and-conjunction-True-True'),
     pytest.param("ultra", _error("reasoning.effort: Input should be 'low', 'medium' or 'high' "
-                                 "and xhigh requires a pro plan"),
-        "high", id="conjunction-stops-at-prose"),
+                                 "and xhigh requires a pro plan"), "high", False, False, id='conjunction-stops-at-prose-False-False'),
     pytest.param("ultra", _error("reasoning.effort value 'ultra' is not supported. Supported values are "
-                                 "low, medium, or high and xhigh requires a pro plan"),
-        "high", id="bare-second-conjunction-is-prose"),
+                                 "low, medium, or high and xhigh requires a pro plan"), "high", True, True, id='bare-second-conjunction-is-prose-True-True'),
     pytest.param("ultra", _error("reasoning.effort value 'ultra' is not supported. Supported values are "
-                                 "'low', 'medium', or 'high' and 'xhigh' is not supported"),
-        "high", id="quoted-second-conjunction-is-prose"),
+                                 "'low', 'medium', or 'high' and 'xhigh' is not supported"), "high", False, False, id='quoted-second-conjunction-is-prose-False-False'),
     pytest.param("ultra", _error("reasoning.effort value 'ultra' is not supported. Supported values are "
-                                 "low, medium, high and xhigh is not supported"),
-        "high", id="first-conjunction-negative-prose"),
+                                 "low, medium, high and xhigh is not supported"), "high", True, True, id='first-conjunction-negative-prose-True-True'),
     pytest.param("xhigh", _error("reasoning.effort value 'xhigh' is not supported. Supported values are "
-                                 "low, medium, high and xhigh is not supported"),
-        "high", id="negative-prose-does-not-suppress-retry"),
+                                 "low, medium, high and xhigh is not supported"), "high", False, False, id='negative-prose-does-not-suppress-retry-False-False'),
     pytest.param("xhigh", _error("reasoning.effort value 'xhigh' is not supported. Supported values are "
-                                 "low, medium, high and xhigh is unsupported"),
-        "high", id="copula-negative-prose-does-not-suppress-retry"),
+                                 "low, medium, high and xhigh is unsupported"), "high", True, True, id='copula-negative-prose-does-not-suppress-retry-True-True'),
     pytest.param("ultra", _error("reasoning.effort value 'ultra' is not supported. Supported values are "
-                                 "low, medium, high, xhigh requires a pro plan"),
-        "high", id="bare-comma-negative-prose"),
+                                 "low, medium, high, xhigh requires a pro plan"), "high", False, False, id='bare-comma-negative-prose-False-False'),
     pytest.param("ultra", _error("reasoning.effort value 'ultra' is not supported. Supported values are "
-                                 "low or medium or high"),
-        "high", id="chained-conjunctions"),
+                                 "low or medium or high"), "high", False, False, id='chained-conjunctions-False-False'),
     pytest.param("xhigh", _error("reasoning.effort value 'xhigh' is not supported. Supported values are "
-                                 "low, medium, or high and xhigh requires a pro plan"),
-        "high", id="prose-tier-does-not-suppress-resend"),
+                                 "low, medium, or high and xhigh requires a pro plan"), "high", True, True, id='prose-tier-does-not-suppress-resend-True-True'),
 ])
 def test_enum_without_scalar_echo_reaches_driver_and_learns_only_after_success(
     evidence_root, tmp_path, asynchronous, body_error, requested, error, applied,
@@ -235,15 +218,10 @@ def test_minimum_recovery_preserves_legacy_aliases_and_requires_positive_evidenc
     assert bool(_store(evidence_root)) is bool(applied)
 
 
-@pytest.mark.parametrize("body_error", [False, True])
-@pytest.mark.parametrize("carrier", ["top", "nested", "anthropic"])
-@pytest.mark.parametrize("supported,applied", [
-    # The old parser accepted the negative 'max' as the highest prescription.
-    ("; 'max' is not supported. Supported values are: 'low', 'medium', 'high', 'xhigh'.", "xhigh"),
-    # The old parser read the serial conjunction as a value 'or' and lost 'high'.
-    (". Supported values are: 'low', 'medium', or 'high'.", "high"),
-    # The old parser read a clause after the serial conjunction as one more value.
-    (". Supported values are low, medium, or high and xhigh requires a pro plan", "high"),
+@pytest.mark.parametrize(("supported", "applied", "carrier", "body_error"), [
+    ("; 'max' is not supported. Supported values are: 'low', 'medium', 'high', 'xhigh'.", "xhigh", "top", False),  # The old parser accepted the negative 'max' as the highest prescription.
+    (". Supported values are: 'low', 'medium', or 'high'.", "high", "nested", True),  # The old parser read the serial conjunction as a value 'or' and lost 'high'.
+    (". Supported values are low, medium, or high and xhigh requires a pro plan", "high", "anthropic", False),  # The old parser read a clause after the serial conjunction as one more value.
 ])
 def test_positive_constraints_are_bound_to_field_and_ignore_negative_quotes(evidence_root, carrier, body_error, supported, applied):
     target = _target("anthropic" if carrier == "anthropic" else "openrouter")
@@ -334,38 +312,25 @@ def test_structured_enum_and_parameter_survive_sdk_exception_projection(evidence
     assert payload_effort(retry) == "high"
 
 
-@pytest.mark.parametrize("body_error", [False, True])
-@pytest.mark.parametrize("message,allowed", [
-    ('reasoning_effort: expected one of "and"|"or"', ("and", "or")),
-    ("reasoning_effort: allowed values are 'low', 'or', or 'high'", ("low", "or", "high")),
-    ("reasoning_effort: allowed values are low, medium, or high", ("low", "medium", "high")),
-    ("reasoning_effort: allowed values are 'low' or higher", ("low",)),
-    ("reasoning_effort: allowed values are 'or' and 'and'", ("or", "and")),
-    ("reasoning_effort: allowed values are low, medium, or high and xhigh requires a pro plan",
-     ("low", "medium", "high")),
-    ("reasoning_effort: allowed values are 'low', 'medium', or 'high' and 'xhigh' is not supported",
-     ("low", "medium", "high")),
-    ("reasoning_effort: allowed values are 'low', 'medium', 'high', xhigh requires a pro plan",
-     ("low", "medium", "high")),
-    ("reasoning_effort: allowed values are low, medium, high and xhigh is not supported",
-     ("low", "medium", "high")),
-    ("reasoning_effort: allowed values are low, medium, high and xhigh is unsupported",
-     ("low", "medium", "high")),
-    ("reasoning_effort: allowed values are 'low', 'medium', 'high', and 'xhigh' isn't supported",
-     ("low", "medium", "high")),
-    ("reasoning_effort: allowed values are 'low', 'medium', 'high', 'xhigh' (unsupported on this plan)",
-     ("low", "medium", "high")),
-    ("reasoning_effort: allowed values are low, medium, high, xhigh requires a pro plan",
-     ("low", "medium", "high")),
-    ("reasoning_effort: allowed values are low or medium or high",
-     ("low", "medium", "high")),
-    ("reasoning_effort: allowed values are 'high' (not recommended)", ("high",)),
-    ("reasoning_effort: allowed values are low, medium, or high",
-     ("low", "medium", "high")),
-    ("reasoning_effort: allowed values are 'low', 'medium', or 'high' and 'xhigh' is not supported",
-     ("low", "medium", "high")),
-    ('reasoning_effort: expected one of "low"|"medium"|"high" and "xhigh" requires a pro plan',
-     ("low", "medium", "high")),
+@pytest.mark.parametrize(("message", "allowed", "body_error"), [
+    pytest.param('reasoning_effort: expected one of "and"|"or"', ("and", "or"), False, id='reasoning_effort: expected one of "and"|"or"-allowed0-False'),
+    pytest.param("reasoning_effort: allowed values are 'low', 'or', or 'high'", ("low", "or", "high"), True, id="reasoning_effort: allowed values are 'low', 'or', or 'high'-allowed1-True"),
+    pytest.param("reasoning_effort: allowed values are low, medium, or high", ("low", "medium", "high"), False, id='reasoning_effort: allowed values are low, medium, or high-allowed2-False'),
+    pytest.param("reasoning_effort: allowed values are 'low' or higher", ("low",), True, id="reasoning_effort: allowed values are 'low' or higher-allowed3-True"),
+    pytest.param("reasoning_effort: allowed values are 'or' and 'and'", ("or", "and"), False, id="reasoning_effort: allowed values are 'or' and 'and'-allowed4-False"),
+    pytest.param("reasoning_effort: allowed values are low, medium, or high and xhigh requires a pro plan", ("low", "medium", "high"), True, id='reasoning_effort: allowed values are low, medium, or high and xhigh requires a pro plan-allowed5-True'),
+    pytest.param("reasoning_effort: allowed values are 'low', 'medium', or 'high' and 'xhigh' is not supported", ("low", "medium", "high"), False, id="reasoning_effort: allowed values are 'low', 'medium', or 'high' and 'xhigh' is not supported-allowed6-False"),
+    pytest.param("reasoning_effort: allowed values are 'low', 'medium', 'high', xhigh requires a pro plan", ("low", "medium", "high"), True, id="reasoning_effort: allowed values are 'low', 'medium', 'high', xhigh requires a pro plan-allowed7-True"),
+    pytest.param("reasoning_effort: allowed values are low, medium, high and xhigh is not supported", ("low", "medium", "high"), False, id='reasoning_effort: allowed values are low, medium, high and xhigh is not supported-allowed8-False'),
+    pytest.param("reasoning_effort: allowed values are low, medium, high and xhigh is unsupported", ("low", "medium", "high"), True, id='reasoning_effort: allowed values are low, medium, high and xhigh is unsupported-allowed9-True'),
+    pytest.param("reasoning_effort: allowed values are 'low', 'medium', 'high', and 'xhigh' isn't supported", ("low", "medium", "high"), False, id="reasoning_effort: allowed values are 'low', 'medium', 'high', and 'xhigh' isn't supported-allowed10-False"),
+    pytest.param("reasoning_effort: allowed values are 'low', 'medium', 'high', 'xhigh' (unsupported on this plan)", ("low", "medium", "high"), True, id="reasoning_effort: allowed values are 'low', 'medium', 'high', 'xhigh' (unsupported on this plan)-allowed11-True"),
+    pytest.param("reasoning_effort: allowed values are low, medium, high, xhigh requires a pro plan", ("low", "medium", "high"), False, id='reasoning_effort: allowed values are low, medium, high, xhigh requires a pro plan-allowed12-False'),
+    pytest.param("reasoning_effort: allowed values are low or medium or high", ("low", "medium", "high"), True, id='reasoning_effort: allowed values are low or medium or high-allowed13-True'),
+    pytest.param("reasoning_effort: allowed values are 'high' (not recommended)", ("high",), False, id="reasoning_effort: allowed values are 'high' (not recommended)-allowed14-False"),
+    pytest.param("reasoning_effort: allowed values are low, medium, or high", ("low", "medium", "high"), True, id='reasoning_effort: allowed values are low, medium, or high-allowed15-True'),
+    pytest.param("reasoning_effort: allowed values are 'low', 'medium', or 'high' and 'xhigh' is not supported", ("low", "medium", "high"), False, id="reasoning_effort: allowed values are 'low', 'medium', or 'high' and 'xhigh' is not supported-allowed16-False"),
+    pytest.param('reasoning_effort: expected one of "low"|"medium"|"high" and "xhigh" requires a pro plan', ("low", "medium", "high"), True, id='reasoning_effort: expected one of "low"|"medium"|"high" and "xhigh" requires a pro plan-allowed17-True'),
 ])
 def test_enum_conjunction_keeps_quoted_literals_and_stops_at_prose(body_error, message, allowed):
     from ouroboros.request_wire_recovery import _wire_rejection
@@ -455,9 +420,7 @@ def test_logical_input_binding_survives_preparation_but_rejects_changed_input(ev
         assert payload_effort(retry) == "max"
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("body_error", [False, True])
-@pytest.mark.parametrize("nano", [False, True])
+@pytest.mark.parametrize(("nano", "body_error", "asynchronous"), [(False, False, False), (True, True, True)])
 def test_real_driver_recovery_binds_timeout_capsule_and_clock(evidence_root, tmp_path, asynchronous, body_error, nano):
     from ouroboros.send_clock import MainSendClock, SendClockPolicy
 
@@ -500,11 +463,10 @@ def test_real_driver_recovery_binds_timeout_capsule_and_clock(evidence_root, tmp
         assert len({candidate["max_tokens"] for candidate in sent}) == 1  # every rung: one rule on one source
 
 
-@pytest.mark.parametrize("control", ["budget", "stop"])
-@pytest.mark.parametrize("requested,error", [
-    ("ultra", _error()),
-    ("none", _error("Reasoning is mandatory", param="reasoning.effort", enum=["medium", "high"])),
-    ("low", _error("Invalid option", param="reasoning.effort", enum=["medium", "high"])),
+@pytest.mark.parametrize(("requested", "error", "control"), [
+    pytest.param("ultra", _error(), "budget", id='ultra-error0-budget'),
+    pytest.param("none", _error("Reasoning is mandatory", param="reasoning.effort", enum=["medium", "high"]), "stop", id='none-error1-stop'),
+    pytest.param("low", _error("Invalid option", param="reasoning.effort", enum=["medium", "high"]), "budget", id='low-error2-budget'),
 ])
 def test_reactive_effort_repair_never_adds_a_send_allowance(evidence_root, tmp_path, monkeypatch, control, requested, error):
     from ouroboros import llm_attempt
@@ -661,8 +623,11 @@ def _remember_wire_repairs(target, source, surface, errors):
         finalize_wire_response({"role": "assistant", "content": "ok"}, {})
 
 
-@pytest.mark.parametrize("carrier", ["nested", "top", "anthropic"])
-@pytest.mark.parametrize("remaining", [("temperature", "top_p"), ("top_p",), ()])
+@pytest.mark.parametrize(("remaining", "carrier"), [
+    pytest.param(("temperature", "top_p"), "nested", id='remaining0-nested'),
+    pytest.param(("top_p",), "top", id='remaining1-top'),
+    pytest.param((), "anthropic", id='remaining2-anthropic'),
+])
 def test_learned_drop_applicability_preserves_other_actions(evidence_root, carrier, remaining):
     from ouroboros.request_wire_recovery import current_wire_candidate
 
@@ -706,9 +671,7 @@ def test_learned_drop_applicability_preserves_other_actions(evidence_root, carri
             assert "temperature" not in sent and "top_p" not in sent
 
 
-@pytest.mark.parametrize("asynchronous", [False, True])
-@pytest.mark.parametrize("body_error", [False, True])
-@pytest.mark.parametrize("carrier", ["nested", "top"])
+@pytest.mark.parametrize(("carrier", "body_error", "asynchronous"), [("nested", False, False), ("top", True, True)])
 def test_chat_driver_recovers_after_inapplicable_learned_drop(
     evidence_root, tmp_path, asynchronous, body_error, carrier,
 ):

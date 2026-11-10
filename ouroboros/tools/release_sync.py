@@ -3,7 +3,9 @@
 VERSION remains canonical for author-facing carriers; pyproject receives PEP
 440 spelling, uv.lock mirrors the editable root package, web/package.json keeps
 VERSION spelling, README badge and direct-download URLs stay current, and
-changelog prose stays manual.
+changelog prose stays manual. A development marker (BIBLE P9) projects every
+carrier except the direct-download links, which keep naming the last published
+release, and it never has a history row or a tag.
 
 Shared over ``VERSION_CARRIER_SPANS``: ``release_metadata_findings`` (the
 release-findings evaluator for commit admission), ``substitute_carrier_spans``
@@ -34,6 +36,11 @@ PRE_SUFFIX = r'(?:-?(?:rc|alpha|beta|a|b)\.?\d+)?'
 _PRE_SUFFIX = PRE_SUFFIX
 
 _VERSION_RE = re.compile(r'^\d+\.\d+\.\d+' + _PRE_SUFFIX + r'$', re.IGNORECASE)
+_PLAIN_VERSION_RE = re.compile(r'^(\d+)\.(\d+)\.(\d+)$')
+# BIBLE P9's one development-cycle marker: alpha zero of the next release base, written
+# X.Y.Z-alpha.0 and reserved in every spelling the grammar allows (each is the same PEP 440
+# version), so no spelling reaches a tag or dead links. A numbered prerelease starts at alpha 1.
+_DEVELOPMENT_MARKER_RE = re.compile(r'^(\d+)\.(\d+)\.(\d+)-?(?:alpha|a)\.?0+$', re.IGNORECASE)
 
 # README Version History row; pre-release rows bucket under their base version.
 _VERSION_ROW_RE = re.compile(
@@ -108,6 +115,12 @@ DESKTOP_DOWNLOAD_IDS = tuple(
     if proof_id not in ANDROID_DOWNLOAD_IDS
 )
 _PUBLIC_REPOSITORY = "razzant/ouroboros"
+# The release one direct-download link names: a README reference or a projection-owned anchor.
+_DOWNLOAD_LINK_RELEASE_RE = re.compile(
+    r'(?:^\[download-[a-z0-9_-]+\]:\s*|<a\b(?=[^>]*\bdata-release-download=")[^>]*\bhref=")'
+    r'[^\s"]*/releases/download/v([^/\s"]+)/',
+    re.MULTILINE | re.IGNORECASE,
+)
 
 
 def release_asset_name(proof_id: str, version: str) -> str:
@@ -231,6 +244,11 @@ VERSION_CARRIER_SPANS: Tuple[VersionCarrierSpan, ...] = (
 )
 
 CARRIER_SPAN_PATHS = frozenset(span.path for span in VERSION_CARRIER_SPANS)
+# Under a development marker these spans carry the last published release, not VERSION.
+PUBLISHED_RELEASE_SPANS = frozenset(
+    span.carrier_id for span in VERSION_CARRIER_SPANS
+    if span.carrier_id in ("readme_history", "readme_download_refs") or "_download_" in span.carrier_id
+)
 
 
 def carrier_spans_for(path: str) -> Tuple[VersionCarrierSpan, ...]:
@@ -386,6 +404,48 @@ def _download_url_desyncs(
     return desync
 
 
+def published_download_version(*texts: str) -> str:
+    """The one release the direct-download links in *texts* name; '' for none or several."""
+    named = {version for text in texts for version in _DOWNLOAD_LINK_RELEASE_RE.findall(str(text or ""))}
+    return named.pop() if len(named) == 1 else ""
+
+
+def moves_published_release_forward(before_readme: str, after_readme: str) -> bool:
+    """Whether *after_readme*'s links name a newer plain release than *before_readme*'s, with its history row.
+
+    Publication itself is no fact of this tree: the update that claims it stays a reviewed, deliberate act."""
+    before, after = published_download_version(before_readme), published_download_version(after_readme)
+    if not (_PLAIN_VERSION_RE.match(before) and _PLAIN_VERSION_RE.match(after)):
+        return False
+    return (tuple(map(int, after.split("."))) > tuple(map(int, before.split(".")))
+            and bool(re.search(r'^\|\s*' + re.escape(after) + r'\s*\|', after_readme, re.MULTILINE)))
+
+
+def _marker_download_desyncs(
+    version: str,
+    *,
+    readme_text: str = "",
+    site_install_text: str = "",
+    docs_install_text: str = "",
+    detailed: bool = False,
+) -> List[str]:
+    """A marker builds no installers, so its links keep one published plain release below it."""
+    texts = (readme_text, site_install_text, docs_install_text)
+    if not any("[download-" in text or 'data-release-download="' in text for text in texts):
+        return []
+    published = published_download_version(*texts)
+    if _PLAIN_VERSION_RE.match(published) and not next_cycle_problem(published, version):
+        return _download_url_desyncs(
+            published,
+            readme_text=readme_text,
+            site_install_text=site_install_text,
+            docs_install_text=docs_install_text,
+            detailed=detailed,
+        )
+    return [f"direct-download links (expected one published plain release below {version})"
+            if detailed else "direct-download links"]
+
+
 def _shields_escape(version: str) -> str:
     """Double literal hyphens so shields.io keeps them inside the value segment."""
     return version.replace('-', '--')
@@ -426,8 +486,29 @@ def normalize_linux_package_version(version: str) -> str:
 
 
 def is_release_version(version: str) -> bool:
-    """Return True when *version* matches the supported release grammar."""
+    """Return True when *version* matches the supported release grammar.
+
+    A development marker shares the grammar for its carriers; ``is_development_marker``
+    is what tells it from something that may be tagged and published."""
     return bool(_VERSION_RE.match(str(version or "").strip()))
+
+
+def is_development_marker(version: str) -> bool:
+    """Return True for BIBLE P9's development-cycle marker, which never becomes a release."""
+    return bool(_DEVELOPMENT_MARKER_RE.match(str(version or "").strip()))
+
+
+def next_cycle_problem(released: str, development: str) -> str:
+    """Why *development* does not open a cycle above the release *released*; '' when it does.
+
+    A prerelease tag sets no floor: it belongs to the cycle of its own base."""
+    marker = _DEVELOPMENT_MARKER_RE.match(str(development or "").strip())
+    if marker is None:
+        return f"{str(development or '').strip() or 'an empty VERSION'} is not a development marker"
+    plain = _PLAIN_VERSION_RE.match(str(released or "").strip())
+    if plain and tuple(map(int, plain.groups())) >= tuple(map(int, marker.groups())):
+        return f"{development} does not sort above the release {released}"
+    return ""
 
 
 def normalize_release_tag(tag: str) -> str:
@@ -436,7 +517,7 @@ def normalize_release_tag(tag: str) -> str:
     if not raw:
         return ""
     version = raw[1:] if raw.lower().startswith("v") else raw
-    if not is_release_version(version):
+    if not is_release_version(version) or is_development_marker(version):
         return ""
     return f"v{version}"
 
@@ -507,7 +588,7 @@ def version_carrier_desyncs(
             if detailed else "web/modules/api_types.js"
         )
     desync.extend(
-        _download_url_desyncs(
+        (_marker_download_desyncs if is_development_marker(version) else _download_url_desyncs)(
             version,
             readme_text=download_readme_text,
             site_install_text=site_install_text,
@@ -530,7 +611,12 @@ def release_metadata_findings(texts: dict[str, str]) -> List[str]:
         findings.append("VERSION is empty or malformed; use a supported release version.")
     readme = texts.get("README.md")
     if readme is not None:
-        if is_release_version(version) and not re.search(r'\|\s*' + re.escape(version) + r'\s*\|', readme):
+        has_row = re.search(r'\|\s*' + re.escape(version) + r'\s*\|', readme)
+        if is_development_marker(version):
+            if has_row:
+                findings.append(f"VERSION is the development marker {version}; it never takes a README "
+                                "Version History row. Remove the row; its release row comes with the plain cut.")
+        elif is_release_version(version) and not has_row:
             findings.append(f"VERSION is {version} but README.md changelog has no table row for this version. "
                             "Add a changelog entry in the Version History table in README.md.")
         limits = check_history_limit(readme)
@@ -592,9 +678,20 @@ def check_worktree_version_sync(repo_dir) -> str:
     return ""
 
 
-def sync_release_metadata(repo_dir: str) -> List[str]:
-    """Sync VERSION into generated and author-facing release carriers."""
+def sync_release_metadata(repo_dir: str, *, write: bool = True, published_version: str = "") -> List[str]:
+    """Sync VERSION into generated and author-facing release carriers.
+
+    ``write=False`` changes nothing and names the carriers this sync would rewrite now.
+    A development marker leaves the direct-download links alone unless the caller names
+    the published release they must carry (``published_version``: a managed update's
+    target); a release derives them from VERSION and ignores it.
+    """
     root = Path(repo_dir)
+
+    def put(path: Path, text: str) -> None:
+        if write:
+            path.write_text(text, encoding="utf-8")
+
     version_file = root / "VERSION"
     if not version_file.exists():
         return []
@@ -606,6 +703,7 @@ def sync_release_metadata(repo_dir: str) -> List[str]:
     # pyproject must be PEP 440; author-facing carriers keep VERSION spelling.
     pyproject_version = _normalize_pep440(version)
     badge_url_version = _shields_escape(version)
+    download_version = published_version if is_development_marker(version) else version
 
     changed: List[str] = []
 
@@ -619,7 +717,7 @@ def sync_release_metadata(repo_dir: str) -> List[str]:
             flags=re.MULTILINE,
         )
         if new_text != text:
-            pyproject.write_text(new_text, encoding="utf-8")
+            put(pyproject, new_text)
             changed.append("pyproject.toml")
 
     uv_lock = root / "uv.lock"
@@ -631,7 +729,7 @@ def sync_release_metadata(repo_dir: str) -> List[str]:
             count=1,
         )
         if replacements == 1 and new_text != text:
-            uv_lock.write_text(new_text, encoding="utf-8")
+            put(uv_lock, new_text)
             changed.append("uv.lock")
 
     web_package = root / "web" / "package.json"
@@ -644,7 +742,7 @@ def sync_release_metadata(repo_dir: str) -> List[str]:
             flags=re.MULTILINE,
         )
         if new_text != text:
-            web_package.write_text(new_text, encoding="utf-8")
+            put(web_package, new_text)
             changed.append("web/package.json")
 
     web_lock = root / "web" / "package-lock.json"
@@ -656,7 +754,7 @@ def sync_release_metadata(repo_dir: str) -> List[str]:
             text,
         )
         if new_text != text:
-            web_lock.write_text(new_text, encoding="utf-8")
+            put(web_lock, new_text)
             changed.append("web/package-lock.json")
 
     api_types = root / "web" / "modules" / "api_types.js"
@@ -668,7 +766,7 @@ def sync_release_metadata(repo_dir: str) -> List[str]:
             text,
         )
         if new_text != text:
-            api_types.write_text(new_text, encoding="utf-8")
+            put(api_types, new_text)
             changed.append("web/modules/api_types.js")
 
     readme = root / "README.md"
@@ -680,9 +778,10 @@ def sync_release_metadata(repo_dir: str) -> List[str]:
             ),
             text,
         )
-        new_text = _sync_readme_download_urls(new_text, version)
+        if download_version:
+            new_text = _sync_readme_download_urls(new_text, download_version)
         if new_text != text:
-            readme.write_text(new_text, encoding="utf-8")
+            put(readme, new_text)
             changed.append("README.md")
 
     for relative in (
@@ -690,12 +789,12 @@ def sync_release_metadata(repo_dir: str) -> List[str]:
         Path("docs/install/index.html"),
     ):
         install_page = root / relative
-        if not install_page.exists():
+        if not download_version or not install_page.exists():
             continue
         text = install_page.read_text(encoding="utf-8")
-        new_text = _sync_html_download_urls(text, version)
+        new_text = _sync_html_download_urls(text, download_version)
         if new_text != text:
-            install_page.write_text(new_text, encoding="utf-8")
+            put(install_page, new_text)
             changed.append(relative.as_posix())
 
     arch = root / "docs" / "ARCHITECTURE.md"
@@ -706,7 +805,7 @@ def sync_release_metadata(repo_dir: str) -> List[str]:
             text,
         )
         if new_text != text:
-            arch.write_text(new_text, encoding="utf-8")
+            put(arch, new_text)
             changed.append("docs/ARCHITECTURE.md")
 
     return changed

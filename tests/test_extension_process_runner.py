@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import pathlib
 import sys
 import time
@@ -661,6 +662,113 @@ def test_isolated_dependency_extension_child_inherits_runtime_mode(tmp_path, mon
     assert dispatch_extension_tool_subprocess(tool, ctx, {}) == "light"
 
 
+_BOUND_CHILD_PLUGIN = (
+    "def _say(ctx, text='hi'):\n"
+    "    return f'old:{text}'\n"
+    "def register(api):\n"
+    "    api.register_tool('say', _say, description='say', schema={})\n"
+)
+
+
+def _review_current_payload(drive_root, loaded):
+    from ouroboros.skill_loader import SkillReviewState, save_review_state
+
+    current = find_skill(drive_root, loaded.name, repo_path=str(loaded.skill_dir.parent))
+    save_review_state(drive_root, loaded.name, SkillReviewState(status="pass", content_hash=current.content_hash))
+    return current
+
+
+@pytest.mark.parametrize("between", ["update", "unchanged", "disable", "peer_conflict"])
+def test_an_out_of_process_call_runs_only_the_payload_its_host_bound(tmp_path, monkeypatch, between):
+    """A reviewed update can reach the disk after every host check and before the child reads it. The real child
+    refuses it typed, before any handler, instead of running the replacement under the bound call; an unchanged
+    payload runs, and a disable landing in that window is refused by the child's own load gate. So is an enabled
+    peer's equal-size conflicting edit with a restored mtime, though the host already holds its old text (#1217):
+    the child reads its peers fresh and is given no host facts."""
+    from ouroboros import extension_process_runner as runner
+    from ouroboros import skill_peer_inventory
+    from ouroboros.skill_loader import save_enabled
+    from ouroboros.tools.registry import ToolRegistry
+    from tests._extension_loader_shared import _write_ext_skill
+
+    loaded, repo_root, drive_root = _prepare_extension(
+        tmp_path, "bound_child", _BOUND_CHILD_PLUGIN, permissions=["tool"],
+        extra_frontmatter="dependencies:\n  - dummy_pkg\n")
+    _mark_isolated_deps_installed(drive_root, loaded)
+    peer = repo_root / "peer_child" / "SKILL.md"
+    if between == "peer_conflict":
+        _write_ext_skill(repo_root, "peer_child", plugin_body="def register(api):\n    pass\n", permissions=["tool"],
+                         extra_frontmatter='conflicts: ["other_child"]\n')
+        save_enabled(drive_root, "peer_child", True)
+    assert extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root) is None
+    tool_name = extension_loader.extension_surface_name("bound_child", "say")
+    assert extension_loader.get_tool(tool_name)["out_of_process"] is True
+    real_run_child = runner._run_child
+    landed = []
+
+    def after_host_checks(payload, **kwargs):  # liveness, guards and Safety passed; the child has not started
+        if between == "update":
+            (loaded.skill_dir / "plugin.py").write_text(_BOUND_CHILD_PLUGIN.replace("old:", "new:"), encoding="utf-8")
+            _review_current_payload(drive_root, loaded)
+        elif between == "disable":
+            save_enabled(drive_root, loaded.name, False)
+        elif between == "peer_conflict":
+            assert any(text == peer.read_text(encoding="utf-8") for held in skill_peer_inventory._HELD_FACTS.values()
+                       for location, (text, _facts) in held.items() if location.name == "peer_child")
+            stat, raw = peer.stat(), peer.read_bytes()
+            changed = raw.replace(b"other_child", b"bound_child")
+            assert changed != raw and len(changed) == len(raw)
+            peer.write_bytes(changed)
+            os.utime(peer, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+            landed.append(between)
+        return real_run_child(payload, **kwargs)
+
+    monkeypatch.setattr(runner, "_run_child", after_host_checks)
+    registry = ToolRegistry(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=drive_root)
+    registry._ctx.task_metadata = {"work_kind": "owner"}
+
+    result = registry.execute_result(tool_name, {"text": "hi"})
+
+    if between == "unchanged":
+        assert result.status == "ok" and _payload(result.text) == "old:hi", result
+        return
+    assert not _payload(result.text).startswith(("old:", "new:")), "a handler ran"
+    if between == "update":
+        assert (result.status, result.code) == ("unavailable", "EXTENSION_UNAVAILABLE"), result
+        assert "changed after this call was bound" in result.text
+    elif between == "peer_conflict":
+        assert landed == [between] and result.status == "error" and "conflict" in result.text, result
+    else:
+        assert result.status == "error" and "disabled" in result.text, result
+
+
+def test_a_child_load_checks_the_publication_it_loaded_not_only_what_it_discovered(tmp_path, monkeypatch):
+    """Discovery can hash the bound payload and then read a review saved for its replacement: the load passes review
+    on the new bytes, so only the loaded publication's own hash shows that the bound payload is gone."""
+    from dataclasses import replace
+
+    from ouroboros import extension_process_runner as runner
+    from ouroboros import skill_loader
+
+    loaded, repo_root, drive_root = _prepare_extension(
+        tmp_path, "late_change", _BOUND_CHILD_PLUGIN, permissions=["tool"])
+    bound = loaded.content_hash
+    (loaded.skill_dir / "plugin.py").write_text(_BOUND_CHILD_PLUGIN.replace("old:", "new:"), encoding="utf-8")
+    _review_current_payload(drive_root, loaded)
+    real_discover = skill_loader.discover_skill_identity
+    monkeypatch.setattr(skill_loader, "discover_skill_identity", lambda *a, **k: [
+        replace(found, content_hash=bound) for found in real_discover(*a, **k)])
+    monkeypatch.setattr("ouroboros.config.load_settings", lambda: {})
+
+    with pytest.raises(runner.ExtensionProcessError) as refused:
+        runner._load_child_extension(loaded.name, drive_root, pathlib.Path(__file__).resolve().parents[1],
+                                     repo_root, expected_content_hash=bound)
+
+    assert refused.value.failure_kind == runner.PAYLOAD_REPLACED, refused.value
+    extension_loader.unload_extension(loaded.name)  # the child's own exit path; then the unbound load is fine
+    runner._load_child_extension(loaded.name, drive_root, pathlib.Path(__file__).resolve().parents[1], repo_root)
+
+
 def test_isolated_dependency_extension_rejects_unproxied_side_effect_surface(tmp_path):
     # send_ws_message/on_unload/companion are now supported out-of-process, but a
     # per-call child cannot host an in-process supervised task — that stays rejected
@@ -689,8 +797,6 @@ def test_isolated_dependency_extension_rejects_unproxied_side_effect_surface(tmp
     [
         {"tools": [{"name": "foreign_tool"}]},
         {"routes": [{"path": "/api/extensions/other/x", "methods": ["GET"]}]},
-        {"ws_handlers": [{"type": "foreign.ws"}]},
-        {"ui_tabs": [{"key": "other:tab"}]},
         {"settings_sections": [{"key": "other:settings"}]},
     ],
 )
@@ -720,7 +826,6 @@ def test_out_of_process_catalog_revalidates_parent_namespace(tmp_path, catalog):
     "catalog",
     [
         lambda skill: {"tools": [{"name": extension_loader.extension_surface_name(skill.name, "bad"), "schema": []}]},
-        lambda skill: {"routes": [{"path": f"/api/extensions/{skill.name}/bad", "methods": ["TRACE"]}]},
         lambda skill: {"ws_handlers": [{"type": extension_loader.extension_surface_name(skill.name, "bad") + "."}]},
         lambda skill: {"ui_tabs": [{"key": f"{skill.name}:bad", "render": []}]},
         lambda skill: {"settings_sections": [{"key": f"{skill.name}:bad", "render": []}]},

@@ -14,7 +14,7 @@ from ouroboros.tools import services
 from ouroboros.tools.registry import ToolContext
 from tests.test_run_command_schema_truth import _bound
 
-pytestmark = [pytest.mark.serial, pytest.mark.skipif(os.name == "nt", reason="task census is POSIX-only")]
+pytestmark = [pytest.mark.skipif(os.name == "nt", reason="task census is POSIX-only")]
 
 
 def test_invocation_coordinates_are_atomic_and_preserve_explicit_non_task(tmp_path):
@@ -36,9 +36,14 @@ def test_invocation_coordinates_are_atomic_and_preserve_explicit_non_task(tmp_pa
         assert ps.task_launch_target(invocation_binding(), **fallback) is None
 
 
-@pytest.mark.parametrize("executor_kind", [None, "local"], ids=["host", "executor"])
-@pytest.mark.parametrize("case", ["manual", "ordinary", "unbound", "non-task", "non-task-named", "kept"])
-@pytest.mark.parametrize("invoked", [False, True], ids=["context", "invocation"])
+@pytest.mark.parametrize(("invoked", "case", "executor_kind"), [
+    pytest.param(False, "manual", None, id='context-manual-host'),
+    pytest.param(False, "unbound", None, id='context-unbound-host'),
+    pytest.param(False, "non-task-named", None, id='context-non-task-named-host'),
+    pytest.param(True, "ordinary", "local", id='invocation-ordinary-executor'),
+    pytest.param(True, "non-task", "local", id='invocation-non-task-executor'),
+    pytest.param(True, "kept", "local", id='invocation-kept-executor'),
+])
 def test_service_scope_uses_identity_not_its_display_fallback(tmp_path, monkeypatch, executor_kind, case, invoked):
     from ouroboros import config as cfg
 

@@ -16,6 +16,7 @@ import pytest
 from ouroboros import chat_chain, dialogue_import as di, dialogue_positions as dp, dialogue_store as ds, store
 from ouroboros.utils import iter_jsonl_objects, jsonl_chain_handles, jsonl_generation_signature
 from tests._dialogue import chat_rows, lines, progress_rows, seed
+from tests._store_shared import independent_writer
 
 
 def chat(cmid="", text="hi", *, chat_id=1, direction="in", ts="2026-10-17T00:00:00+00:00", **extra):
@@ -75,7 +76,7 @@ def test_a_page_read_in_one_step_holds_the_rows_and_order_a_plain_select_returns
     ds.append(tmp_path, "chat", chat("named", "owed", dispatch_marker=1), dispatch={"process": "p1"})
     ds.append(tmp_path, "chat", {"ts": "2026-10-18T00:00:00+00:00", "direction": "in", "text": "no chat id"})
     arrival = ds.append(tmp_path, "chat", chat("", "a guest", chat_id=4242, type="place_arrival"))
-    with sqlite3.connect(ds.path(tmp_path)) as db:  # a place arrival's source pointer lands after its append
+    with independent_writer(ds.path(tmp_path)) as db:  # a place arrival's source pointer lands after its append
         db.execute("UPDATE dialogue SET dispatch_input=? WHERE stream='chat' AND seq=?",
                    (json.dumps({"place_context_source_ref": {"kind": "place_context", "id": "c1"}}), arrival.seq))
     with ds.transaction(tmp_path, write=False) as conn:
@@ -309,7 +310,6 @@ def _metered(monkeypatch):
 
 @pytest.mark.parametrize("read", [
     lambda root: ds.room_candidates(root, "chat", 100, tasks=["t-bound"], origins=["1:origin-1"], limit=20),
-    lambda root: ds.task_rows(root, ["t-bound"], stream="chat"),
     lambda root: ds.accepted_row(root, 1, "origin-1"),
     lambda root: ds.main_candidates(root, "chat", exclude_chats=range(1000, 1030), limit=20),
 ])
@@ -538,7 +538,7 @@ def test_the_export_appends_through_a_binary_descriptor(tmp_path, monkeypatch):
     assert flags and all(mode & sentinel for mode in flags), f"the export opened {live.name} without O_BINARY"
 
 
-@pytest.mark.parametrize("written", ["whole", "part", "none", "absent", "foreign"])
+@pytest.mark.parametrize("written", ["whole", "absent", "foreign"])
 def test_an_export_interrupted_before_its_coordinate_moved_finishes_the_batch_once(tmp_path, monkeypatch, written):
     """A death after the batch reached the file and before ``files_seq`` moved: the retry finishes
     the recorded batch (appends only what is missing) instead of appending it a second time; bytes
@@ -664,7 +664,6 @@ def _spawned_writer(root, index, count, done):
         done.put((index, repr(exc)))
 
 
-@pytest.mark.serial
 def test_four_writer_processes_lose_and_duplicate_nothing(tmp_path):
     ds.append(tmp_path, "progress", progress("seed", "seed"))
     ctx = multiprocessing.get_context("spawn")

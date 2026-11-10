@@ -17,7 +17,7 @@ from typing import Callable, Iterable
 from urllib.parse import unquote, urlsplit
 
 from ouroboros.markdown_source import MarkdownSource, SourceRange, parse_markdown_source
-from ouroboros.repo_remotes import OFFICIAL_REPO
+from ouroboros.repo_remotes import OFFICIAL_REPO, remote_fetch_urls
 from ouroboros.update_channels import UPDATE_CHANNEL_BRANCHES
 
 
@@ -299,7 +299,8 @@ def read_book_section(book: ReferenceBook, title: str) -> BookView:
 
 BOOK_GROWTH_RULE = (
     "Each touched book, BIBLE.md and the prompts (prompts/*.md as one text) must end no larger "
-    "than at its contribution base; added text is paid by shortening the same text. Manual/tag "
+    "than at its contribution base; added text is paid in the same text by a statement that leaves, "
+    "never by a lost fact (DEVELOPMENT \"Paying down a size cap\"). Manual/tag "
     "CI without that base does not verify this rule. The owner's book-growth label can approve "
     "an exception; local commits are not blocked."
 )
@@ -342,11 +343,22 @@ class BookBalance:
         return max(0, delta or 0)
 
 
+_OFFLINE_GIT = {"GIT_NO_LAZY_FETCH": "1", "GIT_ALLOW_PROTOCOL": ""}
+
+
 def _git_bytes(root: Path, *args: str) -> bytes | None:
+    """stdout of one git read, ``None`` when it fails; a measurement fetches nothing.
+
+    A partial clone fetches an object it lacks once a read needs it. Here that read fails instead
+    and its measure stays unknown: Git 2.44+ starts no fetch (``GIT_NO_LAZY_FETCH``), and the fetch
+    of an older Git stops before it opens a transport, because the empty ``GIT_ALLOW_PROTOCOL`` allow-list denies every protocol.
+    """
+    import os
     import subprocess
 
     try:
-        done = subprocess.run(["git", *args], cwd=str(root), capture_output=True, timeout=30)
+        done = subprocess.run(["git", *args], cwd=str(root), capture_output=True, timeout=30,
+                              env={**os.environ, **_OFFLINE_GIT})
     except (OSError, subprocess.SubprocessError):
         return None
     return done.stdout if done.returncode == 0 else None
@@ -373,10 +385,8 @@ def _official_contribution_target(root: Path) -> str:
     Git supplies shared remotes/refs for linked worktrees too. If multiple official
     remotes have this ref, the first by name wins and is shown in every measurement.
     """
-    remotes = (_git_bytes(root, "remote", "-v") or b"").decode("utf-8", errors="replace")
-    for row in sorted(remotes.splitlines()):
-        name, _, location = row.partition("\t")
-        if location.endswith(" (fetch)") and _official_fetch_url(location[:-8]):
+    for name, url in remote_fetch_urls(lambda *args: _git_bytes(root, *args)):
+        if _official_fetch_url(url):
             ref = f"refs/remotes/{name}/{UPDATE_CHANNEL_BRANCHES['development']}"
             if _git_bytes(root, "rev-parse", "--verify", f"{ref}^{{commit}}"):
                 return ref

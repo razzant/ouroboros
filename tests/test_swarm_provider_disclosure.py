@@ -18,7 +18,6 @@ from tests.test_delivery_forced_finalization import _forced_test_context
 from tests.test_swarm_host_admission import host as host_fixture, incoming_case, promotion_event, rows
 
 host = host_fixture
-pytestmark = pytest.mark.serial
 
 
 def test_last_assistant_salvage_keeps_bytes_and_skips_empty_nonassistant_messages():

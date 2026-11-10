@@ -24,12 +24,12 @@ import pytest
 
 from ouroboros import dialogue_store
 from ouroboros.gateway.history_paging import _ARRIVAL_SEARCH_ROWS, _RECENT_WINDOW_ROWS
-from tests import _dialogue as dialogue_test
+from tests._room_browser_shared import _client, _seed_room, _unread, _wait_for
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _SETTLE_RESTORE_FRAMES, _emit_ws_frame
 from tests._store_shared import seed_result
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 PANEL = "#project-panel .chat-messages"
 LATE = "Late final answer"
 LATER = "Later late answer"
@@ -149,10 +149,11 @@ def test_an_opened_room_lands_on_its_late_answer_and_a_later_one_is_read_only_cl
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
-def test_an_opened_room_lands_on_its_newest_reply_above_later_rows_and_a_read_room_reopens_at_the_bottom(
+def test_an_opened_room_lands_on_its_newest_reply_above_later_rows_and_a_read_room_returns_as_it_was_left(
         direct_server_with_data, engine):
     """The owner's later notes and a card below the newest reply push it above the bottom: the unread
-    room opens on it and reads it (owner decision 2026-10-11); reopened once read, it opens at its bottom."""
+    room opens on it and reads it (owner decision 2026-10-11); reopened in the same page session once read, it
+    is found as it was left, on that reply (owner 2026-11-03, DESIGN "History edges"), and reads nothing again."""
     from playwright.sync_api import sync_playwright
 
     from ouroboros.projects_registry import create_project
@@ -209,45 +210,13 @@ def test_an_opened_room_lands_on_its_newest_reply_above_later_rows_and_a_read_ro
             page.evaluate(_SETTLE_RESTORE_FRAMES)
             page.wait_for_timeout(300)
             reopened = messages.evaluate("n => n.scrollHeight - n.scrollTop - n.clientHeight")
+            back = messages.evaluate(_BOX_OF, NEWEST)
             page.screenshot(path=str(evidence / f"read-band-{engine}-tail-reopened.png"))
-            assert reopened <= 1, ("a read room reopens at its bottom, as before", reopened)
+            assert abs(back["top"] - landed["top"]) <= 2 and abs(reopened - gap) <= 2, \
+                ("a read room returns where it was left, on its newest reply", landed, back, gap, reopened)
             assert len(seen()) == 1, "and reads nothing again"
         finally:
             browser.close()
-
-
-def _seed_room(data, project_id, name, rows, archives=()):
-    """A Project room holding ``rows`` as the server stores them, after ``archives``: an older
-    install's chain segments ``(name, rows)`` (a raw string is a line as written), imported first."""
-    from ouroboros.projects_registry import create_project
-
-    chat_id = create_project(data, project_id, name=name)["chat_id"]
-    if archives:
-        dialogue_test.seed(data, archives={segment: [line if isinstance(line, str) else {**line, "chat_id": chat_id}
-                                                     for line in lines] for segment, lines in archives})
-        dialogue_test.import_all(data)
-    for row in rows:
-        dialogue_store.append(data, "chat", {**row, "chat_id": chat_id})
-    return chat_id, advance_room_revision(data, chat_id=chat_id)["visible_revision"]
-
-
-def _unread(row):
-    """A Project row's unread fact: its own attribute, never its mark's colour, which the owner's amber outranks."""
-    return row.and_(row.page.locator("[data-unread]"))
-
-
-def _client(browser, url, project_id, acks, init=()):
-    """One client showing the room's row unread; ``acks`` collects its read receipts."""
-    page = browser.new_page(viewport={"width": 1187, "height": 734})
-    page.on("request", lambda request: acks.append(json.loads(request.post_data or "{}"))
-            if request.method == "POST" and request.url.endswith("/api/ui/preferences") else None)
-    for script in (_CAPTURE_TEST_SOCKET, *init):
-        page.add_init_script(f"({script})()")
-    page.goto(url, wait_until="domcontentloaded")
-    page.wait_for_function("() => window.__testSockets?.some(s => s.readyState === 1)")
-    row = page.locator(f'.nav-project-row[data-project-id="{project_id}"]')
-    _unread(row).wait_for(state="attached")
-    return page, row
 
 
 def _open_room(pw, engine, url, project_id, acks, init=()):
@@ -255,14 +224,6 @@ def _open_room(pw, engine, url, project_id, acks, init=()):
     page, row = _client(browser, url, project_id, acks, init)
     row.evaluate("el => el.click()")
     return browser, page, row
-
-
-def _wait_for(page, check, attempts=100):
-    for _ in range(attempts):
-        if check():
-            return True
-        page.wait_for_timeout(100)
-    return check()
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
@@ -506,12 +467,16 @@ def test_a_reply_arriving_while_the_window_is_hidden_is_read_when_it_is_shown_ag
             second = advance_room_revision(data, chat_id=chat_id)["visible_revision"]
             _emit_ws_frame(page, {"type": "projects_changed"})
             _unread(row).wait_for(state="attached")
-            messages.locator(".chat-bubble").filter(has_text="Reply while away").wait_for(state="attached")
             page.evaluate(_SETTLE_RESTORE_FRAMES)
             page.wait_for_timeout(500)
+            # A room in a hidden window is away (DESIGN §10 "Moving between places"): it reads and draws nothing.
+            assert messages.locator(".chat-bubble").filter(has_text="Reply while away").count() == 0, \
+                "a hidden window's room draws nothing it missed"
             assert seen() == [first], "nobody can see a hidden window"
 
             page.evaluate(_SET_HIDDEN, False)
+            # Shown again it reads what it missed, as on a reconnect, and the reply on screen is read.
+            messages.locator(".chat-bubble").filter(has_text="Reply while away").wait_for(state="attached")
             assert _wait_for(page, lambda: seen() == [first, second]), acks
             _unread(row).wait_for(state="detached")
             page.evaluate(_SETTLE_RESTORE_FRAMES)
@@ -585,21 +550,21 @@ _HOLD_QUESTION = """() => {
 _COMPOSER = "#project-panel .chat-input-area textarea"
 
 
-@pytest.mark.parametrize("retained", [True, False], ids=["retained", "rebuilt"])
+@pytest.mark.parametrize("staged", [True, False], ids=["staged", "kept"])
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_an_ordinary_reopen_reads_its_room_while_an_old_question_reveal_is_held(direct_server_with_data, engine,
-                                                                              retained):
+                                                                              staged):
     """A question reveal belongs to the showing that started it. Closed while its question detail is
-    held and reopened ordinarily, the room is read at its newest message at once, whether the reopen
-    reuses the instance its staged file kept or builds a new one; the old reveal, released later,
-    moves nothing and takes neither the draft nor the focus."""
+    held and reopened ordinarily, the room is read at its newest message at once; the room left is kept away
+    and is the room reopened, marked by a staged file or not (every visited room stays: parent decision
+    2026-11-04, DESIGN §10); the old reveal, released later, moves nothing and takes neither the draft nor the focus."""
     from playwright.sync_api import sync_playwright
 
     from ouroboros.projects_registry import bind_task_to_project, get_project
     from ouroboros.task_results import write_task_result
 
     data = direct_server_with_data["data_dir"]
-    slug = "held-kept" if retained else "held-new"
+    slug = "held-kept" if staged else "held-new"
     chat_id, revision = _seed_room(data, slug, "Held room", [
         {"ts": f"2026-09-28T10:{minute:02d}:00Z", "direction": "out", "text": f"Reply {minute}"} for minute in range(4)])
     project = get_project(data, slug)
@@ -627,7 +592,7 @@ def test_an_ordinary_reopen_reads_its_room_while_an_old_question_reveal_is_held(
             row = page.locator(f'.nav-project-row[data-project-id="{slug}"]')
             _unread(row).wait_for(state="attached")
             messages = page.locator(PANEL)
-            if retained:
+            if staged:
                 row.evaluate("el => el.click()")
                 messages.locator(".chat-bubble").filter(has_text="Reply 3").wait_for(state="attached")
                 assert _wait_for(page, lambda: seen() == [revision]), acks
@@ -649,11 +614,18 @@ def test_an_ordinary_reopen_reads_its_room_while_an_old_question_reveal_is_held(
             page.wait_for_function("() => typeof window.__releaseQuestion === 'function'")
             page.wait_for_timeout(500)
             assert seen() == before, "landing on the question is not reading"
+            room = page.locator(f'[id="panel-pchat-{slug}"]')
+            room.evaluate("node => { window.__keptRoom = node; }")
             page.locator("#project-panel-close").click()
-            parked = page.locator('.chat-instance-panel[data-pending-work="1"]') if retained else messages
-            parked.wait_for(state="attached" if retained else "detached")
+            if staged:
+                page.locator('.chat-instance-panel[data-pending-work="1"]').wait_for(state="attached")
+            else:
+                room.wait_for(state="hidden")
+                assert room.evaluate("node => node === window.__keptRoom && node.isConnected && node.hidden"), \
+                    "the room left is kept away, hidden, not built again"
             row.evaluate("el => el.click()")
-            if not retained:
+            page.wait_for_function("() => window.__keptRoom.isConnected && !window.__keptRoom.hidden")  # the kept room returns
+            if not staged:
                 page.locator(_COMPOSER).fill(DRAFT)
             read = _wait_for(page, lambda: seen() == [*before, revision], attempts=50)
             page.evaluate(_SETTLE_RESTORE_FRAMES)
@@ -671,7 +643,7 @@ def test_an_ordinary_reopen_reads_its_room_while_an_old_question_reveal_is_held(
             assert page.evaluate("() => document.activeElement?.matches('.chat-input-area textarea')"), \
                 "the released reveal takes no focus"
             assert messages.locator('[data-quiz-id="q-held"]').count() == 0, "nor reveals its question"
-            if retained:
+            if staged:
                 assert page.locator("#project-panel .attach-name").filter(has_text="kept.txt").count() == 1
             assert seen() == [*before, revision], ("the retired reveal decides nothing", acks)
         finally:

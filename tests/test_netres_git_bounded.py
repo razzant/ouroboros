@@ -91,7 +91,6 @@ def test_git_network_bounded_rejects_missing_cwd(tmp_path):
     assert "cwd" in err
 
 
-@pytest.mark.serial
 def test_checkout_reset_fetch_uses_configured_bound_and_keeps_local_head(tmp_path, monkeypatch):
     """The real reset/wrapper chain keeps its local reset after a timed-out fetch."""
     repo = _seed_repo(tmp_path / "repo")

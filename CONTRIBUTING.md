@@ -95,12 +95,13 @@ After publishing the branch, do not rewrite its remote history. Bring later
 target changes in with a normal merge, or coordinate a replacement with a
 maintainer. Any update invalidates earlier review evidence.
 
-External contributors do not allocate release versions. Leave `VERSION`, the
-project version in `pyproject.toml`, the editable root in `uv.lock`, the version
-in `web/package.json`, `GATEWAY_CONTRACT_VERSION`, the README badge and Version
-History, the named installer links in README and both install pages, the
-Architecture version header, and release tags unchanged.
-Maintainers assign collision-free release metadata on the final landing tree.
+Leave `VERSION`, the project version in `pyproject.toml`, the editable root in
+`uv.lock`, the version in `web/package.json`, `GATEWAY_CONTRACT_VERSION`, the README
+badge and Version History, the named installer links in README and both install
+pages, the Architecture version header, and release tags unchanged.
+Between releases `VERSION` is one fixed `X.Y.Z-alpha.0` development marker that no
+contribution moves; the exact commit identifies a build. Maintainers open each cycle
+and cut each release ("Maintainer Boundary" below).
 
 Commit the intended change before producing final evidence, then require
 `git status --short` to be empty. Review evidence covers a committed
@@ -133,10 +134,11 @@ OURO_SIZE_RATCHET_BASE_REF=upstream/ouroboros python -m pytest -o addopts="" tes
 Use the exact target-base SHA when verifying a frozen range. Without a base,
 the reference-book comparison is skipped. `python scripts/run_tests.py tests/test_x.py`
 forwards a focused run. Inside Ouroboros a reviewed commit (`commit_reviewed` /
-`vcs_commit_reviewed`) runs the complete battery in its hermetic gate, or reuses
-its unsigned receipt of an identical complete run, unless `skip_tests` is set, so
-running it by hand first is optional rather than a second requirement. Ordinary
-PR/branch cloud CI is disabled: local verification and independent review remain.
+`vcs_commit_reviewed`) runs a selected set in its hermetic gate unless `skip_tests`
+is set: the contract floor, changed tests, direct importers of changed code and
+your `extra_tests`; `full_tests` asks for the whole battery. A selected pass is
+not the full battery. Ordinary PR/branch cloud CI is disabled: local verification
+and independent review remain.
 Maintainers may dispatch CI for a reviewed candidate; review outside code before
 that secret-bearing run. Release tags retain the full gate. If the full battery could
 not finish on your machine or within your budget, say so — `NOT_RUN` with the
@@ -145,9 +147,10 @@ reason — and deliver the focused evidence; never report it as green.
 Record exact commands, outcomes, and producer exit codes. If a check could not
 run, record `NOT_RUN` and the reason instead of claiming it passed.
 
-Tests that spawn a real process, bind a real port, or mutate module-level
-global state must be marked `@pytest.mark.serial`. A merely slow test must be
-made faster or split: the serial pass has the same 300 s per-test timeout.
+A test that owns its child, its private root and port 0 marks nothing;
+`@pytest.mark.serial("<resource>")` names the one host resource a test cannot
+isolate, such as a fixed port or a real daemon. A merely slow test must be made
+faster or split.
 See [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) for the CI split and isolation
 rules.
 
@@ -236,10 +239,10 @@ read-only tools, so the run does not depend on a very large reviewer window.
 Reading coverage is diagnostic: incomplete or unobserved ranges are recorded
 beside the received verdict and never remove a responding reviewer from quorum,
 block a commit or automatically buy another review. The author judges whether
-a concrete gap warrants more reading. A coupling review that cannot run at
-all — an unreadable repository, an unavailable review subject, a reviewer that
-failed or answered outside the contract — is reported as
-`SCOPE_REVIEW_BLOCKED` with its cause, and the evidence packet is preserved
+a concrete gap warrants more reading. A review that cannot run at all (an
+unreadable repository, an unavailable review subject, no reviewer answering
+within the contract) ends as a typed block naming its cause in `block_reason`,
+such as `review_not_performed`, with exit 3; the evidence packet is preserved
 and marked incomplete. The agentic checklist review above needs none of this.
 
 The run keeps its own writes off your data root: its review drive
@@ -356,7 +359,32 @@ commit, push, merge, release, or publication.
 
 Maintainers may reproduce tests, request a smaller diff, add integration fixes,
 and rerun the project's final review on the exact landing tree. They choose the
-landing parent and release version while preserving contributor authorship.
+landing parent while preserving contributor authorship.
+
+Between releases they keep one development cycle (BIBLE P9;
+`tests/test_development_cycle.py`):
+
+1. **Open.** Write `VERSION` as `X.Y.Z-alpha.0`, of a base above the last release, and
+   run `release_sync.sync_release_metadata` (`commit_reviewed` in a body candidate does
+   when `VERSION` is staged). Every carrier follows except the download links and README
+   history, which stay on the last release. No row, tag or installer follows: CI's
+   `release-preflight` and `scripts/build_repo_bundle.py` refuse it.
+2. **Cut.** A selected candidate becomes plain `X.Y.Z` with its README row; the sync moves
+   its links and the commit creates `vX.Y.Z`. Land it on `ouroboros`, merged if the tip has
+   moved, and push the branch before the tag: CI records the remote branch containing the
+   tag as the one installs track, so it must be `ouroboros`. Until publication, `ouroboros`
+   alone links to the unpublished release; `main`, Pages and Homebrew move only at
+   promotion. A greater minor leaves `X.Y.*` free for a repair cut from the release and
+   merged the same way.
+3. **Next marker.** Write it right after the cut, or as the merge's resolution (`python
+   scripts/carrier_rebase_helper.py --prefer theirs` on the carrier conflicts, the marker
+   in `VERSION`, a sync). The release's links and row stay: the one carrier move
+   admitted with `VERSION` unchanged, on the author's reviewed claim; no tag proves it.
+   `sync_release_metadata(repo, published_version="X.Y.Z")` repairs links a merge dropped.
+4. **Promote, after publication.** `scripts/promote_stable.py` refuses until `ouroboros`
+   holds the tag and its links under a numerically greater marker, and never writes that
+   branch. `main` stays the release tree plus its generated Cask, never the development
+   tree.
 
 Contributions are licensed under the repository's
 [`LICENSE`](LICENSE). By submitting a contribution, you confirm that you have

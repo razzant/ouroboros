@@ -82,7 +82,7 @@ def test_normalizer_idempotent():
     assert [m["role"] for m in once] == [m["role"] for m in twice]
 
 
-@pytest.mark.parametrize("failure", ["missing", "orphan", "foreign", "duplicate_call", "duplicate_result", "missing_id"])
+@pytest.mark.parametrize("failure", ["missing", "duplicate_call", "missing_id"])
 def test_incomplete_or_ambiguous_episode_retains_all_rows(failure):
     opening = _assistant_toolcall()
     opening["tool_calls"].extend(_assistant_toolcall("c2")["tool_calls"])

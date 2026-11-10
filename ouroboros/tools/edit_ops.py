@@ -76,8 +76,32 @@ from ouroboros.tool_access import (
 )
 from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for
 from ouroboros.utils import safe_relpath, write_text
+from ouroboros import work_domain
 
 log = logging.getLogger(__name__)
+
+
+def _land_edit_bytes(target: pathlib.Path, content: str) -> None:
+    """Land a multi-file patch or batch edit at ``target``. A work-domain path is written AS THE WORK DOMAIN
+    (``work_domain.write_text``), so an employee's ancestor swap reaches only the work domain and never a service
+    root; the service's own paths keep the exact atomic overwrite they always had."""
+    from ouroboros import work_domain
+
+    if work_domain.is_work(target):
+        work_domain.write_text(target, content)
+    else:
+        write_text(target, content)
+
+
+def _delete_edit_target(target: pathlib.Path) -> None:
+    """Delete a patch target. A work-domain path is removed AS THE WORK DOMAIN, so an ancestor swap can only
+    remove a work-domain file, never one in a service root; the service's own paths keep ``unlink``."""
+    from ouroboros import work_domain
+
+    if work_domain.is_work(target):
+        work_domain.remove(target)
+    else:
+        target.unlink()
 
 
 # ---------------------------------------------------------------------------
@@ -333,12 +357,14 @@ def _partial_write_failure(
         # (a counted/context miss) and are classified as policy denials. This is a
         # genuine partial mutation from an I/O fault and must stay an execution
         # failure, so it carries its own prefix and lands in the generic `error`.
-        return (
+        from ouroboros.tools.git_repo_edit import _with_path_facts
+
+        return _with_path_facts(ctx, source_tool, (
             f"⚠️ EDIT_OPS_PARTIAL_WRITE_FAILED ({tag}): {detail}\n"
             f"PARTIALLY APPLIED — these files WERE written: {', '.join(changed_paths)}.{skipped}\n"
             "Do not repeat this call: read the written files and continue from their current content."
             f"{copies}\n" + footer
-        )
+        ), binding.base_path if binding is not None else active_repo_dir_for(ctx), changed_paths)
     return f"⚠️ {tag}: {detail}\nNothing was written.{skipped}{copies}"
 
 
@@ -438,8 +464,10 @@ def numbered_edit_preview(text: str, offsets: List[int], *, max_sites: int = 8) 
 
 def newline_normalization_note(target: pathlib.Path) -> str:
     """Disclose the existing universal-newline read and LF write behavior."""
+    from ouroboros import work_domain  # a work file's bytes: the confined intake, never a service open
+
     try:
-        raw = target.read_bytes()
+        raw = work_domain.read_bytes(target)
     except OSError:
         return ""
     return "⚠️ Existing CRLF/CR line endings were normalized to LF." if b"\r" in raw else ""
@@ -452,14 +480,19 @@ def _repo_edit_binding(binding: ResolvedResourceBinding) -> bool:
     }
 
 
+# An exact editor named what it removes; the full-write advice (use edit_text) would send it back to itself.
+EXACT_EDIT_SHRINK_RECOVERY = (
+    "If the removal is intended, repeat the same call with force=true; this confirms shrinking every file in the call.")
+
+
 def _edit_content_block(binding: ResolvedResourceBinding, content: str, force: bool) -> str:
     """The existing shrink policy of the target's lane, before any edit write."""
     from ouroboros.tools.core import _check_data_shrink_guard
     from ouroboros.tools.git_repo_edit import _check_shrink_guard
 
     if _repo_edit_binding(binding):
-        return _check_shrink_guard(binding, content, force) or ""
-    return _check_data_shrink_guard(binding.target_path, content, force) or ""
+        return _check_shrink_guard(binding, content, force, recovery=EXACT_EDIT_SHRINK_RECOVERY) or ""
+    return _check_data_shrink_guard(binding.target_path, content, force, recovery=EXACT_EDIT_SHRINK_RECOVERY) or ""
 
 
 def edit_syntax_note(binding: ResolvedResourceBinding | None, content: str) -> str:
@@ -1031,7 +1064,7 @@ def _apply_patch(
         mutation_binding = mutation_binding or item_binding
         bindings[rel] = item_binding
         if op.kind == "add":
-            if rel in seen or target.exists():
+            if rel in seen or work_domain.exists(target):
                 errors.append(
                     f"⚠️ APPLY_PATCH_ERROR: Add File {op.path}: file already exists. "
                     "Use '*** Update File:' to modify it."
@@ -1062,7 +1095,7 @@ def _apply_patch(
             if rel in seen or rel in deleted:
                 errors.append(f"Delete File {op.path}: conflicts with another operation on this file")
                 continue
-            if not target.exists():
+            if not work_domain.exists(target):
                 errors.append(f"⚠️ APPLY_PATCH_ERROR: Delete File {op.path}: file not found.")
                 continue
             if not _repo_edit_binding(item_binding) and not force:
@@ -1079,11 +1112,11 @@ def _apply_patch(
         if rel in seen:
             content = seen[rel]
         else:
-            if not target.exists():
+            if not work_domain.exists(target):
                 errors.append(f"⚠️ APPLY_PATCH_ERROR: Update File {op.path}: file not found.")
                 continue
             try:
-                content = target.read_text(encoding="utf-8")
+                content = work_domain.read_text(target)
             except Exception as e:  # noqa: BLE001 - report unreadable target
                 errors.append(f"⚠️ APPLY_PATCH_ERROR: cannot read {op.path}: {e}")
                 continue
@@ -1106,6 +1139,15 @@ def _apply_patch(
     final_content: Dict[str, Tuple[pathlib.Path, str]] = {}
     for target, rel, content in planned_writes:
         final_content[rel] = (target, content)
+    from ouroboros.tools.git_repo_edit import _holds_exactly, _unchanged_result, _with_path_facts
+
+    # A target already holding exactly its final bytes is not rewritten: no effect, no new result (owner, 8 Nov 2026).
+    unchanged = [rel for rel, (target, content) in final_content.items()
+                 if bindings[rel].root != "user_files" and _holds_exactly(target, content)]
+    for rel in unchanged:
+        del final_content[rel]
+    if unchanged and not final_content and not planned_deletes:
+        return _unchanged_result(ctx, [f"{bindings[rel].root}:{rel}" for rel in unchanged], bindings[unchanged[0]].base_path)
     syntax_notes: List[str] = []
     for rel, (target, content) in final_content.items():
         if refusal := _edit_content_block(bindings[rel], content, force):
@@ -1150,7 +1192,7 @@ def _apply_patch(
 
     for rel, (target, content) in final_content.items():
         try:
-            write_text(target, content)
+            _land_edit_bytes(target, content)
         except Exception as e:  # noqa: BLE001 - surface the failed path
             return partial(f"write failed for {rel}: {e}")
         changed_paths.append(rel)
@@ -1166,7 +1208,7 @@ def _apply_patch(
                 return partial(f"{rel} WAS written but its user artifact registration failed: {exc}", landed=True)
     for target, rel in planned_deletes:
         try:
-            target.unlink()
+            _delete_edit_target(target)
         except Exception as e:  # noqa: BLE001 - surface the failed path
             return partial(f"delete failed for {rel}: {e}")
         changed_paths.append(rel)
@@ -1187,7 +1229,10 @@ def _apply_patch(
         previews.append(f"Context after {rel}:\n{numbered_edit_preview(content, sites[rel] or [0])}")
     if previews:
         body += "\n" + "\n".join(previews)
-    return f"{body}\n{footer}"
+    if unchanged:
+        body += "\nUnchanged, not rewritten (already held exactly this content): " + ", ".join(unchanged)
+    base = mutation_binding.base_path if mutation_binding is not None else active_repo_dir_for(ctx)
+    return _with_path_facts(ctx, "apply_patch", f"{body}\n{footer}", base, changed_paths, unchanged)
 
 
 # ---------------------------------------------------------------------------
@@ -1271,11 +1316,11 @@ def _edit_batch(
             continue
         mutation_binding = mutation_binding or item_binding
         if rel not in contents:
-            if not target.exists():
+            if not work_domain.exists(target):
                 errors.append(f"edit {idx} ({rel}): file not found")
                 continue
             try:
-                contents[rel] = target.read_text(encoding="utf-8")
+                contents[rel] = work_domain.read_text(target)
             except Exception as e:  # noqa: BLE001 - report unreadable target
                 errors.append(f"edit {idx} ({rel}): cannot read: {e}")
                 continue
@@ -1320,6 +1365,15 @@ def _edit_batch(
             "⚠️ EDIT_BATCH_ERROR: batch aborted, NOTHING was written (atomic). Problems:\n"
             + "\n".join("  - " + e for e in errors)
         )
+    from ouroboros.tools.git_repo_edit import _holds_exactly, _unchanged_result, _with_path_facts
+
+    unchanged = [rel for rel, text in contents.items()  # already these exact bytes: not rewritten (owner, 8 Nov 2026)
+                 if bindings[rel].root != "user_files" and _holds_exactly(targets[rel], text)]
+    for rel in unchanged:
+        del contents[rel]
+    if unchanged and not contents:
+        return with_argument_notes(ctx, _unchanged_result(
+            ctx, [f"{bindings[rel].root}:{rel}" for rel in unchanged], bindings[unchanged[0]].base_path), notes)
     for rel, text in contents.items():
         if refusal := _edit_content_block(bindings[rel], text, force):
             return f"⚠️ EDIT_BATCH_ERROR: {refusal}\nNothing was written."
@@ -1341,7 +1395,7 @@ def _edit_batch(
     order = list(contents)
     for rel, text in contents.items():
         try:
-            write_text(targets[rel], text)
+            _land_edit_bytes(targets[rel], text)
         except Exception as e:  # noqa: BLE001 - surface the failed path
             return _partial_write_failure(
                 ctx, changed, source_tool, "EDIT_BATCH_ERROR",
@@ -1368,11 +1422,12 @@ def _edit_batch(
                          for rel in changed)
     if registered_outputs:
         previews += "\n" + "\n".join(registered_outputs)
-    return with_argument_notes(ctx, (
+    return with_argument_notes(ctx, _with_path_facts(ctx, source_tool, (
         f"✅ {source_tool} applied {len(applied)} edit(s) across {len(changed)} file(s):\n"
         + "\n".join("  " + a for a in applied)
         + f"\n{previews}\n{footer}"
-    ), notes)
+        + ("\nUnchanged, not rewritten (already held exactly this content): " + ", ".join(unchanged) if unchanged else "")
+    ), mutation_binding.base_path if mutation_binding is not None else active_repo_dir_for(ctx), changed, unchanged), notes)
 
 
 # ---------------------------------------------------------------------------

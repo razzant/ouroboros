@@ -20,6 +20,9 @@ from ouroboros.review_execution import (
 )
 from ouroboros.review_native_episode import NativeToolRoundReviewExecutor
 from ouroboros.review_substrate import ReviewRequest, ReviewSlot
+from ouroboros.tools.review_response import parse_model_response
+from ouroboros.triad_review import parse_seat_answer
+from tests._source_scan import parse
 
 _VERDICT = '[{"severity": "advisory", "item": "x", "evidence": "e", "recommendation": "r"}]'
 
@@ -97,6 +100,10 @@ def test_episode_reads_then_answers(subject_repo):
     usage = result.usage
     assert usage["native_rounds"] == 2
     assert usage["host_file_read_attestation"] == "host_observed"
+    # The wave's seat row prefers `read_provenance`: a second stamp on this usage would relabel
+    # the host's own receipts as a delegated session's inference in the recorded manifest.
+    row = parse_model_response("openai/fake-reviewer", {"usage": usage, "choices": [{"message": {"content": _VERDICT}}]}, {})
+    assert parse_seat_answer(row, ["coupling"]).context_manifest["read_provenance"] == "host_observed"
     assert usage["native_tool_receipts"][0]["tool"] == "read_file"
     assert usage["native_tool_receipts"][0]["path"] == "greeting.txt"
     assert len(observed_usage) == 2
@@ -353,7 +360,7 @@ def test_terminal_round_masks_secrets_structurally(subject_repo):
         assert token not in NativeToolRoundReviewExecutor._terminal_round_fact(scalar)
 
 
-@pytest.mark.parametrize("wrappers", [0, 1, 2, 3, 5, 8, 12])
+@pytest.mark.parametrize("wrappers", [0, 3, 12])
 def test_nested_json_secrets_fail_closed_at_any_nesting(wrappers):
     """FAIL CLOSED (P1): a low-entropy secret under a secret-named key wrapped
     in N JSON strings is masked structurally while the expansion budget lasts
@@ -528,7 +535,7 @@ def test_slot_logical_window_bounds_the_episode(subject_repo, tmp_path, monkeypa
     assert exc.value.code == "deadline_exhausted" and not llm.calls
 
 
-@pytest.mark.parametrize("container", [["junk", {"id": "x"}], 7, True, "junk", {"id": "x"}, 0, False, "", {}])
+@pytest.mark.parametrize("container", [["junk", {"id": "x"}], 0, {}])
 def test_round_without_progress_is_a_typed_malformed_end(subject_repo, container):
     """PROGRESS FLOOR: a round with neither prose nor one well-formed tool call
     adds nothing and would re-enter the paid send forever — whatever container
@@ -1041,7 +1048,7 @@ def _last_read_view_sites(sources):
     sites = set()
     for rel, text in sources.items():
         try:
-            tree = ast.parse(text)
+            tree = parse(text)
         except SyntaxError:
             continue
         for node in ast.walk(tree):

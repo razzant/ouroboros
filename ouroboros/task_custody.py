@@ -13,6 +13,8 @@ pending, and every obligation the drive still holds is in canonical custody:
   registration records inside the child store (derived FIRST, then checked
   against the store: an absent store or file is a missing source, never
   permission), plus every unrecorded file the store lists;
+* the raw QA its store keeps at ``source_handles/test-evidence``, at its exact
+  relative paths (``history_retention.carry_raw_evidence``);
 * the input closure of the mail addressed to the task (attachments and their
   manifest sources) and of its task contract;
 * the child's verification receipts, unioned into the canonical stream;
@@ -112,7 +114,7 @@ class _Retained(Exception):
 
 
 class CustodyBusy(OSError):
-    """A publisher could not take the task's custody lock: retry later, nothing failed."""
+    """A publisher could not take the task's custody lock; the cause does not decide the task's outcome."""
 
 
 class PublicationClosed(OSError):
@@ -175,8 +177,12 @@ def _task_lock(drive_root: Any, task_id: str, suffix: str, timeout_sec: float) -
     require_owned_root(drive_root)
     tid = validate_task_id(task_id)
     path = custody_anchor(drive_root, tid) / "task_results" / f"{tid}.{suffix}.lock"
+    held: Dict[str, Any] = {}
     fd = acquire_exclusive_file_lock(path, timeout_sec=timeout_sec, stale_sec=120.0, poll_sec=0.01,
-                                     owner_aware_stale=True)
+                                     owner_aware_stale=True, outcome=held)
+    if fd is None and held.get("reason") != "contention":
+        code, text = held.get("errno"), f"{suffix} lock of {tid} was not taken: platform outcome {held.get('reason') or 'unknown'}"
+        raise CustodyBusy(code, f"{text} ({os.strerror(code)})") if isinstance(code, int) else CustodyBusy(text)
     try:
         yield fd is not None
     finally:
@@ -189,7 +195,7 @@ def task_custody_lock(drive_root: Any, task_id: str, *, timeout_sec: float = 5.0
     settlement take it around every file they place and the row write that lists it. It
     lives on the canonical side (``task_results/<id>.custody.lock``), never inside a drive
     that settlement deletes, for the canonical root and every own child drive alike.
-    Yields whether it was acquired."""
+    Yields whether acquired; a non-contention refusal raises CustodyBusy with the known platform cause."""
     return _task_lock(drive_root, task_id, "custody", timeout_sec)
 
 
@@ -1051,6 +1057,8 @@ def _prepare_occupant(canonical: pathlib.Path, drive: pathlib.Path, task_id: str
     except (OSError, ValueError, StoreError) as exc:
         raise _Retained("task_result_unreadable") from exc
     status = str(current.get("status") or "")
+    if isinstance(current.get("owner_keep"), dict):
+        raise _Retained("owner_keep")
     if admission_rollback and not child and not current.get("started_at") \
             and status not in {"running", "interrupted"}:
         return {"task_id": task_id, "current": current, "plan": [], "rollback": True, "live": live,
@@ -1093,9 +1101,10 @@ def _receipts_identity(drive: pathlib.Path, task_id: str) -> Optional[tuple]:
 def _secure_occupant(canonical: pathlib.Path, drive: pathlib.Path, prepared: Dict[str, Any],
                      closed: Callable[[], bool]) -> int:
     """Phase A, under the occupant's custody lock: re-check the row, union receipts, carry the
-    input closure, publish, write once from the row-locked CURRENT and verify the re-read
-    row; ``closed()`` is re-asked before each of those effects. Records the revision Phase B
-    must still see. Returns files published."""
+    input closure and raw QA, publish, write once from the row-locked CURRENT and verify the
+    re-read row; ``closed()`` is re-asked before each of those effects. Records the revision
+    Phase B must still see. Returns files published."""
+    from ouroboros.history_retention import raw_evidence_custodied
     from ouroboros.outcome_receipt_store import publish_verification_receipt_union
 
     def fence() -> None:
@@ -1121,6 +1130,10 @@ def _secure_occupant(canonical: pathlib.Path, drive: pathlib.Path, prepared: Dic
     fence()
     prepared["input_fields"], prepared["inputs"] = _input_closure(canonical, drive, task_id, current, rows)
     fence()
+    carried = raw_evidence_custodied(canonical, drive, task_id, current)
+    if carried is None:
+        raise _Retained("raw_evidence_uncustodied")  # the gap is on the row, the retry owner's now
+    fence()
     source = drive / _ARTIFACTS_DIR / task_id
     published = _publish(canonical, task_id, prepared["plan"])
 
@@ -1141,7 +1154,7 @@ def _secure_occupant(canonical: pathlib.Path, drive: pathlib.Path, prepared: Dic
     if _pending_refs_under(readback, drive):
         raise _Retained("child_refs_pending")
     prepared["revision_after"] = custody_revision(readback)
-    return sum(1 for item in prepared["plan"] if item.get("staged") is not None)
+    return carried + sum(1 for item in prepared["plan"] if item.get("staged") is not None)
 
 
 def _recheck_occupant(canonical: pathlib.Path, drive: pathlib.Path, prepared: Dict[str, Any]) -> None:
@@ -1149,6 +1162,8 @@ def _recheck_occupant(canonical: pathlib.Path, drive: pathlib.Path, prepared: Di
     and the receipts are exactly what Phase A left (bounded reads, no copy or hash)."""
     task_id = prepared["task_id"]
     current = load_task_result(canonical, task_id, strict=True) or {}
+    if isinstance(current.get("owner_keep"), dict):
+        raise _Retained("owner_keep")  # the writer saves it under this very lock: no keep can follow this move
     if attempt_basis(current) != prepared["basis"] or custody_revision(current) != prepared["revision_after"]:
         raise _Retained("canonical_changed")
     rows, complete = unread_mail_rows(drive, task_id)
@@ -1174,7 +1189,8 @@ def _recheck_occupant(canonical: pathlib.Path, drive: pathlib.Path, prepared: Di
 # I/O error) is attempted again on the next pass.
 TRANSIENT_RETENTIONS = frozenset({"liveness_unknown", "task_live", "generation_closed", "custody_busy",
                                    "mailbox_busy", "store_busy", "canonical_changed", "drive_occupant_changed",
-                                   "call_inventory_changed", "task_result_unreadable"})
+                                   "call_inventory_changed", "task_result_unreadable", "review_environment_held",
+                                   "kept_service_capture_owed"})
 
 
 def settlement_basis(parent: pathlib.Path, task_id: str, task_dir: pathlib.Path, drive: pathlib.Path) -> list:
@@ -1296,7 +1312,8 @@ def record_rest(rested: Optional[Dict[str, Any]], layout: str, parent: pathlib.P
 
 def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: Optional[LiveProbe],
                        guard: Optional[Guard] = None, stop: Optional[Callable[[], bool]] = None,
-                       admission_rollback: bool = False, report: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                       admission_rollback: bool = False, report: Optional[Dict[str, Any]] = None,
+                       owed: Any = None) -> Dict[str, Any]:
     """The one decision to delete one of TASK's own execution drives; see the module docstring.
 
     ``live(task_id)`` is the caller's supervisor probe (True live, False proven not live,
@@ -1305,7 +1322,8 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
     final census, probe and move happen inside it. ``stop()`` closes a maintenance
     generation between phases. ``admission_rollback`` additionally lets a never-started
     task's drive go without a settled row. Returns ``{"status": "removed" | "retained",
-    "reason", "published"}`` and, given a prune ``report``, records a kept drive.
+    "reason", "published"}`` and, given a prune ``report``, records a kept drive. ``owed``: the pass's one read of the
+    kept-output debts (``owed_declarations``) for the first gate; the move rechecks with its own.
     """
     canonical = pathlib.Path(canonical_root).resolve(strict=False)
     tid = validate_task_id(task_id)
@@ -1319,14 +1337,22 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
             raise _Retained("not_own_drive")
         if live is None:
             raise _Retained("liveness_unknown")
+        from ouroboros.tools.kept_service_outputs import owed_output_hold
+        from ouroboros.workspace_preflight import review_scratch_held
+        if review_scratch_held(canonical, drive):
+            raise _Retained("review_environment_held")
+        if owed_output_hold(canonical, base, owed=owed):  # a kept service's declared outputs here still owe their capture
+            raise _Retained("kept_service_capture_owed")
         occupants = _occupants(drive, tid)
         prepared = [_prepare_occupant(canonical, drive, occupant, live=live, staging=staging,
                                       admission_rollback=admission_rollback and occupant == tid, stop=closed)
                     for occupant in occupants]
         if closed():
             raise _Retained("generation_closed")
-        if any(live(item["task_id"]) is not False for item in prepared):
-            raise _Retained("task_live")  # ownership back after preparation; asked BEFORE any custody lock
+        for item in prepared:
+            alive = live(item["task_id"])
+            if alive is not False:
+                raise _Retained("liveness_unknown" if alive is None else "task_live")
         with contextlib.ExitStack() as stack:  # Phase A: publication, per occupant, every write fenced
             stack.enter_context(publication_fence(closed))
             for item in prepared:
@@ -1336,13 +1362,26 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
                 outcome["published"] += _secure_occupant(canonical, drive, item, closed)
         if closed():
             raise _Retained("generation_closed")
+        # Phase A may have published custody onto the canonical row. Prepare the
+        # supervisor's signed ownership read AFTER that publication, outside its
+        # queue lock; Phase B still rejects any subsequent change or new owner.
+        for item in prepared:
+            alive = live(item["task_id"])
+            if alive is not False:
+                raise _Retained("liveness_unknown" if alive is None else "task_live")
         with (guard() if guard is not None else contextlib.nullcontext(True)) as allowed:  # Phase B: the move
             if not allowed:
                 raise _Retained("generation_closed")
             if _occupants(drive, tid) != occupants:
                 raise _Retained("drive_occupant_changed")
-            if any(live(item["task_id"]) is not False for item in prepared):
-                raise _Retained("task_live")
+            if review_scratch_held(canonical, drive):
+                raise _Retained("review_environment_held")
+            if owed_output_hold(canonical, base):
+                raise _Retained("kept_service_capture_owed")
+            for item in prepared:
+                alive = live(item["task_id"])
+                if alive is not False:
+                    raise _Retained("liveness_unknown" if alive is None else "task_live")
             with contextlib.ExitStack() as stack:
                 for item in prepared:
                     if not stack.enter_context(task_custody_lock(canonical, item["task_id"],
@@ -1366,6 +1405,8 @@ def settle_child_drive(canonical_root: Any, task_id: str, drive: Any, *, live: O
     except _Retained as retained:
         # A fenced write surfaces as its caller's own failure reason: a closed generation names the close.
         outcome["reason"] = "generation_closed" if closed() else str(retained)
+    except StoreBusy:
+        outcome["reason"] = "generation_closed" if closed() else "store_busy"
     except (OSError, ValueError, TimeoutError) as exc:
         outcome["reason"] = "generation_closed" if closed() else f"custody_error: {type(exc).__name__}"
         if not closed():
@@ -1395,15 +1436,18 @@ def _remove_entry(entry: pathlib.Path) -> None:
 
 def sweep_custody_leftovers(canonical_root: Any, *, min_age_sec: float = 3600.0) -> None:
     """Remove the staging a crashed settlement left behind (older than ``min_age_sec``, so a
-    running settlement keeps its own); staging is a private copy, unserved and unreferenced."""
+    running settlement keeps its own); staging is a private copy, unserved and unreferenced. A scratch
+    release's entry holds its record, the only one: the next release pass publishes it instead."""
     import time
+
+    from ouroboros.workspace_preflight import _RELEASE_MARK
 
     root = pathlib.Path(canonical_root) / _STAGING_DIR
     if not root.is_dir() or root.is_symlink():
         return
     for entry in root.iterdir():
         try:
-            if time.time() - entry.lstat().st_mtime >= min_age_sec:
+            if _RELEASE_MARK not in entry.name and time.time() - entry.lstat().st_mtime >= min_age_sec:
                 _remove_entry(entry)
         except OSError:
             continue
@@ -1429,10 +1473,20 @@ def custody_trash_entries(canonical_root: Any) -> List[Tuple[str, List[int]]]:
 def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
     """Delete the drives settlements moved aside: each was fully custodied before its move, and
     nothing serves or references it, so no age or liveness applies. The maintenance child runs this,
-    off the serving process. Returns the count removed and each entry that survived its removal
-    (``name -> identity``; the child retries it at its next run, a changed identity makes the job due)."""
-    report: Dict[str, Any] = {"removed": 0, "stuck": {}}
+    off the serving process. Returns the count removed, stuck and held entries that survived
+    (``name -> identity``; the child retries it at its next run, a changed identity makes the job due)
+    and ``holds``. An entry goes only once its scratch is released and each record a producer's retention
+    marker keeps (#2708) has moved into its own ``<id>+scratch-<token>/`` entry, held, re-read every run,
+    as ``producer_retained`` (the marker's words, since it was written) until the marker is gone
+    (``session_scratch.release_trash_entry``). A failed release or handoff, or a removal it survived, keeps
+    the entry whole, its records included, as the hold ``removal_failed`` (its name and the failure)."""
+    from ouroboros.session_scratch import aggregate_holds, release_trash_entry
+    from ouroboros.tools.kept_service_outputs import owed_declarations
+
+    report: Dict[str, Any] = {"removed": 0, "stuck": {}, "holds": []}
+    held: List[Any] = []
     root = pathlib.Path(canonical_root) / _TRASH_DIR
+    owed = owed_declarations(canonical_root)  # one selection for the whole pass: every entry reads the same debts
     try:
         entries = [] if root.is_symlink() else list(root.iterdir())
     except (FileNotFoundError, NotADirectoryError):
@@ -1440,21 +1494,29 @@ def remove_custody_trash(canonical_root: Any, *, stop: Optional[Callable[[], boo
     for entry in entries:
         if stop is not None and stop():
             break
-        with contextlib.suppress(OSError):
-            if entry.is_dir() and not entry.is_symlink():
-                from ouroboros.workspace_preflight import release_session_scratch
-
-                release_session_scratch(entry)
-                if (entry / "data").is_dir() and not (entry / "data").is_symlink():
-                    release_session_scratch(entry / "data")
-            _remove_entry(entry)
+        holding, failed = False, ""
+        try:  # the scratch release and every retained record's handoff are the conditions of the removal
+            holding, retained = release_trash_entry(canonical_root, entry, owed=owed)
+        except Exception as exc:  # whatever failed, the entry and every record still in it wait
+            failed = f"{entry.name}: {type(exc).__name__}"
+            held += [(row["class"], row["example"], row["since"]) for row in getattr(exc, "retained", ())]
+            log.warning("Custody trash entry %s kept: its scratch release did not complete", entry.name, exc_info=True)
+        else:
+            held += [(row["class"], row["example"], row["since"]) for row in retained]
+            if not holding:
+                with contextlib.suppress(OSError):
+                    _remove_entry(entry)
         try:
             stat = entry.lstat()
-            report["stuck"][entry.name] = [stat.st_ino, stat.st_mtime_ns]
+            report.setdefault("held" if holding else "stuck", {})[entry.name] = [stat.st_ino, stat.st_mtime_ns]
+            if not holding:
+                held.append(("removal_failed", failed or f"{entry.name}: survived its removal", stat.st_mtime))
         except FileNotFoundError:
             report["removed"] += 1
         except OSError as exc:
             report["stuck"][entry.name] = [type(exc).__name__]
+            held.append(("removal_failed", f"{entry.name}: {type(exc).__name__}", None))
+    report["holds"] = aggregate_holds(held)
     if report["removed"]:  # the bytecode the removed sources left is owed to retirement now
         from ouroboros.maintenance_retirement import artifact_changed
 

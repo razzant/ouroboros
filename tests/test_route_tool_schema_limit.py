@@ -1,8 +1,8 @@
 """A provider's physical ceiling on tool schemas per request (direct OpenAI: 128).
 
 Main and the provider canary fit through the same function: under the ceiling
-nothing changes; above it the overflow tail is left out, never a core, meta or
-actor-loaded schema, and Main tells the actor which names it left out.
+nothing changes; above it the overflow tail is left out, never a core, meta,
+gateway or actor-loaded schema, and Main tells the actor which names it left out.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from ouroboros import loop as loop_module
 from ouroboros import loop_model_call
 from ouroboros.provider_models import tool_schema_limit
-from ouroboros.tool_capabilities import CORE_TOOL_NAMES, META_TOOL_NAMES
+from ouroboros.tool_capabilities import CORE_TOOL_NAMES, MCP_GATEWAY_TOOL_NAME, META_TOOL_NAMES
 from ouroboros.tool_policy import fit_tool_schemas_to_limit
 from tests.provider_contract_ci import (
     CANARY_TOOL_NAME,
@@ -23,7 +23,7 @@ from tests.provider_contract_ci import (
 )
 
 OPENAI_MAIN = "openai::gpt-5.6-terra"
-PINNED = sorted(CORE_TOOL_NAMES | META_TOOL_NAMES)
+PINNED = sorted(CORE_TOOL_NAMES | META_TOOL_NAMES | {MCP_GATEWAY_TOOL_NAME})  # the gateway keeps the list stable
 
 
 def _schema(name):

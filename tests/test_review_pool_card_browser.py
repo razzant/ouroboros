@@ -22,7 +22,7 @@ from tests.test_ui_smoke_playwright import _browser_missing, _open_review_checkp
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 WIDTHS = {"phone": {"width": 390, "height": 844}, "desktop": {"width": 1280, "height": 900}}
 TASK_ID = "pool-card"

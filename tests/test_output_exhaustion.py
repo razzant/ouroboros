@@ -25,7 +25,7 @@ import pytest
 import ouroboros.loop as loop_mod
 import ouroboros.loop_llm_call as call_mod
 import ouroboros.loop_transport as loop_transport
-from ouroboros import usage_accounting as ua
+from ouroboros import loop_output_exhaustion as recovery, usage_accounting as ua
 from ouroboros.loop import _output_exhausted_notice, run_llm_loop
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros._usage_response import output_exhaustion_facts, reported_reasoning_tokens, response_finish_reason
@@ -234,6 +234,33 @@ def test_empty_stop_reply_is_retried_as_an_ordinary_empty_response(tmp_path, no_
     assert "_last_llm_error_kind" not in usage and "_last_llm_output_exhausted" not in usage
 
 
+@pytest.mark.parametrize(("usage", "msg"), [
+    ({"prompt_tokens": 5, "response_finish_reason": "content_filter"}, {"role": "assistant", "content": ""}),  # OpenAI family
+    ({"prompt_tokens": 5}, {"role": "assistant", "content": "", "stop_reason": "refusal"}),  # Anthropic
+])
+def test_a_provider_content_refusal_is_typed_sent_once_and_carries_its_lineage(tmp_path, no_sleep, usage, msg):
+    """A provider's refusal is a route fact, not a transient empty reply: one send, its own event
+    and kind, no cooldown, no spent wall, not infra; a transient body error still retries as itself."""
+    assert _classify_empty_response(usage, msg) == ("provider_content_refusal", False, True)
+    assert _classify_empty_response({**usage, "provider_error": {"kind": "rate_limit", "code": 429}}, msg) == (
+        "llm_empty_response", False, False)
+    llm, totals = _ScriptedLLM((msg, usage), (msg, usage)), {}
+    with ua.usage_scope(ua.UsageScope(task_id="t-exhaust", root_task_id="root", parent_task_id="parent")):
+        assert _call(llm, tmp_path, totals)[0] is None
+
+    assert llm.calls == 1 and no_sleep == []
+    [row] = _events(tmp_path, "provider_content_refusal")
+    assert (row["finish_reason"], row["root_task_id"], row["parent_task_id"]) == (
+        usage.get("response_finish_reason") or msg.get("stop_reason"), "root", "parent")
+    assert _events(tmp_path, "llm_empty_response") == _events(tmp_path, "provider_incomplete_response") == []
+    assert totals["_last_llm_error_kind"] == "content_filter" == totals["_last_llm_call_meta"]["failure_code"]
+    assert "content_filter" not in _TRANSIENT_RETRY_KINDS | _COOLDOWN_ERROR_KINDS
+    assert (totals["execution_status"], totals["reason_code"]) == ("failed", "provider_content_refusal")
+    assert RETRY_WALL_EXHAUSTED_KEY not in totals and "_last_llm_output_exhausted" not in totals
+    assert loop_transport._FAILURE_KIND_WORDS["content_filter"] != loop_transport._FAILURE_KIND_WORDS[
+        "provider_policy_refusal"]
+
+
 # ------------------------------------------------------------------ the next ordinary round (T10)
 
 HOST_FACT = "[SYSTEM NOTICE]\nThe provider ended your previous reply on its length limit"
@@ -430,3 +457,51 @@ def test_an_exhausted_candidate_after_an_unknown_primary_keeps_its_wait_and_its_
     assert llm.requests[-1]["messages"] != llm.requests[-2]["messages"]
     assert "entered" in [row.get("phase") for row in _events(tmp_path, "network_wait")]
     assert "_pending_transport_outcome" not in usage  # the usable reply closed the unknown record
+
+
+# ------------------------------------------------------------------ text a typed finish cut (#1472)
+
+CUT_TEXT = "The probe finished: both files were read and the first count is 12, while the second"
+
+
+def _finished(source, finish, text=CUT_TEXT):
+    """A usable reply whose finish arrives where its lane writes it: usage (OpenAI family, Claudexor, local,
+    GigaChat) or the native Anthropic message's ``stop_reason``; ``none`` carries no finish fact."""
+    msg, usage = {"role": "assistant", "content": text}, {"prompt_tokens": 9, "completion_tokens": 4096, "cost": 0.0}
+    if source == "usage":
+        usage["response_finish_reason"] = finish
+    elif source == "message":
+        msg["stop_reason"] = finish
+    return msg, usage
+
+
+@pytest.mark.parametrize("shape", ["task", "main"])
+@pytest.mark.parametrize(("source", "finish"), [("usage", "length"), ("usage", "tool_calls"), ("usage", "function_call"),
+                                                  ("message", "max_tokens"), ("message", "tool_use")])
+def test_text_a_typed_finish_cut_gets_one_informed_turn_on_every_lane(tmp_path, loop_env, no_sleep, source, finish, shape):
+    """Each lane's typed finish makes callless text no final: the next ORDINARY round on the same route reads
+    the kept words and one host fact, and its answer is the final; no route is walked (``loop_env``). ``main``
+    is only the loop's Main shape (``is_direct_chat``): Main admission and delivery are not run here."""
+    llm = _ScriptedLLM(_finished(source, finish), OK_RESPONSE)
+    kwargs = _loop_kwargs(tmp_path, llm, [])
+    if shape == "main":
+        kwargs["tools"]._ctx.is_direct_chat, kwargs["tools"]._ctx.current_chat_id = True, 1
+    result, usage, trace = run_llm_loop(**kwargs)
+    assert result == "done" and llm.calls == 2
+    first, second = (request["messages"] for request in llm.requests)
+    assert second[:len(first)] == first  # appended: the cut request stays a prefix of the next
+    kept = second.index({"role": "assistant", "content": CUT_TEXT})
+    assert f"(finish_reason={finish})" in second[kept + 1]["content"] and second[kept + 1]["role"] == "user"
+    assert [row["round"] for row in _events(tmp_path, "llm_round")] == [1, 2]
+    assert "forced_finalization" not in trace and recovery.UNFINISHED_KEY not in usage
+
+
+@pytest.mark.parametrize(("source", "finish"), [("usage", "stop"), ("message", "end_turn"), ("usage", None),
+                                                  ("none", None), ("usage", "content_filter")])
+def test_other_finishes_leave_text_the_plain_final(tmp_path, loop_env, no_sleep, source, finish):
+    """Negative control: only the output-limit and tool-call finishes mark a cut. Stop, end_turn, a null or absent
+    finish and any other typed finish leave the text the round's final, as before: one call, no host fact."""
+    llm = _ScriptedLLM(_finished(source, finish))
+    result, usage, trace = run_llm_loop(**_loop_kwargs(tmp_path, llm, []))
+    assert (result, llm.calls) == (CUT_TEXT, 1)
+    assert recovery.UNFINISHED_KEY not in usage and "forced_finalization" not in trace

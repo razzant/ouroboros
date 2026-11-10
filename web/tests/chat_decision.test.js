@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { NodeStub, countPropertyWrites, fixture, frameBubble, turn, WS_MSG } from './chat_decision_fixture.js';
+import { questionPresentation } from '../modules/question_presentation.js';
 // The head's shared status mark (web/modules/status_mark.js): [shape, hue, hidden].
 const markOf = (card) => { const mark = card.querySelector('.chat-quiz-mark'); return [mark.dataset.shape, mark.dataset.hue, mark.hidden]; };
 test('targeted detail preserves normalized option details, single-flight, and the existing answer form', async () => {
@@ -1206,4 +1207,28 @@ test('settled native history needs no recovery reads, and missing exact room pro
         assert.equal(await fx.decision.readQuestion('t-1', 'qz-1', ''), null);
         assert.equal(fx.calls.length, 0);
     } finally { fx.decision.destroy(); fx.restore(); }
+});
+
+test('a question card says its work is paused from the instance\'s works and returns to its words after Resume', () => {
+    const fx = fixture();
+    try {
+        const card = fx.decision.buildQuizCard({ ...WS_MSG, options: ['Yes', 'No'], owner_wait_state: 'waiting' });
+        const status = () => card.querySelector('.chat-quiz-status-text').textContent;
+        assert.equal(status(), 'Waiting for your answer');
+        const works = (activity) => ({ episodes: new Map([['root', { work_id: 'root', confirmed: true, episode: { task_id: 'root' },
+            members: { ids: ['root', 't-1'], states: { 't-1': { activity } } } }]]) });
+        fx.decision.syncWorks(works('paused'));
+        // The card shows the paused reading of its own question, which names Resume (question_presentation.test.js).
+        assert.equal(status(), questionPresentation({ state: 'open', owner_wait_state: 'waiting' }, { paused: true }).status);
+        assert.match(status(), /\bResume\b/);
+        assert.deepEqual(markOf(card), ['dot', 'owner', false], 'the owner\'s answer is still wanted');
+        fx.decision.syncWorks(works('working'));
+        assert.equal(status(), 'Waiting for your answer');
+        // An answer in flight keeps its own words until it settles.
+        fx.decision.syncWorks(works('paused'));
+        card.dataset.submission = 'sending';
+        card.querySelector('.chat-quiz-status-text').textContent = 'Sending…';
+        fx.decision.syncWorks(works('working'));
+        assert.equal(status(), 'Sending…');
+    } finally { fx.restore(); }
 });

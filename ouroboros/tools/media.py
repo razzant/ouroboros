@@ -7,7 +7,8 @@ dep degrades gracefully rather than burning rounds. The PDF readers (one handler
 boundary; `youtube_transcript` is web-gated like web_search
 (`registry._WEB_TOOLS`). `extract_video_frames` optionally uses `ffmpeg` from PATH
 when available, writes each call's frames into a new directory, and returns typed
-`EXTRACT_VIDEO_FRAMES_UNAVAILABLE` otherwise.
+`EXTRACT_VIDEO_FRAMES_UNAVAILABLE` otherwise. `read_archive` lists a ZIP or reads one member's
+text through read_file's own admission (``archive_reader``: nothing is extracted).
 """
 from __future__ import annotations
 
@@ -21,9 +22,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from typing import Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
 
 _OCR_PDF_MAX_BYTES = 25 * 1024 * 1024
 _OCR_PDF_MAX_PAGES = 50
@@ -36,26 +39,59 @@ _VIDEO_MAX_FRAMES = 12
 _VIDEO_FRAME_TIMEOUT_SEC = 120
 
 
+def _relative_candidates(ctx: ToolContext, text: str, raw: pathlib.Path) -> tuple[List[pathlib.Path], str]:
+    """Where a relative media path may live, in order, or a refusal when nothing can be named.
+
+    It means the active workspace (read_file's default root), as for view_image; a file
+    missing there never falls through to uploads, the serving checkout, the home or a
+    parent's roots. The one compatibility address is the staged-attachment manifest's
+    ``attachments/<name>``: after the workspace, it also names that file in this task's
+    own artifact_store (``read_file(root='artifact_store', path='attachments/<name>')``).
+    """
+    from ouroboros.artifacts import _ATTACHMENTS_SUBDIR
+
+    candidates: List[pathlib.Path] = []
+    no_workspace = ""
+    try:
+        from ouroboros.tools.registry import active_repo_dir_for
+
+        candidates.append(pathlib.Path(active_repo_dir_for(ctx)).expanduser() / raw)
+    except Exception as exc:  # noqa: BLE001 — the caller sees why no workspace could be named
+        no_workspace = str(exc) or type(exc).__name__
+    if len(raw.parts) == 2 and raw.parts[0] == _ATTACHMENTS_SUBDIR and raw.parts[1] != "..":
+        try:
+            from ouroboros.tool_access import resource_root_path
+
+            candidates.append(pathlib.Path(resource_root_path(ctx, "artifact_store")) / raw)
+        except Exception:  # noqa: BLE001 — no artifact store, no compatibility address
+            pass
+    if not candidates:
+        return [], (
+            f"⚠️ TOOL_ARG_ERROR: relative path {text!r} has no active workspace to resolve against: "
+            f"{no_workspace}. Name the file by its absolute path."
+        )
+    return [c.resolve(strict=False) for c in candidates], ""
+
+
 def _resolve_local_file(ctx: ToolContext, path: str, *, max_bytes: int) -> tuple[pathlib.Path | None, str]:
     """Resolve a local file path through the SAME trust boundary as view_image/read_file:
     it must sit under an allowed file root and pass the protected-artifact read guard.
-    Returns (path, "") on success or (None, error_message)."""
+    An absolute or ``~`` path is the file it names; a relative one follows
+    ``_relative_candidates``. Returns (path, "") on success or (None, error_message)."""
     from ouroboros.tools.vision import _allowed_file_roots, _read_file_parity_block
     from ouroboros.tool_access import path_is_relative_to
 
     text = str(path or "").strip()
     if not text:
         return None, "⚠️ TOOL_ARG_ERROR: `path` is required."
-    roots = _allowed_file_roots(ctx)
     raw = pathlib.Path(text).expanduser()
-    # Resolve against EVERY allowed root (not just the first) so a RELATIVE path from the
-    # staged-attachment manifest — e.g. `attachments/doc.pdf`, which lives under artifact_store,
-    # not the uploads root — is found wherever it actually is, matching the
-    # read_file(root='artifact_store', path='attachments/...') contract the manifest advertises.
     if raw.is_absolute():
         candidates = [raw.resolve(strict=False)]
     else:
-        candidates = [(r / text).resolve(strict=False) for r in roots]
+        candidates, refusal = _relative_candidates(ctx, text, raw)
+        if refusal:
+            return None, refusal
+    roots = _allowed_file_roots(ctx)
     confined = [c for c in candidates if any(c == r or path_is_relative_to(c, r) for r in roots)]
     if not confined:
         return None, (
@@ -79,7 +115,8 @@ def _resolve_local_file(ctx: ToolContext, path: str, *, max_bytes: int) -> tuple
     except Exception:  # noqa: BLE001 — guard is best-effort; the root check above is the floor
         pass
     if not fp.exists() or not fp.is_file():
-        return None, f"⚠️ FILE_NOT_FOUND: {text}"
+        where = "" if raw.is_absolute() else f" (resolved: {' or '.join(str(c) for c in confined)})"
+        return None, f"⚠️ FILE_NOT_FOUND: {text}{where}"
     if fp.stat().st_size > max_bytes:
         return None, f"⚠️ FILE_TOO_LARGE: {fp.stat().st_size} bytes (max {max_bytes})."
     return fp, ""
@@ -384,7 +421,7 @@ def _pdf_text_schema(name: str, lead: str) -> dict:
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Local PDF path (inside the active workspace / task drive / artifact store / attachments / uploads)."},
+                "path": {"type": "string", "description": "Local PDF path: relative to the active workspace, or absolute inside the workspace, task drive, artifact store or uploads. A staged attachments/<name> also resolves in this task's artifact store."},
                 "pages": {"type": "string", "description": "Optional 1-based pages, e.g. '3', '2-5', '7-' or '1,4-6'. Default: all pages up to max_pages."},
                 "start_char": {"type": "integer", "minimum": 0, "default": 0, "description": "Resume at this character of one selected page's extracted text. A nonzero offset requires pages selecting exactly one page."},
                 "max_pages": {"type": "integer", "description": f"Cap pages read from the selection (default {_OCR_PDF_MAX_PAGES}; pages past it are named)."},
@@ -392,6 +429,93 @@ def _pdf_text_schema(name: str, lead: str) -> dict:
             "required": ["path"],
         },
     }
+
+
+@completed_local_read
+def _read_archive(ctx: ToolContext, path: str = "", root: str = "", entry: int = 0, member: str = "",
+                  offset: int = 0, start_byte: int = 0, encoding: str = "utf-8", bucket: str = "",
+                  skill_name: str = "") -> str:
+    """List a ZIP archive, or read one member's text, after read_file's own admission of the file (its
+    roots and skill_payload selectors, Presence ceiling, runtime-data and protected-path rules);
+    ``archive_reader`` extracts nothing. A member read publishes its own ``archive_member_view`` identity,
+    never read_file's ``read_view``."""
+    from ouroboros.archive_reader import listing, member_text
+    from ouroboros.tools.core_file_tools import read_admission
+    from ouroboros.tools.tool_resolution import _root_containing_absolute_path
+
+    text = str(path or "").strip()
+    if not text:
+        return "⚠️ TOOL_ARG_ERROR: `path` is required."
+    if any(type(value) is not int or value < 0 for value in (entry, offset, start_byte)):
+        return "⚠️ TOOL_ARG_ERROR: entry, offset and start_byte must be nonnegative integers."
+    chosen = str(root or "").strip() or _root_containing_absolute_path(ctx, "read_file", text) or "active_workspace"
+    normalized, binding, refusal = read_admission(ctx, chosen, text, bucket=str(bucket or ""),
+                                                  skill_name=str(skill_name or ""))
+    if refusal is not None:
+        return _publish_tool_result(ctx, refusal) if isinstance(refusal, ToolResult) else refusal
+    target, label = pathlib.Path(binding.target_path), f"{normalized}:{text}"
+    from ouroboros import work_domain
+    if not work_domain.is_work(target) and not target.is_file():
+        return f"⚠️ FILE_NOT_FOUND: {label} (resolved: {target})"
+    with _archive_read_path(target) as archive_path:
+        if not entry and not member:
+            return listing(archive_path, label, offset=offset)
+        rendered, identity = member_text(archive_path, label, entry=entry, member=str(member or ""),
+                                         start_byte=start_byte, encoding=str(encoding or "utf-8"))
+    if identity is None:
+        return rendered
+    return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=rendered,
+                                                meta={"archive_member_view": identity}))
+
+
+@contextmanager
+def _archive_read_path(target: pathlib.Path):
+    """Give archive_reader a stable snapshot when the admitted file belongs to the work domain.
+
+    The service must never open a work-domain pathname itself: a work-side symlink could otherwise redirect
+    ``ZipFile`` to a service-only file. ``measure`` reads through the confined descriptor, or resolves a link in
+    the work domain itself. Bounds, member reads and hashing then use one service-owned byte snapshot. This
+    costs O(archive size) disk and I/O; the file is closed before ZipFile opens it (also on Windows).
+    """
+    from ouroboros import work_domain
+
+    if not work_domain.is_work(target):
+        yield target
+        return
+    with tempfile.TemporaryDirectory(prefix="ouroboros-archive-") as folder:
+        snapshot = pathlib.Path(folder) / "archive.zip"
+        with snapshot.open("wb") as sink:
+            work_domain.measure(target, sink=sink)
+        yield snapshot
+
+
+_READ_ARCHIVE_SCHEMA = {
+    "name": "read_archive",
+    "description": (
+        "List a ZIP archive's entries, or read one member's text, without extracting anything to disk: names "
+        "inside (absolute, '..', symlinks) stay text. The listing pages 200 entries and names folders, "
+        "archives inside (listed, not opened), encrypted members and compression it does not decode; a member "
+        "read returns up to 200,000 decompressed bytes and the start_byte that continues it. ZIP only for now."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "The ZIP file, as read_file's path."},
+            "root": {"type": "string", "description": (
+                "As read_file's root (default active_workspace; an absolute path selects the root holding it). "
+                "A staged attachment is root='artifact_store', path='attachments/<name>'.")},
+            "entry": {"type": "integer", "minimum": 0, "description": "Read this member, by its number in the listing."},
+            "member": {"type": "string", "description": "Or read the member with exactly this name as listed."},
+            "offset": {"type": "integer", "minimum": 0, "description": "Listing: start after this many entries."},
+            "start_byte": {"type": "integer", "minimum": 0,
+                           "description": "Member read: resume at this byte of the member, as a cut read names."},
+            "encoding": {"type": "string", "description": "Member read: its text encoding (default utf-8, e.g. cp1251)."},
+            "bucket": {"type": "string", "description": "As read_file's: required only for root=skill_payload."},
+            "skill_name": {"type": "string", "description": "As read_file's: required only for root=skill_payload."},
+        },
+        "required": ["path"],
+    },
+}
 
 
 def get_tools() -> List[ToolEntry]:
@@ -403,6 +527,8 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry(name="extract_pdf_text", schema=_pdf_text_schema(
             "extract_pdf_text", "Extract the embedded text layer of a local PDF."),
             handler=_ocr_pdf, timeout_sec=120, safety_policy="skip"),
+        ToolEntry(name="read_archive", schema=_READ_ARCHIVE_SCHEMA, handler=_read_archive, timeout_sec=120,
+                  safety_policy="skip"),
         ToolEntry(
             name="youtube_transcript",
             schema={
@@ -440,7 +566,7 @@ def get_tools() -> List[ToolEntry]:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "Local video path inside an allowed file root."},
+                        "path": {"type": "string", "description": "Local video path: relative to the active workspace, or absolute inside an allowed file root. A staged attachments/<name> also resolves in this task's artifact store."},
                         "timestamps": {"type": "string", "description": "Optional comma/space-separated seconds to extract. Defaults to the first N integer seconds."},
                         "max_frames": {"type": "integer", "description": f"Maximum frames to extract (default 5, hard cap {_VIDEO_MAX_FRAMES})."},
                     },

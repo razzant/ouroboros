@@ -16,7 +16,6 @@ from tests.test_loop_transport_wait import _loop_kwargs
 from tests.test_pause_model_receiver import _extract, _request, _until
 from tests.test_working_checkpoint import _registry
 
-pytestmark = pytest.mark.serial
 
 
 def _start_loop(tmp_path, kwargs):

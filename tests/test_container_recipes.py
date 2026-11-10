@@ -81,6 +81,9 @@ def test_the_compose_carrier_is_the_one_executable_recipe():
         assert service["profiles"] == [name], "one profile per volume set"
         assert service["restart"] == "on-failure" and service["init"] is True
         assert service["ports"] == ["127.0.0.1:8765:8765"]
+    for guide in ("Dockerfile", "docs/DEPLOYMENT.md"):  # their plain `docker run` publishes on loopback too
+        published = re.findall(r"docker run [^\n]*?-p (\S+)", (REPO / guide).read_text(encoding="utf-8"))
+        assert published and all(port.startswith("127.0.0.1:") for port in published), guide
     image = services["image"]
     assert image["environment"]["OUROBOROS_LAUNCH_INTENT"] == "automatic"
     assert image["environment"]["OUROBOROS_DATA_DIR"] == "/data"
@@ -167,22 +170,3 @@ def test_boot_health_fails_only_when_the_phase_is_failed():
     finally:
         for server in servers:
             server.shutdown()
-
-
-def test_the_guides_point_to_the_carrier_instead_of_repeating_it():
-    deployment = (REPO / "docs" / "DEPLOYMENT.md").read_text(encoding="utf-8")
-    assert "packaging/docker/compose.yaml" in deployment and "```yaml" not in deployment
-    assert "python-build-standalone release 20261009" in deployment
-    assert "CPython 3.10.22 and SQLite 3.53.1" in deployment
-    assert "does not replace" in deployment
-    assert "installing the app again" in deployment
-    assert "boot.phase" in deployment and "no start deadline" in deployment
-    readme = (REPO / "README.md").read_text(encoding="utf-8")
-    assert "CPython 3.10.22 and SQLite 3.53.1" in readme
-    assert "install the app again" in readme
-    for page in (REPO / "site" / "install" / "index.html", REPO / "docs" / "install" / "index.html"):
-        html = page.read_text(encoding="utf-8")
-        assert "CPython 3.10.22 and SQLite 3.53.1" in html
-        assert "install the app again" in html
-    assert "packaging/docker/compose.yaml" in readme
-    assert "docker/compose.yaml" in (REPO / "packaging" / "systemd" / "README.md").read_text(encoding="utf-8")

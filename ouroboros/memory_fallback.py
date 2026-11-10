@@ -10,6 +10,8 @@ comes first: one room's oldest run of unfolded pages, whoever wrote them, folded
    later one when an older one is unreadable to the helper or already refused).
 2. Else the view showed old narrative only by pointer (``narrative``): adjacent unfolded
    runs of one kind of one room among those pointers, oldest first, folded into a part.
+2b. Else the view folded the words or the line of a room of my other conversations where my human or
+   I spoke (``other_room``): the oldest such room's oldest open segment.
 3. Else, only after a root that was not a direct turn (the late phase of a direct turn
    blocks the owner's next message), the oldest unfolded period of the old memory,
    blocks 1-22 (block 0 is already a retelling of two months the mind folds itself):
@@ -286,7 +288,7 @@ def candidate_units(root: Any, store: ChronicleStore, shortage: Optional[Shortag
                     allow_legacy: bool) -> Iterator[FallbackUnit]:
     """Units in consideration order: the shortage's disjoint runs, then old periods."""
     root = pathlib.Path(root)
-    if shortage is not None and shortage.kind == "open_rows":
+    if shortage is not None and shortage.kind in ("open_rows", "other_room"):
         # Oldest run first; a later run only when an older one has no readable input or a receipt.
         for segment in memory_inventory.open_segments(root, store, shortage.room_id,
                                                       until=shortage.newest_addressed_row):
@@ -428,7 +430,9 @@ def _stamp_line(entry: Mapping[str, Any], lane_rows: int) -> str:
     for label, key in (("outcome", "outcome"), ("phase", "outcome_phase"), ("review", "review_verdict"),
                        ("reason", "reason_code"), ("objective", "objective_status")):
         if entry.get(key):
-            facts.append(f"{label} {entry[key]}")
+            facts.append(f"{label} {entry[key]}" + (f" by {entry['objective_source']}" + (
+                f" ({entry['objective_reason']})" if entry.get("objective_reason") else "")
+                if key == "objective_status" and entry.get("objective_source") else ""))
     finality = recorded_finality(entry.get("outcome_final"), entry.get("outcome_authority"),
                                  host_facts=entry.get("source") == "host_task_facts")
     if finality:
@@ -462,13 +466,16 @@ def _rows(root: pathlib.Path, read_rows: List[Tuple[Dict[str, Any], Dict[str, An
         line = render_memory_row(address, row, author=author, indent=INDENT) if spoken or not task else ""
         pointer = (f"{memory_row_header(address, row, author=author)} (words, {len(render_row_text(row))} chars — "
                    "read by address)") if spoken and cls["author"].get("kind") != "human" else ""
+        if cls["author"].get("kind") == "place_fact":
+            pointer = f"{memory_row_header(address, row, author=author)} (reaction — read by address)"
         items.append(_Row((address, row, pos), task, line, pointer))
     return items
 
 
 def _owner_words(root: pathlib.Path, items: List[_Row]) -> Dict[str, Tuple[str, str, str]]:
-    """``task -> (group, verbatim block, address block)``: the owner's words that caused each task."""
-    from ouroboros.owner_words import render_owner_words, task_owner_words  # D15->D17 is lazy-only
+    """``task -> (group, verbatim block, address block)``: my human's words for each task."""
+    from ouroboros.owner_words import (render_owner_words, task_owner_words, unread_target,  # D15->D17 is lazy-only
+                                       words_stamp)
 
     out: Dict[str, Tuple[str, str, str]] = {}
     for item in items:
@@ -484,10 +491,10 @@ def _owner_words(root: pathlib.Path, items: List[_Row]) -> Dict[str, Tuple[str, 
         block = render_owner_words(rows, absent, audience="writer", root_task_id=root_task)
         if not block:
             continue
-        refs = [f"[{row.get('ts') or 'time not recorded'} · owner · {row.get('source')} of task {row.get('task_id')}"
-                f" · {row.get('ref')}] ({len(row.get('text') or '')} chars — not shown: the input could not hold "
-                "them)" for row in rows]
-        pointer = "## Words of my human that caused this work (by reference)\n" + "\n".join(refs) if refs else block
+        # The whole form's stamps (a reply target under its own author, never my human), each body's size alone.
+        refs = [words_stamp(row) + (f" ({len(row['text'])} chars — not shown: the input could not hold them)"
+                                    if row.get("text") else f" {unread_target(row)}") for row in rows]
+        pointer = "## My human's words for this work (by reference)\n" + "\n".join(refs) if refs else block
         out[item.task] = (group, block, pointer)
     return out
 
@@ -718,12 +725,14 @@ def _parse(text: str, *, part: bool = False) -> Optional[Dict[str, Any]]:
 def _publish(root: pathlib.Path, store: ChronicleStore, unit: FallbackUnit, draft: WriterInput,
              answer: Dict[str, Any], usage: Dict[str, Any], binding: Dict[str, Any]) -> PublishResult:
     from ouroboros.knowledge import observed_route_stamp
-    from ouroboros.tools.chronicle import _quote_resolver
+    from ouroboros.tools.chronicle import _quote_resolver, page_room_label
 
     author = {"kind": "helper", "writer": "fallback_part" if unit.kind == "part" else "fallback_page",
               "route": observed_route_stamp(usage), "attribution": "helper draft, not lived"}
     metadata = {"unit": unit.describe(), "input_sha256": draft.input_sha256, "light_binding": binding,
                 "addressed_rows": list(draft.addressed_rows)}
+    if unit.kind != "part":
+        metadata["room_label"] = page_room_label(root, unit.room_id, unit.segment.rows if unit.segment else ())
     resolver = _quote_resolver(root, row_lineage(root), draft.positions)
     if unit.kind == "part":
         return store.publish_part(room_id=unit.room_id, text=answer["text"], member_ids=list(draft.member_ids),

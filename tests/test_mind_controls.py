@@ -159,9 +159,7 @@ def test_control_refusal_arrives_as_system_task_mail_not_owner_words(tmp_path, m
     assert pushed[0]["actor_task_id"] == "mind-root"
 
 
-@pytest.mark.serial
-@pytest.mark.parametrize("actor", ["ordinary-analysis", "silence-analysis"])
-def test_api_selected_task_id_retains_pause_resume_continue(api_host, actor):
+def test_api_selected_task_id_retains_pause_resume_continue(api_host):
     from starlette.requests import Request
 
     from ouroboros.gateway.tasks import _create_task_from_body
@@ -172,13 +170,13 @@ def test_api_selected_task_id_retains_pause_resume_continue(api_host, actor):
     from supervisor import workers
     from supervisor.events_mind_controls import _apply
 
+    actor = "ordinary-analysis"
     request = Request({"type": "http", "app": SimpleNamespace(state=SimpleNamespace(
         drive_root=api_host.root, repo_dir=workers.REPO_DIR))})
     for task_id in (actor, "other"):
         response = _create_task_from_body(request, {"task_id": task_id, "description": "Ordinary work"})
         assert response.status_code == 200, response.body
     stored = load_task_result(api_host.root, actor)
-    assert "work_diagnostic" not in stored["metadata"]
     ctx = SimpleNamespace(task_id=actor, drive_root=api_host.root, task_metadata=stored["metadata"],
                           pending_events=[], event_queue=None)
     _interrupted(api_host.root)

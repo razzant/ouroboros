@@ -129,6 +129,9 @@ def decode_frame(data: bytes) -> AudioFrame | VideoFrame:
 #   {"type": "flush", "epoch": int}                           # stop playback of older epochs now
 PEER_MESSAGE_TYPES = ("hello", "mute", "played", "context", "participant", "share", "bye")
 SERVER_MESSAGE_TYPES = ("state", "activity", "turn", "caption", "flush")
+# One peer control's limit at the socket door, in UTF-8 bytes. Server messages are
+# never cut to it: a caption's text arrives in full, whether a delta the peer appends
+# or (``replace``/``final``) text that replaces its item.
 MAX_CONTROL_BYTES = 16 * 1024
 
 
@@ -139,6 +142,11 @@ def encode_control(message: Dict[str, Any]) -> str:
 
 
 def decode_control(text: str) -> Dict[str, Any]:
+    """Read one peer control as the socket door does, within ``MAX_CONTROL_BYTES``.
+
+    Short server types still decode here for existing readers. This is not a reader
+    for server messages, which have no byte cutoff: parse those as ordinary JSON.
+    """
     if len(text.encode("utf-8")) > MAX_CONTROL_BYTES:
         raise ValueError("live call control message too large")
     message = json.loads(text)

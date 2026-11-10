@@ -30,7 +30,7 @@ from ouroboros.gateway.cost_breakdown import make_cost_breakdown_endpoint  # noq
 from ouroboros.gateway.history_paging import (
     HistoryCursorError, deferred_before, delivered_history_gaps, history_page_coverage, history_page_tokens, progress_quota_predicate,
     replay_evidence_rows, room_lens, room_view_fingerprint, select_history_page, latest_arrival, notes_stamp, parse_around,
-    IMPORTING, PROJECTION_FAILED, _PROBE_ROWS, _RECENT_WINDOW_BYTES, _RECENT_WINDOW_ROWS,
+    chat_quota_predicate, IMPORTING, PROJECTION_FAILED, _PROBE_ROWS, _RECENT_WINDOW_BYTES, _RECENT_WINDOW_ROWS,
 )
 from ouroboros.gateway.history_deliveries import delivery_fields
 from ouroboros.cost_projection import carry_cost_meta, live_root_cost_projection
@@ -38,6 +38,7 @@ from ouroboros.outcomes import normalize_outcome_axes
 from ouroboros.history_retention import retention_summary
 from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
 from ouroboros.project_dialogue import ORIGIN_ADDRESSED_NOTICE_TYPES, ROUTING_RECEIPT_FIELDS, historical_terminal_projection
+from ouroboros.room_appearances import frame_project, room_project
 from ouroboros.store import StoreError, StoreMigrating
 from ouroboros.subagent_messages import SUBAGENT_MESSAGE_FIELDS, delegated_activity_meta, executor_observation_meta, initiator_meta, subagent_message_meta
 from ouroboros.task_results import TASK_COST_META_FIELDS as _TASK_COST_META_FIELDS
@@ -112,9 +113,9 @@ _PROGRESS_META_FIELDS = (
     # the pointer on reload while its outer task_id stays empty.
     "lifecycle_pointer",
     "initiator",  # the turn's origin label (a consciousness wake-up)
-    # The frame's voice: a replayed host note must stay a host note, or a reload
-    # would hand the card title back to the very line live rendering refused it.
-    "narration", "spoken",
+    # The frame's voice: a replayed host note (or the model's display reasoning) must
+    # stay what it was, or a reload would hand the card title back to a line live refused it.
+    "narration", "reasoning", "spoken",
     "card_row", "card_row_id", "card_row_revision",
     "checkpoint_kind", "episode_id", "phase", "elapsed_sec",
 )
@@ -279,28 +280,6 @@ def _recent_entries(root: pathlib.Path, stream: str, want: int, counts) -> list:
     return entries
 
 
-def _chat_quota_predicate(row_matches_thread):
-    """Human-row quota predicate shared by the rotated chat read and the
-    window-truncation accounting (must equal the render loop's filter)."""
-
-    def _counts_toward_thread(e):
-        if not isinstance(e, dict):
-            return False
-        if str(e.get("direction", "")).lower() not in ("in", "out"):
-            return False
-        if e.get("type") == "routing_options":
-            # LLM-grounding rows (#198) are skipped by the render loop, so
-            # they must not consume the human-row quota either — a run of
-            # picker refusals would silently evict real messages.
-            return False
-        if is_a2a_chat_id(e.get("chat_id", 1)):
-            return False
-        ec = _stored_chat_id(e.get("chat_id"), 1)
-        return row_matches_thread(ec, e)
-
-    return _counts_toward_thread
-
-
 def _history_identity(entry):
     from ouroboros.chat_references import projection_fields
     return {**({"row_address": entry["row_address"]} if entry.get("row_address") else projection_fields(entry)),
@@ -315,7 +294,7 @@ def _copy_task_summary_metadata(rec: Dict[str, Any], entry: Dict[str, Any]) -> N
     for key in ("model_execution", "review_projection", "history_retention", "terminal_time", "cancel_origin"):
         if isinstance(entry.get(key), dict):
             rec[key] = dict(entry[key])
-    for key in ("suggested_name", "wake_summary", "schedule_name"):
+    for key in ("suggested_name", "wake_summary", "schedule_name", "target_label"):
         if entry.get(key): rec[key] = str(entry[key])
     for key in ("tool_calls", "rounds", "tool_errors", "routing_tool_calls", "completion_tool_calls"):
         if key in entry:
@@ -378,6 +357,7 @@ def _annotate_terminal_task_truth(
     """
 
     try:
+        from ouroboros.late_review_marks import late_current_outcome
         from ouroboros.project_dialogue import outcome_phase
         from ouroboros.projects_registry import task_presentation_name
         from ouroboros.task_status import FINAL_STATUSES
@@ -447,8 +427,11 @@ def _annotate_terminal_task_truth(
         live_cost_by_task: Dict[str, Dict[str, Any]] = {}
         finalizing_tasks: set = set()
         unfinished_tasks: set = set()
+        unread_tasks: set = set()  # no answer from the store (``_load_terminal_result``'s {}): unknown, not absent
         for task_id in result_task_ids:
             result = _load_terminal_result(data_dir, task_id, cache)
+            if not result:
+                unread_tasks.add(task_id)
             if carriers.get(task_id, {}).get("system_type") == "task_evidence":
                 carriers[task_id]["_is_direct_chat"] = bool(result.get("_is_direct_chat"))
             child_meta = subagent_message_meta(result, task_id=task_id)
@@ -460,18 +443,16 @@ def _annotate_terminal_task_truth(
                 str(checkpoint.get("post_task_synthesis") or "")
                 if isinstance(checkpoint, dict) else ""
             )
-            # An OPEN post-task checkpoint means the final answer is stored
-            # but synthesis (and the settled task_done) has not landed: the
-            # task is FINALIZING, not terminal. This covers the plain root
-            # (status already "completed") AND the split-drive project root,
-            # whose canonical status stays scheduled/running until copy-back.
-            # A cancelled record stays terminal immediately, and a
-            # record without a checkpoint keeps the legacy terminal semantics.
+            # An open post-task checkpoint is still finalizing, even with a stored final answer:
+            # plain roots may already say completed; split-drive roots stay scheduled/running until copy-back.
+            # Cancellation is terminal immediately; without a checkpoint the legacy semantics stand.
             checkpoint_open = post_task_synthesis_is_open(synthesis)
             if checkpoint_open and (status in {"completed", "failed"} or status not in FINAL_STATUSES):
                 finalizing_tasks.add(task_id)
             elif status in FINAL_STATUSES:
                 terminal_status_by_task[task_id] = status
+                if task_id in carriers and (current := late_current_outcome(data_dir, result)):
+                    carriers[task_id]["current_outcome"] = current  # children also need the stored revision on reload
             elif status:
                 unfinished_tasks.add(task_id)
             if task_id in finalizing_tasks or task_id in terminal_status_by_task:
@@ -541,25 +522,29 @@ def _annotate_terminal_task_truth(
             if previous is None or str(message.get("ts") or "") >= str(previous.get("ts") or ""):
                 latest_progress_by_task[task_id] = message
 
+        # Answer first (agent_task_pipeline): a root's final is saved before its result is. Until the store
+        # answers, its own status is a claim the saved nonterminal result refutes: its card holds Finalizing….
+        answered_unstored = {str(m.get("task_id") or "") for m in combined if not m.get("is_progress")
+                             and m.get("task_terminal_status") and str(m.get("task_id") or "") in unfinished_tasks}
         anchored = anchored_children or set()
         for message in combined:
             task_id = str(message.get("task_id") or "")
             if not task_id or message.get("system_type") in ("project_question_pointer", *ORIGIN_ADDRESSED_NOTICE_TYPES):
                 continue
             if message.get("system_type") in {"project_started", "project_handoff"} and not message.get("task_name"):
-                # Legacy rows reuse this request's result read, never split the prose label.
-                message["task_name"] = task_presentation_name(cache.get(task_id))
+                message["task_name"] = task_presentation_name(  # a legacy row reuses this request's result read;
+                    cache.get(task_id), fallback=message.get("project_name") or "Task")  # nameless: its Project
             # Selected receipt events keep their physical identity, but show current task-result truth.
             row_id = str(message.get("card_row_id") or "")
             if message.get("card_row") == "reviews" and row_id.startswith("merge-receipt:"):
-                from ouroboros.merge_receipts import card_row_text
+                from ouroboros.merge_receipts import card_row_projection
                 try:
                     receipt = next(r for r in cache.get(task_id, {}).get("merge_receipts", [])
                                    if isinstance(r, dict) and row_id == f"merge-receipt:{r.get('receipt_id')}")
                     revision = receipt.get("revision", 0)
                     if type(revision) is not int or revision < int(message.get("card_row_revision") or 0):
                         raise ValueError("canonical receipt revision unavailable")
-                    message.update(text=card_row_text(receipt), card_row_revision=revision)
+                    message.update(**card_row_projection(data_dir, receipt), card_row_revision=revision)
                 except (StopIteration, KeyError, TypeError, ValueError, AttributeError):
                     message["text"] += "\nCurrent merge receipt unavailable; showing recorded event."
             if cache.get(task_id, {}).get("_history_result_absent"):
@@ -581,6 +566,14 @@ def _annotate_terminal_task_truth(
             if task_id in finalizing_tasks:
                 message["task_phase"] = "finalizing"
                 message.update(terminal_truth_by_task[task_id])
+            elif task_id in answered_unstored:
+                message.pop("task_terminal_status", None)
+                message.update(task_phase="finalizing", outcome_final=False)
+            elif task_id in unread_tasks and not message.get("is_progress") and message.get("task_terminal_status"):
+                # #2801: an unread result confirms no outcome; the row's own status is a claim, never Done, and a
+                # known absent result (``_history_result_absent``) keeps its legacy/historical terminal instead.
+                message.pop("task_terminal_status", None)
+                message["task_phase"] = "unfinished"
             elif task_id in unfinished_tasks:
                 # A saved nonterminal result refutes the legacy "plain speech
                 # is a final" fallback; it does not attest current execution.
@@ -703,7 +696,6 @@ def _collect_chat_rows(
     # Quiz lifecycle merge (#Q-2b): the chat row froze the card at ask time ("open"); the durable
     # truth is the owner_quiz task-result projection, read once per asking task in this call.
     quiz_projection_cache: Dict[str, Dict[str, Any]] = {}
-    question_projects = None
     question_keys = set()
 
     def _quiz_source(task_id):
@@ -722,7 +714,7 @@ def _collect_chat_rows(
     combined: list = []
     chat_quota_rows = 0
     stream_gaps: set[str] = set()
-    _chat_counts_toward_quota = _chat_quota_predicate(row_matches_thread)
+    _chat_counts_toward_quota = chat_quota_predicate(row_matches_thread, _stored_chat_id)
     try:
         _chat_entries = (_recent_entries(chat_path.parent.parent, "chat", n_human, _chat_counts_toward_quota)
                          if selected_entries is None else selected_entries)
@@ -739,8 +731,11 @@ def _collect_chat_rows(
             if entry.get("type") in {"quiz_answer", "quiz_closed"}:
                 if (replay_evidence is not None and isinstance(entry.get("quiz"), dict)
                         and row_matches_thread(_stored_chat_id(entry.get("chat_id"), 1), entry)):
+                    from ouroboros.owner_quiz import question_delivery_now  # as recorded; its delivery as it is now
+                    quiz, live = dict(entry["quiz"]), _quiz_source(str(entry.get("task_id") or ""))["quizzes"]
+                    quiz.update(question_delivery_now(live.get(str(quiz.get("quiz_id") or ""))))
                     replay_evidence.append({"text": "", "role": "system", "is_progress": False,
-                                            "system_type": entry["type"], "quiz": dict(entry["quiz"]),
+                                            "system_type": entry["type"], "quiz": quiz,
                                             "task_id": str(entry.get("task_id") or ""),
                                             "ts": str(entry.get("ts") or ""), **_history_identity(entry)})
                 continue
@@ -771,14 +766,11 @@ def _collect_chat_rows(
             pointer_chat = getattr(row_matches_thread, "question_project_chat", lambda row: 0)(entry)
             if pointer_chat:
                 from ouroboros.project_dialogue import project_question_pointer
-                from ouroboros.projects_registry import list_reserved_projects
 
-                if question_projects is None:
-                    question_projects = {row["chat_id"]: row for row in list_reserved_projects(chat_path.parent.parent)}
                 tid, qid = str(entry.get("task_id") or ""), str(entry["quiz"].get("quiz_id") or "")
                 source = _quiz_source(tid)
                 pointer = project_question_pointer(entry, source["quizzes"].get(qid) or answered.get((tid, qid)),
-                                                   question_projects.get(pointer_chat), source["wait"])
+                                                   room_project(chat_path.parent.parent, pointer_chat, strict=True), source["wait"])
                 if pointer and (tid, qid) not in question_keys:
                     question_keys.add((tid, qid))
                     pointer.update(_history_identity(entry))
@@ -825,9 +817,10 @@ def _collect_chat_rows(
                     if isinstance(entry.get(key), dict):
                         rec[key] = dict(entry[key])
                 for key in ("project_id", "project_name", "task_name", "target_label", "status", "completion_answer",
-                            "completion_reason", "delivery_id", "handoff_id"):
+                            "completion_reason", "delivery_id", "handoff_id", "wake_summary"):
                     if key in entry:
                         rec[key] = str(entry.get(key) or "")
+            rec.update(frame_project(chat_path.parent.parent, entry))
             annotation = _user_annotation(role, rec["client_message_id"], chat_annotations)
             if origin := getattr(row_matches_thread, "origin_identity", lambda entry: "")(entry):
                 rec["origin_id"] = origin
@@ -862,11 +855,11 @@ def _collect_chat_rows(
                     _qid = str(quiz.get("quiz_id") or "")
                     _live = _quiz_source(_qtid)["quizzes"].get(_qid) or answered.get((_qtid, _qid))
                     if isinstance(_live, dict):
-                        from ouroboros.owner_quiz import CLOSURE_FIELDS, question_delivery_projection
+                        from ouroboros.owner_quiz import CLOSURE_FIELDS, SECRET_FIELDS, question_delivery_projection
                         if delivery := question_delivery_projection(_live):
                             quiz["question_delivery"] = delivery
                         quiz["state"] = str(_live.get("state") or quiz.get("state") or "open")
-                        for key in ("answered_index", "comment", "wait_ended_at", *CLOSURE_FIELDS, "materials"):
+                        for key in ("answered_index", "comment", "wait_ended_at", *CLOSURE_FIELDS, "materials", *SECRET_FIELDS):
                             if key in _live:
                                 quiz[key] = _live[key]
                         if _live.get("host_facts") and not quiz.get("host_facts"):
@@ -1435,7 +1428,7 @@ def _assemble_history_response(
     view = room_view_fingerprint(thread_id, project_chat_ids, project_source_refs, bindings_by_task)
     page = select_history_page(data_dir, thread_id, view, cursor,
                                {"human": n_human, "progress": n_progress},
-                               {"chat": _chat_quota_predicate(row_matches_thread),
+                               {"chat": chat_quota_predicate(row_matches_thread, _stored_chat_id),
                                 "progress": progress_quota_predicate(row_matches_thread, _stored_chat_id)},
                                {"human": _MAX_N_HUMAN, "progress": _MAX_N_PROGRESS},
                                room_lens(data_dir, thread_id, project_chat_ids, project_source_refs, bindings_by_task),
@@ -1466,8 +1459,9 @@ def _assemble_history_response(
     if lifecycle_row is not None:
         combined.append(lifecycle_row)
     result_cache[_READS].prefetch(row.get("task_id") for row in combined)
+    named = thread_id in project_chat_ids or (thread_id == 1 and classified)  # an unreadable registry: Main reads on
     arrival = latest_arrival(combined, page, data_dir, row_matches_thread, _stored_chat_id, chat_gaps, lambda task_id: (
-        _load_terminal_result(data_dir, task_id, result_cache))) if thread_id in project_chat_ids else (
+        _load_terminal_result(data_dir, task_id, result_cache))) if named else (
         {} if classified or thread_id == 1 else {"latest_message": None})  # an unclassified room may be a Project
     if recent:  # arrival is named above, before the tail and the annotation
         (messages, result_cache, human_rows_dropped, lineage_truncated, review_overlays_truncated, floor,
@@ -1526,7 +1520,7 @@ def _assemble_history_response(
 
     # Hidden source evidence shares ordinary keyed replay. It carries no new
     # review/cost authority and never consumes the conversation quota.
-    messages.extend(replay_evidence_rows(messages, replay_evidence))
+    messages.extend(replay_evidence_rows(messages, replay_evidence, result_cache, data_dir))
     tokens = history_page_tokens(page, messages, result_cache[_READS])
     stream_gaps = delivered_history_gaps(data_dir, page, {
         "chat": chat_gaps | selections["chat"][2], "progress": progress_gaps | selections["progress"][2]})

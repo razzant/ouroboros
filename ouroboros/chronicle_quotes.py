@@ -36,7 +36,8 @@ def quote_refusal(quotes: Any, resolver: Optional[QuoteResolver]) -> Optional[Tu
     """``(reason, detail)`` for the first quote that is not the words of the row at its address
     (``quote_in``) spoken by the named class, or None when every quote is.
 
-    ``resolver(address)`` returns ``(rendered row text, author kind)`` or ``None``.
+    ``resolver(address)`` returns ``(the row's quotable words, author kind)`` or ``None``: its rendered text,
+    a typed reaction carrier's own text only (``dialogue_provenance.quote_words``).
     """
     if not quotes:
         return None

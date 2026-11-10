@@ -14,7 +14,7 @@ import logging
 from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros.config import get_finalization_grace_sec
-from ouroboros.deadline_utils import owner_deadline_exhausted, review_transport_timeout
+from ouroboros.deadline_utils import caller_deadline_arguments, owner_deadline_exhausted, review_transport_timeout
 from ouroboros.triad_review import (
     default_output_contract,
     empty_array_is_verified_clean,
@@ -271,10 +271,18 @@ def _extract_verdict_via_light_model(
         transport = review_transport_timeout(model, transport_timeout_sec, deadline_at)
         if transport is not None:
             chat_kwargs["timeout"] = transport
+        # The same deadline − grace window also bounds the send after preparation (#572).
+        chat_kwargs.update(caller_deadline_arguments(deadline_at, None, reserve_sec=get_finalization_grace_sec(),
+                                                     dispatch_only=True))
         with physical_attempt_limit(1), usage_scope(_scope):
             message, usage = llm.chat(**chat_kwargs)
     except Exception as exc:
+        from ouroboros.llm_attempt import refused_by_own_window
         from ouroboros.llm_claudexor import propagate_model_error
+        if refused_by_own_window(exc, own_window_spent=owner_deadline_exhausted(
+                deadline_at=deadline_at, reserve_sec=get_finalization_grace_sec())):
+            # Unsent once its own window ended while it prepared: its result before admission, not a task control.
+            return None, {"model": model, "reason_code": "deadline_exhausted", "dispatch": "not_dispatched"}
         propagate_model_error(exc)
         log.warning("Review session verdict extraction failed: %s", exc)
         return None, {}

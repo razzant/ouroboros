@@ -61,18 +61,21 @@ def in_place_refusal(authority, selector_root, workspace, mode, strategy, scope_
                  f"workspace='in_place' was refused: {reason}. Nothing was started.", definitely_unrun=True) if reason else None
 
 
-def in_place_start(adopted_copy, target_root):
-    """(snapshot, refusal, resource_ref, binding) for an in-place Git writer: no copy is made."""
+def in_place_start(adopted_copy, target_root, service=None):
+    """(snapshot, refusal, resource_ref, binding) for an in-place Git writer: no copy is made.
+    ``service`` makes its disposable scratch (``subagent_work_order.session_service_directories``),
+    called only once the start is accepted, so a refusal leaves nothing behind."""
+    from ouroboros import work_domain
     from ouroboros.delegate_shared import _fail
     from ouroboros.delegate_start_instructions import in_place_binding_instruction
 
-    if adopted_copy is not None or not (Path(target_root) / ".git").exists():
+    if adopted_copy is not None or not work_domain.exists(Path(target_root) / ".git"):
         detail = ("this continuation resumes an undisposed private copy; continue it there (omit workspace)"
                   if adopted_copy is not None else "the write root is not a Git working tree; ordinary folders "
                   "use directory_strategy='direct'")
         return None, _fail("delegate_start", "workspace_in_place_unavailable",
                            f"workspace='in_place' was refused: {detail}. Nothing was started.", definitely_unrun=True), {}, ""
-    return None, "", in_place_ref(), in_place_binding_instruction(target_root)
+    return None, "", in_place_ref(), in_place_binding_instruction(target_root, service() if service else None)
 
 
 def in_place_block(entry):
@@ -127,7 +130,9 @@ def default_shaped_directory_options(strategy, scope_paths) -> bool:
 
 def git_directory_options_refusal(target_root, strategy, scope_paths, *, git_workspace=False):
     """One argument-shape check for scheduling and direct Git session starts."""
-    if (git_workspace or (Path(target_root) / ".git").exists()) and not default_shaped_directory_options(strategy, scope_paths):
+    from ouroboros import work_domain
+
+    if (git_workspace or work_domain.exists(Path(target_root) / ".git")) and not default_shaped_directory_options(strategy, scope_paths):
         return "Directory options apply to ordinary folders; Git workspaces keep their snapshot contract."
     return ""
 
@@ -141,22 +146,23 @@ def snapshot_checkout(ctx, target_root, authority) -> str:
     folder of that private clone. A writer keeps the worktree-root rule, and a worktree
     overlapping the data drive is never cloned: the folder session then refuses it typed.
     """
+    from ouroboros import work_domain  # a work folder's Git and metadata are the work domain's, by its spelling
     from ouroboros.platform_layer import bootstrap_process_path
     from ouroboros.tool_access import paths_overlap_casefold
     from ouroboros.workspace_admission import has_git_metadata
 
     root = Path(target_root)
-    if (root / ".git").exists():
+    if work_domain.exists(root / ".git"):
         return str(root)
-    if not getattr(authority, "investigation", False) or not has_git_metadata(root.resolve()):
+    if not getattr(authority, "investigation", False) or not has_git_metadata(work_domain.settle(root)):
         return ""
     bootstrap_process_path()
     try:
-        probe = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=str(root),
-                               capture_output=True, text=True, timeout=5)
+        probe = work_domain.run(["git", "rev-parse", "--show-toplevel"], cwd=str(root),
+                                capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
         return ""
-    top = Path(probe.stdout.strip()).resolve() if probe.returncode == 0 and probe.stdout.strip() else None
+    top = work_domain.settle(probe.stdout.strip()) if probe.returncode == 0 and probe.stdout.strip() else None
     if top is None or paths_overlap_casefold(top, Path(custody.custody_root(ctx)).resolve()):
         return ""
     return str(top)
@@ -267,6 +273,12 @@ def _download(gateway, run_id, source, destination, expected=None):
         temporary.unlink(missing_ok=True)
 
 
+def _settled(path: object) -> Path:
+    from ouroboros import work_domain  # a work folder by its spelling, any other resolved as before
+
+    return work_domain.settle(path)
+
+
 def capture_directory_result(drive, entry, gateway, *, publish=True):
     """Capture observed terminal work independently of its pending money record.
 
@@ -319,7 +331,7 @@ def capture_directory_result(drive, entry, gateway, *, publish=True):
     original = json.loads(raw_path.read_text())
     source_root = entry.resource_ref.get("source_root") or entry.target_root  # a staged folderless input copy
     if (original.get("version") != 1 or not original.get("executionRoot")
-            or Path(original.get("sourceRoot") or "").resolve() != Path(source_root).resolve()
+            or _settled(original.get("sourceRoot") or "") != _settled(source_root)
             or not isinstance(original.get("entries"), list)):
         raise ValueError("engine directory manifest has an invalid source or execution binding")
     direct = entry.resource_ref["strategy"] == "direct"

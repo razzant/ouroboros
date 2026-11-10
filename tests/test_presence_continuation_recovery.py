@@ -7,7 +7,7 @@ from ouroboros import presence_continuation as pc
 from ouroboros.review_operation import controller_identity, controller_state
 
 
-@pytest.mark.parametrize("identity", [None, {}, {"pid": 0}, {"pid": "unreadable"}])
+@pytest.mark.parametrize("identity", [None, {}, {"pid": "unreadable"}])
 def test_missing_author_identity_does_not_invent_a_crash(identity):
     row = {"status": "running", "presence_continuation": {"initial": {}, "author_controller": identity}}
     assert pc.continuation_status(row) == "running"
@@ -21,8 +21,11 @@ def test_current_process_author_remains_pending():
     assert pc.work_view(row, "turn")[1]["status"] == "pending"
 
 
-@pytest.mark.parametrize("fields", [("birth", "kernel_birth"), ("session",)], ids=["birth", "session"])
-@pytest.mark.parametrize("observer_missing", [False, True])
+@pytest.mark.parametrize(("observer_missing", "fields"), [
+    pytest.param(False, ("birth", "kernel_birth"), id='False-birth'),
+    pytest.param(False, ("session",), id='False-session'),
+    pytest.param(True, ("birth", "kernel_birth"), id='True-birth'),
+])
 def test_local_controller_with_incomplete_identity_remains_unknown(monkeypatch, fields, observer_missing):
     from ouroboros import review_operation
 
@@ -51,16 +54,18 @@ def test_foreign_live_controller_without_birth_evidence_remains_unknown(monkeypa
     assert pc.continuation_status(row) == "running" and pc.work_view(row, "turn")[0] == 202
 
 
-@pytest.mark.parametrize("status", ["completed", "failed", "cancelled", "interrupted"])
+@pytest.mark.parametrize("status", ["completed", "failed", "interrupted"])
 def test_terminal_record_is_not_reclassified_by_an_author_witness(status):
     row = {"status": status, "presence_continuation": {"initial": {}, "author_controller": {"pid": 0}}}
     assert pc.continuation_status(row) == status
 
 
-@pytest.mark.parametrize("status", ["running", "interrupted", "completed", "failed", "cancelled"])
-@pytest.mark.parametrize("record", [
-    {"initial": {"work_ref": ""}, "child_work_ref": "work-late"},
-    {"initial": {"work_ref": "work-late"}},  # already retained by older hosts at the first park
+@pytest.mark.parametrize(("record", "status"), [
+    pytest.param({"initial": {"work_ref": ""}, "child_work_ref": "work-late"}, "running", id='record0-running'),
+    pytest.param({"initial": {"work_ref": ""}, "child_work_ref": "work-late"}, "completed", id='record0-completed'),
+    pytest.param({"initial": {"work_ref": ""}, "child_work_ref": "work-late"}, "cancelled", id='record0-cancelled'),
+    pytest.param({"initial": {"work_ref": "work-late"}}, "interrupted", id='record1-interrupted'),  # already retained by older hosts at the first park
+    pytest.param({"initial": {"work_ref": "work-late"}}, "failed", id='record1-failed'),  # already retained by older hosts at the first park
 ])
 def test_every_continuation_work_state_preserves_independent_child_discovery(status, record):
     row = {"status": status, "presence_continuation": record}

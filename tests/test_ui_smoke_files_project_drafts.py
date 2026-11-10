@@ -14,7 +14,7 @@ import pytest
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def _browser(pw, engine):
@@ -42,6 +42,7 @@ def _files_gateway(page):
         "uploads": 0, "upload_error": "Upload refused.", "directories": [], "deleted": [],
         "hold_navigation": False, "pending_navigation": [],
         "hold_operation": "", "pending_operations": [], "transfers": [], "list_paths": [], "upload_paths": [],
+        "content": {},  # a file's text as another client saved it meanwhile
     }
     root = "/workspace/" + "long-project-name-" * 5
     names = ["sample.txt", "other.txt", "unreadable.txt", "picture.png", "paper.pdf", "archive.bin", "large.txt"]
@@ -71,7 +72,7 @@ def _files_gateway(page):
                 return
             payload = {"path": path, "name": path, "size": 31, "root_path": root,
                        "display_path": f"{root}/{path}", "is_text": True,
-                       "content": "Original file contents\nSecond line\n"}
+                       "content": fixture["content"].get(path, "Original file contents\nSecond line\n")}
             if path in {"picture.png", "paper.pdf", "archive.bin"}:
                 payload.update(is_text=False, content="")
             if path == "picture.png":
@@ -230,7 +231,7 @@ def test_files_retains_document_and_submits_one_write(direct_server_with_data, e
             page.locator("#files-new-dir").click()
             page.locator("[data-confirm-input]").fill("created-dir")
             page.get_by_role("button", name="Create", exact=True).click()
-            expect(page.locator("#files-preview-status")).to_contain_text("Directory created-dir created")
+            expect(page.locator("#files-preview-status")).to_contain_text("Folder created-dir created")
             _same_draft(page, "Draft before save\nKeep this text.", [2, 8])
             assert fixture["directories"] == [{"path": ".", "name": "created-dir"}]
 
@@ -302,8 +303,11 @@ def test_files_retains_document_and_submits_one_write(direct_server_with_data, e
             expect(page.locator("#files-preview-status")).to_contain_text("Directory temporarily unavailable")
             _same_draft(page, "Draft survives list error")
             expect(page.locator("#files-save")).to_be_enabled()
+            # Another page keeps the draft for the return (owner 2026-11-03): no question, the same draft.
             page.locator('[data-nav-page="dashboard"]').click()
-            page.get_by_role("button", name="Stay", exact=True).click()
+            expect(page.locator("#page-dashboard")).to_have_class(re.compile(r"\bactive\b"))
+            expect(page.get_by_role("button", name="Stay", exact=True)).to_have_count(0)
+            page.locator('[data-nav-page="files"]').click()
             expect(page.locator("#page-files")).to_have_class(re.compile(r"\bactive\b"))
             _same_draft(page, "Draft survives list error")
 
@@ -383,7 +387,10 @@ def test_files_late_mutations_keep_newer_work(direct_server_with_data, engine): 
                     elif newer == "directory":
                         page.locator(".files-entry").filter(has_text="docs").click()
                         page.get_by_role("button", name="Discard", exact=True).click()
-                        expect(page.locator("#files-preview-path")).to_contain_text("/docs")
+                        # The folder opened (its list starts with the way up); the preview keeps no header until a
+                        # file is chosen.
+                        expect(page.locator("#files-list .files-entry.parent-link")).to_have_count(1)
+                        expect(page.locator(".files-preview-header")).to_be_hidden()
                     else:
                         editor.fill("Newer input while action is pending")
                         editor.evaluate("el => {window.filesEditor = el; el.setSelectionRange(4, 9);}")
@@ -468,13 +475,14 @@ def test_project_sources_keep_selected_target(direct_server_with_data, engine): 
                 opener = page.locator("#nav-projects-add")
                 opener.focus()
                 page.evaluate("window.openTestProject(); undefined")
-                expect(page.locator("[data-np-name]")).to_be_focused()
-                close = page.locator('.new-project-dialog [aria-label="Close"]')
-                close.focus()
+                name = page.locator("[data-np-name]")
+                expect(name).to_be_focused()
+                # The foot's Cancel is the one way out (no head Close, U024); the focus still wraps inside the dialog.
+                expect(page.locator('.new-project-dialog [aria-label="Close"]')).to_have_count(0)
                 page.keyboard.press("Shift+Tab")
                 expect(page.locator("[data-np-create]")).to_be_focused()
                 page.keyboard.press("Tab")
-                expect(close).to_be_focused()
+                expect(name).to_be_focused()
                 page.locator("[data-np-name]").fill("Scoped project")
                 page.locator(f'input[name="np-source"][value="{source}"]').check()
                 expected = {"name": "Scoped project"}
@@ -735,6 +743,45 @@ def test_a_narrow_files_page_shows_the_list_first_and_back_keeps_the_draft(direc
             assert (panes["view"], panes["focus"], panes["unsaved"], panes["sideways"]) == (
                 "list", "picture.png", [], False), panes
             assert not errors, errors
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_a_files_draft_kept_across_pages_says_when_its_file_changed_meanwhile(direct_server_with_data, engine):  # noqa: F811
+    """Another page keeps the unsaved draft (owner 2026-11-03); its return reads the file again and says when it changed
+    meanwhile, before a Save would replace that change (Opus review, 6 Nov). Unchanged, the return says nothing."""
+    pytest.importorskip("playwright.sync_api")
+    from playwright.sync_api import expect, sync_playwright
+
+    with sync_playwright() as pw:
+        browser = _browser(pw, engine)
+        try:
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            fixture = _files_gateway(page)
+            page.goto(direct_server_with_data["url"] + "/#files", wait_until="domcontentloaded")
+            page.locator(".files-entry").filter(has_text="sample.txt").click()
+            editor = page.get_by_role("textbox", name="File contents", exact=True)
+            expect(editor).to_have_value("Original file contents\nSecond line\n")
+            editor.fill("Draft kept across pages")
+            status = page.locator("#files-preview-status")
+
+            def away_and_back():
+                page.evaluate("document.querySelector('[data-nav-page=\"skills\"]').click()")
+                page.wait_for_function("document.querySelector('#page-skills').classList.contains('active')")
+                page.evaluate("document.querySelector('[data-nav-page=\"files\"]').click()")
+                page.wait_for_function("document.querySelector('#page-files').classList.contains('active')")
+
+            away_and_back()
+            page.wait_for_timeout(500)  # the return's read of the file has answered
+            expect(status).not_to_contain_text("changed after this draft began")
+            expect(editor).to_have_value("Draft kept across pages")
+            fixture["content"]["sample.txt"] = "Saved meanwhile by another client\n"
+            away_and_back()
+            expect(status).to_have_text("This file changed after this draft began; Save replaces those changes.")
+            expect(editor).to_have_value("Draft kept across pages")
+            assert fixture["writes"] == [], "said, nothing written"
+            _capture(page, f"files-{engine}-changed-elsewhere")
         finally:
             browser.close()
 

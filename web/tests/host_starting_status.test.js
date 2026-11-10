@@ -12,6 +12,7 @@ import {
     supervisorReady,
 } from '../modules/chat_activity.js';
 import { createChatInstance } from '../modules/chat.js';
+import { startFailureCause } from '../modules/host_starting_status.js';
 import { emptyWorkState, roomStatusView } from '../modules/work_status.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 import { projection, room, work } from './work_fixture.js';
@@ -267,8 +268,11 @@ test('the Starting… header follows the phase: starting, chat ready, failed', (
     assert.deepEqual(startingStatus(SERVING), { kind: 'starting', text: 'Starting…', title: '' });
     assert.deepEqual(startingStatus(CHAT_READY),
         { kind: 'starting', text: 'Chat ready, restoring background tasks', title: '' });
-    assert.deepEqual(startingStatus(FAILED),
-        { kind: 'starting', text: 'Start failed', title: 'current-facts store not published: failed' });
+    assert.deepEqual(startingStatus(FAILED),  // the word stays whole; the cause is the step a short bar drops first
+        { kind: 'failed', text: 'Start failed', tone: 'failed', step: 'current-facts store not published: failed',
+          title: 'current-facts store not published: failed' }, 'a failed start is its own state, never a starting one');
+    assert.deepEqual(startingStatus({ ...SERVING, phase: 'failed' }),
+        { kind: 'failed', text: 'Start failed', tone: 'failed', step: '', title: '' });
     assert.deepEqual(startingStatus(SOFT_FAILED),
         { kind: 'starting', text: 'Chat ready, restoring background tasks', title: 'extensions: ValueError: bad manifest' },
         'a fail-soft step shows its error while the start goes on');
@@ -278,6 +282,18 @@ test('the Starting… header follows the phase: starting, chat ready, failed', (
         'readiness outranks the phase: a ready supervisor is Online whatever the boot said');
     assert.equal(roomStatusView({ ...idle, room: room('queued') }, { ready: false, boot: CHAT_READY }).text,
         'Queued', 'work keeps its own word beside the phase');
+});
+
+test('a room\'s list says a failed start whatever word its work puts in the bar, and only a failed start (U003)', () => {
+    const badge = (tone, title = '') => ({ dataset: { tone }, title });
+    assert.equal(startFailureCause({ badge: badge('failed', FAILED.error), ready: false, latest: null }), FAILED.error);
+    // Work outranks the start's word in the bar ("Working"); the list still reads the same producer over the boot.
+    assert.equal(startFailureCause({ badge: badge('live'), ready: false, latest: { boot: FAILED } }), FAILED.error);
+    assert.equal(startFailureCause({ badge: badge('live'), ready: true, latest: { boot: FAILED } }), null,
+        'readiness outranks the phase, as in the bar');
+    for (const boot of [SERVING, CHAT_READY, SOFT_FAILED, null]) {
+        assert.equal(startFailureCause({ badge: badge('starting'), ready: false, latest: { boot } }), null);
+    }
 });
 
 test('Main: the header paints the phase from the snapshot and forgets it on disconnect', async () => {
@@ -290,9 +306,30 @@ test('Main: the header paints the phase from the snapshot and forgets it on disc
         assert.equal(chat.kind(), 'status-badge starting', 'still the starting tone: tasks are not admitted yet');
         chat.instance.hydrateStateSnapshot({ supervisor_ready: false }, Infinity, 50);
         assert.equal(chat.status(), 'Chat ready, restoring background tasks', 'a body without the phase changes nothing');
+        const page = chat.instance.page;
+        const trigger = page.querySelector('.rw-trigger');
+        const failure = page.querySelector('.rw-failure');
+        assert.equal(trigger.disabled, true, 'Main with nothing listed while it starts: nothing to open');
+        assert.equal(failure.hidden, true, 'a start that goes on says no failure');
         chat.snapshot({ supervisor_ready: false, boot: FAILED });
-        assert.equal(chat.status(), 'Start failed');
+        assert.equal(chat.status(), 'Start failed', 'the word alone, so a narrow bar never drops it with the cause');
+        assert.equal(chat.kind(), 'status-badge failed');
+        assert.equal(globalThis.document.byId.get('chat-status').dataset.step, FAILED.error, 'the cause is the step');
         assert.equal(globalThis.document.byId.get('chat-status').title, FAILED.error, 'the cause rides the badge title');
+        // U001/U003: the capsule says the failure with its red dot and stays pressable; its list reads the same state
+        // and heads with the failure's line, Restart beside it and the cause behind Details, never "starting".
+        await chat.settle();
+        assert.equal(trigger.dataset.tone, 'failed');
+        assert.equal(trigger.disabled, false);
+        const dot = trigger.querySelector('.status-mark');
+        assert.deepEqual([dot.dataset.shape, dot.dataset.hue, dot.hidden], ['dot', 'failed', false]);
+        assert.equal(failure.hidden, false);
+        assert.equal(failure.querySelector('.rw-failure-lead').textContent, 'Ouroboros could not finish starting.');
+        const restart = failure.querySelector('.btn');
+        assert.equal(restart.textContent, 'Restart');
+        assert.ok(Object.hasOwn(restart.dataset, 'primary'), 'the one action of the line');
+        assert.equal(failure.querySelector('.ui-result-details').textContent, FAILED.error);
+        assert.notEqual(page.querySelector('.rw-note').textContent, 'Ouroboros is starting…');
         chat.snapshot({ supervisor_ready: true, boot: { ...CHAT_READY, phase: 'ready', tasks_ready: true } });
         assert.equal(chat.status(), 'Online');
         assert.equal(globalThis.document.byId.get('chat-status').title, '');

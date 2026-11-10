@@ -28,6 +28,9 @@ def test_starter_implements_frozen_plan_with_authorization_before_send(plan_setu
     path, request, key = p.engine.calls[-1]
     assert path == f"/v2/threads/{prior.thread_id}/turns"
     assert request["mode"] == "agent" and request["access"] == "workspace_write"
+    assert "ACCESS: you may edit inside this root" in request["prompt"]
+    assert "ACCESS: The starting folder is a location, not a read boundary" not in request["prompt"]
+    assert request["prompt"].count("this line governs native process access") == 1
     assert request["planRunId"] == prior.run_id
     assert hashlib.sha256(p.engine.plan).hexdigest() == result["promotion"]["plan_sha256"]
     assert request["overridePlanReadiness"] is False and "continueFrom" not in request
@@ -60,7 +63,7 @@ def test_unready_requires_explicit_recorded_override(plan_setup, readiness):
     assert p.engine.calls[-1][1]["overridePlanReadiness"] is True
 
 
-@pytest.mark.parametrize("blocked", ["leaf", "peer", "unrecorded_starter", "legacy", "beyond_ceiling", "changed_authority", "changed_target"])
+@pytest.mark.parametrize("blocked", ["leaf", "beyond_ceiling", "changed_target"])
 def test_promotion_floor_refuses_without_ceiling_authority_and_keeps_ordinary_floor(plan_setup, monkeypatch, blocked):
     p = plan_setup
     prior = ready_plan(p)

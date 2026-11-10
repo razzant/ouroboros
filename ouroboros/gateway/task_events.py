@@ -18,6 +18,15 @@ lets the cursor step over a not-yet-imported archive segment that predates the t
 (API admission stamps it for generated ids). A pending segment the task may have rows
 in is disclosed once (``history_gap`` ``still_importing``) and never crossed, so no row
 is skipped; skipped archive bytes still count in the offset.
+
+A budgeted v2 pass checks its clock at fully processed row boundaries. After
+``_PASS_SLICE_SEC`` without a frame, a ``cursor_checkpoint`` carries its progress;
+a blocked read can delay that boundary. The pass reads until the later of the
+request deadline and one slice after it began. Spending that budget ends the
+request with a checkpoint and no ``task_result``; a result follows only a pass
+that reached every source's pinned end. The client resumes with that cursor.
+Legacy replay filters each file as it parses it, holding matches rather than the
+whole chain's records.
 """
 
 from __future__ import annotations
@@ -78,6 +87,9 @@ _LOG_SOURCES = (
 _DIALOGUE_SOURCES = frozenset(ds.STREAMS)  # read from the store; the other sources are rotated files
 _DIALOGUE_BATCH = 200  # rows per probe page: one short read transaction, never the whole stream
 _TASK_COLUMNS = ("task_id", "parent_task_id", "root_task_id", "subagent_task_id")
+# The longest a v2 pass reads without a frame, and the least read budget of one request: well
+# inside the CLI's 40 s socket timeout, so a scan of unrelated rows never reads as a dead server.
+_PASS_SLICE_SEC = 10.0
 
 
 async def api_task_events(request: Request) -> StreamingResponse:
@@ -421,20 +433,25 @@ class _TaskEventFollower:
             ordinals = ordinals_of(root, source, [row.seq for row in rows]) if rows else {}
         except StoreError:  # the counts below the cutover are not settled: no number is better than a guess
             ordinals = {}
-        return [(row.row, ordinals[row.seq].ordinal + 1 if row.seq in ordinals else None) for row in rows]
+        return [(row.row, ordinals[row.seq].ordinal + 1 if row.seq in ordinals else None)
+                for row in ds.whole_rows(root, rows)]
 
-    def _read_chain_delta(self, root: pathlib.Path, source: str, parts: tuple) -> List[Any]:
-        """Entries appended to one (root, source) chain since the recorded state: a dialogue
-        stream's rows after the recorded coordinate (with their lines), or a file chain's bytes.
+    def _read_chain_rows(self, root: pathlib.Path, source: str, parts: tuple) -> Tuple[List[Dict[str, Any]], bool]:
+        """The lineage's rows appended to one (root, source) chain since the recorded state, and
+        whether anything was consumed: a dialogue stream's rows after the recorded coordinate (with
+        their lines), or a file chain's bytes, filtered file by file as each is parsed so a replay
+        holds matching rows, never every record of the chain; the line count still counts them all.
 
         Fresh state (a late-discovered log) naturally degenerates to reading the
         whole chain: every archive is "new" and the live offset is 0."""
         if source in _DIALOGUE_SOURCES:
-            return self._read_dialogue_delta(root, source)
+            entries = self._read_dialogue_delta(root, source)
+            return self._entries_to_rows(root, source, entries), bool(entries)
         state = self._log_state(root, source)
         live = root.joinpath(*parts)
         prefix = _ROTATED_LOG_PREFIXES.get(source)
-        entries: List[Dict[str, Any]] = []
+        rows: List[Dict[str, Any]] = []
+        consumed = False
         if prefix:
             try:
                 archive_paths = sorted(
@@ -464,7 +481,8 @@ class _TaskEventFollower:
                 start = state.pop("rotated_offset", state["offset"])
                 for index, path in enumerate(new_archives):
                     got, _, _ = _tasks_namespace()._read_live_jsonl_entries(path, start if index == 0 else 0)
-                    entries.extend(got)
+                    rows.extend(self._entries_to_rows(root, source, got))
+                    consumed = consumed or bool(got)
                     state["archives"].append(path.name)
                 if not (had_stash and len(new_archives) == 1):
                     # No stash: offset/ino still describe the OLD live file (now
@@ -478,7 +496,7 @@ class _TaskEventFollower:
         try:
             live_stat = live.stat()
         except OSError:
-            return entries
+            return rows, consumed
         if (state["ino"] is not None and live_stat.st_ino != state["ino"]) or (
             live_stat.st_size < state["offset"]
         ):
@@ -491,8 +509,8 @@ class _TaskEventFollower:
             state["offset"] = 0
         got, new_offset, ino = _tasks_namespace()._read_live_jsonl_entries(live, state["offset"])
         state["offset"], state["ino"] = new_offset, ino
-        entries.extend(got)
-        return entries
+        rows.extend(self._entries_to_rows(root, source, got))
+        return rows, consumed or bool(got)
 
     def _entries_to_rows(self, root: pathlib.Path, source: str, entries: List[Any]) -> List[Dict[str, Any]]:
         """Events for the entries that match the lineage filter: a file chain's entries are
@@ -542,8 +560,7 @@ class _TaskEventFollower:
         rows: List[Dict[str, Any]] = []
         for root in self.roots:
             for source, parts in _LOG_SOURCES:
-                entries = self._read_chain_delta(root, source, parts)
-                rows.extend(self._entries_to_rows(root, source, entries))
+                rows.extend(self._read_chain_rows(root, source, parts)[0])
         if self.result:
             rows.append({
                 "source": "task_result",
@@ -565,10 +582,9 @@ class _TaskEventFollower:
         rows: List[Dict[str, Any]] = []
         for root in list(self.roots):
             for source, parts in _LOG_SOURCES:
-                entries = self._read_chain_delta(root, source, parts)
-                if entries:
-                    advanced = True
-                    rows.extend(self._entries_to_rows(root, source, entries))
+                got, consumed = self._read_chain_rows(root, source, parts)
+                advanced = advanced or consumed
+                rows.extend(got)
         rows.sort(key=_event_sort_key)
         return rows, advanced
 
@@ -605,6 +621,12 @@ class _TaskEventCursorFollower(_TaskEventFollower):
         self.seq = cursor["seq"]
         self.view = cursor["view"]
         self.positions = {root: dict(sources) for root, sources in cursor["positions"].items()}
+        # The current pass's read budget (a ``time.monotonic`` instant; None reads each pass whole,
+        # without slice checkpoints), whether the last pass reached every source's pinned end before
+        # that budget ran out, and when this request last sent a frame.
+        self.pass_deadline: Optional[float] = None
+        self.pass_complete = True
+        self._last_frame = time.monotonic()
 
     def checkpoint(self) -> dict:
         return {"v": 2, "seq": self.seq, "view": self.view,
@@ -613,7 +635,21 @@ class _TaskEventCursorFollower(_TaskEventFollower):
     def envelope(self, event: dict, *, identity: str = "", delivery: bool = True) -> dict:
         if delivery:
             self.seq += 1
+        self._last_frame = time.monotonic()  # every envelope becomes one frame of the stream
         return {**event, "seq": self.seq, "event_id": identity, "cursor": self.checkpoint()}
+
+    def _slice_frame(self) -> Optional[dict]:
+        """At a fully processed row boundary of a budgeted pass: the checkpoint owed after a slice
+        without a frame, or the one that ends the pass because its budget is spent, which turns
+        ``pass_complete`` False; None when the pass reads on silently."""
+        if self.pass_deadline is None:
+            return None
+        now = time.monotonic()
+        if now >= self.pass_deadline:
+            self.pass_complete = False
+        elif now - self._last_frame < _PASS_SLICE_SEC:
+            return None
+        return self.envelope({"type": "cursor_checkpoint", "task_id": self.task_id}, delivery=False)
 
     def refresh_view(self) -> Optional[dict]:
         self.refresh_result()
@@ -642,7 +678,10 @@ class _TaskEventCursorFollower(_TaskEventFollower):
         JSONL record keeps its existing support; history is never one batch.
         Each source's logical EOF is pinned for this pass; later appends wait
         for the next pass so a busy source cannot starve the rest of the view.
+        A budgeted pass checks its clock after each bounded read (``_slice_frame``),
+        so it can stop there, but only after it has made that read's progress.
         """
+        self.pass_complete = True
         for notice in self.take_notices():
             yield self.envelope(notice, delivery=False)
         skipped = False  # a skipped replica's position, which only a frame carries to the client
@@ -650,6 +689,8 @@ class _TaskEventCursorFollower(_TaskEventFollower):
             for source, parts in _LOG_SOURCES:
                 if source in _DIALOGUE_SOURCES:
                     yield from self._read_dialogue_events(root, source)
+                    if not self.pass_complete:
+                        return
                     continue
                 live = root.joinpath(*parts)
                 position = self.positions[str(root)][source]
@@ -722,6 +763,10 @@ class _TaskEventCursorFollower(_TaskEventFollower):
                         yield self.envelope(event, identity=identity)
                     if position == before:
                         break
+                    if (frame := self._slice_frame()) is not None:
+                        yield frame
+                        if not self.pass_complete:
+                            return
         if skipped:  # a cut in the idle window after the pass would otherwise re-read the copy it skipped
             yield self.envelope({"type": "cursor_checkpoint", "task_id": self.task_id}, delivery=False)
 
@@ -759,7 +804,7 @@ class _TaskEventCursorFollower(_TaskEventFollower):
         lower = position
         while lower < bound:
             rows = ds.probe_rows(root, source, keys, lower=lower, before=bound, limit=_DIALOGUE_BATCH, newest_first=False)
-            for row in rows:
+            for row in ds.whole_rows(root, rows):
                 while skipped and skipped[0].seq < row.seq:
                     gap = skipped.pop(0)
                     self.positions[key][source] = gap.end
@@ -781,6 +826,10 @@ class _TaskEventCursorFollower(_TaskEventFollower):
             if len(rows) < _DIALOGUE_BATCH:
                 break
             lower = rows[-1].seq + 1
+            if (frame := self._slice_frame()) is not None:  # positions sit at the page's last row
+                yield frame
+                if not self.pass_complete:
+                    return
         for gap in skipped:
             self.positions[key][source] = gap.end
             yield self.envelope({"type": "history_gap", "source": source, "root": key, "task_id": self.task_id,
@@ -814,6 +863,7 @@ async def _api_task_events_v2(request: Request, task_id: str):
                 replay = await asyncio.to_thread(follower.refresh_view)
                 if replay:
                     yield _sse(replay, event_id=follower.seq)
+                follower.pass_deadline = max(deadline, time.monotonic() + _PASS_SLICE_SEC)
                 rows = follower.read_events()
                 try:
                     while True:
@@ -823,6 +873,8 @@ async def _api_task_events_v2(request: Request, task_id: str):
                         yield _sse(event, event_id=event["seq"])
                 finally:
                     rows.close()
+                if not follower.pass_complete:
+                    break  # its checkpoint ended the request: a result waits for a whole pass
                 terminal = follower.result_is_final()
                 if first or terminal:
                     result = follower.result

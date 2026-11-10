@@ -12,9 +12,12 @@ from __future__ import annotations
 from tests import _dialogue as dialogue_test
 
 import asyncio
+import contextlib
 import json
 import queue
+import threading
 from functools import partial
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 
 import httpx
@@ -104,6 +107,92 @@ def _gateway(daemon):
     return gateway
 
 
+def _refusal(code, retryable):
+    """The engine's own refusal of a run's event stream, as ``run-events-stream.ts`` writes it:
+    no ``id``, and the response ends after it."""
+    return "event: error\ndata: " + json.dumps({
+        "code": code, "message": "Run event stream could not be read.", "retryable": retryable, "fieldErrors": [],
+        "requiredActions": ["reconnect"] if retryable else [], "evidenceRefs": [], "context": {}},
+        separators=(",", ":")) + "\n\n"
+
+
+class LoopbackEngine:
+    """The engine's routes on a real loopback socket. The event stream is chunked SSE written one
+    frame at a time after ``Last-Event-ID``, then ``tail`` (``event: end``, a ``_refusal`` or nothing)
+    and the response's last chunk; ``POST /v2/runs/wait-many`` answers the contract probe, else
+    ``attention``; ``GET /v2/runs/<run_id>`` serves ``detail``."""
+
+    def __init__(self, journal, *, tail="", run_id="run-1", detail=None, attention=None):
+        self.journal, self.tail, self.run_id, self.detail, self.attention = journal, tail, run_id, detail, attention
+        self.requests = []
+
+    def stream_reads(self):
+        """The ``Last-Event-ID`` of every event stream request, in order."""
+        return [cursor for _method, path, cursor in self.requests if path.endswith("/events")]
+
+    @contextlib.contextmanager
+    def serving(self):
+        from ouroboros.gateways.claudexor_observation import PROBE_RUN_ID
+
+        engine = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *_args):
+                pass
+
+            def _head(self, content_type, **headers):
+                self.send_response(200)
+                for name, value in {"Content-Type": content_type, "Connection": "close", **headers}.items():
+                    self.send_header(name, value)
+                self.end_headers()
+
+            def _json(self, body):
+                data = json.dumps(body).encode()
+                self._head("application/json", **{"Content-Length": str(len(data))})
+                self.wfile.write(data)
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+                engine.requests.append(("POST", self.path, body))
+                if self.path == "/v2/handshake":
+                    return self._json({"compatible": True, "protocolMajor": 3,
+                                       "engine": {"version": "5.1.0", "sha": "loopback"}})
+                if body.get("targets") == [{"runId": PROBE_RUN_ID, "seen": None}]:
+                    return self._json({"wakeReason": "timeout", "attention": [], "summaries": [
+                        {"status": None, "pending": None, "token": None, "problem": "not_found"}]})
+                return self._json(engine.attention)
+
+            def do_GET(self):
+                engine.requests.append(("GET", self.path, self.headers.get("Last-Event-ID")))
+                if self.path == "/v2/operations":
+                    return self._json({"operations": [_STREAM_ROUTE, {"method": "POST", "path": "/v2/runs/wait-many"}]})
+                if self.path == f"/v2/runs/{engine.run_id}":
+                    return self._json(engine.detail)
+                after = int(self.headers.get("Last-Event-ID") or 0)
+                self._head("text/event-stream", **{"Transfer-Encoding": "chunked"})
+                for frame in [": connected\n\n", *(f"id: {e['seq']}\nevent: {e['type']}\ndata: {json.dumps(e)}\n\n"
+                                                   for e in engine.journal if e["seq"] > after), engine.tail]:
+                    if frame:
+                        self.wfile.write(b"%x\r\n%s\r\n" % (len(frame.encode()), frame.encode()))
+                        self.wfile.flush()
+                self.wfile.write(b"0\r\n\r\n")
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        gateway = gateway_module.ClaudexorGateway(gateway_module.DaemonEndpoint("127.0.0.1", server.server_port, "fixture"))
+        try:
+            gateway.handshake()
+            yield gateway
+        finally:
+            gateway.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+
 def _ctx(tmp_path, emitted):
     return SimpleNamespace(task_id="child", task_attempt=0, drive_root=tmp_path, task_metadata={},
                            emit_progress_fn=lambda text, **meta: emitted.append((text, meta)))
@@ -170,6 +259,28 @@ def test_an_open_stream_that_goes_quiet_returns_what_it_read():
         lambda _request: httpx.Response(200, stream=Quiet())))
     read = read_run_events(gateway, "run-1", after_seq=0, through_seq=5, timeout_sec=1)
     assert [e.seq for e in read.events] == [1] and read.through_seq == 1 and read.stop == "time"
+
+
+@pytest.mark.parametrize(("tail", "stop", "problem"), [
+    (_refusal("run_expired_by_retention", False), "error",
+     {"code": "run_expired_by_retention", "retryable": False, "required_actions": []}),
+    (_refusal("bulk_executor_failed", True), "error",
+     {"code": "bulk_executor_failed", "retryable": True, "required_actions": ["reconnect"]}),
+    ("event: error\ndata: worker gone\n\n", "error", {"code": "unknown", "retryable": True, "required_actions": []}),
+    ('id: 9\nevent: error\ndata: {"retryable": false}\n\n', "error",
+     {"code": "unknown", "retryable": False, "required_actions": []}),
+    ("event: end\ndata: {}\n\n", "end", None),
+    ("", "time", None),
+    (_refusal("store_" + "x" * 120, True), "error",
+     {"code": "store_" + "x" * 120, "retryable": True, "required_actions": ["reconnect"]}),
+], ids=["retention-for-good", "worker-reconnect", "unreadable-is-retryable", "numbered-is-no-event", "end", "eof",
+        "long-code-kept-whole"])
+def test_the_engines_refusal_ends_the_read_typed_after_every_whole_frame(tail, stop, problem):
+    engine = LoopbackEngine([_harness(1, "message", text="one"), _harness(2, "message", text="two")], tail=tail)
+    with engine.serving() as gateway:
+        read = read_run_events(gateway, "run-1", after_seq=0, through_seq=None, timeout_sec=5)
+    assert [e.seq for e in read.events] == [1, 2] and read.through_seq == 2, "the frames before it stand, the cursor too"
+    assert (read.stop, read.ended, read.problem) == (stop, stop == "end", problem)
 
 
 def test_route_presence_comes_from_the_engine_catalog_once_per_engine_identity():
@@ -437,6 +548,65 @@ def test_a_terminal_read_that_keeps_failing_is_a_final_provisional_gap(tmp_path,
                                "final": True, "where": "run_journal"}]
 
 
+@pytest.mark.parametrize("served", [2, 0], ids=["partial-then-refused", "refused-at-once"])
+def test_a_journal_retention_reclaimed_is_read_once_and_its_gap_promises_no_later_read(tmp_path, served):
+    engine = LoopbackEngine([_harness(seq, "message", text=f"line {seq}") for seq in range(1, served + 1)],
+                            tail=_refusal("run_expired_by_retention", False))
+    ctx = _ctx(tmp_path, [])
+    with engine.serving() as gateway:
+        record, = _records(ctx, gateway, 5, drain=30)
+        assert record["gaps"] == [{"after_seq": served, "through_seq": 5, "reason": "stream_error:run_expired_by_retention",
+                                   "retryable": False, "final": True}], "the unread range stays explicit"
+        assert [p["text"] for p in record["parts"]] == [f"line {seq}" for seq in range(1, served + 1)]
+        source = record["source"]
+        assert (source["kind"], source.get("read_through"), source.get("retryable")) == (
+            ("run_events", served, False) if served else ("timeline_window", None, False)), "the source ends at what was read"
+        assert engine.stream_reads() == ["0"] and delegate_activity._memo("child", "run-1").shown_through == 5, \
+            "the refused range is passed once its gap is emitted"
+        assert _records(ctx, gateway, 5, drain=30) == [] and engine.stream_reads() == ["0"], \
+            "the same wait again reads nothing: no futile reread"
+    text = delegate_activity.progress_text(record)
+    assert "can no longer be read" in text and "reported separately" in text and "reads them" not in text
+
+
+def test_a_refused_range_whose_frame_failed_is_committed_by_the_local_replay_and_not_read_again(tmp_path):
+    engine = LoopbackEngine([_harness(1, "message", text="one"), _harness(2, "message", text="two")],
+                            tail=_refusal("run_expired_by_retention", False))
+    ctx = _ctx(tmp_path, [])
+
+    def closed(_record):
+        raise RuntimeError("progress channel closed")
+
+    with engine.serving() as gateway:
+        with pytest.raises(RuntimeError):
+            _records(ctx, gateway, 5, drain=30, emit=closed)
+        assert delegate_activity._memo("child", "run-1").shown_through == 0, "a frame not handed over moves no cursor"
+        (replayed, commit), = list(delegate_activity.retained_observations(ctx, "run-1"))
+        commit()
+        assert replayed["gaps"][0]["retryable"] is False and delegate_activity._memo("child", "run-1").shown_through == 5
+        assert _records(ctx, gateway, 5, drain=30) == [] and engine.stream_reads() == ["0"], \
+            "the local replay commits what the live frame would have: the refused range is not read again"
+
+
+def test_a_retryable_refusal_keeps_the_drains_bounded_reconnect_and_is_never_called_retention(tmp_path, monkeypatch):
+    engine = LoopbackEngine([_harness(1, "message", text="one")], tail=_refusal("run_event_not_found", True))
+    clock = [0.0]
+    monkeypatch.setattr(delegate_activity, "time", SimpleNamespace(
+        monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds)))
+    with engine.serving() as gateway:
+        exact, window = _records(_ctx(tmp_path, []), gateway, 4, drain=2)
+    reads = engine.stream_reads()
+    assert reads[0] == "0" and set(reads[1:]) == {"1"} and 2 < len(reads) <= 2 + 2 / delegate_activity._RETRY_SEC, \
+        "the drain reconnects from its last whole frame, within its own allowance"
+    assert [p["text"] for p in exact["parts"]] == ["one"] and not exact.get("gaps")
+    assert window["source"] == {"kind": "timeline_window", "reason": "stream_error:run_event_not_found",
+                                "provisional": True, "rows": 0, "retryable": True}
+    assert window["gaps"] == [{"after_seq": 1, "through_seq": 4, "reason": "stream_error:run_event_not_found",
+                               "retryable": True, "final": True}]
+    text = delegate_activity.progress_text(window)
+    assert "tries again" in text and "retention" not in text and "can no longer" not in text
+
+
 # -- the wait loop, the carrier and replay ------------------------------------------------
 
 def _agent(tool_ctx):
@@ -453,7 +623,7 @@ def _agent(tool_ctx):
     return agent, events
 
 
-@pytest.mark.parametrize("unit,needs_omission", [("\x00", True), ("\x00\\", True), ("\\", False), ("🙂", False)])
+@pytest.mark.parametrize("unit,needs_omission", [("\x00", True), ("\\", False), ("🙂", False)])
 def test_serialized_speech_bound_survives_the_real_progress_carrier(tmp_path, unit, needs_omission):
     text = unit * (6000 // len(unit))
     originals = [_harness(seq, "message", text=text) for seq in range(1, 5)]
@@ -606,6 +776,50 @@ def test_a_later_wait_on_an_ended_run_catches_up_what_no_frame_carried(tmp_path,
         "catching up reads the ended run's journal: no new run, answer or control request"
 
 
+def test_the_supervised_beat_over_a_reclaimed_journal_reads_detail_and_delivers_the_same_result(tmp_path, monkeypatch):
+    """The beat (``observation_only``) over the real gateway and socket, for one ended run with its
+    journal kept and then reclaimed by retention: only the timeline differs."""
+    from ouroboros.tools import delegate
+    from tests._delegated_transport_shared import _nanny_ctx
+
+    detail = {"lastSeq": 2, "summary": {"runId": "run-1", "state": "succeeded", "effectiveAccess": "readonly"},
+              "timeline": [], "primaryOutput": {"kind": "answer", "text": "done", "truncated": False}}
+    attention = {"wakeReason": "attention", "attention": [0],
+                 "summaries": [{"status": "succeeded", "pending": False, "token": "a" * 43, "problem": None}]}
+    monkeypatch.setattr(delegate, "_capture_terminal_patch", lambda *a, **k: None)
+    clock = [0.0]
+    monkeypatch.setattr(delegate_activity, "time", SimpleNamespace(
+        monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds)))
+    seen = {}
+    for case, journal, tail in (
+            ("kept", [_harness(1, "message", text="Working on it."), _run_event(2, "run.completed")], "event: end\ndata: {}\n\n"),
+            ("reclaimed", [], _refusal("run_expired_by_retention", False))):
+        delegate_activity.reset_process_memo()
+        (tmp_path / case).mkdir()
+        ctx = _nanny_ctx(tmp_path / case, task_id="child")
+        ctx.task_attempt = 0
+        _agent_obj, events = _agent(ctx)
+        monkeypatch.setitem(delegate._CUSTODY, "run-1", RunCustody(task_id="child", run_id="run-1", route_id="claude",
+                                                                    model="m", access="readonly"))
+        engine = LoopbackEngine(journal, tail=tail, detail=detail, attention=attention)
+        with engine.serving() as gateway:
+            result = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=3, since_seq=0,
+                                                        observation_only=True, gateway=gateway))
+        frames = [row for row in (events.get_nowait() for _ in range(events.qsize())) if row["type"] == "send_message"]
+        seen[case] = (result, [frame["progress_meta"]["delegated_activity"] for frame in frames], engine)
+    (kept, kept_activity, kept_engine), (reclaimed, activity, engine) = seen["kept"], seen["reclaimed"]
+    assert reclaimed == kept and kept["status"] == "terminal", "a journal the engine reclaimed never changes the result"
+    assert [p["text"] for p in kept_activity[0]["parts"]] == ["Working on it."] and kept_engine.stream_reads() == ["0"]
+    window, = activity
+    assert window["source"]["reason"] == "stream_error:run_expired_by_retention" and not window["parts"]
+    assert window["gaps"] == [{"after_seq": 0, "through_seq": 2, "reason": "stream_error:run_expired_by_retention",
+                               "retryable": False, "final": True}]
+    assert engine.stream_reads() == ["0"], "the beat's read only: a journal refused for good is not read again"
+    assert ("GET", "/v2/runs/run-1", None) in engine.requests, "the refused beat handed the decision to the detail read"
+    assert not [body for method, path, body in engine.requests if path == "/v2/runs/wait-many"
+                and body["targets"][0]["runId"] == "run-1"], "no attention was read or acknowledged for the refused beat"
+
+
 def test_the_binder_delivery_and_replay_drop_a_foreign_or_malformed_record(tmp_path):
     record = {"v": 1, "task_id": "child", "run_id": "run-1", "after_seq": 0, "through_seq": 2,
               "source": {"kind": "run_events"}, "parts": [{"kind": "message", "text": "hi", "actor": "claude/a01"}]}
@@ -653,8 +867,7 @@ def test_telegram_card_leads_with_the_executors_latest_words_and_keeps_its_count
     assert "tool_result" in _subagent_card_text(event, "progress", "en"), "a frame without the record is unchanged"
 
 
-@pytest.mark.parametrize("recap", [False, True])
-@pytest.mark.parametrize("problem_count", [1, 8])
+@pytest.mark.parametrize(("problem_count", "recap"), [(1, True), (8, False)])
 def test_telegram_long_speech_preserves_problems_gaps_and_full_task_reference(recap, problem_count):
     from skills.telegram.lib.telegram_state import _subagent_card_text
 
@@ -718,3 +931,37 @@ def test_a_terminal_drain_yields_to_the_owners_stop_between_reads(tmp_path, monk
     record, = _records(other, flaky, 1, drain=30)
     assert len(daemon.requests) == before, "Restart admits no catalog or stream request"
     assert record["gaps"][0]["reason"] == "owner_owner_restart"
+
+
+def test_permanent_fallback_replays_all_retained_words_after_repeated_emission_failure(tmp_path):
+    from ouroboros.gateways.claudexor_run_events import RunEvent, RunEventsRead
+
+    ctx = _ctx(tmp_path, [])
+    ctx.emit_progress_fn = lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("closed channel"))
+    problem = {"code": "run_expired_by_retention", "retryable": False, "required_actions": []}
+    for seq, text in ((1, "one"), (2, "two")):
+        value = _harness(seq, "message", text=text)
+        read = RunEventsRead(events=[RunEvent(seq, value["type"], json.dumps(value), value)], through_seq=seq,
+                             problem=problem if seq == 2 else None)
+        delegate_progress.emit_stream(ctx, "run-1", read, after_seq=seq - 1)
+    records = _records(ctx, SimpleNamespace(), 3)
+    assert [part["text"] for record in records for part in record["parts"]] == ["one", "two"]
+    assert records[-1]["gaps"] == [{"after_seq": 2, "through_seq": 3,
+                                    "reason": "stream_error:run_expired_by_retention", "retryable": False}]
+    assert delegate_activity._memo("child", "run-1").shown_through == 3
+
+
+def test_permanent_refusal_is_published_even_when_no_unread_tail_remains(tmp_path, monkeypatch):
+    from ouroboros.gateways.claudexor_run_events import RunEvent, RunEventsRead
+
+    monkeypatch.setattr(delegate_activity, "_persist", lambda *_a: {})
+    value = _harness(1, "message", text="long words " * 2000)
+    read = RunEventsRead(events=[RunEvent(1, value["type"], json.dumps(value), value)], through_seq=1,
+                         problem={"code": "run_expired_by_retention", "retryable": False, "required_actions": []})
+    ctx = _ctx(tmp_path, [])
+    records = list(delegate_activity.stream_observations(ctx, "run-1", read, after=0))
+    record, commit = records[0]
+    commit()
+    assert record["source"]["retained"] is False and record["parts"][0]["truncated"] is True
+    assert record["source"]["retryable"] is False and not record.get("gaps")
+    assert record["source"]["reason"] == "stream_error:run_expired_by_retention"

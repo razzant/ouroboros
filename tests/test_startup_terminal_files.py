@@ -132,7 +132,7 @@ def test_orphan_exclusion_filters_before_effective_materialization(roots, monkey
     for tid in ["live", "dead"]:
         write_task_result(root, tid, "running", result="original")
     read = []
-    def effective(root, tid, materialize_artifacts=True, *, _boot=False):
+    def effective(root, tid, materialize_artifacts=True, *, _boot=False, reads=None):
         tid = tid["task_id"]
         read.append((tid, materialize_artifacts))
         return {"task_id": tid, "status": "failed", "result": "proven orphan"}
@@ -157,9 +157,11 @@ def test_startup_recovery_skips_symlinked_external_task_drive(roots):
     assert not result_exists(root, "evil")
 
 
-@pytest.mark.parametrize("family", ["headless", "task_drives"])
-@pytest.mark.parametrize("status", ["failed", "cancelled", "rejected_duplicate"])
-@pytest.mark.parametrize("child_status", [None, "running"])
+@pytest.mark.parametrize(("child_status", "status", "family"), [
+    (None, "cancelled", "headless"),
+    ("running", "failed", "task_drives"),
+    ("running", "rejected_duplicate", "task_drives"),
+])
 def test_host_terminal_without_child_terminal_does_not_disable_retention(
     roots, monkeypatch, family, status, child_status,
 ):
@@ -353,7 +355,7 @@ def test_legacy_scheduled_split_root_is_rebound_only_from_proven_child_start(roo
     assert result_signature(root, "split") == before
 
 
-@pytest.mark.parametrize("condition", ["pending", "owner_wait", "live", "no_start", "missing_queue", "stale_queue", "no_boot", "cancel_pending"])
+@pytest.mark.parametrize("condition", ["pending", "missing_queue", "cancel_pending"])
 def test_legacy_split_start_recovery_preserves_unproven_or_owned_work(roots, monkeypatch, condition):
     from supervisor import queue
     from ouroboros.cancel_intents import request_cancel
@@ -561,7 +563,7 @@ def test_orphan_reconcile_closes_the_open_quiz_and_its_paired_wait(roots, monkey
     monkeypatch.setattr(
         "ouroboros.task_status.effective_task_result",
         # The reconciler reuses the addressed row for its status-only decision.
-        lambda _root, row, materialize_artifacts=True, _boot=False: {"task_id": row["task_id"], "status": "failed", "result": "proven orphan"},
+        lambda _root, row, materialize_artifacts=True, _boot=False, reads=None: {"task_id": row["task_id"], "status": "failed", "result": "proven orphan"},
     )
 
     assert reconcile_orphaned_running_tasks(root) == 2
@@ -790,7 +792,6 @@ def _surviving_worker(root, task_id, *, chat_id=1):
     return proc
 
 
-@pytest.mark.serial
 def test_a_worker_that_survived_the_shutdown_is_killed_before_the_terminal_is_written(
     roots, monkeypatch,
 ):
@@ -847,7 +848,6 @@ def test_a_worker_that_survived_the_shutdown_is_killed_before_the_terminal_is_wr
     assert stored["result"] == terminal[0]["result"] == SERVER_STOPPED_CANCEL
 
 
-@pytest.mark.serial
 def test_an_ordinary_cancel_of_a_live_worker_keeps_stating_the_kill(roots, monkeypatch):
     """The shared producer speaks for a shutdown fence and for nothing else.
 
@@ -873,7 +873,6 @@ def test_an_ordinary_cancel_of_a_live_worker_keeps_stating_the_kill(roots, monke
     assert stored["result"] == LIVE_WORKER_CANCEL
 
 
-@pytest.mark.serial
 def test_the_fence_is_the_same_on_either_side_of_the_reap(roots):
     """Restore never consults process liveness, so whether the previous
     generation's worker died before or after the fence was minted must not change

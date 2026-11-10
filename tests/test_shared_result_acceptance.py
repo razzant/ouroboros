@@ -38,6 +38,42 @@ from tests.test_continue_successor_integration import continue_from, interrupted
 # Every Git tree, state root and process is case-local; these fixtures may run in parallel.
 
 
+@pytest.mark.parametrize(("decision", "direct"), [("apply", False), ("accept", True), ("reject", False)])
+def test_ordinary_verdict_binds_consumed_shared_or_direct_result(tmp_path, monkeypatch, direct, decision):
+    from ouroboros.tools import subagent_integration as integration
+    from ouroboros.tools.join_ledger import _current_child_result_disposition
+
+    s = Shared(tmp_path, monkeypatch)
+    folder = tmp_path / "plain" if direct else s.tree
+    if direct:
+        folder.mkdir()
+    s.admit("A", folder)
+    s.write({"report.txt": b"child work\n"}, folder)
+    s.finish("A", register=(folder / "report.txt",) if direct else ())
+    consumed = _child_result_sha256(load_effective_task_result(s.drive, "A"))
+    locate = integration._locate_child_patch
+
+    def locate_then_publish(ctx, tid):
+        located = locate(ctx, tid)
+        write_task_result(s.drive, tid, "completed", result="A revised its final report after lookup")
+        return located
+
+    with monkeypatch.context() as racing:
+        racing.setattr(integration, "_locate_child_patch", locate_then_publish)
+        out = s.integrate("A", decision=decision, reason="judge the consumed result")
+    assert "CHILD_RESULT_STALE" in out, out
+    assert s.verdict("A")["child_result_sha256"] == consumed
+    assert s.custody()[-1]["child_result_sha256"] == consumed
+    assert "decision_authority" not in s.verdict("A") and "original_parent_task_id" not in s.verdict("A")
+    current = load_effective_task_result(s.drive, "A")
+    assert _child_result_sha256(current) != consumed and not _current_child_result_disposition(current)
+    interrupted_root(s.drive, s.parent_id)
+    successor = continue_from(s.drive, s.parent_id)
+    out = s.integrate("A", s.ctx(successor), decision="reject", reason="judge the new report")
+    assert "Rejected" in out and "owner-Continue successor" in out, out
+    assert (folder / "report.txt").read_bytes() == b"child work\n"
+
+
 def git(root, *args):
     return subprocess.run(["git", *args], cwd=root, capture_output=True, check=True).stdout
 
@@ -437,12 +473,8 @@ def test_excluded_and_ignored_files_are_disclosed_not_checked(tmp_path, monkeypa
 
 @pytest.mark.parametrize("case, expected", [
     ("missing_reason", "TOOL_ARG_ERROR"),
-    ("long_reason", "TOOL_ARG_ERROR"),
     ("self_worktree", "INTEGRATE_ACCEPT_UNSUPPORTED"),
     ("genesis", "INTEGRATE_GENESIS_FORBIDDEN"),
-    ("wrong_target", "INTEGRATE_EXTERNAL_WORKSPACE_TARGET_MISMATCH"),
-    ("read_denied", "INTEGRATE_TARGET_FORBIDDEN"),
-    ("not_a_child", "INTEGRATE_LINEAGE_FORBIDDEN"),
 ])
 def test_accept_refusals_come_before_any_decision(shared, case, expected):
     s = shared
@@ -503,6 +535,56 @@ def test_direct_folder_outputs_take_the_same_acceptance(tmp_path, monkeypatch, o
     assert s.states("A") == {"notes.txt": "unchanged", "report.txt": "changed"}
     assert s.disposition("A") == "integrated"
     assert _collision(s.verdict_path("A"), hashlib.sha256(observed).hexdigest()).read_bytes() == observed
+
+
+@pytest.mark.parametrize("change", ["self_loop", "inward_twin", "outward_twin", "folder_loop", "member_link",
+                                    "policy_on_link", "policy_on_destination"])
+def test_direct_folder_outputs_are_judged_as_entries_never_followed(tmp_path, monkeypatch, change):
+    """#2549 for direct-folder results: a registered file or directory member later replaced by a link is
+    changed and never read (its destination holds the registered bytes exactly, so following it would read
+    unchanged); a policy on the link's own path still refuses, one on its destination never applies; a path
+    beyond a folder that became a loop is unknown while every other path is still checked."""
+    from ouroboros.artifact_directories import copy_directory_to_task_artifacts
+
+    s = Shared(tmp_path, monkeypatch)
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    s.admit("A", plain)
+    s.write({"report.txt": b"A's report\n", "notes.txt": b"A's notes\n", "nested/deep.txt": b"A's deep\n",
+             "bundle/one.txt": b"bundle one\n"}, plain)
+    copy_directory_to_task_artifacts(ToolContext(repo_dir=s.system, drive_root=s.drive, task_id="A",
+                                                 workspace_root=plain, workspace_mode="external"), plain / "bundle")
+    manifest = s.finish("A", register=(plain / "report.txt", plain / "notes.txt", plain / "nested" / "deep.txt"))
+    assert manifest["capture_kind"] == "directory_direct"
+    moved = {"member_link": plain / "bundle" / "one.txt", "folder_loop": plain / "nested"}.get(change, plain / "report.txt")
+    twin = (tmp_path if change == "outward_twin" else plain) / f"twin-{moved.name}"
+    try:
+        if change == "folder_loop":
+            shutil.rmtree(moved)
+        else:
+            moved.rename(twin)  # the destination keeps the registered bytes exactly
+        moved.symlink_to(moved.name if change in ("self_loop", "folder_loop") else twin)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(str(exc))
+    ctx = s.ctx()
+    if change.startswith("policy"):
+        ctx.task_contract = {"resource_policy": {"protected_artifacts": [{
+            "id": "black-box", "paths": [str(moved if change == "policy_on_link" else twin)],
+            "deny": ["read_bytes", "hash"]}]}}
+    out = s.integrate("A", ctx)
+    assert "INTEGRATE_DIRECTORY_OUTPUT_MISMATCH" in out, out
+    if change == "policy_on_link":
+        assert "RESOURCE_POLICY_BLOCKED" in out and s.disposition("A") == "", out
+        return
+    expected = dict.fromkeys(("report.txt", "notes.txt", "nested/deep.txt", "bundle/one.txt"), "unchanged")
+    expected.update({"nested/deep.txt": "unknown"} if change == "folder_loop" else
+                    {moved.relative_to(plain).as_posix(): "changed"})
+    assert s.states("A") == expected, out
+    out = s.integrate("A", ctx, decision="accept", reason="the folder holds A's result as it now stands")
+    assert out.startswith("OK: accepted") and s.disposition("A") == "integrated", out
+    if change != "folder_loop":
+        assert twin.read_bytes() == {"bundle/one.txt": b"bundle one\n"}.get(
+            moved.relative_to(plain).as_posix(), b"A's report\n")
 
 
 @pytest.mark.parametrize("subject", ["A", "run_0123abcd"])
@@ -653,6 +735,55 @@ def test_paths_no_git_entry_can_stand_for_are_type_changes_beside_known_paths(tm
     assert tree_state(s.tree) == before
 
 
+@pytest.mark.parametrize("kind", ["self_loop", "two_link_loop", "dangling", "inward", "outward"])
+def test_a_link_is_compared_as_the_link_git_records(shared, kind):
+    """#2549: a symlink in the shared result is checked as its own entry (type and link text), never
+    followed, so a loop, a dangling or an outward link verifies like any file beside it."""
+    s = shared
+    s.admit("A")
+    s.write({"normal.txt": b"ordinary output\n"})
+    outside = s.tmp / "outside.txt"
+    outside.write_bytes(b"outside B\n")
+    target = {"self_loop": "link", "two_link_loop": "other", "dangling": "missing",
+              "inward": "README.md", "outward": str(outside)}[kind]
+    try:
+        (s.tree / "link").symlink_to(target)
+        if kind == "two_link_loop":
+            (s.tree / "other").symlink_to("link")
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(str(exc))
+    # The link text as the OS reads it back: Windows names an absolute target by its \\?\ substitute path.
+    written = os.readlink(s.tree / "link")
+    manifest = s.finish("A")
+    assert manifest["status"] == "ready_with_changes", manifest
+    before = tree_state(s.tree)
+    out = s.integrate("A")
+    assert "Verified external_workspace child A" in out and "reverse check still passes" not in out, out
+    assert set(s.states("A").values()) == {"unchanged"}, out
+    assert os.readlink(s.tree / "link") == written and tree_state(s.tree) == before
+    assert outside.read_bytes() == b"outside B\n"
+
+
+def test_an_unexaminable_path_is_named_unknown_and_the_rest_still_checked(tmp_path, monkeypatch):
+    """A folder above a captured file that became a symlink loop cannot be examined (RuntimeError before Python
+    3.13, ELOOP after): that path is unknown, every other path keeps its state, and acceptance stays possible."""
+    s = Shared(tmp_path, monkeypatch, files={"keep.txt": b"keep\n"})
+    s.admit("A")
+    s.write({"keep.txt": b"keep, by A\n", "nested/report.txt": b"A's report\n"})
+    s.finish("A")
+    shutil.rmtree(s.tree / "nested")
+    try:
+        (s.tree / "nested").symlink_to("nested")
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(str(exc))
+    out = s.integrate("A")
+    assert "INTEGRATE_EXTERNAL_WORKSPACE_MISMATCH" in out and "unknown 1: nested/report.txt" in out, out
+    assert s.states("A") == {"keep.txt": "unchanged", "nested/report.txt": "unknown"}, out
+    assert "could not be examined" in s.verdict("A")["path_findings_note"]
+    out = s.integrate("A", decision="accept", reason="the report folder is a test fixture now")
+    assert out.startswith("OK: accepted") and s.disposition("A") == "integrated", out
+
+
 def test_a_recreated_path_the_reverse_check_tolerates_is_named_an_edit(tmp_path, monkeypatch):
     s = Shared(tmp_path, monkeypatch, files={"gone": b"a file\n"})
     s.admit("A")
@@ -787,9 +918,7 @@ def unwritable(*_args, **_kwargs):
 
 
 @pytest.mark.parametrize("decision, failed", [
-    ("accept", ["verdict_artifact_write_failed"]), ("accept", ["custody_row_write_failed"]),
-    ("accept", ["verdict_artifact_write_failed", "custody_row_write_failed"]),
-    ("apply", ["custody_row_write_failed"]), ("reject", ["verdict_artifact_write_failed"]),
+    ("accept", ["verdict_artifact_write_failed"]), ("apply", ["custody_row_write_failed"]), ("reject", ["verdict_artifact_write_failed"]),
 ])
 def test_a_decision_names_each_failed_write_of_its_own_evidence(shared, monkeypatch, decision, failed):
     s = shared

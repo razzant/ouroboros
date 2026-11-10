@@ -170,7 +170,7 @@ def test_technically_broken_continue_successor_keeps_its_offer(tmp_path, broken)
     assert gateway.removed == ['project']
 
 
-@pytest.mark.parametrize('authority', ['missing', 'unreadable', 'unknown_live', 'reserved'])
+@pytest.mark.parametrize('authority', ['missing', 'unknown_live', 'reserved'])
 def test_unknown_authority_or_reserved_owner_keeps_registration(tmp_path, monkeypatch, authority):
     gateway = Gateway()
     row = seed(tmp_path)

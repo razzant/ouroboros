@@ -31,7 +31,7 @@ from tests.separate_ui_support import (
     wait_until,
 )
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 EXAMPLE = REPO_ROOT / "docs/examples/client_views"
 BROWSERS = ["chromium", "webkit"]
 
@@ -126,11 +126,15 @@ def _painted_document(document):
 def _keyless_models_step(document, endpoint):
     """The real Accounts → Models route, without a subscription-only quick-start button."""
     document.locator("#next-btn").wait_for(timeout=30_000)
-    for section in ("api-access", "more-providers"):
-        details = document.locator(f'[data-collapse="{section}"]')
-        if details.get_attribute("open") is None:
-            details.locator("summary").first.click()
-    document.locator("#openai-compatible-url").fill(endpoint)
+    details = document.locator('[data-collapse="api-access"]')
+    if details.get_attribute("open") is None:
+        details.locator("summary").first.click()
+    # A keyless endpoint is the compatible card's own Default key (docs/DESIGN.md §7: a key is a row of its provider's
+    # card), and the card opens by its own head, apart from the "More options" disclosure.
+    toggle = document.locator('[data-provider-card="compatible"] [data-provider-toggle]')
+    if toggle.get_attribute("aria-expanded") != "true":
+        toggle.click()
+    document.locator("#s-openai-compatible-base-url").fill(endpoint)
     document.locator("#next-btn").click()
     document.locator('[data-model-role="main"]').wait_for()
     _painted_document(document)

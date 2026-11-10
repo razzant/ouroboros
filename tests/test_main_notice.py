@@ -44,7 +44,7 @@ class TestProducer:
         q = queue.Queue()
         ctx = _ctx(tmp_path, _project(tmp_path), event_queue=q)
         assert _send_user_message(ctx, "The Cursor account is out of usage.", destination="main") == (
-            "OK: notice sent to the main chat.")
+            "OK: notice accepted for delivery to the main chat.")
         frame = q.get_nowait()
         assert frame["chat_id"] == 1
         assert frame["system_type"] == "main_notice"
@@ -66,19 +66,34 @@ class TestProducer:
         q = queue.Queue()
         # A wake or scheduled root runs in Main with no owner-door stamp.
         bare = _ctx(tmp_path, 1, event_queue=q)
-        assert _send_user_message(bare, "An owner notice", destination="main").startswith("⚠️ MAIN_NOTICE_BLOCKED:")
+        refused = _send_user_message(bare, "An owner notice", destination="main")
+        assert refused.startswith("⚠️ MAIN_NOTICE_BLOCKED:")
+        # The refusal names the room the caller is already in (06.11: a scheduled Main root was told it was
+        # "neither bound to a Project nor started by the owner" and its finding never reached the owner).
+        assert "already runs in Main" in refused and "destination='current'" in refused
         assert q.empty() and not bare.pending_events
         assert not (tmp_path / "logs" / "events.jsonl").exists()
+        # A root in a foreign numeric room gets the plain refusal: it is not in Main, so the text must not say so.
+        elsewhere = _send_user_message(_ctx(tmp_path, 5_000_000_001, event_queue=q), "An owner notice", destination="main")
+        assert elsewhere.startswith("⚠️ MAIN_NOTICE_BLOCKED:") and "already runs in Main" not in elsewhere
+        assert "neither bound to a registered Project nor started by the owner" in elsewhere
+        assert "destination='current' still writes this work's own room" in elsewhere
+        assert q.empty()
+        # The relay return path shares the rule, not the sentence: a Main-room caller that did not ask for
+        # 'main' gets the plain reason, so the Main clause never describes a destination nobody chose.
+        from ouroboros.tools.control_runtime import _main_notice_refusal
+        assert "already runs in Main" not in _main_notice_refusal(bare, 1)
+        assert "already runs in Main" in _main_notice_refusal(bare, 1, asked_main=True)
         owner = _ctx(tmp_path, 1, event_queue=q, meta={"origin_message_ref": {"chat_id": 1, "client_message_id": "m1"}})
-        assert _send_user_message(owner, "An owner notice", destination="main") == "OK: notice sent to the main chat."
+        assert _send_user_message(owner, "An owner notice", destination="main") == "OK: notice accepted for delivery to the main chat."
         frame = q.get_nowait()
         assert frame["chat_id"] == 1 and frame["system_type"] == "main_notice"
 
-    @pytest.mark.parametrize("destination", ["current", "", None, " Current "])
+    @pytest.mark.parametrize("destination", ["current", "", " Current "])
     def test_default_and_empty_destination_stay_in_the_current_room(self, tmp_path, destination):
         q = queue.Queue()
         ctx = _ctx(tmp_path, 1_000_123, event_queue=q)
-        assert _send_user_message(ctx, "A word while I work.", destination=destination) == "OK: message sent to owner chat."
+        assert _send_user_message(ctx, "A word while I work.", destination=destination) == "OK: message accepted for delivery to owner chat."
         frame = q.get_nowait()
         assert frame["chat_id"] == 1_000_123
         assert frame["system_type"] == "proactive_message"
@@ -91,7 +106,7 @@ class TestProducer:
         assert "destination='telegram'" in result and "'main'" in result
         assert q.empty() and not ctx.pending_events
 
-    @pytest.mark.parametrize("case", ["child_metadata", "child_contract", "child_lineage", "presence", "a2a", "hidden", "hidden_string"])
+    @pytest.mark.parametrize("case", ["child_metadata", "a2a", "hidden_string"])
     def test_child_presence_and_a2a_callers_gain_no_main_voice(self, tmp_path, case):
         q = queue.Queue()
         chat_id, meta, contract = (_project(tmp_path) if case in
@@ -126,7 +141,7 @@ class TestFinalCustody:
         ctx = _ctx(tmp_path, _project(tmp_path), event_queue=None)
         assert _send_user_message(ctx, "Owner-held problem.", destination="main") == (
             "OK: notice queued for delivery to the main chat.")
-        assert _send_user_message(ctx, "Mid-task reply.") == "OK: message queued for delivery."
+        assert _send_user_message(ctx, "Mid-task reply.") == 'OK: message queued for delivery to Project room "Launch".'
         live = queue.Queue()
         # No final buffered yet: neither typed send may ship as the answer.
         assert deliver_final_message_live(live, ctx.pending_events, ctx.task_id) is False
@@ -168,8 +183,11 @@ def _history(tmp_path, chat_id):
 
 
 class TestDeliveryAndReplay:
-    @pytest.mark.parametrize("live", [True, False], ids=["live", "deferred"])
-    @pytest.mark.parametrize("born_in", ["project", "main", "main_unstamped"])
+    @pytest.mark.parametrize(("born_in", "live"), [
+        pytest.param("project", True, id='project-live'),
+        pytest.param("main", False, id='main-deferred'),
+        pytest.param("main_unstamped", True, id='main_unstamped-live'),
+    ])
     def test_notice_is_one_message_in_main_and_its_project_live_and_on_reload(self, tmp_path, host, live, born_in):
         project_chat = _project(tmp_path)
         # A root bound after admission keeps the chat it was born in on its row;

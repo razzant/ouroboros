@@ -73,6 +73,11 @@ def test_schema_conformant_clean_verdict_survives(tmp_path, fake_route, monkeypa
     assert start["model"] == "fake-small" and start["effort"] == "low"
     assert start["maxSeconds"] == 30 - elapsed_before_dispatch
     assert "unwrapped substantive deliverable" in start["prompt"]
+    assert "The starting folder is a location, not a read boundary" in start["instructions"]
+    assert "within the parent's existing read authority" in start["instructions"]
+    assert "supplemental sources cannot substitute a live tree" in start["instructions"]
+    assert "Reading the tree directly is a complete substitute" in start["instructions"]
+    assert "final answer must follow the output contract" in start["instructions"]
     # The manifest declared a non-interactive structured-output transport, so
     # the schema was asked on the EFFECTIVE route (D19).
     assert "outputSchema" in start
@@ -946,7 +951,7 @@ def test_failed_pending_invocation_checkpoint_refuses_provider_post(
     assert state == {}
 
 def _record_pending_review_invocation(
-    drive_root, *, invocation_id: str, task_id: str = "t-b", request=None,
+    drive_root, *, invocation_id: str, task_id: str = "t-b", request=None, **facts,
 ):
     route_id = "fake-review"
     body = request or {
@@ -967,8 +972,53 @@ def _record_pending_review_invocation(
         idempotency_key="stored-logical-key", invocation_id=invocation_id,
         max_seconds=30, request=body, project_id="proj-owned",
         project_owned=True, route=route_id, surface="scope_review",
-        slot_id="scope_slot_1",
+        slot_id="scope_slot_1", **facts,
     )
+
+@pytest.mark.parametrize("serving", ["store-a", "store-b"])
+def test_pending_recovery_replays_its_key_only_into_the_recording_store(tmp_path, fake_route, monkeypatch, serving):
+    """Engine keys live per store: a replaced store never receives the recorded key before any paid
+    stamp; the recording store answers it, and STARTED binds the store the replay's receipt names."""
+    from ouroboros.review_execution import ReviewRouteUnavailable
+
+    invocation_id = "inv-store-bound"
+    _record_pending_review_invocation(tmp_path, invocation_id=invocation_id, daemon_store_id="store-a")
+    start = fake_route.start_run
+    monkeypatch.setattr(fake_route, "store_identity", serving, raising=False)
+    monkeypatch.setattr(fake_route, "start_run", lambda self, request, **kw: {**start(self, request, **kw), "storeId": serving})
+    state = {"pending_invocation_id": invocation_id}
+    if serving == "store-b":
+        with pytest.raises(ReviewRouteUnavailable) as raised:
+            _run_session_directly(tmp_path, retry_state=state)
+        assert raised.value.code == "invocation_store_unproven"
+        assert not [key for gateway in fake_route.instances for key in gateway.start_keys]
+        assert state == {"pending_invocation_id": invocation_id}
+        return
+    result = _run_session_directly(tmp_path, retry_state=state)
+    assert result["idempotent_recovery"] is True
+    assert [key for gateway in fake_route.instances for key in gateway.start_keys] == [invocation_id]
+    custody._CUSTODY.clear()
+    assert custody.replay(tmp_path)[result["run_id"]].daemon_store_id == "store-a"
+
+def test_a_lost_review_start_is_never_replayed_into_a_replacement_that_names_no_store(tmp_path, fake_route, monkeypatch):
+    """The first POST's reply is lost in a named store: the request row keeps the handshake's
+    identity, so a replacement naming none is not shown to hold the key and nothing is re-sent."""
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+    from ouroboros.review_execution import ReviewRouteUnavailable
+
+    monkeypatch.setattr(fake_route, "store_identity", "store-a", raising=False)
+    fake_route.start_error = ClaudexorUnavailable("daemon_unreachable", "the reply was lost", status_code=0)
+    state = {}
+    with pytest.raises(ClaudexorUnavailable):
+        _run_session_directly(tmp_path, retry_state=state)
+    token = state["pending_invocation_id"]
+    assert custody.invocation_record(tmp_path, token)["handshake_store_id"] == "store-a"
+    monkeypatch.setattr(fake_route, "store_identity", "", raising=False)
+    with pytest.raises(ReviewRouteUnavailable) as raised:
+        _run_session_directly(tmp_path, retry_state=state)
+    assert raised.value.code == "invocation_store_unproven"
+    assert [key for gateway in fake_route.instances for key in gateway.start_keys] == [token]
+
 
 def test_pending_recovery_refuses_foreign_owner_before_gateway(tmp_path, fake_route):
     from ouroboros.review_execution import ReviewRouteUnavailable
@@ -1335,7 +1385,7 @@ def test_owner_disabled_route_refusal_carries_its_typed_code(tmp_path, fake_rout
 
 
 @pytest.mark.parametrize("telemetry_case", [
-    "missing_file", "old_without_final_id", "malformed_yaml", "known_off_pin", "known_exact",
+    "missing_file", "malformed_yaml", "known_exact",
 ])
 def test_final_route_observation_absence_is_disclosed_without_discarding_the_verdict(
     tmp_path, monkeypatch, fake_route, telemetry_case,

@@ -146,7 +146,6 @@ def test_bounded_writer_bounds_corrupt_index_rebuild(monkeypatch, tmp_path):
     assert all(call[1] == 17 for call in calls)
 
 
-@pytest.mark.serial
 def test_git_capture_times_out_instead_of_hanging(monkeypatch, tmp_path):
     """Issue #182: a hung git process (fsmonitor deadlock, an unresponsive
     filesystem) must not stall the rescue/rollback graph indefinitely. A
@@ -179,7 +178,8 @@ def test_git_capture_default_timeout_is_unbounded(monkeypatch, tmp_path):
     communicate = subprocess.Popen.communicate
 
     def observed(proc, *args, **kwargs):
-        waits.append((proc, kwargs.get("timeout"), proc in shell_process._active_subprocesses, proc.stdin))
+        if proc.args == ["git", "status", "--porcelain"]:
+            waits.append((proc, kwargs.get("timeout"), proc in shell_process._active_subprocesses, proc.stdin))
         return communicate(proc, *args, **kwargs)
 
     monkeypatch.setattr(subprocess.Popen, "communicate", observed)
@@ -192,8 +192,10 @@ def test_git_capture_default_timeout_is_unbounded(monkeypatch, tmp_path):
     assert proc not in shell_process._active_subprocesses and shell_process._spawning_subprocesses == 0
 
 
-@pytest.mark.parametrize("timeout", [None, 30])
-@pytest.mark.parametrize("error_type", [KeyboardInterrupt, OSError])
+@pytest.mark.parametrize(("error_type", "timeout"), [
+    pytest.param(KeyboardInterrupt, None, id='KeyboardInterrupt-None'),
+    pytest.param(OSError, 30, id='OSError-30'),
+])
 def test_git_capture_exception_cleanup_preserves_the_exception(monkeypatch, tmp_path, timeout, error_type):
     """The public capture's exceptional exit must reap its real child and close its pipes,
     for both wait modes. Inject the communication failure only into this test's child."""
@@ -242,6 +244,9 @@ def test_git_capture_unconfirmed_cleanup_keeps_custody_and_original_error(monkey
     failure = KeyboardInterrupt("original interruption")
 
     class UnconfirmedProcess:
+        def poll(self):
+            return self.returncode
+
         pid = 12345
         returncode = None
         stdin = None
@@ -284,6 +289,9 @@ def test_bounded_git_process_kills_tree_and_is_panic_tracked(monkeypatch):
     killed = []
 
     class HungProcess:
+        def poll(self):
+            return self.returncode
+
         returncode = -9
         stdin = stdout = stderr = None
 
@@ -299,6 +307,8 @@ def test_bounded_git_process_kills_tree_and_is_panic_tracked(monkeypatch):
             return "", "partial diagnostic"
 
     proc = HungProcess()
+    from tests.test_tracked_tree_containment import fake_tree_read
+    fake_tree_read(monkeypatch, proc, remains=False)
     monkeypatch.setattr(git_ops.subprocess, "Popen", lambda *_a, **_k: proc)
     monkeypatch.setattr(
         platform_layer, "kill_process_tree", lambda child: killed.append(child),

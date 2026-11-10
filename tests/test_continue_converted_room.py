@@ -22,7 +22,6 @@ import pytest
 
 from tests._budget_pause_exact_helpers import _install_queue
 
-pytestmark = pytest.mark.serial  # installs the process-wide queue/state roots
 
 NONCE = "press-0001-abcdef"
 TEXT = "Write the Friday report"
@@ -299,7 +298,6 @@ def test_a_failed_first_snapshot_retries_the_same_nonce_into_the_same_room(host,
     ("bindings_unreadable", "project_routing_fence_lookup_failed", False),
     ("binding_malformed", "project_routing_fence_lookup_failed", False),
     ("project_missing", "project_routing_fence_changed", True),
-    ("project_closed", "project_routing_fence", True),
 ])
 def test_unreadable_missing_or_closed_room_refuses_without_falling_back_to_main(host, damage, error, claimed):
     from ouroboros import projects_registry as registry

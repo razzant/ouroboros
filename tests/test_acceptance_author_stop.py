@@ -35,9 +35,9 @@ def _fail_result_wave(monkeypatch, reviews: list) -> None:
     records: dict = {}
     asked: dict = {}
 
-    def settled(_ctx, subject_sha, rows=None):
+    def settled(_ctx, subject_sha, rows=None, *, refusal=False):
         asked["sha"] = subject_sha
-        return records.get(subject_sha)
+        return None if refusal else records.get(subject_sha)  # each wave here settles FAIL: none is a $0 refusal
 
     def wave(_ctx, *, subject, answer="", **_kwargs):
         assert subject == "result"
@@ -55,10 +55,12 @@ def _fail_result_wave(monkeypatch, reviews: list) -> None:
     monkeypatch.setattr(review_change, "run_review_change", wave)
 
 
-def _run_stop_loop(tmp_path, monkeypatch, responses, *, stop_services, produced=False, mode="required"):
+def _run_stop_loop(tmp_path, monkeypatch, responses, *, stop_services, produced=False, mode="required",
+                   before_loop=None):
     """A real loop: real tool round, real delivery step, real result review at delivery.
 
-    Only the model, the reviewers' paid wave and the service teardown are substituted.
+    Only the model, the reviewers' paid wave and the service teardown are substituted. ``before_loop(data)``
+    runs on the seeded root before round one (owner mail its first drain reads).
     """
     import ouroboros.loop as loop
     from ouroboros.tools import services as services_mod
@@ -117,6 +119,8 @@ def _run_stop_loop(tmp_path, monkeypatch, responses, *, stop_services, produced=
     ctx.is_direct_chat = False
     ctx.task_attempt = 1
     ctx.current_chat_id = 1
+    if before_loop is not None:
+        before_loop(data)
     result, usage, trace = loop.run_llm_loop(
         messages=[{"role": "user", "content": "Ship the export endpoint."}],
         tools=registry, llm=SimpleNamespace(default_model=lambda: "test-model"),
@@ -174,7 +178,7 @@ def test_a_stop_survives_service_teardown_without_another_model_round(tmp_path, 
     assert axes["objective"]["status"] == "fail" and axes["objective"]["reason"] == "author_stop"
     record = {"status": "completed", "reason_code": str(outcome.get("reason_code") or "final_message"),
               "outcome_axes": axes}
-    assert completion_status_label(record, {}) == "Failed"
+    assert completion_status_label(record, {}) == "Stopped"
     verdict = _completion_verdict(record, {})
     assert STOP_RATIONALE.rstrip(".") in verdict, verdict
     assert verdict.startswith("Ouroboros stopped with unfinished work")
@@ -291,3 +295,17 @@ def test_evidence_changing_after_an_honoured_stop_neither_reopens_nor_replaces_i
     assert axes["objective"]["status"] == "fail" and axes["objective"]["reason"] == "author_stop"
     verdict = _completion_verdict({"status": "completed", "reason_code": "final_message", "outcome_axes": axes}, {})
     assert verdict.startswith("Ouroboros stopped with unfinished work") and STOP_RATIONALE.rstrip(".") in verdict
+
+
+def test_an_owner_stop_over_a_held_plan_objective_keeps_the_open_plan_sentence():
+    """The host twin of reason_detail.test.js: only an error is held by a plan objective; an owner's stop over one
+    keeps the record's open-plan sentence beside its own cause (as on the target)."""
+    from ouroboros.project_dialogue import _completion_verdict, outcome_phase
+
+    record = {"status": "cancelled", "cancel_origin": {"actor": "owner", "reason": "old stop"},
+              "terminal_plan_review_open": True,
+              "outcome_axes": {"objective": {"status": "fail", "source": "plan_review_cycles_exhausted",
+                                             "reason": "plan_review_cycles_exhausted"},
+                               "execution": {"status": "ok", "plan_review": "objections_open"}}}
+    assert outcome_phase(record, {}) == "cancelled"
+    assert "Objections to the plan were still open" in _completion_verdict(record, {})

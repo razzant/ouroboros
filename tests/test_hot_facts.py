@@ -5,9 +5,10 @@ import json
 
 import pytest
 
-from ouroboros import budget_pause, maintenance_jobs, owner_pause, store, store_hot_facts as hot
+from ouroboros import budget_pause, maintenance, maintenance_jobs, owner_pause, store, store_hot_facts as hot
 from ouroboros.task_results import write_task_result
 from ouroboros.task_store import patch_document
+from tests._cases import case_folders
 
 
 def _task(txn, tid, **fields):
@@ -269,6 +270,498 @@ def test_damaged_job_input_waits_for_its_own_change(tmp_path, monkeypatch):
     assert hot.run_hot_facts(tmp_path)["state"] == "done"
 
 
+def test_one_damaged_row_never_starves_the_valid_rows_after_it(tmp_path, monkeypatch):
+    """The pass names the damaged row and still derives every independent row after it (across batches),
+    then fails; it rests while exactly that row is unchanged, and an older writer's new row beside it is
+    derived on the next pass. Damage never becomes a known fact: the damaged row stays underived."""
+    with store.open_store(tmp_path, write=True) as txn:
+        _old_task(txn, "a-bad")
+        txn.conn.execute("UPDATE task_bodies SET body=? WHERE task_id='a-bad'", ("{",))
+        for index in range(hot._DERIVE_BATCH * 2 + 3):
+            _old_task(txn, f"legacy-{index:03d}", origin_message_ref={"chat_id": 7, "client_message_id": f"m{index}"})
+        for run_id, facts in (("bad-run", "{"), ("old-run", json.dumps({"run_id": "old-run", "root_task_id": "tree"}))):
+            txn.conn.execute("INSERT INTO custody_runs(run_id,task_id,facts,state) VALUES (?,?,?,?)",
+                             (run_id, "legacy-000", facts, "closed"))  # a later family's legacy rows
+        txn.conn.execute("INSERT INTO obligations(set_name,id,facts) VALUES (?,?,?)",
+                         ("custody_open", "invocation:old", json.dumps({"request": {"root_task_id": "tree"}})))
+    with pytest.raises(ValueError, match="task:a-bad"):
+        hot.run_hot_facts(tmp_path)
+    with store.open_store(tmp_path, write=False) as txn:
+        assert [row[0] for row in txn.conn.execute(f"SELECT task_id FROM tasks WHERE {hot.TASK_UNDERIVED}")] == ["a-bad"]
+        assert (txn.row("legacy-000", "origin"), txn.row("a-bad", "origin")) == ("7:m0", None)
+        assert [tuple(row) for row in txn.conn.execute("SELECT run_id, root_task_id, facts_derived FROM custody_runs "
+                                                       "ORDER BY run_id")] == [("bad-run", None, None), ("old-run", "tree", 1)]
+        assert txn.conn.execute("SELECT request_root_task_id FROM obligations WHERE id='invocation:old'").fetchone()[0] == "tree"
+    failed = maintenance_jobs.job(tmp_path, hot.JOB)
+    assert failed["state"] == "failed" and failed["waiting_on"]["id"] == "a-bad"
+    assert [(item["table"], item["id"], item["reason"]) for item in failed["damaged"]] == [
+        ("tasks", "a-bad", "body_unreadable"), ("custody_runs", "bad-run", "facts_unreadable")]
+    with monkeypatch.context() as patch:
+        patch.setattr(store.Txn, "body_text", lambda *_: pytest.fail("unchanged damaged input was retried"))
+        assert hot.run_hot_facts(tmp_path) == failed
+    with store.open_store(tmp_path, write=True) as txn:
+        _old_task(txn, "z-late")
+    with pytest.raises(ValueError, match="task:a-bad"):
+        hot.run_hot_facts(tmp_path)
+    with store.open_store(tmp_path, write=False) as txn:
+        assert (txn.row("z-late", "origin"), txn.row("a-bad", "origin")) == ("", None)
+    with store.open_store(tmp_path, write=True) as txn:
+        _task(txn, "a-bad")
+        txn.put_custody("bad-run", {"run_id": "bad-run", "task_id": "legacy-000"}, state="closed")
+    assert hot.run_hot_facts(tmp_path)["state"] == "done"
+    assert maintenance_jobs.job(tmp_path, hot.JOB)["damaged"] is None
+
+
+# ---- the dispatcher's look and the child's step over damaged input: maintenance.due -> run_job -----
+
+# The stored bytes of each family's damaged row, distinct so a decode names the row it read.
+_BAD = {"tasks": "{task", "custody_runs": "{run", "custody_open": "{open", "custody_refused": "{refused"}
+_NAMED = [("tasks", "a-bad", "body_unreadable"), ("custody_runs", "a-bad", "facts_unreadable"),
+          ("custody_open", "a-bad", "facts_unreadable"), ("custody_refused", "a-bad", "facts_unreadable")]
+
+
+def _request(key, facts):
+    return lambda txn, name: txn.conn.execute("INSERT INTO obligations(set_name,id,facts) VALUES (?,?,?)", (name, key, facts))
+
+
+def _damage_every_family(root):
+    with store.open_store(root, write=True) as txn:
+        _old_task(txn, "a-bad")
+        txn.conn.execute("UPDATE task_bodies SET body=? WHERE task_id='a-bad'", (_BAD["tasks"],))
+        txn.conn.execute("INSERT INTO custody_runs(run_id,task_id,facts,state) VALUES ('a-bad','task',?,'closed')",
+                         (_BAD["custody_runs"],))
+        for name in hot.REQUEST_SETS:
+            _request("a-bad", _BAD[name])(txn, name)
+
+
+def _new_task_older_writer(txn):
+    _old_task(txn, "z-new")
+
+
+def _new_task_origin_only(txn):  # a row an upgraded store derived before the origin column
+    _task(txn, "z-new")
+    txn.conn.execute("UPDATE tasks SET origin=NULL WHERE task_id='z-new'")
+
+
+def _new_task_chat_only(txn):  # a row an upgraded store derived before the chat column
+    _task(txn, "z-new", chat_id=4242)
+    txn.conn.execute("UPDATE tasks SET chat_id=NULL WHERE task_id='z-new'")
+
+
+def _new_custody(txn):
+    txn.conn.execute("INSERT INTO custody_runs(run_id,task_id,facts,state) VALUES ('z-new','task',?,'closed')",
+                     (json.dumps({"run_id": "z-new", "root_task_id": "tree"}),))
+
+
+_NEW_ROW = {"task_older_writer": (_new_task_older_writer, "SELECT origin IS NOT NULL AND chat_id IS NOT NULL AND "
+                                                          "owner_pause_state IS NOT NULL FROM tasks WHERE task_id='z-new'"),
+            "task_origin_only": (_new_task_origin_only, "SELECT origin IS NOT NULL FROM tasks WHERE task_id='z-new'"),
+            "task_chat_only": (_new_task_chat_only, "SELECT chat_id='4242' FROM tasks WHERE task_id='z-new'"),
+            "custody_runs": (_new_custody, "SELECT facts_derived=1 FROM custody_runs WHERE run_id='z-new'"),
+            **{name: ((lambda name: lambda txn: _request("z-new", json.dumps({"request": {"root_task_id": "tree"}}))(txn, name))(name),
+                      f"SELECT request_root_task_id='tree' FROM obligations WHERE set_name='{name}' AND id='z-new'")
+               for name in hot.REQUEST_SETS}}
+
+
+def _server_looks(root):
+    return "hot_facts" in maintenance.due(root)
+
+
+def _job(root):
+    return maintenance_jobs.job(root, hot.JOB)
+
+
+def _revision(root):
+    with store.open_store(root, write=False) as txn:
+        return txn.revision()
+
+
+def _named(root):
+    return [(item["table"], item["id"], item["reason"]) for item in _job(root)["damaged"] or ()]
+
+
+@pytest.fixture
+def decoded(monkeypatch):
+    """Every damaged stored text a JSON decode was handed, in this process."""
+    seen, real = [], json.loads
+
+    def loads(raw, *args, **kwargs):
+        if raw in _BAD.values():
+            seen.append(raw)
+        return real(raw, *args, **kwargs)
+
+    monkeypatch.setattr(json, "loads", loads)
+    return seen
+
+
+@pytest.fixture
+def named_damage(tmp_path, monkeypatch):
+    """A root whose job's finished pass named one damaged row per family."""
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    _damage_every_family(tmp_path)
+    assert _server_looks(tmp_path)
+    with pytest.raises(ValueError, match="task:a-bad"):
+        maintenance.run_job(tmp_path, "hot_facts")
+    assert _job(tmp_path)["state"] == "failed" and _named(tmp_path) == _NAMED
+    return tmp_path
+
+
+def test_unchanged_named_damage_is_no_work_for_either_look(named_damage, decoded, monkeypatch):
+    before, row = _revision(named_damage), _job(named_damage)
+    decoded.clear()
+    assert not _server_looks(named_damage)
+    assert maintenance.run_job(named_damage, "hot_facts") is None
+    assert hot.run_hot_facts(named_damage) == row
+    assert decoded == [] and _revision(named_damage) == before and _job(named_damage) == row
+
+
+@pytest.mark.parametrize("family", list(_NEW_ROW))
+def test_a_new_underived_row_beside_named_damage_wakes_the_server_look(named_damage, family):
+    with store.open_store(named_damage, write=True) as txn:
+        _NEW_ROW[family][0](txn)
+    assert _server_looks(named_damage), "the row waits for the child to start for another reason"
+
+
+@pytest.mark.parametrize("family", list(_NEW_ROW))
+def test_the_pass_a_new_row_starts_derives_it_without_reading_named_damage_again(named_damage, decoded, family):
+    add, derived = _NEW_ROW[family]
+    with store.open_store(named_damage, write=True) as txn:
+        add(txn)
+    decoded.clear()
+    with pytest.raises(ValueError, match="task:a-bad"):  # the failure stays loud, with the same names
+        maintenance.run_job(named_damage, "hot_facts")
+    assert decoded == [], "unchanged damaged rows were decoded again"
+    with store.open_store(named_damage, write=False) as txn:
+        assert txn.conn.execute(derived).fetchone()[0] == 1
+    assert _named(named_damage) == _NAMED and _job(named_damage)["state"] == "failed"
+    assert not _server_looks(named_damage) and maintenance.run_job(named_damage, "hot_facts") is None
+
+
+def _repair(txn, table, way):
+    if table == "tasks":
+        _task(txn, "a-bad") if way == "repaired" else txn.delete_task("a-bad")
+    elif table == "custody_runs":
+        if way == "repaired":
+            txn.put_custody("a-bad", {"run_id": "a-bad", "task_id": "task"}, state="closed")
+        else:
+            txn.conn.execute("DELETE FROM custody_runs WHERE run_id='a-bad'")
+    elif way == "repaired":
+        txn.conn.execute("UPDATE obligations SET facts=? WHERE set_name=? AND id='a-bad'",
+                         (json.dumps({"request": {"root_task_id": "tree"}}), table))
+    else:
+        txn.conn.execute("DELETE FROM obligations WHERE set_name=? AND id='a-bad'", (table,))
+
+
+@pytest.mark.parametrize("way", ["repaired", "removed"])
+def test_repaired_or_removed_damage_is_work_once_and_ends_in_done(named_damage, decoded, way):
+    remaining = list(_NAMED)
+    for table, _key, _reason in _NAMED:
+        with store.open_store(named_damage, write=True) as txn:
+            _repair(txn, table, way)
+        remaining = [entry for entry in remaining if entry[0] != table]
+        assert _server_looks(named_damage), table
+        decoded.clear()
+        if remaining:
+            with pytest.raises(ValueError):
+                maintenance.run_job(named_damage, "hot_facts")
+            assert _named(named_damage) == remaining and decoded == []
+            assert not _server_looks(named_damage)
+    row = maintenance.run_job(named_damage, "hot_facts")
+    assert row["state"] == "done" and decoded == []
+    assert _job(named_damage)["damaged"] is None and not _job(named_damage).get("damage_only")
+    assert not _server_looks(named_damage) and maintenance.run_job(named_damage, "hot_facts") is None
+
+
+@pytest.mark.parametrize("facts", ["[1]", "null", "3"])
+def test_custody_and_request_facts_that_are_no_object_wait_by_name_beside_later_rows(tmp_path, monkeypatch, facts):
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    with store.open_store(tmp_path, write=True) as txn:
+        txn.conn.execute("INSERT INTO custody_runs(run_id,task_id,facts,state) VALUES ('a-odd','task',?,'closed')", (facts,))
+        _new_custody(txn)
+        for name in hot.REQUEST_SETS:
+            _request("a-odd", facts)(txn, name)
+            _request("z-new", json.dumps({"request": {"root_task_id": "tree"}}))(txn, name)
+    with pytest.raises(ValueError, match="custody_runs row facts_not_object: a-odd"):
+        maintenance.run_job(tmp_path, "hot_facts")
+    assert _named(tmp_path) == [(table, "a-odd", "facts_not_object") for table in ("custody_runs", *hot.REQUEST_SETS)]
+    with store.open_store(tmp_path, write=False) as txn:
+        assert txn.conn.execute(_NEW_ROW["custody_runs"][1]).fetchone()[0] == 1
+        for name in hot.REQUEST_SETS:
+            assert txn.conn.execute(_NEW_ROW[name][1]).fetchone()[0] == 1
+    assert not _server_looks(tmp_path) and maintenance.run_job(tmp_path, "hot_facts") is None
+
+
+@pytest.mark.parametrize("status", [[], {"state": "running"}])
+def test_a_task_status_the_writer_refuses_waits_by_name_beside_later_rows(tmp_path, monkeypatch, status):
+    """Valid JSON with its own id and an array or object status, which ``task_columns`` cannot classify:
+    named damage, the rows after it derive, the look rests while it is unchanged and wakes on new input."""
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    with store.open_store(tmp_path, write=True) as txn:
+        with pytest.raises(TypeError):  # writer acceptance is unchanged
+            _task(txn, "refused", status=status)
+        assert txn.row("refused", "task_id") is None
+        _old_task(txn, "a-odd")
+        txn.conn.execute("UPDATE task_bodies SET body=? WHERE task_id='a-odd'",
+                         (json.dumps({"task_id": "a-odd", "status": status, "_schema_version": 1}),))
+        _old_task(txn, "b-legacy")
+    with pytest.raises(ValueError, match="task body status_unreadable: task:a-odd"):
+        maintenance.run_job(tmp_path, "hot_facts")
+    assert _named(tmp_path) == [("tasks", "a-odd", "status_unreadable")] and _job(tmp_path)["damage_only"]
+    with store.open_store(tmp_path, write=False) as txn:
+        assert (txn.row("b-legacy", "control_valid"), txn.row("a-odd", "control_valid")) == (1, None)
+        assert hot._read_rows(txn, ["a-odd"])["a-odd"]["control_valid"] == 0  # a passive read: that row unknown
+    assert not _server_looks(tmp_path) and maintenance.run_job(tmp_path, "hot_facts") is None
+    with store.open_store(tmp_path, write=True) as txn:
+        _new_task_older_writer(txn)
+    assert _server_looks(tmp_path)
+    with pytest.raises(ValueError, match="task:a-odd"):
+        maintenance.run_job(tmp_path, "hot_facts")
+    with store.open_store(tmp_path, write=True) as txn:
+        _task(txn, "a-odd")  # its own writer repairs it
+    assert _server_looks(tmp_path) and maintenance.run_job(tmp_path, "hot_facts")["state"] == "done"
+
+
+def test_a_named_row_rewritten_still_damaged_is_read_once_and_named_anew(named_damage, decoded):
+    with store.open_store(named_damage, write=True) as txn:
+        txn.conn.execute("UPDATE tasks SET write_seq=write_seq+1 WHERE task_id='a-bad'")
+    assert _server_looks(named_damage)
+    decoded.clear()
+    with pytest.raises(ValueError, match="task:a-bad"):
+        maintenance.run_job(named_damage, "hot_facts")
+    assert decoded == [_BAD["tasks"]], "only the changed row is read again"
+    assert not _server_looks(named_damage)
+
+
+def test_an_interrupted_pass_keeps_its_names_and_resumes_past_them(tmp_path, monkeypatch, decoded):
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(hot, "_DERIVE_BATCH", 1)
+    _damage_every_family(tmp_path)
+    with store.open_store(tmp_path, write=True) as txn:
+        for tid in ("b", "c", "d"):
+            _old_task(txn, tid)
+    calls = []
+
+    def stop_after_the_second_row():
+        calls.append(1)
+        return len(calls) > 4  # the checks around a-bad and b have passed: a stop lands on a committed cursor
+
+    row = maintenance.run_job(tmp_path, "hot_facts", should_stop=stop_after_the_second_row)
+    assert row["state"] == "pending" and _named(tmp_path)[:1] == _NAMED[:1]
+    assert _server_looks(tmp_path), "an unfinished pass stays due"
+    decoded.clear()
+    with pytest.raises(ValueError, match="task:a-bad"):
+        maintenance.run_job(tmp_path, "hot_facts")
+    assert decoded.count(_BAD["tasks"]) == 0 and _named(tmp_path) == _NAMED
+    with store.open_store(tmp_path, write=False) as txn:
+        assert [row[0] for row in txn.conn.execute("SELECT task_id FROM tasks WHERE origin IS NULL")] == ["a-bad"]
+    assert not _server_looks(tmp_path)
+
+
+def test_a_hard_stop_mid_pass_leaves_the_pass_due_and_its_names_kept(named_damage, decoded, monkeypatch):
+    class Killed(BaseException):
+        """A stop no handler of the job's row loop answers."""
+
+    with store.open_store(named_damage, write=True) as txn:
+        _old_task(txn, "z-new")
+    real = hot.task_columns
+
+    with monkeypatch.context() as patch:
+        patch.setattr(hot, "task_columns", lambda _document: (_ for _ in ()).throw(Killed()))
+        with pytest.raises(Killed):
+            maintenance.run_job(named_damage, "hot_facts")
+    assert hot.task_columns is real and _job(named_damage)["state"] == "pending" and _named(named_damage) == _NAMED
+    assert _server_looks(named_damage)
+    decoded.clear()
+    with pytest.raises(ValueError):
+        maintenance.run_job(named_damage, "hot_facts")
+    assert decoded == [] and not _server_looks(named_damage)
+
+
+@pytest.mark.parametrize("rewrite", ["still_damaged", "valid"])
+def test_a_writer_racing_the_pass_over_a_named_row_wins_and_the_next_pass_settles_it(named_damage, decoded, monkeypatch, rewrite):
+    with store.open_store(named_damage, write=True) as txn:
+        _old_task(txn, "z-new")
+    real, raced = hot.task_columns, []
+
+    def derive(document):
+        if not raced:
+            raced.append(True)
+            with store.open_store(named_damage, write=True) as txn:
+                if rewrite == "valid":
+                    _old_task(txn, "a-bad")
+                else:
+                    txn.conn.execute("UPDATE tasks SET write_seq=write_seq+1 WHERE task_id='a-bad'")
+        return real(document)
+
+    monkeypatch.setattr(hot, "task_columns", derive)
+    row = maintenance.run_job(named_damage, "hot_facts")
+    assert row["state"] == "pending" and _server_looks(named_damage), "the changed row is not left behind"
+    assert ("tasks", "a-bad", "body_unreadable") not in _named(named_damage)
+    decoded.clear()
+    with pytest.raises(ValueError):
+        maintenance.run_job(named_damage, "hot_facts")
+    assert ("tasks" in {entry[0] for entry in _named(named_damage)}) is (rewrite == "still_damaged")
+    assert decoded == ([_BAD["tasks"]] if rewrite == "still_damaged" else [])
+    assert not _server_looks(named_damage)
+
+
+def test_a_held_store_mid_pass_is_no_failure_and_stays_due(tmp_path, monkeypatch, decoded):
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    _damage_every_family(tmp_path)
+    with store.open_store(tmp_path, write=True) as txn:
+        _old_task(txn, "b")
+    real, held = hot.task_columns, []
+
+    def derive(document):
+        if not held:
+            held.append(True)
+            raise store.StoreBusy("held", reason="contention")
+        return real(document)
+
+    monkeypatch.setattr(hot, "task_columns", derive)
+    with pytest.raises(store.StoreBusy):
+        maintenance.run_job(tmp_path, "hot_facts")
+    assert _job(tmp_path)["state"] == "pending", "a held store parked the job as failed"
+    assert _server_looks(tmp_path)
+    decoded.clear()
+    with pytest.raises(ValueError, match="task:a-bad"):
+        maintenance.run_job(tmp_path, "hot_facts")
+    assert decoded.count(_BAD["tasks"]) == 0 and not _server_looks(tmp_path)
+
+
+def test_a_derivation_fault_stays_an_error_spawns_nothing_and_runs_with_the_child(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    with store.open_store(tmp_path, write=True) as txn:
+        for tid in ("a", "b"):
+            _old_task(txn, tid)
+    with monkeypatch.context() as patch:
+        patch.setattr("ouroboros.task_status.stored_list_order_is_final", lambda _document: 1 / 0)
+        with pytest.raises(ZeroDivisionError):
+            maintenance.run_job(tmp_path, "hot_facts")
+        row = _job(tmp_path)
+        assert row["state"] == "failed" and row["waiting_on"]["id"] == "a" and not row.get("damage_only")
+        assert not _server_looks(tmp_path), "a repeated fault would spawn the child on every look"
+        with pytest.raises(ZeroDivisionError):
+            maintenance.run_job(tmp_path, "hot_facts")  # the child, running for another reason, tries again
+    assert maintenance.run_job(tmp_path, "hot_facts")["state"] == "done"
+    assert not _server_looks(tmp_path)
+
+
+def test_the_childs_report_and_row_keep_the_failure_visible_at_rest(named_damage, monkeypatch):
+    monkeypatch.setattr(maintenance, "JOBS", {"hot_facts": maintenance.JOBS["hot_facts"]})
+    with store.open_store(named_damage, write=True) as txn:
+        _old_task(txn, "z-new")
+    report = maintenance.run(named_damage)
+    assert report["status"] == "failed" and report["jobs"]["hot_facts"]["state"] == "failed"
+    row = _job(named_damage)
+    assert row["last_error"]["class"] == "ValueError" and "task:a-bad" in row["error"]
+    assert maintenance.run(named_damage) == {"status": "completed", "jobs": {}}
+    assert _job(named_damage) == row, "a rest neither clears the failure nor rewrites the row"
+
+
+def test_the_look_reads_no_body_and_costs_the_same_beside_any_number_of_derived_rows(tmp_path, monkeypatch):
+    import sqlite3
+
+    from tests._cost_meter import CostMeter, tagged
+
+    reads, counts = [], {}
+
+    def authorizer(action, table, _column, _db, _source):
+        if action == sqlite3.SQLITE_READ and table == "task_bodies":
+            reads.append(table)
+        return sqlite3.SQLITE_OK
+
+    for size in (2, 200):
+        root = tmp_path / str(size)
+        root.mkdir()
+        monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
+        with store.open_store(root, write=True) as txn:
+            for index in range(size):
+                _task(txn, f"derived-{index:04d}", result="r" * 4000)
+        _damage_every_family(root)
+        with pytest.raises(ValueError):
+            maintenance.run_job(root, "hot_facts")
+        row = _job(root)
+        store.close_connections()
+        with CostMeter(root) as meter:
+            assert tagged("look", lambda: hot.hot_facts_due(root, row, False)) is False
+        counts[size] = meter.snapshot("look")["counts"]
+        with store.open_store(root, write=False) as txn:
+            txn.conn.set_authorizer(authorizer)
+            try:
+                assert hot._settled(txn, hot._named_damage(row))
+            finally:
+                txn.conn.set_authorizer(lambda *_args: sqlite3.SQLITE_OK)
+    assert reads == []
+    assert counts[2].get("statements") == counts[200].get("statements")
+    assert counts[200].get("vm_steps", 0) <= counts[2].get("vm_steps", 0) + 200, (counts[2], counts[200])
+
+
+# ---- schema readers across the origin step, in both directions -------------------------------------
+
+_SCHEMA_NINE_UNDERIVED = (
+    "owner_pause_state IS NULL OR owner_pause_fence_id IS NULL OR owner_pause_facts IS NULL OR budget_pause_state IS NULL "
+    "OR budget_pause_attempt IS NULL OR budget_pause_facts IS NULL OR post_task_synthesis IS NULL OR owner_wait_state "
+    "IS NULL OR owner_wait_reason IS NULL OR control_valid IS NULL OR list_stable IS NULL OR root_task_id IS NULL")
+
+
+def schema_nine(root):
+    """The store an older body left: no origin or chat column or index, its index predicate and version."""
+    with store.open_store(root, write=True) as txn:
+        for index in ("tasks_origin", "tasks_underived_origin", "tasks_underived_chat", "tasks_underived_hot"):
+            txn.conn.execute(f"DROP INDEX IF EXISTS {index}")
+        txn.conn.execute("ALTER TABLE tasks DROP COLUMN origin")
+        txn.conn.execute("ALTER TABLE tasks DROP COLUMN chat_id")
+        txn.conn.execute(f"CREATE INDEX tasks_underived_hot ON tasks(task_id) WHERE {_SCHEMA_NINE_UNDERIVED}")
+        txn.conn.execute("UPDATE meta SET value='9' WHERE key='schema_version'")
+    store.close_connections(store.store_path(root))
+
+
+def test_a_store_before_the_origin_step_is_read_owed_and_upgraded_without_a_body_decode(tmp_path, monkeypatch):
+    from ouroboros import task_store
+    from ouroboros.store_import import upgrade_current_schema
+
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    ref = {"chat_id": 7, "client_message_id": "m1", "ts": "t", "text_sha256": "0" * 64}
+    write_task_result(tmp_path, "legacy", "completed", result="kept", origin_message_ref=ref)
+    write_task_result(tmp_path, "other", "completed", result="kept")
+    schema_nine(tmp_path)
+    assert hot.read(tmp_path, "legacy")["status"] == "completed"
+    assert sorted(task_store.origin_documents(tmp_path, "7:m1")[0]) == ["legacy"]
+    assert _server_looks(tmp_path), "the look must say owed: the runner upgrades first"
+    with store.open_store(tmp_path, write=False) as txn:  # every reader above stayed passive
+        assert txn.meta("schema_version") == 9
+        assert "origin" not in {row["name"] for row in txn.conn.execute("PRAGMA table_info(tasks)")}
+    with monkeypatch.context() as patch:
+        patch.setattr(store.Txn, "body_text", lambda *_: pytest.fail("the schema step decoded a body"))
+        upgrade_current_schema(tmp_path)
+    with store.open_store(tmp_path, write=False) as txn:
+        assert txn.meta("schema_version") == store.SCHEMA_VERSION
+        assert txn.row("legacy", "origin") is None and txn.meta("job:" + hot.JOB)["state"] == "pending"
+    assert sorted(task_store.origin_documents(tmp_path, "7:m1")[0]) == ["legacy"]
+    assert _server_looks(tmp_path)
+    assert maintenance.run_job(tmp_path, "hot_facts")["state"] == "done"
+    with store.open_store(tmp_path, write=False) as txn:
+        assert (txn.row("legacy", "origin"), txn.row("other", "origin")) == ("7:m1", "")
+    assert sorted(task_store.origin_documents(tmp_path, "7:m1")[0]) == ["legacy"]
+    assert not _server_looks(tmp_path) and maintenance.run_job(tmp_path, "hot_facts") is None
+
+
+def test_an_older_bodys_probes_still_answer_on_a_store_past_the_origin_step(tmp_path):
+    """A rollback shares this store: the older dispatcher's and job's ``INDEXED BY`` probes name its own
+    predicate, so the origin step leaves that index's definition alone (no query solution otherwise, and
+    the older body's whole maintenance look would fail on every tick)."""
+    assert hot.TASK_UNDERIVED == _SCHEMA_NINE_UNDERIVED
+    with store.open_store(tmp_path, write=True) as txn:
+        _old_task(txn, "older")
+    with store.open_store(tmp_path, write=False) as txn:
+        assert txn.conn.execute(f"SELECT 1 FROM tasks INDEXED BY tasks_underived_hot WHERE {_SCHEMA_NINE_UNDERIVED} "
+                                "LIMIT 1").fetchone() is not None
+        assert [row[0] for row in txn.conn.execute(
+            f"SELECT task_id FROM tasks INDEXED BY tasks_underived_hot WHERE ({_SCHEMA_NINE_UNDERIVED}) AND task_id>? "
+            "ORDER BY task_id LIMIT ?", ("", 64))] == ["older"]
+
+
 def test_derived_rows_read_no_body_and_underived_rows_still_do(tmp_path):
     """Proved by SQLite's authorizer, not by patching ``Txn.body_text``: the SQL itself joins no body."""
     import sqlite3
@@ -310,18 +803,21 @@ _NOT_THIS_TASK = {"torn": "{", "array": "[]", "null": "null", "empty": "{}", "fo
     "task_id": "other", "status": "running", "swarm_fanout_rollup": _HISTORY, "swarm_fanout_basis": {"base": _HISTORY}})}
 
 
-@pytest.mark.parametrize("kind", list(_NOT_THIS_TASK))
-def test_a_body_that_is_not_this_task_leaves_only_its_own_row_unknown(tmp_path, kind):
-    with store.open_store(tmp_path, write=True) as txn:
-        _old_task(txn, "bad")
-        _old_task(txn, "legacy", budget_pause={"state": "pausing", "task_attempt": 2})
-        txn.conn.execute("UPDATE task_bodies SET body=? WHERE task_id='bad'", (_NOT_THIS_TASK[kind],))
-    with store.open_store(tmp_path, write=False) as txn:
-        rows = hot._read_rows(txn, ["bad", "legacy"])
-    assert rows["bad"]["control_valid"] == 0
-    assert (rows["legacy"]["control_valid"], rows["legacy"]["budget_pause_attempt"]) == (1, 2)
-    with pytest.raises(ValueError, match="unreadable or invalid"):
-        hot.read(tmp_path, "bad")
+def test_a_body_that_is_not_this_task_leaves_only_its_own_row_unknown(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for kind in list(_NOT_THIS_TASK):
+        tmp_path = next(case_paths)
+        with subtests.test(kind=kind):
+            with store.open_store(tmp_path, write=True) as txn:
+                _old_task(txn, "bad")
+                _old_task(txn, "legacy", budget_pause={"state": "pausing", "task_attempt": 2})
+                txn.conn.execute("UPDATE task_bodies SET body=? WHERE task_id='bad'", (_NOT_THIS_TASK[kind],))
+            with store.open_store(tmp_path, write=False) as txn:
+                rows = hot._read_rows(txn, ["bad", "legacy"])
+            assert rows["bad"]["control_valid"] == 0
+            assert (rows["legacy"]["control_valid"], rows["legacy"]["budget_pause_attempt"]) == (1, 2)
+            with pytest.raises(ValueError, match="unreadable or invalid"):
+                hot.read(tmp_path, "bad")
 
 
 def test_a_fault_in_column_derivation_still_fails_the_read(tmp_path, monkeypatch):
@@ -333,19 +829,22 @@ def test_a_fault_in_column_derivation_still_fails_the_read(tmp_path, monkeypatch
         hot._read_rows(txn, ["legacy"])
 
 
-@pytest.mark.parametrize("kind", list(_NOT_THIS_TASK))
-def test_a_whole_upsert_replaces_such_a_body_with_only_its_own_basis(tmp_path, kind):
-    base = {**_HISTORY, "fanout_count": 1, "requested_count": 1, "child_ids": ["own"]}
-    with store.open_store(tmp_path, write=True) as txn:
-        for tid in ("plain", "carried"):
-            _old_task(txn, tid)
-            txn.conn.execute("UPDATE task_bodies SET body=? WHERE task_id=?", (_NOT_THIS_TASK[kind], tid))
-        _task(txn, "plain")
-        _task(txn, "carried", swarm_fanout_rollup=base, swarm_fanout_basis={"base": base})
-        plain, carried = txn.load("plain"), txn.load("carried")
-    assert "swarm_fanout_rollup" not in plain and "swarm_fanout_basis" not in plain
-    assert (carried["swarm_fanout_rollup"], carried["swarm_fanout_basis"]) == (base, {"base": base})
-    assert hot.read(tmp_path, "plain")["control_valid"] == 1
+def test_a_whole_upsert_replaces_such_a_body_with_only_its_own_basis(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for kind in list(_NOT_THIS_TASK):
+        tmp_path = next(case_paths)
+        with subtests.test(kind=kind):
+            base = {**_HISTORY, "fanout_count": 1, "requested_count": 1, "child_ids": ["own"]}
+            with store.open_store(tmp_path, write=True) as txn:
+                for tid in ("plain", "carried"):
+                    _old_task(txn, tid)
+                    txn.conn.execute("UPDATE task_bodies SET body=? WHERE task_id=?", (_NOT_THIS_TASK[kind], tid))
+                _task(txn, "plain")
+                _task(txn, "carried", swarm_fanout_rollup=base, swarm_fanout_basis={"base": base})
+                plain, carried = txn.load("plain"), txn.load("carried")
+            assert "swarm_fanout_rollup" not in plain and "swarm_fanout_basis" not in plain
+            assert (carried["swarm_fanout_rollup"], carried["swarm_fanout_basis"]) == (base, {"base": base})
+            assert hot.read(tmp_path, "plain")["control_valid"] == 1
 
 
 def test_a_whole_upsert_keeps_a_valid_held_basis_and_patches_stay_strict(tmp_path):
@@ -360,3 +859,110 @@ def test_a_whole_upsert_keeps_a_valid_held_basis_and_patches_stay_strict(tmp_pat
         patch_document(tmp_path, "torn", lambda current: {**current, "note": "patched"})
     with store.open_store(tmp_path, write=False) as txn:
         assert txn.body_text("torn") == "{"
+
+
+# ---- the admitted chat: the room rule's lineage read across the chat step ----------------------------
+
+# The lineage read before the chat column: each row's chat from its body, as the room rule converted it.
+_BODY_LINEAGE = ("SELECT t.task_id, CASE json_type(b.body, '$.chat_id') WHEN 'real' THEN CAST(json_extract(b.body, "
+                 "'$.chat_id') AS INTEGER) ELSE '' || json_extract(b.body, '$.chat_id') END FROM tasks t LEFT JOIN "
+                 "task_bodies b ON b.task_id = t.task_id WHERE t.task_id IN (SELECT value FROM json_each(?))")
+
+
+def _body_chats(root, ids):
+    def converted(value):
+        try:
+            return int(value) if value not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
+    with store.open_store(root, write=False) as txn:
+        return {tid: converted(chat) for tid, chat in txn.conn.execute(_BODY_LINEAGE, (json.dumps(sorted(ids)),))}
+
+
+def _lineage_chats(root, ids):
+    """The room rule's read (``projects_registry._read_lineage``), fresh: each id's admitted chat, None unanswered."""
+    from ouroboros import projects_registry as registry
+
+    for key in [key for key in registry._TASK_LINEAGE if key[0] == str(root)]:
+        del registry._TASK_LINEAGE[key]
+    read = registry._read_lineage(root, ids)
+    return None if read is None else {tid: facts["chat_id"] for tid, facts in read.items()}
+
+
+def schema_ten(root):
+    """The store an older body left before the chat step: no chat column or index, version 10."""
+    with store.open_store(root, write=True) as txn:
+        txn.conn.execute("DROP INDEX IF EXISTS tasks_underived_chat")
+        txn.conn.execute("ALTER TABLE tasks DROP COLUMN chat_id")
+        txn.conn.execute("UPDATE meta SET value='10' WHERE key='schema_version'")
+    store.close_connections(store.store_path(root))
+
+
+# Each body's ``chat_id`` and the chat the room rule reads from it: a JSON real's integer part, text through int().
+_CHATS = [({"chat_id": 5}, 5), ({"chat_id": 7.9}, 7), ({"chat_id": -2.5}, -2), ({"chat_id": "12"}, 12),
+          ({"chat_id": " 13 "}, 13), ({"chat_id": "abc"}, None), ({"chat_id": ""}, None), ({"chat_id": None}, None),
+          ({"chat_id": True}, 1), ({"chat_id": False}, 0), ({"chat_id": {"a": 1}}, None), ({"chat_id": [3]}, None),
+          ({}, None)]
+
+
+def test_the_admitted_chat_answers_from_its_column_as_the_body_read_did(tmp_path):
+    with store.open_store(tmp_path, write=True) as txn:
+        for index, (fields, _chat) in enumerate(_CHATS):
+            _task(txn, f"d{index:02d}", **fields)  # a writer derives the column
+            _old_task(txn, f"u{index:02d}", **fields)  # an older writer leaves it underived
+    ids = [f"{side}{index:02d}" for side in "du" for index in range(len(_CHATS))]
+    expected = {f"{side}{index:02d}": chat for side in "du" for index, (_fields, chat) in enumerate(_CHATS)}
+    assert _body_chats(tmp_path, ids) == expected  # the read the column replaces
+    assert _lineage_chats(tmp_path, ids) == expected
+    with store.open_store(tmp_path, write=False) as txn:
+        assert [txn.row(f"d{index:02d}", "chat_id") for index in range(len(_CHATS))] == [
+            "" if chat is None else str(chat) for _fields, chat in _CHATS]  # "" is a known absence, never NULL
+        assert all(txn.row(f"u{index:02d}", "chat_id") is None for index in range(len(_CHATS)))
+    assert hot.run_hot_facts(tmp_path)["state"] == "done"
+    with store.open_store(tmp_path, write=False) as txn:
+        assert all(txn.row(f"u{index:02d}", "chat_id") == txn.row(f"d{index:02d}", "chat_id") for index in range(len(_CHATS)))
+    assert _lineage_chats(tmp_path, ids) == expected
+
+
+def test_a_derived_rows_lineage_reads_no_body_and_an_underived_row_still_does(tmp_path):
+    """Every body malformed: a read that parses one (``json_type``) fails. The derived rows' lineage answers from
+    their columns alone; an older writer's underived row still pays its body read, so its read fails as before."""
+    with store.open_store(tmp_path, write=True) as txn:
+        _task(txn, "kid", chat_id=7, parent_task_id="mid", root_task_id="top", delegation_role="subagent")
+        _task(txn, "mid", chat_id="")
+        _old_task(txn, "older", chat_id=8)
+        txn.conn.execute("UPDATE task_bodies SET body='{'")
+    from ouroboros import projects_registry as registry
+
+    assert _lineage_chats(tmp_path, ["kid", "mid"]) == {"kid": 7, "mid": None}
+    assert registry._TASK_LINEAGE[(str(tmp_path), "kid")] == {"parent_task_id": "mid", "root_task_id": "top",
+                                                             "delegation_role": "subagent", "chat_id": 7}
+    assert _lineage_chats(tmp_path, ["kid", "older"]) is None  # the store cannot answer the older row's chat now
+
+
+def test_a_store_before_the_chat_step_reads_bodies_and_upgrades_without_a_body_decode(tmp_path, monkeypatch):
+    from ouroboros.store_import import upgrade_current_schema
+
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    write_task_result(tmp_path, "legacy", "completed", result="kept", chat_id=4242)
+    write_task_result(tmp_path, "other", "completed", result="kept")
+    schema_ten(tmp_path)
+    assert _lineage_chats(tmp_path, ["legacy", "other"]) == {"legacy": 4242, "other": None}
+    assert _server_looks(tmp_path), "the look must say owed: the runner upgrades first"
+    with store.open_store(tmp_path, write=False) as txn:  # the reads above stayed passive
+        assert txn.meta("schema_version") == 10
+        assert "chat_id" not in {row["name"] for row in txn.conn.execute("PRAGMA table_info(tasks)")}
+    with monkeypatch.context() as patch:
+        patch.setattr(store.Txn, "body_text", lambda *_: pytest.fail("the schema step decoded a body"))
+        upgrade_current_schema(tmp_path)
+    with store.open_store(tmp_path, write=False) as txn:
+        assert txn.meta("schema_version") == store.SCHEMA_VERSION == hot.CHAT_VERSION
+        assert txn.row("legacy", "chat_id") is None and txn.meta("job:" + hot.JOB)["state"] == "pending"
+    assert _lineage_chats(tmp_path, ["legacy", "other"]) == {"legacy": 4242, "other": None}  # underived: its body
+    assert maintenance.run_job(tmp_path, "hot_facts")["state"] == "done"
+    with store.open_store(tmp_path, write=True) as txn:
+        assert (txn.row("legacy", "chat_id"), txn.row("other", "chat_id")) == ("4242", "")
+        txn.conn.execute("UPDATE task_bodies SET body='{'")  # from here a body read would fail
+    assert _lineage_chats(tmp_path, ["legacy", "other"]) == {"legacy": 4242, "other": None}  # the column answers
+    assert not _server_looks(tmp_path) and maintenance.run_job(tmp_path, "hot_facts") is None

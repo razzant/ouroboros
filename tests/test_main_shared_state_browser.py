@@ -16,7 +16,7 @@ from tests.ui_chat_viewport_smoke import (
     _wait_state_reads_quiescent, state_reads,
 )
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 _PILL = '#page-chat .chat-toolbar-row > button.chat-question-nav'
 _ACTION = '#chat-messages .chat-bubble.owner-action[data-owner-action="paused-task"]'
@@ -58,11 +58,18 @@ def test_shared_app_read_failure_reaches_main_without_overwriting_newer_question
         page = browser.new_page(viewport={"width": 1100, "height": 900})
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.add_init_script(f"({_CAPTURE_TEST_SOCKET})(); ({_OBSERVE_STATE_READS})();")
+        # A poll reads after awaiting its gate, so its tick is not on the read's stack: the tick names itself until its task ends.
         page.add_init_script("""(() => {
-            const fetch = window.fetch;
+            const fetch = window.fetch, every = window.setInterval;
+            let tick = '';
+            window.setInterval = (run, ...rest) => every((...args) => {
+                tick = run.name;
+                setTimeout(() => { tick = ''; });
+                return run(...args);
+            }, ...rest);
             window.__stateCallers = [];
             window.fetch = (url, init) => {
-                if (String(url).split('?')[0].endsWith('/api/state')) window.__stateCallers.push(new Error().stack);
+                if (String(url).split('?')[0].endsWith('/api/state')) window.__stateCallers.push(`${tick}\\n${new Error().stack}`);
                 return fetch(url, init);
             };
         })();""")
@@ -147,26 +154,26 @@ def test_shared_app_read_failure_reaches_main_without_overwriting_newer_question
             expect(live).to_have_attribute("data-state", "open")
             stages.append("new complete census restores availability")
             _wait_state_reads_quiescent(page)
-            # The existing Main poll is a second producer of failed reads. Admit
-            # other shared reads normally until that actual consumer is observed.
+            # The page's periodic poll while a room is on screen (app.js) is a second producer of failed reads.
+            # Admit other shared reads normally until that actual consumer is observed.
             holding = True
             chat_read = None
             for _ in range(150):
                 if held:
                     route = held.pop(0)
                     caller = page.evaluate('window.__stateCallers.at(-1)')
-                    if 'refreshHeaderControlState' in caller:
+                    if 'pollShownRoomState' in caller:
                         chat_read = route
                         break
                     response = route.fetch()
                     route.fulfill(response=response, json={**response.json(), **census})
                 page.wait_for_timeout(100)
-            assert chat_read is not None, 'real chat poll was not observed'
+            assert chat_read is not None, 'real room poll was not observed'
             chat_read.fulfill(status=503, json={'error': 'fixture chat state failure'})
             expect(budget).to_have_text('Unavailable')
             expect(resume).to_be_disabled()
             expect(cached).to_have_attribute("data-state", "unknown")
-            stages.append('chat-originated failure remains unavailable rather than loading')
+            stages.append('poll-originated failure remains unavailable rather than loading')
             assert not errors, errors
         finally:
             page.screenshot(path=str(evidence / "last-view.png"))
@@ -248,7 +255,7 @@ def test_project_panel_read_failure_reaches_main_without_overwriting_newer_quest
             stages.append("cached census enables Resume; the pill mounts its question at its own date")
             _wait_state_reads_quiescent(page)
 
-            # Hold a shared read so Main's periodic poll joins it instead of reading;
+            # Hold a shared read so the page's periodic poll joins it instead of reading;
             # the panel's forced mount read then owns the one coalesced follow-up.
             holding = True
             _emit_ws_frame(page, {"type": "projects_changed"})

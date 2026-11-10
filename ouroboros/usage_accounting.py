@@ -23,14 +23,14 @@ import uuid
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Dict, Iterator, Literal, Optional, Tuple, get_args
 
-from ouroboros.physical_attempt_context import PhysicalAttemptContext
+from ouroboros.physical_attempt_context import PhysicalAttemptContext, dispatched as _observe_dispatched
 from ouroboros.pricing import estimate_cost_optional
 from ouroboros._usage_response import (
     _normalized_input_token_usage, _reported_token_count, observed_processing_mode, usage_from_response,
     _plain, _provider_exception_facts, physical_failure_evidence, provider_failure_payload, provider_cost_value,
 )
 from ouroboros.review_dispatch import invoke_bound_api_review_paid_stamp
-from ouroboros.transport_custody import release_pre_dispatch_attempt
+from ouroboros.transport_custody import release_pre_dispatch_attempt, report_attempt_end
 from ouroboros.usage_ledger import (  # noqa: F401 — re-exported substrate
     QUARANTINE_REL, BillingAuthorityUnavailable, ControlAuthorityUnavailable, UsageAccountingError,
     UsageLedgerCorrupt, UsageLockUnavailable, _drive_root, _named_lock, _number, _TERMINAL,
@@ -59,7 +59,7 @@ __all__ = (
     "current_physical_attempt_predicate", "current_usage_scope",
     "execute_physical_attempt", "execute_physical_attempt_async",
     "last_physical_attempt_capture", "last_root_accounting", "physical_attempt_capture_from_exception",
-    "mark_dispatched", "mark_unresolved", "physical_attempt_limit",
+    "mark_dispatched", "mark_unresolved", "paid_admission", "physical_attempt_limit",
     "record_subscription_session",
     "record_unmetered_external_dispatch", "refresh_root_accounting",
     "release_attempt", "reserve_attempt", "settle_attempt",
@@ -99,14 +99,12 @@ def _stash_root_accounting(
     *,
     integrity_degraded: bool = False,
 ) -> None:
-    """Refresh the process-local root snapshot. ``spend`` is the rendered
-    bucket: its ``settled_usd`` is the known spend money readers decide on, its
-    ``accounted_usd`` the exposure including holds; a missing field stays
-    unknown (``None``), never borrowed from the other. ``reservation`` is the identity
-    of a row this call has just APPENDED (attempt id, task, category, review
-    slot): only a successful ``reserve_attempt`` passes one, so a reader that
-    finds its own identity here has observed its own reservation — a refresh,
-    a settlement or a refused reservation never leaves one."""
+    """Refresh the process-local root snapshot from the rendered ``spend`` bucket.
+    ``settled_usd`` is known spend; ``accounted_usd`` includes holds. Missing values
+    stay unknown (``None``), never borrowed from the other field. Only a successful
+    ``reserve_attempt`` supplies ``reservation``: the row it just appended (attempt
+    id, task, category, review slot). Finding that identity confirms its reservation;
+    refreshes, settlements and refused reservations add no identity."""
     root_task_id = str(root_task_id or "").strip()
     if not root_task_id:
         return
@@ -196,10 +194,11 @@ def refresh_root_accounting(
         return cached
 
 def _known_spend_text(summary: Dict[str, Any]) -> str:
-    """A refusal's money: the known spend that decided it, the open holds beside it."""
-    holds = (_number(summary.get("reserved_usd")) or 0.0) + (_number(summary.get("unresolved_upper_bound_usd")) or 0.0)
-    return (f"known=${float(_number(summary.get('settled_usd')) or 0.0):.6f} "
-            f"(open holds ${holds:.6f} not counted as spending)")
+    """A refusal's money: the known spend that decided it, what is not counted beside it, each by its name."""
+    from ouroboros.cost_projection import uncounted_money_text
+
+    beside = uncounted_money_text(summary, decimals=6)
+    return f"known=${float(_number(summary.get('settled_usd')) or 0.0):.6f}" + (f" ({beside}; not counted as spending)" if beside else "")
 
 
 class BudgetExceeded(UsageAccountingError):
@@ -323,6 +322,8 @@ class PhysicalAttemptCapture:
     submitted_processing_mode: str = ""
     processing_basis: Optional[Dict[str, Any]] = None
     effort: Optional[Dict[str, Any]] = None
+    # The submitted fit-estimator count of these bytes (measurement only): 0 unknown, or an exact local count outranks it.
+    prompt_tokens_bounded_estimate: int = 0
 
 
 @contextlib.contextmanager
@@ -629,13 +630,24 @@ def _global_limit(request: AttemptRequest) -> float:
     return float("inf") if configured is None else max(0.0, configured)
 
 
-_CANDIDATE_ROW_FIELDS = (
-    "candidate_raw_sha256", "candidate_raw_size_bytes", "candidate_context_sha256",
-    "candidate_context_size_bytes", "candidate_measurement_kind", "physical_context",
-    "candidate_manifest_ref",
-    "processing_preference", "submitted_processing_mode", "processing_basis",
-    "effort",
-)
+_SUBSCRIPTION_OR_LOCAL = frozenset({"claudexor", "local"})  # the owned subscription engine, the local lane
+
+
+def paid_admission(provider: Any, bound: Any, *, billed: bool = False) -> bool:
+    """Whether one attempt needs PAID admission, the only kind a reached GLOBAL limit refuses
+    (owner 2A, 04.11; BIBLE P8). A known price decides: positive pays, a known $0 does not. An
+    unknown price pays on every API provider; on the subscription engine or the local lane it does
+    not, unless that route's own receipts already carried cash (``billed``: refused from the next
+    call). The ledger keeps an unknown price unknown either way."""
+    if bound is not None:
+        return float(bound) > 0
+    return billed or str(provider or "").strip().lower() not in _SUBSCRIPTION_OR_LOCAL
+
+
+def _paid_at_limit(view: Any, provider: Any, bound: Any, model: Any) -> bool:
+    """``paid_admission`` inside the money transaction; a route's evidence is its model summary's settled cash."""
+    unpriced_free = bound is None and str(provider or "").strip().lower() in _SUBSCRIPTION_OR_LOCAL
+    return paid_admission(provider, bound, billed=unpriced_free and view.bucket("model", str(model or "")).cash[0] > 0)
 
 
 def _check_dispatch_fences(scope: UsageScope, root: pathlib.Path, *, retry: bool = True) -> None:
@@ -694,7 +706,8 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
         with acquire(root) as view:
             _check_dispatch_fences(scope, root, retry=False)
             global_limit = _global_limit(request)
-            if view.exceeds_limit(global_limit):
+            # Owner 2A: the reached global limit refuses paid admission only (root/group still refuse all).
+            if view.exceeds_limit(global_limit) and _paid_at_limit(view, request.provider, bound, request.model):
                 raise BudgetExceeded(
                     f"global model budget exhausted: {_known_spend_text(view.summary())}, "
                     f"limit=${global_limit:.6f}",
@@ -945,6 +958,7 @@ def record_subscription_session(
         "credential_profile_id": str(credential_profile_id or ""),
         "access_profile": str(access_profile or ""),
         "session_id_sha256": identity,
+        "run_id": stable_id,
         **({"effort_resolution": copy.deepcopy(effort_resolution)} if isinstance(effort_resolution, dict) else {}),
         # Present only when the harness reported a complete, valid object.
         **({"input_token_usage": input_counters} if input_counters is not None else {}),
@@ -1035,8 +1049,10 @@ def _transition_once(reservation: AttemptReservation, state: str, **fields: Any)
                 ("root", scope.root_limit_usd, scope.root_task_id),
             ):
                 # The reservation's own predicate: known spend reached the limit
-                # since this attempt was reserved, so nothing is sent.
-                if limit is not None and view.exceeds_limit(limit, root_task_id=identity):
+                # since this attempt was reserved, so nothing is sent (global: paid admission only).
+                if limit is not None and view.exceeds_limit(limit, root_task_id=identity) and (axis == "root"
+                        or _paid_at_limit(view, current.get("provider"), current.get("reservation_upper_bound_usd"),
+                                          current.get("model"))):
                     raise BudgetExceeded(f"{axis} model budget changed before dispatch", limit_scope=axis,
                                          root_task_id=scope.root_task_id)
             from ouroboros.usage_admission import raise_group_refusal
@@ -1400,6 +1416,8 @@ def _record_attempt_capture(
         submitted_processing_mode=request.submitted_processing_mode,
         processing_basis=copy.deepcopy(request.processing_basis),
         effort=copy.deepcopy(request.effort),
+        prompt_tokens_bounded_estimate=0 if request.prompt_tokens_exact is not None else max(
+            0, int(request.prompt_tokens_bounded_estimate or 0)),
     )
     _LAST_PHYSICAL_ATTEMPT.set(capture)
     _PHYSICAL_DRIVE_ROOT.set((reservation.attempt_id, reservation.drive_root))
@@ -1408,6 +1426,9 @@ def _record_attempt_capture(
             setattr(exc, "physical_attempt_capture", capture)
         except Exception:
             pass
+    if state == "released":
+        _observe_dispatched(capture)
+    report_attempt_end(capture, exc)
     return capture
 
 
@@ -1466,6 +1487,7 @@ def execute_physical_attempt(
         if failure is exc:
             raise
         raise failure from exc
+    _observe_dispatched(dispatch_capture)  # outside the pre-dispatch guard; it never raises
     try:
         from ouroboros._usage_wait import late_settler, model_send
         response = model_send(reservation, send, settle_late=late_settler(
@@ -1538,6 +1560,7 @@ async def execute_physical_attempt_async(
         if failure is exc:
             raise
         raise failure from exc
+    _observe_dispatched(dispatch_capture)
     async def complete():
         try:
             response = await send()

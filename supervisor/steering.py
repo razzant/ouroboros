@@ -17,16 +17,6 @@ from ouroboros.utils import utc_now_iso
 log = logging.getLogger(__name__)
 
 
-def _relayed_owner_message(client_message_id: str) -> str:
-    """The owner message identified by this receipt, or empty for a synthetic act.
-
-    Only owner-text delivery copies it into the recipient's mailbox. A task
-    relay may key its receipt on that message without passing on owner authority."""
-    from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX
-
-    return "" if client_message_id.startswith(AGENT_RECEIPT_ID_PREFIX) else client_message_id
-
-
 def _issuer(evt: Dict[str, Any]) -> Dict[str, Any]:
     """The event's issuer fact; an event from a producer that predates it is an
     owner turn (every such producer was a chat turn or the owner's picker click)."""
@@ -38,19 +28,27 @@ def _task_issued(evt: Dict[str, Any]) -> bool:
     return str(_issuer(evt).get("kind") or "") == "task"
 
 
-def _notice_row_owed(evt: Dict[str, Any], carrier: str, *, paired: bool) -> bool:
-    """Whether an owner act's refusal publishes its System row (``_refusal_row``).
+def _mind_note(evt: Dict[str, Any]) -> bool:
+    """An act whose words are the teller's own: no owner quote and a synthetic receipt id (``tell_task`` with a note
+    only, ``control_relay._tell_task``). Whatever turn speaks it, the note is not my human's words (D7: without a
+    verified source the words are the teller's), so its refusal is the teller's to narrate from its typed tool
+    result, as a task-issued act's is; the owner's chat shows no row and no ACK for it. An act that carries an owner
+    quote or wears an owner message id (a relayed message, the routing card's click) keeps its owner notice."""
+    from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX
 
-    Always when its receipt selected that row as the carrier: no ACK carrying the cause
-    was handed over (its durable row was refused, or no live ACK went out), so nothing else
-    tells it, whatever message the act wears. Otherwise only for an unlabelled act (a
-    synthetic receipt id) on a path that keeps the row the web shows, paired with the ACK.
-    A task that spoke for itself reads its typed refusal in its tool result and Logs row.
+    return not evt.get("quotes") and str(evt.get("client_message_id") or "").startswith(AGENT_RECEIPT_ID_PREFIX)
+
+
+def _notice_row_owed(evt: Dict[str, Any], carrier: str) -> bool:
+    """Whether an owner act's refusal publishes its System row (``_refusal_row``): exactly when its receipt
+    selected that row as the carrier, early or late alike. Nothing else then tells it: no ACK carrying the cause
+    was handed over (its durable row was refused, or no live ACK went out), or the ACK answers no chat row (an
+    unlabelled act of my human's words: a quote whose row has no client id rides a synthetic receipt id), which
+    is never a carrier (``events_project_routing._routing_notice_ack_fields``). A task that spoke for itself reads
+    its typed refusal in its tool result and Logs row; a turn's note without owner words (``_mind_note``) has no
+    owner notice, so its receipt selects no carrier.
     """
-    if _task_issued(evt):
-        return False
-    return carrier == "system" or (
-        paired and not _relayed_owner_message(str(evt.get("client_message_id") or "").strip()))
+    return carrier == "system" and not _task_issued(evt)
 
 
 def _presence_target_refused(ctx: Any, evt: Dict[str, Any], task: Dict[str, Any]) -> bool:
@@ -64,7 +62,7 @@ def _presence_target_refused(ctx: Any, evt: Dict[str, Any], task: Dict[str, Any]
     stands in only for a record without Presence provenance.
     """
     from ouroboros.dialogue_provenance import (
-        presence_metadata_binding, presence_related_work, presence_target_record,
+        presence_record_binding, presence_related_work, presence_target_record, presence_task_binding,
     )
 
     if "presence_binding_id" in evt:
@@ -74,13 +72,34 @@ def _presence_target_refused(ctx: Any, evt: Dict[str, Any], task: Dict[str, Any]
         running = getattr(ctx, "RUNNING", None)
         meta = running.get(str(_issuer(evt).get("task_id") or "")) if isinstance(running, dict) else None
         row = meta.get("task") if isinstance(meta, dict) else None
-        binding = presence_metadata_binding(row.get("metadata")) if isinstance(row, dict) else None
-        if binding is None and isinstance(row, dict) and isinstance(row.get("task_contract"), dict):
-            binding = "" if "capability_ceiling" in row["task_contract"] else None
+        binding = presence_task_binding(row) if isinstance(row, dict) else None
     if binding is None:
         return False
     target = str(evt.get("target_task_id") or task.get("id") or "").strip()
-    return not presence_related_work(binding, presence_target_record(ctx.DRIVE_ROOT, target, queue_row=task))
+    record = presence_target_record(ctx.DRIVE_ROOT, target, queue_row=task)
+    if binding and task.get("_inline_presence_author") and presence_record_binding(record) == binding:
+        return False  # the live author of this place's own conversation: place_guard names it to its callers
+    if binding and _delivered_in_conversation(ctx, target, evt.get("sender_origin")):
+        return False  # the work that leads this thread (it has a delivery here): a lineage-scoped note (owner 06.11, 4=A)
+    return not presence_related_work(binding, record)
+
+
+def _delivered_in_conversation(ctx: Any, task_id: str, sender_origin: Any) -> bool:
+    """Whether ``task_id`` has a delivery receipt in the sender's own conversation (its run origin's provider, account,
+    conversation and thread): the host's record that this work wrote there, a thread it rooted or answered, read from
+    the dialogue store and never from the target's say-so."""
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_runner import _live_task_rows
+
+    origin = sender_origin if isinstance(sender_origin, dict) else {}
+    if not task_id or not (origin.get("provider") and origin.get("conversation_id")):
+        return False
+    key = conversation_key(str(origin["provider"]), str(origin.get("account_id") or ""), str(origin["conversation_id"]),
+                           str(origin.get("thread_id") or ""))
+    try:
+        return any(row.get("type") == "presence_delivery" for row in _live_task_rows(ctx.DRIVE_ROOT, task_id, key))
+    except Exception:
+        return False  # an unreadable store proves no relation
 
 
 def _refuse_steering_while_cancelling(
@@ -115,22 +134,17 @@ def _refuse_steering_while_cancelling(
     # A cancel-pending refusal is a live notice to the OWNER who asked; a task
     # that spoke for itself reads its typed refusal in the tool result instead.
     # An act that wears an owner message shows its cause on that message's
-    # receipt line once its ACK is handed over; an UNLABELLED owner act (a
-    # synthetic receipt id), or one whose ACK was not, needs the standalone
-    # sentence — the same rule as the other refusals (``_notice_row_owed``).
-    if notify and _notice_row_owed(evt, carrier, paired=True):
-        _refusal_row(ctx, evt, target, target_label, "rejected", "cancel_pending", carrier)
+    # receipt line once its ACK is handed over; otherwise its receipt selects the
+    # standalone sentence — the same rule as the other refusals (``_notice_row_owed``).
+    if notify and _notice_row_owed(evt, carrier):
+        _refusal_row(ctx, evt, target, target_label, "rejected", "cancel_pending")
     return carrier
 
 
-def _refusal_row(
-    ctx: Any, evt: Dict[str, Any], target: str, target_label: str, status: str, reason: str, carrier: str = "",
-) -> None:
-    """Publish an owner act's host cause as System: an unlabelled act has no chat receipt row,
-    and any act whose ACK was not handed over has no other notice (``_notice_row_owed``).
+def _refusal_row(ctx: Any, evt: Dict[str, Any], target: str, target_label: str, status: str, reason: str) -> None:
+    """Publish an owner act's host cause as the System row its receipt selected as the notice's
+    carrier (``_notice_row_owed``): every client shows it, the phone included.
 
-    The row names the carrier its receipt selected: ``routing_ack`` when the ACK already
-    carried the cause (a transport showing ACKs skips this copy), otherwise ``system``.
     It replies to the act's own owner message, never to the target task's origin.
     """
     from ouroboros.project_dialogue import routing_refusal_cause
@@ -144,11 +158,10 @@ def _refusal_row(
         ctx.send_with_budget(
             chat, f"{target_label or 'Task'} · {routing_refusal_cause('steer_task', status, reason, None)}",
             role="system", system_type="steer_not_delivered", task_id=target,
-            progress_meta={"routing_notice_carrier": "routing_ack" if carrier == "routing_ack" else "system",
-                           "reply_to": _routing_notice_reply(ctx, evt)},
+            progress_meta={"routing_notice_carrier": "system", "reply_to": _routing_notice_reply(ctx, evt)},
         )
     except Exception:
-        log.debug("steer refusal row failed for %s", target, exc_info=True)
+        log.warning("steer refusal row failed for %s", target, exc_info=True)
 
 
 def _steer_receipt(
@@ -159,13 +172,17 @@ def _steer_receipt(
     additionally gets its Logs row and a chat acknowledgement only when tied to
     a real owner message; synthetic task receipts stay silent."""
     from supervisor.events import _emit_routing_receipt
+    from supervisor.events_project_routing import _owner_message_receipt
 
     task_issued = _task_issued(evt)
-    owner_message_id = _relayed_owner_message(str(evt.get("client_message_id") or "").strip())
     receipt = _emit_routing_receipt(
         ctx, evt, action="steer_task", target=target, target_label=target_label,
         status=status, reason=reason, detail=detail,
-        attachment_manifest=attachment_manifest, publish=not task_issued or bool(owner_message_id),
+        attachment_manifest=attachment_manifest,
+        # The owner hears of an act that carries their words or their click; a task's act and the mind's own note
+        # (``_mind_note``) keep their durable receipt and tell their refusal to the teller alone, except on the
+        # owner message a task's relay keys its receipt on (that passes on no owner authority).
+        publish=(not task_issued and not _mind_note(evt)) or bool(_owner_message_receipt(evt.get("client_message_id"))),
     )
     for quote in evt.get("quotes") or []:
         source = quote.get("source") or {}
@@ -192,6 +209,43 @@ def _steer_receipt(
         except Exception:
             log.debug("task_message_routed row failed", exc_info=True)
     return receipt
+
+
+def _presence_author(ctx: Any, target: str):
+    """``(agent, lock, row)`` of this process's live inline Presence author ``target``, moved or not; else the
+    narrow reason a live inline turn takes nothing here; else None (no such live turn: ``target_unknown``).
+
+    A live author resolves even while its intake is closed: the delivery transaction then refuses it under
+    the same lock (``presence_author_closed`` while its turn still runs). A live turn whose author is not in
+    its loop here, a starting one included, is ``presence_author_closed`` too, one in another process has no
+    endpoint here (``presence_author_elsewhere``), and one whose facts cannot be read is never called ended
+    (``presence_author_unreadable``).
+    """
+    try:
+        from ouroboros.conversation_lease import presence_author_agent, resolved_presence_turns
+        from ouroboros.task_results import load_task_result
+        from supervisor.cancel_publication import live_presence_row
+
+        observed = resolved_presence_turns(ctx.DRIVE_ROOT)
+        fact = next((fact for fact in observed["roots"] if fact["task_id"] == target), None)
+        if fact is None:
+            if observed["complete"] or not live_presence_row(load_task_result(ctx.DRIVE_ROOT, target, strict=True) or {}):
+                return None
+            return "presence_author_unreadable"
+        if fact["state"] == "unreadable":
+            return "presence_author_unreadable"
+        if not fact["local"]:
+            return "presence_author_elsewhere"
+        agent = presence_author_agent(ctx.DRIVE_ROOT, target)
+        lock = getattr(agent, "_owner_message_admission_lock", None)
+        if lock is not None and fact["state"] == "running":
+            with lock:
+                if getattr(agent, "_busy", False) and getattr(agent, "_current_task_id", None) == target:
+                    return agent, lock, {**fact["row"], "id": target, "_inline_presence_author": True}
+        return "presence_author_closed"
+    except Exception:
+        log.debug("steer_task: inline Presence author %s unreadable", target, exc_info=True)
+        return "presence_author_unreadable"
 
 
 def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
@@ -225,6 +279,14 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
                 direct_active = task is not None
     except Exception:
         direct_active = False
+    presence_refusal = ""
+    if not direct_active:
+        presence = _presence_author(ctx, target)
+        if isinstance(presence, tuple):
+            direct_agent, direct_lock, task = presence
+            direct_active = True
+        elif presence:
+            presence_refusal = presence  # used only if no queue row holds the target either
     if not direct_active:
         running = getattr(ctx, "RUNNING", None)
         meta = running.get(target) if isinstance(running, dict) else None
@@ -269,7 +331,7 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
     # follow-up reaches that actor's mailbox, never a second direct turn. A
     # direct turn that is neither is simply unknown here.
     if not isinstance(task, dict):
-        refusal = "target_unknown"
+        refusal = presence_refusal or "target_unknown"
     elif str(task.get("delegation_role") or "") == "subagent":
         refusal = "subagent_target"
     elif _presence_target_refused(ctx, evt, task):
@@ -278,16 +340,16 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
         refusal = ""
     if refusal:
         # Fail visibly: the chosen task is not a steerable running task here.
-        # The receipt carries the cause; an OWNER turn whose act wears no owner
-        # message (a synthetic receipt id), or whose ACK was not handed over,
-        # also gets the chat sentence, because nothing else in its chat can show
-        # the refusal. A task that spoke for itself reads the typed refusal in
-        # its tool result and its Logs row.
+        # The receipt carries the cause; an owner act of my human's words that
+        # wears no owner message (a quote without a client id), or whose ACK was
+        # not handed over, also gets the chat sentence, because nothing else in
+        # its chat can show the refusal. A task that spoke for itself, and a note
+        # of the mind (``_mind_note``), read the typed refusal in the tool result.
         carrier = str(_steer_receipt(
             ctx, evt, target, target_label=target_label, status="needs_manual_target", reason=refusal,
         ).get("routing_notice_carrier") or "")
-        if _notice_row_owed(evt, carrier, paired=True):
-            _refusal_row(ctx, evt, target, target_label, "needs_manual_target", refusal, carrier)
+        if _notice_row_owed(evt, carrier):
+            _refusal_row(ctx, evt, target, target_label, "needs_manual_target", refusal)
         log.info("steer_task: %s target %s for chat %s", refusal, target, chat_id)
         return
     # Idempotent delivery: a stable msg_id from client_message_id+target dedups
@@ -333,7 +395,11 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
                 and getattr(direct_agent, "_accepting_owner_messages", False)
                 and str(getattr(direct_agent, "_current_task_id", "") or "") == target
             ):
-                refused = refuse("target_closed")
+                from ouroboros.presence_runner import presence_turn_is_live
+
+                # A closed inline author whose turn still runs has not finished.
+                refused = refuse("presence_author_closed" if task.get("_inline_presence_author")
+                                 and presence_turn_is_live(target, drive_root=ctx.DRIVE_ROOT) else "target_closed")
         drive = pathlib.Path(ctx.DRIVE_ROOT) if direct_active else _task_drive_for_task(task, target)
         if not direct_active:
             _queue_lock.acquire()
@@ -396,11 +462,11 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
         if direct_lock_held:
             direct_lock.release()
     if refused is not None:
-        # Only the cancel refusal keeps an unlabelled act's paired web row here; any
-        # refusal whose ACK was not handed over tells its cause in this row.
+        # A refusal found inside the transaction is told like an early one: by the
+        # System row whenever its receipt selected it (``_notice_row_owed``).
         status, reason, carrier = refused
-        if _notice_row_owed(evt, carrier, paired=reason == "cancel_pending"):
-            _refusal_row(ctx, evt, target, target_label, status, reason, carrier)
+        if _notice_row_owed(evt, carrier):
+            _refusal_row(ctx, evt, target, target_label, status, reason)
     if delivered:
         if fence_generation_changed:
             ctx.persist_queue_snapshot(reason="acceptance_fence_owner_message")

@@ -69,14 +69,11 @@ def _answer_late(root, monkeypatch):
 
 
 def _fresh_head(root, monkeypatch, bridge, *, running=None):
-    """The real intake starts ONE fresh head; the task its real admission hands the agent."""
-    import queue as queue_mod
-
-    import supervisor.workers as workers
+    """The real intake starts ONE fresh head; the task its real admission and its carrier's first step hand
+    the agent (``carried_turn``: the lane door, then the real worker body here)."""
+    from tests.test_attachment_staging import carried_turn
 
     [(args, kwargs)] = _intake(root, monkeypatch, bridge, running=running)
-    monkeypatch.setattr(workers, "DRIVE_ROOT", root)
-    monkeypatch.setattr(workers, "get_event_q", lambda: queue_mod.Queue())
 
     class _Head:
         task = None
@@ -86,8 +83,8 @@ def _fresh_head(root, monkeypatch, bridge, *, running=None):
             return []
 
     head = _Head()
-    workers._run_chat_task(head, args[0], args[1], None, task_constraint=kwargs.get("task_constraint"),
-                           task_metadata=kwargs["task_metadata"])
+    carried_turn(monkeypatch, root, head, args[0], args[1], None, task_constraint=kwargs.get("task_constraint"),
+                 task_metadata=kwargs["task_metadata"])
     assert head.task is not None
     return head.task
 
@@ -226,8 +223,7 @@ def _continue_of_asker():
     return {"id": "next", "text": "continue", "predecessor_authority": {"task_id": ASKER, "source": _pull_source(ASKER)}}
 
 
-@pytest.mark.parametrize("forked", [False, True])
-@pytest.mark.parametrize("kind", ["late_answer", "continue"])
+@pytest.mark.parametrize(("kind", "forked"), [("late_answer", False), ("continue", True)])
 def test_the_displayed_notes_reader_resolves_for_the_receiving_task(tmp_path, monkeypatch, forked, kind):
     """Execute the emitted reader, not the asker's unqualified artifact_store recipe."""
     from ouroboros.main_context_authority import late_answer_notes_message, predecessor_notes_message, WORKING_NOTES_FIELD
@@ -283,7 +279,27 @@ def test_a_cleared_field_stays_cleared_while_a_record_before_the_field_reads_its
     assert predecessor_notes_message(_continue_of_asker(), drive_root=tmp_path)["content"].endswith(legacy)
 
 
-@pytest.mark.parametrize("damage", ["source_missing", "source_altered", "field_malformed", "result_unreadable"])
+@pytest.mark.parametrize("ending", ["stopped", "finished"])
+def test_an_askers_open_continue_is_named_and_a_finished_asker_without_notes_stays_silent(tmp_path, ending):
+    """An asker that stopped with work left names its open Continue in the lead, even without notes to show; a finished
+    asker's Continue is closed, so its lead stays plain and, with no notes kept, no row is added."""
+    from ouroboros.main_context_authority import late_answer_notes_message
+    from ouroboros.task_results import write_task_result
+
+    stop = {"lifecycle": {"status": "completed"}, "objective": {"status": "fail", "source": "task_completion",
+                                                                "reason": "author_stop"},
+            "execution": {"status": "ok", "task_completion": {"action": "stop", "rationale": "The choice is open."}}}
+    axes = stop if ending == "stopped" else {"lifecycle": {"status": "completed"}, "execution": {"status": "ok"}}
+    write_task_result(tmp_path, ASKER, "completed", result=FINAL, outcome_axes=axes)
+    note = late_answer_notes_message(_late_head(), drive_root=tmp_path)
+    if ending == "finished":
+        assert note is None
+        return
+    assert "its Continue is open (author_stop; continue_task)" in note["content"]
+    assert "It kept no working notes" in note["content"] and READER in note["content"]
+
+
+@pytest.mark.parametrize("damage", ["source_missing", "field_malformed", "result_unreadable"])
 def test_an_unreadable_asker_source_is_a_typed_gap_row_and_nothing_is_inferred(tmp_path, damage):
     from ouroboros.artifacts import task_artifact_dir_path
     from ouroboros.main_context_authority import (

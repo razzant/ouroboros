@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from ouroboros.artifacts import actor_source_reference
 from ouroboros.tools import github, github_read
 from ouroboros.tools.registry import ToolContext
 
@@ -45,6 +46,10 @@ def _context(tmp_path, kind):
 
 SHA, MOVED = "a" * 40, "b" * 40
 BASE = "https://github.example/owner/selected"
+# `gh pr edit` with a token that lacks read:org (#2424): the CLI's own preparation query, not the edit, is refused.
+READ_ORG_REFUSAL = ("GraphQL: Your token has not been granted the required scopes to execute this query. The 'login' "
+                    "field requires one of the following scopes: ['read:org'], but your token has only been granted "
+                    "the: ['repo'] scopes. Please modify your token's scopes at: https://github.com/settings/tokens.\n")
 
 
 def _run(run_id, name="CI", status="completed", conclusion="success", **extra):
@@ -67,7 +72,9 @@ def gh_calls(monkeypatch):
     def run(argv, **kwargs):
         calls.append((argv, kwargs))
         output = ""
-        if argv[1] == "api":
+        if argv[1:3] == ["repo", "view"]:
+            output = json.dumps({"nameWithOwner": "owner/selected", "url": BASE})
+        elif argv[1] == "api":
             route = _api_parts(argv)[0].split("?", 1)[0]
             method = argv[argv.index("--method") + 1] if "--method" in argv else "GET"
             if route == "graphql":
@@ -122,7 +129,7 @@ _NEW_CALLS = [
      ["repo view", "api", "api", "pr list", "pr create", "pr view"]),
     ("github_write", {"method": "update", "kind": "pr", "target": 7, "expect": {"head_sha": SHA, "base_sha": MOVED},
                       "title": "New title", "body": "New body", "base": "release"},
-     ["pr view", "repo view", "api", "pr edit", "pr view"]),
+     ["pr view", "api", "api", "pr view"]),
     ("github_write", {"method": "update", "kind": "pr", "target": 7, "draft": False, "expect": {"head_sha": SHA}},
      ["pr view", "pr ready", "pr view"]),
 ]
@@ -146,10 +153,8 @@ def complete_gh(monkeypatch):
                 "digest": f"sha256:{hashlib.sha256(archive_bytes).hexdigest()}",
                 "workflow_run": {"id": 11, "head_sha": SHA}}
     monkeypatch.setattr(github, "github_token_from_env_or_settings", lambda: "fixture-token")
-    monkeypatch.setattr(github_workflows, "_retain", lambda _ctx, **kw: {
-        "path": f"fixture/{kw['source_id']}.{kw['extension']}", "size": len(kw["data"]),
-        "sha256": hashlib.sha256(kw["data"]).hexdigest(),
-    })
+    # The ref ``_retain`` returns, priced without writing bytes: these cases judge the gh target, not retention.
+    monkeypatch.setattr(github_workflows, "_retain", lambda _ctx, **kw: actor_source_reference(category="tool_results", **kw))
 
     def record(argv, kwargs):
         calls.append((list(argv), kwargs))
@@ -169,11 +174,8 @@ def complete_gh(monkeypatch):
             assert kwargs["input"] == "New body"
             pr.update(title="New title", body="New body", isDraft=False)
             return pr["url"]
-        if args[:2] == ["pr", "edit"]:
-            assert {"--title=New title", "--base=release", "--body-file=-"} <= set(args)
-            assert kwargs["input"] == "New body"
-            pr.update(title="New title", body="New body", baseRefName="release")
-            return ""
+        if args[:2] == ["pr", "edit"]:  # Its preparation queries organization fields a repo-scoped token cannot read.
+            return SimpleNamespace(returncode=1, stdout="", stderr=READ_ORG_REFUSAL)
         if args[:2] == ["pr", "ready"]:
             assert args[2] == "7" and "--undo" not in args
             pr["isDraft"] = False
@@ -189,10 +191,18 @@ def complete_gh(monkeypatch):
                 return {"total_count": 1, "artifacts": [artifact]}
             if path == "repos/owner/selected/actions/artifacts/23":
                 return artifact
+            if path == "repos/owner/selected/pulls/7" and args[args.index("--method") + 1] == "PATCH":
+                fields = json.loads(kwargs["input"])
+                assert fields == {"title": "New title", "body": "New body", "base": "release"}
+                pr.update(title=fields["title"], body=fields["body"], baseRefName=fields["base"])
+                return {"number": 7, "html_url": pr["url"], "title": pr["title"], "body": pr["body"],
+                        "base": {"ref": pr["baseRefName"]}, "head": {"sha": pr["headRefOid"]}}
         raise AssertionError(f"unexpected gh command: {argv!r}")
 
     def run(argv, **kwargs):
         value = record(argv, kwargs)
+        if isinstance(value, SimpleNamespace):
+            return value
         return SimpleNamespace(returncode=0, stdout=value if isinstance(value, str) else json.dumps(value), stderr="")
 
     def capture(argv, cwd, env, timeout, path, max_bytes):
@@ -237,7 +247,7 @@ def test_new_repository_tools_keep_target_through_read_and_readback(
                                      "repos/owner/selected/actions/artifacts/23/zip"],
         "create_pr": ["repos/owner/selected/git/ref/heads/feature",
                              "repos/owner/selected/git/ref/heads/main"],
-        "update": ["repos/owner/selected/git/ref/heads/release"],
+        "update": ["repos/owner/selected/git/ref/heads/release", "repos/owner/selected/pulls/7"],
     }
     assert [argv[2] for argv, _ in complete_gh if argv[1] == "api"] == api_paths.get(operation, [])
     for argv, kwargs in complete_gh:
@@ -269,8 +279,10 @@ def test_new_repository_tools_keep_target_through_read_and_readback(
         assert complete_gh[-1][1]["capture"] is True
     else:
         assert "Read-back:" in result and "confirmed" in result
-        assert sum(argv[1:3] in (["pr", "create"], ["pr", "edit"], ["pr", "ready"])
+        # One mutation; the field edit is a REST PATCH at the read PR's own host, never `gh pr edit`.
+        assert sum(argv[1:3] in (["pr", "create"], ["pr", "ready"]) or "PATCH" in argv
                    for argv, _ in complete_gh) == 1
+        assert not any(argv[1:3] == ["pr", "edit"] for argv, _ in complete_gh)
 
 
 @pytest.mark.parametrize("kind", ["system", "queued", "room", "fileless", "broken"])
@@ -317,10 +329,15 @@ def test_every_repository_tool_keeps_target_in_all_subcalls(tmp_path, gh_calls, 
     result = entry.handler(ctx, **args, repo=repo)
 
     assert not result.startswith("⚠️"), result
-    assert len(gh_calls) == count
+    # An omitted repo names its one target before the first REST or GraphQL leg; the checks reader has none.
+    assert len(gh_calls) == count + (not repo and args["method"] != "checks")
     assert "repo" in entry.schema["parameters"]["properties"]
     for argv, kwargs in gh_calls:
-        if argv[1] == "api":
+        if argv[1:3] == ["repo", "view"]:
+            assert argv[-2:] == ["--json", "nameWithOwner,url"]
+            # An ambient GH_REPO still selects the repository where no Project replaced it, as it does for gh itself.
+            assert argv[3:-2] == (["unrelated/wrong-repo"] if kind == "system" else [])
+        elif argv[1] == "api":
             route, hostname, fields = _api_parts(argv)
             if route == "graphql":  # Node facts follow the PR URL returned by GitHub, like list(kind='pr').
                 assert argv == ["gh", "api", "graphql", "--hostname", "github.example", "--input", "-"]
@@ -332,10 +349,7 @@ def test_every_repository_tool_keeps_target_in_all_subcalls(tmp_path, gh_calls, 
                                 "--hostname", "github.example"]
                 continue
             assert "--repo" not in argv  # gh api has no --repo: the route or the typed fields name the repository.
-            if repo:
-                assert route.startswith("repos/owner/selected/") and hostname == "github.example" and "{owner}" not in route
-            else:
-                assert route.startswith("repos/{owner}/{repo}/") and not hostname
+            assert route.startswith("repos/owner/selected/") and hostname == "github.example" and "{owner}" not in route
         elif repo:
             assert argv[-2:] == ["--repo", repo]
         else:
@@ -346,7 +360,7 @@ def test_every_repository_tool_keeps_target_in_all_subcalls(tmp_path, gh_calls, 
         assert kwargs["env"]["GH_HOST"] == "configured.example"
 
 
-@pytest.mark.parametrize("failure", ["note", "missing-room", "fileless", "missing-workspace", "invalid-workspace-mode"])
+@pytest.mark.parametrize("failure", ["note", "fileless", "invalid-workspace-mode"])
 def test_unusable_project_never_calls_gh_on_system_repo(tmp_path, gh_calls, failure):
     ctx, project = _context(tmp_path, "queued" if "workspace" in failure else "room")
     if failure == "note":
@@ -423,7 +437,7 @@ def test_required_target_is_an_error_then_a_valid_call_has_no_stale_failure(tmp_
     assert len(gh_calls) == _count
 
 
-@pytest.mark.parametrize("repo", [False, 0, [], {}, 1])
+@pytest.mark.parametrize("repo", [False, 0, 1])
 def test_invalid_public_target_values_cannot_be_generic_transport(tmp_path, gh_calls, repo):
     ctx, _ = _context(tmp_path, "queued")
     assert "GH_TARGET_INVALID" in github_read.run_read(ctx, method="get", kind="issue", target=7, repo=repo)
@@ -504,20 +518,102 @@ def test_presence_repository_selection_keeps_host_argument_authority(tmp_path, g
         assert not gh_calls
     else:
         assert result.startswith("github_read get issue #7")
-        assert len(gh_calls) == 1
-        if bound:
-            assert gh_calls[0][0][2] == "repos/owner/allowed/issues/7"
-        else:
-            assert gh_calls[0][0][2] == "repos/{owner}/{repo}/issues/7"
+        assert len(gh_calls) == (1 if bound else 2)
+        assert gh_calls[-1][0][2] == ("repos/owner/allowed/issues/7" if bound else "repos/owner/selected/issues/7")
 
 
-def test_child_cannot_bypass_process_binding_with_explicit_repo(tmp_path, gh_calls):
+def _role_context(tmp_path, kind, role):
+    """A Project with its folder, or one without (``folderless``); ``child`` is a delegated read-only subagent."""
+    ctx, cwd = _context(tmp_path, "queued" if kind == "project" else "system")
+    if kind == "folderless":
+        ctx.project_id = "project-fixture"
+        cwd = ctx.task_drive_root()
+    if role == "child":
+        ctx.task_metadata = {"delegation_role": "subagent"}
+    return ctx, cwd
+
+
+def _registry(ctx):
     from ouroboros.tools.registry import ToolRegistry
 
-    ctx, _ = _context(tmp_path, "queued")
-    ctx.task_metadata = {"delegation_role": "subagent"}
     registry = ToolRegistry(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root)
     registry.set_context(ctx)
-    result = registry.execute("github_read", {"method": "get", "kind": "issue", "target": 7, "repo": "owner/unselected"})
-    assert result.startswith("⚠️ GH_ERROR:") and "cannot shell any process cwd root" in result
+    return registry
+
+
+_CHILD_READS = [  # Representative reads a read-only child is offered, on both fake CLIs.
+    ("gh_calls", {"method": "get", "kind": "issue", "target": 7}),
+    ("gh_calls", {"method": "get", "kind": "pr", "target": 7, "include": ["diff"]}),
+    ("gh_calls", {"method": "api", "route": "repos/{owner}/{repo}/issues/7"}),
+    ("gh_calls", {"method": "checks", "target": 7}),
+    ("complete_gh", {"method": "get", "kind": "run", "target": 11, "include": ["log"]}),
+    ("complete_gh", {"method": "download", "kind": "artifact", "target": 23, "max_bytes": 4096}),
+]
+
+
+@pytest.mark.parametrize("kind", ["project", "folderless"])
+@pytest.mark.parametrize("fixture,args", _CHILD_READS)
+@pytest.mark.parametrize("repo", ["", "github.example/owner/selected"])
+def test_read_only_child_reads_github_where_a_writer_would(tmp_path, request, monkeypatch, kind, fixture, args, repo):
+    """github_read is offered to read-only children: it binds gh's directory with read authority, so the child
+    launches exactly what an ordinary writer in the same context launches, in the same directory."""
+    calls = request.getfixturevalue(fixture)
+    monkeypatch.setenv("GH_REPO", "unrelated/wrong-repo")
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_k: (True, ""))
+    observed = {}
+    for role in ("writer", "child"):
+        ctx, cwd = _role_context(tmp_path, kind, role)
+        calls.clear()
+        result = _registry(ctx).execute_result("github_read", {**args, "repo": repo})
+        observed[role] = (result.status, result.code, [(argv, kw["cwd"], "GH_REPO" in kw["env"]) for argv, kw in calls])
+    assert observed["child"] == observed["writer"]
+    status, code, launched = observed["child"]
+    if kind == "folderless" and not repo:
+        assert (status, code, launched) == ("error", "TOOL_ARG_ERROR", [])
+        return
+    assert status == "ok" and launched
+    # The repository subcommands run in the selected folder, without the ambient GH_REPO default.
+    assert all((selected, ambient) == (str(cwd), False) for argv, selected, ambient in launched if argv[1] != "api")
+
+
+def test_read_only_child_keeps_every_other_github_gate(tmp_path, gh_calls, monkeypatch):
+    """Read authority for gh's directory widens nothing else: writes, merge and the shell stay withheld, and the
+    network and disabled-method gates still refuse before any gh launch."""
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_k: (True, ""))
+    ctx, _ = _role_context(tmp_path, "project", "child")
+    registry = _registry(ctx)
+    for name, args in (("github_write", {"method": "comment", "target": 7, "body": "text"}),
+                       ("pr_merge", {"number": 7, "expected_head_sha": SHA, "method": "merge"}),
+                       ("run_command", {"cmd": ["gh", "issue", "list"]})):
+        assert registry.execute_result(name, args).status == "blocked", name
+    read = {"method": "get", "kind": "issue", "target": 7}
+    for contract, fragment in (({"allowed_resources": {"network": False}}, "network"),
+                               ({"disabled_tools": ["get_github_issue"]}, "get_github_issue")):
+        ctx.task_contract = contract
+        blocked = registry.execute_result("github_read", read)
+        assert blocked.status == "blocked" and fragment in blocked.text, blocked.text
+    assert not gh_calls
+    ctx.task_contract = {}
+    assert registry.execute_result("github_read", read).status == "ok" and len(gh_calls) == 2
+
+
+def test_read_only_child_with_an_unavailable_project_folder_sends_nothing(tmp_path, gh_calls):
+    ctx, project = _role_context(tmp_path, "project", "child")
+    project.rmdir()
+    result = _registry(ctx).execute_result("github_read", {"method": "list", "kind": "issue"})
+    assert result.text.startswith("⚠️ GH_TARGET_UNAVAILABLE:")
+    assert (result.status, result.meta.get("operation_outcome")) == ("unavailable", "completed_no_effect")
+    assert not gh_calls
+
+
+def test_a_directory_that_cannot_be_bound_is_a_typed_no_effect_target_refusal(tmp_path, gh_calls, monkeypatch):
+    """An explicit repo does not replace the selected folder as gh's directory, and never falls back to the system
+    repository: an unreadable room registry refuses, typed, before gh starts."""
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_k: (True, ""))
+    ctx, _ = _context(tmp_path, "room")
+    ctx.task_metadata = {"_project_room_note": "registry unavailable"}
+    result = _registry(ctx).execute_result("github_read", {"method": "get", "kind": "issue", "target": 7,
+                                                           "repo": "owner/selected"})
+    assert result.text.startswith("⚠️ GH_TARGET_UNAVAILABLE:") and "registry unavailable" in result.text
+    assert (result.status, result.meta.get("operation_outcome")) == ("unavailable", "completed_no_effect")
     assert not gh_calls

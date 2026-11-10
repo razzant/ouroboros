@@ -58,10 +58,8 @@ class CheckingAreaUnavailable(RuntimeError):
 def _checking_area_present(path: pathlib.Path) -> bool:
     try:
         path.lstat()
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
+    except OSError as exc:
+        return not isinstance(exc, FileNotFoundError)  # dangling links and unreadable paths are not absence
     return True
 
 
@@ -97,6 +95,20 @@ def _remove_checking_area(path: pathlib.Path, git: Optional[Mapping[str, Any]] =
     if _checking_area_present(path):  # dangling links and unreadable paths are not absence
         raise CheckingAreaUnavailable(f"checking cleanup unverified or residual at {path}")
     _worktree(common, "remove", "--force", "--force", str(path))
+
+
+def _release_unless_kept(data_root: Any, task_id: str, area: pathlib.Path, summary: Dict[str, Any],
+                         git: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """Release a captured copy, and its seat's scratch (``session_scratch.release_seat_scratch``), unless the owner
+    keeps its task (``owner_keep``): the receipt stands either way, a kept copy goes at a later pass. Seat-locked."""
+    from ouroboros.owner_keep import gate
+    from ouroboros.session_scratch import release_seat_scratch
+
+    with gate(data_root, task_id, timeout_sec=0) as why:
+        released = summary if why else _release_area(area, summary, git)
+        if not (why or "cleanup_error" in released):
+            release_seat_scratch(data_root, task_id, area.parent)
+        return released
 
 
 def _move_area(source: pathlib.Path, target: pathlib.Path, git: Optional[Mapping[str, Any]] = None) -> None:
@@ -621,29 +633,26 @@ def _capture_directory(home: pathlib.Path, marker: Mapping[str, Any]) -> pathlib
     return home / (f"evidence-{capture_id}" if capture_id else "evidence")
 
 
-def capture_seat_evidence(data_root: Any, task_id: str, operation_id: str) -> Dict[str, Any]:
-    """Retain one terminal seat's changes as evidence, then remove its one-shot copy.
-
-    ``summary.json`` precedes deletion; ``retained``/``partial`` repeats only retry cleanup.
-    Active thread copies stay. The seat lock serializes captures across processes, with
-    immutable evidence per operation. Failure keeps the copy and names the error without
-    raising; ``{}`` means the operation had no checking copy.
-    """
+def capture_seat_evidence(data_root: Any, task_id: str, operation_id: str, *, hold: bool = False) -> Dict[str, Any]:
+    """Save immutable evidence before releasing a terminal one-shot copy under its
+    seat lock. Threads and explicit continuation holds keep their copies; failures
+    retain with an error. An empty answer means no checking copy was recorded."""
     home = seat_dir(data_root, task_id, operation_id)
     try:
-        seat = str(json.loads((home / "checking.json").read_text(encoding="utf-8")).get("thread_seat") or "")
+        marker = json.loads((home / "checking.json").read_text(encoding="utf-8"))
+        seat, held = str(marker.get("thread_seat") or ""), str(marker.get("held_home") or "")
     except FileNotFoundError:
         return {}
     except (OSError, ValueError) as exc:  # a marker that exists but cannot be read is not absence
         return {"status": "capture_failed", "area": str(unindexed(home, "area")), "error": f"checking marker unreadable: {exc}"}
     try:
-        with _seat_locked(seat_dir(data_root, task_id, f"thread:{seat}") if seat else home):
-            return _capture_locked(data_root, task_id, operation_id)
+        with _seat_locked(seat_dir(data_root, task_id, f"thread:{seat}" if seat else held or operation_id)):
+            return _capture_locked(data_root, task_id, operation_id, hold=hold)
     except OSError as exc:
         return {"status": "capture_failed", "area": str(unindexed(home, "area")), "error": f"seat lock unavailable: {exc}"}
 
 
-def _capture_locked(data_root: Any, task_id: str, operation_id: str) -> Dict[str, Any]:
+def _capture_locked(data_root: Any, task_id: str, operation_id: str, *, hold: bool = False) -> Dict[str, Any]:
     """``capture_seat_evidence`` for a caller that already holds the seat lock."""
     home = seat_dir(data_root, task_id, operation_id)
     area, evidence = unindexed(home, "area"), home / "evidence"
@@ -658,25 +667,29 @@ def _capture_locked(data_root: Any, task_id: str, operation_id: str) -> Dict[str
         evidence = _capture_directory(home, marker)
     except CheckingAreaUnavailable as exc:
         return {"status": "capture_failed", "area": str(area), "error": str(exc)}
-    thread_seat = str(marker.get("thread_seat") or "")
-    # A failed predecessor moves under its operation; its local copy wins after a crash too.
+    thread_seat, held_home = str(marker.get("thread_seat") or ""), str(marker.get("held_home") or "")
+    # A failed predecessor moves under its operation; its local copy wins after a crash too. An explicit
+    # successor of a stopped one-shot seat works in the copy its predecessor's home still holds.
     thread_copy = bool(thread_seat and not _checking_area_present(area))
-    if thread_copy:
-        area = unindexed(seat_dir(data_root, task_id, f"thread:{thread_seat}"), "area")
+    physical = marker  # the copy's own home names who holds it: a superseded turn or seat never takes it back
+    if thread_copy or held_home:
+        area = unindexed(seat_dir(data_root, task_id, f"thread:{thread_seat}" if thread_copy else held_home), "area")
+        try:
+            physical = json.loads((area.parent / "checking.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            physical = {}
     prior = _receipt(data_root, task_id, operation_id)
+    holder = (physical.get("operation_id") if thread_copy else physical.get("holder_operation_id")
+              or physical.get("operation_id") or ("" if held_home else operation_id))
+    if str(holder or "") != operation_id:
+        return prior if prior.get("status") in _RECEIPTED else {
+            "status": "capture_failed", "area": str(area), "error": "the checking copy no longer belongs to this operation"}
+    keep = thread_copy or hold or bool(physical.get("held_for_continuation"))
     if prior.get("status") in _RECEIPTED:
-        return prior if thread_copy else _release_area(area, prior, marker.get("git"))
+        return prior if keep else _release_unless_kept(data_root, task_id, area, prior, marker.get("git"))
     if area.is_symlink():
         return {"status": "capture_failed", "area": str(area),
                 "error": "checking area was replaced by a symlink; target was not read"}
-    if thread_copy:
-        try:
-            active = json.loads((area.parent / "checking.json").read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            active = {}
-        if active.get("operation_id") != operation_id:
-            return {"status": "capture_failed", "area": str(area),
-                    "error": "thread checking area no longer belongs to this operation"}
     if not area.is_dir():  # already captured and released: the retained summary answers
         return prior or {"status": "released_without_summary", "evidence_dir": str(evidence)}
     gaps: List[Dict[str, Any]] = []
@@ -722,6 +735,8 @@ def _capture_locked(data_root: Any, task_id: str, operation_id: str) -> Dict[str
         atomic_write_json(evidence / "summary.json", summary)  # the receipt precedes any deletion
         if marker.get("capture_id"):
             atomic_write_json(home / "checking.json", marker)
+        if hold and not thread_copy and not errors:  # kept for an explicit successor (``review_continuation``)
+            atomic_write_json(area.parent / "checking.json", {**physical, "held_for_continuation": True})
     except Exception as exc:  # the copy stays; nothing was deleted without a receipt
         log.warning("review checking copy %s evidence capture failed", area, exc_info=True)
         if not (evidence / "summary.json").exists():  # an attempt without a receipt leaves no generation
@@ -729,7 +744,7 @@ def _capture_locked(data_root: Any, task_id: str, operation_id: str) -> Dict[str
 
             _force_rmtree(evidence)  # copies keep read-only modes, which Windows refuses to unlink
         return {"status": "capture_failed", "area": str(area), "error": f"{type(exc).__name__}: {exc}"}
-    return summary if thread_copy or errors else _release_area(area, summary, marker.get("git"))
+    return summary if keep or errors else _release_unless_kept(data_root, task_id, area, summary, marker.get("git"))
 
 
 def _receipt_path(data_root: Any, task_id: str, operation_id: str) -> pathlib.Path:
@@ -964,16 +979,11 @@ def wave_checking_source(session_root: Any, slots: Any, *, data_root: Any,
 
 
 def terminal_seat_evidence(data_root: Any, task_id: str, operation_id: str,
-                           detail: Any) -> Dict[str, Any]:
-    """Capture an observed terminal run's seat; its one-shot copy goes with the receipt.
-
-    Normal results, attach-only collection and timeout/interaction cancellation
-    receipts share this boundary. Any terminal state releases, whatever process
-    census the engine reports (owner decisions 2026-10-12 and 2026-10-13): bytes a
-    leftover writes after the terminal are not part of the verdict.
-    """
+                           detail: Any, *, hold: bool = False) -> Dict[str, Any]:
+    """Capture an observed terminal; a resumable stop holds copy and environment
+    for its explicit successor, within the original recorded window (no new TTL)."""
     from ouroboros.delegate_custody import is_terminal
 
     if not isinstance(detail, dict) or not is_terminal(detail):
         return {}
-    return capture_seat_evidence(data_root, task_id, operation_id)
+    return capture_seat_evidence(data_root, task_id, operation_id, hold=hold)

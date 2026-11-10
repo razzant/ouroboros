@@ -36,7 +36,7 @@ from tests._shared import producer_evidence_dir
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 PROJECT, PROJECT_NAME = "admission-room", "Admission research"
 ADMITTED_FAILURE, REPLACEMENT = "admitted-fail-1381", "replacement-1381"

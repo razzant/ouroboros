@@ -16,8 +16,17 @@ from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 
+def answer_projects(route, rows):
+    """``GET /api/projects`` from a page fixture's rows: the list, or the one row ``?id=`` names, as a reference reads
+    its room (CLIENT_CONTRACT §6)."""
+    from urllib.parse import parse_qs, urlparse
+
+    wanted = parse_qs(urlparse(route.request.url).query).get("id")
+    route.fulfill(json={"projects": [row for row in rows if not wanted or row["id"] == wanted[0]]})
+
+
 def producer_evidence_dir(fallback, name, *, env=()):
-    """Where one test producer's own diagnostics go: one destination per invocation.
+    """Where one test producer's published diagnostics (frames, DOM, JSON) go: one destination per invocation.
 
     A destination the operator exported explicitly for this family wins unchanged. Otherwise
     the shared channel decides: ``diagnostic_directory`` redirects to the launcher's
@@ -35,15 +44,17 @@ def producer_evidence_dir(fallback, name, *, env=()):
             path = pathlib.Path(explicit)
             path.mkdir(parents=True, exist_ok=True)
             return path
-    return diagnostic_directory(fallback, name)
+    return diagnostic_directory(fallback, name, publish=True)
 
 
-def retire_synthetic_retention(directory, *reasons) -> bool:
+def retire_synthetic_retention(directory, *reasons, release=None) -> bool:
     """Remove the retention marker THIS test manufactured, only when it says exactly ``reasons``.
 
     A fixture that fakes an unproven hold or an export fault proves no surviving
     process, yet its marker would keep the whole enclosing run. Any other line may
     describe a real one, so it keeps the marker. True when no marker remains.
+    ``release`` frees what that marker held, only once it is proven synthetic; unless
+    it returns True, the marker stays and keeps holding it.
     """
     from ouroboros.test_environment import RETENTION_MARKER
 
@@ -59,8 +70,26 @@ def retire_synthetic_retention(directory, *reasons) -> bool:
     known = {line for reason in reasons for line in reason.rstrip().splitlines()}
     if not lines or not known.issuperset(lines):
         return False
+    if release is not None and not release():
+        return False
     marker.unlink()
     return True
+
+
+def retire_synthetic_gate_hold(repo, temp_root, reason) -> bool:
+    """Undo a hermetic gate's hold over a lane this test stubbed or faulted, by its exact reason.
+
+    Only a marker saying nothing but that reason (the gate's line and its release owner's)
+    lets the worktree and its registration go, and the marker goes only after they did.
+    Any other line, an unreadable marker or a failed removal keeps all three.
+    """
+    import subprocess
+
+    def remove_worktree() -> bool:
+        return subprocess.run(["git", "worktree", "remove", "--force", str(pathlib.Path(temp_root) / "repo")],
+                              cwd=str(repo), capture_output=True).returncode == 0
+
+    return retire_synthetic_retention(temp_root, reason, "hermetic preflight: " + reason, release=remove_worktree)
 
 
 def retention_left_in(directory) -> str:
@@ -135,8 +164,8 @@ def wait_test_child_stop(pid: int, *, timeout_sec: float = 3.0) -> dict:
 
 # Every function in the tree that persists a settings document, as (repo-relative POSIX
 # path, function name). Three route through `config.prepare_settings_for_persist`; the
-# context-pair migration and the Colab generator are exempt from it by design and carry
-# their reason in the prologue tripwire's exempt table. Two pins read this one list: the
+# context-pair migration and the Colab generator (for a foreign root) are exempt from it by
+# design and carry their reason in the prologue tripwire's exempt table. Two pins read this one list: the
 # tripwire in tests/test_runtime_mode_elevation.py proves the scanned roots hold exactly
 # these writers (plus its declared non-writer matches), and the byte pin in
 # tests/test_settings_read_seam.py drives every one of them through its real entry point.
@@ -296,6 +325,25 @@ def live_worker_pids(data_root):
             if str(row.get("purpose") or "").startswith("worker:") and _fingerprint_matches(row)}
 
 
+def live_worker_slots(data_root):
+    """``{slot id: pid}`` of the ledger's live workers (``purpose="worker:<wid>"``).
+
+    A RUNNING row's ``worker_id`` names its slot, so this maps a task to the one
+    process carrying it; the pool's other live workers (the conversation lane's
+    ready spare among them) stay apart."""
+    from ouroboros.process_custody import _fingerprint_matches, _read_ledger_strict
+
+    readable, entries = _read_ledger_strict(data_root)
+    assert readable, "worker custody is unreadable"
+    slots = {}
+    for row in entries:
+        purpose = str(row.get("purpose") or "")
+        slot = purpose.removeprefix("worker:")
+        if purpose.startswith("worker:") and slot.isdigit() and _fingerprint_matches(row):
+            slots[int(slot)] = int(row["pid"])
+    return slots
+
+
 def write_queue_document(path, payload):
     """Publish a fixture document and its matching liveness stamp; retain its date."""
     from ouroboros.utils import atomic_write_json
@@ -418,3 +466,26 @@ def current_python_env(env_root) -> None:
     base = os.path.dirname(os.path.abspath(getattr(sys, "_base_executable", "") or sys.executable))
     version = ".".join(map(str, sys.version_info[:3]))
     (venv / "pyvenv.cfg").write_text(f"home = {base}\nversion = {version}\n", encoding="utf-8")
+
+
+def full_disk_at(monkeypatch, part):
+    """ENOSPC exactly where the platform lock creates its ``.lock`` file (``O_CREAT|O_EXCL``) under ``part``."""
+    import errno
+
+    real = os.open
+
+    def create(path, flags, *args, **kwargs):
+        if part in str(path) and str(path).endswith(".lock") and flags & os.O_CREAT and flags & os.O_EXCL:
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC), str(path))
+        return real(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", create)
+
+
+def run_absent_in(store_id):
+    """Claudexor's run-detail 404 (``run-detail-route.ts``): it names the store it read in ``context.storeId``."""
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    error = ClaudexorUnavailable("http_404", "no such run", status_code=404)
+    error.problem = {"error": "no such run", "context": {"storeId": store_id}}
+    return error

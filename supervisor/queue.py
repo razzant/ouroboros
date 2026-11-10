@@ -18,7 +18,7 @@ from supervisor.state import (
     load_state,
     append_jsonl,  # noqa: F401 -- queue_snapshot leaf reads it via the _queue() handle
     atomic_write_text,  # noqa: F401 -- queue_snapshot leaf reads it via the _queue() handle
-    budget_remaining, EVOLUTION_BUDGET_RESERVE,
+    budget_remaining,
     reconstruct_task_cost as reconstruct_task_cost,
 )
 from supervisor.message_bus import (
@@ -30,7 +30,6 @@ from ouroboros.config import (
     DATA_DIR,
     FINALIZATION_GRACE_DEFAULT_SEC,
     get_finalization_grace_sec,
-    get_per_call_timeout_ceiling_sec,  # noqa: F401 -- queue_timeouts leaf reads it via the _queue() handle
     get_task_abs_ceiling_sec,  # noqa: F401 -- queue_timeouts leaf reads it via the _queue() handle
     get_task_idle_timeout_sec,  # noqa: F401 -- queue_timeouts leaf reads it via the _queue() handle
 )
@@ -70,9 +69,6 @@ HEARTBEAT_STALE_SEC: int = 120
 QUEUE_MAX_RETRIES: int = 1
 FINALIZATION_GRACE_SEC: int = FINALIZATION_GRACE_DEFAULT_SEC
 SCHEDULED_TASKS_FILE = pathlib.Path("state") / "scheduled_tasks.json"
-# BUG3: pause a campaign whose objective fails to absorb after this many reviewed cycles.
-# Mirrors the consecutive-failures threshold; keyed on the objective fingerprint, not failures.
-OBJECTIVE_REPEAT_CAP: int = 3
 
 
 # Whether THIS process owns the supervisor's live maps (``init`` ran): a process that merely
@@ -80,7 +76,7 @@ OBJECTIVE_REPEAT_CAP: int = 3
 # OWNER_PID names that process: a child forked after ``init`` inherits INITIALIZED, not the pid.
 INITIALIZED = False
 OWNER_PID: Optional[int] = None
-QUEUE_PUBLICATION = None  # Structural documents and their successfully published generation.
+QUEUE_PUBLICATION = None  # (path, encoded documents, snapshot generation, generation per document) of the last successful publication.
 
 
 def owns_live_queue(drive_root: Any) -> bool:
@@ -99,7 +95,10 @@ def owns_live_queue(drive_root: Any) -> bool:
 
 def init(drive_root: pathlib.Path) -> None:
     global DRIVE_ROOT, FINALIZATION_GRACE_SEC, INITIALIZED, OWNER_PID, QUEUE_SNAPSHOT_PATH, QUEUE_PUBLICATION
+    from supervisor.queue_publication import reset as reset_publication
+
     QUEUE_PUBLICATION = None
+    reset_publication()  # nothing marked or published by this generation, no tick publisher yet
     DRIVE_ROOT = drive_root
     INITIALIZED, OWNER_PID = True, os.getpid()
     QUEUE_SNAPSHOT_PATH = drive_root / "state" / "queue_snapshot.json"
@@ -254,17 +253,25 @@ def prepare_root_billing(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 _UNRESOLVED = object()
 
 
+def _reads_subagents_settings(task: Dict[str, Any]) -> bool:
+    """A root without an explicit subagents mode reads the settings for its subagent policy."""
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    return not (task.get("parent_task_id") or metadata.get("parent_task_id")) and "subagents_mode" not in metadata
+
+
 @contextlib.contextmanager
 def prepared_root_billing(task: Dict[str, Any], *, resolved: Any = _UNRESOLVED):
-    """Resolve a root's billing BEFORE the caller takes ``_queue_lock``.
-
-    ``enqueue_task`` called inside the block for the same task uses the result
-    instead of reading the ledger under the lock. Written as a context manager
-    so the call shape ``enqueue_task(task, ...)`` stays the same everywhere.
-    ``resolved``: a ``prepare_root_billing`` result the caller read before Q.
+    """Resolve what a root's admission reads BEFORE the caller takes ``_queue_lock``: its billing (the money
+    ledger) and the settings its subagent policy needs. ``enqueue_task`` inside the block uses these instead of
+    reading under the caller's hold (Q spans memory only); the call shape ``enqueue_task(task, ...)`` stays the
+    same. ``resolved``: a ``prepare_root_billing`` result read before Q. The consciousness allowance window is
+    the producer's own off-lock read, passed to ``enqueue_task`` explicitly.
     """
+    from ouroboros.config import load_settings
+
     billing = prepare_root_billing(task) if resolved is _UNRESOLVED else resolved
-    token = _PREPARED_ROOT_BILLING.set((str(task.get("id") or "").strip(), billing))
+    prepared = {"billing": billing, "settings": load_settings() if _reads_subagents_settings(task) else None}
+    token = _PREPARED_ROOT_BILLING.set((str(task.get("id") or "").strip(), prepared))
     try:
         yield
     finally:
@@ -294,15 +301,16 @@ def enqueue_task(
     metadata["work_kind"] = work_kind({"origin_message_ref": t.get("origin_message_ref"), **metadata})
     t["metadata"] = metadata
     if not restoring_snapshot:
-        t.pop("_project_scope_none", None)  # Only this host admission can attest absence.
+        t.pop("_project_scope_none", None)  # A caller's mark proves nothing: this admission attests absence anew.
         t.pop("_consciousness_continuation", None)  # never a caller-supplied marker
         if continuation:
             t["_consciousness_continuation"] = True
+    prepared = _PREPARED_ROOT_BILLING.get()  # a caller holding Q read these off the lock (``prepared_root_billing``)
+    prepared = prepared[1] if prepared is not None and prepared[0] == str(t.get("id") or "").strip() else None
     subagents_settings = None
-    if (not restoring_snapshot and not (t.get("parent_task_id") or metadata.get("parent_task_id"))
-            and "subagents_mode" not in metadata):
+    if not restoring_snapshot and _reads_subagents_settings(t):
         from ouroboros.config import load_settings
-        subagents_settings = load_settings()
+        subagents_settings = prepared["settings"] if prepared is not None and prepared["settings"] else load_settings()
     attach_task_contract(apply_consciousness_authority(t))
     from ouroboros.tool_access_roots import freeze_tool_profile
     freeze_tool_profile(t)
@@ -316,9 +324,8 @@ def enqueue_task(
     # cross-process lock; in a cold process a full parse): resolve it here, off
     # the queue lock, and only attach it inside. A caller whose admission
     # transaction already holds the lock resolved it earlier (``prepared_root_billing``).
-    prepared = _PREPARED_ROOT_BILLING.get()
-    if prepared is not None and prepared[0] == str(t.get("id") or "").strip():
-        billing = prepared[1]
+    if prepared is not None:
+        billing = prepared["billing"]
     else:
         billing = None if restoring_snapshot else prepare_root_billing(t)
     project_id = str(t.get("project_id") or "").strip()
@@ -516,13 +523,15 @@ def enqueue_task(
             ) else "none"
         if ADMISSION_RESERVATIONS.get(task_id) == admission_token:
             ADMISSION_RESERVATIONS.pop(task_id, None)
-        if not restoring_snapshot and (durable or agent_restart_pending()):
-            if persist_queue_snapshot(reason="agent_restart_admission") is not True:
-                # No accepted reply and no dispatch. A partial disk publication
-                # is outside the named return set and boots held for Resume.
+        durable_before_reply = not restoring_snapshot and (durable or agent_restart_pending())
+    if durable_before_reply:
+        # Durable before the reply, after this function's own hold (Q spans memory only). A failed barrier
+        # withdraws the row under Q again: no accepted reply, no dispatch; a partial publication boots held for Resume.
+        if publish_queue_snapshot(reason="agent_restart_admission") is not True:
+            with _queue_lock:
                 PENDING[:] = [row for row in PENDING if row is not t]
-                persist_queue_snapshot(reason="agent_restart_admission_unconfirmed")
-                return {**t, "_admission_blocked": "restart_admission_unconfirmed"}
+            publish_queue_snapshot(reason="agent_restart_admission_unconfirmed")
+            return {**t, "_admission_blocked": "restart_admission_unconfirmed"}
     return t
 
 
@@ -551,7 +560,7 @@ def ensure_control_task_result(task_id: str) -> Dict[str, Any]:
         fields = {key: task[key] for key in (
             "type", "chat_id", "metadata", "task_contract", "root_task_id", "parent_task_id",
             "delegation_role", "project_id", "workspace_root", "workspace_mode", "memory_mode",
-            "budget_drive_root", "queued_at", "admitted_dispatch", "_admission_owner_token",
+            "drive_root", "child_drive_root", "budget_drive_root", "queued_at", "admitted_dispatch", "_admission_owner_token",
             "origin_message_text", "origin_message_ref", "objective", "title", "suggested_name",
             "original_task_id", "timeout_retry_from", "deadline_at", "execution_timeout_sec", "root_cost_ceiling_usd",
             "billing_group", "task_constraint", "objective_author", "owner_corpus", "task_group_id", "task_group",
@@ -658,8 +667,8 @@ def _consciousness_admission_block(task: Dict[str, Any], window: Optional[Dict[s
                     "OUROBOROS_CONSCIOUSNESS_DAILY_USD=0: consciousness may not spend")
         at_least = " (at least)" if window.get("unknown_unmetered") else ""
         known = window.get("settled_usd")
-        open_holds = 0.0 if known is None else max(0.0, float(window.get("accounted_usd") or 0.0) - float(known))
-        holds = f" (plus ${open_holds:.2f} of open holds, not counted)" if open_holds > 0 else ""
+        from ouroboros.cost_projection import uncounted_money_text  # each uncounted part by its ledger name (P8)
+        holds = f" (plus {parts}, not counted)" if (parts := uncounted_money_text(window)) else ""
         spent = "unknown" if known is None else f"${float(known):.2f}{at_least}"
         return ("consciousness_allowance_exhausted", (
             f"{spent} of ${window['limit_usd']:.2f} "
@@ -831,6 +840,14 @@ def queue_deep_self_review_task(reason: str, model: str = "", force: bool = Fals
     return tid
 
 
+def project_running() -> List[str]:
+    """The RUNNING ids the evolution idle gate waits for: every row but the conversation lane's (an owner turn, a
+    wake, a Presence turn), which base ran in the server and never let hold it."""
+    from supervisor.conversation_lane import conversation_row
+
+    return [task_id for task_id, meta in RUNNING.items() if not conversation_row(meta)]
+
+
 def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Return a non-mutating evolution scheduling snapshot.
 
@@ -849,11 +866,16 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
     consecutive_failures = int(st.get("evolution_consecutive_failures") or 0)
     try:
         # A status snapshot is a display read: without a supplied projection it rides the last validated snapshot.
-        remaining: Optional[float] = round(float(budget_remaining(st, strict=True, projection=budget_projection, allow_stale=True)), 2)
+        actual_remaining: Optional[float] = float(budget_remaining(st, strict=True, projection=budget_projection, allow_stale=True))
         accounting_available = True
     except Exception:
-        remaining = None
+        actual_remaining = None
         accounting_available = False
+    # Cents are for display; the status is classified on the amount admission itself reads.
+    remaining = None if actual_remaining is None else round(actual_remaining, 2)
+    from supervisor.worker_assignment import needs_paid_admission
+    # A reached limit blocks only paid admission: an evolution task opens on Main.
+    exhausted = actual_remaining is not None and actual_remaining <= 0 and needs_paid_admission({"metadata": {}})
     queued_task = next((t for t in PENDING if str(t.get("type") or "") == "evolution"), None)
     running_task = next(
         (
@@ -865,6 +887,7 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
         ),
         None,
     )
+    project = project_running()  # what the idle gate waits for: never a conversation turn
     status = "disabled"
     detail = "Evolution mode is off."
 
@@ -887,37 +910,22 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
         detail = "Evolution task is running now."
     elif isinstance(queued_task, dict):
         status = "queued"
-        detail = "Evolution task is queued and waiting for a worker."
+        detail = "Evolution task is queued."
     elif not accounting_available:
         status = "accounting_unavailable"
         detail = "Cost accounting is unavailable; evolution dispatch is paused without changing the campaign."
-    elif consecutive_failures >= 3:
-        status = "paused_failures"
-        detail = (
-            f"Paused after {consecutive_failures} consecutive failures. "
-            "Use Evolve again after investigating the failure."
-        )
     elif enabled and not owner_chat_id:
         status = "waiting_for_owner_chat"
         detail = "Waiting for the first owner chat binding before scheduling evolution."
-    elif enabled and remaining is not None and remaining < EVOLUTION_BUDGET_RESERVE:
+    elif enabled and exhausted:
         status = "budget_blocked"
-        detail = (
-            f"Budget reserve active: ${remaining:.2f} remaining, "
-            f"${EVOLUTION_BUDGET_RESERVE:.0f} reserved for conversations."
-        )
-    elif enabled and (PENDING or RUNNING):
+        detail = "Global budget exhausted: no new cycle starts until the limit allows one. The campaign stays on."
+    elif enabled and (PENDING or project):
         status = "waiting_for_idle"
         detail = "Waiting for active tasks to finish before the next evolution cycle."
     elif enabled:
         status = "idle_ready"
         detail = "Idle and ready to queue the next evolution cycle."
-    elif remaining is not None and remaining < EVOLUTION_BUDGET_RESERVE and str(st.get("last_evolution_task_at") or "").strip():
-        status = "budget_stopped"
-        detail = (
-            f"Evolution auto-stopped because only ${remaining:.2f} remains, "
-            f"below the ${EVOLUTION_BUDGET_RESERVE:.0f} conversation reserve."
-        )
 
     return {
         "enabled": enabled if enabled_known else None,
@@ -933,9 +941,9 @@ def get_evolution_status_snapshot(*, budget_projection: Optional[Dict[str, Any]]
         # is float('inf'), which strict JSON cannot carry — surface None so
         # /api/state stays serializable on onboarding installs.
         "budget_remaining_usd": remaining if remaining is not None and math.isfinite(remaining) else None,
-        "budget_reserve_usd": float(EVOLUTION_BUDGET_RESERVE),
+        "budget_reserve_usd": 0.0,  # frozen field: Evolution keeps no reserve of its own (owner, 2026-11-02)
         "pending_count": len(PENDING),
-        "running_count": len(RUNNING),
+        "running_count": len(project),
         "queued_task_id": str((queued_task or {}).get("id") or ""),
         "running_task_id": str((running_task or {}).get("id") or ""),
     }
@@ -969,8 +977,15 @@ from supervisor.queue_snapshot import (  # noqa: E402, F401 -- intentional publi
     _kept_service_pids,
     _retained_daemon_pids,
     parse_iso_to_ts,
-    persist_queue_snapshot,
     restore_pending_from_snapshot,
+)
+from supervisor.queue_publication import (  # noqa: E402, F401 -- intentional public re-exports
+    persist_queue_snapshot,
+    publish_queue_changes,
+    publish_queue_snapshot,
+    start_queue_writer,
+    stop_queue_writer,
+    tick_publisher_started,
 )
 from supervisor.queue_timeouts import (  # noqa: E402, F401 -- intentional public re-exports
     _enforce_task_timeouts_locked,
@@ -980,5 +995,6 @@ from supervisor.queue_timeouts import (  # noqa: E402, F401 -- intentional publi
     _subtree_progressing,
     _task_deadline_ts,
     _task_drive_for_task,
+    enforce_due_task_timeouts,
     enforce_task_timeouts,
 )

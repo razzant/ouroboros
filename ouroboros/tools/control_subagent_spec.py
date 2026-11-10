@@ -12,6 +12,9 @@ from typing import Any, Dict
 
 
 VALID_SUBTASK_MEMORY_MODES = frozenset({"forked", "empty"})
+# The fields a parent may widen a child's memory view by: the ones its description offers, no other ViewSpec field.
+MEMORY_VIEW_FIELDS = ("story", "room_page", "room_lanes", "origin_words", "other_conversations", "marks", "knowledge",
+                      "owner_words")
 
 
 def schedule_subagent_properties() -> Dict[str, Any]:
@@ -28,6 +31,7 @@ def schedule_subagent_properties() -> Dict[str, Any]:
     from ouroboros.tool_access import SUBAGENT_CAPABILITIES
     from ouroboros.configured_subagents import SESSION_ACCESS_LOWERING
     from ouroboros.delegate_documents import attachment_parameters
+    from ouroboros.delegate_readonly_inputs import input_files_parameter
     from ouroboros.settings_scales import EFFORT_SCALE
 
     return {
@@ -52,28 +56,40 @@ def schedule_subagent_properties() -> Dict[str, Any]:
         "access": {"type": "string", "enum": ["inherit", *SESSION_ACCESS_LOWERING], "default": "inherit", "description":
             "inherit (default/omitted) preserves owner-selected Agent-session access; readonly or "
             "workspace_write may only lower it. API-model rows ignore it with disclosure. It grants "
-            "no task or product-write authority. "
+            "no task or product-write authority: a non-acting session's evidence-only private checking copy owes no apply, "
+            "so do not call integrate_delegated_patch to apply or reject its changes. "
             "Select readonly for read-only session execution; write_surface controls native child/nanny authority."},
         "objective": {"type": "string", "description": "Focused OUTCOME and scope, not a step-by-step script. A harness-dispatched child forwards work to its delegated run; a scripted objective can read as orders to execute natively."},
         "expected_output": {"type": "string", "description": "Concrete handoff expected from the child."},
         "role": {"type": "string", "description": "Optional freeform lineage/UI role, e.g. architecture-reviewer; omission assigns no role."},
-        "context": {"type": "string", "description": "Optional reference context, not instructions: write the orientation it lacks (purpose, prior decisions, material paths). The child does not see this conversation; input_sources says what it starts with. For a harness-dispatched child this becomes its session's WORK ORDER; that session has none of my memory, so put recipes/details here, not in objective."},
+        "context": {"type": "string", "description": "Optional reference context, not instructions: write the orientation it lacks (purpose, prior decisions, material paths). The child does not see this conversation; input_sources says what it starts with. For a harness-dispatched child this becomes its session's WORK ORDER; that session starts with my human's words, the marks and the knowledge outline but none of my other memory, so put recipes/details here, not in objective."},
         "input_sources": {
             "type": "string", "enum": ["shared", "declared"],
             "description": (
-                "Omit or shared: the child starts with SYSTEM/BIBLE, book maps, my identity, life's top-level "
-                "account (except Agent-session supervisors), the child's room page, full assignment, "
-                "attachments and my human's originating words verbatim; knowledge and other material "
-                "remain one read away. declared selects only the authored objective/context/constraints, "
-                "my human's originating words verbatim and full governance/task authority for an independent "
-                "first position. It excludes automatic shared memory, dialogue, project knowledge, inherited "
-                "parent context and attachments; put common evidence in context. Descendants cannot widen inherited "
+                "Every child starts with my human's words for the work verbatim and dated, the marks in force "
+                "and the knowledge outline; other knowledge stays one read away. Omit or shared: it also starts "
+                "with SYSTEM/BIBLE, book maps, my identity, life's top-level account (except Agent-session "
+                "supervisors), the child's room page, full assignment and attachments. declared selects only "
+                "the authored objective/context/constraints and full governance/task authority for an independent "
+                "first position; it excludes the rest of shared memory (identity, life account, room page), "
+                "dialogue, inherited parent context and attachments; put common evidence in context. Descendants cannot widen inherited "
                 "declared. Selection lasts for the task; the assignment defines retention/collaboration, "
                 "and tool results/messages can broaden input. It prescribes no exchange sequence or "
                 "transport, provides no access isolation and makes no claim about provider context or priors."
             ),
         },
         "constraints": {"type": "string", "description": "Optional constraints/non-goals for the child."},
+        "memory_view": {
+            "type": "object",
+            "description": (
+                "Optional widening of the child's memory view by field, e.g. {\"knowledge\": true} starts it with the whole "
+                "knowledge base instead of the outline. Fields: story, room_page, room_lanes, origin_words, "
+                "other_conversations, marks (all|room_and_global), knowledge, owner_words. It only widens but for the story, "
+                "which the assignment may leave out: my human's words and the marks in force can be turned on, never off "
+                "(owner_words false and marks none are refused), and any other field is refused here. Omitted: the role's "
+                "default view. A value the view does not know is refused "
+                "at the child's start with the role default and one event."),
+        },
         "memory_mode": {
             "type": "string",
             "enum": sorted(VALID_SUBTASK_MEMORY_MODES),
@@ -96,7 +112,7 @@ def schedule_subagent_properties() -> Dict[str, Any]:
             # self_worktree (the trap behind the read-only-audit cancel-storm). It is NOT
             # an acting VALID_WRITE_SURFACES member — it normalizes to the omit path.
             "enum": ["read_only", "self_worktree", "external_workspace", "genesis"],
-            "description": "read_only (default/omitted) keeps the native child/nanny read-only. Acting surfaces: self_worktree copies that Git source's current files for parent patch integration; external_workspace: native children write shared files directly; genesis creates a standalone project. See tool description for integration. Acting surfaces require mutative subagents enabled (default ON in advanced/pro).",
+            "description": "read_only (default/omitted) keeps the native child/nanny read-only. Acting surfaces self_worktree, external_workspace (native children write shared files directly) and genesis are defined with their integration in the tool description; they require mutative subagents enabled (default ON in advanced/pro).",
         },
         "write_root": {"type": "string", "description": "external_workspace project directory, with or without Git; never runtime data, including installed skills. Omit for a new cooperative shared Git tree. Ignored for self_worktree (source: workspace_root), read_only and genesis (own empty root)."},
         "directory_strategy": {
@@ -115,6 +131,11 @@ def schedule_subagent_properties() -> Dict[str, Any]:
             "Your retained inputs, for an agent_session child only (API children refuse both): the first start of "
             "the child's work order attaches them; its later starts, continuations and replacements select their own. "
             "With input_sources=declared only these inputs are copied to the child."),
+        **input_files_parameter(
+            "Read-only children only (write_surface omitted or read_only); [] reports an empty receipt. Checked with your "
+            "read authority and the child's limits and retained before the child is queued; the queued receipt lists each "
+            "copy. An API child's first input names each copy for read_file(path=<copy>); an agent_session child's first "
+            "start verifies them."),
         "protected_paths_grant": {"type": "boolean", "default": False, "description": "Allow the child to modify protected paths in its self_worktree. Honored only in pro runtime mode; you still re-check at integration."},
         "external_tool_grants": {"type": "array", "items": {"type": "string"}, "description": "Optional extension/MCP tool names to grant this mutative child. Denied by default."},
         "allowed_origins": {
@@ -123,8 +144,8 @@ def schedule_subagent_properties() -> Dict[str, Any]:
         },
         "delegation_intent": {"type": "string", "description": "Whether/how this child should delegate further, including children/grandchildren. Propagates through its delegation budget and prompt; defaults to the parent's intent."},
         "may_mutate": {"type": "boolean", "default": False, "description": "Intent to allow this child acting descendants; ordinary mutative-subagent gating and depth/active caps still apply."},
-        "may_fan_out": {"type": "boolean", "default": True, "description": "Whether this child may spawn multiple children, within the per-root active cap."},
-        "max_children": {"type": "integer", "default": 0, "description": "Optional soft cap on this child's own direct children (0 = inherit / configured cap)."},
+        "may_fan_out": {"type": "boolean", "default": True, "description": "Whether this child may have more than one direct child: false allows one admitted in its whole lifetime, a finished one included. The per-root active cap still applies."},
+        "max_children": {"type": "integer", "default": 0, "description": "Optional cap on how many direct children this child may have admitted in its whole lifetime, finished ones included; a start past it is refused (0 = inherit your cap; never above it)."},
         "requested_depth": {
             "type": "integer", "default": 0,
             "description": "Intended absolute nesting depth from root=0 (children=1, grandchildren=2, great-grandchildren=3). Recorded as your request and reported as requested/permitted/achieved on the root result; never changes configured caps. 0/omitted means no request.",
@@ -268,6 +289,16 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None) -> tu
             import uuid
 
             directory_options["document_import_intent"] = uuid.uuid4().hex
+    if params.get("input_files") is not None:  # shape only: permission and copying happen with the queued child's identity
+        from ouroboros.delegate_readonly_inputs import InputSelectionError, selection_entries
+
+        try:
+            directory_options["input_files"] = selection_entries(params["input_files"])
+        except InputSelectionError as exc:
+            return {}, f"⚠️ TOOL_ARG_ERROR (schedule_subagent): {exc.detail}"
+        if directory_options["input_files"] and str(params.get("write_surface") or "").strip().lower() not in {"", "read_only"}:
+            return {}, ("⚠️ TOOL_ARG_ERROR (schedule_subagent): input_files_readonly_only: input_files prepares inputs "
+                        "for a read-only child; omit it or write_surface.")
     if params.get("workspace") not in (None, "copy", "in_place"):
         return {}, "⚠️ TOOL_ARG_ERROR (schedule_subagent): workspace must be copy or in_place."
     if params.get("workspace") == "in_place":  # the documented default geometry is no folder request, as at delegate_start
@@ -329,6 +360,13 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None) -> tu
         if subset_only and not set(origins).issubset(resource_policy.get("allowed_origins", [])):
             return {}, "⚠️ BROWSER_ORIGIN_NOT_GRANTED: this caller may only narrow its inherited allowed_origins."
         resource_policy["allowed_origins"] = origins
+    view = params.get("memory_view")
+    if isinstance(view, dict) and (view.get("owner_words") is False or view.get("marks") == "none"):
+        return {}, ("⚠️ TOOL_ARG_ERROR (schedule_subagent): memory_view only widens a child's view; "
+                    "it keeps my human's words and the marks in force.")
+    if isinstance(view, dict) and not set(view) <= set(MEMORY_VIEW_FIELDS):
+        return {}, ("⚠️ TOOL_ARG_ERROR (schedule_subagent): memory_view fields are "
+                    f"{', '.join(MEMORY_VIEW_FIELDS)} (got: {', '.join(sorted(map(str, set(view) - set(MEMORY_VIEW_FIELDS))))}).")
     return {
         "deadline_at": deadline_at, "objective": objective, "expected_output": expected_output,
         "role": str(params.get("role") or "").strip(),
@@ -337,6 +375,7 @@ def _validated_schedule_fields(params: Dict[str, Any], *, ctx: Any = None) -> tu
         "memory_mode": memory_mode, "may_mutate": params.get("may_mutate", False),
         "requested_effort": requested_effort,
         **({"delegated_mode": params["mode"]} if params.get("mode") is not None else {}),
+        **({"memory_view": view} if view is not None else {}),  # its values are checked at the child's start
         "acceptance_claims": acceptance_claims,
         "resource_policy": resource_policy,
         "parent_contract": parent,

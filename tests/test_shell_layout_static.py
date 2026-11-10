@@ -55,48 +55,38 @@ def test_shell_sheets_key_structure_off_the_layout_attribute_not_width_queries()
     capped = placed.split('html[data-layout="docked"] .project-panel {', 1)[1].split("}", 1)[0]
     assert "max-width: 100%;" in capped
     assert "data-project-fill" not in css and "data-project-fill" not in _read("web/app.js")
-
-
-def test_a_handle_drag_restyles_one_box_and_the_room_follows_it_by_layout():
-    """A drag frame writes the measured width into the dragged box's own --drag-width, which no element inherits; the
-    stored width on :root, which every element inherits (a whole-document restyle, about half of a WebKit drag frame
-    on the owner's Main), is written once at the end. So nothing but the box itself may read the stored width: the
-    grid column, the dimmed room and the panel's cap follow the box by layout, also while it is dragged."""
-    sheets = {rel: re.sub(r"/\*.*?\*/", "", _read(rel), flags=re.S)
-              for rel in ("web/style.css", "web/ui.css", "web/room_work.css", "web/settings.css", "web/model_roles.css",
-                          "web/model_wait.css")}
-    readers = {var: [(rel, line.strip()) for rel, text in sheets.items() for line in text.splitlines()
-                     if f"var({var})" in line] for var in ("--sidebar-width", "--project-panel-width")}
-    assert readers["--sidebar-width"] == [("web/style.css", "width: var(--drag-width, var(--sidebar-width));")], readers
-    assert readers["--project-panel-width"] == [("web/style.css", "width: var(--drag-width, var(--project-panel-width));")], readers
-    css = sheets["web/style.css"]
-    assert "width: var(--drag-width, var(--sidebar-width));" in css.split("#primary-sidebar {", 1)[1].split("}", 1)[0]
-    assert "width: var(--drag-width, var(--project-panel-width));" in css.split(".project-panel {", 1)[1].split("}", 1)[0]
-    registered = css.split("@property --drag-width {", 1)[1].split("}", 1)[0]
-    assert "inherits: false;" in registered and "syntax: '*';" in registered, "no element inherits a drag's width"
-    assert "overflow-x: clip;" in css.split("\n#app {", 1)[1].split("}", 1)[0], "the sliding panel never widens the page"
     # What a drag writes, and when, is behaviour: tests/test_shell_interactions_browser.py drags both handles (the
     # stored widths change once, at the end; a Project closed mid-drag keeps its width).
 
 
-def test_the_layout_numbers_live_once_in_theme_js():
-    theme = _read("web/theme.js")
-    assert theme.count("dockedMinWidth: 720") == 1
-    assert "projectBesideMainMinWidth" not in theme
-    assert "root.dataset.layout = layout" in theme
-    assert "window.ouroLayout = Object.freeze(" in theme
-    for rel in ("web/modules/layout.js", "web/app.js", "web/modules/client_surface.js", "web/modules/page_header.js"):
-        source = _read(rel)
-        assert "720" not in source, f"{rel} repeats the docked width; read it from layout.js"
-        assert "matchMedia('(max-width" not in source and "matchMedia('(min-width" not in source, rel
-    # A sheet may size content at 720px (the Skills sheet does); it may not copy the switch into a query.
-    switch_copy = re.compile(r"@(?:media|container)[^{]*\b(?:719|720)(?:\.\d+)?px")
-    for rel in ("web/style.css", "web/ui.css", "web/room_work.css", "web/settings.css"):
-        found = switch_copy.search(_read(rel))
-        assert found is None, f"{rel} repeats the docked width in a query ({found.group(0) if found else ''}); key it off html[data-layout]"
-    assert switch_copy.search("@media (min-width: 720px) { .x { y: z } }"), "the guard still recognizes a copied switch"
-    for rel in ("web/app.js", "web/modules/client_surface.js"):
-        assert "from './modules/layout.js'" in _read(rel) or "from './layout.js'" in _read(rel), rel
-    # The switch is painted before CSS: theme.js loads first (theme.test.js pins the order too).
-    html = _read("web/index.html")
-    assert html.index("/static/theme.js") < html.index("/static/ui.css")
+def test_a_finger_is_the_switchs_other_fact_and_opens_a_project_in_mains_place():
+    """The primary input (owner 06.11): theme.js paints `html[data-pointer]` from one `(pointer: coarse)` query beside the
+    layout, and only the shell's sheets read it; docked under a finger the Project takes the content column with no
+    scrim and no width handle of its own (the sidebar keeps its). It is an input fact, never a width rule: a desk with a
+    mouse keeps the panel beside Main at its own width (owner 18.10, 4A). The painting and the door are behaviour
+    (web/tests/layout.test.js); the rendered room is tests/test_shell_project_open_browser.py."""
+    css = _read("web/style.css")
+    whole = css.split('html[data-layout="docked"][data-pointer="coarse"] .project-panel {', 1)[1].split("}", 1)[0]
+    assert "width: 100%;" in whole and "box-shadow: none;" in whole and "border-left: none;" in whole, whole
+    hidden = css.split('html[data-layout="docked"][data-pointer="coarse"] .project-panel-backdrop,', 1)[1].split("}", 1)[0]
+    assert 'html[data-layout="docked"][data-pointer="coarse"] .project-panel > .resize-handle {' in hidden, hidden
+    assert "display: none;" in hidden, hidden
+    # The shell asks the door; the pointer queries outside theme.js are a closed list that only shrinks (a component's
+    # own fact: the surface packet, a row's long press, the reader, the Interface size), never a new reader.
+    readers = sorted(path.relative_to(REPO).as_posix() for path in (REPO / "web").glob("**/*.js")
+                     if "tests" not in path.parts and "vendor" not in path.parts
+                     and "(pointer: coarse)" in path.read_text(encoding="utf-8"))
+    assert set(readers) <= {"web/theme.js", "web/modules/client_surface.js", "web/modules/chat_row_menu.js",
+                            "web/modules/document_reader.js", "web/modules/interface_size.js"}, readers
+
+
+def test_mains_count_and_read_follow_one_predicate():
+    """While a Project is open Main is not the room on screen (owner 06.11; DESIGN "Unread"): its row counts its new
+    messages and nothing reads them until Main is back. The count, ☰'s dot and the read ask the same `mainOnScreen()`,
+    so a covered Main can neither hide its number nor be read behind the Project. The read is behaviour
+    (web/tests/main_unread_counter.test.js, project_history_ack.test.js); the count and the dot have no other home in
+    the default lane (the browser case, tests/test_shell_project_open_browser.py, is opt-in)."""
+    app = _read("web/app.js")
+    badge = app.split("function updateUnreadBadge()", 1)[1].split("\n}\n", 1)[0]
+    assert "mainOnScreen() ? 0 : mainUnreadCount()" in badge, badge
+    assert "(!mainOnScreen() && mainUnreadCount() > 0)" in app

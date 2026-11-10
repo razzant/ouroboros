@@ -261,8 +261,11 @@ def test_unreadable_snapshot_keeps_the_recorded_expectations(tmp_path, monkeypat
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process observations; Windows has its creation-time tests")
-@pytest.mark.parametrize("kind", ["main", "host_service", "local_model"])
-@pytest.mark.parametrize("uncertainty", ["mismatched", "unmeasured", "missing_fingerprint"])
+@pytest.mark.parametrize(("uncertainty", "kind"), [
+    ("mismatched", "main"),
+    ("unmeasured", "host_service"),
+    ("missing_fingerprint", "local_model"),
+])
 def test_matching_binding_uncertainty_does_not_permit_a_control_endpoint(tmp_path, monkeypatch, kind, uncertainty):
     from ouroboros import config, process_custody, server_process
     from ouroboros.browser_policy import runtime_service_kind

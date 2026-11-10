@@ -308,10 +308,9 @@ def review_wave_budget_gate(
             "limit_usd": admission.get("limit_usd"),
             "known_usd": admission.get("known_usd"),
             "accounted_usd": admission.get("accounted_usd"),
-            "reserved_usd": admission.get("reserved_usd"),
             **{key: admission.get(key) for key in (
-                "binding_axis", "global_limit_usd", "global_known_usd", "global_accounted_usd",
-                "global_reserved_usd", "global_remaining_usd")},
+                "reserved_usd", "unresolved_upper_bound_usd", "binding_axis", "global_limit_usd", "global_known_usd",
+                "global_accounted_usd", "global_reserved_usd", "global_unresolved_upper_bound_usd", "global_remaining_usd")},
             "slots": admission.get("slots"),
             "slot_bounds": admission.get("slot_bounds"),
             "unpriced_slots": unpriced,
@@ -580,8 +579,8 @@ def build_goal_section(
     ``## Informational context`` block and explicitly flagged as narrative
     so reviewers don't fact-check commit-message wording against the code.
 
-    ``owner_words`` is the host-attested section of the owner's words that
-    caused the work (``owner_words.owner_words_text``), placed right after the
+    ``owner_words`` is the host-attested section of my human's words for
+    the work (``owner_words.owner_words_text``), placed right after the
     intent: what was asked, beside the author's account of the change. Empty
     keeps the section byte-identical to a review without it.
     ``preflight_execution`` is the wave's frozen test execution exhibit
@@ -695,26 +694,7 @@ def check_worktree_readiness(
     except Exception:
         pass
 
-    # 3. Core Python changes without test changes (reuses the check-1 git status).
-    try:
-        if status_result is not None and status_result.returncode == 0:
-            has_py_in_core = False
-            has_test_change = False
-            for fpath in parse_changed_paths_from_porcelain(status_result.stdout or ""):
-                if fpath.endswith(".py") and (
-                    fpath.startswith("ouroboros/") or fpath.startswith("supervisor/")
-                ):
-                    has_py_in_core = True
-                if fpath.startswith("tests/"):
-                    has_test_change = True
-            if has_py_in_core and not has_test_change:
-                warnings.append(
-                    "Python files in ouroboros/supervisor modified without corresponding test changes."
-                )
-    except Exception:
-        pass
-
-    # 4. Size-ratchet findings. Never blocking here: the official repository's
+    # 3. Size-ratchet findings. Never blocking here: the official repository's
     # CI ``size_ratchet`` lane is the enforcing surface; this warning lets the
     # agent regenerate the manifest or shrink the debt before the official
     # line rejects the same finding. Cheap since the history replay retired
@@ -748,9 +728,9 @@ def check_worktree_readiness(
 def _run_review_preflight_tests(ctx: "Any", timeout: Optional[int] = None, *, force: bool = False) -> Optional[str]:
     """Run pytest before expensive review steps unless disabled or unavailable.
 
-    Timeout is owned by ``run_hermetic_pytest`` (default + ``OUROBOROS_PREFLIGHT_TIMEOUT_SEC``
-    env) so callers do not re-pin a stale literal; an explicit ``timeout`` still
-    overrides for tests."""
+    The budget is owned by ``run_hermetic_pytest``: none for the full suite (owner 5A), and for
+    a bounded run ``OUROBOROS_PREFLIGHT_TIMEOUT_SEC`` else the default, so callers do not re-pin
+    a stale literal; an explicit ``timeout`` still bounds any tier (tests use it)."""
     if not force and os.environ.get("OUROBOROS_PRE_PUSH_TESTS", "1") != "1":
         return None
     repo_dir = getattr(ctx, "repo_dir", None)

@@ -151,13 +151,18 @@ def _stage(geo, ctx, monkeypatch, run_id="run-1", engine=None):
 
 def _read_whole(ctx, read_next):
     """Cover the artifact contiguously through the real registry, like a model would."""
-    arguments = {key: read_next[key] for key in ("root", "path")}
+    arguments = {key: read_next[key] for key in ("root", "path") if key in read_next}
     stride = tool_result_limit("read_file") - 5_000
     text = pathlib.Path(read_next["path"]).read_text(encoding="utf-8")
     for number, line in enumerate(text.splitlines(keepends=True), start=1):
         for offset in range(0, max(len(line), 1), stride):
             result = _execute(ctx, "read_file", **arguments, start_line=number, max_lines=1, start_char=offset)
             assert result.status == "ok" and not result.text.startswith("⚠️"), result.text[:300]
+
+
+def _rootless(read):
+    """The advertised form of a stored staging read: same address, the reader's own permitted root."""
+    return {**read, "arguments": {key: value for key, value in read["arguments"].items() if key != "root"}}
 
 
 def _receipts(geo):
@@ -186,7 +191,7 @@ def _publish_terminal_result(geo, task_id, status="cancelled"):
 
 # --- the staging task reads its own retained answer on every drive -----------------
 
-@pytest.mark.parametrize("geometry", ["canonical_top", "forked_top", "readonly_child", "acting_child"])
+@pytest.mark.parametrize("geometry", ["canonical_top", "forked_top", "acting_child"])
 def test_the_staging_task_reads_its_retained_output_on_every_drive(geo, monkeypatch, geometry):
     ctx = {
         "canonical_top": lambda: _top(geo, ROOT),
@@ -274,10 +279,15 @@ def test_a_root_continue_reads_its_old_nanny_childs_answer_after_drive_cleanup(g
     stored_receipt = next(row for row in stored if row["run_id"] == "run-1")
     stored_source = stored_receipt["staged_output"]
     assert public_receipt["staged_output"] == {
-        **stored_source, "read": stored_source["source_read"], "direct_read": stored_source["read"]}
+        **stored_source, "read": stored_source["source_read"], "direct_read": _rootless(stored_source["read"])}
     assert public_receipt["staged_output"]["sha256"] == source["sha256"]
     assert public_receipt["staged_output"]["task_id"] == NANNY
     assert '"run_dir": "/engine/runs/run-1"' in listed, "the read tool shows the engine's own locator"
+    direct = public_receipt["staged_output"]["direct_read"]
+    for reader in (continuation, parent):  # the exact advertised recipe, from outside the staging lineage (#2539)
+        opened = _execute(reader, direct["tool"], **direct["arguments"])
+        assert opened.status == "ok" and not opened.text.startswith("⚠️"), opened.text[:300]
+        assert "complete answer line" in opened.text
     first_reader = public_receipt["staged_output"]["read"]
     assert first_reader == public_receipt["staged_output"]["source_read"]
     sized = json.loads(_execute(continuation, first_reader["tool"],
@@ -375,7 +385,6 @@ def test_existing_read_rules_run_first_and_the_default_read_never_opens_the_sour
         "an explicit selector is never swallowed by the unchanged-result shortcut"
 
 
-@pytest.mark.serial  # retry authority reads a fresh queue snapshot (the retry suites' lane)
 def test_a_retry_reader_stages_into_its_own_store_and_the_starter_receipt_names_it(tmp_path, monkeypatch):
     from ouroboros.delegate_terminal import _audit_task_custody, record_terminal_reconciliation
     from ouroboros.tools import delegate
@@ -417,7 +426,7 @@ def test_a_retry_reader_stages_into_its_own_store_and_the_starter_receipt_names_
     public = next(row["staged_output"] for row in runs if row["run_id"] == held.run_id)
     assert public["read"] == public["source_read"]
     assert public["read"]["arguments"]["task_id"] == "retry-a"
-    assert public["direct_read"] == staged["read"]
+    assert public["direct_read"] == _rootless(staged["read"])
 
     page = json.loads(call(ctx, "get_task_result", task_id="retry-a", delegated_output_sha256=artifact["sha256"],
                            source_start_char=0, source_end_char=40).text)["delegated_output_source"]

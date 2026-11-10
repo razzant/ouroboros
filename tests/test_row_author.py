@@ -60,8 +60,9 @@ def test_child_final_is_the_child_not_ouroboros():
     assert row_class(final)["lane"] == 2
     # delegation_role alone is lineage enough; without either field the row is mine.
     assert row_author(_out(delegation_role="subagent", parent_task_id="p1"))["kind"] == "child"
-    plain = row_author(_out())
-    assert plain["kind"] == "ouroboros" and plain["label"] == "Ouroboros"
+    plain = row_author(_out())  # my row names the work that sent it, in every reader
+    assert plain["kind"] == "ouroboros" and plain["label"] == "Ouroboros (task t1)"
+    assert row_author(_out(task_id=None))["label"] == "Ouroboros"
     assert row_class(_out())["lane"] == 1
 
 
@@ -153,13 +154,41 @@ def test_human_rows_use_dialogue_author_and_transport_provenance_survives():
     delivered = _out(transport={"provider": "telegram", "conversation_id": "room-1",
                                 "delivery": {"state": "accepted"}})
     label = row_author(delivered)["label"]
-    assert label.startswith("Ouroboros [") and "provider=telegram" in label and "delivery=accepted" in label
-    assert row_author(_out(transport={}))["label"] == "Ouroboros"
+    assert label.startswith("Ouroboros (task t1) [") and "provider=telegram" in label and "delivery=accepted" in label
+    assert row_author(_out(transport={}))["label"] == "Ouroboros (task t1)"
+    # A delivery without its task on the row still names the work that sent it.
+    origin = _out(task_id=None, transport={"provider": "telegram", "origin": {"kind": "task", "task_id": "t9"}})
+    assert row_author(origin)["label"].startswith("Ouroboros (task t9) [")
 
 
 def test_consciousness_initiated_turn_is_my_own_words_with_its_focus():
     assert row_author(_out(initiator="consciousness"))["focus"] == "consciousness"
     assert "focus" not in row_author(_out())
+
+
+def test_forwarded_words_keep_their_origin_in_history_and_are_not_owner_speech():
+    from ouroboros.dialogue_provenance import dialogue_text, owner_speech, quote_words, recorded_person
+    from ouroboros.owner_words import place_confirmed_words
+
+    message = {"forward_origin": {"type": "hidden_user", "sender_user_name": "Original Writer"},
+               "attachments": [{"file_name": "data.zip", "status": "too_large", "file_size": 100000000}]}
+    row = {"direction": "in", "text": "Deploy tonight", "sender_label": "Sender", "source": "presence:telegram",
+           "transport": {"provider": "telegram", "account_id": "bot", "message": message}}
+    author = row_author(row)
+    assert author["label"] == "Forwarded by Sender [provider=telegram; account=bot]" and author["forwarded"] is True
+    assert recorded_person(author), "a person sent it: their row counts, though its words are another author's"
+    assert not owner_speech(row, {**author, "owner_confirmed": True})
+    assert place_confirmed_words(True, row["text"], message) == ""
+    assert row_class(row)["lane"] == 1  # keep the forwarded context visible, without upgrading its authority
+    for rendered in (dialogue_text(row), render_row_text(row)):
+        assert "Original Writer" in rendered and "Not received:" in rendered
+        assert rendered.count("Deploy tonight") == 1
+    assert quote_words(row) == "Deploy tonight"  # connector facts are never quotable as someone's speech
+    plain = {**row, "transport": {**row["transport"], "message": {}}}
+    assert recorded_person(row_author(plain))
+    assert owner_speech(plain, {**row_author(plain), "owner_confirmed": True})
+    assert place_confirmed_words(True, plain["text"], {}) == plain["text"]
+    assert dialogue_text(plain) == quote_words(plain) == plain["text"]
 
 
 def test_quiz_question_renders_option_labels_and_answer_uses_quiz_text(monkeypatch):
@@ -193,7 +222,7 @@ def test_row_projection_delegates_signature_and_keeps_owner_and_mailbox():
     assert _row_projection({"kind": "owner_text", "text": "x"}, "mailbox", 1)["author"] == "Owner"
     child = _row_projection(_out(subagent_task_id="c1", parent_task_id="p1"), "chat", 1)["author"]
     assert child.startswith("child c1") and "Ouroboros" not in child
-    assert _row_projection(_out(), "chat", 1)["author"] == "Ouroboros"
+    assert _row_projection(_out(), "chat", 1)["author"] == "Ouroboros (task t1)"
     assert _row_projection({"direction": "system", "type": "cancel_receipt", "text": "x"}, "chat", 1)["author"] == "host"
     assert _row_projection({"direction": "in", "text": "hi"}, "chat", 1)["author"] == "User"
 

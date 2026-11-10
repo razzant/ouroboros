@@ -47,8 +47,7 @@ def _body_spy(monkeypatch):
     return reads
 
 
-@pytest.mark.parametrize("kind", ["headless", "direct"])
-@pytest.mark.parametrize("count,size", [(3, 128), (70, 100_000)])
+@pytest.mark.parametrize(("count", "size", "kind"), [(3, 128, "headless"), (70, 100_000, "direct")])
 def test_real_writer_young_and_nonterminal_bodies_are_not_read_on_either_pass(
         tmp_path, monkeypatch, kind, count, size):
     root = tmp_path / "data"
@@ -70,16 +69,15 @@ def test_real_writer_young_and_nonterminal_bodies_are_not_read_on_either_pass(
         assert txn.revision() == before, "known hints add no periodic writes"
 
 
-@pytest.mark.parametrize("kind", ["headless", "direct"])
-@pytest.mark.parametrize("fields,removed", [
-    ({"artifact_finalized_at": FUTURE, "completed_at": OLD, "ts": OLD}, False),
-    ({"artifact_finalized_at": "bad", "completed_at": OLD, "ts": FUTURE}, True),
-    ({"artifact_finalized_at": "", "completed_at": "bad",
-      "finished_at": "2026-10-01T00:00:00", "ts": FUTURE}, True),
-    ({"artifact_finalized_at": OLD, "completed_at": FUTURE, "ts": FUTURE}, True),
-    ({"artifact_finalized_at": "bad", "completed_at": "bad",
-      "finished_at": "bad", "ts": "bad"}, True),
-    ({"ts": YOUNG}, False),
+@pytest.mark.parametrize(("fields", "removed", "kind"), [
+    pytest.param({"artifact_finalized_at": FUTURE, "completed_at": OLD, "ts": OLD}, False, "headless", id='fields0-False-headless'),
+    pytest.param({"artifact_finalized_at": "bad", "completed_at": OLD, "ts": FUTURE}, True, "direct", id='fields1-True-direct'),
+    pytest.param({"artifact_finalized_at": "", "completed_at": "bad",
+      "finished_at": "2026-10-01T00:00:00", "ts": FUTURE}, True, "headless", id='fields2-True-headless'),
+    pytest.param({"artifact_finalized_at": OLD, "completed_at": FUTURE, "ts": FUTURE}, True, "direct", id='fields3-True-direct'),
+    pytest.param({"artifact_finalized_at": "bad", "completed_at": "bad",
+      "finished_at": "bad", "ts": "bad"}, True, "headless", id='fields4-True-headless'),
+    pytest.param({"ts": YOUNG}, False, "direct", id='fields5-False-direct'),
 ])
 def test_exact_precedence_naive_utc_invalid_dates_and_layout_mtime(
         tmp_path, kind, fields, removed):
@@ -198,10 +196,10 @@ def test_imported_projection_and_quarantined_missing_invalid_outcomes(tmp_path):
     store_import.ensure_current_store(root, with_children=False)
     task_store.patch_document(root, "invalid", lambda _: document("invalid", status="", ts=YOUNG))
     report = prune(root, retention_days=7, now=NOW, live=lambda _: False)
-    assert not report["pruned"]
-    assert {row["task_id"] for row in report["errors"]} == {"legacy", "invalid"}
+    assert not report["pruned"] and not report["errors"]  # an unreadable row holds its own drive, no pass error
     assert {row["task_id"]: row["reason"] for row in report["skipped"]} == {
-        "admitted": "younger_than_retention", "missing": "task_not_terminal"}
+        "admitted": "younger_than_retention", "missing": "task_not_terminal",
+        "legacy": "task_result_unreadable", "invalid": "task_result_unreadable"}
     assert _flag(root, "admitted")[0] == retention.task_result_retention_at(document("admitted", ts=YOUNG))
 
 

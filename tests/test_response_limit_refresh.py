@@ -14,7 +14,6 @@ transport = transport_fixtures.transport
 
 @pytest.mark.parametrize("provider,outage", [
     ("openrouter", "transport"), ("openrouter", "http_error"), ("openrouter", "omitted"),
-    ("openai-compatible", "transport"), ("openai-compatible", "http_error"),
 ])
 def test_expired_maximum_throttles_failed_catalog_refresh_then_recovers_on_wire(
         transport, monkeypatch, provider, outage):

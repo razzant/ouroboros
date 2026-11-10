@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
+import { askEvidence } from '../modules/plan_record_presentation.js';
 import {
     mergeReviewGroup,
     planReviewGroupFromTaskDetail,
@@ -198,4 +200,154 @@ test('a detail without the host fold never claims "no open objection", and an un
     const named = planReviewGroupFromTaskDetail({ task_id: 'root', status: 'running', plan_record: record,
         plan_objections: fold({}, [], { legacy_unreadable: { source: 'plan_review_state', error: 'ValueError: PLAN_REVIEW_STATE_INVALID' } }) }, 'root');
     assert.match(named.attempts[0].detailText, /earlier plan-review state unreadable \(plan_review_state\): ValueError: PLAN_REVIEW_STATE_INVALID/);
+});
+
+test('pending room preparation stays qualified before a dispatch outcome, including a known pending seat', () => {
+    const inline = { conversation_rows: 2, conversation_inline_rows: 2, other_rows: 1 };
+    for (const unresolved of [false, true]) {
+        const participant = { ...answered('pending', 'm/a', {}), status: 'pending', unresolved, room_delivery: inline };
+        const record = { schema_version: 3, revisions: RECORD.revisions, asks: [
+            { ask_id: 'a1', revision: 2, host_added: [], participants: [participant] },
+        ] };
+        const group = planReviewGroupFromTaskDetail({ task_id: 'root', status: 'running', plan_record: record, plan_objections: fold() }, 'root');
+        assert.match(group.attempts.at(-1).detailText, /counted for a delivery that may not have been sent/);
+    }
+});
+
+test('Record facts say what the room gave each seat and what its file reads covered, apart and without a judgement', () => {
+    const inline = { conversation_rows: 19, conversation_inline_rows: 19, other_rows: 481 };
+    const record = { schema_version: 3, revisions: RECORD.revisions, asks: [
+        { ask_id: 'a1', ts: '2026-10-15T02:05:00+00:00', revision: 2, message: '', host_added: [], participants: [
+            answered('unread', 'm/a', {}, { retrieves: true, room_delivery: inline, host_file_read_attestation: 'host_observed',
+                room_read_coverage: { status: 'incomplete', covered_chars: 0, complete_chars: 52340, provenance: 'host_observed' } }),
+            answered('part', 'm/b', {}, { retrieves: true, room_delivery: { ...inline, conversation_inline_rows: 7 },
+                room_read_coverage: { status: 'incomplete', covered_chars: 12000, complete_chars: 52340, provenance: 'host_observed' } }),
+            answered('session', 'm/c', {}, { retrieves: true, room_delivery: inline,
+                room_read_coverage: { status: 'complete', covered_chars: 52340, complete_chars: 52340, provenance: 'harness_observed' } }),
+            answered('unobserved', 'm/d', {}, { retrieves: true, room_delivery: inline, host_file_read_attestation: 'unobserved' }),
+            answered('packet', 'm/e', {}, { retrieves: false, room_delivery: { conversation_rows: 2, conversation_inline_rows: 2, other_rows: 0 } }),
+            answered('older', 'm/f', {}),
+            // What an older projector could store: a blank 0 of N, and a paged brief's numbers with no provenance.
+            answered('blank', 'm/g', {}, { room_read_coverage: { status: '', covered_chars: 0, complete_chars: 1234, provenance: '' } }),
+            answered('brief', 'm/h', {}, { room_read_coverage: { status: 'incomplete', covered_chars: 10, complete_chars: 900000, provenance: '' } }),
+        ] },
+    ] };
+    const group = planReviewGroupFromTaskDetail({ task_id: 'root', status: 'done', plan_record: record, plan_objections: fold() }, 'root');
+    const facts = group.attempts.at(-1).detailText.split('\n');
+    assert.ok(facts.includes('Participant unread room: 19 of 19 conversation rows inline, 481 other rows only in the snapshot file · file reads covered 0 of 52,340 characters · observed by the host'));
+    assert.ok(facts.includes('Participant part room: 7 of 19 conversation rows inline, 481 other rows only in the snapshot file · file reads covered 12,000 of 52,340 characters · observed by the host'));
+    assert.ok(facts.includes('Participant session room: 19 of 19 conversation rows inline, 481 other rows only in the snapshot file · file reads covered 52,340 of 52,340 characters · inferred from the harness journal'));
+    // What nothing measured says nothing: never 0 of N, and an older record gains no line.
+    assert.ok(facts.includes('Participant unobserved room: 19 of 19 conversation rows inline, 481 other rows only in the snapshot file'));
+    assert.ok(facts.includes('Participant packet room: 2 of 2 conversation rows inline'));
+    for (const seat of ['older', 'blank', 'brief']) assert.ok(!facts.some((line) => line.startsWith(`Participant ${seat} room`)), seat);
+    assert.ok(!facts.join('\n').includes('%'));
+    // These facts move no state, tone or verdict, and a read of nothing is no objection.
+    assert.equal(group.verdict, 'no open objection');
+    assert.equal(group.tone, 'done');
+    assert.equal(group.attempts.at(-1).tone, 'done');
+    assert.equal(group.attempts.at(-1).verdict, 'no objection');
+    const html = renderReviewsSection([group], { sectionExpanded: true, expandedGroups: new Set([group.id]),
+        expandedAttempts: new Set(group.attempts.map((a) => `${group.id}:${a.id}`)) });
+    assert.match(html, /<dt>Participant unread room<\/dt><dd>19 of 19 conversation rows inline, 481 other rows only in the snapshot file · file reads covered 0 of 52,340 characters · observed by the host<\/dd>/);
+});
+
+// An ask whose evidence was mixed, as plan_task records it: an own artifact at its real absolute address (attached
+// whole, and listed twice), a helper's saved result, the settings file (refused), a link (never fetched), a large file
+// (its head) and a chat range whose history has a gap (attached, in part).
+const LONG = '/Users/owner/Ouroboros/data/task_results/artifacts/example-task/source_handles/context_checkpoints/'
+    + `plan-revision-0003-${'a'.repeat(64)}.json`;
+const MIXED_ASK = {
+    ask_id: 'a3', ts: '2026-10-15T03:05:00+00:00', revision: 2, message: 'Mixed evidence.', host_added: [],
+    attach: [LONG, 'task:helper-1', LONG, '/Users/owner/Ouroboros/data/settings.json', 'https://example.com/spec',
+        'docs/CHECKLISTS.md', 'chat:7::lines=1-40'],
+    attached: [{ locator: LONG, sha256: 'a'.repeat(64), bytes: 11352 }, { locator: 'task:helper-1', sha256: 'b'.repeat(64), bytes: 812 },
+        { locator: 'docs/CHECKLISTS.md', sha256: 'c'.repeat(64), bytes: 170512, ref: { root: 'artifact_store', path: 'x.txt' } },
+        { locator: 'chat:7::lines=1-40', sha256: 'd'.repeat(64), bytes: 52340 }],
+    omissions: [{ locator: LONG, reason: 'duplicate_locator' }, { locator: '/Users/owner/Ouroboros/data/settings.json', reason: 'denied_path' },
+        { locator: 'https://example.com/spec', reason: 'url_not_fetched' }, { locator: 'docs/CHECKLISTS.md', reason: 'truncated_to_40000' },
+        { locator: 'chat:7::lines=1-40', reason: 'chat_history_gap:mailbox_incomplete' }],
+    participants: [answered('triad_a', 'm/a', { prose: 'Read what came.' })],
+};
+
+test('an ask names what it attached, whole or in part, apart from what it did not, and a cut never counts as a failure', () => {
+    const record = { schema_version: 3, revisions: RECORD.revisions, asks: [MIXED_ASK] };
+    const group = planReviewGroupFromTaskDetail({ task_id: 'root', status: 'done', plan_record: record, plan_objections: fold() }, 'root');
+    const ask = group.attempts.at(-1);
+    // The opened row's one sentence counts locators: the repeat is one item attached whole, the head and the gapped
+    // range are attached in part, the refused file and the link are not attached.
+    assert.equal(ask.evidenceNotice, 'Evidence for this ask: 2 of 6 attached whole, 2 in part, 2 not attached.');
+    const facts = ask.detailText.split('\n');
+    const at = facts.indexOf('Ask a3 evidence: prepared for its participants: 2 of 6 attached whole, 2 in part, 2 not attached');
+    assert.ok(at > 0, ask.detailText);
+    assert.deepEqual(facts.slice(at + 1, at + 7), [
+        `Ask a3 attached: ${LONG} · source 11,352 bytes · listed more than once (duplicate_locator) · sha256 ${'a'.repeat(64)}`,
+        `  task:helper-1 · source 812 bytes · sha256 ${'b'.repeat(64)}`,
+        `  docs/CHECKLISTS.md · in part: the first 40,000 of 170,512 bytes (truncated_to_40000) · sha256 ${'c'.repeat(64)}`,
+        `  chat:7::lines=1-40 · source 52,340 bytes · in part: the conversation history has a gap (chat_history_gap:mailbox_incomplete) · sha256 ${'d'.repeat(64)}`,
+        'Ask a3 not attached: /Users/owner/Ouroboros/data/settings.json · settings or runtime data outside this task\'s own stores (denied_path)',
+        '  https://example.com/spec · a link: links are listed, never fetched (url_not_fetched)',
+    ]);
+    // Evidence moves no state, tone or verdict.
+    assert.equal(ask.verdict, 'no objection');
+    assert.equal(ask.tone, 'done');
+    const html = renderReviewsSection([group], { sectionExpanded: true, expandedGroups: new Set([group.id]) });
+    const row = html.match(/<div class="review-attempt" data-review-attempt="plan:root:ask:a3">[\s\S]*?<div class="review-seat"/)[0];
+    assert.match(row, /<p class="review-ask-line">[^<]*<\/p><p class="review-line review-line-whole"><span class="review-line-text">Evidence for this ask: 2 of 6 attached whole, 2 in part, 2 not attached\.<\/span><\/p>/);
+    assert.doesNotMatch(row, /settings\.json|example\.com|truncated_to|denied_path/);  // which and why stay in Record facts
+    const dl = html.match(/<details class="review-facts"[\s\S]*?<\/details>/)[0];
+    assert.ok(dl.includes(`<dt>Ask a3 attached</dt><dd>${LONG} · source 11,352 bytes`), dl);
+    assert.match(dl, /<dt>Ask a3 not attached<\/dt><dd>\/Users\/owner\/Ouroboros\/data\/settings\.json · [^<]*\nhttps:\/\/example\.com\/spec · /);
+});
+
+test('an older ask says what it did not record, never that nothing attached, and a complete ask adds no sentence', () => {
+    const asks = [
+        { ask_id: 'old', ts: '2026-10-15T01:05:00+00:00', revision: 1, message: '', host_added: [], participants: [answered('triad_a', 'm/a', {})] },
+        { ask_id: 'cut', ts: '2026-10-15T01:06:00+00:00', revision: 1, message: '', host_added: [], attach: ['a.md', 'b.md'],
+            attached: [{ locator: 'a.md', sha256: 'e'.repeat(64), bytes: 9 }], participants: [answered('triad_a', 'm/a', {})] },
+        { ask_id: 'named', ts: '2026-10-15T01:07:00+00:00', revision: 1, message: '', host_added: [], attach: ['a.md'],
+            participants: [answered('triad_a', 'm/a', {})] },
+        { ask_id: 'whole', ts: '2026-10-15T01:08:00+00:00', revision: 1, message: '', host_added: [], attach: ['a.md'],
+            attached: [{ locator: 'a.md', sha256: 'e'.repeat(64), bytes: 9 }], omissions: [], participants: [answered('triad_a', 'm/a', {})] },
+        { ask_id: 'none', ts: '2026-10-15T01:09:00+00:00', revision: 1, message: '', host_added: [], attach: [], attached: [], omissions: [],
+            participants: [answered('triad_a', 'm/a', {})] },
+    ];
+    const group = planReviewGroupFromTaskDetail({ task_id: 'root', status: 'done', plan_record: { schema_version: 3, revisions: RECORD.revisions, asks }, plan_objections: fold() }, 'root');
+    const [old, cut, named, whole, none] = group.attempts.slice(1);
+    assert.match(old.detailText, /^Ask old evidence: not recorded$/m);
+    assert.doesNotMatch(old.detailText, /0 of|attached whole|nothing/);
+    // What attached is known, why the other is not: it reads as not attached with its reasons not recorded.
+    assert.equal(cut.evidenceNotice, 'Evidence for this ask: 0 of 2 attached whole, 1 attached, completeness not recorded, 1 not attached.');
+    assert.match(cut.detailText, /Ask cut attached: a\.md · completeness not recorded/);
+    assert.match(cut.detailText, /^Ask cut not attached: b\.md$/m);
+    assert.match(cut.detailText, /^Ask cut evidence cuts and absences: not recorded$/m);
+    // Only the declaration is known: the row discloses missing preparation facts.
+    assert.equal(named.evidenceNotice, 'Evidence for this ask: 0 of 1 attached whole, 1 not recorded.');
+    assert.match(named.detailText, /^Ask named declared, attachment not recorded: a\.md$/m);
+    assert.match(named.detailText, /^Ask named evidence: prepared for its participants: 0 of 1 attached whole, 1 not recorded$/m);
+    assert.equal(whole.evidenceNotice, '');
+    assert.match(whole.detailText, /^Ask whole attached: a\.md · source 9 bytes · sha256 e{64}$/m);
+    assert.equal(none.evidenceNotice, '');
+    assert.doesNotMatch(none.detailText, /evidence|attached/);
+    const html = renderReviewsSection([group], { sectionExpanded: true, expandedGroups: new Set([group.id]) });
+    assert.equal((html.match(/Evidence for this ask:/g) || []).length, 2);
+});
+
+
+test('a declared locator missing both preparation rows stays unknown and visible', () => {
+    const asks = [{ ask_id: 'gap', revision: 1, attach: ['unresolved.md'], attached: [], omissions: [], participants: [] }];
+    const group = planReviewGroupFromTaskDetail({ task_id: 'root', status: 'done', plan_record: { schema_version: 3, revisions: RECORD.revisions, asks }, plan_objections: fold() }, 'root');
+    const ask = group.attempts.at(-1);
+    assert.equal(ask.evidenceNotice, 'Evidence for this ask: 0 of 1 attached whole, 1 not recorded.');
+    assert.match(ask.detailText, /declared, attachment not recorded: unresolved\.md/);
+});
+
+test('the browser classifies every shared evidence case as the host does', () => {
+    // One table with tests/test_plan_record.py (plan_record.ask_evidence): the two classifiers cannot drift apart.
+    const { cases } = JSON.parse(readFileSync(new URL('./fixtures/plan_ask_evidence_parity.json', import.meta.url), 'utf8'));
+    assert.ok(cases.length >= 9);
+    for (const row of cases) {
+        const { recorded, counts, items } = askEvidence(row.ask);
+        assert.deepEqual({ recorded, counts, items: items.map((item) => [item.locator, item.state, item.reasons]) }, row.expected, row.name);
+    }
 });

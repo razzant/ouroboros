@@ -24,7 +24,6 @@ import uuid
 import pytest
 
 pytestmark = [
-    pytest.mark.serial,
     pytest.mark.skipif(
         sys.platform != "win32" or os.environ.get("OUROBOROS_WINDOWS_DESKTOP_QA") != "1",
         reason="needs an interactive Windows desktop and OUROBOROS_WINDOWS_DESKTOP_QA=1",

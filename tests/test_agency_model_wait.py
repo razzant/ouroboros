@@ -10,11 +10,13 @@ from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests.test_llm_claudexor import MODEL, ledger
 from tests.test_model_wait import _refusal, live_wait, setup  # noqa: F401 - pytest fixtures
 
-pytestmark = pytest.mark.serial
 
 
-@pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
-@pytest.mark.parametrize("code", ["auth_required", "subscription_window_exhausted", "credential_pool_exhausted"])
+@pytest.mark.parametrize(("code", "mode"), [
+    ("auth_required", "advanced"),
+    ("subscription_window_exhausted", "cyber_pro"),
+    ("credential_pool_exhausted", "cyber_pro"),
+])
 def test_resource_refusal_does_not_suspend_cyber_execution(live_wait, tmp_path, monkeypatch, mode, code):  # noqa: F811 - pytest fixture
     root, transport, client, controller, _events, _decide = live_wait
     refusal = _refusal(code)
@@ -69,6 +71,8 @@ def test_resource_refusal_does_not_suspend_cyber_execution(live_wait, tmp_path, 
 
 
 def test_explicit_local_safety_keeps_precedence_over_subscription_name(monkeypatch):
+    # A Light of its own on the local lane: the real slot label routes it local before the subscription branch.
+    monkeypatch.setenv("OUROBOROS_MODEL_SAFETY", "")
+    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", MODEL)
     monkeypatch.setenv("USE_LOCAL_LIGHT", "true")
-    monkeypatch.setattr(safety, "get_safety_model", lambda: MODEL)
     assert safety._resolve_safety_routing() == (True, False, None)

@@ -33,7 +33,7 @@ function inertElement() {
     const listeners = new Map();
     const target = {
         innerHTML: '', textContent: '', value: '', hidden: false, disabled: false, checked: false,
-        dataset: {}, style: {}, classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+        dataset: {}, style: { setProperty() {} }, classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
         children: [], childNodes: [], attributes: [], firstElementChild: null,
         addEventListener(type, fn) { listeners.set(type, fn); },
         removeEventListener() {},
@@ -132,6 +132,7 @@ async function withWizard(bootstrap, query, body, { fetch, location, prepare } =
     install('setInterval', win.setInterval);
     install('clearTimeout', win.clearTimeout);
     install('clearInterval', win.clearInterval);
+    install('ResizeObserver', class { observe() {} disconnect() {} });
     try {
         // A ReferenceError here is the exact failure that shipped in 6.113.3–6.114.0.
         await import(`../modules/onboarding_wizard.js?${query}`);
@@ -372,7 +373,7 @@ test('an unknown save keeps the draft; Check status reads back THIS attempt, whi
         // "Check status" is the ONE primary action while the outcome is unknown; the re-submit stays offered,
         // as an explicit secondary "Retry save" (rc.15 review MINOR 3).
         assert.match(html, /class="btn btn-primary" id="check-save-btn"[^>]*>Check status</);
-        assert.match(html, /class="btn btn-secondary" id="next-btn"[^>]*>Retry save</);
+        assert.match(html, /class="btn btn-default" id="next-btn"[^>]*>Retry save</);
         assert.equal((html.match(/btn-primary/g) || []).length, 1, 'exactly one primary action');
 
         doc.getElementById('check-save-btn').fire('click');
@@ -658,7 +659,8 @@ test('the summary step stages the language and applies it only after the complet
     assert.match(source, /stage: \(value\) => \{ state\.languageChoice = value; \} \}\)/);
     const complete = source.indexOf('const result = await completeOnboardingAtomically(payload);');
     const apply = source.indexOf('await applyStagedLanguage();', complete);
-    const announce = source.indexOf('announceCompletion(result);', complete);
+    // The hand-off runs through the Consciousness row's afterSave (#1603), which announces last.
+    const announce = source.indexOf('announce: () => announceCompletion(result)', complete);
     assert.ok(complete > 0 && apply > complete && announce > apply, 'complete → apply the staged language → announce');
     assert.match(source, /await saveLanguageChoice\(choice\)/, 'the shared writer, not a second path');
     // The other verified-success path — an unknown save whose own receipt the attempt read-back returned —
@@ -763,6 +765,71 @@ test('the summary warns, and still offers Start, when Blocking review has no rev
     }
 });
 
+// Audit 05.11 item 13: with a subscription, Summary says what an exhausted quota does. A set Fallback continues the
+// work before any wait (PR #1443); without one the work waits for the reset. A model row names its source in words.
+test('Summary says what an exhausted subscription quota does, with and without a Fallback', async () => {
+    const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
+    const fetch = async (url, init = {}) => {
+        let body = {};
+        if (String(url) === '/api/model-catalog') body = subscription.catalog;
+        else if (String(url) === '/api/claudexor/status') body = subscription.status;
+        else if (String(url) === '/api/onboarding/subagents/preview') {
+            const payload = JSON.parse(init.body);
+            body = { ok: true, available_subagents: { enabled: true, items: [] },
+                model_settings: Object.fromEntries(Object.keys(subscription.preview.model_settings).map((key) => [key, payload[key]])) };
+        }
+        return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+    };
+    const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+    // Walk from Accounts (where the connected subscription is observed) to Summary.
+    const summary = async (query, fallbackModel, mainModel = 'claudexor::codex=gpt-test', openrouterKey = '') => {
+        let html = '', budget = '';
+        const bootstrap = { ...BOOTSTRAP, initialState: { ...BOOTSTRAP.initialState, openrouterKey, mainModel, fallbackModel, automaticModels: [] } };
+        await withWizard(bootstrap, query, async ({ doc }) => {
+            await settle();
+            for (let step = 0; step < 4; step += 1) {
+                doc.getElementById('next-btn').fire('click');
+                await settle();
+                if (step === 2) budget = doc.getElementById('root').innerHTML;  // the Budget step's quota card
+            }
+            html = doc.getElementById('root').innerHTML;
+        }, { fetch });
+        return { html, budget };
+    };
+    const waits = await summary('quota-without-fallback', '');
+    assert.match(waits.html, /When quota runs out[\s\S]*?Waits for the reset, then continues/);
+    assert.match(waits.html, /Codex · gpt-test · Auto rotation/, 'a subscription source by its catalog label, not its id');
+    assert.match(waits.budget, /If the pool is exhausted, Ouroboros waits for the reset\./, 'no Fallback is promised when none is set');
+    const routed = await summary('quota-with-fallback', 'openai/gpt-5.6-luna');
+    assert.match(routed.html, /When quota runs out[\s\S]*?Tries the Fallback, then waits for the reset/);
+    assert.match(routed.html, /OpenRouter · openai\/gpt-5\.6-luna/, 'the Fallback row names its source in words');
+    assert.match(routed.budget, /If the pool is exhausted, the Fallback models go first, then Ouroboros waits for the reset\./);
+    for (const { html } of [waits, routed]) assert.doesNotMatch(html, /wait and auto-continue on reset/);
+    // Codex connected while every slot runs on an API route: no quota serves a model, so no such row.
+    const api = await summary('quota-api-main', '', 'google/gemini-3.8-flash', 'sk-or-v1-test-not-a-secret');
+    assert.match(api.html, /Total API budget/, 'the walk reached Summary');
+    assert.doesNotMatch(api.html, /When quota runs out/);
+});
+
+// Review R1 (C3): a model the local runtime serves is named Local in Summary, never by the cloud source its stored id implies.
+test('Summary names a model the local runtime serves as Local, and a cloud one by its source', async () => {
+    const summary = async (query, localRoutingMode) => {
+        let html = '';
+        const bootstrap = { ...BOOTSTRAP, stepOrder: ['summary', ...BOOTSTRAP.stepOrder.filter((step) => step !== 'summary')],
+            initialState: { ...BOOTSTRAP.initialState, localSource: '/models/local-test.gguf', localRoutingMode,
+                mainModel: 'google/gemini-3.8-flash', fallbackModel: 'openai/gpt-5.6-luna', automaticModels: [] } };
+        await withWizard(bootstrap, query, ({ doc }) => { html = doc.getElementById('root').innerHTML; });
+        return html;
+    };
+    const row = (html, label) => html.match(new RegExp(`<strong>${label}</strong>\\s*<span>([^<]*)`))?.[1] || '';
+    const all = await summary('local-all-summary', 'all');
+    assert.match(row(all, 'Main'), /^Local · google\/gemini-3\.8-flash/);
+    assert.match(row(all, 'Fallback'), /^Local · openai\/gpt-5\.6-luna/);
+    const fallbackOnly = await summary('local-fallback-summary', 'fallback');
+    assert.match(row(fallbackOnly, 'Main'), /^OpenRouter · google\/gemini-3\.8-flash/);
+    assert.match(row(fallbackOnly, 'Fallback'), /^Local · openai\/gpt-5\.6-luna/);
+});
+
 // PR #1560: walk the real wizard from Accounts to the completion POST. A fresh Z.ai-only
 // setup saves the provider's image-capable Vision; an owner's edit and an existing
 // install's saved value, blank included, are what gets saved instead.
@@ -850,7 +917,7 @@ test('an owner who clears or replaces the recommended Vision keeps that choice a
 test('a reopened wizard saves an existing install\'s Vision as it was, blank or custom', async () => {
     for (const saved of ['', 'zai::glm-ocr']) {
         const initialState = { ...BOOTSTRAP.initialState, zaiKey: BOOTSTRAP.secretPlaceholder, mainModel: 'zai::glm-5.3',
-            lightModel: 'zai::glm-5.3-flash', fallbackModel: 'zai::glm-5.3-flash', visionModel: saved };
+            lightModel: 'zai::glm-5.3-flash', fallbackModel: 'zai::glm-5.3-flash', visionModel: saved, automaticModels: [] };
         const body = await finishFromAccounts({ ...BOOTSTRAP, freshInstall: false, initialState }, `zai-existing-${saved || 'blank'}`);
         assert.equal(body.OUROBOROS_MODEL_VISION, saved);
     }
@@ -939,7 +1006,7 @@ test('a fresh local-only setup saves Light and Fallbacks that follow the local M
         models: { 'light-model': 'owner-light' } });
     assert.deepEqual([edited.OUROBOROS_MODEL_LIGHT, edited.OUROBOROS_MODEL_FALLBACKS], ['owner-light', '']);
     const initialState = { ...BOOTSTRAP.initialState, localSource: '/models/local-test.gguf', localRoutingMode: 'all',
-        mainModel: 'owner-main', lightModel: 'owner-light', fallbackModel: 'owner-fallback' };
+        mainModel: 'owner-main', lightModel: 'owner-light', fallbackModel: 'owner-fallback', automaticModels: [] };
     const reopened = await finishFromAccounts({ ...BOOTSTRAP, freshInstall: false, initialState }, 'local-only-saved');
     assert.deepEqual([reopened.OUROBOROS_MODEL, reopened.OUROBOROS_MODEL_LIGHT, reopened.OUROBOROS_MODEL_FALLBACKS],
         ['owner-main', 'owner-light', 'owner-fallback']);

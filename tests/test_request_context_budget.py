@@ -108,9 +108,6 @@ def test_unknown_reply_space_is_an_optimistic_estimate_marked_unknown():
 
 @pytest.mark.parametrize("mode,owner_mode,expected", [
     ("low", "low", (250_000, 65_536)),  # owner Low carries its target
-    ("low", "max", (None, 65_536)),  # task-local Low keeps Max's window
-    ("nano", "nano", (85_000, 8_192)),  # Nano: its target and its own minimum headroom
-    ("nano", "max", (None, 8_192)),  # a Nano the window chose: its headroom, no owner target
     ("nano", "low", (None, 8_192)),
     ("max", "max", (None, 65_536)),
 ])

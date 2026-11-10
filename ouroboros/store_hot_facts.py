@@ -9,7 +9,12 @@ The request snapshot is short lived and released before any consumer runs.
 The schema gate adds the columns without decoding bodies. ``run_hot_facts`` classifies
 underived rows under a sequence/source CAS, so a racing writer's row is left to that
 writer and a damaged input waits for its own change; a body that is not its own task's
-object (``own_document``) is such input and derives nothing, never another task's root.
+object, or whose status the writer refuses (``own_document``), is such input and derives
+nothing, never another task's root.
+The pass names each damaged row (``damaged``, the first also ``waiting_on``), still derives the
+independent rows after it and never reads a named row again while it is unchanged, then fails. The
+dispatcher's look (``hot_facts_due``) compares current facts through the partial indexes: exactly those
+rows, unchanged, are no work; any other underived row, or a change to a named one, is.
 Stop's membership probe is the indexed root set plus parent ancestry, queue-only bridges
 included. The census copies its queue and owner registries before its one short
 transaction per addressed store.
@@ -22,7 +27,6 @@ import copy
 import hashlib
 import json
 import os
-import sqlite3
 from typing import Any
 
 from ouroboros import store_task_cards
@@ -30,18 +34,29 @@ from ouroboros.utils import machine_json
 
 VERSION = 6
 LIST_VERSION = 9
+ORIGIN_VERSION = 10
+CHAT_VERSION = 11
+VERSIONS = (VERSION, LIST_VERSION, ORIGIN_VERSION, CHAT_VERSION)  # each schema step that adds these columns
 JOB = "hot_facts"
 TASK_COLUMNS = {
     "owner_pause_state": "TEXT", "owner_pause_fence_id": "TEXT", "owner_pause_facts": "TEXT",
     "budget_pause_state": "TEXT", "budget_pause_attempt": "INTEGER", "budget_pause_facts": "TEXT",
     "post_task_synthesis": "TEXT", "owner_wait_state": "TEXT", "owner_wait_reason": "TEXT",
     "control_valid": "INTEGER", "list_stable": "INTEGER",
+    # The owner message the task's own top-level ``origin_message_ref`` names (``dialogue_store.origin_key``),
+    # "" for none: discovery for the Host Service operation reader (``task_store.origin_documents``), never authority.
+    "origin": "TEXT",
+    # The chat the task was admitted in, as the room rule reads it (``admitted_chat``), "" for none.
+    "chat_id": "TEXT",
 }
+SELECTION_COLUMNS = ("list_stable", "origin", "chat_id")  # selection, discovery and room facts no control reader needs
 CUSTODY_COLUMNS = {
     "root_task_id": "TEXT", "billing_group_id": "TEXT", "output_unread": "INTEGER",
     "payload_held": "INTEGER", "facts_derived": "INTEGER", "write_seq": "INTEGER NOT NULL DEFAULT 0",
 }
-TASK_UNDERIVED = " OR ".join(f"{name} IS NULL" for name in (*TASK_COLUMNS, "root_task_id"))
+# An older body's INDEXED BY probes name this predicate on a shared store: a later column keeps its own index.
+OWN_UNDERIVED = {"origin": "tasks_underived_origin", "chat_id": "tasks_underived_chat"}
+TASK_UNDERIVED = " OR ".join(f"{name} IS NULL" for name in (*TASK_COLUMNS, "root_task_id") if name not in OWN_UNDERIVED)
 CUSTODY_UNDERIVED = "facts_derived IS NULL"
 REQUEST_SETS = ("custody_open", "custody_refused")
 REQUEST_UNDERIVED = "set_name IN ('custody_open','custody_refused') AND request_root_task_id IS NULL"
@@ -49,6 +64,8 @@ INDEXES = (
     f"CREATE INDEX IF NOT EXISTS tasks_underived_hot ON tasks(task_id) WHERE {TASK_UNDERIVED}",
     "CREATE INDEX IF NOT EXISTS tasks_list_stable ON tasks(list_stable, status, ts, task_id)",
     "CREATE INDEX IF NOT EXISTS tasks_underived_root ON tasks(task_id) WHERE root_task_id IS NULL",
+    "CREATE INDEX IF NOT EXISTS tasks_origin ON tasks(origin) WHERE origin<>''",
+    *(f"CREATE INDEX IF NOT EXISTS {index} ON tasks(task_id) WHERE {name} IS NULL" for name, index in OWN_UNDERIVED.items()),
     "CREATE INDEX IF NOT EXISTS tasks_owner_pause ON tasks(owner_pause_state, task_id) WHERE owner_pause_state<>''",
     "CREATE INDEX IF NOT EXISTS tasks_budget_pause ON tasks(budget_pause_state, task_id) WHERE budget_pause_state<>''",
     "CREATE INDEX IF NOT EXISTS tasks_phase ON tasks(post_task_synthesis, task_id) WHERE post_task_synthesis<>''",
@@ -91,20 +108,70 @@ def upgrade(txn) -> None:
     txn.conn.execute("DROP INDEX IF EXISTS tasks_underived_hot")
     for sql in (*INDEXES, INVALIDATE_CUSTODY, INVALIDATE_REQUEST):
         txn.conn.execute(sql)
-    owed = any(txn.conn.execute(f"SELECT 1 FROM {table} INDEXED BY {index} WHERE {where} LIMIT 1").fetchone()
-               for table, index, where in _UNDERIVED_PROBES)  # a fresh store has nothing to classify
+    owed = not _settled(txn, {})  # a fresh store has nothing to classify
     txn.set_meta("job:" + JOB, {"state": "pending" if owed else "done", "cursor": None, "done": 0, "total": None})
 
 
-_UNDERIVED_PROBES = (("tasks", "tasks_underived_hot", TASK_UNDERIVED),
-                     ("custody_runs", "custody_underived_hot", CUSTODY_UNDERIVED),
-                     ("obligations", "custody_request_underived", REQUEST_UNDERIVED))
+# Each family of derivable rows: its table, identity, the (underived predicate, partial index) probes that
+# select its rows without visiting a derived one, and the source stamp its compare-and-set holds.
+_FAMILIES = {
+    "tasks": ("tasks", "task_id", ((TASK_UNDERIVED, "tasks_underived_hot"),
+                                   *((f"{name} IS NULL", index) for name, index in OWN_UNDERIVED.items())), "write_seq"),
+    "custody_runs": ("custody_runs", "run_id", ((CUSTODY_UNDERIVED, "custody_underived_hot"),), "write_seq"),
+    **{name: ("obligations", "id", ((f"{REQUEST_UNDERIVED} AND set_name='{name}'", "custody_request_underived"),),
+              "facts") for name in REQUEST_SETS},
+}
+
+
+def _input_stamp(value: Any) -> Any:
+    # Obligation rows have no sequence. Compare their exact source bytes on
+    # write, but retain only their digest in a damaged-input waiting fact.
+    return hashlib.sha256(value.encode("utf-8")).hexdigest() if isinstance(value, str) else value
+
+
+def _underived_rows(txn, scope: str, limit: int, after: str = "") -> list:
+    """``(identity, source stamp)`` of the family's first LIMIT underived rows past AFTER, by identity: each
+    probe reads at most LIMIT index entries, and a row among the union's first LIMIT is among its probe's."""
+    table, identity, probes, stamp = _FAMILIES[scope]
+    rows = {}
+    for where, index in probes:
+        rows.update((row[0], row[1]) for row in txn.conn.execute(
+            f"SELECT {identity},{stamp} FROM {table} INDEXED BY {index} WHERE ({where}) AND {identity}>? "
+            f"ORDER BY {identity} LIMIT ?", (after, limit)))
+    return sorted(rows.items())[:limit]
+
+
+def _settled(txn, damage: dict) -> bool:
+    """Whether the only underived rows are exactly DAMAGE's, each as it was named; bounded by what it names."""
+    for scope in _FAMILIES:
+        held = {key: item["stamp"] for (name, key), item in damage.items() if name == scope}
+        if {key: _input_stamp(stamp) for key, stamp in _underived_rows(txn, scope, len(held) + 1)} != held:
+            return False
+    return True
+
+
+def _unchanged(txn, damage: dict) -> dict:
+    """DAMAGE's rows still underived, each as it was named: a repaired, removed or rewritten row leaves it."""
+    kept = {}
+    for (scope, key), item in damage.items():
+        table, identity, probes, stamp = _FAMILIES[scope]
+        where = " OR ".join(f"({predicate})" for predicate, _index in probes)
+        record = txn.conn.execute(f"SELECT {stamp} FROM {table} WHERE {identity}=? AND ({where})", (key,)).fetchone()
+        if record is not None and _input_stamp(record[0]) == item["stamp"]:
+            kept[(scope, key)] = item
+    return kept
+
+
+def _named_damage(row: dict) -> dict:
+    return {(item["table"], item["id"]): item for item in row.get("damaged") or ()}
 
 
 def own_document(task_id: str, body: Any) -> tuple:
     """``(document, "")`` when the stored BODY is TASK_ID's own JSON object, else ``(None, reason)``:
-    ``body_missing``, ``body_unreadable``, ``body_not_object``, ``identity_missing`` or ``identity_mismatch``.
-    Only such a document may derive this row's facts; another task's body would publish its root."""
+    ``body_missing``, ``body_unreadable``, ``body_not_object``, ``identity_missing``, ``identity_mismatch`` or
+    ``status_unreadable`` (an array or object status: the writer refuses one, ``task_columns`` cannot classify it).
+    Only such a document may derive this row's facts; another task's body would publish its root. A scalar
+    status that is no valid status is still this row's document: it derives a flagged row (``control_valid=0``)."""
     if body is None:
         return None, "body_missing"
     try:
@@ -115,7 +182,18 @@ def own_document(task_id: str, body: Any) -> tuple:
         return None, "body_not_object"
     if str(document.get("task_id") or "") != task_id:
         return None, "identity_mismatch" if document.get("task_id") else "identity_missing"
+    if isinstance(document.get("status"), (dict, list)):
+        return None, "status_unreadable"
     return document, ""
+
+
+def _own_facts(raw: Any) -> tuple:
+    """``(facts, "")`` when a custody or request row's stored text is its JSON object, else ``(None, reason)``."""
+    try:
+        facts = json.loads(raw)
+    except (ValueError, TypeError, RecursionError):
+        return None, "facts_unreadable"
+    return (facts, "") if isinstance(facts, dict) else (None, "facts_not_object")
 
 
 def lineage_root(document: dict) -> str:
@@ -125,7 +203,18 @@ def lineage_root(document: dict) -> str:
                or document["task_id"])
 
 
+def admitted_chat(value: Any) -> str:
+    """A task's own top-level ``chat_id`` as the room rule reads it (``projects_registry._read_lineage``), as the
+    integer's text: an integer or its text, a JSON real's integer part, a boolean's 1 or 0; "" for none or any
+    other value, as the rule's read of the body answered."""
+    try:
+        return "" if value is None or value == "" else str(int(value))
+    except (TypeError, ValueError, OverflowError):
+        return ""
+
+
 def task_columns(document: dict) -> dict:
+    from ouroboros.dialogue_store import origin_key
     from ouroboros.task_status import stored_list_order_is_final
 
     fence = document.get("owner_pause") or {}
@@ -149,6 +238,8 @@ def task_columns(document: dict) -> dict:
         "owner_wait_reason": str(wait.get("reason") or "") if isinstance(wait, dict) else "",
         "control_valid": int(isinstance(document.get("status"), str) and bool(document["status"].strip())),
         "list_stable": int(stored_list_order_is_final(document)),
+        "origin": origin_key(document.get("origin_message_ref")),
+        "chat_id": admitted_chat(document.get("chat_id")),
     }
 
 
@@ -210,9 +301,9 @@ def _read_rows(txn, ids) -> dict:
     if not ids:
         return {}
     modern = int(txn.meta("schema_version") or VERSION) >= VERSION
-    # Control readers do not need list selection; its backfill must not make
-    # already-derived pause/phase facts read bodies again.
-    names = [name for name in TASK_COLUMNS if name != "list_stable"]
+    # Control readers do not need list selection or origin discovery; their backfill
+    # must not make already-derived pause/phase facts read bodies again.
+    names = [name for name in TASK_COLUMNS if name not in SELECTION_COLUMNS]
     columns = "," + ",".join(f"t.{name}" for name in names) if modern else ""
     cards, join = store_task_cards.select(txn)  # the card facts ride the hot row: the census needs no document
     # A derived row answers from its columns alone: the writer derived them from the body it validated in
@@ -301,16 +392,100 @@ def controls(root, task_id: str) -> dict:
             "budget_pause": json.loads(row["budget_pause_facts"])}
 
 
-def underived(root: Any) -> bool:
-    """Whether any row still lacks its hot-fact columns: indexed probes in one read transaction."""
+def statuses(root, task_ids) -> dict:
+    """Each id's stored status in ONE short read, for a pass over many queue rows: the status, ``None``
+    for no row, or the exception a single read of that id raises. No body is decoded for a derived row;
+    a store that cannot answer maps every id to its failure: unknown, never absent."""
     from ouroboros import store
+    from ouroboros.store_import import OCCUPIED
+    from ouroboros.task_results import validate_task_id
 
+    answers: dict = {}
+    ids = []
+    for task_id in task_ids:
+        try:
+            ids.append(validate_task_id(task_id))
+        except ValueError as exc:
+            answers[str(task_id)] = exc
+    if not ids:
+        return answers
+    ids = sorted(set(ids))
     try:
         with store.open_store(root, write=False) as txn:
-            return any(txn.conn.execute(f"SELECT 1 FROM {table} INDEXED BY {index} WHERE {where} LIMIT 1").fetchone()
-                       for table, index, where in _UNDERIVED_PROBES)
-    except sqlite3.OperationalError:
-        return True  # a schema below the hot-fact columns: the runner upgrades it first
+            if int(txn.meta("schema_version") or VERSION) < VERSION:
+                rows = _read_rows(txn, ids)
+            else:
+                rows = {record["task_id"]: dict(record) for record in txn.conn.execute(
+                    "SELECT task_id,status,control_valid FROM tasks WHERE task_id IN (SELECT value FROM json_each(?))",
+                    (json.dumps(ids),))}
+                underived = [tid for tid, row in rows.items() if row["control_valid"] is None]
+                rows.update(_read_rows(txn, underived))  # an older writer's row alone pays its body read
+                occupied = (txn.meta(OCCUPIED) or {}) if set(ids) - rows.keys() else {}
+                rows.update({tid: {"control_valid": 0} if occupied.get(tid) else None for tid in set(ids) - rows.keys()})
+    except Exception as exc:
+        return {**answers, **{tid: exc for tid in ids}}
+    for tid, row in rows.items():
+        if isinstance(row, Exception):
+            answers[tid] = row
+        elif row is not None and not row["control_valid"]:
+            answers[tid] = ValueError(f"task result authority is unreadable or invalid: task:{tid}")
+        else:
+            answers[tid] = None if row is None else row["status"]
+    return answers
+
+
+# A saved cold request or receipt lives on a live pause row (``sleep_custody.accepted_receipt``).
+COLD_CUSTODY_STATES = ("requested", "accepted")
+# Non-ordinary JSON (``machine_json`` may write NaN, which ``json_valid`` rejects) passes: the caller decides.
+_COLD_ROWS = ("SELECT task_id, budget_pause_facts FROM tasks INDEXED BY tasks_budget_pause "
+              "WHERE budget_pause_state<>'' AND budget_pause_state IN ('pausing','paused','resume_granted') "
+              "AND control_valid=1 AND CASE WHEN json_valid(budget_pause_facts) THEN "
+              "json_extract(budget_pause_facts,'$.external_custody.state') IN ('requested','accepted') ELSE 1 END")
+
+
+def cold_custody_rows(root, task_ids) -> dict:
+    """Among ``task_ids``, each pause row carrying a saved cold request or receipt, in ONE indexed read:
+    the cost follows the rows that carry one, never how many ids the caller holds. A row an older writer has not
+    derived pays its own body read; a row whose control facts are invalid answers nothing here, so no
+    acceptance is inferred from it. Raises when the store cannot answer; the caller keeps what it knows."""
+    from ouroboros import store
+
+    wanted = {str(task_id) for task_id in task_ids}
+    with store.open_store(root, write=False) as txn:
+        if int(txn.meta("schema_version") or VERSION) < VERSION:
+            derived, underived = [], sorted(wanted)
+        else:
+            derived = [(row["task_id"], row["budget_pause_facts"]) for row in txn.conn.execute(_COLD_ROWS)
+                       if row["task_id"] in wanted]
+            underived = sorted(wanted & {row["task_id"] for row in txn.conn.execute(
+                f"SELECT task_id FROM tasks INDEXED BY tasks_underived_hot WHERE {TASK_UNDERIVED}")})
+        held = _read_rows(txn, underived)
+    rows = {tid: json.loads(facts) for tid, facts in derived}
+    for tid, row in held.items():
+        if isinstance(row, Exception):
+            raise row
+        if row and row.get("control_valid"):
+            pause = json.loads(row["budget_pause_facts"])
+            if isinstance(pause, dict) and (pause.get("external_custody") or {}).get("state") in COLD_CUSTODY_STATES:
+                rows[tid] = pause
+    return {tid: pause for tid, pause in rows.items() if isinstance(pause, dict)}
+
+
+def hot_facts_due(root: Any, row: dict, child: bool) -> bool:
+    """Whether a pass has work, from current facts (``maintenance._hot_facts_due``): indexed probes in one read
+    transaction, no body read. A store below the column is owed: the runner upgrades it first. A pass that
+    finished named its damage (``damage_only``): exactly those rows, unchanged, are no work, for any process.
+    A pass that stopped on a fault proves nothing about the rest: it spawns nothing itself and runs again
+    whenever the child runs (``child``), as a repeated fault would otherwise spawn it on every look."""
+    from ouroboros import store
+
+    with store.open_store(root, write=False) as txn:
+        schema = txn.meta("schema_version")
+        if schema is not None and int(schema) < VERSIONS[-1]:
+            return True
+        if row.get("state") != "failed":
+            return not _settled(txn, {})
+        return not _settled(txn, _named_damage(row)) if row.get("damage_only") else child
 
 
 # Rows the derivation classifies per write transaction (and per recorded cursor): one commit per batch,
@@ -325,28 +500,17 @@ def run_hot_facts(root: Any, *, progress=None, should_stop=None) -> dict:
 
     upgrade_current_schema(root)
     stop = should_stop or (lambda: False)
-    tables = {
-        "tasks": ("tasks", "task_id", TASK_UNDERIVED, "tasks_underived_hot", "write_seq", task_columns),
-        "custody_runs": ("custody_runs", "run_id", CUSTODY_UNDERIVED, "custody_underived_hot", "write_seq", custody_columns),
-        **{name: ("obligations", "id", f"{REQUEST_UNDERIVED} AND set_name='{name}'",
-                  "custody_request_underived", "facts", request_columns) for name in REQUEST_SETS},
-    }
-
-    def remaining(txn):
-        return any(txn.conn.execute(f"SELECT 1 FROM {table} INDEXED BY {index} WHERE {where} LIMIT 1").fetchone()
-                   for table, _id, where, index, _stamp, _derive in tables.values())
-
-    def input_stamp(value):
-        # Obligation rows have no sequence. Compare their exact source bytes on
-        # write, but retain only their digest in a damaged-input waiting fact.
-        return hashlib.sha256(value.encode("utf-8")).hexdigest() if isinstance(value, str) else value
+    derivations = {"tasks": task_columns, "custody_runs": custody_columns,
+                   **{name: request_columns for name in REQUEST_SETS}}
 
     with store.name_lock(root, "hot_facts.lock", timeout_sec=store.STORE_WAIT_SEC):
         row = maintenance_jobs.job(root, JOB) or {}
+        debt = _named_damage(row)
         with store.open_store(root, write=False) as txn:
-            owed = remaining(txn)
-        if row.get("state") == "done" and not owed:
-            return row
+            if row.get("state") == "done" and _settled(txn, {}):
+                return row
+            if row.get("state") == "failed" and row.get("damage_only") and _settled(txn, debt):
+                return row  # unchanged damaged input is not retried by a timer
 
         def record(**facts):
             updated = maintenance_jobs.record(root, JOB, **facts)
@@ -354,75 +518,88 @@ def run_hot_facts(root: Any, *, progress=None, should_stop=None) -> dict:
                 progress(updated)
             return updated
 
-        cursor = row.get("cursor") or {"table": "tasks", "after": ""}
+        first = {"table": "tasks", "after": ""}
+        # A pass resumes at its cursor; a finished or failed one starts again (a rollback writer's NULLs, a
+        # changed damaged row), selecting only rows still underived. Either keeps the damage it named.
+        cursor = row["cursor"] if row.get("state") in ("pending", "running") and row.get("cursor") else first
         done = int(row.get("done") or 0)
-        if row.get("state") == "done":
-            cursor = {"table": "tasks", "after": ""}  # a rollback writer introduced new NULLs
         if stop():
             return record(state="pending", cursor=cursor, done=done)
         waiting = row.get("waiting_on") or {}
-        if row.get("state") == "failed" and waiting:
-            table, key, where, _index, stamp, _derive = tables[waiting["table"]]
-            with store.open_store(root, write=False) as txn:
-                current = txn.conn.execute(f"SELECT {stamp} FROM {table} WHERE {key}=? AND ({where})",
-                                           (waiting["id"],)).fetchone()
-            if current is not None and input_stamp(current[0]) == waiting["stamp"]:
-                return row  # unchanged damaged input is not retried by a timer
-        record(state="running", cursor=cursor, done=done, total=None, error=None, waiting_on=None)
+        record(state="running", cursor=cursor, done=done, total=None, error=None, waiting_on=None, damage_only=None,
+               damaged=list(debt.values()) or None)
         try:
-            start = list(tables).index(cursor["table"])
-            for position, (scope, (table, identity, where, index, stamp, derive)) in enumerate(tables.items()):
+            start = list(_FAMILIES).index(cursor["table"])
+            for position, (scope, (table, identity, probes, stamp)) in enumerate(_FAMILIES.items()):
                 if position < start:
                     continue
+                where = " OR ".join(f"({predicate})" for predicate, _index in probes)
                 after = cursor["after"] if cursor["table"] == scope else ""
                 cursor = {"table": scope, "after": after}
                 while not stop():
                     with store.open_store(root, write=False) as txn:
-                        batch = txn.conn.execute(
-                            f"SELECT {identity},{stamp} FROM {table} INDEXED BY {index} "
-                            f"WHERE ({where}) AND {identity}>? ORDER BY {identity} LIMIT ?", (after, _DERIVE_BATCH)).fetchall()
-                        sources = [(item[0], item[1], txn.body_text(item[0]) if table == "tasks" else
-                                    item[1] if table == "obligations" else txn.conn.execute(
-                                        "SELECT facts FROM custody_runs WHERE run_id=?", (item[0],)).fetchone()[0])
-                                   for item in batch]
-                    if not sources:
+                        batch = _underived_rows(txn, scope, _DERIVE_BATCH, after)
+                        # A named row, unchanged, is passed without reading it again.
+                        sources = {key: (txn.body_text(key) if table == "tasks" else raw if table == "obligations" else
+                                         txn.conn.execute("SELECT facts FROM custody_runs WHERE run_id=?",
+                                                          (key,)).fetchone()[0])
+                                   for key, raw in batch
+                                   if (debt.get((scope, key)) or {}).get("stamp") != _input_stamp(raw)}
+                    if not batch:
+                        known = {key for name, key in debt if name == scope}
                         with store.open_store(root, write=False) as txn:
-                            more = txn.conn.execute(f"SELECT 1 FROM {table} INDEXED BY {index} WHERE {where} LIMIT 1").fetchone()
+                            more = any(key not in known for key, _stamp in _underived_rows(txn, scope, len(known) + 1))
                         if more:
                             after = ""  # sequence-CAS lost to an old writer/handoff behind the cursor
                             continue
                         break
-                    derived = []
+                    derived, seen = [], ""
                     try:
-                        for tid, seq, raw in sources:
+                        for key, raw in batch:
                             if stop():
                                 break
-                            waiting = {"table": scope, "id": tid, "stamp": input_stamp(seq)}
-                            document, fault = own_document(tid, raw) if table == "tasks" else (json.loads(raw), "")
-                            if fault:  # never another task's root: this damaged input waits like any other
-                                raise ValueError(f"task body {fault}: task:{tid}")
-                            derived.append((tid, seq, derive(document)))
-                    finally:  # what was derived before a stop or a damaged input commits with its cursor
+                            if key in sources:
+                                waiting = {"table": scope, "id": key, "stamp": _input_stamp(raw)}
+                                document, fault = (own_document(key, sources[key]) if table == "tasks"
+                                                   else _own_facts(sources[key]))
+                                if fault:  # never another task's root: this damaged input waits by name, alone
+                                    debt[(scope, key)] = {**waiting, "reason": fault}
+                                else:
+                                    debt.pop((scope, key), None)
+                                    derived.append((key, raw, derivations[scope](document)))
+                            seen = key
+                    finally:  # what was derived before a stop or a derivation fault commits with its cursor
                         if derived:
                             with store.open_store(root, write=True) as txn:
-                                for tid, seq, values in derived:
+                                for key, raw, values in derived:
                                     done += txn.conn.execute(
                                         f"UPDATE {table} SET {','.join(name + '=?' for name in values)} "
                                         f"WHERE {identity}=? AND {stamp}=? AND ({where})",
-                                        (*values.values(), tid, seq)).rowcount
-                            after = derived[-1][0]
+                                        (*values.values(), key, raw)).rowcount
+                        if seen:
+                            after = seen
                             cursor = {"table": scope, "after": after}
-                            record(cursor=cursor, done=done)
+                            record(cursor=cursor, done=done, damaged=list(debt.values()) or None)
                     if stop():
                         return record(state="pending", cursor=cursor, done=done)
                 if stop():
                     return record(state="pending", cursor=cursor, done=done)
             with store.open_store(root, write=False) as txn:
-                owed = remaining(txn)
-            if owed:  # an old writer added NULLs in a family already passed
-                return record(state="pending", cursor={"table": "tasks", "after": ""}, done=done)
-            return record(state="done", cursor=cursor, done=done, waiting_on=None)
+                debt = _unchanged(txn, debt)
+                exact = _settled(txn, debt)
         except BaseException as exc:
-            record(state="failed" if isinstance(exc, Exception) else "pending", cursor=cursor,
-                   done=done, error=f"{type(exc).__name__}: {exc}", waiting_on=waiting)
+            # A held store is no failure: the job stays due, as ``maintenance._contention`` reports it.
+            held = isinstance(exc, store.StoreBusy) or getattr(exc, "reason", None) == "contention"
+            record(state="failed" if isinstance(exc, Exception) and not held else "pending", cursor=cursor, done=done,
+                   error=f"{type(exc).__name__}: {exc}", waiting_on=waiting, damaged=list(debt.values()) or None)
             raise
+        if not exact:  # an old writer added NULLs in a family already passed, or rewrote a named row
+            return record(state="pending", cursor=first, done=done, damaged=list(debt.values()) or None)
+        if not debt:
+            return record(state="done", cursor=cursor, done=done, waiting_on=None, damaged=None)
+        named = next(iter(debt.values()))
+        error = (f"task body {named['reason']}: task:{named['id']}" if named["table"] == "tasks"
+                 else f"{named['table']} row {named['reason']}: {named['id']}")
+        record(state="failed", cursor=cursor, done=done, error=f"ValueError: {error}", waiting_on=named,
+               damage_only=True, damaged=list(debt.values()))
+        raise ValueError(error)

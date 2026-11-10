@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import copy
+import json
+from contextlib import contextmanager
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -10,7 +13,7 @@ from tests import test_subscription_setup_browser as setup_browser
 
 subscription_ui = setup_browser.subscription_ui
 capture = setup_browser.capture
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def _inventory_row(harness, *, targets=None):
@@ -202,8 +205,8 @@ def test_packaged_update_preparation_requires_an_explicit_restart_without_fake_o
     row = _inventory_row("codex")
     posts = []
     message = ("Environment preparation complete; CLI update not started. "
-               "Use Restart in the chat header, then repeat Update. Restart interrupts engine sessions; "
-               "saved work follows the existing recovery rules.")
+               "Use Restart Claudexor in Accounts, then repeat Update. It ends every run on the engine; "
+               "its confirmation says how many and whose.")
 
     def maintenance(route):
         if route.request.method == "GET":
@@ -229,3 +232,196 @@ def test_packaged_update_preparation_requires_an_explicit_restart_without_fake_o
     capture(page, f"maintenance-preparation-{theme}")
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     assert not ui["errors"]
+
+
+PINNED_SPAWN_FAILURE = json.loads((Path(__file__).parent / "fixtures/claudexor_maintenance_spawn_enoent.json").read_text(encoding="utf-8"))
+ROW_OBSERVED = "2026-10-09T12:00:00Z"
+
+
+def _host_reply_for_missing_executable(path, monkeypatch):
+    """What the real host service answers to the pinned engine's captured wire, for this path."""
+    from ouroboros import harness_maintenance as service
+    from ouroboros import review_run_isolation
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    monkeypatch.setattr(review_run_isolation, "attach_home", lambda: None)
+    monkeypatch.delenv("OUROBOROS_CLAUDEXOR_BIN", raising=False)
+    received = {**PINNED_SPAWN_FAILURE["body"], "message": f"spawn {path} ENOENT"}
+
+    def fail(*_args, **_kwargs):
+        error = ClaudexorUnavailable(received["code"], received["message"], status_code=PINNED_SPAWN_FAILURE["status"])
+        error.problem = copy.deepcopy(received)
+        raise error
+
+    class Gateway:
+        engine_version = PINNED_SPAWN_FAILURE["provenance"]["engine_version"]
+        engine_build_sha = PINNED_SPAWN_FAILURE["provenance"]["engine_build_sha"]
+        maintenance_harnesses = staticmethod(fail)
+
+    @contextmanager
+    def connection():
+        yield Gateway()
+
+    monkeypatch.setattr(service, "read_owned_gateway", connection)
+    with pytest.raises(ClaudexorUnavailable) as caught:
+        service.inspect_harnesses([], fresh=True)
+    return service.maintenance_problem(caught.value)
+
+
+def _remount(page):
+    page.evaluate("""async () => {
+        const accounts = await import('/static/modules/harness_accounts.js');
+        const {claudexorStatus} = await import('/static/modules/claudexor_status_store.js');
+        accounts.destroyHarnessAccounts();
+        await accounts.initHarnessAccounts({store: claudexorStatus});
+    }""")
+
+
+@pytest.mark.parametrize("width,theme", [(1440, "light"), (1440, "dark"), (390, "light")])
+def test_missing_executable_is_one_explained_section_fact_until_a_real_fresh_read(subscription_ui, tmp_path, monkeypatch, width, theme):
+    from playwright.sync_api import expect
+
+    ui, page = subscription_ui, subscription_ui["page"]
+    page.add_init_script("localStorage.setItem('ouroboros.theme', %s)" % repr(theme))
+    page.set_viewport_size({"width": width, "height": 950})
+    executable = tmp_path / "Moved Ouroboros.app" / "Contents" / "Frameworks" / "node-standalone" / "bin" / "node"
+    status, failure = _host_reply_for_missing_executable(executable, monkeypatch)
+    assert failure["error"]["message"] == f"spawn {executable} ENOENT"
+    rows = [_inventory_row("codex"), _inventory_row("agy", targets=["latest"])]
+    for row in rows:
+        row["observedAt"] = ROW_OBSERVED
+    world = {"broken": False}
+    reads, held = [], []
+
+    def maintenance(route):
+        query = parse_qs(urlparse(route.request.url).query)
+        current = query.get("fresh") == ["true"] or query.get("checkLatest") == ["true"]
+        reads.append(current)
+        assert route.request.method == "GET", "Inspecting never posts"
+        if world.get("hold") and query.get("harness") == ["agy"]:
+            held.append(route)
+        elif current and world["broken"]:
+            route.fulfill(status=status, json=failure)
+        else:  # Every read mints a new top-level time, the cached ones included.
+            route.fulfill(json={"observedAt": "2026-11-04T01:31:00Z", "harnesses": rows})
+
+    page.route("**/api/claudexor/maintenance/**", maintenance)
+    page.goto(ui["url"] + "/#settings")
+    page.locator('[data-settings-tab="providers"]').click()
+    banner = page.locator("#agents-service-banner")
+    codex = page.locator('.agent-family-card[data-family="codex"]')
+    agy = page.locator('.agent-family-card[data-family="agy"]')
+    expect(codex.locator(".harness-maintenance-line")).to_have_text("Program 2.0.0 · Managed · Latest not checked")
+    expect(banner).not_to_contain_text("no longer present")
+
+    # Press the family's own check, the path an owner takes; the failure reaches the whole section.
+    world["broken"] = True
+    codex.get_by_role("button", name="Check latest", exact=True).click()
+    expect(banner).to_contain_text("The executable reported by the last program inspection is no longer present.")
+    expect(banner).to_contain_text("If the app was moved or replaced, Restart Claudexor in Accounts may help")
+    expect(banner).to_contain_text("it ends every run on the engine, and success is not guaranteed.")
+    expect(banner).to_have_attribute("data-tone", "warn")
+    expect(banner).not_to_contain_text("ENOENT")
+    for family in (codex, agy):
+        line = family.locator(".harness-maintenance-line")
+        expect(line).to_contain_text("Last known")
+        expect(line).to_contain_text("2026")
+        expect(line).not_to_contain_text("2026-11")
+        assert "T12:00:00Z" not in line.inner_text()
+        text = family.inner_text()
+        assert "no longer present" not in text and "ENOENT" not in text and "Program inspection unavailable" not in text
+        assert family.locator('[data-maintenance-action="latest"]').count() == 0
+    expect(codex.get_by_role("button", name="Check latest", exact=True)).to_be_enabled()
+
+    # The exact words have one home.
+    toggle = page.locator("#agents-service-diagnostics-toggle")
+    expect(toggle).to_be_visible()
+    toggle.click()
+    fact = page.locator('#agents-service-diagnostics [data-fact="Last program inspection"] dd')
+    expect(fact).to_contain_text(f"ENOENT: spawn {executable} ENOENT")
+    expect(page.locator('#agents-service-diagnostics [data-fact="Inspected by engine"] dd')).to_have_text(
+        f"{PINNED_SPAWN_FAILURE['provenance']['engine_version']} · {PINNED_SPAWN_FAILURE['provenance']['engine_build_sha']}")
+    assert page.get_by_text(f"spawn {executable} ENOENT", exact=False).count() == 1
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    page.locator(".agents-service").scroll_into_view_if_needed()
+    capture(page, f"maintenance-missing-executable-{width}-{theme}")
+
+    # A failed read lands without rebuilding the rows: another family's Details keeps its focus and open state.
+    details = codex.get_by_role("button", name="Details", exact=True)
+    details.click()
+    world["hold"] = True
+    agy.get_by_role("button", name="Check version", exact=True).click()
+    expect(agy.get_by_role("button", name="Checking…", exact=True)).to_be_disabled()
+    details.focus()
+    assert held
+    world["hold"] = False
+    held.pop().fulfill(status=status, json=failure)
+    expect(agy.get_by_role("button", name="Check version", exact=True)).to_be_enabled()
+    expect(details).to_be_focused()
+    expect(details).to_have_attribute("aria-expanded", "true")
+
+    # The status tick's own rebuild keeps the disclosure open too.
+    page.evaluate("""async () => {
+        const {refreshHarnessStatus} = await import('/static/modules/harness_accounts.js');
+        await refreshHarnessStatus();
+    }""")
+    expect(codex.get_by_role("button", name="Details", exact=True)).to_have_attribute("aria-expanded", "true")
+    expect(codex.locator(".harness-maintenance-details")).to_be_visible()
+    expect(page.locator("#agents-service-diagnostics-toggle")).to_have_attribute("aria-expanded", "true")
+    assert codex.locator(".harness-maintenance-details").inner_text().count("ENOENT") == 0
+    codex.locator(".agent-family-head").scroll_into_view_if_needed()
+    capture(page, f"maintenance-missing-executable-details-{width}-{theme}")
+
+    # A remount's cached read answers 200: not proof of anything current.
+    before = len(reads)
+    _remount(page)
+    expect(banner).to_contain_text("no longer present")
+    expect(codex.locator(".harness-maintenance-line")).to_contain_text("Last known")
+    assert False in reads[before:]
+
+    # A true fresh success removes the current instruction and the last-known mark.
+    world["broken"] = False
+    codex.get_by_role("button", name="Check latest", exact=True).click()
+    expect(banner).not_to_contain_text("no longer present")
+    expect(banner).not_to_contain_text("Restart")
+    expect(codex.locator(".harness-maintenance-line")).not_to_contain_text("Last known")
+    expect(agy.locator(".harness-maintenance-line")).not_to_contain_text("Last known")
+    expect(page.locator('#agents-service-diagnostics [data-fact="Last program inspection"]')).to_have_count(0)
+    expect(codex.get_by_role("button", name="Update", exact=True)).to_be_visible()
+    assert not any("restart" in path or "login" in path or "maintenance" in path for path, _ in ui["posts"])
+    page.locator(".agents-service").scroll_into_view_if_needed()
+    capture(page, f"maintenance-missing-executable-recovered-{width}-{theme}")
+    assert not ui["errors"]
+
+
+def test_retained_failed_operation_on_a_healthy_replacement_advises_nothing(subscription_ui, tmp_path):
+    from playwright.sync_api import expect
+
+    ui, page = subscription_ui, subscription_ui["page"]
+    gone = tmp_path / "old-app" / "node"
+    operation = {
+        "id": "old-operation", "harness": "codex", "state": "failed", "phase": "settled",
+        "finishedAt": "2026-10-09T12:00:00Z", "mutation": "unknown", "termination": "confirmed",
+        "problem": {**PINNED_SPAWN_FAILURE["body"], "message": f"spawn {gone} ENOENT"},
+    }
+    row = _inventory_row("codex")
+    row.update(observedAt="2026-10-09T12:05:00Z", operation={key: operation[key] for key in ("id", "state", "phase", "finishedAt")})
+    methods = []
+
+    def maintenance(route):
+        methods.append(route.request.method)
+        route.fulfill(json={"harnesses": [row]} if urlparse(route.request.url).path.endswith("/harnesses") else operation)
+
+    page.route("**/api/claudexor/maintenance/**", maintenance)
+    page.goto(ui["url"] + "/#settings")
+    page.locator('[data-settings-tab="providers"]').click()
+    family = page.locator('.agent-family-card[data-family="codex"]')
+    expect(family).to_contain_text("Update failed · Installed files may have changed")
+    family.get_by_role("button", name="Details", exact=True).click()
+    expect(family.locator(".harness-maintenance-exact code")).to_have_text(f"spawn {gone} ENOENT")
+    expect(page.locator("#agents-service-banner")).not_to_contain_text("Restart")
+    expect(page.locator("#agents-service-banner")).not_to_contain_text("no longer present")
+    assert "Restart" not in family.inner_text()
+    assert set(methods) == {"GET"}
+    family.locator(".agent-family-head").scroll_into_view_if_needed()
+    capture(page, "maintenance-missing-executable-history")

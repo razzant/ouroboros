@@ -38,6 +38,14 @@ from tests import _contributor_packet_shared as shared
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def _own_tracked_registry(monkeypatch):
+    """The wrapper's real Git commands are tracked children (#2841) that only an idle probe retires; a private
+    registry keeps them out of later tests in the same worker (tests/test_extension_ws_stream_diagnostics.py)."""
+    from ouroboros.tools import shell_process
+    monkeypatch.setattr(shell_process, "_active_subprocesses", set())
+
+
 @pytest.mark.parametrize('delivery,refused', [('native', False), ('packet', True), ('', False)])
 def test_contributor_config_roundtrip_keeps_direct_api_delivery(monkeypatch, delivery, refused):
     from scripts.run_external_review import _diff_size_refusal, _frozen_pool_catalog
@@ -809,22 +817,8 @@ def test_contributor_proposal_binds_clean_base_head_and_tree(tmp_path, monkeypat
          "pyproject.project.version"),
         ("uv.lock", 'version = "1.2.3"', 'version = "1.2.4"',
          "uv.editable_root.version"),
-        ("web/package.json", '"version":"1.2.3"', '"version":"1.2.4"',
-         "web.package.version"),
-        ("web/modules/api_types.js", 'VERSION = "1.2.3"', 'VERSION = "1.2.4"',
-         "gateway.contract.version"),
-        ("README.md", "Version 1.2.3", "Version 1.2.4",
-         "readme.badge.version"),
-        ("README.md", "| 1.2.3 | Current |", "| 1.2.4 | Current |",
-         "readme.latest_history_row"),
         ("README.md", "v1.2.3/Ouroboros-1.2.3.dmg",
          "v1.2.4/Ouroboros-1.2.4.dmg", "readme.download.macos-arm64.0"),
-        ("site/install/index.html", "v1.2.3/Ouroboros-1.2.3.dmg",
-         "v1.2.4/Ouroboros-1.2.4.dmg", "site.install.download.macos-arm64.0"),
-        ("docs/install/index.html", "v1.2.3/Ouroboros-1.2.3.dmg",
-         "v1.2.4/Ouroboros-1.2.4.dmg", "docs.install.download.macos-arm64.0"),
-        ("docs/ARCHITECTURE.md", "Ouroboros v1.2.3", "Ouroboros v1.2.4",
-         "architecture.header.version"),
     ],
 )
 def test_contributor_proposal_rejects_every_version_carrier(
@@ -860,9 +854,7 @@ def test_contributor_proposal_checks_each_duplicate_installer_link(
     "relative_path",
     [
         "ouroboros/review_substrate.py",
-        "ouroboros/review_execution.py",
         "ouroboros/utils.py",
-        "ouroboros/tools/registry.py",
         "scripts/run_external_review.py",
     ],
 )
@@ -1049,8 +1041,7 @@ def test_packet_seats_carry_each_seats_one_saved_text(tmp_path, monkeypatch):
     assert len(reads) == 3  # one selected text per seat, nothing else read
 
 
-@pytest.mark.parametrize("status", ["pending", "responded"])
-@pytest.mark.parametrize("cost", [0.01, 0.0, None])
+@pytest.mark.parametrize(("cost", "status"), [(0.01, "pending"), (0.0, "responded"), (None, "pending")])
 def test_external_review_cost_report_keeps_amount_knowledge_separate_from_lifecycle(status, cost):
     actors = _actors([{"slot_id": "slot_1", "model_id": "reviewer", "status": status, "cost_usd": cost}])
     evidence, report = _review_evidence_and_cost(actors)

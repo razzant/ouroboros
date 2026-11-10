@@ -21,7 +21,9 @@ LINT_PREFIX = "ruff "  # a lint finding's id: "ruff <code> <path> <name>"
 SIZE_PREFIX = "size "  # a size check test's id: "size <nodeid>"
 SYSTEMS = {"linux": "Linux", "windows": "Windows"}
 _BLOCK = re.compile(r"<!-- post-merge-red (\{.*?\}) -->", re.S)
+_AUTHOR = re.compile(r" by `([^`\n]+)` landed\. First bad commit")  # a culprit issue's opening (issue_body)
 _FORWARD = "This check blocks nothing and reverts nothing; the fix goes forward in a new pull request."
+_COMMENT_LIMIT = 60_000  # GitHub refuses a comment longer than 65,536 characters
 
 
 class GitHub:
@@ -131,7 +133,7 @@ def issue_title(block: dict, pr: dict | None) -> str:
     return f"{on}: failing tests without a found culprit"
 
 
-def issue_body(block: dict, *, head: str, run_url: str, author: str = "") -> str:
+def issue_body(block: dict, *, head: str, run_url: str, author: str = "", seen: str = "Found failing") -> str:
     system = SYSTEMS[system_of(block)]
     if block["kind"] == "culprit":
         merge = f"#{block['pr']}" if block.get("pr") else f"commit `{block['culprit'][:12]}`"
@@ -143,9 +145,9 @@ def issue_body(block: dict, *, head: str, run_url: str, author: str = "") -> str
     else:
         opening = f"These tests fail on `ouroboros` on {system}, but the post-merge check could not find the merge that broke them."
     rows = "\n".join(f"- {_named(nodeid)}" for nodeid in block["ids"])
-    return (f"{opening}\n\n{rows}\n\nFound failing at `{head}`: {run_url}\n\n{_FORWARD}{_size_hint(block)} The "
-            f"post-merge check closes this issue by itself once every test above passes on `ouroboros` on {system}."
-            f"\n\n{machine_block(block)}\n")
+    return (f"{opening}\n\n{rows}\n\n{seen} at `{head}`: {run_url}\n\n{_FORWARD}{_size_hint(block)} The "
+            f"post-merge check takes each test off this list once it passes on `ouroboros` on {system}, and closes "
+            f"this issue when none is left.\n\n{machine_block(block)}\n")
 
 
 def find_merged_pr(github, sha: str) -> dict | None:
@@ -157,12 +159,13 @@ def find_merged_pr(github, sha: str) -> dict | None:
 
 
 def open_issues(github) -> list[dict]:
-    """Open `post-merge-red` issues that carry a machine block: [{"number", "block"}]."""
+    """Open `post-merge-red` issues that carry a machine block: [{"number", "block", "author"}]."""
     rows = []
     for item in github.pages(f"issues?state=open&labels={LABEL}"):
         block = parse_machine_block(item.get("body") or "")
         if "pull_request" not in item and block is not None:
-            rows.append({"number": item["number"], "block": block})
+            author = _AUTHOR.search(item.get("body") or "") if block.get("kind") == "culprit" else None
+            rows.append({"number": item["number"], "block": block, "author": author.group(1) if author else ""})
     return rows
 
 
@@ -181,17 +184,20 @@ def ensure_label(github) -> None:
 
 
 def route(github, *, classification: dict, attribution: dict, head: str, run_url: str, recheck,
-          size_recheck=None, system: str = "linux") -> dict:
-    """Close this system's issues whose tests pass at the head, then hand each red over.
+          size_recheck=None, system: str = "linux", same_run=None, checkpoint=None) -> dict:
+    """Hand each red over, then take off this system's issues what passes at the head.
 
     A culprit's pull request gets one comment and one open issue per culprit pull request is
-    created or extended; reds without blame not tracked yet get one issue per kind. `recheck(ids)`
-    runs test ids at the head once and answers `outcomes` values; `size_recheck(base, ids)` does
-    so for size ids, measured against `base`. A failed GitHub call becomes a warning in the record
-    and the hand-over goes on. Issues of another system are never read further, extended or closed.
+    created or extended; reds without blame not tracked yet get one issue per kind. `checkpoint(record)`
+    then receives that hand-over before any recheck starts, so a step killed during the recheck still
+    leaves it. `same_run(ids)` answers the ids this run already passed at the head on this system;
+    `recheck(ids)` runs the others once and answers `outcomes` values; `size_recheck(base, ids)` does
+    so for size ids, measured against `base`. An issue loses each id that passes, named in a comment,
+    and closes when none is left. A failed GitHub call becomes a warning in the record and the
+    hand-over goes on. Issues of another system are never read further, extended or closed.
     """
     record = {"format": 1, "os": system, "comments": [], "created": [], "updated": [], "closed": [],
-              "warnings": [], "rechecked": {}, "handed": []}
+              "narrowed": [], "warnings": [], "same_run": {}, "rechecked": {}, "handed": [], "complete": False}
 
     def call(what, function, *args):
         try:
@@ -204,12 +210,7 @@ def route(github, *, classification: dict, attribution: dict, head: str, run_url
     failed = {row["id"] for row in classification.get("failed", [])}
     known, issues = call("list the open post-merge-red issues", open_issues, github)
     issues = [issue for issue in issues or [] if system_of(issue["block"]) == system]
-    if known and issues:
-        node_green = (NODE_LANE not in failed and ((classification.get("selection") or {}).get("node") == "success"
-                                                   or any(row["id"] == NODE_LANE for row in classification.get("flaky", []))))
-        _close_green(call, github, issues, failed, node_green, head, run_url, recheck, record,
-                     lint_checked=bool(classification.get("lint_checked")), size_recheck=size_recheck)
-    tracked = {nodeid for issue in issues if issue["number"] not in record["closed"] for nodeid in issue["block"]["ids"]}
+    tracked = {nodeid for issue in issues for nodeid in issue["block"]["ids"]}
     groups = defaultdict(list)
     for verdict in attribution.get("verdicts") or [{"id": nodeid, "verdict": "unattributed"} for nodeid in failed]:
         if verdict["id"] in failed and verdict["verdict"] == "culprit":
@@ -240,15 +241,26 @@ def route(github, *, classification: dict, attribution: dict, head: str, run_url
                     + (f" Tracking issue: #{number}." if number else ""))
             if call(f"comment on #{pr['number']}", github.post, f"issues/{pr['number']}/comments", {"body": text})[0]:
                 record["comments"].append(pr["number"])
+    if checkpoint is not None:
+        call("record the hand-over", checkpoint, record)
+    if known and issues:
+        node_green = (NODE_LANE not in failed and ((classification.get("selection") or {}).get("node") == "success"
+                                                   or any(row["id"] == NODE_LANE for row in classification.get("flaky", []))))
+        _close_green(call, github, issues, failed, node_green, head, run_url, recheck, record,
+                     lint_checked=bool(classification.get("lint_checked")), size_recheck=size_recheck,
+                     same_run=same_run)
+    record["complete"] = known  # unreadable open issues: no recheck ran, whatever this run handed over
     return record
 
 
 def _close_green(call, github, issues, failed, node_green, head, run_url, recheck, record, *,
-                 lint_checked=False, size_recheck=None) -> None:
+                 lint_checked=False, size_recheck=None, same_run=None) -> None:
     ids = sorted({nodeid for issue in issues for nodeid in issue["block"]["ids"]
                   if not nodeid.startswith((LINT_PREFIX, SIZE_PREFIX))} - failed - {NODE_LANE})
-    status = recheck(ids) if ids else {}
-    record["rechecked"] = dict(status)
+    record["same_run"] = known = dict(same_run(ids)) if same_run and ids else {}
+    rest = [nodeid for nodeid in ids if nodeid not in known]
+    record["rechecked"] = dict(recheck(rest)) if rest else {}
+    status = {**record["rechecked"], **known}
     sized = defaultdict(set)  # base -> the size ids measured against it
     for issue in issues:
         sized[size_base(issue["block"])].update(nodeid for nodeid in issue["block"]["ids"]
@@ -265,17 +277,43 @@ def _close_green(call, github, issues, failed, node_green, head, run_url, rechec
             return lint_checked and nodeid not in failed
         if nodeid.startswith(SIZE_PREFIX):  # a growth inside a later base is invisible to that check
             return nodeid not in failed and (size_status.get(size_base(block)) or {}).get(nodeid) in ("passed", "absent")
-        return nodeid not in failed and status.get(nodeid) in ("passed", "skipped", "absent")
+        return nodeid not in failed and status.get(nodeid) in ("passed", "absent")
 
     for issue in issues:
-        if not all(green(issue["block"], nodeid) for nodeid in issue["block"]["ids"]):
-            continue
-        number, text = issue["number"], (f"Green at `{head}` on {SYSTEMS[system_of(issue['block'])]}: every test this "
-                                         f"issue tracks passes on `ouroboros` or no longer exists ({run_url}). Closing.")
-        if (call(f"comment on #{number}", github.post, f"issues/{number}/comments", {"body": text})[0]
-                and call(f"close #{number}", github.patch, f"issues/{number}",
-                         {"state": "closed", "state_reason": "completed"})[0]):
-            record["closed"].append(number)
+        block, number = issue["block"], issue["number"]
+        gone = [nodeid for nodeid in block["ids"] if green(block, nodeid)]
+        system = SYSTEMS[system_of(block)]
+        if gone and len(gone) == len(block["ids"]):
+            text = (f"Green at `{head}` on {system}: every test this issue tracks passes on `ouroboros` or no longer "
+                    f"exists ({run_url}). Closing.")
+            if (call(f"comment on #{number}", github.post, f"issues/{number}/comments", {"body": text})[0]
+                    and call(f"close #{number}", github.patch, f"issues/{number}",
+                             {"state": "closed", "state_reason": "completed"})[0]):
+                record["closed"].append(number)
+        elif gone:
+            # The machine block keeps what is still not green; the comments are the record of what left it.
+            rest = {**block, "ids": [nodeid for nodeid in block["ids"] if nodeid not in gone]}
+            texts = _retired_comments(gone, head=head, run_url=run_url, system=system, left=len(rest["ids"]))
+            if (all(call(f"comment on #{number}", github.post, f"issues/{number}/comments", {"body": text})[0]
+                    for text in texts)
+                    and call(f"narrow #{number}", github.patch, f"issues/{number}", {"body": issue_body(
+                        rest, head=head, run_url=run_url, author=issue.get("author", ""), seen="Still not passing")})[0]):
+                issue["block"] = rest
+                record["narrowed"].append({"issue": number, "ids": gone})
+
+
+def _retired_comments(ids, *, head: str, run_url: str, system: str, left: int) -> list[str]:
+    """The comments that name the ids leaving an issue, each within GitHub's comment limit."""
+    opening = (f"Green at `{head}` on {system} ({run_url}): these pass on `ouroboros` or no longer exist, so this "
+               "issue no longer tracks them:\n\n")
+    closing = f"\n\nStill tracked here: {left}."
+    chunks, rows = [], []
+    for row in (f"- {_named(nodeid)}" for nodeid in ids):
+        if rows and len(opening) + len(closing) + sum(len(line) + 1 for line in rows) + len(row) > _COMMENT_LIMIT:
+            chunks.append(rows)
+            rows = []
+        rows.append(row)
+    return [opening + "\n".join(chunk) + closing for chunk in [*chunks, rows]]
 
 
 def _upsert_issue(call, github, issues, block, pr, head, run_url, record) -> int | None:
@@ -291,15 +329,15 @@ def _upsert_issue(call, github, issues, block, pr, head, run_url, record) -> int
         if not (ok and isinstance(issue, dict) and issue.get("number")):
             return None
         record["created"].append(issue["number"])
-        issues.append({"number": issue["number"], "block": block})
+        issues.append({"number": issue["number"], "block": block, "author": author})
         return issue["number"]
     number, known = existing["number"], set(existing["block"]["ids"])
     if added := sorted(set(block["ids"]) - known):
         # What the issue recorded stays; a field its block predates (an issue opened before the
         # legs has no `base`) comes from this run, or a size id added to it could never be measured.
         merged = {**block, **existing["block"], "ids": sorted(known | set(added))}
-        if call(f"update #{number}", github.patch, f"issues/{number}",
-                {"body": issue_body(merged, head=head, run_url=run_url, author=author)})[0]:
+        if call(f"update #{number}", github.patch, f"issues/{number}", {"body": issue_body(
+                merged, head=head, run_url=run_url, author=author or existing.get("author", ""))})[0]:
             existing["block"] = merged
             record["updated"].append(number)
             call(f"comment on #{number}", github.post, f"issues/{number}/comments", {"body": (

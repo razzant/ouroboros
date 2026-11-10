@@ -112,8 +112,19 @@ def test_git_catalog_schema_bytes_and_handler_owners_are_stable():
     # S3 collection permits omitted commit_message; S5 adds author doctrine; D4 adds wake_on.
     # Target merge retains the contributor tool affordances and target review/mail contracts.
     # Mechanical revert names effective mode/task or managed-update authority, without fresh review.
+    # wake_on (review_waiting, 8f35c1416): host-marked waking place arrivals bypass selectors; context-only
+    # place arrivals stay unread until a genuine wake. That sentence is the only change from 6865d432….
+    # vcs_restore (#2433) now says it restores index and files and deletes new files in scope,
+    # staged or not; that description is the only change from 86389708….
+    # Explicit continuation (#2677): both reviewed-commit aliases add continue_seats and say what review_reference
+    # does with and without author_disposition; those two properties are the only change from 4bb35274….
+    # #2680: both aliases' paths say omitted paths with author_disposition mean the reviewed paths, and their
+    # author_disposition accepts the candidate the call stages (omitted paths: the reviewed ones), not the current
+    # attributed candidate; those two descriptions are the only change from aa615be1….
+    # 06.11: extra_tests says which entries the tests preflight runs and that it skips others with a note; that
+    # description is the only change from a4ff0c92….
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "6865d432fa0ac00af83d27322f356e4ef0e6636e7f9c9c3a8783de7845fe206e"
+        "e7ad640f7fc3a806bcdca365c58247423cdab89d31ba0e9c032f27ac4a78bf57"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

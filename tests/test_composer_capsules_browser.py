@@ -1,8 +1,8 @@
 """The composer's two owner capsules in the real composer (DESIGN "Composer owner controls").
 
-On a real server in Chromium and WebKit: `Context Max` opens inline into exactly three modes
-(a choice posts the owner endpoint at once, a refusal says why and keeps the saved mode, a reload
-reads it back; Enter opens onto the chosen mode, arrows choose a neighbour, Esc returns to the
+On a real server in Chromium and WebKit: Context, whose closed word is the mode its room's works' latest requests were sent
+in (`—` before any, never the saved mode), opens inline into exactly three modes (a choice posts the owner endpoint at
+once and leaves the closed word alone, a refusal says why and keeps the saved mode, a reload reads it back; Enter opens onto the chosen mode, arrows choose a neighbour, Esc returns to the
 head); one capsule is open at a time — one press on the other capsule switches on a desktop, and on
 a phone, where an open strip stands alone, the capsule that opens next is never left hidden by the
 first one's layout. Effort's max bracket keeps clear of the capsule's rounded end — measured
@@ -21,6 +21,7 @@ and no frame of an opening or a closing wraps there, left to right or right to l
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -28,9 +29,33 @@ from tests.test_effort_range_browser import _evidence_dir, _launch, _open_chat, 
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture import
 from tests.ui_chat_viewport_smoke import set_viewport
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 CONTEXT = "#page-chat .chat-context-mode"
+
+
+def _sent(applied: str, *, preferred: str = "max", cause: str = "memory", work: str = "synthetic-work-a",
+          at: str = "2026-01-05T10:04:00+00:00", chat_id: int = 1) -> dict:
+    """A synthetic census row (a test fixture, never a live write): one of a room's root works whose latest sent
+    request was sent in `applied` (the backend's `context_attempt`, gateway/state.py; `dispatched` is the host's
+    commitment before the provider send, not the provider's acceptance)."""
+    return {"activity_id": work, "chat_id": chat_id, "project_id": "", "client_message_id": "", "kind": "managed_task",
+            "phase": "working", "started_at": 0, "task_attempt": 1, "can_resume": False, "cancelable": False,
+            "context_attempt": {"attempt_id": f"{work}-1", "ledger_state": "dispatched", "round_id": "r1",
+                                "preferred_at_send": preferred, "applied": applied, "profile": f"owner_{applied}",
+                                "cause": "" if applied == preferred else cause, "observed_at": at, "task_attempt": 1,
+                                "llm_call_id": "c1", "execution_id": "e1", "call_attempt": 1}}
+
+
+def _observe_context(page, rows: list) -> list:
+    """Every `/api/state` answer gains `rows` (a list the caller may change: the 3 s room poll reads it again)."""
+    def handle(route):
+        response = route.fetch()
+        body = response.json()
+        body["active_chat_activities"] = [*(body.get("active_chat_activities") or []), *rows]
+        route.fulfill(response=response, json=body)
+    page.route(re.compile(r"/api/state(\?.*)?$"), handle)
+    return rows
 EFFORT = "#page-chat .chat-effort-range"
 ROW = """() => {
     const row = document.querySelector('#page-chat .chat-toolbar-row');
@@ -268,7 +293,8 @@ def test_context_capsule_chooses_one_of_three_modes_and_reads_back(direct_server
         try:
             _open_chat(page, url, width=1440, theme="light")
             closed = _row(page)
-            assert closed["ctx"]["head"] == "ContextMax" and closed["ctx"]["checked"] == ["max"], closed
+            # No request of this room was seen: a dash, while the strip keeps the saved Max.
+            assert closed["ctx"]["head"] == "Context—" and closed["ctx"]["checked"] == ["max"], closed
             assert closed["ctx"]["tabbable"] == [] and closed["oneLine"] and closed["namesShown"] == [True, True, True], closed
             _shot(page, tmp_path, f"capsules-closed-{engine}-light")
             posts = []
@@ -290,7 +316,7 @@ def test_context_capsule_chooses_one_of_three_modes_and_reads_back(direct_server
             # Keyboard: Esc returns to the head, Enter opens onto the chosen mode, an arrow chooses.
             page.keyboard.press("Escape")
             _until(page, "r.ctx.open === 'false' && r.ctx.focused === 'head'")
-            assert _row(page)["ctx"]["head"] == "ContextLow"
+            assert _row(page)["ctx"]["head"] == "Context—", "a choice never paints what the room's requests were sent in"
             page.keyboard.press("Enter")
             _until(page, "r.ctx.open === 'true' && r.ctx.focused === 'low'")
             with page.expect_response(lambda r: r.url.endswith("/api/owner/context-mode"), timeout=30_000):
@@ -310,7 +336,7 @@ def test_context_capsule_chooses_one_of_three_modes_and_reads_back(direct_server
             page.evaluate("() => window.ouroTheme.set('dark')")
             page.reload(wait_until="domcontentloaded")
             page.wait_for_function(f"() => document.querySelector('{EFFORT}')?.dataset.known === 'true'", timeout=30_000)
-            _until(page, "r.ctx.mode === 'nano' && r.ctx.head === 'ContextNano'", timeout=30_000)
+            _until(page, "r.ctx.mode === 'nano' && r.ctx.checked.join() === 'nano' && r.ctx.head === 'Context—'", timeout=30_000)
             assert _painted(page) == ["dark", "dark"], "the dark shots show the dark theme"
             _shot(page, tmp_path, f"capsules-closed-nano-{engine}-dark")
             page.click(f"{CONTEXT} .chat-capsule-head")
@@ -479,7 +505,9 @@ def test_closed_names_reduced_motion_and_a_resize_that_refits(direct_server_with
             _until(page, "r.eff.fit === 'inline' && r.solo === '' && r.ctx.shown && r.subShown")
             page.keyboard.press("Escape")
             # Probe both sides of the actual named row's width. System fonts differ between
-            # Linux and macOS; 390/340 are not product breakpoints (DESIGN).
+            # Linux and macOS; 390/340 are not product breakpoints (DESIGN). Just short of it the names
+            # give way one at a time, the longest first, and the row is compacted only when none can
+            # stay (#2886 7426e9fbf, U123): here the longest name alone goes.
             _until(page, "r.eff.open === 'false' && r.namesShown.every(Boolean) && r.oneLine")
             page.wait_for_function("""sel => !document.querySelector(sel).style.getPropertyValue('--capsule-body-width')""", arg=EFFORT)
             named_width = page.evaluate("""() => {
@@ -488,9 +516,12 @@ def test_closed_names_reduced_motion_and_a_resize_that_refits(direct_server_with
                 return Math.ceil(kids.reduce((sum, n) => sum + n.getBoundingClientRect().width, 0)
                     + parseFloat(css.columnGap) * (kids.length - 1) + parseFloat(css.paddingLeft) + parseFloat(css.paddingRight));
             }""")
-            for index, (width, names) in enumerate(((named_width + 4, True), (named_width - 4, False), (named_width + 4, True))):
+            name_widths = page.evaluate("""() => [...document.querySelectorAll('#page-chat .chat-toolbar-row .chat-capsule-name')]
+                .map((name) => name.getBoundingClientRect().width)""")
+            every, short = [True] * len(name_widths), [width < max(name_widths) for width in name_widths]
+            for index, (width, names) in enumerate(((named_width + 4, every), (named_width - 4, short), (named_width + 4, every))):
                 page.locator('#page-chat .chat-toolbar-row').evaluate('(row, width) => row.style.width = width + "px"', width)
-                _until(page, f"r.namesShown.every(n => n === {str(names).lower()}) && r.oneLine")
+                _until(page, f"{str(names).lower()}.every((n, i) => n === r.namesShown[i]) && r.compact === '' && r.oneLine")
                 facts[f"closed-{index}-{width}"] = _row(page)
                 _shot(page, tmp_path, f"capsules-closed-names-{engine}-{index}-{width}")
             assert not errors, errors
@@ -782,6 +813,7 @@ def test_long_closed_values_on_a_320px_phone_give_way_on_one_line(direct_server_
         seen = {}
         try:
             _install(page, payload)
+            _observe_context(page, [_sent("max")])  # the room's request was sent in its saved Max: the long closed word
             _open_chat(page, url, width=320, height=860)
             page.wait_for_function(f"""() => document.querySelector('{CONTEXT} .chat-capsule-value')?.textContent === '{context_word}'
                 && document.querySelector('{EFFORT} .chat-capsule-value')?.textContent === '{effort_word}'""", timeout=30_000)
@@ -831,6 +863,7 @@ def test_long_values_open_and_close_without_a_wrapping_frame(direct_server_with_
         runs = {}
         try:
             _install(page, payload)
+            _observe_context(page, [_sent("max")])
             _open_chat(page, url, width=320)
             page.wait_for_function(f"""() => document.querySelector('{CONTEXT} .chat-capsule-value')?.textContent === '{context_word}'
                 && document.querySelector('{EFFORT} .chat-capsule-value')?.textContent === '{effort_word}'""", timeout=30_000)
@@ -951,3 +984,230 @@ def test_a_strip_that_opens_alone_grows_from_its_capsule_and_folds_back(direct_s
         assert all(abs(frame["height"] - opening["before"]["height"]) <= 1 for frame in closing["frames"]), (name, closing["frames"])
     reduced = runs["reduced"]
     assert reduced["frames"][0]["morph"] == "" and not reduced["frames"][0]["surface"], ("reduced motion: at once", reduced)
+
+
+# The Context capsule as the owner reads it (DESIGN "Composer owner controls", owner 08.11): its closed word and lit arc
+# are what this room's works' latest requests were sent in, and Effort's dot keeps the saved mode on its arc only while the two
+# differ. Every scene is a synthetic census row (`_sent`), labelled in the evidence name.
+CTX_FACTS = """() => {
+    const el = document.querySelector('#page-chat .chat-context-mode');
+    const row = el.closest('.chat-toolbar-row');
+    const value = el.querySelector('.chat-capsule-value');
+    const dot = el.querySelector('.chat-context-choice');
+    const hint = el.querySelector('.ui-hint');
+    const fact = hint.querySelector('.ui-hint-fact');
+    const box = (node) => { const r = node.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
+    const style = getComputedStyle(el);
+    const kids = [...row.children].filter((kid) => getComputedStyle(kid).display !== 'none' && kid.getBoundingClientRect().width > 0);
+    const tops = kids.map((kid) => kid.getBoundingClientRect().top);
+    const probe = document.createElement('span');
+    document.body.append(probe);
+    const ink = (token) => { probe.style.color = `var(${token})`; return getComputedStyle(probe).color; };
+    const inks = { meta: ink('--text-meta'), secondary: ink('--text-secondary') };
+    probe.remove();
+    return {
+        word: value.textContent, valueColor: getComputedStyle(value).color, inks, actual: el.dataset.contextActual,
+        mode: el.dataset.contextMode, open: el.dataset.open,
+        lit: [...el.querySelectorAll('.chat-context-arc')].filter((arc) => arc.getAttribute('data-lit') === 'true').map((arc) => arc.dataset.arc),
+        arcInk: Object.fromEntries([...el.querySelectorAll('.chat-context-arc')].map((arc) => [arc.dataset.arc, getComputedStyle(arc).stroke])),
+        dotShown: getComputedStyle(dot).display !== 'none', dotAt: [dot.getAttribute('cx'), dot.getAttribute('cy')], dotFill: getComputedStyle(dot).fill,
+        label: el.querySelector('.chat-capsule-head').getAttribute('aria-label') || '',
+        frame: [style.outlineStyle, style.borderStyle, style.borderTopWidth, style.borderTopColor], width: el.getBoundingClientRect().width,
+        hintShown: !hint.hidden, factShown: !fact.hidden, factWords: fact.textContent, hintBox: hint.hidden ? null : box(hint),
+        oneLine: Math.max(...tops) - Math.min(...tops) < 2,
+        docScroll: document.documentElement.scrollWidth > innerWidth + 1, viewport: [innerWidth, innerHeight],
+    };
+}"""
+CTX_SCENES = [
+    # name, census rows, the closed word, lit arcs, the saved mode's dot shown, the head's accessible name ('' = its words)
+    ("agree-max", [_sent("max")], "Max", ["max"], False, ""),
+    ("mixed-low-and-max", [_sent("low"), _sent("max", work="synthetic-work-b", at="2026-01-05T10:06:00+00:00")], "Mixed",
+     ["low", "max"], True, "Context: Mixed, Low and Max, Max chosen"),
+    ("low-now-max-chosen", [_sent("low", at="2026-01-05T10:08:00+00:00")], "Low", ["low"], True, "Context: Low now, Max chosen"),
+    # follows the scene above: none runs now, the newest seen request was Low
+    ("last-low", [], "Low", ["low"], True, "Context: Low last, Max chosen"),
+]
+
+
+@pytest.mark.parametrize("engine,width,height,mobile", [("webkit", 1100, 750, False), ("chromium", 1100, 750, False),
+                                                        ("webkit", 390, 844, True), ("chromium", 390, 844, True)])
+def test_context_says_the_observed_mode_and_keeps_the_saved_one_as_a_dot(direct_server_with_data, engine, width, height, mobile, tmp_path):  # noqa: F811
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import sync_playwright
+
+    url = direct_server_with_data["url"]
+    with sync_playwright() as pw:
+        browser, page = _launch(pw, engine, viewport={"width": width, "height": height}, is_mobile=mobile, has_touch=mobile)
+        seen = {}
+        try:
+            rows = _observe_context(page, [])
+            posts = []
+            page.on("request", lambda r: posts.append(r.url) if "/api/owner/" in r.url and r.method == "POST" else None)
+            _open_chat(page, url, width=width, height=height, theme="dark")
+            for theme in ("dark", "light"):
+                page.evaluate(f"() => window.ouroTheme.set('{theme}')")
+                page.wait_for_function(f"() => document.documentElement.dataset.theme === '{theme}'")
+                rows[:] = []
+                page.reload(wait_until="domcontentloaded")  # a fresh page: nothing seen yet
+                page.wait_for_function(f"() => document.querySelector('{CONTEXT}')?.dataset.contextActual === 'unknown'", timeout=30_000)
+                page.wait_for_timeout(300)
+                seen[f"unknown-{theme}"] = facts = page.evaluate(CTX_FACTS)
+                _shot(page, tmp_path, f"context-synthetic-unknown-{engine}-{theme}-{width}")
+                page.locator(CONTEXT).screenshot(path=str(_evidence_dir(tmp_path) / f"context-synthetic-unknown-{engine}-{theme}-{width}--capsule.png"))
+                assert facts["word"] == "—" and facts["lit"] == [] and facts["dotShown"] and facts["mode"] == "max", facts
+                assert facts["valueColor"] == facts["inks"]["secondary"], facts
+                assert facts["label"] == "Context: actual unknown, Max chosen", facts
+                unknown_frame = facts["frame"]
+                frame = None
+                for name, scene, word, lit, dot, label in CTX_SCENES:
+                    rows[:] = scene
+                    page.wait_for_function(f"""() => {{ const el = document.querySelector('{CONTEXT}');
+                        return el.querySelector('.chat-capsule-value').textContent === '{word}'
+                            && (el.querySelector('.chat-capsule-head').getAttribute('aria-label') || '') === '{label}'
+                            && [...el.querySelectorAll('.chat-context-arc[data-lit="true"]')].map((a) => a.dataset.arc).join() === '{",".join(lit)}'; }}""",
+                                           timeout=15_000)
+                    page.wait_for_timeout(300)
+                    seen[f"{name}-{theme}"] = facts = page.evaluate(CTX_FACTS)
+                    _shot(page, tmp_path, f"context-synthetic-{name}-{engine}-{theme}-{width}")
+                    page.locator(CONTEXT).screenshot(path=str(_evidence_dir(tmp_path) / f"context-synthetic-{name}-{engine}-{theme}-{width}--capsule.png"))
+                    assert facts["dotShown"] is dot and facts["mode"] == "max" and facts["dotAt"] == ["157.78", "115.94"], facts
+                    # No added frame: the capsule's own hairline, exactly as when the room agrees, and no outline.
+                    frame = frame if name != "agree-max" else facts["frame"]
+                    assert facts["frame"] == frame and frame[0] == "none" and frame[1] != "dashed", (facts, frame)
+                    assert facts["oneLine"] and not facts["docScroll"], facts
+                    assert facts["valueColor"] == facts["inks"]["meta"], facts
+                    assert facts["label"] == label, facts
+                    if name == "low-now-max-chosen":
+                        # Open: the strip marks the saved Max; the hint adds the one dated fact line.
+                        page.locator(f"{CONTEXT} .chat-capsule-head").click()
+                        page.wait_for_function(f"() => document.querySelector('{CONTEXT}').dataset.open === 'true'")
+                        page.wait_for_timeout(450)
+                        seen[f"{name}-open-{theme}"] = opened = page.evaluate(CTX_FACTS)
+                        _shot(page, tmp_path, f"context-synthetic-{name}-open-{engine}-{theme}-{width}")
+                        assert opened["hintShown"] and opened["factShown"], opened
+                        assert opened["factWords"].startswith("Low nowThe history does not fit the Max window. Request at "), opened
+                        left, top, right, bottom = opened["hintBox"]
+                        assert left >= 0 and top >= 0 and right <= width and bottom <= height, opened
+                        assert page.locator(f'{CONTEXT} .chat-seg[data-mode="max"]').get_attribute("aria-checked") == "true"
+                        page.keyboard.press("Escape")
+                        page.wait_for_function(f"() => document.querySelector('{CONTEXT}').dataset.open === 'false'")
+                        # The keyboard focus ring Escape returns to the head stays visible.
+                        ring = page.evaluate(f"""() => {{ const head = document.querySelector('{CONTEXT} .chat-capsule-head');
+                            return [document.activeElement === head, head.matches(':focus-visible'), getComputedStyle(head).outlineStyle,
+                                    getComputedStyle(head).boxShadow]; }}""")
+                        seen[f"focus-{theme}"] = ring
+                        assert ring[0], ring
+                        _shot(page, tmp_path, f"context-synthetic-{name}-focus-{engine}-{theme}-{width}")
+                        page.evaluate("() => document.activeElement?.blur()")  # the next scenes show the capsule unfocused
+                assert unknown_frame == frame, "the unknown capsule keeps the same frame"
+            assert posts == [], "painting what the room's requests were sent in never writes the saved mode"
+        finally:
+            _record(tmp_path, f"context-synthetic-{engine}-{width}", seen)
+            browser.close()
+
+
+def test_context_shows_the_newest_request_not_proven_unsent_through_overlapping_requests(direct_server_with_data, tmp_path):  # noqa: F811
+    """The real attempt fold's public fact, read by the real page in WebKit: an overlapping newer request that is proven
+    unsent gives way to the next one not proven unsent (Low, though a Max send lies behind it), never the older Max."""
+    from ouroboros.physical_attempt_context import attempt_view, fold_attempt
+
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import sync_playwright
+
+    def frame(attempt: str, state: str, applied: str, minute: int, call: str) -> dict:
+        return {**_sent(applied, at=f"2026-01-05T10:0{minute}:00+00:00")["context_attempt"], "attempt_id": attempt,
+                "ledger_state": state, "llm_call_id": call, "execution_id": "e1", "round_id": "r1", "call_attempt": 1}
+
+    def scenes(a_outcome: str) -> list:
+        steps = [("p", "settled", "max", 1, "c1"), ("a", "dispatched", "low", 2, "c2"), ("b", "dispatched", "max", 3, "c3"),
+                 ("b", "released", "max", 3, "c3"), ("a", a_outcome, "low", 2, "c2")]
+        words = ["Max", "Low", "Max", "Low", "Max" if a_outcome == "released" else "Low"]
+        held, out = [], []
+        for (attempt, state, applied, minute, call), word in zip(steps, words):
+            fact = frame(attempt, state, applied, minute, call)
+            # Only the newest attempt's own call opens it; later frames are late outcomes of attempts already held.
+            held = fold_attempt(held, fact, active=attempt != "a" or state == "dispatched") or held
+            out.append((word, {**_sent("max"), "context_attempt": attempt_view(held)}))
+        return out
+
+    url = direct_server_with_data["url"]
+    with sync_playwright() as pw:
+        browser, page = _launch(pw, "webkit", viewport={"width": 1100, "height": 750})
+        try:
+            rows = _observe_context(page, [])
+            _open_chat(page, url, width=1100, height=750)
+            for outcome in ("settled", "unresolved", "released"):
+                rows[:] = []
+                page.reload(wait_until="domcontentloaded")
+                page.wait_for_function(f"() => document.querySelector('{CONTEXT}')?.dataset.contextActual === 'unknown'", timeout=30_000)
+                for word, row in scenes(outcome):
+                    rows[:] = [row]
+                    page.wait_for_function(f"() => document.querySelector('{CONTEXT} .chat-capsule-value').textContent === '{word}'",
+                                           timeout=15_000)
+        finally:
+            browser.close()
+
+
+def test_a_project_rooms_context_reads_only_its_own_root_works(direct_server_with_data, tmp_path):  # noqa: F811
+    """A real Project room (a neutral one created on the test's own server) reads its own chat's root works: Main's
+    work and the Project's helper change nothing. One engine (WebKit, the desktop app's), desktop and 390 px."""
+    import urllib.request
+
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import sync_playwright
+
+    url = direct_server_with_data["url"]
+
+    def request(path, body=None):
+        req = urllib.request.Request(url + path, data=None if body is None else json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as response:
+            return json.loads(response.read())
+
+    project = request("/api/projects", {"id": "context-sample", "name": "Context Sample"})["project"]
+    room = int(project["chat_id"])
+    assert room != 1, project
+    with sync_playwright() as pw:
+        browser, page = _launch(pw, "webkit", viewport={"width": 1100, "height": 750})
+        seen = {}
+        try:
+            _observe_context(page, [
+                _sent("max", work="synthetic-main-work"),  # Main's own work: never the Project's
+                _sent("nano", work="synthetic-helper", chat_id=room, at="2026-01-05T10:09:00+00:00")
+                | {"parent_task_id": "synthetic-project-work", "delegation_role": "subagent"},  # a helper: never the room's
+                _sent("low", work="synthetic-project-work", chat_id=room),
+            ])
+            _open_chat(page, url, width=1100, height=750)
+            page.evaluate("project => window.dispatchEvent(new CustomEvent('ouro:open-project', {detail: {project}}))", project)
+            panel = f"#panel-pchat-{project['id']}"
+            ctx = f"{panel} .chat-context-mode"
+            page.wait_for_function(f"""() => document.querySelector('{ctx} .chat-capsule-value')?.textContent === 'Low'""", timeout=30_000)
+            facts = lambda sel: page.evaluate(f"""() => {{ const el = document.querySelector('{sel}');
+                const fact = el.querySelector('.ui-hint-fact');
+                return {{ word: el.querySelector('.chat-capsule-value').textContent, mode: el.dataset.contextMode,
+                    lit: [...el.querySelectorAll('.chat-context-arc[data-lit="true"]')].map((a) => a.dataset.arc),
+                    dot: getComputedStyle(el.querySelector('.chat-context-choice')).display !== 'none',
+                    label: el.querySelector('.chat-capsule-head').getAttribute('aria-label') || '',
+                    open: el.dataset.open, fact: fact.hidden ? '' : fact.textContent,
+                    docScroll: document.documentElement.scrollWidth > innerWidth + 1 }}; }}""")
+            for width, height in ((1100, 750), (390, 844)):
+                page.set_viewport_size({"width": width, "height": height})
+                page.wait_for_timeout(400)
+                seen[f"project-closed-{width}"] = closed = facts(ctx)
+                seen[f"main-closed-{width}"] = main = facts("#page-chat .chat-context-mode")
+                _shot(page, tmp_path, f"context-synthetic-project-closed-webkit-dark-{width}")
+                assert closed["word"] == "Low" and closed["lit"] == ["low"] and closed["dot"] and closed["mode"] == "max", seen
+                assert closed["label"] == "Context: Low now, Max chosen" and not closed["docScroll"], seen
+                assert main["word"] == "Max" and main["lit"] == ["max"] and not main["dot"], "Main reads only its own work"
+                page.locator(f"{ctx} .chat-capsule-head").click()
+                page.wait_for_function(f"() => document.querySelector('{ctx}').dataset.open === 'true'")
+                page.wait_for_timeout(450)
+                seen[f"project-open-{width}"] = opened = facts(ctx)
+                _shot(page, tmp_path, f"context-synthetic-project-open-webkit-dark-{width}")
+                assert opened["fact"].startswith("Low nowThe history does not fit the Max window. Request at "), seen
+                page.keyboard.press("Escape")
+                page.wait_for_function(f"() => document.querySelector('{ctx}').dataset.open === 'false'")
+                page.evaluate("() => document.activeElement?.blur()")
+        finally:
+            _record(tmp_path, "context-synthetic-project-webkit", seen)
+            browser.close()

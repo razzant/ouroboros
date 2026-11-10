@@ -13,7 +13,6 @@ from ouroboros.review import candidate_repo_paths
 from supervisor import update_merge_policy
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture(scope="module")

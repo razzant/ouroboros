@@ -7,8 +7,9 @@ Look before you measure. A screenshot is a picture you must actually open; a mea
 
 - `browse_page(url, output="screenshot", viewport="WxH", engine="webkit")` renders the page and attaches the pixels to your context in the same round. `file://` paths work. Name the engine you used: WebKit shows what a native macOS window shows but may download on first use; Chromium is bundled.
 - `browser_action(action="screenshot")` keeps the capture in the browser session but does not show it to you; follow it with `analyze_screenshot`, or take the picture with `browse_page` instead.
-- `browser_action(action="evaluate", value=<the text of measure.js>)` calls the snippet on the current page and returns its facts and findings. Take the screenshot first so the page has painted; WebKit can report one width before the first paint and another after. The tool cuts any result at 20,000 characters, so a frozen page never comes back whole this way: freeze with the script below and write the frame to a file.
+- `browser_action(action="evaluate", value=<the text of measure.js>)` calls the snippet on the current page and returns its facts and findings. Take the screenshot first so the page has painted; WebKit can report one width before the first paint and another after. A long result comes back as a bounded view with its whole text kept as an exact source; to keep a frozen page as a frame, freeze it with the script below and write the frame to a file.
 - Detail: judge it on a crop at device scale 2 from the script below, never on a stitched or scaled sheet.
+- Optional, never in tests, CI, a release or a schedule: `references/live_stand.py` (Python with Playwright; its docstring is the manual) captures every place and tab of Ouroboros's own interface on the live data, read-only, with every write answered locally, and diffs the stylesheets of two `web/` folders on one page.
 
 ## A script, for Ouroboros or a delegated session
 
@@ -40,6 +41,7 @@ with sync_playwright() as pw:
     # To freeze a live page as a comparison frame instead, open its URL and run:
     #   frozen = page.evaluate(call("freeze.js", {}))
     #   pathlib.Path("frame.html").write_text(frozen["html"])
+    #   frozen["missing"] names what the frame lacks or could not confirm: fix it or say so, and look at the frame beside the live page.
     print(json.dumps(report, ensure_ascii=False, indent=1), failed)
     browser.close()
 shutil.rmtree(tmp, ignore_errors=True)

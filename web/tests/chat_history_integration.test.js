@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { installDom, restoreDom, ElementStub, walkCard } from './chat_dom_fixture.js';
+import { PREVIEW_KEY } from '../modules/chat_preview.js';
 
 const TS = '2026-09-12T12:00:00.000Z';
 const row = (id, text, extra = {}) => ({
@@ -14,18 +15,22 @@ const page = (messages, cursor = 'page:recent', next = null) => ({
     window: { complete: next === null, truncated_by: next ? ['quota'] : [] },
 });
 
-function fixture(t, initial = page([]), fetchPage = null) {
+// `seed` runs on the fresh document before the room exists (this origin's saved preview); a response may be a promise
+// the test settles, or `{ httpStatus, body }` for a refused read.
+function fixture(t, initial = page([]), fetchPage = null, { seed = null } = {}) {
     let response = initial, revision = 0;
     const calls = [], handlers = new Map();
     const { prior, mount } = installDom(async (url, init) => {
         if (String(url).startsWith('/api/chat/history')) {
             const cursor = new URL(String(url), 'http://local').searchParams.get('cursor');
             calls.push(cursor);
-            const data = cursor && fetchPage ? await fetchPage(cursor, init) : response;
+            const data = cursor && fetchPage ? await fetchPage(cursor, init) : await response;
+            if (data?.httpStatus) return { ok: false, status: data.httpStatus, json: async () => data.body };
             return { ok: true, json: async () => data };
         }
         return { ok: true, json: async () => ({ active_direct_turns: [] }) };
     });
+    seed?.();
     const priorSocket = globalThis.WebSocket;
     globalThis.WebSocket = { OPEN: 1 };
     const instance = createChatInstance({
@@ -104,6 +109,14 @@ function recordRenderedMarkup(t) {
     t.after(() => Object.defineProperty(ElementStub.prototype, 'innerHTML', descriptor));
     return markup;
 }
+
+// This room's rows in this origin's saved preview (chat_preview.js): Project chat 2, no appearance scope.
+const PREVIEW_ROOM = JSON.stringify(['', [2, '']]);
+const savedTexts = () => (JSON.parse(localStorage.getItem(PREVIEW_KEY) || '{"rooms":[]}').rooms
+    .find((entry) => entry.key === PREVIEW_ROOM)?.rows || []).map((item) => item.text);
+const settle = async (check = () => false) => {
+    for (let n = 0; n < 80 && !check(); n += 1) await new Promise((resolve) => setTimeout(resolve, 0));
+};
 
 test('R3 a terminal census before first history preserves source narration and its chronological anchor', async t => {
     const text = 'Retained authored evidence from the original task';
@@ -367,9 +380,10 @@ for (const systemType of ['reminder', 'skill_notice']) for (const historyFirst o
             assert.equal(original.dataset.historyId, 'chat:100');
             assert.equal(original.dataset.historySource, 'chat:rotation-1');
             assert.equal(original.dataset.historyOffset, '100');
-            const saved = sessionStorage.getItem('ouro_chat:2');
+            const saved = localStorage.getItem(PREVIEW_KEY);
+            assert.deepEqual(savedTexts(), [message.text], 'the saved preview holds the newest read\'s row');
             f.emit(live);
-            assert.equal(sessionStorage.getItem('ouro_chat:2'), saved, 'a late live copy is not persisted again');
+            assert.equal(localStorage.getItem(PREVIEW_KEY), saved, 'a late live copy is not saved again');
             await f.refresh(page([message]));
         }
         assert.equal(f.bubbles().length, 1);
@@ -399,7 +413,7 @@ test('repeated physical history identity updates the routing annotation on the s
     assert.notEqual(note.textContent, 'Choosing the right destination…');
     assert.match(note.textContent, /Investigation/);
     const annotationText = note.textContent, metadata = { ...bubble.dataset };
-    const saved = sessionStorage.getItem('ouro_chat:2');
+    const saved = localStorage.getItem(PREVIEW_KEY);
     f.emit({ role: message.role, content: message.text, ts: message.ts,
         client_message_id: message.client_message_id, source: message.source,
         sender_session_id: message.sender_session_id });
@@ -408,7 +422,7 @@ test('repeated physical history identity updates the routing annotation on the s
     assert.equal(bubble.querySelector('.msg-routing-annotation'), note);
     assert.equal(note.textContent, annotationText, 'the live echo cannot clear the saved routing receipt');
     assert.deepEqual(bubble.dataset, metadata);
-    assert.equal(sessionStorage.getItem('ouro_chat:2'), saved);
+    assert.equal(localStorage.getItem(PREVIEW_KEY), saved);
 });
 
 test('a live echo preserves the projected saved-context note and origin metadata', async t => {
@@ -425,7 +439,7 @@ test('a live echo preserves the projected saved-context note and origin metadata
     assert.equal(original.dataset.originId, origin.origin_id);
     assert.equal(original.dataset.originProjected, '1');
     const metadata = { ...original.dataset }, noteText = note.textContent;
-    const saved = sessionStorage.getItem('ouro_chat:2');
+    const saved = localStorage.getItem(PREVIEW_KEY);
     f.emit({ role: origin.role, content: origin.text, ts: origin.ts,
         source: origin.source, sender_session_id: origin.sender_session_id });
     assert.equal(f.bubbles().length, 1);
@@ -433,7 +447,7 @@ test('a live echo preserves the projected saved-context note and origin metadata
     assert.equal(original.querySelector('.saved-project-context'), note);
     assert.equal(note.textContent, noteText);
     assert.deepEqual(original.dataset, metadata);
-    assert.equal(sessionStorage.getItem('ouro_chat:2'), saved);
+    assert.equal(localStorage.getItem(PREVIEW_KEY), saved);
 });
 
 test('a replayed refusal receipt shows the host cause and a later scheduled receipt patches the same note', async (t) => {
@@ -695,6 +709,31 @@ test('the owner echo and its history row stay one bubble keyed by his id', async
     assert.equal(f.bubbles()[0].dataset.clientMessageId, 'owner:201');
 });
 
+test("an owner message links its http(s) address live and from history, and Copy keeps the owner's words", async (t) => {
+    const words = 'Read `https://e.com/a?b=1&c=2`, then <b>reply</b>.';
+    const link = '<a class="md-link" href="https://e.com/a?b=1&amp;c=2" target="_blank" rel="noopener noreferrer">'
+        + 'https://e.com/a?b=1&amp;c=2</a>';
+    const message = (bubble) => bubble.innerHTML.match(/<div class="message">[\s\S]*?<\/div>/)?.[0];
+    const saved = row('chat:211', words, { role: 'user', client_message_id: 'owner:211', source: 'web' });
+    const f = fixture(t);
+    await f.refresh();
+    f.emit({ ...saved, content: words, history_id: undefined });
+    const live = f.bubbles()[0];
+    assert.equal(message(live), `<div class="message">Read \`${link}\`, then &lt;b&gt;reply&lt;/b&gt;.</div>`);
+    const copied = [];
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async (text) => copied.push(text) } });
+    t.after(() => delete navigator.clipboard);
+    const copy = live.children.find((node) => node.classList.contains('chat-message-copy'));
+    for (const handler of copy.listeners.get('click')) await handler({ target: copy });
+    assert.deepEqual(copied, [words]);
+    // An earlier message with the same words arrives only from history.
+    const earlier = row('chat:210', words, { role: 'user', client_message_id: 'owner:210', source: 'web',
+        ts: '2026-09-12T11:00:00.000Z' });
+    await f.refresh(page([earlier, saved]));
+    const replayed = f.bubbles().find((bubble) => bubble.dataset.clientMessageId === 'owner:210');
+    assert.equal(message(replayed), message(live), 'history paints the same linked words');
+});
+
 test("a host reply that names the owner's submission is drawn beside his bubble, not into it", async (t) => {
     const f = fixture(t);
     await f.refresh();
@@ -707,4 +746,184 @@ test("a host reply that names the owner's submission is drawn beside his bubble,
     assert.equal(f.bubbles()[1].dataset.clientMessageId, undefined);
     await f.refresh(page([user, reply]));
     assert.equal(f.bubbles().length, 2, 'history adopts the reply instead of adding a third row');
+});
+
+test('only an admitted newest read writes the saved preview; ↓\'s latest page refreshes it', async (t) => {
+    offScreen(t);
+    const recent = page([row('chat:900', 'Newest saved message')], 'page:recent', 'before:1');
+    const older = (index) => page([row(`chat:${300 - index * 100}`, `Older ${index}`)], `page:${index}`,
+        index < 3 ? `before:${index + 1}` : null);
+    const f = fixture(t, recent, (cursor) => older(Number(cursor.split(':')[1])));
+    await f.refresh();
+    assert.deepEqual(savedTexts(), ['Newest saved message']);
+    for (let n = 0; n < 3; n += 1) await scrollEdge(f);
+    assert.deepEqual(f.calls, [null, 'before:1', 'before:2', 'before:3']);
+    assert.deepEqual(savedTexts(), ['Newest saved message'], 'an older page is never the room\'s newest text');
+    // ↓ from older history reads the present as a `latest` page: that admitted window refreshes the preview too.
+    f.respond(page([row('chat:900', 'Newest saved message'), row('chat:950', 'Arrived while reading')], 'page:recent', 'before:1'));
+    globalThis.document.byId.get('chat-scroll-bottom').click();
+    await settle(() => f.calls.length > 4 && savedTexts().length === 2);
+    assert.deepEqual(f.calls.slice(4), [null]);
+    assert.deepEqual(savedTexts(), ['Newest saved message', 'Arrived while reading']);
+    const before = localStorage.getItem(PREVIEW_KEY);
+    // A newest window that could not read the conversation stream keeps the record; so does a refused read.
+    await f.refresh({ ...page([]), window: { complete: false, truncated_by: ['chat_source_unavailable'] } });
+    assert.equal(localStorage.getItem(PREVIEW_KEY), before);
+    f.respond({ httpStatus: 503, body: { messages: [], error: 'history_source_unavailable',
+        reason_code: 'history_source_unavailable', has_more: true, next_cursor: null } });
+    await f.instance.refreshHistory({ revision: 90 });
+    assert.equal(localStorage.getItem(PREVIEW_KEY), before);
+    // A bounded window that is merely incomplete is still the room's newest text.
+    await f.refresh({ ...page([row('chat:960', 'Bounded newest')]), window: { complete: false, truncated_by: ['quota'] } });
+    assert.deepEqual(savedTexts(), ['Bounded newest']);
+});
+
+test('a newest read answered after its room left writes nothing', async (t) => {
+    const f = fixture(t, page([row('chat:100', 'Read while shown')]));
+    await f.refresh();
+    let release;
+    f.respond(new Promise((resolve) => { release = resolve; }));
+    const pending = f.instance.refreshHistory({ revision: 7 });
+    await settle(() => f.calls.length === 2);
+    f.instance.leave();
+    release(page([row('chat:200', 'Answered after the room left')]));
+    await pending;
+    await settle();
+    assert.deepEqual(savedTexts(), ['Read while shown'], 'a late answer is no admitted window');
+    assert.equal(f.bubbles().some((node) => node.innerHTML.includes('Answered after')), false);
+});
+
+const seedPreview = (rows) => () => localStorage.setItem(PREVIEW_KEY, JSON.stringify({ v: 2, rooms: [{ key: PREVIEW_ROOM, rows }] }));
+const SAVED_ROWS = [{ id: 'chat:5', role: 'user', text: 'Saved question', speaker: 'You' },
+    { id: 'chat:6', role: 'assistant', text: 'Saved <b>answer</b>\nsecond line', speaker: 'Ouroboros' }];
+const previewNode = (f) => f.messages.children.find((node) => node.dataset.savedPreview === 'true');
+
+test('a warm opening paints the saved text before its first read, grants it nothing, and the read replaces it', async (t) => {
+    let release;
+    const f = fixture(t, new Promise((resolve) => { release = resolve; }), null, { seed: seedPreview(SAVED_ROWS) });
+    await settle(() => f.calls.length === 1);
+    const shown = previewNode(f);
+    assert.ok(shown, 'painted while the first read is out');
+    assert.equal(shown.children[0].textContent, 'Saved text preview · updating');
+    assert.deepEqual(shown.children.slice(1).map((node) => [node.className, node.dataset.previewHistoryId,
+        node.children.map((part) => part.textContent)]), [
+        ['chat-bubble user', 'chat:5', ['You', 'Saved question']],
+        ['chat-bubble assistant', 'chat:6', ['Ouroboros', 'Saved <b>answer</b>\nsecond line']]]);
+    for (const selector of ['button', 'a', '[data-history-id]']) {
+        assert.equal(shown.querySelectorAll(selector).length, 0, `no ${selector}: no action, link or history identity`);
+    }
+    assert.equal(f.instance.hasPaintedHistory(), false);
+    assert.equal(f.messages.dataset.historyHydrated, undefined);
+    // The reader never moved: whatever the painted text did to the layout, the first canonical read opens at the newest
+    // message.
+    f.messages.scrollTop = 0;
+    release(page([row('chat:6', 'Canonical answer'), row('chat:7', 'Fresh answer')]));
+    await settle(() => f.messages.dataset.historyHydrated === 'true');
+    assert.ok(f.messages.scrollHeight > 0);
+    assert.equal(f.messages.scrollTop, f.messages.scrollHeight, 'the first canonical read opens at the newest message');
+    assert.equal(previewNode(f), undefined, 'the canonical page replaces it');
+    assert.deepEqual(f.bubbles().map((node) => node.dataset.historyId), ['chat:6', 'chat:7']);
+    assert.equal(f.instance.hasPaintedHistory(), true);
+    assert.deepEqual(savedTexts(), ['Canonical answer', 'Fresh answer']);
+});
+
+for (const status of [500, 401]) test(`a warm opening whose first read fails with ${status} ${status === 401 ? 'discards the saved text at once' : 'keeps it, not current, beside Retry'}`, async (t) => {
+    const f = fixture(t, { httpStatus: status, body: { error: 'Controlled history failure' } }, null,
+        { seed: seedPreview(SAVED_ROWS) });
+    await settle(() => f.calls.length === 1 && (status === 401 ? !previewNode(f) : /not current/.test(previewNode(f)?.children[0].textContent)));
+    const retry = f.messages.querySelector('.chat-load-older')?.querySelector('.chat-load-older-btn');
+    assert.equal(retry?.textContent, 'Retry loading messages');
+    assert.equal(f.instance.hasPaintedHistory(), false);
+    if (status === 401) {
+        assert.equal(previewNode(f), undefined);
+        assert.equal(localStorage.getItem(PREVIEW_KEY), null, 'a refused session keeps no conversation text');
+        return;
+    }
+    assert.equal(previewNode(f).children[0].textContent, 'Saved text preview · not current');
+    assert.deepEqual(savedTexts(), ['Saved question', 'Saved <b>answer</b>\nsecond line'], 'a transient failure erases nothing');
+});
+
+// Every history read the room makes passes one door (chat.js fetchHistory): its newest read, a page, ↓'s latest page and
+// arrivals alike. Any of them refused for authentication takes this origin's saved text; a page that merely failed takes
+// nothing (its Retry is the room's, the saved text is not its statement).
+for (const [read, status] of [['older', 401], ['older', 403], ['latest', 401], ['older', 500], ['latest', 503]]) {
+    test(`a ${read} page answered ${status} ${status < 500 ? 'erases' : 'keeps'} the saved text`, async (t) => {
+        offScreen(t);
+        const answer = { httpStatus: status, body: { error: 'Owner session required.' } };
+        const recent = page([row('chat:900', 'Newest saved message')], 'page:recent', 'before:1');
+        const older = (index) => page([row(`chat:${300 - index * 100}`, `Older ${index}`)], `page:${index}`,
+            index < 3 ? `before:${index + 1}` : null);
+        const f = fixture(t, recent, (cursor) => (read === 'older' ? answer : older(Number(cursor.split(':')[1]))));
+        await f.refresh();
+        assert.deepEqual(savedTexts(), ['Newest saved message']);
+        if (read === 'older') {
+            await f.clickOlder();
+            assert.deepEqual(f.calls, [null, 'before:1']);
+        } else {
+            // Read far enough back that the present is released: ↓ then reads it as a `latest` page.
+            for (let n = 0; n < 3; n += 1) await scrollEdge(f);
+            f.respond(answer);
+            globalThis.document.byId.get('chat-scroll-bottom').click();
+            await settle(() => f.calls.length > 4);
+            assert.deepEqual(f.calls, [null, 'before:1', 'before:2', 'before:3', null]);
+        }
+        await settle(() => localStorage.getItem(PREVIEW_KEY) === null);
+        if (status < 500) assert.equal(localStorage.getItem(PREVIEW_KEY), null, 'a refused session keeps no conversation text');
+        else assert.deepEqual(savedTexts(), ['Newest saved message'], 'a failed page erases nothing');
+    });
+}
+
+test('the saved preview keeps the feed\'s order: an accepted delayed arrival lands where its time puts it', async (t) => {
+    // Reproduction from the R1 review (Astra): A 12:00, B 12:02, then C arrives stamped 12:01.
+    const earlier = row('chat:1', 'Earlier answer', { ts: '2026-09-12T12:00:00Z' });
+    const newer = row('chat:2', 'Newer question', { role: 'user', ts: '2026-09-12T12:02:00Z' });
+    const delayed = row('chat:3', 'Delayed older answer', { ts: '2026-09-12T12:01:00Z' });
+    const f = fixture(t, { ...page([earlier, newer]), after_cursor: 'after:recent' }, (cursor) => {
+        assert.equal(cursor, 'after:recent');
+        return { messages: [delayed], after_cursor: 'after:delta',
+            window: { complete: true, truncated_by: [], latest_message: { history_id: 'chat:3', out_of_order: true } } };
+    });
+    await f.refresh();
+    await f.refresh();
+    assert.deepEqual(f.calls, [null, 'after:recent'], 'the arrivals read, not a newest page, brought the row');
+    const saved = () => JSON.parse(localStorage.getItem(PREVIEW_KEY)).rooms[0].rows.map((item) => item.id);
+    assert.deepEqual(f.bubbles().map((node) => node.dataset.historyId), ['chat:1', 'chat:3', 'chat:2']);
+    assert.deepEqual(saved(), ['chat:1', 'chat:3', 'chat:2'], 'reopening must not reorder the accepted conversation');
+});
+
+test('a newest window listing a delayed row after newer ones is saved in the order the feed draws it', async (t) => {
+    const rows = [row('chat:1', 'A', { ts: '2026-09-12T12:00:00Z' }), row('chat:2', 'B', { role: 'user', ts: '2026-09-12T12:02:00Z' }),
+        row('chat:3', 'C, delivered late', { ts: '2026-09-12T12:01:00Z' })];
+    const f = fixture(t, page(rows));
+    await f.refresh();
+    assert.deepEqual(f.bubbles().map((node) => node.dataset.historyId), ['chat:1', 'chat:3', 'chat:2']);
+    assert.deepEqual(JSON.parse(localStorage.getItem(PREVIEW_KEY)).rooms[0].rows.map((item) => item.id), ['chat:1', 'chat:3', 'chat:2']);
+});
+
+// Equal times: the feed (insertTimelineNode) breaks the tie by stream position, comparing the source as text, so after a
+// log rotation `chat:rotation-10` stands before `chat:rotation-9` however the read lists them. The saved preview must
+// read the same as the canonical feed, from a newest window and from an arrival.
+const sameInstant = (source, offset) => ({ ts: '2026-09-12T12:00:00.000Z', history_position: { source, offset } });
+
+test('equal times: a newest window is saved in the order the feed draws it, by stream position', async (t) => {
+    const f = fixture(t, page([row('chat:500', 'Older log, later offset', sameInstant('chat:rotation-9', 500)),
+        row('chat:0', 'Newer log, same millisecond', sameInstant('chat:rotation-10', 0)),
+        row('chat:20', 'Same log, earlier offset', sameInstant('chat:rotation-9', 20))]));
+    await f.refresh();
+    const canonical = f.bubbles().map((node) => node.dataset.historyId);
+    assert.deepEqual(canonical, ['chat:0', 'chat:20', 'chat:500'], 'the feed orders the tie by position');
+    assert.deepEqual(JSON.parse(localStorage.getItem(PREVIEW_KEY)).rooms[0].rows.map((item) => item.id), canonical);
+});
+
+test('equal times: an accepted arrival is saved where the feed places it', async (t) => {
+    const f = fixture(t, { ...page([row('chat:1', 'Earlier', { ts: '2026-09-12T11:59:00.000Z' }),
+        row('chat:500', 'Same instant, older log', sameInstant('chat:rotation-9', 500))]), after_cursor: 'after:recent' },
+    () => ({ messages: [row('chat:0', 'Same instant, newer log', sameInstant('chat:rotation-10', 0))], after_cursor: 'after:delta',
+        window: { complete: true, truncated_by: [], latest_message: { history_id: 'chat:0' } } }));
+    await f.refresh();
+    await f.refresh();
+    assert.deepEqual(f.calls, [null, 'after:recent'], 'the arrivals read brought the row');
+    const canonical = f.bubbles().map((node) => node.dataset.historyId);
+    assert.deepEqual(canonical, ['chat:1', 'chat:0', 'chat:500']);
+    assert.deepEqual(JSON.parse(localStorage.getItem(PREVIEW_KEY)).rooms[0].rows.map((item) => item.id), canonical);
 });

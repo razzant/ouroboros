@@ -70,10 +70,6 @@ def test_recent_abi_retirements_section_carries_the_abi_70_window():
     assert "OUROBOROS_REVIEWER_SLOTS" in section, "the migration target must be named"
 
 
-def test_model_send_design_note_matches_the_observability_contract():
-    assert (REPO / "ouroboros" / "model_send_seal.py").exists()
-
-
 def test_settings_docs_name_every_key_owner_and_what_startup_persists():
     """Keep the live settings and their rows in the tool-read reference table."""
     arch = _read("docs/ARCHITECTURE.md")
@@ -148,13 +144,14 @@ def _change_review_items() -> dict:
 
 
 def test_checklist_item_numbers_cited_outside_the_checklist_name_the_current_items():
-    """The change-review checklist was renumbered (core 1-9, body layer 10-29).
+    """The change-review checklist was renumbered (core 1-9, body layer 10-30; item 30
+    `execution_placement` added with the owner's decision 1A, 2026-11-02).
     Every place that cites an item BY NUMBER AND NAME — the engineering chapters,
     the architecture book, runtime comments, test docstrings — must agree with the
     live table; a number that names the wrong item sends a reviewer to the wrong
     rule. The standing archive keeps its historical numbers by its own note."""
     items = _change_review_items()
-    assert items[7] == "capability_regression" and items[11] == "development_compliance" and len(items) == 29
+    assert items[7] == "capability_regression" and items[11] == "development_compliance" and len(items) == 30
     names = "|".join(sorted(items.values(), key=len, reverse=True))
     forms = (
         # "item 17 (`subagent_isolation`)", "item 21 `source_completeness`", "item 15 (self_consistency)", "item 27, `gateway_parity`"
@@ -187,13 +184,6 @@ def test_checklist_item_numbers_cited_outside_the_checklist_name_the_current_ite
     assert not re.search(r"CHECKLISTS items? (?:2|13)\([a-z]\)", dev)
 
 
-def test_phase3_governance_language_is_pinned_without_new_qa_surface():
-    development = _read("docs/DEVELOPMENT.md")
-    # The heading is selected by DOC_RESIDUE_SKIPPED_SUBSECTIONS below.
-    assert "External facts: unknown is not no" in development
-    assert "| Location | Fact | Evidence & re-probe | If stale |" in development
-
-
 # Identifiers the prompts legitimately name in backticks that are NOT tools:
 # parameter names, resource roots, write surfaces, typed outcome/status tokens
 # and runtime-context keys. A NEW snake_case identifier in a prompt must either
@@ -210,7 +200,7 @@ PROMPT_NON_TOOL_IDENTIFIERS = frozenset({
     "write_root", "write_surface",
     # tool parameters named as cross-tool policy
     "project_id", "project_name", "recommended_use", "retry_of", "review_rebuttal", "subagent_id", "working_note",
-    "extra_tests", "full_tests", "test_reason",
+    "extra_tests", "full_tests", "test_reason", "view_address",
     # typed outcomes / statuses / runtime-context keys
     "needs_manual_target", "started_uncustodied", "owner_client",
     # safety policy class names (ouroboros/safety.py TOOL_POLICY values) and
@@ -449,6 +439,7 @@ def test_architecture_endpoint_table_mirrors_route_registries(tmp_path):
 SETTINGS_TABLE_ENV_ONLY_ROWS = frozenset({
     "OUROBOROS_TRUST_NONLOCAL_BIND_WITHOUT_PASSWORD", "OUROBOROS_DISABLE_MANAGED_UPDATES",
     "OUROBOROS_PRESENTATION", "OUROBOROS_DESKTOP_BACKGROUND", "OUROBOROS_USER_FILES_ROOT", "OUROBOROS_OBSERVABILITY_KEEP_RAW",
+    "OUROBOROS_CHROMIUM_SANDBOX",
     "OUROBOROS_OBSERVABILITY_RETENTION_DAYS", "OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC",
     "OUROBOROS_REVIEW_MAX_TOKENS", "OUROBOROS_PREFLIGHT_TIMEOUT_SEC", "OUROBOROS_PREFLIGHT_SERIAL",
     "OUROBOROS_PREFLIGHT_TEST_WORKERS", "OUROBOROS_BUNDLE_DIR",

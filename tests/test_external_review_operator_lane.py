@@ -3,6 +3,9 @@ review-only cycle, run in the runtime's isolated checkout of the staged index
 (R3), with its hermetic tests, the author's optional ``surface=preflight`` look
 (record + the helper's full answer), drift artifact and custody-bound retention."""
 
+import contextlib
+import errno
+import io
 import json
 import os
 import subprocess
@@ -34,8 +37,8 @@ def test_settings_land_before_the_lane_without_a_key_heuristic():
         assert 'os.environ.get("ANTHROPIC_API_KEY"' not in source
 
 
-def _operator_fixture(tmp_path: Path, monkeypatch, order: list | None = None, *,
-                      scout_enabled: bool = True) -> tuple[Path, list[dict]]:
+def _operator_fixture(tmp_path: Path, monkeypatch, order: list | None = None, *, scout_enabled: bool = True,
+                      preflight_answer: str = _PREFLIGHT_ANSWER) -> tuple[Path, list[dict]]:
     """An installed body with a staged README edit; the operator lane's paid seam
     (the review substrate) and hermetic test runner are the golden stand-ins, and
     the gate reads the golden panel from the frozen slot plan. ``order`` records
@@ -73,7 +76,7 @@ def _operator_fixture(tmp_path: Path, monkeypatch, order: list | None = None, *,
         order.append(("preflight", request.session_root))
         reserved = (getattr(usage_ctx, "_review_reserved_operations", None) or {}).get(request.surface) or {}
         return SimpleNamespace(actors=[{
-            "slot_id": "api-scout", "model": slots[0].model, "status": "ok", "raw_text": _PREFLIGHT_ANSWER,
+            "slot_id": "api-scout", "model": slots[0].model, "status": "ok", "raw_text": preflight_answer,
             "usage": {"provider": "openrouter", "resolved_model": "openai/fake-reviewer",
                       "prompt_tokens": 10, "completion_tokens": 5, "cost": 0.001},
             "operation_id": str(reserved.get("api-scout") or "op-api-scout"),
@@ -240,6 +243,78 @@ def test_operator_lane_without_isolation_reviews_this_worktree(tmp_path, monkeyp
     assert exit_code == 0, (output / "outcome.json").read_text(encoding="utf-8")
     assert {Path(brief["session_root"]) for brief in briefs if brief["session_root"]} == {repo}
     assert not (tmp_path / "drive" / "state" / "review_checkouts").exists()
+
+
+# Cyrillic, a supplementary-plane emoji and a BMP arrow: neither cp1252 nor ASCII has any of them.
+_UNICODE_REASON = "прочитано целиком 🐍 → готово"
+
+
+def _unicode_review(tmp_path: Path, monkeypatch) -> tuple[str, str]:
+    """The operator fixture with the named preflight look; that seat and panel seat t1 answer in Unicode."""
+    from tests.test_git_review_preflight_gate import _roster
+
+    def answer(seat: str) -> str:
+        return json.dumps([{"item": "code_quality", "verdict": "PASS", "severity": "advisory",
+                            "reason": f"{seat}: {_UNICODE_REASON}"}], ensure_ascii=False)
+
+    _roster(monkeypatch)
+    monkeypatch.setitem(shared.ANSWERS, "t1", answer("t1"))
+    _operator_fixture(tmp_path, monkeypatch, preflight_answer=answer("api-scout"))
+    return answer("t1"), answer("api-scout")
+
+
+@pytest.mark.parametrize("encoding", ["utf-8", "cp1252", "ascii"])
+def test_a_console_that_cannot_encode_the_review_shows_escapes_and_the_artifacts_keep_it_exact(
+        tmp_path, monkeypatch, encoding):
+    """Windows opens a piped stdout in its ANSI code page (cp1252, errors=strict), and a review carries text
+    no such page holds (a reviewer's Cyrillic or emoji, the ⚠️ of an omission notice). The console shows it
+    as backslash escapes, the UTF-8 artifacts keep the exact text and the exit code stays the verdict's; a
+    UTF-8 console shows the text itself (#2464: a passed review died at ``print`` before full-output.txt
+    and outcome.json existed)."""
+    import scripts.run_external_review as module
+
+    t1, preflight = _unicode_review(tmp_path, monkeypatch)
+    # The streams Python opens on such a pipe: stdout strict, stderr backslashreplace.
+    stdout, stderr = (io.TextIOWrapper(io.BytesIO(), encoding=encoding, errors=errors)
+                      for errors in ("strict", "backslashreplace"))
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        exit_code, output = _run_operator_lane(module, monkeypatch, tmp_path, "--preflight-reviewer=api-scout")
+    stdout.flush()
+    stderr.flush()
+    shown, said = (stream.buffer.getvalue().decode(encoding) for stream in (stdout, stderr))
+    assert exit_code == 0, said[-3000:]
+    assert json.loads((output / "outcome.json").read_text(encoding="utf-8"))["exit_code"] == 0
+    sections = shared.full_output_sections((output / "full-output.txt").read_text(encoding="utf-8"))
+    seats = json.loads(sections["REVIEW SEAT RECORDS (ledger rows with retained answers, full, untruncated)"])
+    assert {seat["seat_id"]: seat["answer"] for seat in seats}["t1"] == t1
+    assert (output / "preflight.txt").read_text(encoding="utf-8") == preflight + "\n"
+    assert "PREFLIGHT REVIEW" in shown and "AGGREGATE VERDICT" in shown and "Artifacts: " in said
+    if encoding == "utf-8":
+        assert f"t1: {_UNICODE_REASON}" in shown and f"api-scout: {_UNICODE_REASON}" in shown
+    else:
+        assert "\\U0001f40d" in shown and "\\u2192" in shown and "\\u043f" in shown and "🐍" not in shown
+
+
+def test_a_console_that_fails_after_the_review_raises_with_every_artifact_already_written(tmp_path, monkeypatch):
+    """A finished run saves everything before it shows anything: a console that fails (a reader that closed
+    the pipe, as ``| head`` does) raises to the caller, never swallowed, after outcome.json, full-output.txt
+    and the preflight record already hold the verdict."""
+    import scripts.run_external_review as module
+
+    class ClosedPipe(io.StringIO):
+        def write(self, _text):
+            raise BrokenPipeError(errno.EPIPE, "the reader closed the pipe")
+
+    _t1, preflight = _unicode_review(tmp_path, monkeypatch)
+    with contextlib.redirect_stdout(ClosedPipe()), pytest.raises(BrokenPipeError):
+        _run_operator_lane(module, monkeypatch, tmp_path, "--preflight-reviewer=api-scout")
+    output = tmp_path / "out-0"  # the folder _run_operator_lane named
+    outcome = json.loads((output / "outcome.json").read_text(encoding="utf-8"))
+    assert outcome["exit_code"] == 0 and outcome["outcome"]["status"] == "passed"
+    verdict = json.loads(shared.full_output_sections(
+        (output / "full-output.txt").read_text(encoding="utf-8"))["AGGREGATE VERDICT"])
+    assert verdict["exit_code"] == 0 and verdict["review_record"]["record_id"] == outcome["outcome"]["review_record_id"]
+    assert (output / "preflight.txt").read_text(encoding="utf-8") == preflight + "\n"
 
 
 def _fresh_operator_lane(root: str) -> None:

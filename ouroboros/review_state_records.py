@@ -393,6 +393,28 @@ def _normalize_findings(items: List[Any]) -> List[Dict[str, Any]]:
     return normalized
 
 
+def _continued_rows(existing: Any, incoming: Any) -> List[Any]:
+    """The incoming roster, except per slot: a row an explicit continuation reopened keeps its successor against a
+    stale snapshot naming no operation or one it superseded (``review_continuation``), and a settled row keeps its
+    outcome against a late pending snapshot of its operation (``review_state_custody.settled_row_outlives``)."""
+    rows = {str(row.get("slot_id") or ""): row for row in existing or [] if isinstance(row, dict)}
+
+    def current(row: Any) -> Any:
+        old = rows.get(str(row.get("slot_id") or "")) if isinstance(row, dict) else None
+        if old is None:
+            return row
+        reopened = old.get("superseded_operation_ids") and str(row.get("operation_id") or "") in {"", *old["superseded_operation_ids"]}
+        return old if reopened or _rs().settled_row_outlives(old, row) else row
+    return [current(row) for row in incoming or existing or []]
+
+
+def _continued_scope(existing: Any, incoming: Any) -> Dict[str, Any]:
+    merged = dict(incoming or existing or {})
+    if isinstance(merged.get("raw_results"), list) and isinstance((existing or {}).get("raw_results"), list):
+        merged["raw_results"] = _continued_rows(existing["raw_results"], merged["raw_results"])
+    return merged
+
+
 def _merge_attempt(existing: CommitAttemptRecord, incoming: CommitAttemptRecord) -> CommitAttemptRecord:
     data = {
         name: getattr(incoming, name) or getattr(existing, name)
@@ -408,8 +430,8 @@ def _merge_attempt(existing: CommitAttemptRecord, incoming: CommitAttemptRecord)
         updated_ts=incoming.updated_ts or existing.updated_ts or _utc_now(),
         finished_ts=incoming.finished_ts or existing.finished_ts,
         triad_models=list(incoming.triad_models or existing.triad_models),
-        triad_raw_results=list(getattr(incoming, "triad_raw_results", None) or getattr(existing, "triad_raw_results", None) or []),
-        scope_raw_result=dict(getattr(incoming, "scope_raw_result", None) or getattr(existing, "scope_raw_result", None) or {}),
+        triad_raw_results=_continued_rows(getattr(existing, "triad_raw_results", None), getattr(incoming, "triad_raw_results", None)),
+        scope_raw_result=_continued_scope(getattr(existing, "scope_raw_result", None), getattr(incoming, "scope_raw_result", None)),
         author_disposition=dict(incoming.author_disposition or existing.author_disposition),
         review_input=dict(getattr(incoming, "review_input", None) or getattr(existing, "review_input", None) or {}),
         # Once an attempt physically dispatched a paid triad/scope wave the fact is
@@ -428,6 +450,10 @@ def _merge_attempt(existing: CommitAttemptRecord, incoming: CommitAttemptRecord)
         ),
     )
     merged = CommitAttemptRecord(**data)
+    roster = _rs()._attempt_review_roster_rows(merged)
+    if merged.late_result_pending and roster and roster != _rs()._attempt_review_roster_rows(incoming) and not any(
+            _rs()._review_roster_row_is_pending(row) for row in roster):
+        merged.late_result_pending = False  # only a late snapshot raised it: the rows it named stay settled
     if merged.raw_stripped:
         # A late terminal merging onto an already-compacted row (a stale
         # in-flight row that slid past the newest-50 window) must not

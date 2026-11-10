@@ -48,7 +48,7 @@ SKILL_REVIEW_ITEMS = (
     "timeout_and_output_discipline", "extension_namespace_discipline", "widget_module_safety",
     "inject_chat_minimization", "event_subscription_minimization", "companion_process_safety",
     "host_token_handling", "error_handling", "integration_preflight", "bug_hunting",
-    "completion_notification", "context_snapshot_discipline",
+    "completion_notification", "context_snapshot_discipline", "payload_credentials",
 )
 MAX_DIFF_LINES_PER_FILE = 400
 # The earlier verdict's findings shown in the brief: a bound, and every cut named with the record that keeps the whole.
@@ -485,10 +485,12 @@ _CHECKLIST_HEADING = "## Checklist (source of truth — follow it literally)"
 _TOOL_EFFECT_RULE = """\
 Under permissions_honesty, compare each manifest tools: declaration with its
 implementation: effect read means no external mutation, message means words to
-people, write includes mixed operations (absent or unknown also means write).
-Check that target names every destination argument, including To/Cc/Bcc, and
-conversation/thread name the actual routing arguments. Caller-selected effect
-arguments cannot attest a read. Place connectors must declare every tool."""
+people, gesture means only a nonverbal response such as a reaction on the one
+message its message: argument names, write includes mixed operations (absent or
+unknown also means write). Check that target names every destination argument,
+including To/Cc/Bcc, and conversation/thread/message name the actual routing
+arguments. Caller-selected effect arguments cannot attest a read.
+Place connectors must declare every tool."""
 
 _OUTPUT_RULE = """\
 Rules of this answer: report PROBLEMS ONLY. Each element names one checklist item in `item` (exactly one of

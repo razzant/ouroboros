@@ -64,7 +64,7 @@ export class NodeStub {
                 node.setAttribute(attr[1], attr[2] ?? '');
             }
             stack.at(-1).appendChild(node);
-            if (!['input', 'br', 'hr', 'img', 'meta', 'link'].includes(tag)) stack.push(node);
+            if (!['input', 'br', 'hr', 'img', 'meta', 'link', 'wbr'].includes(tag)) stack.push(node);
         }
     }
     appendChild(node) { node.remove(); node.parentElement = this; this.children.push(node); return node; }
@@ -82,6 +82,8 @@ export class NodeStub {
     contains(node) { return this === node || this.children.some((child) => child.contains(node)); }
     matches(selector) {
         if (selector.includes(',')) return selector.split(',').some((part) => this.matches(part.trim()));
+        const tagged = selector.match(/^([a-z][\w-]*)(\[.+\])$/);  // `details[data-key="…"]`: the tag, then its brackets
+        if (tagged) return this.tagName === tagged[1] && this.matches(tagged[2]);
         if (selector.includes('][')) return (selector.match(/\[[^\]]+\]/g) || []).every((part) => this.matches(part));
         if (selector.startsWith('#')) return this.id === selector.slice(1);
         if (selector.startsWith('.')) return this.classList.contains(selector.slice(1));

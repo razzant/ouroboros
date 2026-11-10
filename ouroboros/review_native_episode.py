@@ -337,9 +337,6 @@ def inspection_registry(root: str, drive_root: Any, task_id: str = "") -> tuple[
     ctx.task_metadata["native_data_root"] = str(drive_root)
     registry.set_context(ctx)
     schemas = [schema for schema in (registry.get_schema_by_name(name) for name in _INSPECTION_TOOL_NAMES) if schema]
-    if not any(s["function"]["name"] == "compact_context" for s in schemas):
-        from ouroboros.tools.compact_context import get_tools
-        schemas.append({"type": "function", "function": get_tools()[0].schema})
     if not schemas:
         raise ReviewRouteUnavailable(
             "no inspection tool schemas are projectable for the native "
@@ -537,8 +534,10 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
             messages.append(notice)
         return receipt.status == "applied"
 
-    def _read_coverage(self) -> dict:
-        """Fold exact delivered intervals over the caller's complete required manifest.
+    def _read_coverage(self, manifest_key: str = "") -> dict:
+        """Fold exact delivered intervals over one complete declared manifest: ``manifest_key``, else the one
+        ``session_read_facts`` chooses, the required manifest when its key exists (an empty one included),
+        else the ``observed_sources`` the host only observes.
 
         Four states: ``unobserved`` when the surface declared no manifest at all,
         ``declared_empty`` (a complete coverage of nothing) when it declared an
@@ -546,16 +545,16 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         """
         from ouroboros.tool_access import resource_root_path
         policy = self.assignment.request.policy or {}
-        required = policy.get("native_required_sources")
-        if not isinstance(required, list):
+        manifest = policy.get(manifest_key or ("native_required_sources" if "native_required_sources" in policy else "observed_sources"))
+        if not isinstance(manifest, list):
             return {"status": "unobserved", "reason": "required_source_manifest_missing", "sources": []}
-        if not required:
+        if not manifest:
             return {"status": "complete", "reason": "declared_empty", "sources": [],
                     "required_source_count": 0}
         if self._inspection_ctx is None:
-            return {"status": "unobserved", "reason": "native_inspection_unavailable", "sources": required}
+            return {"status": "unobserved", "reason": "native_inspection_unavailable", "sources": manifest}
         rows = []
-        for source in required:
+        for source in manifest:
             row = dict(source) if isinstance(source, dict) else {"source": source}
             try:
                 total = row["complete_chars"]
@@ -598,21 +597,24 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         self._record_round_source()
         policy = self.assignment.request.policy or {}
         coverage = self._read_coverage()
+        required = "native_required_sources" in policy
+        # A required manifest (a paged brief creates its own) never hides what the host observed.
+        observed = {"observed_read_coverage": self._read_coverage("observed_sources")} if required and "observed_sources" in policy else {}
         if self._source_gap and coverage["status"] == "complete":
             coverage = {**coverage, "status": "incomplete", "reason": self._source_gap}
         history_ref = self._store_source("history", {
             "required_sources": policy.get("native_required_sources"),
-            "required_sources_ref": policy.get("native_required_sources_ref"),
+            "required_sources_ref": policy.get("native_required_sources_ref"), "observed_sources": policy.get("observed_sources"),
             "round_sources": self._round_source_refs, "read_receipts": self._tool_receipts,
-            "coverage": coverage, "view_changes": self._view_changes,
+            "coverage": coverage, **observed, "view_changes": self._view_changes,
         })
         if self._source_gap and coverage["status"] == "complete":
             coverage = {**coverage, "status": "incomplete", "reason": self._source_gap}
-        facts = {"native_read_coverage": coverage, "native_history_source": history_ref,
+        facts = {"native_read_coverage": coverage, **observed, "native_history_source": history_ref,
                  "native_view_changes": self._view_changes, "native_source_gap": self._source_gap}
         if self._initial_source:
             facts["native_initial_source"] = self._initial_source
-        if coverage["status"] == "incomplete":
+        if required and coverage["status"] == "incomplete":  # an observed source is no capability delta
             facts["native_incomplete"] = "required_source_coverage_incomplete"
         return facts
 
@@ -680,23 +682,18 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         return self._verdict_result()
 
     def _inspection_registry(self, root: str, drive_root: Any) -> tuple[Any, List[Dict[str, Any]]]:
-        """A fresh instance-local registry pinned to ``root``, read-only.
-
-        Reuses the existing capability machinery wholesale instead of a new
-        allowlist mechanism: the ``local_readonly_subagent`` constraint gives
-        the read-only operation/root matrix, ``disabled_tools`` trims its
-        broader name allowlist down to the inspection six, and the resource
-        contract keeps extension/MCP discovery off. ``registry._ctx`` is
-        per-instance, so the worker's own registry/context is never touched.
-        ``drive_root`` is the data plane the inspection tools may read: an
-        empty scratch directory by default, or the surface's opt-in
-        ``policy["native_data_root"]`` (a stored paged source or skill index
-        resolves there; deep self-review exposes the runtime root while its
-        memory whitelist arrives inline) — the read-only constraint applies to
-        it exactly as to the repository.
+        """``inspection_registry`` pinned to ``root``, read-only, over ``drive_root`` (scratch, or the
+        surface's ``policy["native_data_root"]``: a stored paged source or skill index resolves there;
+        deep self-review exposes the runtime root while its memory whitelist arrives inline). A body
+        candidate the request froze beside its subject (``policy["native_candidate_root"]``: a plan whose
+        task keeps its own folder, ``plan_ask.planning_roots``) becomes the context's workspace edge, the
+        one a candidate author's child records (``tool_access_reads.inherited_read_roots``): its absolute
+        paths READ as ``active_workspace``; subject, governance, writes and path class are unchanged.
         """
         registry, self._inspection_ctx, schemas = inspection_registry(
             root, drive_root, str(self.assignment.request.task_id or "review"))
+        if candidate := str((self.assignment.request.policy or {}).get("native_candidate_root") or ""):
+            self._inspection_ctx.task_metadata["parent_workspace"] = {"root": candidate, "mode": "", "source": "system_repo"}
         return registry, schemas
 
     def _reprepare_model_call(self, values: dict, *, messages: list) -> dict:
@@ -759,13 +756,13 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
             while True:
                 # Time, money and provider outcomes have their own owners.
                 # Approximate context sizing never decides whether to continue.
-                if owner_deadline_exhausted(
-                    deadline_at=deadline_at, reserve_sec=get_finalization_grace_sec(),
-                ) or (logical_deadline is not None and monotonic_now() >= float(logical_deadline)):
+                owner_spent = owner_deadline_exhausted(deadline_at=deadline_at, reserve_sec=get_finalization_grace_sec())
+                if owner_spent or (logical_deadline is not None and monotonic_now() >= float(logical_deadline)):
                     end_reason = "deadline_exhausted"
                     if shape == "report" and last_content:
                         break  # a report keeps its draft (marked incomplete below)
-                    raise _deadline_exhausted_error("owner deadline exhausted mid native review episode")
+                    raise _deadline_exhausted_error("owner deadline exhausted mid native review episode" if owner_spent
+                                                    else "slot logical window exhausted mid native review episode")
                 round_idx += 1
                 self._retire_reasoning(messages, schemas, round_idx)
                 chat_kwargs = self._chat_kwargs(messages, schemas, max_tokens)
@@ -1007,9 +1004,9 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
                 required.append({"root": "artifact_store", "path": source["path"],
                                  **source_text_identity(self.episode_prompt.encode("utf-8")),
                                  "coverage_basis": "candidate_blob"})
-                policy["native_required_sources"] = required
                 ref = self._store_source("required-sources", required)
-                policy["native_required_sources_ref"] = ref
+                self.assignment = replace(self.assignment, request=replace(self.assignment.request, policy={  # this seat's own: a wave shares one request
+                    **policy, "native_required_sources": required, "native_required_sources_ref": ref}))
                 messages = native_first_send_messages(native_paged_prompt(paged_review_text(
                     self.episode_prompt, source, label="review brief", delegated=False), self._output_contract()), ref)
         return registry, schemas, messages, _wire_size(messages, schemas)
@@ -1254,10 +1251,9 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         returned text, ``line_ends`` the end offsets of the body's complete
         lines on the renderer's own line definition) — nothing is parsed back
         from the header and no newline is recounted here. The stamped offsets
-        hold on the returned text because every host note (``_annotate_reread``'s
-        re-read hint, the registry's route/safety notes via
-        ``_compose_execute_result``) TRAILS the rendered view — a prepended note
-        would shift ``body_start``. The stamp's binding
+        hold on the returned text because every host note (the registry's
+        route/safety notes via ``_compose_execute_result``) TRAILS the rendered
+        view — a prepended note would shift ``body_start``. The stamp's binding
         to THIS call is structural, not a comparison: the reader resets it on
         entry, the caller clears it before every dispatch, the context is
         instance-local, and the caller reads the stamp only for a call that

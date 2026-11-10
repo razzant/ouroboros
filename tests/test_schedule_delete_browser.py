@@ -12,7 +12,7 @@ from ouroboros.test_evidence import diagnostic_directory
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def test_schedule_delete_withdraws_rows_that_stay_visible_and_restorable(direct_server_with_data):
@@ -75,7 +75,7 @@ def test_schedule_delete_withdraws_rows_that_stay_visible_and_restorable(direct_
                     # Known work in flight keeps the withdrawn row in the standing list.
                     expect(retained).to_be_visible()
                     expect(section).to_contain_text("deletion pending · work in flight")
-                    shot = diagnostic_directory(root.parent, "schedule-delete") / f"schedule-delete-{name}.png"
+                    shot = diagnostic_directory(root.parent, "schedule-delete", publish=True) / f"schedule-delete-{name}.png"
                     page.screenshot(path=str(shot), full_page=True, animations="disabled")
                     print(f"SCHEDULE_DELETE_SCREENSHOT {shot}")
                     removable = section.locator(f'[data-act="schedule-delete"][data-id="{clean_id}"]')

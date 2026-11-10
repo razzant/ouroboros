@@ -4,7 +4,8 @@ import copy
 
 import pytest
 
-from ouroboros.outcomes import derive_loop_outcome
+from ouroboros.outcomes import derive_loop_outcome, normalize_outcome_axes
+from tests._cases import plain_rows
 
 
 TOOL_ERRORS = [
@@ -18,57 +19,47 @@ TOOL_ERRORS = [
 ]
 
 
-@pytest.mark.parametrize("tool_error", TOOL_ERRORS)
-@pytest.mark.parametrize("review", [None, "PASS", "FAIL", "DEGRADED"])
-@pytest.mark.parametrize("text,usage,extra,execution,reason", [
-    pytest.param("Delivered answer.", {}, {}, "ok", "final_message", id="delivered"),
-    pytest.param("", {}, {}, "failed", "empty_final_text", id="empty"),
-    pytest.param("Retained answer", {"execution_status": "infra_failed", "reason_code": "provider_unavailable"},
-                 {}, "infra_failed", "provider_unavailable", id="provider-failure"),
-    pytest.param("Retained answer", {"execution_status": "failed", "reason_code": "task_exception"},
-                 {}, "failed", "task_exception", id="task-failure"),
-    pytest.param("Retained answer", {"execution_status": "failed", "reason_code": "deadline_local",
-                                    "_best_effort_extracted": True},
-                 {}, "best_effort", "deadline_local", id="deadline"),
-    pytest.param("Retained answer", {}, {"delivery_candidate": {
-        "degraded": True, "degraded_reason": "invalid_delivery_control_after_repair"}},
-        "degraded", "invalid_delivery_control_after_repair", id="incomplete-delivery"),
-    pytest.param("Retained answer", {}, {"child_result_dispositions": {"deferred_count": 1}},
-                 "degraded", "child_results_deferred", id="deferred-child"),
-    pytest.param("Retained answer", {}, {"verification_events": [{"services": [
-        {"name": "result", "artifact_output_failed": True}]}]},
-        "degraded", "tool_failure", id="artifact-failure"),
-])
-def test_tool_errors_do_not_decide_delivery_or_acceptance(tool_error, review, text, usage, extra, execution, reason):
-    trace = {"tool_calls": [copy.deepcopy(tool_error)], **copy.deepcopy(extra)}
-    if review:
-        trace.update(review_runs=[{"authority": "host_root", "aggregate_signal": review}],
-                     review_decision={"eligibility": "eligible", "trigger": "host_root_effects"})
-    outcome = derive_loop_outcome(text, usage, trace)
-    axes = outcome["outcome_axes"]
-    assert axes["execution"]["status"] == execution
-    assert axes["execution"]["reason_code"] == reason
-    judged = {None: "not_evaluated", "PASS": "pass", "FAIL": "fail", "DEGRADED": "degraded"}[review]
-    if "child_result_dispositions" in extra and review != "FAIL":
-        judged = "best_effort"
-    elif "delivery_candidate" in extra and review is None:
-        judged = "degraded"
-    assert axes["objective"]["status"] == judged
-    assert bool(axes["objective"].get("warning")) == (judged == "not_evaluated")
-    errors = axes["execution"]["unresolved_tool_errors"] or axes["execution"]["cosmetic_tool_errors"]
-    assert errors[0]["status"] == tool_error["status"]
-    if tool_error.get("signal"):
-        assert errors[0]["signal"] == "SIGKILL"
-        assert errors[0]["exit_code"] == -9
-        assert not axes["execution"]["cosmetic_tool_errors"]
-    if execution == "ok":
-        assert outcome["failure"] is None
-    if review and judged == review.lower():
-        assert axes["objective"]["source"] == "task_acceptance_review"
+def test_tool_errors_do_not_decide_delivery_or_acceptance(subtests):
+    for tool_error in plain_rows(TOOL_ERRORS):
+        for review in [None, "PASS", "FAIL", "DEGRADED"]:
+            for text, usage, extra, execution, reason in [("Delivered answer.", {}, {}, "ok", "final_message"), ("", {}, {}, "failed", "empty_final_text"), ("Retained answer", {"execution_status": "infra_failed", "reason_code": "provider_unavailable"}, {}, "infra_failed", "provider_unavailable"), ("Retained answer", {"execution_status": "failed", "reason_code": "task_exception"}, {}, "failed", "task_exception"), ("Retained answer", {"execution_status": "failed", "reason_code": "deadline_local",
+                               "_best_effort_extracted": True}, {}, "best_effort", "deadline_local"), ("Retained answer", {}, {"delivery_candidate": {
+   "degraded": True, "degraded_reason": "invalid_delivery_control_after_repair"}}, "degraded", "invalid_delivery_control_after_repair"), ("Retained answer", {}, {"child_result_dispositions": {"deferred_count": 1}}, "degraded", "child_results_deferred"), ("Retained answer", {}, {"verification_events": [{"services": [
+   {"name": "result", "artifact_output_failed": True}]}]}, "degraded", "tool_failure")]:
+                with subtests.test(tool_error=tool_error, review=review, text=text, usage=usage, extra=extra, execution=execution, reason=reason):
+                    trace = {"tool_calls": [copy.deepcopy(tool_error)], **copy.deepcopy(extra)}
+                    if review:
+                        trace.update(review_runs=[{"authority": "host_root", "aggregate_signal": review}],
+                                     review_decision={"eligibility": "eligible", "trigger": "host_root_effects"})
+                    outcome = derive_loop_outcome(text, usage, trace)
+                    axes = outcome["outcome_axes"]
+                    assert axes["execution"]["status"] == execution
+                    assert axes["execution"]["reason_code"] == reason
+                    judged = {None: "not_evaluated", "PASS": "pass", "FAIL": "fail", "DEGRADED": "degraded"}[review]
+                    if "child_result_dispositions" in extra and review != "FAIL":
+                        judged = "best_effort"
+                    elif "delivery_candidate" in extra and review is None:
+                        judged = "degraded"
+                    assert axes["objective"]["status"] == judged
+                    # A failed read (owner 06.11, A) and a command the task went past (owner 09.11, A) stay in the
+                    # details; a signal-killed command warns when nothing judged the result.
+                    loud = bool(tool_error.get("signal"))
+                    assert bool(axes["objective"].get("warning")) == (judged == "not_evaluated" and loud)
+                    errors = axes["execution"]["unresolved_tool_errors"] or axes["execution"]["cosmetic_tool_errors"]
+                    assert errors[0]["status"] == tool_error["status"]
+                    assert bool(errors[0].get("read_only") or errors[0].get("details_only")) == (not loud)
+                    if tool_error.get("signal"):
+                        assert errors[0]["signal"] == "SIGKILL"
+                        assert errors[0]["exit_code"] == -9
+                        assert not axes["execution"]["cosmetic_tool_errors"]
+                    if execution == "ok":
+                        assert outcome["failure"] is None
+                    if review and judged == review.lower():
+                        assert axes["objective"]["source"] == "task_acceptance_review"
 
 
 def test_advisory_review_cannot_clear_unreviewed_tool_error_warning():
-    trace = {"tool_calls": [{"tool": "search_code", "is_error": True, "status": "error"}],
+    trace = {"tool_calls": [{"tool": "write_file", "is_error": True, "status": "error"}],
              "review_runs": [{"authority": "agent_advisory", "aggregate_signal": "PASS"}]}
     axes = derive_loop_outcome("Delivered answer.", {}, trace)["outcome_axes"]
     assert axes["execution"]["status"] == "ok"
@@ -78,14 +69,58 @@ def test_advisory_review_cannot_clear_unreviewed_tool_error_warning():
     assert axes["objective"]["warning"] == "residual_tool_errors_without_review"
 
 
-@pytest.mark.parametrize("exit_code,signal,bucket", [
-    (-9, "SIGKILL", "unresolved_tool_errors"), (1, "", "cosmetic_tool_errors"),
+@pytest.mark.parametrize(("call", "loud", "flag"), [
+    pytest.param({"tool": "read_file", "status": "argument_error"}, False, "read_only", id="failed-read"),
+    pytest.param({"tool": "search_code", "status": "error"}, False, "read_only", id="failed-search"),
+    pytest.param({"tool": "browse_page", "status": "error"}, False, "read_only", id="failed-page-read"),
+    pytest.param({"tool": "github_read", "status": "error"}, False, "read_only", id="failed-github-read"),
+    pytest.param({"tool": "write_file", "status": "error"}, True, "", id="unfulfilled-write"),
+    pytest.param({"tool": "github_write", "status": "safety_violation"}, True, "", id="send-stopped-by-safety"),
+    pytest.param({"tool": "run_command", "status": "non_zero_exit", "exit_code": 1}, False, "details_only", id="failed-command"),
+    pytest.param({"tool": "run_script", "status": "timeout"}, False, "details_only", id="timed-out-script"),
+    pytest.param({"tool": "run_command", "status": "safety_violation"}, True, "", id="command-stopped-by-safety"),
+    pytest.param({"tool": "run_script", "status": "safety_violation"}, True, "", id="script-stopped-by-safety"),
+    pytest.param({"tool": "run_script", "status": "run_script_error"}, True, "", id="script-run-error"),
+    pytest.param({"tool": "run_command", "status": "artifact_output_error"}, True, "", id="command-output-unregistered"),
+    pytest.param({"tool": "run_command", "status": "non_zero_exit", "exit_code": -9, "signal": "SIGKILL"}, True, "",
+                 id="signal-killed-command"),
+    pytest.param({"tool": "edit_batch", "status": "argument_error"}, False, "details_only", id="rejected-write-call"),
+    pytest.param({"tool": "enable_tools", "status": "unknown_tool"}, False, "details_only", id="call-named-no-tool"),
+    pytest.param({"tool": "mcp_gitlab__get_commit", "status": "mcp_error"}, True, "", id="unknown-kind"),
+    pytest.param({"tool": "skill_exec", "status": "error"}, True, "", id="unknown-builtin-kind-that-ran"),
 ])
-@pytest.mark.parametrize("extra,execution,reason", [
-    ({}, "ok", "final_message"),
-    ({"delivery_candidate": {"degraded": True, "degraded_reason": "invalid_delivery_control_after_repair"}},
-     "degraded", "invalid_delivery_control_after_repair"),
-    ({"child_result_dispositions": {"deferred_count": 1}}, "degraded", "child_results_deferred"),
+def test_only_a_loud_leftover_warns_without_review(call, loud, flag):
+    """Owner 06.11 («A — изменения и команды») revised 09.11 («Q1: A»): with no review, Done turns into Done with
+    warnings only for a loud leftover — an effect that did not land, a send or command Safety stopped, a signal-killed
+    command, a command whose declared output never registered, or a tool of unknown kind that ran and failed. A failed
+    read (``read_only``), a command that ran and failed or timed out and a call the tool refused before running
+    (``details_only``) are still recorded, in the details."""
+    axes = derive_loop_outcome("Delivered answer.", {}, {"tool_calls": [{**call, "is_error": True, "args": {}}]})["outcome_axes"]
+    assert axes["objective"]["status"] == "not_evaluated" and axes["execution"]["status"] == "ok"
+    assert bool(axes["objective"].get("warning")) == loud
+    stored = normalize_outcome_axes({"status": "completed", "outcome_axes": axes})  # a stored result read back
+    assert bool(stored["objective"].get("warning")) == loud
+    [error] = axes["execution"]["unresolved_tool_errors"] or axes["execution"]["cosmetic_tool_errors"]
+    assert error["tool"] == call["tool"]
+    assert {key for key in ("read_only", "details_only") if error.get(key)} == ({flag} if flag else set())
+
+
+def test_a_record_written_before_the_flags_stays_loud():
+    """A stored error without ``read_only`` or ``details_only`` (written before either flag) keeps the warning: the
+    presentation never guesses that an old command error was harmless."""
+    from ouroboros.outcomes import normalize_outcome_axes
+
+    legacy = {"status": "completed", "outcome_axes": {
+        "execution": {"status": "ok", "cosmetic_tool_errors": [{"tool": "run_command", "status": "non_zero_exit", "exit_code": 1}]},
+        "objective": {"status": "not_evaluated", "source": "none"},
+    }}
+    assert normalize_outcome_axes(legacy)["objective"]["warning"] == "residual_tool_errors_without_review"
+
+
+@pytest.mark.parametrize(("extra", "execution", "reason", "exit_code", "signal", "bucket"), [
+    pytest.param({}, "ok", "final_message", -9, "SIGKILL", "unresolved_tool_errors", id='extra0-ok-final_message--9-SIGKILL-unresolved_tool_errors'),
+    pytest.param({"delivery_candidate": {"degraded": True, "degraded_reason": "invalid_delivery_control_after_repair"}}, "degraded", "invalid_delivery_control_after_repair", -9, "SIGKILL", "unresolved_tool_errors", id='extra1-degraded-invalid_delivery_control_after_repair--9-SIGKILL-unresolved_tool_errors'),
+    pytest.param({"child_result_dispositions": {"deferred_count": 1}}, "degraded", "child_results_deferred", -9, "SIGKILL", "unresolved_tool_errors", id='extra2-degraded-child_results_deferred--9-SIGKILL-unresolved_tool_errors'),
 ])
 def test_persisted_unjudged_objective_keeps_warning_after_normalization(
     tmp_path, exit_code, signal, bucket, extra, execution, reason,

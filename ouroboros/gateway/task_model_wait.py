@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import functools
 import json
 import pathlib
 from contextlib import nullcontext
@@ -11,6 +12,7 @@ from typing import Any
 
 from starlette.responses import JSONResponse
 
+from ouroboros.deployment_policy import served_wait
 from ouroboros.gateway._helpers import json_error
 from ouroboros.model_wait import mutate_wait
 from ouroboros.task_results import validate_task_id
@@ -40,17 +42,18 @@ def history_wait_overlay(messages: list[dict], owner_limit: int) -> tuple[list[d
         for wait_id, row in message["model_waits"].items():
             previous = current["model_waits"].get(wait_id) or {}
             if int(row.get("revision") or 0) > int(previous.get("revision") or 0):
-                current["model_waits"][wait_id] = copy.deepcopy(row)
+                current["model_waits"][wait_id] = served_wait(copy.deepcopy(row))
     ordered = sorted(by_owner.values(), key=lambda row: row["ts"])
     return other, ordered[-owner_limit:] if owner_limit > 0 else [], len(ordered) > owner_limit
 
 
 class WaitDecisionRefused(ValueError):
-    def __init__(self, reason: str, row: dict | None = None, status: int = 409):
+    def __init__(self, reason: str, row: dict | None = None, status: int = 409, text: str = ""):
         super().__init__(reason)
         self.reason = reason
         self.row = row or {}
         self.status = status
+        self.text = text or reason  # the sentence a card shows; ``reason`` stays the typed code
 
 
 def _action(body: dict) -> tuple[str, str, dict]:
@@ -109,8 +112,8 @@ def _live_task(task_id: str) -> dict:
         return task
 
 
-def _decide(root: Any, body: dict) -> JSONResponse:
-    from ouroboros.gateway.owner_settings import CommitBoundary
+def _decide(root: Any, body: dict, request: Any = None) -> JSONResponse:
+    from ouroboros.gateway.owner_settings import CommitBoundary, record_settings_change
     from ouroboros.owner_mailbox import KIND_MODEL_WAIT, write_owner_message
     from supervisor.queue import _task_drive_for_task
 
@@ -226,6 +229,12 @@ def _decide(root: Any, body: dict) -> JSONResponse:
                 return None
             if previous.get("state") != "waiting" or previous.get("revision") != action["revision"]:
                 raise WaitDecisionRefused("stale_model_wait", previous)
+            from ouroboros.deployment_policy import managed_model_roles
+            from ouroboros.gateway.owner_settings import MANAGED_BY_DEPLOYMENT
+
+            if action["action"] == "switch" and previous.get("role") in managed_model_roles():
+                raise WaitDecisionRefused(MANAGED_BY_DEPLOYMENT, previous, 403,  # Retry and auto-continue stay
+                                          "Your organization sets this model; its administrator changes it. Retry or keep waiting.")
             if action.get("persist_role"):
                 from ouroboros.gateway.owner_settings import _owner_read_settings_raw
                 from ouroboros.model_slots import apply_model_role_override
@@ -275,8 +284,9 @@ def _decide(root: Any, body: dict) -> JSONResponse:
                         return value
 
                     with settings_document_mutation():  # a chosen model is authored, the shown default included
-                        _owner_update_settings(transform, boundary=boundary,
-                                               authored_keys=model_role_setting_keys(row["role"]), allow_safety_lowering=True)
+                        record_settings_change(request, _owner_update_settings(  # the writer's receipt, as Settings
+                            transform, boundary=boundary, authored_keys=model_role_setting_keys(row["role"]),
+                            allow_safety_lowering=True))
                     if transformation_completed:
                         row = mutate(wait_id,
                                      lambda previous: {**previous, "saved_request_id": action["request_id"]})
@@ -305,24 +315,25 @@ def _decide(root: Any, body: dict) -> JSONResponse:
                                                msg_id=f"model_wait:{wait_id}:{action['request_id']}", kind=KIND_MODEL_WAIT):
                         raise WaitDecisionRefused("mailbox_write_failed", row, 503)
         return JSONResponse({"ok": True, "decision_id": body["decision_id"], "request_id": action["request_id"],
-                             "state": row["state"], "wait": row, "duplicate": duplicate, "applied": applied,
+                             "state": row["state"], "wait": served_wait(row), "duplicate": duplicate, "applied": applied,
                              "saved": saved()},
                             status_code=200 if duplicate else 202)
     except WaitDecisionRefused as error:
         # Applied, saved and the refusal are separate facts; after a claim its row is read as it now is.
         applied = claim_as_it_is()
         current = row if claimed else error.row
-        return json_error(error.reason, error.status, ok=False, reason_code=error.reason,
-                          state=current.get("state", ""), wait=current, applied=applied, saved=saved())
+        return json_error(error.text, error.status, ok=False, reason_code=error.reason,
+                          state=current.get("state", ""), wait=served_wait(current), applied=applied, saved=saved())
     except Exception as error:
         applied = claim_as_it_is()
-        return json_error(str(error), 503, ok=False, reason_code="model_wait_decision_failed", wait=row,
+        return json_error(str(error), 503, ok=False, reason_code="model_wait_decision_failed", wait=served_wait(row),
                           applied=applied, saved=saved())
 
 
-async def answer_model_wait_decision(root: Any, body: dict) -> tuple[int, dict]:
-    """Share the existing wait effect and settings-writer receipts across transports."""
-    decide = _decide
+async def answer_model_wait_decision(root: Any, body: dict, *, request: Any = None) -> tuple[int, dict]:
+    """Share the existing wait effect and settings-writer receipts across transports; ``request`` declares a
+    saved choice's origin (``owner_settings.record_settings_change``)."""
+    decide = functools.partial(_decide, request=request)
     if body.get("persist_role") is True:
         from ouroboros.gateway.settings import _run_settings_writer
 

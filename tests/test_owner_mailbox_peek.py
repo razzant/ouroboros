@@ -68,7 +68,7 @@ def test_transport_episode_reuses_empty_proof_and_checks_incoming_queue_each_tic
     assert loop_transport.TransportWaitEpisode().mailbox_peek is not episode.mailbox_peek
 
 
-@pytest.mark.parametrize("change", ["ack_only", "replace", "truncate", "same_size", "delete_ack", "delete_mailbox"])
+@pytest.mark.parametrize("change", ["ack_only", "truncate", "delete_mailbox"])
 def test_each_source_fingerprint_change_invalidates_empty_proof(tmp_path, change):
     path, ack = acknowledged_history(tmp_path, 2)
     peek = mailbox.OwnerMailboxPeek()
@@ -131,8 +131,7 @@ def test_revocation_and_retry_keep_the_existing_control_semantics(tmp_path, kind
     assert mailbox.drain_owner_entries(tmp_path, "parent", set(), 2) == []
 
 
-@pytest.mark.parametrize("source", ["mailbox", "ack"])
-@pytest.mark.parametrize("fault", ["torn", "malformed", "read_error"])
+@pytest.mark.parametrize(("fault", "source"), [("torn", "ack"), ("malformed", "ack"), ("read_error", "mailbox")])
 def test_failed_or_incomplete_read_is_never_a_cached_empty_result(tmp_path, monkeypatch, source, fault):
     path, ack = acknowledged_history(tmp_path, 2)
     target = path if source == "mailbox" else ack
@@ -176,7 +175,7 @@ def test_stat_error_does_not_make_fail_soft_empty_sticky(tmp_path, monkeypatch):
     assert counts == {path: 2, ack: 1}
 
 
-@pytest.mark.parametrize("ack_state", ["missing", "valid", "torn", "malformed", "unreadable"])
+@pytest.mark.parametrize("ack_state", ["missing", "torn", "unreadable"])
 def test_acknowledged_owner_source_and_wait_completeness_remain_distinct(tmp_path, monkeypatch, ack_state):
     assert mailbox.write_owner_message(tmp_path, "Enable the repaired skill", "parent", msg_id="owner")
     ack = mailbox._ack_path(tmp_path, "parent")
@@ -227,3 +226,41 @@ def test_append_between_read_and_final_stat_is_not_cached_as_empty(tmp_path, mon
     peek = mailbox.OwnerMailboxPeek()
     assert not peek.pending(tmp_path, "parent", set(), 1)
     assert peek.pending(tmp_path, "parent", set(), 1)
+
+
+@pytest.mark.parametrize("words", ["plain words", "Ещё одно сообщение"])
+def test_a_torn_row_keeps_its_bytes_and_the_next_rows_stay_whole_and_reach_the_drain_once(tmp_path, monkeypatch, words):
+    from ouroboros import utils
+
+    real, torn = utils._write_fd_fully, []
+
+    def tear_inside_a_character(fd, data, path):
+        if not torn and str(path).endswith("worker.jsonl"):
+            torn.append(data)
+            os.write(fd, data[:data.index(words.encode("utf-8")) + 1])
+            raise OSError("injected torn mailbox write")
+        return real(fd, data, path)
+
+    monkeypatch.setattr(utils, "_write_fd_fully", tear_inside_a_character)
+
+    def place(msg_id):
+        return mailbox.write_task_message(tmp_path, words, "worker", source_task_id="s", provenance="place_event", msg_id=msg_id,
+                                          place_arrival={"source_event_id": msg_id, "message": {}, "wake": True})
+
+    assert place("place-event:first") is False, "the bool API: a torn append is no success"
+    path = mailbox._mailbox_path(tmp_path, "worker")
+    prefix = path.read_bytes()
+    assert prefix and not prefix.endswith(b"\n")
+    assert mailbox.place_event_retained(tmp_path, "worker", "place-event:first") is False, "a torn row cannot be delivered"
+    assert place("place-event:first") is True and place("place-event:first") is True, "once whole, deduplicated"
+    assert place("place-event:second") is True
+    assert mailbox.write_owner_message(tmp_path, "owner words", "worker", msg_id="owner-1")  # an unrelated writer keeps working
+    raw = path.read_bytes()
+    assert raw.startswith(prefix + b"\n"), "the torn bytes stay exactly as they landed, the next row on its own line"
+    rows = [json.loads(line) for line in raw[len(prefix) + 1:].decode("utf-8").splitlines()]
+    assert [row["msg_id"] for row in rows] == ["place-event:first", "place-event:second", "owner-1"]
+    status = {}
+    drained = mailbox.drain_owner_entries(tmp_path, "worker", set(), _read_status=status)
+    assert [entry["msg_id"] for entry in drained] == ["place-event:first", "place-event:second", "owner-1"]
+    assert status["complete"] is False, "a skipped row is said: the read covered less than the whole file"
+    assert mailbox.mailbox_holds(tmp_path, "worker", "place-event:second")

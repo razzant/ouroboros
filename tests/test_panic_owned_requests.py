@@ -19,7 +19,6 @@ from ouroboros.platform_layer import request_process_tree_kill
 from ouroboros.tools import services, shell_process
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 
-pytestmark = pytest.mark.serial
 
 
 def _wait_for(read):

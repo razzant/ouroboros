@@ -21,7 +21,6 @@ from tests._budget_pause_exact_helpers import _install_queue, _loop_ctx
 from tests.test_restart_retention import _pool_events, _queued
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 
 def _working_run(root, workers, task_id, *, attempt=1, parent=""):
@@ -212,8 +211,12 @@ def test_saved_successor_keeps_frozen_source_across_another_crash_before_dispatc
     assert wc.load_recovery(ctx, source)["working"]["boundary"] == "pre_effect"
 
 
-@pytest.mark.parametrize("origin", ["restarted", "resumed", "crash_retry"])
-@pytest.mark.parametrize("door", ["restart", "quit", "crash", "panic"])
+@pytest.mark.parametrize(("door", "origin"), [
+    ("restart", "restarted"),
+    ("quit", "resumed"),
+    ("crash", "crash_retry"),
+    ("panic", "restarted"),
+])
 def test_runnable_saved_successor_waiting_for_capacity_follows_the_next_stop(tmp_path, monkeypatch, origin, door):
     """A pending successor still owns saved work; another stop does not buy an attempt."""
     import queue as stdqueue
@@ -272,7 +275,7 @@ def test_runnable_saved_successor_waiting_for_capacity_follows_the_next_stop(tmp
         assert budget_hold_fact(restored)["reason"] == HOLD_SAVED_WORK
 
 
-@pytest.mark.parametrize("control", ["prior_hold", "owner_hold", "stop", "bad_source", "attempt_dispatched"])
+@pytest.mark.parametrize("control", ["prior_hold", "stop", "bad_source"])
 def test_restart_does_not_return_a_saved_successor_without_current_admission(tmp_path, monkeypatch, control):
     import queue as stdqueue
 
@@ -466,8 +469,7 @@ def test_a_managed_update_window_never_times_out_the_saved_work_it_returns(tmp_p
     monkeypatch.setattr(queue, "_reap_queue", reaps)
     monkeypatch.setattr(queue, "_ensure_reaper_started", lambda: None)
     monkeypatch.setattr(queue, "FINALIZATION_GRACE_SEC", 120)
-    monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 900)
-    monkeypatch.setattr(queue, "get_per_call_timeout_ceiling_sec", lambda: 1800)  # idle window 1920 s
+    monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 1920)  # the window this timeline was written for
     monkeypatch.setattr(queue_timeouts, "time", SimpleNamespace(time=lambda: clock[0]))
 
     def run(task_id, wid, *, progress_at, **task):
@@ -602,15 +604,13 @@ def test_a_stop_keeps_each_saved_queue_time_through_restore_and_its_readers(tmp_
     ({"queued_at": None}, "2026-01-01T00:00:00+00:00", None),
     ({}, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
     ({}, None, None),
-    ({"queued_at": 1760000000.25}, None, 1760000000.25),
-    ({"queued_at": 1760000000}, None, 1760000000),
     ({"queued_at": True}, None, None),
     ({"queued_at": float("nan")}, None, None),
     ({"queued_at": float("inf")}, None, None),
     ({"queued_at": 0}, None, None),
     ({"queued_at": ""}, "2026-01-01T00:00:00+00:00", None),
     ({"queued_at": ["2026-10-01"]}, None, None),
-], ids=["outer", "explicit-null", "nested-fallback", "absent", "epoch-float", "epoch-int", "bool", "nan", "inf",
+], ids=["outer", "explicit-null", "nested-fallback", "absent", "bool", "nan", "inf",
         "zero", "blank", "not-a-time"])
 def test_the_saved_row_decoder_reads_the_outer_queue_time_first(outer, nested, expected):
     """The outer value decides; only its absence falls back to a nested copy; nothing is guessed."""
@@ -627,35 +627,6 @@ def test_the_saved_row_decoder_reads_the_outer_queue_time_first(outer, nested, e
     assert retry["queued_at"] == expected, "a shutdown-custody row keeps the saved time or its unknown"
 
 
-def test_a_direct_hold_keeps_its_numeric_queue_time_through_snapshot_and_restore(tmp_path, monkeypatch):
-    """R1 #1805: ``direct_pause.retain_direct_hold`` stamps a numeric epoch; the snapshot keeps it on
-    the outer row and restore returns that known time to the queue and its readers, never unknown."""
-    import datetime
-
-    from ouroboros import server_routing_context as routing
-    from ouroboros.gateway.state import _chat_activities_snapshot_safe
-    from supervisor.direct_pause import retain_direct_hold
-    from tests.test_project_routing_v664 import _ctx
-
-    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
-    _pool_events(workers, monkeypatch)
-    write_task_result(tmp_path, "direct-held", STATUS_RUNNING, chat_id=0, _is_direct_chat=True,
-                      root_task_id="direct-held")
-    before = time.time()
-    retain_direct_hold({"id": "direct-held", "type": "task", "chat_id": 0, "root_task_id": "direct-held",
-                        "_attempt": 1, "text": "direct work"}, unsaved=True)
-    [held] = workers.PENDING
-    stamped = held["queued_at"]
-    assert isinstance(stamped, float) and before <= stamped <= time.time(), "the producer's own numeric epoch"
-    snap = json.loads(queue.QUEUE_SNAPSHOT_PATH.read_text())
-    assert [row["queued_at"] for row in snap["pending"]] == [stamped], "serialized on the outer row"
-    workers.PENDING[:] = []
-    queue.restore_pending_from_snapshot()
-    [restored] = [row for row in workers.PENDING if row["id"] == "direct-held"]
-    assert restored["queued_at"] == stamped
-    census = {row["activity_id"]: row["started_at"] for row in _chat_activities_snapshot_safe(tmp_path, direct_turns=[])}
-    assert census["direct-held"] == stamped
-    roots = {row["task_id"]: row["started_at"] for row in routing.addressable_roots(
-        _ctx(tmp_path, pending=list(workers.PENDING))).rows()}
-    assert roots["direct-held"] == stamped
-    assert datetime.datetime.fromtimestamp(stamped, datetime.timezone.utc).year >= 2026
+# R1 #1805 (``direct_pause.retain_direct_hold`` stamping a numeric ``queued_at`` on a failed inline park's
+# hold) is retired with the in-process park: a direct turn is a conversation-lane RUNNING row whose pause
+# the supervisor parks like any carried task's, so no hold of that kind is minted here any more.

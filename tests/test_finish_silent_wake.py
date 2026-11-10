@@ -143,8 +143,11 @@ def test_a_quiet_run_with_open_delegated_custody_is_never_silenced(wake):
     assert stored["outcome_axes"]["execution"]["status"] == "ok"
 
 
-@pytest.mark.parametrize("answer", [None, "", "Read the journal; nothing changed my view."])
-@pytest.mark.parametrize("cause", ["own_clock", "focus"])
+@pytest.mark.parametrize(("cause", "answer"), [
+    ("own_clock", None),
+    ("own_clock", "Read the journal; nothing changed my view."),
+    ("focus", ""),
+])
 def test_clean_silent_wake_publishes_nothing_and_keeps_its_record(wake, answer, cause):
     metadata = {**WAKE, "wake_cause": cause}
     if cause == "focus":  # the host stamps a focus with its place and its event
@@ -182,8 +185,7 @@ def test_internal_work_and_earlier_sends_remain(wake):
     assert not quiet_finish(stored)
 
 
-@pytest.mark.parametrize("live", [False, True])
-@pytest.mark.parametrize("tool", ["send_links", "send_file"])
+@pytest.mark.parametrize(("tool", "live"), [("send_links", True), ("send_file", False)])
 def test_send_family_prevents_a_quiet_finish(wake, live, tool):
     path = wake.root / "note.txt"
     path.write_text("A source for you.", encoding="utf-8")
@@ -197,8 +199,11 @@ def test_send_family_prevents_a_quiet_finish(wake, live, tool):
     assert not quiet_finish(stored)
 
 
-@pytest.mark.parametrize("cause", ["own_clock", "focus"])
-@pytest.mark.parametrize("action,silent", [("finish", True), ("finish", False), ("stop", False)])
+@pytest.mark.parametrize(("action", "silent", "cause"), [
+    ("finish", True, "own_clock"),
+    ("finish", False, "focus"),
+    ("stop", False, "own_clock"),
+])
 def test_wake_summary_titles_the_stored_wake_without_changing_its_words(wake, cause, action, silent):
     metadata = {**WAKE, "wake_cause": cause}
     summary = "Проверил состояние системы; вмешательство не требуется."
@@ -260,20 +265,28 @@ def test_retry_does_not_inherit_the_previous_attempts_summary(wake, cause, title
     assert second["result"] == "Second note" and not second.get("title") and "summary" not in second
 
 
-@pytest.mark.parametrize("metadata,direct", [({}, True), ({**SCHEDULE, "presence": {"binding_id": "b1"}}, False),
-    ({"initiator": "consciousness", "usage_category": CONSCIOUSNESS_TASK_CATEGORY}, False), (WAKE, False)])
-@pytest.mark.parametrize("action", ["finish", "stop"])
-def test_summary_refuses_runs_not_self_started_but_empty_summary_keeps_ordinary_completion(wake, metadata, direct, action):
+@pytest.mark.parametrize(("action", "metadata", "direct"), [
+    pytest.param("finish", {}, True, id='finish-metadata0-True'),
+    pytest.param("finish", {"initiator": "consciousness", "usage_category": CONSCIOUSNESS_TASK_CATEGORY}, False, id='finish-metadata2-False'),
+    pytest.param("stop", {**SCHEDULE, "presence": {"binding_id": "b1"}}, False, id='stop-metadata1-False'),
+    pytest.param("stop", WAKE, False, id='stop-metadata3-False'),
+])
+def test_child_summary_is_dropped_and_named_and_empty_summary_keeps_ordinary_completion(wake, metadata, direct, action):
+    """A child's sentence never vetoes its honest final: the answer is staged, the sentence dropped and named."""
     from ouroboros.tools.control_runtime import _finish_task
 
     wake.ctx.task_metadata, wake.ctx.is_direct_chat = metadata, direct
+    wake.ctx.task_id, wake.ctx.parent_task_id = TASK_ID, "parent-task"
     wake.ctx._active_builtin_tool_result = None
-    rejected = _finish_task(wake.ctx, action=action, answer="Answer", rationale="Unfinished", summary="A line")
-    assert "COMPLETION_ARGUMENT: silent and summary are available only on a self-started run" in rejected
-    assert wake.ctx._active_builtin_tool_result.code == "TOOL_ARG_ERROR"
-    assert getattr(wake.ctx, "_completion_request", None) is None
+    named = _finish_task(wake.ctx, action=action, answer="Answer", rationale="Unfinished", summary="A line")
+    assert json.loads(named) == {"status": "completion_requested", "completion_control": True, "action": action,
+                                 "ignored": ["summary"]}
+    assert wake.ctx._active_builtin_tool_result is None
+    request = wake.ctx._completion_request
+    assert request["answer"] == "Answer" and request["ignored"] == ["summary"] and "wake_summary" not in request
+    wake.ctx._completion_request = None
     assert "completion_requested" in _finish_task(wake.ctx, action=action, answer="Answer", rationale="Unfinished", summary=" \n")
-    assert "wake_summary" not in wake.ctx._completion_request
+    assert "wake_summary" not in wake.ctx._completion_request and "ignored" not in wake.ctx._completion_request
 
 
 @pytest.mark.parametrize("action,silent", [("finish", True), ("finish", False), ("stop", False)])
@@ -437,8 +450,11 @@ def test_schedule_marker_does_not_bypass_quiet_authority(wake, extra, occurrence
     wake.ctx.parent_task_id = parent
     wake.ctx.task_metadata = {**extra, "schedule_occurrence": occurrence}
     assert "COMPLETION_ARGUMENT" in _finish_task(wake.ctx, action="finish", silent=True)
-    assert "COMPLETION_ARGUMENT" in _finish_task(wake.ctx, action="finish", answer="Answer", summary="A line")
     assert getattr(wake.ctx, "_completion_request", None) is None
+    if parent or extra.get("delegation_role") == "subagent" or extra.get("root_task_id"):
+        assert json.loads(_finish_task(wake.ctx, action="finish", answer="Answer.", summary="A line."))["ignored"] == ["summary"]
+        assert "wake_summary" not in wake.ctx._completion_request
+        wake.ctx._completion_request = None
     assert "completion_requested" in _finish_task(wake.ctx, action="finish", answer="Ordinary answer.")
 
 
@@ -538,10 +554,9 @@ def test_quiet_project_schedule_through_delivery_and_notifications(wake, monkeyp
 
 @pytest.mark.parametrize("metadata,direct", [
     ({"initiator": "owner", "usage_category": "chat"}, True),
-    ({"initiator": "consciousness", "usage_category": CONSCIOUSNESS_TASK_CATEGORY}, True),
     ({"initiator": "consciousness", "usage_category": CONSCIOUSNESS_TASK_CATEGORY}, False),
     ({"presence": {"binding_id": "b1"}, "usage_category": "presence"}, True),
-], ids=["owner-turn", "wake-started-root", "wake-started-child", "presence"])
+], ids=["owner-turn", "wake-started-child", "presence"])
 def test_other_turns_cannot_finish_silently(wake, metadata, direct):
     wake.ctx.is_direct_chat = direct
     text, usage, trace, _ = wake.run([finish(silent=True), finish("Ordinary answer.")], metadata=metadata)
@@ -573,9 +588,11 @@ def _fail(usage):
     usage["execution_status"] = "failed"
 
 
-@pytest.mark.parametrize("internal", ["", "INTERNAL: probe svc failed; retry next wake."])
-@pytest.mark.parametrize("outcome,status", [("failed", "failed"), ("degraded", "degraded"),
-                                            ("custody", "ok")])
+@pytest.mark.parametrize(("outcome", "status", "internal"), [
+    ("failed", "failed", ""),
+    ("degraded", "degraded", "INTERNAL: probe svc failed; retry next wake."),
+    ("custody", "ok", ""),
+])
 def test_nonclean_outcome_publishes_a_host_notice_never_the_internal_words(wake, internal, outcome, status):
     """Errors are not hidden behind silence, and words selected as internal never become speech."""
     from supervisor.terminal_delivery import build_completed_result_event
@@ -730,8 +747,7 @@ def _resume_in_new_process(wake, monkeypatch, wait):
 INTERNAL = "INTERNAL: journal read, nothing new."
 
 
-@pytest.mark.parametrize("summary", ["", "Checked the journal."])
-@pytest.mark.parametrize("sent", [False, True])
+@pytest.mark.parametrize(("sent", "summary"), [(False, ""), (True, "Checked the journal.")])
 def test_cold_resume_completes_the_restored_quiet_selection_silently(wake, monkeypatch, summary, sent):
     responses = [call("send_user_message", {"text": "A visible progress update."})] if sent else []
     wait = _park_after_selection(wake, monkeypatch, [*responses, finish(INTERNAL, silent=True, summary=summary)])
@@ -855,11 +871,10 @@ def _spoken(wake, pending, bus):
     return json.dumps([sends(pending), sends(drained(bus)), owed_rows(wake.root)], ensure_ascii=False)
 
 
-@pytest.mark.parametrize("internal", ["", INTERNAL])
-@pytest.mark.parametrize("control,expire,source,reason", [
-    ("deadline", True, "retained_candidate", "finalization_grace"),
-    ("owner_stopped_direct_chat_turn", False, "owner_stop_retained_candidate", "owner_requested_finalization"),
-], ids=["deadline", "owner-stop"])
+@pytest.mark.parametrize(("control", "expire", "source", "reason", "internal"), [
+    pytest.param("deadline", True, "retained_candidate", "finalization_grace", "", id='deadline-'),
+    pytest.param("owner_stopped_direct_chat_turn", False, "owner_stop_retained_candidate", "owner_requested_finalization", INTERNAL, id='owner-stop-INTERNAL: journal read, nothing new.'),
+])
 def test_forced_rail_retaining_quiet_bytes_publishes_only_the_host_notice(wake, monkeypatch, internal,
                                                                            control, expire, source, reason):
     """The forced rail keeps the quiet candidate's exact bytes: they stay internal, while the

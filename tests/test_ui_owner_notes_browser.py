@@ -24,7 +24,7 @@ from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
 from tests.test_reconnect_feed_browser import HISTORY_LANDED
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 # Midday UTC instants keep "Dec 31" / "Jan 1" stable in any server zone from UTC-11 to UTC+11.
 DUE = "Call mother about Sunday."
@@ -174,8 +174,9 @@ def test_notes_reach_main_activity_and_the_live_banner(direct_server_with_data, 
             waiting = schedules.locator(".activity-row").filter(has_text=LATER)
             waiting.wait_for(state="visible", timeout=30_000)
             assert waiting.locator(".activity-name").inner_text() == LATER
-            assert waiting.locator(".activity-sub[data-i18n-authored]").inner_text() == LATER
-            timing = waiting.locator(".activity-sub").filter(has_text=re.compile(r"^reminder · one-shot · at/after "))
+            # The name already says the note's words: its Details keeps no second copy.
+            assert waiting.locator(".activity-order").count() == 0
+            timing = waiting.locator(".activity-sub").filter(has_text=re.compile(r"^Reminder · Once on "))
             assert timing.count() == 1
             assert timing.locator("time").get_attribute("datetime") == "2999-01-01T09:00:00Z"
             schedules.scroll_into_view_if_needed()

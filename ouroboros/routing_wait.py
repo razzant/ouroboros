@@ -66,10 +66,12 @@ def wait_for_promotion_admission(
     timeout_sec: float | None = None,
     poll_sec: float = PROMOTE_CONFIRM_POLL_SEC,
 ) -> Dict[str, Any]:
-    """Wait for matching-token admission in the canonical task-result SSOT."""
+    """Wait for matching-token admission in the canonical task-result SSOT. A timeout carries
+    the wait it measured (``waited_sec``, monotonic): reads can overrun the configured bound."""
     from ouroboros.task_results import load_task_result
 
-    deadline = time.monotonic() + _confirm_wait_sec(timeout_sec)
+    started = time.monotonic()
+    deadline = started + _confirm_wait_sec(timeout_sec)
     while True:
         result = load_task_result(root, task_id) or {}
         admission = result.get("promotion_admission")
@@ -106,7 +108,8 @@ def wait_for_promotion_admission(
             }:
                 return receipt
         if time.monotonic() >= deadline:
-            return {"status": "unconfirmed", "reason": "confirmation_timeout"}
+            return {"status": "unconfirmed", "reason": "confirmation_timeout",
+                    "waited_sec": round(time.monotonic() - started, 1)}
         time.sleep(poll_sec)
 
 

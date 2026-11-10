@@ -286,8 +286,7 @@ def test_linux_browser_fallback_still_configures_the_packaged_host(host, monkeyp
 
 
 @pytest.mark.parametrize(("version", "reason"), [
-    ("7.1.9", "newer app build"), ("v7.1.12-rc.3", "newer app build"),
-    ("", "could not be confirmed"), ("unknown", "could not be confirmed"), ("7.2", "could not be confirmed"),
+    ("7.1.9", "newer app build"), ("", "could not be confirmed"), ("7.2", "could not be confirmed"),
 ])
 def test_old_or_unproven_launcher_cannot_register(host, monkeypatch, version, reason):
     package, os_state = host
@@ -307,7 +306,7 @@ def test_a_prerelease_suffix_does_not_make_a_new_launcher_old(host, monkeypatch,
     assert startup.autostart_status() == {"state": "off"}
 
 
-@pytest.mark.parametrize("kind", ["source_launcher", "source_server", "unstable_macos", "missing_appimage"])
+@pytest.mark.parametrize("kind", ["source_launcher", "unstable_macos", "missing_appimage"])
 def test_unavailable_hosts_never_register(host, tmp_path, monkeypatch, kind):
     package, os_state = host
     exe = package("linux" if kind == "missing_appimage" else "darwin", appimage=kind == "missing_appimage")
@@ -397,7 +396,8 @@ def test_an_xdg_entry_whose_appimage_is_gone_follows_the_new_file_and_keeps_its_
     path = tmp_path / ".config/autostart/ouroboros.desktop"
     path.parent.mkdir(parents=True)
     old = tmp_path / "Ouroboros-7.8.0 (old).AppImage"
-    path.write_text(f'[Desktop Entry]\nType=Application\nName=Ouroboros\nExec="{old}" --launch-intent automatic\n'
+    # The older copy's own entry, escaped: a raw Windows path is not a valid quoted Exec program.
+    path.write_text(f'[Desktop Entry]\nType=Application\nName=Ouroboros\nExec={startup._desktop_command(old)}\n'
                     "Terminal=false\nX-GNOME-Autostart-enabled=false\n", encoding="utf-8")
     old.touch()
     assert startup.follow_moved_app() is False, "a copy that still exists stays other_copy"

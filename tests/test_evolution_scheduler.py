@@ -225,7 +225,6 @@ def test_timeout_marks_evolution_reaping_before_scheduler_can_replace_it(tmp_pat
     reaper_jobs = _CaptureQueue()
     monkeypatch.setattr(queue, "FINALIZATION_GRACE_SEC", 0)
     monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 1)
-    monkeypatch.setattr(queue, "get_per_call_timeout_ceiling_sec", lambda: 1)
     monkeypatch.setattr(queue, "get_task_abs_ceiling_sec", lambda: 10)
     monkeypatch.setattr(queue, "_ensure_reaper_started", lambda: None)
     monkeypatch.setattr(queue, "_reap_queue", reaper_jobs)
@@ -466,6 +465,17 @@ def test_refused_evolution_respects_current_controls(refused_evolution, monkeypa
         ended = evo.complete_evolution_campaign("owner stopped")
         assert ended["transaction_history"][-1]["cleanup_status"] == "skipped_never_admitted"
         assert refused_evolution.git["calls"] == before
+
+
+def test_evolution_starts_on_a_subscription_main_at_the_reached_global_limit(refused_evolution, monkeypatch):
+    """A reached global limit refuses paid admission only; the "budget" control above is a paid Main's."""
+    from supervisor import queue
+
+    monkeypatch.setenv("OUROBOROS_MODEL", "claudexor::codex=gpt-6-astra")
+    monkeypatch.setattr(queue, "budget_remaining", lambda *a, **k: 0)
+    refused_evolution.bindings.write_text('{"bindings": {}}', encoding="utf-8")
+    queue.enqueue_evolution_task_if_needed()
+    assert len(queue.PENDING) == 1
 
 
 @pytest.mark.parametrize("field,value", [("objective", "Different objective"), ("source", "owner_chat")])

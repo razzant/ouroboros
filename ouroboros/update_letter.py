@@ -36,13 +36,12 @@ import contextlib
 import hashlib
 import json
 import logging
-import os
 import pathlib
 import re
 import threading
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
-from ouroboros.update_channels import normalize_update_channel
+from ouroboros.update_channels import get_update_channel
 from ouroboros.utils import atomic_write_json, read_json_dict, truncate_within_limit, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -64,6 +63,9 @@ RECORD_LOCK_WAIT_SEC = 10.0
 # The Runtime context's pointer while an update is on offer: where the range is, and the one writer.
 DESCRIPTION_SOURCES = ("query_data(op='json', kind='update_material', select='text', max_bytes=<letter.material"
                        ".text_bytes>); vcs_read(root='system_repo'); save with record_update_description")
+# Every status names its basis and the one way to refresh it (a check is the owner's Update panel's own call).
+CHECK_SOURCE = ("as of status_as_of; POST /api/update/check refreshes it; GET /api/update/status reads without "
+                "fetching; operations: GET /api/contract")
 _SHA_RE = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _KEY_FIELDS = ("base_sha", "target_sha", "update_channel", "target_ref")
 
@@ -1005,10 +1007,10 @@ def official_update_projection(
         if not head or head == "unknown":
             # context.py's own sentinel for a git it could not read. Comparing it with real
             # SHAs would report "moved since check" about a body that has not moved at all.
-            return {"status": "unknown", "error": "head_unresolved"}
+            return {"status": "unknown", "error": "head_unresolved", "check": CHECK_SOURCE}
         if state is None:
-            # Lock-free read, like the neighbouring drive-state section: this runs on
-            # every task round and consciousness cycle, never under the state lock.
+            # Lock-free read, like the neighbouring drive-state section: this runs at each
+            # task head's context build and consciousness cycle, never under the state lock.
             state = read_json_dict(pathlib.Path(drive_root or DATA_DIR) / "state" / "state.json") or {}
         cache = state.get("managed_update_cache") if isinstance(state, dict) else None
         cache = cache if isinstance(cache, dict) else {}
@@ -1016,19 +1018,19 @@ def official_update_projection(
         # The cached check describes ONE channel. After the owner switches channels it says
         # nothing about the active one (the panel asks for a new check for the same reason),
         # so the fact is honestly "unchecked" there — the letter stays, as history.
-        active_channel = normalize_update_channel(os.environ.get("OUROBOROS_UPDATE_CHANNEL"))
+        active_channel = get_update_channel()  # the environment, else the settings (direct callers set none)
         cached_channel = str(cache.get("update_channel") or "")
         if cached_channel and cached_channel != active_channel:
             return {
                 "status": "unchecked", "status_as_of": "",
                 "running": {"version": get_version(), "sha": head},
-                "update_channel": active_channel, "target": None, "behind": None, "ahead": None,
+                "update_channel": active_channel, "target": None, "behind": None, "ahead": None, "check": CHECK_SOURCE,
                 "local_changes": "unknown", "letter": runtime_letter(project_letter(
                     record, head_sha=head, latest_sha="", request=_request_view(record, drive_root, with_status=False))),
                 "post_merge_reds": (record or {}).get("post_merge_reds"),
             }
         latest = str(cache.get("latest_sha") or "")
-        checked_head = str((record or {}).get("checked_head_sha") or "")
+        checked_head = str(cache.get("checked_head_sha") or "")  # the check's own HEAD, never the letter's
         shown = shown_letter(record)[0] if record else {}
         record_key = shown.get("key") if isinstance(shown.get("key"), dict) else {}
         letter = runtime_letter(project_letter(record, head_sha=head, latest_sha=latest,
@@ -1058,16 +1060,19 @@ def official_update_projection(
             "running": {"version": get_version(), "sha": head},
             "update_channel": str(cache.get("update_channel") or ""),
             "target": target,
-            "behind": cache.get("behind"),
-            "ahead": cache.get("ahead"),
+            "checked_head": checked_head or None,
+            # Counts describe the checked HEAD; a checkout at the checked tip is level with it; any other HEAD is unknown.
+            "behind": cache.get("behind") if head == checked_head else 0 if head == latest else None,
+            "ahead": cache.get("ahead") if head == checked_head else 0 if head == latest else None,
             # Commits ahead are history; this is whether the checked HEAD held content of its own.
             "local_changes": str(cache.get("local_changes") or "unknown")
             if head == str(cache.get("checked_head_sha") or "") else "unknown",
             "letter": letter,
             "post_merge_reds": (record or {}).get("post_merge_reds"),
             # Where the range and the one writer are, for a mind that decides to describe it.
+            "check": CHECK_SOURCE,
             **({"description_sources": DESCRIPTION_SOURCES} if status == "update_available" else {}),
         }
     except Exception as exc:  # noqa: BLE001 — a fact that raises would take the whole context with it
         log.debug("official_update projection failed", exc_info=True)
-        return {"status": "unknown", "error": type(exc).__name__}
+        return {"status": "unknown", "error": type(exc).__name__, "check": CHECK_SOURCE}

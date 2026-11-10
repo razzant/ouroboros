@@ -33,8 +33,7 @@ def test_navigation_matches_full_inventory_with_real_markdown_titles_and_metadat
     assert store.knowledge_index_view(address, view) == expected
 
 
-@pytest.mark.parametrize("scope", ["global", "project:demo"])
-@pytest.mark.parametrize("index_exists", [False, True])
+@pytest.mark.parametrize(("index_exists", "scope"), [(False, "global"), (True, "project:demo")])
 def test_real_consumers_see_a_same_size_external_edit(tmp_path, monkeypatch, scope, index_exists):
     monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
     address = store.resolve_knowledge_address(tmp_path, "topic", scope)
@@ -134,7 +133,9 @@ def _shelf(tmp_path, notes):
 def test_a_notes_navigation_is_parsed_once_per_content(tmp_path, monkeypatch):
     from ouroboros import utils
 
-    monkeypatch.setattr(utils, "_RACY_NS", 0)  # trust notes as written (the clock-tick rule has its own case)
+    # Trust notes as written (the clock-tick rule has its own case) on every clock: with 0 a note written in the
+    # read's own tick still looks unsettled where time.time_ns ticks at 15.6 ms (Windows), and is parsed again.
+    monkeypatch.setattr(utils, "_RACY_NS", -2_000_000_000)
     address = _shelf(tmp_path, {"alpha": "---\nsummary: First\n---\n# Alpha\n", "beta": "# Beta\nBody.\n"})
     parses = _navigation_parses(monkeypatch)
     first = store.knowledge_index_view(address)

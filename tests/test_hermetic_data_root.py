@@ -157,7 +157,6 @@ def test_every_atomic_writer_fails_closed_on_live_root_write(monkeypatch, tmp_pa
     assert sorted(p.name for p in ok.parent.iterdir()) == ["state.json"]
 
 
-@pytest.mark.serial
 def test_update_merge_suites_leave_live_shaped_root_untouched(tmp_path):
     """Keep the historical node's child-startup/writer isolation witness.
 

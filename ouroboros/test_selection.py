@@ -1,7 +1,8 @@
 """Commit/PR test scope: a contract floor, direct imports and authored widening.
 
 Selection is computed from the candidate's files, including dirty and untracked
-inputs. It is a minimum, not a claim about dynamic or indirect consumers.
+inputs. It is a minimum, not a claim about dynamic or indirect consumers. It names
+modules; the runners' lane exclusions still decide which of their tests execute.
 """
 from __future__ import annotations
 
@@ -30,20 +31,23 @@ FLOOR_TESTS = {
     "tests/test_safety_policy.py": "every built-in tool has an explicit safety policy",
 }
 
-SELECTION_RULE = "floor + changed tests + direct importers + authored widening"
+SELECTION_RULE = "floor + changed tests + direct importers of changed code, tests and test helpers + authored widening"
 # Bind the policy this process loaded, even if its source changes later on disk.
 _POLICY_SOURCE = Path(__file__).read_bytes()
 _APPARATUS = frozenset({
     "pyproject.toml", "pytest.ini", ".pytest.ini", "setup.cfg", "tox.ini",
     "uv.lock", "requirements.txt", "requirements-runtime.lock",
     "web/package.json", "web/package-lock.json", "site/pnpm-lock.yaml",
-    "ouroboros/preflight_runner.py", "ouroboros/preflight_node.py",
+    "ouroboros/preflight_runner.py", "ouroboros/preflight_probe.py", "ouroboros/preflight_node.py",
+    "ouroboros/test_bytecode.py",
     "ouroboros/preflight_receipts.py", "ouroboros/commit_admission.py",
     "ouroboros/test_selection.py", "ouroboros/preflight_inventory.py",
     "ouroboros/preflight_qualification.py", "scripts/run_tests.py", "scripts/safe_test.py",
     "ouroboros/test_environment.py", ".github/workflows/ci.yml",
     "ouroboros/process_containment.py", "ouroboros/process_lifeline.py",
     "ouroboros/process_overload.py", "ouroboros/test_parallelism.py",
+    "tests/default_lane.py", "tests/browser_lane.py", "tests/ci_evidence.py", "tests/ci_verdicts.py",
+    "tests/ci_accepted.py", "tests/stack_samples.py", "tests/_test_folders.py",
 })
 # What switches, attests, boots and restores a body: a selected run cannot qualify
 # adopting a change to the machinery that adopts it. A minimum, not a risk classifier.
@@ -78,11 +82,18 @@ def is_test_module(path: str) -> bool:
     return bool(p.parts) and p.parts[0] == "tests" and p.name.startswith("test_") and p.suffix == ".py"
 
 
+def is_test_helper(path: str) -> bool:
+    """Python under tests/ that pytest neither collects nor loads as its configuration."""
+    p = PurePosixPath(path)
+    return (p.parts[0] == "tests" and p.suffix == ".py" and p.name != "conftest.py"
+            and not is_test_module(path) and path not in _APPARATUS)
+
+
 def apparatus_change(path: str) -> bool:
     p = PurePosixPath(path)
-    # Under tests/, everything but a test module (helpers, conftest, fixture data) is shared apparatus.
+    # Under tests/, pytest configuration and fixture data are shared apparatus; a helper selects its importers.
     return (path in _APPARATUS or path in FLOOR_TESTS
-            or (p.parts[0] == "tests" and not is_test_module(path))
+            or (p.parts[0] == "tests" and not is_test_module(path) and not is_test_helper(path))
             or (p.name.startswith("requirements") and p.suffix in {".txt", ".lock"}))
 
 
@@ -165,7 +176,36 @@ def _scanned_imports(repo: Path, path: str) -> frozenset[str]:
     return _IMPORT_SCANS[key]
 
 
-def validate_widening(repo: Path, extra_tests=(), full_tests=False, reason="") -> tuple[str, ...]:
+def _imports_of(repo: Path, path: str) -> frozenset[str]:
+    try:
+        return _scanned_imports(repo, path)
+    except (SyntaxError, UnicodeError) as exc:
+        # An unavailable graph grants no extra automatic escalation rule.
+        raise ValueError(f"import scan unavailable for {path}; repair it or request full_tests with test_reason") from exc
+
+
+def _bound(imports: Iterable[str], modules: Iterable[str]) -> list[str]:
+    """The modules that a set of imports names, a package or a member of it included."""
+    return sorted(name for name in modules if any(i == name or i.startswith(name + ".") for i in imports))
+
+
+def _reaching_helper(repo: Path, helper: str, sources: Iterable[str]) -> set[str]:
+    """The non-test Python under tests/ that reaches ``helper`` through imports, itself included.
+
+    A helper runs nothing alone: the test modules importing any of these answer for it.
+    """
+    reached = {helper}
+    while True:
+        names = {_module(path) for path in reached}
+        more = {path for path in sources if path not in reached and _bound(_imports_of(repo, path), names)}
+        if not more:
+            return reached
+        reached |= more
+
+
+def validate_widening(repo: Path, extra_tests=(), full_tests=False, reason="", *, skipped=None) -> tuple[str, ...]:
+    """The widening a commit asks; ``skipped`` (a list) collects the extra_tests entries the tests preflight cannot
+    run, disclosed instead of refusing the call (06.11); without it such an entry refuses, as before."""
     if type(full_tests) is not bool or not isinstance(extra_tests, (list, tuple)):
         raise ValueError("extra_tests must be a list of paths and full_tests must be a boolean")
     if not isinstance(reason, str):
@@ -175,13 +215,17 @@ def validate_widening(repo: Path, extra_tests=(), full_tests=False, reason="") -
     normalized = set()
     for path in extra_tests:
         if not isinstance(path, str) or "\\" in path or ".." in PurePosixPath(path).parts:
-            raise ValueError(f"extra_tests needs repository-relative test modules: {path!r}")
-        p = PurePosixPath(path)
-        if p.is_absolute() or not is_test_module(path) or not (repo / path).is_file():
-            raise ValueError(f"extra_tests module is missing or invalid: {path!r}")
-        if not (repo / path).resolve().is_relative_to(repo.resolve()):
-            raise ValueError(f"extra_tests module escapes the candidate: {path!r}")
-        normalized.add(p.as_posix())
+            problem = f"extra_tests needs repository-relative test modules: {path!r}"
+        elif PurePosixPath(path).is_absolute() or not is_test_module(path) or not (repo / path).is_file():
+            problem = f"extra_tests module is missing or invalid: {path!r}"
+        elif not (repo / path).resolve().is_relative_to(repo.resolve()):
+            problem = f"extra_tests module escapes the candidate: {path!r}"
+        else:
+            normalized.add(PurePosixPath(path).as_posix())
+            continue
+        if skipped is None:
+            raise ValueError(problem)
+        skipped.append(str(path))
     return tuple(sorted(normalized))
 
 
@@ -221,30 +265,38 @@ def select_from_paths(repo: Path, paths: Iterable[str], *, base: str,
     if missing:
         raise ValueError("required gate floor is missing: " + ", ".join(missing))
     changed = tuple(sorted(set(paths)))
-    files = tuple(sorted(p.relative_to(repo).as_posix() for p in (repo / "tests").rglob("test_*.py")))
+    python = sorted(p.relative_to(repo).as_posix() for p in (repo / "tests").rglob("*.py"))
+    files = tuple(path for path in python if is_test_module(path))
+    sources = tuple(path for path in python if not is_test_module(path))
     reasons = [(path, f"floor: {invariant}") for path, invariant in FLOOR_TESTS.items()]
     versions = _release_versions(repo, base) if _RELEASE_CARRIERS & set(changed) else set()
-    full = [(p, "verification apparatus changed") for p in changed if apparatus_change(p)
+    apparatus = "verification apparatus changed"
+    full = [(p, apparatus) for p in changed if apparatus_change(p)
             and not (p in _RELEASE_CARRIERS and _version_only_change(repo, base, p, versions))]
     full += [(p, "body cutover/recovery changed") for p in changed if p in _CUTOVER]
     if full_tests:
         full.append(("*", "author requested full: " + test_reason.strip()))
     selected = set(FLOOR_TESTS)
-    modules = {_module(p) for p in changed if p.endswith(".py") and not p.startswith("tests/")}
+    # A changed test module or helper is imported like product code; a helper's importers answer for it,
+    # unless pytest configuration loads it for every test or nothing traced imports it (a child script).
+    modules = {_module(p) for p in changed if p.endswith(".py")}
+    helpers = {p: _reaching_helper(repo, p, sources) for p in changed
+               if not full and is_test_helper(p) and (repo / p).is_file()}
+    full += [(p, apparatus) for p, reached in helpers.items() if any(apparatus_change(r) for r in reached)]
+    modules.update(_module(r) for reached in helpers.values() for r in reached)
+    imported: set[str] = set()
     for path in files:
         if path in changed:
             selected.add(path)
             reasons.append((path, "changed test module"))
         if not full and modules:
-            try:
-                imports = _scanned_imports(repo, path)
-            except (SyntaxError, UnicodeError) as exc:
-                # An unavailable graph grants no extra automatic escalation rule.
-                raise ValueError(f"import scan unavailable for {path}; repair it or request full_tests with test_reason") from exc
-            bound = sorted(name for name in modules if any(i == name or i.startswith(name + ".") for i in imports))
+            bound = _bound(_imports_of(repo, path), modules)
             if bound:
                 selected.add(path)
+                imported.update(bound)
                 reasons.append((path, "direct import: " + ", ".join(bound)))
+    if not full:
+        full = [(p, apparatus) for p, reached in helpers.items() if not {_module(r) for r in reached} & imported]
     reasons.extend((p, "author widening: " + test_reason.strip()) for p in extra)
     selected.update(extra)
     return TestSelection("full" if full else "selected", base, files if full else tuple(sorted(selected)),
@@ -282,7 +334,7 @@ def widening_properties() -> dict:
     """Tool-schema SSOT: the model chooses consumers the import graph cannot see."""
     return {
         "extra_tests": {"type": "array", "items": {"type": "string"}, "default": [],
-                        "description": "Add test module paths for indirect/dynamic, prompt, skill or cross-language consumers beyond the floor and direct imports; explain in test_reason."},
+                        "description": "Add Python test modules (tests/test_*.py of this repository) for indirect/dynamic, prompt or skill consumers beyond the floor and direct imports; explain in test_reason. Other entries are skipped with a note."},
         "full_tests": {"type": "boolean", "default": False,
                        "description": "Request the full battery for broad or unresolved impact; explain in test_reason. Managed updates and adoption/evolution publication require full; local adoption may use an exact whole-delta selection. See DEVELOPMENT: The tiered commit and CI gates for publication limits."},
         "test_reason": {"type": "string", "default": "",
@@ -291,13 +343,19 @@ def widening_properties() -> dict:
 
 
 def bind_commit_test_request(ctx, kwargs) -> str:
+    ctx._commit_call_notes = []  # a commit call's notes start here (``review_collection.note_commit_call``)
     request = {key: kwargs.pop(key, default) for key, default in
                (("extra_tests", []), ("full_tests", False), ("test_reason", ""))}
+    skipped: list = []
     try:
         request["extra_tests"] = validate_widening(Path(ctx.repo_dir), **{
-            "extra_tests": request["extra_tests"], "full_tests": request["full_tests"], "reason": request["test_reason"]})
+            "extra_tests": request["extra_tests"], "full_tests": request["full_tests"], "reason": request["test_reason"]},
+            skipped=skipped)
     except ValueError as exc:
         return f"⚠️ TOOL_ARG_ERROR: {exc}. Nothing was staged or reviewed."
+    if skipped:  # what the tests preflight cannot run is disclosed, never a refusal of the commit (06.11)
+        ctx._commit_call_notes.append("extra_tests skipped (only Python test modules tests/test_*.py of this "
+                                      f"repository run in the tests preflight): {', '.join(skipped)}.")
     ctx._commit_test_request = request
     return ""
 

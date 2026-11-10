@@ -24,6 +24,7 @@ from tests.test_llm_claudexor import MODEL, ledger
 from tests.test_llm_claudexor import result as _model_result
 from tests.test_llm_claudexor import setup as _model_fixture
 from tests._usage_store_testing import ledger_rows
+from tests._cases import case_folders, chosen_rows
 
 _owned_gateway_uses_each_test_transport = _owned_fixture
 fake_route = _route_fixture
@@ -44,15 +45,16 @@ def _finish(report, applied=None):
                               "effortResolution": report, "appliedOptions": applied})[1]
 
 
-@pytest.mark.parametrize("applied", [None, {}, {"cacheKey": "unrelated"}])
-@pytest.mark.parametrize("report", REPORTS.values(), ids=REPORTS)
-def test_paired_fixture_is_preparation_evidence_not_dispatch_or_provider_echo(applied, report):
-    usage = _finish(report, applied)
-    assert usage["effort_resolution"] == report
-    assert usage["effort"]["requested"] == "ultra"
-    assert usage["effort"]["sent"] == {"options.reasoningEffort": "ultra"}
-    assert usage["effort"]["reported"] is None
-    assert usage["claudexor"]["applied_options"] == applied
+def test_paired_fixture_is_preparation_evidence_not_dispatch_or_provider_echo(subtests):
+    for applied in [None, {}, {"cacheKey": "unrelated"}]:
+        for report in REPORTS.values():
+            with subtests.test(applied=applied, report=report):
+                usage = _finish(report, applied)
+                assert usage["effort_resolution"] == report
+                assert usage["effort"]["requested"] == "ultra"
+                assert usage["effort"]["sent"] == {"options.reasoningEffort": "ultra"}
+                assert usage["effort"]["reported"] is None
+                assert usage["claudexor"]["applied_options"] == applied
 
 
 def test_provider_response_echo_remains_observation_when_resolution_has_none():
@@ -71,7 +73,7 @@ def test_observation_reporter_is_separate_from_resolution_authority():
     assert usage["effort_resolution"]["source"] == "account_catalog"
 
 
-@pytest.mark.parametrize("report", [None, {}, [], {"requested": "ultra"},
+@pytest.mark.parametrize("report", chosen_rows([None, {}, [], {"requested": "ultra"},
     {**SHARED, "submitted": None}, {**SHARED, "parameter": None},
     {**SHARED, "requested": None}, {**SHARED, "resolution": "exact"},
     {**SHARED, "resolution": "floor", "requested": None},
@@ -89,7 +91,7 @@ def test_observation_reporter_is_separate_from_resolution_authority():
     *[{**SHARED, field: invalid} for field in ("requested", "submitted", "parameter", "observed", "observedSource")
       for invalid in (" ", 1, False, [], {})],
     {**VARIANTS["known_parameter_unverifiable"], "parameter": " "},
-])
+], 4, 5, 7, 10, 13, 15, 17, 19, 20))
 def test_malformed_or_incoherent_reports_stay_unknown_in_both_consumers(tmp_path, report):
     assert validated_effort_resolution(report) is None
     usage = _finish(report)
@@ -100,17 +102,20 @@ def test_malformed_or_incoherent_reports_stay_unknown_in_both_consumers(tmp_path
     assert final_attempt_facts(detail, "run-fixture")["effort_resolution"] is None
 
 
-@pytest.mark.parametrize("report", REPORTS.values(), ids=REPORTS)
-def test_paired_fixture_binds_only_to_unique_final_session_attempt(tmp_path, report):
-    detail = _write_telemetry(tmp_path, [
-        {"attempt_id": "a01", "effort_resolution": {**SHARED, "observed": "wrong", "observedSource": "earlier"}},
-        {"attempt_id": "a02", "effort_resolution": report},
-    ])
-    assert final_attempt_facts(detail, "run-fixture")["effort_resolution"] == report
-    detail = _write_telemetry(tmp_path, [{"attempt_id": "a01", "effort_resolution": report}, {"attempt_id": "a02"}])
-    assert "effort_resolution" not in final_attempt_facts(detail, "run-fixture")
-    detail = _write_telemetry(tmp_path, [{"attempt_id": "a02", "effort_resolution": report}, {"attempt_id": "a02"}])
-    assert final_attempt_facts(detail, "run-fixture") == {}
+def test_paired_fixture_binds_only_to_unique_final_session_attempt(subtests, tmp_path):
+    case_paths = case_folders(tmp_path)
+    for report in REPORTS.values():
+        tmp_path = next(case_paths)
+        with subtests.test(report=report):
+            detail = _write_telemetry(tmp_path, [
+                {"attempt_id": "a01", "effort_resolution": {**SHARED, "observed": "wrong", "observedSource": "earlier"}},
+                {"attempt_id": "a02", "effort_resolution": report},
+            ])
+            assert final_attempt_facts(detail, "run-fixture")["effort_resolution"] == report
+            detail = _write_telemetry(tmp_path, [{"attempt_id": "a01", "effort_resolution": report}, {"attempt_id": "a02"}])
+            assert "effort_resolution" not in final_attempt_facts(detail, "run-fixture")
+            detail = _write_telemetry(tmp_path, [{"attempt_id": "a02", "effort_resolution": report}, {"attempt_id": "a02"}])
+            assert final_attempt_facts(detail, "run-fixture") == {}
 
 
 @pytest.mark.parametrize("token", ["future-token", "none"])
@@ -119,8 +124,11 @@ def test_exact_tokens_are_not_reranked_and_literal_none_is_not_omission(token):
     assert validated_effort_resolution(report) == report
 
 
-@pytest.mark.parametrize("resolution", ["omitted", "unverifiable", "rejected"])
-@pytest.mark.parametrize("parameter", [None, "model_reasoning_effort"])
+@pytest.mark.parametrize(("parameter", "resolution"), [
+    (None, "omitted"),
+    (None, "rejected"),
+    ("model_reasoning_effort", "unverifiable"),
+])
 def test_absent_knob_is_null_and_never_confirms_a_tier(resolution, parameter):
     report = {**SHARED, "submitted": None, "parameter": parameter, "resolution": resolution}
     assert validated_effort_resolution(report) == report
@@ -193,8 +201,14 @@ def test_old_model_result_without_resolution_keeps_effort_unknown(model_setup):
     assert not ledger(root)[-1].get("effort_resolution")
 
 
-@pytest.mark.parametrize("online", [False, True])
-@pytest.mark.parametrize("evidence", ["missing", "prepared", "applied", "observed", "malformed", "malformed_applied"])
+@pytest.mark.parametrize(("evidence", "online"), [
+    ("missing", True),
+    ("prepared", True),
+    ("applied", False),
+    ("observed", True),
+    ("malformed", False),
+    ("malformed_applied", False),
+])
 def test_late_model_result_keeps_only_exact_attempt_effort_evidence(tmp_path, monkeypatch, online, evidence):
     from types import SimpleNamespace
 

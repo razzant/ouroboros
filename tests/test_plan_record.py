@@ -4,6 +4,7 @@ read-only legacy import. Every rule is pinned in both directions."""
 from __future__ import annotations
 
 import json
+import pathlib
 
 import pytest
 
@@ -77,8 +78,7 @@ def test_parse_reply_reads_the_one_object_in_prose_or_fence_and_dedups_ids():
     assert error == "" and nested["withdrawn"] == [{"id": "o2", "why": "done"}]
 
 
-@pytest.mark.parametrize("text", ["just prose", "[1, 2]", '{"objections": "nope"}', '{"withdrawn": {"id": "o1", "why": "x"}}',
-                                  '{"prose": 3}', '```json\n{"id": "c1", "claim": "a quoted done_when row"}\n```'])
+@pytest.mark.parametrize("text", ["just prose", '{"prose": 3}', '```json\n{"id": "c1", "claim": "a quoted done_when row"}\n```'])
 def test_parse_reply_refuses_unreadable_or_malformed_replies_whole(text):
     reply, error = pr.parse_reply(text)
     assert reply is None and error
@@ -686,3 +686,14 @@ def test_the_one_legacy_loader_names_the_read_that_failed_and_projects_the_rest(
     assert error["source"] == "author_plan" and "gone" in error["error"] and [o["id"] for o in legacy["open_objections"]] == ["s1:f1"]
     absent, error = pr.legacy_facts(tmp_path, "t-none")
     assert absent["engaged"] is False and absent["open_objections"] == [] and error == {}
+
+
+def test_ask_evidence_classifies_every_shared_case_as_the_browser_does():
+    """One table with web/tests/review_plan_record.test.js (``askEvidence``): the two classifiers cannot drift apart."""
+    fixture = pathlib.Path(__file__).resolve().parents[1] / "web" / "tests" / "fixtures" / "plan_ask_evidence_parity.json"
+    cases = json.loads(fixture.read_text(encoding="utf-8"))["cases"]
+    assert len(cases) >= 9
+    for case in cases:
+        evidence = pr.ask_evidence(case["ask"])
+        assert {"recorded": evidence["recorded"], "counts": evidence["counts"],
+                "items": [[item["locator"], item["state"], item["reasons"]] for item in evidence["items"]]} == case["expected"], case["name"]

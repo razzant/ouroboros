@@ -421,7 +421,9 @@ def bind_task(root, task, record):
     origin = origin_of(record)
     if origin:
         meta.update(origin_task_id=origin["task_id"], origin_root_task_id=origin["root_task_id"])
-        meta["objective_author"] = {"kind": "task", "task_id": origin["task_id"]}
+        # The task's own record of who supplied its text stands (a later Schedules API edit, an accepted
+        # occurrence's frozen author); only a template that recorded none is the follow-up's task's.
+        meta.setdefault("objective_author", {"kind": "task", "task_id": origin["task_id"]})
     meta["followup_origin"] = origin
     meta["followup_relation"] = copy.deepcopy(record.get("followup_relation") or {"kind": relation_kind(record)})
     if relation_kind(record) != "related":
@@ -506,8 +508,8 @@ def restore_followup(root, data, current, *, expected_hold_id, resolved, actor, 
                 raise store.ScheduleRefused("relationship_immutable", "only an unknown relationship can be resolved")
             after["followup_origin"], after["followup_relation"] = resolved
         from ouroboros.consciousness_authority import stamp_schedule_writer
-        stamp_schedule_writer(after, writer_kind, writer_metadata,
-                              started_root=relation_kind(after) == "independent")
+        stamp_schedule_writer(after, writer_kind, writer_metadata,  # a restore of the same work
+                              started_root=relation_kind(after) == "independent", same_work=True)
         after["followup_released"] = {**(after.get("followup_released") or {}), **hold.get("controls", {})}
         after.pop("followup_hold", None)
         after["followup_wait"] = policy_view(root, data, after)["wait"]

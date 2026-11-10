@@ -4,6 +4,11 @@ The format stamp describes the document, including an empty queue. Old names
 are interpreted here once; ordinary readers use work_stop's current policy.
 The pure converter also accepts stored documents so lost queue locators become
 addressable again. Restore still checks terminal/cancel/source authority.
+
+Format 1 embedded every row whole; format 2 may publish large task values once, by
+content address (``queue_observation.SHARED_KEY``), which the reader expands before
+anything here runs. Both read alike; only an unstamped (pre-selection) document is
+converted.
 """
 
 import copy
@@ -15,7 +20,8 @@ from ouroboros.work_stop import (
 )
 
 FORMAT_KEY = "work_stop_format"
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
+_ACCEPTED_FORMATS = frozenset({1, FORMAT_VERSION})
 _AWAITING = "root_fence_member_pending_selection"
 _POINTS = ("_budget_pause", "_budget_pause_resume", "_owner_wait_resume", "_working_recovery", SELECTION_KEY)
 
@@ -86,9 +92,11 @@ def _ghost(document):
     pause, limit = document.get("budget_pause") or {}, document.get("resource_limit") or {}
     if pause.get("state") not in {"pausing", "paused", "resume_granted"} and limit.get("status") != "budget_hold":
         return None
+    from ouroboros.project_admission import carried_basis
     from supervisor.queue_snapshot import _PENDING_FIELDS
 
     task = {key: copy.deepcopy(document[key]) for key in _PENDING_FIELDS if document.get(key) is not None}
+    task.update(carried_basis(document))  # the result's admitted basis, never one recaptured later (#2547)
     task.update(id=document["task_id"], type=document.get("type") or "task",
                 chat_id=document.get("chat_id", 0), _attempt=document.get("task_attempt") or 1)
     lineage = resolve_task_lineage(task["id"], **{key: document.get(key) for key in (
@@ -108,7 +116,7 @@ def normalize_snapshot(snapshot, documents=()):
     Documents are observations, never modified. Missing rows acquire no grant or
     no-dispatch proof; an explicit Resume must recheck their actual source.
     """
-    if snapshot.get(FORMAT_KEY) == FORMAT_VERSION:
+    if snapshot.get(FORMAT_KEY) in _ACCEPTED_FORMATS:
         return []
     documents = {row["task_id"]: row for row in documents if row.get("task_id")}
     changes = []
@@ -137,7 +145,7 @@ def normalize_snapshot(snapshot, documents=()):
 
 def normalize_for_restore(snapshot, root):
     """Boot adapter: observe current results, journal conversions, publish via Q."""
-    if snapshot.get(FORMAT_KEY) == FORMAT_VERSION or snapshot.get("_snapshot_invalid") or snapshot.get("_snapshot_missing"):
+    if snapshot.get(FORMAT_KEY) in _ACCEPTED_FORMATS or snapshot.get("_snapshot_invalid") or snapshot.get("_snapshot_missing"):
         return False
     from ouroboros.task_results import list_task_results, load_task_result
     from ouroboros.utils import append_jsonl, utc_now_iso

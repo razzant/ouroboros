@@ -1,8 +1,9 @@
 """Telegram typing from real producers to a fake Telegram client (DESIGN §9).
 
-The direct chat lane, the answer-first final, the owner-wait resume seam, the
-delegated-run supervision loop, a review panel's seats and the supervisor's
-send/typing/lease handlers run for real; their frames cross the real
+The conversation lane (the admission in the server, the body in a carrier run
+here), the answer-first final, the owner-wait resume seam, the delegated-run
+supervision loop, a review panel's seats and the supervisor's send/typing/lease
+handlers run for real; their frames cross the real
 ``LocalChatBridge`` and the global event bus into the Telegram plugin's own
 handlers and its one ``TypingCue``, which reads the host's real projection. Only
 Telegram itself is a recorder. Negative controls stay beside each positive one.
@@ -26,7 +27,6 @@ import pytest
 
 from tests._budget_pause_exact_helpers import _install_queue, _loop_ctx
 
-pytestmark = pytest.mark.serial
 
 PINNED = 777
 ORIGIN = {"origin_message_ref": {"chat_id": 1, "client_message_id": "m-1", "ts": "2026-10-17T00:00:00+00:00"}}
@@ -198,9 +198,10 @@ def _quiet(flow, chat=PINNED, ticks=4):
 
 
 def test_owner_turn_types_until_its_answer_and_post_answer_work_never_revives_it(flow, monkeypatch):
-    from ouroboros import agent as agent_module
     from ouroboros import agent_task_pipeline as pipeline
+    from ouroboros.task_carrier import LANE_CONVERSATION
     from supervisor import state as supervisor_state
+    from tests.conversation_carrier_support import carry, install_lane_spare
 
     monkeypatch.setattr(supervisor_state, "reconstruct_task_cost", lambda *a, **k: {})
     monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *a, **k: None)
@@ -230,10 +231,15 @@ def test_owner_turn_types_until_its_answer_and_post_answer_work_never_revives_it
                                        event_queue=self._event_queue)
             return []
 
-    monkeypatch.setattr(agent_module, "make_agent", lambda **kw: Actor())
     flow.start()
-    turn = threading.Thread(target=flow.workers.handle_chat_direct, args=(1, "question", None),
-                            kwargs={"task_metadata": {**ORIGIN, "client_message_id": "m-1"}}, daemon=True)
+    # The server admits the turn (its RUNNING row, the typing receipt, the lane spare's queue) and runs
+    # nothing of it; the carrier is this thread, with the actor above.
+    spare = install_lane_spare(flow.workers, 90)
+    flow.workers.handle_chat_direct(1, "question", None, task_metadata={**ORIGIN, "client_message_id": "m-1"})
+    [tid] = [task_id for task_id, meta in flow.workers.RUNNING.items() if meta.get("lane") == LANE_CONVERSATION]
+    assert spare.busy_task_id == tid and flow.registry.actors() == []
+    turn = threading.Thread(target=carry, args=(flow.workers, spare, Actor()), kwargs={"out_q": flow.queue},
+                            daemon=True)
     turn.start()
     try:
         assert _until(lambda: flow.telegram.kinds().count(("typing", PINNED)) >= 3), flow.telegram.kinds()
@@ -246,7 +252,7 @@ def test_owner_turn_types_until_its_answer_and_post_answer_work_never_revives_it
         assert _until(lambda: flow.telegram.kinds().count(("message", PINNED)) == 2)
         answered = time.monotonic()
         time.sleep(TICK * 6)  # the turn is alive in its slow store: post-answer work
-        assert flow.registry.get(flow.registry.actors()[0].activity_id).reply_handed_off is True
+        assert flow.workers.RUNNING[tid]["reply_handed_off"] is True  # the row's fact, as the registry's once was
         after = flow.telegram.kinds(since=answered)
         assert ("typing", PINNED) not in after, after
         calls = flow.telegram.kinds()
@@ -254,36 +260,44 @@ def test_owner_turn_types_until_its_answer_and_post_answer_work_never_revives_it
     finally:
         interim_go.set(), answer_go.set(), store_release.set()
         turn.join(10)
-    assert flow.registry.actors() == []
+    assert not turn.is_alive() and spare.busy_task_id is None, "the carrier released its turn"
+    assert flow.registry.actors() == [], "no thread of the server ran the turn"
 
 
 def test_a_wake_up_turn_and_a_helper_start_never_flash_typing(flow, monkeypatch):
-    """A start event is no cue: a consciousness turn's announce and a delegated child's
-    start reach the bridge, and nothing is shown (the bridge used to flash once per event)."""
-    from ouroboros import agent as agent_module
+    """A start event is no cue: a consciousness turn's announce (its admitted row, its carried body) and a
+    delegated child's start reach the bridge, and nothing is shown (the bridge used to flash once per event)."""
+    from tests.conversation_carrier_support import carry, install_lane_spare
 
     release = threading.Event()
 
     class Actor:
+        _event_queue = None
+
         def handle_task(self, task):
             assert release.wait(10)
             return []
 
-    monkeypatch.setattr(agent_module, "make_agent", lambda **kw: Actor())
     flow.start()
+    spare = install_lane_spare(flow.workers, 90)
     receipt = flow.workers.handle_wake_direct(1, "wake", {"initiator": "consciousness",
                                                            "usage_category": "consciousness"})
-    assert receipt["admitted"] is True
-    flow.workers.RUNNING["kid"] = {"task": {"id": "kid", "chat_id": 1, "parent_task_id": "absent-root",
-                                            "root_task_id": "absent-root", "delegation_role": "subagent"},
-                                   "attempt": 1, "worker_id": 0}
-    reads = flow.reads[0]
-    flow.queue.put({"type": "typing_start", "task_id": "kid", "chat_id": 1, "phase": "thinking"})
-    assert _until(lambda: flow.reads[0] > reads), "the start woke the cue"
-    time.sleep(TICK * 4)
-    release.set()
-    assert _until(lambda: not any(thread.name.startswith("wake-turn-") and thread.is_alive()
-                                  for thread in threading.enumerate()))
+    assert receipt["admitted"] is True and spare.busy_task_id == receipt["task_id"]
+    wake = threading.Thread(target=carry, args=(flow.workers, spare, Actor()), kwargs={"out_q": flow.queue},
+                            daemon=True)
+    wake.start()
+    try:
+        flow.workers.RUNNING["kid"] = {"task": {"id": "kid", "chat_id": 1, "parent_task_id": "absent-root",
+                                                "root_task_id": "absent-root", "delegation_role": "subagent"},
+                                       "attempt": 1, "worker_id": 0}
+        reads = flow.reads[0]
+        flow.queue.put({"type": "typing_start", "task_id": "kid", "chat_id": 1, "phase": "thinking"})
+        assert _until(lambda: flow.reads[0] > reads), "the start woke the cue"
+        time.sleep(TICK * 4)
+    finally:
+        release.set()
+        wake.join(10)
+    assert not wake.is_alive()
     assert flow.telegram.kinds() == []
 
 

@@ -7,10 +7,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests._delegate_capture_child import idle_maintenance_child  # noqa: F401
 from tests.test_synthesis_ownership_recovery import work as work, checkpoint
 from tests.test_delegate_body_collection import _until
 
-pytestmark = pytest.mark.serial
+pytestmark = [pytest.mark.usefixtures("idle_maintenance_child")]
 
 
 def test_real_maintenance_recovers_unsent_phase_while_usage_duty_is_blocked(work, monkeypatch):
@@ -45,13 +46,13 @@ def test_real_maintenance_recovers_unsent_phase_while_usage_duty_is_blocked(work
         assert entered.wait(3)
         _until(lambda: checkpoint(work)["post_task_synthesis"] == "completed")
         assert not release.is_set()
-        assert work.calls == ["fallback", "scratch", "promotion"]
+        assert work.calls == ["fallback", "promotion"]
         _until(lambda: not phase.post_task_synthesis_in_flight(work.root, work.task["id"]))
         # Another ordinary pass has no paid remainder to repeat.
         latch = threading.Lock()
         latch.acquire()
         sm._run_terminal_duty(work.root, "post_task_synthesis_recovery", latch)
-        assert work.calls == ["fallback", "scratch", "promotion"]
+        assert work.calls == ["fallback", "promotion"]
     finally:
         release.set()
         for thread in threads:

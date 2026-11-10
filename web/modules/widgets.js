@@ -62,17 +62,14 @@ function pageTemplate() {
 }
 
 function renderCardHtml(tab) {
-    // Avoid leaking internal "skill:tab_id"; show skill only as needed.
+    // The card's own title names it; the skill's id is no owner word, so only a card kept from the chat says where from.
     const title = tab.title || tab.tab_id || tab.skill;
-    const source = tab.pinned_card ? 'kept from the chat' : `from ${tab.skill}`;
-    const subtitle = tab.skill && tab.skill !== title
-        ? `<span class="widgets-card-source">${escapeHtml(source)}</span>`
-        : '';
+    const subtitle = tab.pinned_card ? '<span class="widgets-card-source">kept from the chat</span>' : '';
     const span = Number(tab.span || tab.grid_span || 1);
     const spanClass = span >= 2 ? ' widgets-card-span-2' : '';
     const { run, menu } = renderWidgetCardParts(tab);
     return `
-        <article class="widgets-card${spanClass}" data-widget-key="${escapeHtml(widgetKey(tab))}">
+        <article class="ui-card widgets-card${spanClass}" data-widget-key="${escapeHtml(widgetKey(tab))}">
             <div class="widgets-card-head">
                 <div class="widgets-card-title">
                     <strong>${escapeHtml(title)}</strong>
@@ -82,7 +79,7 @@ function renderCardHtml(tab) {
                     ${run ? `<div class="widgets-card-run">${run}</div>` : ''}
                     <div class="widgets-card-tools">
                         ${menu}
-                        <button class="widgets-card-drag" type="button" data-widget-reorder-handle title="Move widget: drag or use arrow keys" aria-label="Move widget: drag or use arrow keys">↕</button>
+                        <button class="btn btn-ghost btn-sm widgets-card-drag" type="button" data-widget-reorder-handle title="Move widget: drag or use arrow keys" aria-label="Move widget: drag or use arrow keys">↕</button>
                     </div>
                 </div>
             </div>
@@ -1151,19 +1148,22 @@ export function initWidgets(ctx = {}) {
         if (!ok && status) Object.assign(status, { textContent: `The card was not removed: ${error}` }).dataset.tone = 'error';
     }
 
-    const cardMenus = bindWidgetCardMenus(list, setWidgetStartMode, widths, removeKeptCard);
+    const stopFromMenu = (key) => { const tab = tabByKey(key), card = liveCardFor(list, key); if (tab && card) stopWidgetByOwner(card, tab); };
+    const cardMenus = bindWidgetCardMenus(list, setWidgetStartMode, widths, removeKeptCard, stopFromMenu);
     window.addEventListener('pagehide', (event) => {
         listRequests.abortAll();
         if (!event.persisted) { cardMenus.destroy(); widths.dispose(); }
     });
+    // The head's power starts a stopped card and stops a running one, as the card menu's Stop does (widget_card.js).
     list.addEventListener('click', (event) => {
-        const power = event.target.closest('[data-widget-power]');
-        if (!power || power.disabled) return;
-        const card = power.closest('[data-widget-key]');
+        const card = event.target.closest('[data-widget-power]:not(:disabled)')?.closest('[data-widget-key]');
         const tab = tabByKey(card?.dataset.widgetKey || '');
-        if (!card || !tab) return;
-        if (widgetDisposers.has(widgetKey(tab))) stopWidgetByOwner(card, tab);
-        else startWidgetByOwner(card, tab);
+        if (tab) (widgetDisposers.has(widgetKey(tab)) ? stopWidgetByOwner : startWidgetByOwner)(card, tab);
+    });
+    // A mount that ended by itself (widget_module.js) settles stopped, its fault and Start again kept (widget_card.js).
+    list.addEventListener('ouro-widget-ended', (event) => {
+        const card = event.target.closest('[data-widget-key]'), tab = tabByKey(card?.dataset.widgetKey || '');
+        if (tab) { disposeWidgetByKey(widgetKey(tab)); settleStopped(card, tab); }
     });
 
     window.addEventListener('ouro:page-shown', (event) => {

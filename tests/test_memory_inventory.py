@@ -414,7 +414,7 @@ def test_other_steps_foreign_shapes_and_no_fact_are_no_shortage():
     only_facts = _trace(FloorLevel((("F1", (line["first"],)),)))
     assert only_facts[mi.VIEW_TRACE_KEY]["floor"]["newest_addressed_row"] is not None  # F1 names a row too
     assert mi.shortage_from_trace(only_facts) is None
-    for step, ident in (("F1b", "2"), ("F3", "1000"), ("F6", room["lane1"][0]["address"])):
+    for step, ident in (("F6g", "2"), ("F3", "1000"), ("F6w", "2:" + room["lane1"][0]["address"])):
         assert mi.shortage_from_trace(_trace(FloorLevel(((step, (ident,)),)))) is None, step
     assert mi.shortage_from_trace(_trace(FloorLevel())) is None  # the full view
     good = _trace(FloorLevel((("F2", (room["lane1"][0]["address"],)),)))
@@ -483,9 +483,10 @@ def test_the_inventory_imports_no_model_client_and_reads_projects_lazily():
     assert mi.VIEW_TRACE_KEY == "memory_view"
 
 
-def test_private_main_contact_stays_in_mains_inventory_like_canonical_history(tmp_path):
-    """F5: a Presence root's private question is Main's however its work is bound, in canonical membership and
-    in the memory inventory alike; an ordinary question of the same bound work is its Project's."""
+def test_private_main_contact_is_mains_and_its_projects_in_inventory_like_canonical_history(tmp_path):
+    """A Presence root's private question keeps Main and joins the Project its work is bound to (it was Main's
+    alone before), in canonical membership and in the memory inventory alike; an ordinary question of the same
+    bound work is its Project's alone."""
     from ouroboros import memory_inventory as mi
     from ouroboros.project_dialogue import room_membership
     from ouroboros.projects_registry import RoomResolver, bind_task_to_project, create_project
@@ -499,7 +500,7 @@ def test_private_main_contact_stays_in_mains_inventory_like_canonical_history(tm
                "text": "Private owner question", "quiz": {"quiz_id": "private-q", "presence_contact": contact}}
     ordinary = {**private, "quiz": {"quiz_id": "plain-q"}, "text": "Ordinary question"}
     facts = mi.membership_facts(tmp_path)
-    for row, expected in ((private, [1]), (ordinary, [alpha["chat_id"]])):
+    for row, expected in ((private, [1, alpha["chat_id"]]), (ordinary, [alpha["chat_id"]])):
         canonical = [chat for chat in (1, alpha["chat_id"]) if room_membership(
             chat, {alpha["chat_id"]}, [], RoomResolver(tmp_path))(1, row)]
         assert canonical == expected

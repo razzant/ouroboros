@@ -5,11 +5,9 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-pytestmark = pytest.mark.serial
 
 
-@pytest.mark.parametrize("surface", ["page", "readiness"])
-@pytest.mark.parametrize("existing", [False, True])
+@pytest.mark.parametrize(("existing", "surface"), [(False, "page"), (True, "readiness")])
 def test_wizard_freshness_comes_from_settings_file(surface, existing, monkeypatch, tmp_path):
     from ouroboros import config
     from ouroboros.gateway import onboarding_host, settings
@@ -19,8 +17,9 @@ def test_wizard_freshness_comes_from_settings_file(surface, existing, monkeypatc
     if existing:
         path.write_text(content, encoding="utf-8")
     monkeypatch.setattr(config, "SETTINGS_PATH", path)
+    # Both surfaces read the one live Setup derivation in onboarding_host.
     module, handler = (onboarding_host, onboarding_host.onboarding_page) if surface == "page" else (
-        settings, settings.api_onboarding)
+        onboarding_host, settings.api_onboarding)
     monkeypatch.setattr(module, "load_settings", lambda: {
         "OUROBOROS_MODEL": "google/gemini-3.8-flash",
     })

@@ -1,7 +1,8 @@
 """Main's route-bound window facts, independent of review capability authority.
 
 Acceptances are lower bounds, never evidence of room for a reply. A numbered
-refusal constrains planning until a later larger acceptance or evidence expiry.
+refusal, or a numberless one at the refused request's measured size, constrains
+planning until a later larger acceptance or evidence expiry.
 The observations share the capability JSON store; old stores need no migration.
 """
 from __future__ import annotations
@@ -183,15 +184,27 @@ def resolve_window(evidence, reserve: int, *, root=None, bound: bool = True,
                         retired_ack=getattr(evidence, "retired_ack", {}) or (captured.retired_ack if captured else {}))
 
 
-def record_refusal(usage, plan) -> None:
+def record_refusal(usage, plan, refused_input: int = 0) -> None:
+    """Record a typed size refusal for the refusing account: its stated limit, else ``refused_input``.
+
+    ``refused_input`` is the caller's measured provider-unit size of the refused request (anchored on an
+    accepted request of this conversation), passed only when measured: Codex states no number, and a
+    route that never records its refusals keeps planning at a larger acceptance and is refused again.
+    Without a stated limit or a measured size a refusal adds no ceiling, and a refusal of one input string's
+    length (``INPUT_STRING_LENGTH_CODES``) adds none at any size: it says nothing of the token window."""
     from ouroboros import capability_evidence as ce
+    from ouroboros.context_budget import INPUT_STRING_LENGTH_CODES
 
     plan = observed_plan(plan, usage)
-    if plan is None:
+    if plan is None or not getattr(plan, "window_witness_bound", True):
         return
     message = str(usage.get("_last_llm_provider_message") or "")
     limit = ce._parse_ctx_limit_number(message)
-    if not limit or not getattr(plan, "window_witness_bound", True):
+    if not limit:
+        if (int(refused_input or 0) > 0
+                and str(usage.get("_last_llm_provider_code") or "").lower() not in INPUT_STRING_LENGTH_CODES):
+            record_observation(ce.canonical_evidence_root(), observation_scope(plan),
+                               refused=int(refused_input), kind="input")
         return
     # Sglang shares its input bound with generation, so its length refusal stays total.
     input_only = any(marker in message.lower() for marker in ("prompt is too long", "maximum input", "input token count"))

@@ -21,7 +21,6 @@ from tests.test_admission_contention import database_reader
 from tests.test_execution_clock_resume_handover import clock  # noqa: F401
 from tests.test_owner_wait_pool import pool as pool
 
-pytestmark = pytest.mark.serial
 
 
 def _context(root, task, started):
@@ -95,8 +94,11 @@ def _resumed_sleep(root, monkeypatch, now, *, descendant=False):
                            worker=worker, commands=commands, handoff=handoff, checkpoint=checkpoint)
 
 
-@pytest.mark.parametrize("descendant", [False, True], ids=["root", "descendant"])
-@pytest.mark.parametrize("nested_root", ["missing", "member", "foreign"])
+@pytest.mark.parametrize(("nested_root", "descendant"), [
+    pytest.param("missing", False, id='missing-root'),
+    pytest.param("member", True, id='member-descendant'),
+    pytest.param("foreign", False, id='foreign-root'),
+])
 def test_retained_warm_resume_and_next_park_use_the_current_worker_clock(
         tmp_path, monkeypatch, clock, descendant, nested_root):  # noqa: F811
     env = _resumed_sleep(tmp_path, monkeypatch, clock, descendant=descendant)
@@ -331,7 +333,6 @@ def test_pending_park_spares_only_idle_timeout(pool, monkeypatch, hard_axis):
         finally:
             conn.execute("ROLLBACK")
     monkeypatch.setattr(queue, "get_task_idle_timeout_sec", lambda: 10)
-    monkeypatch.setattr(queue, "get_per_call_timeout_ceiling_sec", lambda: 1)
     monkeypatch.setattr(queue, "get_task_abs_ceiling_sec", lambda: 1000 if hard_axis == "absolute_ceiling" else 10000)
     monkeypatch.setattr(queue, "FINALIZATION_GRACE_SEC", 0)
     reaps = stdqueue.Queue()

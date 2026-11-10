@@ -54,6 +54,15 @@ def _routing_notice_carried(status: str, cause: str, options: Any, attachment_ma
     return bool(cause) or rejected or (status == "needs_manual_target" and isinstance(options, list) and bool(options))
 
 
+def _owner_message_receipt(client_message_id: Any) -> str:
+    """The owner message this receipt id names, or "" for an act that wears none: no id, or the synthetic id of an
+    act tied to no owner message (``AGENT_RECEIPT_ID_PREFIX``). Such an id annotates no chat row."""
+    from ouroboros.project_dialogue import AGENT_RECEIPT_ID_PREFIX
+
+    client_message_id = str(client_message_id or "").strip()
+    return "" if client_message_id.startswith(AGENT_RECEIPT_ID_PREFIX) else client_message_id
+
+
 def _routing_notice_reply(ctx: Any, evt: Dict[str, Any]) -> Dict[str, Any]:
     """The owner message a routing notice answers, as its exact host Reply reference.
 
@@ -63,11 +72,7 @@ def _routing_notice_reply(ctx: Any, evt: Dict[str, Any]) -> Dict[str, Any]:
     keeps a task-keyed System row from borrowing its target task's own origin.
     """
     from ouroboros.chat_references import reference_from_row
-    from ouroboros.project_dialogue import (
-        AGENT_RECEIPT_ID_PREFIX,
-        owner_message_ref_is_valid,
-        resolve_owner_message_source,
-    )
+    from ouroboros.project_dialogue import owner_message_ref_is_valid, resolve_owner_message_source
 
     client_message_id = str(evt.get("client_message_id") or "").strip()
     try:
@@ -78,7 +83,7 @@ def _routing_notice_reply(ctx: Any, evt: Dict[str, Any]) -> Dict[str, Any]:
         if row is None and owner_message_ref_is_valid(source) and (
                 not client_message_id or source["client_message_id"] == client_message_id):
             row = resolve_owner_message_source(ctx.DRIVE_ROOT, source)
-        if row is None and client_message_id and not client_message_id.startswith(AGENT_RECEIPT_ID_PREFIX):
+        if row is None and _owner_message_receipt(client_message_id):
             from supervisor.message_ingress import accepted_chat_message
 
             row = accepted_chat_message(ctx.DRIVE_ROOT, int(evt.get("chat_id") or 0), client_message_id)
@@ -89,12 +94,17 @@ def _routing_notice_reply(ctx: Any, evt: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _routing_notice_ack_fields(ctx: Any, evt: Dict[str, Any], fields: Dict[str, Any]) -> Dict[str, Any]:
-    """What an ACK sent from these receipt fields adds when it carries the act's owner notice:
-    itself as the selected carrier and the owner message it answers; ``{}`` for a quiet ACK.
-    Neither is a row field, and neither proves that a transport delivered anything."""
+    """What an ACK sent from these receipt fields says of the act's owner notice: ``{}`` for a quiet ACK; else the
+    carrier the receipt selects. That is the ACK itself, with the owner message it answers, when its id names one.
+    An ACK whose id names none annotates no chat row, so it is never the carrier: it names ``system``, the System
+    row its act's path writes where the host owns the notice (a host-issued act, a steer of my human's words) and
+    every client shows; a tool act tied to no owner message writes none, and the model narrates its tool result.
+    Neither field is a row field, and neither proves that a transport delivered anything."""
     if not _routing_notice_carried(fields["status"], str(fields.get("cause") or ""), fields.get("options"),
                                    fields.get("attachment_manifest")):
         return {}
+    if not _owner_message_receipt(evt.get("client_message_id")):
+        return {"routing_notice_carrier": "system"}
     return {"routing_notice_carrier": "routing_ack", "reply_to": _routing_notice_reply(ctx, evt)}
 
 
@@ -114,6 +124,7 @@ def _routing_receipt_fields(
     options: Optional[list] = None,
     attachment_manifest: Optional[list] = None,
     reasoning_effort: str = "",
+    unnamed_label: str = "Task",
     **supplied: Any,
 ) -> Dict[str, Any]:
     """The fields one routing receipt states, read once (#968).
@@ -127,12 +138,14 @@ def _routing_receipt_fields(
     whose work cannot be read fails as it always did; for any other act the work's
     facts are added enrichment, so the receipt falls back to that address rather
     than being lost. ``supplied`` is the caller's own presentation, forwarded as
-    given and never chosen here; only ``ROUTING_RECEIPT_FIELDS`` reach the durable row.
+    given and never chosen here; only ``ROUTING_RECEIPT_FIELDS`` reach the durable row. ``unnamed_label``: a nameless
+    work's label ("" for a Main turn's saved words: no placeholder name).
     """
     from ouroboros.project_dialogue import routing_refusal_cause, routing_target_label
 
     if target and not str(target_label or "").strip():
-        target_label = routing_target_label(ctx.DRIVE_ROOT, action, target, task=evt, project_id=str(evt.get("project_id") or ""))
+        target_label = routing_target_label(ctx.DRIVE_ROOT, action, target, task=evt, project_id=str(evt.get("project_id") or ""),
+                                            fallback=unnamed_label)
     fields: Dict[str, Any] = {**supplied, "action": action, "target": target, "target_label": target_label, "status": status}
     optional = {
         "routing_token": str(evt.get("routing_token") or "").strip(),
@@ -244,8 +257,9 @@ def _emit_routing_receipt(
     if attachment_manifest is not None:
         receipt["attachment_manifest"] = _events()._routing_attachments(attachment_manifest) or []
     # The carrier SELECTED for the act's owner notice (never proof that a transport
-    # delivered it): the ACK when one carrying it was handed over; for a known refusal
-    # without one, the System row its path writes; "" when there is nothing to say.
+    # delivered it): the ACK when one carrying it was handed over and answers a chat row;
+    # for a known refusal without such an ACK, the System row its path writes, if any;
+    # "" when there is nothing to say.
     receipt["routing_notice_carrier"] = "system" if fields.get("cause") and publish else ""
     if annotation_status == "failed":
         # Fail closed: no ACK outruns its durable row, so a landed act reads unconfirmed
@@ -261,9 +275,10 @@ def _publish_routing_ack(ctx: Any, evt: Dict[str, Any], fields: Dict[str, Any]) 
     """Publish a live non-bubble acknowledgement after durable authority exists:
     the fields its row was written from (``_routing_receipt_fields``), never a second read.
 
-    An ACK carrying the act's owner notice also names itself its carrier and the owner
-    message it answers (``_routing_notice_ack_fields``, #966). The return is that carrier
-    once the bus took the ACK without raising ("" for a quiet ACK or none sent).
+    An ACK carrying the act's owner notice also names the carrier its receipt selects:
+    itself and the owner message it answers, or the System row when it answers no chat
+    row (``_routing_notice_ack_fields``, #966). The return is that carrier once the bus
+    took the ACK without raising ("" for a quiet ACK or none sent).
     """
     try:
         try:
@@ -546,7 +561,10 @@ def _promote_chat_to_task_outcome(evt: Dict[str, Any], ctx: Any) -> Dict[str, An
 
         claim_promotion_intent(ctx.DRIVE_ROOT, evt)
         evt = {**evt, "_admission_reserved": True}
-        if str(evt.get("source") or "").strip() and not evt.get("_source_prepared"):
+        from ouroboros.presence_owner_contact import private_start_refusal
+
+        private_refusal = private_start_refusal(ctx.DRIVE_ROOT, evt)
+        if not private_refusal and str(evt.get("source") or "").strip() and not evt.get("_source_prepared"):
             threading.Thread(
                 target=_prepare_promote_source_off_loop,
                 args=(dict(evt), ctx),
@@ -555,10 +573,10 @@ def _promote_chat_to_task_outcome(evt: Dict[str, Any], ctx: Any) -> Dict[str, An
             ).start()
             return {"status": "preparing", "task_id": task_id}
         source_error = str(evt.get("_source_error") or "")
-        if source_error:
+        if private_refusal or source_error:
             outcome = {
                 "status": "needs_manual_target",
-                "reason": "project_source_error",
+                "reason": private_refusal or "project_source_error",
                 "never_admitted": True,
                 "detail": source_error,
                 "task_id": task_id,
@@ -759,10 +777,10 @@ def _notify_host_initiated_refusal(ctx: Any, evt: Dict[str, Any], outcome: Any, 
     to a new room — bound to the task that never started. A tool-issued promote
     gets nothing here (its receipt plus the failed call are the record and the
     model narrates); preparing, scheduled and replayed outcomes send nothing.
-    The row names the carrier its act's receipt selected: ``routing_ack`` when
-    the ACK already carried the notice (a transport showing ACKs skips this
-    copy), otherwise ``system``. It replies to the owner's message, never to
-    the unstarted task's own origin.
+    The row names the carrier its act's receipt selected: ``routing_ack`` when the
+    ACK on the owner's message already carried the notice (a transport showing ACKs
+    skips this copy), otherwise ``system``. It replies to the owner's message, never
+    to the unstarted task's own origin.
     """
     if not evt.get("host_initiated") or not isinstance(outcome, dict) or outcome.get("replayed"):
         return
@@ -792,7 +810,7 @@ def _notify_host_initiated_refusal(ctx: Any, evt: Dict[str, Any], outcome: Any, 
                            "reply_to": _routing_notice_reply(ctx, evt)},
         )
     except Exception:
-        log.debug("host-initiated refusal row failed for %s", evt.get("task_id"), exc_info=True)
+        log.warning("host-initiated refusal row failed for %s", evt.get("task_id"), exc_info=True)
 
 
 def _handle_promote_chat_to_task(evt: Dict[str, Any], ctx: Any) -> Dict[str, Any]:

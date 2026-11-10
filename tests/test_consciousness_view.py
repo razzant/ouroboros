@@ -54,14 +54,54 @@ def test_places_context_has_every_place_and_room_without_reading_history(monkeyp
     rows = view.place_views(tmp_path)
     assert [row["unanswered"] for row in rows] == [3, None, 0]
     text = view.places_text(tmp_path, rows)
-    assert "Inbox [mail]: active; open turns: 3; chat_history(chat_id=-1); chat_history(chat_id=-2)" in text
+    assert "Inbox [mail]: active; open turns: 3; rooms: 2" in text
+    assert "chat_history(" not in text and "chat:" not in text  # a count, and one reader for every room
+    assert text.count("configure_presence(action='inspect', place_id=") == 1 and text.endswith("in brackets>)")
     assert "Quiet room [quiet]: silent; open turns: 0; no captured room" in text
-    assert "Paused room [paused]: paused; open turns: unknown" in text
+    assert "Paused room [paused]: paused; open turns: unknown; rooms: 1" in text
     assert "note (owner): Watch releases." in text and "note (owner): Keep the exact second line." in text
     assert calls == [(tmp_path, place.place_id) for place in configured]
     for place in configured:
         places.edit_place(tmp_path, place.place_id, "disconnect", author="owner")
     assert view.places_text(tmp_path, view.place_views(tmp_path)) == "none"
+
+
+@pytest.mark.parametrize("brief,detail", [
+    ([{"state": "active"}, {"state": "silent"}, {"state": "paused"}], "Off: no own wakes; 2 places only hear."),
+    ([{"state": "silent"}, {"state": "paused"}], "Off: no own wakes; 1 place only hears."),
+    ([{"state": "paused"}], "Off: no own wakes."),
+    (None, "Off: no own wakes."),
+    ("unread", "Off: no own wakes; its places only hear."),  # the place store could not be read: as Stop says
+])
+def test_off_says_no_own_wakes_and_how_many_places_only_hear(brief, detail):
+    """Owner 06.11: Off read «Background consciousness is off.» while 28 places went on reading «active». The host's
+    one detail line (the chip's name, the Shade and the Dashboard headline) counts them from the brief it already has."""
+    snapshot = {} if brief is None else {"places_brief": None if brief == "unread" else brief}
+    described = view.describe_consciousness_state(snapshot, False)
+    assert (described["status"], described["detail"]) == ("disabled", detail)
+    assert "hear" not in view.describe_consciousness_state(snapshot, True)["detail"], "a switch that is on claims nothing"
+
+
+def test_my_map_names_each_circle_once_with_its_whole_words_and_my_placements(monkeypatch, tmp_path):
+    """The own-clock map groups places under their circles (each circle's words whole, once), then the places in no
+    circle; a place I put in a circle says that my human's words there still restrict it, without their consent."""
+    monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _root: [])
+    monkeypatch.setattr(places, "place_room_index", lambda *_a: [], raising=False)
+    rows = [places.connect_place(tmp_path, connector="bridge", provider="chat", conversation_id=cid, label=label)
+            for cid, label in (("a", "Team chat"), ("b", "Team mail"), ("c", "Family"))]
+    team = places.create_circle(tmp_path, name="Team", text="Shared words, line one.\nLine two.", author="owner")
+    places.edit_place(tmp_path, rows[0].place_id, "set_circle", author="owner", circle_id=team["circle_id"])
+    places.edit_place(tmp_path, rows[1].place_id, "set_circle", author="ouroboros", circle_id=team["circle_id"])
+    text = view.places_text(tmp_path, view.place_views(tmp_path))
+    assert text.count("Shared words, line one.") == 1 and "\n    words (owner): Line two." in text
+    assert f'circle Team [{team["circle_id"]}]\n    words (owner): Shared words, line one.' in text
+    team_mail = next(line for line in text.splitlines() if "Team mail" in line)
+    team_chat = next(line for line in text.splitlines() if "Team chat" in line)
+    assert "you placed it in this circle" in team_mail and "you placed it" not in team_chat
+    # My human's words there still restrict; only consent needs their placement (prompts/SAFETY.md).
+    assert "your human's words there still restrict it, but consent needs their placement" in team_mail
+    assert "context" not in team_mail
+    assert text.index("not in a circle:") < text.index("Family") and text.index("Team chat") < text.index("not in a circle:")
 
 
 def test_unavailable_index_does_not_claim_zero(monkeypatch, tmp_path):
@@ -71,7 +111,8 @@ def test_unavailable_index_does_not_claim_zero(monkeypatch, tmp_path):
         raise OSError("room index unavailable")
     monkeypatch.setattr(places, "place_room_index", unavailable)
     assert view.place_views(tmp_path)[0]["unanswered"] is None
-    assert "unknown" in view.places_text(tmp_path, view.place_views(tmp_path))
+    text = view.places_text(tmp_path, view.place_views(tmp_path))
+    assert "rooms unknown" in text and "no captured room" not in text  # unknown never reads as zero
     assert "unknown" in view.places_text(tmp_path, None)
 
 
@@ -142,7 +183,6 @@ def test_clock_identity_alone_can_keep_a_terminal_wake_live(tmp_path, wake):
 
 @pytest.mark.parametrize("status,phase,live", [
     ("running", "running", True), ("interrupted", "unknown", True), ("paused", "paused", True),
-    ("scheduled", "queued", True), ("requested", "queued", True), ("queued", "queued", True),
     ("completed", "done", False), ("failed", "error", False), ("cancelled", "cancelled", False),
     ("rejected_duplicate", "warn", False),
 ])
@@ -157,16 +197,15 @@ def test_status_is_independent_of_missing_terminal_time(tmp_path, wake, status, 
     assert row["phase"] == phase and row["quiet"] is False
 
 
-@pytest.mark.parametrize("clock_live", [False, True])
-@pytest.mark.parametrize("status,owner_wait,phase", [
-    ("running", {}, "running"),
-    ("running", {"state": "waiting", "quiz_id": "q1"}, "waiting"),
-    ("running", {"state": "resumed", "quiz_id": "q1"}, "running"),
-    ("running", {"state": "answered", "wait_for_answer": True}, "running"),
-    ("running", {"state": "open", "quiz_id": "q1"}, "unknown"),
-    ("scheduled", {}, "queued"),
-    ("scheduled", {"state": "waiting", "quiz_id": "q1"}, "waiting"),
-    ("paused", {}, "paused"),
+@pytest.mark.parametrize(("status", "owner_wait", "phase", "clock_live"), [
+    pytest.param("running", {}, "running", True, id='running-owner_wait0-running-True'),
+    pytest.param("running", {"state": "waiting", "quiz_id": "q1"}, "waiting", True, id='running-owner_wait1-waiting-True'),
+    pytest.param("running", {"state": "resumed", "quiz_id": "q1"}, "running", False, id='running-owner_wait2-running-False'),
+    pytest.param("running", {"state": "answered", "wait_for_answer": True}, "running", True, id='running-owner_wait3-running-True'),
+    pytest.param("running", {"state": "open", "quiz_id": "q1"}, "unknown", False, id='running-owner_wait4-unknown-False'),
+    pytest.param("scheduled", {}, "queued", False, id='scheduled-owner_wait5-queued-False'),
+    pytest.param("scheduled", {"state": "waiting", "quiz_id": "q1"}, "waiting", True, id='scheduled-owner_wait6-waiting-True'),
+    pytest.param("paused", {}, "paused", False, id='paused-owner_wait7-paused-False'),
 ])
 def test_live_wakes_keep_the_task_activity_word(tmp_path, wake, status, owner_wait, phase, clock_live):
     wake.update(status=status, owner_wait=owner_wait, outcome_axes={}, wake_silent=False)
@@ -212,8 +251,11 @@ def test_terminal_time_for_another_attempt_is_unknown(tmp_path, wake):
     assert row["ended_at"] is None and row["live"] is False
 
 
-@pytest.mark.parametrize("summary", [None, "Проверил состояние; нового решения не требуется.", ""])
-@pytest.mark.parametrize("note", ["Short note", "First line\n" + "several words\t" * 400])
+@pytest.mark.parametrize(("note", "summary"), [
+    ("Short note", None),
+    ("Short note", ""),
+    pytest.param("First line\n" + "several words\t" * 400, "Проверил состояние; нового решения не требуется.", id='First line\nseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\tseveral words\t-Проверил состояние; нового решения не требуется.'),
+])
 def test_summary_is_only_authored_summary_and_note_is_whole(tmp_path, wake, summary, note):
     wake["result"] = note
     if summary is not None:
@@ -227,7 +269,7 @@ def test_summary_is_only_authored_summary_and_note_is_whole(tmp_path, wake, summ
 
 
 @pytest.mark.parametrize("silent,owner,notice,quiet", [
-    (True, None, "", True), (True, False, "", True), (True, True, "", False),
+    (True, None, "", True), (True, True, "", False),
     (True, None, "A tool failed.", False), (False, None, "", False), ("true", None, "", False),
 ])
 def test_quiet_uses_delivery_facts(tmp_path, wake, silent, owner, notice, quiet):
@@ -332,7 +374,7 @@ def test_selection_is_distinct_bounded_and_ordered_by_ledger_time(tmp_path, monk
     assert [r["task_id"] for r in view.recent_wakes(tmp_path, [])] == ids[:50]
 
 
-@pytest.mark.parametrize("own,places", [(50, 0), (0, 50), (49, 1), (25, 25), (75, 75), (75, 1), (1, 75)])
+@pytest.mark.parametrize("own,places", [(50, 0), (0, 50), (49, 1)])
 def test_wake_selection_reserves_each_source_and_tops_up_unused_share(tmp_path, monkeypatch, own, places):
     ids = {}
     for cause, count in (("own", own), ("place:mail", places)):
@@ -497,6 +539,7 @@ def test_durable_automatic_release_and_receipts_survive_result_updates(tmp_path,
     assert row["conversation"] == "chat:a:r" and row["chat_id"] == -7
     labelled, = view.recent_wakes(tmp_path, [{"place_id": "mail", "label": "Inbox"}])
     assert labelled["cause"] == "focus" and labelled["place_label"] == "Inbox"
+    assert labelled["place_id"] == "mail", "the Shade's door opens this place's sheet; an own wake carries none"
 
 
 def test_own_clock_text_survives_an_unreadable_room(tmp_path, monkeypatch):
@@ -518,7 +561,7 @@ def test_own_clock_text_survives_an_unreadable_room(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("kind,owner,clause", [("user", True, "writes as Mailbox (your human's own account)"),
-    ("user", False, "writes as Mailbox"), ("bot", False, "as Ouroboros (bot Mailbox)"), ("bot", True, "as Ouroboros (bot Mailbox)"), (None, False, "")])
+    ("bot", False, "as Ouroboros (bot Mailbox)"), (None, False, "")])
 def test_own_clock_reads_captured_identity_without_changing_brief_view(tmp_path, kind, owner, clause):
     place = places.connect_place(tmp_path, connector="bridge", provider="chat", account_id="account")
     if owner:

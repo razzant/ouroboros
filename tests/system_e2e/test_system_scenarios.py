@@ -617,7 +617,6 @@ S2_SCRIPT = [
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s1_boot_identity_ws_chat_and_task_contract(e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
     root = tmp_path_factory.mktemp("s1")
@@ -690,7 +689,6 @@ def test_s1_boot_identity_ws_chat_and_task_contract(e2e_clone, tmp_path_factory)
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s2_commit_reviewed_triad_and_scope_pass_on_doc_only_diff(e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
     root = tmp_path_factory.mktemp("s2")
@@ -782,7 +780,6 @@ S3_PLANTED = {
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 @pytest.mark.skipif(sys.platform != "linux", reason="/proc environ probe is Linux-only")
 def test_s3_poisoned_parent_credentials_never_reach_the_server_tree(
         e2e_clone, tmp_path_factory, monkeypatch):
@@ -871,7 +868,6 @@ S4_SNAPSHOT_PATHS = (S4_PROTECTED_PATH, "BIBLE.md")
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s4_protected_path_write_denial_has_zero_side_effects(e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
     root = tmp_path_factory.mktemp("s4")
@@ -921,7 +917,6 @@ def test_s4_protected_path_write_denial_has_zero_side_effects(e2e_clone, tmp_pat
 
 
 @pytest.mark.integration
-@pytest.mark.serial
 def test_s5_public_task_projections_carry_honest_only_cost_names(e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
     root = tmp_path_factory.mktemp("s5")

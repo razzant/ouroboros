@@ -1,4 +1,4 @@
-"""A call owes the target's Low-start line at its first adopted connection only."""
+"""A call owes the target's Low-start line at its first adopted connection only, once per Low episode."""
 from types import SimpleNamespace
 
 import pytest
@@ -30,3 +30,10 @@ def test_adopted_call_reports_a_memory_lowered_start_once(tmp_path, sent, room, 
     for n in range(3):
         record_session_view(host, evidence, f'renewed-manifest-{n}')
     assert len(sent) == expected
+    # Later calls: Low while an episode holds adds nothing, one that holds Max closes it, Low again opens a new one.
+    for task, room in (('call-b', _room()), ('call-c', _room('held')), ('call-d', _room())):
+        later = SimpleNamespace(**{**vars(host), 'plan': _plan(room), '_session_opened': False,
+                                   'ctx': SimpleNamespace(**{**vars(ctx), 'task_id': task})})
+        record_session_view(later, evidence, f'{task}-manifest')
+    assert [event['delivery_id'] for _root, event in sent] == ['low_start:call-low:2'] * expected + (
+        [] if expected else ['low_start:call-b:2']) + ['low_start:call-d:2']

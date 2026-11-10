@@ -10,13 +10,14 @@ import contextlib
 import hashlib
 import json
 import logging
+import os
 import pathlib
 import subprocess
 import time
 from typing import Any, Dict, List, Optional
 
 from ouroboros.tools.registry import ToolContext
-from ouroboros.tools.git_plumbing import _sanitize_git_error, _publish_git_error, _publish_review_blocked
+from ouroboros.tools.git_plumbing import WHOLE_INDEX, _sanitize_git_error, _publish_git_error, _publish_review_blocked
 from ouroboros.tools.review_helpers import review_enforcement_blocks
 
 # Keep the public facade's logger name in server/stdout records.
@@ -62,10 +63,12 @@ def _fingerprint_staged_diff(repo_dir: pathlib.Path) -> Dict[str, Any]:
     ``git write-tree`` is the staged snapshot Git will commit. HEAD plus every
     MERGE_HEAD row is the exact parent vector. VERSION is read from the index,
     and a staged VERSION bump binds the expected release tag and any pre-existing
-    tag target. The existing durable fingerprint fields remain the review-state
-    mechanism; only their input becomes complete. ``diff_sha256`` is the frozen
+    tag target; a development marker (BIBLE P9) binds none. The existing durable
+    fingerprint fields remain the review-state mechanism; only their input becomes
+    complete. ``diff_sha256`` is the frozen
     subject's own patch identity (``review_subject.staged_patch``).
     """
+    from ouroboros.tools.release_sync import is_development_marker
     from ouroboros.tools.review_subject import staged_patch
 
     try:
@@ -99,7 +102,7 @@ def _fingerprint_staged_diff(repo_dir: pathlib.Path) -> Dict[str, Any]:
             staged_version = ""
         if version_staged and not staged_version:
             raise RuntimeError("staged VERSION is missing or empty")
-        expected_tag = f"v{staged_version}" if version_staged else ""
+        expected_tag = f"v{staged_version}" if version_staged and not is_development_marker(staged_version) else ""
         existing_tag_target = ""
         if expected_tag:
             tag_probe = subprocess.run(
@@ -245,6 +248,14 @@ def _revalidation_outcome(ctx, commit_message, commit_start, before, after, *, w
     }
 
 
+def _owed_before_git(ctx, commit_message, commit_start, post_fingerprint, skip_tests):
+    """A resumed attempt's free collection still owes this call's tests before Git, on the reviewed bytes (#2410)."""
+    return _git()._preflight_and_tests_gate(
+        ctx, commit_message, commit_start, classification_paths=[], skip_tests=skip_tests, landing=True,
+    ) or _revalidation_outcome(ctx, commit_message, commit_start, post_fingerprint,
+                               _git()._fingerprint_staged_diff(pathlib.Path(ctx.repo_dir)))
+
+
 def _publish_pending_review(ctx: ToolContext, message: str, custody_lost: bool) -> str:
     """Both pending handbacks preserve custody facts beside their returned text."""
     return _publish_tool_result(ctx, ToolResult(
@@ -348,7 +359,7 @@ def _finalize_blocked_review(
         degraded_reasons=list(getattr(ctx, "_review_degraded_reasons", []) or []),
     )
     try:
-        _git().run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
+        _git()._unstage_candidate(ctx)
     except Exception as e:
         warning = f"⚠️ GIT_WARNING (reset): {_sanitize_git_error(str(e))}"
         return f"{combined_msg}\n\n---\n{warning}"
@@ -373,6 +384,27 @@ def _review_cycle_infra_failure(
     return {"status": "failed", "message": message}
 
 
+def _index_outside_selection(ctx: ToolContext, commit_message: str, commit_start: float, outside: List[str],
+                             attribution: Optional[Dict[str, Any]], rejoin: bool) -> Dict[str, Any]:
+    """Refuse an index that already stages paths outside the selection; nothing is synced or staged
+    and the index keeps every entry. Task attribution labels each path; without it the paths are
+    only outside the selected set."""
+    labels = (("excluded_preexisting_dirty", "already changed when this task's baseline was captured"),
+              ("uncertain", "attribution uncertain, not in paths"), ("candidates", "task-attributed, not in paths"))
+    facts = ", ".join(outside) if attribution is None else "; ".join(f"{path} (" + next(
+        (label for key, label in labels if path in (attribution.get(key) or [])), "not attributed to this task") + ")"
+        for path in outside)
+    message = ("⚠️ GIT_INDEX_OUTSIDE_SELECTION_BLOCKED: the index already stages path(s) outside the selected paths"
+               + (" and this task's open-review candidates" if rejoin and attribution is not None else "")
+               + f": {facts}. The review and the commit take the whole index, so they would land with it. Nothing "
+               "was synced, staged or reviewed; the index and files are unchanged. Add the ones that belong to this "
+               "commit to paths, or retry once the others are no longer staged.")
+    if not getattr(ctx, "_review_resume_pending", False):
+        _git()._record_commit_attempt(ctx, commit_message, "blocked", block_reason="index_outside_selection",
+                                      block_details=message, duration_sec=time.time() - commit_start, phase="preflight")
+    return {"status": "blocked", "message": message, "block_reason": "index_outside_selection"}
+
+
 def _stage_candidate_for_review(
     ctx: ToolContext,
     commit_message: str,
@@ -380,116 +412,103 @@ def _stage_candidate_for_review(
     *,
     paths: Optional[List[str]],
     came_from_detached_checkout: bool,
+    attribution: Optional[Dict[str, Any]] = None,
 ) -> tuple[List[str], Optional[List[str]], Optional[Dict[str, Any]]]:
-    """Stage the candidate and return its paths without invoking any reviewer."""
-    if not bool(getattr(ctx, "_review_resume_pending", False)):
+    """Stage the candidate and return its paths without invoking any reviewer.
+
+    ``paths=None`` stages the whole tree. A list stages exactly its literal names, and an empty one
+    is refused; a name absent from disk that the index already deletes is not added again (Git
+    refuses it, #2417), a recreated one is. Before any metadata sync or staging, an index already
+    staging a path outside the list (plus VERSION's release carriers when VERSION is listed) is
+    refused; a call collecting this task's open review exactly (resumed, or ``collected_open_peer``) keeps its
+    attributed and uncertain ones. ``ctx._staged_selection`` records, after the sync and before the add, the paths
+    and the staged ones taken in; the exits undo that (``git_plumbing._unstage_candidate``), a refusal nothing.
+    """
+    resume, repo = bool(getattr(ctx, "_review_resume_pending", False)), pathlib.Path(ctx.repo_dir)
+    rejoin = resume or getattr(ctx, "_review_collected_peer", None) is not None  # never a merely possible peer
+
+    def fail(message: str) -> tuple:
+        return [], None, _git()._review_cycle_infra_failure(ctx, commit_message, commit_start, message)
+
+    def git_failure(label: str, exc: Exception) -> tuple:
+        return fail(_publish_git_error(ctx, f"⚠️ GIT_ERROR ({label}): {_sanitize_git_error(str(exc))}"))
+
+    staged: Dict[str, str] = {}
+    gone: List[str] = []  # reviewed entries Git now stages as none (``replaced_by_directories``): only their removal
+    if paths is not None:
+        try:
+            paths = [_git().safe_relpath(path) for path in paths if str(path).strip()]
+        except ValueError as exc:
+            return fail(f"⚠️ PATH_ERROR: {exc}")
+        if not paths:
+            return fail("⚠️ PATH_ERROR: paths names no file, so nothing was staged; name the files, or omit paths.")
+        from ouroboros.tools.release_sync import CARRIER_SPAN_PATHS
+        from ouroboros.tools.review_collection import replaced_by_directories
+
+        try:
+            staged, gone = _git()._staged_index(ctx.repo_dir), replaced_by_directories(ctx, paths)
+        except Exception as exc:
+            return git_failure("staged-status", exc)
+
+        allowed = set(paths) | (set(CARRIER_SPAN_PATHS) if "VERSION" in paths else set())
+        if rejoin and attribution is not None:
+            allowed |= set(attribution.get("candidates") or []) | set(attribution.get("uncertain") or [])
+        if attribution is not None:
+            # Carrier expansion never adopts foreign work or freshly unselected uncertainty.
+            allowed -= set(attribution.get("excluded_preexisting_dirty") or [])
+            if not rejoin:
+                allowed -= set(attribution.get("uncertain") or []) - set(paths)
+        if outside := sorted(set(staged) - allowed):
+            return [], None, _index_outside_selection(ctx, commit_message, commit_start, outside, attribution, rejoin)
+    if resume:
+        ctx._staged_selection = WHOLE_INDEX if paths is None else sorted(staged)
+    else:
         from ouroboros.commit_admission import auto_sync_release_metadata_if_needed
 
-        synced = auto_sync_release_metadata_if_needed(
-            ctx, pathlib.Path(ctx.repo_dir), pathlib.Path(ctx.drive_root), paths,
-        )
+        synced = auto_sync_release_metadata_if_needed(ctx, repo, pathlib.Path(ctx.drive_root), paths)
         if paths is not None and synced:
             paths = sorted(set(paths) | set(synced))
-        if paths:
-            try:
-                safe_paths = [_git().safe_relpath(path) for path in paths if str(path).strip()]
-            except ValueError as exc:
-                error = _git()._review_cycle_infra_failure(
-                    ctx, commit_message, commit_start, f"⚠️ PATH_ERROR: {exc}"
-                )
-                return [], None, error
-            add_cmd = ["git", "add"] + safe_paths
-        else:
+        if paths is None:
             _git()._ensure_gitignore(ctx.repo_dir)
             add_cmd = ["git", "add", "-A"]
+        else:
+            names = [path for path in paths if path not in gone and (staged.get(path) != "D" or os.path.lexists(repo / path))]
+            add_cmd = ["git", "--literal-pathspecs", "add", "--", *names] if names else []
+        ctx._staged_selection = WHOLE_INDEX if paths is None else sorted(set(paths) | set(staged))
         try:
-            _git().run_cmd(add_cmd, cwd=ctx.repo_dir)
+            if add_cmd:
+                _git().run_cmd(add_cmd, cwd=ctx.repo_dir)
+            if gone:  # exact entries, never pathspecs: nothing below them is added
+                _git().run_cmd(["git", "update-index", "--force-remove", "--", *gone], cwd=ctx.repo_dir)
         except Exception as exc:
-            error = _git()._review_cycle_infra_failure(
-                ctx,
-                commit_message,
-                commit_start,
-                _publish_git_error(
-                    ctx,
-                    f"⚠️ GIT_ERROR (add): {_sanitize_git_error(str(exc))}",
-                ),
-            )
-            return [], None, error
-        if not paths and not _git()._authorized_managed_update_resolver(ctx):
+            return git_failure("add", exc)
+        if paths is None and not _git()._authorized_managed_update_resolver(ctx):
             removed = _git()._unstage_binaries(ctx.repo_dir)
             if removed:
                 log.warning("Unstaged %d binary files: %s", len(removed), removed)
     try:
         status = _git().run_cmd(["git", "status", "--porcelain"], cwd=ctx.repo_dir)
     except Exception as exc:
-        error = _git()._review_cycle_infra_failure(
-            ctx,
-            commit_message,
-            commit_start,
-            _publish_git_error(
-                ctx,
-                f"⚠️ GIT_ERROR (status): {_sanitize_git_error(str(exc))}",
-            ),
-        )
-        return [], None, error
+        return git_failure("status", exc)
     if not status.strip():
-        if came_from_detached_checkout:
-            message = (
-                "⚠️ GIT_LOST_WORKTREE_ON_DETACHED_CHECKOUT_FAILED: working tree is clean "
-                "after detached HEAD reconciliation. The detached commits may have been "
-                "orphaned. Inspect `git reflog` and restore if needed."
-            )
-        else:
-            message = "⚠️ GIT_NO_CHANGES: nothing to commit."
-        return [], None, _git()._review_cycle_infra_failure(
-            ctx, commit_message, commit_start, message
-        )
-
+        return fail(
+            "⚠️ GIT_LOST_WORKTREE_ON_DETACHED_CHECKOUT_FAILED: working tree is clean "
+            "after detached HEAD reconciliation. The detached commits may have been "
+            "orphaned. Inspect `git reflog` and restore if needed."
+            if came_from_detached_checkout else "⚠️ GIT_NO_CHANGES: nothing to commit.")
     try:
-        staged_status_raw = _git().run_cmd(
-            ["git", "diff", "--cached", "--name-status", "-M"], cwd=ctx.repo_dir
-        )
-        classification_paths = _git().paths_from_name_status(staged_status_raw)
+        # Re-read the resulting index through the same NUL-delimited owner, including both rename sides.
+        classification_paths = list(_git()._staged_index(ctx.repo_dir))
     except Exception as exc:
-        try:
-            staged_names_raw = _git().run_cmd(
-                ["git", "diff", "--cached", "--name-only"], cwd=ctx.repo_dir
-            )
-        except Exception:
-            error = _git()._review_cycle_infra_failure(
-                ctx,
-                commit_message,
-                commit_start,
-                _publish_git_error(
-                ctx,
-                f"⚠️ GIT_ERROR (staged-status): {_sanitize_git_error(str(exc))}",
-            ),
-            )
-            return [], None, error
-        classification_paths = [
-            line.strip() for line in staged_names_raw.splitlines() if line.strip()
-        ]
+        return git_failure("staged-status", exc)
     snapshot_paths = classification_paths or None
-    if snapshot_paths is None:
-        try:
-            staged_names_raw = _git().run_cmd(
-                ["git", "diff", "--cached", "--name-only"], cwd=ctx.repo_dir
-            )
-        except Exception as exc:
-            error = _git()._review_cycle_infra_failure(
-                ctx,
-                commit_message,
-                commit_start,
-                _publish_git_error(
-                ctx,
-                f"⚠️ GIT_ERROR (staged-names): {_sanitize_git_error(str(exc))}",
-            ),
-            )
-            return [], None, error
-        snapshot_paths = [
-            line.strip() for line in staged_names_raw.splitlines() if line.strip()
-        ] or None
-        classification_paths = snapshot_paths or []
+    if attribution is not None and isinstance(attribution.get("selection"), dict):
+        # A rejoin keeps the earlier whole index; describe that subject, not the narrower automatic proposal.
+        uncertain, selected = set(attribution.get("uncertain") or []), set(classification_paths)
+        attribution["selection"] = {**attribution["selection"],
+                                    "uncertain": sorted(uncertain & selected),
+                                    "left_out": sorted(uncertain - selected)}
+        ctx._commit_attribution = attribution["selection"]
     return classification_paths, snapshot_paths, None
 
 
@@ -535,15 +554,16 @@ def _reset_commit_review_state(ctx):
     ctx._last_review_slot_executions = {}
     ctx._review_custody_lost = False
     ctx._current_review_attempt_number = None
-    ctx._collect_commit_source = None
-    ctx._author_commit_source = None
+    ctx._collect_commit_source = ctx._review_collected_peer = None  # the reference or exact peer this call collects
+    ctx._author_commit_source = ctx._author_commit_scope = None  # the reference's reviewed subject (``author_scope``)
     ctx._author_commit_decision = None
     ctx._author_commit_record = None
     ctx._commit_review_status = "unknown"
     ctx._commit_preflight = None
     ctx._commit_review_panel = None
-    ctx._preflight_execution, ctx._review_since = None, ""
+    ctx._preflight_execution, ctx._review_since, ctx._commit_attribution = None, "", None
     ctx._review_detached_operations = []  # what THIS call's author left (``review_pause.watch_left_review``)
+    ctx._staged_selection = None  # what this call staged (``_stage_candidate_for_review``)
 
 
 from ouroboros.tools.commit_gate import _return_commit_feedback, settle_commit_review_ledger  # noqa: E402
@@ -566,6 +586,7 @@ def _run_reviewed_stage_cycle(
     preflight_reviewer: str = "",
     panel: Any = None,
     review_only: bool = False,
+    attribution: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """The reviewed stage cycle under this commit's panel (``commit_gate.compose_commit_panel``):
     every pool reader of the cycle — the contract fingerprint, the paid roster, the wave's
@@ -581,7 +602,7 @@ def _run_reviewed_stage_cycle(
             skip_advisory_pre_review=skip_advisory_pre_review, skip_tests=skip_tests, goal=goal, scope=scope,
             review_rebuttal=review_rebuttal, came_from_detached_checkout=came_from_detached_checkout,
             require_release_tag=require_release_tag, preflight_reviewer=preflight_reviewer,
-            review_only=review_only)
+            review_only=review_only, attribution=attribution)
 
 
 def _reviewed_stage_cycle(
@@ -600,6 +621,7 @@ def _reviewed_stage_cycle(
     require_release_tag: bool = True,
     preflight_reviewer: str = "",
     review_only: bool = False,
+    attribution: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     skip_advisory_pre_review = bool(skip_advisory_review or skip_advisory_pre_review)
     # Subject evidence and memo are scoped to this exact attempt.
@@ -611,6 +633,7 @@ def _reviewed_stage_cycle(
         commit_start,
         paths=paths,
         came_from_detached_checkout=came_from_detached_checkout,
+        attribution=attribution,
     )
     if stage_error is not None:
         return stage_error
@@ -626,46 +649,30 @@ def _reviewed_stage_cycle(
             runtime_mode=runtime_mode,
             action="commit",
         )
-        try:
-            if not bool(getattr(ctx, "_review_resume_pending", False)):
-                _git().run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
-        except Exception:
-            pass
         if not bool(getattr(ctx, "_review_resume_pending", False)):
+            try:
+                _git()._unstage_candidate(ctx)
+            except Exception:
+                pass
             _git()._record_commit_attempt(
-                ctx,
-                commit_message,
-                "blocked",
-                block_reason="core_protection_blocked",
-                block_details=msg,
-                duration_sec=time.time() - commit_start,
-                critical_findings=[],
-                phase="preflight",
-            )
-        return {
-            "status": "blocked",
-            "message": msg,
-            "block_reason": "core_protection_blocked",
-        }
+                ctx, commit_message, "blocked", block_reason="core_protection_blocked", block_details=msg,
+                duration_sec=time.time() - commit_start, critical_findings=[], phase="preflight")
+        return {"status": "blocked", "message": msg, "block_reason": "core_protection_blocked"}
     pre_fingerprint = _git()._fingerprint_staged_diff(pathlib.Path(ctx.repo_dir))
     if not pre_fingerprint.get("ok"):
         if bool(getattr(ctx, "_review_resume_pending", False)):
-            return {
-                "status": "blocked",
-                "message": "⚠️ REVIEW_BINDING_UNAVAILABLE: cannot verify the exact pending review identity; no new dispatch was started.",
-                "block_reason": "fingerprint_unavailable",
-                "pre_fingerprint": pre_fingerprint,
-                "post_fingerprint": {},
-            }
-        return {
-            "status": "blocked",
-            "message": _git()._handle_revalidation_failure(
+            message = "⚠️ REVIEW_BINDING_UNAVAILABLE: cannot verify the exact pending review identity; no new dispatch was started."
+        else:
+            message = _git()._handle_revalidation_failure(
                 ctx,
                 commit_message,
                 commit_start,
                 pre_fingerprint=pre_fingerprint,
                 kind="fingerprint_unavailable",
-            ),
+            )
+        return {
+            "status": "blocked",
+            "message": message,
             "block_reason": "fingerprint_unavailable",
             "pre_fingerprint": pre_fingerprint,
             "post_fingerprint": {},
@@ -695,11 +702,14 @@ def _reviewed_stage_cycle(
             gate_outcome["message"] = _publish_tool_result(ctx, ToolResult(
                 status="blocked", code="LEGACY_BLOCKED", text=gate_outcome["message"]))
             return gate_outcome
+    # Only a call resuming its own open attempt continues that call, whose checks ran before its wave was sent;
+    # a new call collecting the completed round's usable verdict at $0 (``_free_cycle_gate``) owes its own (#2410).
+    resumes_open = bool(getattr(ctx, "_review_reconcile_only", False) and getattr(ctx, "_review_resume_pending", False))
     binding_error = _git()._review_binding_precondition_error(
         pre_fingerprint, require_release_tag=require_release_tag
     )
     if binding_error:
-        if not bool(getattr(ctx, "_review_reconcile_only", False)):
+        if not resumes_open:
             _git()._record_commit_attempt(
                 ctx,
                 commit_message,
@@ -729,10 +739,10 @@ def _reviewed_stage_cycle(
     ctx._commit_review_evidence = (
         pending_commit_review_evidence(ctx) if getattr(ctx, "_review_reconcile_only", False)
         else capture_commit_review_evidence(ctx) if advisory_replay is None else {})
-    if getattr(ctx, "_review_reconcile_only", False):  # the seats' frozen exhibit, never this call's tests
+    if resumes_open:  # the seats' frozen exhibit, never this call's tests
         ctx._preflight_execution = pending_commit_review_evidence(ctx, "preflight_execution") or {"status": "unobserved"}
     preflight_gate_outcome = None
-    if not bool(getattr(ctx, "_review_reconcile_only", False)):
+    if not resumes_open:
         preflight_gate_outcome = _git()._preflight_and_tests_gate(
             ctx, commit_message, commit_start,
             classification_paths=classification_paths,
@@ -743,15 +753,17 @@ def _reviewed_stage_cycle(
             goal=goal, scope=scope, review_only=review_only,
         )
     if preflight_gate_outcome is not None:
+        ctx._review_reconcile_only = False  # refused before collecting: leak no no-dispatch flag (as above)
         _release_review_evidence_if_settled(ctx)
         return preflight_gate_outcome
-    if not bool(getattr(ctx, "_review_reconcile_only", False)):
+    if not resumes_open:
         after_preflight = _git()._fingerprint_staged_diff(pathlib.Path(ctx.repo_dir))
         changed = compute_snapshot_hash(pathlib.Path(ctx.repo_dir), commit_message, paths=snapshot_paths) != prepared_snapshot
         revalidation = _revalidation_outcome(
             ctx, commit_message, commit_start, pre_fingerprint, after_preflight, worktree_changed=changed,
         )
         if revalidation is not None:
+            ctx._review_reconcile_only = False
             _release_review_evidence_if_settled(ctx)
             return revalidation
     _git()._record_commit_attempt(
@@ -826,12 +838,16 @@ def _reviewed_stage_cycle(
     from ouroboros.review_custody import review_retry_cancelled
     from ouroboros.deadline_utils import owner_deadline_exhausted_for_context
 
-    if review_retry_cancelled(ctx) or owner_deadline_exhausted_for_context(ctx):
-        blocked, combined_msg, block_reason = True, "⚠️ REVIEW_STOPPED: owner cancellation or deadline prevents this commit.", "owner_stopped"
     material = (blocked or combined_findings or getattr(ctx, "_last_review_critical_findings", [])
                 or getattr(ctx, "_last_review_advisory_findings", []) or scope_advisory
                 or getattr(ctx, "_last_review_block_reason", "") or triad_block_reason
                 or getattr(ctx, "_review_degraded_reasons", []) or advisory_replay is not None)
+    if (resumes_open and not review_only and not (blocked or hand_back_all or (ordinary_advisory and material))
+            and not (review_retry_cancelled(ctx) or owner_deadline_exhausted_for_context(ctx))
+            and (owed := _owed_before_git(ctx, commit_message, commit_start, post_fingerprint, skip_tests))):
+        return owed  # the owner-control decision below follows these owed tests, so it gates Git (#2410)
+    if review_retry_cancelled(ctx) or owner_deadline_exhausted_for_context(ctx):
+        blocked, combined_msg, block_reason = True, "⚠️ REVIEW_STOPPED: owner cancellation or deadline prevents this commit.", "owner_stopped"
     if (author_source is None and (hand_back_all or (ordinary_advisory and material))
             and block_reason != "owner_stopped"):
         return _return_commit_feedback(ctx, commit_message, commit_start, pre_fingerprint, post_fingerprint,
@@ -974,7 +990,7 @@ def _run_non_committing_review_cycle(
             if not (_git()._review_custody_pending(ctx)
                     or (bool(getattr(ctx, "_review_resume_pending", False))
                         and (locals().get("outcome") or {}).get("status") != "passed")):
-                _git().run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
+                _git()._unstage_candidate(ctx)  # nothing when the call staged nothing
         except Exception as exc:
             unstage_warning = f"⚠️ GIT_WARNING (reset): {_sanitize_git_error(str(exc))}"
         _git()._release_git_lock(lock)

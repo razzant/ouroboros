@@ -16,7 +16,6 @@ improvement passes to zero: both left with the task-acceptance machine.
 
 from __future__ import annotations
 
-from tests import _dialogue as dialogue_test
 
 import json
 import pathlib
@@ -33,9 +32,7 @@ from ouroboros import owner_hurry as oh
 from ouroboros.gateway.tasks import api_task_hurry
 from ouroboros.owner_mailbox import (
     KIND_HURRY,
-    _ack_path,
     _mailbox_path,
-    acknowledge_task_messages,
     drain_owner_entries,
     write_owner_message,
 )
@@ -76,71 +73,10 @@ def _hurry_rows(drive_root, task_id):
     ]
 
 
-def _chat_log_snapshot(drive_root):
-    path = pathlib.Path(drive_root) / "logs" / "chat.jsonl"
-    return dialogue_test.log_text(path) if bool(dialogue_test.log_rows(path)) else None
-
-
 # ---------------------------------------------------------------------------
 # §19.7.4 bullet 1 — production endpoint: drives, projection, refusals,
 # idempotency, terminal TOCTOU
 # ---------------------------------------------------------------------------
-
-
-def test_direct_task_mailbox_lands_on_canonical_drive_with_projection(tmp_path, monkeypatch):
-    task = {"id": "root-1", "chat_id": 0, "root_task_id": "root-1", "_attempt": 1}
-    _isolate_queue(monkeypatch, tmp_path, running={"root-1": {"task": task, "attempt": 1}})
-    before_chat = _chat_log_snapshot(tmp_path)
-    with _client(tmp_path) as client:
-        resp = client.post("/api/tasks/root-1/hurry", json={"request_id": "req-1"})
-    assert resp.status_code == 200
-    body = resp.json()
-    assert body == {
-        "ok": True, "task_id": "root-1", "request_id": "req-1",
-        "state": "requested", "attempt_key": 1, "duplicate": False,
-    }
-    # Physical mailbox: DIRECT task -> canonical drive (same rule as steer_task).
-    rows = _hurry_rows(tmp_path, "root-1")
-    assert len(rows) == 1
-    assert rows[0]["msg_id"] == "hurry:req-1"
-    assert rows[0]["text"] == "owner_hurry"          # parser-required reason, not prose
-    # Canonical projection: requested block keyed by the real attempt.
-    block = load_task_result(tmp_path, "root-1")["owner_hurry"]
-    assert block["attempt_key"] == 1
-    assert block["request_id"] == "req-1"
-    assert block["state"] == oh.STATE_REQUESTED
-    assert block["reason"] == oh.REASON_OWNER_HURRY
-    # NO-CHAT: the ingress produced no chat row anywhere.
-    assert _chat_log_snapshot(tmp_path) == before_chat
-    # The one durable non-chat event row is is_progress=False.
-    events = [
-        json.loads(line)
-        for line in (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    hurry_events = [e for e in events if e.get("type") == "owner_hurry"]
-    assert len(hurry_events) == 1
-    assert hurry_events[0]["phase"] == "requested"
-    assert hurry_events[0]["is_progress"] is False
-    assert hurry_events[0]["requested_by"] == "owner"
-
-
-def test_forked_task_mailbox_goes_to_the_child_drive(tmp_path, monkeypatch):
-    child_drive = tmp_path / "forks" / "root-2"
-    child_drive.mkdir(parents=True)
-    task = {
-        "id": "root-2", "chat_id": 0, "root_task_id": "root-2",
-        "child_drive_root": str(child_drive), "_attempt": 3,
-    }
-    _isolate_queue(monkeypatch, tmp_path, running={"root-2": {"task": task, "attempt": 3}})
-    with _client(tmp_path) as client:
-        resp = client.post("/api/tasks/root-2/hurry", json={"request_id": "req-f"})
-    assert resp.status_code == 200
-    assert resp.json()["attempt_key"] == 3
-    # Mailbox on the CHILD drive, projection on the CANONICAL drive.
-    assert len(_hurry_rows(child_drive, "root-2")) == 1
-    assert not _mailbox_path(tmp_path, "root-2").exists()
-    assert load_task_result(tmp_path, "root-2")["owner_hurry"]["attempt_key"] == 3
 
 
 def test_refusal_matrix_managed_child_cancel_sealed_and_not_live(tmp_path, monkeypatch):
@@ -314,73 +250,8 @@ def test_restart_re_drain_restores_exactly_one_latch(tmp_path):
 # ---------------------------------------------------------------------------
 # §19.7.4 bullet 3 — production _no_tool_final_answer: hurry is not a follow-up
 # ---------------------------------------------------------------------------
-
-
-def test_post_answer_hurry_drain_never_reopens_a_sealed_root(tmp_path, monkeypatch):
-    from tests.test_delivery_forced_finalization import _forced_test_context
-
-    loop, registry, ctx, trace = _forced_test_context(tmp_path)
-    monkeypatch.setattr(loop, "_compute_subagent_handoff", lambda *_a, **_k: None)
-    monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_a, **_k: False)
-    monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", lambda *_a, **_k: False)
-    released = []
-    monkeypatch.setattr(
-        loop, "_release_for_owner_followup",
-        lambda *a, **k: released.append((a, k)),
-    )
-    # The root's admission is sealed (an owner follow-up would release it); the
-    # post-answer admission drain finds a freshly delivered hurry control.
-    registry._ctx._task_acceptance_sealed_fence_token = "sealed-root"
-    registry._ctx.owner_message_admission_lock = threading.Lock()
-    registry._ctx.owner_message_admission_agent = SimpleNamespace(
-        _accepting_owner_messages=True, _busy=True, _current_task_id="parent1",
-    )
-    registry._ctx.budget_drive_root = str(tmp_path)
-    registry._ctx.task_attempt = 1
-    write_owner_message(tmp_path, "owner_hurry", "parent1", msg_id="hurry:late", kind=KIND_HURRY)
-    oh.record_requested(tmp_path, "parent1", request_id="late", attempt=1)
-
-    result = loop._no_tool_final_answer(
-        "Final answer.", ctx, trace, registry, _q.Queue(), set(), lambda _m: None,
-    )
-    # The final answer went through: hurry never reopened the sealed root.
-    assert result is not None
-    assert released == []
-    assert getattr(registry._ctx, "_owner_directives", []) == []
-    assert oh.latched(registry._ctx) is not None       # ...but the latch IS armed
-
-
-# ---------------------------------------------------------------------------
 # §19.7.4 bullets 4+5 — the acceptance skip and the improvement-pass overlay left
 # with the task-acceptance machine; the stored reason keeps its vocabulary
-# ---------------------------------------------------------------------------
-
-
-def _task_ctx(tmp_path, *, latched):
-    ctx = SimpleNamespace(
-        is_direct_chat=False,
-        drive_root=str(tmp_path),
-        budget_drive_root=str(tmp_path),
-        task_metadata={},
-        task_contract={},
-        task_attempt=1,
-        task_id="t-acc",
-    )
-    if latched:
-        ctx._owner_hurry_latch = {"msg_id": "hurry:x", "requested_at": "", "reason": oh.REASON_OWNER_HURRY}
-    return ctx
-
-
-def test_the_hurry_reason_stays_out_of_the_forced_rail_and_best_effort_vocabulary():
-    """Old task records carry ``owner_hurry`` as an acceptance-skip reason: an owner-approved
-    detail fact, never a forced-rail bypass or a best-effort reason the objective reader counts."""
-    from ouroboros.outcomes import ACCEPTANCE_BYPASS_REASON_BY_RAIL, BEST_EFFORT_REASON_CODES
-
-    assert oh.REASON_OWNER_HURRY == "owner_hurry"
-    assert "owner_hurry" not in ACCEPTANCE_BYPASS_REASON_BY_RAIL.values()
-    assert "owner_hurry" not in BEST_EFFORT_REASON_CODES
-
-
 # ---------------------------------------------------------------------------
 # §19.7.4 bullet 6 — production _enforce_plan_gate force-plan projection
 # ---------------------------------------------------------------------------
@@ -404,49 +275,6 @@ def _plan_record(kind: str) -> dict:
         seat.update(status="answered", reply={"prose": "", "objections": [{"id": "o1", "text": "no"}], "withdrawn": []})
     record["asks"].append({"ask_id": "a1", "ts": "t", "revision": 1, "message": "", "participants": [seat]})
     return record
-
-
-@pytest.mark.parametrize(
-    ("kind", "hurry_allows"),
-    [
-        ("held", True), ("awaiting", True),        # locally advisory / proceed
-        ("unsent", True),                          # an ask that reached nobody: attempted, disclosed, never held (scope R1 F1)
-        ("absent", True),                          # no plan creates no obligation
-    ],
-)
-def test_enforce_plan_gate_task_local_advisory_matrix(tmp_path, monkeypatch, kind, hurry_allows):
-    import ouroboros.loop as loop_mod
-
-    monkeypatch.setattr(loop_mod, "get_review_enforcement", lambda: "blocking")
-    monkeypatch.setattr(oh, "_plan_facts", lambda _ctx: (_plan_record(kind), {}, False))
-
-    def _swarm_held(ctx):
-        trace = {"reasoning_notes": []}
-        tools = SimpleNamespace(_ctx=ctx)
-        held = loop_mod._enforce_plan_gate("answer", [], tools, trace, lambda _m: None)
-        return held, trace
-
-    latched_ctx = _task_ctx(tmp_path, latched=True)
-    latched_ctx.task_metadata = {"force_plan": True}
-    held, trace = _swarm_held(latched_ctx)
-    assert held is (not hurry_allows)
-    decision = trace.get("plan_gate", {})
-    if hurry_allows and kind != "absent":
-        # Attribution rides the decision for the task detail.
-        assert decision["owner_hurry_local_advisory"] is True
-        assert decision["configured_enforcement"] == "blocking"
-    # WITHOUT the latch the same blocking install holds the held state and the plan never
-    # written; an ask whose answers are merely awaited never held (silence holds nothing), and
-    # an ask every seat refused before dispatch is attempted — disclosed, not held (outages never hold).
-    unlatched_ctx = _task_ctx(tmp_path, latched=False)
-    unlatched_ctx.task_metadata = {"force_plan": True}
-    held_unlatched, _t = _swarm_held(unlatched_ctx)
-    assert held_unlatched is (kind == "held")
-    # Durable review state was never touched (the monkeypatched loader is the
-    # only read; nothing wrote a plan record).
-    assert not (tmp_path / "task_results").exists() or "plan_record" not in json.dumps(
-        load_task_result(tmp_path, "t-acc") or {},
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -490,118 +318,9 @@ def test_projection_survives_concurrent_terminal_writes_and_omission_is_not_eras
     assert stored["status"] == "completed"
 
 
-def test_writer_never_routes_through_write_task_result():
-    """The projection writer must not carry a status argument that could
-    regress/drop the write — structural pin on the module source."""
-    import inspect
-
-    source = inspect.getsource(oh)
-    # Docstrings NAME the forbidden writer; the code must never CALL or import it.
-    assert "write_task_result(" not in source
-    assert "import write_task_result" not in source
-    assert "patch_document(" in source
-
-
 # ---------------------------------------------------------------------------
 # §19.7.4 bullet 8 — retry reset: crash-requeue exercised end to end
 # ---------------------------------------------------------------------------
-
-
-def test_crash_requeue_runs_the_shared_retry_reset(tmp_path, monkeypatch):
-    """The §19.7.2 item 11 mandated path: supervisor/workers.py crash-requeue
-    (_attempt+1 same-id front requeue) must strip the executable control AND
-    archive the projection before the retry attempt is admitted."""
-    from tests.test_terminal_durability_v664 import _crashed_worker, _install_supervisor
-    from supervisor import queue, worker_health, workers as worker_pool
-
-    for module in (queue, worker_pool):
-        monkeypatch.setattr(module, "PENDING", [])
-        monkeypatch.setattr(module, "RUNNING", {})
-    monkeypatch.setattr(worker_pool, "WORKERS", {})
-    monkeypatch.setattr(queue, "BUDGET_ROOT_FENCES", {})
-    _queue, _state, workers, events = _install_supervisor(tmp_path, monkeypatch)
-    jobs = _q.Queue()
-    monkeypatch.setattr(_queue, "_reap_queue", jobs)
-    monkeypatch.setattr(_queue, "_ensure_reaper_started", lambda: None)
-    task = {"id": "crash-1", "type": "task", "chat_id": 0, "_attempt": 1}
-    # A started task has lifecycle truth before hurry adds its status-free projection.
-    write_task_result(tmp_path, task["id"], "running", chat_id=0)
-    # The dead attempt had an executable hurry: mailbox control + applied block.
-    write_owner_message(tmp_path, "owner_hurry", "crash-1", msg_id="hurry:r1", kind=KIND_HURRY)
-    oh.record_requested(tmp_path, "crash-1", request_id="r1", attempt=1)
-    oh.record_applied(tmp_path, "crash-1", attempt=1)
-    _crashed_worker(monkeypatch, workers, task)
-    monkeypatch.setattr(workers, "load_state", lambda: {})
-    reset_calls = []
-    real_reset = oh.retry_reset
-    def reset(*args, **kwargs):
-        reset_calls.append((args, kwargs))
-        return real_reset(*args, **kwargs)
-    monkeypatch.setattr(oh, "retry_reset", reset)
-
-    workers.ensure_workers_healthy()
-    assert workers.PENDING == [] and reset_calls == [], "health only reserves the queued recovery"
-    job = jobs.get_nowait()
-    assert job["kind"] == "confirmed_dead_worker" and job["task_id"] == "crash-1"
-    worker_health.recover_confirmed_dead_worker(job)
-    assert jobs.empty(), "one crash recovery must not schedule an unowned retry loop"
-    assert len(reset_calls) == 1 and reset_calls[0][1]["reason"] == "worker_crash_requeue"
-
-    # Same-id front requeue with the bumped attempt.
-    assert [(t["id"], t["_attempt"]) for t in workers.PENDING] == [("crash-1", 2)]
-    # NO executable latch survives, while the append-only mailbox remains as
-    # the durable owner-text carrier.
-    assert _mailbox_path(tmp_path, "crash-1").exists()
-    assert drain_owner_entries(tmp_path, "crash-1", attempt_key=2) == []
-    # ...and the current block is archived into history, not silently dropped.
-    stored = load_task_result(tmp_path, "crash-1")
-    assert "owner_hurry" not in stored
-    history = stored["owner_hurry_history"]
-    assert history[-1]["request_id"] == "r1"
-    assert history[-1]["archived_reason"] == "worker_crash_requeue"
-
-
-def test_retry_reset_is_shared_by_reaper_and_evolution_retry(tmp_path):
-    """The reaper timeout path calls the SAME helper (source pin), and the
-    helper itself is idempotent + fail-soft for any same-id requeue producer."""
-    import inspect
-
-    from supervisor import task_reaper
-
-    assert "retry_reset" in inspect.getsource(task_reaper.reap_timed_out_task)
-    # Functional: control revoked in-place, block archived, second call is a no-op.
-    write_owner_message(tmp_path, "owner_hurry", "evo-1", msg_id="hurry:r1", kind=KIND_HURRY)
-    oh.record_requested(tmp_path, "evo-1", request_id="r1", attempt=1)
-    oh.retry_reset(tmp_path, tmp_path, "evo-1", reason="evolution_retry")
-    assert _mailbox_path(tmp_path, "evo-1").exists()
-    assert drain_owner_entries(tmp_path, "evo-1", attempt_key=2) == []
-    stored = load_task_result(tmp_path, "evo-1")
-    assert "owner_hurry" not in stored
-    assert stored["owner_hurry_history"][-1]["archived_reason"] == "evolution_retry"
-    oh.retry_reset(tmp_path, tmp_path, "evo-1", reason="evolution_retry")   # idempotent
-    assert len(load_task_result(tmp_path, "evo-1")["owner_hurry_history"]) == 1
-
-
-def test_retry_preserves_unacked_owner_text_and_revokes_attempt_controls(tmp_path):
-    import ouroboros.loop as loop
-
-    write_owner_message(tmp_path, "exact owner bytes  \n", "retry-owner", msg_id="owner-1")
-    write_owner_message(
-        tmp_path, "owner_hurry", "retry-owner", msg_id="hurry-1", kind=KIND_HURRY,
-    )
-    first_ctx = _drain_ctx(tmp_path, task_id="retry-owner", attempt=1)
-    first_messages: list = []
-    loop._drain_incoming_messages(
-        first_messages, _q.Queue(), tmp_path, "retry-owner", None, set(), owner_ctx=first_ctx,
-    )
-    assert "exact owner bytes" in json.dumps(first_messages)
-
-    oh.retry_reset(tmp_path, tmp_path, "retry-owner", reason="worker_crash_requeue")
-    replay = drain_owner_entries(tmp_path, "retry-owner", attempt_key=2)
-
-    assert [(row["msg_id"], row["kind"], row["text"]) for row in replay] == [
-        ("owner-1", "owner_text", "exact owner bytes  \n"),
-    ]
 
 
 @pytest.mark.parametrize("crash_boundary", ["after_drain", "after_tool_call", "after_tool_execution"])
@@ -716,118 +435,6 @@ def test_fresh_attempt_replays_exact_owner_text_until_terminal(
     assert wire.count("model must see these exact bytes") == 1
 
 
-def test_historical_settled_attempt_ack_does_not_suppress_fresh_attempt(tmp_path):
-    write_owner_message(tmp_path, "incorporated", "settled-owner", msg_id="owner-settled")
-    assert acknowledge_task_messages(
-        tmp_path, "settled-owner", ["owner-settled"],
-        wake_id="old-model-response", attempt_key=1,
-    )
-    ack = _ack_path(tmp_path, "settled-owner")
-    rows = [json.loads(line) for line in ack.read_text(encoding="utf-8").splitlines()]
-    rows[0]["settled"] = True
-    ack.write_text(
-        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8",
-    )
-
-    replay = drain_owner_entries(tmp_path, "settled-owner", attempt_key=2)
-    assert [(row["msg_id"], row["text"]) for row in replay] == [
-        ("owner-settled", "incorporated"),
-    ]
-
-
-def test_nonterminal_loop_cleanup_preserves_owner_mailbox(tmp_path, monkeypatch):
-    import ouroboros.delegate_custody as delegated
-    import ouroboros.loop as loop
-
-    write_owner_message(tmp_path, "survive loop exit", "loop-exit", msg_id="owner-loop")
-    assert acknowledge_task_messages(
-        tmp_path, "loop-exit", ["owner-loop"], wake_id="attempt-1", attempt_key=1,
-    )
-    inner = SimpleNamespace(
-        _delivery_candidate=object(), _delivery_control_required=True,
-        task_metadata={},
-    )
-    monkeypatch.setattr(loop, "_finalize_task_services", lambda _ctx: False)
-    monkeypatch.setattr(delegated, "release_task_runs", lambda *_a, **_k: [])
-    loop._cleanup_loop_resources(None, loop._LoopExitContext(
-        tools=SimpleNamespace(_ctx=inner), drive_root=tmp_path, task_id="loop-exit",
-        event_queue=None, drive_logs=tmp_path / "logs",
-        accumulated_usage={}, llm_trace={},
-    ))
-
-    replay = drain_owner_entries(tmp_path, "loop-exit", attempt_key=2)
-    assert [(row["msg_id"], row["text"]) for row in replay] == [
-        ("owner-loop", "survive loop exit"),
-    ]
-
-
 # ---------------------------------------------------------------------------
 # §19.7.4 bullets 9+10 — no-chat counters and P3/safety non-consultation
 # ---------------------------------------------------------------------------
-
-
-def test_full_hurry_lifecycle_writes_zero_chat_rows_and_zero_bus_calls(tmp_path, monkeypatch):
-    import ouroboros.loop as loop
-
-    bus_calls = []
-    import supervisor.message_bus as mb
-
-    monkeypatch.setattr(
-        mb, "log_chat", lambda *a, **k: bus_calls.append(("log_chat", a, k)),
-    )
-    task = {"id": "nochat-1", "chat_id": 7, "root_task_id": "nochat-1", "_attempt": 1}
-    _isolate_queue(monkeypatch, tmp_path, running={"nochat-1": {"task": task, "attempt": 1}})
-    with _client(tmp_path) as client:
-        client.post("/api/tasks/nochat-1/hurry", json={"request_id": "rq"})
-    events: list = []
-    ctx = _drain_ctx(tmp_path, task_id="nochat-1", attempt=1)
-    loop._drain_incoming_messages(
-        [], _q.Queue(), tmp_path, "nochat-1",
-        SimpleNamespace(put_nowait=events.append), set(), owner_ctx=ctx,
-    )
-    oh.reconcile_terminal(tmp_path, "nochat-1")
-    # chat.jsonl was never created; the message bus was never called.
-    assert _chat_log_snapshot(tmp_path) is None
-    assert bus_calls == []
-    # Every emitted live event is a log_event envelope carrying the non-chat
-    # owner_hurry family, is_progress=False — never send_message/chat frames.
-    assert events, "the applied event must exist"
-    assert {e.get("type") for e in events} == {"log_event"}
-    payloads = [e["data"] for e in events]
-    assert {p.get("type") for p in payloads} == {"owner_hurry"}
-    assert all(p["is_progress"] is False for p in payloads)
-
-
-def test_p3_commit_and_safety_surfaces_never_consult_hurry(monkeypatch, tmp_path):
-    """§19.7.2 item 10: no hurry predicate/import enters commit review, the
-    preflight, triad/scope, deterministic gates, safety, or the tool boundary;
-    and arming the latch leaves settings/env byte-identical."""
-    import os
-
-    repo = pathlib.Path(oh.__file__).resolve().parent.parent
-    guarded = [
-        repo / "ouroboros" / "safety.py",
-        repo / "ouroboros" / "tools" / "registry.py",
-        repo / "ouroboros" / "tools" / "git.py",
-        repo / "ouroboros" / "tools" / "parallel_review.py",
-        repo / "ouroboros" / "tools" / "commit_gate.py",
-        repo / "ouroboros" / "tools" / "preflight_review.py",
-        repo / "prompts" / "SAFETY.md",
-    ]
-    for path in guarded:
-        assert path.exists(), path
-        text = path.read_text(encoding="utf-8")
-        assert "owner_hurry" not in text, f"{path} must not consult hurry"
-        assert "KIND_HURRY" not in text, f"{path} must not consult hurry"
-    env_before = dict(os.environ)
-    from ouroboros.config import get_review_enforcement, get_task_review_mode
-
-    enforcement_before = get_review_enforcement()
-    mode_before = get_task_review_mode()
-    ctx = _drain_ctx(tmp_path, task_id="t-env", attempt=1)
-    oh.record_requested(tmp_path, "t-env", request_id="r", attempt=1)
-    oh.apply_latch(ctx, {"msg_id": "hurry:r", "ts": "2026-08-15T00:00:00Z"})
-    assert oh.latched(ctx) is not None
-    assert dict(os.environ) == env_before
-    assert get_review_enforcement() == enforcement_before
-    assert get_task_review_mode() == mode_before

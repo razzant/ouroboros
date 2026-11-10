@@ -88,7 +88,17 @@ NANO_MIN_HEADROOM_TOKENS = 8_192
 RECLAIM_LOW_WATER_DIVISOR = 8
 #: An unknown reclaim target: the step takes everything its category can give (the refusal passes).
 WHOLE_CATEGORY = 2**31 - 1
-REFUSAL_PASSES = (("host_copies", "bodies"), ("floor", "books", "unseen_bodies"))
+# The owner's order (7A, 09.10.2026), sized step by step: superseded host rows, then bodies already shown, oldest
+# first, for the measured excess only, then memory detail for the rest and the return-after-fold slack (its floor
+# lowers the books only where memory cannot make room, BIBLE P1); books and unseen bodies after a further refusal,
+# then memory's rest and a just-chosen body last (owner 2A, ``loop_model_call._apply_refusal_pass``).
+REFUSAL_PASSES = (("host_copies", "bodies", "floor"), ("books", "unseen_bodies"))
+# A physical unfit of a directly required handbook is its owner's or caller's to resolve; the host switches nothing.
+# ``{}`` takes "; a Continue keeps it" exactly where that terminal's cause offers Continue (``owner_continue``).
+REQUIRED_BOOK_CHOICES = ("The choices are a route with a larger window, the owner's Context mode, or a new task "
+                         "without this requirement{}.")
+#: A round's size refusal on a known window that holds the view without the required handbook (``context_renewal``).
+REQUIRED_BOOK_UNFIT_KEY = "_context_required_book_unfit"
 
 def start_room_levels(role: str, *, direct_chat: bool = False) -> int:
     """Roots (an integrating task that is not a direct chat turn) leave two eighths for their work; a wake
@@ -193,17 +203,20 @@ def request_context_budget(
             "target_deficit_tokens": (max(0, measured + reserve - target_tokens) if target_tokens else None),
             "capacity_deficit_tokens": (max(0, measured + reserve - window_tokens) if window_tokens else None)}
 
-# One overflow vocabulary for every seam that must recognize a CONTEXT-WINDOW
-# overflow (Main provider-code precedence and the local transport). A provider
-# code or message shape added here reaches both seams at once; per-module copies
-# drifted independently before.
+# One vocabulary of refusals a smaller input cures, for every seam that must
+# recognize them (Main provider-code precedence and the local transport): the
+# context window, or one input string's length. A provider code or message shape
+# added here reaches both seams at once; per-module copies drifted independently.
 CONTEXT_OVERFLOW_CODES = frozenset({
     "context_length_exceeded",
     "context_window_exceeded",
     "model_context_window_exceeded",
     "prompt_too_long",
     "input_too_long",
+    "string_above_max_length",
 })
+#: A refusal of one input string's length (OpenAI's 10 MiB text limit, 07.11.2026) teaches no token window.
+INPUT_STRING_LENGTH_CODES = frozenset({"string_above_max_length"})
 CONTEXT_OVERFLOW_MESSAGE_MARKERS = (
     "context_length_exceeded",
     "context length",
@@ -270,7 +283,7 @@ def context_overflow_message(text: Any) -> bool:
         return False
     return any(marker in low for marker in CONTEXT_OVERFLOW_MESSAGE_MARKERS) or _parse_ctx_limit_number(low) > 0
 
-MeasurementBasis = Literal["fresh_route_usage", "fresh_model_usage", "cold_estimate"]
+MeasurementBasis = Literal["fresh_route_usage", "fresh_model_usage", "refused_input", "cold_estimate"]
 ReclaimStatus = Literal[
     "applied", "no_eligible", "checkpoint_failed", "no_measurable_shrink", "binding_mismatch",
     "no_op", "fit_rejected", "source_unavailable", "authored_note_required",

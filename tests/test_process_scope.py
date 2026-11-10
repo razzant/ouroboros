@@ -129,7 +129,10 @@ def test_end_scope_ends_a_platform_binary_through_its_group_and_a_node_child_thr
     marker = ps.mint_marker(ps.TASK_SCOPE_PREFIX)
     # The incident shape of a task's own command: a shell in its own group starts a
     # background /bin/sleep and exits; the sleep stays in the recorded group.
-    shell = _sleeper({marker: "1"}, argv=["/bin/sh", "-c", "/bin/sleep 120 >/dev/null 2>&1 & /bin/sleep 1"])
+    from ouroboros.tools.shell_process import contained_popen, retire_tracked
+    shell = contained_popen(subprocess.Popen,
+        ["/bin/sh", "-c", "/bin/sleep 120 >/dev/null 2>&1 & /bin/sleep 1"],
+        env={**os.environ, marker: "1"}, start_new_session=True)
     group = _group(shell)  # recorded while the leader lives, as the spawn seams do
     shell.wait(timeout=5)  # the shell is gone; its background child keeps the group
     rows = ps.census([marker])
@@ -148,10 +151,10 @@ def test_end_scope_ends_a_platform_binary_through_its_group_and_a_node_child_thr
         assert bystander.poll() is None, "another scope's child is untouched"
     finally:
         _end(runaway, bystander)
-        try:
-            os.kill(orphan_pid, 9)
-        except ProcessLookupError:
-            pass
+        _pl.request_process_tree_kill(shell)  # the waitable leader still owns this group
+        _end(shell)
+        assert _gone(orphan_pid)
+        assert retire_tracked(shell)
 
 
 def test_a_reused_or_emptied_group_is_never_signalled():
@@ -169,6 +172,23 @@ def test_a_reused_or_emptied_group_is_never_signalled():
         assert outcome["ended"] == [bystander.pid] and _gone(bystander.pid)
     finally:
         _end(bystander)
+
+
+def test_a_recycled_group_with_an_exited_replacement_leader_is_the_disclosed_residual(monkeypatch):
+    """A recorded group that emptied and whose number came back as a new group, whose leader also exited, passes the
+    reuse rule when its live member is younger than the recorded leader: it is signalled. The disclosed residual
+    (ARCHITECTURE §9 Limits), kept so Stop and Panic still reach a reaped leader's orphans."""
+    old, new = "Mon Jan  1 00:00:00 2001", "Mon Jan  1 00:00:00 2024"
+    group = {"pgid": 765400, "leader_birth": old}
+    row = ps._Row(765401, 1, 765400, new, ps.birth_epoch(new))
+    monkeypatch.setattr(ps, "census", lambda markers=(): {row.pid: row})
+    monkeypatch.setattr(ps, "read_identities", lambda pids: {
+        pid: ps._Identity(ps.IDENTITY_ALIVE, new, 765400) if pid == row.pid else ps._Identity(ps.IDENTITY_ABSENT)
+        for pid in pids})
+    signals = []
+    monkeypatch.setattr(_pl, "deliver_signal", lambda *a, **kw: signals.append((a, kw)))
+    ps.end_scope(groups=[group], grace_sec=0, rescans=0)
+    assert [call[0][0] for call in signals] == [row.pid], "the member younger than the recorded leader is the group's"
 
 
 def test_a_member_whose_identity_changed_is_not_signalled(monkeypatch):
@@ -256,9 +276,10 @@ def test_a_leader_that_already_exited_still_gets_its_group_recorded_and_its_chil
     for _ in range(2):
         shell = subprocess.Popen(["/bin/sh", "-c", "/bin/sleep 120 >/dev/null 2>&1 & echo $!"], stdout=subprocess.PIPE,
                                  stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, text=True, start_new_session=True)
-        launches.append((shell, int(shell.stdout.read().strip().splitlines()[-1])))
-    zombie_shell, zombie_child = launches[0]
-    reaped_shell, reaped_child = launches[1]
+        child = int(shell.stdout.read().strip().splitlines()[-1])
+        launches.append((shell, child, ps.measure_birth(child)))
+    zombie_shell, zombie_child, _ = launches[0]
+    reaped_shell, reaped_child, _ = launches[1]
     try:
         time.sleep(0.3)  # the shells exited; the first stays a zombie (unwaited), the second is reaped below
         reaped_shell.wait(timeout=5)
@@ -274,11 +295,11 @@ def test_a_leader_that_already_exited_still_gets_its_group_recorded_and_its_chil
             assert _gone(child)
     finally:
         _end(zombie_shell, reaped_shell)
-        for _shell, child in launches:
-            try:
-                os.kill(child, 9)
-            except ProcessLookupError:
-                pass
+        for _shell, child, birth in launches:
+            assert birth, "cleanup needs the measured child identity, never a saved PID alone"
+            cleanup = ps.end_scope(captured=[{"pid": child, "birth": birth}], grace_sec=0.5)
+            assert cleanup["settled"], cleanup
+            assert _gone(child)
 
 
 def test_a_denied_or_failed_signal_is_unverified_never_gone_and_only_denied_is_final(monkeypatch):

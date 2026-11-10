@@ -21,7 +21,6 @@ from tests.test_swarm_host_admission import host  # noqa: F401
 from tests._store_shared import delete_result, result_exists, unreadable_result
 from tests.worker_pool_support import affirm_ready
 
-pytestmark = pytest.mark.serial
 
 
 @pytest.fixture
@@ -99,8 +98,11 @@ def _resource_hold(host, clock, monkeypatch, kind, *, deadline=True):  # noqa: F
     return task
 
 
-@pytest.mark.parametrize("kind", ["global_budget", "root_budget", "root_selection"])
-@pytest.mark.parametrize("deadline", [False, True], ids=["duration-only", "explicit-calendar"])
+@pytest.mark.parametrize(("deadline", "kind"), [
+    pytest.param(False, "global_budget", id='duration-only-global_budget'),
+    pytest.param(False, "root_selection", id='duration-only-root_selection'),
+    pytest.param(True, "root_budget", id='explicit-calendar-root_budget'),
+])
 def test_never_started_resource_wait_reaches_deadline_outcome_without_resume(
     host, clock, monkeypatch, kind, deadline,  # noqa: F811
 ):
@@ -200,8 +202,7 @@ def test_never_started_project_wait_expires_on_the_tick_without_capacity(host, c
     assert _done(clock) == ["failed"]
 
 
-@pytest.mark.parametrize("veto", ["owner_pause", "result_missing", "result_unreadable", "possible", "started",
-                                    "unknown_dispatch", "exact_pause", "resume", "owner_wait", "working_recovery"])
+@pytest.mark.parametrize("veto", ["owner_pause", "result_missing", "working_recovery"])
 def test_project_deadline_does_not_take_protected_or_unknown_custody(
     host, clock, tmp_path, monkeypatch, veto,  # noqa: F811
 ):

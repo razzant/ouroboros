@@ -103,11 +103,14 @@ class JsonSession:
                 raise
             raise RealtimeSetupError(code, f"the voice service answered the connection with HTTP {status}") from exc
 
-    async def write(self, payload):
+    async def write(self, payload, *, snapshot=None):
+        """Return an optional write-boundary snapshot only after a successful send."""
         raw = canonical_json(payload)
         async with self._send_lock:
+            state = snapshot() if snapshot is not None else None
             self.observe("send", raw)
             await self.ws.send(raw)
+            return state
 
     async def read(self):
         raw = await self.ws.recv()

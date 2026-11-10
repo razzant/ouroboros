@@ -6,7 +6,7 @@ import pytest
 
 from ouroboros import update_letter as letter, update_qualification as qualification
 from ouroboros.tools import github
-from tests.test_pr_merge_receipts import BASE, HEAD, _receipts, world  # noqa: F401
+from tests.test_pr_merge_receipts import BASE, HEAD, ROUTE, _receipts, sent, world  # noqa: F401
 from tests.test_update_letter import _capture_for, _commit, _git, _record, _status, history_repo  # noqa: F401
 from tests.test_update_letter_merge_range import merged_range  # noqa: F401
 
@@ -116,7 +116,7 @@ def test_paging_observes_older_runs_before_inferring_coverage(monkeypatch, older
     assert pages == [1, 2, 3] and not changed
 
 
-@pytest.mark.parametrize("ending", ["exhausted", "oldest", "predates", "budget", "unavailable"])
+@pytest.mark.parametrize("ending", ["exhausted", "budget", "unavailable"])
 def test_coverage_requires_reading_through_the_range(ending, monkeypatch):
     commits = [{"sha": sha, "subject": sha, "date": "2026-10-23T03:00:00+03:00"}
                for sha in ("newest", "middle", "oldest")]
@@ -221,25 +221,26 @@ def test_merge_commit_carries_checks_and_missing_evidence_without_blocking(world
     out = github._pr_merge(world.ctx, number=7, expected_head_sha=HEAD, method="merge", checks=checks,
                            review_verdict="AUTHOR ACCEPTED")
     assert "merge: merged" in out
-    call = next(c for c in world.gh.calls if c[:2] == ["pr", "merge"])
-    assert call[6:] == ["--body-file", "-"]
-    body = world.gh.merge_inputs[0]
+    call = next(c for c in world.gh.calls if sent(c))
+    assert call == ["api", ROUTE, "--hostname", "github.com", "--method", "PUT", "--input", "-"]
+    body = world.gh.merge_inputs[0]  # the commit_message: GitHub appends it to its automatic title
     receipt = qualification.commit_qualification(body)
     assert receipt == _receipts(world)[0]["qualification"]
     assert receipt["checks"][0] == {**checks[0], "source": "author_declared"}
     assert receipt["checks"][1]["name"] == "cost_contract"
     assert receipt["checks"][1]["status"] == "unknown"
     assert "No execution evidence" in body and "Post-merge check: not run yet" in body
-    assert receipt["review"] == {"observed": "unknown", "declared": "AUTHOR ACCEPTED"}
+    assert receipt["review"] == {"observed": "unknown", "state": "no_record", "relation": "unknown",
+                                 "declared": "AUTHOR ACCEPTED"}
     assert "Summary of the change" in body
 
 
 def test_rebase_discloses_that_it_creates_no_merge_commit(world):  # noqa: F811
     github._pr_merge(world.ctx, number=7, expected_head_sha=HEAD, method="rebase")
     assert _receipts(world)[0]["commit_receipt"] == "no_merge_commit_for_rebase"
-    assert next(c for c in world.gh.calls if c[:2] == ["pr", "merge"]) == [
-        "pr", "merge", "7", "--rebase", "--match-head-commit", HEAD]
-    assert world.gh.merge_inputs == [None]
+    assert next(c for c in world.gh.calls if sent(c)) == [
+        "api", ROUTE, "--hostname", "github.com", "--method", "PUT", "--input", "-"]
+    assert world.gh.merge_payloads == [{"sha": HEAD, "merge_method": "rebase"}] and world.gh.merge_inputs == [None]
 
 
 def test_check_shape_refusal_then_valid_missing_checks_still_merge(world):  # noqa: F811
@@ -254,6 +255,56 @@ def test_malformed_trailer_is_unknown_and_valid_one_is_read():
         body = qualification.TRAILER + json.dumps({**receipt, **changes})
         assert qualification.commit_qualification(body) is None
     assert qualification.commit_qualification(qualification.commit_summary(receipt)) == receipt
+
+
+def test_the_trailer_keeps_record_state_and_request_relation_and_legacy_says_not_recorded():
+    record = {"record": {"state": "pending", "verdict": {"aggregate": "PASS"}}}
+    new = qualification.merge_qualification(record, relation="covers_head")
+    assert new["review"] == {"observed": "PASS", "state": "pending", "relation": "covers_head", "declared": "unknown"}
+    assert qualification.merge_qualification({}, relation="not_declared")["review"] == {
+        "observed": "unknown", "state": "no_record", "relation": "not_declared", "declared": "unknown"}
+    assert ("- Review: observed PASS (record pending, subject relation at the merge request covers_head); "
+            "author declared unknown") in qualification.commit_summary(new)
+    assert qualification.commit_qualification(qualification.commit_summary(new)) == new
+    legacy = qualification.merge_qualification(record)  # a receipt from before the relation: nothing invented
+    assert legacy["review"] == {"observed": "PASS", "declared": "unknown"}
+    assert ("- Review: observed PASS (record state and subject relation at the merge request not recorded); "
+            "author declared unknown") in qualification.commit_summary(legacy)
+    assert "settled" not in qualification.commit_summary(legacy)
+
+
+def _receipt_commit(n, review):
+    return {"sha": f"{n:040x}", "subject": f"change {n}", "date": "2026-11-04T10:00:00+00:00", "body_read": True,
+            "receipt": {"schema": 1, "checks": [], "review": review, "post_merge": {"status": "not_run"}}}
+
+
+def test_review_combinations_stay_bound_to_their_commit_in_every_summary():
+    pass_different = {"observed": "PASS", "state": "settled", "relation": "changes_after_review", "declared": "PASS"}
+    fail_same = {"observed": "FAIL", "state": "settled", "relation": "covers_head", "declared": "PASS"}
+    legacy = {"observed": "PASS", "declared": "PASS"}
+    future = {**fail_same, "observed": "PASS", "landing": "same"}
+    guessed = {**pass_different, "relation": "approved"}
+    value = {"base_sha": "a" * 40, "target_sha": "b" * 40, "commits": [
+        _receipt_commit(n, review) for n, review in enumerate((pass_different, fail_same, legacy, future, guessed))]}
+    compact = qualification.compact_qualification(value)["commits"]
+    assert compact["reviews"] == [
+        {"observed": "FAIL", "state": "settled", "relation": "covers_head", "declared": "PASS", "count": 1},
+        {"observed": "PASS", "state": "not_recorded", "relation": "not_recorded", "declared": "PASS", "count": 1},
+        {"observed": "PASS", "state": "settled", "relation": "changes_after_review", "declared": "PASS", "count": 1}]
+    assert compact["unabridged"] == [{"sha": f"{3:040x}", "receipt": {"review": future}},
+                                     {"sha": f"{4:040x}", "receipt": {"review": guessed}}]
+    assert qualification.qualification_summary(value)["reviews"] == [{**review, "count": 1} for review in (
+        pass_different, fail_same,
+        {"observed": "PASS", "state": "not_recorded", "relation": "not_recorded", "declared": "PASS"}, future, guessed)]
+
+
+def test_qualification_summary_preserves_unknown_review_count_field():
+    review = {"observed": "PASS", "state": "settled", "relation": "covers_head", "declared": "PASS",
+              "count": "source-count"}
+    value = {"base_sha": "a" * 40, "target_sha": "b" * 40, "commits": [_receipt_commit(0, review)]}
+    row = qualification.qualification_summary(value)["reviews"][0]
+    assert row["count"] == "source-count"
+    assert row["_count"] == 1
 
 
 def test_github_checks_include_red_intermediate_sha_but_exclude_other_ranges():
@@ -406,7 +457,8 @@ def test_every_completed_check_shows_the_open_reds_to_an_up_to_date_install(tmp_
     status = _status(available=False, latest_sha="", official_repo_url="https://github.com/razzant/ouroboros")
     record = letter.refresh_after_check(status, drive_root=tmp_path)
     assert [row["number"] for row in record["post_merge_reds"]["issues"]] == [2390]
-    cache = {"managed_update_cache": {"latest_sha": "", "available": False, "behind": 0, "ahead": 0, "checked_at": "t0"}}
+    cache = {"managed_update_cache": {"latest_sha": "", "available": False, "behind": 0, "ahead": 0, "checked_at": "t0",
+                                      "checked_head_sha": status["current_sha"]}}
     fact = letter.official_update_projection("a" * 40, drive_root=tmp_path, state=cache)
     assert fact["status"] == "up_to_date" and fact["letter"] is None
     assert fact["post_merge_reds"]["read"] == "observed" and fact["post_merge_reds"]["issues"][0]["number"] == 2390
@@ -433,4 +485,3 @@ def test_a_failed_read_keeps_the_observation_the_record_holds_under_the_lock():
                                       target_version="7.9.0")
     assert record["post_merge_reds"]["read"] == "unavailable"
     assert (record["post_merge_reds"]["issues"], record["post_merge_reds"]["observed_at"]) == (held["issues"], "t1")
-

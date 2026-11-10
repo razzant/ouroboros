@@ -8,7 +8,7 @@ import pytest
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
 from tests._live_stack import stack
 from tests._live_stack_page import jpeg as synthetic_frame
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 
 
 @pytest.mark.parametrize('engine,thinking', [('openai', False), ('grok', False), ('gemini', False), ('gemini', True)])
@@ -111,9 +111,60 @@ def test_full_stack_languages_barge_in_mail_sharing_attention_and_real_tool(host
         assert len([r for r in facts if r.get('type') == 'call.offer_wait']) == 1
         assert any(r.get('type') == 'call.input_audio' for r in facts)
         assert any('Synthetic barge-in answered.' in str(r) for r in run.transcript())
-        from ouroboros.working_checkpoint import checkpoint_path
-        saved = json.loads(checkpoint_path(run.root, run.state.ctx.task_id, 1).read_text())
+        from ouroboros.working_checkpoint import read_working
+        saved = read_working(run.root, run.state.ctx.task_id, 1)[1]
         assert any('started showing the screen' in str(r) for r in saved['messages'])
         assert any('Synthetic typed room message.' in str(r) for r in saved['messages'])
         assert any(r.get('tool_call_id') == 'real-read' for r in saved['messages'])
+    asyncio.run(scenario())
+
+
+# Fewer characters than a peer's control may carry bytes, and more UTF-8 bytes than that: 9,000 Cyrillic
+# characters from the owner, a longer answer with emoji from Ouroboros.
+LONG_OWNER = ('Синтетическая длинная реплика владельца ' * 225).strip() + '.'
+LONG_ANSWER = 'Синтетический длинный ответ Ouroboros 🐍. ' * 400
+LONG_INTERRUPTED = 'Синтетический длинный ответ, который прервали 🐍. ' * 400
+LONG_UNFINISHED = 'Синтетический длинный ответ, который не закончился 🐍. ' * 400
+
+
+@pytest.mark.parametrize('engine', ['openai', 'grok', 'gemini'])
+def test_captions_beyond_a_peers_control_bound_keep_the_call_and_their_whole_words(host_world, monkeypatch, engine):
+    assert len(LONG_OWNER) == 9000 and len(LONG_OWNER.encode('utf-8')) > 16 * 1024
+
+    async def scenario():
+        async with stack(host_world, monkeypatch, engine) as run:
+            def words(text):
+                return any(r.get('text', '').endswith(text) for r in run.transcript())
+            run.provider.script.append(('say', LONG_ANSWER))
+            await run.owner_says(LONG_OWNER)
+            await run.wait(lambda: any(v.get('text') == LONG_ANSWER and v.get('final') for v in run.page.controls))
+            await run.quiet()
+            await run.wait(lambda: words(LONG_OWNER) and words(LONG_ANSWER))
+
+            # A slow socket still holds a long caption when the owner barges in: the interrupt's flush reads that queue.
+            hub, send_text, opened = run.call.hub, run.page.send_text, asyncio.Event()
+            async def slow_socket(text):
+                await opened.wait()
+                await send_text(text)
+            run.page.send_text = slow_socket
+            epoch = hub.epoch
+            run.wire.say(LONG_INTERRUPTED, complete=False)
+            run.provider.script.append(('say', 'Synthetic answer after the barge-in.'))
+            saying = asyncio.create_task(run.owner_says('Synthetic words over the long answer.'))
+            await run.wait(lambda: hub.epoch != epoch)
+            opened.set()
+            await saying
+            assert any(v.get('text') == LONG_INTERRUPTED for v in run.page.controls), 'the flush keeps queued captions'
+            await run.wait(lambda: any(v.get('text') == 'Synthetic answer after the barge-in.' and v.get('final')
+                                      for v in run.page.controls))
+            await run.quiet()
+            await run.wait(lambda: words(LONG_INTERRUPTED) and words('Synthetic answer after the barge-in.'))
+
+            # End during a long unfinished answer: the peer has left, and teardown keeps what the provider had sent.
+            run.wire.say(LONG_UNFINISHED, complete=False)
+            await run.wait(lambda: any(v.get('text') == LONG_UNFINISHED for v in run.page.controls))
+        assert run.result[1]['execution_status'] == 'ok', run.result
+        assert run.result[1]['reason_code'] == 'finished', run.result
+        assert not any(r.get('code', 1000) != 1000 for r in run.page.closed)
+        assert any(r.get('text') == '[Partial transcript] ' + LONG_UNFINISHED for r in run.transcript())
     asyncio.run(scenario())

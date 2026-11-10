@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import pytest
 
-from tests.test_composer_capsules_browser import LONG_VALUES, _record
+from tests.test_composer_capsules_browser import LONG_VALUES, _observe_context, _record, _sent
 from tests.test_effort_range_browser import _launch, _open_chat, _shot
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 PROBE = """() => {
     const seen = new WeakSet(), rows = [], observers = [];
@@ -113,6 +113,7 @@ def test_width_show_and_translation_do_not_wait_a_painted_frame(direct_server_wi
             language = {"payload": {"language": "en", "english": True, "entries": {}, "revision": 0}}
             page.route("**/api/ui/i18n", lambda route: route.fulfill(json=language["payload"]))
             page.route("**/api/ui/i18n/missing", lambda route: route.fulfill(json={"ok": True}))
+            _observe_context(page, [_sent("max")])  # Context's closed word is an observed mode; this one agrees with Max
             _open_chat(page, direct_server_with_data["url"], width=1440)
             for width in (360, 600, 340, 1440):
                 _phase(page, f"viewport-{width}")

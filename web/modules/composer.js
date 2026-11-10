@@ -51,7 +51,7 @@ export function composerMarkup() {
                             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
                         </button>
                         <input type="file" id="chat-file-input" class="chat-file-input-hidden" accept="*/*" multiple>
-                        <textarea id="chat-input" placeholder="Message Ouroboros..." rows="1" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+                        <textarea id="chat-input" placeholder="Message Ouroboros..." rows="1" autocorrect="on" autocapitalize="sentences" spellcheck="true"></textarea>
                         <span class="chat-voice-slot" data-composer-voice hidden></span>
                         <div class="chat-send-group">
                             <button class="chat-send-inline ui-hit-area" id="chat-send" title="Send message">Send</button>
@@ -355,7 +355,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
     const modelPicker = pickerEl ? createComposerModelPicker({ el: pickerEl, projectId, save: apiClient.ownerChatModel,
         showToast, onLayout }) : null;
     const ownerControls = createComposerOwnerControls({ row: page.querySelector('.chat-toolbar-row'), box: page, byId, apiFetch, showToast,
-        projectId, saveEffortRange: apiClient.ownerEffortRange,
+        projectId, chatId, saveEffortRange: apiClient.ownerEffortRange,
         saveSubagentsMode: apiClient.ownerSubagentsMode,
         fitValues: () => (modelPicker ? [modelPicker.nameEl()] : []),
         openSettings: () => openSettings?.('agents'), refreshState, onLayout, readingBack });
@@ -478,6 +478,6 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         },
     };
     const contributed = [bindComposerPlus({ composer }), bindComposerChips({ composer, menu: createPlusMenu }),
-        bindVoiceControls({ composer }), bindConversationControls({ composer, page, chatId, ws })];
+        bindVoiceControls({ composer }), bindConversationControls({ composer, page, chatId, ws: ws.socket || ws })];  // a call keeps its frames in a room away
     return composer;
 }

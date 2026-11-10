@@ -34,6 +34,8 @@ class TaskSettingsSnapshot:
     settings: Mapping
     environ: Mapping
     actor_scope: tuple[Path, Mapping] | None = None
+    # Original task projection, before the first private cognition overlay.
+    projected_environ: Mapping | None = None
 
 
 def _next_task_setting(key: str) -> bool:
@@ -156,17 +158,19 @@ def runtime_setting(key: str, default=None):
     """Environment-shaped runtime read; absence in the snapshot stays absent.
 
     A route key (``route_choice.ROUTE_SETTING_KEYS``: model slots, accounts, provider keys) reads the
-    settings document as it is now, in a task or not; every other next-task key keeps the task's snapshot."""
+    settings document as it is now, in a task or not; every other next-task key keeps the task's snapshot.
+    A deployment policy's managed key reads as the policy lets it, whatever the view held."""
+    from ouroboros.deployment_policy import effective_value
     from ouroboros.route_choice import ROUTE_SETTING_KEYS, live_setting
 
     if key in ROUTE_SETTING_KEYS:
         served, value = live_setting(key, default)
         if served:
-            return value
+            return effective_value(key, value)
     snapshot = _TASK_SETTINGS.get()
     if snapshot is not None and _next_task_setting(key):
-        return snapshot.environ.get(key, default)
-    return os.environ.get(key, default)
+        return effective_value(key, snapshot.environ.get(key, default))
+    return effective_value(key, os.environ.get(key, default))
 
 
 def runtime_environ() -> dict[str, str]:
@@ -187,19 +191,21 @@ def runtime_environ() -> dict[str, str]:
                     env.pop(key, None)
                 else:
                     env[key] = snapshot.environ[key]
+    from ouroboros.deployment_policy import effective_environ
     from ouroboros.route_choice import live_environ_overlay
 
     live_environ_overlay(env)  # a model call in a child (vision) uses the current model and key, never a cleared one
+    effective_environ(env)
     return env
 
 
-def _actor_project(scope: tuple[Path, Mapping]) -> str:
+def _actor_project(scope: tuple[Path, Mapping], *, scheduled_room: bool = False) -> str:
     """Current room from lineage or admitted facts, never a working directory."""
     from ouroboros.project_admission import reserved_project_for_chat
     from ouroboros.projects_registry import RoomResolver, get_reserved_project
 
     root, actor = scope
-    if actor.get("presence"):
+    if actor.get("presence") and not scheduled_room:
         return ""
     chat = RoomResolver(root, strict=True)(actor.get("id"), actor.get("parent_task_id"), actor.get("root_task_id"))
     if chat:
@@ -224,21 +230,28 @@ def _with_cognition(snapshot: TaskSettingsSnapshot, cognition: Mapping) -> TaskS
     values = cognition_overrides(cognition)
     values.pop("OUROBOROS_SUBAGENTS_MODE")  # this axis is live, never restored from an actor snapshot
     values["OUROBOROS_CONTEXT_MODE_AUTO_LOW"] = cognition.get("context_mode_auto_low", "false")
+    projected = snapshot.environ if snapshot.projected_environ is None else snapshot.projected_environ
     return replace(snapshot, settings=MappingProxyType({**snapshot.settings, **values}),
-                   environ=MappingProxyType({**snapshot.environ, **values}))
+                   environ=MappingProxyType({**snapshot.environ, **values}),
+                   projected_environ=projected)
 
 
 def _actor_scope(task: Mapping, drive_root: Path) -> tuple[Path, Mapping]:
     from ouroboros.consciousness_authority import is_consciousness_origin
-    from ouroboros.dialogue_provenance import presence_metadata_binding
+    from ouroboros.dialogue_provenance import presence_metadata_binding, presence_record_metadata
 
     metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
     actor = {key: task.get(key) or metadata.get(key) for key in (
         "id", "parent_task_id", "root_task_id", "project_id", "chat_id")}
-    actor["presence"] = bool(task.get("_presence_turn") or presence_metadata_binding(metadata) is not None)
-    actor["autonomous"] = bool(task.get("type") == "evolution" or metadata.get("evolution_root_task_id")
-                               or metadata.get("evolution_transaction") or is_consciousness_origin(metadata)
-                               or metadata.get("work_kind") == "consciousness" or actor["presence"])
+    # The record's own view (its owner door and lineage too): the owner's related work keeps its room.
+    actor["presence"] = bool(task.get("_presence_turn")
+                             or presence_metadata_binding(presence_record_metadata(task)) is not None)
+    # Only the scheduler stamps this origin; descendants and Continue carry it by value. A time-born task follows
+    # its room's Off regardless of author or place. Ordinary wakes, Presence and Evolve retain their own controls.
+    actor["scheduled"] = bool(metadata.get("schedule_writer_kind"))
+    actor["autonomous"] = not actor["scheduled"] and bool(
+        task.get("type") == "evolution" or metadata.get("evolution_root_task_id") or metadata.get("evolution_transaction")
+        or is_consciousness_origin(metadata) or metadata.get("work_kind") == "consciousness" or actor["presence"])
     return (Path(task.get("budget_drive_root") or metadata.get("budget_drive_root") or drive_root),
             MappingProxyType(actor))
 
@@ -296,6 +309,11 @@ def live_effort_range() -> dict[str, str]:
     return read_cognition(root, _actor_project(snapshot.actor_scope), settings=settings)["effort_range"]
 
 
+def _schedule_capped(mode: str, actor: Mapping) -> str:
+    """Work the clock started holds no Swarm request (owner 03.11): Auto, while the room's Off still stops it."""
+    return "auto" if mode == "swarm" and actor.get("scheduled") else mode
+
+
 def live_subagents_mode(*, task: Mapping | None = None, drive_root: Path | None = None,
                         settings: Mapping | None = None) -> str:
     """Live room choice from explicit or bound actor facts; autonomous work keeps its controls."""
@@ -309,7 +327,8 @@ def live_subagents_mode(*, task: Mapping | None = None, drive_root: Path | None 
         return config.normalize_subagents_mode(settings.get("OUROBOROS_SUBAGENTS_MODE"))
     if scope[1].get("autonomous"):
         return "auto"
-    return read_cognition(scope[0], _actor_project(scope), settings=settings)["subagents_mode"]
+    project = _actor_project(scope, scheduled_room=bool(scope[1].get("scheduled")))
+    return _schedule_capped(read_cognition(scope[0], project, settings=settings)["subagents_mode"], scope[1])
 
 
 def record_subagents_admission(task: dict, drive_root: Path, *, settings: Mapping | None = None,
@@ -323,7 +342,8 @@ def record_subagents_admission(task: dict, drive_root: Path, *, settings: Mappin
         cognition = project.get("cognition") if project is not None else None
         mode = ((cognition if isinstance(cognition, Mapping) else {}).get("subagents_mode") if project is not None
                 else settings.get("OUROBOROS_SUBAGENTS_MODE"))
-        mode = "auto" if _actor_scope(task, drive_root)[1].get("autonomous") else normalize_subagents_mode(mode)
+        actor = _actor_scope(task, drive_root)[1]
+        mode = "auto" if actor.get("autonomous") else _schedule_capped(normalize_subagents_mode(mode), actor)
         mode = mode if subagents_availability(settings) == "available" else "off"
     else:
         # Direct turns have no queue admission row. Resolve their accepted room,
@@ -336,9 +356,15 @@ def record_subagents_admission(task: dict, drive_root: Path, *, settings: Mappin
 
 
 def room_subagents_mode_applies() -> bool:
-    """Consciousness and Evolve keep their own controls, including their descendants."""
+    """Consciousness, Presence and Evolve keep their own controls, including their descendants; scheduled work does not."""
     snapshot = _TASK_SETTINGS.get()
     return not (snapshot and snapshot.actor_scope and snapshot.actor_scope[1].get("autonomous"))
+
+
+def actor_is_scheduled() -> bool:
+    """Whether the bound actor is work the clock started, or carries on from it."""
+    snapshot = _TASK_SETTINGS.get()
+    return bool(snapshot and snapshot.actor_scope and snapshot.actor_scope[1].get("scheduled"))
 
 
 def actor_subagents_availability() -> str | None:
@@ -385,30 +411,62 @@ def skill_environ() -> dict:
         with SETTINGS_ENV_LOCK:
             source = dict(os.environ)
     else:
-        source = dict(snapshot.environ)
+        source = dict(snapshot.environ if snapshot.projected_environ is None else snapshot.projected_environ)
     ours = projected_settings(source)
     return {key: value for key, value in source.items() if key not in ours or ours[key] != _value_digest(value)}
 
 
-def skill_settings(settings_reader=None) -> dict:
+def skill_settings(settings_reader=None, *, strict: bool = False) -> dict:
     """What a skill reads: the settings document as it reads now, in a task or not (owner choice A, #1122).
 
-    The one reader behind a skill's ``PluginAPI.get_settings``, its scripts' and companions' environment and the
-    funded-credential disclosure of its handlers; grants and the manifest allowlist filter it afterwards; the
+    The one reader behind a skill's ``PluginAPI.get_settings``, its scripts' and companions' environment, the
+    funded-credential disclosure of its handlers and an explicit ``env_from_settings`` selection of commands,
+    scripts, verification and services; grants and the manifest allowlist filter a skill's view afterwards; the
     task's review reads keep its snapshot while its model, account and key reads share this view
     (``route_choice``, ``runtime_settings``). The loader lets the
     environment stand in for a key the document leaves unset, and a long-lived process still holds what earlier
     projections mirrored there — this task's start, an earlier task's, the server's it inherited — so a key the owner
     cleared or deleted since would come back. The read overlays ``skill_environ`` instead: our mirrored values never
-    stand in, an operator's own variable still does. Nothing here touches the process environment."""
+    stand in, an operator's own variable still does. Nothing here touches the process environment.
+
+    ``strict`` keeps these semantics but raises ``SettingsDocumentUnknown`` for a present document that cannot be
+    read as one object, where the default read falls back to defaults. A reader that reads the document says so by
+    accepting ``strict`` as ``config.load_settings`` does (an out-of-process child's reader, with its operator
+    overlay, does too); one that does not (a fixed snapshot: a catalog's declared inputs, a test) has no document
+    to be unknown and reads as given."""
     from ouroboros import config
 
+    reader = settings_reader or config.load_settings
     with settings_read_environ(skill_environ()):
-        return dict((settings_reader or config.load_settings)() or {})
+        return dict((reader(strict=True) if strict and _reads_strictly(reader) else reader()) or {})
+
+
+def _reads_strictly(reader) -> bool:
+    import inspect
+
+    try:
+        return "strict" in inspect.signature(reader).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def selection_settings(*, settings_reader=None) -> dict:
+    """Current effective Settings for an explicit process selection (#2915).
+
+    Reuse the mirror-safe skill reader and the existing route overlay, without
+    restoring task values. Defaults and operator variables keep their precedence;
+    missing effective keys stay missing. Selection authority belongs to the caller.
+    """
+    from ouroboros.deployment_policy import effective_settings
+    from ouroboros.route_choice import live_settings_overlay
+
+    settings = skill_settings(settings_reader)
+    live_settings_overlay(settings)
+    return effective_settings(settings)
 
 
 def runtime_settings(*, settings_reader=None) -> dict:
-    """Runtime document view; owner writers continue using config.load_settings."""
+    """Task document view; explicit process refs instead read selection_settings."""
     from ouroboros import config
 
     settings = dict((settings_reader or config.load_settings)() or {})
@@ -421,10 +479,11 @@ def runtime_settings(*, settings_reader=None) -> dict:
                 settings.pop(key, None)
             else:
                 settings[key] = copy.deepcopy(snapshot.settings[key])
+    from ouroboros.deployment_policy import effective_settings
     from ouroboros.route_choice import live_settings_overlay
 
     live_settings_overlay(settings)  # route keys read the document as it is now (route_choice)
-    return settings
+    return effective_settings(settings)  # an old snapshot never widens what the deployment manages
 
 
 def task_settings_snapshot(settings: dict, environ: dict) -> TaskSettingsSnapshot:
@@ -510,6 +569,50 @@ def read_settings_json_verified(settings_path: Path, *, behind_writer: bool = Fa
         if expected_settings_sha256():
             raise SettingsIntegrityError("settings snapshot is unreadable") from exc
         return _read_behind_the_writer(settings_path) if behind_writer else None
+
+
+class SettingsDocumentUnknown(RuntimeError):
+    """A present settings document could not be read as one JSON object: its values are unknown, not absent."""
+
+
+def read_settings_json_strict(settings_path: Path, *, behind_writer: bool = False) -> dict | None:
+    """``read_settings_json_verified`` that tells absent from unknown: ``None`` only for a file that does not exist;
+    an unreadable, undecodable or non-object document (JSON ``null`` included) raises ``SettingsDocumentUnknown``
+    after the same single read behind the writer's lock. A pin keeps its typed ``SettingsIntegrityError``."""
+    pinned = bool(expected_settings_sha256())
+    if pinned:
+        value = read_settings_json_verified(settings_path)  # under a pin an absent file is already typed
+    else:
+        try:
+            with settings_path.open("rb") as handle:
+                raw = handle.read()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            if behind_writer:
+                return _strict_behind_the_writer(settings_path)
+            raise SettingsDocumentUnknown("settings document is unreadable") from exc
+        try:
+            value = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            if behind_writer:
+                return _strict_behind_the_writer(settings_path)
+            raise SettingsDocumentUnknown("settings document is not valid JSON") from exc
+    if not isinstance(value, dict):
+        if behind_writer and not pinned:
+            return _strict_behind_the_writer(settings_path)
+        raise SettingsDocumentUnknown("settings document is not an object")
+    return value
+
+
+def _strict_behind_the_writer(settings_path: Path) -> dict | None:
+    from ouroboros import config
+
+    fd = config._acquire_settings_lock()
+    try:
+        return read_settings_json_strict(settings_path)
+    finally:
+        config._release_settings_lock(fd)
 
 
 def _read_behind_the_writer(settings_path: Path):

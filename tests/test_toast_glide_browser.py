@@ -14,7 +14,7 @@ from tests import test_subscription_setup_browser as setup_browser
 from tests.test_design_system_gate_browser import save_evidence, seed_page, settle
 
 subscription_ui = setup_browser.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.fixture(params=['webkit', 'chromium'])
@@ -119,7 +119,12 @@ def _key_scroll(page, key, to_end):
     raise AssertionError((key, 'the keyboard did not scroll the notices there', state))
 
 
-@pytest.mark.parametrize('width,height', [(320, 568), (1280, 800)], ids=['phone', 'wide'])
+# The wide window has room for both warnings at the body type (14 px, #2886 4ace565ef), their shadow room included,
+# under a mouse or a finger (whose 44 px close button narrows their words).
+WIDE = (1280, 1000)
+
+
+@pytest.mark.parametrize('width,height', [(320, 568), WIDE], ids=['phone', 'wide'])
 def test_two_kept_warnings_are_reached_whole_by_wheel_and_keyboard(toast_ui, tmp_path, width, height):
     """Once both "Resuming" lines time out, the two gap warnings stay. On a phone the page's stack ends above the
     screen's bottom and scrolls: a wheel over a notice reaches the second close button and the last word, the keyboard
@@ -213,7 +218,7 @@ def test_the_kept_column_follows_the_window_and_scrolls_from_its_margin(toast_ui
             settle(page)
         facts['margin_wheel'] = page.evaluate(SCROLL)
         assert facts['margin_wheel']['top'] > 0, ('a wheel over the margin scrolls the cut column', facts)
-        page.set_viewport_size({'width': 1280, 'height': 800})
+        page.set_viewport_size({'width': WIDE[0], 'height': WIDE[1]})
         page.wait_for_function("() => !document.getElementById('toast-stack').hasAttribute('tabindex')")
         facts['wide'] = wide = page.evaluate(REACH)
         first = wide['toasts'][0]

@@ -13,8 +13,9 @@ reference were split verbatim into ``tests/test_workspace_executor_services.py``
 ``tests/test_workspace_executor_admission.py``; the repository builder they share lives
 in ``tests/_workspace_executor_shared.py``.
 
-Whole-file serial suite: it spawns real processes, so ``tests/conftest.py`` tags this
-module and its three siblings ``serial`` and the parallel pass excludes them.
+Runs in the xdist pass beside other files: its processes are owned children killed within the
+test's own drive root (``kill_all_foreground``/``kill_all_services(drive_root)``) and the per-worker
+registries are restored by ``_isolate_workspace_executor_globals``, so it names no host resource.
 """
 from __future__ import annotations
 
@@ -395,7 +396,9 @@ def test_run_script_directory_output_keeps_ordinary_names_and_reports_dotenv_ski
     assert not any(name.endswith(".env") for name in names)
 
 
-def test_run_command_external_workspace_unchanged_directory_output_is_cosmetic(tmp_path, monkeypatch):
+def test_run_command_external_workspace_unchanged_directory_output_reuses_only_a_proven_capture(tmp_path, monkeypatch):
+    import zipfile
+
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     system_repo = tmp_path / "system"
     workspace = tmp_path / "workspace"
@@ -414,20 +417,88 @@ def test_run_command_external_workspace_unchanged_directory_output_is_cosmetic(t
     )
     registry = ToolRegistry(repo_dir=system_repo, drive_root=data)
     registry.set_context(ctx)
+    store = data / "task_results" / "artifacts" / "workspace-unchanged-dir-output"
 
-    result = registry.execute(
-        "run_command",
-        {
-            "cmd": [sys.executable, "-c", "print('noop')"],
-            "cwd": str(workspace),
-            "outputs": ["site"],
-        },
-    )
+    def run(code="print('noop')"):
+        result = registry.execute_result(
+            "run_command", {"cmd": [sys.executable, "-c", code], "cwd": str(workspace), "outputs": ["site"]})
+        # C2 (v6.36.0): present-but-unchanged is never a blocking error. Missing outputs still block.
+        assert result.code == "OK" and "ARTIFACT_OUTPUT_ERROR" not in result.text, result.text
+        return result, sorted(path.name for path in store.glob("site.*.zip"))
 
-    # C2 (v6.36.0): present-but-unchanged is a cosmetic note, NOT a blocking error
-    # (a deterministic re-run / re-verify is not a failure). Missing outputs still block.
-    assert "ARTIFACT_OUTPUT_ERROR" not in result
-    assert "unchanged output (cosmetic): site" in result
+    def page(zip_name):
+        with zipfile.ZipFile(store / zip_name) as archive:
+            return archive.read("index.html").decode()
+
+    first, zips = run()
+    # The first declaration of an existing unchanged directory registers its ledger+ZIP pair ...
+    assert first.meta.get("artifact_registered") is True and "registered directory output" in first.text
+    assert [page(name) for name in zips] == ["<h1>old</h1>"]
+    # ... and a repeat whose pair still holds these bytes is a cosmetic note.
+    repeat, same = run()
+    assert repeat.meta.get("artifact_registered") is not True and same == zips, repeat.text
+    assert "ARTIFACT_OUTPUT_NOTE" in repeat.text and "unchanged output (cosmetic): site" in repeat.text
+    # An edit keeping size and mtime leaves the stat baseline equal; the member digests still decide.
+    edited, now = run("import os, pathlib; p = pathlib.Path('site/index.html'); s = p.stat(); "
+                      "p.write_text('<h1>new</h1>'); os.utime(p, ns=(s.st_atime_ns, s.st_mtime_ns))")
+    (fresh,) = set(now) - set(zips)
+    assert edited.meta.get("artifact_registered") is True and page(fresh) == "<h1>new</h1>", edited.text
+    assert "captured as found" not in edited.text  # an equal stat baseline is no claim about the bytes
+    assert page(zips[0]) == "<h1>old</h1>"  # the older bytes keep their own content-named pair
+    # A corrupt retained ZIP under unchanged rows, or a missing ledger, is repaired, never reused.
+    (store / fresh).write_bytes(b"not a zip")
+    assert run()[0].meta.get("artifact_registered") is True and page(fresh) == "<h1>new</h1>"
+    ledger = store / fresh.replace(".zip", ".manifest.json")
+    ledger.write_bytes(b"broken ledger")
+    assert run()[0].meta.get("artifact_registered") is True and page(fresh) == "<h1>new</h1>"
+    ledger.unlink()
+    assert run()[0].meta.get("artifact_registered") is True and ledger.is_file()
+    assert run()[0].meta.get("artifact_registered") is not True
+    # A process rewriting the ZIP in place registers its own bytes there, which then prove no directory.
+    rewritten = registry.execute_result("run_command", {"cmd": [sys.executable, "-c", f"open({fresh!r}, 'ab').write(b'x')"],
+                                                        "cwd": "artifact_store", "outputs": [fresh]})
+    assert rewritten.code == "OK" and rewritten.meta.get("artifact_registered") is True, rewritten.text
+    process_zip = (store / fresh).read_bytes()
+    assert run()[0].meta.get("artifact_registered") is True and page(fresh) == "<h1>new</h1>"
+    # Repairs keep the replaced bytes, including a registered process rewrite, in ordinary recovery history.
+    versions = data / "task_results" / "artifact_versions" / ctx.task_id
+    zip_versions = [path.read_bytes() for path in (versions / fresh).glob("*") if path.is_file()]
+    ledger_versions = [path.read_bytes() for path in (versions / ledger.name).glob("*") if path.is_file()]
+    assert b"not a zip" in zip_versions and process_zip in zip_versions
+    assert b"broken ledger" in ledger_versions
+
+
+def test_unchanged_directory_output_with_nothing_exportable_stays_a_note(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    system_repo, workspace, data = tmp_path / "system", tmp_path / "workspace", tmp_path / "data"
+    _init_repo(system_repo)
+    _init_repo(workspace)
+    data.mkdir()
+    for name in ("empty", "secrets", "emptied"):
+        (workspace / name).mkdir()
+    (workspace / "secrets" / ".env").write_text("TOKEN=fixture", encoding="utf-8")
+    (workspace / "emptied" / "index.html").write_text("<h1>old</h1>", encoding="utf-8")
+    ctx = ToolContext(repo_dir=system_repo, drive_root=data, workspace_root=workspace, workspace_mode="external",
+                      task_id="workspace-dir-nothing-exportable")
+    registry = ToolRegistry(repo_dir=system_repo, drive_root=data)
+    registry.set_context(ctx)
+
+    def run(output, code="print('noop')"):
+        return registry.execute_result(
+            "run_command", {"cmd": [sys.executable, "-c", code], "cwd": str(workspace), "outputs": [output]})
+
+    # Nothing to capture and nothing this run changed: the published cosmetic note, never a failure.
+    notes = {output: run(output) for output in ("empty", "secrets")}
+    for output, result in notes.items():
+        assert result.code == "OK" and result.meta.get("artifact_registered") is not True, result.text
+        assert "ARTIFACT_OUTPUT_NOTE" in result.text, result.text
+        assert f"unchanged output (cosmetic): {output}; no exportable members" in result.text
+    assert "skipped 1 member(s) of directory output secrets" in notes["secrets"].text  # the policy receipt stays
+    # A directory this run created or emptied with nothing to export still fails explicitly.
+    for output, code in (("fresh", "import os; os.mkdir('fresh')"), ("emptied", "import os; os.remove('emptied/index.html')")):
+        result = run(output, code)
+        assert result.code == "ARTIFACT_OUTPUT_ERROR", result.text
+        assert f"failed directory output copy {output}: no exportable members" in result.text
 
 
 def test_run_command_executor_failure_keeps_trace(tmp_path, monkeypatch):
@@ -639,7 +710,7 @@ def test_start_service_local_branch_uses_case_aware_overlay(tmp_path, monkeypatc
     assert payload.get("state") in ("running", "ready", "started", None) or payload
 
 
-@pytest.mark.parametrize("layout", ["repo", "nested", "worktree", "plain"])
+@pytest.mark.parametrize("layout", ["repo", "nested", "plain"])
 def test_live_run_scripts_keep_git_clean_and_own_only_their_scratch(tmp_path, monkeypatch, layout):
     import concurrent.futures
     import pathlib

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from pathlib import Path
 
 import pytest
@@ -15,11 +14,11 @@ pytest_plugins = ("tests.test_ui_smoke_playwright",)
 
 ANTHROPIC = "sk-ant-api03-SYNTHETIC-" + "0123456789abcdef" * 7 + "-END"
 CUSTOM = "synthetic-custom-" + "ABCDEF0123456789" * 6 + "-END"
+OWN = "synthetic-own-" + "0A1B2C3D4E5F6789" * 6 + "-END"
 MCP = "synthetic-mcp-" + "fedcba9876543210" * 6 + "-END"
 ADDED = "sk-or-v1-SYNTHETIC-added-" + "13579bdf" * 8 + "-END"
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_saved_secret_show_preserves_settings_and_drafts(direct_server_with_data, engine):
@@ -29,7 +28,7 @@ def test_saved_secret_show_preserves_settings_and_drafts(direct_server_with_data
     server["stop_server"]()
     settings_path = server["data_dir"] / "settings.json"
     settings = json.loads(settings_path.read_text(encoding="utf-8"))
-    settings.update(ANTHROPIC_API_KEY=ANTHROPIC, TEST_REVEAL_KEY=CUSTOM,
+    settings.update(ANTHROPIC_API_KEY=ANTHROPIC, TEST_REVEAL_KEY=CUSTOM, TEST_OWN_KEY=OWN,
                     GITHUB_TOKEN="synthetic-github-token", MCP_ENABLED=False,
                     OUROBOROS_CONNECTIONS=[{"kind": "openrouter", "name": "claude-credits",
                                             "label": "Claude credits", "api_key": ADDED}],
@@ -102,7 +101,7 @@ def test_saved_secret_show_preserves_settings_and_drafts(direct_server_with_data
             assert shown_box["x"] + shown_box["width"] <= toggle.bounding_box()["x"], (masked_box, shown_box)
             expect(field).to_have_value(mask)
             expect(field).to_have_attribute("type", "password")
-            expect(page.locator("#settings-unsaved-indicator")).not_to_have_class(re.compile(r"\bis-visible\b"))
+            expect(page.locator(".settings-footer")).to_have_attribute("data-draft", "clean")
             assert saves == [] and reveals == [{"key": "ANTHROPIC_API_KEY"}]
             anthropic_card.locator('[data-provider-test="anthropic"]').click()
             expect(anthropic_card.locator("[data-provider-test-status]")).to_contain_text("Works")
@@ -132,30 +131,38 @@ def test_saved_secret_show_preserves_settings_and_drafts(direct_server_with_data
             added.locator(".secret-toggle").click()
             expect(added.locator(".settings-secret-value")).to_have_text(ADDED)
             assert reveals[-1] == {"connection": "openrouter@claude-credits", "field": "api_key"}
-            expect(page.locator("#settings-unsaved-indicator")).not_to_have_class(re.compile(r"\bis-visible\b"))
+            expect(page.locator(".settings-footer")).to_have_attribute("data-draft", "clean")
             added.locator(".secret-toggle").click()
             expect(added.locator(".settings-secret-value")).to_be_hidden()
 
             # Every top-level consumer uses the same complete view, including dynamic rows. A provider
-            # key has its one input in Accounts; Secrets draws no second one.
+            # key has its one input in Accounts; Secrets draws no second one. A key a skill asked for is
+            # drawn once, under its asker; an owner's own key is a custom row.
             page.click('[data-settings-tab="secrets"]')
             expect(page.locator('#page-settings [data-secret-setting="ANTHROPIC_API_KEY"]')).to_have_count(1)
-            custom = page.locator('[data-custom-secret-row][data-original-key="TEST_REVEAL_KEY"]')
-            custom.locator("[data-row-secret-toggle]").click()
-            expect(custom.locator(".settings-secret-value")).to_have_text(CUSTOM)
-            custom.locator("[data-custom-secret-key]").fill("RENAMED_REVEAL_KEY")
-            custom.locator("[data-row-secret-toggle]").click()
-            expect(custom.locator(".settings-secret-value")).to_have_text(CUSTOM)
-            expect(custom.locator(".settings-secret-source")).to_have_text("Saved value for TEST_REVEAL_KEY")
-            assert reveals[-1] == {"key": "TEST_REVEAL_KEY"}
-            custom.locator("[data-custom-secret-key]").fill("TEST_REVEAL_KEY")
             requested = page.locator("#skill-requested-secrets")
+            expect(requested.locator('[data-secret-setting="TEST_REVEAL_KEY"]')).to_have_count(1)
+            expect(page.locator('[data-custom-secret-row][data-original-key="TEST_REVEAL_KEY"]')).to_have_count(0)
+            custom = page.locator('[data-custom-secret-row][data-original-key="TEST_OWN_KEY"]')
+            custom.locator("[data-row-secret-toggle]").click()
+            expect(custom.locator(".settings-secret-value")).to_have_text(OWN)
+            custom.locator("[data-custom-secret-key]").fill("RENAMED_OWN_KEY")
+            custom.locator("[data-row-secret-toggle]").click()
+            expect(custom.locator(".settings-secret-value")).to_have_text(OWN)
+            expect(custom.locator(".settings-secret-source")).to_have_text("Saved value for TEST_OWN_KEY")
+            assert reveals[-1] == {"key": "TEST_OWN_KEY"}
+            custom.locator("[data-custom-secret-key]").fill("TEST_OWN_KEY")
             requested.locator("[data-row-secret-toggle]").click()
             expect(requested.locator(".settings-secret-value")).to_have_text(CUSTOM)
-            expect(page.locator("#settings-unsaved-indicator")).not_to_have_class(re.compile(r"\bis-visible\b"))
+            assert reveals[-1] == {"key": "TEST_REVEAL_KEY"}
+            expect(page.locator(".settings-footer")).to_have_attribute("data-draft", "clean")
 
             page.click('[data-settings-tab="advanced"]')
             mcp = page.locator("[data-mcp-card]").first
+            edit = mcp.locator("[data-mcp-edit]")  # a saved server is a row; its form opens behind Edit
+            assert not edit.evaluate("details => details.open")
+            edit.locator(":scope > summary").click()
+            expect(edit).to_have_attribute("open", "")
             mcp.locator("[data-mcp-header-toggle]").click()
             expect(mcp.locator(".settings-secret-value")).to_have_text(MCP)
             assert reveals[-1] == {"mcp_server_id": "saved_mcp"}
@@ -169,9 +176,9 @@ def test_saved_secret_show_preserves_settings_and_drafts(direct_server_with_data
             page.click("#btn-save-settings")
             expect(page.locator("#settings-status")).to_contain_text("Settings saved", timeout=20_000)
             assert len(saves) == 1
-            assert "ANTHROPIC_API_KEY" not in saves[0] and "TEST_REVEAL_KEY" not in saves[0]
+            assert all(key not in saves[0] for key in ("ANTHROPIC_API_KEY", "TEST_REVEAL_KEY", "TEST_OWN_KEY"))
             assert saves[0]["MCP_SERVERS"][0]["auth_token"] == MCP[:8] + "..."
-            assert all(value not in json.dumps(saves[0]) for value in (ANTHROPIC, CUSTOM, MCP, ADDED))
+            assert all(value not in json.dumps(saves[0]) for value in (ANTHROPIC, CUSTOM, OWN, MCP, ADDED))
             assert "OUROBOROS_CONNECTIONS" not in saves[0], "an untouched added key travels in no save"
 
             # A real edit in Accounts survives Show: a draft is shown as typed, never as the saved key.
@@ -197,13 +204,13 @@ def test_saved_secret_show_preserves_settings_and_drafts(direct_server_with_data
             expect(custom.locator("[data-row-secret-toggle]")).to_have_text("Hide")
             custom.locator("[data-row-secret-clear]").click()
             assert held
-            held.pop().fulfill(json={"value": CUSTOM})
+            held.pop().fulfill(json={"value": OWN})
             expect(custom.locator(".settings-secret-value")).to_be_hidden()
             expect(custom.locator("[data-custom-secret-value]")).to_have_value("")
             behavior["reveal"] = "real"
             page.click("#btn-save-settings")
             expect(page.locator("#settings-status")).to_contain_text("Settings saved", timeout=20_000)
-            assert saves[-1]["TEST_REVEAL_KEY"] == ""
+            assert saves[-1]["TEST_OWN_KEY"] == ""
 
             # Read failure stays local and retryable, without changing the key or dirty state.
             github = page.locator("#s-secret-github-token").locator("..")
@@ -215,14 +222,13 @@ def test_saved_secret_show_preserves_settings_and_drafts(direct_server_with_data
             behavior["reveal"] = "real"
             github.locator(".secret-toggle").click()
             expect(github.locator(".settings-secret-value")).to_have_text("synthetic-github-token")
-            expect(page.locator("#settings-unsaved-indicator")).not_to_have_class(re.compile(r"\bis-visible\b"))
+            expect(page.locator(".settings-footer")).to_have_attribute("data-draft", "clean")
             page.click("#btn-reload-settings")
             expect(github.locator(".settings-secret-value")).to_be_hidden()
         finally:
             browser.close()
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_settings_paints_and_saves_while_the_installed_skill_list_is_held(direct_server_with_data, engine):
@@ -278,10 +284,10 @@ def test_settings_paints_and_saves_while_the_installed_skill_list_is_held(direct
             expect(page.locator("#btn-save-settings")).to_be_enabled()
             page.click('[data-settings-tab="advanced"]')  # the repo field lives on Advanced
             page.locator("#s-gh-repo").fill("owner/held-proof")
-            expect(page.locator("#settings-unsaved-indicator")).to_have_class(re.compile(r"\bis-visible\b"))
+            expect(page.locator(".settings-footer")).to_have_attribute("data-draft", "dirty")
             held.pop().fulfill(json=listing)
             expect(page.locator("#s-gh-repo")).to_have_value("owner/held-proof")
-            expect(page.locator("#settings-unsaved-indicator")).to_have_class(re.compile(r"\bis-visible\b"))
+            expect(page.locator(".settings-footer")).to_have_attribute("data-draft", "dirty")
             # A confirmed Save waits for the settings document only: its reload's list read stays
             # held, yet the save completes, Save is usable again and the owner can leave the page.
             page.click("#btn-save-settings")
@@ -293,7 +299,7 @@ def test_settings_paints_and_saves_while_the_installed_skill_list_is_held(direct
                 page.wait_for_timeout(50)
             assert len(held) == 1, "the post-save reload reads the list once more, still held"
             expect(page.locator("#btn-save-settings")).to_be_enabled()
-            expect(page.locator("#settings-unsaved-indicator")).not_to_have_class(re.compile(r"\bis-visible\b"))
+            expect(page.locator(".settings-footer")).to_have_attribute("data-draft", "clean")
             page.click('[data-nav-page="chat"]')
             expect(page.locator("#page-chat")).to_be_visible(timeout=10_000)
             behavior["hold"] = False

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import math
 import os
@@ -36,6 +37,10 @@ class TaskTimeoutCLIError(CLIError):
 
 class ConnectionCLIError(CLIError):
     pass
+
+
+class StreamInterruptedCLIError(ConnectionCLIError):
+    """An answered event stream that broke off: a read timeout, reset or truncated response."""
 
 
 class OuroborosHTTPClient:
@@ -115,6 +120,9 @@ class OuroborosHTTPClient:
             raise CLIError(f"HTTP {exc.code}: {raw}") from exc
         except urllib.error.URLError as exc:
             raise ConnectionCLIError(f"cannot stream from Ouroboros server at {self.base_url}: {exc}") from exc
+        except (TimeoutError, ConnectionError, http.client.HTTPException) as exc:
+            raise StreamInterruptedCLIError(
+                f"stream from Ouroboros server at {self.base_url} broke off: {exc or type(exc).__name__}") from exc
 
 
 def _server_command(args: argparse.Namespace) -> int:
@@ -160,7 +168,7 @@ def _status_command(args: argparse.Namespace) -> int:
         _print_json({"health": health, "state": state})
         return 0
     print(f"Ouroboros {health.get('version', '?')} at {client.base_url}")
-    print(f"branch={state.get('branch', '?')} sha={state.get('sha', '?')} workers={state.get('workers_alive', 0)}/{state.get('workers_total', 0)}")
+    print(f"branch={state.get('branch', '?')} sha={state.get('sha', '?')} worker_slots={state.get('workers_alive', 0)}/{state.get('workers_total', 0)} (project pool and conversation lane; inline carriers may be thread-backed)")
     print(f"pending={state.get('pending_count', 0)} running={state.get('running_count', 0)} runtime_mode={state.get('runtime_mode', '?')}")
     return 0
 
@@ -878,6 +886,9 @@ def _watch_task(
     Streams with POST v2 (resumable cursor); falls back to GET with a sequence
     number only when the first connection, before any event, fails with HTTP 405.
     Replays are deduplicated by log identity over the most recent 4096 identities.
+    A stream that broke off after its cursor moved reconnects from the last event
+    consumed; one that broke off without moving it is a connection error, so a
+    failure that recurs at the same place is reported, never retried forever.
     """
     cursor: Optional[dict] = None
     legacy_seq = 0
@@ -899,6 +910,7 @@ def _watch_task(
             request_timeout = max(1.0, min(40.0, remaining + 1.0))
         path = f"/api/tasks/{urllib.parse.quote(task_id)}/events"
         saw_event = False
+        resumed_from = (cursor, legacy_seq)
         try:
             events = (client.stream_sse(f"{path}?cursor={legacy_seq}&wait={wait_param}", timeout=request_timeout)
                       if legacy else client.stream_sse(path, timeout=request_timeout,
@@ -933,6 +945,11 @@ def _watch_task(
                         raise CLIError("v2 task event is missing its cursor")
                     cursor = next_cursor
                 legacy_seq = max(legacy_seq, int(event.get("seq") or legacy_seq))
+        except StreamInterruptedCLIError:
+            if deadline is not None and time.time() >= deadline:
+                raise TaskTimeoutCLIError(f"task {task_id} did not finish within {timeout_sec:g}s")
+            if (cursor, legacy_seq) == resumed_from:
+                raise  # nothing this connection delivered moved the stream
         except CLIError as exc:
             if (first_connection and not saw_event and not legacy
                     and isinstance(exc.__cause__, urllib.error.HTTPError) and exc.__cause__.code == 405):
@@ -1026,7 +1043,8 @@ def _patch_from_result(
         patch_artifact = next((
             artifact
             for artifact in artifacts
-            if str(artifact.get("name") or pathlib.Path(str(artifact.get("path") or "")).name) == "workspace.patch"
+            if artifact.get("kind") != "workspace_capture_history"
+            and str(artifact.get("name") or pathlib.Path(str(artifact.get("path") or "")).name) == "workspace.patch"
         ), None)
     if patch_artifact is not None:
         patch_status = str(patch_artifact.get("status") or "").lower()
@@ -1035,7 +1053,8 @@ def _patch_from_result(
         if patch_status == "failed":
             raise PatchCLIError("workspace patch artifact failed")
         name = str(patch_artifact.get("name") or pathlib.Path(str(patch_artifact.get("path") or "")).name or "workspace.patch")
-        raw = client.get_bytes(f"/api/tasks/{urllib.parse.quote(task_id)}/artifacts/{urllib.parse.quote(name)}")
+        selector = "?" + urllib.parse.urlencode({"relpath": patch_artifact["relpath"]}) if "/" in str(patch_artifact.get("relpath", "")) else ""
+        raw = client.get_bytes(f"/api/tasks/{urllib.parse.quote(task_id)}/artifacts/{urllib.parse.quote(name)}{selector}")
         if strict and not raw:
             raise PatchCLIError("workspace patch artifact is empty")
         return raw.decode("utf-8", errors="replace")
@@ -1043,8 +1062,9 @@ def _patch_from_result(
         manifest_artifact = next((item for item in artifacts if item.get("kind") == "workspace_patch_manifest"), None)
         if manifest_artifact is not None:
             name = str(manifest_artifact.get("name") or "workspace_patch.json")
+            selector = "?" + urllib.parse.urlencode({"relpath": manifest_artifact["relpath"]}) if "/" in str(manifest_artifact.get("relpath", "")) else ""
             manifest = json.loads(client.get_bytes(
-                f"/api/tasks/{urllib.parse.quote(task_id)}/artifacts/{urllib.parse.quote(name)}"))
+                f"/api/tasks/{urllib.parse.quote(task_id)}/artifacts/{urllib.parse.quote(name)}{selector}"))
             if manifest.get("capture_kind") in {"directory_direct", "engine_directory"} or manifest.get("file_outputs"):
                 raise PatchCLIError(
                     f"This result is delivered as complete files rather than a Git patch; inspect {name} and its file references.")

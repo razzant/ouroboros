@@ -170,9 +170,11 @@ def scheduled_origin(ctx: Any) -> str:
     that root's origin and nothing further back. Absent or malformed grants nothing.
     An unreadable receipt grants nothing NOW and is read again next time: only what a
     completed read showed is remembered for this actor, never a transient fault.
-    Disclosed cost: a folderless readonly helper copies every permitted lineage file
-    (``delegate_readonly_inputs``), so each such start copies the origin's whole
-    ``task_drive``/``artifact_store``, and one unreadable origin file refuses it.
+    Disclosed default cost: each folderless readonly start without a nonempty ``input_files``
+    selection stages every permitted lineage file (``delegate_readonly_inputs``), the origin's
+    whole ``task_drive``/``artifact_store`` included: a clone where the volume shares blocks,
+    else a full stream; one unreadable origin file refuses it. A nonempty selection replaces
+    this automatic walk.
     """
     meta = getattr(ctx, "task_metadata", None)
     root_id = str((meta if isinstance(meta, dict) else {}).get("root_task_id") or getattr(ctx, "task_id", "") or "")

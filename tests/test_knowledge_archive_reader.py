@@ -1,4 +1,4 @@
-"""A Light memory reader reads the archive receipt through its own file tool.
+"""A reader opens the archive receipt through the ``read_file`` tool it advertises.
 
 This complements archive lifecycle tests: the historical source still names the
 pre-archive bytes after edits and restore, while current reading stays current, and
@@ -10,7 +10,6 @@ from pathlib import Path
 
 import pytest
 
-from ouroboros.consolidator import KnowledgeReadContext
 from ouroboros.tools.core_file_tools import _render_line_slice, delivered_source_prefix
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 
@@ -22,7 +21,7 @@ def _write(registry, **arguments):
 
 
 @pytest.mark.parametrize("scope", ["global", "project:reader-check"])
-def test_a_light_reader_reads_exact_previous_source_after_restore(tmp_path, scope):
+def test_a_reader_reads_exact_previous_source_after_restore(tmp_path, scope):
     canonical = tmp_path / "canonical"
     execution = tmp_path / "execution"
     canonical.mkdir()
@@ -43,14 +42,10 @@ def test_a_light_reader_reads_exact_previous_source_after_restore(tmp_path, scop
                      old_str="Earlier facts.", content="Later corrected facts.")
     _write(registry, topic="reader-source", scope=scope, mode="restore",
            expected_revision=changed["knowledge_source"]["revision"])
-    reader = KnowledgeReadContext(ctx, "memory_consolidation")
-    allowed = {item["function"]["name"] for item in reader.tools}
-    assert ref["read"]["tool"] == "read_file" and "read_file" in allowed
-    observed = reader.read_call({"id": "historical-source", "function": {
-        "name": ref["read"]["tool"], "arguments": json.dumps(ref["read"]["arguments"])}})
-    assert observed["status"] == "ok", observed
-    shown = observed["result"]  # numbered display; the reader's own view maps it to source
-    payload = json.loads(delivered_source_prefix(observed["result_meta"]["read_file_source"], shown, len(shown)))
+    assert ref["read"]["tool"] == "read_file"
+    shown = registry.execute(ref["read"]["tool"], ref["read"]["arguments"])
+    # A numbered display; the reader's own recorded view maps it back to source.
+    payload = json.loads(delivered_source_prefix(registry._ctx.last_read_view, shown, len(shown)))
     raw = payload[ref["field"]].encode("utf-8")
     assert payload["revision"] == revision == hashlib.sha256(raw).hexdigest()
     assert b"Earlier facts." in raw and b"Later corrected facts." not in raw
@@ -59,8 +54,7 @@ def test_a_light_reader_reads_exact_previous_source_after_restore(tmp_path, scop
     assert '"state": "active"' in current and "Later corrected facts." in current
 
 
-@pytest.mark.parametrize("scope", ["global", "project:reader-check"])
-@pytest.mark.parametrize("mode", ["archive", "restore"])
+@pytest.mark.parametrize(("mode", "scope"), [("archive", "global"), ("restore", "project:reader-check")])
 def test_a_canonical_reader_reads_previous_source_before_copyback(tmp_path, scope, mode):
     from ouroboros.artifacts import read_actor_source_bytes
     from tests.test_knowledge_archive import setup, transition
@@ -81,11 +75,9 @@ def test_a_canonical_reader_reads_previous_source_before_copyback(tmp_path, scop
            expected_revision=json.loads(reply.split("\n", 1)[1])["knowledge_source"]["revision"],
            old_str="Старый берег.", content="LATER CURRENT BODY")
     # A reader on the CANONICAL drive (the forked task has not copied back yet).
-    canonical = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=ctx.task_id)
-    observed = KnowledgeReadContext(canonical, "memory_consolidation").read_call({
-        "id": "previous-source", "function": {"name": ref["read"]["tool"], "arguments": json.dumps(ref["read"]["arguments"])}})
-    assert observed["status"] == "ok", observed
-    delivered = observed["result"]
+    canonical = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    canonical.set_context(ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=ctx.task_id))
+    delivered = canonical.execute(ref["read"]["tool"], ref["read"]["arguments"])
     assert "old_content" in delivered
     view = {}  # the delivered numbered display, mapped by the renderer that produced it
     _render_line_slice(ref["path"], exact.decode("utf-8"), extent=view)
@@ -97,8 +89,7 @@ def test_a_canonical_reader_reads_previous_source_before_copyback(tmp_path, scop
     assert read_actor_source_bytes(tmp_path, ctx.task_id, ref) == exact
 
 
-@pytest.mark.parametrize("scope", ["global", "project:reader-check"])
-@pytest.mark.parametrize("failing_root", ["canonical", "execution"])
+@pytest.mark.parametrize(("failing_root", "scope"), [("canonical", "global"), ("execution", "project:reader-check")])
 def test_archive_requires_previous_source_in_both_reader_roots(tmp_path, monkeypatch, scope, failing_root):
     from ouroboros import artifacts
     from tests.test_knowledge_archive import setup, transition

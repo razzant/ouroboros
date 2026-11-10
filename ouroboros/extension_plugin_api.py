@@ -38,6 +38,7 @@ from ouroboros.contracts.plugin_api import (
     normalize_extension_route_methods,
 )
 from ouroboros.event_bus import VALID_TOPICS as VALID_EVENT_TOPICS, get_global_event_bus
+from ouroboros.deployment_extensions import discloses_failure
 from ouroboros.extension_companion import companion_spawn_env, CompanionDescriptor, get_global_supervisor, is_server_process
 from ouroboros.extension_isolated_deps import (
     async_isolated_site_dirs_scope,
@@ -53,6 +54,7 @@ from ouroboros.extension_registry_state import (
     _StagedRegistrations,
     _StagedSupervisedTask,
     _extensions,
+    _lifecycle_lock_for,
     _load_failures,
     _lock,
     _record_companion_name,
@@ -84,7 +86,7 @@ from ouroboros.node_runtime import (
     skill_node_argv,
 )
 from ouroboros.provider_models import MODEL_PROVIDER_CREDENTIAL_KEYS
-from ouroboros.settings_integrity import skill_settings
+from ouroboros.settings_integrity import SettingsDocumentUnknown, skill_settings
 from ouroboros.skill_loader import (
     compute_content_hash,
     requested_core_setting_keys,
@@ -596,7 +598,7 @@ class PluginAPIImpl:
                 except Exception:
                     restarts += 1
                     if spec.restart_policy != "on_failure" or restarts > spec.max_restarts:
-                        log.warning("supervised task %s/%s stopped after failure", self._skill, spec.name, exc_info=True)
+                        log.warning("supervised task %s/%s stopped after failure", self._skill, spec.name, exc_info=discloses_failure(self._skill))
                         return
                     await asyncio.sleep(max(0.1, float(spec.backoff_seconds)))
 
@@ -719,7 +721,7 @@ class PluginAPIImpl:
             try:
                 broadcaster(payload)
             except Exception:
-                log.warning("extension %s WS broadcast failed for %s", self._skill, full, exc_info=True)
+                log.warning("extension %s WS broadcast failed for %s", self._skill, full, exc_info=discloses_failure(self._skill))
 
     def _send_ws_message_via_host(self, short: str, data: Dict[str, Any]) -> None:
         """Best-effort WS push from an out-of-process child/companion via Host Service."""
@@ -957,7 +959,7 @@ class PluginAPIImpl:
                 log.warning(
                     "extension %s post-swap side effect failed; the published "
                     "bundle is disposed through the standard unload path",
-                    self._skill, exc_info=True,
+                    self._skill, exc_info=discloses_failure(self._skill),
                 )
                 raise
         # Companion PROCESSES start OUTSIDE the registry lock (the pre-split
@@ -971,7 +973,7 @@ class PluginAPIImpl:
                 companion_supervisor.start(spawn.descriptor)
             except Exception:
                 log.warning("extension %s companion %s failed to start; disposed through "
-                            "the standard unload path", self._skill, spawn.descriptor.name, exc_info=True)
+                            "the standard unload path", self._skill, spawn.descriptor.name, exc_info=discloses_failure(self._skill))
                 raise
 
     def _close_runtime_access(self) -> None:
@@ -988,37 +990,173 @@ class PluginAPIImpl:
         level_no = levels.get(str(level or "info").lower(), logging.INFO)
         log.log(level_no, "[ext %s] %s %s", self._skill, message, fields or "")
 
+    def _readable_settings_keys(self, keys: Sequence[str], settings: Dict[str, Any]) -> list[str]:
+        """The settings keys a request may see in ``settings``, the document its values come from: allowlisted,
+        and a core key, or a custom secret that document holds, only with its owner grant."""
+        protected_upper = {k.upper() for k in FORBIDDEN_SKILL_SETTINGS}
+        protected_upper.update(requested_core_setting_keys(list(self._env_allow), settings))
+        readable: list[str] = []
+        for raw_key in keys or ():
+            key = str(raw_key).strip()
+            canonical = key.upper()
+            if not key:
+                continue
+            if canonical in protected_upper and canonical not in self._granted_upper:
+                # Do not reveal forbidden/core key presence without a grant.
+                continue
+            if key not in self._env_allow and canonical not in self._env_allow_upper:
+                continue
+            settings_key = canonical if canonical in protected_upper else key
+            if settings_key not in readable:
+                readable.append(settings_key)
+        return readable
+
+    def _runtime_unloading(self) -> bool:
+        with _lock:
+            return self._runtime_closing or self._runtime_closed or self._skill in _unloading
+
     def get_settings(self, keys: Sequence[str]) -> Dict[str, Any]:
         from ouroboros.realtime_credentials import session_settings
 
         with self._api_lock:
-            with _lock:
-                if self._runtime_closing or self._runtime_closed or self._skill in _unloading:
-                    return {}
+            if self._runtime_unloading():
+                return {}
             if "read_settings" not in self._permissions:
                 # Missing permission fails closed without leaking key presence.
                 return {}
-            settings = session_settings(self, self._current_settings())
-            with _lock:
-                if self._runtime_closing or self._runtime_closed or self._skill in _unloading:
-                    return {}
-            out: Dict[str, Any] = {}
-            protected_upper = {k.upper() for k in FORBIDDEN_SKILL_SETTINGS}
-            protected_upper.update(requested_core_setting_keys(list(self._env_allow)))
-            for raw_key in keys or ():
-                key = str(raw_key).strip()
-                canonical = key.upper()
-                if not key:
-                    continue
-                if canonical in protected_upper and canonical not in self._granted_upper:
-                    # Do not reveal forbidden/core key presence without a grant.
-                    continue
-                if key not in self._env_allow and canonical not in self._env_allow_upper:
-                    continue
-                settings_key = canonical if canonical in protected_upper else key
-                if settings_key in settings:
-                    out[settings_key] = settings[settings_key]
-            return out
+            document = self._current_settings()
+            settings = session_settings(self, document)
+            if self._runtime_unloading():
+                return {}
+            return {key: settings[key] for key in self._readable_settings_keys(keys, document) if key in settings}
+
+    def _require_api_generation(self, method: str) -> None:
+        """2.4 methods need a 2.x negotiation: every declared 2.x minimum negotiates the host's 2.4, so in
+        practice a field-less legacy (1.3) payload is the one refused them."""
+        try:
+            major, minor = (int(part) for part in self._plugin_api_generation.split(".", 1))
+        except ValueError:
+            major, minor = 0, 0
+        if (major, minor) < (2, 4):
+            raise ExtensionRegistrationError(
+                f"{method} needs plugin_api \"2.4\"; skill {self._skill!r} negotiated "
+                f"{self._plugin_api_generation}")
+
+    def get_settings_state(self, keys: Sequence[str]) -> Dict[str, Any]:
+        from ouroboros.realtime_credentials import session_settings
+
+        self._require_api_generation("get_settings_state")
+        closed: Dict[str, Any] = {"status": "access_closed", "values": {}, "missing": []}
+        if not keys or not self._readable_settings_keys(keys, {}):
+            # Nothing any document would let it read (an empty one only lacks custom secrets): only the access
+            # answers, from the flag unload sets before it waits on anything, without the settings read or this
+            # API's lock (a reader may hold it), so a per-request check is cheap.
+            if self._runtime_unloading() or "read_settings" not in self._permissions:
+                return closed
+            return {"status": "ok", "values": {}, "missing": []}
+        with self._api_lock:
+            if self._runtime_unloading() or "read_settings" not in self._permissions:
+                return closed
+            try:
+                document = skill_settings(self._settings_reader, strict=True)
+            except SettingsDocumentUnknown:
+                return closed if self._runtime_unloading() else {"status": "unknown", "values": {}, "missing": []}
+            if self._runtime_unloading():
+                return closed
+            readable, settings = self._readable_settings_keys(keys, document), session_settings(self, document)
+            values = {key: settings[key] for key in readable
+                      if settings.get(key) is not None and str(settings.get(key)).strip() != ""}
+            return {"status": "ok", "values": values, "missing": [key for key in readable if key not in values]}
+
+    def _published_and_open(self) -> bool:
+        """This API is still the open runtime of the live publication: unload and reload both end it."""
+        with _lock:
+            if self._runtime_closing or self._runtime_closed or self._skill in _unloading:
+                return False
+            bundle = _extensions.get(self._skill)
+            return bundle is not None and self in bundle.api_instances
+
+    def _refresh_admission(self) -> tuple[str, frozenset[str]]:
+        """Why a refresh may not start this skill's companion now ("" when it may), and the grants it carries.
+
+        Read under the skill's lifecycle lock, which saving On/Off, unload and reload also hold. Every reason
+        the runtime state gives besides ``disabled`` and ``missing_grants`` reads ``not_desired``."""
+        if not self._published_and_open():
+            return "access_closed", frozenset()
+        from ouroboros.extension_liveness import runtime_state_for_skill_name
+
+        state = runtime_state_for_skill_name(self._skill, self._drive_root)
+        if not state.get("desired_live"):
+            reason = str(state.get("reason") or "")
+            return (reason if reason in {"disabled", "missing_grants"} else "not_desired"), frozenset()
+        granted = {str(key).strip().upper() for key in (state.get("grant_status") or {}).get("granted_keys") or []}
+        return "", frozenset(self._granted_upper & granted)  # a revoked grant is gone at once; nothing is widened
+
+    def refresh_companion_process(self, name: str, expected: Optional[Mapping[str, Any]] = None, *,
+                                  only_if_differs: bool = False) -> str:
+        _reject_extension_child_side_effect("refresh_companion_process")
+        self._require_api_generation("refresh_companion_process")
+        if "companion_process" not in self._permissions:
+            raise ExtensionRegistrationError(
+                f"skill {self._skill!r} cannot 'companion_process' — manifest permissions={sorted(self._permissions)}")
+        clean_name = _assert_tool_name(name)
+        spec = self._companion_specs.get(clean_name)
+        if spec is None:
+            raise ExtensionRegistrationError(
+                f"companion {clean_name!r} is not declared in manifest.companion_processes")
+        compare_keys = sorted({key for raw in self._env_allow for key in (raw, raw.upper())})
+        if expected is not None and not isinstance(expected, Mapping):
+            raise ExtensionRegistrationError("refresh_companion_process expected= maps settings keys to values")
+        wanted = None if expected is None else {str(key): value for key, value in expected.items()}
+        if wanted is not None and (stray := sorted(set(wanted) - set(compare_keys))):
+            raise ExtensionRegistrationError(  # names only: a value never enters an error
+                f"refresh_companion_process expected= names {stray}, not env_from_settings of {self._skill!r}")
+        if only_if_differs and (wanted is None or any(raw not in wanted and raw.upper() not in wanted
+                                                      for raw in self._env_allow)):
+            raise ExtensionRegistrationError(
+                "refresh_companion_process only_if_differs= needs expected= naming every env_from_settings key")
+        import asyncio
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            raise ExtensionRegistrationError("refresh_companion_process blocks; call it off the event loop")
+        if not is_server_process():
+            return "not_server"
+        supervisor = get_global_supervisor()
+        if supervisor is None:
+            return "no_supervisor"
+        if not self._published_and_open():
+            return "access_closed"
+        if blocker := supervisor.refresh_blocker(self._skill, clean_name, wanted if only_if_differs else None):
+            return blocker  # nothing to apply settings to yet, a retained process, or one carrying the caller's read
+        # The skill's lifecycle lock, where Off and unload persist, holds the admission before the stop and the
+        # final one with the spawn; the stop holds no lock, so an owner's Off never waits for it.
+        lifecycle, admitted = _lifecycle_lock_for(self._skill), {"refusal": "", "granted": frozenset()}
+
+        def admit() -> bool:
+            admitted["refusal"], admitted["granted"] = self._refresh_admission()
+            return not admitted["refusal"]
+
+        with lifecycle:
+            if not admit():
+                return admitted["refusal"]
+
+        def build_env() -> Dict[str, str]:
+            settings = skill_settings(self._settings_reader, strict=True)
+            token = mint_skill_token(self._state_dir, self._skill, self._skill_dir)
+            return companion_spawn_env(
+                spec, token, env_allow=self._env_allow, granted_upper=admitted["granted"],
+                skill=self._skill, skill_dir=self._skill_dir, state_dir=self._state_dir, settings=settings)
+
+        try:
+            outcome = supervisor.refresh(self._skill, clean_name, build_env, compare_keys=compare_keys,
+                                         still_valid=admit, admission=lifecycle, expected=wanted)
+        except SettingsDocumentUnknown:
+            return "settings_unknown"
+        return admitted["refusal"] if outcome == "refused" else outcome
 
     def get_state_dir(self) -> str:
         return str(self._state_dir)

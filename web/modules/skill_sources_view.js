@@ -7,10 +7,10 @@ import { bindMenu } from './ui_interactions.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { skillSourcesApi } from './api_client.js';
 import {
-    openAddSourceDialog, openFirstStartDialog, openRemoveSourceDialog, openRenameSourceDialog, openTrustDialog,
+    openAddSourceDialog, openFirstStartDialog, openRemoveSourceDialog, openRenameSourceDialog, openTrustDialog, sourceProblemsHtml,
 } from './skill_dialogs.js';
 import {
-    buttonHtml, chipHtml, displayAddress, officialMarkHtml, plural, relativeAge, sourceAboutText,
+    buttonHtml, chipHtml, officialMarkHtml, plural, relativeAge, sourceAboutText, sourceAddressText,
     statusHtml, trayHtml, trustValueText,
 } from './skill_presentation.js';
 
@@ -20,7 +20,7 @@ import {
  */
 export function sourceHealthHtml(source, health) {
     if (source.kind === 'builtin') return '';  // it ships with the app: nothing is read
-    if (!health?.state) return source.kind === 'registry' ? statusHtml('searched when you search', 'muted') : statusHtml('not read yet', 'muted');
+    if (!health?.state) return source.kind === 'registry' ? statusHtml('read when chosen or searched', 'muted') : statusHtml('not read yet', 'muted');
     const age = relativeAge(health.last_read_at);
     if (health.state === 'reading' || (health.refreshing && health.state !== 'error')) {
         return statusHtml(age ? `reading… (list from ${escapeHtml(age)})` : 'reading…', 'muted', { work: true });
@@ -29,7 +29,7 @@ export function sourceHealthHtml(source, health) {
         const shown = health.state === 'ready' && age ? ` — showing the list from ${escapeHtml(age)}` : '';
         return `${statusHtml(`couldn’t be read: ${escapeHtml(health.error || 'no answer')}${shown}`, 'warn')} ${buttonHtml('Try again', { tone: 'ghost', attrs: `data-source-action="refresh" data-source-id="${escapeHtml(source.id)}"` })}`;
     }
-    if (source.kind === 'registry' || health.state === 'search') return statusHtml('searched when you search', 'muted');
+    if (source.kind === 'registry' || health.state === 'search') return statusHtml('read when chosen or searched', 'muted');
     return statusHtml(age ? `read ${escapeHtml(age)}` : 'read', 'muted');
 }
 
@@ -50,7 +50,7 @@ export function renderSourceRow(source, { items = [], health = null } = {}) {
     ].join('');
     const meta = [];
     const state = health || source;
-    const address = displayAddress(source.url || source.path || '');
+    const address = sourceAddressText(source);
     if (address) meta.push(escapeHtml(address));
     // A count is a fact of a list that was read; before that it is unknown, never 0.
     if (source.kind !== 'registry' && (state.state === 'ready' || items.length)) {
@@ -63,19 +63,21 @@ export function renderSourceRow(source, { items = [], health = null } = {}) {
     return `<div class="skills-source-row" data-source-row="${id}">
         <div class="skills-source-main"><strong>${escapeHtml(source.name)}</strong>${marks}</div>
         <div class="skills-source-actions">
-            <button type="button" class="skills-trust-value${suggested ? ' is-suggested' : ''}" data-source-action="trust" data-source-id="${id}" aria-label="${escapeHtml(`${source.name}: ${trustValueText(source)}${suggested ? ' (suggested)' : ''}. Change`)}">${escapeHtml(trustValueText(source))}${suggested ? ' (suggested)' : ''} ›</button>
-            <div class="skills-card-menu"><button type="button" class="skills-card-menu-trigger" aria-label="More actions for ${escapeHtml(source.name)}" aria-haspopup="menu" aria-expanded="false" data-source-menu="${id}">⋮</button></div>
+            <button type="button" class="skills-trust-value${suggested ? ' is-suggested' : ''} ui-hit-area" data-source-action="trust" data-source-id="${id}" aria-label="${escapeHtml(`${source.name}: ${trustValueText(source)}${suggested ? ' (suggested)' : ''}. Change`)}">${escapeHtml(trustValueText(source))}${suggested ? ' (suggested)' : ''} ›</button>
+            <div class="skills-card-menu"><button type="button" class="btn btn-ghost btn-sm skills-card-menu-trigger" aria-label="More actions for ${escapeHtml(source.name)}" aria-haspopup="menu" aria-expanded="false" data-source-menu="${id}">⋮</button></div>
         </div>
         <div class="skills-source-meta">
             <div class="skills-source-about">${escapeHtml(sourceAboutText(source))}</div>
             <div class="skills-source-facts">${meta.join(' · ')}</div>
+            ${sourceProblemsHtml(Array.isArray(state.problems) ? state.problems : [])}
         </div>
     </div>`;
 }
 
 /**
- * Mount the Sources view. `host` = { sources(force), sourcesProblem(): string, catalog({refresh}), installedSkills(): rows|null,
- *   reloadAll(): Promise, toast(msg, tone), showMadeHere(), openBehaviorSettings() }.
+ * Mount the Sources view. `host` = { sources(force), sourcesProblem(): string, sourceSuggestions(): rows,
+ *   catalog({refresh}), installedSkills(): rows|null, reloadAll(): Promise, toast(msg, tone), showMadeHere(),
+ *   openBehaviorSettings() }.
  */
 export function createSkillSources({ pane, host, api = skillSourcesApi }) {
     let sources = [];
@@ -103,7 +105,7 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
         const madeHere = (host.installedSkills() || []).filter((row) => !row.install && ['external', 'self_authored'].includes(String(row.source || ''))).length;
         const pendingRows = unconfirmedHubRows(sources);
         pane.innerHTML = `
-            <section class="skills-card skills-sources-card">
+            <section class="ui-card skills-card skills-sources-card">
                 <div class="skills-sources-head">
                     <div class="skills-sources-id"><h3>Sources</h3>${statusHtml(error ? `couldn’t be read: ${escapeHtml(error)}` : `${plural(sources.length, 'source')} connected`, error ? 'danger' : 'muted')}</div>
                     ${buttonHtml('Add source', { attrs: 'data-source-action="add"' })}
@@ -115,8 +117,8 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
                 <div class="skills-source-rows">${sources.map((source) => renderSourceRow(source, { items: items.get(source.id) || [], health: health.get(source.id) })).join('')}</div>
             </section>
             <div class="skills-sources-foot">
-                <p>Skills made on this computer${host.installedSkills() ? ` (${madeHere})` : ''} don’t come from a source. <button type="button" class="skills-link-quiet" data-source-action="made_here">Publish one to share it ›</button></p>
-                <p>Automatic keys for skills that may run: <button type="button" class="skills-link-quiet" data-source-action="behavior">Settings → Behavior ›</button></p>
+                <p>Skills made on this computer${host.installedSkills() ? ` (${madeHere})` : ''} don’t come from a source. <button type="button" class="skills-link-quiet ui-hit-area" data-source-action="made_here">Publish one to share it ›</button></p>
+                <p>Automatic keys for skills that may run: <button type="button" class="skills-link-quiet ui-hit-area" data-source-action="behavior">Settings → Behavior ›</button></p>
             </div>`;
     }
 
@@ -212,7 +214,7 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
         const source = sources.find((row) => row.id === target.dataset.sourceId);
         try {
             if (action === 'add') {
-                const added = await openAddSourceDialog({ api });
+                const added = await openAddSourceDialog({ api, suggestions: host.sourceSuggestions?.() || [] });
                 if (added) await afterChange(`${added.name || 'The source'} added. Its skills are in Browse.`);
             } else if (action === 'first_start') await confirmFirstStart();
             else if (action === 'made_here') host.showMadeHere();

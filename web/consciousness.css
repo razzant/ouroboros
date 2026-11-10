@@ -1,14 +1,12 @@
-/* Consciousness, places and the owner's safety choices: Dashboard › Consciousness, the place sheet and the Connect
-   flow, Settings › Behavior › Consciousness and Safety Supervisor, the Agents second-check mark and a connector's
-   icon on Skills cards. Composition over ui.css tokens and the existing recipes (the Storage summary, the §6 account
+/* Consciousness, places and the owner's safety choices: Dashboard › Consciousness, Circles, the place sheet and the
+   Add flow, Settings › Behavior › Consciousness and Safety Supervisor, the Agents second-check mark and a connector's
+   icon on Skills cards. Composition over ui.css tokens and the existing recipes (the Dashboard tab body, the §6 account
    row, the Settings segmented tray, the document-reader dialog, .ui-chip, .ui-status, .btn tones, the status mark);
    no value of its own. Narrow layouts follow their own container, never the viewport (DESIGN §10). */
 
 /* ---- shared pieces ------------------------------------------------------------------------------------------------ */
 .place-glyph { display: inline-flex; flex: 0 0 auto; color: var(--text-primary); }
 .place-glyph svg { display: block; }
-.consciousness-fact { white-space: nowrap; }
-.consciousness-num { font-variant-numeric: tabular-nums; }
 /* Work running now is the house status mark (moving dots in the surface's ink), placed after its words. */
 .status-mark.consciousness-mark { vertical-align: middle; margin-inline-start: var(--space-2); }
 /* A link inside a sentence keeps the sentence's lines (DESIGN §10): primary ink, no body. */
@@ -22,13 +20,22 @@
     font-weight: 600;
     text-align: start;
     cursor: pointer;
-    border-radius: var(--radius-xs);
+    border-radius: var(--radius-inner);
 }
 .consciousness-inline-link:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 /* The shells give every button a finger's minimum box; a link inside a sentence keeps the sentence's lines and
    takes the hit extension instead (.ui-hit-area, DESIGN §10). */
 :is(.dashboard-shell, .settings-shell) button.consciousness-inline-link { min-inline-size: 0; min-block-size: 0; }
 @media (hover: hover) { .consciousness-inline-link:hover { text-decoration: underline; text-underline-offset: 3px; } }
+/* Under a finger each such door reaches the touch minimum around its line, so a sentence ending in one and the control
+   under it part by that reach and their hit areas never overlap (ui.css .ui-hit-area): two such sentences
+   (.consciousness-door-line) stand a touch minimum and a hairline gap apart, line to line. */
+@media (pointer: coarse) {
+    .consciousness-door-line + .consciousness-door-line {
+        margin-block-start: calc(var(--touch-target-min) - var(--type-meta) * var(--line-meta) + var(--space-1));
+    }
+    [data-consciousness-places] + .consciousness-more { margin-block-start: var(--space-5); }
+}
 /* The owner's own words keep the owner's voice: the blue tint and its ink, here in an editable field. */
 textarea.ui-control.consciousness-owner-words {
     min-height: 0;
@@ -61,14 +68,9 @@ textarea.ui-control.consciousness-owner-words {
 .cx-chip[hidden], .cx-chip-word[hidden] { display: none; }
 .cx-chip-glyph { display: inline-flex; flex: none; }
 .cx-chip-glyph svg { display: block; width: 18px; height: 18px; }
-/* It leads the bar's end group, so a status word that grows or shrinks never moves it (DESIGN bible 6). */
-:is(.chat-page-header, .project-panel-bar) > .cx-chip { margin-inline-start: auto; }
-:is(.chat-page-header, .project-panel-bar) > .cx-chip:not([hidden]) + :is(.app-page-actions, .app-page-trailing) { margin-inline-start: 0; }
-/* Before a Project's name is cut the chip shows its brain and mark alone (room_work.js fitWord); its name says it all. */
-.project-panel-bar > .cx-chip[data-fit="mark"] .cx-chip-word { display: none; }
-:root[data-theme] .cx-chip.ui-chrome-control[data-off="true"] .cx-chip-glyph,
-:root[data-theme] .cx-chip.ui-chrome-control[data-off="true"]:not([data-evolving="true"]) .cx-chip-word { color: var(--text-meta); }
-:root[data-theme] .cx-chip.ui-chrome-control[data-open="1"] { background: var(--chip-float-hover); }
+.cx-chip.ui-chrome-control[data-off="true"] .cx-chip-glyph,
+.cx-chip.ui-chrome-control[data-off="true"]:not([data-evolving="true"]) .cx-chip-word { color: var(--text-meta); }
+.cx-chip.ui-chrome-control[data-open="1"] { background: var(--chip-float-hover); }
 /* Its sheet is the work list's (room_work.css .rw-shade): its own opaque material hung under the bar's capsules, at
    most 40rem wide and ending under the bar's last control, so it opens under the chip. */
 .rw-shade.cx-shade { left: auto; width: min(40rem, calc(100% - var(--rw-left, 0px) - var(--rw-right, 0px))); }
@@ -90,9 +92,19 @@ textarea.ui-control.consciousness-owner-words {
 .cx-wake-time { color: var(--text-meta); font-variant-numeric: tabular-nums; }
 .cx-wake-text { min-width: 0; overflow-wrap: anywhere; color: var(--text-primary); }
 .cx-wake-outcome { font-size: var(--type-meta); color: var(--text-meta); }
+/* A wake in a place is a door to that place's sheet: the whole row is the target, one state layer over all of it;
+   under a finger the row itself reaches the touch minimum, so neighbouring rows never share a reach. */
+.cx-wake-door {
+    width: 100%; margin: 0; padding: 0; border: 0; border-radius: var(--radius-inner); background: transparent;
+    font-family: inherit; font-weight: inherit; text-align: start; cursor: pointer;
+}
+.cx-wake-door:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+.cx-wake-door:disabled { cursor: default; }
+@media (hover: hover) { .cx-wake-door:not(:disabled):hover { background: var(--menu-item-hover); } }
+@media (pointer: coarse) { .cx-wake-door { min-height: var(--touch-target-min); } }
 .cx-doors { display: flex; flex-wrap: wrap; gap: var(--space-4); margin-top: var(--space-2); }
 .cx-door {
-    padding: 0; border: 0; border-radius: var(--radius-xs); background: transparent; cursor: pointer;
+    padding: 0; border: 0; border-radius: var(--pill-radius); background: transparent; cursor: pointer;
     font: inherit; font-size: var(--type-body); line-height: var(--line-body); font-weight: 600; color: var(--tone-crimson-word);
 }
 .cx-door:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
@@ -103,9 +115,6 @@ textarea.ui-control.consciousness-owner-words {
 .consciousness-levels { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
 .consciousness-levels li { color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); }
 .consciousness-levels strong { color: var(--text-primary); font-weight: 600; }
-.consciousness-places { display: flex; flex-direction: column; gap: var(--space-2); }
-.consciousness-places-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
-.consciousness-subhead { margin: 0; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-title); font-weight: 600; }
 .consciousness-place-rows { display: flex; flex-direction: column; gap: var(--space-1); margin: 0; padding: 0; list-style: none; }
 /* A place row is a door: the whole tray opens its sheet, one state layer over all of it. */
 .consciousness-place-row {
@@ -147,100 +156,36 @@ textarea.ui-control.consciousness-owner-words {
     cursor: pointer;
 }
 
-/* ---- Dashboard › Consciousness ------------------------------------------------------------------------------------- */
-.consciousness-root { gap: var(--space-4); container: consciousness / inline-size; }
-.consciousness-read-status:empty { display: none; }
-.consciousness-summary-text { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
-.consciousness-headline { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); min-width: 0; }
-/* The words and the moving mark flow as one line box, so the mark follows the last word wherever it wraps. */
-.consciousness-headline .storage-total { min-width: 0; }
-.btn.btn-ghost.consciousness-stop { flex: 0 0 auto; }
-.consciousness-why { margin: var(--space-1) 0 0; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
-.consciousness-next { margin: 2px 0 0; color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); }
-.consciousness-summary-foot {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    margin-top: var(--space-3);
-    padding-top: var(--space-3);
-    border-top: 1px solid var(--surface-border-soft);
-}
-.consciousness-summary-foot .storage-meta { margin: 0; }
-.consciousness-causes { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
-.consciousness-card { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-4); }
+/* ---- Dashboard › Consciousness (consciousness_dashboard.js) on the Dashboard tab body ------------------------------- */
+/* The headline card is the shared .dashboard-hero: the state in the host's words with its one status mark, the money of
+   the last 24 hours and the own-task count as its meta, Start/Stop beside them; the rest is that card's Details. */
+.consciousness-card { display: flex; flex-direction: column; gap: var(--space-3); }
 .consciousness-wake-group { display: flex; flex-direction: column; gap: var(--space-3); }
-.consciousness-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3); }
-.consciousness-card-head-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.consciousness-card-head .storage-meta { margin: 0; }
+.consciousness-card-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .consciousness-card-head .btn { flex: 0 0 auto; }
 .consciousness-copy { margin: 0; color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); }
 .consciousness-foot { margin: 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
-.consciousness-dash-places { display: flex; flex-direction: column; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
-/* A place row: the §6 identity anatomy as one door; today's spend in a column of its own. */
-.consciousness-dash-place {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-areas: "main spend" "meta spend";
-    align-items: center;
-    column-gap: var(--space-3);
-    row-gap: 2px;
-    width: 100%;
-    min-height: var(--touch-target-min);
-    padding: var(--space-3) var(--space-4);
-    border: 0;
-    border-radius: var(--radius-inner);
-    background: var(--surface-tray);
-    color: var(--text-primary);
-    font: inherit;
-    text-align: start;
-    cursor: pointer;
-}
-.consciousness-dash-place:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
-@media (hover: hover) { .consciousness-dash-place:hover { background: var(--menu-item-hover); } }
-.consciousness-dash-place-main { grid-area: main; display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
-.consciousness-dash-place-meta {
-    grid-area: meta;
-    padding-inline-start: calc(18px + var(--space-3));
-    color: var(--text-meta);
-    font-size: var(--type-meta);
-    line-height: var(--line-meta);
-}
-/* Today's spend in the place: a fact in tabular figures, the dash where nothing is known (as Costs writes it). */
-.consciousness-spend {
-    grid-area: spend;
-    min-width: 5ch;
-    color: var(--text-primary);
-    font-size: var(--type-body);
-    line-height: var(--line-body);
-    font-weight: 500;
-    font-variant-numeric: tabular-nums;
-    text-align: end;
-}
-.consciousness-spend.is-none { color: var(--text-meta); font-weight: 400; }
 .consciousness-wakes { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
 .consciousness-wake {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
     column-gap: var(--space-3);
-    align-items: start;
+    align-items: baseline;
     padding: var(--space-3) 0;
 }
-.consciousness-wake + .consciousness-wake { border-top: 1px solid var(--surface-border-soft); }
-.consciousness-wake-time::after { content: " ·"; }
+.consciousness-wake + .consciousness-wake { border-top: 1px solid var(--divider); }
 .consciousness-wake-time { color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); font-variant-numeric: tabular-nums; }
 .consciousness-wake-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .consciousness-wake-head { color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); overflow-wrap: anywhere; }
 .consciousness-wake-where, .consciousness-wake-own { color: var(--text-primary); font-weight: 600; }
-.consciousness-wake-own { display: inline-flex; align-items: center; gap: 6px; }
+/* Its own time reads on the line's baseline: the glyph sits in the words, not beside them in a box of its own. */
+.consciousness-wake-own .place-glyph { display: inline-block; vertical-align: -0.15em; margin-inline-end: 6px; }
 .consciousness-wake-summary { margin: 0; overflow-wrap: anywhere; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
 .consciousness-wake-lead { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); }
 .consciousness-wake-facts { margin: var(--space-1) 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); overflow-wrap: anywhere; }
 .consciousness-wake-facts.is-line { margin: 0; }
 .consciousness-wake-checks { display: flex; flex-wrap: wrap; gap: var(--space-1); }
 .consciousness-wake-checks .skills-chip { white-space: normal; overflow-wrap: anywhere; }
-.consciousness-wake-more { min-width: 0; font-size: var(--type-body); line-height: var(--line-body); }
-.consciousness-wake-more > summary { display: list-item; width: fit-content; margin-inline-start: 1em; color: var(--text-meta); cursor: pointer; border-radius: var(--radius-xs); }
-.consciousness-wake-more > summary:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 .consciousness-wake-note-label { margin: var(--space-2) 0 var(--space-1); color: var(--text-meta); font-size: var(--type-meta); font-weight: 600; }
 .consciousness-wake-note { overflow-wrap: anywhere; color: var(--text-primary); }
 .consciousness-wake-note > :first-child { margin-top: 0; }
@@ -255,26 +200,79 @@ textarea.ui-control.consciousness-owner-words {
     text-align: end;
     white-space: nowrap;
 }
-/* A narrow column (a phone, a narrow window): the time and cost share the first line, the rest gets the width;
-   a place row puts its spend under the meta. */
-@container consciousness (max-width: 560px) {
+/* A narrow tab body (a phone, a narrow window): the time and cost share the first line, the rest gets the width. */
+@container dashboard (max-width: 560px) {
     .consciousness-wake { grid-template-columns: minmax(0, 1fr) auto; row-gap: var(--space-1); }
-    .consciousness-wake-time::after { content: none; }
     .consciousness-wake-time { grid-column: 1; grid-row: 1; }
     .consciousness-wake-cost { grid-column: 2; grid-row: 1; }
     .consciousness-wake-main { grid-column: 1 / -1; grid-row: 2; }
     .consciousness-card-head { flex-wrap: wrap; }
-    .consciousness-dash-place { grid-template-columns: minmax(0, 1fr); grid-template-areas: "main" "meta" "spend"; }
-    .consciousness-spend { text-align: start; padding-inline-start: calc(18px + var(--space-3)); }
+}
+
+/* ---- Circles (circles.js): the directory of circles and the one place row ---------------------------------------- */
+/* One card, a row per circle (the Dashboard's disclosure), rows parted by the divider as the wakes are. */
+.circles-directory { display: flex; flex-direction: column; }
+.circle-fold { padding: var(--space-3) 0; }
+.circle-fold + .circle-fold { border-top: 1px solid var(--divider); }
+.circles-directory > .circle-fold:first-child { padding-top: 0; }
+.circles-directory > .circle-fold:last-child { padding-bottom: 0; }
+/* The head: the name, under it its words in one line in the reading ink, the count at the end of the name's line (the
+   caret too); open, the line gives way to the words whole below. */
+.circle-fold.ui-disclosure > summary.circle-head { align-items: flex-start; }
+.circle-fold.ui-disclosure > summary.circle-head::before { margin-block-start: calc((var(--type-section) * var(--line-title) - 7.5px) / 2); }
+.circle-head-main { flex: 1 1 auto; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.circle-head-line { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); font-weight: 400; }
+.circle-fold[open] > summary .circle-head-line { display: none; }
+.circle-head-count { flex: 0 0 auto; white-space: nowrap; line-height: calc(var(--type-section) * var(--line-title)); }
+/* The body starts where the head's name starts: past the caret (6px and its 1.5px border), its margins and the gap. */
+.circle-body { display: flex; flex-direction: column; gap: var(--space-3); padding-inline-start: calc(7.5px + 2px + var(--space-1) + var(--space-2)); }
+.circle-words { display: flex; flex-direction: column; gap: var(--space-2); }
+/* A circle's words read whole, their lines kept, in their author's voice (a note's material, .place-note). */
+.circle-words-text > p { margin: 0; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); white-space: pre-wrap; overflow-wrap: anywhere; }
+.circle-editor-end { margin-inline-start: auto; }
+.place-rows { display: flex; flex-direction: column; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+/* The one place row: the §6 identity anatomy as one door. Its name, the service as a quiet label and the facts share
+   the first line, the facts wrapping under the name when the row is narrow; its description reads under them,
+   CSS-ellipsized. */
+.place-row {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    width: 100%;
+    min-height: var(--touch-target-min);
+    padding: var(--space-3) var(--space-4);
+    border: 0;
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
+    color: var(--text-primary);
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+}
+.place-row:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+@media (hover: hover) { .place-row:hover { background: var(--menu-item-hover); } }
+.place-row-main { display: flex; flex-wrap: wrap; align-items: center; column-gap: var(--space-3); row-gap: 2px; min-width: 0; }
+.place-row-source { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.place-row-main > .consciousness-place-facts { flex: 0 0 auto; margin-inline-start: auto; white-space: nowrap; }
+.place-row-meta { padding-inline-start: calc(18px + var(--space-3)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+/* A silent or paused place reads in the quieter ink (the work list's settled rows). */
+.place-row:is([data-state="silent"], [data-state="paused"]) .consciousness-place-name { color: var(--text-secondary); }
+/* A narrow body: the name stays beside its mark, wrapping there; the service and the facts follow under it. */
+@container dashboard (max-width: 560px) {
+    .place-row-main { display: grid; grid-template-columns: auto minmax(0, 1fr); }
+    .place-row-main > :not(.place-glyph) { grid-column: 2; }
+    .place-row-main > .consciousness-place-facts { margin-inline-start: 0; text-align: start; white-space: normal; }
 }
 
 /* ---- the place sheet and the Connect flow: the document reader's dialog geometry ------------------------------- */
 /* On the desk the Connect list is as tall as its rows (a phone keeps the reader's full sheet). */
-:root[data-layout="docked"] .document-reader.place-connect { height: auto; }
-:root[data-layout="docked"] .place-connect .document-reader-panel { max-height: min(var(--document-reader-size), calc(100dvh - 2 * var(--space-5))); }
+/* A modal dialog keeps the engine's inset 0, so only fit-content (never auto) sizes it to its rows. */
+:root[data-layout="docked"] .document-reader.place-connect { height: fit-content; }
+:root[data-layout="docked"] .place-connect .document-reader-panel { max-height: min(var(--document-reader-size), calc(100dvh - 2 * var(--space-5) - var(--inset-top))); }
 .place-sheet .document-reader-title { display: flex; align-items: center; gap: var(--space-3); white-space: normal; }
 .place-sheet-body { display: flex; flex-direction: column; gap: var(--space-5); container: placesheet / inline-size; }
-.place-sheet-section { display: flex; flex-direction: column; gap: var(--space-2); width: 100%; max-width: 720px; margin: 0 auto; }
+/* One column under the sheet's head: the sections start where its title starts. */
+.place-sheet-section { display: flex; flex-direction: column; gap: var(--space-2); width: 100%; max-width: 720px; margin: 0; }
 .place-sheet-section > h3 { margin: 0; color: var(--text-primary); font-size: var(--type-section); line-height: var(--line-title); font-weight: 600; }
 .place-sheet-section p { margin: 0; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); overflow-wrap: anywhere; }
 .place-history-plain { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
@@ -314,6 +312,17 @@ textarea.ui-control.consciousness-owner-words {
 .place-field-row .ui-model-chooser { flex: 1 1 auto; min-width: 0; }
 .place-field-row .btn { flex: 0 0 auto; }
 .place-disconnect-confirm { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3) var(--space-4); border-radius: var(--radius-inner); background: var(--surface-tray); }
+/* The sheet's context: its circle as a choice the width of its name, the circle's words in two lines (whole in the
+   circle) and the place's own notes in brief, three lines, each in its author's voice (All notes shows them whole). */
+.place-circle-row > select.ui-control { flex: 0 1 auto; width: auto; }
+.place-sheet-section p.place-circle-text, .place-note-preview > p {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    white-space: pre-wrap;
+}
+.place-sheet-section p.place-circle-text { -webkit-line-clamp: 2; line-clamp: 2; color: var(--text-secondary); }
+.place-note-preview > p { -webkit-line-clamp: 3; line-clamp: 3; }
 @container placesheet (max-width: 480px) {
     .place-field-row { flex-wrap: wrap; }
     .place-field-row .btn { margin-inline-start: auto; }
@@ -338,6 +347,7 @@ textarea.ui-control.consciousness-owner-words {
 .place-convo-row time { font-variant-numeric: tabular-nums; }
 .place-convo-fact::before { content: '·'; margin-inline-end: var(--space-2); }
 .place-convo-text { color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); overflow-wrap: anywhere; }
+.place-convo-reaction { overflow-wrap: anywhere; }
 .place-convo-text.chat-markdown > :first-child { margin-top: 0; }
 .place-convo-text.chat-markdown > :last-child { margin-bottom: 0; }
 .place-convo-row.is-system { padding: var(--space-2) var(--space-4); border-radius: var(--radius-inner); background: var(--system-bubble-bg); }

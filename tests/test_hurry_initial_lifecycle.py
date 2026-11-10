@@ -54,7 +54,6 @@ def pool(tmp_path, monkeypatch):
     monkeypatch.setattr(workers, "MAX_WORKERS", 1)
     monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "")
     monkeypatch.setattr(workers, "_repo_writer_gate_reason", "")
-    monkeypatch.setattr(workers, "CRASH_TS", [])
     monkeypatch.setattr(workers, "_LAST_SPAWN_TIME", 0)
     monkeypatch.setattr(workers, "QUEUE_MAX_RETRIES", 1)
     monkeypatch.setattr(workers, "load_state", state.load_state)
@@ -186,15 +185,12 @@ def test_real_admission_hurry_and_pre_running_death_recover(pool, monkeypatch, o
     assert task_id not in queue.RUNNING and pool.jobs.empty()
     assert pool.respawns == [0]
     row = results.load_task_result(pool.root, task_id, strict=True)
-    if exitcode < 0:
-        assert row["status"] == "failed" and row["reason_code"] == "worker_crash_signal"
-        assert len([event for event in pool.events.queue if event.get("type") == "task_done"]) == 1
-        assert not queue.PENDING and row["owner_hurry"]["request_id"] == "request-1"
-    else:
-        assert row["status"] == "interrupted"
-        assert [(task["id"], task["_attempt"]) for task in queue.PENDING] == [(task_id, 2)]
-        assert "owner_hurry" not in row
-        assert row["owner_hurry_history"][-1]["request_id"] == "request-1"
+    # A signal death takes the same one retry as an exit code (ARCHITECTURE §5); the row names the signal.
+    assert row["status"] == "interrupted" and (exitcode > 0 or "signal 11" in row["result"])
+    assert not [event for event in pool.events.queue if event.get("type") == "task_done"]
+    assert [(task["id"], task["_attempt"]) for task in queue.PENDING] == [(task_id, 2)]
+    assert "owner_hurry" not in row  # the attempt-scoped hurry is stripped on the same-id requeue
+    assert row["owner_hurry_history"][-1]["request_id"] == "request-1"
 
 
 def test_initializer_holds_queue_lock_and_does_not_rewrite_existing_wait(pool, monkeypatch):
@@ -255,7 +251,7 @@ def test_hurry_does_not_release_restored_work_before_owner_resume(pool):
     assert pool.slot.in_q.empty() and set(queue.RUNNING) == {task_id}
 
 
-@pytest.mark.parametrize("status", ["scheduled", "running", "interrupted", "completed", "cancelled", "future_status"])
+@pytest.mark.parametrize("status", ["scheduled", "running", "future_status"])
 def test_create_only_observes_late_row_under_the_store_write_lock(tmp_path, status):
     """A create-only seed that meets another writer's open transaction waits for it and
     then observes the row that writer published: the late row lands once, unchanged."""

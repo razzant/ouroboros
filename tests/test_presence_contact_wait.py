@@ -27,7 +27,6 @@ from tests.test_presence_continuation_bootstrap import finish, install_bootstrap
 from tests.test_presence_owner_contact import _answer, _ask, _run, contact_runtime as _contact_runtime, focus  # noqa: F401
 
 contact_runtime = _contact_runtime
-pytestmark = pytest.mark.serial
 
 
 @pytest.mark.parametrize("request_id", ["same-question", ""], ids=["explicit-key", "implicit-presence-key"])

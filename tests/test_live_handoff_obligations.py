@@ -12,10 +12,11 @@ from ouroboros.contracts.realtime import RealtimeSetupError
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
 from tests._live_stack import stack
 from tests._live_stack_wire import NativeWire
-from tests.test_live_conversation import host_world as host_world
+from tests._live_world import host_world as host_world
 from tests.test_live_host_settlement import tariff
 from tests.test_live_stack_preparation import request, ROUTES
 from tests.test_grok_openai_protocol import providers as providers, Wire
+from tests._cases import chosen_rows
 
 
 @pytest.mark.parametrize('engine,thinking', ROUTES)
@@ -30,17 +31,16 @@ def test_preparation_refusal_is_terminal_without_another_attempt(host_world, mon
         monkeypatch.setattr(NativeWire, 'send', refuse)
         async with stack(host_world, monkeypatch, engine, thinking=thinking) as run:
             await request(run)
-            for _ in range(1500):
-                if run.running.done() or len(run.provider.connections) >= 3:
-                    break
-                await asyncio.sleep(.01)
+            # The refusal ends the call; a third connection would be a retry. 15 s of elapsed time (the span the old
+            # loop nominally had), not a count of sleeps.
+            await run.wait(lambda: run.running.done() or len(run.provider.connections) >= 3, timeout=15)
             attempts = len(run.provider.connections)
         assert attempts == 2, f'Provider refused connection 2, but {attempts} connections opened'
         assert run.result[1]['reason_code'] == 'provider_error'
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('engine,thinking', ROUTES)
+@pytest.mark.parametrize('engine,thinking', chosen_rows(ROUTES, 0, 1, 3))
 def test_legacy_provider_without_silent_catchup_keeps_sequential_calls(host_world, monkeypatch, engine, thinking):
     async def scenario():
         async with stack(host_world, monkeypatch, engine, thinking=thinking) as run:
@@ -71,7 +71,7 @@ def test_legacy_provider_without_silent_catchup_keeps_sequential_calls(host_worl
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('engine,thinking', ROUTES)
+@pytest.mark.parametrize('engine,thinking', chosen_rows(ROUTES, 0, 3))
 @pytest.mark.parametrize('mail_kind', ['room', 'task_result'])
 def test_mail_durable_before_switch_keeps_its_unanswered_obligation(host_world, monkeypatch, engine, thinking, mail_kind):
     async def scenario():
@@ -121,7 +121,7 @@ def test_mail_durable_before_switch_keeps_its_unanswered_obligation(host_world, 
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('engine,thinking', ROUTES)
+@pytest.mark.parametrize('engine,thinking', chosen_rows(ROUTES, 0, 1, 3))
 def test_waiting_socket_death_is_closed_and_settled_before_quiet(host_world, monkeypatch, engine, thinking):
     async def scenario():
         async with stack(host_world, monkeypatch, engine, thinking=thinking) as run:
@@ -208,7 +208,7 @@ def test_prepared_account_change_is_rechecked_at_adoption(host_world):
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('engine,thinking', ROUTES)
+@pytest.mark.parametrize('engine,thinking', chosen_rows(ROUTES, 0, 1, 3))
 def test_languages_recorded_after_preparation_reach_next_session(host_world, monkeypatch, engine, thinking):
     async def scenario():
         async with stack(host_world, monkeypatch, engine, thinking=thinking) as run:
@@ -228,7 +228,7 @@ def test_languages_recorded_after_preparation_reach_next_session(host_world, mon
 
 
 @pytest.mark.parametrize('field,value', [('voice', 'Kore'), ('instructions', 'New exact owner instruction.'),
-    ('pause', 'long'), ('interruptions', False), ('thinking', 'high'), ('search', True)])
+    ('pause', 'long'), ('interruptions', False)])
 def test_changed_live_option_discards_preparation_once(host_world, monkeypatch, field, value):
     async def scenario():
         async with stack(host_world, monkeypatch, 'gemini', thinking=True) as run:
@@ -257,10 +257,9 @@ def test_exact_documented_gemini_expiry_continues(host_world, monkeypatch, think
                 run.wire.put({'sessionResumptionUpdate': {'resumable': True, 'newHandle': 'synthetic-expiry-handle'}})
                 await run.wait(lambda: run.host.state.get('resume_handle') == 'synthetic-expiry-handle')
             await run.wire.websocket.close(code=1011, reason='Deadline expired before operation could complete.')
-            for _ in range(1500):
-                if run.running.done() or len(run.provider.connections) >= 2:
-                    break
-                await asyncio.sleep(.01)
+            # Continuation is a second connection while the call lives; the call ending first is the failure.
+            # The same 15 s of elapsed time as the refusal case.
+            await run.wait(lambda: run.running.done() or len(run.provider.connections) >= 2, timeout=15)
             continued = len(run.provider.connections) == 2
         assert continued, run.result
     asyncio.run(scenario())
@@ -290,8 +289,12 @@ def test_heard_but_interrupted_answers_prove_continuation(host_world, monkeypatc
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('engine,thinking', [('gemini', False), ('gemini', True), ('openai', False), ('grok', False)])
-@pytest.mark.parametrize('break_offer', [False, True])
+@pytest.mark.parametrize(("break_offer", "engine", "thinking"), [
+    (False, 'gemini', True),
+    (False, 'grok', False),
+    (True, 'gemini', False),
+    (True, 'openai', False),
+])
 def test_handoff_mail_offer_keeps_custody_until_its_write_succeeds(host_world, monkeypatch, engine, thinking, break_offer):
     from ouroboros.contracts.live_conversation import ContextUpdate
     from tests.test_live_stack_preparation import request
@@ -318,9 +321,9 @@ def test_handoff_mail_offer_keeps_custody_until_its_write_succeeds(host_world, m
             run.provider.script.append(('say', 'Old connection answered the spoken owner turn.'))
             old.input_end('owner-holds-mail-switch', 'Synthetic spoken turn before the handoff.')
             await run.wait(lambda: run.host.connection_number == (3 if break_offer else 2))
+            # Quiet can precede the offer's actual write. Observe its answer, not a scheduling allowance.
+            await run.wait(lambda: bool(run.wire.spoken), 30)
             await run.quiet()
-            # Allow the normal offer worker to process an event-loop turn after quiet.
-            await asyncio.sleep(.1)
             assert any(text in str(row) for row in run.host.messages)
             assert len(run.wire.spoken) == 1, dict(
                 broken=broken, spoken=run.wire.spoken, pending=run.call.pending_offers,

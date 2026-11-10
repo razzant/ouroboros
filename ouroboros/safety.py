@@ -26,10 +26,14 @@ from ouroboros.loop_llm_call import classify_llm_exception, is_rate_limit_text
 from ouroboros.pricing import emit_llm_usage_event, normalize_usage_cost, infer_provider_from_model
 from ouroboros.utils import sanitize_tool_result_for_log
 from ouroboros.config import runtime_setting
+from ouroboros.deployment_policy import (
+    RELEASE_AFTER_DANGEROUS, RELEASE_UNJUDGED, REPEAT_AFTER_DANGEROUS, checker, organization_rules, safety_exit_open,
+)
 from ouroboros.safety_config import OWNER_RULES_KEY
 
 from ouroboros.safety_records import (
-    _safety_drive_root, _record_safety_usage, _emit_durable_safety_event, _emit_safety_mode_skip, coalesce_verdicts, verdict_history_bytes,
+    _safety_drive_root, _record_safety_usage, _emit_durable_safety_event, _emit_safety_mode_skip, coalesce_verdicts,
+    safety_check_wait, verdict_history_bytes, parse_safety_response as _parse_safety_response,
 )
 from ouroboros.consciousness_authority import work_kind, effective_runtime_mode
 
@@ -114,7 +118,7 @@ TOOL_POLICY: Dict[str, str] = {
     "tree_read": POLICY_SKIP,
     "start_task": POLICY_CHECK,
     "move_to_project": POLICY_SKIP,
-    "tell_task": POLICY_CHECK,
+    "tell_task": POLICY_SKIP,  # a relay between my own works: the send it leads to is checked where it happens
     "update_scratchpad": POLICY_SKIP,
     "update_identity": POLICY_SKIP,
     "update_world": POLICY_SKIP,
@@ -133,6 +137,7 @@ TOOL_POLICY: Dict[str, str] = {
     "delegate_answer": POLICY_SKIP,
     "delegate_message": POLICY_SKIP,
     "cancel_task": POLICY_SKIP,
+    "set_task_retention": POLICY_SKIP,  # a retention fact on the owner's own held words; never deletes
     "resume_child_task": POLICY_SKIP,
     "discard_child_result": POLICY_SKIP,
     "override_delegation_constraint": POLICY_SKIP,
@@ -151,7 +156,7 @@ TOOL_POLICY: Dict[str, str] = {
     "presence_cancel_work": POLICY_SKIP,
     "configure_presence": POLICY_CHECK,
     "escalate": POLICY_SKIP,
-    "forward_to_worker": POLICY_CHECK,
+    "forward_to_worker": POLICY_SKIP,  # a relay, like tell_task
     "compact_context": POLICY_SKIP,
     "enable_tools": POLICY_SKIP,
     "preflight_review": POLICY_SKIP,
@@ -447,9 +452,9 @@ class _VerdictHistory(dict):
 
 class _Assessment(tuple):
     """Keep the public pair ABI while distinguishing flags from infrastructure holds."""
-    def __new__(cls, allowed, message, *, status="", verdicts=()):
+    def __new__(cls, allowed, message, *, status="", verdicts=(), destination=""):
         result = super().__new__(cls, (allowed, message))
-        result.status, result.verdicts = status, tuple(verdicts)
+        result.status, result.verdicts, result.destination = status, tuple(verdicts), destination
         return result
 
 
@@ -470,24 +475,60 @@ def _subject_digest(tool_name, arguments):
     return hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
 
 
-def _remember(ctx, digest, tool_name, assessment, *, speech_refused=False):
+# A flag is overridden by a decision, never by bytes re-presented: the re-issue must come from a later model call.
+_SEND_DESPITE = ("To send despite this flag, repeat the identical call (its request_id too, if it has one) in a "
+                 "later step; any changed argument is checked again. ")
+# When neither applicable DANGEROUS exit is open, the saved verdict still answers.
+_REPEAT_CLOSED = ("This deployment's policy lets no repeat send it: a changed call is checked again, and only the "
+                  "organization's administrator changes that policy.")
+
+
+# How returned words open: their level, and that nothing was sent.
+_NOT_SENT = {"SUSPICIOUS": "⚠️ SAFETY_WARNING: Message not sent", "DANGEROUS": "⚠️ SAFETY_VIOLATION: Message not sent"}
+
+
+def _authoring_call(ctx):
+    """The model call that authored this tool call (the loop's ``_current_llm_call_meta``); "" when unknown."""
+    meta = getattr(ctx, "_current_llm_call_meta", None)
+    return str(meta.get("llm_call_id") or "") if isinstance(meta, dict) else ""
+
+
+def _remember(ctx, digest, tool_name, assessment, *, flagged="", marked=False, gate="", held=""):
+    """Retain a verdict. Flagged words keep their level, authoring model call, whether only the verdict saw them as
+    words and, if DANGEROUS, their words-and-destination key (``gate``); a hold keeps its cause and authoring call.
+    True when kept, False when decisive history would not fit (a verdict then ends this call's stored hold and marks
+    the row ``judged``, so no answer releases a judged call unjudged), None without a root, which keeps nothing."""
     root = _root_id(ctx)
     if not root:
-        return True  # rootless calls never earn a reusable speech flag
-    row = {"digest": digest, "tool": tool_name, "verdicts": assessment.verdicts,
-           "speech_refused": speech_refused}
+        if ctx is not None and assessment.verdicts:
+            judged = getattr(ctx, "_safety_judged_subjects", set())
+            judged.add(digest)
+            ctx._safety_judged_subjects = judged  # this context's lifetime only; a fresh head has no such fact
+        return None  # rootless calls never earn a reusable speech flag, so no exit is offered for them
     with _PRIOR_LOCK:
         previous = _PRIOR_VERDICTS.get(root, {})
-        row["verdicts"] = coalesce_verdicts(previous.get(digest, {}).get("verdicts", ()), assessment.verdicts)
+        before = previous.get(digest, {})
+        row = {"digest": digest, "tool": tool_name,
+               "verdicts": coalesce_verdicts(before.get("verdicts", ()), assessment.verdicts),
+               **({"flagged": flagged} if flagged else {"held": held} if held else {}),
+               **({"judged": True} if held and before.get("judged") else {}),
+               **({"llm_call_id": _authoring_call(ctx)} if flagged or held else {}),
+               **({"marked": True} if flagged and marked else {}), **({"gate": gate} if gate else {})}
         history = _VerdictHistory({**previous, digest: row})
         history.omitted_safe = getattr(previous, "omitted_safe", 0)
         safe_rows = iter([key for key, value in history.items()
-                         if not value.get("speech_refused") and value.get("verdicts")
+                         if not value.get("flagged") and value.get("verdicts")
                          and all(verdict["status"] == "SAFE" for verdict in value["verdicts"])])
         while verdict_history_bytes(history) > _SAFETY_PRIOR_BYTE_BUDGET:
             key = next(safe_rows, None)
-            if key is None:
-                return False  # decisive flags must fit in full
+            if key is None:  # decisive flags must fit in full
+                if not held:  # even a first verdict ends unchecked authority when its full text will not fit
+                    for name in ("held", "llm_call_id") if before.get("held") else ():
+                        before.pop(name, None)
+                    before["judged"] = True
+                    previous[digest] = before
+                    _PRIOR_VERDICTS[root] = previous
+                return False
             history.omitted_safe += sum(1 + verdict.get("repeat_count", 0) for verdict in history.pop(key)["verdicts"])
         if root not in _PRIOR_VERDICTS and len(_PRIOR_VERDICTS) >= 512:
             _PRIOR_VERDICTS.popitem(last=False)  # an evicted root earns no speech reissue
@@ -506,48 +547,101 @@ def _needs_checker(ctx):
         and get_safety_mode("consciousness") == "full")
 
 
-def _hold(ctx, tool_name, reason, *, status="UNAVAILABLE"):
+def _hold(ctx, tool_name, reason, *, status="UNAVAILABLE", judged=""):
+    """Hold this one call. ``judged``: the reasons of a verdict reached but not kept, said as such, never unjudged."""
     _emit_durable_safety_event(ctx, {"type": "safety_hold", "tool": tool_name, "reason": reason, "hold": status})
     marker = "SAFETY_SUBJECT_TOO_LARGE_BLOCKED" if status == "TOO_LARGE" else "SAFETY_UNAVAILABLE"
-    next_step = ("Reduce the payload or split the work before retrying; complete evidence must fit."
-                 if status == "TOO_LARGE" else "Retry when review is available.")
-    return _Assessment(False, f"⚠️ {marker}: {reason}. This call was not checked. {next_step}", status=status)
+    told = (f"This call was judged; its verdict cannot be kept:\n{judged}" if judged else
+            "This call was not checked: that is no verdict. " + ("A smaller call may fit." if status == "TOO_LARGE" else "Retry later."))
+    return _Assessment(False, f"⚠️ {marker}: {reason}. {told}", status=status)
 
 
-def _focus_event_source(row, metadata, notes):
-    """A place event's host frame as its typed records when they reproduce that row exactly.
-
-    Each row is compared on its own, so any other row (attachments, images, another turn's frame,
-    a Continue order) stays whole. Notes as they stood at the event are kept only where they differ
-    from those read now."""
-    from ouroboros.presence_context import focus_frame_sources
-
-    typed = (focus_frame_sources(metadata, row.get("content"))
-             if isinstance(row, dict) and row.get("source") == "initial_text" else None)
-    if typed is None:
-        return row
-    at_event, place_id = typed.pop("notes_at_event", None) or [], (metadata.get("focus") or {}).get("place_id")
-
-    def versions(rows):
-        return sorted((str(n.get("text")), str(n.get("author")), str(n.get("at") or "")) for n in rows)
-    if versions(at_event) != versions(n for n in notes if n["place_id"] == place_id):
-        typed["notes_at_event"] = at_event
-    return {**{key: value for key, value in row.items() if key != "content"},
-            "host_frame": "prompts/FOCUS.md showed the mind these records and its allowance",
-            **typed}
+_WAIT = ("In this mode words flagged DANGEROUS wait for your human: never route them through another tool; changed words "
+         "are checked again. ")  # outside Cyber Pro, as a dangerous action stops there
+_RELEASE_CLOSED = ": this deployment's policy lets no answer of your human release a call unjudged."
 
 
-def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, ctx=None, resolved_binding=None):
-    """Fixed host evidence, with authorship separate from semantic authorization."""
-    from dataclasses import asdict, is_dataclass
+def _owner_line(subject, head=""):
+    """How my human releases a waiting call: the exact card its ``_exit_subject`` needs (answered, whatever it says)."""
+    words, destinations, exact, _ = subject
+    card = (f"with this exact call on its own line of the card: {words}\n" if exact
+            else f"with these exact words on their own lines, unprefixed, and the destination {', '.join(destinations)} "
+                 "on the card; ")
+    return (f"{head}Or ask your human privately {card}their answer lets your identical call send it. The host checks "
+            "that they answered that card, not what they answered: send only on their approval.")
+
+
+def _declared_speech(tool_name, effect):
+    """Words the host knows before any verdict, from declarations only: the automatic reply or a ``message`` effect
+    (a connector's ``sends.when`` included); never an argument name."""
+    return tool_name == "place_reply" or effect.effect == "message"
+
+
+def _exact_call(tool_name, arguments):
+    """A call as my human's card quotes it when it declares no words or destination of its own: the whole call."""
+    return f"{tool_name} {json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)}"
+
+
+def _exit_subject(ctx, tool_name, arguments, effect, ext_tool=None):
+    """What my human's card must hold, as ``(words, destinations, exact, labels)``: declared words with each place's
+    label and every recipient outside a place's own conversation (one place never covers another recipient), else the
+    exact call (``_exact_call``): an MCP tool, words only the verdict saw, or words or recipients the host cannot tell."""
     from ouroboros.place_guard import call_place_facts
-    from ouroboros.places import load_places
-    from ouroboros.tool_access import canonical_data_root
+    from ouroboros.tool_effects import argument_value, target_values
+
+    if _declared_speech(tool_name, effect):
+        words = argument_value(arguments, effect.text or "text")
+        facts = call_place_facts(ctx, tool_name, arguments, ext_tool=ext_tool) or {}
+        rows = [row for row in facts.get("places") or [] if row.get("place_label")]
+        labels, own = list(dict.fromkeys(row["place_label"] for row in rows)), {row.get("conversation_id") for row in rows}
+        targets = facts.get("targets") or target_values(effect, arguments)
+        destinations = list(dict.fromkeys(labels + [value for key, values in targets.items() for value in values
+                                                    if key not in {"account_id", "thread_id", effect.thread} and value not in own]))
+        if isinstance(words, str) and words.strip() and destinations:
+            return words, destinations, False, labels
+    return _exact_call(tool_name, arguments), [tool_name], True, []
+
+
+def _owner_yes(ctx, subject):
+    """The id of my human's answer in this work whose card (the quiz it answers, never a chat message) holds the words
+    and every destination ``subject()`` resolves; "" if none. A draft answered before the send counts, as does an
+    answer that started a fresh head (its card rides in the head's owner rows). The host checks bytes and destination
+    only: the mind's call after reading the answer is its judgment that it approves."""
+    from ouroboros.owner_words import OWNER_SOURCES, is_answered_card
+
+    cards = [(row, str(row["reply_to"]["text"])) for row in getattr(ctx, "_owner_directives", None) or []
+             if isinstance(row, dict) and row.get("source") in OWNER_SOURCES and is_answered_card(row.get("reply_to"))
+             and row["reply_to"].get("text")]
+    words, destinations, _, _ = subject() if cards else ("", [], True, [])
+    for row, card in cards:
+        # The words as whole lines of the card and each destination as a whole token, never a part of a longer one.
+        if (f"\n{words.strip()}\n" in f"\n{card}\n"
+                and all(re.search(rf"(?<!\w){re.escape(d)}(?!\w)", card) for d in destinations)):
+            return str(row.get("quiz_id") or row.get("msg_id") or row["reply_to"].get("address") or "an answer")
+    return ""
+
+
+def _words_key(subject):
+    """Declared words and their place (else recipients) apart from the tool and other arguments, so a wait for my human
+    is never re-rolled through another door or request_id; "" when the host cannot tell them."""
+    return "" if subject[2] else _subject_digest("words", [subject[0], sorted(subject[3] or subject[1])])
+
+
+def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, ctx=None, resolved_binding=None,
+                        evidence=None, ext_tool=None):
+    """Fixed host evidence, with authorship separate from semantic authorization. ``evidence`` (a dict) receives
+    the destinations and notes resolved here, so a refusal names them without resolving them again; an extension
+    call's place facts come from the descriptor being dispatched (``ext_tool``), never a later publication."""
+    from dataclasses import asdict, is_dataclass
+    from ouroboros import owner_words
+    from ouroboros.place_guard import call_place_facts, place_evidence
+    from ouroboros.tool_effects import mcp_sends_as
+    from ouroboros.safety_evidence import focus_event_source
 
     metadata = getattr(ctx, "task_metadata", None) or {}
     kind = work_kind(metadata)
     focus = metadata.get("focus") or {}
-    place = dict(call_place_facts(ctx, tool_name, arguments) or {})
+    place = dict(call_place_facts(ctx, tool_name, arguments, ext_tool=ext_tool) or {})
     place_ids = {row["place_id"] for row in place.get("places", []) if row.get("place_id")}
     # A focus occasions the work; it does not establish where this call lands.
     # Only these two built-ins take an actual place reference as their subject.
@@ -555,41 +649,35 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
     if referenced and referenced not in place_ids:  # a resolved row already names its place
         place["place_id"] = referenced
         place_ids.add(referenced)
-    notes = []  # each place's notes once, read now from the canonical store
-    if place_ids:
-        for record in load_places(canonical_data_root(ctx)):
-            if record.place_id not in place_ids:
-                continue
-            if record.place_id == place.get("place_id"):
-                place.update(place_label=record.label, place_state=record.state)
-            notes.extend({"place_id": record.place_id, "text": n.text, "author": n.author,
-                          **({"at": n.at} if n.at else {}),
-                          "standing_delegation": n.author in {"owner", "migration"}} for n in record.notes)
+    # Each place's notes and circle words once, read now from the canonical store (a circle call adds its circle).
+    notes = place_evidence(ctx, place, place_ids, tool_name, arguments)
     if tool_name == "place_reply":  # always a message; resolved rows already carry its route
         place["effect"] = "message"
         if not place.get("targets"):
             place["targets"] = {"destination": arguments.get("destination")}
     occasion = "unknown"
-    if metadata.get("schedule_writer_kind"):
-        occasion = metadata["schedule_writer_kind"] + "-written schedule"
-    elif focus:
-        occasion = "confirmed owner account" if (focus.get("actor") or {}).get("owner_confirmed") else "person in a place"
+    if metadata.get("schedule_writer_kind"):  # whose work; who supplied its text is its ``schedule_text`` sources' fact
+        occasion = metadata["schedule_writer_kind"] + " work's schedule"
+    elif focus:  # read at this check: a confirmation made after the admission ``focus`` records counts
+        from ouroboros.presence_context import focus_owner_now
+        occasion = "confirmed owner account" if focus_owner_now(ctx) else "person in a place"
     elif metadata.get("wake_cause") == "own_clock":
         occasion = "own clock"
     elif kind == "owner":
         occasion = "owner door"
     directives = getattr(ctx, "_owner_directives", None)
     # User messages are quoted input when the caller has no retained host source; never certify them as owner words.
-    sources = directives if isinstance(directives, list) else [m for m in (messages or []) if m.get("role") == "user"]
-    if isinstance(directives, list):
-        sources = [_focus_event_source(row, metadata, notes) for row in sources]
+    sources = [*directives, *owner_words.safety_sources(ctx)] if isinstance(directives, list) else [m for m in (messages or []) if m.get("role") == "user"]
+    sources = [focus_event_source(row, metadata, notes) for row in sources]  # the evidence diet: what a row costs
     target = asdict(resolved_binding) if is_dataclass(resolved_binding) else resolved_binding
+    # Whose credential an MCP call acts with (e.g. a server signed in as my human); connectors carry it per place.
+    sends_as = {"sends_as": mcp} if tool_name.startswith("mcp_") and (mcp := mcp_sends_as(tool_name)) else {}
     with _PRIOR_LOCK:
         root = _root_id(ctx)
         history = _PRIOR_VERDICTS.get(root, {})
         if root in _PRIOR_VERDICTS:
             _PRIOR_VERDICTS.move_to_end(root)
-        earlier = list(history.values())
+        earlier = [{key: value for key, value in row.items() if key != "gate"} for row in history.values()]
         omitted_safe = getattr(history, "omitted_safe", 0)
     bundle = {
         "work": {"kind": kind, "label": "your work" if kind == "owner" else "consciousness",
@@ -598,65 +686,20 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
         "occasion": {"cause": occasion, "consciousness_cause": metadata.get("consciousness_cause"),
                      "origin_wake_task_id": metadata.get("origin_wake_task_id"), "focus": focus,
                      "sources": sources, "retained_host_sources": isinstance(directives, list)},
-        "subject": {"tool": tool_name, "physical_target": target, "place": place},
-        # The acting mind's context reads the same key through the same snapshot (``owner_rules_section``).
-        "standing_delegation": {"owner_rules": runtime_setting(OWNER_RULES_KEY, ""), "place_notes": notes},
+        "subject": {"tool": tool_name, "physical_target": target, "place": place, **sends_as},
+        # The acting mind's context reads the same key through the same snapshot (``owner_rules_section``);
+        # a deployment's rules keep their own author, the policy file (``organization_rules_section``).
+        "standing_delegation": {"owner_rules": runtime_setting(OWNER_RULES_KEY, ""), "place_notes": notes,
+                                **({"organization_rules": rules} if (rules := organization_rules()) else {})},
         "earlier_verdicts": earlier,
         "earlier_safe_verdicts_omitted": omitted_safe,
     }
+    if isinstance(evidence, dict):
+        evidence.update(place=place, notes=notes)
     return (f"Runtime mode: {_runtime_mode(ctx)}\nHost evidence (provenance is not consent):\n"
             + _render_subject_json(bundle) + "\nProposed tool call:\nTool: " + tool_name
             + "\nArguments:\n" + (args_json if args_json is not None else _render_subject_json(arguments))
             + "\nIs this safe?")
-
-
-def _parse_safety_response(text: str) -> Optional[Dict[str, Any]]:
-    """Parse a safety JSON object from a model response.
-
-    Safety reviewers occasionally wrap JSON in prose despite the prompt. We
-    accept the first object that has the expected shape, but still fail closed
-    when no valid object exists.
-    """
-    clean = text.replace("```json", "").replace("```", "").strip()
-    candidates = [clean]
-    depth = 0
-    start = -1
-    in_string = False
-    escape = False
-    for idx, ch in enumerate(clean):
-        if in_string:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_string = False
-            continue
-        if ch == '"':
-            in_string = True
-        elif ch == "{":
-            if depth == 0:
-                start = idx
-            depth += 1
-        elif ch == "}" and depth:
-            depth -= 1
-            if depth == 0 and start >= 0:
-                candidates.append(clean[start:idx + 1])
-                start = -1
-    best: Dict[str, Any] | None = None
-    rank = {"SAFE": 1, "SUSPICIOUS": 2, "DANGEROUS": 3}
-    for candidate in candidates:
-        try:
-            obj = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(obj, dict):
-            continue
-        status = str(obj.get("status") or "").upper()
-        if status in {"SAFE", "SUSPICIOUS", "DANGEROUS"}:
-            if best is None or rank[status] > rank[str(best.get("status") or "").upper()]:
-                best = {"status": status, "reason": str(obj.get("reason") or "")}
-    return best
 
 
 def _classify_safety_parse_failure(msg: Dict[str, Any], usage: Optional[Dict[str, Any]]) -> str:
@@ -726,12 +769,26 @@ def _safety_deadline_epoch(ctx: Optional[Any]) -> Optional[float]:
         return None
 
 
+def _route_has_access(model: str, use_local: bool) -> bool:
+    """Whether a deployment's Supervisor route may be asked: local and subscription routes may; an API route
+    needs its connection's credential, the test ``_resolve_safety_routing`` applies to the Supervisor's own route."""
+    from ouroboros.provider_models import provider_for_model
+
+    return use_local or provider_for_model(model) == "claudexor" or _light_model_has_reachable_provider(model)
+
+
 def _resolve_safety_routing() -> Tuple[bool, bool, Optional[str]]:
-    """Choose local/remote safety backend; unreachable fallback fails open."""
+    """Choose local/remote safety backend; unreachable fallback fails open.
+
+    Only no-backend cases fail open with ``SAFETY_WARNING``: no local lane and either no provider key or one not
+    covering the light model's provider; a fallback local runtime that fails or is rate-limited, never a chain route
+    (``_unanswered``). An explicit local runtime (``USE_LOCAL_LIGHT``) that fails holds."""
     selected = get_safety_model()
     explicit = bool(str(runtime_setting("OUROBOROS_MODEL_SAFETY", "") or "").strip())
     local_light = str(runtime_setting("USE_LOCAL_LIGHT", "") or "").lower() in ("true", "1")
-    if selected.endswith(" (local)") or (not explicit and local_light):
+    # The lane is the one the resolved model names (``get_safety_model`` labels it): a blank Light follows
+    # Main and Main's lane, so a leftover USE_LOCAL_LIGHT never sends an inherited remote Main locally (#2969).
+    if selected.endswith(" (local)"):
         inherited_main = not explicit and not local_light and not str(runtime_setting("OUROBOROS_MODEL_LIGHT", "") or "").strip()
         return True, inherited_main, None
 
@@ -773,14 +830,14 @@ _UNCHECKED_WARNING_SUFFIX = (
 # Only a genuine THROUGHPUT signal may wave a safety check through, so the predicate is
 # narrower than "retryable". `classify_llm_exception` folds every transient class —
 # 408, 5xx and timeouts included — into `provider_transient`, and those are outages, not
-# throttling: they keep today's blocking SAFETY_VIOLATION path. A `provider_transient`
+# throttling: no retry, this route answered nothing. A `provider_transient`
 # therefore qualifies only when the provider actually said 429, by status code or by the
 # shared rate-limit text vocabulary (`is_rate_limit_text` — imported rather than copied,
 # so the two lanes cannot fork). Permanent classes are already excluded upstream: a
-# structured `insufficient_quota` wins over a 429 status inside that helper and still
-# blocks. On the HTTP-200 body lane (`llm._normalize_remote_response`) the qualifying
+# structured `insufficient_quota` wins over a 429 status inside that helper: no retry
+# either. On the HTTP-200 body lane (`llm._normalize_remote_response`) the qualifying
 # kind is exactly `rate_limit`, which that module assigns only to a transient body error
-# whose code IS 429; its other body transients stay blocking too.
+# whose code IS 429; its other body transients are plain outages (no retry; the chain is asked next).
 # Backoff: one 2.0s sleep, inside the range the loop's own transient pattern
 # (`2.0 ** attempt`) spans; no new setting, because this lane has exactly one retry.
 _SAFETY_BODY_RATE_LIMIT_KIND = "rate_limit"
@@ -807,19 +864,20 @@ _SAFETY_RATE_LIMIT_BACKOFF_SEC = 2.0
 
 # Process-local storm latch: after a NON-fallback-lane check (remote, or a local
 # PRIMARY whose vLLM/proxy 429s) exhausted both attempts on a provider rate limit, every
-# safety check in this process short-circuits to the same blocked SAFETY_UNAVAILABLE
-# answer for this window WITHOUT a provider call (the mark/is-cooling shape of
-# ouroboros/fallback_cooldown.py, inlined because this lane needs one timestamp, not a
-# per-model map). The safety lane is the highest-frequency LIGHT consumer — every guarded
-# tool call on every in-process subagent thread — so re-probing a storming route on each
-# call would amplify the very storm it reports.
+# safety check in this process skips the Supervisor's own route for this window WITHOUT a
+# provider call: to the owner's Fallback chain, else the same blocked SAFETY_UNAVAILABLE
+# answer (the mark/is-cooling shape of ouroboros/fallback_cooldown.py, kept apart from it so a
+# checker storm never reroutes Main; a chain route keeps its own window). The safety lane is the
+# highest-frequency LIGHT consumer — every guarded tool call on every in-process subagent
+# thread — so re-probing a storming route on each call would amplify the very storm it reports.
 _SAFETY_STORM_COOLDOWN_SEC = 30.0
 _SAFETY_STORM_UNTIL = 0.0
+_CHAIN_STORMS: Dict[tuple, float] = {}  # a Fallback route's own storm window, by its complete binding
 
 
 class _SafetyRateLimited(Exception):
-    """Both safety attempts hit a provider rate limit; the caller BLOCKS this one call
-    with the typed SAFETY_UNAVAILABLE outcome (infrastructure fact, not a verdict).
+    """Both safety attempts hit a provider rate limit: the route answered nothing (the chain is tried next, else
+    the caller BLOCKS this one call with the typed SAFETY_UNAVAILABLE outcome; infrastructure, not a verdict).
     ``latched`` marks the storm-window short-circuit shape: it carries no NEW storm
     evidence, so the outcome must not extend the window (else the advised retry would
     keep re-arming it forever). ``attempts`` is the PHYSICAL call count behind this
@@ -830,6 +888,23 @@ class _SafetyRateLimited(Exception):
         super().__init__(message)
         self.latched = latched
         self.attempts = 0 if latched else attempts
+
+
+def _arm_storm_latch() -> None:
+    global _SAFETY_STORM_UNTIL
+    _SAFETY_STORM_UNTIL = time.time() + _SAFETY_STORM_COOLDOWN_SEC
+
+
+def _mark_storm(error: BaseException, binding: tuple, *, own: bool, fail_open: bool) -> None:
+    """Close a route for the latch window after a CONFIRMED storm (both attempts 429ed): the Supervisor's own
+    route through the process latch (never on the fail-open local lane), a chain route through its own window.
+    A deadline-expired single 429 is one data point, and a latched skip carries no new evidence."""
+    if not isinstance(error, _SafetyRateLimited) or error.attempts < 2:
+        return
+    if not own:
+        _CHAIN_STORMS[binding] = time.time() + _SAFETY_STORM_COOLDOWN_SEC
+    elif not fail_open:
+        _arm_storm_latch()
 
 
 def _is_throughput_rate_limit(kind: str, status_code: Optional[int], safe_error: str) -> bool:
@@ -860,7 +935,7 @@ def _safety_rate_limit_reason(
         return f"{found.kind}: {safe_error}"[:300]
     body = usage.get("provider_error") if isinstance(usage, dict) else None
     if isinstance(body, dict) and _body_is_quota_refusal(body):
-        return None  # structured insufficient-quota is PERMANENT: keep today's blocking path
+        return None  # structured insufficient-quota is PERMANENT: no retry on this route
     if not isinstance(body, dict) or str(body.get("kind") or "") != _SAFETY_BODY_RATE_LIMIT_KIND:
         return None
     return sanitize_tool_result_for_log(
@@ -880,8 +955,7 @@ def _safety_rate_limit_backoff(ctx: Optional[Any]) -> None:
 
 
 def _rate_limited_outcome(
-    ctx: Optional[Any], tool_name: str, error: str, *, local_fallback: bool, arm_latch: bool,
-    attempts: int = 2,
+    ctx: Optional[Any], tool_name: str, error: str, *, local_fallback: bool, attempts: int = 2,
 ) -> Tuple[bool, str]:
     'Terminal outcome of a rate-limited safety check, split by lane. The local-FALLBACK'
     if local_fallback:
@@ -897,33 +971,19 @@ def _rate_limited_outcome(
             f"⚠️ SAFETY_WARNING: The local fallback Safety Supervisor was rate-limited "
             f"and could not check this call ({error}). {_UNCHECKED_WARNING_SUFFIX}"
         )
-    return _safety_unavailable_blocked(ctx, tool_name, error, arm_latch=arm_latch, attempts=attempts)
+    return _safety_unavailable_blocked(ctx, tool_name, error, attempts=attempts)
 
 
 def _safety_unavailable_blocked(
-    ctx: Optional[Any], tool_name: str, error: str, *, arm_latch: bool = True, attempts: int = 2,
+    ctx: Optional[Any], tool_name: str, error: str, *, attempts: int = 2,
 ) -> Tuple[bool, str]:
-    'Rate-limited safety lane: BLOCK this one call with a typed non-verdict outcome.'
-    if arm_latch and attempts >= 2:
-        # The latch's documented trigger is a CONFIRMED storm: both attempts 429ed.
-        # A deadline-expired single 429 is one data point, not a storm - later
-        # checks in this process keep their own probe.
-        global _SAFETY_STORM_UNTIL
-        _SAFETY_STORM_UNTIL = time.time() + _SAFETY_STORM_COOLDOWN_SEC
-    shape = (
-        "storm latch, no attempt" if not arm_latch
-        else "deadline expired before the retry" if attempts < 2
-        else "after one retry"
-    )
-    action = (
-        "blocked_unchecked_storm_latched" if not arm_latch
-        else "blocked_unchecked_deadline_expired" if attempts < 2
-        else "blocked_unchecked_after_retry"
-    )
+    'Rate-limited safety lane: BLOCK this one call with a typed non-verdict outcome (``_mark_storm`` closes the route).'
+    shape, action = (("storm latch, no attempt", "blocked_unchecked_storm_latched") if not attempts else
+                     ("deadline expired before the retry", "blocked_unchecked_deadline_expired") if attempts < 2 else
+                     ("after one retry", "blocked_unchecked_after_retry"))
     log.error("Safety check rate-limited for %s (%s); blocking unchecked: %s", tool_name, shape, error)
-    _emit_durable_safety_event(ctx, {
-        "type": "safety_check_rate_limited", "tool": tool_name, "action": action, "error": error,
-    })
+    _emit_durable_safety_event(ctx, {"type": "safety_check_rate_limited", "tool": tool_name, "action": action,
+                                     "error": error})
     # The provider error goes on its own line: downstream status classification scans
     # only the FIRST line for outcome markers, and a raw error body could carry one.
     return False, (
@@ -962,8 +1022,12 @@ def _safety_model_call(
     use_local: bool, call_type: str, user_prompt: str, on_usage: Any,
     model_role: str = "safety", effort: str = "low", account: Optional[str] = None,
     processing: Optional[str] = None, attempts_limit: int = 2, system_prompt: Optional[str] = None,
+    latch: bool = True, wait_for_resources: Optional[bool] = None,
 ) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
-    'ONE safety model call, with ONE bounded retry when the provider rate-limits it.'
+    """ONE safety model call, with ONE bounded retry when the provider rate-limits it.
+
+    ``latch`` consults the storm latch (the Supervisor's own route only); ``wait_for_resources=False`` returns a
+    quota or sign-in refusal at once, so a configured route after this one can answer first."""
     from ouroboros import model_concurrency
     from ouroboros.llm_observability import chat_observed
     from ouroboros.tools.review_helpers import cached_prompt_blocks
@@ -974,65 +1038,111 @@ def _safety_model_call(
         if processing is None:
             processing = resolve_processing_preference("safety")
 
-    if time.time() < _SAFETY_STORM_UNTIL:
-        raise _SafetyRateLimited(
-            "safety lane cooling down after a recent rate-limit storm; no attempt made",
-            latched=True,
-        )
-    reason = ""
-    for attempt in range(attempts_limit):
-        if attempt:
-            deadline = _safety_deadline_epoch(ctx)
-            if deadline is not None and time.time() >= deadline:
-                break  # the task deadline is spent: the retry would be a paid call past it
-            _safety_rate_limit_backoff(ctx)
-            if deadline is not None and time.time() >= deadline:
-                break  # the backoff sleep itself consumed the deadline
-        exc: Optional[Exception] = None
-        msg: Dict[str, Any] = {}
-        usage: Optional[Dict[str, Any]] = None
-        try:
-            # The physical sender takes the provider slot; this only carries the deadline.
-            with model_concurrency.model_call_scope(
-                light_model, use_local, _safety_deadline_epoch(ctx)
-            ):
-                msg, usage = chat_observed(
-                    client,
-                    drive_root=_safety_drive_root(ctx),
-                    task_id=str(getattr(ctx, "task_id", "") or "safety"),
-                    call_type=call_type,
-                    # Stable, tool-free SAFETY.md prefix; subject remains uncached.
-                    messages=[
-                        {"role": "system", "content": cached_prompt_blocks(
-                            (system_prompt if system_prompt is not None else _get_safety_prompt()), ttl=_SAFETY_CACHE_TTL)},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    model=light_model, use_local=use_local,
-                    max_tokens=get_safety_max_tokens(), reasoning_effort=effort,
-                    timeout=get_safety_call_timeout_sec(),
-                    model_role=model_role, model_account_override=account, processing_preference=processing,
-                    wait_for_resources=not mode_has_unrestricted_agency(_runtime_mode(ctx)),
-                    response_format=({"type": "json_object"}
-                                     if LLMClient.supports_response_format(light_model, use_local=use_local)
-                                     else None),
-                )
-        except Exception as e:
-            from ouroboros.llm_claudexor import propagate_model_error
-            propagate_model_error(e)
-            exc = e
-        safe_error = sanitize_tool_result_for_log(f"{type(exc).__name__}: {exc}") if exc else ""
-        rate_limited = _safety_rate_limit_reason(exc, usage, safe_error)
-        on_usage(usage)
-        if rate_limited is None:
-            if exc is not None:
-                raise exc
-            return msg, usage
-        reason = rate_limited
-        attempts = attempt + 1
-        log.warning(
-            "Safety check rate-limited for %s (attempt %d/2): %s", tool_name, attempts, reason,
-        )
-    raise _SafetyRateLimited(reason, attempts=attempts)
+    if latch and time.time() < _SAFETY_STORM_UNTIL:
+        raise _SafetyRateLimited("safety lane cooling down after a recent rate-limit storm; no attempt made", latched=True)
+    with safety_check_wait(ctx, tool_name):  # the tool waits on this check, its bounded retry included
+        reason = ""
+        for attempt in range(attempts_limit):
+            if attempt:
+                deadline = _safety_deadline_epoch(ctx)
+                if deadline is not None and time.time() >= deadline:
+                    break  # the task deadline is spent: the retry would be a paid call past it
+                _safety_rate_limit_backoff(ctx)
+                if deadline is not None and time.time() >= deadline:
+                    break  # the backoff sleep itself consumed the deadline
+            exc: Optional[Exception] = None
+            msg: Dict[str, Any] = {}
+            usage: Optional[Dict[str, Any]] = None
+            try:
+                deadline = _safety_deadline_epoch(ctx)
+                # The physical sender takes the provider slot; this only carries the deadline. The same
+                # task deadline that ends the slot wait and the retry also bounds the send (#572).
+                with model_concurrency.model_call_scope(light_model, use_local, deadline):
+                    msg, usage = chat_observed(
+                        client,
+                        drive_root=_safety_drive_root(ctx),
+                        task_id=str(getattr(ctx, "task_id", "") or "safety"),
+                        call_type=call_type,
+                        # Stable, tool-free SAFETY.md prefix; subject remains uncached.
+                        messages=[
+                            {"role": "system", "content": cached_prompt_blocks(
+                                (system_prompt if system_prompt is not None else _get_safety_prompt()), ttl=_SAFETY_CACHE_TTL)},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        model=light_model, use_local=use_local,
+                        max_tokens=get_safety_max_tokens(), reasoning_effort=effort,
+                        timeout=get_safety_call_timeout_sec(),
+                        model_role=model_role, model_account_override=account, processing_preference=processing,
+                        wait_for_resources=(not mode_has_unrestricted_agency(_runtime_mode(ctx))
+                                            if wait_for_resources is None else wait_for_resources),
+                        response_format=({"type": "json_object"}
+                                         if LLMClient.supports_response_format(light_model, use_local=use_local)
+                                         else None),
+                        **({"caller_dispatch_deadline_ts": deadline} if deadline is not None else {}),
+                    )
+            except Exception as e:
+                from ouroboros.llm_claudexor import propagate_model_error
+                propagate_model_error(e)
+                exc = e
+            safe_error = sanitize_tool_result_for_log(f"{type(exc).__name__}: {exc}") if exc else ""
+            rate_limited = _safety_rate_limit_reason(exc, usage, safe_error)
+            on_usage(usage)
+            if rate_limited is None:
+                if exc is not None:
+                    raise exc
+                return msg, usage
+            reason = rate_limited
+            attempts = attempt + 1
+            log.warning(
+                "Safety check rate-limited for %s (attempt %d/2): %s", tool_name, attempts, reason,
+            )
+        raise _SafetyRateLimited(reason, attempts=attempts)
+
+
+def _safety_routes(model: str, use_local: bool, overrides: Optional[dict] = None) -> List[Tuple[str, bool, str, tuple]]:
+    """The Supervisor's route, then the owner's resilience chain (``OUROBOROS_MODEL_FALLBACKS`` on the
+    ``USE_LOCAL_FALLBACK`` lane, as the main loop walks it), each complete binding once: the effective model and
+    locality a live wait-card switch gives the role (what is sent, recorded and charged), its role, its binding.
+    A deployment's checker walks only its own routes, with their own accounts, and no switch moves them."""
+    from ouroboros.model_slots import route_binding
+    from ouroboros.provider_models import fallback_candidate_targets
+
+    if (managed := checker()) is not None:
+        return [(model, local, "safety", (model, local, account)) for model, local, account in managed.routes()]
+    chain_local = str(runtime_setting("USE_LOCAL_FALLBACK", "") or "").lower() in ("true", "1")
+    rows = [(model, use_local, "safety")] + [(target.model_id, chain_local, f"fallback:{index}") for index, target
+                                             in enumerate(fallback_candidate_targets(preserve_slots=True))]
+    routes, seen = [], set()
+    for row in rows:
+        binding = route_binding(*row, overrides=overrides)
+        if binding not in seen:
+            seen.add(binding)
+            routes.append((binding[0], binding[1], row[2], binding))
+    return routes
+
+
+def _answered_nothing(msg: Dict[str, Any], usage: Optional[Dict[str, Any]]) -> str:
+    """A provider error body with no content, described; "" when the route answered."""
+    body = usage.get("provider_error") if isinstance(usage, dict) else None
+    if not isinstance(body, dict) or str((msg or {}).get("content") or "").strip():
+        return ""
+    return f"provider error {body.get('code') or ''} {body.get('type') or ''}: {body.get('message') or ''}"
+
+
+def _unanswered(ctx: Optional[Any], tool_name: str, error: Exception, *, fail_open: bool):
+    """The outcome of a route that answered nothing: the one-route rule. Only the Supervisor's own fallback
+    local route may ``fail_open``; any storm is already marked (``_mark_storm``)."""
+    if isinstance(error, _SafetyRateLimited):
+        return _Assessment(*_rate_limited_outcome(
+            ctx, tool_name, str(error), local_fallback=fail_open, attempts=error.attempts), status="UNAVAILABLE")
+    from ouroboros.llm_claudexor import propagate_model_error
+    propagate_model_error(error)
+    safe_error = sanitize_tool_result_for_log(f"{type(error).__name__}: {error}")
+    if fail_open:  # a fallback local outage warns instead of blocking all unknown tools
+        log.warning("Safety local-fallback LLM call failed for %s (%s); proceeding with warning", tool_name, safe_error)
+        return _Assessment(True, f"⚠️ SAFETY_WARNING: Local safety runtime unreachable ({safe_error}). {_UNCHECKED_WARNING_SUFFIX}", status="UNAVAILABLE")
+    log.error("Safety check LLM call failed for %s: %s", tool_name, safe_error)
+    return _hold(ctx, tool_name, f"Safety check failed with error: {safe_error}")
 
 
 def _run_llm_check(
@@ -1041,16 +1151,20 @@ def _run_llm_check(
     messages: Optional[List[Dict[str, Any]]],
     ctx: Optional[Any],
     resolved_binding: Optional[Any] = None,
+    ext_tool: Optional[Any] = None,
 ) -> Tuple[bool, str]:
     """Run a single light-model safety check and classify the verdict."""
     args_json = _render_subject_json(arguments)
     if len(args_json) > _SAFETY_SUBJECT_CHAR_BUDGET:
         return _Assessment(*_subject_too_large_blocked(ctx, tool_name, len(args_json)), status="TOO_LARGE")
+    evidence = {}
     prompt = _build_check_prompt(tool_name, arguments, messages, args_json=args_json,
-                                 ctx=ctx, resolved_binding=resolved_binding)
+                                 ctx=ctx, resolved_binding=resolved_binding, evidence=evidence, ext_tool=ext_tool)
     if len(prompt.encode("utf-8")) > _SAFETY_BUNDLE_BYTE_BUDGET:
         return _hold(ctx, tool_name, "The complete mandatory evidence bundle is too large", status="TOO_LARGE")
-    _use_local_light, _is_local_fallback, _skip_reason = _resolve_safety_routing()
+    # A deployment's walk judges each of its own routes (below): its primary's access never stops the others.
+    managed = checker()
+    _use_local_light, _is_local_fallback, _skip_reason = (False, False, None) if managed else _resolve_safety_routing()
     if _skip_reason is not None:
         if _needs_checker(ctx):
             return _hold(ctx, tool_name, _skip_reason)
@@ -1080,32 +1194,86 @@ def _run_llm_check(
         else:
             _record_safety_usage(ctx, usage_payload)
 
-    try:
-        msg, usage = _safety_model_call(
-            client=client, ctx=ctx, tool_name=tool_name, light_model=light_model,
-            use_local=_use_local_light, call_type="safety_supervisor",
-            user_prompt=prompt, on_usage=_emit_safety_usage, system_prompt=system_prompt,
-        )
-    except _SafetyRateLimited as e:
-        return _Assessment(*_rate_limited_outcome(
-            ctx, tool_name, str(e),
-            local_fallback=_use_local_light and _is_local_fallback and not _needs_checker(ctx),
-            arm_latch=not getattr(e, "latched", False),
-            attempts=getattr(e, "attempts", 2),
-        ), status="UNAVAILABLE")
-    except Exception as e:
-        from ouroboros.llm_claudexor import propagate_model_error
-        propagate_model_error(e)
-        safe_error = sanitize_tool_result_for_log(f"{type(e).__name__}: {e}")
-        # Fallback local outage warns instead of blocking all unknown tools.
-        if _use_local_light and _is_local_fallback and not _needs_checker(ctx):
-            log.warning(
-                "Safety local-fallback LLM call failed for %s (%s); proceeding with warning",
-                tool_name, safe_error,
+    # A route that answers nothing (a throttle after its retry, an outage, a quota or sign-in refusal, an error
+    # body) is an infrastructure fact, not a verdict: the check moves along the owner's chain. With no answer the
+    # Supervisor's own route decides the outcome exactly as before, its owner question (a model wait) included.
+    from ouroboros.llm_claudexor import propagate_model_error
+    from ouroboros.model_wait import current_model_wait, model_wait_reason
+    from ouroboros.transport_custody import outcome_unknown_on_chain
+
+    fail_open = _use_local_light and _is_local_fallback and not _needs_checker(ctx)
+    waiter = current_model_wait()
+    routes = _safety_routes(light_model, _use_local_light, waiter.overrides if waiter else None)
+    skipped: List[Dict[str, str]] = []  # routes that answered nothing, then the one that answered
+
+    def pinned(binding: tuple) -> Dict[str, Any]:  # a deployment's route: its own account, no inherited preference
+        return {"account": binding[2], "processing": ""} if managed is not None else {}
+
+    def record_skips(answered: Optional[Dict[str, str]]) -> None:  # None: no route of the walk answered
+        _emit_durable_safety_event(ctx, {"type": "safety_route_fallback", "tool": tool_name,
+                                         "unavailable": skipped, "answered": answered})
+
+    if managed is not None:  # a route this process cannot ask answers nothing and is never sent
+        skipped = [{"model": row[0], "role": row[2], "error": "its connection has no credential"}
+                   for row in routes if not _route_has_access(row[0], row[1])]
+        routes = [row for row in routes if _route_has_access(row[0], row[1])]
+        if not routes:
+            record_skips(None)
+            return _hold(ctx, tool_name, "No route of the deployment's Safety Supervisor has its connection's credential")
+    alone, own_failure, own_reply = len(routes) == 1, None, None
+
+    for index, (light_model, _use_local_light, role, binding) in enumerate(routes):
+        try:
+            if index and time.time() < _CHAIN_STORMS.get(binding, 0.0):
+                raise _SafetyRateLimited("cooling down after this route's own rate-limit storm", latched=True)
+            msg, usage = _safety_model_call(
+                client=client, ctx=ctx, tool_name=tool_name, light_model=light_model, use_local=_use_local_light,
+                call_type="safety_supervisor", user_prompt=prompt, on_usage=_emit_safety_usage,
+                system_prompt=system_prompt, model_role=role, latch=not index,
+                wait_for_resources=None if alone else False, **pinned(binding),
             )
-            return _Assessment(True, f"⚠️ SAFETY_WARNING: Local safety runtime unreachable ({safe_error}). {_UNCHECKED_WARNING_SUFFIX}", status="UNAVAILABLE")
-        log.error("Safety check LLM call failed for %s: %s", tool_name, safe_error)
-        return _hold(ctx, tool_name, f"Safety check failed with error: {safe_error}")
+            failure = "" if alone else _answered_nothing(msg, usage)
+            own_reply = (msg, usage) if failure and not index else own_reply
+        except Exception as error:
+            if not isinstance(error, _SafetyRateLimited) and not model_wait_reason(error):
+                stops = True  # an interruption or an unknown outcome never moves to another route
+                try:
+                    propagate_model_error(error)
+                    stops = outcome_unknown_on_chain(error)  # a direct call that may have answered
+                finally:
+                    if stops and skipped:
+                        record_skips(None)
+                if stops:  # never a new verdict, nor the local route's warning for another route's call
+                    return _unanswered(ctx, tool_name, error, fail_open=fail_open and not index)
+            _mark_storm(error, binding, own=not index, fail_open=fail_open)  # later checks skip it in its window
+            if alone:
+                if skipped:
+                    record_skips(None)
+                return _unanswered(ctx, tool_name, error, fail_open=fail_open)
+            own_failure = own_failure if index else error
+            failure = f"{type(error).__name__}: {error}"
+        if not failure:
+            if skipped:
+                log.warning("Safety check for %s answered by %s after %s", tool_name, light_model, skipped)
+                record_skips({"model": light_model, "role": role})
+            break
+        skipped.append({"model": light_model, "role": role, "error": sanitize_tool_result_for_log(failure)[:300]})
+    else:
+        record_skips(None)
+        light_model, _use_local_light, role, binding = routes[0]
+        if own_reply is not None:
+            msg, usage = own_reply  # its error body takes the parse lane, as before
+        elif not model_wait_reason(own_failure):
+            return _unanswered(ctx, tool_name, own_failure, fail_open=fail_open)
+        else:
+            try:  # its quota or sign-in refusal: the owner question comes after the chain, as Main's does
+                msg, usage = _safety_model_call(
+                    client=client, ctx=ctx, tool_name=tool_name, light_model=light_model, use_local=_use_local_light,
+                    call_type="safety_supervisor", user_prompt=prompt, on_usage=_emit_safety_usage,
+                    system_prompt=system_prompt, **pinned(binding))
+            except Exception as error:
+                _mark_storm(error, binding, own=True, fail_open=fail_open)
+                return _unanswered(ctx, tool_name, error, fail_open=fail_open)
 
     result = _parse_safety_response(msg.get("content") or "")
     if result is None:
@@ -1120,11 +1288,12 @@ def _run_llm_check(
             "tool": tool_name,
             "failure_class": failure_class,
         })
+        own = binding == routes[0][3]  # only the walk's first route consults and arms the process latch
         try:
             repair_prompt = (
                 "Your previous Safety Supervisor response was not parseable as the required JSON object.\n"
                 "Return ONLY this strict JSON shape, with no markdown and no prose:\n"
-                "{\"status\":\"SAFE|SUSPICIOUS|DANGEROUS\",\"reason\":\"short reason\"}\n\n"
+                "{\"status\":\"SAFE|SUSPICIOUS|DANGEROUS\",\"reason\":\"short reason\",\"speech\":true|false,\"quote\":\"\"}\n\n"
                 "Original proposed tool call follows again.\n\n"
                 f"{prompt}"
             )
@@ -1132,19 +1301,15 @@ def _run_llm_check(
                 client=client, ctx=ctx, tool_name=tool_name, light_model=light_model,
                 use_local=_use_local_light, call_type="safety_supervisor_repair",
                 user_prompt=repair_prompt, on_usage=_emit_safety_usage, system_prompt=system_prompt,
+                model_role=role, latch=own, **pinned(binding),
             )
             result = _parse_safety_response(repair_msg.get("content") or "")
             if result is None:
                 failure_class = _classify_safety_parse_failure(repair_msg, repair_usage)
-        except _SafetyRateLimited as e:
-            return _Assessment(*_rate_limited_outcome(
-                ctx, tool_name, str(e),
-                local_fallback=_use_local_light and _is_local_fallback and not _needs_checker(ctx),
-                arm_latch=not getattr(e, "latched", False),
-                attempts=getattr(e, "attempts", 2),
-            ), status="UNAVAILABLE")
+        except _SafetyRateLimited as e:  # a chain route's storm closes that route; it never takes the local warning
+            _mark_storm(e, binding, own=own, fail_open=fail_open)
+            return _unanswered(ctx, tool_name, e, fail_open=fail_open and own)
         except Exception as exc:
-            from ouroboros.llm_claudexor import propagate_model_error
             propagate_model_error(exc)
             log.warning("Safety repair retry failed for %s: %s", tool_name, exc, exc_info=True)
         if result is None:
@@ -1158,7 +1323,7 @@ def _run_llm_check(
 
     verdicts = [{"stage": "first", **result}]
     row = None
-    if result["status"] != "SAFE":
+    if result["status"] != "SAFE" and managed is None:  # a deployment's Supervisor decides alone
         from ouroboros.configured_subagents import normalize_configured_subagents
         try:
             catalog, _ = normalize_configured_subagents(runtime_setting("OUROBOROS_SUBAGENTS", "") or {"enabled": False, "items": []})
@@ -1177,7 +1342,8 @@ def _run_llm_check(
                 client=client, ctx=ctx, tool_name=tool_name, light_model=light_model, use_local=_use_local_light,
                 call_type="safety_second_check", user_prompt=second_prompt, on_usage=_emit_safety_usage, system_prompt=system_prompt,
                 model_role="subagent:" + row.subagent_id, effort=row.effort or "low",
-                account=row.route.credential_profile_id, processing=row.processing_preference or None, attempts_limit=1)
+                account=row.route.credential_profile_id, processing=row.processing_preference or None, attempts_limit=1,
+                latch=False)
             second = _parse_safety_response(msg.get("content") or "")
         except Exception as exc:
             from ouroboros.llm_claudexor import propagate_model_error
@@ -1188,14 +1354,31 @@ def _run_llm_check(
         result = second
         verdicts.append({"stage": "second", "row_id": row.subagent_id, **result})
     status = result["status"]
-    reasons = "\n".join(f"{v['stage']}: {v['status']} — {v.get('reason', '')}" for v in verdicts)
+    reasons = _reasons(verdicts)
     if status == "SAFE":
         return _Assessment(True, "", status=status, verdicts=verdicts)
     if status == "SUSPICIOUS":
         return _Assessment(True, "⚠️ SAFETY_WARNING: The Safety Supervisor flagged this action as suspicious.\n"
-                           + reasons + "\nThe command was allowed, but consider whether this is the right approach.", status=status, verdicts=verdicts)
+                           + reasons + "\nThe command was allowed, but consider whether this is the right approach.",
+                           status=status, verdicts=verdicts, destination="\n".join(_destination_lines(evidence)))
     return _Assessment(False, "⚠️ SAFETY_VIOLATION: The Safety Supervisor blocked this command.\n"
-                       + reasons + "\nReconsider whether and how to proceed.", status=status, verdicts=verdicts)
+                       + reasons + "\nReconsider whether and how to proceed.", status=status, verdicts=verdicts,
+                       destination="\n".join(_destination_lines(evidence)))
+
+
+def _reasons(verdicts):
+    """Each stage's level and reason, one per line, as the mind and the room's record read them."""
+    return "\n".join(f"{v['stage']}: {v['status']} — {v.get('reason', '')}" for v in verdicts)
+
+
+def _destination_lines(evidence):
+    """The flagged call's destinations as the bundle resolved them: each label with my human's notes and circle words."""
+    from ouroboros.place_guard import destination_line
+
+    place = evidence.get("place") or {}
+    rows = {row["place_id"]: row for row in [*(place.get("places") or []), place] if row.get("place_id")}
+    return [destination_line(row.get("place_label") or pid, [note for note in evidence.get("notes") or ()
+                                                            if note["place_id"] == pid]) for pid, row in rows.items()]
 
 
 def check_safety(
@@ -1206,11 +1389,27 @@ def check_safety(
     python_resolution: Optional[Any] = None,
     resolved_binding: Optional[Any] = None,
     declared_policy: str = "",
+    ext_tool: Optional[Any] = None,
 ) -> Tuple[bool, str]:
     """Return ``(allowed, warning_or_error)`` for one tool call.
 
     ``declared_policy`` is a first-party ``ToolEntry``'s own declaration; a
-    ``TOOL_POLICY`` entry outranks it and an invalid value is ``DEFAULT_POLICY``."""
+    ``TOOL_POLICY`` entry outranks it and an invalid value is ``DEFAULT_POLICY``.
+    Speech, known before a verdict from declarations or marked by the verdict's ``speech``, follows the final
+    assessment: SUSPICIOUS or DANGEROUS returns it unsent once, with the reason, the verdict's ``quote`` and the
+    destination's notes. An identical re-issue (request_id included) from a later model call sends SUSPICIOUS words in
+    every mode and DANGEROUS words in Cyber Pro, the mode read when they are sent; elsewhere DANGEROUS words wait for
+    my human, keyed on the declared words and destination, so a new request_id buys no fresh check. My human's answer
+    whose card holds the exact words as whole lines and the destination (a call declaring neither: the exact call)
+    sends them in every mode, one given before the send included (``_owner_yes``): the host checks that the card was
+    answered, never what the answer says. A hold on speech, or on an MCP call without a verdict, binds in every mode
+    and names the same exit. Deployment exits separately govern an agent's DANGEROUS repeat, a human's card after
+    DANGEROUS and a card without a verdict. Permissions are read at sending; a closed exit buys no second roll of
+    a kept exact-call verdict. An unretained verdict is still known to be judged for this context's lifetime, so
+    it cannot leave through the unchecked exit; a fresh check can recover. The speech mark is the final
+    stage's; words only it saw meet the one-author guard first. ``ext_tool`` is the extension descriptor being
+    dispatched: its effect and the brief's place facts are the publication it was read with
+    (``tool_effects.bound_declaration``)."""
     # Arguments can be None for no-parameter tool calls.
     tool_name = str(tool_name or "").strip()
     arguments = arguments or {}
@@ -1218,13 +1417,15 @@ def check_safety(
     policy = TOOL_POLICY.get(tool_name) or (declared if declared in POLICY_VALUES else DEFAULT_POLICY)
 
     from ouroboros.tool_effects import effect_of
-    effect = effect_of(tool_name, ctx=ctx, is_mcp=tool_name.startswith("mcp_"))
-    speech = tool_name == "place_reply" or effect.effect == "message"
+    is_mcp = tool_name.startswith("mcp_")
+    effect = effect_of(tool_name, ext_tool=ext_tool, ctx=ctx, is_mcp=is_mcp, args=arguments)
+    speech = _declared_speech(tool_name, effect)  # a verdict may add the mark (below); an unjudged MCP call waits too
     if tool_name == "manage_schedules" and arguments.get("action") in {"create", "update", "restore"}:
         policy = POLICY_CHECK
     if effect.declared and effect.effect == "read":
-        _emit_durable_safety_event(ctx, {"type": "safety_declared_read_skip", "tool": tool_name,
-                                        "reason": "reviewed tool declaration: read", "source": effect.source})
+        _emit_durable_safety_event(ctx, {"type": "safety_declared_read_skip", "tool": tool_name, "source": effect.source,
+                                        "reason": "server annotation readOnlyHint" if effect.source == "mcp"
+                                        else "reviewed tool declaration: read"})
         return True, ""
     if policy == POLICY_SKIP and not speech:
         return True, ""
@@ -1248,22 +1449,9 @@ def check_safety(
             # (adversarial review r1 #19: audit only real deltas vs full mode).
             return True, ""
 
-    cyber = mode_has_unrestricted_agency(_runtime_mode(ctx))
-    digest = _subject_digest(tool_name, arguments)
-    with _PRIOR_LOCK:
-        root = _root_id(ctx)
-        prior = _PRIOR_VERDICTS.get(root, {}).get(digest, {})
-        if root in _PRIOR_VERDICTS:
-            _PRIOR_VERDICTS.move_to_end(root)
-    if speech and prior.get("speech_refused"):
-        _emit_durable_safety_event(ctx, {"type": "safety_sent_despite_check", "tool": tool_name,
-                                       "subject_digest": digest, "verdicts": prior["verdicts"],
-                                       "detail": "sent despite the check"})
-        return True, "⚠️ SAFETY_ADVICE: Identical re-issue; sent despite the check."
-
     # Preserve the selected assessment coverage independently of resource
     # admission. Cyber changes the authority of an assessment, never its verdict.
-    # Non-full modes retain their existing disclosed skips.
+    # Non-full modes retain their existing disclosed skips: an unchecked call meets no flag, wait or card.
     safety_mode = get_safety_mode(work_kind(getattr(ctx, "task_metadata", None)))
     if safety_mode != "full":
         skip_llm = safety_mode == "off" or (safety_mode == "light" and policy == POLICY_CHECK_CONDITIONAL)
@@ -1271,8 +1459,76 @@ def check_safety(
             _emit_safety_mode_skip(ctx, tool_name, safety_mode, policy)
             return True, ""
 
+    cyber = mode_has_unrestricted_agency(_runtime_mode(ctx))
+    digest = _subject_digest(tool_name, arguments)
+    with _PRIOR_LOCK:
+        root = _root_id(ctx)
+        rows = _PRIOR_VERDICTS.get(root, {})
+        prior, gates = rows.get(digest, {}), {row["gate"]: row for row in rows.values() if row.get("gate")}
+        if root in _PRIOR_VERDICTS:
+            _PRIOR_VERDICTS.move_to_end(root)
+    call, flag, resolved = _authoring_call(ctx), prior.get("flagged", ""), []
+    if digest in getattr(ctx, "_safety_judged_subjects", ()):
+        prior = {**prior, "judged": True}
+    # Unmanaged keeps upstream behavior; an explicit list never silently gains the new human exit.
+    repeat, release = safety_exit_open(REPEAT_AFTER_DANGEROUS), safety_exit_open(RELEASE_UNJUDGED)
+    release_dangerous = safety_exit_open(RELEASE_AFTER_DANGEROUS)
+
+    def subject():  # what my human's card must hold, resolved at most once per check (``_exit_subject``)
+        resolved or resolved.append(_exit_subject(ctx, tool_name, arguments, effect, ext_tool))
+        return resolved[0]
+
+    def one_author():  # the place guard a message meets at dispatch, for words only a verdict saw
+        from ouroboros.place_guard import verdict_speech_refusal
+        return verdict_speech_refusal(ctx, tool_name, arguments, is_mcp=is_mcp, ext_tool=ext_tool)
+
+    def released(quiz, words_by_verdict):  # my human's answered card holds these exact words: no new check
+        if words_by_verdict and (refusal := one_author()):
+            return False, refusal
+        said = "\nThe check had said:\n" + _reasons(basis) if any(v["status"] != "SAFE" for v in basis or ()) else ""
+        return sent("safety_sent_despite_check" if flag or gated else "safety_sent_without_assessment",
+                    f"Sent on your human's answer ({quiz}), without a new check. The host checked that they answered "
+                    "a card with these exact words, not what they answered." + said,
+                    quiz_id=quiz, **({"hold": prior["held"]} if prior.get("held") else {}))
+
+    def sent(event, advice, **facts):
+        _emit_durable_safety_event(ctx, {"type": event, "tool": tool_name, "subject_digest": digest, "sent_by": call,
+                                         **({"verdicts": basis} if basis else {}),
+                                         **({"flagged_in": prior.get("llm_call_id", "")} if flag else {}), **facts})
+        return True, "⚠️ SAFETY_ADVICE: " + advice
+    # Who sends flagged words, read when they are sent: the mind for SUSPICIOUS, and for DANGEROUS in Cyber Pro;
+    # else my human's card. ``gated``: these declared words to this destination were flagged DANGEROUS elsewhere.
+    gated = gates.get(_words_key(subject())) if gates and speech else None
+    mind_may = (cyber and repeat) or (flag == "SUSPICIOUS" and not gated)
+    basis = prior.get("verdicts") or (gated or {}).get("verdicts")  # the verdicts a release overrides
+    level = "DANGEROUS" if gated else flag  # the words' gate outranks an older exact-call flag
+    card_open = level != "DANGEROUS" or release_dangerous
+    closed = level == "DANGEROUS" and not (mind_may or card_open)
+    exits = (_REPEAT_CLOSED if closed else _owner_line(subject(), _SEND_DESPITE if mind_may else _WAIT)
+             if card_open else _SEND_DESPITE) if level else ""
+    if flag and (not call or call == prior.get("llm_call_id")):  # the flagged decision re-presented, not a later one
+        return False, _NOT_SENT[flag] + ": this exact call was flagged in this same step. " + exits
+    if flag and closed:
+        return False, _NOT_SENT[level] + ": this exact call was refused before. " + _REPEAT_CLOSED
+    # My human's card reaches words (declared, or marked by a verdict) and an MCP call no verdict judged an action; a
+    # call no verdict judged only through an open release, and never one whose verdict was reached but not kept.
+    if (speech or prior.get("marked") or (is_mcp and not prior.get("verdicts"))) and call and (
+            call != prior.get("llm_call_id")) and card_open and (level or (release and not prior.get("judged"))) and (
+            quiz := _owner_yes(ctx, subject)):
+        return released(quiz, prior.get("marked"))
+    if gated and not cyber:  # owner's answer above may release it; an older SUSPICIOUS flag cannot
+        return False, (f"{_NOT_SENT['DANGEROUS']}: these words were flagged DANGEROUS in this work for this place or "
+                       f"recipient. {exits}")
+    if flag:
+        if not mind_may:  # it waits for my human: no fresh check re-rolls it
+            return False, _NOT_SENT[flag] + ". " + exits
+        if prior.get("marked") and (refusal := one_author()):
+            return False, refusal
+        return sent("safety_sent_despite_check", "Identical re-issue from a later step; sent despite the check:\n"
+                    + _reasons(prior["verdicts"]), detail="sent despite the check by a later model call")
+
     try:
-        assessment = _run_llm_check(tool_name, arguments, messages, ctx, resolved_binding)
+        assessment = _run_llm_check(tool_name, arguments, messages, ctx, resolved_binding, ext_tool)
     except Exception as exc:
         from ouroboros.llm_claudexor import propagate_model_error
         from ouroboros.model_wait import propagate_model_control
@@ -1281,20 +1537,56 @@ def check_safety(
     allowed, message = assessment
     verdicts = getattr(assessment, "verdicts", ())
     if verdicts:
-        flagged_speech = speech and any(v["status"] != "SAFE" for v in verdicts)
-        if not _remember(ctx, digest, tool_name, assessment, speech_refused=flagged_speech):
-            assessment = _hold(ctx, tool_name, "This work's mandatory prior-verdict history is too large", status="TOO_LARGE")
+        # Words follow the final assessment (a second check included): any flag returns them unsent once.
+        marked = not speech and verdicts[-1].get("speech") is True  # words only the final verdict saw
+        speech = speech or marked
+        status = getattr(assessment, "status", "")
+        flag = status if speech and status in ("SUSPICIOUS", "DANGEROUS") else ""
+        mind_may = flag == "SUSPICIOUS" or (cyber and repeat)
+        card_open = flag != "DANGEROUS" or release_dangerous
+        closed = flag == "DANGEROUS" and not (mind_may or card_open)
+        # Every refusal of words is kept, whatever its exit is now: its next issue reads the exit as it then stands.
+        kept = _remember(ctx, digest, tool_name, assessment, flagged=flag, marked=marked,
+                         gate=_words_key(subject()) if flag == "DANGEROUS" else "")
+        _emit_durable_safety_event(ctx, {"type": "safety_verdict", "tool": tool_name,
+                                       "subject_digest": digest, "verdicts": verdicts})
+        if kept is False:  # reached but not kept: held, its verdict said
+            assessment = _hold(ctx, tool_name, "This work's mandatory prior-verdict history is too large",
+                               status="TOO_LARGE", judged=_reasons(verdicts))
             allowed, message = assessment
         else:
-            _emit_durable_safety_event(ctx, {"type": "safety_verdict", "tool": tool_name,
-                                           "subject_digest": digest, "verdicts": verdicts})
-            if flagged_speech:
-                reasons = "\n".join(f"{v['stage']}: {v['status']} — {v.get('reason', '')}" for v in verdicts)
-                return False, ("⚠️ SAFETY_VIOLATION: Message not sent.\n" + reasons
-                               + "\nReconsider whether and how to proceed. An identical re-issue sends despite the check.")
-    # Holds cannot earn retry authority. Speech holds bind in every runtime mode.
-    if speech and not allowed:
-        return False, message
+            if flag and marked and call and card_open and (quiz := _owner_yes(ctx, subject)):  # answered before the send
+                prior = {"verdicts": list(verdicts), "llm_call_id": call}
+                basis = prior["verdicts"]
+                return released(quiz, True)
+            if flag:  # private to the mind: the words, the rule, where they would land and a kept exit
+                quote = next((v["quote"] for v in reversed(verdicts) if v.get("quote")), "")
+                tail = (_REPEAT_CLOSED if closed else _owner_line(subject(), _SEND_DESPITE if mind_may else _WAIT)
+                        if card_open else _SEND_DESPITE) if kept else ""
+                return False, (_NOT_SENT[flag] + ".\n" + _reasons(verdicts)
+                               + (f"\nFlagged words: {json.dumps(quote, ensure_ascii=False)}" if quote else "")
+                               + (f"\n{assessment.destination}" if getattr(assessment, "destination", "") else "")
+                               + (f"\n{tail}" if tail else ""))
+            if marked and allowed and (refusal := one_author()):  # the guard a message meets at dispatch
+                return False, refusal
+    # A call never judged a non-SAFE action leaves on my human's card for its exact form (a pre-approved github_write),
+    # where this deployment leaves that release open. Speech holds bind in every mode, as does an MCP call's (built-in
+    # undeclared tools' holds stay advice).
+    if not allowed and not verdicts and all(v["status"] == "SAFE" for v in prior.get("verdicts", ())) and call and (
+            call != prior.get("llm_call_id")) and release and not prior.get("judged") and (
+            quiz := _owner_yes(ctx, subject)):
+        return released(quiz, False)
+    if not allowed and (speech or (is_mcp and not getattr(assessment, "verdicts", ()))):
+        if verdicts:  # a judged call is no hold: no wait for a check, no exit
+            return False, message
+        held = _remember(ctx, digest, tool_name, assessment, held=getattr(assessment, "status", "") or "UNAVAILABLE")
+        head = ("This call waits until a check judges it: its server does not mark it read-only, so it may deliver "
+                "words." if effect.source == "mcp" else "These words wait until a check judges them.")
+        if held is True and release:
+            return False, (message + "\n" + _owner_line(subject(), head + " Retry in a later step. ")
+                           + " Never route these words through another tool.")
+        retry = _RELEASE_CLOSED if held is True else "."  # nothing kept names no exit
+        return False, f"{message}\n{head} Retry in a later step{retry} Never route these words through another tool."
     if cyber and not allowed:
         _emit_durable_safety_event(ctx, {"type": "safety_advisory", "tool": tool_name,
             "assessment_allowed": False, "assessment": message, "runtime_mode": _runtime_mode(ctx), "execution_allowed": True})

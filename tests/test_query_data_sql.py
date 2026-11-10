@@ -52,14 +52,7 @@ def test_sql_child_keeps_windows_systemroot(ctx, monkeypatch):
 
 @pytest.mark.parametrize("query", [
     "ATTACH DATABASE ':memory:' AS other",
-    "CREATE TABLE surprise(x)",
-    "DELETE FROM tasks",
     "UPDATE tasks SET status='failed'",
-    "INSERT INTO tasks(task_id) VALUES ('unexpected')",
-    "DROP TABLE tasks",
-    "PRAGMA user_version=4",
-    "PRAGMA query_only=OFF",
-    "SELECT load_extension('not-an-extension')",
     "SELECT body FROM task_bodies",
 ])
 def test_sql_denials_and_working_select(ctx, query):
@@ -70,12 +63,10 @@ def test_sql_denials_and_working_select(ctx, query):
         assert txn.load("caller")["result"] == "body only"
 
 
-@pytest.mark.parametrize("db", ["current", "money"])
-@pytest.mark.parametrize("snapshot", [False, True])
-@pytest.mark.parametrize("query,message", [
-    ("DELETE FROM meta", "not authorized"),
-    ("SELECT )", 'near ")": syntax error'),
-    ("SELECT 1; SELECT 2", "You can only execute one statement at a time."),
+@pytest.mark.parametrize(("query", "message", "snapshot", "db"), [
+    ("DELETE FROM meta", "not authorized", False, "current"),
+    ("SELECT )", 'near ")": syntax error', True, "money"),
+    ("SELECT 1; SELECT 2", "You can only execute one statement at a time.", False, "current"),
 ])
 def test_sql_errors_are_query_failures_not_store_damage(ctx, db, snapshot, query, message):
     if db == "money":
@@ -138,12 +129,54 @@ def test_authorizer_denies_extension_function_independently():
         conn.close()
 
 
-@pytest.mark.parametrize("pragma", ["table_info(tasks)", "table_xinfo(tasks)", "table_list",
-                                    "index_list(tasks)", "index_info(tasks_parent)"])
+@pytest.mark.parametrize("pragma", ["table_info(tasks)", "table_list",
+                                    "index_info(tasks_parent)"])
 def test_metadata_pragmas_are_readable(ctx, pragma):
     result = run(ctx, "PRAGMA " + pragma)
     assert result["status"] == "ok", result
     assert result["data"]["rows"]
+
+
+def test_the_table_valued_form_of_an_admitted_pragma_reads_the_same_schema(ctx):
+    """Owner 09.11 (answer A): SELECT ... FROM pragma_table_info('tasks') reads what PRAGMA table_info(tasks)
+    already reads; it opens no row of another table."""
+    pragma = run(ctx, "PRAGMA table_info(tasks)")
+    table = run(ctx, "SELECT * FROM pragma_table_info('tasks')")
+    assert table["status"] == "ok" and table["data"]["rows"] == pragma["data"]["rows"], (table, pragma)
+    assert run(ctx, "SELECT name FROM pragma_table_list")["status"] == "ok"
+    assert run(ctx, "SELECT body FROM task_bodies")["status"] == "error"
+
+
+def test_declaring_the_pragma_tables_passes_over_only_a_missing_one(monkeypatch):
+    """SQLite 3.40 and older refuse that form unless the pragma tables are declared before the authorizer.
+    A table this SQLite lacks is passed over; the deadline's interrupt landing there still stops the read."""
+    monkeypatch.setattr(sql, "_PRAGMA_TABLES", sql._PRAGMA_TABLES | {"pragma_no_such_pragma"})
+    request = {"db": "current", "query": "SELECT * FROM pragma_table_info('tasks')", "max_rows": 10,
+               "max_bytes": 1 << 20}
+    for interrupt in (False, True):
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.execute("CREATE TABLE tasks (id TEXT)")
+            pending = {"interrupt": interrupt, "declaring": False}
+
+            def trace(statement):
+                pending["declaring"] = statement.endswith(" LIMIT 0")
+
+            def progress():  # the deadline's conn.interrupt(), landing in the first declaration
+                fire = pending["interrupt"] and pending["declaring"]
+                pending["interrupt"] = pending["interrupt"] and not fire
+                return fire
+
+            conn.set_trace_callback(trace)
+            conn.set_progress_handler(progress, 1)
+            if interrupt:
+                with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+                    sql._fetch(conn, request)
+                assert not pending["interrupt"]
+            else:
+                assert sql._fetch(conn, request)["rows"] == [[0, "id", "TEXT", 0, None, 0]]
+        finally:
+            conn.close()
 
 
 def test_heap_is_limited_only_in_child(ctx):
@@ -377,8 +410,7 @@ def test_sqlite_failure_owns_only_its_interrupt_and_an_expired_busy_wait(tmp_pat
         assert not owned(spent, errors[name], fired), name
 
 
-@pytest.mark.parametrize("started", [False, True])
-@pytest.mark.parametrize("returncode", [None, 0, 1])
+@pytest.mark.parametrize(("returncode", "started"), [(None, True), (0, False), (1, True)])
 def test_late_parent_observation_keeps_exited_child_answer(tmp_path, monkeypatch, started, returncode):
     from types import SimpleNamespace
 

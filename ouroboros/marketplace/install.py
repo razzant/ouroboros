@@ -16,6 +16,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
+from ouroboros.force_remove import force_rmtree
 from ouroboros.marketplace.adapter import AdapterResult, adapt_openclaw_skill
 from ouroboros.marketplace.clawhub import (
     ClawHubArchive,
@@ -157,7 +158,15 @@ def snapshot_payload_state(
     *,
     include_state_provenance: bool = False,
 ) -> PayloadRollbackSnapshot:
-    """Copy current live payload/state so a failed install/update can restore it."""
+    """Copy current live payload/state so a failed install/update can restore it.
+
+    Links are copied as links, never through them: an environment's interpreter link may dangle
+    after the app moved, and a link target is not payload, so it is not frozen either (an
+    absolute link into the live tree reads it from this copy and from ``.previous``). The
+    dependency owner re-points a restored environment (``isolated_deps``). A failed copy is
+    removed before the error propagates, so an incomplete copy never becomes a rollback source.
+    Native Windows is unverified: a link there needs the symlink privilege (else the copy
+    fails), and CPython copies a junction as a directory."""
 
     drive_root = pathlib.Path(drive_root)
     target_dir = pathlib.Path(target_dir)
@@ -167,7 +176,13 @@ def snapshot_payload_state(
         rollback_root = target_dir.parent / ".rollback"
         rollback_root.mkdir(parents=True, exist_ok=True)
         backup_dir = rollback_root / f"{target_dir.name}.{uuid.uuid4().hex}"
-        shutil.copytree(target_dir, backup_dir)
+        try:
+            shutil.copytree(target_dir, backup_dir, symlinks=True)
+        except BaseException:
+            force_rmtree(backup_dir)
+            if backup_dir.exists():
+                log.error("Incomplete rollback copy of %s remains at %s", skill_name, backup_dir)
+            raise
     return PayloadRollbackSnapshot(
         drive_root=drive_root,
         skill_name=skill_name,
@@ -414,6 +429,20 @@ def _rewrite_staged_identity(staging_dir: pathlib.Path, new_name: str) -> Option
     return new_hash
 
 
+def _landing_refusal(drive_root: pathlib.Path, name: str, target_dir: pathlib.Path) -> Optional[Dict[str, Any]]:
+    """Why a ClawHub landing of ``name`` at ``target_dir`` must not happen, as ``fail`` arguments: another
+    location's package of that name, or a deployment's required package it would replace or shadow."""
+    from ouroboros.deployment_extensions import install_refusal
+    from ouroboros.skill_loader import _skill_location_conflict_error
+
+    identity_error = _skill_location_conflict_error(drive_root, name=name, location="clawhub", target_dir=target_dir)
+    if identity_error:
+        return {"error": identity_error}
+    if managed := install_refusal(drive_root, name):
+        return {"error": managed, "error_code": "managed_by_deployment", "error_status": 403}
+    return None
+
+
 def install_skill(
     drive_root: pathlib.Path,
     repo_dir: pathlib.Path,
@@ -538,17 +567,9 @@ def install_skill(
             if new_manifest_hash:
                 adapter_result.provenance["translated_manifest_sha256"] = new_manifest_hash
     target_dir = target_root / adapter_result.target_dirname
-    from ouroboros.skill_loader import _skill_location_conflict_error
-
-    identity_error = _skill_location_conflict_error(
-        drive_root,
-        name=adapter_result.sanitized_name,
-        location="clawhub",
-        target_dir=target_dir,
-    )
-    if identity_error:
+    if refusal := _landing_refusal(drive_root, adapter_result.sanitized_name, target_dir):  # before the landing
         staged.cleanup()
-        return fail(identity_error, sanitized_name=adapter_result.sanitized_name, **package)
+        return fail(sanitized_name=adapter_result.sanitized_name, **refusal, **package)
     auto_specs = list((adapter_result.provenance.get("install_specs") or {}).get("auto") or [])
     repair_partial_existing = False
     if target_dir.exists() and not overwrite and auto_specs:
@@ -745,8 +766,11 @@ def uninstall_skill(
     Path traversal is blocked by sanitize round-trip, root containment, and a
     required ``.clawhub.json`` sidecar proving marketplace ownership.
     """
+    from ouroboros.deployment_extensions import change_refusal
     from ouroboros.skill_loader import _sanitize_skill_name
 
+    if managed := change_refusal(sanitized_name, "uninstall"):  # before the unload and the removal
+        return UninstallResult(False, sanitized_name, managed)
     cleaned = (sanitized_name or "").strip()
     if (
         not cleaned
@@ -825,8 +849,11 @@ def update_skill(
 
     The install record keeps its source fields; the new release and the source's current trust
     replace the old ones. ``auto_review=False`` leaves the review to the caller."""
+    from ouroboros.deployment_extensions import change_refusal
     from ouroboros.skill_loader import _skill_location_conflict_error
 
+    if managed := change_refusal(sanitized_name, "update"):  # before any download, snapshot or landing
+        return InstallResult(False, sanitized_name, error=managed, error_code="managed_by_deployment", error_status=403)
     expected_target = _clawhub_skills_root(drive_root) / sanitized_name
     identity_error = _skill_location_conflict_error(
         drive_root,

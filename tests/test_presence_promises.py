@@ -20,7 +20,6 @@ from ouroboros.presence_admission import admit_presence_turn
 from ouroboros.presence_runner import PresenceTurnEvent, _build_task
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 
-pytestmark = pytest.mark.serial
 
 RUN_AT = "2030-01-01T09:00:00+00:00"
 
@@ -55,7 +54,8 @@ def _turn(root, account, conversation, number=1):
 
 
 def _promise(registry, objective):
-    reply = registry.execute("schedule_followup", {"objective": objective, "run_at": RUN_AT, "relation": "independent"})
+    reply = registry.execute("schedule_followup", {"objective": objective, "run_at": RUN_AT, "relation": "independent",
+                                                   "destination": "place"})
     assert reply.startswith("FOLLOWUP_SCHEDULED"), reply
     return reply.split("follow-up ", 1)[1].split(" ", 1)[0]
 
@@ -137,7 +137,7 @@ def test_the_place_sees_its_pending_promises_in_its_focus_and_digest(table):
     # The next turn of the place, in another of its conversations, is told what it still owes.
     _registry, task, _ = _turn(root, "team", "k2", number=2)
     work_here = task["metadata"]["focus_work_here"]
-    assert "Promises this place scheduled" in work_here and asked in work_here
+    assert "Follow-ups related to this place" in work_here and asked in work_here
     assert "Check whether Ann still needs the backup report" in work_here and "from conversation chat:team:k1" in work_here
     assert withdrawn not in work_here and foreign not in work_here
     assert "manage_schedules" in work_here and "cancel_task" in work_here
@@ -178,14 +178,15 @@ def test_an_unreadable_listing_never_fails_the_turn_and_never_reads_as_no_promis
         monkeypatch.setattr("supervisor.followup_policy.observed_store", unreadable_controls)
     _registry, task, _binding = _turn(root, "team", "k2")
     work_here = task["metadata"]["focus_work_here"]
-    assert "Promises this place scheduled" in work_here and "Unavailable now" in work_here
+    assert "Follow-ups related to this place" in work_here and "Unavailable now" in work_here
 
 
 DUE = "2000-01-01T00:00:00+00:00"
 
 
 def _due_promise(registry, objective):
-    reply = registry.execute("schedule_followup", {"objective": objective, "run_at": DUE, "relation": "independent"})
+    reply = registry.execute("schedule_followup", {"objective": objective, "run_at": DUE, "relation": "independent",
+                                                   "destination": "place"})
     assert reply.startswith("FOLLOWUP_SCHEDULED"), reply
     return reply.split("follow-up ", 1)[1].split(" ", 1)[0]
 

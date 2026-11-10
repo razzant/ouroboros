@@ -441,9 +441,16 @@ def _root_cost_stop_authority(scope: Any) -> Tuple[str, Optional[float]]:
     pct = normalize_budget_profile(contract.get("budget_profile")).get("cost_hard_stop_pct")
     if pct is not None:
         return COST_STOP_EXPLICIT, float(pct)
-    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
-    producer = _positive(row.get("root_cost_ceiling_usd")) or _positive(metadata.get("root_cost_ceiling_usd"))
+    producer = recorded_producer_ceiling(row)
     return (COST_STOP_PRODUCER, producer) if producer is not None else (COST_STOP_NONE, None)
+
+
+def recorded_producer_ceiling(row: Dict[str, Any]) -> Optional[float]:
+    """A task row's recorded producer allowance (``root_cost_ceiling_usd`` on the row, else in its metadata) when
+    strictly positive, else ``None``: what a member's root authored (``_root_cost_stop_authority``) and the TOTAL a
+    Continue hands on unchanged, its stop comparing the whole work's group spend (``loop_budget``)."""
+    metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    return _positive(row.get("root_cost_ceiling_usd")) or _positive(metadata.get("root_cost_ceiling_usd"))
 
 
 def _cost_stop_inputs(ctx: Any) -> Dict[str, Any]:
@@ -478,9 +485,13 @@ def _cost_stop_inputs(ctx: Any) -> Dict[str, Any]:
     except Exception:
         log.debug("Usage scope or group cap projection unavailable for cost ceiling resolution", exc_info=True)
     profile = resolve_budget_profile(ctx)
+    # The owner's own Resume moved this Presence turn off its producer allowance (#2566): its live stack's scope
+    # may still carry the number, the record its metadata keeps decides.
+    metadata = getattr(ctx, "task_metadata", None)
+    lifted = isinstance(metadata, dict) and isinstance(metadata.get("producer_allowance_lifted"), dict)
     if profile.get("cost_hard_stop_pct") is not None:
         authority = COST_STOP_EXPLICIT
-    elif _positive(root_ceiling) is None:
+    elif _positive(root_ceiling) is None or lifted:
         authority, root_ceiling = COST_STOP_NONE, None
     elif not non_root_member:
         authority = COST_STOP_PRODUCER
@@ -492,7 +503,7 @@ def _cost_stop_inputs(ctx: Any) -> Dict[str, Any]:
         elif authority != COST_STOP_UNKNOWN:
             root_ceiling = value
     return {"authority": authority, "profile": profile, "root_cap_usd": root_cap,
-            "non_root_member": non_root_member, "root_ceiling_usd": root_ceiling}
+            "non_root_member": non_root_member, "root_ceiling_usd": root_ceiling, "producer_allowance_lifted": lifted}
 
 
 def _resolve_from_inputs(inputs: Dict[str, Any], budget_remaining_usd: Optional[float]) -> CostCeiling:
@@ -572,7 +583,9 @@ def restore_cost_ceiling(ctx: Any, saved: Any) -> Optional[CostCeiling]:
     if (restored.state == COST_CEILING_DISABLED and previous is not None
             and previous.state in {COST_CEILING_ACTIVE, COST_CEILING_EXHAUSTED_SOFT_LAND}):
         removed = "soft_land" if previous.ceiling_usd is None else f"${float(previous.ceiling_usd):.2f}"
-        restored = replace(restored, basis=f"{restored.basis}(saved default stop {removed} removed)")
+        what = ("producer allowance {} lifted by the owner's Resume" if inputs.get("producer_allowance_lifted")
+                else "default stop {} removed")
+        restored = replace(restored, basis=f"{restored.basis}(saved {what.format(removed)})")
     return restored
 
 
@@ -586,9 +599,9 @@ def cost_ceiling_disclosure(ceiling: CostCeiling) -> Dict[str, Any]:
         "basis": ceiling.basis,
         "allocation": "unreserved_shared_pool",
         "rule": (
-            "The early in-task cost stop of THIS task's whole tree, if any. Ordinary tasks have none: new paid calls "
+            "The early in-task cost stop of THIS task's whole tree, if any. Ordinary tasks have none: new model calls "
             "are refused only when known spend (confirmed and estimated, subagents included) reaches the hard tree "
-            "cap, the whole-work group cap or the shared Total budget. An active stop is an explicit "
+            "cap or the whole-work group cap, and new paid calls when it reaches the shared Total budget. An active stop is an explicit "
             "cost_hard_stop_pct profile's point (resolved once at task start, retained by descendants; spend over it "
             "stops) or a producer's allowance such as a wake's daily remainder (known spend reaching it stops). At "
             "any of these a task with an exact continuation pauses with its work saved; an actor without one ends "

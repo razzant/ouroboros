@@ -4,7 +4,8 @@
 // the room bring it back; a focused field keeps it; history paged in or let go, rows arriving or growing and a hidden
 // typing row move nothing, and a press on another control is that control's. Unless the owner's own gesture took the room
 // off its newest row (not a swipe begun in a card's frame, which the feed never sees, nor the app's own navigation such
-// as the waiting pill's jump) no scroll is the owner reading back.
+// as the waiting pill's jump) no scroll is the owner reading back. A short keyboard room folds it with the field focused
+// (owner 9.11) until the keyboard goes down or the room grows; an open capsule keeps it.
 // Real frames are in the browser lane (tests/test_composer_fold_browser.py).
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -70,9 +71,10 @@ function rig({ stack = true } = {}) {
     };
     // A layout pass changed `el`'s size: its observers hear of it.
     const resize = (el) => { for (const o of observers) if (o.targets.has(el)) o.fn([{ target: el }]); };
-    const env = { stack, layout: null, readingBack: true };
+    const env = { stack, layout: null, readingBack: true, short: false };
     const fold = createComposerFold({ feed, wrap, row, win, doc, isStack: () => env.stack,
-        onLayout: (fn) => { env.layout = fn; return () => { env.layout = null; }; }, readingBack: () => env.readingBack });
+        onLayout: (fn) => { env.layout = fn; return () => { env.layout = null; }; }, readingBack: () => env.readingBack,
+        short: () => env.short });
     // The owner's finger moves the feed: reading back brings every row further down and the scroll off its end.
     const scroll = (down, by = 30) => {
         for (const r of rows) r.bottom += down ? by : -by;
@@ -266,4 +268,51 @@ test('only on a phone; another layout brings the row back; the end of the room c
     assert.equal(['feed:scroll', 'wrap:focusin', 'wrap:pointerdown'].some((k) => r.listeners.has(k)), false, 'no listener stays');
     assert.equal(r.env.layout, null, 'nor the layout watch');
     assert.equal(r.observers.some((o) => o.targets.size), false, 'nor the field\'s observer');
+});
+
+test('a short keyboard room folds the row, the field keeping the focus; the keyboard down or more room brings it back', () => {
+    const r = rig();
+    r.env.short = true;  // the room alone is short (the feed's box says so), with no keyboard
+    r.resize(r.feed);
+    assert.equal(r.fold.folded(), false, 'without the keyboard a short room keeps the row');
+    r.keys.add('keyboard-open');
+    r.doc.activeElement = r.input;
+    r.resize(r.feed);
+    assert.equal(r.fold.folded(), true, 'the keyboard up in a short room folds it, the field keeping the focus');
+    assert.equal(r.props.get('--fold-row-h'), '32px', 'from the line\'s own height');
+    assert.equal(r.props.get('--fold-menu-dy'), '12px', '☰ to the field\'s last line, beside "+"');
+    for (let i = 0; i < 4; i += 1) r.scroll(i % 2 === 1);
+    r.listeners.get('wrap:focusin')({ target: r.input });
+    assert.equal(r.fold.folded(), true, 'there the feed\'s scroll and the field\'s focus bring nothing back');
+    r.env.short = false;  // the keyboard still up, the room taller
+    r.resize(r.feed);
+    assert.equal(r.fold.folded(), false, 'a roomier keyboard brings it back');
+    r.env.short = true;
+    r.resize(r.feed);
+    assert.equal(r.fold.folded(), true);
+    r.keys.delete('keyboard-open');
+    r.doc.activeElement = null;
+    r.resize(r.feed);
+    assert.equal(r.fold.folded(), false, 'the keyboard down brings it back');
+    r.row.open = true;  // a capsule open when the keyboard comes up in the short room
+    r.keys.add('keyboard-open');
+    r.doc.activeElement = r.input;
+    r.resize(r.feed);
+    assert.equal(r.fold.folded(), false, 'an open capsule is never folded away');
+    r.row.open = false;  // closed by a press on the field, which keeps its focus: no focus, scroll or resize follows
+    r.fold.sync();       // the capsules' owner asks once the capsule has settled closed
+    assert.equal(r.fold.folded(), true, 'a capsule settled closed folds the short room\'s row again');
+    r.fold.destroy();
+    assert.equal(r.observers.some((o) => o.targets.size), false, 'the feed\'s observer goes too');
+});
+
+test('a resize of the room leaves a fold of the owner\'s reading back', () => {
+    const r = rig();
+    for (let i = 0; i < 3; i += 1) r.scroll(true);
+    assert.equal(r.fold.folded(), true);
+    r.resize(r.feed);
+    assert.equal(r.fold.folded(), true, 'only the owner\'s scroll, the field\'s focus or another layout ends it');
+    r.scroll(false);
+    r.scroll(false);
+    assert.equal(r.fold.folded(), false);
 });

@@ -20,7 +20,7 @@ from tests.test_chat_history_paging_browser import _FRAMES, _idle, _open, _resul
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 from tests.ui_chat_viewport_smoke import _emit_ws_frame
 
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 def seed_reply_history(root, *, outside_sidebar=False):

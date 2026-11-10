@@ -13,7 +13,7 @@ from tests.test_project_chat_continuity import _write_history_rows
 from tests import test_subscription_setup_browser as ui_fixture
 
 subscription_ui = ui_fixture.subscription_ui
-pytestmark = [pytest.mark.ui_browser, pytest.mark.serial]
+pytestmark = [pytest.mark.ui_browser]
 
 
 @pytest.mark.parametrize("main_status", ["completed", "failed"])

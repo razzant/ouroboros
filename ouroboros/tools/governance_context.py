@@ -11,7 +11,8 @@ carry inline and which it reaches through a navigation map. Three tiers:
    ``docs/CHECKLISTS_ARCHIVE.md`` whole. This tier is byte-stable across
    commits, so the caller puts it in its cache-marked prefix.
 2. **Rules by change class, within a budget share.** ``docs/DESIGN.md`` when the
-   change touches ``web/``; the review-and-commit protocol chapter always; and
+   change touches ``web/``, its design bible alone for changed words elsewhere;
+   the review-and-commit protocol chapter always; and
    every DEVELOPMENT chapter whose text mentions a touched file NAME. Bounded by
    :data:`~ouroboros.runtime_limits.REVIEW_GOVERNANCE_INLINE_SHARE` of the
    reviewer's usable window, largest-relevance-first. Whenever DESIGN is not
@@ -76,8 +77,6 @@ DEVELOPMENT_BOOK_ID = "development"
 ARCHITECTURE_BOOK_ID = "architecture"
 # Always relevant: it is the protocol the reviewer is executing right now.
 REVIEW_PROTOCOL_CHAPTER = "docs/development/05-review-and-commit-protocol.md"
-# Existing whole-DESIGN inline selection; the heading map is body-wide.
-DESIGN_CHANGE_CLASS_PREFIX = "web/"
 
 PACKET_DELIVERY = "packet"
 RETRIEVING_DELIVERY = "retrieving"
@@ -531,6 +530,7 @@ def governance_context(
     layer: str = BODY_LAYER,
     subject_root: Any = None,
     manifest_facts: Any = None,
+    review_words: Any = None,
 ) -> GovernanceContext:
     """Tier the governance corpus for ONE reviewer of ONE change.
 
@@ -638,21 +638,36 @@ def governance_context(
             rows.append(_row(path, 2, "navigation", len(chapter.text),
                              "no touched file mentioned"))
 
-    design_touched = any(path.startswith(DESIGN_CHANGE_CLASS_PREFIX) for path in touched)
+    web_touched = any(path.startswith("web/") for path in touched)
+    has_words = review_words is not None and bool(review_words.changes or review_words.gaps)
     design_text = load_governance_doc(root, DESIGN_PATH, on_missing="explicit")
+    chapter_text = {chapter.source_path: chapter.text for chapter in dev_chapters}
+    chapter_text[DESIGN_PATH] = design_text
     design_missing = design_text.startswith("[⚠️ OMISSION") or not design_text.strip()
     if design_missing:
         rows.append(_row(DESIGN_PATH, 2, "navigation", 0,
                          design_text or "DESIGN source is empty; content not delivered"))
-    elif design_touched:
+    elif web_touched:
         candidates.append(((1, 0, DESIGN_PATH), DESIGN_PATH, DESIGN_PATH,
-                           f"a touched path is under {DESIGN_CHANGE_CLASS_PREFIX}"))
+                           "a touched path is under web/"))
+    elif has_words:
+        # The seed and component recipes follow the numbered principles inside
+        # the same Markdown section: stop where the numbered list ends, not at H2.
+        bible = re.search(r"(?ms)^## Design bible\b.*?^1\. .*?(?=^(?!\d+\. )\S|\Z)", design_text)
+        path = f"{DESIGN_PATH}#Design bible"
+        if bible:
+            last = re.findall(r"(?m)^(\d+)\. ", bible[0])[-1]
+            chapter_text[path] = bible[0].strip()
+            candidates.append(((1, 0, path), path, f"{path} (excerpt: principles 1–{last})",
+                               "changed source words; design bible excerpt only"))
+        else:
+            rows.append(_row(path, 2, "navigation", 0, "design bible excerpt unavailable; inspect the named source"))
+        rows.append(_row(DESIGN_PATH, 2, "navigation", len(design_text),
+                         "full DESIGN remains on demand; only its bible is selected for source words"))
     else:
         rows.append(_row(DESIGN_PATH, 2, "navigation", len(design_text),
-                         "heading map only; no touched path under " + DESIGN_CHANGE_CLASS_PREFIX))
+                         "heading map only; no frontend path or changed source words"))
 
-    chapter_text = {chapter.source_path: chapter.text for chapter in dev_chapters}
-    chapter_text[DESIGN_PATH] = design_text
     for order, path, title, reason in sorted(candidates):
         _admit(path, title, chapter_text.get(path, ""), 2, reason)
 

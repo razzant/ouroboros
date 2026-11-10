@@ -8,7 +8,12 @@ export function resetSecretReveals(root) {
     root.querySelectorAll('[data-secret-reveal]').forEach((input) => reveals.get(input)?.reset());
 }
 
-export function bindSecretReveal(input, button, { savedSelector, savedLabel = () => '', identityInputs = [] } = {}) {
+// The toggle's words. Settings shows this English and the page overlay translates it; a surface the
+// overlay never walks passes its own localized `copy` (secret_hitl.js, through `tr`).
+const REVEAL_COPY = Object.freeze({ show: 'Show', hide: 'Hide' });
+
+export function bindSecretReveal(input, button, { savedSelector, savedLabel = () => '', identityInputs = [],
+    copy = REVEAL_COPY } = {}) {
     const existing = reveals.get(input);
     if (existing) return existing;
     const row = input.closest('.secret-input-row');
@@ -53,7 +58,7 @@ export function bindSecretReveal(input, button, { savedSelector, savedLabel = ()
         preview.removeAttribute('aria-describedby');
         status.textContent = '';
         status.hidden = true;
-        button.textContent = 'Show';
+        button.textContent = copy.show;
         button.setAttribute('aria-expanded', 'false');
         button.removeAttribute('aria-busy');
     }
@@ -69,12 +74,12 @@ export function bindSecretReveal(input, button, { savedSelector, savedLabel = ()
         const current = () => open && generation === request && input.isConnected
             && value === input.value && applied === input.dataset.appliedValue
             && identityInputs.every((node, index) => node.value === identities[index]);
-        button.textContent = 'Hide';
+        button.textContent = copy.hide;
         try {
             let disclosed = value;
             if (value && value === applied && input.dataset.forceClear !== '1') {
                 const selector = savedSelector?.();
-                if (!selector) throw new Error('The saved value has no lookup identity. Reload Settings or enter a new value.');
+                if (!selector) throw new Error('The saved value has no lookup identity. Reload settings or enter a new value.');
                 const sourceLabel = savedLabel();
                 button.setAttribute('aria-busy', 'true');
                 status.textContent = 'Loading…';

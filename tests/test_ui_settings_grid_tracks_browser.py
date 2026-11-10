@@ -17,6 +17,9 @@ import pathlib
 
 import pytest
 from tests.test_ui_smoke_agents_panel import _AGENTS_PANEL_ROSTER
+from tests import test_subscription_setup_browser as setup_browser
+
+subscription_ui = setup_browser.subscription_ui
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
 
@@ -70,7 +73,6 @@ def _open_settings(page, url: str, tab: str) -> None:
     page.click(f'[data-settings-tab="{tab}"]')
 
 
-@pytest.mark.serial
 @pytest.mark.ui_browser
 def test_settings_grid_tracks_never_scroll_the_body_sideways(direct_server_with_data):
     """At 780x680 the Agents route grid and a custom secret row stay inside the
@@ -115,7 +117,7 @@ def test_settings_grid_tracks_never_scroll_the_body_sideways(direct_server_with_
                 page.wait_for_selector(".settings-custom-secret-row", timeout=20_000)
                 seen["secrets@780"] = page.evaluate(_MEASURE_JS, ".settings-custom-secret-row > *")
                 seen["secrets-remove@780"] = page.evaluate(
-                    _MEASURE_JS, ".settings-custom-secret-remove")
+                    _MEASURE_JS, "[data-custom-secret-remove]")
                 seen["secrets-row@780"] = page.evaluate(_SHAPE_JS, ".settings-custom-secret-row")
                 page.screenshot(path=str(evidence_dir / "settings-secrets-780.png"))
 
@@ -165,3 +167,66 @@ def test_settings_grid_tracks_never_scroll_the_body_sideways(direct_server_with_
     assert shape["children"] == 5, f"unexpected route controls at 1280px:\n{where}"
     assert len(shape["template"].split()) == 3, f"the route grid lost its three tracks at 1280px:\n{where}"
     assert shape["rows"] == 2, f"the route controls no longer form Source+Model / Account+Effort+Access at 1280px:\n{where}"
+
+
+@pytest.mark.ui_browser
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_action_results_reflow_before_their_text_is_squeezed(subscription_ui, theme):
+    """The real Models row: a container can be narrow in a wide desktop window.
+
+    The synthetic translation stresses the existing rendered controls, not a copy
+    of their markup. Containment alone passed the old, unreadable two-column row.
+    At 360/280px the result gets the row's full width (2px rounding tolerance),
+    rather than the old 95/15px sliver. At 640px both still fit on the same line.
+    """
+    from playwright.sync_api import expect
+
+    ui, seen = subscription_ui, {}
+    page = ui["page"]
+    page.set_viewport_size({"width": 1100, "height": 750})
+    page.add_init_script(f"localStorage.setItem('ouroboros.theme', {json.dumps(theme)})")
+    page.goto(ui["url"] + "/#settings")
+    page.locator('[data-settings-tab="models"]').click()
+    button = page.locator("#btn-refresh-model-catalog")
+    row = button.locator("..")
+    expect(button).to_be_visible()
+    # Use the real refresh/failure transition before stressing its wording.
+    ui["backend"]["catalog_status"] = 503
+    ui["backend"]["catalog_response"] = {"error": "Catalog temporarily unavailable"}
+    button.click()
+    expect(button).to_be_enabled()
+    # The shared action row (ui.css .ui-action-row): the trigger, then its result as the next sibling.
+    status = row.locator(".ui-result")
+    expect(status).not_to_be_empty()
+    status.evaluate("e => e.textContent = 'Der Modellkatalog ist momentan nicht erreichbar. Die gespeicherte Auswahl bleibt erhalten; bitte versuchen Sie die Aktualisierung erneut.'")
+    button.evaluate("e => e.textContent = 'Modellkatalog erneut aktualisieren'")
+    row.evaluate("e => { window.actionReadingRow = e; window.actionReadingButton = e.firstElementChild; }")
+    for width in (640, 360, 280):
+        row.evaluate("(e, w) => { e.style.width = w + 'px'; e.style.maxWidth = '100%'; }", width)
+        page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+        row.scroll_into_view_if_needed()
+        seen[str(width)] = row.evaluate("""e => {
+            const box = e.getBoundingClientRect(), action = e.firstElementChild.getBoundingClientRect();
+            const text = e.querySelector('.ui-result').getBoundingClientRect();
+            return {width: box.width, text: text.width, textTop: text.top,
+                actionBottom: action.bottom, actionRight: action.right - box.right,
+                overflow: e.scrollWidth - e.clientWidth};
+        }""")
+        setup_browser.capture(page, f"action-results-{theme}-{width}")
+    where = json.dumps(seen, indent=2)
+    for width in (360, 280):
+        result = seen[str(width)]
+        assert result["text"] >= result["width"] - 2, f"the long result needs its own readable line:\n{where}"
+        assert result["textTop"] >= result["actionBottom"] - 1, f"the result wraps under its action:\n{where}"
+    assert seen["640"]["textTop"] < seen["640"]["actionBottom"], f"keep the result beside its action when it fits:\n{where}"
+    assert all(v["overflow"] <= 1 and v["actionRight"] <= 1 for v in seen.values()), where
+    # Reflow preserves the actual node, focus and action; no reconstructed lookalike.
+    button.focus()
+    expect(button).to_be_focused()
+    assert page.evaluate("window.actionReadingButton === document.querySelector('#btn-refresh-model-catalog')")
+    ui["backend"].pop("catalog_status")
+    ui["backend"].pop("catalog_response")
+    before = sum('/api/model-catalog' in url for url in ui["reads"])
+    button.press("Enter")
+    expect(button).to_be_enabled()
+    assert sum('/api/model-catalog' in url for url in ui["reads"]) > before
