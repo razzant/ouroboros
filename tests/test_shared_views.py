@@ -477,9 +477,7 @@ def test_the_same_bytes_under_a_credential_named_parent_are_another_fact():
     assert len({key[0] for key in facts}) == 1 and {key[1] for key in facts} == {False, True}
 
 
-def test_changed_bytes_or_changed_rules_are_worked_out_again(monkeypatch):
-    from ouroboros import redaction
-
+def test_changed_bytes_are_worked_out_again():
     payload = _view(_transcript(2))
     facts: dict = {}
     obs.redact_projection(payload, facts=facts)
@@ -489,7 +487,5 @@ def test_changed_bytes_or_changed_rules_are_worked_out_again(monkeypatch):
     result, scanned = _scanned(edited, facts)
     assert len(facts) == known + 1 and scanned == len(_json_bytes(edited["messages"][1]))
     assert _json_bytes(result.value) == _json_bytes(obs.redact_projection(edited).value)
-    monkeypatch.setattr(redaction, "RULES_VERSION", "other rules")
-    result, scanned = _scanned(edited, facts)
-    assert scanned == sum(len(_json_bytes(e)) for e in {_json_bytes(e): e for e in edited["messages"] + TOOLS}.values())
-    assert _json_bytes(result.value) == _json_bytes(obs.redact_projection(edited).value)
+
+

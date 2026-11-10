@@ -312,19 +312,10 @@ def _redact_any(value: Any, records: List[RedactionRecord], path: str, *, secret
     return value
 
 
-#: The identity of the rules above, part of every part fact's key: a fact found under other rules is never reused.
-RULES_VERSION = hashlib.sha256(repr((
-    [(rule, pattern.pattern, pattern.flags) for rule, pattern in _TOKEN_PATTERNS],
-    [regex.pattern for regex in (_SECRET_QUERY_PARAM_RE, _SECRET_LITERAL_RE, _SECRET_LITERAL_KEY_RE, _SECRET_GENERIC_KV_RE)],
-    sorted(_METADATA_QUALIFIER_SEGMENTS), sorted(_SECRET_KEY_EXACT), _SECRET_KEY_SUFFIXES, _SECRET_KEY_COMPOUND_SUFFIXES,
-    _SECRET_KEY_SEGMENT_MARKERS, _GENERIC_KV_SECRET_KEY_HINTS, sorted(SCHEMA_MAPS), sorted(SCHEMA_KINDS),
-    sorted(SCHEMA_NOTES))).encode("utf-8")).hexdigest()
-
-
 def part_fact(item: Any, facts: Dict[tuple, tuple], *, path: str = "$",
               secret_literals: bool = False) -> Optional[Tuple[bytes, Any, Tuple[Tuple[str, str], ...]]]:
-    """``(bytes, masked value, records)`` of one request-view part, worked out once per its bytes, its parent's flags
-    (``secret_literals``; a list element never inherits ``schema``) and ``RULES_VERSION``, then reused from ``facts``.
+    """``(bytes, masked value, records)`` of one request-view part, worked out once per its bytes and its parent's
+    flags (``secret_literals``; a list element never inherits ``schema``), then reused from ``facts``.
     The value is None when custody projection and redaction leave the part's bytes alone (it is public as it is);
     record paths are relative to the part. None for a part that is not plain JSON: bytes made with ``default=str``
     would not name its value, so it is walked each time. Working a fact out counts its bytes as ``secret_scan``."""
@@ -332,7 +323,7 @@ def part_fact(item: Any, facts: Dict[tuple, tuple], *, path: str = "$",
         raw = json.dumps(item, ensure_ascii=False, sort_keys=True).encode("utf-8")
     except (TypeError, ValueError):
         return None
-    key = (hashlib.sha256(raw).hexdigest(), secret_literals, RULES_VERSION)
+    key = (hashlib.sha256(raw).hexdigest(), secret_literals)
     fact = facts.get(key)
     if fact is None:
         from ouroboros.anthropic_native_custody import observability_custody_projection
