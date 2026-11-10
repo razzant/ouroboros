@@ -4,10 +4,10 @@
 # Deliberately NOT wired to `schedule`: the owner decision adds no browser cron,
 # and the existing manual/tag checks stay exactly as they were.
 #
-# The complete lane runs as eight shards on eight runners. Every shard collects and
+# The complete lane runs as nine shards on nine runners. Every shard collects and
 # guards the WHOLE lane, then executes its slice: nodes packed by the weights of its
 # caller's frozen shard plan (.github/actions/shard-plan) when it carries them, else
-# every eighth node of the sorted node ids;
+# every ninth node of the sorted node ids;
 # `ui-manifest` collects the lane once with no shard option, and the `ui-smoke`
 # aggregator fails unless the shards' evidence proves that each manifest node ran
 # in exactly the shard it belongs to. A node no shard executed is named there.
@@ -53,7 +53,7 @@ jobs:
           fi
 
   ui-shard:
-    name: ui-shard (${{ matrix.shard }}/8)
+    name: ui-shard (${{ matrix.shard }}/9)
     needs: scope
     if: ${{ needs.scope.outputs.run_browser == 'true' }}
     runs-on: ubuntu-latest
@@ -69,7 +69,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -161,7 +161,7 @@ jobs:
           xvfb-run -a python -I -S scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/ui/host" --accepted tests/accepted_failures.json --
           python -I -S scripts/safe_test.py --evidence-dir "${{ runner.temp }}/ci-raw/ui/host"
           -- python -m pytest tests/ -m ui_browser --require-ui-browser -vv --tb=short --timeout=900
-          --ui-browser-shard=${{ matrix.shard }}/8 --session-timeout=4500
+          --ui-browser-shard=${{ matrix.shard }}/9 --session-timeout=4500
           --junitxml="${{ runner.temp }}/ci-private/ui/host.xml"
           --ci-evidence-dir="${{ runner.temp }}/ci-evidence/ui/host"
       # Ubuntu 23.10+ runners restrict unprivileged user namespaces through AppArmor, so the pinned
@@ -235,7 +235,7 @@ jobs:
           --evidence-dir "${{ runner.temp }}/ci-evidence/ui/host"
           --producer-outcome "$PRODUCER_OUTCOME" --scope full
           --artifact-outcome "$ARTIFACT_OUTCOME" --artifact-url "$ARTIFACT_URL"
-          --summary "$GITHUB_STEP_SUMMARY" --label "shard ${{ matrix.shard }}/8"
+          --summary "$GITHUB_STEP_SUMMARY" --label "shard ${{ matrix.shard }}/9"
       - name: Summarize browser tools results
         id: tools_summary
         if: ${{ !cancelled() && steps.browser_tools.outcome != 'skipped' }}
@@ -405,5 +405,5 @@ jobs:
           python3 -I -S tests/ci_evidence.py reconcile-shards
           --manifest "${{ runner.temp }}/ui-proof/manifest"
           --shards "${{ runner.temp }}/ui-proof/shards"
-          --count 8 --sha "${{ github.sha }}" --run-id "${{ github.run_id }}"
+          --count 9 --sha "${{ github.sha }}" --run-id "${{ github.run_id }}"
           --summary "$GITHUB_STEP_SUMMARY"

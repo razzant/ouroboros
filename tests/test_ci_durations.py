@@ -874,7 +874,7 @@ def _frozen_lane(tmp_path, monkeypatch, shard_plan):
     plan, table = _prepared(shard_plan, _answers(*history))
     frozen = _write(tmp_path / "plan" / "ci-durations.json", table)
     monkeypatch.setenv(DURATIONS_ENV, str(frozen))
-    blocks = {shard: _ui_lane(tmp_path, UI_SHARDED, f"{shard}/8")[0] for shard in range(1, 9)}
+    blocks = {shard: _ui_lane(tmp_path, UI_SHARDED, f"{shard}/9")[0] for shard in range(1, 10)}
     return plan, table, frozen, _ui_lane(tmp_path, UI_SHARDED)[0], blocks
 
 
@@ -884,10 +884,10 @@ def _prove(tmp_path, manifest, blocks):
     for shard, block in blocks.items():
         _projection(root / "shards" / f"s{shard}" / "host", [_row(node, 1.0) for node in block["assigned"]],
                     system="Linux", ui_browser=block)
-    return reconcile_shards(root / "manifest", root / "shards", count=8, sha=SHA, run_id=RUN)
+    return reconcile_shards(root / "manifest", root / "shards", count=9, sha=SHA, run_id=RUN)
 
 
-def test_the_manifest_and_all_eight_shards_pack_by_the_one_frozen_table(tmp_path, monkeypatch, shard_plan):
+def test_the_manifest_and_all_nine_shards_pack_by_the_one_frozen_table(tmp_path, monkeypatch, shard_plan):
     """The real readers over the real table: one weight list, one honest source, a complete proof; a leg that read
     anything else is a gap in the same reconciliation."""
     plan, table, frozen, manifest, blocks = _frozen_lane(tmp_path, monkeypatch, shard_plan)
@@ -905,9 +905,9 @@ def test_the_manifest_and_all_eight_shards_pack_by_the_one_frozen_table(tmp_path
     data["ui_nodes"][UI_SHARDED[0]] += 100_000
     other = _write(tmp_path / "plan" / "other.json", data)
     monkeypatch.setenv(DURATIONS_ENV, str(other))
-    blocks[3] = _ui_lane(tmp_path, UI_SHARDED, "3/8")[0]
+    blocks[3] = _ui_lane(tmp_path, UI_SHARDED, "3/9")[0]
     gaps, _ = _prove(tmp_path / "second", manifest, blocks)
-    assert "shard 3/8: node weights differ from the manifest" in gaps, gaps
+    assert "shard 3/9: node weights differ from the manifest" in gaps, gaps
 
 
 def _gh_shim(tmp_path, answers):
