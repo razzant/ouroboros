@@ -271,7 +271,6 @@ test('Search is a field in the row and its suggestions stand outside it: Main, t
         { key: 'source:openrouter', selected: false, text: 'OpenRouter 3 models · paid by key' },
     ]);
     assert.deepEqual(r.notes(), ['Recent', 'Sources']);
-    assert.doesNotMatch(r.list().innerHTML, /\b1 models\b/);
     assert.match(r.list().innerHTML, /<p class="chat-model-rule" role="presentation">Applies to new work here; running work keeps its model\.<\/p>$/);
     // A source's own list, and the way back.
     await r.take('source:subscription:codex');
@@ -348,6 +347,20 @@ test('under a finger, opening the capsule and pressing Search raise no keyboard:
     await r.press('Search');
     assert.ok(r.input() && r.list(), 'the field and the list are there');
     assert.notEqual(r.doc.activeElement, r.input());
+    r.controls.destroy();
+});
+
+test('every count the capsule prints agrees with its noun: one model, several models, and how many more', async () => {
+    const many = Array.from({ length: 70 }, (_, i) => openrouter(`vendor/model-${String(i).padStart(2, '0')}`));
+    const r = room({ storeOptions: { catalog: { model_sources: CATALOG.model_sources,
+        items: [codex('gpt-6-astra'), ...many, { provider_id: 'openai', provider: 'OpenAI', id: 'gpt-6', name: 'gpt-6', value: 'openai::gpt-6' }] } } });
+    await r.open();
+    await r.press('Search');
+    assert.deepEqual(r.rows().slice(1).map((row) => row.text),
+        ['Codex 1 model · subscription', 'OpenRouter 70 models · paid by key', 'OpenAI 1 model · paid by key']);
+    await r.take('source:openrouter');
+    assert.equal(r.rows().length, 61, 'the way back and sixty models');
+    assert.deepEqual(r.notes(), ['10 more · keep typing'], 'the rest is a number with no noun to disagree with');
     r.controls.destroy();
 });
 
