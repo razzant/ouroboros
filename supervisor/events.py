@@ -220,8 +220,19 @@ def _handle_main_llm_call_state(evt: Dict[str, Any], ctx: Any) -> None:
             same = old.get("attempt_id") == fact.get("attempt_id")
             if same:
                 fact["observed_at"] = old["observed_at"]  # settlement must not make an old send newer
-            previous = old.get("previous") if same or old.get("ledger_state") == "released" else {
-                key: value for key, value in old.items() if key != "previous"}
+                # A same-attempt update keeps the already-confirmed fallback, if any.
+                previous = old.get("previous")
+            elif old.get("ledger_state") in {"dispatched", "released"}:
+                # A provisional send supersedes the current one, but must not become a
+                # new link in the fallback chain.  Keep the confirmed fallback that
+                # was already behind it; otherwise overlapping Pause/Resume releases
+                # can erase a genuine earlier send and the UI reports `unknown`.
+                previous = old.get("previous")
+            else:
+                # Settled/unresolved is a confirmed send, so it becomes the fallback
+                # for the new provisional dispatch.  Do not carry an older fallback
+                # behind a confirmed current send.
+                previous = {key: value for key, value in old.items() if key != "previous"}
             if previous and fact.get("ledger_state") in {"dispatched", "released"}:
                 fact["previous"] = previous
         if direct is not None:

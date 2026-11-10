@@ -592,7 +592,7 @@ def test_a_late_proof_of_no_start_retracts_the_paused_send_in_the_public_census(
         except BaseException as exc:  # noqa: BLE001 - the test inspects the exact interruption
             close(exc)
 
-    if neighbour == "after-genuine-send":  # an earlier call of this task attempt sent P in Max and was answered
+    if neighbour in {"after-genuine-send", "beside-newer-send"}:  # an earlier call of this task attempt sent P in Max and was answered
         prior_id = ("root", 1, "call-w", "exec", "exec:round:0", 1)
         p = SimpleNamespace(state="dispatched", attempt_id="attempt-p", physical_context=replace(
             low, profile="owner_max", rendered_mode="max", mode_cause="", round_id="exec:round:0"))
@@ -614,14 +614,28 @@ def test_a_late_proof_of_no_start_retracts_the_paused_send_in_the_public_census(
         record = registry.get("root") if direct else None
         assert (record.active_llm_call if direct else meta.get("active_llm_call")) is None, "its call is closed"
         expected = {**held, "ledger_state": "released"}  # the same send, its time and its one previous kept
-        if neighbour == "beside-newer-send":  # the next call of this task attempt sent B in Max; A is its previous
+        if neighbour == "beside-newer-send":  # B is provisional; A is later released after B is released
             newer_id = ("root", 1, "call-y", "exec", "exec:round:2", 1)
             emit_main_call_state(queue_, newer_id, "started")
             b = SimpleNamespace(state="dispatched", attempt_id="attempt-b", physical_context=replace(
                 low, profile="owner_max", rendered_mode="max", mode_cause="", round_id="exec:round:2"))
             emit_main_call_state(queue_, newer_id, "dispatched", capture=b)
-            assert census()["previous"]["attempt_id"] == held["attempt_id"]
-            expected = {key: value for key, value in census().items() if key != "previous"}
+            assert census()["previous"]["attempt_id"] == "attempt-p", "keep the confirmed fallback, not provisional A"
+            b_held = census()
+            b_release = {**b_held, "ledger_state": "released"}
+            queue_.put({"type": "main_llm_call_state", "task_id": "root", "task_attempt": 1,
+                        "llm_call_id": "call-y", "execution_id": "exec", "round_id": "exec:round:2",
+                        "call_attempt": 1, "phase": "dispatched", "context_attempt": b_release})
+            after_b_release = census()
+            assert after_b_release["ledger_state"] == "released"
+            assert after_b_release["previous"]["attempt_id"] == "attempt-p"
+            # A's late proof arrives after B was released; it must not retract P.
+            queue_.put({"type": "main_llm_call_state", "task_id": "root", "task_attempt": 1,
+                        "llm_call_id": "call-x", "execution_id": "exec", "round_id": "exec:round:1",
+                        "call_attempt": 1, "phase": "dispatched",
+                        "context_attempt": {**held, "ledger_state": "released"}})
+            assert census() == after_b_release
+            expected = after_b_release
         # Forged releases of the same attempt under another call or task attempt change nothing.
         for forged in ({"call_attempt": 2}, {"llm_call_id": "call-z"}, {"task_attempt": 2}):
             frame = {"type": "main_llm_call_state", "task_id": "root", "task_attempt": 1, "llm_call_id": "call-x",
