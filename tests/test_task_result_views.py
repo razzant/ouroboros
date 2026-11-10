@@ -205,10 +205,14 @@ def test_every_short_view_keeps_current_handoff_disclosures(tmp_path, view, unch
     assert "answer" in answer and not answer.get("result_unchanged")
 
 
-def test_a_roots_short_views_carry_its_continue_offer_on_every_read_and_a_childs_carry_none(tmp_path):
-    """The offer the routing references show (``owner_continue.offer_view``), in every short view: recomputed on
-    each read, so an answer the reader already holds never freezes a Continue admitted since; a child's work is
-    its root's, so a child's view names no offer."""
+def _outcome_block(text):
+    return json.loads(text.split("[SUBTASK_OUTCOME]\n", 1)[1].split("\n[/SUBTASK_OUTCOME]", 1)[0])
+
+
+def test_a_roots_reads_carry_its_continue_offer_on_every_read_and_a_childs_carry_none(tmp_path):
+    """The offer the routing references show (``owner_continue.offer_view``), in every short view and in the full
+    read's outcome block: recomputed on each read, so an answer the reader already holds never freezes a Continue
+    admitted since; a child's work is its root's, so a child's reads name no offer, settled or still running."""
     stop = {"execution": {"status": "ok", "reason_code": "final_message", "task_completion": {
         "action": "stop", "rationale": "The review still runs.", "answer_sha256": "a" * 64, "source": "finish_task"}},
         "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}}
@@ -216,17 +220,25 @@ def test_a_roots_short_views_carry_its_continue_offer_on_every_read_and_a_childs
                       terminal_origin="model_final", root_task_id="stopped-root", delegation_role="root",
                       reason_code="final_message", outcome_axes=stop)
     _write(tmp_path)
+    write_task_result(tmp_path, "running-child", "running", parent_task_id="parent", root_task_id="parent",
+                      delegation_role="subagent")
     ctx = _ctx(tmp_path)
+    open_offer = {"eligible": True, "cause": "author_stop", "refusal": ""}
     views = {view: json.loads(results._get_task_result(ctx, "stopped-root", view=view))
              for view in ("answer", "summary", "evidence")}
     for payload in views.values():
-        assert payload["continuation_offer"] == {"eligible": True, "cause": "author_stop", "refusal": ""}
+        assert payload["continuation_offer"] == open_offer
+    assert _outcome_block(results._get_task_result(ctx, "stopped-root"))["continuation_offer"] == open_offer
     write_task_result(tmp_path, "stopped-root", "completed",
                       continued_by={"successor_task_id": "next-root", "state": "admitted"})
-    again = json.loads(results._get_task_result(ctx, "stopped-root", view="answer",
-                                                known_result_sha256=views["answer"]["child_result_sha256"]))
+    known = views["answer"]["child_result_sha256"]
+    claimed = {"eligible": False, "refusal": "already_continued", "successor_task_id": "next-root", "state": "admitted"}
+    again = json.loads(results._get_task_result(ctx, "stopped-root", view="answer", known_result_sha256=known))
     assert again["result_unchanged"] is True and "answer" not in again
-    assert again["continuation_offer"] == {"eligible": False, "refusal": "already_continued",
-                                           "successor_task_id": "next-root", "state": "admitted"}
-    for view in ("answer", "summary", "evidence"):
-        assert "continuation_offer" not in json.loads(results._get_task_result(ctx, "child", view=view))
+    assert again["continuation_offer"] == claimed
+    full = results._get_task_result(ctx, "stopped-root", known_result_sha256=known)
+    assert "Result and trace are unchanged" in full and _outcome_block(full)["continuation_offer"] == claimed
+    for child in ("child", "running-child"):
+        for view in ("answer", "summary", "evidence"):
+            assert "continuation_offer" not in json.loads(results._get_task_result(ctx, child, view=view)), (child, view)
+        assert "continuation_offer" not in _outcome_block(results._get_task_result(ctx, child)), child
