@@ -47,13 +47,13 @@ def _mail(tmp_path, task_id, text, *, sender="", kind="task_message", msg_id=Non
         from ouroboros.owner_mailbox import _mailbox_path
 
         path = _mailbox_path(tmp_path, task_id)
-        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
         rows[-1]["source_task_id"] = sender
-        path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
 
 
 def test_an_unnamed_mode_sleeps_and_a_named_in_slot_wait_is_unchanged(tmp_path):
-    """Owner Q2=A: with no mode named, a positive timeout_sec (the wake time) or a selector sleeps; a named
+    """Owner Q2=A: with no mode named, an omitted or positive timeout_sec or a selector sleeps; a named
     in_slot and a zero window hold the slot as before, and in_slot never takes a selector."""
     from ouroboros.tools.control_task_results import _await_messages
 
@@ -70,6 +70,18 @@ def test_an_unnamed_mode_sleeps_and_a_named_in_slot_wait_is_unchanged(tmp_path):
     ctx._model_sleep, ctx._owner_wait_requested = None, ""
     assert json.loads(_await_messages(ctx, senders=["peer"]))["reason"] == "sleep_armed"
     assert ctx._model_sleep["senders"] == ["peer"] and not ctx._model_sleep["any_mail"]
+    ctx._model_sleep, ctx._owner_wait_requested = None, ""
+    bare = json.loads(_await_messages(ctx))
+    assert bare["reason"] == "sleep_armed" and ctx._model_sleep["any_mail"] and not ctx._model_sleep["wake_at"]
+    from ouroboros.model_sleep import wake_reason
+
+    assert not wake_reason(ctx, ctx._model_sleep)
+    _mail(tmp_path, ctx.task_id, "from an unselected peer", sender="peer")
+    assert wake_reason(ctx, ctx._model_sleep)
+    presence = _ctx(tmp_path, task_id="presence")
+    presence.owner_wait_callback = None
+    assert json.loads(_await_messages(presence))["slot"] == "held"
+    assert not getattr(presence, "_model_sleep", None)
 
 
 def test_selectors_are_validated_and_a_ready_source_answers_at_once(tmp_path):

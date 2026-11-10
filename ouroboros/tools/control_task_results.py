@@ -930,10 +930,10 @@ def _wait_window(
     return window, bound
 
 
-def _await_messages(ctx: ToolContext, timeout_sec: int = 0, mode: Any = None, senders: Any = None,
+def _await_messages(ctx: ToolContext, timeout_sec: Optional[int] = None, mode: Any = None, senders: Any = None,
                     tasks: Any = None, runs: Any = None, wake_at: Any = None, wake_after_sec: Any = None,
                     services: Any = None) -> str:
-    """Unless a mode is named, a selector or a positive ``timeout_sec`` (then the wake time) sleeps
+    """Unless a mode is named, an omitted or positive ``timeout_sec`` (then the wake time) sleeps
     (``_await_as_sleep``: released once nothing live keeps it, owner Q2=A). A named in_slot, a zero
     window (a peek) and a task with no continuation owner instead hold this task's worker slot until an
     unread mailbox entry exists or the window elapses. Delivers nothing: the round-top drain owns delivery and
@@ -957,13 +957,13 @@ def _await_messages(ctx: ToolContext, timeout_sec: int = 0, mode: Any = None, se
 
     named, timed = str(mode or "").strip().lower(), str(timeout_sec or 0) != "0"
     sources = senders or tasks or runs or services or wake_at or wake_after_sec
-    if not named and (sources or timed) and callable(getattr(ctx, "owner_wait_callback", None)):
+    if not named and (sources or timed or timeout_sec is None) and callable(getattr(ctx, "owner_wait_callback", None)):
         named, wake_after_sec = "default", (timeout_sec if timed and not (wake_at or wake_after_sec) else wake_after_sec)
     if named not in ("", "in_slot") or sources:
         return _await_as_sleep(ctx, named, senders=senders, tasks=tasks, runs=runs, services=services,
                                wake_at=wake_at, wake_after_sec=wake_after_sec)
     try:
-        requested = int(timeout_sec)
+        requested = int(timeout_sec) if timeout_sec is not None else 0
     except (TypeError, ValueError):
         return _publish_tool_result(ctx, ToolResult(
             status="error", code="TOOL_ARG_ERROR",
