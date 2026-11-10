@@ -806,7 +806,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     # Books step down on the frame's own completed view, never on a price of one. Max keeps whole books only beside
     # the whole story and the work room (a start's rule); the same ordinary Nano is the last physical rescue for every
     # Main route, a view already shown included. A frame whose core alone cannot fit steps down unrendered. A frame
-    # is judged by its pieces' prices: a frame the fit walks away from is never drawn.
+    # is judged by its pieces' prices: a frame the fit walks away from is never drawn whole.
     while True:
         shown = floor.NO_VIEW if mode != "nano" and overflows() else render()
         books_lost = (kept is None or start_work) and mode == "max" and allowances["margin"] is not None and (

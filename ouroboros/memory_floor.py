@@ -54,7 +54,7 @@ def view_tokens(text: str) -> int:
 
 class ViewFit:
     """One frame's memory view: ``level``, its receipt ``note`` and ``facts``, priced from the snapshot's pieces. Its
-    texts are drawn only when read, so a frame the fit walks away from is never drawn."""
+    whole texts are drawn only when read, so a frame the fit walks away from is only priced, piece by piece."""
 
     def __init__(self, snapshot: mv.MemoryViewSnapshot, level: mv.FloorLevel, note: str, facts: Dict[str, Any]):
         self.snapshot, self.level, self.note, self.facts = snapshot, level, note, facts

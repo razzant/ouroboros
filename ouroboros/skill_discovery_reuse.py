@@ -24,8 +24,9 @@ A change key is ``skill_identity._change_key``'s (device, inode, size, mtime, ct
 the rule the payload digests already trust: a write, truncation, ``utime``, rename or entry added to a directory
 moves a change time the caller cannot set back. The identity is taken after the read it covers, and kept only when
 no change time lies within ``_RACY_NS`` of the read's start, so a write during the read or in its coarse clock tick
-is read again next time. On Windows or a filesystem the store does not call local nothing is kept: discovery reads
-everything every time, as before. Each caller gets its own skill, review and manifest objects, since callers assign
+is read again next time. On Windows or a filesystem the store does not call local nothing is kept (``keeps``): discovery
+reads everything every time, as before, and a load hashes again what discovery just hashed (``skill_hash_again``, a
+repeat of that platform). Each caller gets its own skill, review and manifest objects, since callers assign
 their fields (``enabled``, ``review``, ``source``); the values inside are shared and no caller mutates them in place,
 as no reader of a parsed view does (a deep copy would cost more than the reviews' JSON it saves parsing). Nothing is
 written, and no process shares another's answers.
@@ -63,6 +64,11 @@ def _key(path: Any) -> Any:
         return _MISSING
     except OSError:
         return None
+
+
+def keeps(path: Any) -> bool:
+    """Whether a read under ``path`` may be kept: its change key is trusted (a local filesystem, never Windows)."""
+    return _key(path) is not None
 
 
 def _tree(root: Any, *, skip: Iterable[str] = (), depth: Optional[int] = None, links: bool = False) -> Dict[str, Any]:
@@ -111,7 +117,7 @@ def _kept(memo: "OrderedDict[Tuple[Any, ...], Any]", key: Tuple[Any, ...], held:
 def reused_inventory(key: Tuple[Any, ...], roots: Iterable[Any], walk: Callable[[], Any]) -> Any:
     """``walk()``, the location inventory of ``roots``, or the last one of ``key`` while its directories hold."""
     roots = [pathlib.Path(root) for root in roots]
-    if any(_key(root) is None for root in roots):  # Windows or a filesystem not called local: read, keep nothing
+    if not all(keeps(root) for root in roots):  # Windows or a filesystem not called local: read, keep nothing
         return walk()
 
     def identity() -> Dict[str, Any]:
@@ -151,10 +157,10 @@ def _payload_identity(skill_dir: Any, declared: Iterable[str]) -> Dict[str, Any]
 def reused_digest(key: Tuple[Any, ...], skill_dir: Any, declared: Tuple[str, ...], compute: Callable[[], str]) -> str:
     """``compute()``, the release digest of ``skill_dir``, or the last one of ``key`` while its payload tree holds.
     Counted in the measured window (``context_timing``): ``skill_hash`` per digest computed, by ``key``,
-    ``skill_hash_reused`` per digest taken."""
+    ``skill_hash_reused`` per digest taken; where nothing is kept a second digest of ``key`` is ``skill_hash_again``."""
     from ouroboros.context_timing import counted
 
-    local = _key(skill_dir) is not None  # Windows or a filesystem not called local: compute, keep nothing
+    local = keeps(skill_dir)  # Windows or a filesystem not called local: compute, keep nothing
     held = _DIGESTS.get(key) if local else None
     if held is not None and _payload_identity(skill_dir, declared) == held[0]:
         counted("skill_hash_reused")
@@ -170,7 +176,7 @@ def reused_digest(key: Tuple[Any, ...], skill_dir: Any, declared: Tuple[str, ...
 def reused_skill(key: Tuple[Any, ...], skill_dir: Any, state_dir: Any, load: Callable[[], Any]) -> Any:
     """A copy of ``load()``, the loaded package at ``skill_dir`` (or None), or of the last one of ``key`` while
     its payload tree, the owner-state files in ``state_dir`` and the manifest-declared entries hold."""
-    if _key(skill_dir) is None:  # Windows or a filesystem not called local: read, keep nothing
+    if not keeps(skill_dir):  # Windows or a filesystem not called local: read, keep nothing
         return load()
 
     def identity(loaded: Any) -> Dict[str, Any]:
