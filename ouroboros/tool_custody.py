@@ -448,17 +448,9 @@ def retained_tool_custody(root: Any, task_id: str, row: dict, *, excluding: str 
                 or claim_still_owns_effect(root, claim)):
             blockers.append({"kind": "tool_handoff", "task_id": task_id, "operation": claim,
                              "operation_id": operation_id, **tool_handoff_reason(claim)})
-    from ouroboros.merge_receipts import effect_is_definite
-    receipts = row.get("merge_receipts") or []
-    # A merged PR cannot merge again: once any receipt of this task shows its exact PR merged, no request of it is
-    # held, whatever each one's own effect (an unconfirmed one stays unconfirmed and is not rewritten).
-    merged = {url for r in receipts if (r.get("outcome") or {}).get("status") == "merged"
-              and (url := (r.get("repo") or {}).get("url"))}
-    for receipt in receipts:
-        if (receipt.get("launch_operation_ids") and not effect_is_definite(receipt)
-                and (receipt.get("repo") or {}).get("url") not in merged):
-            blockers.append({"kind": "merge_operation", "task_id": task_id,
-                             "receipt_id": receipt.get("receipt_id")})
+    from ouroboros.merge_receipts import held_receipts
+    blockers += [{"kind": "merge_operation", "task_id": task_id, "receipt_id": receipt.get("receipt_id"),
+                  "reason": why} for receipt, why in held_receipts(row)]
     return blockers
 
 

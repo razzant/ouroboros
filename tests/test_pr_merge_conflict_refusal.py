@@ -7,7 +7,8 @@ owner's decision a proven refusal ends this attempt's custody even beside an unr
 PR, whose readback alone keeps the receipt read-back-only; a later explicit call for an open PR without a queue
 sends exactly one new merge. An unknown request keeps its hold and a plain call only reads it back, never resends;
 only the owner-chosen explicit continuation (9 Nov) decides one new request, and once any receipt of the task shows
-the PR merged no request of it is held.
+the PR merged no request of it is held. A Resume naming a settled unknown request (9 Nov) goes on without it: the
+decision sits beside its unchanged receipt, nothing is sent again, and a later queue or call holds it again.
 """
 from __future__ import annotations
 
@@ -503,6 +504,99 @@ def test_a_late_landing_of_the_earlier_request_refuses_the_continuation_and_stil
     assert _held(chain) is False
 
 
+# --- 9 Nov (quiz 0ad8b0): a Resume goes on past a settled unknown request without its result -----------------
+
+INCIDENT = (1, "", "Pull Request is still a draft\n")  # the held receipt's shape: an exit gh gave no status for
+
+
+def _decide(chain, *ids, text="go on without it"):
+    """The owner's Resume census of this tree, with its named decision bound as the door binds it."""
+    from ouroboros.control_actor import accepting_unknown, owner_door
+    from supervisor.continuation_admission import action_writers
+
+    with owner_door("api_task_resume"), accepting_unknown(ids, text):
+        return action_writers(chain.queue, "root")
+
+
+def _custody(chain):
+    from ouroboros.tool_custody import retained_tool_custody
+
+    return retained_tool_custody(chain.root, "root", load_task_result(chain.root, "root"))
+
+
+def _decisions(chain):
+    events = chain.root / "logs" / "events.jsonl"
+    lines = events.read_text(encoding="utf-8").splitlines() if events.exists() else []
+    return [json.loads(line) for line in lines if '"local_custody_unknown_accepted"' in line]
+
+
+@pytest.mark.parametrize("unknown", [INCIDENT, BAD_GATEWAY, "timeout"], ids=["generic-exit", "502", "timeout"])
+def test_a_resume_naming_a_settled_unknown_request_goes_on_and_never_sends_it(chain, unknown):
+    """Owner choice (9 Nov): the named decision sits beside the receipt, whose facts, revision and publication stay;
+    nothing is sent again, a plain call still only reads it back, and Pause, cold sleep and Continue hold nothing."""
+    from ouroboros.merge_receipts import card_row_text, public_block
+    from ouroboros.work_stop import resume_outcome
+
+    chain.answers.append(unknown)
+    assert _merge(chain, HEAD).meta["operation_outcome"] == "unknown" and _held(chain) is True
+    (before,) = _receipts(chain)
+    rid = before["receipt_id"]
+    blockers = _custody(chain)
+    assert blockers == [{"kind": "merge_operation", "task_id": "root", "receipt_id": rid,
+                         "reason": "merge_effect_unknown"}]
+    refusal = resume_outcome({"ok": False, "error": "owner_pause_effects_unsettled", "blockers": blockers})
+    assert refusal["acceptable_unknown"] == [rid]
+    assert refusal["message"] == "Resume refused: the outcome of a merge request of task root is unknown"
+
+    _decide(chain)  # a Resume naming nothing accepts nothing
+    assert _held(chain) is True and not _decisions(chain)
+    _decide(chain, rid, "receipt-elsewhere")
+    assert _held(chain) is False
+    [event] = _decisions(chain)
+    assert event["accepted"] == [rid] and event["unmatched"] == ["receipt-elsewhere"] and not event["refused"]
+    (after,) = _receipts(chain)
+    decision = after["unknown_accepted"]
+    assert {key: value for key, value in after.items() if key != "unknown_accepted"} == before
+    assert (decision["actor"], decision["text"], decision["reason"], decision["replay_authorized"]) == (
+        "owner", "go on without it", "merge_effect_unknown", False)
+    assert "go on without it" not in public_block(after) + card_row_text(after), "the decision stays private"
+
+    _repair(chain)
+    again = _merge(chain, REPAIRED)
+    assert "sent no new merge request" in again.text and len(chain.merges) == 1
+    (kept,) = _receipts(chain)
+    assert (kept["unknown_accepted"], kept["effect"], kept["outcome"]["status"]) == (decision, before["effect"], "unknown")
+    assert _held(chain) is False
+    _consumers(chain.root, chain.registry, chain.queue, chain.workers, False)
+
+
+def test_a_queue_read_back_after_the_decision_holds_again_and_no_resume_goes_past_it(chain):
+    """The decision covers the unknown it was made about: a later readback showing a queue holds the request again
+    and naming it is refused by that reason; the PR's merge then frees it. The decision stays recorded."""
+    from ouroboros.work_stop import acceptable_unknown
+
+    chain.answers.append(BAD_GATEWAY)
+    _merge(chain, HEAD)
+    (receipt,) = _receipts(chain)
+    _decide(chain, receipt["receipt_id"])
+    decision = _receipts(chain)[0]["unknown_accepted"]
+    assert _held(chain) is False
+    chain.fake.pr.update(autoMergeRequest={"enabledAt": "by another actor"})
+    _merge(chain, HEAD)  # a plain call reads it back and sends nothing
+    (queued,) = _receipts(chain)
+    assert (queued["outcome"]["status"], queued["unknown_accepted"]) == ("queued", decision)
+    assert _held(chain) is True and len(chain.merges) == 1
+    blockers = _custody(chain)
+    assert [b["reason"] for b in blockers] == ["merge_queued"] and acceptable_unknown(blockers) == []
+    _decide(chain, receipt["receipt_id"])
+    assert _held(chain) is True, "a known queue is never waived"
+    assert _decisions(chain)[-1]["refused"] == [{"id": receipt["receipt_id"], "task_id": "root",
+                                                 "reason": "merge_queued"}]
+    chain.fake.pr.update(state="MERGED", mergeCommit={"oid": MERGE}, autoMergeRequest=None)
+    _merge(chain, HEAD)
+    assert _receipts(chain)[0]["outcome"]["status"] == "merged" and _held(chain) is False and len(chain.merges) == 1
+
+
 def test_a_crash_after_githubs_durable_refusal_clears_without_running_the_handler_again(tmp_path):
     """A durably refused merge holds nothing; the ended worker's own claim is retired by the process-end owner
     (positive evidence the process ended), never by re-executing the handler."""
@@ -572,6 +666,67 @@ def test_only_a_merged_readback_of_the_same_pr_in_the_same_task_ends_an_unconfir
                                                      "launch_operation_ids": [], "outcome": {"status": "merged"}})
     assert [i["receipt_id"] for i in retained_tool_custody(tmp_path, "blank", load_task_result(tmp_path, "blank"))
             if i["kind"] == "merge_operation"] == ["d"]
+
+
+def test_only_a_settled_unknown_request_is_accepted_and_no_observer_writes_or_drops_the_decision(tmp_path):
+    """Judged under the receipt lock: a call still claimed, an unsettled request, a queue or GitHub's merged answer
+    is refused by its reason, an id of no receipt is unmatched and nothing is recorded twice; a stale observer neither
+    drops nor mints a decision, and a new call of the accepted request holds it again while it runs."""
+    from ouroboros import merge_receipts
+    from ouroboros.local_custody_repair import ACCEPTABLE_UNKNOWN, accept_unknown_custody
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+    from ouroboros.tool_custody import retained_tool_custody
+
+    def custody():
+        return retained_tool_custody(tmp_path, "root", load_task_result(tmp_path, "root"))
+
+    def held():
+        return {item["receipt_id"]: item["reason"] for item in custody() if item["kind"] == "merge_operation"}
+
+    def stored():
+        return {r["receipt_id"]: r for r in load_task_result(tmp_path, "root")["merge_receipts"]}
+
+    assert merge_receipts.UNKNOWN_EFFECT in ACCEPTABLE_UNKNOWN
+    write_task_result(tmp_path, "root", STATUS_RUNNING, root_task_id="root", delegation_role="root", launch_handoffs={
+        "op-live": {"tool": "pr_merge", "task_id": "root", "root_task_id": "root", "claimed_at": "t",
+                    "state": "claimed", "local_owner": {}, "owner_proof": {}}})
+    unknown = {"schema": 1, "state": "settled", "repo": {"url": URL}, "number": 7,
+               "requested": {"method": "squash", "expected_head_sha": HEAD},
+               "effect": {"ok": False, "failure": "exit", "http_status": 502},
+               "outcome": {"status": "unknown", "reason": "pr_state_open_after_unconfirmed_effect"}}
+    cases = {"unknown": {}, "live": {"launch_operation_ids": ["op-live"]},
+             "unsettled": {"state": "effect_attempted", "outcome": {}},
+             "queued": {"outcome": {"status": "queued", "reason": "auto_merge_pending"}},
+             "answered": {"effect": {"ok": True, "failure": "", "merge_sha": MERGE},
+                          "outcome": {"status": "unknown", "reason": "merge_answered_pr_still_open"}}}
+    for name, facts in cases.items():
+        merge_receipts.write_receipt(tmp_path, "root", {**unknown, "receipt_id": name,
+                                                        "launch_operation_ids": [f"op-{name}"], **facts})
+    before = stored()
+    assert held() == {"unknown": "merge_effect_unknown", "live": "merge_call_unreturned",
+                      "unsettled": "merge_unsettled", "queued": "merge_queued", "answered": "merge_answered"}
+    by = {"actor": "owner", "text": "go on", "at": "2026-11-09T20:00:00+00:00"}
+    outcome = accept_unknown_custody(tmp_path, {"root"}, [*cases, "gone"], root_task_id="root", by=by)
+    assert outcome["accepted"] == ["unknown"] and outcome["unmatched"] == ["gone"]
+    assert sorted((row["id"], row["reason"]) for row in outcome["refused"]) == [
+        ("answered", "merge_answered"), ("live", "merge_call_unreturned"), ("queued", "merge_queued"),
+        ("unsettled", "merge_unsettled")]
+    after = stored()
+    assert after["unknown"].pop("unknown_accepted") == {**by, "reason": "merge_effect_unknown", "replay_authorized": False}
+    assert after == before, "no fact, revision or publication of any receipt changed"
+    assert "unknown" not in held()
+    assert [item["operation_id"] for item in custody() if item["kind"] == "tool_handoff"] == ["op-live"], \
+        "a live call stays its own hold"
+    again = accept_unknown_custody(tmp_path, {"root"}, ["unknown"], root_task_id="root", by={**by, "text": "again"})
+    assert again == {"accepted": [], "refused": [], "unmatched": ["unknown"]}, "nothing is recorded twice"
+
+    # Observers whose snapshot predates the decision, or that carry one of their own, write facts only.
+    merge_receipts.write_receipt(tmp_path, "root", {**before["unknown"], "observed_after": {"state": "OPEN"}})
+    merge_receipts.write_receipt(tmp_path, "root", {**before["queued"], "unknown_accepted": {"actor": "forged"}})
+    assert stored()["unknown"]["unknown_accepted"]["text"] == "go on" and "unknown_accepted" not in stored()["queued"]
+    assert "unknown" not in held()
+    merge_receipts.write_receipt(tmp_path, "root", {**before["unknown"], "launch_operation_ids": ["op-live"]})
+    assert held()["unknown"] == "merge_call_unreturned", "a new call of the request holds it while it runs"
 
 
 def test_a_refusal_recorded_after_an_observer_published_advances_the_revision(tmp_path):
