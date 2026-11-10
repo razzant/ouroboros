@@ -727,36 +727,49 @@ def test_every_listed_result_says_how_its_work_ended_and_whether_its_continue_is
 
 
 def test_an_unreadable_listed_result_is_unknown_never_a_finished_author(tmp_path, monkeypatch):
-    """A row that cannot be read now, or whose facts cannot be read from it, stays listed with its reader and an
-    explicit unknown; the rest of the window keeps its facts."""
+    """A row that cannot be read, or whose facts cannot be read from it, stays listed with its reader and an explicit
+    unknown, and the window goes on; a failing store is read once: that row and every row not yet read are unknown,
+    with no further read waiting on the store (owner-message intake runs on the supervisor loop)."""
     from ouroboros import owner_continue, task_results
+    from ouroboros import server_routing_context as routing
     from ouroboros.projects_registry import create_project
-    from ouroboros.server_routing_context import _decision_turn_metadata
     from ouroboros.store import StoreBusy
 
     project = create_project(tmp_path, "room", name="Room")
     _ended(tmp_path, "r-stop", "2026-11-10T11:23:57Z", stop=True)
     _ended(tmp_path, "r-torn", "2026-11-10T11:30:00Z", stop=True)
-    _ended(tmp_path, "r-busy", "2026-11-10T11:40:00Z", stop=True)
+    _ended(tmp_path, "r-bad", "2026-11-10T11:40:00Z", stop=True)
     real_load, real_offer = task_results.load_task_result, owner_continue.offer_view
+    reads, busy = [], set()
 
     def load(root, task_id, **kwargs):
-        if task_id == "r-busy":
-            raise StoreBusy("row busy", reason="contention")
+        reads.append(task_id)
+        if task_id in busy:
+            raise StoreBusy("store busy", reason="contention")
+        if task_id == "r-bad":
+            raise ValueError("unreadable body")
         return real_load(root, task_id, **kwargs)
 
     monkeypatch.setattr(task_results, "load_task_result", load)
     monkeypatch.setattr(owner_continue, "offer_view", lambda row, task_id: (
         (_ for _ in ()).throw(ValueError("torn facts")) if task_id == "r-torn" else real_offer(row, task_id)))
-    metadata = _decision_turn_metadata(_decision_ctx(tmp_path), int(project["chat_id"]), "cm-gap", {"project_id": "room"})
+    metadata = routing._decision_turn_metadata(_decision_ctx(tmp_path), int(project["chat_id"]), "cm-gap",
+                                               {"project_id": "room"})
     listed = {row["task_id"]: row for row in metadata["project_routing_manifest"]["final_results"]}
-    assert listed["r-busy"] == {"task_id": "r-busy", "status": "unknown", "title": "",
-                                "authority_source": listed["r-busy"]["authority_source"], "outcome": "unknown",
-                                "continuation_offer": "unknown", "read_error": "StoreBusy"}
-    assert listed["r-busy"]["authority_source"]["arguments"] == {"task_id": "r-busy", "include_authority": True}
+    assert listed["r-bad"] == {"task_id": "r-bad", "status": "unknown", "title": "",
+                               "authority_source": listed["r-bad"]["authority_source"], "outcome": "unknown",
+                               "continuation_offer": "unknown", "read_error": "ValueError"}
+    assert listed["r-bad"]["authority_source"]["arguments"] == {"task_id": "r-bad", "include_authority": True}
     assert (listed["r-torn"]["outcome"], listed["r-torn"]["continuation_offer"], listed["r-torn"]["read_error"]) == (
         "unknown", "unknown", "ValueError")
     assert listed["r-stop"]["continuation_offer"]["eligible"] is True
+
+    reads.clear()
+    busy.add("r-bad")  # the store itself now refuses: the newest row's read is the window's only one
+    finals, _omissions = routing._recent_root_results(_decision_ctx(tmp_path), "room")
+    assert reads == ["r-bad"]
+    assert [(row["task_id"], row["outcome"], row["continuation_offer"], row["read_error"]) for row in finals] == [
+        (task, "unknown", "unknown", "StoreBusy") for task in ("r-bad", "r-torn", "r-stop")]
 
 
 def _boundary(tmp_path, metadata, messages, *, delivery=None, own=None):

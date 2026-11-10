@@ -12,7 +12,12 @@ found through the registry row's ``last_task_result_id`` pointer (stamped by
 roots only), with a bounded scan as fallback. Every such result reference, the
 pointer and both windows, also says how its work ended (``_ended_work_facts``):
 an author stop's open Continue is a fact the next focus reads, not one it must
-dig for, and ``continue_task`` is among the valid actions it may choose.
+dig for, and ``continue_task`` is among the valid actions it may choose. These
+facts ride where the decision lane is built (``server_owner_routing``: a Project
+room's turn; a Main turn when the install has Projects, a live root or an
+unreadable roots list) and in a wake's Main facts, and Main's manifest only beside
+Projects or live roots: a Main turn of a Project-less install with no live work
+reads a stopped card in its own room and the offer through ``get_task_result``.
 """
 
 from __future__ import annotations
@@ -366,11 +371,18 @@ def _recent_root_results(ctx: Any, project_id: str = "") -> tuple:
         counted = project_result_counts(ctx.DRIVE_ROOT, project_id) if project_id else None
     except StoreError as exc:
         return [], {"final_results": None, "final_results_error": f"result_store_unreadable: {exc}", "children": None}
-    finals = []
+    finals, store_failure = [], None
     for task_id in ids[:cap]:
+        if store_failure is not None:  # the store failed once: no further read waits on it
+            finals.append(_unreadable_result(task_id, store_failure))
+            continue
         try:
             row = load_task_result(ctx.DRIVE_ROOT, task_id)
-        except Exception as exc:  # one unreadable row is its reference's named gap, not the window's
+        except StoreError as exc:  # the store itself (busy, migrating, lost): this row and the rest are unknown
+            store_failure = exc
+            finals.append(_unreadable_result(task_id, exc))
+            continue
+        except Exception as exc:  # this row alone: its reference's named gap, never the window's
             finals.append(_unreadable_result(task_id, exc))
             continue
         if row is not None:
@@ -559,8 +571,12 @@ def _decision_turn_metadata(ctx: Any, chat_id: int, client_message_id: str, task
     needs: the RUNNING tasks in THIS chat (so it can tell_task the right one
     instead of spawning a duplicate) and the originating message id (for idempotent
     steer delivery). P5-clean: surfaces state only; the agent picks the target by
-    judgment among answer / tell_task / start_task / move_to_project. ``roots``: the
-    message's one ``addressable_roots`` snapshot, read here when not handed down."""
+    judgment among answer / tell_task / start_task / move_to_project / continue_task.
+    ``roots``: the message's one ``addressable_roots`` snapshot, read here when not
+    handed down. Built where the decision lane is (``server_owner_routing``: a Project
+    room; Main when the install has Projects, a live root or an unreadable roots
+    list) and for a wake (``main_lane_routing_metadata``); Main's manifest stays only
+    beside Projects or live roots."""
     md = dict(task_metadata) if isinstance(task_metadata, dict) else {}
     roots = roots if roots is not None else addressable_roots(ctx)
     addressable_here = roots.rows(chat_id)
