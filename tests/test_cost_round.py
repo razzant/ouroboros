@@ -89,7 +89,8 @@ def _rounds(root, task_id: str, start: list) -> list:
 def test_r1_round_two_scans_only_the_bytes_it_adds(engine, turns):
     """R1. Round 2 scans for secrets exactly the bytes its records store for the first time, and no part twice, after
     a short start and after a long one alike. The counters themselves count: round 2 always stores something new
-    (its answer and the owner's next message)."""
+    (its answer and the owner's next message). The equality is per part as the scan keys it, in its own key order: a
+    part met in two orders is scanned once per order and stored once, so live ``work`` may then show more scanned."""
     first, second = _rounds(engine, f"task-{turns}", _history(turns))
     assert first["work"]["secret_scan"] > 0 and second["work"]["new_parts"] > 0, (first["work"], second["work"])
     work = second["work"]

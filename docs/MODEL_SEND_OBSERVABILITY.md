@@ -232,7 +232,8 @@ the batch's end). Facts for the log only; nothing decides by them.
   the redaction worked out (once per part per task, §3.2); `new_parts`, bytes
   of shared parts the CAS stored for the first time (`observability.write_part`).
   R1 (`tests/test_cost_round.py`): round 2 scans exactly the bytes it adds, at
-  any start size.
+  any start size. A scan is keyed by the part's own key order and the CAS by its
+  sorted bytes, so a part met in two orders is scanned twice and stored once.
 - `host_steps.steps`: `[wall ms, thread CPU ms]` between marks: `round_top`
   (the batch's end to the model call), `model_call` (to the first record),
   `request_record`, `physical_candidate`, `daemon_upload`, `create_operation`
