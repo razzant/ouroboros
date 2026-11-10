@@ -384,6 +384,9 @@ def test_direct_provider_history_keeps_refusal_text_and_omits_stop_metadata(setu
     ("create", "http_400", 400, False, False),
     ("create", "auth_required", 401, False, False),
     ("get", "subscription_window_exhausted", 429, False, True),
+    # After engine retention, missing request bytes/receipts prove no old non-dispatch.
+    ("create", "resource_not_found", 404, False, False),
+    ("get", "model_operation_not_found", 404, False, True),
 ])
 def test_only_exact_pre_admission_create_refusal_releases_the_attempt(setup, monkeypatch, phase, code, status, not_sent, asynchronous):
     root, gateway, client = setup
@@ -1089,6 +1092,34 @@ def test_unknown_engine_outcome_retains_response_without_resend_or_false_zero(se
     assert retained(root) == gateway.results[0] and not gateway.acks
     assert len(gateway.accepted_operations) == 1 and ledger(root)[-1]["state"] == "unresolved"
     assert ledger(root)[-1].get("cost_usd") is None
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_a_tracked_send_is_recorded_before_create_and_hears_its_end(setup, asynchronous):
+    from ouroboros.llm_attempt import track_physical_attempts
+
+    root, gateway, client = setup
+
+    class Tracker:
+        def __init__(self):
+            self.claimed, self.creates_at_claim, self.heard = [], [], []
+
+        def __call__(self, reservation):
+            self.claimed.append(reservation.attempt_id)
+            self.creates_at_claim.append(len(gateway.creates))
+
+        def attempt_ended(self, capture, error):
+            self.heard.append((capture.attempt_id, capture.state, error is None))
+
+    tracker = Tracker()
+    with track_physical_attempts(tracker):
+        if asynchronous:
+            asyncio.run(client.chat_async([{"role": "user", "content": "hi"}], MODEL))
+        else:
+            client.chat([{"role": "user", "content": "hi"}], MODEL)
+    assert tracker.creates_at_claim == [0]
+    assert tracker.heard == [(tracker.claimed[0], "settled", True)]
+    assert ledger(root)[-1]["attempt_id"] == tracker.claimed[0]
 
 
 def test_continuation_repair_is_bounded_to_one_unstarted_operation(setup):

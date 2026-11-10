@@ -173,9 +173,15 @@ def minted_root(root: str, drive: Any) -> bool:
     ``state/headless_tasks/<id>/**``, which the drive custody pass retires) or a checkout the subagent
     worktree registry holds (a child's copy, a body candidate). Any other root, an owner's project or
     the system repository, keeps its registration wherever it lives, even under the data root."""
+    from ouroboros.subagent_worktrees import registered_checkout
+
+    return minted_shape(root, drive) or registered_checkout(root)
+
+
+def minted_shape(root: str, drive: Any) -> bool:
+    """``minted_root``'s data-root half: the tree's place under the data root alone, no registry read."""
     import pathlib
 
-    from ouroboros.subagent_worktrees import registered_checkout
     from ouroboros.tools.review_subject import CHECKOUT_SUBDIR
 
     path, data = pathlib.Path(root).resolve(), pathlib.Path(drive).resolve()
@@ -183,8 +189,7 @@ def minted_root(root: str, drive: Any) -> bool:
     return (parts[:2] == ("state", CHECKOUT_SUBDIR)
             or any(parts[i:i + 2] == ("source_handles", "review_inputs") for i in range(len(parts) - 1))
             or (len(parts) > 1 and parts[0] == "task_drives")
-            or (len(parts) > 2 and parts[:2] == ("state", "headless_tasks"))
-            or registered_checkout(root))
+            or (len(parts) > 2 and parts[:2] == ("state", "headless_tasks")))
 
 
 def ephemeral_scope(gateway: Any, *, thread: bool = False) -> bool:

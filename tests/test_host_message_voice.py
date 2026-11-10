@@ -173,6 +173,7 @@ HOST_ROW_CLASSES = {
     "evolution_cycle_outcome": ("runtime_state", 1),
     "evolution_notice": ("runtime_state", 7),  # lifecycle x4, toggle, light-mode queue drop, /evolve off report; the failure, repeat and reserve stops are gone (owner, 2026-11-02)
     "finalization_notice": ("card_row", 2),
+    "historical_retirement_notice": ("runtime_state", 1),  # old reviewer sessions and minted registrations, once
     "host_progress": ("card_row", 1),
     "initialization_notice": ("not_started", 1),
     "low_start_notice": ("runtime_state", 1),  # once per Low episode of memory-lowered starts (owner A, 07.11; was 1B)

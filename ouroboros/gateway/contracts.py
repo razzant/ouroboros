@@ -14,6 +14,9 @@ from ouroboros.storage import (  # noqa: F401 -- public re-exports
     StorageVolume, StorageRemover,
 )
 from ouroboros.owner_keep import OwnerKeepRequest, OwnerKeepResponse  # noqa: F401 -- public re-exports
+from ouroboros.launch_custody import (  # noqa: F401 -- public re-exports
+    KeptService, KeptServiceStopRequest, KeptServiceStopResponse, KeptServicesResponse,
+)
 from ouroboros.storage_deleted import (  # noqa: F401 -- public re-exports
     StorageActiveProject, StorageDeletedFolder, StorageDeletedProject, StorageDeletedProjects, StorageFolderPart,
 )
@@ -1096,6 +1099,8 @@ class TaskCreateRequest(_TaskCreateRequestRequired, total=False):
     # v6.60.0: "" | "final_answer_line" — adapter-declared machine-extractable answer
     # protocol; flows into task_contract.answer_protocol and inherits to subagents.
     answer_protocol: str
+    # true: task review Required reviews the whole final answer even without files (task_contract.review_answer).
+    review_answer: bool
     allowed_resources: Dict[str, Any]
     resource_policy: Dict[str, Any]
     disabled_tools: list[str]
@@ -1577,6 +1582,7 @@ __all__ = [
     "StorageActiveProject", "StorageDeletedFolder", "StorageDeletedProject", "StorageDeletedProjects", "StorageFolderPart",
     "StorageFree", "StorageFreeEntry", "StorageFreeGroup", "StorageFreeItem", "StorageFreeItemsResponse", "StorageFreeKept",
     "StorageFreePool", "StorageFreeRequest", "StorageFreeRun", "OwnerKeepRequest", "OwnerKeepResponse",
+    "KeptService", "KeptServicesResponse", "KeptServiceStopRequest", "KeptServiceStopResponse",
     "HTTP_ENDPOINTS",
     "WS_MESSAGE_TYPES",
 ]

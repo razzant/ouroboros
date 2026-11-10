@@ -103,7 +103,9 @@ def test_actual_outcome_summary_and_phone(case, fragment, tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize("trigger,enforcement,obligations,expected_neutral", [
-    ("auto_effect", "advisory", [], True),
+    # An author's acceptance without the reviewers' approval is always flagged, an optional review's too
+    # (owner, 8 Nov 2026): the compact notice says the same sentence as the card.
+    ("auto_effect", "advisory", [], False),
     ("required_effect", "advisory", [], False),
     ("auto_effect", "blocking", [], False),
     ("auto_effect", "advisory", ["unmet-review"], False),

@@ -14,6 +14,13 @@ from typing import Any
 from starlette.routing import BaseRoute, Route, WebSocketRoute
 
 
+def _kept_service_routes() -> list[BaseRoute]:
+    """Activity › Background: the services tasks kept running and the owner's Stop of one launch."""
+    from ouroboros.gateway.kept_services import kept_service_routes
+
+    return kept_service_routes()
+
+
 def _ui_client_routes() -> list[BaseRoute]:
     """Installation-wide owner UI preferences and the install's
     interface language with its translation memory (``/api/ui/*``)."""
@@ -300,7 +307,7 @@ def collect_routes(
         Route("/api/update/description", endpoint=api_update_description, methods=["POST"]),
         Route("/api/update/apply", endpoint=api_update_apply, methods=["POST"]),
         Route("/api/cost-breakdown", endpoint=make_cost_breakdown_endpoint(data_dir)),
-        *storage_routes(data_dir),
+        *storage_routes(data_dir), *_kept_service_routes(),
         Route("/api/evolution-data", endpoint=api_evolution_data),
         Route("/api/chat/history", endpoint=make_chat_history_endpoint(data_dir)),
         Route("/api/logs/{name}", endpoint=api_logs_tail, methods=["GET"]),

@@ -1172,7 +1172,7 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
                                                 source_verification=(
                                                     custody.work_order_source_verification(entry)
                                                     if entry.work_order_source_request else {}
-                                                ))
+                                                ), detail=detail)
             def _expired() -> str:
                 # The window payload is a DICT; the supervising wake adds its own
                 # whole-sleep facts (``sleep``, one cache-horizon note) as fields at
@@ -1448,7 +1448,7 @@ def get_tools() -> List[ToolEntry]:
                 "at the engine timeout; timeout_at=null waits until answered); the "
                 "payload's continuation=same_session fact means an answer (free_text "
                 "included, e.g. a peer's original you relay) resumes THIS session, each "
-                "resumed turn a paid round, while an input_required terminal names "
+                "resumed turn a paid round. async_questions_only=true marks questions that hold nothing: the agent keeps working, an answer reaches it as its next user message (delivered is that handoff, not proof it was read), and an unanswered one closes at its timeout_at with nothing sent; an input_required terminal names "
                 "continuation=new_physical_run: answer it with delegate_start(subagent_id=..., continue_from=<run_id>, "
                 "prompt=<the answers>). An unfinished "
                 "terminal carries the engine's resumable block (cause, resetsAt, carriers) and one continuity line "
@@ -1499,7 +1499,7 @@ def get_tools() -> List[ToolEntry]:
                 "later round and you relay it back here) and keep waiting; an "
                 "unanswered question with a "
                 "timeout_at benign-declines at the engine timeout (the run continues "
-                "on stated assumptions), while timeout_at=null waits until answered. "
+                "on stated assumptions), while timeout_at=null waits until answered. An async question (async_questions_only=true, delivery=async) holds nothing: the agent keeps working, delivered hands the answer to its next user message (not proof it was read, so it confirms no source_response), and unanswered it closes at its timeout_at with nothing sent. "
                 "Typed outcomes: delivered; already_resolved (the run moved on — do "
                 "not re-post); not_found; rejected (a definite engine refusal of "
                 "these rows — HTTP 400/409/413/422 only — fix them); "

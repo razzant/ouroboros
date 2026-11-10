@@ -1,7 +1,7 @@
 // Activity dashboard subtab (P4): a single observability + minimal-control view for
-// cron/scheduled tasks, what is running/queued now, and background consciousness.
-// Management is DIRECT mechanical control via existing APIs (cancel a task, enable/
-// disable/delete/restore schedules, start/stop background consciousness). Every
+// cron/scheduled tasks, what is running/queued now, background consciousness and the services
+// tasks kept running. Management is DIRECT mechanical control via existing APIs (cancel a task, enable/
+// disable/delete/restore schedules, start/stop background consciousness, stop one kept service). Every
 // lifecycle button NAMES its action to the one audited server seam, so the owner's
 // buttons and the agent's tool mean exactly the same thing.
 
@@ -364,6 +364,71 @@ export function scheduleOutcomeToast(action, outcome, { word = action, done: don
     return outcome.status === 'withdrawn' ? [`Schedule ${done}.`, 'info'] : null;
 }
 
+/** One service a task kept running, as custody reads it now (`GET /api/services/kept`): its name leads, then its state,
+ * the task it came from, since when and the address its log printed; Stop ends that one launch. */
+export function keptServiceRowHtml(service) {
+    const name = String(service?.name || 'service');
+    const id = String(service?.launch_id || '');
+    const captureOnly = service?.state === 'capture_owed';
+    const action = captureOnly ? 'Save outputs' : 'Stop';
+    const origin = String(service?.task_title || '').trim() || String(service?.task_id || '').trim();
+    const since = whenLabel(service?.since);
+    const facts = [
+        `Kept by a task · ${service?.state === 'running' ? 'running' : service?.state === 'capture_owed'
+            ? 'ended, declared outputs not captured yet' : 'status unknown'}`,
+        origin ? `from ${esc(origin)}` : '',
+        since ? `since ${esc(since)}` : '',
+        service?.address ? esc(service.address) : '',
+    ].filter(Boolean).join(' · ');
+    return `<div class="ui-row activity-row" data-kept-service="${esc(id)}">
+            <span class="ui-row-title activity-name" data-i18n-authored>${esc(name)}</span>
+            <span class="ui-row-meta activity-sub">${facts}</span>
+            <div class="ui-row-actions activity-row-actions">
+                <button type="button" class="btn btn-default btn-sm" data-act="kept-stop" data-id="${esc(id)}" data-name="${esc(name)}" data-capture-only="${captureOnly ? '1' : '0'}" aria-label="${action} ${esc(name)}">${action}</button>
+            </div>
+        </div>`;
+}
+
+/** The kept services under Background: every row, then what the read could not see. An unreadable list says so. */
+export function keptServicesHtml(data) {
+    if (!data || !Array.isArray(data.services)) {
+        return '<div class="activity-empty">Kept services could not be read. Whether any still run is unknown.</div>';
+    }
+    const rows = data.services.map(keptServiceRowHtml);
+    if (data.complete === false) {
+        rows.push(`<div class="activity-empty">Kept services may be missing from this list: ${esc(data.note || 'custody could not be read whole')}.</div>`);
+    }
+    return rows.join('');
+}
+
+/** The Stop confirmation: what a stop does, never a promise its outputs will be kept (the receipt says). */
+export function keptStopConfirmBody(name, captureOnly = false) {
+    if (captureOnly) return `Save outputs from ${name}? This service was reported ended. This rechecks it, stops any remaining processes and tries to save its declared outputs for the original task. The result will show what was saved.`;
+    return `Stop ${name}? A task started it and asked to keep it running. Stopping it ends its processes and keeps its log, then tries to capture the outputs it declared for that task; the result will say whether they were kept. Nothing else will be stopped.`;
+}
+
+/** A Stop receipt in owner words, with its toast tone: a stop whose declared outputs were not all kept says so. */
+export function keptStopToast(receipt, name) {
+    const subject = receipt?.name || name || 'The service';
+    const outputs = receipt?.outputs || {};
+    switch (receipt?.outcome) {
+    case 'stopped':
+        if (outputs.state === 'captured') return [`Stopped ${subject}. Its log and declared outputs are kept.`, 'success'];
+        if (outputs.state === 'none_declared') return [`Stopped ${subject}. Its log is kept.`, 'success'];
+        return [outputs.state === 'unavailable'
+            ? `Stopped ${subject}. Its log is kept; no declared outputs were captured: ${outputs.detail || 'none recorded'}.`
+            : `Stopped ${subject}. Its log is kept, but not every declared output was captured: ${
+                outputs.detail || 'the capture did not finish'}.`, 'warning'];
+    case 'not_found':
+        if (!receipt.outputs) return [`${subject} was no longer running; nothing was stopped.`, 'info'];
+        return receipt.ok ? [`${subject} was no longer running; its declared outputs are now kept.`, 'success']
+            : [`${subject} was no longer running; not every declared output was captured: ${
+                outputs.detail || 'the capture did not finish'}.`, 'warning'];
+    case 'not_confirmed': return [`${subject} is not confirmed stopped: ${receipt.detail || 'some processes may still run'}.`, 'warning'];
+    default: return [`Whether ${subject} stopped is unknown: ${receipt?.detail || 'custody could not be read'}.`, 'error'];
+    }
+}
+
 export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
     if (!mount) return { refresh: () => {} };
     let busy = false;
@@ -485,7 +550,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             paused.length ? groupHtml('paused', `Paused (${paused.length})`, paused, { open: true }) : ''].join('');
     }
 
-    function renderBg(stateData) {
+    function renderBg(stateData, kept) {
         if (typeof stateData?.bg_consciousness_enabled !== 'boolean') throw new Error('Background state unavailable');
         const enabled = stateData.bg_consciousness_enabled;
         const bg = (stateData && stateData.bg_consciousness_state) || {};
@@ -504,7 +569,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
                 <button type="button" class="btn btn-sm btn-default" data-act="bg-toggle" data-enabled="${enabled ? '1' : '0'}"${ws ? '' : ' disabled'}>${enabled ? 'Stop' : 'Start'}</button>
                 <button type="button" class="btn btn-sm btn-ghost" data-act="bg-open" aria-label="Open Dashboard › Consciousness"${openDashboardTab ? '' : ' hidden'}>Details</button>
             </div>
-        </div>`;
+        </div>${keptServicesHtml(kept)}`;
     }
 
     // The standing promises first: what will run, then what waits or is held, then what is withdrawn or switched off.
@@ -570,6 +635,7 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
             getJson('/api/tasks?queue_only=1'),
             readStateJson(),
             getJson('/api/schedules'),
+            getJson('/api/services/kept'),
         ]);
         if (destroyed || revision !== refreshRevision) return;
         // A request can take long enough for the owner to move focus elsewhere.
@@ -579,7 +645,8 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
         // the owner made a newer choice while the request was in flight.
         const mayRestoreFocus = !focusedKey || document.activeElement === focused;
         const census = results[1].status === 'fulfilled' ? results[1].value : null;
-        const renderers = [(data) => renderQueue(data?.queue, census), renderBg, renderSchedules];
+        const kept = results[3].status === 'fulfilled' ? results[3].value : null;
+        const renderers = [(data) => renderQueue(data?.queue, census), (data) => renderBg(data, kept), renderSchedules];
         sections.forEach((section, index) => {
             const { root, status, content } = section;
             root.removeAttribute('aria-busy');
@@ -713,6 +780,24 @@ export function initActivity({ mount, ws, openDashboardTab = null } = {}) {
                 // The outcome speaks the pressed button's word (Enable sends `restore` and says "enabled").
                 await scheduleAction(id, action, `owner chose ${action} from Activity`, btn.dataset.holdId || '',
                     { word: btn.textContent.trim().toLowerCase() || action, done: btn.dataset.done || '' });
+            } else if (act === 'kept-stop') {
+                const name = btn.dataset.name || 'this service';
+                const captureOnly = btn.dataset.captureOnly === '1';
+                const action = captureOnly ? 'Save outputs' : 'Stop';
+                const confirmed = await openConfirmDialog({
+                    title: `${action} ${name}`,
+                    body: keptStopConfirmBody(name, captureOnly),
+                    confirmLabel: action,
+                    danger: true,
+                });
+                if (!confirmed) return;
+                const receipt = await fetchJson(`/api/services/kept/${encodeURIComponent(id)}/stop`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ reason: captureOnly ? 'the owner retried saving its outputs from Activity › Background'
+                        : 'the owner stopped it from Activity › Background' }),
+                });
+                showToast(...keptStopToast(receipt, name));
             } else if (act === 'bg-toggle') {
                 const on = btn.dataset.enabled === '1';
                 // Reuse the existing direct control command (same as the chat header

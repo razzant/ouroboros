@@ -357,6 +357,7 @@ def _annotate_terminal_task_truth(
     """
 
     try:
+        from ouroboros.late_review_marks import late_current_outcome
         from ouroboros.project_dialogue import outcome_phase
         from ouroboros.projects_registry import task_presentation_name
         from ouroboros.task_status import FINAL_STATUSES
@@ -442,18 +443,16 @@ def _annotate_terminal_task_truth(
                 str(checkpoint.get("post_task_synthesis") or "")
                 if isinstance(checkpoint, dict) else ""
             )
-            # An OPEN post-task checkpoint means the final answer is stored
-            # but synthesis (and the settled task_done) has not landed: the
-            # task is FINALIZING, not terminal. This covers the plain root
-            # (status already "completed") AND the split-drive project root,
-            # whose canonical status stays scheduled/running until copy-back.
-            # A cancelled record stays terminal immediately, and a
-            # record without a checkpoint keeps the legacy terminal semantics.
+            # An open post-task checkpoint is still finalizing, even with a stored final answer:
+            # plain roots may already say completed; split-drive roots stay scheduled/running until copy-back.
+            # Cancellation is terminal immediately; without a checkpoint the legacy semantics stand.
             checkpoint_open = post_task_synthesis_is_open(synthesis)
             if checkpoint_open and (status in {"completed", "failed"} or status not in FINAL_STATUSES):
                 finalizing_tasks.add(task_id)
             elif status in FINAL_STATUSES:
                 terminal_status_by_task[task_id] = status
+                if task_id in carriers and (current := late_current_outcome(data_dir, result)):
+                    carriers[task_id]["current_outcome"] = current  # children also need the stored revision on reload
             elif status:
                 unfinished_tasks.add(task_id)
             if task_id in finalizing_tasks or task_id in terminal_status_by_task:
@@ -1521,7 +1520,7 @@ def _assemble_history_response(
 
     # Hidden source evidence shares ordinary keyed replay. It carries no new
     # review/cost authority and never consumes the conversation quota.
-    messages.extend(replay_evidence_rows(messages, replay_evidence))
+    messages.extend(replay_evidence_rows(messages, replay_evidence, result_cache, data_dir))
     tokens = history_page_tokens(page, messages, result_cache[_READS])
     stream_gaps = delivered_history_gaps(data_dir, page, {
         "chat": chat_gaps | selections["chat"][2], "progress": progress_gaps | selections["progress"][2]})

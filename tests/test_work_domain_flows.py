@@ -5,7 +5,9 @@ work domain; the audit hook of ``test_work_domain`` records anything the service
 own pathname. Covered: a workspace at the mapping's own root; an unlistable subtree read as a hold or a failure,
 never as an empty success; hard-linked outputs and supplied member provenance; streamed transfers; an unconfirmed
 work-domain end; a foreground command's whole group; staged inputs held by their task; a native skill-payload run
-drafted in its work copy; an installed script skill run from its verified work copy with dependencies built there.
+drafted in its work copy; an installed script skill run from its verified work copy with dependencies built there;
+a task's own evidence over a work folder: an exact-bytes write, an ignored output, the attribution baseline and the
+result-review material.
 """
 
 from __future__ import annotations
@@ -25,9 +27,9 @@ import zipfile
 import pytest
 
 from ouroboros import work_domain
-from tests.test_execution_domain import _registry
+from tests.test_execution_domain import _registry, attached, section
 from tests.test_execution_domain import env as env  # fixture
-from tests.test_work_domain import _managed, _work_repo, service_effects_on
+from tests.test_work_domain import _git, _managed, _work_repo, service_effects_on
 
 
 def _records(env):
@@ -531,3 +533,213 @@ def test_an_installed_script_skill_runs_from_its_verified_work_copy_with_depende
     assert again["stdout"].split()[0] == "from-the-work-venv" and not (home / "scripts" / "planted.py").exists()
     assert (installed / "probe" / "scripts" / "run.py").read_text() == script  # the installed payload: untouched
     assert not docker.records()
+
+
+def _clean_filter_witness(env, repo):
+    """The repository's own clean filter, recording which side ran it (``IN_FAKE_CONTAINER`` is the container's)."""
+    witness, script = env.root / "filter-ran", env.root / "mark-clean.sh"
+    script.write_text(f"#!/bin/sh\nprintf '%s\\n' \"${{IN_FAKE_CONTAINER:-service}}\" >> {witness}\ncat\n", encoding="utf-8")
+    script.chmod(0o755)
+    _git(repo, "config", "filter.mark.clean", str(script))
+    (repo / ".gitattributes").write_text("*.txt filter=mark\n", encoding="utf-8")
+    return witness
+
+
+def test_an_exact_bytes_write_and_an_ignored_output_are_judged_only_through_the_work_domain(env, monkeypatch):
+    """A write of the bytes a work file already holds is recognized through the confined intake: a typed no-effect,
+    with no write in the container. A link on the way to a service file never compares that file's bytes, so the
+    answer is no oracle of them. Which written paths Git ignores is asked of the repository's own Git, in the container."""
+    docker = _managed(env, monkeypatch)
+    repo = _work_repo(env.work / "app", {"same.txt": "same bytes\n", ".gitignore": "dist/\n"})
+    service = env.root / "service-only"
+    service.mkdir()
+    (service / "token.txt").write_text("SERVICE SECRET\n", encoding="utf-8")
+    (repo / "linked").symlink_to(service, target_is_directory=True)
+    registry = _registry(env, repo)
+    where = {"root": "active_workspace"}
+    with service_effects_on(env.work, service, allowed_opens=(str(env.work),)) as seen:
+        same = registry.execute_result("write_file", {**where, "path": "same.txt", "content": "same bytes\n"})
+        probe = registry.execute_result("write_file", {**where, "path": "linked/token.txt", "content": "SERVICE SECRET\n"})
+        ignored = registry.execute_result("write_file", {**where, "path": "dist/report.txt", "content": "made\n"})
+    assert seen == [], seen
+    assert same.meta.get("operation_outcome") == "completed_no_effect", same
+    assert not [call for call in attached(docker, "mv -f") if "same.txt" in " ".join(call)]
+    assert probe.meta.get("operation_outcome") != "completed_no_effect", probe
+    assert attached(docker, "check-ignore") and "Retained file outputs: dist/report.txt" in ignored.text, ignored
+    assert ignored.meta.get("changed_paths") == ["dist/report.txt"], ignored
+
+
+@pytest.mark.parametrize("failure", ["refused", "unsettled", "exit"])
+def test_git_that_cannot_say_what_it_ignores_leaves_a_landed_write_reported_as_landed(env, monkeypatch, failure):
+    """Capture cannot undo a landed write: a refusal, an unconfirmed end or Git's own failure means Git did not say,
+    and the write keeps its typed receipt, with nothing asking for a retry."""
+    _managed(env, monkeypatch)
+    repo = _work_repo(env.work / "app", {".gitignore": "dist/\n"})
+    registry = _registry(env, repo)
+    original = work_domain.run
+
+    def run(cmd, **kwargs):
+        if list(cmd[:2]) != ["git", "check-ignore"]:
+            return original(cmd, **kwargs)
+        if failure == "refused":
+            raise work_domain.WorkDomainRefused("nothing was started")
+        arrived = subprocess.CompletedProcess(cmd, 0 if failure == "unsettled" else 128, b"dist/report.txt\0", b"")
+        if failure == "unsettled":
+            raise work_domain.WorkDomainUnsettled("backend unconfirmed", arrived)
+        return arrived
+
+    monkeypatch.setattr(work_domain, "run", run)
+    written = registry.execute_result("write_file", {"root": "active_workspace", "path": "dist/report.txt", "content": "made\n"})
+    assert "⚠️" not in written.text and "Retained file outputs" not in written.text, written
+    assert written.meta.get("changed_paths") == ["dist/report.txt"], written
+    assert (repo / "dist" / "report.txt").read_text() == "made\n"
+
+
+def test_a_work_folders_attribution_is_taken_by_its_own_git_and_confined_reads(env, monkeypatch):
+    """The admission baseline of a work Git folder, its candidates, its commit epoch and its terminal snapshot: the
+    repository's Git (whose filters are its own) runs only in the container, a dirty file is fingerprinted through
+    the confined intake and a dirty link by its own text, and the service's own repository stays the service's."""
+    from ouroboros.mutation_attribution import (
+        advance_mutation_baseline,
+        attributed_commit_paths,
+        attributed_git_candidates,
+        capture_root_baseline,
+        record_terminal_mutation_candidates,
+        try_reanchor_stale_baseline,
+    )
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+
+    docker = _managed(env, monkeypatch)
+    system, data = _work_repo(env.root / "serving", {"body.py": "BODY = 1\n"}), env.root / "drive"
+    data.mkdir()
+    repo = _work_repo(env.work / "app", {"a.txt": "one\n"})
+    witness = _clean_filter_witness(env, repo)
+    (repo / "a.txt").write_text("own\n", encoding="utf-8")  # one size: Git must run the filter to tell it changed
+    secret = env.root / "service-only.txt"
+    secret.write_text("SERVICE SECRET\n", encoding="utf-8")
+    (repo / "owner-link").symlink_to(secret)
+    write_task_result(data, "exec-task", STATUS_RUNNING)
+    with service_effects_on(env.work, secret, allowed_opens=(str(env.work),)) as seen:
+        evidence = capture_root_baseline(data, {"id": "exec-task"}, system_repo=system, workspace=repo, conversation=False)
+    assert seen == [], seen
+    assert set(witness.read_text().split()) == {"1"}, "the repository's filter ran only in the container"
+    rows = {row["surface_type"]: row for row in evidence["baseline"]["surfaces"]}
+    assert sorted(rows) == ["external_workspace", "system_repo"] and rows["external_workspace"]["canonical_root"] == str(repo)
+    dirty = rows["external_workspace"]["git"]["dirty_fingerprints"]
+    assert dirty["owner-link"] == {"kind": "symlink", "target": str(secret)}, dirty
+    assert dirty["a.txt"]["sha256"] == hashlib.sha256(b"own\n").hexdigest(), dirty
+
+    work_domain.write_text(repo / "b.txt", "two\n")
+    with service_effects_on(env.work, secret, allowed_opens=(str(env.work),)) as seen:
+        found = attributed_git_candidates(data, "exec-task", repo)
+    assert seen == [], seen
+    assert found["candidates"] == ["b.txt"] and found["blockers"] == [], found
+    assert found["excluded_preexisting_dirty"] == [".gitattributes", "a.txt", "owner-link"], found
+
+    _git(repo, "add", "b.txt")
+    _git(repo, "commit", "-qm", "the task's own commit")
+    head = _git(repo, "rev-parse", "HEAD").decode().strip()
+    with service_effects_on(env.work, secret, allowed_opens=(str(env.work),)) as seen:
+        advance_mutation_baseline(data, "exec-task", repo, commit=head)
+        committed = attributed_commit_paths(data, "exec-task", repo)
+        terminal = record_terminal_mutation_candidates(data, "exec-task")
+    assert seen == [], seen
+    assert committed == ["b.txt"], committed
+    [row] = [row for row in terminal["terminal_candidate_snapshot"]["surfaces"] if row["surface_type"] == "external_workspace"]
+    assert row["blockers"] == [] and row["base_commit"] == head, row
+
+    (repo / "c.txt").write_text("someone else's\n", encoding="utf-8")
+    _git(repo, "add", "c.txt")
+    _git(repo, "commit", "-qm", "a foreign commit")
+    with service_effects_on(env.work, secret, allowed_opens=(str(env.work),)) as seen:
+        reanchored = try_reanchor_stale_baseline(data, "exec-task", repo)
+    assert seen == [] and reanchored is True, seen
+
+    (env.work / "app").rename(env.work / "app-moved")  # the employee makes the folder a link to a service repository
+    service_repo = _work_repo(env.root / "service-repo", {"kept.txt": "the service's\n"})
+    (env.work / "app").symlink_to(service_repo, target_is_directory=True)
+    write_task_result(data, "later-task", STATUS_RUNNING)
+    with service_effects_on(env.work, service_repo, allowed_opens=(str(env.work),)) as seen:
+        later = capture_root_baseline(data, {"id": "later-task"}, system_repo=system, workspace=env.work / "app", conversation=True)
+    assert seen == [], seen  # its spelling stays the work domain's: no service Git was steered to that repository
+    assert [row["canonical_root"] for row in later["baseline"]["surfaces"]] == [str(env.work / "app")], later
+    assert attached(docker, "status") and not docker.records()
+
+
+def test_a_work_folder_mapped_at_another_address_is_still_its_own_git_tree(env, monkeypatch):
+    """Git in the container prints the container's spelling of the folder, so no printed address decides whether the
+    admitted folder is its own tree: the service's spelling stays the surface's identity."""
+    from ouroboros.mutation_attribution import capture_root_baseline
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+
+    backend = env.root / "container-view"
+    _managed(env, monkeypatch, executor={**section(env)["executor"], "path_mappings": [
+        {"host_path": str(env.work), "backend_path": str(backend)}]})
+    folder, data, system = env.work / "app", env.root / "drive", env.root / "system"
+    for created in (folder, data, system):
+        created.mkdir()
+    view = _work_repo(backend / "app", {"a.txt": "one\n"})
+    write_task_result(data, "exec-task", STATUS_RUNNING)
+    evidence = capture_root_baseline(data, {"id": "exec-task"}, system_repo=system, workspace=folder, conversation=True)
+    assert evidence is not None, "the admitted folder is its own Git tree at either spelling"
+    [row] = evidence["baseline"]["surfaces"]
+    assert (row["surface_type"], row["canonical_root"]) == ("external_workspace", str(folder)), row
+    assert row["git"]["base_commit"] == _git(view, "rev-parse", "HEAD").decode().strip(), row
+
+
+def test_a_results_material_is_read_and_kept_through_the_work_domain(env, monkeypatch):
+    """``produced_material`` over a managed folder at its real consumers: identities and retained copies arrive
+    through the confined intake, a folder the employee made a link after the write is the work domain's own read and
+    never a service file, a produced link is its own text, and the words of the change come from the container's Git.
+    The mocked ``cat`` is the namespace boundary a real container gives; the service opens nothing there by name."""
+    from ouroboros.mutation_attribution import capture_root_baseline
+    from ouroboros.result_material import answer_text, produced_material
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+
+    docker = _managed(env, monkeypatch)
+    repo = _work_repo(env.work / "app", {"kept.py": 'MESSAGE = "Keeps the value."\n'})
+    registry = _registry(env, repo)
+    ctx, data = registry._ctx, env.root / "drive"
+    write_task_result(data, ctx.task_id, STATUS_RUNNING)
+    capture_root_baseline(data, {"id": ctx.task_id}, system_repo=env.root / "system", workspace=repo, conversation=True)
+    calls = []
+    kept_text = 'MESSAGE = "Keeps the new value."\n'
+    for path, content in (("kept.py", kept_text), ("out/result.txt", "the made result\n")):
+        result = registry.execute_result("write_file", {"root": "active_workspace", "path": path, "content": content})
+        assert result.meta.get("changed_paths") == [path], result
+        calls.append({"tool": "write_file", "args": {"path": path}, "is_error": False, "status": "ok",
+                      "tool_result_meta": dict(result.meta)})  # as the loop records it
+    ctx._execution_trace = {"tool_calls": calls}
+    work_domain.make_symlink(repo / "made-link", "kept.py")
+    service = env.root / "service-only"
+    service.mkdir()
+    (service / "result.txt").write_text("SERVICE SECRET\n", encoding="utf-8")
+    (repo / "out").rename(repo / "out-was")
+    (repo / "out").symlink_to(service, target_is_directory=True)
+    view, container = b"THE WORK DOMAIN'S VIEW\n", work_domain.run_in_work
+
+    def run_in_work(argv, **kwargs):
+        if list(argv[:2]) == ["cat", "--"] and str(repo / "out") in str(argv[2]):
+            kwargs["stdout"].write(view)
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        return container(argv, **kwargs)
+
+    monkeypatch.setattr(work_domain, "run_in_work", run_in_work)
+    with service_effects_on(env.work, service, allowed_opens=(str(env.work),)) as seen:
+        produced = produced_material(ctx)
+        subject = answer_text(reply="done", produced=produced, verification="checked")
+    assert seen == [], seen
+    listed = {item["path"]: item for item in produced["files"]}
+    kept = listed[str(repo / "kept.py")]
+    assert kept["sha256"] == hashlib.sha256(kept_text.encode()).hexdigest(), kept
+    assert pathlib.Path(kept["retained"]).read_text(encoding="utf-8") == kept_text, kept
+    assert json.loads(listed[str(repo / "made-link")]["link"]) == "kept.py" and "retained" not in listed[str(repo / "made-link")]
+    planted = listed[str(repo / "out" / "result.txt")]
+    assert planted["sha256"] == hashlib.sha256(view).hexdigest(), planted
+    assert pathlib.Path(planted["retained"]).read_bytes() == view, planted
+    assert produced["workspace"] == str(repo) and "SERVICE SECRET" not in subject, subject
+    assert "Keeps the new value." in produced.get("words_section", "") and attached(docker, "cat-file"), produced
+
+    monkeypatch.setenv("PATH", str(env.root / "no-cli"))  # nothing can ask the container now: no evidence of absence
+    asked = {item["path"]: item for item in produced_material(ctx)["files"]}[str(repo / "out" / "result.txt")]
+    assert asked["sha256"] == "unreadable (FileNotFoundError)" and "retained_gap" in asked, asked

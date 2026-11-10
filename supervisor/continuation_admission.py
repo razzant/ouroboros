@@ -237,7 +237,7 @@ def _recorded_work_limits(result: Dict[str, Any], metadata: Dict[str, Any], cont
 
     Each field is read the way the predecessor's registry and acceptance readers bound it: withheld tools from every
     carrier (``task_disabled_tools``), resources with the contract winning per key over the row's own map, the policy,
-    the ingress claims, the answer protocol, the delegation rights and the budget profile (its cost stop) an API caller
+    the ingress claims, the answer protocol and answer-review requirement, the delegation rights and the budget profile (its cost stop) an API caller
     declared from the contract (canonical over stored) else the row, as ``build_task_contract`` reads them, and its own
     direct handbook answer, false too, from the contract alone. The successor holds them on its stored contract carrier,
     which its admission builds into its own contract (``enqueue_task``) and its scheduled result keeps for a successor
@@ -261,7 +261,7 @@ def _recorded_work_limits(result: Dict[str, Any], metadata: Dict[str, Any], cont
         "answer_protocol": normalize_answer_protocol(contract.get("answer_protocol") or metadata.get("answer_protocol")
                                                      or result.get("answer_protocol")),
         **{key: value for key, value in built.items()
-           if key in {"delegation_budget", "budget_profile", "context_requires_development"}},
+           if key in {"delegation_budget", "budget_profile", "context_requires_development", "review_answer"}},
     }
     fields = {key: value for key, value in limits.items() if value or value is False}  # a direct handbook "no" moves too
     carried: Dict[str, Any] = {"task_contract": fields} if fields else {}

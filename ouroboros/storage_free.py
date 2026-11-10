@@ -700,7 +700,9 @@ class FreeSpace:
         )
         from ouroboros.task_status import FINAL_STATUSES
         from ouroboros.test_environment import SCRATCH_MARKER
+        from ouroboros.tools.kept_service_outputs import owed_declarations, owed_output_hold
 
+        owed = owed_declarations(root)  # one read of the kept-output debts for this whole preview
         live = self._probe()
         days = get_gc_retention_days()
         cutoff = age_cutoff(days)
@@ -753,13 +755,14 @@ class FreeSpace:
                     item.eligible_after = _eligible_after(float(row.get("created_at") or 0), 0)
                     kept = owner_keep.is_kept(root, task_id)  # the proof reads the keep too: name it, not "in use"
                     _sorted_into(root, group, "in_use" if kept else "unreadable" if open_ids is None else "offer"
-                                 if snapshot_released(row, open_ids, data_dir=root, live=live) else "in_use", item,
+                                 if snapshot_released(row, open_ids, data_dir=root, live=live, owed=owed) else "in_use", item,
                                  owner_keep.OWNER_KEEP if kept else "")
                     continue
                 item = _Candidate(GROUP_WORKING_COPIES, f"{kind or 'plain'}:{_record_name(path)}", path, kind or "plain",
                                   task=task_id, row=row)
                 item.eligible_after = _eligible_after(max(float(row.get("created_at") or 0), float(row.get("used_at") or 0)), days)
-                over = body_candidate._recorded_terminal(task_id, root) and not body_candidate.live_lineage_processes(root, task_id)
+                over = body_candidate._recorded_terminal(task_id, root) and not body_candidate.live_lineage_processes(
+                    root, task_id) and not body_candidate._capture_owed(row, root, owed)
                 reason = ""
                 if over and kind == "body_candidate":
                     # The retirer's own order (``retention_verdict``), its scratch witness left unwritten.
@@ -857,7 +860,7 @@ class FreeSpace:
                 if entry.parent.name != "custody_trash" or not entry.is_dir() or entry.is_symlink():
                     continue
                 hold = retention_hold(pathlib.Path(str(row["path"])))
-                if hold is not None and hold["class"] == PRODUCER_RETAINED:
+                if hold is not None and hold["class"] == PRODUCER_RETAINED and not owed_output_hold(root, row["path"], owed=owed):
                     producer_entries.setdefault(entry, []).append({**row, "example": hold["example"]})
             for entry, held in sorted(producer_entries.items(), key=lambda pair: pair[0].name):  # ``rows`` stays the copies'
                 examples = [str(row.get("example") or "producer-retained session scratch") for row in held]

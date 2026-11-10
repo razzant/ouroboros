@@ -359,8 +359,11 @@ def test_an_unavailable_producer_source_is_a_named_gap_never_a_guess(tmp_path, m
     assert rr.result_review_at_delivery(ctx, "Clicked.", trace_of(ctx), lambda _text: None) is False and sends == []
 
 
-def test_the_same_receipt_is_reviewed_once_and_a_new_receipt_is_a_new_subject(tmp_path, monkeypatch):
-    ctx = _floor_ctx(tmp_path, monkeypatch)
+@pytest.mark.parametrize("enforcement", ["advisory", "blocking"])
+def test_the_same_receipt_is_reviewed_once_and_a_new_receipt_is_a_new_subject(tmp_path, monkeypatch, enforcement):
+    """A new receipt is new material, a new subject. Under Advisory the author who received the earlier PASS decides
+    on it (owner, 8 Nov 2026): no wave is bought, the PASS stays the earlier version's; Blocking re-reviews it."""
+    ctx = _floor_ctx(tmp_path, monkeypatch, enforcement=enforcement)
     sends: list[dict] = []
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
     desktop = mac(ctx, tmp_path, monkeypatch)
@@ -373,11 +376,18 @@ def test_the_same_receipt_is_reviewed_once_and_a_new_receipt_is_a_new_subject(tm
     assert len(sends) == 3 and subject_text(ctx) == first, "the same receipt is the same subject: reused at $0"
 
     desktop.call("key", keys="cmd+s")
-    assert rr.result_review_at_delivery(ctx, answer, trace_of(ctx), lambda _text: None) is True  # the new PASS
-    assert len(sends) == 6, "a new receipt is new material: a new review"
     clicked, saved = (effect["receipt"] for effect in rr.produced_material(ctx)["effects"])
+    assert clicked in first and saved not in first
+    if enforcement == "advisory":
+        assert rr.result_review_at_delivery(ctx, answer, trace_of(ctx), lambda _text: None) is False
+        assert len(sends) == 3, "the revised result is the author's to accept: nothing is bought"
+        [run] = trace_of(ctx)["review_runs"]
+        assert run["earlier_revision"] is True and run["aggregate_signal"] == "PASS"
+        return
+    assert rr.result_review_at_delivery(ctx, answer, trace_of(ctx), lambda _text: None) is True  # the new PASS
+    assert len(sends) == 6, "Blocking: the new material is reviewed again"
     second = subject_text(ctx)
-    assert clicked in first and saved not in first and clicked in second and saved in second
+    assert clicked in second and saved in second
     current = [run for run in trace_of(ctx)["review_runs"] if not run.get("superseded_by_revision")]
     assert [run["aggregate_signal"] for run in current] == ["PASS"]
 

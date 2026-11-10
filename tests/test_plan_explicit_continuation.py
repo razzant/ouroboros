@@ -577,6 +577,12 @@ def test_a_stopped_seat_thread_from_before_activation_stays_in_the_engine_and_ke
     report = _retention(h, engine)  # the code arrives after that run started; custody holds it, so the pass walks
     assert report["activated"] and report["tasks"] == 0 and report["waiting"] == 0, report
     assert not (report["holds"] or report["errors"] or report["observed"]), report  # the walk waits for ``taken``
+    from ouroboros import maintenance_jobs
+    from ouroboros.maintenance_retirement import JOB
+
+    # The ordinary pass alone: the one historical walk, which releases such a thread once, is recorded over here
+    # (its own tests: tests/test_historical_retirement.py).
+    maintenance_jobs.record(h.drive, JOB, historical_walk={"done_at": "2026-11-09T00:00:00+00:00", "waiting": []})
     _row(h.drive, "task-1", "completed", tree="task-1")
     report = _retention(h, engine)
     assert report["holds"] == {"predates_activation": 1} and report["waiting"] == 0, report

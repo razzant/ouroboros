@@ -327,6 +327,369 @@ def test_a_retained_source_is_read_without_the_chronicle_and_other_modes_still_w
     assert "memory is not active" in _memory_read(_ctx(tmp_path, "wake1"), room_id=1)
 
 
+@pytest.mark.parametrize("verdict, subject, resolves", [("PASS", "subject-a", True), ("PASS", "subject-b", False),
+                                                        ("FAIL", "subject-a", False)])
+def test_a_late_pass_rewrites_only_the_review_derived_outcome_of_the_current_row(tmp_path, monkeypatch, verdict, subject,
+                                                                                  resolves):
+    """The late PASS of an author's pending finish (``resolve_pending_result_review``) sets the review axis and the
+    objective ``_objective_axis`` derives from it inside the store's own write over the CURRENT row: an outcome
+    write that landed after the resolver's first read is kept, and so is every warning the review never answered
+    (``receipt_absent``). The existing late-review event then carries that current outcome, bound to the exact task,
+    record and subject, once: durable, and pushed live where a bridge exists. Another verdict or another version
+    changes and announces nothing, and a replay announces nothing again."""
+    from ouroboros import review_ledger
+    from ouroboros.late_review_marks import resolve_pending_result_review
+    from ouroboros.outcomes import WARN_RECEIPT_ABSENT, _merge_objective_warning, _objective_axis
+    from ouroboros.project_dialogue import outcome_phase
+    from ouroboros.task_results import load_task_result, write_task_result
+
+    review = {"status": "awaiting", "source": "result_review", "author_finish": "author_finish_pending",
+              "pending_review": {"record_id": "rl-late", "subject_sha": "subject-a"},
+              "acceptance_decision": {"status": "finalized_unaccepted", "source": "result_review",
+                                      "reason": "author_finish_pending", "enforcement": "advisory"}}
+    objective = _objective_axis(review)
+    _merge_objective_warning(objective, WARN_RECEIPT_ABSENT)
+    write_task_result(tmp_path, "task-1", "completed", outcome_axes={
+        "execution": {"status": "ok"}, "review": review, "objective": objective})
+    before = load_task_result(tmp_path, "task-1")["outcome_axes"]
+
+    def record_after_a_concurrent_write(_root, record_id):  # another writer lands after the resolver's first read
+        axes = load_task_result(tmp_path, "task-1")["outcome_axes"]
+        write_task_result(tmp_path, "task-1", "completed", outcome_axes={**axes, "artifacts": {"status": "not_applicable"}})
+        return {"record_id": record_id, "subject": {"diff_sha": subject}, "verdict": {"aggregate": verdict},
+                "ts": "2026-11-08T22:25:00+00:00"}
+
+    monkeypatch.setattr(review_ledger, "load_record", record_after_a_concurrent_write)
+    pushed = []
+    monkeypatch.setattr("supervisor.message_bus.try_get_bridge", lambda: SimpleNamespace(push_log=pushed.append))
+
+    def announced():
+        path = tmp_path / "logs" / "events.jsonl"
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+        return [row for row in rows if row.get("type") == "review_late_result"]
+
+    assert resolve_pending_result_review(tmp_path, "task-1", "rl-late") is resolves
+    stored = load_task_result(tmp_path, "task-1")["outcome_axes"]
+    assert stored["artifacts"] == {"status": "not_applicable"}, "the concurrent write is never lost"
+    assert stored["objective"]["warnings"] == [WARN_RECEIPT_ABSENT], "a warning the review never answered stays"
+    if not resolves:
+        assert (stored["review"], stored["objective"]) == (before["review"], before["objective"])
+        assert announced() == [] and pushed == [], "a FAIL or another version announces nothing"
+        return
+    assert stored["review"]["status"] == "pass" and "pending_review" not in stored["review"]
+    assert stored["review"]["pending_finish_resolved"]["objective"] == before["objective"]
+    assert {key: value for key, value in stored["objective"].items() if key not in {"warning", "warnings"}} == \
+        _objective_axis(stored["review"]) == {"status": "pass", "source": "result_review", "review_status": "pass"}
+    [event] = announced()
+    assert {key: event[key] for key in ("task_id", "surface", "record_id", "subject_sha", "aggregate")} == {
+        "task_id": "task-1", "surface": "result", "record_id": "rl-late", "subject_sha": "subject-a", "aggregate": "PASS"}
+    current = event["current_outcome"]
+    row = load_task_result(tmp_path, "task-1")
+    assert current["outcome_phase"] == outcome_phase(row, {}) == "warn", "the warning the review never answered stays"
+    assert current["outcome_axes"]["objective"]["warnings"] == [WARN_RECEIPT_ABSENT]
+    assert current["outcome_axes"]["artifacts"] == {"status": "not_applicable"} and current["revision"] == row["updated_at"]
+    assert outcome_phase(current, {}) == current["outcome_phase"], "its card reads the phase a reload computes"
+    assert "pending_finish_resolved" not in json.dumps(current) and "late_verdict" not in json.dumps(current), "compact"
+    assert [frame["task_id"] for frame in pushed] == ["task-1"] and pushed[0]["current_outcome"] == current
+    assert resolve_pending_result_review(tmp_path, "task-1", "rl-late") is False, "resolved once"
+    assert len(announced()) == 1 and len(pushed) == 1, "a replay announces nothing again"
+
+
+def test_a_warning_written_after_the_late_pass_is_in_what_its_card_repaints(tmp_path, monkeypatch):
+    """Astra, 10 Nov 2026: a custody warning (``delegated_runs_unreconciled``) that lands after the late PASS resolved
+    the row and before the event is published is in the announced outcome, because the event reads the stored row when
+    it publishes: the card repaints Done with warnings, as a reload does, never the resolver's earlier Done. Its
+    card orders a late outcome by the revision it read (``lateOutcomeIsCurrent``): an older snapshot published later
+    never repaints the newer state, and the same frame again still paints."""
+    import pathlib
+    import subprocess
+
+    from ouroboros import late_review_marks as late, review_ledger
+    from ouroboros.outcomes import _objective_axis
+    from ouroboros.preflight_node import resolve_node
+    from ouroboros.project_dialogue import outcome_phase
+    from ouroboros.task_results import load_task_result, write_task_result
+
+    review = {"status": "awaiting", "source": "result_review", "author_finish": "author_finish_pending",
+              "pending_review": {"record_id": "rl-late", "subject_sha": "subject-a"},
+              "acceptance_decision": {"status": "finalized_unaccepted", "source": "result_review",
+                                      "reason": "author_finish_pending", "enforcement": "advisory"}}
+    write_task_result(tmp_path, "task-1", "completed", reason_code="final_message", outcome_axes={
+        "execution": {"status": "ok", "reason_code": "final_message"}, "review": review,
+        "objective": _objective_axis(review)})
+    ended_at = load_task_result(tmp_path, "task-1")["updated_at"]
+    monkeypatch.setattr(review_ledger, "load_record", lambda _root, record_id: {
+        "record_id": record_id, "subject": {"diff_sha": "subject-a"}, "verdict": {"aggregate": "PASS"}, "ts": "t"})
+    resolved, announce = [], late.announce_current_outcome
+
+    def custody_lands_first(*args, **kwargs):  # the custody writer lands between the resolution and the event
+        resolved.append(load_task_result(tmp_path, "task-1"))
+        write_task_result(tmp_path, "task-1", "completed", delegated_runs_unreconciled=["run-x"])
+        return announce(*args, **kwargs)
+
+    monkeypatch.setattr(late, "announce_current_outcome", custody_lands_first)
+    pushed = []
+    monkeypatch.setattr("supervisor.message_bus.try_get_bridge", lambda: SimpleNamespace(push_log=pushed.append))
+    assert late.resolve_pending_result_review(tmp_path, "task-1", "rl-late") is True
+    stored = load_task_result(tmp_path, "task-1")
+    assert stored["outcome_axes"]["review"]["status"] == "pass" and stored["delegated_runs_unreconciled"] == ["run-x"]
+    assert outcome_phase(resolved[0], {}) == "done" and resolved[0]["updated_at"] < stored["updated_at"], \
+        "the resolver's own copy reads Done and is older than the warning"
+    [event] = [row for row in map(json.loads, (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8")
+                                  .splitlines()) if row.get("type") == "review_late_result"]
+    current = event["current_outcome"]
+    assert current["outcome_phase"] == outcome_phase(stored, {}) == "warn", "the custody warning stays"
+    assert current["delegated_runs_unreconciled"] == ["run-x"] and current["revision"] == stored["updated_at"]
+    assert [frame["current_outcome"] for frame in pushed] == [current], "the live frame carries the same outcome"
+
+    stale = {**event, "current_outcome": late.current_outcome(resolved[0])}  # the resolver's copy, published later
+    assert stale["current_outcome"]["outcome_phase"] == "done" and stale["ts"] >= current["revision"]
+    node = resolve_node()
+    assert node, "the card's ordering of a late outcome requires Node"
+    script = """import {lateOutcomeIsCurrent, summarizeChatLiveEvent} from './web/modules/log_events.js';
+let text = ''; for await (const chunk of process.stdin) text += chunk;
+const [current, stale, endedAt] = JSON.parse(text), card = {finished: true, latestSourceTs: endedAt};
+const taken = lateOutcomeIsCurrent(card, current), view = summarizeChatLiveEvent(current);
+card.latestSourceTs = current.current_outcome.revision;  // the clock chat.js sets when it takes the frame
+console.log(JSON.stringify([taken, view.phase, view.headline, lateOutcomeIsCurrent(card, stale),
+  lateOutcomeIsCurrent(card, current)]));"""
+    checked = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True, text=True, check=True,
+                             input=json.dumps([event, stale, ended_at]), cwd=pathlib.Path(__file__).resolve().parents[1])
+    assert json.loads(checked.stdout) == [True, "warn", "Done with warnings", False, True], checked.stdout
+
+
+def test_a_stale_late_outcome_loses_to_a_newer_row_written_inside_its_millisecond(tmp_path, monkeypatch):
+    """Astra, 10 Nov 2026 (C1): a stored row's ``updated_at`` carries microseconds and two writes of one task can land
+    inside one millisecond. The revisions the real writer and ``current_outcome`` produce keep their order in the card's
+    own guard (``lateOutcomeIsCurrent``): the older PASS never clears the newer custody warning, the same revision again
+    is a replay, a truly later outcome inside that millisecond paints, and the older warning cannot return over it."""
+    import pathlib
+    import subprocess
+
+    from ouroboros import late_review_marks as late, task_results
+    from ouroboros.outcomes import _objective_axis
+    from ouroboros.preflight_node import resolve_node
+    from ouroboros.project_dialogue import outcome_phase
+
+    clock = {"now": ""}
+    monkeypatch.setattr(task_results, "utc_now_iso", lambda: clock["now"])
+
+    def written(micros, **fields):  # a real store write at an exact moment of one millisecond
+        clock["now"] = f"2026-11-10T05:06:26.{micros:06d}+00:00"
+        return task_results.write_task_result(tmp_path, "task-1", "completed", **fields)
+
+    review = {"status": "pass", "source": "result_review", "aggregate_signals": ["PASS"]}
+    older = written(147169, reason_code="final_message", terminal_origin="model_final", result="The answer", outcome_axes={
+        "execution": {"status": "ok", "reason_code": "final_message"}, "review": review,
+        "objective": _objective_axis(review)})
+    newer = written(147857, delegated_runs_unreconciled=["run-x"])
+    later = written(147969, delegated_runs_unreconciled=[])
+    assert [outcome_phase(dict(row), {}) for row in (older, newer, later)] == ["done", "warn", "done"]
+    assert [row["updated_at"][:23] for row in (older, newer)] == ["2026-11-10T05:06:26.147"] * 2, "one millisecond"
+    node = resolve_node()
+    assert node, "the card's ordering of a late outcome requires Node"
+    script = """import {lateOutcomeIsCurrent} from './web/modules/log_events.js';
+let text = ''; for await (const chunk of process.stdin) text += chunk;
+const [older, newer, later] = JSON.parse(text).map((current_outcome) => ({ts: '', current_outcome}));
+const card = (frame) => ({finished: true, latestSourceTs: frame.current_outcome.revision});
+console.log(JSON.stringify([lateOutcomeIsCurrent(card(newer), older), lateOutcomeIsCurrent(card(newer), newer),
+  lateOutcomeIsCurrent(card(newer), later), lateOutcomeIsCurrent(card(later), newer)]));"""
+    checked = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True, text=True, check=True,
+                             input=json.dumps([late.current_outcome(row) for row in (older, newer, later)]),
+                             cwd=pathlib.Path(__file__).resolve().parents[1])
+    assert json.loads(checked.stdout) == [False, True, True, False], checked.stdout
+
+
+def test_an_ordinary_ended_task_is_never_resolved_or_announced_by_a_late_pass(tmp_path, monkeypatch):
+    """A task that finished without a pending review keeps its stored outcome and its warning whatever late PASS names
+    it: nothing is resolved and nothing is announced."""
+    from ouroboros import review_ledger
+    from ouroboros.late_review_marks import resolve_pending_result_review
+    from ouroboros.outcomes import WARN_RECEIPT_ABSENT, _merge_objective_warning
+    from ouroboros.task_results import load_task_result, write_task_result
+
+    objective = {"status": "not_evaluated", "source": "none"}
+    _merge_objective_warning(objective, WARN_RECEIPT_ABSENT)
+    write_task_result(tmp_path, "task-1", "completed", outcome_axes={
+        "execution": {"status": "ok"}, "review": {"status": "skipped"}, "objective": objective})
+    before = load_task_result(tmp_path, "task-1")["outcome_axes"]
+    monkeypatch.setattr(review_ledger, "load_record", lambda _root, record_id: {
+        "record_id": record_id, "subject": {"diff_sha": "subject-a"}, "verdict": {"aggregate": "PASS"}})
+    assert resolve_pending_result_review(tmp_path, "task-1", "rl-late") is False
+    assert load_task_result(tmp_path, "task-1")["outcome_axes"] == before
+    assert not (tmp_path / "logs" / "events.jsonl").exists()
+
+
+@pytest.mark.parametrize("warning", ["", "receipt_absent"])
+def test_the_announced_outcome_is_the_parity_row_the_card_and_the_host_both_read(tmp_path, monkeypatch, warning):
+    """The compact current outcome the resolver announces is exactly a row of the browser/host parity fixture
+    (``web/tests/fixtures/outcome_phase_parity.json``): the card's twin and a reload's host reader read it alike, Done,
+    or Done with warnings while an independent ``receipt_absent`` stays."""
+    import pathlib
+
+    from ouroboros import review_ledger
+    from ouroboros.late_review_marks import resolve_pending_result_review
+    from ouroboros.outcomes import _merge_objective_warning, _objective_axis
+    from ouroboros.task_results import write_task_result
+
+    review = {"status": "awaiting", "source": "result_review", "author_finish": "author_finish_pending",
+              "pending_review": {"record_id": "rl-late", "subject_sha": "subject-a"},
+              "acceptance_decision": {"status": "finalized_unaccepted", "source": "result_review",
+                                      "reason": "author_finish_pending", "enforcement": "advisory"}}
+    objective = _objective_axis(review)
+    if warning:
+        _merge_objective_warning(objective, warning)
+    write_task_result(tmp_path, "task-1", "completed", reason_code="final_message", outcome_axes={
+        "execution": {"status": "ok", "reason_code": "final_message"}, "review": review, "objective": objective})
+    monkeypatch.setattr(review_ledger, "load_record", lambda _root, record_id: {
+        "record_id": record_id, "subject": {"diff_sha": "subject-a"}, "verdict": {"aggregate": "PASS"}, "ts": "t"})
+    assert resolve_pending_result_review(tmp_path, "task-1", "rl-late") is True
+    [event] = [json.loads(line) for line in (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    fixture = pathlib.Path(__file__).resolve().parents[1] / "web" / "tests" / "fixtures" / "outcome_phase_parity.json"
+    rows = [case["record"] for case in json.loads(fixture.read_text(encoding="utf-8"))["cases"] if "late PASS" in case["name"]]
+    assert {key: value for key, value in event["current_outcome"].items() if key != "revision"} == rows[1 if warning else 0]
+
+
+def _js_views(rows):
+    """``taskOutcomeSeverity``, ``taskReasonDetail`` and the terminal summary's phase, headline, body and collapsed
+    line of each row, as the browser reads them (``log_events.js``)."""
+    import pathlib
+    import subprocess
+
+    from ouroboros.preflight_node import resolve_node
+
+    node = resolve_node()
+    assert node, "the browser twin's reading of a late current outcome requires Node"
+    script = """import {taskOutcomeSeverity, taskReasonDetail, taskTerminalSummary, summarizeChatLiveEvent} from './web/modules/log_events.js';
+let text = ''; for await (const chunk of process.stdin) text += chunk;
+const view = (s) => s && [s.phase, s.headline, s.body, s.activityPreview || ''];
+console.log(JSON.stringify(JSON.parse(text).map(([row, late]) => [taskOutcomeSeverity(row), taskReasonDetail(row),
+  view(late ? summarizeChatLiveEvent(late) : taskTerminalSummary({...row, outcome_final: true}))])));"""
+    checked = subprocess.run([node, "--input-type=module", "-e", script], input=json.dumps(rows), capture_output=True,
+                             text=True, check=True, cwd=pathlib.Path(__file__).resolve().parents[1])
+    return json.loads(checked.stdout)
+
+
+def test_a_late_current_outcome_reads_like_its_whole_row_in_the_host_and_the_browser():
+    """The late projection keeps every fact a finished card's status and cause readers take (``current_outcome``):
+    each record of the browser/host parity fixture reads alike whole and projected, through ``outcome_phase`` and
+    ``_completion_verdict`` and through their twins ``taskOutcomeSeverity``, ``taskReasonDetail`` and the terminal
+    summary; an exhausted delivery keeps its saved-answer pointer."""
+    import pathlib
+
+    from ouroboros.late_review_marks import current_outcome
+    from ouroboros.outcomes import _merge_objective_warning
+    from ouroboros.project_dialogue import _completion_verdict, outcome_phase
+
+    fixture = pathlib.Path(__file__).resolve().parents[1] / "web" / "tests" / "fixtures" / "outcome_phase_parity.json"
+    records = [case["record"] for case in json.loads(fixture.read_text(encoding="utf-8"))["cases"]]
+    pairs = [(record, current_outcome(record, record.get("terminal_delivery"))) for record in records]
+    for whole, projected in pairs:
+        assert (outcome_phase(projected, {}), _completion_verdict(projected, {})) == (
+            outcome_phase(whole, {}), _completion_verdict(whole, {}))
+    # An exhausted delivery reads as its ending row merges it (``terminal_projection._project_row``).
+    stored = {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok"}}}
+    objective = {}
+    _merge_objective_warning(objective, "terminal_delivery_exhausted")
+    ending = {**stored, "outcome_axes": {"execution": {"status": "ok"}, "objective": objective},
+              "terminal_delivery": {"state": "exhausted", "preserved_path": "/saved/answer.md"}}
+    pairs.append((ending, current_outcome(stored, {"state": "exhausted", "delivery_id": "d1",
+                                                   "preserved_path": "/saved/answer.md"})))
+    views = _js_views([[row, None] for pair in pairs for row in pair])
+    assert views[0::2] == views[1::2] and len(views) == 2 * len(pairs) > 300
+    assert views[-1][:2] == ["warn", views[-1][1]] and "/saved/answer.md" in views[-1][1]
+
+
+def test_a_late_pass_keeps_the_saved_candidate_remainder_and_cleanup_its_card_states(tmp_path, monkeypatch):
+    """The real seam: a stored outcome whose execution names a saved candidate's uncommitted remainder and its
+    cleanup line, resolved by a late PASS, announces a current outcome whose card sentence still states both, exactly
+    as the stored row's own readers do; the late event's collapsed line is that cause, never the narration."""
+    from ouroboros import review_ledger
+    from ouroboros.late_review_marks import resolve_pending_result_review
+    from ouroboros.outcomes import _objective_axis
+    from ouroboros.project_dialogue import _completion_verdict, outcome_phase
+    from ouroboros.task_results import load_task_result, write_task_result
+
+    review = {"status": "awaiting", "source": "result_review", "author_finish": "author_finish_pending",
+              "pending_review": {"record_id": "rl-late", "subject_sha": "subject-a"},
+              "acceptance_decision": {"status": "finalized_unaccepted", "source": "result_review",
+                                      "reason": "author_finish_pending", "enforcement": "advisory"}}
+    write_task_result(tmp_path, "task-1", "completed", reason_code="final_message", result="The saved report.",
+                      outcome_axes={"execution": {"status": "ok", "reason_code": "final_message",
+                                                  "mutation_attribution": {"uncommitted_remainder": {"state": "known", "count": 2}},
+                                                  "evolution_cleanup": {"line": "The saved checkout remains for inspection"}},
+                                    "review": review, "objective": _objective_axis(review)})
+    monkeypatch.setattr(review_ledger, "load_record", lambda _root, record_id: {
+        "record_id": record_id, "subject": {"diff_sha": "subject-a"}, "verdict": {"aggregate": "PASS"}, "ts": "t"})
+    monkeypatch.setattr("supervisor.message_bus.try_get_bridge", lambda: None)
+    assert resolve_pending_result_review(tmp_path, "task-1", "rl-late") is True
+    [event] = [json.loads(line) for line in (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    row, current = load_task_result(tmp_path, "task-1"), event["current_outcome"]
+    sentence = "2 uncommitted files remain in the saved candidate · The saved checkout remains for inspection."
+    assert _completion_verdict(current, {}) == _completion_verdict(row, {}) == sentence
+    assert outcome_phase(current, {}) == outcome_phase(row, {}) == current["outcome_phase"] == "done"
+    assert "The saved report." not in json.dumps(current) and current["_result_text_present"] is True
+    [stored, late] = _js_views([[row, None], [current, event]])
+    assert stored[:2] == late[:2] == ["done", sentence]
+    assert late[2] == ["done", "Done", sentence, sentence], "the card's collapsed line is the cause"
+
+
+_FAILED_PRE_BRANCH = [{"tool": "submit_skill_to_hub", "is_error": True, "status": "error", "skill_publish_attempt": {
+    "ok": False, "skill": "weather", "completed_stage": "local_preflight", "snapshot_hash": "h"}}]
+_OVERLAYS = {  # producer: (trace facts, task the publication veto reads, the phase that must stand)
+    "publish_failed_pre_branch": ({"tool_calls": _FAILED_PRE_BRANCH}, {"type": "skill_publish", "metadata": {
+        "skill_publish_target": {"skill": "weather", "repository": "owner/hub"}}}, "error"),
+    "publish_target_missing": ({}, {"type": "skill_publish", "metadata": {}}, "error"),
+    "deferred_child": ({"child_result_dispositions": {"deferred_count": 1}}, None, "warn"),
+    "delivery_control": ({"delivery_candidate": {"degraded": True}}, None, "warn"),
+}
+
+
+@pytest.mark.parametrize("producer", sorted(_OVERLAYS))
+def test_a_late_pass_keeps_what_another_producer_set_over_the_pending_finish(tmp_path, monkeypatch, producer):
+    """Reproduced 9 Nov 2026 on the unchanged candidate (an Opus seat's probe): a publication receipt veto, deferred
+    child results and delivery control each set the objective over what the pending finish's review gave it, and the
+    late PASS of that review erased them (a failed publication read Done). The PASS answers the review alone: the
+    review axis passes, the objective keys the pending review derived follow it, and every key another producer set
+    stands with its phase and its card sentence, as an independent ``receipt_absent`` already did."""
+    from ouroboros import review_ledger
+    from ouroboros.late_review_marks import _REVIEW_DERIVED_OBJECTIVE, resolve_pending_result_review
+    from ouroboros.outcomes import _objective_axis, derive_loop_outcome
+    from ouroboros.project_dialogue import _completion_verdict, outcome_phase
+    from ouroboros.skill_publish_result import apply_skill_publish_receipt_veto
+    from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.tools.review_result import _finish_pending
+
+    extra, task, phase = _OVERLAYS[producer]
+    trace = {"tool_calls": [], **extra}
+    _finish_pending(SimpleNamespace(_completion_selected={"rationale": "The owner needs it now."}, task_metadata={},
+                                    task_id="task-1"), trace, "rl-late", SimpleNamespace(diff_sha="subject-a"))
+    loop = derive_loop_outcome("Delivered.", {}, trace)
+    loop = apply_skill_publish_receipt_veto(loop, task, trace) if task else loop
+    write_task_result(tmp_path, "task-1", "completed", reason_code=loop["reason_code"], result="Delivered.",
+                      outcome_axes=loop["outcome_axes"])
+    before = load_task_result(tmp_path, "task-1")
+    stored = before["outcome_axes"]["objective"]
+    own = {key: value for key, value in stored.items() if key in _REVIEW_DERIVED_OBJECTIVE
+           and value != _objective_axis(before["outcome_axes"]["review"]).get(key)}
+    assert own and outcome_phase(before, {}) == phase, (own, stored)
+    monkeypatch.setattr(review_ledger, "load_record", lambda _root, record_id: {
+        "record_id": record_id, "subject": {"diff_sha": "subject-a"}, "verdict": {"aggregate": "PASS"}, "ts": "t"})
+    monkeypatch.setattr("supervisor.message_bus.try_get_bridge", lambda: None)
+    assert resolve_pending_result_review(tmp_path, "task-1", "rl-late") is True
+    after = load_task_result(tmp_path, "task-1")
+    objective = after["outcome_axes"]["objective"]
+    assert after["outcome_axes"]["review"]["status"] == "pass" and objective["review_status"] == "pass"
+    assert {key: objective.get(key) for key in own} == own, "another producer's objective stands"
+    assert objective.get("reason") != "author_finish_pending", "the pending finish's own reason follows its PASS"
+    assert {key: objective.get(key) for key in ("receipt_veto", "deferred_count")} == {
+        key: stored.get(key) for key in ("receipt_veto", "deferred_count")}
+    assert outcome_phase(after, {}) == phase and "before the reviewers answered" not in _completion_verdict(after, {})
+    [event] = [json.loads(line) for line in (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+               if '"review_late_result"' in line]
+    assert event["current_outcome"]["outcome_phase"] == phase
+
+
 def _owed_rows(root):
     from ouroboros import store
     from ouroboros.late_review_marks import OWED_SET

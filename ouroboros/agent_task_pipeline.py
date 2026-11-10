@@ -535,9 +535,12 @@ def _attach_host_mutation_projection(
     )
     # Only the owning root task refreshes its terminal candidate snapshot at
     # outcome derivation; a subagent never rewrites the root's evidence.
-    snapshot_failed = False
+    snapshot_failed, body_observed = False, True
     if task_id and task_id == root_task_id:
         try:
+            # Only the body's own baseline can leave an uncommitted candidate remainder; an admitted folder's work
+            # is its delivery, so its failed capture claims none.
+            body_observed = attribution_task_id(evidence_root, (task_id,), surface_type="system_repo") == task_id
             if attribution_task_id(evidence_root, (task_id,)) == task_id:
                 from ouroboros.body_candidate import find  # the root's own copy reads as the commit consumer reads it
                 copy = find(task_id) or {}
@@ -549,7 +552,7 @@ def _attach_host_mutation_projection(
     for candidate in task_ids:
         projection = load_mutation_evidence_projection(evidence_root, candidate)
         if projection:
-            if snapshot_failed:
+            if snapshot_failed and body_observed:
                 projection["uncommitted_remainder"] = {"state": "unknown", "count": None, "surfaces": []}
             llm_trace["mutation_attribution"] = projection
             return

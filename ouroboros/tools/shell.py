@@ -440,14 +440,15 @@ def _run_shell(
             executor_note = "\n\nEXECUTOR_TRACE:\n" + json.dumps(res.backend_trace, ensure_ascii=False, indent=2)
         if res.returncode != 0:
             if _is_search_no_match(res):
-                text = autocorrect_note + (
-                    f"{_describe_returncode(res.returncode, cwd=work_dir, binding=binding)} (no matches)\n"
-                    f"{_format_process_output(res.stdout or '', '')}"
-                    f"{executor_note}"
-                )
+                text = autocorrect_note + (f"{_describe_returncode(res.returncode, cwd=work_dir, binding=binding)} (no matches)\n"
+                                           f"{_format_process_output(res.stdout or '', '')}{executor_note}")
                 return _publish_process_result(ctx, "SHELL_NO_MATCH", text, exit_code=res.returncode, shell_regex_auto_corrected=regex_autocorrected, meta=process_meta)
-            text = autocorrect_note + f"⚠️ SHELL_EXIT_ERROR: command exited with {_describe_returncode(res.returncode, cwd=work_dir, binding=binding, lived_ms=_lived_ms, resolved_runtime=_active_resolved_runtime(ctx))}.\n\n{_format_process_output(res.stdout or '', res.stderr or '')}{executor_note}"
-            return _publish_process_result(ctx, "SHELL_EXIT_ERROR", text, exit_code=res.returncode, shell_regex_auto_corrected=regex_autocorrected, meta=process_meta)
+            # The failure stays the failure; a declared output it demonstrably created or changed is its partial result.
+            artifact_note, _, artifact_registered = _register_process_outputs(
+                ctx, outputs, pathlib.Path(work_dir), cwd_root=cwd_root, changed_paths=set(_status_snapshot(repo_root) or []),
+                before_outputs=before_outputs, binding=binding, output_context=output_context, changed_only=True)
+            text = autocorrect_note + f"⚠️ SHELL_EXIT_ERROR: command exited with {_describe_returncode(res.returncode, cwd=work_dir, binding=binding, lived_ms=_lived_ms, resolved_runtime=_active_resolved_runtime(ctx))}.\n\n{_format_process_output(res.stdout or '', res.stderr or '')}{artifact_note}{executor_note}"
+            return _publish_process_result(ctx, "SHELL_EXIT_ERROR", text, exit_code=res.returncode, artifact_registered=artifact_registered, shell_regex_auto_corrected=regex_autocorrected, meta=process_meta)
         after_changed = _status_snapshot(repo_root)
         if after_changed != before_changed:
             # This resolved cwd may be outside the live-repo dispatcher snapshot.
@@ -723,7 +724,7 @@ def get_tools() -> List[ToolEntry]:
 	                    "type": "array",
 	                    "items": {"type": "string"},
 	                    "default": [],
-	                    "description": "Paths captured into the task artifact store after success, e.g. outputs=['report.txt']. An eligible path is captured even if this run left it unchanged; outside Cyber Pro a system_repo file is eligible only while it has uncommitted changes. The managed artifact directory is created lazily; do not move files into an assumed physical store. A declaration whose location is refused stops the call before it starts. Only outputs accept a relative '../' spelling, judged by its resolved location like an absolute one; cwd and file-tool path rules are unchanged.",
+	                    "description": "Paths captured into the task artifact store, e.g. outputs=['report.txt']: after success an eligible path even if this run left it unchanged, after a failure only one it created or changed; outside Cyber Pro a system_repo file is eligible only while it has uncommitted changes. The managed artifact directory is created lazily; do not move files into an assumed physical store. A declaration whose location is refused stops the call before it starts. Only outputs accept a relative '../' spelling, judged by its resolved location like an absolute one; cwd and file-tool path rules are unchanged.",
 	                },
 	                "scratch": {
 	                    "type": "array",
@@ -769,7 +770,7 @@ def get_tools() -> List[ToolEntry]:
 	                    "type": "array",
 	                    "items": {"type": "string"},
 	                    "default": [],
-	                    "description": "Paths captured into the task artifact store after success, e.g. outputs=['report.txt']. An eligible path is captured even if this run left it unchanged; outside Cyber Pro a system_repo file is eligible only while it has uncommitted changes. The managed artifact directory is created lazily; do not move files into an assumed physical store. A declaration whose location is refused stops the call before it starts. Only outputs accept a relative '../' spelling, judged by its resolved location like an absolute one; cwd and file-tool path rules are unchanged.",
+	                    "description": "Paths captured into the task artifact store, e.g. outputs=['report.txt']: after success an eligible path even if this run left it unchanged, after a failure only one it created or changed; outside Cyber Pro a system_repo file is eligible only while it has uncommitted changes. The managed artifact directory is created lazily; do not move files into an assumed physical store. A declaration whose location is refused stops the call before it starts. Only outputs accept a relative '../' spelling, judged by its resolved location like an absolute one; cwd and file-tool path rules are unchanged.",
 	                },
 	                "scratch": {
 	                    "type": "array",
