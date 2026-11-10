@@ -121,12 +121,13 @@ def test_the_counted_rung_and_the_group_lines_cost_their_drawn_text(lined, count
 @pytest.mark.parametrize("note", ["", "### Physical floor\nThis view keeps \"quotes\" and a \\ backslash."])
 def test_a_level_is_priced_by_its_pieces_exactly_as_its_drawn_text(note):
     """The price of a level is the sum of its pieces and the separators that join them: at any level, with or without the
-    floor note, ``story_chars`` and ``room_chars`` are the JSON characters of the drawn texts. A piece whose key forgets
-    what its text reads would differ here."""
+    floor note, ``story_chars`` and ``room_chars`` are the JSON characters of the texts a snapshot without pieces draws.
+    A piece whose key forgets a step its text reads answers another level's price here."""
     snapshot = _snapshot()
+    fresh = dataclasses.replace(snapshot)
     for level in _levels(snapshot):
-        assert mv.story_chars(snapshot, level) == mv.json_chars(mv.render_story(snapshot, level))
-        assert mv.room_chars(snapshot, level, floor_note=note) == mv.json_chars(mv.render_room(snapshot, level, floor_note=note))
+        assert mv.story_chars(snapshot, level) == mv.json_chars(mv.render_story(fresh, level))
+        assert mv.room_chars(snapshot, level, floor_note=note) == mv.json_chars(mv.render_room(fresh, level, floor_note=note))
 
 
 def test_a_level_holds_the_whole_story_only_when_its_text_is_the_whole_story():
