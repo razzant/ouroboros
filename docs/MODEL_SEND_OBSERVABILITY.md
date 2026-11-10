@@ -46,7 +46,7 @@ response-assembly truth is covered transitively by the next round's
 | Durable candidate manifest + redacted CAS blob, written before dispatch, with two labelled digest domains (`canonical_json_v1_pre_redaction` facts vs `observability_json_v1_post_default_redaction_cas` blob); the blob is a request view stored once — its messages and tool schemas are parts, its skeleton placement is spliced back into the exact whole on read (`shared_values`, PERSISTENCE observability row), so the CAS digest and size are the whole's | `observability.persist_physical_candidate` / `persist_call` | The sealed record carrier |
 | Attempt lifecycle `reserved → dispatched → settled|unresolved` / `reserved → released`, short-lock append + sequence replay | `usage_accounting` | The join target for the reverse direction |
 | Anthropic native custody projection (opaque provider-native content replaced before persistence; disclosed as `anthropic_native_custody_projected`) | `anthropic_native_custody.physical_custody_projection` | Prototype of a typed exclusion |
-| Secret redaction with per-hit `RedactionRecord`s | `observability._redact_text` + rules | Prototype of a typed exclusion |
+| Secret redaction with per-hit `RedactionRecord`s | `redaction._redact_text` + rules | Prototype of a typed exclusion |
 
 An identity gate that compares only two **in-memory** serializations cannot
 establish whether the durable record matches either copy.

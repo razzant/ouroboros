@@ -145,6 +145,7 @@ ouroboros/ — agent core and shared runtime (§6)
   loop_tool_execution.py, tool_call_log.py, late_tool_results.py — tool dispatch, results, per-invocation counting
   deadline_utils.py — deadline parsing and the transport-vs-logical wait seam
   observability.py, source_retention.py, shared_values.py — private CAS: elements stored once, gzip-1, hardlinks (§10)
+  redaction.py — secret redaction of stored projections: the rules, the walk and its `RedactionRecord`s (docs/MODEL_SEND_OBSERVABILITY.md §4)
   evidence_packs.py, evidence_packer.py — per-task xz packs (maintenance job, §5); verified addressed reads, missing ≠ `evidence_corrupt` (PERSISTENCE)
   finalization_timing.py — final-event phase fields and `task_finalization_timing` (§6)
   process_logging.py — per-process logging bootstrap; the server is the sole `server.log` writer; the launcher copies the server pipe, byte-capped, into `agent_stdout.log`
