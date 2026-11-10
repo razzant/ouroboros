@@ -42,7 +42,7 @@ from ouroboros._usage_rows import (
     REVIEW_ATTRIBUTION_KEYS, BindingIndex, Bucket, row_ts_epoch, summary_delta,
 )
 from ouroboros.usage_origin import bind_root_attribution
-from ouroboros import store as _core
+from ouroboros import store as _core, store_timing
 from ouroboros.store import (
     TIER_ENFORCED, TIER_NAME, busy as _busy, file_identity as _identity, fsync_directory as _fsync_directory,
     process_lock as _process_lock,
@@ -714,10 +714,8 @@ def _commit(conn: sqlite3.Connection) -> None:
     try:
         _core.commit(conn)
     except sqlite3.OperationalError as exc:
-        if _busy(exc):
-            error = UsageLockUnavailable(f"usage store commit did not complete: {exc}", reason="contention")
-            error.rollback_confirmed = getattr(exc, "rollback_confirmed", False)
-            raise error from exc
+        if _busy(exc):  # contention, typed with the COMMIT's phase, wait and budget (``store_timing.ended``)
+            raise _typed(exc) from exc
         raise UsageAccountingError(f"usage store commit failed: {exc}") from exc
 
 
@@ -847,7 +845,7 @@ def _typed(exc: sqlite3.Error) -> UsageAccountingError:
     (the waits' business), a damaged file is ``UsageLedgerCorrupt`` (unknown,
     never zero), anything else an ``UsageAccountingError``."""
     if isinstance(exc, sqlite3.OperationalError) and _busy(exc):
-        error = UsageLockUnavailable(f"usage store busy: {exc}", reason="contention")
+        error = UsageLockUnavailable(f"usage store busy: {exc}{store_timing.busy_note(exc)}", reason="contention")
         if hasattr(exc, "rollback_confirmed"):
             error.rollback_confirmed = exc.rollback_confirmed
         return error
