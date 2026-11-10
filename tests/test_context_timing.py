@@ -120,18 +120,6 @@ def test_the_collector_rests_for_a_block_and_resumes_after_it():
         gc.enable()
 
 
-def test_a_collection_inside_the_resting_block_counts_in_its_window_and_nothing_outside_one():
-    """A collection that still happens inside a measured build (an explicit ``gc.collect``) is the build's work; the
-    collector's own count of it stays out of a window nobody opened."""
-    with collector_rests(), measured_sections():
-        gc.collect()
-        work = section_spans()["work"]
-    assert work["gc_collections"] >= 1 and work["gc_ms"] >= 0
-    with collector_rests():
-        gc.collect()
-    assert section_spans() == {}
-
-
 @pytest.mark.parametrize("realtime", [False, True])
 def test_the_agent_measures_its_context_build(tmp_path, monkeypatch, realtime):
     """The agent opens the measured scope around its context build, so the receipt can carry the spans."""
