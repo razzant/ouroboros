@@ -196,18 +196,21 @@ def write_shared_blob(drive_root: pathlib.Path, payload: Any, parts: Dict[str, D
 #: by every call of the task. Their elements are stored once (``write_shared_blob``); every other
 #: record (tool calls, responses, reviews) is written whole.
 SHARED_ELEMENT_CALL_TYPES = frozenset({"llm_request", "physical_llm_candidate", "llm_claudexor_request"})
-_LISTED_PARTS: Dict[Tuple[str, str], set] = {}  # (drive root, task) -> parts a manifest of this process listed
-_LISTED_PARTS_TASKS = 16  # tasks whose listings this process remembers; forgetting one costs a fuller manifest
+#: (drive root, task) -> (the parts a manifest of this process listed, their redaction facts: ``redaction.part_fact``)
+_TASK_PARTS: Dict[Tuple[str, str], Tuple[set, dict]] = {}
+_TASK_PARTS_TASKS = 16  # tasks this process remembers; forgetting one costs a fuller manifest and its parts' scans again
 
 
-def _listed_parts(drive_root: pathlib.Path, task_id: str) -> set:
+def task_parts(drive_root: pathlib.Path, task_id: str) -> Tuple[set, dict]:
+    """What this process knows of a task's parts: the ones a manifest listed and their redaction facts, which the
+    request records and the working checkpoint share (a part either one met is not scanned again)."""
     key = (str(drive_root), str(task_id))
-    listed = _LISTED_PARTS.get(key)
-    if listed is None:
-        while len(_LISTED_PARTS) >= _LISTED_PARTS_TASKS:
-            del _LISTED_PARTS[next(iter(_LISTED_PARTS))]
-        listed = _LISTED_PARTS[key] = set()
-    return listed
+    known = _TASK_PARTS.get(key)
+    if known is None:
+        while len(_TASK_PARTS) >= _TASK_PARTS_TASKS:
+            del _TASK_PARTS[next(iter(_TASK_PARTS))]
+        known = _TASK_PARTS[key] = (set(), {})
+    return known
 
 
 def read_blob_ref(
@@ -1020,7 +1023,8 @@ def persist_call(
     from ouroboros.anthropic_native_custody import observability_custody_projection
 
     shared = call_type in SHARED_ELEMENT_CALL_TYPES
-    redacted = redact_projection(observability_custody_projection(payload), parts=shared)
+    listed, facts = task_parts(drive_root, task_id)
+    redacted = redact_projection(observability_custody_projection(payload), facts=facts if shared else None)
     effective_keep_raw = keep_raw
     if effective_keep_raw is None:
         effective_keep_raw = (
@@ -1044,7 +1048,6 @@ def persist_call(
         full_ref = store(redacted.value)
         projection_ref = full_ref
         full_redacted = True
-    listed = _listed_parts(drive_root, task_id)
     new_parts = [ref for digest, ref in parts.items() if digest not in listed]
     manifest_ref = write_call_manifest(
         drive_root,

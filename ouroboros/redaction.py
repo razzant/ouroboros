@@ -312,16 +312,53 @@ def _redact_any(value: Any, records: List[RedactionRecord], path: str, *, secret
     return value
 
 
-def redact_projection(value: Any, *, parts: bool = False) -> RedactionResult:
-    """``value`` with its secret values masked and one record per rule that fired. ``parts``: ``value`` is a request
-    view, and the bytes of each part a scan reads are counted for the round's receipt (``context_timing.counted``,
-    verb ``secret_scan``, keyed by the part's bytes and its parent's flags)."""
-    from ouroboros.context_timing import counted
+#: The identity of the rules above, part of every part fact's key: a fact found under other rules is never reused.
+RULES_VERSION = hashlib.sha256(repr((
+    [(rule, pattern.pattern, pattern.flags) for rule, pattern in _TOKEN_PATTERNS],
+    [regex.pattern for regex in (_SECRET_QUERY_PARAM_RE, _SECRET_LITERAL_RE, _SECRET_LITERAL_KEY_RE, _SECRET_GENERIC_KV_RE)],
+    sorted(_METADATA_QUALIFIER_SEGMENTS), sorted(_SECRET_KEY_EXACT), _SECRET_KEY_SUFFIXES, _SECRET_KEY_COMPOUND_SUFFIXES,
+    _SECRET_KEY_SEGMENT_MARKERS, _GENERIC_KV_SECRET_KEY_HINTS, sorted(SCHEMA_MAPS), sorted(SCHEMA_KINDS),
+    sorted(SCHEMA_NOTES))).encode("utf-8")).hexdigest()
 
-    def scanned(item: Any, records: List[RedactionRecord], path: str, secret_literals: bool) -> Any:
-        raw = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
-        counted("secret_scan", len(raw), key=(hashlib.sha256(raw).hexdigest(), secret_literals))
-        return _redact_any(item, records, path, secret_literals=secret_literals)
+
+def part_fact(item: Any, facts: Dict[tuple, tuple], *, path: str = "$",
+              secret_literals: bool = False) -> Optional[Tuple[bytes, Any, Tuple[Tuple[str, str], ...]]]:
+    """``(bytes, masked value, records)`` of one request-view part, worked out once per its bytes, its parent's flags
+    (``secret_literals``; a list element never inherits ``schema``) and ``RULES_VERSION``, then reused from ``facts``.
+    The value is None when custody projection and redaction leave the part's bytes alone (it is public as it is);
+    record paths are relative to the part. None for a part that is not plain JSON: bytes made with ``default=str``
+    would not name its value, so it is walked each time. Working a fact out counts its bytes as ``secret_scan``."""
+    try:
+        raw = json.dumps(item, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
+    key = (hashlib.sha256(raw).hexdigest(), secret_literals, RULES_VERSION)
+    fact = facts.get(key)
+    if fact is None:
+        from ouroboros.anthropic_native_custody import observability_custody_projection
+        from ouroboros.context_timing import counted
+
+        projected, found = observability_custody_projection(item), []
+        value = _redact_any(projected, found, path, secret_literals=secret_literals)
+        public = not found and json.dumps(projected, ensure_ascii=False, sort_keys=True).encode("utf-8") == raw
+        fact = facts[key] = (None if public else value, tuple((record.path[len(path):], record.rule) for record in found))
+        counted("secret_scan", len(raw), key=key)
+    return raw, fact[0], fact[1]
+
+
+def redact_projection(value: Any, *, facts: Optional[Dict[tuple, tuple]] = None) -> RedactionResult:
+    """``value`` with its secret values masked and one record per rule that fired. With ``facts``, ``value`` is a
+    request view: each part (``shared_values``) is redacted once per ``part_fact`` key and its records re-rooted where
+    it stands, so the result is byte for byte the whole walk's."""
+    def part(item: Any, records: List[RedactionRecord], path: str, secret_literals: bool) -> Any:
+        found = part_fact(item, facts, path=path, secret_literals=secret_literals)
+        if found is None:
+            from ouroboros.context_timing import counted
+
+            counted("secret_scan", len(json.dumps(item, ensure_ascii=False, sort_keys=True, default=str).encode()))
+            return _redact_any(item, records, path, secret_literals=secret_literals)
+        records.extend(RedactionRecord(path=path + suffix, rule=rule) for suffix, rule in found[2])
+        return item if found[1] is None else found[1]
 
     records: List[RedactionRecord] = []
-    return RedactionResult(_redact_any(value, records, "$", part=scanned if parts else None), records)
+    return RedactionResult(_redact_any(value, records, "$", part=part if facts is not None else None), records)

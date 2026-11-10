@@ -60,11 +60,11 @@ def engine(tmp_path, monkeypatch):
     from ouroboros import observability, pricing
 
     monkeypatch.setattr(pricing, "_fetch_live_rows", lambda *_: pytest.fail("Claudexor must not fetch API pricing"))
-    observability._LISTED_PARTS.clear()
+    observability._TASK_PARTS.clear()
     gateway = Gateway(results=[_answer("Round one answer."), _answer("Round two answer.")])
     monkeypatch.setattr(transport, "ensure_owned_gateway", lambda **_kw: gateway)
     yield root
-    observability._LISTED_PARTS.clear()
+    observability._TASK_PARTS.clear()
 
 
 def _rounds(root, task_id: str, start: list) -> list:

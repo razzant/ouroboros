@@ -36,13 +36,6 @@ TURN_GAPS: Dict[Tuple[str, str], Tuple[str, Dict[str, int]]] = {
         "process's first owner turn on the owner's Mac paid 373 to 632. Remover: razzant/ouroboros#2025 (one ps "
         "per 256 pids), owned by the voice sprint (owner decision 22.10, 3A).",
         {"popen": 25}),
-    ("R1", "round:2"): (
-        "Round 2 scans every part of its three request records again (the logical request and its equal send "
-        "copy, the physical candidate, the Claudexor request; tests/test_cost_round.py): 75,290 bytes after a "
-        "2-turn start and 450,834 after a 60-turn one, for the 93 bytes the round adds, of which 54,480 and "
-        "336,138 are parts the same round had already scanned. Remover: the redaction walk keeps each part's "
-        "fact by its bytes, its parent's flags and the rules (K3, this change).",
-        {"secret_scan": 450741, "secret_scan_again": 336138}),
 }
 
 

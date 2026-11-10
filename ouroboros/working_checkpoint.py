@@ -153,23 +153,15 @@ def _shared_element(ctx: Any, element: Any) -> Optional[bytes]:
     A part's bytes are the element's ``observability._json_bytes`` (plain JSON, sorted keys), the
     same bytes a request view's part has, so a message the views stored is not stored again.
     Only an element on which custody projection and redaction are no-ops is shared: its bytes
-    are public-safe, as every CAS part is. Live handles and secret-bearing elements stay inline.
+    are public-safe, as every CAS part is. Live handles, opaque values (not plain JSON) and
+    secret-bearing elements stay inline. The verdict is the task's redaction fact of those bytes,
+    the one its request records keep (``observability.task_parts``): what either met is not scanned again.
     """
-    try:
-        raw = json.dumps(element, ensure_ascii=False, sort_keys=True).encode("utf-8")
-    except (TypeError, ValueError):
-        return None  # not plain JSON: the checkpoint encoder names its opaque values inline
-    digest = hashlib.sha256(raw).hexdigest()
-    known = getattr(ctx, "_working_parts_public", None)
-    if known is None:
-        known = ctx._working_parts_public = {}
-    public = known.get(digest)
-    if public is None:
-        from ouroboros.anthropic_native_custody import observability_custody_projection
-        from ouroboros.observability import redact_projection
+    from ouroboros.observability import task_parts
+    from ouroboros.redaction import part_fact
 
-        public = known[digest] = redact_projection(observability_custody_projection(element)).value == element
-    return raw if public else None
+    found = part_fact(element, task_parts(_root(ctx), str(ctx.task_id))[1])
+    return found[0] if found is not None and found[1] is None else None
 
 
 def _list_working_parts(ctx: Any, parts: Dict[str, bytes]) -> int:

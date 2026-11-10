@@ -145,6 +145,31 @@ def test_ordinary_call_seals_the_send_copy_and_reconstructs_clean(data_root):
     assert not _violation_events(data_root)
 
 
+def test_a_known_candidate_is_still_sealed_before_the_send_with_the_whole_walks_bytes(data_root):
+    """A later attempt of the task finds each part's redaction fact (``redaction.part_fact``): its sealed record still
+    lands before the send, holds the bytes the whole walk gives and discloses the same secret rows."""
+    first = _manifest(_dispatch(data_root, "task-seal-known"))
+    sent = []
+
+    def send(**candidate):
+        calls = data_root / "observability" / "calls" / "task-seal-known"
+        sent.append((copy.deepcopy(candidate), {path.name for path in calls.glob("*.json")}))
+        return _Response()
+
+    client = LLMClient(api_key="unused")
+    with ua.usage_scope(_scope(data_root, "task-seal-known")):
+        client._create_chat_completion_with_retries(send, _payload(), _target())
+    final = _rows(data_root)[-1]
+    manifest = _manifest(final)
+    (candidate, present), = sent
+    assert pathlib.Path(final["candidate_manifest_ref"]["path"]).name in present, "sealed before the send"
+    stored, intact = seal_mod._read_blob_bytes(manifest)
+    assert intact and stored == seal_mod._reconstruct_blob_bytes(candidate)
+    rows = [row for row in manifest["model_send_seal"]["exclusions"] if row["class"] == "secret_redaction"]
+    assert rows and rows == [row for row in first["model_send_seal"]["exclusions"] if row["class"] == "secret_redaction"]
+    assert not _violation_files(data_root)
+
+
 def test_the_closed_exclusion_enum_is_exactly_the_four_note_classes():
     assert seal_mod.EXCLUSION_CLASSES == {
         "secret_redaction", "provider_native_custody",
