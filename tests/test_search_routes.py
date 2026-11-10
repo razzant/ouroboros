@@ -292,10 +292,11 @@ def _discoverable(monkeypatch, **packages):
 
 @pytest.mark.parametrize('settings,expected', [
     ({'ANTHROPIC_API_KEY': 'synthetic'}, {'anthropic': 'package_missing', 'openai': 'no_credentials',
-                                          'openrouter': 'no_credentials', 'ddgs': 'package_missing'}),
+                                          'openrouter': 'no_credentials', 'ddgs': 'package_missing',
+                                          'deepseek': 'no_credentials'}),
     ({'OPENAI_API_KEY': 'synthetic', 'OPENAI_BASE_URL': 'https://compatible.invalid/v1'},
      {'openai': 'legacy_openai_base_url', 'openrouter': 'no_credentials', 'anthropic': 'no_credentials',
-      'ddgs': 'package_missing'}),
+      'ddgs': 'package_missing', 'deepseek': 'no_credentials'}),
 ])
 def test_unavailable_legs_name_their_locally_known_cause(monkeypatch, settings, expected):
     _discoverable(monkeypatch, anthropic=False, ddgs=False)
@@ -337,13 +338,13 @@ def test_settings_preview_endpoint_serves_the_unavailable_causes(monkeypatch):
     data = client.get('/api/settings', params={'websearch_preview': '1'}).json()
     assert [leg['source'] for leg in data['legs']] == ['openrouter', 'ddgs']
     assert {leg['source']: leg['unavailable_reason'] for leg in data['unavailable']} == {
-        'openai': 'no_credentials', 'anthropic': 'package_missing'}
+        'openai': 'no_credentials', 'anthropic': 'package_missing', 'deepseek': 'no_credentials'}
     assert 'secret-7f3' not in json.dumps(data)  # causes never carry a secret value
     # No saved Model: the preview is the resolver's route, each leg on its source's recommended model.
     assert data == resolve_web_search_route(settings=dict(saved)) and data['model'] == ''
     assert {leg['source']: (leg['model'], leg['model_source']) for leg in data['legs'] + data['unavailable']} == {
         source: (SEARCH_MODELS[source], 'provider_default') for source in ('openai', 'openrouter', 'anthropic')
-    } | {'ddgs': ('', 'provider_default')}
+    } | {'ddgs': ('', 'provider_default'), 'deepseek': ('', 'provider_default')}
 
 
 def _progress_ctx():
@@ -495,7 +496,7 @@ def _withheld(registry):
     ('auto', {'OPENAI_API_KEY': 'synthetic', 'OPENAI_BASE_URL': 'https://compatible.invalid/v1'},
      {'anthropic': False, 'ddgs': False}, 'legacy_openai_base_url+missing_credential+package_missing',
      'web_search_backend: openai legacy_openai_base_url, openrouter no_credentials, '
-     'anthropic no_credentials, ddgs package_missing'),
+     'anthropic no_credentials, ddgs package_missing, deepseek no_credentials'),
 ])
 def test_registry_withholds_web_search_under_the_route_cause(tmp_path, monkeypatch, backend, keys, packages, reason, detail):
     _search_settings(monkeypatch, backend, **keys)
@@ -697,7 +698,7 @@ def test_settings_keep_a_blank_search_model_blank_and_a_saved_one_saved(tmp_path
 # resolver sends for the target's own Source and Model, never as a chat route and never by Main's provider.
 
 @pytest.mark.parametrize(("search", "search_keys", "main"), [
-    pytest.param("", {"OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"}, "openrouter/model", id='-search_keys0-openrouter/model'),  # Blank: the recommended model of every source Auto tries, whatever Main is (owner decision, 1 Nov 2026).
+    pytest.param("", {"OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY"}, "openrouter/model", id='-search_keys0-openrouter/model'),  # Blank: the recommended model of every source Auto tries, whatever Main is (owner decision, 1 Nov 2026).
     pytest.param("gpt-5.2", {"OPENAI_API_KEY", "OPENROUTER_API_KEY"}, "anthropic::owner-main", id='gpt-5.2-search_keys1-anthropic::owner-main'),  # A bare native id is OpenAI's in search grammar: its OpenAI leg first, then the same model on OpenRouter.
     pytest.param("google/gemini-2.5-pro", {"OPENROUTER_API_KEY"}, "openrouter/model", id='google/gemini-2.5-pro-search_keys2-openrouter/model'),  # An OpenRouter catalog id (a single-model pin) plans that leg only, never Auto's other-model fallback.
     pytest.param("openai@work::gpt-5.5", {"OPENAI_API_KEY", "OPENROUTER_API_KEY", "OUROBOROS_CONNECTIONS"}, "anthropic::owner-main", id='openai@work::gpt-5.5-search_keys3-anthropic::owner-main'),  # A named connection travels as its row; the saved route's same-model OpenRouter leg is kept too.
@@ -712,12 +713,13 @@ def test_the_web_search_slot_plans_the_legs_its_configured_search_sends(main, se
 
     live = {"OUROBOROS_MODEL": main, "OUROBOROS_MODEL_LIGHT": main, "OUROBOROS_WEBSEARCH_MODEL": search,
             "OPENROUTER_API_KEY": "or-value", "OPENAI_API_KEY": "oa-value", "ANTHROPIC_API_KEY": "an-value",
+            "DEEPSEEK_API_KEY": "ds-value",
             "OUROBOROS_CONNECTIONS": [{"kind": "openai", "name": "work", "api_key": "work-value"}]}
     chat_only = provider_credential_plan({**live, "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"})["planned_keys"]
     assert set(provider_credential_plan(live)["planned_keys"]) == set(chat_only) | search_keys
     out = build_isolated_settings(live, OUROBOROS_MODEL=main, OUROBOROS_MODEL_LIGHT=main)
-    assert {key for key in ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY") if key in out} >= (
-        search_keys - {"OUROBOROS_CONNECTIONS"})
+    assert {key for key in ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY")
+            if key in out} >= (search_keys - {"OUROBOROS_CONNECTIONS"})
     first = resolve_web_search_route(settings=out)["legs"][0]
     target = resolve_web_search_route(settings=live)["legs"][0]
     assert (first["source"], first["model"], first.get("connection", "")) == (
