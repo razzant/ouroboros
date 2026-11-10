@@ -34,14 +34,22 @@ def same_directory(left: Any, right: Any) -> bool:
 
 
 def source_is_system_repo(source: Any, system_repo: Any) -> bool:
-    """Admission-time Git identity, including nested/linked copies of the body."""
+    """Admission-time Git identity, including nested/linked copies of the body. A work-domain folder never is:
+    the mappings may not reach the checkout, and a Git directory its repository names is the work's spelling,
+    never one the service may resolve into its own."""
+    from ouroboros import work_domain
+
+    if work_domain.is_work(source):
+        return False
     source, system = Path(source).resolve(), Path(system_repo).resolve()
     if same_directory(source, system):
         return True
     def common(root):
         try:
-            proc = subprocess.run(["git", "rev-parse", "--git-common-dir"], cwd=str(root),
-                                  capture_output=True, text=True, encoding="utf-8", timeout=5)
+            from ouroboros import work_domain  # a work repository's Git runs as the work domain
+
+            proc = work_domain.run(["git", "rev-parse", "--git-common-dir"], cwd=str(root),
+                                   capture_output=True, text=True, encoding="utf-8", timeout=5)
         except (OSError, subprocess.SubprocessError):
             return None
         if proc.returncode:

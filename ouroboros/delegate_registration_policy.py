@@ -298,5 +298,5 @@ STARTED_FIRST_WINS_FACTS: Tuple[str, ...] = (
     "capture_id", "snapshot_task_id", "authority_source", "resource_ref", "selected_subagent_id",
     "config_fingerprint", "work_order_fingerprint", "work_order_coverage",
     "authority_fingerprint", "work_order_source_request", "category", "source",
-    "execution_mode", "effective_access", "thread_id", *STARTED_MAPPING_FIELDS,
+    "execution_mode", "effective_access", "thread_id", "engine_ref", *STARTED_MAPPING_FIELDS,
     *REVIEW_ATTRIBUTION_KEYS)

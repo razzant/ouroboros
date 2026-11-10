@@ -2,7 +2,9 @@
 
 Only the selected execution subject needs payload identity, review and grants.
 Peers need manifest conflicts and enablement; hashing their payloads contributes
-nothing to that decision. There is no stat/TTL cache and no partial LoadedSkill.
+nothing to that decision, except for a deployment's required name at its required
+path, whose enablement depends on its bytes (``deployment_extensions.peer_enabled``,
+the loader's reused read). There is no stat/TTL cache and no partial LoadedSkill.
 
 Every observation reads each peer manifest's bytes again. A successful parse
 leaves the two facts a peer keeps (``conflicts`` and the declared ``os``), held
@@ -27,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ouroboros.contracts.skill_manifest import SkillManifest, SkillManifestError, parse_skill_manifest_text
+from ouroboros.deployment_extensions import peer_enabled
 from ouroboros.skill_loader import (
     _ManifestUnreadable, _classify_skill_source, _manifest_text_for_dir, _native_platform_visible,
     _SkillLocationCandidate, _skill_location_inventory, load_enabled,
@@ -99,8 +102,9 @@ def _manifest_peer(drive_root: Path, candidate: _SkillLocationCandidate, held: _
     if candidate.location == "native" and not _native_platform_visible(candidate.skill_dir, facts) and _classify_skill_source(
             candidate.skill_dir, location=candidate.location, drive_root=drive_root) == "native":
         return None  # discovery hides a launcher seed for another platform
-    return SkillPeer(**identity, enabled=load_enabled(drive_root, candidate.name) if enabled is None else enabled,
-                     conflicts=facts.conflicts)
+    if enabled is None:  # a deployment's required package reads as on (``deployment_extensions``)
+        enabled = peer_enabled(drive_root, candidate, load_enabled(drive_root, candidate.name))
+    return SkillPeer(**identity, enabled=enabled, conflicts=facts.conflicts)
 
 
 def discover_skill_peers(
@@ -145,7 +149,8 @@ def discover_conflict_peers(
     counts = Counter(candidate.name for candidate in inventory)
     peers = []
     for candidate in inventory:
-        if counts[candidate.name] > 1 or candidate.name == subject or not load_enabled(drive_root, candidate.name):
+        if counts[candidate.name] > 1 or candidate.name == subject or not peer_enabled(
+                drive_root, candidate, load_enabled(drive_root, candidate.name)):
             continue
         peer = _manifest_peer(drive_root, candidate, held, enabled=True)
         if peer is not None and not peer.manifest_error:

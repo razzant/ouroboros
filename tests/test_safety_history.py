@@ -70,11 +70,12 @@ def test_safe_history_compacts_but_flagged_speech_stays_mandatory(supervisor, mo
             break
     else:
         raise AssertionError("Flagged history must hold when decisive evidence does not fit")
-    assert "These words wait until a check judges them" in message and "Never route these words" in message  # held
+    # Judged, though its verdict cannot be kept: refused with that verdict said, never as an unjudged wait.
+    assert "judged" in message and "DANGEROUS — Decisive flagged evidence" in message and "wait until a check" not in message
     count = len(h.calls)
     h.replies.append({"status": "DANGEROUS", "reason": "Decisive flagged evidence" * 3})
     assert not h.module.check_safety("place_reply", {"text": f"flag-{n}"}, ctx=h.ctx)[0]
-    assert len(h.calls) == count + 1  # a hold did not earn speech retry authority
+    assert len(h.calls) == count + 1  # an unkept verdict earned no speech retry authority
 
 
 def test_root_limit_evicts_retry_authority_without_holding_new_work(supervisor):

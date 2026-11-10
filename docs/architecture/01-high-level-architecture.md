@@ -93,6 +93,7 @@ supervisor/ — background thread inside server.py (§5)
 ouroboros/ — agent core and shared runtime (§6)
   config.py, launch_roots.py — SSOT facade: paths, settings load/save, PID lock (§7)
   settings_defaults.py, settings_scales.py, model_slots.py, review_model_routes.py, runtime_limits.py — settings vocabularies `config.py` re-exports (§7; §10 invariant 3)
+  deployment_policy.py, deployment_extensions.py, execution_domain.py, work_domain.py, work_skill_payloads.py — deployment settings, Safety, body, extensions and work domains (§7, §6, §13)
   version.py — version string from VERSION, importlib.metadata fallback
   secret_masking.py, settings_integrity.py, route_choice.py — Settings/MCP wire placeholders and secret repair before env overlay/persistence; task-local/skill settings views, snapshot pin (`OUROBOROS_SETTINGS_SHA256`), projection echo/digests (`OUROBOROS_PROJECTED_*`); live route keys, a turn's route choice (§6, §7)
   credential_shapes.py — credential leaf names and physical locations (§6 Credential mutation and diagnostic redaction)
@@ -208,7 +209,7 @@ ouroboros/ — agent core and shared runtime (§6)
   mcp_task_session.py, mcp_browser_guard.py — stdio session per live task loop; browser-policy callback (§6 MCP)
   safety.py — Safety Supervisor call (typed outcomes: §6 Safety Supervisor outcomes)
   safety_config.py — independent coverage per kind (your work, consciousness), the resolved checker and the one-time settings migration
-  safety_records.py, safety_evidence.py — verdict-neutral Safety usage and event bookkeeping; the bundle's evidence diet
+  safety_records.py, safety_evidence.py — Safety verdict parsing/accounting; the bundle's evidence diet
   ouroboros/gateway/safety_settings.py — owner Safety level, rules and checker endpoints
   consciousness.py, consciousness_wake.py — the background alarm admitting an ordinary Main turn through the supervisor tick; the wake input and `wake_task_metadata` envelope (§6 Background consciousness)
   consciousness_authority.py, consciousness_allowance.py — dispatch-bound autonomy ceilings and the rolling 24-hour allowance (§6 Background consciousness and Evolution)
@@ -336,7 +337,7 @@ ouroboros/ — agent core and shared runtime (§6)
   skill_loader.py, skill_catalogue.py — Discovers data buckets and connected folders (`OUROBOROS_SKILLS_REPO_PATH` is My folder), state in `data/state/skills/<name>/`; paged skill records, named diagnostics and manifest addresses, the delegate skill index (§13)
   skill_context_snapshot.py — Optional skill facts at the append-only tail; visible-base lease renewal (§6)
   skill_readiness.py — Execution readiness and next actions from review, hash, enablement, grants, dependencies and peer conflicts
-  skill_peer_inventory.py, skill_conflicts.py — execution-time peers without payload reads: the `SkillPeer` projection and the one conflict verdict (§13)
+  skill_peer_inventory.py, skill_conflicts.py — execution-time peers, reading a payload only for a required package: the `SkillPeer` projection and the one conflict verdict (§13)
   skill_dependencies.py — Dependency-spec resolution, the one package-readying seam and its owner sentences
   skill_repair_admission.py — selected-skill development admission against an immutable `base_content_hash`; no long shell lock or rollback (§6 Skills and extensions)
   skill_owner_attestation.py — Skip review / Turn on anyway: the owner accepts exact bytes without LLM review (§13)

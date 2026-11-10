@@ -24,7 +24,10 @@ import json
 import os
 import pathlib
 import re
+import tempfile
 from typing import Any, Dict, List, Optional, Tuple
+
+from ouroboros import work_domain
 
 RESULT_WORDS_SOURCE = "the produced files named above by path and content hash"
 _EXCERPT_FLOOR = 1200  # characters one text file may take of the excerpt budget before the rest is divided
@@ -36,26 +39,29 @@ _CAPTURED_ROOTS = ("artifact_store", "user_files", "deliverables")  # their writ
 
 
 def _output_path(path: Any) -> str:
-    """The listed output's own path: its folder resolved, its last part never followed (a link is an output itself)."""
+    """The listed output's own path: its folder resolved (a work folder keeps its spelling, the container resolves
+    it), its last part never followed (a link is an output itself)."""
     path = pathlib.Path(path)
-    return str(path.resolve(strict=False) if path.name in {"", ".", ".."} else path.parent.resolve(strict=False) / path.name)
+    return str(work_domain.settle(path) if path.name in {"", ".", ".."} else work_domain.settle(path.parent) / path.name)
 
 
 def _file_identity(path: pathlib.Path) -> Dict[str, Any]:
-    """Size and sha256 of one listed file, read stably (``artifacts.stream_artifact_file``), else why not; a symbolic
-    link's are of its exact link text (``readlink``), shown whole as ``link``, broken or relative alike."""
+    """Size and sha256 of one listed file, read stably (``artifacts.stream_artifact_file``; a work file through the
+    confined intake, never a service open of its pathname), else why not; a symbolic link's are of its exact link
+    text (``readlink``), shown whole as ``link``, broken or relative alike. A work domain that could not be asked is
+    unreadable, no evidence that the file is gone."""
     from ouroboros.artifacts import stream_artifact_file
 
     try:
-        if path.is_symlink():
-            text = os.readlink(os.fsencode(path))
+        work = work_domain.is_work(path)
+        if work_domain.kind(path) == "link" if work else path.is_symlink():
+            text = os.fsencode(work_domain.readlink(path)) if work else os.readlink(os.fsencode(path))
             return {"size": len(text), "sha256": hashlib.sha256(text).hexdigest(),
                     "link": json.dumps(os.fsdecode(text), ensure_ascii=False)}
-        return stream_artifact_file(path)
-    except FileNotFoundError:
-        return {"size": 0, "sha256": "deleted"}
-    except OSError as exc:
-        return {"size": 0, "sha256": f"unreadable ({type(exc).__name__})"}
+        return work_domain.measure(path) if work else stream_artifact_file(path)
+    except (OSError, ValueError) as exc:
+        gone = isinstance(exc, FileNotFoundError) and not getattr(exc, "process_not_started", False)
+        return {"size": 0, "sha256": "deleted" if gone else f"unreadable ({type(exc).__name__})"}
 
 
 def _same_file_kind(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
@@ -87,7 +93,12 @@ def _retained_copy(root: Any, task_id: str, item: Dict[str, Any], registration: 
             present = target.is_file() and not target.is_symlink() and bool(stream_artifact_file(target, expected=identity))
         except OSError:
             present = False
-        if not present:
+        if not present and work_domain.is_work(item["path"]):  # its bytes received from the work, then verified
+            with tempfile.TemporaryFile() as spool:
+                work_domain.measure(item["path"], spool)
+                spool.flush()
+                copy_artifact_file(spool, target, expected=identity, mode=0o444)
+        elif not present:
             copy_artifact_file(pathlib.Path(item["path"]), target, expected=identity, mode=0o444)
     except Exception as exc:  # changed while it was copied, a full disk, a closed publication: a stated gap
         return {"retained_gap": f"its copy could not be retained ({type(exc).__name__}: {exc})"}
@@ -211,7 +222,7 @@ def produced_material(ctx: Any) -> Dict[str, Any]:
             except Exception as exc:
                 out["issues"].append(f"this task's own commits could not be read ({type(exc).__name__}: {exc})")
             if candidates:
-                out["workspace"] = str(pathlib.Path(str(repo)).resolve(strict=False))
+                out["workspace"] = str(work_domain.settle(str(repo)))
                 from ouroboros.review_words import ReviewWords, section_budget
 
                 try:

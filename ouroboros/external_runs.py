@@ -159,20 +159,24 @@ def observe_task_runs(root: Any, task_id: str, *, reason: str = "budget_resume_u
         except Exception as exc:
             log.warning("Budget pause cannot reach the harness gateway to request stops: %s", exc)
             gateway = None
+    from ouroboros.execution_domain import EngineClients
+
+    engines = EngineClients(lambda: gateway)  # each run's stop goes to the engine it runs on (``execution_domain``)
     try:
         from ouroboros import delegate_custody as custody
 
         for run in stopping:
             row = _row(run, stop_policy="request_stop", review_owned=False)
             run_id = row["run_id"]
-            if gateway is None:
+            engine = engines.reach(run)
+            if engine is None:
                 row.update(state=EXTERNAL_STOP_UNKNOWN, stop_outcome=(
                     "requested_unverified_gateway_unavailable" if run_id in issued
                     else "not_issued_gateway_unavailable"))
             else:
                 try:
-                    result = (_reread_requested_stop(root, gateway, run) if run_id in issued
-                              else custody.cancel_and_verify(pathlib.Path(root), gateway, run, reason))
+                    result = (_reread_requested_stop(root, engine, run) if run_id in issued
+                              else custody.cancel_and_verify(pathlib.Path(root), engine, run, reason))
                     outcome = str(result.get("outcome") or "")
                     row.update(stop_outcome=outcome, detail=str(result.get("detail") or ""))
                     if outcome == custody.CANCEL_CONFIRMED:
@@ -186,6 +190,7 @@ def observe_task_runs(root: Any, task_id: str, *, reason: str = "budget_resume_u
                                detail=str(exc)[:300])
             rows.append(row)
     finally:
+        engines.drop()
         if gateway is not None:
             try:
                 gateway.close()
@@ -209,7 +214,7 @@ def _reread_requested_stop(root: Any, gateway: Any, run: Any) -> Dict[str, Any]:
     try:
         detail = gateway.get_run(run.run_id)
     except ClaudexorUnavailable as exc:
-        if custody.daemon_says_absent(exc, run=run):
+        if custody.daemon_says_absent(exc, gateway=gateway, run=run):
             custody.close_absent_run(pathlib.Path(root), gateway, run, "get_run_absent", absence=exc)
             return {"outcome": custody.CANCEL_CONFIRMED, "detail": "absent"}
         return {"outcome": "unverified", "detail": f"{exc.code}: {exc}"}

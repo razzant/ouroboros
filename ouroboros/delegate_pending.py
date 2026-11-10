@@ -77,6 +77,9 @@ def pending_invocations(
                 **{key: copy.deepcopy(row[key]) for key in ("execution_mode", "effective_access", "thread_id", "authority_ceiling", "promotion") if key in row},
                 # Copies: the source rows are the caller's snapshot.
                 "resource_ref": copy.deepcopy(row.get("resource_ref")) if isinstance(row.get("resource_ref"), dict) else {},
+                # The engine bound before the POST (``execution_domain``): a replay goes there or nowhere.
+                **({"engine_ref": copy.deepcopy(row["engine_ref"])} if isinstance(row.get("engine_ref"), dict)
+                   and row["engine_ref"] else {}),
                 "selected_subagent_id": str(row.get("selected_subagent_id") or ""),
                 "config_fingerprint": str(row.get("config_fingerprint") or ""),
                 "work_order_fingerprint": str(row.get("work_order_fingerprint") or ""),

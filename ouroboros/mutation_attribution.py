@@ -22,12 +22,11 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import pathlib
 import stat
-import subprocess
 from typing import Any, Iterable, Mapping, Sequence
 
+from ouroboros import work_domain
 from ouroboros.task_results import STATUS_RUNNING, load_task_result, write_task_result
 from ouroboros.utils import safe_relpath, utc_now_iso
 
@@ -76,7 +75,7 @@ def _canonical_root(value: Any) -> pathlib.Path:
     text = str(value or "").strip()
     if not text:
         raise ValueError("mutation surface root is required")
-    return pathlib.Path(text).expanduser().resolve(strict=False)
+    return work_domain.settle(pathlib.Path(text).expanduser())  # a work folder keeps its spelling; any other resolves
 
 
 def _stable_hash(payload: Any) -> str:
@@ -92,7 +91,7 @@ def _stable_hash(payload: Any) -> str:
 def _run_git(root: pathlib.Path, *args: str, timeout: float | None = None) -> str:
     from ouroboros.git_observation import host_git_env
 
-    proc = subprocess.run(
+    proc = work_domain.run(  # a work folder's Git, with its config and filters, runs as the work domain
         ["git", *args],
         cwd=str(root),
         capture_output=True,
@@ -181,37 +180,42 @@ def _git_committed_paths(root: pathlib.Path, base_commit: str, current_head: str
 
 
 def _path_fingerprint(path: pathlib.Path) -> dict[str, Any]:
-    """Fingerprint one exact known path without walking any parent directory."""
+    """Fingerprint one exact known path without walking any parent directory. A work path's metadata and bytes
+    come through the confined intake, never a service open of its pathname."""
     try:
-        stat = path.lstat()
+        info = work_domain.lstat(path)
     except FileNotFoundError:
         return {"kind": "missing"}
-    if path.is_symlink():
+    if stat.S_ISLNK(info.st_mode):
         return {
             "kind": "symlink",
-            "target": os.readlink(path),
+            "target": work_domain.readlink(path),
         }
-    if path.is_file():
-        if int(stat.st_size) > _FINGERPRINT_MAX_BYTES:
+    if stat.S_ISREG(info.st_mode):
+        if int(info.st_size) > _FINGERPRINT_MAX_BYTES:
             return {
                 "kind": "file",
-                "size": int(stat.st_size),
+                "size": int(info.st_size),
                 "sha256_skipped": "over_size_cap",
             }
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
+        if work_domain.is_work(path):
+            sha256 = work_domain.measure(path)["sha256"]
+        else:
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            sha256 = digest.hexdigest()
         return {
             "kind": "file",
-            "size": int(stat.st_size),
-            "sha256": digest.hexdigest(),
+            "size": int(info.st_size),
+            "sha256": sha256,
         }
-    if path.is_dir():
+    if stat.S_ISDIR(info.st_mode):
         # Deliberately do not recurse.  user_files may be the owner's home and
         # the contract permits only declared targets / existing artifact refs.
         return {"kind": "directory"}
-    return {"kind": "other", "size": int(stat.st_size)}
+    return {"kind": "other", "size": int(info.st_size)}
 
 
 def _git_path_fingerprints(root: pathlib.Path, paths: Iterable[str]) -> dict[str, dict[str, Any]]:
@@ -229,7 +233,7 @@ def _git_path_fingerprints(root: pathlib.Path, paths: Iterable[str]) -> dict[str
     for row in files.values():
         row["git_mode"] = None
     try:
-        config = subprocess.run(
+        config = work_domain.run(
             ["git", "config", "--type=bool", "--null", "--get-regexp", r"^core\.(filemode|symlinks)$"],
             cwd=str(root), capture_output=True, text=True, check=False,
         )
@@ -256,7 +260,7 @@ def _git_path_fingerprints(root: pathlib.Path, paths: Iterable[str]) -> dict[str
             elif options.get("core.filemode", "true") == "false":
                 row["git_mode"] = indexed if indexed in {"100644", "100755"} else "100644"
             else:
-                row["git_mode"] = "100755" if (root / path).lstat().st_mode & stat.S_IXUSR else "100644"
+                row["git_mode"] = "100755" if work_domain.lstat(root / path).st_mode & stat.S_IXUSR else "100644"
     except (OSError, RuntimeError, ValueError):
         logging.getLogger(__name__).debug("Git fingerprint mode unavailable", exc_info=True)
     return fingerprints
@@ -476,9 +480,9 @@ def capture_root_baseline(
     surfaces = [] if conversation else [{"surface_type": "system_repo", "host_root": str(system_repo)}]
     folder = _canonical_root(workspace) if str(workspace or "").strip() else None
     if folder is not None and folder != _canonical_root(system_repo):
-        try:
-            own_tree = _canonical_root(_run_git(folder, "rev-parse", "--show-toplevel",
-                                                timeout=_GIT_PROBE_TIMEOUT_SEC).strip()) == folder
+        try:  # at its own top level cdup is empty: Git in a container prints its own spelling of any address
+            own_tree = _run_git(folder, "rev-parse", "--is-inside-work-tree", "--show-cdup",
+                                timeout=_GIT_PROBE_TIMEOUT_SEC).strip() == "true"
         except Exception:
             own_tree = False
         evidence = (load_task_result(results_drive_root, task_id) or {}).get("mutation_evidence") if own_tree else None
@@ -1104,7 +1108,7 @@ def try_reanchor_stale_baseline(
         current_head = _run_git(root, "rev-parse", "HEAD").strip()
         if not base_commit or base_commit == current_head:
             return False
-        ancestor_probe = subprocess.run(
+        ancestor_probe = work_domain.run(
             ["git", "merge-base", "--is-ancestor", base_commit, current_head],
             cwd=str(root),
             capture_output=True,

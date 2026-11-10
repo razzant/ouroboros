@@ -1,6 +1,26 @@
 /**
+ * The usage ledger row's physical context of a task's latest sent Main attempt (``physical_attempt_context.ContextAttemptFact``).
+ * ``dispatched`` is the host's commitment, not provider acceptance; ``released`` retracts that exact attempt.
+ * @typedef {Object} ContextAttemptFact
+ * @property {string} attempt_id
+ * @property {'dispatched'|'settled'|'unresolved'|'released'} ledger_state
+ * @property {string} round_id
+ * @property {''|'max'|'low'|'nano'} preferred_at_send  // the task plan's owner mode when it sent
+ * @property {'max'|'low'|'nano'} applied  // the mode the sent candidate was rendered in
+ * @property {string} profile  // owner_max | owner_low | owner_nano | task_local_low | task_local_nano
+ * @property {''|'memory'|'route'|'window'|'after_start'} cause  // why applied is lower than preferred_at_send
+ * @property {string} observed_at
+ * @property {number} task_attempt
+ * @property {string} llm_call_id
+ * @property {string} execution_id
+ * @property {number} call_attempt
+ * @property {ContextAttemptObservation=} previous  // the next-newest attempt not proven unsent while this one is dispatched or released; never a chain
+ */
+/** @typedef {Omit<ContextAttemptFact, 'previous'>} ContextAttemptObservation */
+/**
  * @typedef {Object} ActiveDirectTurn
  * @property {Object=} model_activity  // exact-call transport observation; no request/account content
+ * @property {ContextAttemptFact=} context_attempt  // its task attempt's latest sent attempt, kept past the call
  * @property {Object.<string,Object>=} model_waits
  * @property {number=} task_attempt
  * @property {string=} turn_phase  // direct turn: the last start fact it passed (accepted … dispatched); display only
@@ -44,6 +64,7 @@
  * @property {boolean=} required_question_unavailable  // a recorded owner-question wait whose detail could not be read: possibly blocked, never "no question"
  * @property {Object.<string,{requires_owner_action?:boolean,revision:number,task_attempt:number}>=} model_waits Current owner facts; missing action evidence is unavailable.
  * @property {Object=} model_activity  // exact-call transport observation; never quota wait or task liveness
+ * @property {ContextAttemptFact=} context_attempt  // its task attempt's latest sent attempt, kept past the call
  * @property {number=} task_attempt
  * @property {string=} turn_phase  // direct turn: the last start fact it passed (accepted … dispatched); display only
  * @property {string} activity_id

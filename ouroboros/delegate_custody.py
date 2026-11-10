@@ -147,6 +147,8 @@ class RunCustody:
     # gets a fresh id. ``idempotency_key`` above only finds pending work.
     invocation_id: str = ""
     daemon_store_id: str = ""  # the engine store that admitted the run; "" = unbound (older engine or receipt)
+    # The work-engine locator is bound before POST; it is not admission-store proof.
+    engine_ref: Dict[str, Any] = field(default_factory=dict)
     # Configured-actor binding. Empty on historical/root-legacy delegate starts.
     selected_subagent_id: str = ""
     config_fingerprint: str = ""
@@ -312,7 +314,7 @@ def emit(drive_root: Any, kind: str, payload: Dict[str, Any], *, propagate_conte
             log.debug("Start history unavailable", exc_info=True)
     return written
 
-def daemon_says_absent(exc: Any, *, run: Optional[RunCustody] = None) -> bool:
+def daemon_says_absent(exc: Any, *, gateway: Any = None, run: Optional[RunCustody] = None) -> bool:
     """A run's 404 proves absence in its owning store; project cleanup uses raw HTTP.
 
     A run bound to a store is absent only when the 404 itself names that store (the
@@ -322,11 +324,14 @@ def daemon_says_absent(exc: Any, *, run: Optional[RunCustody] = None) -> bool:
     it. Either way that store keeps no record of the run; no executor, effect or new start is
     proven or licensed by it.
     """
-    return int(getattr(exc, "status_code", 0) or 0) == 404 and (run is None or _absence_provable(run, exc))
+    return int(getattr(exc, "status_code", 0) or 0) == 404 and (run is None or _absence_provable(run, exc, gateway))
 
 
-def _absence_provable(run: RunCustody, absence: Any) -> bool:
-    return not run.terminal_source and (not run.daemon_store_id or run.daemon_store_id == _answering_store(absence))
+def _absence_provable(run: RunCustody, absence: Any, gateway: Any = None) -> bool:
+    from ouroboros.execution_domain import same_engine
+
+    return not run.terminal_source and same_engine(gateway, run) and (
+        not run.daemon_store_id or run.daemon_store_id == _answering_store(absence))
 
 
 def _answering_store(exc: Any) -> str:
@@ -345,8 +350,10 @@ def admitted_store_id(receipt: Any) -> str:
 
 def bind_daemon_store(drive_root: Any, gateway: Any, entry: RunCustody) -> None:
     """Bind a row its admission left unbound after a successful exact read; never from a 404 or PID."""
+    from ouroboros.execution_domain import same_engine
+
     identity = getattr(gateway, "store_identity", "")
-    if isinstance(identity, str) and identity and not entry.daemon_store_id:
+    if isinstance(identity, str) and identity and not entry.daemon_store_id and same_engine(gateway, entry):
         if emit(drive_root, STORE_BOUND, {"run_id": entry.run_id, "task_id": entry.task_id,
                 "invocation_id": entry.invocation_id, "daemon_store_id": identity}):
             entry.daemon_store_id = identity
@@ -595,6 +602,7 @@ def _apply(state: Dict[str, RunCustody], row: Dict[str, Any]) -> None:
         entry = RunCustody(
             run_id=run_id,
             daemon_store_id=str(row.get("daemon_store_id") or ""),
+            engine_ref=copy.deepcopy(row["engine_ref"]) if isinstance(row.get("engine_ref"), dict) else {},
             project_owned=bool(row.get("project_owned")),
             project_persistent=bool(row.get("project_persistent")),
             delegated=row.get("delegated") is True,
@@ -1035,6 +1043,7 @@ def record_started(drive_root: Any, custody: RunCustody,
     landed = emit(drive_root, STARTED, {
         "run_id": custody.run_id,
         "daemon_store_id": custody.daemon_store_id,
+        **({"engine_ref": copy.deepcopy(custody.engine_ref)} if custody.engine_ref else {}),
         "project_owned": custody.project_owned, "project_persistent": custody.project_persistent,
         "resource_ref": custody.resource_ref or {},
         **{key: copy.deepcopy(getattr(custody, key)) for key in _STARTED_MAPPING_FIELDS},
@@ -1147,6 +1156,9 @@ def _retire_project_locked(drive_root: Any, gateway: Any, custody: RunCustody, *
         log.warning("Retirement deferred: replay failed for %s",
                     custody.run_id, exc_info=True)
         return
+    from ouroboros.execution_domain import same_engine
+    if not same_engine(gateway, custody):
+        return  # the registration lives on the run's own engine: that engine's pass retires it
     try:
         gateway.remove_project(custody.project_id)
     except Exception as exc:
@@ -1194,7 +1206,7 @@ def close_absent_run(drive_root: Any, gateway: Any, custody: RunCustody, reason:
         if current.settled:
             custody.settled = True
             return
-        if not _absence_provable(current, absence):
+        if not _absence_provable(current, absence, gateway):
             raise ClaudexorUnavailable("daemon_store_identity_unproven", "Run absence is unproven in its owning store")
         custody.settled = emit(drive_root, CLOSED_ABSENT, {
             "run_id": custody.run_id, "task_id": custody.task_id, "route": custody.route_id,
@@ -1385,7 +1397,7 @@ def cancel_and_verify(drive_root: Any, gateway: Any, custody: RunCustody, reason
     try:
         detail = gateway.get_run(custody.run_id)
     except ClaudexorUnavailable as exc:
-        if daemon_says_absent(exc, run=custody):
+        if daemon_says_absent(exc, gateway=gateway, run=custody):
             close_absent_run(drive_root, gateway, custody, "get_run_absent", absence=exc)
             return _cancel_result(drive_root, custody, CANCEL_CONFIRMED, accepted=accepted,
                                   control_status=control_status, state="absent")

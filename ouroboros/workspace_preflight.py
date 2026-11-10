@@ -19,6 +19,7 @@ import tempfile
 import uuid
 from typing import Any, Dict, Iterable, List, NamedTuple, Tuple
 
+from ouroboros import work_domain
 from ouroboros.platform_layer import (
     IS_LINUX, IS_MACOS, IS_WINDOWS, bootstrap_process_path, node_runtime_health, resolve_bundled_node,
 )
@@ -292,7 +293,7 @@ def _session_scratch(owner: pathlib.Path, execution: pathlib.Path) -> pathlib.Pa
     serialized using the existing file lock; no process owns an in-memory cleanup obligation.
     """
     from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
-    from ouroboros.session_scratch import recorded_scratch
+    from ouroboros.session_scratch import recorded_scratch, work_session_scratch
     from ouroboros.test_environment import git_ancestor, session_scratch_parent
     from ouroboros.utils import atomic_write_json
 
@@ -311,6 +312,11 @@ def _session_scratch(owner: pathlib.Path, execution: pathlib.Path) -> pathlib.Pa
                 if git_ancestor(path) is not None or path == execution or path in execution.parents or execution in path.parents:
                     raise ValueError(f"{path} overlaps a Git working tree or the execution root")
                 return path  # never recreate a path between identity validation and granting it
+        if work_domain.managed():  # the work engine's session writes it: the work domain's own folder
+            path = work_session_scratch(execution)
+            seen = work_domain.lstat(path)
+            atomic_write_json(record, {"schema_version": 1, "path": str(path), "identity": [seen.st_dev, seen.st_ino]})
+            return path
         parent = session_scratch_parent().resolve()
         if git_ancestor(parent) is not None:
             raise ValueError(f"{parent} is inside a Git working tree")
@@ -570,14 +576,16 @@ def session_service_directories(gateway: Any, route_id: str, *, access: str, mod
         return ServiceDirectories(limitation="auxiliary_roots_unsupported: this route's engine negotiates no "
                                              "writable directory outside the copy")
     try:
+        from ouroboros.session_scratch import work_download_caches
         from ouroboros.task_results import validate_task_id
 
-        execution = pathlib.Path(execution_root).resolve()
+        execution = work_domain.settle(execution_root)
         task_id = validate_task_id(task_id)
         owner = (_owned_directory(holder, (SESSION_SCRATCH_DIRNAME, key), execution) if holder is not None
                  else _owned_directory(drive_root, ("task_drives", task_id, SESSION_SCRATCH_DIRNAME, key), execution))
-        caches = [_owned_directory(data_root, (PACKAGE_DOWNLOADS_DIRNAME, name), execution)
-                  for name, _variable in (_CACHE_VARIABLES if granted else ())]
+        caches = ((work_download_caches(execution) if granted else []) if work_domain.managed() else
+                  [_owned_directory(data_root, (PACKAGE_DOWNLOADS_DIRNAME, name), execution)
+                   for name, _variable in (_CACHE_VARIABLES if granted else ())])
         scratch = _session_scratch(owner, execution)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return ServiceDirectories(limitation=f"{'service_directories_unavailable' if granted else SCRATCH_UNAVAILABLE}: "
@@ -749,9 +757,9 @@ def session_service_facts(service: ServiceDirectories, data_root: Any) -> str:
 
 def git_head_basis(root: pathlib.Path) -> Tuple[str, str]:
     """A readable commit, positively unborn branch, or unknown; a failed probe is never unborn."""
-    def probe(*args):
-        return subprocess.run(["git", *args], cwd=str(root), capture_output=True,
-                              text=True, timeout=5, check=False)
+    def probe(*args):  # a work repository's Git and files are the work domain's
+        return work_domain.run(["git", *args], cwd=str(root), capture_output=True,
+                               text=True, timeout=5, check=False)
 
     try:
         head = probe("rev-parse", "--verify", "HEAD^{commit}")
@@ -765,7 +773,7 @@ def git_head_basis(root: pathlib.Path) -> Tuple[str, str]:
         if missing.returncode == 1 and history.returncode == 0 and history.stdout.strip():
             log_path = root / history.stdout.strip()
             try:
-                size = log_path.stat().st_size
+                size = (work_domain.lstat(log_path) if work_domain.is_work(log_path) else log_path.stat()).st_size
             except FileNotFoundError:
                 size = 0
             if size == 0:
@@ -963,7 +971,7 @@ def _apply_node_exec_probe(tools: Dict[str, Dict[str, Any]]) -> None:
 def _git_stdout(root: pathlib.Path, cmd: List[str], *, timeout: int) -> str:
     from ouroboros.git_observation import host_git_env
     try:
-        result = subprocess.run(
+        result = work_domain.run(
             cmd,
             cwd=str(root),
             capture_output=True,

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import pathlib
-import subprocess
+import stat
 from typing import Dict, List, Optional
 
 from ouroboros.tools.registry import ToolContext
@@ -35,12 +35,19 @@ _CONTENT_OMITTED_PREFIX = "<<CONTENT_OMITTED"
 
 def _holds_exactly(target: pathlib.Path, content: str) -> bool:
     """The regular file already holds exactly the bytes ``write_text`` would leave (UTF-8, byte-exact). A symlink
-    (the atomic write would replace it) or anything unreadable is not, so the ordinary write decides."""
+    (the atomic write would replace it), a link on a work path's way, or anything unreadable is not, so the ordinary
+    write decides. A work file is compared through the confined intake, never a service open of its pathname."""
+    from ouroboros import work_domain
+
     data = content.encode("utf-8")
     try:
+        if work_domain.is_work(target):
+            info = work_domain.lstat(target)
+            return (stat.S_ISREG(info.st_mode) and info.st_size == len(data)
+                    and work_domain.read_bytes(target, limit=len(data) + 1) == data)
         return (not target.is_symlink() and target.is_file() and target.stat().st_size == len(data)
                 and target.read_bytes() == data)
-    except OSError:
+    except (OSError, ValueError):
         return False
 
 
@@ -96,6 +103,26 @@ def _with_path_facts(ctx: ToolContext, tool_name: str, text: str, base: pathlib.
                                                                         **unchanged_meta}))
 
 
+def _land_repo_bytes(target: pathlib.Path, content: str, *, append: bool = False) -> None:
+    """Land repo file bytes at ``target``.
+
+    A work-domain path is written AS THE WORK DOMAIN (``work_domain.write_text``): the pinned container
+    resolves and opens it, so an employee's ancestor swap reaches only the work domain and never a service root
+    the mapping does not carry, and the parent folder is made there too. The service's own paths (its checkout,
+    its data) keep the exact atomic overwrite and non-atomic append they always had."""
+    from ouroboros import work_domain
+
+    if work_domain.is_work(target):
+        work_domain.write_text(target, content, append=append)
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if append:
+        with target.open("a", encoding="utf-8", newline="") as fh:
+            fh.write(content)  # append is intentionally NOT atomized
+    else:
+        _git().write_text(target, content)
+
+
 def _check_shrink_guard(
     binding: ResolvedResourceBinding,
     new_content: str,
@@ -111,18 +138,20 @@ def _check_shrink_guard(
 
     if force or mode_has_unrestricted_agency(_git()._current_runtime_mode()):
         return None
+    from ouroboros import work_domain  # a work file is read, and its Git run, as the work domain
+
     try:
         target = binding.target_path
         file_path = _git()._binding_repo_rel(binding)
-        if not target.exists():
+        if not work_domain.exists(target):
             return None
-        result = subprocess.run(
+        result = work_domain.run(
             ["git", "ls-files", "--error-unmatch", _git().safe_relpath(file_path)],
             cwd=str(binding.base_path), capture_output=True, text=True,
         )
         if result.returncode != 0:
             return None
-        old_content = target.read_text(encoding="utf-8")
+        old_content = work_domain.read_text(target)
         old_len = len(old_content)
         new_len = len(new_content)
         if old_len > 0 and new_len < old_len * 0.7:
@@ -257,10 +286,8 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
                 binding_items[0].base_path, written_paths, unchanged)
         try:
             target = binding.target_path
-            target.parent.mkdir(parents=True, exist_ok=True)
             if mode == "append":
-                with target.open("a", encoding="utf-8", newline="") as fh:
-                    fh.write(e["content"])  # append is intentionally NOT atomized
+                _land_repo_bytes(target, e["content"], append=True)
                 written.append(f"{display_root}:{rel_path} (+{len(e['content'])} chars appended)")
                 written_paths.append(rel_path)
                 note = capture_known_workspace_outputs(
@@ -273,12 +300,14 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
                 unchanged.append(rel_path)
                 continue
             old_content: Optional[str] = None
-            if target.exists():
+            from ouroboros import work_domain  # the previous bytes of a work file: confined intake
+
+            if work_domain.exists(target):
                 try:
-                    old_content = target.read_text(encoding="utf-8")
+                    old_content = work_domain.read_text(target)
                 except Exception:
                     old_content = None
-            _git().write_text(target, e["content"])
+            _land_repo_bytes(target, e["content"])
             written.append(f"{display_root}:{rel_path} ({len(e['content'])} chars)")
             written_paths.append(rel_path)
             note = capture_known_workspace_outputs(
@@ -452,11 +481,13 @@ def _str_replace_editor(
             action="edit",
         )
 
-    if not target.exists():
+    from ouroboros import work_domain  # a work file is read through the confined intake, never a service open
+
+    if not work_domain.exists(target):
         return publish_no_effect(ctx, f"⚠️ EDIT_TEXT_ERROR: file not found: {path}", tool_name="edit_text")
 
     try:
-        content = target.read_text(encoding="utf-8")
+        content = work_domain.read_text(target)
     except Exception as e:
         return publish_no_effect(ctx, f"⚠️ EDIT_TEXT_ERROR: cannot read {path}: {e}", tool_name="edit_text")
 
@@ -509,10 +540,10 @@ def _str_replace_editor(
         if _cas:
             return _cas
     try:
-        _git().write_text(target, new_content)
+        _land_repo_bytes(target, new_content)
     except Exception as e:
         try:
-            changed_after_error = target.read_text(encoding="utf-8") != content
+            changed_after_error = work_domain.read_text(target) != content
         except OSError:
             changed_after_error = True
         if changed_after_error:

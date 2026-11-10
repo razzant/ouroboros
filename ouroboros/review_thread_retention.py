@@ -741,6 +741,9 @@ class _Pass:
                  census: Callable[[], Optional[set]], stop: Callable[[], bool]) -> None:
         self.root, self.activated_at, self._engine, self.live, self.census = root, activated_at, engine, live, census
         self._opened, self._owned, self._supported = engine is not None, False, None
+        from ouroboros.execution_domain import EngineClients
+        self.work = EngineClients(self.engine)  # each engine-held object through its own engine (``execution_domain``)
+        self._work_supported: Dict[Any, str] = {}
         self.stop, self.stopped = stop, False
         self.report: Dict[str, Any] = {"tasks": 0, "retained": 0, "accepted": 0, "refused": 0, "abandoned": 0,
                                        "unknown": 0, "holds": {}, "errors": [], "observed": []}
@@ -760,8 +763,20 @@ class _Pass:
                 self._engine = None
         return self._engine
 
-    def usable(self) -> str:
-        """Why this pass cannot ask the engine anything about thread retirement (asked once), or ``""``."""
+    def usable(self, engine: Any = None) -> str:
+        """Why this pass cannot ask an engine anything about thread retirement, or ``""``: the owned engine (asked once)
+        by default, else ``engine``, the work engine holding an object (once per engine; ``execution_domain``)."""
+        if engine is not None and engine is not self._engine:
+            from ouroboros.execution_domain import engine_key
+
+            key = engine_key(engine)
+            if key not in self._work_supported or key is None:  # an unreachable stand-in is asked each time
+                try:
+                    verdict = "" if engine.thread_retirement_supported() else "engine_export_unsupported"
+                except Exception:
+                    verdict = "engine_unavailable"
+                self._work_supported[key] = verdict
+            return self._work_supported[key]
         if self._supported is None:
             engine = self.engine()
             try:
@@ -777,6 +792,7 @@ class _Pass:
                 self._engine.close()
             except Exception:
                 log.debug("engine close failed", exc_info=True)
+        self.work.drop()
 
     def task(self, task_id: str) -> str:
         """``WAIT`` keeps the task for a later pass; ``DONE`` lets it go until its next terminal write."""
@@ -792,8 +808,10 @@ class _Pass:
         fresh = [thread for thread in sorted(threads) if _export_owed(releases.get(thread))]
         if not (bound or fresh):
             return DONE
-        if self.usable():  # nothing can be read, sent or reconciled now: the task is asked again later
-            self.hold(self.usable())
+        from ouroboros.execution_domain import current
+
+        if current() is None and self.usable():  # unmanaged: the owned engine answers for every release and thread
+            self.hold(self.usable())  # nothing can be read, sent or reconciled now: the task is asked again later
             return WAIT
         kept = is_kept(self.root, task_id)
         why, runs = ("owner_keep", {}) if kept else tree_hold(self.root, task_id, document, live=self.live,
@@ -821,7 +839,7 @@ class _Pass:
         (``delegate_documents.release_owed_imports``: its own whole-work hold, this pass's engine, stop and report)."""
         from ouroboros.delegate_documents import release_owed_imports
 
-        return release_owed_imports(self.root, task_id, engine=self.engine, live=self.live, census=self.census,
+        return release_owed_imports(self.root, task_id, engine=self.work.for_store, live=self.live, census=self.census,
                                     hold=self.hold, stop=self.stop, observed=self.report["observed"].append)
 
     def between(self, done: int) -> bool:
@@ -833,7 +851,11 @@ class _Pass:
         return False
 
     def reconcile(self, task_id: str, record: Dict[str, Any], *, may_send: bool) -> Optional[str]:
-        state = drive_release(self.root, task_id, record, self.engine(), may_send=may_send)
+        engine = self.work.for_store(record.get("store_id"))  # the engine whose store holds the release
+        if self.usable(engine):  # that engine cannot be asked now: the release stays bound
+            self.hold(self.usable(engine))
+            return WAIT
+        state = drive_release(self.root, task_id, record, engine, may_send=may_send)
         key = "unknown" if state == "bound" else state
         self.report[key] = self.report.get(key, 0) + 1
         return WAIT if state == "bound" else None
@@ -879,7 +901,10 @@ class _Pass:
         if not runs or not all(_after(entry.started_ts, self.activated_at) for entry in runs):
             self.hold("predates_activation" if runs else "no_host_runs")  # never this code's to release
             return None
-        engine = self.engine()
+        engine = self.work.reach(runs[0])  # the thread's own engine, which its host runs were started on
+        if self.usable(engine):  # that engine cannot be asked now: the thread waits for a later pass
+            self.hold(self.usable(engine))
+            return WAIT
         store_id = str(getattr(engine, "store_identity", "") or "")
         # Only the engine's inventory answers an inventory hold: the same export is not tried again as it was. A hold
         # of this host (an unverified item, the tree at the release boundary) reuses the verified items it kept.

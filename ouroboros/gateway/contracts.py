@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 from ouroboros.cost_projection import CostPresentation
+from ouroboros.physical_attempt_context import ContextAttemptFact  # noqa: F401 -- public re-export
 from ouroboros.delegate_custody_usage import CostCustody
 from ouroboros.gateway.reference_contracts import ChatReferenceFields, SharedRowFrame
 from ouroboros.storage import (  # noqa: F401 -- public re-exports
@@ -708,6 +709,7 @@ class ActiveDirectTurn(TypedDict):
     started_at: float
     model_waits: NotRequired[Dict[str, Any]]
     model_activity: NotRequired[Dict[str, Any]]  # content-free observation bound to the active Main call
+    context_attempt: NotRequired[ContextAttemptFact]  # latest observation; released retracts its send, previous survives
     task_attempt: NotRequired[int]
     turn_phase: NotRequired[str]  # the last start fact its execution passed (TURN_PHASES); display only
     executor: NotRequired[str]  # where the turn runs: worker, inline_call or inline_degraded (task_carrier.EXECUTORS)
@@ -859,13 +861,6 @@ class SettingsPolicyAxis(TypedDict, total=False):
     restart_required: bool
     pending: bool
     applies: Literal["restart", "next_task"]
-
-
-class SettingsPolicyState(TypedDict):
-    access: SettingsPolicyAxis
-    supervisor: SettingsPolicyAxis
-    review: SettingsPolicyAxis
-    running_task_snapshot: bool
 
 
 class SettingsMeta(SettingsNetworkMeta, total=False):
@@ -1481,7 +1476,7 @@ class OnboardingPresetFailureResponse(TypedDict):
 
 # Human/test-visible contract index; routers own executable Route objects.
 from ouroboros.gateway.endpoint_index import HTTP_ENDPOINTS
-from ouroboros.gateway.client_contracts import FileBrowserListResponse, ServedUiState  # noqa: E402,F401
+from ouroboros.gateway.client_contracts import FileBrowserListResponse, ServedUiState, SettingsPolicyState  # noqa: E402,F401
 
 WS_MESSAGE_TYPES: tuple[str, ...] = (
     "conversation_finished", "chat", "command",

@@ -5019,11 +5019,13 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 :is(.chat-context-mode, .chat-subagents-mode) .chat-seg[aria-checked="true"] {
     color: var(--mode-ink);
 }
-.chat-context-mode[data-context-mode="nano"] .chat-context-arc[data-arc="nano"],
-.chat-context-mode[data-context-mode="low"] .chat-context-arc[data-arc="low"],
-.chat-context-mode[data-context-mode="max"] .chat-context-arc[data-arc="max"] {
-    stroke: var(--mode-ink);
-}
+.chat-context-arc[data-lit="true"] { stroke: var(--accent-light); }
+.chat-context-arc[data-lit="true"][data-arc="low"] { stroke: var(--status-neutral-fg); }
+.chat-context-arc[data-lit="true"][data-arc="nano"] { stroke: var(--project); }
+/* The saved mode's dot (Effort's primary dot) stands only while the observation disagrees with it; an observation
+   this page has not made reads as a dash in secondary ink, like a value that has not arrived. */
+.chat-context-mode:not([data-context-differs="true"]) .chat-context-choice { display: none; }
+.chat-context-mode[data-context-actual="unknown"] .chat-capsule-value { color: var(--text-secondary); }
 .chat-context-strip {
     position: relative;
     flex: 0 0 auto;
@@ -6678,6 +6680,11 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
 .skills-official-toggle { display: inline-flex; align-items: center; gap: var(--space-2); color: var(--text-secondary); font-size: var(--type-body); cursor: pointer; }
 .skills-list-status:empty { display: none; }
 .skills-list-status { margin-bottom: var(--space-2); }
+/* The organization's required extensions that are not running: one tray above the list, a missing one included. */
+.skills-org-requirements { margin-bottom: var(--space-3); padding: var(--space-3) var(--space-4); border-radius: var(--radius-inner); background: var(--surface-tray); }
+.skills-org-requirements-lead { margin: 0; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
+.skills-org-requirements-list { margin: var(--space-1) 0 0; padding-left: var(--space-5); color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); overflow-wrap: anywhere; }
+.skills-org-requirements-note { margin: var(--space-1) 0 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .skills-empty { margin: var(--space-3) 0; color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); }
 .skills-empty p { margin: 0 0 var(--space-2); }
 @container skillschrome (max-width: 600px) {

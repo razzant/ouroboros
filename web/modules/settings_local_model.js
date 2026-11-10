@@ -45,6 +45,17 @@ function setProgressBar(fraction) {
     bar.setAttribute('aria-valuenow', Math.round(fraction * 100));
 }
 
+/** A deployment checker answering locally binds this server's identity: those fields read only, its note shown
+ *  (the Start endpoint refuses any other launch, `deployment_policy.local_launch_refusal`). */
+export function applyLocalModelPolicy(root, fixed) {
+    for (const id of ['s-local-source', 's-local-filename', 's-local-port', 's-local-chat-format']) {
+        const input = root.querySelector(`#${id}`);
+        if (input) input.readOnly = fixed;
+    }
+    const note = root.querySelector('[data-local-model-fixed]');
+    if (note) note.hidden = !fixed;
+}
+
 export function bindLocalModelControls({ state, onApplication } = {}) {
     let destroyed = false;
     let stopPending = false;

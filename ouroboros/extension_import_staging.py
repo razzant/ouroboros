@@ -3,7 +3,11 @@
 Completed trees are addressed by reviewed content and runtime/dependency
 identity. Processes share the bytes, keeping PID references until unload;
 reclamation requires both an obsolete identity and dead owners. Publication,
-reference acquisition and sweeping use the same cross-process lock.
+reference acquisition and sweeping use the same cross-process lock. Under a
+deployment's execution domain a tree is imported only once its files hash to
+the trusted digest (``deployment_extensions.staged_verifier``): a cached tree
+that does not is replaced by a fresh copy, which must pass too. Such trees are
+their own identity, never one a generation without that check left behind.
 """
 
 from __future__ import annotations
@@ -60,16 +64,28 @@ def _stage_extension_import_tree(
     state_dir: pathlib.Path,
     entry_path: pathlib.Path,
 ) -> tuple[pathlib.Path, pathlib.Path]:
-    """Acquire a complete immutable import tree, copying only on a cache miss."""
+    """Acquire a complete immutable import tree, copying only on a cache miss; under an execution domain only a
+    tree that hashes to the trusted bytes (``staged_verifier``) is handed out."""
+    from ouroboros.deployment_extensions import staged_verifier
+
     resolved_root = skill.skill_dir.resolve()
     relative_entry = entry_path.relative_to(resolved_root)
     identity = extension_import_identity(skill)
     import_root = state_dir / "__extension_imports" / identity
+    verify = staged_verifier(skill)
     with extension_cache_lock(state_dir, "imports"):
         if not skill.skill_dir.is_dir():
             raise RuntimeError(f"extension {skill.name!r} payload was removed before import acquisition")
-        if not (import_root / "complete.json").is_file():
+        complete = (import_root / "complete.json").is_file()
+        if complete and verify is not None and not verify(import_root / "skill"):
+            log.warning("Staged import of %s does not hash to its trusted bytes; staging it again", skill.name)
+            complete = False
+        if not complete:
             _copy_extension_tree(skill, import_root)
+            if verify is not None and not verify(import_root / "skill"):
+                shutil.rmtree(import_root, ignore_errors=True)
+                raise RuntimeError(f"extension {skill.name!r} changed while it was staged: its copy does not hash to "
+                                   "the bytes its administrator delivered, so nothing of it was imported")
         owners = import_root / "owners"
         owners.mkdir(exist_ok=True)
         (owners / str(os.getpid())).touch()
@@ -79,7 +95,9 @@ def _stage_extension_import_tree(
 
 
 def extension_import_identity(skill: LoadedSkill) -> str:
-    """The installer's fingerprint owns dependency changes, not the review hash."""
+    """The installer's fingerprint owns dependency changes, not the review hash. A generation that checks staged
+    trees against trusted bytes (an execution domain) names that check, so it never reuses an unchecked tree."""
+    from ouroboros.deployment_policy import trusted_extensions
     from ouroboros.marketplace.isolated_deps import FINGERPRINT_FILENAME
 
     executable = pathlib.Path(sys.executable).resolve()
@@ -92,6 +110,7 @@ def extension_import_identity(skill: LoadedSkill) -> str:
     runtime = hashlib.sha256(repr((
         str(executable), st.st_size, st.st_mtime_ns, sys.version,
         sys.prefix, sys.platform, str(skill.skill_dir.resolve()),
+        *(("trusted_bytes_checked",) if trusted_extensions() is not None else ()),
     )).encode("utf-8") + deps).hexdigest()
     return f"sha256-{skill.content_hash}-{runtime}"
 

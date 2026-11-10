@@ -84,17 +84,20 @@ def _configured_session(ctx: Any) -> bool:
 
 
 def _leaf_probe_live(ctx: Any, run_id: str) -> bool:
-    """READ-ONLY liveness probe: one short engine poll, no lease/settle/cancel.
+    """READ-ONLY liveness probe: one short engine poll of the run's own engine, no lease/settle/cancel.
 
     Requires a POSITIVE non-terminal engine state. A gateway failure, refusal,
     or state-less payload is not evidence of a live leaf (fail-closed)."""
     import contextlib
 
     try:
-        from ouroboros.claudexor_daemon import ensure_owned_gateway
+        from ouroboros import claudexor_daemon
         from ouroboros.delegate_progress import bounded_poll
+        from ouroboros.execution_domain import run_gateway
 
-        with contextlib.closing(ensure_owned_gateway(admission_wait_sec=0)) as gateway:
+        entry = custody.lookup(custody.custody_root(ctx), str(getattr(ctx, "task_id", "") or ""), run_id)[1]
+        with contextlib.closing(run_gateway(entry, lambda: claudexor_daemon.ensure_owned_gateway(
+                admission_wait_sec=0), timeout_sec=5.0)) as gateway:
             detail = bounded_poll(gateway, run_id, 5.0)
         state = str(custody.summary_of(detail).get("state") or "")
     except Exception:

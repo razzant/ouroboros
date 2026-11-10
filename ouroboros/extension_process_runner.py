@@ -296,6 +296,9 @@ def _child_env(
     for key in _RUNTIME_MODE_ENV_KEYS:
         if os.environ.get(key):
             env[key] = str(os.environ[key])
+    from ouroboros.deployment_policy import child_policy_env
+
+    env.update(child_policy_env())  # its settings reads see this generation's policy; a changed file refuses there
     # WA6: carry bytecode suppression into the scrubbed child env so an extension
     # subprocess running the embedded python never writes __pycache__/*.pyc into a
     # signed+notarized macOS .app bundle (which would break the codesign seal).
@@ -594,8 +597,11 @@ def _run_child(
         if overflow["stdout"] or overflow["stderr"]:
             raise ExtensionProcessError("extension child output exceeded safety cap")
         if proc.returncode != 0:
+            from ouroboros.deployment_extensions import discloses_failure, WITHHELD
+
             stderr_text = stderr.decode("utf-8", errors="replace").strip()
-            safe_stderr = sanitize_tool_result_for_log(stderr_text)[-2000:] if stderr_text else ""
+            safe_stderr = (sanitize_tool_result_for_log(stderr_text)[-2000:] if stderr_text else ""
+                           ) if discloses_failure(payload.get("skill_name")) else WITHHELD
             code_detail = _format_child_returncode(int(proc.returncode or 0))
             detail = f"{code_detail}; {safe_stderr}" if safe_stderr else code_detail
             raise ExtensionProcessError(f"extension child exited abnormally: {detail}")
@@ -1152,7 +1158,7 @@ def _child_main(input_path: str) -> None:
     channel = None
     if mode == "route":
         from ouroboros.extension_route_stream import ChildResponseChannel
-        channel = ChildResponseChannel()
+        channel = ChildResponseChannel(skill_name)
     _bootstrap_quiet_child_crash_reporting()
     try:
         skill = _load_child_extension(skill_name, drive_root, repo_dir, skills_repo_path,
@@ -1178,7 +1184,9 @@ def _child_main(input_path: str) -> None:
             except OSError:
                 pass
         else:
-            outcome = {"ok": False, "error": sanitize_tool_result_for_log(f"{type(exc).__name__}: {exc}"),
+            from ouroboros.deployment_extensions import failure_words
+
+            outcome = {"ok": False, "error": sanitize_tool_result_for_log(failure_words(skill_name, exc)),
                        **({"failure_kind": exc.failure_kind} if isinstance(exc, ExtensionProcessError) else {})}
     finally:
         try:

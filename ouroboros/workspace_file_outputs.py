@@ -13,14 +13,16 @@ import tempfile
 from uuid import uuid4
 import zipfile
 
+from ouroboros import work_domain
+
 
 def _path(root, relative):
     rel = PurePosixPath(relative)
     if not relative or rel.is_absolute() or ".." in rel.parts or "\\" in relative:
         raise ValueError(f"invalid file-result path: {relative!r}")
     path = Path(root) / relative
-    try:
-        inside = path.parent.resolve().is_relative_to(Path(root).resolve())
+    try:  # a work target by its spelling (its links are the work domain's to resolve), any other resolved as before
+        inside = work_domain.settle(path.parent).is_relative_to(work_domain.settle(root))
     except RuntimeError as exc:  # a symlink loop above the name before Python 3.13
         raise ValueError(f"file-result path cannot be resolved: {relative!r}: {exc}") from exc
     if not inside:
@@ -30,25 +32,27 @@ def _path(root, relative):
 
 def _side(path):
     from ouroboros.artifacts import stream_artifact_file
+    work = work_domain.is_work(path)  # a work path's identity through the confined intake, never a service open
     try:
-        mode = path.lstat().st_mode
+        mode = (work_domain.lstat(path) if work else path.lstat()).st_mode
     except FileNotFoundError:
         return None
     if stat.S_ISLNK(mode):
-        link = os.readlink(path)
+        link = work_domain.readlink(path) if work else os.readlink(path)
         data = os.fsencode(link)
         return {"kind": "symlink", "link_target": link, "size": len(data),
                 "sha256": sha256(data).hexdigest(), "mode": stat.S_IMODE(mode)}
     if not stat.S_ISREG(mode):
         raise ValueError(f"file-result path is not a file or symlink: {path}")
-    return {"kind": "file", **stream_artifact_file(path), "mode": stat.S_IMODE(mode)}
+    return {"kind": "file", **(work_domain.measure(path) if work else stream_artifact_file(path)),
+            "mode": stat.S_IMODE(mode)}
 
 
 def _git_side(root, base_ref, relative):
     if base_ref == "(unborn)":
         return None
-    entry = subprocess.run(["git", "ls-tree", "-z", base_ref, "--", f":(literal){relative}"],
-                           cwd=root, capture_output=True, check=True).stdout
+    entry = work_domain.run(["git", "ls-tree", "-z", base_ref, "--", f":(literal){relative}"],
+                            cwd=root, capture_output=True, check=True).stdout
     if not entry:
         return None
     fields = entry.split(b"\t", 1)[0].split()
@@ -57,8 +61,8 @@ def _git_side(root, base_ref, relative):
         raise ValueError(f"unsupported Git file-result baseline: {relative}")
     from ouroboros.artifacts import stream_artifact_file
     with tempfile.TemporaryFile() as blob:
-        subprocess.run(["git", "cat-file", "blob", oid.decode()], cwd=root,
-                       stdout=blob, stderr=subprocess.PIPE, check=True)
+        work_domain.run(["git", "cat-file", "blob", oid.decode()], cwd=root,
+                        stdout=blob, stderr=subprocess.PIPE, check=True)
         result = {**stream_artifact_file(blob), "mode": stat.S_IMODE(int(mode, 8))}
         if mode == b"120000":
             blob.seek(0)
@@ -229,7 +233,7 @@ class PreparedFileOutputs:
     """Temporary verified bytes and exact preimages, owned by the caller's Git lock."""
     def __init__(self, rows, target, temporary, baseline_sha, file_baseline=None):
         from ouroboros.artifacts import copy_artifact_file, stream_artifact_file
-        self.rows, self.target = rows, Path(target).resolve()
+        self.rows, self.target = rows, work_domain.settle(target)
         file_baseline = file_baseline or {}
         self.paths = [row["path"] for row in rows]
         self.temporary, self.before, self.applied = Path(temporary), {}, []
@@ -247,7 +251,12 @@ class PreparedFileOutputs:
                 raise ValueError(f"file-result baseline mismatch: {relative}")
             self.before[relative] = observed
             if observed and observed["kind"] == "file":
-                copy_artifact_file(target_path, self.temporary / f"{index}.before", expected=observed)
+                if work_domain.is_work(target_path):  # the preimage's bytes received from the work, then checked
+                    with (self.temporary / f"{index}.before").open("xb") as sink:
+                        if work_domain.measure(target_path, sink) != {key: observed[key] for key in ("size", "sha256")}:
+                            raise ValueError(f"file-result target changed while its preimage was read: {relative}")
+                else:
+                    copy_artifact_file(target_path, self.temporary / f"{index}.before", expected=observed)
             after = row["after"]
             if after and after["kind"] == "file":
                 prepared = self.temporary / f"{index}.after"
@@ -261,8 +270,20 @@ class PreparedFileOutputs:
         return verify_file_outputs(self.rows, self.target)
 
     def _write(self, index, side, suffix):
-        from ouroboros.artifacts import copy_artifact_file
+        from ouroboros.artifacts import copy_artifact_file, stream_artifact_file
         path = _path(self.target, self.rows[index]["path"])
+        if work_domain.is_work(path):  # applied AS the work domain: the container resolves and writes the path
+            if side is None:
+                work_domain.remove(path)
+            elif side["kind"] == "file":
+                prepared = self.temporary / f"{index}.{suffix}"
+                stream_artifact_file(prepared, expected=side)
+                work_domain.write_file(path, prepared, mode=side["mode"])  # the verified file streams, never read whole
+            elif side["kind"] == "symlink":
+                work_domain.make_symlink(path, side["link_target"])
+            else:
+                raise ValueError(f"unsupported file-result kind: {side['kind']}")
+            return
         if side is None:
             path.unlink(missing_ok=True)
         elif side["kind"] == "file":
@@ -312,7 +333,7 @@ def prepare_file_outputs(rows, target, *, baseline_sha="", file_baseline=None):
 def _changed_before(path: Path, started_ns: int) -> bool:
     """Did PATH last change (content or inode; on Windows creation stands for the inode) before ``started_ns``?"""
     try:
-        info = path.lstat()
+        info = work_domain.lstat(path)
     except OSError:
         return False
     return max(info.st_ctime_ns, info.st_mtime_ns) < started_ns
@@ -328,7 +349,15 @@ def _direct_named_evidence(root: Path, task: dict, retain_dir: Path, previous: d
     from ouroboros.workspace_patch_capture import _held_named_evidence
 
     declared, changed = root / EVIDENCE_DIRNAME, set()
-    if declared.is_symlink() or (declared.exists() and not declared.is_dir()):
+    if work_domain.is_work(declared):  # a work folder's evidence, listed from held descriptors (links named)
+        what = work_domain.kind(declared)
+        if what not in ("dir", "missing"):
+            changed.add(EVIDENCE_DIRNAME)  # retained as a named gap, never followed
+        elif what == "dir":  # a subtree that cannot be listed still asks retention, which then records why
+            for current, listed in work_domain.walk_entries(declared, onerror=lambda _e: changed.add(EVIDENCE_DIRNAME)):
+                changed.update((Path(current) / name).relative_to(root).as_posix()
+                               for name, kind in listed if kind in ("file", "link"))
+    elif declared.is_symlink() or (declared.exists() and not declared.is_dir()):
         changed.add(EVIDENCE_DIRNAME)  # retained as a named gap, never followed
     elif declared.is_dir():  # a subtree that cannot be listed still asks retention, which then records why
         for current, dirs, files in os.walk(declared, followlinks=False, onerror=lambda _e: changed.add(EVIDENCE_DIRNAME)):
@@ -357,14 +386,15 @@ def _directory_direct_artifacts(
     from ouroboros.utils import atomic_write_json, utc_now_iso
     from ouroboros.workspace_admission import has_git_metadata
 
-    root = root.resolve(strict=False)
+    root = work_domain.settle(root)
     meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     # Admitted while missing (#1799) and still absent: no tree to diff, and nothing remains there.
-    absent = (not root.exists() and not root.is_symlink()
-              and (meta.get("workspace_availability") or {}).get("state") == "missing")
+    what = work_domain.kind(root) if work_domain.is_work(root) else ""
+    absent = ((what == "missing") if what else (not root.exists() and not root.is_symlink())) and (
+        meta.get("workspace_availability") or {}).get("state") == "missing"
     constraint = _acting_constraint_from_task(task)
     surface = str((task.get("task_constraint") or {}).get("surface") or "")
-    if (not (root.is_dir() or absent) or surface in {"self_worktree", "genesis"}
+    if (not ((what == "dir") if what else root.is_dir()) and not absent or surface in {"self_worktree", "genesis"}
             or (constraint and constraint.base_sha) or _preflight_head_from_task(task)
             or has_git_metadata(root)):
         return None
@@ -380,7 +410,7 @@ def _directory_direct_artifacts(
     outputs = []
     for item in records:
         source = str(item.get("source_path") or "")
-        if source and Path(source).resolve(strict=False).is_relative_to(root):
+        if source and work_domain.settle(source).is_relative_to(root):
             outputs.append(dict(item))
     manifest = {
         "schema_version": 1, "workspace_root": str(root), "status": ARTIFACT_STATUS_READY,
@@ -421,10 +451,11 @@ def capture_known_workspace_outputs(ctx, workspace_root, paths, *, source_tool, 
     from ouroboros.tools.tool_resolution import active_repo_dir_for, system_repo_dir_for
     from ouroboros.workspace_admission import has_git_metadata
 
-    root = Path(workspace_root).resolve(strict=False)
-    if (not root.is_dir() or task_id_for_artifacts(ctx) == "interactive"
+    root = work_domain.settle(workspace_root)  # a work folder by its spelling; its files read by the confined intake
+    if (not ((work_domain.kind(root) == "dir") if work_domain.is_work(root) else root.is_dir())
+            or task_id_for_artifacts(ctx) == "interactive"
             or root == system_repo_dir_for(ctx).resolve(strict=False)
-            or root != active_repo_dir_for(ctx).resolve(strict=False)):
+            or root != work_domain.settle(active_repo_dir_for(ctx))):
         return ""
     git_root = has_git_metadata(root)
     if git_root and not (paths := _git_ignored(root, paths)):
@@ -433,7 +464,8 @@ def capture_known_workspace_outputs(ctx, workspace_root, paths, *, source_tool, 
     for relative in dict.fromkeys(paths):
         try:
             source = root / relative
-            if not source.exists() and not source.is_symlink():
+            if work_domain.kind(source) == "missing" if work_domain.is_work(source) else (
+                    not source.exists() and not source.is_symlink()):
                 removed.append(relative)
                 continue
             record = copy_file_to_task_artifacts(ctx, source, kind="user_file")
@@ -458,14 +490,18 @@ def capture_known_workspace_outputs(ctx, workspace_root, paths, *, source_tool, 
 
 def _git_ignored(root, paths):
     """The written paths Git ignores in ``root`` (``git check-ignore``, which never names a tracked path), in their
-    order; none when Git cannot say."""
+    order; none when Git cannot say. A work folder's Git is the work domain's: a refusal or an end the container did
+    not confirm is Git not saying, and the landed write keeps its own receipt."""
     from ouroboros.git_observation import host_git_env
 
     names = [str(path) for path in dict.fromkeys(paths) if str(path)]
     if not names:
         return []
-    proc = subprocess.run(["git", "check-ignore", "-z", "--stdin"], cwd=str(root), input="\0".join(names).encode("utf-8"),
-                          capture_output=True, env=host_git_env(), check=False)
+    try:
+        proc = work_domain.run(["git", "check-ignore", "-z", "--stdin"], cwd=str(root), input="\0".join(names).encode("utf-8"),
+                               capture_output=True, env=host_git_env(), check=False)
+    except (OSError, ValueError):
+        return []
     if proc.returncode not in (0, 1):
         return []
     ignored = set(proc.stdout.decode("utf-8", "replace").split("\0"))

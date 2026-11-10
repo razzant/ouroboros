@@ -31,7 +31,7 @@ const BUDGET_NOTE_FALLBACK = 'Budget limits use known spend: Total Budget applie
 // Runtime mode is one axis of the owner policy contract. Keep the Settings
 // presentation in the same vocabulary as the onboarding setup contract; the
 // saved value is still handled by settings.js and the owner endpoint.
-const RUNTIME_MODE_OPTIONS = [
+export const RUNTIME_MODE_OPTIONS = [
     { value: 'light', label: 'Light' },
     { value: 'advanced', label: 'Advanced' },
     { value: 'pro', label: 'Pro' },
@@ -141,6 +141,7 @@ function accountsPanel() {
                 <div class="form-field ui-field">
                     <label for="s-openai-base-url">Legacy OpenAI Base URL</label>
                     <input id="s-openai-base-url" placeholder="https://api.openai.com/v1 or compatible endpoint" class="ui-control" name="s-openai-base-url" type="text">
+                    <div class="settings-inline-note" data-legacy-base-url-fixed hidden></div>
                 </div>
             </div>`,
         })}
@@ -359,7 +360,7 @@ function behaviorPanel() {
                 { value: 'stable', label: 'Stable' },
                 { value: 'qa', label: 'QA' },
                 { value: 'development', label: 'Development' },
-            ] }),
+            ] }) + '<div class="settings-inline-note" data-update-channel-fixed hidden>Set by your organization: its administrator updates this installation.</div>',
         })}
 
         <!-- Last on the tab: set once, and on a browser or Docker host it only explains
@@ -602,6 +603,7 @@ function advancedPanel() {
                     <input id="s-local-chat-format" placeholder="auto-detect" class="ui-control" name="s-local-chat-format" type="text">
                 </div>
             </div>
+            <div class="settings-inline-note" data-local-model-fixed hidden>Your organization’s Safety Supervisor answers from this model: its source, filename, port and chat format are set by your organization. Start and Stop stay yours.</div>
             <div class="settings-toolbar">
                 <button class="btn btn-primary" id="btn-local-start">Start</button>
                 <button class="btn btn-default" id="btn-local-stop">Stop</button>

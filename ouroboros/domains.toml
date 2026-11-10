@@ -207,6 +207,7 @@ D20 = "Presence"
 "ouroboros/colab_bootstrap.py" = "D12"
 "ouroboros/commit_admission.py" = "D06"
 "ouroboros/config.py" = "D12"
+"ouroboros/deployment_policy.py" = "D12"  # administrator constraints over effective settings
 "ouroboros/launch_roots.py" = "D12"  # the stdlib launch tuple and work-root basis config derives from
 "ouroboros/composer_cognition.py" = "D12"
 "ouroboros/confined_files.py" = "D18"
@@ -318,6 +319,7 @@ D20 = "Presence"
 "ouroboros/evolution_checkpoints.py" = "D15"
 "ouroboros/evolution_fingerprint.py" = "D15"
 "ouroboros/evolution_history.py" = "D10"  # Dashboard Evolution: tagged versions measured once per commit, behind gateway/control.py
+"ouroboros/deployment_extensions.py" = "D14"  # the extensions a deployment requires: enablement, refusals, hold
 "ouroboros/extension_companion.py" = "D14"
 "ouroboros/extension_health.py" = "D14"
 "ouroboros/extension_isolated_deps.py" = "D14"
@@ -939,6 +941,9 @@ D20 = "Presence"
 "ouroboros/workspace_admission.py" = "D17"
 "ouroboros/workspace_executor.py" = "D17"
 "ouroboros/workspace_executor_paths.py" = "D17"
+"ouroboros/execution_domain.py" = "D17"  # a deployment's execution domain: its pinned executor, work engine and Panic
+"ouroboros/work_domain.py" = "D17"  # file effects inside a deployment's work domain: the confined intake, never a followed link
+"ouroboros/work_skill_payloads.py" = "D17"  # a managed deployment's verified work copy of a reviewed skill payload
 "ouroboros/docker_process_observer.py" = "D17"
 "ouroboros/workspace_patch_rules.py" = "D17"
 "ouroboros/workspace_preflight.py" = "D17"
@@ -1348,6 +1353,7 @@ lazy_only = [
   "D09->D04",
   "D09->D05",
   "D09->D07",
+  "D09->D10",
   "D09->D11",
   "D09->D12",
   "D09->D14",
@@ -1366,6 +1372,7 @@ lazy_only = [
   "D12->D15",
   "D12->D16",
   "D12->D17",
+  "D12->D19",
   "D13->D05",
   "D13->D06",
   "D13->D07",
@@ -1398,6 +1405,7 @@ lazy_only = [
   "D17->D02",
   "D17->D09",
   "D17->D13",
+  "D17->D14",
   "D17->D20",
   "D18->D01",
   "D18->D07",

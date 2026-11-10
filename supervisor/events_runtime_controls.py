@@ -31,7 +31,15 @@ def _handle_deep_self_review_request(evt: Dict[str, Any], ctx: Any) -> None:
 def _handle_promote_to_stable(evt: Dict[str, Any], ctx: Any) -> None:
     import subprocess as sp
 
+    from ouroboros.deployment_policy import body_replacement_refusal
     from supervisor.git_ops import promote_branch_exact
+
+    if refusal := body_replacement_refusal():  # the recovery branch a failed restart serves is the administrator's
+        st = ctx.load_state()
+        if st.get("owner_chat_id"):
+            ctx.send_with_budget(int(st["owner_chat_id"]), f"❌ Promotion to stable refused: {refusal}",
+                                 role="system", system_type="promotion_notice")
+        return
     from supervisor.update_merge import (
         acquire_update_lock,
         active_update_tx,

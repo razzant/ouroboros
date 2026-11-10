@@ -134,6 +134,10 @@ class SettingsLockUnavailable(RuntimeError):
     """The settings lock could not be taken; nothing was checked or persisted."""
 
 
+# The typed code of a write the deployment policy refused (``deployment_policy.DeploymentPolicyRefusal``).
+MANAGED_BY_DEPLOYMENT = "managed_by_deployment"
+
+
 class CommitBoundary:
     """Where "saved" starts being true.
 
@@ -199,8 +203,12 @@ def owner_write_guard(endpoint: Callable) -> Callable:
 
     @functools.wraps(endpoint)
     async def _guarded(request: Request) -> JSONResponse:
+        from ouroboros.deployment_policy import DeploymentPolicyRefusal
+
         try:
             return await endpoint(request)
+        except DeploymentPolicyRefusal as exc:
+            return unsaved_error(str(exc), 403, code=MANAGED_BY_DEPLOYMENT)
         except SettingsLockUnavailable as exc:
             return unsaved_error(str(exc), 503, code="settings_locked")
         except SettingsDocumentBusy as exc:
@@ -442,11 +450,14 @@ class _SavedDocumentFields:
 
     def __call__(self, document: Dict[str, Any]) -> Dict[str, Any]:
         from ouroboros import config as _config
+        from ouroboros.deployment_policy import DeploymentPolicyRefusal, choice_refusal
         from ouroboros.settings_scales import OPTIONAL_BOUND_LEGACY
 
         refusal = str(self.check(document) or "") if self.check is not None else ""
         if refusal:
             raise SettingsPreconditionFailed(refusal)
+        if managed := next(filter(None, (choice_refusal(key, value) for key, value in self.changes.items())), ""):
+            raise DeploymentPolicyRefusal(managed)  # each field is an explicit choice, even one the document holds
         if _settings_document_present():
             return {**document, **self.changes}
         effective = _config.load_settings_lock_held()
@@ -622,6 +633,7 @@ _ABSENT = object()
 
 __all__ = [
     "CommitBoundary",
+    "MANAGED_BY_DEPLOYMENT",
     "STALE_SETTINGS_READ_REFUSAL",
     "SettingsDocumentUnreadable",
     "SettingsLockUnavailable",

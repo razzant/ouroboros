@@ -2,6 +2,8 @@
 import pytest
 
 from tests._safety_fixtures import supervisor as supervisor_fixture
+from ouroboros.tool_effects import effect_of as published_effect
+from ouroboros.place_guard import call_place_facts as published_destinations
 supervisor = supervisor_fixture
 
 
@@ -118,6 +120,52 @@ def test_dangerous_words_wait_for_my_human_outside_cyber_pro(supervisor, monkeyp
     h.later()
     ok, message = h.module.check_safety("place_reply", joi, ctx=h.ctx)
     assert not ok and "wait for your human" in message and len(h.calls) == 4
+
+
+@pytest.mark.parametrize("release", ["owner_card", "cyber_pro", "owner_closed", "cyber_closed"])
+def test_later_dangerous_words_hold_older_suspicious_retry(supervisor, monkeypatch, release):
+    """A DANGEROUS word/recipient gate outranks an older exact-call SUSPICIOUS retry, not its owner's release."""
+    from ouroboros import tool_effects, place_guard, extension_registry_state
+    from ouroboros.extension_surface_names import extension_surface_name
+    h = supervisor
+    monkeypatch.setattr(tool_effects, "effect_of", published_effect)
+    monkeypatch.setattr(place_guard, "call_place_facts", published_destinations)
+    name = extension_surface_name("example", "send")
+    descriptor = {"skill": "example", "extension_generation": "fixture",
+                  extension_registry_state.REVIEWED_DECLARATION: {"extension_generation": "fixture",
+                      "provides_place": False, "tool": {"name": "send", "effect": "message", "target": "recipient"}}}
+    text = "Fixture report is ready."
+    older = {"text": text, "recipient": "fixture-room", "request_id": "first"}
+    def check(args):
+        return h.module.check_safety(name, args, ctx=h.ctx, ext_tool=descriptor)
+    h.replies.append({"status": "SUSPICIOUS", "reason": "confirm the audience"})
+    assert not check(older)[0]
+    h.later()
+    h.replies.append({"status": "DANGEROUS", "reason": "the audience is outside this report's circle"})
+    assert not check({**older, "request_id": "second"})[0]
+    h.later()
+    allowed, message = check(older)
+    assert not allowed, "the older exact-call flag must not bypass the newer word/recipient gate"
+    assert "wait for your human" in message and "repeat the identical call" not in message
+    assert len(h.calls) == 2 and not any(e["type"] == "safety_sent_despite_check" for e in h.events)
+    if release in {"owner_card", "owner_closed"}:
+        h.ctx._owner_directives = [{"source": "owner_quiz_answer", "content": "Send it", "quiz_id": "q-later",
+            "reply_to": {"address": "quiz q-later of task work",
+                         "text": f"Send this to fixture-room?\n{text}\n1. Send it"}}]
+    else:
+        monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
+    if release.endswith("_closed"):
+        from ouroboros.deployment_policy import RELEASE_AFTER_DANGEROUS, REPEAT_AFTER_DANGEROUS
+        shut = RELEASE_AFTER_DANGEROUS if release == "owner_closed" else REPEAT_AFTER_DANGEROUS
+        monkeypatch.setattr(h.module, "safety_exit_open", lambda exit_: exit_ != shut)
+    h.later()
+    allowed, message = check(older)
+    if release.endswith("_closed"):
+        assert not allowed and len(h.calls) == 2, "an older flag cannot reopen a closed deployment exit"
+        return
+    assert allowed and len(h.calls) == 2
+    assert h.events[-1]["type"] == "safety_sent_despite_check"
+    assert ("(q-later)" if release == "owner_card" else "sent despite the check") in message
 
 
 def test_an_unchecked_mode_meets_no_flag_wait_or_card(supervisor, monkeypatch):

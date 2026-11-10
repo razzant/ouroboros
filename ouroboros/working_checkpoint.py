@@ -143,7 +143,8 @@ def save_resumed(tools: Any, state: Dict[str, Any], messages: list, trace: dict,
         tools=tools, messages=messages, llm_trace=trace, accumulated_usage=usage, owner_msg_seen=seen,
         round_idx=int(state["round_idx"]), tool_schemas=state["tool_schemas"],
         budget_tail=str((state.get("resume_point") or {}).get("budget_tail") or "tool"),
-        context_model_role=str(state.get("context_model_role") or "")), RESUMED)
+        context_model_role=str(state.get("context_model_role") or ""),
+        context_start=state.get("context_start")), RESUMED)
 
 
 def _shared_element(ctx: Any, element: Any) -> Optional[bytes]:
@@ -249,6 +250,9 @@ def _write(ctx: Any, limit_ctx: Any, boundary: str, *, model_call: Any = None) -
         state["context_model_role"] = model_call.model_role or state["context_model_role"]
     if boundary == RESUMED:  # written before the rebind: the plan is still the new worker's
         state["context_model_role"] = limit_ctx.context_model_role
+        from ouroboros.context_fit import carried_start
+
+        state["context_start"] = list(carried_start(limit_ctx.context_start))  # the source's start, or unknown
     state["working"] = {"boundary": boundary, "seq": seq, "saved_at": utc_now_iso(),
                         "budget_tail": getattr(limit_ctx, "budget_tail", "tool"),
                         "pending_tool_call_ids": pending_tool_call_ids(limit_ctx.messages)}

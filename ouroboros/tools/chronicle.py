@@ -70,6 +70,7 @@ from ouroboros.knowledge import focus_signature
 from ouroboros.mark_anchors import anchor_problem, describe as describe_anchor
 from ouroboros.memory_view_account import (quote_line, selection_facts, source_change_lines, told_by, told_map,
                                          told_records)
+from ouroboros.store import StoreError
 from ouroboros.tool_capabilities import tool_result_limit
 from ouroboros.tools.registry import ToolEntry
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
@@ -433,6 +434,13 @@ def publish_covered_page(root: Path, store: ChronicleStore, author: Dict[str, An
     return result, covers, facts, stamp
 
 
+# A writer saves one record and names what it changed; it re-reads no whole story around the write (a capture is a
+# read of all history, and a store the importer holds would fail a choice already saved). The whole drawn measure is
+# its reader's, on demand; a selection's full before/after view is memory_read(proposed_selection=...) before it.
+_STORY_MEASURE = ("My story's drawn size is not re-measured by a write: memory_read(story=true) measures it whole, each "
+                  "record's tokens and the pages no part or account holds yet.")
+
+
 def _write_page(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
     covers_arg = a["covers"]
     if not isinstance(covers_arg, dict):
@@ -450,7 +458,9 @@ def _write_page(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, A
                       rooms=sorted(covers["rooms"]) if covers.get("rooms") else None,
                       first=chat_chain.format_address(covers["first"]) if covers["first"] else None,
                       last=chat_chain.format_address(covers["last"]) if covers["last"] else None,
-                      stamp=dict(sorted(statuses.items())))
+                      stamp=dict(sorted(statuses.items())),
+                      effect=f"this page: {len(a['text'] or ''):,} characters. {_STORY_MEASURE} This task's view is "
+                      "not refreshed; the next start re-measures its Max room.")
 
 
 def _own_or_legacy(record: Optional[Dict[str, Any]], author: Dict[str, Any]) -> bool:
@@ -465,13 +475,16 @@ def _own_or_legacy(record: Optional[Dict[str, Any]], author: Dict[str, Any]) -> 
         str(signer.get("task_id") or "") == str(author.get("task_id") or ""))
 
 
-def _fold_effect(store: ChronicleStore, action: str, ids: Iterable[Any], text: str) -> str:
-    """What a fold did, measured (the records' own words before, the new text after); never a claim about Max."""
+def _fold_effect(store: ChronicleStore, action: str, ids: Iterable[Any], text: str,
+                 drawn: str = "") -> str:
+    """What a fold did, measured (the records' own words before, the new text after, then ``drawn``: where my story's
+    drawn size is measured, ``_STORY_MEASURE``); never a claim about Max."""
     ids = [str(ident) for ident in ids]
     before = sum(len(str((store.get(ident) or {}).get("text") or "")) for ident in ids)
     return (f"{action} {len(ids)} record{'' if len(ids) == 1 else 's'}: {before:,} -> {len(text or ''):,} characters. "
-            "Originals remain readable by address. This task's view is not refreshed; the next start re-measures "
-            "its Max room and rewrites the cached story from the first changed retelling.")
+            + (drawn + " " if drawn else "") + "Originals remain readable by address. This task's view is not "
+            "refreshed; the next start re-measures its Max room and rewrites the cached story from the first changed "
+            "retelling.")
 
 
 def _write_part(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
@@ -491,7 +504,8 @@ def _write_part(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, A
     resolver = _quote_resolver(root, row_lineage(root))
     result = store.publish_part(room_id=room, text=a["text"], member_ids=[str(m) for m in members], author=author,
                                 expected_sequence=a["expected_sequence"], quotes=a["quotes"] or (), quote_resolver=resolver)
-    return _published(ctx, result, effect=_fold_effect(store, "folded", members, a["text"]) if result.ok else None)
+    return _published(ctx, result, effect=_fold_effect(store, "folded", members, a["text"], _STORY_MEASURE)
+                      if result.ok else None)
 
 
 def _write_note(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
@@ -536,8 +550,10 @@ def _write_selection(ctx: Any, root: Path, store: ChronicleStore, author: Dict[s
     shown = True if a["shown"] is None else a["shown"]
     result = store.select_account(str(a["target_id"]), replaces=[str(r) for r in replaces], author=author,
                                   reason=str(a["reason"] or ""), shown=shown)
-    effect = (_fold_effect(store, "the account now tells", replaces, str((store.get(str(a["target_id"])) or {}).get("text") or ""))
-              if shown else "withdrawal saved: other selections and folds still determine what appears. This "
+    drawn = _STORY_MEASURE
+    effect = (_fold_effect(store, "the account now tells", replaces,
+                           str((store.get(str(a["target_id"])) or {}).get("text") or ""), drawn)
+              if shown else f"withdrawal saved: other selections and folds still determine what appears. {drawn} This "
               "task's view is not refreshed; the next start re-measures its Max room.")
     return _published(ctx, result, replaces=len(replaces) if result.ok else None, shown=shown if result.ok else None,
                       effect=effect if result.ok else None,
@@ -556,7 +572,7 @@ def _selection_receipt(root: Path, store: ChronicleStore, selection: Dict[str, A
                 return ("Selection saved; another selection is now acting, so its displacement is not attributed to "
                         f"this write. Read the current choices with memory_read(node_id='{account}').")
             facts = selection_facts(store, account)
-    except (OSError, TimeoutError, ValueError) as exc:
+    except (OSError, TimeoutError, ValueError, StoreError) as exc:
         return (f"Selection saved; its post-write composition could not be read ({type(exc).__name__}). "
                 f"Do not repeat the write; memory_read(node_id='{account}') reads its recorded choices.")
     now, named, changes = facts["tells"], len(facts["named"]), facts["uncited_changes"]
@@ -1097,12 +1113,36 @@ def _read_rooms(root: Path, store: ChronicleStore, start: int, limit: int) -> st
 
 
 def _read_story(root: Path, store: ChronicleStore, start: int, limit: int) -> str:
+    """My story's pages, parts and accounts by the room and kind they already carry, the heaviest room first: each
+    with its id, revision, period, the tokens the full view draws for it (``memory_floor.drawn_tokens``, the measure
+    of ``unfolded_pages`` and the start's Max room) and its reader; the records accounts tell are counted, not drawn.
+    Facts for the mind's choice of what to fold, never a choice."""
     from ouroboros import memory_view as mv
+    from ouroboros.memory_floor import story_measure
 
-    story, _status, _refusals = mv.capture_story(store, root, mv.room_labeler(root))
-    entries = [entry for entry in story if entry.get('kind') != 'legacy' and not entry.get('told_by')]
-    return _window(f"My story: {len(entries)} pages, parts and accounts", '\n'.join(map(mv._page_pointer, entries)),
-                   start, limit, lambda n: f'memory_read(story=true, start={n})')
+    with capture(root, tail="terminal"):  # the story and every listed record's revision: one state, one index read
+        story, status, refusals = mv.capture_story(store, root, mv.room_labeler(root))
+        entries = [entry for entry in story if entry.get('kind') != 'legacy' and not entry.get('told_by')]
+        found = [record for entry in entries if (record := store.get(str(entry["id"]))) is not None]
+        revisions = {record["id"]: record.get("revision") for record in store.interpret(found, sources=False)} if found else {}
+    measure = story_measure(story, status, refusals)
+    groups: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    for entry in entries:
+        groups.setdefault((str(entry.get('room_id')), str(entry.get('label') or entry.get('room_id'))), []).append(entry)
+    weight = {key: sum(measure["drawn"].get(str(entry["id"]), 0) for entry in group) for key, group in groups.items()}
+    lines = []
+    for key in sorted(groups, key=lambda key: (-weight[key], key[1])):
+        kinds = Counter(entry["kind"] for entry in groups[key])
+        lines.append(f"## {key[1]} [room {key[0]}]: ~{weight[key]:,} tokens; " + ", ".join(
+            f"{n} {kind}{'' if n == 1 else 's'}" for kind, n in sorted(kinds.items())) + f"; memory_read(room_id='{key[0]}')")
+        for entry in groups[key]:
+            revision = revisions.get(entry["id"]) or "not recorded"
+            lines.append(f"{mv._page_pointer(entry)}; revision {revision}; ~{measure['drawn'].get(str(entry['id']), 0):,} tokens")
+    unfolded, told = measure["unfolded"], sum(1 for entry in story if entry.get('told_by'))
+    head = (f"My story: {len(entries)} pages, parts and accounts; drawn whole ~{measure['tokens']:,} tokens, "
+            f"{unfolded['pages']} pages no part or account holds yet ~{unfolded['tokens']:,}; {told} records told by "
+            "accounts, not drawn")
+    return _window(head, '\n'.join(lines), start, limit, lambda n: f'memory_read(story=true, start={n})')
 
 
 def _proposal(value: Any) -> Dict[str, Any]:
@@ -1131,24 +1171,36 @@ def _read_proposal(ctx: Any, root: Path, store: ChronicleStore, proposal: Dict[s
     my story and this room's page as they are and, in the proposal's capture of that same state
     (``capture(proposed=…)``), with it acting, compared line by line by the view's own renderers; then every
     record the account would tell and every one it tells now and would stop telling (``told_records`` of each
-    view), whole as it acts now with its readers, whatever lines the comparison matched. A later page
+    view), whole as it acts now with its readers, whatever lines the comparison matched. The same two states,
+    reprojected into this task's captured view, are fitted as its next start in its one captured frame
+    (``memory_floor.counterfactual_starts``); without that frame the read names what it lacks. A later page
     continues only the same document: every page's header names the document's ``fingerprint``, complete or
     not, and a page of another one is refused, never joined. A refusal is returned as the ``PublishResult``
     it is (the write's own, or ``position_mismatch``).
     """
-    from ouroboros import memory_view as mv
-    from ouroboros.memory_floor import view_tokens
+    import dataclasses
 
-    spec = mv.ViewSpec("integrator", room_id=room, room_lanes=False, origin_words=False, other_conversations=False,
-                       marks="none", knowledge=False)
+    from ouroboros import memory_view as mv
+    from ouroboros.memory_floor import counterfactual_lines, counterfactual_starts, reprojected, view_tokens
+
+    narrow = dict(room_lanes=False, origin_words=False, other_conversations=False, marks="none", knowledge=False)
+    spec = mv.ViewSpec("integrator", room_id=room, **narrow)
+    plan = getattr(ctx, "context_fit_plan", None)  # this task's one captured frame: its start's core and route facts
+    held = getattr(getattr(plan, "core", None), "memory_view_json", "")
+    captured = mv.snapshot_from_json(held) if held else None
+    own = dataclasses.replace(captured.spec, owner_words=False, **narrow) if captured else None
+    same = own is not None and dataclasses.replace(own, work_room_levels=spec.work_room_levels) == spec  # no new read
     with capture(root, tail="terminal"):  # one state for the rules, both views and every record's facts
         result = store.select_account(proposal["target_id"], replaces=proposal["replaces"], author=focus_signature(ctx),
                                       reason="read before choosing", shown=proposal["shown"], propose=True)
         if not result.ok:
             return result
         account, now = result.record["target_id"], mv.capture_memory_view(root, {}, spec)
+        fits = {"now": now if same else mv.capture_memory_view(root, {}, own)} if own else {}
         with capture(root, proposed=result.record):
             then = mv.capture_memory_view(root, {}, spec)
+            if own:
+                fits["with this selection"] = then if same else mv.capture_memory_view(root, {}, own)
         acting = (store.interpret([store.get(account)], sources=False)[0].get("selection") or {})
         told_now, told_then = (told_map([e for e in view.story if e["kind"] == "account"]) for view in (now, then))
         tells = told_records(store, account, told_then)
@@ -1193,6 +1245,8 @@ def _read_proposal(ctx: Any, root: Path, store: ChronicleStore, proposal: Dict[s
              "included)" + (f"; their rooms: {rooms_of(would)}" if would else "")
              + (f"; it would stop telling {len(stopped)} it tells now (rooms: {rooms_of(stopped)})" if stopped else "")
              + ("; memory_read(proposed_selection=<same>, room_id=<room>) compares another room's page" if records else ""),
+             *counterfactual_lines(counterfactual_starts(plan, {name: reprojected(captured, fresh)
+                                                                for name, fresh in fits.items()})),
              "", "## My story: now -> with this selection ('-' leaves, '+' arrives)", *(_diff(*stories) or ["(unchanged)"]),
              "", f"## This room's page ({room}): now -> with this selection", *(_diff(*rooms) or ["(unchanged)"]),
              "", "## What the account would tell, each record whole as it acts now"]

@@ -1429,10 +1429,10 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
 
 
 def _run_git_network_cmd(cmd: List[str], cwd: pathlib.Path) -> str:
-    """Bounded network git, returning stdout or raising with stdout/stderr."""
-    from supervisor.update_source import _git_network_bounded
+    """Bounded network git, returning stdout or raising with stdout/stderr (a work repository's in the work domain)."""
+    from ouroboros.tools.git_plumbing import network_git_bounded
 
-    rc, out, err = _git_network_bounded(list(cmd[1:]), cwd=cwd)
+    rc, out, err = network_git_bounded(list(cmd[1:]), cwd=cwd)
     if rc != 0:
         raise RuntimeError(
             f"Command failed: {' '.join(cmd)}\n\nSTDOUT:\n{out}\n\nSTDERR:\n{err}"

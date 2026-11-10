@@ -1,8 +1,10 @@
-"""Immutable protocol metadata for the currently selected descriptor generation.
+"""Immutable protocol metadata for each engine's currently selected descriptor generation.
 
 Liveness/admission probes remain fresh. Only model-call preparation reuses a
 successful normal handshake; the route catalog is immutable within a generation.
-No client, token or historical generation is retained here.
+Each descriptor path (the owned engine's, a managed deployment's work engine's)
+keeps only its current generation, so one engine's handshake never evicts the
+other's. No client, token or historical generation is retained here.
 """
 from __future__ import annotations
 
@@ -14,9 +16,7 @@ from concurrent.futures import Future, TimeoutError
 
 STORE_IDENTITY = {"X-Claudexor-Store-Identity": "1"}  # opt-in ``storeId``: handshake, run start, thread turn
 _lock = threading.Lock()
-_key = None
-_handshake = None
-_operations = None
+_generations = {}  # descriptor path -> [generation key, handshake body, catalog future]
 
 
 def descriptor_stamp(path):
@@ -36,19 +36,24 @@ def endpoint_generation(endpoint):
 
 
 def _select(key):
-    global _key, _handshake, _operations
-    if key != _key:
-        _key, _handshake, _operations = key, None, None
+    """This descriptor's current generation, replacing an older one of the same path (lock held)."""
+    entry = _generations.get(key[0])
+    if entry is None or entry[0] != key:
+        entry = _generations[key[0]] = [key, None, None]
+    return entry
+
+
+def _current(key):
+    entry = _generations.get(key[0]) if key is not None else None
+    return entry if entry is not None and entry[0] == key else None
 
 
 def remember_handshake(gateway, body):
     gateway._store_identity = body.get("storeId") if isinstance(body.get("storeId"), str) else ""
     key = endpoint_generation(gateway._endpoint)
     if key is not None:
-        global _handshake
         with _lock:
-            _select(key)
-            _handshake = copy.deepcopy(body) if body.get("servingMode") != "recovery_only" else None
+            _select(key)[1] = copy.deepcopy(body) if body.get("servingMode") != "recovery_only" else None
 
 
 def remembered_engine(gateway):
@@ -56,7 +61,8 @@ def remembered_engine(gateway):
     generation (one daemon process, one engine build), or ``None``: no new request is made."""
     key = endpoint_generation(getattr(gateway, "_endpoint", None))
     with _lock:
-        engine = (_handshake or {}).get("engine") if key is not None and key == _key else None
+        entry = _current(key)
+        engine = (entry[1] or {}).get("engine") if entry is not None else None
     return (str(engine.get("version") or ""), str(engine.get("sha") or "")) if isinstance(engine, dict) else None
 
 
@@ -72,7 +78,8 @@ def model_gateway(factory):
         return factory()
     key = endpoint_generation(endpoint)
     with _lock:
-        body = copy.deepcopy(_handshake) if key is not None and key == _key else None
+        entry = _current(key)
+        body = copy.deepcopy(entry[1]) if entry is not None else None
     if body is None:
         return factory()
     gateway = ClaudexorGateway(endpoint)
@@ -91,20 +98,20 @@ def operations(gateway, fetch, *, timeout_sec=None):
     key = endpoint_generation(gateway._endpoint)
     if key is None:
         return fetch()
-    global _operations
     with _lock:
-        _select(key)
-        owner = _operations is None
+        entry = _select(key)
+        owner = entry[2] is None
         if owner:
-            _operations = Future()
-        pending = _operations
+            entry[2] = Future()
+        pending = entry[2]
     if owner:
         try:
             pending.set_result(fetch())
         except BaseException as exc:
             with _lock:
-                if _key == key and _operations is pending:
-                    _operations = None
+                current = _current(key)
+                if current is not None and current[2] is pending:
+                    current[2] = None
             pending.set_exception(exc)
     try:
         return copy.deepcopy(pending.result(timeout=timeout_sec))

@@ -170,6 +170,10 @@ def _ensure_playwright_installed(*, engine: str = "chromium", allow_install: boo
                 "Browser tools require Playwright, which is not bundled. "
                 f"Install manually: pip3 install playwright && python3 -m playwright install {engine}"
             )
+        from ouroboros.deployment_policy import body_replacement_refusal
+
+        if refusal := body_replacement_refusal():  # the package would land in the serving interpreter
+            raise RuntimeError(f"Browser tools require Playwright, which is not installed. {refusal}")
         log.info("Playwright not found, installing...")
         from ouroboros.platform_layer import pip_install_target_args
 

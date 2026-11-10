@@ -282,7 +282,7 @@ def _reconcile_each(drive_root: Any, runs: List[RunCustody],
                     pending: Optional[List[Dict[str, Any]]] = None,
                     deliberate_terminal: str = "", live_task_ids=None, recoverable_handles=(),
                     replay_pending: Optional[Callable[[], bool]] = None) -> List[Dict[str, Any]]:
-    """One transport, one settle-or-cancel pass. Shared by every reconcile surface.
+    """One settle-or-cancel pass, one transport per engine. Shared by every reconcile surface.
 
     ``gateway_factory`` has NO default: the caller names whether this pass may ensure
     (the admitted sweep) or only attach (every release, kill, stop and Restart path).
@@ -294,6 +294,10 @@ def _reconcile_each(drive_root: Any, runs: List[RunCustody],
     the third duty: settlement no longer discharges project ownership, and the
     startup/periodic sweep surface is where settled-but-owned registrations get
     their retry lane (the task-scoped surface can exit early with none open).
+    Runs, pending invocations and registrations bound to a managed work engine pass
+    through that engine alone, one pass per engine (``execution_domain.engine_groups``):
+    a lost create is re-POSTed only where it was bound, and one engine's answer never
+    settles another's run or project. Unmanaged, the owned engine's pass is the whole pass.
     """
     if gateway_factory is None:
         raise ValueError("delegated-run reconciliation needs an explicit gateway factory: "
@@ -302,6 +306,7 @@ def _reconcile_each(drive_root: Any, runs: List[RunCustody],
     # a deferred one must not spin the daemon up.
     from ouroboros.delegate_continuation import still_continuable
     from ouroboros.delegate_custody_current import held_runs
+    from ouroboros.execution_domain import engine_factory, engine_groups
 
     # Owned registrations and unsettled runs are HELD rows: one indexed read.
     snapshot = list(held_runs(drive_root).values())
@@ -317,6 +322,20 @@ def _reconcile_each(drive_root: Any, runs: List[RunCustody],
     registrations = [row for row in snapshot
                      if row.project_owned and row.project_id
                      and row.project_id not in unsettled_projects]
+    outcomes: List[Dict[str, Any]] = []
+    for ref, (bound_runs, bound_pending, bound_registrations) in engine_groups(runs, pending or [], registrations):
+        outcomes.extend(_reconcile_engine(
+            drive_root, bound_runs, engine_factory(ref, gateway_factory), bound_pending if pending is not None else None,
+            bound_registrations, deliberate_terminal=deliberate_terminal, live_task_ids=live_task_ids,
+            recoverable_handles=recoverable_handles, replay_pending=replay_pending))
+    return outcomes
+
+
+def _reconcile_engine(drive_root: Any, runs: List[RunCustody], gateway_factory: Callable[[], Any],
+                      pending: Optional[List[Dict[str, Any]]], registrations: List[RunCustody], *,
+                      deliberate_terminal: str, live_task_ids, recoverable_handles,
+                      replay_pending: Optional[Callable[[], bool]]) -> List[Dict[str, Any]]:
+    """``_reconcile_each``'s pass over one engine: its runs, pending invocations and registrations."""
     def _replay_admitted() -> bool:
         return replay_pending is not None and bool(replay_pending())
 
@@ -457,8 +476,19 @@ def _recover_pending_invocation(drive_root: Any, gateway: Any,
     execution = body.get("execution") if isinstance(body.get("execution"), dict) else {}
     scope = body.get("scope") if isinstance(body.get("scope"), dict) else {}
     from ouroboros.delegate_plan import plan_facts
+    from ouroboros.execution_domain import is_work_ref, recorded_ref
 
+    # The engine this invocation was bound to before its POST (this pass replayed it there): the recovered row
+    # keeps it, with the store that engine proved, as a fresh start's row does; else a later pass would ask the
+    # owned engine about a work run and take its 404 for the run's absence.
+    bound = recorded_ref(record)
+    engine = dict(bound) if is_work_ref(bound) else {}
+    if engine and not engine.get("store"):
+        proven = getattr(gateway, "engine_ref", None)
+        if is_work_ref(proven) and proven.get("descriptor") == engine.get("descriptor") and proven.get("store"):
+            engine["store"] = str(proven["store"])
     custody = _custody().RunCustody(
+        engine_ref=engine,
         run_id=run_id, task_id=task_id, daemon_store_id=_custody().admitted_store_id(handle),
         **plan_facts(record),
         route_id=str(record["route"] or body.get("primaryHarness") or ""),
@@ -621,7 +651,7 @@ def _reconcile_one(drive_root: Any, gateway: Any, custody: RunCustody, *,
     try:
         detail = gateway.get_run(custody.run_id)
     except ClaudexorUnavailable as exc:
-        if _custody().daemon_says_absent(exc, run=custody):
+        if _custody().daemon_says_absent(exc, gateway=gateway, run=custody):
             _custody().close_absent_run(drive_root, gateway, custody, "reconcile_absent", absence=exc)
             result = {"run_id": custody.run_id, "task_id": custody.task_id, "action": "absent"}
         else:

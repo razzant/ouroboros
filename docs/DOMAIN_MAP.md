@@ -19,16 +19,16 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D09 | Cancellation, owner control & process custody | 27 | 0 |
 | D10 | Git, update & release machinery | 40 | 0 |
 | D11 | Gateway, server & Web UI | 115 | 0 |
-| D12 | Settings & configuration | 27 | 0 |
+| D12 | Settings & configuration | 28 | 0 |
 | D13 | Safety, guards & runtime mode | 12 | 0 |
-| D14 | Skills & extensions | 72 | 0 |
+| D14 | Skills & extensions | 73 | 0 |
 | D15 | Memory, knowledge, consciousness & self-evolution | 35 | 0 |
 | D16 | Observability, usage accounting & cost | 31 | 0 |
-| D17 | Projects, workspaces & task results | 56 | 0 |
+| D17 | Projects, workspaces & task results | 59 | 0 |
 | D18 | Launcher, packaging, platform & shared substrate | 40 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 26 | 0 |
-| **total** | | **1008** | **0** |
+| **total** | | **1013** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -65,7 +65,7 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
 
 ## Hidden coupling (classified out of the strict graph)
 
-- lazy-only cross-domain pairs: **125**
+- lazy-only cross-domain pairs: **128**
   - D01->D08
   - D01->D10
   - D01->D11
@@ -120,6 +120,7 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
   - D09->D04
   - D09->D05
   - D09->D07
+  - D09->D10
   - D09->D11
   - D09->D12
   - D09->D14
@@ -138,6 +139,7 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
   - D12->D15
   - D12->D16
   - D12->D17
+  - D12->D19
   - D13->D05
   - D13->D06
   - D13->D07
@@ -170,6 +172,7 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
   - D17->D02
   - D17->D09
   - D17->D13
+  - D17->D14
   - D17->D20
   - D18->D01
   - D18->D07
@@ -932,6 +935,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/colab_bootstrap.py`
 - `ouroboros/composer_cognition.py`
 - `ouroboros/config.py`
+- `ouroboros/deployment_policy.py`
 - `ouroboros/i18n_memory.py`
 - `ouroboros/launch_roots.py`
 - `ouroboros/launcher_onboarding.py`
@@ -975,6 +979,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 ### D14 — Skills & extensions
 
 - `ouroboros/betterleaks_runtime.py`
+- `ouroboros/deployment_extensions.py`
 - `ouroboros/event_bus.py`
 - `ouroboros/extension_child_catalog.py`
 - `ouroboros/extension_companion.py`
@@ -1128,6 +1133,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/dialogue_retry.py`
 - `ouroboros/dialogue_store.py`
 - `ouroboros/docker_process_observer.py`
+- `ouroboros/execution_domain.py`
 - `ouroboros/headless.py`
 - `ouroboros/headless_status.py`
 - `ouroboros/history_retention.py`
@@ -1170,6 +1176,8 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/terminal_time.py`
 - `ouroboros/tool_error_words.py`
 - `ouroboros/tools/project_journal.py`
+- `ouroboros/work_domain.py`
+- `ouroboros/work_skill_payloads.py`
 - `ouroboros/workspace_admission.py`
 - `ouroboros/workspace_executor.py`
 - `ouroboros/workspace_executor_paths.py`

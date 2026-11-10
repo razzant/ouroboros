@@ -799,8 +799,8 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
 
         if exit_code == RESTART_EXIT_CODE:
             log.info("Agent requested restart (exit code 42). Restarting...")
-            _sync_existing_repo_from_bundle()
-            if not _install_deps():
+            _sync_existing_repo_from_bundle()  # a deployment policy's packages are its administrator's: none synced
+            if not os.environ.get("OUROBOROS_DEPLOYMENT_POLICY", "").strip() and not _install_deps():
                 # Retry dependency sync once before letting imports fail under the crash fuse.
                 log.error(
                     "Dependency install failed after the restart request; "

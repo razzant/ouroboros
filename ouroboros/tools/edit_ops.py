@@ -76,8 +76,32 @@ from ouroboros.tool_access import (
 )
 from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for
 from ouroboros.utils import safe_relpath, write_text
+from ouroboros import work_domain
 
 log = logging.getLogger(__name__)
+
+
+def _land_edit_bytes(target: pathlib.Path, content: str) -> None:
+    """Land a multi-file patch or batch edit at ``target``. A work-domain path is written AS THE WORK DOMAIN
+    (``work_domain.write_text``), so an employee's ancestor swap reaches only the work domain and never a service
+    root; the service's own paths keep the exact atomic overwrite they always had."""
+    from ouroboros import work_domain
+
+    if work_domain.is_work(target):
+        work_domain.write_text(target, content)
+    else:
+        write_text(target, content)
+
+
+def _delete_edit_target(target: pathlib.Path) -> None:
+    """Delete a patch target. A work-domain path is removed AS THE WORK DOMAIN, so an ancestor swap can only
+    remove a work-domain file, never one in a service root; the service's own paths keep ``unlink``."""
+    from ouroboros import work_domain
+
+    if work_domain.is_work(target):
+        work_domain.remove(target)
+    else:
+        target.unlink()
 
 
 # ---------------------------------------------------------------------------
@@ -440,8 +464,10 @@ def numbered_edit_preview(text: str, offsets: List[int], *, max_sites: int = 8) 
 
 def newline_normalization_note(target: pathlib.Path) -> str:
     """Disclose the existing universal-newline read and LF write behavior."""
+    from ouroboros import work_domain  # a work file's bytes: the confined intake, never a service open
+
     try:
-        raw = target.read_bytes()
+        raw = work_domain.read_bytes(target)
     except OSError:
         return ""
     return "⚠️ Existing CRLF/CR line endings were normalized to LF." if b"\r" in raw else ""
@@ -1038,7 +1064,7 @@ def _apply_patch(
         mutation_binding = mutation_binding or item_binding
         bindings[rel] = item_binding
         if op.kind == "add":
-            if rel in seen or target.exists():
+            if rel in seen or work_domain.exists(target):
                 errors.append(
                     f"⚠️ APPLY_PATCH_ERROR: Add File {op.path}: file already exists. "
                     "Use '*** Update File:' to modify it."
@@ -1069,7 +1095,7 @@ def _apply_patch(
             if rel in seen or rel in deleted:
                 errors.append(f"Delete File {op.path}: conflicts with another operation on this file")
                 continue
-            if not target.exists():
+            if not work_domain.exists(target):
                 errors.append(f"⚠️ APPLY_PATCH_ERROR: Delete File {op.path}: file not found.")
                 continue
             if not _repo_edit_binding(item_binding) and not force:
@@ -1086,11 +1112,11 @@ def _apply_patch(
         if rel in seen:
             content = seen[rel]
         else:
-            if not target.exists():
+            if not work_domain.exists(target):
                 errors.append(f"⚠️ APPLY_PATCH_ERROR: Update File {op.path}: file not found.")
                 continue
             try:
-                content = target.read_text(encoding="utf-8")
+                content = work_domain.read_text(target)
             except Exception as e:  # noqa: BLE001 - report unreadable target
                 errors.append(f"⚠️ APPLY_PATCH_ERROR: cannot read {op.path}: {e}")
                 continue
@@ -1166,7 +1192,7 @@ def _apply_patch(
 
     for rel, (target, content) in final_content.items():
         try:
-            write_text(target, content)
+            _land_edit_bytes(target, content)
         except Exception as e:  # noqa: BLE001 - surface the failed path
             return partial(f"write failed for {rel}: {e}")
         changed_paths.append(rel)
@@ -1182,7 +1208,7 @@ def _apply_patch(
                 return partial(f"{rel} WAS written but its user artifact registration failed: {exc}", landed=True)
     for target, rel in planned_deletes:
         try:
-            target.unlink()
+            _delete_edit_target(target)
         except Exception as e:  # noqa: BLE001 - surface the failed path
             return partial(f"delete failed for {rel}: {e}")
         changed_paths.append(rel)
@@ -1290,11 +1316,11 @@ def _edit_batch(
             continue
         mutation_binding = mutation_binding or item_binding
         if rel not in contents:
-            if not target.exists():
+            if not work_domain.exists(target):
                 errors.append(f"edit {idx} ({rel}): file not found")
                 continue
             try:
-                contents[rel] = target.read_text(encoding="utf-8")
+                contents[rel] = work_domain.read_text(target)
             except Exception as e:  # noqa: BLE001 - report unreadable target
                 errors.append(f"edit {idx} ({rel}): cannot read: {e}")
                 continue
@@ -1369,7 +1395,7 @@ def _edit_batch(
     order = list(contents)
     for rel, text in contents.items():
         try:
-            write_text(targets[rel], text)
+            _land_edit_bytes(targets[rel], text)
         except Exception as e:  # noqa: BLE001 - surface the failed path
             return _partial_write_failure(
                 ctx, changed, source_tool, "EDIT_BATCH_ERROR",

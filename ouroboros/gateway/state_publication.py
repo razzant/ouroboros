@@ -101,8 +101,8 @@ def _failure(exc: BaseException) -> Tuple[str, str]:
 
 
 def _queue_revision() -> Tuple[Any, ...]:
-    """The queue's revision, the live ids, and each RUNNING row's model activity (an in-memory fact
-    the documents omit). Read without Q: ``list()`` copies a dict or list whole."""
+    """The queue's revision, the live ids, and each RUNNING row's model activity and sent attempt context
+    (in-memory facts the documents omit). Read without Q: ``list()`` copies a dict or list whole."""
     from supervisor import queue
     from supervisor.queue_publication import queue_revision
 
@@ -111,7 +111,8 @@ def _queue_revision() -> Tuple[Any, ...]:
     for task_id, meta in list(queue.RUNNING.items()):
         active = (meta.get("active_llm_call") or {}) if isinstance(meta, dict) else {}
         running.append((str(task_id), meta.get("attempt") if isinstance(meta, dict) else None,
-                        json.dumps(active.get("model_activity"), sort_keys=True, default=str)))
+                        json.dumps([active.get("model_activity"), meta.get("context_attempt") if isinstance(
+                            meta, dict) else None], sort_keys=True, default=str)))
     return (queue_revision(), tuple(pending), tuple(running))
 
 

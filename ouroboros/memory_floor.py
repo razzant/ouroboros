@@ -11,16 +11,16 @@ import json
 import logging
 import math
 from functools import cached_property, lru_cache
-from typing import Callable, Any, Dict, Iterable, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from ouroboros import context_budget
-from ouroboros.chat_chain import parse_address
-from ouroboros.context_layout import WHOLE_OR_OUTLINE_STEPS
 from ouroboros import memory_view as mv
 from ouroboros import memory_view_conversations as conversations
 from ouroboros import memory_view_legacy as legacy
+from ouroboros.chat_chain import parse_address
+from ouroboros.context_layout import WHOLE_OR_OUTLINE_STEPS
+from ouroboros.section_floor import PROTECTED, relocated_text, retain_section, section_views
 from ouroboros.utils import estimate_tokens
-from ouroboros.section_floor import PROTECTED, retain_section, relocated_text, section_views
 
 log = logging.getLogger(__name__)
 
@@ -263,6 +263,37 @@ def floor_parts(fact: Mapping[str, Any]) -> str:
     return f"{named}, reply reserve {fact['reserve']:,}, work room {fact['work']:,}"
 
 
+def start_cause(facts: Optional[Mapping[str, Any]]) -> str:
+    """Why a start fit's own projection (its ``memory_facts``) is below the owner's mode: ``""`` without a mode
+    switch (``floor.mode_switch``); ``memory`` when memory crowded the Max room (``crowded_by_memory``), ``route``
+    when the window cannot hold the books and core, else ``window``."""
+    facts = facts or {}
+    if not (facts.get("floor") or {}).get("mode_switch"):
+        return ""
+    room = facts.get("max_room")
+    return "memory" if crowded_by_memory(room) else "route" if (room or {}).get("cause") == "route" else "window"
+
+
+def drawn_tokens(entry: Mapping[str, Any]) -> int:
+    """One story entry as the full view draws it: a retold record whole (``F3``'s whole form), else its own page
+    lines (``memory_view._page_lines``; an account's told lines aside). Told by an account, it is not drawn: 0."""
+    if entry.get("told_by"):
+        return 0
+    return view_tokens(legacy.retold_record(entry) if entry.get("kind") == "legacy" else "\n".join(mv._page_lines(entry)))
+
+
+def story_measure(story: Iterable[Mapping[str, Any]], status: Optional[Mapping[str, Any]] = None,
+                  refusals: Iterable[Mapping[str, Any]] = ()) -> Dict[str, Any]:
+    """My story from its captured entries alone (``memory_view.capture_story``): ``tokens`` as the full view draws
+    the whole block (``render_story``), ``drawn`` each entry's own tokens by id (``drawn_tokens``) and ``unfolded``
+    (``unfolded_pages``). What ``memory_read(story=true)`` reports; a measure, never a mode."""
+    story = tuple(story)
+    snapshot = mv.MemoryViewSnapshot(spec=mv.ViewSpec("integrator"), store_status={"state": "active"}, frontier={},
+                                     story=story, legacy_blocks=dict(status or {}), fallback_refusals=tuple(refusals))
+    return {"tokens": view_tokens(mv.render_story(snapshot)), "unfolded": unfolded_pages(snapshot),
+            "drawn": {str(entry["id"]): drawn_tokens(entry) for entry in story if not entry.get("told_by")}}
+
+
 def unfolded_pages(snapshot: Optional[mv.MemoryViewSnapshot]) -> Dict[str, Any]:
     """My story's pages no part or account holds yet, from the captured snapshot alone: how many, their tokens and
     ``rooms`` as ``[label, tokens, pages]``, the room holding most of them first (where they pile up)."""
@@ -270,7 +301,7 @@ def unfolded_pages(snapshot: Optional[mv.MemoryViewSnapshot]) -> Dict[str, Any]:
     for entry in snapshot.story if snapshot else ():
         if entry.get("kind") == "page" and not entry.get("told_by"):
             room = rooms.setdefault(str(entry.get("room_id")), [str(entry.get("label") or entry.get("room_id")), 0, 0])
-            room[1] += view_tokens("\n".join(mv._page_lines(entry)))
+            room[1] += drawn_tokens(entry)
             room[2] += 1
     ranked = sorted(rooms.values(), key=lambda room: (-room[1], room[0]))
     return {"pages": sum(room[2] for room in ranked), "tokens": sum(room[1] for room in ranked), "rooms": ranked}
@@ -743,7 +774,7 @@ HOST_STEPS = ("runtime", "review_pool", "review_continuity", "installed_skills",
 
 
 def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, root, task_id, allowance=None,
-                shortest=None, budget_mode=None, slack=0, bare=None):
+                shortest=None, budget_mode=None, slack=0, bare=None, retain=None):
     """First steps of mode_views, using the same physical allowance as memory.
 
     Producers own meaning; this walk selects only explicit smaller views. Retained
@@ -763,7 +794,8 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
     (``render_view_for_mode(shortest=True)``). After each new address that receipt can
     grow, so the frame re-prices the walk's level beside the new forms and walks again
     only when the level no longer fits (``context_fit._view_projections``).
-    ``bare(addressed)`` measures a request without memory: when even every candidate at
+    ``retain`` captures a section before its pointer (``retain_section``; a write-free fit passes
+    ``section_floor.predicted_section``). ``bare(addressed)`` measures a request without memory: when even every candidate at
     its shorter form exceeds the window that way, no price here can fit, so each candidate
     steps for the window unpriced and the saving stays unpaid.
     Every frame begins from what was shown (``previous``) and pays what that frame
@@ -805,7 +837,7 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
         if part.section_id in WHOLE_OR_OUTLINE_STEPS and fits and (soft or initial - current >= excess):
             continue  # an outline is a physical step, never a start-room or slack choice
         try:
-            row = retain_section(part, root=root, task_id=task_id)
+            row = (retain or retain_section)(part, root=root, task_id=task_id)
         except (OSError, ValueError):
             log.warning("Host section capture unavailable; keeping %s whole", part.section_id, exc_info=True)
             continue
@@ -818,3 +850,140 @@ def _host_steps(sections, previous, *, measure, window, reserve, ratio, saving, 
         receipts.append({**row, "tokens_saved": saved, **({"start_room": start_room} if start_room else {})})
         current, fits = measure(addressed), None
     return receipts, max(0, saving - (initial - current))
+
+
+# --- a pairwise start fit of other memories in one captured frame ------------------------------------------------
+
+STORY_FIELDS = ("legacy", "under_parts", "told")  # this room's records whose form my story decides
+
+
+def reprojected(captured: mv.MemoryViewSnapshot, fresh: mv.MemoryViewSnapshot) -> mv.MemoryViewSnapshot:
+    """The captured view with only what my story decides read again (``fresh``, a capture of the same spec with no
+    lanes, conversations or marks): the story, its status and refusals, this room's retold records, pages under parts
+    and told records. Rows, conversations, marks, notes and every other fact stay as this task captured them."""
+    room = captured.room
+    if room is not None and fresh.room is not None:
+        room = {**room, **{key: fresh.room[key] for key in STORY_FIELDS if key in fresh.room}}
+    return dataclasses.replace(captured, story=fresh.story, legacy_blocks=fresh.legacy_blocks,
+                               store_status=fresh.store_status, fallback_refusals=fresh.fallback_refusals, room=room)
+
+
+def counterfactual_starts(plan: Any, snapshots: Mapping[str, mv.MemoryViewSnapshot]) -> Dict[str, Any]:
+    """Each named memory fitted as a fresh start of this plan's one captured frame by the start's own fitter
+    (``context_fit._view_projections``): the same core, books, assignment, tool schemas the start priced, window
+    record, reply and working reserves, density and owner mode; nothing else is read. A host step's section is
+    priced at the address its capture would publish (``section_floor.predicted_section``) and nothing is written: no
+    view receipt, calibration, checkpoint or plan. When no view holds the whole input, the start's own rescue applies
+    as production's (``context_input_selection.rescued_start``) to the deliveries this start captured, in its order
+    (``rescued_inputs``); an arm on one says ``"input": "rescued"``. ``{"measured": False, "missing": [...]}`` names
+    inputs this plan lacks; each arm is ``{"mode", "max_room", "steps", "host"}``, ``{"refused": reason}`` when no
+    start view fits, or ``{"unmeasured": reason}`` (a further rescue this start never captured included)."""
+    from ouroboros import context_fit as cf
+    from ouroboros.section_floor import predicted_section
+
+    core, record = getattr(plan, "core", None), getattr(plan, "window_record", None)
+    missing = [name for name, held in (
+        ("the captured context core and memory view", core is not None and bool(getattr(core, "memory_view_json", ""))),
+        ("the tool schemas its start priced", getattr(plan, "start_tool_schemas_json", None) is not None),
+        ("its window record", record is not None)) if not held]
+    if missing:
+        return {"measured": False, "missing": missing}
+    schemas, ratio = json.loads(plan.start_tool_schemas_json), float(plan.max_projection.calibration_ratio)
+    governance = {form: cf._governance_blocks(None, core, mode=form) for form in ("max", "low")}
+    rescues, last = rescued_inputs(plan)
+    arms: Dict[str, Any] = {}
+    for name, snapshot in snapshots.items():
+        if not snapshot.active:
+            arms[name] = {"unmeasured": "memory capture unavailable: " + str(snapshot.store_status.get("state"))}
+            continue  # an unreadable journal is not an empty history that fits Max
+        def fit(user_content_json: str, snapshot=snapshot) -> Tuple[Dict[str, Any], str]:
+            return cf._view_projections(
+                dataclasses.replace(core, memory_view_json=mv.snapshot_json(snapshot)), governance,
+                user_content_json, preferred=plan.preferred_mode, tool_schemas=schemas,
+                window_tokens=record.total_equivalent, known_window=record.usable is not None,
+                output_reserve=plan.output_reserve_tokens, window_record=record, ratio=ratio,
+                working_reserve_tokens=plan.working_reserve_tokens, work_room_levels=snapshot.spec.work_room_levels,
+                retain=predicted_section)
+        rescued = False
+        try:
+            try:
+                contents, mode = fit(core.user_content_json)
+            except cf.MinimumViewUnfit as unfit:
+                if not unfit.physical or unfit.required_book_tokens or not rescues:
+                    raise  # a refusal production names too; or, with no captured rescue, unknown below
+                for rescue in rescues:  # production's order; the last refusal stands as its own
+                    try:
+                        contents, mode = fit(rescue)
+                        break
+                    except cf.MinimumViewUnfit as refused:
+                        unfit = refused
+                else:
+                    if not last:
+                        raise _UncapturedRescue("every rescue this start captured is refused; its further forms "
+                                                "were never captured") from unfit
+                    raise unfit
+                rescued = True
+        except cf.MinimumViewUnfit as unfit:
+            arms[name] = ({"unmeasured": "the whole input does not fit and this start captured no rescue of it"}
+                          if unfit.physical and not unfit.required_book_tokens and not rescues else {"refused": str(unfit)})
+            continue
+        except Exception as exc:  # the read keeps its other answers; this arm is unknown, never a mode
+            if not isinstance(exc, _UncapturedRescue):
+                log.warning("pairwise start fit of %s not measured", name, exc_info=True)
+            arms[name] = {"unmeasured": str(exc) if isinstance(exc, _UncapturedRescue) else type(exc).__name__}
+            continue
+        facts = contents[mode][1]
+        arms[name] = {"mode": mode, "max_room": facts.get("max_room"), "steps": dict((facts.get("floor") or {}).get(
+            "steps") or {}), "host": [(row["section_id"], row["tokens_saved"]) for row in facts.get(
+                "host_sections_addressed", ())], **({"input": "rescued"} if rescued else {})}
+    frame = {"core": plan.core_sha256[:12], "preferred": plan.preferred_mode, "window": record.total_equivalent,
+             "known": record.usable is not None, "reserve": plan.output_reserve_tokens, "ratio": ratio,
+             "schemas": len(schemas or ()), "started": plan.start[0] or plan.initial_mode}  # the start's own mode
+    return {"measured": True, "frame": frame, "arms": arms}
+
+
+class _UncapturedRescue(Exception):
+    """A pairwise start fit reached past the rescues its start captured: unknown, never a refusal."""
+
+
+def rescued_inputs(plan: Any) -> Tuple[List[str], bool]:
+    """The deliveries this plan's start used in place of its whole input (``context_input_selection.rescued_start``,
+    held on its projections), in production's rescue order: a wake's bound form (every mode's) first, owner-Nano's
+    exact input pointer (Nano's alone) last; and whether that last is production's last rescue, so its refusal is
+    one. Nothing is read or written: what the start did not capture is not here."""
+    held = {mode: plan.projection(mode).user_content_json for mode in MODES}
+    wake = held["max"] or held["low"]
+    pointer = held["nano"] if held["nano"] and held["nano"] != wake else None
+    rescues = [text for text in (wake, pointer) if text]
+    return rescues, bool(pointer) and plan.preferred_mode == "nano"
+
+
+def counterfactual_lines(fit: Mapping[str, Any]) -> List[str]:
+    """``counterfactual_starts`` as the reader's lines: the frame, then each arm's start mode and Max room in the
+    host's measured parts (``measure_text``), its floor steps and predicted host steps; a missing input is named."""
+    head = "## The next start in this task's captured frame (a pairwise fit; nothing written)"
+    if not fit.get("measured"):
+        return ["", head, "not measured: this task's plan does not hold " + "; ".join(fit.get("missing") or ()) + "."]
+    f = fit["frame"]
+    lines = ["", head, (
+        f"frame: core {f['core']}, owner mode {f['preferred']}, window {f['window']:,}"
+        f"{'' if f['known'] else ' (not known: no window bound applies)'}, reply reserve {f['reserve']:,}, density "
+        f"{f['ratio']:.3f}, {f['schemas']} tool schemas as this task's start priced them; my story, its status and this "
+        "room's retold records read now, everything else as this task captured it. "
+        + ("This task's original start is not known: its continuation did not carry it."
+           if f["started"] == "unknown" else f"This task started in {f['started']} (its start projection, a separate "
+           "fact: my chronicle may have changed since)."))]
+    for name, arm in fit["arms"].items():
+        if "refused" in arm or "unmeasured" in arm:
+            lines.append(f"- {name}: no start view fits ({arm['refused']})" if "refused" in arm
+                         else f"- {name}: not measured ({arm['unmeasured']}); its mode is unknown")
+            continue
+        room = arm["max_room"]
+        steps = ", ".join(f"{step} {count}" for step, count in arm["steps"].items()) or "none"
+        host = ", ".join(f"{section} ~{saved:,}" for section, saved in arm["host"])
+        lines.append(f"- {name}: starts {arm['mode'].capitalize()}"
+                     + (" on the input this start rescued" if arm.get("input") == "rescued" else "")
+                     + (f"; Max room {room['cause']}: {measure_text(room)}" if room else "; no Max room measured")
+                     + f"; floor steps {steps}"
+                     + (f"; host sections by address, if their capture succeeds: {host}" if host else ""))
+    return lines

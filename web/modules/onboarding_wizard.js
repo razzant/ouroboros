@@ -27,6 +27,7 @@ import { createConsciousnessOffer } from './onboarding_consciousness.js';
 import { createConnectionsEditor } from './settings_connections.js';
 import { PROVIDER_CARDS, providerSettingsCard } from './settings_provider_cards.js';
 import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
+import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_policy.js';
 
 (() => {
         // The served wizard document needs its own menu-key binding.
@@ -48,10 +49,8 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         const MODEL_SLOTS = SETUP_CONTRACT.modelSlots || [];
         const REVIEW_MODES = SETUP_CONTRACT.reviewModes || [];
         const RUNTIME_MODES = SETUP_CONTRACT.runtimeModes || [];
-        // The setup contract owns the access ladder. Pick the matching layout
-        // for its current number of choices so adding Cyber Pro does not leave
-        // the fourth card stranded under a three-column presentation.
-        const RUNTIME_MODE_GRID_CLASS = RUNTIME_MODES.length > 3 ? 'four' : 'three';
+        // The setup contract owns the access ladder (a deployment's ceiling included): one column per choice.
+        const RUNTIME_MODE_GRID_CLASS = ['one', 'two', 'three', 'four'][Math.min(RUNTIME_MODES.length, 4) - 1] || 'four';
         const LOCAL_ROUTING_MODES = SETUP_CONTRACT.localRoutingModes || [];
         const BUDGET_FIELDS = SETUP_CONTRACT.budgetFields || [];
         const LOCAL_FIELDS = [
@@ -671,16 +670,16 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
     }
     function mainBinding() { return JSON.stringify([state.mainModel, state.modelAccounts.main || '', state.modelProcessingPreferences?.main || state.processingPreference || '']); }
 
-        function providerKeyField({ id, label, placeholder, stateKey, note, inputType }) {
-            const type = inputType || 'password';
+        function providerKeyField({ id, label, placeholder, stateKey, note, inputType, settingKey }) {
+            const type = inputType || 'password', fixed = checkerFieldsNote(checkerReads(bootstrap.deployment, settingKey) ? [label] : []);
             return `
                 <div class="field ui-field">
                 <div class="field-label-row">
                     <label for="${escapeHtml(id)}">${escapeHtml(label)}</label>
-                    <button class="field-clear" data-clear="${escapeHtml(id)}" type="button" aria-label="Clear ${escapeHtml(label)}">Clear</button>
+                    ${fixed ? '' : `<button class="field-clear" data-clear="${escapeHtml(id)}" type="button" aria-label="Clear ${escapeHtml(label)}">Clear</button>`}
                 </div>
-                <input id="${escapeHtml(id)}" class="ui-control" type="${escapeHtml(type)}" aria-describedby="${escapeHtml(id)}-help" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(state[stateKey])}">
-                <div id="${escapeHtml(id)}-help" class="field-note ui-field-help">${escapeHtml(note)}</div>
+                <input id="${escapeHtml(id)}" class="ui-control" type="${escapeHtml(type)}" aria-describedby="${escapeHtml(id)}-help" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(state[stateKey])}"${fixed ? ' readonly' : ''}>
+                <div id="${escapeHtml(id)}-help" class="${fixed ? 'wizard-inline-note' : 'field-note ui-field-help'}" data-checker-field="${fixed ? '1' : ''}">${escapeHtml(fixed || note)}</div>
             </div>
             `;
         }
@@ -879,6 +878,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
         const runtimeModeCopy = HOST_MODE === 'desktop'
             ? 'Separate axis from review enforcement. This first-run choice becomes the boot baseline before Ouroboros starts; later elevation requires native launcher confirmation.'
             : 'Separate axis from review enforcement. Web/Docker onboarding saves this through the owner endpoint; the selected mode becomes active after restart.';
+        const accessBound = deploymentNote(bootstrap.deployment, 'access');  // a constraint, kept on compact screens too
         return `
             <div class="step-header">
                 <div>
@@ -899,6 +899,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
             <div class="panel-card runtime-mode-card">
                 <h3>Access level</h3>
                     <p class="field-note">${escapeHtml(runtimeModeCopy)}</p>
+                    ${accessBound ? `<div class="wizard-inline-note" data-access-bound>${escapeHtml(accessBound)}</div>` : ''}
                     <div class="wizard-choice-grid ${RUNTIME_MODE_GRID_CLASS}">
                         ${RUNTIME_MODES.map((mode) => `
                             <button type="button" class="wizard-choice ${escapeHtml(mode.className || mode.value)} ${runtimeMode === mode.value ? 'active' : ''}" data-runtime-mode="${escapeHtml(mode.value)}" aria-pressed="${runtimeMode === mode.value}">
@@ -1157,7 +1158,7 @@ import { bindSecretInputs, resetSecretReveals } from './settings_secrets.js';
             }
             // The card's own fields first, as Settings does: load() binds each row it mounts.
             bindSecretInputs(panel);
-            connectionsEditor.load(draftSettings(), { modelSlots: MODEL_SLOTS });
+            connectionsEditor.load({ ...draftSettings(), _meta: { policy_state: { deployment: bootstrap.deployment } } }, { modelSlots: MODEL_SLOTS });
             // Back remounts the draft, not a saved document. Show and Test must still
             // use edited values locally rather than look up an unsaved row's key.
             panel.querySelectorAll('[data-connection-row][data-uid]').forEach((row) => {
