@@ -66,11 +66,16 @@ _MAX_INLINE_QUESTIONS = 3
 _MAX_INLINE_OPTIONS = 12
 
 
-def _interactions_are_news(run_id: str, pending: List[Dict[str, Any]]) -> bool:
+def _interactions_are_news(run_id: str, pending: List[Dict[str, Any]], acknowledged: Any = ()) -> bool:
     """True when this pending set has not been returned for this run yet — and
-    record it. A re-ask after a decline is a NEW interaction id, so it is news."""
+    record it. A re-ask after a decline is a NEW interaction id, so it is news.
+    ``acknowledged`` is what the run's acknowledged wakes durably showed: a process
+    with no memory of the run (a cold sleep woke in a new one) does not show it again."""
     ids = frozenset(str(row.get("interaction_id") or "") for row in pending)
     if _REPORTED_INTERACTIONS.get(run_id) == ids:
+        return False
+    if run_id not in _REPORTED_INTERACTIONS and ids and ids <= frozenset(str(item) for item in acknowledged):
+        _REPORTED_INTERACTIONS[run_id] = ids
         return False
     if run_id not in _REPORTED_INTERACTIONS \
             and len(_REPORTED_INTERACTIONS) >= _REPORTED_INTERACTIONS_MAX_KEYS:

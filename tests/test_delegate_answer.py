@@ -231,8 +231,8 @@ def test_a_new_question_returns_immediately_with_the_full_text(tmp_path, monkeyp
 
 
 def test_the_same_question_does_not_busy_loop_the_next_wait(tmp_path, monkeypatch):
-    """A nanny that escalated up the hierarchy and re-waits must HOLD its
-    window, not spin: the known question rides the expiry payload instead."""
+    """A nanny that escalated up the hierarchy and re-waits is not handed the
+    same question as news: the known question rides the run's present state."""
     import ouroboros.tools.delegate as delegate
 
     _waiting_stub(monkeypatch, [_pending_row()])
@@ -245,6 +245,31 @@ def test_the_same_question_does_not_busy_loop_the_next_wait(tmp_path, monkeypatc
     assert second["status"] == "no_progress"
     assert second["waiting_on_user"] is True
     assert second["pending_interactions"][0]["interaction_id"] == "int-1"
+
+
+def test_a_question_an_acknowledged_wake_showed_stays_shown_in_a_new_process(tmp_path, monkeypatch):
+    """A cold sleep wakes in a new process with no memory of the questions it showed. What the run's acknowledged
+    wakes showed (its supervision record) is not news there either; a question none acknowledged still is."""
+    import ouroboros.tools.delegate as delegate
+    from ouroboros import delegate_supervision as supervision
+    from ouroboros.delegate_interactions import _REPORTED_INTERACTIONS
+
+    rows = [_pending_row()]
+    _waiting_stub(monkeypatch, rows)
+    ctx = _wait_ctx(tmp_path)
+    _own_run(delegate)
+    state = supervision._load_state(ctx, "run-1")
+    state["interaction_acknowledged_ids"] = ["int-0", "int-1"]
+    supervision._save_state(ctx, state)
+    _REPORTED_INTERACTIONS.clear()  # the new process
+    known = json.loads(delegate._read_run(ctx, "run-1", 5))
+    assert known["status"] == "no_progress" and known["waiting_on_user"] is True, known
+    assert known["pending_interactions"][0]["interaction_id"] == "int-1"
+    _REPORTED_INTERACTIONS.clear()
+    rows[0] = _pending_row(iid="int-2")
+    fresh = json.loads(delegate._read_run(ctx, "run-1", 5))
+    delegate._CUSTODY.clear()
+    assert fresh["status"] == "waiting_on_user" and fresh["pending_interactions"][0]["interaction_id"] == "int-2"
 
 
 def test_a_reask_with_a_new_interaction_id_is_news_again(tmp_path, monkeypatch):

@@ -991,6 +991,17 @@ def _halt_breached_run(ctx: ToolContext, gateway: Any, entry: _RunCustody,
     ).text
 
 
+def _shown_questions(ctx: ToolContext, run_id: str) -> Any:
+    """The question ids this run's acknowledged wakes showed (its supervision record): what a process with no
+    memory of the run, a cold sleep's new one, already showed. Unreadable is none: the question is shown again."""
+    from ouroboros.delegate_supervision import _load_state
+
+    try:
+        return _load_state(ctx, run_id).get("interaction_acknowledged_ids") or ()
+    except (OSError, ValueError):
+        return ()
+
+
 def _read_run(ctx: ToolContext, run_id: str, since_seq: Optional[int] = None, *, gateway: Any = None) -> str:
     """The one addressed read a ``delegate_wait`` wake makes of the run it speaks for
     (``delegate_supervision._observe_once``): its retained or newly collected terminal, a new
@@ -1056,9 +1067,9 @@ def _read_run(ctx: ToolContext, run_id: str, since_seq: Optional[int] = None, *,
                               ensure_ascii=False, indent=2)
         last_seq = int(detail.get("lastSeq") or 0)
         pending = _cx_pending(detail)
-        if pending and _interactions_are_news(rid, pending):
-            # A question the model already saw does not return as news again: a nanny that escalated it
-            # keeps sleeping on the run instead of being woken by the same question.
+        if pending and _interactions_are_news(rid, pending, _shown_questions(ctx, rid)):
+            # A question the model already saw (this process, or an acknowledged wake before a cold sleep) does not
+            # return as news again: a nanny that escalated it sees it beside the run's state, not as a new ask.
             return _waiting_on_user_payload(ctx, rid, state, last_seq, pending,
                                             source_request=entry.work_order_source_request,
                                             source_verification=(custody.work_order_source_verification(entry)
