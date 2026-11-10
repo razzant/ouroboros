@@ -50,11 +50,14 @@ export function observeLayout(win, nodes, layout) {
  * (`say(preview)` gives the words; a mouse resting on another value previews that one's), with
  * CHANGE_RULE under it unless `say` answers its own `rule`, and `onHintAction` for its action. The
  * hint lives inside the capsule, so a press, the pointer or focus there is in the capsule.
+ *
+ * `parts()` names what else is the capsule's own while it stands outside its element (Model's
+ * suggestions float over the page): a press, the pointer or focus there is in the capsule too.
  */
 export function createCapsule({
     el, row, kind, strip, segs, render, focusTarget, padMax = SEG_PAD.max, say = null, onHintAction = () => {},
     busy = () => false, onClosed = () => {}, afterOpen = () => {}, afterOverflow = afterOpen,
-    onLayout = () => {}, onSettled = () => {}, win, doc,
+    onLayout = () => {}, onSettled = () => {}, parts = () => [], win, doc,
 }) {
     const q = (selector) => el.querySelector(selector);
     const head = q('.chat-capsule-head');
@@ -79,9 +82,13 @@ export function createCapsule({
     if (hint) head.setAttribute('aria-describedby', hint.el.id);
     let preview = '';
     const sayHint = () => { if (hint) hint.say({ rule: CHANGE_RULE, ...say(preview) }); };
-    const own = (node) => el.contains(node);
+    const outer = () => parts().filter(Boolean);
+    const own = (node) => el.contains(node) || outer().some((part) => part.contains(node));
     const stillHere = () => {
-        try { return Boolean(el.matches(':hover') || (keyboardFocus && own(doc.activeElement))); } catch { return false; }
+        try {
+            return Boolean(el.matches(':hover') || outer().some((part) => part.matches(':hover'))
+                || (keyboardFocus && own(doc.activeElement)));
+        } catch { return false; }
     };
     // The open strip forgives a mouse that drifts a little: inside the zone (the control, its hint
     // and the corridor between them, plus a small margin) it stays; outside, it closes after the delay
@@ -92,7 +99,7 @@ export function createCapsule({
         const near = (r) => Boolean(r) && point.x >= r.left - HOVER_ZONE_PX && point.x <= r.right + HOVER_ZONE_PX
             && point.y >= r.top - HOVER_ZONE_PX && point.y <= r.bottom + HOVER_ZONE_PX;
         const own = box(el), said = box(hint?.el);
-        if (near(own) || near(said)) return true;
+        if (near(own) || near(said) || outer().some((part) => near(box(part)))) return true;
         if (!own || !said) return false;
         // The corridor: where the hint and the control overlap side to side, the gap between them.
         const corridor = { left: Math.max(own.left, said.left), right: Math.min(own.right, said.right),
