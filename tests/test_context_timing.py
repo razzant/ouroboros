@@ -1,11 +1,11 @@
-"""Section timing of one context build: measured only inside its scope, errors unchanged."""
+"""Section timing and counted work of one measured window: recorded only inside its scope, errors unchanged."""
 from __future__ import annotations
 
 import threading
 
 import pytest
 
-from ouroboros.context_timing import measured_sections, section_spans, timed, timed_section
+from ouroboros.context_timing import counted, measured_sections, section_spans, timed, timed_section
 
 
 @timed_section("demo")
@@ -45,6 +45,57 @@ def test_another_threads_build_does_not_see_this_ones_spans():
         worker.start()
         worker.join()
         assert set(section_spans()["sections_ms"]) == {"demo", "total"}
+    assert seen["spans"] == {}
+
+
+def test_counted_adds_up_inside_a_window_and_records_nothing_outside():
+    counted("reads", 7, key="outside")
+    assert section_spans() == {}
+    with measured_sections():
+        assert section_spans()["work"] == {}
+        counted("reads")
+        counted("reads", 4)
+        assert section_spans()["work"] == {"reads": 5}
+    assert section_spans() == {}
+    with measured_sections():  # the key counted outside any window left no trace in this one
+        counted("reads", key="outside")
+        assert section_spans()["work"] == {"reads": 1}
+
+
+def test_again_counts_only_a_repeated_key_of_the_same_verb():
+    with measured_sections():
+        counted("renders", key="a")
+        counted("renders", key="b")
+        counted("parses", key="a")  # the same key under another verb is not a repeat
+        assert section_spans()["work"] == {"renders": 2, "parses": 1}
+        counted("renders", 3, key="a")  # the repeat adds its whole amount to the verb and to _again
+        counted("renders", 2)  # work without a key is never a repeat
+        assert section_spans()["work"] == {"renders": 7, "parses": 1, "renders_again": 3}
+
+
+def test_a_window_opened_inside_another_keeps_its_own_counts():
+    with measured_sections():
+        counted("reads", key="k")
+        with measured_sections():  # a round's preparation opens the same window: nothing carries in or out
+            counted("reads", key="k")
+            assert section_spans()["work"] == {"reads": 1}
+        counted("reads", key="k")
+        assert section_spans()["work"] == {"reads": 2, "reads_again": 1}
+
+
+def test_another_threads_window_does_not_see_this_ones_work():
+    seen = {}
+
+    def other():
+        counted("reads")
+        seen["spans"] = section_spans()
+
+    with measured_sections():
+        counted("reads")
+        worker = threading.Thread(target=other)
+        worker.start()
+        worker.join()
+        assert section_spans()["work"] == {"reads": 1}
     assert seen["spans"] == {}
 
 
