@@ -2,6 +2,9 @@
 
 The configured cap (default three, <=0 disables) belongs to one model on a resolved
 provider, credential and endpoint, across roles and every process of the installation.
+Where the provider meters streams per ACCOUNT instead of per model (``account_streams``),
+the account is the unit: every model of one account shares one queue, bounded by that
+provider's declared stream ceiling under the configured cap.
 Routes the managed Claudexor engine serves are not queued here: that one daemon is
 already the shared admission point for its accounts (quota-aware routing and
 rotation), and a host cap would only shrink an install's parallel work to the cap
@@ -141,6 +144,26 @@ def _managed(route: dict | None) -> bool:
     return isinstance(route, dict) and str(route.get("provider") or "") == "claudexor"
 
 
+def _account_streams(route: dict | None) -> tuple[str, int | None]:
+    """``(account label, that account's stream ceiling)``, or ``("", None)`` when no account
+    can be read and the credential-and-model key therefore stands."""
+    if not isinstance(route, dict):
+        return "", None
+    from ouroboros.account_streams import account_identity, stream_ceiling
+
+    provider = str(route.get("provider") or "")
+    ceiling = stream_ceiling(provider)
+    if ceiling is None:
+        return "", None
+    label = account_identity(provider, route)
+    if not label:
+        # No readable account (e.g. GigaChat's other ready group, user+password): the
+        # credential-and-model key stands, and so does the owner's cap. A ceiling with
+        # nothing to attach it to would only cut one model's own concurrency.
+        return "", None
+    return label, ceiling
+
+
 def _route_digest(model: str, use_local: bool, route: dict | None) -> str:
     if route is None:
         if use_local:
@@ -156,6 +179,11 @@ def _route_digest(model: str, use_local: bool, route: dict | None) -> str:
         endpoint = f"http://127.0.0.1:{runtime_setting('LOCAL_MODEL_PORT', 8766)}/v1"
     account = {key: str(route.get(key) or "") for key in ("api_key", "user", "password", "credential_profile_id")}
     identity = [provider, str(route.get("source") or ""), endpoint, account, str(model or "")]
+    account_label = _account_streams(route)[0]
+    if account_label:
+        # The provider meters streams per ACCOUNT: every model of one account draws on the
+        # same quota, so the account — never the model — is this queue's unit.
+        identity = [provider, str(route.get("source") or ""), endpoint, account_label]
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
 
@@ -173,6 +201,7 @@ class _Waiter:
             if deadline is not None and (left := max(0.0, float(deadline) - time.time())) < timeout:
                 timeout, self.bound = left, "the caller's deadline"
         self.model = str(model or "")
+        self.account_ceiling = _account_streams(route)[1]
         self.started = time.monotonic()
         self.until = self.started + timeout
         self.directory = _queue_root() / _route_digest(model, use_local, route)
@@ -230,6 +259,10 @@ class _Waiter:
     def step(self):
         self.remaining()
         cap = _cap()
+        if cap > 0 and self.account_ceiling is not None:
+            # One account of this provider serves this many streams in total, at any model:
+            # the owner's cap and the provider's own per-account ceiling, whichever is lower.
+            cap = min(cap, self.account_ceiling)
         if cap <= 0:
             return True
         with self.local.lock:

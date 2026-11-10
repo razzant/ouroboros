@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import multiprocessing
 import os
 import queue
@@ -464,3 +465,81 @@ def test_a_saved_cap_reaches_work_started_under_the_old_one_and_the_save_says_so
             with pytest.raises(mc.ModelSlotTimeout):
                 with mc.model_call_slot("model", route=ROUTE):
                     pytest.fail("a request over the cap was sent anyway")
+
+
+# --- the account, not the model, is the unit when the provider meters streams per account
+
+def _gigachat_route(client_id: str) -> dict:
+    """A GigaChat route whose authorization key encodes one account (base64 client_id:secret)."""
+    return {"provider": "gigachat", "base_url": "https://g.invalid/v1",
+            "api_key": base64.b64encode(f"{client_id}:secret".encode()).decode()}
+
+
+def _holder(route, model, held, release):
+    def run():
+        with mc.model_call_slot(model, route=route):
+            held.set()
+            release.wait(60)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    return thread
+
+
+def _join(holder, release):
+    release.set()
+    holder.join(30)
+    assert not holder.is_alive()
+
+
+def test_two_models_of_one_account_share_its_single_stream(isolated_queue, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC", "1")
+    route = _gigachat_route("client-a")
+    held, release = threading.Event(), threading.Event()
+    holder = _holder(route, "gigachat::GigaChat-3-Pro", held, release)
+    try:
+        assert held.wait(30)
+        # A second model of the SAME account is the same stream: no slot inside the bound.
+        with pytest.raises(mc.ModelSlotTimeout):
+            with mc.model_call_slot("gigachat::GigaChat-3-Ultra", route=route):
+                pass
+    finally:
+        _join(holder, release)
+
+
+def test_another_account_of_the_same_provider_is_admitted_at_once(isolated_queue):
+    held, release = threading.Event(), threading.Event()
+    holder = _holder(_gigachat_route("client-a"), "gigachat::GigaChat-3-Pro", held, release)
+    try:
+        assert held.wait(30)
+        with mc.model_call_slot("gigachat::GigaChat-3-Pro", route=_gigachat_route("client-b")):
+            pass
+    finally:
+        _join(holder, release)
+
+
+def test_a_provider_without_an_account_ceiling_keeps_a_slot_per_model(isolated_queue):
+    route = {"provider": "openai", "base_url": "https://o.invalid/v1", "api_key": "fake-secret"}
+    held, release = threading.Event(), threading.Event()
+    holder = _holder(route, "openai::one", held, release)
+    try:
+        assert held.wait(30)
+        with mc.model_call_slot("openai::two", route=route):
+            pass
+    finally:
+        _join(holder, release)
+
+
+def test_a_key_without_a_readable_account_keeps_the_owners_cap(isolated_queue):
+    # GigaChat's other ready group (user + password) encodes no account: with no account to
+    # key on, the credential-and-model key stands AND the provider's per-account ceiling must
+    # not clamp one model's own concurrency.
+    route = {"provider": "gigachat", "base_url": "https://g.invalid/v1", "user": "u", "password": "p"}
+    held, release = threading.Event(), threading.Event()
+    holder = _holder(route, "gigachat::GigaChat-3-Pro", held, release)
+    try:
+        assert held.wait(30)
+        with mc.model_call_slot("gigachat::GigaChat-3-Pro", route=route):
+            pass
+    finally:
+        _join(holder, release)
