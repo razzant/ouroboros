@@ -950,9 +950,9 @@ def resolve_configured_actor_dispatch(
             )
             gateway = None
             try:
-                from ouroboros.claudexor_daemon import ensure_owned_gateway
+                from ouroboros.execution_domain import native_gateway
 
-                gateway = ensure_owned_gateway()
+                gateway = native_gateway()  # the engine a new native run uses: the domain's work engine, else owned
                 unavailable, reset_at = route_health(
                     gateway, exact_route.route_id, shape, route_model=exact_route.model,
                     pinned_profile=exact_route.profile_id,

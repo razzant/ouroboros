@@ -593,7 +593,7 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
         so an unbounded handshake could spend it before the window began.
         """
         body = self._request(  # the store identity is an opt-in extension of the handshake
-            "POST", "/v2/handshake", timeout_sec=timeout_sec, headers={"X-Claudexor-Store-Identity": "1"},
+            "POST", "/v2/handshake", timeout_sec=timeout_sec, headers=metadata.STORE_IDENTITY,
             json_body={"protocolMajor": CLAUDEXOR_PROTOCOL_MAJOR, "client": "ouroboros"},
         )
         if not isinstance(body, dict):
@@ -959,6 +959,7 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
 
         The logical invocation key and exact request replay one accepted run.
         Host-owned thread bindings use the same producer and recovery identity.
+        Its receipt names the admitting store (``storeId``) when the engine has one.
         """
         if request.get("_thread_id"):
             from ouroboros.review_thread_continuity import start_review_thread_turn
@@ -968,7 +969,7 @@ class ClaudexorGateway(ClaudexorUploadGateway, ClaudexorMaintenanceGateway, Clau
         body = self._request(
             "POST", "/v2/runs",
             json_body=dict(request),
-            headers={"Idempotency-Key": str(idempotency_key or "") or uuid.uuid4().hex},
+            headers={"Idempotency-Key": str(idempotency_key or "") or uuid.uuid4().hex, **metadata.STORE_IDENTITY},
         )
         if not isinstance(body, dict):
             raise ClaudexorUnavailable("malformed_response", "run start returned no handle")

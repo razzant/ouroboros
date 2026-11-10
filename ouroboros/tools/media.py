@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from typing import Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -453,16 +454,39 @@ def _read_archive(ctx: ToolContext, path: str = "", root: str = "", entry: int =
     if refusal is not None:
         return _publish_tool_result(ctx, refusal) if isinstance(refusal, ToolResult) else refusal
     target, label = pathlib.Path(binding.target_path), f"{normalized}:{text}"
-    if not target.is_file():
+    from ouroboros import work_domain
+    if not work_domain.is_work(target) and not target.is_file():
         return f"⚠️ FILE_NOT_FOUND: {label} (resolved: {target})"
-    if not entry and not member:
-        return listing(target, label, offset=offset)
-    rendered, identity = member_text(target, label, entry=entry, member=str(member or ""),
-                                     start_byte=start_byte, encoding=str(encoding or "utf-8"))
+    with _archive_read_path(target) as archive_path:
+        if not entry and not member:
+            return listing(archive_path, label, offset=offset)
+        rendered, identity = member_text(archive_path, label, entry=entry, member=str(member or ""),
+                                         start_byte=start_byte, encoding=str(encoding or "utf-8"))
     if identity is None:
         return rendered
     return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=rendered,
                                                 meta={"archive_member_view": identity}))
+
+
+@contextmanager
+def _archive_read_path(target: pathlib.Path):
+    """Give archive_reader a stable snapshot when the admitted file belongs to the work domain.
+
+    The service must never open a work-domain pathname itself: a work-side symlink could otherwise redirect
+    ``ZipFile`` to a service-only file. ``measure`` reads through the confined descriptor, or resolves a link in
+    the work domain itself. Bounds, member reads and hashing then use one service-owned byte snapshot. This
+    costs O(archive size) disk and I/O; the file is closed before ZipFile opens it (also on Windows).
+    """
+    from ouroboros import work_domain
+
+    if not work_domain.is_work(target):
+        yield target
+        return
+    with tempfile.TemporaryDirectory(prefix="ouroboros-archive-") as folder:
+        snapshot = pathlib.Path(folder) / "archive.zip"
+        with snapshot.open("wb") as sink:
+            work_domain.measure(target, sink=sink)
+        yield snapshot
 
 
 _READ_ARCHIVE_SCHEMA = {

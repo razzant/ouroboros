@@ -199,9 +199,9 @@ def _session_route_reason(row: ConfiguredReviewerSlot) -> str:
     if route is None:
         return "session_target_unparsable"
     try:
-        from ouroboros.claudexor_daemon import ensure_owned_gateway
+        from ouroboros.execution_domain import native_gateway
 
-        gateway = ensure_owned_gateway(admission_wait_sec=0)
+        gateway = native_gateway(admission_wait_sec=0)  # where its seat runs: the domain's work engine, else owned
     except Exception as exc:
         return f"agent_service_unavailable: {type(exc).__name__}: {exc}"
     try:

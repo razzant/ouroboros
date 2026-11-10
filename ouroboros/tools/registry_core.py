@@ -1347,6 +1347,14 @@ class ToolRegistry:
                 implicit_skill_cwd_allowed=selected_skill,
                 allow_short_relative=allow_short_relative,
             ))
+        if name in _REPO_MUTATION_TOOLS and (managed := tool_resolution.serving_body_refusal(
+                self._ctx, resolved_binding, intrinsic=name in _SYSTEM_INTRINSIC_REPO_MUTATION_TOOLS)):
+            return ToolResult(status="blocked", code="MANAGED_BY_DEPLOYMENT", text=(
+                f"⚠️ MANAGED_BY_DEPLOYMENT: {name!r} would change the serving checkout. {managed} Author the change "
+                "in a body candidate or another workspace; it reaches this installation only through its administrator."))
+        if name in tool_resolution._ROOT_ARG_REPO_WRITE_TOOLS and (
+                managed := tool_resolution.required_extension_refusal(resolved_binding)):
+            return ToolResult(status="blocked", code="MANAGED_BY_DEPLOYMENT", text=f"⚠️ MANAGED_BY_DEPLOYMENT: {managed}")
         if name in _SYSTEM_INTRINSIC_REPO_MUTATION_TOOLS:
             light_targets_system = True
         elif resolved_binding is not None:

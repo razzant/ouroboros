@@ -8,10 +8,16 @@ event. The run detail's ``timeline`` is a projection of the same journal WITHOUT
 identity, which is why a caller that must say exactly which events it showed reads here.
 
 One call is one bounded read inside an existing wait: it opens the stream at a cursor, reads
-to a caller-given ``seq`` fence, the stream's own end, a byte bound or a wall-clock bound,
-and closes it. It never subscribes, retries or polls. A line ends only at CR, LF or CRLF,
-so U+0085, U+2028 and U+2029 inside a served JSON line stay text. Only whole frames count
-as read, so ``through_seq`` is always a cursor the next read can resume from exactly.
+to a caller-given ``seq`` fence, the stream's own end, the engine's refusal, a byte bound or
+a wall-clock bound, and closes it. It never subscribes, retries or polls. A line ends only at
+CR, LF or CRLF, so U+0085, U+2028 and U+2029 inside a served JSON line stay text. Only whole
+frames count as read, so ``through_seq`` is always a cursor the next read can resume from
+exactly. The refusal is the stream's own ``event: error`` frame, sent without an ``id`` just
+before the engine closes the stream (``run-events-stream.ts``); the journal has no event
+type ``error``, so its name alone marks it. It ends the read as ``problem`` (``code``,
+``retryable``, ``required_actions``) after every whole frame read before it. Only
+``retryable: false`` says reconnecting cannot deliver the rest, as when retention reclaimed
+the journal; an unreadable refusal is unknown, so it counts as retryable.
 Presence of the route is negotiated from the engine's own catalog, like every other
 optional route.
 """
@@ -51,13 +57,15 @@ class RunEvent:
 
 @dataclass
 class RunEventsRead:
-    """What one bounded read obtained. ``through_seq`` is the last WHOLE event read."""
+    """What one bounded read obtained. ``through_seq`` is the last WHOLE event read;
+    ``problem`` is the engine's refusal that ended it (``stop == "error"``)."""
 
     events: List[RunEvent] = field(default_factory=list)
     through_seq: int = 0
     ended: bool = False
-    stop: str = "time"  # fence | end | bytes | time
+    stop: str = "time"  # fence | end | error | bytes | time
     bytes_read: int = 0
+    problem: Optional[Dict[str, Any]] = None  # {"code", "retryable", "required_actions"}
 
 
 def engine_identity(gateway: Any) -> Tuple[str, str]:
@@ -138,7 +146,8 @@ def read_run_events(gateway: Any, run_id: str, *, after_seq: int, through_seq: O
 
     A refusal or a transport failure before the stream opened raises the gateway's typed
     ``ClaudexorUnavailable``. Once the stream is open, running out of time or bytes is not
-    a failure: the read returns what it holds with ``stop`` naming the bound.
+    a failure: the read returns what it holds with ``stop`` naming the bound, and the
+    engine's refusal inside the stream returns it with ``problem``, never raised.
     Zero allowance opens nothing; a positive one sets HTTPX phase timeouts and a deadline
     checked between lines. A recv already in flight can finish past that deadline.
     """
@@ -208,10 +217,26 @@ def _lines(chunks: Iterable[str]) -> Iterator[str]:
         yield "".join(pending)
 
 
+def _problem(data: str) -> Dict[str, Any]:
+    """The engine's refusal frame as typed facts; anything it does not state is unknown."""
+    try:
+        value = json.loads(data)
+    except ValueError:
+        value = None
+    value = value if isinstance(value, dict) else {}
+    code, actions = value.get("code"), value.get("requiredActions")
+    return {"code": code if isinstance(code, str) and code else "unknown",
+            "retryable": value.get("retryable") is not False,
+            "required_actions": [a for a in actions if isinstance(a, str)] if isinstance(actions, list) else []}
+
+
 def _dispatch(frame: Dict[str, str], result: RunEventsRead, through_seq: Optional[int]) -> bool:
     """Take one whole SSE frame; answer whether the read is complete."""
     if frame.get("event") == "end":
         result.ended, result.stop = True, "end"
+        return True
+    if frame.get("event") == "error":  # with or without an ``id``: never a journal event, never a cursor
+        result.problem, result.stop = _problem(frame.get("data", "")), "error"
         return True
     raw_id = frame.get("id", "")
     if not raw_id.isdigit() or "data" not in frame:

@@ -164,7 +164,8 @@ def inventory_view(inventory: CodeInventory, *, op: str, query: str = "", path: 
                    path_allowed: Callable | None = None) -> NavigationView:
     root = pathlib.Path(inventory.repo_root)
     universe = inventory
-    selector = path if path and (root / path).is_file() else ""
+    from ouroboros import work_domain
+    selector = path if path and work_domain.is_file(root / path) else ""
     scope = "" if selector and op in {"references", "callers", "impact"} else path
     files = [f for f in inventory.files if lang == "any" or grammar_id(f.language) == grammar_id(lang)]
     inventory = replace(inventory, files=files)

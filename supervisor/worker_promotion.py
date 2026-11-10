@@ -127,6 +127,10 @@ def _canonical_promoted_repair_constraint(value: Any) -> tuple[Optional[dict], s
         return None, "invalid_skill_repair_constraint"
     if not payload_dir.is_dir():
         return None, "skill_repair_payload_missing"
+    from ouroboros.deployment_extensions import change_refusal, payload_write_refusal
+
+    if change_refusal(canonical.skill_name, "repair") or payload_write_refusal(payload_dir, data_root=_pool().DRIVE_ROOT):
+        return None, "managed_by_deployment"  # a required package is its administrator's: no repair task starts
     # X3 (owner 11=B): the repair is admitted against ONE exact payload state.
     # An unreadable payload cannot anchor a hash chain — fail closed here, not
     # after the task has already spent rounds.

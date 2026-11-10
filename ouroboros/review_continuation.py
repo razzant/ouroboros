@@ -693,8 +693,9 @@ def _start_requested(custody: Any, task_id: str, slot_id: str, decision: Dict[st
     if not decision.get("thread_id") and scope.get("kind") == "project" and not scope.get("ephemeral"):
         from ouroboros.claudexor_daemon import ensure_owned_gateway
         from ouroboros.delegate_registration_policy import resolve_registration
+        from ouroboros.execution_domain import run_gateway
 
-        gateway = ensure_owned_gateway()  # the stopped run's registration may already be retired
+        gateway = run_gateway(source, ensure_owned_gateway)  # its engine; the stopped run's registration may be retired
         try:
             project_id, owned_id, _persistent, _ = resolve_registration(gateway, str(scope.get("root") or ""), "",
                                                                      str(body.get("access") or "readonly"))
@@ -711,13 +712,21 @@ def _start_requested(custody: Any, task_id: str, slot_id: str, decision: Dict[st
     facts = copy.deepcopy(source.get("work_order_source_request") or {})
     facts.pop("original_prompt_sha256", None)
     (facts.get("turn_sources") or {}).pop("prompt", None)
+    # The successor continues its stopped run (or that run's thread) where that run was admitted: the start is for that
+    # store, and its first send or exact replay goes nowhere else (``replay_store_unproven``). A predecessor bound to
+    # no store (an older engine or receipt) leaves "" and the earlier replay rule; never the cached handshake.
+    from ouroboros.delegate_custody_current import run as custody_run
+
+    stopped = custody_run(custody, str(decision.get("continues_run") or "")) if decision.get("continues_run") else None
     written = custody_module.record_start_requested(
         custody, run_id="", task_id=task_id, idempotency_key=token, invocation_id=token,
+        daemon_store_id=str(getattr(stopped, "daemon_store_id", "") or ""),
         operation_id=decision["operation_id"], max_seconds=int(body.get("maxSeconds") or 0), request=body,
         continuation_of="" if decision.get("thread_id") else str(decision.get("continues_run") or ""),
         surface=decision["surface"], slot_id=slot_id, route=str(source.get("route") or ""),
         project_id=project_id, project_owned=owned, review_source_delivery=facts, work_order_source_request=facts,
         prompt_cache_ttl=source.get("prompt_cache_ttl") or None, **({RESTORE_KEY: restore} if restore else {}),
+        **({"engine_ref": source["engine_ref"]} if source.get("engine_ref") else {}),  # the predecessor's engine
         **({"generation_end_at": closes.isoformat()} if closes is not None else {}),
         **{key: str(source.get(key) or "") for key in ("root_task_id", "parent_task_id", "category", "source",
                                                        *REVIEW_ATTRIBUTION_KEYS, "authority_source", "execution_root", "target_root")})

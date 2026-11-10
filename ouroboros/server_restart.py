@@ -592,13 +592,11 @@ def _managed_update_pending_kwargs() -> dict:
 
 
 def _safe_restart_serialized(safe_restart_fn, *, reason: str, unsynced_policy: str):
-    """Serialize checkout/reset with update apply; only a landed update may restart."""
+    """Serialize checkout/reset with update apply; only a landed update may restart. A managed deployment's
+    restart neither applies nor clears an update intent recorded before it was managed (it waits, untouched)."""
+    from ouroboros.deployment_policy import body_replacement_refusal
     from supervisor import git_ops
-    from supervisor.update_merge import (
-        acquire_update_lock,
-        read_update_tx_strict,
-        release_update_lock,
-    )
+    from supervisor.update_merge import acquire_update_lock, read_update_tx_strict, release_update_lock
 
     try:
         lock_fh = acquire_update_lock(restart=True)
@@ -619,13 +617,14 @@ def _safe_restart_serialized(safe_restart_fn, *, reason: str, unsynced_policy: s
                 "or restart the server process for a web deployment. Restart was deferred "
                 "to preserve the current files."
             )
-        if status == "absent" and not git_ops._clear_update_intent():
+        if status == "absent" and not body_replacement_refusal() and not git_ops._clear_update_intent():
             return False, (
                 "An update intent marker with no update transaction could not be removed; "
                 "restart was deferred rather than applying an orphaned update."
             )
         if status == "valid" and str(tx.get("phase") or "") not in _RESTARTABLE_UPDATE_PHASES:
-            return False, "Managed update merge is still being resolved; restart was deferred."
+            managed = " It began before this deployment was managed; its administrator resolves it." if body_replacement_refusal() else ""
+            return False, f"Managed update merge is still being resolved; restart was deferred.{managed}"
         return safe_restart_fn(reason=reason, unsynced_policy=unsynced_policy)
     finally:
         release_update_lock(lock_fh)

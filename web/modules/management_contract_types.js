@@ -49,6 +49,8 @@
  * @property {boolean=} identity_collision
  * @property {?Object=} install  // source, official (exact endorsed bytes), release, basis, base_known, modified, update_available, withdrawn ({reason, version} for a withdrawn release), left_source, turn_on_when_ready, installed_by, installed_at, reason?, task_id?, check?: {by, notes, at}, pending_update?: {version, digest}, update_rejected?: {version, digest, reason: review_blockers|review_unfinished|preflight_failed, at}
  * @property {string[]=} category
+ * @property {Object=} deployment  // a policy requires this name: the server's requirement row with its when_unmet
+ * @property {{state: ("trusted"|"untrusted"), reason: (string|undefined), detail: (string|undefined), administered: boolean}=} trust  // an extension under an execution domain
  */
 
 /**
@@ -796,6 +798,7 @@
  * @property {string=} checked_at
  * @property {string=} checked_target_sha
  * @property {boolean=} from_cache
+ * @property {string=} managed_by_deployment - its administrator replaces the serving program: why in-app updates refuse
  */
 
 /**
@@ -881,6 +884,7 @@
  * @property {Object.<string,string[]>} problems
  * @property {InstalledSkill[]} skills
  * @property {ExtensionLiveSnapshot} live
+ * @property {Object=} deployment  // {when_unmet, required}: every requirement as the server observes it
  */
 
 /**

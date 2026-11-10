@@ -164,8 +164,8 @@ def wait_test_child_stop(pid: int, *, timeout_sec: float = 3.0) -> dict:
 
 # Every function in the tree that persists a settings document, as (repo-relative POSIX
 # path, function name). Three route through `config.prepare_settings_for_persist`; the
-# context-pair migration and the Colab generator are exempt from it by design and carry
-# their reason in the prologue tripwire's exempt table. Two pins read this one list: the
+# context-pair migration and the Colab generator (for a foreign root) are exempt from it by
+# design and carry their reason in the prologue tripwire's exempt table. Two pins read this one list: the
 # tripwire in tests/test_runtime_mode_elevation.py proves the scanned roots hold exactly
 # these writers (plus its declared non-writer matches), and the byte pin in
 # tests/test_settings_read_seam.py drives every one of them through its real entry point.
@@ -466,3 +466,26 @@ def current_python_env(env_root) -> None:
     base = os.path.dirname(os.path.abspath(getattr(sys, "_base_executable", "") or sys.executable))
     version = ".".join(map(str, sys.version_info[:3]))
     (venv / "pyvenv.cfg").write_text(f"home = {base}\nversion = {version}\n", encoding="utf-8")
+
+
+def full_disk_at(monkeypatch, part):
+    """ENOSPC exactly where the platform lock creates its ``.lock`` file (``O_CREAT|O_EXCL``) under ``part``."""
+    import errno
+
+    real = os.open
+
+    def create(path, flags, *args, **kwargs):
+        if part in str(path) and str(path).endswith(".lock") and flags & os.O_CREAT and flags & os.O_EXCL:
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC), str(path))
+        return real(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", create)
+
+
+def run_absent_in(store_id):
+    """Claudexor's run-detail 404 (``run-detail-route.ts``): it names the store it read in ``context.storeId``."""
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    error = ClaudexorUnavailable("http_404", "no such run", status_code=404)
+    error.problem = {"error": "no such run", "context": {"storeId": store_id}}
+    return error

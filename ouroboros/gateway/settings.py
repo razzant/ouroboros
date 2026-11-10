@@ -23,8 +23,10 @@ from ouroboros.config import (
 )
 from ouroboros.config import ENDPOINT_AUTHORED_SETTINGS as _ENDPOINT_AUTHORED_SETTINGS
 from ouroboros.config import ENDPOINT_WRITTEN_SETTINGS as _ENDPOINT_WRITTEN_SETTINGS, ENDPOINT_WRITERS as _ENDPOINT_WRITERS
+from ouroboros.deployment_policy import DeploymentPolicyRefusal, choice_refusal
 from ouroboros.gateway._helpers import json_error, json_exception, request_drive_root, request_json_or
 from ouroboros.gateway.owner_settings import (
+    MANAGED_BY_DEPLOYMENT,
     CommitBoundary,
     SettingsDocumentBusy,
     SettingsDocumentUnreadable,
@@ -135,9 +137,11 @@ def _build_policy_state(settings: Dict[str, Any]) -> dict:
     Persisted values are the pending choices.  Runtime access is boot-bound;
     Supervisor and Review are hot-reloaded for the next task through the
     existing settings path.  The projection deliberately carries no authority
-    and writes no second state record.
+    and writes no second state record.  A managed deployment adds what its
+    policy file fixes (``deployment``); the values above already read under it.
     """
     from ouroboros import config as _config
+    from ouroboros.deployment_policy import policy_state
     from ouroboros.review_model_routes import get_review_enforcement
 
     configured_access = _config.normalize_runtime_mode(
@@ -178,7 +182,18 @@ def _build_policy_state(settings: Dict[str, Any]) -> dict:
             "active_task_snapshot": running_task_snapshot,
         },
         "running_task_snapshot": running_task_snapshot,
+        **({"deployment": _with_requirement_states(deployment)} if (deployment := policy_state()) is not None else {}),
     }
+
+
+def _with_requirement_states(deployment: dict) -> dict:
+    """The required extensions as this server process observes them (``deployment_extensions.state_rows``)."""
+    if deployment.get("extensions"):
+        from ouroboros.config import DATA_DIR
+        from ouroboros.deployment_extensions import state_rows
+
+        deployment["extensions"] = {**deployment["extensions"], "required": state_rows(DATA_DIR)}
+    return deployment
 
 
 def _build_restart_state(settings: Dict[str, Any]) -> dict:
@@ -190,8 +205,10 @@ def _build_restart_state(settings: Dict[str, Any]) -> dict:
     applied = applied_restart_settings()
     desired = {key: settings.get(key, _SETTINGS_DEFAULTS.get(key, ""))
                for key in _RESTART_REQUIRED_KEYS if key not in local_model_settings({})}
-    applied["OUROBOROS_RUNTIME_MODE"] = get_runtime_mode()
-    desired["OUROBOROS_RUNTIME_MODE"] = normalize_runtime_mode(settings.get("OUROBOROS_RUNTIME_MODE"))
+    from ouroboros.deployment_policy import effective_value
+
+    applied["OUROBOROS_RUNTIME_MODE"] = get_runtime_mode()  # a shadowed raw choice the policy caps restarts nothing
+    desired["OUROBOROS_RUNTIME_MODE"] = effective_value("OUROBOROS_RUNTIME_MODE", normalize_runtime_mode(settings.get("OUROBOROS_RUNTIME_MODE")))
     pending = []
     for key, value in desired.items():
         if key not in applied:
@@ -408,6 +425,8 @@ def _api_owner_runtime_mode_sync(request: Request, body: Any) -> JSONResponse:
     raw_mode = str((body or {}).get("mode") or "").strip().lower()
     if raw_mode not in set(_config.VALID_RUNTIME_MODES):
         return unsaved_error("'mode' must be one of: light, advanced, pro, cyber_pro", 400)
+    if refusal := choice_refusal("OUROBOROS_RUNTIME_MODE", raw_mode):  # even when the document already says so
+        return unsaved_error(refusal, 403, code=MANAGED_BY_DEPLOYMENT)
     # The digest is taken BEFORE the read that decides, so a write landing between the
     # two is refused rather than silently reverted by this request's write.
     digest = settings_document_digest()
@@ -839,10 +858,16 @@ async def api_settings_get(request: Request) -> JSONResponse:
             safe[key] = mask_settings_secret(key, safe[key])
     safe["MCP_SERVERS"] = _mask_mcp_servers_payload(safe.get("MCP_SERVERS") or [])
     safe[CONNECTIONS_KEY] = mask_connections(safe.get(CONNECTIONS_KEY) or [])
+    from ouroboros.deployment_policy import fixed_settings
+    from ouroboros.secret_masking import CONFIGURED_SECRET_PLACEHOLDER
+
+    fixed = fixed_settings()
     for key, value in list(safe.items()):
         if key in SECRET_SETTING_KEYS or key in _SETTINGS_DEFAULTS:
             continue
-        if is_custom_secret_setting_key(
+        if key in fixed:  # the organization's value: not even a prefix of it is shown
+            safe[key] = CONFIGURED_SECRET_PLACEHOLDER
+        elif is_custom_secret_setting_key(
             key, known_setting_keys=_SETTINGS_DEFAULTS
         ) and value:
             safe[key] = mask_settings_secret(key, value)
@@ -1400,4 +1425,6 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
             return unsaved_error(str(e), 503, code="settings_busy")
         if isinstance(e, SettingsDocumentUnreadable):
             return unsaved_error(str(e), 409, code="settings_unreadable")
+        if isinstance(e, DeploymentPolicyRefusal):
+            return unsaved_error(str(e), 403, code=MANAGED_BY_DEPLOYMENT)
         return unsaved_error(str(e), 400)

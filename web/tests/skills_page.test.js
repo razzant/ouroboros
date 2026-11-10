@@ -107,6 +107,15 @@ test('«Update all» covers only unmodified updates installed through trust from
     const unknownBase = structuredClone(second);
     unknownBase.install.base_known = false;
     assert.deepEqual(updateAllCandidates([unknownBase], SOURCES), [], 'an install whose original is unknown asks what to keep');
+    for (const fixed of [{ deployment: { name: 'weather' } }, { trust: { state: 'trusted', administered: true } },
+        { trust: { state: 'untrusted', administered: false } }]) {
+        const managed = { ...byName('weather'), ...fixed };
+        assert.equal(installedSkillModel(managed).update, false);
+        assert.deepEqual(updateAllCandidates([managed], SOURCES), [], 'bulk update follows the card’s organization policy');
+    }
+    const permitted = { ...byName('weather'), trust: { state: 'trusted', administered: false } };
+    assert.equal(installedSkillModel(permitted).update, true);
+    assert.deepEqual(updateAllCandidates([permitted], SOURCES), [permitted]);
 });
 
 test('publish destinations: back to the origin, the owner’s git source, the community catalog', () => {

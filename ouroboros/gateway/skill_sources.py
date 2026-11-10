@@ -316,6 +316,10 @@ async def api_skill_catalog_install(request: Request) -> JSONResponse:
     name = plan["name"] or item_id.partition("/")[2]
     if plan["already_installed"]:
         return JSONResponse({"ok": True, "job_id": "", "name": name, "basis": plan["basis"], "already_installed": True})
+    from ouroboros.deployment_extensions import install_refusal
+
+    if managed := await asyncio.to_thread(install_refusal, drive_root, name):  # the lane refuses it again
+        return _refusal(SkillInstallError("managed_by_deployment", managed, 403))
     job_id = await _start_job(
         "install", name, f"Installing {name} from {plan['row']['name']}",
         lambda progress: install_item(drive_root, item_id, replace=replace, actor="owner",
@@ -361,12 +365,15 @@ async def api_skill_update(request: Request) -> JSONResponse:
 def _precheck_update(drive_root: pathlib.Path, name: str, kwargs: Dict[str, Any]) -> None:
     """Refuse a stale dialog before queueing (the lane re-checks everything)."""
     from ouroboros.config import get_skills_repo_path
+    from ouroboros.deployment_extensions import change_refusal
     from ouroboros.skill_install_record import read_install_record
     from ouroboros.skill_loader import find_skill
     from ouroboros.skill_source_catalog import installed_release_digest
     from ouroboros.skill_source_install import _candidate_plan
     from ouroboros.skill_sources import load_sources
 
+    if managed := change_refusal(name, "update"):
+        raise SkillInstallError("managed_by_deployment", managed, 403)
     record = read_install_record(drive_root, name)
     loaded = find_skill(drive_root, name, repo_path=get_skills_repo_path())
     if record is None or loaded is None:

@@ -1,4 +1,9 @@
-"""Per-skill isolated dependency installation helpers."""
+"""Per-skill isolated dependency installation helpers.
+
+A skill folder that is a work path (a managed installation's work copy of the reviewed payload,
+``work_skill_payloads``) is built in the work domain: every effect there runs as the work domain, every read of
+its files is the confined intake, and its interpreters are the container's own. A service folder is built as
+before, byte for byte."""
 
 from __future__ import annotations
 
@@ -12,10 +17,12 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import uuid
 from typing import Any, Dict, List
 
+from ouroboros import work_domain
 from ouroboros.marketplace.install_specs import install_specs_hash, relative_install_path
 from ouroboros.skill_loader import skill_state_dir, skill_state_dir_path
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso, replace_atomic
@@ -49,13 +56,44 @@ def isolated_bin_dirs(skill_dir: pathlib.Path) -> List[pathlib.Path]:
         env_root / "node" / "node_modules" / ".bin",
         env_root / "cargo" / "bin",
     ]
-    return [path for path in candidates if path.exists()]
+    return [path for path in candidates if work_domain.exists(path)]
+
+
+def _present(path: pathlib.Path) -> bool:
+    """``Path.is_file`` (links followed); a work path's own metadata, a link counting (a venv's interpreter is one)."""
+    return work_domain.kind(path) in ("file", "link") if work_domain.is_work(path) else path.is_file()
+
+
+def _json(path: pathlib.Path) -> Dict[str, Any] | None:
+    """``read_json_dict``; a work file through the confined intake."""
+    from ouroboros.work_skill_payloads import _json_read
+
+    return _json_read(path)
+
+
+def _which(name: str, env: Dict[str, str], env_root: pathlib.Path) -> bool:
+    """Whether ``name`` resolves on the build's PATH: the service's lookup, or the work container's own (its PATH
+    additions first) for a work folder."""
+    if not work_domain.is_work(env_root):
+        return bool(shutil.which(name, path=env.get("PATH", "")))
+    service = set(os.environ.get("PATH", "").split(os.pathsep))
+    added = os.pathsep.join(part for part in env.get("PATH", "").split(os.pathsep) if part and part not in service)
+    found = work_domain.run_in_work(["sh", "-c", 'PATH="$1${1:+:}$PATH"; command -v "$2" >/dev/null', "sh", added, name],
+                                    timeout_sec=60)
+    return work_domain._confirmed(found, f"lookup of {name}").returncode == 0
+
+
+def _interpreter(env_root: pathlib.Path) -> str:
+    """The Python that makes an environment: the service's own, or the work container's for a work folder."""
+    from ouroboros.work_skill_payloads import CONTAINER_PYTHON
+
+    return CONTAINER_PYTHON if work_domain.is_work(env_root) else sys.executable
 
 
 def python_runtime_binary(skill_dir: pathlib.Path) -> pathlib.Path | None:
     bin_dir = isolated_env_dir(skill_dir) / "python" / ("Scripts" if os.name == "nt" else "bin")
     candidate = bin_dir / ("python.exe" if os.name == "nt" else "python")
-    return candidate if candidate.is_file() else None
+    return candidate if _present(candidate) else None
 
 
 def python_env_binding(skill_dir: pathlib.Path) -> str:
@@ -67,6 +105,13 @@ def python_env_binding(skill_dir: pathlib.Path) -> str:
     ``other_python``: a readable other major.minor; ``unreadable``: no home and version.
     The entry's own target is not compared: a Windows launcher or a ``--copies`` binary is a copy."""
     venv = isolated_env_dir(skill_dir) / "python"
+    if work_domain.is_work(venv):  # bound to the work container's own interpreter, never to this one
+        try:
+            if not work_domain.is_dir(venv):
+                return "absent"
+            return "current" if python_runtime_binary(skill_dir) is not None else "unreadable"
+        except OSError:
+            return "unreadable"
     try:
         if not venv.is_dir():
             return "absent"
@@ -116,7 +161,7 @@ def augment_env_for_skill_deps(env: Dict[str, str], skill_dir: pathlib.Path) -> 
     if python_bin:
         out["VIRTUAL_ENV"] = str(python_bin.parent.parent)
     node_modules = env_root / "node" / "node_modules"
-    if node_modules.is_dir():
+    if work_domain.is_dir(node_modules):
         out["NODE_PATH"] = str(node_modules)
     return out
 
@@ -126,7 +171,7 @@ def _installer_env(env_root: pathlib.Path, *, ecosystem: str = "", cache_root: p
     home_dir = env_root / "home"
     cache_dir = cache_root or env_root / "cache"
     for path in (tmp_dir, home_dir, cache_dir):
-        path.mkdir(parents=True, exist_ok=True)
+        work_domain.make_dirs(path)
     env = {key: os.environ[key] for key in _SAFE_ENV_KEYS if key in os.environ}
     env.update({
         "HOME": str(home_dir), "USERPROFILE": str(home_dir),
@@ -138,7 +183,7 @@ def _installer_env(env_root: pathlib.Path, *, ecosystem: str = "", cache_root: p
         "npm_config_cache": str(cache_dir / "npm"), "npm_config_userconfig": str(env_root / "npmrc"),
         "CARGO_HOME": str(env_root / "cargo" / "home"), "CARGO_TARGET_DIR": str(env_root / "cargo" / "target"),
     })
-    if ecosystem == "node":
+    if ecosystem == "node" and not work_domain.is_work(env_root):  # a container resolves its own node
         # npm's `#!/usr/bin/env node` shebang must resolve a working runtime.
         # node_runtime owns the emergency verdict, the byte-identical healthy
         # case, and the disclosed residuals (npm itself is not bundled: an
@@ -180,20 +225,31 @@ def _run(cmd: List[str], *, cwd: pathlib.Path, env: Dict[str, str], timeout_sec:
     from subprocess import Popen
     from ouroboros.platform_layer import merge_hidden_kwargs, subprocess_new_group_kwargs
     from ouroboros.tools.shell import _kill_process_group
+    from ouroboros.execution_domain import attached_launch
     from ouroboros.tools.shell_process import contained_popen, retire_tracked, tracked_start
 
+    shown, launch = list(cmd), attached_launch(cmd, cwd, env)  # managed: the build runs in the pinned executor
+    if launch is not None:
+        cmd, env = launch.argv, launch.env
+        launch.adopt()
     stderr_tail: Dict[str, bytes] = {}
     kwargs: Dict[str, Any] = {
-        "cwd": str(cwd),
+        "cwd": str(cwd) if launch is None else None,
         "env": env,
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.PIPE,
         "stdin": subprocess.DEVNULL,
     }
     kwargs.update(subprocess_new_group_kwargs())
-    with tracked_start() as publish:  # published before the reader thread, the first step that can fail
-        proc = publish(contained_popen(  # noqa: S603 - argv template is controlled.
-            Popen, cmd, **merge_hidden_kwargs(kwargs)))
+    proc = None
+    try:
+        with tracked_start() as publish:  # published before the reader thread, the first step that can fail
+            proc = contained_popen(Popen, cmd, **merge_hidden_kwargs(kwargs))  # noqa: S603 - argv template is controlled.
+            publish(proc)
+    except BaseException:
+        if launch is not None and proc is None:
+            launch.abandon()  # the CLI never started: nothing ran in the container
+        raise
     stderr_thread = None
     try:
         if getattr(proc, "stderr", None) is not None:
@@ -209,9 +265,13 @@ def _run(cmd: List[str], *, cwd: pathlib.Path, env: Dict[str, str], timeout_sec:
         raise
     finally:
         retire_tracked(proc)  # a running root, or a dead root's live or unknown tree, stays named
+        settled = launch is None or launch.settle()  # the CLI's end is not the build's: its group is confirmed ended
         if stderr_thread is not None:
             stderr_thread.join(timeout=1)
-    result = {"cmd": cmd[:2] + ["..."] if len(cmd) > 2 else list(cmd), "returncode": proc.returncode}
+    if not settled:  # its record stays for settlement; the build's outcome is unknown, never a success
+        raise work_domain.WorkDomainUnsettled(f"the build {shown[:2]} ended (exit {proc.returncode}) without the "
+                                              "container confirming its process group ended")
+    result = {"cmd": shown[:2] + ["..."] if len(shown) > 2 else shown, "returncode": proc.returncode}
     stderr_text = stderr_tail.get("stderr", b"").decode("utf-8", errors="replace").strip()
     if stderr_text:
         result["stderr_tail"] = stderr_text
@@ -226,9 +286,9 @@ def _ensure_python_env(env_root: pathlib.Path, timeout_sec: int) -> pathlib.Path
     if binding == "moved":
         rebind_python_env(env_root.parent, timeout_sec)
     elif binding == "other_python":  # its packages cannot load here; the reviewed specs reinstall below
-        shutil.rmtree(venv_dir)
-    if not venv_dir.exists():
-        result = _run([sys.executable, "-m", "venv", str(venv_dir)], cwd=env_root, env=_installer_env(env_root, ecosystem="python"), timeout_sec=timeout_sec)
+        work_domain.remove_tree(venv_dir)
+    if not work_domain.exists(venv_dir):
+        result = _run([_interpreter(env_root), "-m", "venv", str(venv_dir)], cwd=env_root, env=_installer_env(env_root, ecosystem="python"), timeout_sec=timeout_sec)
         if result["returncode"] != 0:
             detail = result.get("stderr_tail") or ""
             raise RuntimeError("python venv creation failed" + (f": {detail}" if detail else ""))
@@ -259,16 +319,16 @@ def _install_node_package(package: str, env_root: pathlib.Path, timeout_sec: int
     # A GUI-launched macOS process starts with a truncated PATH; enrich it the
     # same way the process tools do BEFORE deciding npm is absent (T13).
     bootstrap_process_path()
-    npm = shutil.which("npm")
+    npm = "npm" if work_domain.is_work(env_root) else shutil.which("npm")  # a container resolves its own npm
     if not npm:
         raise RuntimeError("npm is not available on PATH")
     node_root = env_root / "node"
-    node_root.mkdir(parents=True, exist_ok=True)
+    work_domain.make_dirs(node_root)
     env = _installer_env(env_root, ecosystem="node", cache_root=cache_root)
     env["npm_config_prefix"] = str(node_root)
     name = package.rsplit("@", 1)[0] if "@" in package[1:] else package
     package_manifest = node_root / "node_modules" / name / "package.json"
-    previous_version = (read_json_dict(package_manifest) or {}).get("version")
+    previous_version = (_json(package_manifest) or {}).get("version")
     if review_check is not None:
         review_check()
     flags = [] if allow_install_scripts else ["--ignore-scripts"]
@@ -277,7 +337,7 @@ def _install_node_package(package: str, env_root: pathlib.Path, timeout_sec: int
         detail = result.get("stderr_tail") or ""
         raise RuntimeError(f"npm install {package!r} failed" + (f": {detail}" if detail else ""))
     results = [result]
-    if allow_install_scripts and previous_version and previous_version == (read_json_dict(package_manifest) or {}).get("version"):
+    if allow_install_scripts and previous_version and previous_version == (_json(package_manifest) or {}).get("version"):
         # An already installed version can have skipped postinstall earlier.
         # npm install calls that version up-to-date; rebuild only the explicitly
         # authorized package, never every package sharing this environment.
@@ -289,9 +349,12 @@ def _install_node_package(package: str, env_root: pathlib.Path, timeout_sec: int
             raise RuntimeError(f"npm rebuild {package!r} failed: {rebuilt.get('stderr_tail', '')}")
     skill_node_modules = env_root.parent / "node_modules"
     target_node_modules = node_root / "node_modules"
-    if target_node_modules.exists() and not skill_node_modules.exists():
+    if work_domain.exists(target_node_modules) and not work_domain.lexists(skill_node_modules):
         try:
-            skill_node_modules.symlink_to(target_node_modules, target_is_directory=True)
+            if work_domain.is_work(skill_node_modules):  # a relative link, placed as the work domain
+                work_domain.make_symlink(skill_node_modules, f"{env_root.name}/node/node_modules")
+            else:
+                skill_node_modules.symlink_to(target_node_modules, target_is_directory=True)
         except OSError:
             # Some Windows configurations disallow symlinks. PATH + NODE_PATH
             # still cover CommonJS and CLI binaries; ESM import users will see
@@ -302,13 +365,19 @@ def _install_node_package(package: str, env_root: pathlib.Path, timeout_sec: int
 
 def _install_target(env_root: pathlib.Path, relative: str, *, allow_root: bool = False) -> pathlib.Path:
     target = env_root / relative_install_path(relative, allow_root=allow_root)
-    if not target.resolve().is_relative_to(env_root.resolve()):
+    if not work_domain.settle(target).is_relative_to(work_domain.settle(env_root)):
         raise ValueError(f"install path escapes its environment: {relative!r}")
     return target
 
 
 def _output_facts(env_root: pathlib.Path, relative: str) -> Dict[str, Any]:
     path = _install_target(env_root, relative)
+    if work_domain.is_work(path):  # measured through the confined intake, its stamp its own metadata
+        if work_domain.kind(path) != "file":
+            raise RuntimeError(f"declared install output is missing: {relative}")
+        measured, info = work_domain.measure(path, strict=True), work_domain.lstat(path)
+        return {"path": relative, "sha256": measured["sha256"], "size_bytes": measured["size"],
+                "mtime_ns": info.st_mtime_ns, "inode": info.st_ino, "device": info.st_dev}
     if not path.is_file():
         raise RuntimeError(f"declared install output is missing: {relative}")
     digest = hashlib.sha256()
@@ -325,12 +394,24 @@ def _install_download(spec: Dict[str, Any], env_root: pathlib.Path, cache_root: 
     def verify(path):
         return verify_exact_file(path, size_bytes=spec["size_bytes"], sha256=spec["sha256"],
                                  code_prefix="skill_resource", label="skill resource")
-    cache = cache_root / "resources" / spec["sha256"]
+    # A work environment's caches are the work's: the service fetches into its own temporary instead.
+    cache = (pathlib.Path(tempfile.mkdtemp(prefix="ouroboros-skill-resource-")) if work_domain.is_work(cache_root)
+             else cache_root) / "resources" / spec["sha256"]
     source = fetch_exact_file(url=spec["url"], destination=cache, verify=verify,
                               size_bytes=spec["size_bytes"], overflow_code="skill_resource_size_mismatch",
                               failure_code="skill_resource_download_failed", label="skill resource",
                               timeout_sec=timeout_sec)
     target = _install_target(env_root, spec["target"])
+    if work_domain.is_work(target):  # the service's verified file streams into the work, then is checked there
+        try:
+            work_domain.write_file(target, source, mode=0o644)
+            landed = work_domain.measure(target, strict=True)
+        finally:
+            shutil.rmtree(cache.parents[1], ignore_errors=True)  # this install's own temporary download
+        if (landed["size"], landed["sha256"]) != (spec["size_bytes"], spec["sha256"]):
+            raise RuntimeError(f"skill resource changed while it was installed: {spec['target']}")
+        return {"url": spec["url"], "sha256": spec["sha256"], "size_bytes": spec["size_bytes"],
+                "target": spec["target"], "version": str(spec.get("version") or ""), "downloaded": True}
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.installing")
     try:
@@ -363,7 +444,7 @@ def _install_actions(spec: Dict[str, Any], env_root: pathlib.Path, cache_root: p
         if result["returncode"] != 0:
             raise RuntimeError(f"install step {index} failed: {result.get('stderr_tail', '')}")
     env = augment_env_for_skill_deps(base_env, env_root.parent)
-    missing = [name for name in spec.get("bins") or [] if not shutil.which(name, path=env.get("PATH", ""))]
+    missing = [name for name in spec.get("bins") or [] if not _which(name, env, env_root)]
     if missing:
         raise RuntimeError(f"declared install binaries are unavailable: {missing}")
     if check is not None:
@@ -380,6 +461,12 @@ def _install_actions(spec: Dict[str, Any], env_root: pathlib.Path, cache_root: p
 def _run_install_step(step: Dict[str, Any], env_root: pathlib.Path, env: Dict[str, str], timeout_sec: int) -> Dict[str, Any]:
     cwd = _install_target(env_root, step.get("cwd", "."), allow_root=True)
     cmd = list(step["argv"])
+    if work_domain.is_work(env_root):  # the container resolves a name on its PATH (the build's additions first)
+        if "/" in cmd[0] and not cmd[0].startswith("/"):
+            cmd[0] = str(work_domain.settle(cwd / cmd[0]))
+        elif cmd[0] in {"python", "python3"}:
+            cmd[0] = str(python_runtime_binary(env_root.parent) or _interpreter(env_root))
+        return _run(cmd, cwd=cwd, env=env, timeout_sec=timeout_sec)
     # Resolve through the dependency PATH on Windows as well as POSIX. All
     # remaining arguments stay literal; no shell expansion or build language.
     if not pathlib.Path(cmd[0]).is_absolute():
@@ -394,6 +481,8 @@ def _run_install_step(step: Dict[str, Any], env_root: pathlib.Path, env: Dict[st
 def _resolved_packages(env_root: pathlib.Path) -> List[Dict[str, Any]]:
     from ouroboros.extension_isolated_deps import _isolated_python_site_dirs
 
+    if work_domain.is_work(env_root):  # the work environment's metadata is the work's to read: not recorded here
+        return []
     resolved = []
     for dist in importlib.metadata.distributions(path=[str(p) for p in _isolated_python_site_dirs(env_root.parent)]):
         row = {"kind": "python", "name": str(dist.metadata.get("Name") or ""), "version": dist.version}
@@ -444,6 +533,7 @@ def install_isolated_dependencies(
     specs: List[Dict[str, Any]],
     *,
     timeout_sec: int = _DEFAULT_TIMEOUT_SEC,
+    review_dir: pathlib.Path | None = None,
 ) -> Dict[str, Any]:
     """Install declared specs through existing process and dependency owners.
 
@@ -453,11 +543,17 @@ def install_isolated_dependencies(
     """
     extended = any(spec.get("kind") == "download" or spec.get("steps") or spec.get("check") is not None
                    or spec.get("allow_source_build") is True or spec.get("allow_install_scripts") is True for spec in specs)
-    reviewed_hash = _reviewed_install_binding(drive_root, skill_name, skill_dir, specs) if extended else ""
-    review_check = (lambda: _reviewed_install_binding(drive_root, skill_name, skill_dir, specs, reviewed_hash)) if extended else None
+    reviewed = review_dir or skill_dir  # the installed folder the review owner binds, whatever folder is built
+    reviewed_hash = _reviewed_install_binding(drive_root, skill_name, reviewed, specs) if extended else ""
+    review_check = (lambda: _reviewed_install_binding(drive_root, skill_name, reviewed, specs, reviewed_hash)) if extended else None
     env_root = isolated_env_dir(skill_dir)
-    env_root.mkdir(parents=True, exist_ok=True)
-    cache_root = skill_state_dir(drive_root, skill_name) / "dependency_cache"
+    work_domain.make_dirs(env_root)
+    if work_domain.is_work(env_root):  # a work build keeps its caches in the skill's work state folder
+        from ouroboros.execution_domain import skill_state_dir as work_state_dir
+
+        cache_root = work_state_dir(drive_root, skill_name) / "dependency_cache"
+    else:
+        cache_root = skill_state_dir(drive_root, skill_name) / "dependency_cache"
     installed: List[Dict[str, Any]] = []
     logs: List[Dict[str, Any]] = []
     pending_python: List[Dict[str, Any]] = []
@@ -521,7 +617,11 @@ def install_isolated_dependencies(
         "executable_ready": bool(checked) and all(checked) and not failure if checked else None,
         "status": "failed" if failure else "installed", "error": failure.get("error", ""),
     }
-    atomic_write_json(env_root / FINGERPRINT_FILENAME, fingerprint, trailing_newline=True)
+    if work_domain.is_work(env_root):  # the environment's own corroboration, written there; the record stays here
+        fingerprint["work_dir"] = str(skill_dir)
+        work_domain.write_text(env_root / FINGERPRINT_FILENAME, json.dumps(fingerprint, indent=2) + "\n")
+    else:
+        atomic_write_json(env_root / FINGERPRINT_FILENAME, fingerprint, trailing_newline=True)
     atomic_write_json(skill_state_dir(drive_root, skill_name) / DEPS_STATE_FILENAME, fingerprint, trailing_newline=True)
     if failure:
         raise RuntimeError(failure["error"])
@@ -543,7 +643,7 @@ def read_deps_state(
         return {}
     if skill_dir is None:
         return state
-    fingerprint = read_json_dict(isolated_env_dir(skill_dir) / FINGERPRINT_FILENAME) or {}
+    fingerprint = _json(isolated_env_dir(skill_dir) / FINGERPRINT_FILENAME) or {}
     if str(state.get("status") or "") != "installed":
         # The payload-resident fingerprint.json is AGENT-WRITABLE (it lives in
         # the skill dir): it may only ever corroborate a durable deps.json
@@ -571,10 +671,13 @@ def read_deps_state(
         for output in installed.get("outputs") or []:
             try:
                 path = _install_target(isolated_env_dir(skill_dir), output["path"])
-                stat = path.stat()
+                stat = work_domain.lstat(path) if work_domain.is_work(path) else path.stat()
                 stamp = (stat.st_size, stat.st_mtime_ns, stat.st_ino, stat.st_dev)
                 recorded = tuple(output.get(key) for key in ("size_bytes", "mtime_ns", "inode", "device"))
-                if stamp != recorded:
+                if stamp != recorded and work_domain.is_work(path):  # a changed stamp: the bytes decide
+                    if work_domain.measure(path, strict=True) != {"size": output["size_bytes"], "sha256": output["sha256"]}:
+                        raise RuntimeError(f"installed output changed: {output['path']}")
+                elif stamp != recorded:
                     # Preserve fast unchanged reads for large resources. A changed
                     # stat needs byte verification, never a guessed digest match.
                     verify_exact_file(path, size_bytes=output["size_bytes"], sha256=output["sha256"],

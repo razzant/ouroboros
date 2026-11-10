@@ -2,6 +2,13 @@
 
 The custody facade re-exports these readers; the chain oracle stays independent
 of the store reducer so imports and live publication can be compared directly.
+Projections keep FIRST request (including definite refusals), LAST STARTED and first
+request per operation/slot, ordered by outbox ordinal; import preserves completeness.
+Legacy reads require the indexed original request and one provable start, otherwise
+legacy_gap, without chain replay. delegate_custody_current.rebuild repairs quiescent roots.
+Review reconciliation, producer validation, commit collection and session retries share
+this reader; review_custody_legacy_gap forbids replacement sends, including skill review.
+Unknown controller custody defers collection (tests/test_review_invocation_current.py).
 """
 from __future__ import annotations
 
@@ -203,7 +210,7 @@ def invocation_record(drive_root: Any, invocation_id: str, *,
 
 def _request_facts(drive_root: Any, row: Dict[str, Any]) -> Dict[str, Any]:
     """The attempt facts of ONE START_REQUESTED row, the shape ``invocation_record`` returns."""
-    from ouroboros.delegate_pending import request_body
+    from ouroboros.delegate_pending import request_body, store_facts
 
     return {
         "task_id": str(row.get("task_id") or ""),
@@ -218,6 +225,7 @@ def _request_facts(drive_root: Any, row: Dict[str, Any]) -> Dict[str, Any]:
         **({"project_persistent": bool(row["project_persistent"])}
            if "project_persistent" in row else {}),
         "idempotency_key": str(row.get("idempotency_key") or ""),
+        **store_facts(row),
         "root_task_id": str(row.get("root_task_id") or ""),
         "parent_task_id": str(row.get("parent_task_id") or ""),
         "category": str(row.get("category") or "subagent"),
@@ -239,6 +247,9 @@ def _request_facts(drive_root: Any, row: Dict[str, Any]) -> Dict[str, Any]:
                                                   "review_subject_restore") if key in row},  # a released review checkout
         # A copy: the source rows may be the shared, read-only custody memo.
         "resource_ref": copy.deepcopy(row.get("resource_ref")) if isinstance(row.get("resource_ref"), dict) else {},
+        # The engine the attempt was bound to before its POST: a retry re-posts there, never elsewhere.
+        **({"engine_ref": copy.deepcopy(row["engine_ref"])} if isinstance(row.get("engine_ref"), dict)
+           and row["engine_ref"] else {}),
         "selected_subagent_id": str(row.get("selected_subagent_id") or ""),
         "config_fingerprint": str(row.get("config_fingerprint") or ""),
         "work_order_fingerprint": str(row.get("work_order_fingerprint") or ""),

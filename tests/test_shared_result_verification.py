@@ -304,12 +304,24 @@ def test_directory_registered_members_at_b_and_operation_specific_denial(env, mo
 def test_cooperative_target_and_wrong_explicit_target_use_common_admission(env, monkeypatch):
     parent, a, b, drive = env
     monkeypatch.setenv("OUROBOROS_SUBAGENT_PROJECTS_ROOT", str(b.parent))
-    capture(parent, b, drive)
+
+    def neighbour_change_and_ignored_output():
+        # #2450: the capture is the shared tree's Git delta, so a neighbour's tracked change is in it and
+        # the child's expected output under an ignored folder never is.
+        (b / ".gitignore").write_text("scratch/\n")
+        (b / "scratch").mkdir()
+        (b / "scratch" / "expected.json").write_text("{}\n")
+        (b / "a.txt").write_bytes(b"one\nneighbour\nthree\n")
+
+    capture(parent, b, drive, edit=neighbour_change_and_ignored_output)
     assert "TARGET_MISMATCH" in invoke(parent, target_root=str(a))
     assert_unabsorbed(drive)
     out = invoke(parent)
-    assert out.startswith("OK: cooperative no-op"), out
+    assert out.startswith("OK: cooperative no-op for child child:") and "ALREADY" not in out, out
+    assert "only that delta was checked" in out and "other writers' work" in out and "names no author" in out, out
+    assert "does not ignore" in out and "expected.json" not in out, out
     assert verdict(drive)["outcome"] == "coop_already_in_tree"
+    assert verdict(drive)["files"] == [".gitignore", "a.txt"]
 
 
 def test_file_reference_postimage_hash_policy_is_checked_before_verification(env, monkeypatch):

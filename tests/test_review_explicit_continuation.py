@@ -39,6 +39,7 @@ class _Engine:
     def __init__(self):
         self.keys, self.posts, self.fates = {}, [], {"run-1": "stop"}
         self.refuse_next, self.lose_next = None, False
+        self.store = ""  # "": an engine whose receipts name no store; else the store that admits every start
 
     def start(self, gateway, request, idempotency_key):
         gateway.start_requests.append(dict(request))
@@ -51,7 +52,7 @@ class _Engine:
         if "continueFrom" in request and self.lose_next:
             self.lose_next = False
             raise ClaudexorUnavailable("daemon_unreachable", "accepted, reply lost")
-        return {"runId": run_id, "runDir": "/tmp/fake-run"}
+        return {"runId": run_id, "runDir": "/tmp/fake-run", **({"storeId": self.store} if self.store else {})}
 
     def detail(self, gateway, run_id):
         from ouroboros.tools.scope_review_contract import SCOPE_REQUIRED_ITEMS
@@ -234,6 +235,36 @@ def test_an_accepted_successor_whose_reply_was_lost_is_rejoined_with_the_same_ke
     (_first, _k), (lost, lost_key), (replayed, replay_key) = a.engine.posts
     assert replay_key == lost_key == decision["invocation_id"] and replayed == lost == body
     assert a.engine.keys[replay_key] == "run-2" and len(_seat(a, record_id)["continuations"]) == 1
+
+
+@pytest.mark.parametrize("admitted,serving", [("store-a", "store-a"), ("store-a", "store-b"), ("", "store-b")])
+def test_a_successor_is_sent_only_into_the_store_that_admitted_its_stopped_run(stopped_wave, monkeypatch,
+                                                                               admitted, serving):
+    """#2649: the successor's START names the store that admitted run-1 (its continueFrom target), and its first send
+    goes only there. A predecessor bound to no store keeps the earlier replay rule, explicitly."""
+    a = stopped_wave
+    a.engine.store = admitted
+    monkeypatch.setattr(FakeGateway, "store_identity", admitted, raising=False)
+    first = _wave(a)
+    reference, record_id = first["review_reference"], first["record_id"]
+    named = first["continuable_seats"][0]["operation_id"]
+    assert delegate_custody.replay(a.data)["run-1"].daemon_store_id == admitted
+    a.engine.store = serving  # the engine now serves another store, or the same one again
+    monkeypatch.setattr(FakeGateway, "store_identity", serving, raising=False)
+    _call(a, review_reference=reference, continue_seats=[{"seat_id": "second", "operation_id": named}])
+    token = _seat(a, record_id)["continuations"][0]["invocation_id"]
+    assert delegate_custody.invocation_record(a.data, token)["daemon_store_id"] == admitted
+    sent = [key for body, key in a.engine.posts if "continueFrom" in body]
+    if admitted and admitted != serving:  # a store that never admitted run-1 is never sent its successor
+        assert sent == [] and delegate_custody.invocation_record(a.data, token)["state"] == "pending"
+        seat = _seat(a, record_id)
+        assert seat.get("failure_code") == "invocation_store_unproven", {k: seat.get(k) for k in (
+            "status", "operation_state", "failure_code", "reported_cause", "pending_invocation_id")}
+        return
+    assert sent == [token] and _seat(a, record_id)["status"] == "responded"
+    delegate_custody._CUSTODY.clear()
+    successor = a.engine.keys[token]
+    assert delegate_custody.replay(a.data)[successor].daemon_store_id == serving  # its own receipt's store
 
 
 def test_a_choice_recorded_before_a_crash_is_sent_only_by_an_explicit_collection(stopped_wave, monkeypatch):

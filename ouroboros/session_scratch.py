@@ -22,6 +22,8 @@ import stat
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+from ouroboros import work_domain
+
 log = logging.getLogger(__name__)
 
 # The hold a producer's retention marker puts on a scratch: the marker's own words are its example.
@@ -37,7 +39,53 @@ def scratch_parents() -> Tuple[pathlib.Path, ...]:
     temp parent that records made before ``session_scratch_parent`` existed still name."""
     from ouroboros.test_environment import default_temp_parent, session_scratch_parent
 
-    return tuple(dict.fromkeys(parent.resolve() for parent in (session_scratch_parent(), default_temp_parent())))
+    parents = [parent.resolve() for parent in (session_scratch_parent(), default_temp_parent())]
+    try:  # a managed session's scratch is the work domain's, under its staging root (``workspace_preflight``)
+        parents.append(pathlib.Path(work_domain.staging_path("scratch")))
+    except work_domain.WorkDomainRefused:
+        pass
+    return tuple(dict.fromkeys(parents))
+
+
+def _overlaps(path: pathlib.Path, execution: pathlib.Path) -> bool:
+    return path == execution or path in execution.parents or execution in path.parents
+
+
+def work_session_scratch(execution: pathlib.Path) -> pathlib.Path:
+    """A managed session's scratch (``workspace_preflight._session_scratch``): a new ``obs-*`` folder under
+    ``<staging_root>/scratch``, made by the work domain itself (an existing name refuses, as ``mkdtemp`` would
+    retry), apart from the execution tree."""
+    import secrets
+
+    parent = pathlib.Path(work_domain.staging_path("scratch"))
+    work_domain.make_dirs(parent)
+    for _attempt in range(8):
+        path = parent / f"obs-{secrets.token_hex(4)}"
+        if _overlaps(path, execution):
+            raise ValueError(f"{path} overlaps the execution tree {execution}")
+        try:
+            work_domain.make_dir(path)
+        except OSError:
+            continue
+        if work_domain.kind(path) != "dir":
+            raise ValueError(f"{path} is not a real directory")
+        return path
+    raise OSError(f"no new session scratch could be made under {parent}")
+
+
+def work_download_caches(execution: pathlib.Path) -> List[pathlib.Path]:
+    """A managed session's shared download caches (``uv``, ``pip``, ``npm``) under the staging root's package
+    downloads folder, made by the work domain: the service's own data root is never one the work engine is handed."""
+    from ouroboros.workspace_preflight import _CACHE_VARIABLES, PACKAGE_DOWNLOADS_DIRNAME
+
+    caches = []
+    for name, _variable in _CACHE_VARIABLES:
+        path = pathlib.Path(work_domain.staging_path(PACKAGE_DOWNLOADS_DIRNAME, name))
+        if _overlaps(path, execution):
+            raise ValueError(f"{path} overlaps the execution tree {execution}")
+        work_domain.make_dirs(path)
+        caches.append(path)
+    return caches
 
 
 def recorded_scratch(record: pathlib.Path) -> pathlib.Path:
@@ -52,7 +100,7 @@ def recorded_scratch(record: pathlib.Path) -> pathlib.Path:
     path = pathlib.Path(row["path"])
     if path.parent not in scratch_parents() or not path.name.startswith("obs-"):
         raise ValueError(f"{record} does not name a session scratch directory")
-    seen = path.lstat()  # a missing temporary directory is a gap, never silently re-created
+    seen = work_domain.lstat(path)  # a missing temporary directory is a gap, never silently re-created
     if not stat.S_ISDIR(seen.st_mode) or [seen.st_dev, seen.st_ino] != row["identity"]:
         raise ValueError(f"{path} is not the recorded scratch directory")
     return path
@@ -107,17 +155,23 @@ def _nested_drives(drive: pathlib.Path) -> Iterator[pathlib.Path]:
 def retention_hold(path: pathlib.Path) -> Optional[Dict[str, Any]]:
     """The ``producer_retained`` hold on a scratch, or None: the first marker beneath it names the
     reason (its first line; an unreadable subtree counts as one), and when it was written."""
-    from ouroboros.test_environment import retention_markers
+    from ouroboros.test_environment import RETENTION_MARKER, retention_markers
 
-    markers = retention_markers(path)
+    if work_domain.is_work(path):  # walked by held descriptors, its marker read confined; an unlistable folder holds
+        markers: List[pathlib.Path] = []
+        for folder, _dirs, files in work_domain.walk(path, onerror=lambda exc: markers.append(pathlib.Path(exc.filename))):
+            if RETENTION_MARKER in files:
+                markers.append(pathlib.Path(folder) / RETENTION_MARKER)
+    else:
+        markers = retention_markers(path)
     if not markers:
         return None
     marker, reason, since = markers[0], "unreadable subtree", None
     with contextlib.suppress(OSError):
-        since = marker.lstat().st_mtime
-    if marker.is_file() and not marker.is_symlink():
+        since = work_domain.lstat(marker).st_mtime
+    if work_domain.kind(marker) == "file":
         with contextlib.suppress(OSError, UnicodeError):
-            reason = (marker.read_text(encoding="utf-8").strip().splitlines() or ["retained"])[0]
+            reason = (work_domain.read_text(marker).strip().splitlines() or ["retained"])[0]
     return {"class": PRODUCER_RETAINED, "example": f"{path}: {reason}", "since": since}
 
 
@@ -145,6 +199,11 @@ def release_session_scratch(drive: pathlib.Path) -> List[Dict[str, Any]]:
         hold = retention_hold(path)
         if hold is not None:
             retained.append({**hold, "owner": owner, "path": str(path)})  # the producer's to keep: never deleted here
+            continue
+        if work_domain.is_work(path):  # a work scratch is removed by the work domain, its identity checked above
+            work_domain.remove_tree(path)
+            if work_domain.exists(path):
+                raise OSError(f"session scratch removal incomplete: {path}")
             continue
         force_rmtree(path)
         if os.path.lexists(path):

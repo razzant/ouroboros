@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import json
 import pathlib
+import time
 from typing import Any
 from ouroboros.observability import stamp_finalization_enqueue
 from ouroboros.utils import utc_now_iso
@@ -671,6 +672,8 @@ def _run_task_body(runner: Any, task: dict, task_drive_root: str, task_queue: An
         with task_settings_scope(start):
             return carry_presence_turn(task, task_queue, repo_dir, task_drive_root, worker_id=wid,
                                        owner_wait_callback=getattr(runner, "owner_wait_callback", None)) or []
+    from ouroboros.deployment_extensions import HOLD_REASON, hold_reason
+
     if task.get("_conversation_prepare"):
         from supervisor.worker_chat_lane import ConversationRefusal, prepare_conversation_task, refusal_terminal
 
@@ -678,7 +681,25 @@ def _run_task_body(runner: Any, task: dict, task_drive_root: str, task_queue: An
             prepare_conversation_task(runner, task, task_drive_root, broadcast=lambda msg: task_queue.put(dict(msg)))
         except ConversationRefusal as refusal:
             return refusal_terminal(runner, task, refusal, task_queue)
+    if hold_reason() == HOLD_REASON:  # a required extension not running in THIS process: the task's own end
+        return _held_terminal(runner, task, task_queue)
     return runner.handle_task(task)
+
+
+def _held_terminal(runner: Any, task: dict, task_queue: Any) -> list:
+    """A deployment's hold before any body (``deployment_extensions.hold_reason``): the task's typed host notice,
+    returned like a carrier refusal, so the slot stays alive; no model call, no tool, no other task's facts.
+    A Presence turn meets the same check in ``handle_task`` inside its own settlement."""
+    from ouroboros.agent_task_pipeline import emit_task_results
+    from ouroboros.deployment_extensions import HOLD_REASON, hold_text
+
+    events: list = []
+    emit_task_results(
+        runner.env, runner.memory, runner.llm, events, task, hold_text(),
+        {"terminal_origin": "host_notice", "execution_status": "infra_failed", "reason_code": HOLD_REASON},
+        {"reasoning_notes": [], "tool_calls": []}, time.time(), runner.env.drive_path("logs"),
+        ctx=None, event_queue=task_queue)
+    return events
 
 
 def _drain_dialogue_retry() -> None:
@@ -731,7 +752,11 @@ def _record_task_exception(runner: Any, task: dict, exc: Exception, pool_drive_r
         return
     try:
         from ouroboros.agent import _task_exception_terminal
+        from ouroboros.deployment_extensions import HOLD_REASON, hold_text, record_held_task
 
+        if getattr(exc, "before_task_start", False) and getattr(exc, "control_reason", "") == HOLD_REASON:
+            record_held_task(runner.env.drive_root, task, hold_text())  # held before its body: typed, no traceback
+            return
         _task_exception_terminal(runner.env, task, exc, runner.env.drive_path("logs"), keep_terminal=True)
     except Exception:
         log.warning("Exception terminal of task %s was not recorded", task.get("id"), exc_info=True)
