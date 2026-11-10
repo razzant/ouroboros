@@ -1329,9 +1329,9 @@ def test_a_plain_delivered_receipt_claims_no_resume_and_costs_no_read(tmp_path, 
     ([_pending_row()], False),
 ], ids=["async-only", "mixed-set", "legacy-row"])
 def test_the_published_plain_answer_claims_no_resume_for_any_question_set(tmp_path, monkeypatch, rows, async_only):
-    """The real default surface over the real gateway decoder: the registered delegate_wait shows
-    each row's kind, and an answer in the form its note teaches adds one POST and no read, so its
-    receipt is the plain one whichever kind of question it answered."""
+    """The real default surface over the real gateway decoder: delegate_wait's wake shows each
+    row's kind (its one read, ``_read_run``), and an answer in the form its note teaches adds one
+    POST and no read, so its receipt is the plain one whichever kind of question it answered."""
     import httpx
 
     import ouroboros.tools.delegate as delegate
@@ -1358,7 +1358,7 @@ def test_the_published_plain_answer_claims_no_resume_for_any_question_set(tmp_pa
     _own_run(delegate)
     with httpx.Client(transport=httpx.MockTransport(respond), base_url="http://offline.invalid") as client:
         gateway._client = client
-        waiting = json.loads(published["delegate_wait"](ctx, "run-1", wait_sec=600, since_seq=5))
+        waiting = json.loads(delegate._read_run(ctx, "run-1", 5))  # delegate_wait's wake publishes this one read
         reads_before_answer = len(requests)
         answered = json.loads(published["delegate_answer"](
             ctx, "run-1", waiting["pending_interactions"][0]["interaction_id"],

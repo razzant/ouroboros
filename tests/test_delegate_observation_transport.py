@@ -661,5 +661,5 @@ def test_an_opted_in_engine_marks_async_questions_end_to_end_over_http(tmp_path,
     assert reads == ["/v2/runs/run-x"]
     second, _frames = _repaired_engine(tmp_path, monkeypatch, events=stream, wait_many=wait_many, detail=detail,
                                        version="9.9.9", opt_in=True)
-    assert second["status"] == "no_progress" and second["waiting_on_user"] is True, second
+    assert second["status"] == "progress" and second["waiting_on_user"] is True, second  # moved past the wake's cursor 0
     assert second["async_questions_only"] is True, "the question already shown stays quiet, never a second ask"
