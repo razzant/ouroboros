@@ -344,9 +344,6 @@ def redact_projection(value: Any, *, facts: Optional[Dict[tuple, tuple]] = None)
     def part(item: Any, records: List[RedactionRecord], path: str, secret_literals: bool) -> Any:
         found = part_fact(item, facts, path=path, secret_literals=secret_literals)
         if found is None:
-            from ouroboros.context_timing import counted
-
-            counted("secret_scan", len(json.dumps(item, ensure_ascii=False, sort_keys=True, default=str).encode()))
             return _redact_any(item, records, path, secret_literals=secret_literals)
         records.extend(RedactionRecord(path=path + suffix, rule=rule) for suffix, rule in found[2])
         return item if found[1] is None else found[1]

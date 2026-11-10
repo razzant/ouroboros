@@ -489,3 +489,10 @@ def test_changed_bytes_are_worked_out_again():
     assert _json_bytes(result.value) == _json_bytes(obs.redact_projection(edited).value)
 
 
+def test_a_part_with_keys_of_mixed_types_is_redacted_as_the_whole_walk():
+    """A part whose keys have no sorted form is not plain JSON for the CAS; the redaction by parts never serializes it
+    sorted and answers what the whole walk answers, with no exception."""
+    payload = {"messages": [{"role": "user", "content": "plain", 1: "mixed", "token": "sk-" + "a" * 40}]}
+    facts: dict = {}
+    assert obs.redact_projection(payload, facts=facts).manifest() == obs.redact_projection(payload).manifest()
+    assert obs.redact_projection(payload, facts=facts).value == obs.redact_projection(payload).value
