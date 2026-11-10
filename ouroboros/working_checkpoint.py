@@ -157,11 +157,16 @@ def _shared_element(ctx: Any, element: Any) -> Optional[bytes]:
     secret-bearing elements stay inline. The verdict is the task's redaction fact of those bytes,
     the one its request records keep (``observability.task_parts``): what either met is not scanned again.
     """
-    from ouroboros.observability import task_parts
+    from ouroboros.observability import _json_bytes, task_parts
     from ouroboros.redaction import part_fact
 
     found = part_fact(element, task_parts(_root(ctx), str(ctx.task_id))[1])
-    return found[0] if found is not None and found[1] is None else None
+    if found is None or found[0] is not None:
+        return None
+    try:
+        return _json_bytes(element)
+    except TypeError:  # keys of mixed types have no sorted form: it stays inline
+        return None
 
 
 def _list_working_parts(ctx: Any, parts: Dict[str, bytes]) -> int:

@@ -313,14 +313,15 @@ def _redact_any(value: Any, records: List[RedactionRecord], path: str, *, secret
 
 
 def part_fact(item: Any, facts: Dict[tuple, tuple], *, path: str = "$",
-              secret_literals: bool = False) -> Optional[Tuple[bytes, Any, Tuple[Tuple[str, str], ...]]]:
-    """``(bytes, masked value, records)`` of one request-view part, worked out once per its bytes and its parent's
-    flags (``secret_literals``; a list element never inherits ``schema``), then reused from ``facts``.
+              secret_literals: bool = False) -> Optional[Tuple[Any, Tuple[Tuple[str, str], ...]]]:
+    """``(masked value, records)`` of one request-view part, worked out once per its bytes and its parent's flags
+    (``secret_literals``; a list element never inherits ``schema``), then reused from ``facts``. The bytes keep the
+    part's key order, which is the walk's and so its records' order (the CAS address is the sorted form).
     The value is None when custody projection and redaction leave the part's bytes alone (it is public as it is);
     record paths are relative to the part. None for a part that is not plain JSON: bytes made with ``default=str``
     would not name its value, so it is walked each time. Working a fact out counts its bytes as ``secret_scan``."""
     try:
-        raw = json.dumps(item, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        raw = json.dumps(item, ensure_ascii=False).encode("utf-8")
     except (TypeError, ValueError):
         return None
     key = (hashlib.sha256(raw).hexdigest(), secret_literals)
@@ -331,10 +332,10 @@ def part_fact(item: Any, facts: Dict[tuple, tuple], *, path: str = "$",
 
         projected, found = observability_custody_projection(item), []
         value = _redact_any(projected, found, path, secret_literals=secret_literals)
-        public = not found and json.dumps(projected, ensure_ascii=False, sort_keys=True).encode("utf-8") == raw
+        public = not found and json.dumps(projected, ensure_ascii=False).encode("utf-8") == raw
         fact = facts[key] = (None if public else value, tuple((record.path[len(path):], record.rule) for record in found))
         counted("secret_scan", len(raw), key=key)
-    return raw, fact[0], fact[1]
+    return fact
 
 
 def redact_projection(value: Any, *, facts: Optional[Dict[tuple, tuple]] = None) -> RedactionResult:
@@ -345,8 +346,8 @@ def redact_projection(value: Any, *, facts: Optional[Dict[tuple, tuple]] = None)
         found = part_fact(item, facts, path=path, secret_literals=secret_literals)
         if found is None:
             return _redact_any(item, records, path, secret_literals=secret_literals)
-        records.extend(RedactionRecord(path=path + suffix, rule=rule) for suffix, rule in found[2])
-        return item if found[1] is None else found[1]
+        records.extend(RedactionRecord(path=path + suffix, rule=rule) for suffix, rule in found[1])
+        return item if found[0] is None else found[0]
 
     records: List[RedactionRecord] = []
     return RedactionResult(_redact_any(value, records, "$", part=part if facts is not None else None), records)

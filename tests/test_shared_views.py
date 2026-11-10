@@ -489,6 +489,22 @@ def test_changed_bytes_are_worked_out_again():
     assert _json_bytes(result.value) == _json_bytes(obs.redact_projection(edited).value)
 
 
+@pytest.mark.parametrize("names", [["api_key", "password"], ["password", "api_key"]])
+def test_a_schema_in_another_key_order_keeps_the_whole_walk_s_records(names):
+    """A part's fact is held per its bytes in their own order: a schema with secret defaults, met first in one order of
+    its properties and then in the other, is reported in the order of the walk that met it, as the whole walk does."""
+    def request(order):
+        properties = {name: {"type": "string", "default": "sk-" + name * 6} for name in order}
+        return {"tools": [{"type": "function", "function": {"name": "connect", "parameters": {"type": "object",
+                                                                                              "properties": properties}}}]}
+
+    facts: dict = {}
+    obs.redact_projection(request(list(reversed(names))), facts=facts)  # the other order is met first
+    current = request(names)
+    reused, whole = obs.redact_projection(current, facts=facts), obs.redact_projection(current)
+    assert reused.value == whole.value and reused.manifest() == whole.manifest()
+
+
 def test_a_part_with_keys_of_mixed_types_is_redacted_as_the_whole_walk():
     """A part whose keys have no sorted form is not plain JSON for the CAS; the redaction by parts never serializes it
     sorted and answers what the whole walk answers, with no exception."""

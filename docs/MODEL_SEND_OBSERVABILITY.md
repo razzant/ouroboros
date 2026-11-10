@@ -85,8 +85,8 @@ The send seam holds one frozen request representation, verifies its in-memory
 identity and persists one durable pre-send record. It never calls
 `verify_sealed_candidate` or reads that record back. Persistence remains a
 precondition of dispatch. Its redaction scans only parts the task has not met:
-`redaction.part_fact` keeps each part's result by its bytes and its parent's flags
-(`observability.task_parts`, shared with the logical request,
+`redaction.part_fact` keeps each part's result by its bytes, in their key order,
+and its parent's flags (`observability.task_parts`, shared with the logical request,
 the Claudexor request and the working checkpoint), re-roots its records where the
 part stands, and the stored bytes and exclusion rows equal the whole walk's.
 
