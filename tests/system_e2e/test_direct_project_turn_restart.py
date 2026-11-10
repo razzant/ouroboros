@@ -285,3 +285,148 @@ def test_s42_resumed_folderless_work_keeps_its_task_drive_after_a_sibling_gives_
         finally:
             gate.release.set()
             server.stop()
+
+
+TURN_R, BG = "S42_RETURNED_ROOM_TURN", "S42_BACKGROUND_HOLDER"
+FINAL_R = "S42_RETURNED_TURN_CONTINUED_BESIDE_BACKGROUND_WORK"
+
+
+class _ReturnStub(ScriptedStubModel):
+    """The room turn writes before the stop and answers after Resume; the background work answers once released."""
+
+    def __init__(self, gate) -> None:
+        super().__init__(gate=gate)
+        self.served: list = []
+
+    def _next_step(self, body):
+        request = _current(body)
+        if BG in request:
+            self.served.append("BG:final")
+            return {"final": "background work done"}
+        if TURN_R not in request:
+            return None
+        step = dict(WORK) if not any(item == "R:work" for item in self.served) else {"final": FINAL_R}
+        self.served.append("R:work" if "tool" in step else "R:final")
+        return step
+
+
+def _current(body: dict) -> str:
+    """The request a model call serves: the first user message naming this scenario's work, the work's own ask
+    (later host notes and carried owner rows are context, never its request)."""
+    from tests.system_e2e.harness import message_text
+
+    texts = [message_text(m) for m in body.get("messages") or [] if isinstance(m, dict) and m.get("role") == "user"]
+    return next((text for text in texts if not text.startswith(CARRIED)
+                 and any(mark in text for mark in (TURN_R, BG))), "")
+
+
+class _Gates:
+    """Both holds on one loopback model: the room turn's second round before the stop, the background round after."""
+
+    def __init__(self, *gates) -> None:
+        self.gates = gates
+
+    def __call__(self, body: dict) -> None:
+        for gate in self.gates:
+            gate(body)
+
+
+@pytest.fixture(scope="module")
+def s42_candidate(tmp_path_factory):
+    """The working tree under test, uncommitted changes included (``candidate_checkout`` with origin proof), on a
+    dependency-only interpreter; a clean tree may serve its HEAD clone instead, a dirty one never."""
+    from tests.candidate_checkout import CandidateError, candidate_checkout, require_candidate_interpreter
+    from tests.system_e2e.harness import REPO_ROOT, clone_repo
+
+    require_lane(LANE_MOCK)
+    try:
+        require_candidate_interpreter()
+    except CandidateError as exc:
+        dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=REPO_ROOT,
+                               check=True, capture_output=True, text=True).stdout
+        if dirty.strip():
+            pytest.fail(f"{exc} — and the working tree is dirty, so a HEAD clone would not be the candidate")
+        yield clone_repo(tmp_path_factory.mktemp("s42"))
+        return
+    with candidate_checkout(REPO_ROOT, tmp_path_factory.mktemp("s42") / "candidate", origin_proof=True) as candidate:
+        yield candidate
+
+
+@pytest.mark.integration
+def test_s42_a_returned_room_turn_continues_on_its_lane_while_background_work_holds_the_project_slot(
+        s42_candidate, tmp_path):
+    """#2870 on a real server: after a stop and my human's Resume, the returned room turn needs neither the only
+    project slot (``MAX_WORKERS`` 1) nor the room's one-writer lease, both held by background work in the same room;
+    it continues on a conversation-lane carrier, its own origin and carrier recorded by its body."""
+    require_lane(LANE_MOCK)
+    room = tmp_path / "room"
+    room.mkdir()
+    subprocess.run(["git", "init", "-q", str(room)], check=True, capture_output=True)
+
+    def worked(body: dict) -> bool:
+        return (bool(body.get("tools")) and TURN_R in _current(body) and "s2547-progress.txt" in json.dumps(
+            [m for m in body.get("messages") or [] if isinstance(m, dict) and m.get("role") == "tool"]))
+
+    held_turn = ModelGate(worked, timeout=900)
+    held_background = ModelGate(lambda body: bool(body.get("tools")) and BG in _current(body), timeout=900)
+    root = tmp_path / "server"
+    with _ReturnStub(_Gates(held_turn, held_background)) as stub, _released(held_turn), _released(held_background):
+        settings = keyless_settings(stub, OUROBOROS_MAX_WORKERS=1)
+        server = start_server(s42_candidate, root, settings)
+        try:
+            oracle = ArtifactOracle(server.data_root)
+            project = _api(server.base_url, "POST", "/api/projects",
+                           {"name": "S42 returned room", "path": str(room)}, timeout=60).get("project") or {}
+            assert project.get("id") and project.get("chat_id"), project
+            from websockets.sync.client import connect
+
+            message_id = "e2e-s42r-" + uuid.uuid4().hex
+            with connect(ws_url(server), open_timeout=30, proxy=None) as ws:
+                ws.send(json.dumps({"type": "chat", "client_message_id": message_id,
+                                    "content": f"{TURN_R}: write the progress note in this room, then report.",
+                                    "chat_id": project["chat_id"], "project_id": project["id"]}))
+                task = wait_until(lambda: _received(oracle, message_id), 60)
+                assert task and task.get("_is_direct_chat") is True, task
+                task_id = task["id"]
+                assert held_turn.arrived.wait(240), "the room turn never reached its second round"
+            assert wait_until(lambda: _saved(server.data_root, task_id), 60), "no working state was saved"
+            conversation_turn_row(oracle, task_id)
+        finally:
+            server.stop()  # a quit: the saved turn waits for my human's Resume
+
+        server = start_server(s42_candidate, root, settings)
+        try:
+            oracle = ArtifactOracle(server.data_root)
+            assert wait_until(lambda: _pending(oracle, task_id), 60), "the saved turn was not restored"
+            restored = _restored_once(oracle, task_id)
+            assert (restored.get("_execution_owner") or {}).get("lane") == "conversation", restored
+            created = _api(server.base_url, "POST", "/api/tasks", {
+                "description": f"{BG}: background work in this room.", "project_id": project["id"],
+                "chat_id": project["chat_id"], "memory_mode": "forked", "actor_id": "e2e-driver",
+                "source": "e2e-driver", "metadata": {"source": "e2e-driver", "delegation_role": "root"}}, timeout=60)
+            background = str(created.get("task_id") or "")
+            assert background and held_background.arrived.wait(240), {"created": created, "served": stub.served}
+            assert background in oracle.running_ids(), "the background work holds the only project slot"
+            resumed = _api_status(server.base_url, "POST", f"/api/tasks/{task_id}/resume", {}, timeout=60)
+            assert resumed["status"] == 200 and (resumed.get("body") or {}).get("ok") is True, resumed
+            stored = wait_until(
+                lambda: (lambda row: row if row.get("status") in {"completed", "failed", "cancelled"} else None)(
+                    oracle.task_result(task_id)), 180)
+            held = _pending(oracle, task_id)
+            assert stored, {"still_pending": bool(held), "project_hold": held.get("_project_admission_restore_hold"),
+                            "served": stub.served, "running": sorted(oracle.running_ids())}
+            stored = wait_durable_result(oracle, task_id, timeout=60)
+            assert stored.get("status") == "completed" and FINAL_R in str(stored.get("result") or ""), stored
+            owner = stored.get("execution_owner") or {}
+            assert (owner.get("kind"), owner.get("lane"), owner.get("executor")) == (
+                "direct", "conversation", "worker"), owner
+            assert int(stored.get("task_attempt") or 0) == 2 == int(stored.get("admitted_dispatch_attempt") or 0)
+            assert str(oracle.task_result(background).get("status") or "") not in {"completed", "failed", "cancelled"}
+            assert background in oracle.running_ids(), "the background work still held its slot throughout"
+            held_background.release.set()
+            assert wait_durable_result(oracle, background, timeout=180).get("status") == "completed"
+            assert stub.served.count("R:work") == 1, stub.served
+        finally:
+            held_turn.release.set()
+            held_background.release.set()
+            server.stop()

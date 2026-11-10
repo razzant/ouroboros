@@ -26,7 +26,7 @@ test('Restart now confirm-and-send sends exactly one non-queueable /restart', as
     });
     assert.equal(outcome, 'sent');
     assert.equal(sent.length, 1);
-    assert.deepEqual(sent[0][0], { type: 'command', cmd: '/restart' });
+    assert.deepEqual(sent[0][0], { type: 'command', cmd: '/restart', ui_control: { name: 'restart' } });
     assert.deepEqual(sent[0][1], { queue: false });
     assert.equal(seenOptions[0].danger, true);
     assert.equal(seenOptions[0].confirmLabel, 'Restart');

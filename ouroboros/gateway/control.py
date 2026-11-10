@@ -212,6 +212,12 @@ async def api_command(request: Request) -> JSONResponse:
                 if expected != BOOT.snapshot(jobs=False)["since"]:
                     return json_error("Ouroboros restarted before this command arrived.", 409,
                                       accepted=False, reason_code="boot_changed")
+            from supervisor.message_ingress import ui_control_fact
+
+            try:  # the producer that composed this command from a control names it; typed text never does
+                control = ui_control_fact(body.get("ui_control"), pressed_at=utc_now_iso(), command=str(cmd))
+            except ValueError as exc:
+                return json_error(str(exc), 400, accepted=False)
             visible_text = str(body.get("visible_text") or "").strip()
             task_constraint = body.get("task_constraint") if isinstance(body.get("task_constraint"), dict) else None
             visible_task_id = str(body.get("visible_task_id") or "").strip()
@@ -232,7 +238,8 @@ async def api_command(request: Request) -> JSONResponse:
             # SPA heal/repair posts) would otherwise masquerade as ordinary web
             # frames. The honest stamp names the ENDPOINT — the host cannot know
             # the true caller here (disclosed non-goal).
-            send_kwargs["task_metadata"] = {"client_surface": {"channel": "api_command"}, "reply_to": body.get("reply_to", "")}
+            send_kwargs["task_metadata"] = {"client_surface": {"channel": "api_command"}, "reply_to": body.get("reply_to", ""),
+                                            **({"ui_control": control} if control else {})}
             # Publication precedes readiness. Bind the independent owner, keeping
             # this transport's metadata if the supervisor becomes ready meanwhile.
             if bridge is None or str(cmd).strip().lower() == "/restart":

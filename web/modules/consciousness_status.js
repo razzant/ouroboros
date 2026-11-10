@@ -305,7 +305,7 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         if (toggle.disabled || !view) return;
         pending = view.snapshot.enabled ? 'stop' : 'start';
         pendingAt = Date.now();
-        ws.send({ type: 'command', cmd: `/bg ${pending}` });
+        ws.send({ type: 'command', cmd: `/bg ${pending}`, ui_control: { name: 'consciousness_toggle' } });
         paintShade();
         // The runtime applies the command on its own clock: the room's next state answer shows it.
         setTimeout(() => { if (!destroyed) refreshState(true); }, COMMAND_SETTLE_MS);

@@ -656,6 +656,8 @@ export function initSkills(ctx = {}) {
                 cmd: buildHealPrompt(skill),
                 task_constraint: { mode: 'normal', skill_name: skill.name || name, payload_root: skill.payload_root || '', allow_enable: false, allow_review: true },
                 visible_task_id: `skill_repair_${name}`,
+                // The press is my human's request; the prompt above is the host's words, not theirs (#2778).
+                ui_control: { name: 'skill_repair' },
             });
             showToast(`${name}: Ouroboros is on it — see chat`, 'ok');
             emitSkillLifecycle('repair', name);

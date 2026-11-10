@@ -456,7 +456,8 @@ def test_a_press_admitted_after_its_card_changed_reads_the_press_it_accepted(tmp
                                      "lost_in_a_restart"])
 def test_a_parked_head_keeps_the_coined_name_into_its_resumed_attempt(tmp_path, monkeypatch, settles):
     """A Main head whose namer coined a name is paused and parked by the supervisor (RUNNING -> PENDING, the
-    one path a park and a detach take), then Resumed on a project worker, which runs no namer. The namer writes
+    one path a park and a detach take), then Resumed on its conversation carrier (never the idle project worker beside
+    it), whose resumed attempt runs no namer. The namer writes
     the record before its ``task_named`` frame, and the server handles that frame before the park, after it,
     after the Resume handed the worker the row's older copy, crossed with the resumed attempt's own first frame
     (two carrier processes' frames), or never: it was lost with its carrier when the application restarted
@@ -466,10 +467,10 @@ def test_a_parked_head_keeps_the_coined_name_into_its_resumed_attempt(tmp_path, 
     from supervisor import queue
     from supervisor.worker_process import run_worker_task
     from tests._budget_pause_exact_helpers import _fast_hold, _loop_ctx, _quiet_external
-    from tests.conversation_carrier_support import park_lane_pause
-    from tests.test_agent_restart_intent import worker
+    from tests.conversation_carrier_support import dispatched_tasks, install_lane_spare, park_lane_pause
     from tests.test_restart_retention import _pool_events
     from tests.test_restart_saved_work import _stop_and_boot
+    from tests.worker_pool_support import affirm_ready
 
     _asker(tmp_path, 1)
     hold = threading.Event()
@@ -512,14 +513,18 @@ def test_a_parked_head_keeps_the_coined_name_into_its_resumed_attempt(tmp_path, 
     parked = _names(tmp_path, tid)
 
     assert queue.resume_budget_paused_task(tid)["ok"]
-    _, sent = worker(SimpleNamespace(workers=workers), monkeypatch)  # one READY project worker takes it
+    if lost:  # the restart's pool: its lane spare again
+        lane.spare = install_lane_spare(workers)
+    sent: list = []  # one READY idle project worker beside the lane's spare
+    workers.WORKERS[0] = affirm_ready(SimpleNamespace(wid=0, busy_task_id=None, in_q=SimpleNamespace(put=sent.append)))
     workers.assign_tasks()
-    [resumed] = sent
+    [resumed] = dispatched_tasks(lane.spare)
+    assert not [row for row in sent if row.get("type") != "worker_quiescence"], "my human's head returns on its lane"
     if settles == "after_the_resume":
         settle()
     lane.supervisor.holding = crossing
     again = _Head(tmp_path, during=settle if crossing else None)
-    run_worker_task(again, dict(resumed), wid=0, out_q=lane.supervisor, repo_dir=str(tmp_path),
+    run_worker_task(again, dict(resumed), wid=lane.spare.wid, out_q=lane.supervisor, repo_dir=str(tmp_path),
                     drive_root=str(tmp_path))
     if crossing:  # the first attempt's frame reaches the server first, the resumed attempt's own first frame last
         lane.supervisor.release(crossed=True)

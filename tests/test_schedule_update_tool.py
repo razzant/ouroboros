@@ -63,6 +63,9 @@ def test_root_and_act_full_turns_patch_only_supplied_fields(registry, level, mon
     assert row["name"] == "Evening review" and row["task"]["text"].endswith("new reports")
     assert row["task"]["context"] == before["task"]["context"]
     assert row["task"]["reasoning_effort"] == "high"
+    # The one metadata fact a text edit adds: which task supplied the objective it changed, and when (#2764).
+    author = row["task"]["metadata"].pop("objective_author")
+    assert author == {"kind": "task", "task_id": registry._ctx.task_id, "at": author["at"]} and author["at"]
     assert row["task"]["metadata"] == before["task"]["metadata"]
     assert row["destination"] == {"chat_id": 42, "project_id": "reports"}
     assert row["timezone"] == "Europe/Paris" and row["next_run_at"]

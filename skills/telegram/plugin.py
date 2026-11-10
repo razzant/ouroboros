@@ -751,6 +751,8 @@ async def _poller(api) -> None:
                                     "image_base64": "",
                                     "image_mime": "",
                                     "image_caption": "",
+                                    # The press is the owner's; the command is this button's words, not theirs.
+                                    "ui_control": {"name": "telegram_mind_panel"},
                                 })
                                 confirmed = None  # the host took the command: it is not injected again
                                 # Give it a tiny moment to commit setting then refresh mind panel

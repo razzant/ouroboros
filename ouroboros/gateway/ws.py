@@ -519,7 +519,15 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                                 dispatch_accepted_restart, bridge,
                                 callback=getattr(websocket.app.state, "startup_owner_command", None))
                     else:
-                        send_kwargs = {"broadcast": False}
+                        from supervisor.message_ingress import ui_control_fact
+
+                        try:  # a control's press composed this command: no row will speak as my human
+                            control = ui_control_fact(msg.get("ui_control"), pressed_at=utc_now_iso(), command=str(payload))
+                        except ValueError as exc:
+                            await websocket.send_text(json.dumps({"type": "log", "data": {
+                                "level": "warning", "message": f"command refused: {exc}"}}))
+                            continue
+                        send_kwargs = {"broadcast": False, **({"task_metadata": {"ui_control": control}} if control else {})}
                     if msg_type == "command" and (bridge is None or str(payload).strip().lower() == "/restart"):
                         callback = getattr(websocket.app.state, "startup_owner_command", None)
                         action = callback(payload, send_kwargs=send_kwargs) if callable(callback) else None

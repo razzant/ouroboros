@@ -1093,7 +1093,9 @@ class UpdateStatusResponse(TypedDict, total=False):
 class CommandRequest(TypedDict):
     """``POST /api/command``: a slash command (``/restart``, ``/panic``, ``/review``, ``/evolve``,
     ``/bg``, ``/status``) or any other text, which becomes an owner message in Main. ``visible_text``
-    adds a system row; the same ``visible_task_id`` within 5 seconds is answered as deduped."""
+    adds a system row; the same ``visible_task_id`` within 5 seconds is answered as deduped.
+    ``ui_control`` (``{name, owner_text?}``) says a host-drawn control composed ``cmd``: no owner
+    message is written for it, only ``owner_text`` (words typed into the control) is theirs; malformed: 400."""
 
     cmd: str
     if_boot: NotRequired[str]  # optional boot.since precondition, before queueing; Panic ignores it
@@ -1101,6 +1103,7 @@ class CommandRequest(TypedDict):
     visible_text: NotRequired[str]
     visible_task_id: NotRequired[str]
     task_constraint: NotRequired[Dict[str, Any]]
+    ui_control: NotRequired[Dict[str, Any]]
 
 
 class CommandResponse(TypedDict, total=False):

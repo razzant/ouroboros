@@ -1397,14 +1397,15 @@ def kill_workers(
 ) -> bool:
     """Stop the pool's workers and settle the rows they carried.
 
-    ``lanes`` scopes a PROJECT fence (readiness exhaustion) to the
-    project slots: conversation carriers, and the rows they or an awaited carrier
-    own, are partitioned out of the sweep under Q and restored at its end, so a
+    ``lanes`` scopes a PROJECT fence (readiness exhaustion) to the project slots:
+    conversation carriers and the rows they or an awaited carrier own leave the sweep
+    under Q and return at its end, a returned owner turn still queued stays queued, so a
     project-pool fence never terminalises an owner's turn (owner decision 1A).
     A stop without ``lanes`` owns every slot: Panic, Restart and a managed update.
     """
     global _WORKER_POOL_DISABLED_REASON
-    from supervisor import queue, restart_retention as retention  # every door retains saved pauses
+    from supervisor import conversation_lane, queue, restart_retention as retention  # every door retains saved pauses
+    lane_spared = lanes is not None and LANE_CONVERSATION not in lanes  # a project fence: the lane's rows stay
     with _queue_lock:
         if disable_reason:
             previous_disable_reason, _WORKER_POOL_DISABLED_REASON = _WORKER_POOL_DISABLED_REASON, str(disable_reason)
@@ -1587,10 +1588,10 @@ def kill_workers(
                     PENDING.append(task)
                     continue
                 paused = retention.retained_pending(task, sleep_hold_reason=sleep_hold_reason)
-                # Accepted work never ends with the application (boot decides), except a child
-                # whose parent this stop interrupted: invariant 19 settles it as before.
-                if paused or retain_saved_work and not retention.child_of_interrupted(
-                        task, running_task_ids, interrupted_roots):
+                # Accepted work never ends with the application (boot decides), nor a returned owner turn with a project
+                # fence (1A), except a child whose parent this stop interrupted: invariant 19 settles it as before.
+                if paused or ((retain_saved_work or lane_spared and conversation_lane.resumes_on_lane(task))
+                              and not retention.child_of_interrupted(task, running_task_ids, interrupted_roots)):
                     retained_paused_ids.extend([tid] if paused else [])
                     PENDING.append(task)
                     continue

@@ -1034,7 +1034,11 @@ voice; `system_type` names the kind, not the author (the Project question and
 completion mirrors are System pointer rows showing model-authored bytes in
 Ouroboros's voice). New host producers stamp both fields; relays keep them through
 delivery, persistence and history. Model narration, proactive replies and
-questions stay model-authored even when typed.
+questions stay model-authored even when typed. A press of a host-drawn control (a button, a Telegram inline
+button) is the owner's act and the command it composes is host text: no owner row is written,
+and the command's one System receipt (`command_reply`) or the work it starts carries the press;
+words the owner typed into the control (an Evolution objective) stay theirs, exactly as typed
+(`ui_control`).
 
 A host fact has a subject, and the subject names its carrier: a task's fact is a
 row of its card, a fact about the owner's message is the typed annotation on that
