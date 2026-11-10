@@ -70,10 +70,10 @@ def root(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(data))
     monkeypatch.delenv("OUROBOROS_OBSERVABILITY_KEEP_RAW", raising=False)
     packs._READERS.clear()
-    obs._LISTED_PARTS.clear()
+    obs._TASK_PARTS.clear()
     yield data
     packs._READERS.clear()
-    obs._LISTED_PARTS.clear()
+    obs._TASK_PARTS.clear()
 
 
 def test_a_request_view_stores_each_element_once_and_keeps_the_whole_digest(root):
@@ -421,3 +421,75 @@ def test_a_parent_skeleton_missing_a_part_regains_it_from_the_child(tmp_path):
     assert lost.is_file() and skeleton.stat().st_ino == inode, "the part is carried; the parent's skeleton stays"
     shutil.rmtree(child)
     assert packs.blob_bytes(parent, {**ref, "path": ""}) == _json_bytes(payload)
+
+
+# ---- a part's redaction is worked out once (``redaction.part_fact``; K3) ---------------------------------------
+
+SECRET = "ghp_" + "syntheticfixture0123456789" * 2
+
+
+def _secret_view() -> dict:
+    """Redaction fires inside parts (a token, a secret-named key, a nested block), in the skeleton and in a tool's
+    schema; one secret is split across two messages, which no rule reads across."""
+    messages = _transcript(2) + [
+        {"role": "tool", "tool_call_id": "s", "content": f"token: {SECRET}", "api_key": SECRET},
+        {"role": "assistant", "content": [{"type": "text", "text": f"Authorization: Bearer {SECRET}"},
+                                          {"type": "text", "text": "plain"}]},
+        {"role": "user", "content": "the token is ghp_"}, {"role": "user", "content": "syntheticfixture0123456789" * 2},
+    ]
+    login = {"type": "function", "function": {"name": "login", "parameters": {"type": "object", "properties": {
+        "api_key": {"type": "string", "default": "sk-" + "a" * 30}, "page_token": {"type": "string"}}}}}
+    return {**_view(messages, tools=TOOLS[:3] + [login]), "authorization": f"Bearer {SECRET}"}
+
+
+def _scanned(payload, facts) -> tuple:
+    from ouroboros.context_timing import measured_sections, section_spans
+
+    with measured_sections():
+        result = obs.redact_projection(payload, facts=facts)
+        return result, section_spans()["work"].get("secret_scan", 0)
+
+
+@pytest.mark.parametrize("payload", [_secret_view(), _view(_transcript(3))], ids=["secrets", "public"])
+def test_a_view_redacted_by_parts_is_the_whole_walk_byte_for_byte_cold_and_warm(payload):
+    whole = obs.redact_projection(payload)
+    facts: dict = {}
+    cold, scanned = _scanned(payload, facts)
+    warm, rescanned = _scanned(payload, facts)
+    for parts in (cold, warm):
+        assert _json_bytes(parts.value) == _json_bytes(whole.value)
+        assert parts.manifest() == whole.manifest(), "the same rules fired at the same paths, in walk order"
+    elements = {_json_bytes(e) for e in payload["messages"] + payload["tools"]}
+    assert scanned == sum(map(len, elements)) and rescanned == 0, "each distinct part once, then never again"
+    assert whole.value["messages"][-2:] == payload["messages"][-2:], "a secret split across two parts stays unread"
+
+
+def test_the_same_bytes_under_a_credential_named_parent_are_another_fact():
+    element = {"note": "plain example value 12345"}
+    payload = {"type": "object", "properties": {"api_key": {"type": "array", "examples": [element]}},
+               "messages": [element]}
+    facts: dict = {}
+    parts = obs.redact_projection(payload, facts=facts)
+    whole = obs.redact_projection(payload)
+    assert _json_bytes(parts.value) == _json_bytes(whole.value) and parts.manifest() == whole.manifest()
+    assert parts.value["messages"] == [element], "public where its parent is ordinary"
+    assert parts.value["properties"]["api_key"]["examples"][0]["note"].startswith("***REDACTED["), "masked here"
+    assert len({key[0] for key in facts}) == 1 and {key[1] for key in facts} == {False, True}
+
+
+def test_changed_bytes_or_changed_rules_are_worked_out_again(monkeypatch):
+    from ouroboros import redaction
+
+    payload = _view(_transcript(2))
+    facts: dict = {}
+    obs.redact_projection(payload, facts=facts)
+    known = len(facts)
+    edited = copy.deepcopy(payload)
+    edited["messages"][1]["content"] += "!"  # send_messages is the same list: one changed part
+    result, scanned = _scanned(edited, facts)
+    assert len(facts) == known + 1 and scanned == len(_json_bytes(edited["messages"][1]))
+    assert _json_bytes(result.value) == _json_bytes(obs.redact_projection(edited).value)
+    monkeypatch.setattr(redaction, "RULES_VERSION", "other rules")
+    result, scanned = _scanned(edited, facts)
+    assert scanned == sum(len(_json_bytes(e)) for e in {_json_bytes(e): e for e in edited["messages"] + TOOLS}.values())
+    assert _json_bytes(result.value) == _json_bytes(obs.redact_projection(edited).value)
