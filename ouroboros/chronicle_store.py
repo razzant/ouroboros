@@ -347,7 +347,7 @@ class _Snapshot:
     """``_IndexLookups`` answered from one state of the index (``_SNAPSHOT_SQL``, parsed after its read
     transaction closed, and the stored tail facts its view reads, ``_tail_rows``): the same filters and order
     and no statement. A record's stored text is parsed once for this snapshot (``body``), every reader of it takes
-    a copy of its top level, and none of them changes what is nested inside (tests/test_chronicle_capture_once.py);
+    a copy of its top level, and none of them changes what is nested inside (tests/test_chronicle_read_path.py);
     ``memo`` holds facts one capture derives once. A proposal's capture extends its ``tables``."""
     proposed = False  # a proposal's capture: it reads an unsaved record as published (``stored_state``)
 
