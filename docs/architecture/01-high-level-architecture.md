@@ -140,6 +140,7 @@ ouroboros/ — agent core and shared runtime (§6)
   vision_routing.py, vision_image_limits.py, image_preparation.py — owner-mode image routing for Main, explicit VLM/caption sends, route limits and byte preparation (§6 Vision and local image evidence)
   fallback_cooldown.py — per-process 429-aware cooldown for the `OUROBOROS_MODEL_FALLBACKS` chain; advisory
   model_concurrency.py — the installation's fair queue of physical calls per model route (`OUROBOROS_MODEL_MAX_CONCURRENCY`), §7
+  account_streams.py — the account behind a credential and its stream ceiling, so a provider that meters streams per account is admitted per account (§6, §7)
   project_naming.py — admission/Continue names, bounded Light fallback, card conversion and lazy turn naming (§6–7)
   ui_translation.py — one translation worker, accounted Light batches and free-text language resolution (`language_needs_model`; §7)
   ui_language.py, i18n_memory.py — the interface-language fact and one translation memory per language, `state/i18n/<tag>.json`: owner > imported > generated (§7)
