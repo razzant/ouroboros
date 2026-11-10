@@ -1221,7 +1221,6 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
     veto: Dict[str, Any] = {}
     objective: Dict[str, Any] = {}
     completion: Dict[str, Any] = {}
-    review: Dict[str, Any] = {}
     execution: Dict[str, Any] = {}
     artifacts: Dict[str, Any] = {}
     for source in (event, result):
@@ -1235,10 +1234,8 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
         if isinstance(objective.get("receipt_veto"), dict):
             veto = objective["receipt_veto"]
         for holder in (source.get("review_status"), axes.get("review")):
-            if isinstance(holder, dict):
-                review = holder
-                if isinstance(holder.get("acceptance_decision"), dict):
-                    decision = holder["acceptance_decision"]
+            if isinstance(holder, dict) and isinstance(holder.get("acceptance_decision"), dict):
+                decision = holder["acceptance_decision"]
     status = str(decision.get("status") or "").strip()
     cause = str(decision.get("reason") or "")
     raw_reason = str(result.get("reason_code") or event.get("reason_code") or "")

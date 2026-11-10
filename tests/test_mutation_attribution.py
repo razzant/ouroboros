@@ -904,3 +904,40 @@ def test_the_tasks_own_reviewed_commits_stay_its_attributed_paths_but_a_pull_nev
     _git(root, "add", "foreign.txt")
     _git(root, "commit", "-qm", "a pulled commit")
     assert attributed_commit_paths(data, "task-1", root) == ["clean.txt"]
+
+
+def test_git_paths_are_utf8_whatever_the_process_default_encoding(tmp_path, monkeypatch):
+    """Windows CI, 10 Nov 2026: ``text=True`` without an encoding decoded Git's ``-z`` path lists with the locale's
+    code page (cp1252 there). A Cyrillic name broke the status walk and every folder attribution built on it, and the
+    project import's listing lost its credential check with it. Git writes those paths as UTF-8 bytes on every OS;
+    the emulated cp1252 default below stands for Windows on any test machine."""
+    from ouroboros import mutation_attribution
+    from ouroboros.project_sources import _unstage_sensitive_paths
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    root = _repo(tmp_path)
+    (root / "файл.txt").write_bytes(b"base\n")
+    _git(root, "add", "файл.txt")
+    _git(root, "commit", "-qm", "a Cyrillic name")
+    (root / "файл.txt").write_bytes(b"changed\n")
+    (root / "я.txt").write_bytes(b"new\n")
+    project = tmp_path / "project"
+    project.mkdir()
+    _git(project, "init", "-q")
+    (project / "я.txt").write_bytes(b"kept\n")
+    (project / ".env").write_bytes(b"TOKEN=1\n")
+    _git(project, "add", "-A")
+    real_run = subprocess.run
+
+    def windows_default(cmd, *args, **kwargs):
+        if (kwargs.get("text") or kwargs.get("universal_newlines")) and kwargs.get("encoding") is None:
+            kwargs["encoding"] = "cp1252"
+        return real_run(cmd, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "run", windows_default)
+        assert mutation_attribution._git_status_paths(root) == ["файл.txt", "я.txt"]
+        assert _unstage_sensitive_paths(project) == [".env"]
+    staged = subprocess.run(["git", "diff", "--cached", "--name-only", "-z"], cwd=project, check=True,
+                            capture_output=True).stdout
+    assert staged == "я.txt".encode("utf-8") + b"\0", "the credential is unstaged and the other name kept"

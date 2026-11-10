@@ -384,8 +384,9 @@ def test_a_reused_verdict_names_the_rows_of_my_human_its_seats_were_not_sent_by_
 
 def _lay_project(folder: Path) -> None:
     shared.git(folder, "init", "-q")
-    (folder / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
-    (folder / "lib.py").write_text("LIB = 'base'\n", encoding="utf-8")
+    # Exact bytes on every OS: a text-mode write is CRLF on Windows, so an LF write of the same text would change them.
+    (folder / "app.py").write_bytes(b"VALUE = 1\n")
+    (folder / "lib.py").write_bytes(b"LIB = 'base'\n")
     shared.git(folder, "add", "-A")
     shared.git(folder, "commit", "-q", "-m", "base")
     shared.git(folder, "remote", "add", "origin", "https://example.com/third-party/project.git")
