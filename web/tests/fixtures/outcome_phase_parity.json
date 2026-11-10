@@ -42,10 +42,10 @@
       "phase": "done", "headline": "Done", "acceptance_clause": "", "exact_clause": true
     },
     {
-      "name": "empty length recovery ends incomplete with saved work",
+      "name": "incomplete reply recovery ends incomplete with saved work",
       "record": {"status": "failed", "reason_code": "output_recovery_exhausted", "outcome_axes": {"execution": {"status": "infra_failed"}, "objective": {"status": "not_evaluated"}}},
       "phase": "error", "headline": "Failed",
-      "acceptance_clause": "Empty length-limited replies exhausted recovery; saved work remains available."
+      "acceptance_clause": "Incomplete model replies exhausted recovery; saved work remains available."
     },
     {
       "name": "earlier approval never replaces the execution-axis failure behind final_message",

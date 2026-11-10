@@ -894,9 +894,10 @@ def resume_from_working(tools: Any, state: Dict[str, Any], messages: list, trace
             row: {"task_id": source, **record[row]} for row in ("first", "repeat") if isinstance(record.get(row), dict)})}
         if not same_id:
             usage.setdefault("_vision_caption_memo", dict(state["usage"].get("_vision_caption_memo") or {}))
-    from ouroboros.loop_output_exhaustion import KEY as OUTPUT_RECOVERY_KEY
-    if record := (state.get("usage") or {}).get(OUTPUT_RECOVERY_KEY):
-        usage[OUTPUT_RECOVERY_KEY] = dict(record)
+    from ouroboros.loop_output_exhaustion import RECORD_KEYS as OUTPUT_RECOVERY_KEYS
+    for key in OUTPUT_RECOVERY_KEYS:
+        if record := (state.get("usage") or {}).get(key):
+            usage[key] = dict(record)
     # Saved prose is evidence, never permission to skip today's finalization:
     # a restored attempt holds no seal of the interrupted one.
     ctx._task_acceptance_sealed_fence_token = None

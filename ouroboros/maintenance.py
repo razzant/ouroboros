@@ -17,7 +17,7 @@ spawn_maintenance_job``: session custody, its own process group, a parent lifeli
 ``live_children`` serve the Panic and exit census). Queue-owned work (orphan recovery, drive
 settlement under the queue lock and the supervisor's liveness probe) stays in the server: a
 fresh child owns no queue. After each child run not ended by Stop or Panic the server tells the owner
-once what the one-time ``taken`` walk did, when that walk is over (``delegate_result_taken.deliver_receipt``).
+once what each one-time walk did, when it is over (``delegate_result_taken``/``historical_retirement.deliver_receipt``).
 
 Child half: ``main`` (``python -m ouroboros.maintenance``) lowers its priority and runs ``JOBS``
 in order, each asking its own facts again, and prints one bounded JSON report.
@@ -36,9 +36,9 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-from ouroboros import (delegate_capture_job, delegate_pending, delegate_result_taken, maintenance_jobs,
-                       maintenance_retirement, plan_collection_job, record_compression, room_appearances,
-                       room_messages, store, subagent_metrics)
+from ouroboros import (delegate_capture_job, delegate_pending, delegate_result_taken, historical_retirement,
+                       maintenance_jobs, maintenance_retirement, plan_collection_job, record_compression,
+                       room_appearances, room_messages, store, subagent_metrics)
 from ouroboros.startup_historical_audit import _REPORT_BYTES, finish_maintenance_job, spawn_maintenance_job
 
 log = logging.getLogger(__name__)
@@ -537,8 +537,9 @@ class MaintenanceChild:
                 return
             process = spawn_maintenance_job(data_root, repo_dir, PURPOSE)
             finish_maintenance_job(self, process, data_root, started, _report_fields, _record)
-            if not self._stopped.is_set():  # the one-time ``taken`` walk's receipt, never after Stop or Panic
+            if not self._stopped.is_set():  # the one-time walks' receipts, never after Stop or Panic
                 delegate_result_taken.deliver_receipt(data_root)
+                historical_retirement.deliver_receipt(data_root)
         except Exception as exc:
             with contextlib.suppress(Exception):
                 _record(data_root, phase="failed", exception_class=type(exc).__name__,

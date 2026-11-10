@@ -643,3 +643,79 @@ def test_a_gateway_terminal_failure_read_after_a_blip_is_the_runs_own_failure(tm
     detail = rx._poll_session_terminal(gateway, _OutcomeCustodyStub("confirmed"), tmp_path,
                                        SimpleNamespace(run_id="run-f"), "run-f", 600.0)
     assert detail["summary"]["state"] == "failed" and gateway.reads == 2
+
+
+# ---------------------------------------------------------------------------
+# claudexor #628: only a question that HOLDS the reviewer ends its slot
+# ---------------------------------------------------------------------------
+
+
+def _ask(interaction_id, delivery, question, timeout_at=None):
+    row = {"interactionId": interaction_id, "timeoutAt": timeout_at,
+           "questions": [{"id": "q1", "question": question, "options": [], "multi_select": False}]}
+    if delivery is not None:
+        row["delivery"] = delivery
+    return row
+
+
+def _asking(*rows, **summary):
+    return {"lastSeq": 3, "pendingInteractions": list(rows),
+            "summary": {"state": "running", "waitingOnUser": True, **summary}}
+
+
+class _Reads:
+    """Each read answers the next detail; the last one stays."""
+
+    def __init__(self, *details):
+        self.details, self.reads = list(details), 0
+
+    def get_run(self, run_id, *, timeout_sec=None):
+        self.reads += 1
+        return self.details.pop(0) if len(self.details) > 1 else self.details[0]
+
+
+DONE = {"lastSeq": 9, "pendingInteractions": [], "summary": {"state": "succeeded"}}
+
+
+def test_an_async_question_never_ends_a_working_reviewer_slot(tmp_path, monkeypatch):
+    """A reviewer that asks while it keeps working (Codex, delivery=async) may finish with its
+    question unanswered: no cancel, no host wait, no answer loop. Before #628 the first read
+    of any pending row cancelled the slot."""
+    from ouroboros import review_execution as rx
+
+    monkeypatch.setattr(rx, "_SESSION_POLL_SEC", 0.01)
+    asked = _asking(_ask("int-a", "async", "Should I also check the docs?"), asyncQuestionsOnly=True)
+    gateway, custody = _Reads(asked, asked, DONE), _PollCustodyStub()
+    detail = rx._poll_session_terminal(gateway, custody, tmp_path, SimpleNamespace(run_id="run-a"), "run-a", 600.0)
+    assert detail is DONE and gateway.reads == 3
+    assert custody.cancelled == {}, "a question that holds nothing is attention, never the slot's end"
+
+
+def test_a_mixed_set_ends_the_slot_on_its_holding_row_not_on_the_first_row(tmp_path):
+    from ouroboros.review_execution import ReviewSessionWaitingOnUser, _poll_session_terminal
+
+    mixed = _asking(_ask("int-a", "async", "Also check the docs?"),
+                    _ask("int-b", "blocking", "Which schema version applies?"), asyncQuestionsOnly=False)
+    custody = _PollCustodyStub()
+    with pytest.raises(ReviewSessionWaitingOnUser) as caught:
+        _poll_session_terminal(_Reads(mixed), custody, tmp_path, SimpleNamespace(run_id="run-m"), "run-m", 600.0)
+    text = str(caught.value)
+    assert custody.cancelled["reason"] == "review_session_waiting_on_user"
+    assert "int-b" in text and "Which schema version applies?" in text and "int-a" not in text
+
+
+def test_the_holding_rows_own_timeout_decides_not_the_first_rows(tmp_path, monkeypatch):
+    """The first row is async without expiry, the holding one declines inside the slot: the
+    engine resumes the reviewer, so the slot keeps polling (the old reading of ``pending[0]``
+    saw no expiry and cancelled)."""
+    from datetime import datetime, timedelta, timezone
+
+    from ouroboros import review_execution as rx
+
+    monkeypatch.setattr(rx, "_SESSION_POLL_SEC", 0.01)
+    soon = (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat()
+    mixed = _asking(_ask("int-a", "async", "Also check the docs?"), _ask("int-b", None, "Which schema?", soon))
+    custody = _PollCustodyStub()
+    detail = rx._poll_session_terminal(_Reads(mixed, mixed, DONE), custody, tmp_path,
+                                       SimpleNamespace(run_id="run-t"), "run-t", 600.0)
+    assert detail is DONE and custody.cancelled == {}

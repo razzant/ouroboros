@@ -10,7 +10,7 @@ The local `ouroboros-stable` ref is also the recovery fallback, moved by Save re
 
 ### CI topology
 
-`ci.yml`: dispatch/`v*` tags. Secret-free `post-merge.yml` coalesces `ouroboros` pushes: affected Linux/WAL and Windows/PERSIST tests, one retry. Linux adds ruff F, size vs base and cost (8min, k=30; k=100 opt-in). RED separates failures, attribution and gaps, including cost/stage errors. Per-OS `post-merge-red` issues notify PRs; skips never close them. No merge waits; UI/provider wrappers are manual.
+Secret-free `post-merge.yml` coalesces `ouroboros` pushes: affected Linux/WAL and Windows/PERSIST tests, one retry; Linux adds ruff F, size vs base, cost (8min k=30; k=100 opt-in). RED keeps failures, attribution and cost/stage gaps; measured cost xfails are separate. Per-OS `post-merge-red` issues notify PRs before bounded rechecks narrow proven passing/absent IDs; skips/unknowns stay. No merge waits.
 
 | Tier | Jobs | Trust boundary |
 |---|---|---|

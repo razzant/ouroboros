@@ -175,6 +175,8 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/storage/free/preview` | pure preview; 202, start/join |
 | POST | `/api/storage/free` | `StorageFreeRequest`: exact pool `items`, `groups`, or `manual` ids of `view=manual` with `accept_loss: true`; 202, `started`/`reason` |
 | GET | `/api/storage/free/items` | `StorageFreeItemsResponse`: one `view=` page: `pool`, `excluded`, `manual` or `outcomes` |
+| GET | `/api/services/kept` | `KeptServicesResponse` (§9) |
+| POST | `/api/services/kept/{launch_id}/stop` | `reason`; one launch, fresh outcome |
 | POST | `/api/storage/free/cancel` | stop preview/run; freed stays freed |
 | GET | `/api/evolution-data` | |
 | GET | `/api/projects` | 200 rows; `all=1` all; `id` (active/deleting) or `chat_id` (active): one room (missing → none; unreadable → error) |

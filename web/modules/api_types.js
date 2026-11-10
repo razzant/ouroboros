@@ -1377,6 +1377,10 @@
  * @typedef {Object} ScheduleDeleteResponse
  * @property {boolean} ok
  */
+/** @typedef {import('./task_activity_types.js').KeptService} KeptService */
+/** @typedef {import('./task_activity_types.js').KeptServicesResponse} KeptServicesResponse */
+/** @typedef {import('./task_activity_types.js').KeptServiceStopRequest} KeptServiceStopRequest */
+/** @typedef {import('./task_activity_types.js').KeptServiceStopResponse} KeptServiceStopResponse */
 /** @typedef {import('./task_activity_types.js').TaskPauseRequest} TaskPauseRequest */
 /** @typedef {import('./task_activity_types.js').TaskPauseResponse} TaskPauseResponse */
 /**

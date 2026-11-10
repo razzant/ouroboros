@@ -935,10 +935,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # and ``task_results/artifacts/*/*.*.zip``; both are still written, under their artifacts row.
 # 456 -> 457 (owner A, 07.11): the open Low episode of memory-lowered starts, ``state/low_start_episode.json``
 # (``ouroboros/context_view_facts.py``); its own row.
-# 457 -> 458 (result review): result_material retains exact produced bytes under the existing tool_results plane.
-# 458 -> 461 (composition with #3032): restored .review-drive views and source_handles;
-# the two nested view spellings replace the earlier view-family wildcards.
-EXPECTED_SCAN_PATHS = 461
+# Result-review retained material/restored source views and published kept-service declarations
+# share the existing inventory; the combined AST census below pins their union.
+EXPECTED_SCAN_PATHS = 464
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

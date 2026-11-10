@@ -777,15 +777,20 @@ class BodyRuntime:
         (``gateway/reply_preparation.py``), including a received HTTP refusal; ``row`` is the
         compact wait's answer for a run whose detail this pass did not need."""
         from ouroboros.delegate_supervision import run_activity
+        from ouroboros.gateways.claudexor_observation import question_attention
 
         summary = c.summary_of(detail) if detail is not None else {}
+        waiting, async_only = question_attention(detail) if detail is not None else (False, False)
         if row is not None:
-            summary = {"state": row.status or "", "waitingOnUser": bool(row.pending)}
+            # The compact row says the same as the detail would: an opted-in engine marks a row
+            # whose questions are all async ``blocking: false``; unknown keeps the blocking meaning.
+            summary = {"state": row.status or ""}
+            waiting, async_only = bool(row.pending), bool(row.pending) and row.blocking is False
         fact = {"run_id": entry.run_id, "task_id": entry.task_id, "invocation_id": entry.invocation_id,
                 "answered": detail is not None or row is not None or bool(getattr(error, "status_code", 0)),
                 "error_code": str(getattr(error, "code", "")), "http_status": getattr(error, "status_code", 0),
                 "run_state": str(summary.get("state") or ""),
-                "waiting_on_user": bool(summary.get("waitingOnUser") or (detail or {}).get("pendingInteractions")),
+                "waiting_on_user": waiting, "async_questions_only": async_only,
                 "at": time.monotonic()}  # dated on this process's clock, like every in-process reader
         with self.lock:
             previous, self.observed[entry.run_id] = self.observed.get(entry.run_id), fact

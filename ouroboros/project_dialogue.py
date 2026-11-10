@@ -769,7 +769,7 @@ TASK_CAUSE_PHRASES = {
     "context_overflow": "The task outgrew its context before it could finish cleanly",
     "context_capacity": "This route's window cannot hold the task's context",
     "required_reference_unavailable": "The handbook this task requires could not be read",
-    "output_recovery_exhausted": "Empty length-limited replies exhausted recovery; saved work remains available",
+    "output_recovery_exhausted": "Incomplete model replies exhausted recovery; saved work remains available",
     "children_unabsorbed": "Some sub-task results were never folded in, so the task had to wrap up",
     # The supervisor's timeout rails (queue_timeouts.TIMEOUT_TERMINAL_REASONS): the reaper's task_done reason_code,
     # spoken on its grace toast, its kill notice and its salvage line through this same table, never as the code.
