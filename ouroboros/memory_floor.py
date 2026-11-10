@@ -10,7 +10,8 @@ import hashlib
 import json
 import logging
 import math
-from functools import cached_property, lru_cache
+from functools import cached_property
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from ouroboros import context_budget
@@ -40,15 +41,48 @@ _SHOWN += (("F8", "{} unsealed notes by label"), ("F8a", "{} aggregate note list
 _SEALING_TOOLS = frozenset({"chronicle_write", "enable_tools"})  # sent, or loadable through enable_tools
 
 
-@lru_cache(maxsize=4)  # a walk prices one story and one room many times; a memory bound, not a policy
-def json_chars(text: str) -> int:
-    """What a text adds to a request's JSON: its escaped characters, quotes excluded."""
-    return len(json.dumps(text, ensure_ascii=False)) - 2
+def tokens_of(chars: int) -> int:
+    """The host's estimate of a text of ``chars`` JSON-escaped characters inside a request (``view_tokens``)."""
+    return max(1, (chars + 5) // 4) if chars else 0
 
 
 def view_tokens(text: str) -> int:
     """The host's estimate of a text inside a request: its JSON-escaped characters / 4."""
-    return max(1, (json_chars(str(text)) + 5) // 4) if text else 0
+    return tokens_of(mv.json_chars(str(text))) if text else 0
+
+
+class ViewFit:
+    """One frame's memory view: ``level``, its receipt ``note`` and ``facts``, priced from the snapshot's pieces. Its
+    texts are drawn only when read, so a frame the fit walks away from is never drawn; iterating gives the
+    ``(story, room, facts)`` of the delivered view."""
+
+    def __init__(self, snapshot: mv.MemoryViewSnapshot, level: mv.FloorLevel, note: str, facts: Dict[str, Any]):
+        self.snapshot, self.level, self.note, self.facts = snapshot, level, note, facts
+
+    @cached_property
+    def story(self) -> str:
+        return mv.render_story(self.snapshot, self.level)
+
+    @cached_property
+    def room(self) -> str:
+        return mv.render_room(self.snapshot, self.level, floor_note=self.note)
+
+    @cached_property
+    def story_chars(self) -> int:
+        return mv.story_chars(self.snapshot, self.level)
+
+    @cached_property
+    def room_chars(self) -> int:
+        return mv.room_chars(self.snapshot, self.level, floor_note=self.note)
+
+    def __iter__(self):
+        return iter((self.story, self.room, self.facts))
+
+    def __getitem__(self, index: int) -> Any:
+        return (self.story, self.room, self.facts)[index]
+
+
+NO_VIEW = SimpleNamespace(story="", room="", facts={}, level=None, story_chars=0, room_chars=0)  # a frame with no memory
 
 
 def sealed_owner_rows(room: Mapping[str, Any]) -> List[Dict[str, Any]]:
@@ -166,40 +200,12 @@ def floor_allowances(*, window_tokens: Optional[int], output_reserve_tokens: Opt
             "budget": start["with_margin_tokens"] if target_tokens else None}
 
 
-def _memoized_measure(measure):
-    """One walk's immutable forms; never cache across captures or request envelopes."""
-    prices = {}
-    def measured(level):
-        if level.addressed not in prices:
-            prices[level.addressed] = measure(level)
-        return prices[level.addressed]
-    return measured
-
-
-def _shortest_prices(sent, measure):
-    """``(characters, compare)`` of a walk with no target, where only an optional form's order against what it joins decides.
-
-    Two levels of one walk differ in the request only by what they ``sent``: a story's presence never depends on the
-    level, and both sides of an optional form show its room or the receipt its earlier forms earned, so no separator or
-    block comes or goes. The request's estimate is its JSON characters / 4 rounded up, so a trial of no fewer characters
-    never prices lower and one at least four fewer always does; only between them can the whole request's rounding
-    decide, and there both levels are ``measure``d whole, each beside this walk's own host forms and receipt.
-    """
-    measure = _memoized_measure(measure)
-    characters = _memoized_measure(lambda level: sum(len(json.dumps(text, ensure_ascii=False)) for text in sent(level)))
-
-    def compare(taken, trial):
-        before, after = characters(taken), characters(trial)
-        return (before, after) if after >= before or before - after >= 4 else (measure(taken), measure(trial))
-    return characters, compare
-
-
-def max_room_fact(snapshot: Optional[mv.MemoryViewSnapshot], core: Any, books: Iterable[str], *, story: str, fixed: int,
+def max_room_fact(snapshot: Optional[mv.MemoryViewSnapshot], core: Any, books: Iterable[str], *, story: int, fixed: int,
                   schemas: int, window: int, reserve: int, work: int, ratio: float,
                   allowance: Optional[int]) -> Optional[Dict[str, Any]]:
     """The Max room of one start, the host's measure in the owner's Max frame with whole books.
 
-    ``allowance`` is the memory room that frame leaves (``None``: an unknown window, no fact). ``floor_need``
+    ``story`` is its tokens. ``allowance`` is the memory room that frame leaves (``None``: an unknown window, no fact). ``floor_need``
     is the books, core, knowledge with scratchpad and runtime facts (``dynamic_head_text`` and ``dynamic_text``:
     Health, recent activity, skills, drive state too), assignment, reply reserve and work room; ``zero_need`` adds the tool
     schemas, ``need`` my memory in its ordinary forms (task lines collapsed, nothing cut):
@@ -214,7 +220,7 @@ def max_room_fact(snapshot: Optional[mv.MemoryViewSnapshot], core: Any, books: I
     parts["assignment"] = max(0, fixed - schemas - sum(parts.values()))  # the task's messages and their framing
     ordinary = mv.FloorLevel(tuple((step, tuple(_elements(snapshot).ids.get(step, ())))
                                    for step in _ORDINARY)) if snapshot else mv.FULL_VIEW
-    memory = {"story": view_tokens(story), "room": view_tokens(mv.render_room(snapshot, ordinary)) if snapshot else 0,
+    memory = {"story": story, "room": tokens_of(mv.room_chars(snapshot, ordinary)) if snapshot else 0,
               "unfolded": unfolded_pages(snapshot)["tokens"]}
     zero = math.ceil(fixed * ratio) + reserve + work
     return {"window": window, "allowance": allowance, "floor_need": math.ceil((fixed - schemas) * ratio) + reserve + work,
@@ -362,20 +368,15 @@ def required_book_note(*, lowered: bool, book_tokens: int, free: Optional[int], 
 
 def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Optional[int]], *,
                     kept: mv.FloorLevel = mv.FULL_VIEW, saving: int = 0,
-                    measure: Optional[Callable[[mv.FloorLevel], int]] = None,
-                    compare: Optional[Callable[[mv.FloorLevel, mv.FloorLevel], Tuple[int, int]]] = None) -> mv.FloorLevel:
-    """One ordered walk, then give back new cuts that fit. Previously chosen forms stay selected.
-
-    ``compare(taken, trial)`` prices an optional form against the level it joins; by default each is ``measure``d.
-    """
+                    measure: Optional[Callable[[mv.FloorLevel], int]] = None) -> mv.FloorLevel:
+    """One ordered walk, then give back new cuts that fit. Previously chosen forms stay selected. A level is priced
+    from the snapshot's pieces (``render_view_for_mode``'s ``measure``, by default its story and room characters)."""
     table = _elements(snapshot)
     elements = table.priced
     labels = {ident: short for step, ident, _whole, short in elements if step == 'F5l'}
     old = {(step, ident) for step, ids in kept.addressed for ident in ids}
     taken = set(old)
-    measure = _memoized_measure(measure or (
-        lambda level: view_tokens(mv.render_story(snapshot, level)) + view_tokens(mv.render_room(snapshot, level))))
-    compare = compare or (lambda before, after: (measure(before), measure(after)))
+    measure = measure or (lambda level: tokens_of(mv.story_chars(snapshot, level)) + tokens_of(mv.room_chars(snapshot, level)))
     current = measure(kept)
     bounds = [b for b in (allowances.get("margin"), allowances.get("budget"), allowances.get("physical")) if b is not None]
     bound = min(bounds) if bounds else None
@@ -405,7 +406,7 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
                 trial.update((s, i) for s, i, *_ in elements if s == 'F8')
             if step in _LIST_FORMS and not any(s in _LIST_FORMS[step] for s, _ in trial):
                 continue
-            before, after = compare(level(taken), level(trial))
+            before, after = measure(level(taken)), measure(level(trial))
             if after >= before:
                 continue
             current, delta = after, before - after
@@ -708,9 +709,10 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     What ``kept.by_budget`` counts the owner's mode target took (only it carries one), so the note
     and the fact name that budget in whatever mode the view is narrowed, hop after hop.
     ``shortest``: where this walk ends when only uncovered owner rows are left to address, with its
-    completed receipt -- what a start's host walk judges beside the window (``_host_steps``). Its ``measure_text``
-    prices a whole request: only a tie within one token of it needs measuring (``_shortest_prices``).
+    completed receipt -- what a start's host walk judges beside the window (``_host_steps``).
     ``level``: such a walk's level again, without walking, its receipt priced beside this request's host forms.
+    A level is priced from the snapshot's pieces, never by drawing it; ``measure_text(story_chars, room_chars)`` prices
+    the two memory texts of a whole request (by default their own tokens). The result is a ``ViewFit``.
     """
     target, reserve = context_budget.context_mode_limits(mode, owner_mode, output_reserve, working_reserve_tokens=working_reserve_tokens)
     if kept is not None:
@@ -721,9 +723,8 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
                                   work_room_levels=snapshot.spec.work_room_levels, boundary_tokens=boundary_tokens)
     if kept is not None and not start_work:
         allowances = {**allowances, "margin": allowances["physical"]}
-    size = lambda shown: view_tokens(mv.render_story(snapshot, shown)) + view_tokens(mv.render_room(snapshot, shown))
+    size = lambda shown: tokens_of(mv.story_chars(snapshot, shown)) + tokens_of(mv.room_chars(snapshot, shown))
     uncovered = uncovered_owner_rows(snapshot)
-    @lru_cache(maxsize=128)
     def receipt(level):
         note = floor_note(level, window_tokens=window, mode=mode, target_tokens=target, lowered_from=lowered_from,
                           tool_names=tool_names, budget_mode=owner_mode, max_room=max_room)
@@ -735,21 +736,18 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
                 "uncovered owner words remain in view; only physical pressure can turn their oldest rows into named addresses."
                 if owners else "what my memory shows even in its shortest forms exceeds it.")
         return note
-    # The request owner can measure JSON separators and rounding in the actual envelope.
-    measure_text = measure_text or (lambda story, room: view_tokens(story) + view_tokens(room))
-    def sent(level):  # the two texts this level adds to a request, its receipt included
-        return mv.render_story(snapshot, level), mv.render_room(snapshot, level, floor_note=receipt(level))
-    measure = lambda level: measure_text(*sent(level))
+    # The request owner measures JSON separators and rounding in the actual envelope, beside these two texts' characters.
+    measure_text = measure_text or (lambda story_chars, room_chars: tokens_of(story_chars) + tokens_of(room_chars))
+    def measure(level):  # the two texts this level adds to a request, its receipt included
+        return measure_text(mv.story_chars(snapshot, level), mv.room_chars(snapshot, level, floor_note=receipt(level)))
     if shortest and level is None:  # A saving no form can pay takes every form in walk order; no physical bound
-        characters, compare = _shortest_prices(sent, measure)  # stops it before owner rows.
         level = fit_memory_view(snapshot, {**allowances, "physical": None}, kept=kept or mv.FULL_VIEW, saving=math.inf,
-                                measure=characters, compare=compare)
+                                measure=measure)  # stops it before owner rows.
     elif level is None:
         level = fit_memory_view(snapshot, allowances, kept=kept or mv.FULL_VIEW, saving=saving, measure=measure)
-    note = receipt(level)
-    return (mv.render_story(snapshot, level), mv.render_room(snapshot, level, floor_note=note),
-            view_facts(snapshot, level, window_tokens=window, mode=mode, allowances=allowances, target_tokens=target,
-                       lowered_from=lowered_from))
+    return ViewFit(snapshot, level, receipt(level), view_facts(snapshot, level, window_tokens=window, mode=mode,
+                                                                allowances=allowances, target_tokens=target,
+                                                                lowered_from=lowered_from))
 
 
 TRACE_FIELDS = ("role", "room_id", "floor", "story_status", "max_room", "host_sections_addressed")  # what a task trace keeps of a view receipt

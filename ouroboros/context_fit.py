@@ -690,7 +690,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     """
     from dataclasses import replace
     from ouroboros import memory_floor as floor
-    from ouroboros.memory_view import snapshot_from_json, render_story, render_room, FULL_VIEW
+    from ouroboros.memory_view import FULL_VIEW, json_chars, room_chars, snapshot_from_json, story_chars, whole_story_at
     from ouroboros.tool_policy import select_tool_schemas
 
     whole_core, whole_governance = core, governance
@@ -709,27 +709,27 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     previous = tuple((kept_sections or {}).get(start or preferred, ()))
     receipts, room_fact = list(previous), None  # room_fact: the start's Max room, named by a view lowered from Max
     held = (kept or {}).get(start or preferred) or FULL_VIEW
-    story_before, room_before = (render_story(snapshot, held), render_room(snapshot, held)) if snapshot else ("", "")
+    story_before, room_before = (story_chars(snapshot, held), room_chars(snapshot, held)) if snapshot else (0, 0)
 
     # One serialization per request shape; a host section's shorter form and a memory text then add or take only
     # their own characters (JSON escapes per character, and these texts are embedded verbatim).
     shapes, text_chars = {}, {}
     def escaped(text):
         if text not in text_chars:
-            text_chars[text] = floor.json_chars(text)
+            text_chars[text] = json_chars(text)
         return text_chars[text]
-    def measure(selected, sent, addressed, story="", room=""):
+    def measure(selected, sent, addressed, story=0, room=0):  # ``story``, ``room``: the memory texts' characters
         key = (selected, sent.chosen, bool(story), bool(room))
         counted("request_forms", key=("frame", *key))
-        if key not in shapes:
-            whole = _request_tokens(_system_blocks(core, governance[form[selected]], story, room, mode=selected,
-                addressed={}), user_content_json, supplementary_messages_json=core.supplementary_messages_json,
+        if key not in shapes:  # one-letter memory texts hold the shape; only presence changes separators and blocks
+            whole = _request_tokens(_system_blocks(core, governance[form[selected]], "s" if story else "", "r" if room else "",
+                mode=selected, addressed={}), user_content_json, supplementary_messages_json=core.supplementary_messages_json,
                 current_messages=current_messages, chars=True)
-            shapes[key] = whole - floor.json_chars(story) - floor.json_chars(room), tool_schema_tokens(list(sent.schemas))
+            shapes[key] = whole - bool(story) - bool(room), tool_schema_tokens(list(sent.schemas))
         base, schemas = shapes[key]
         full = {part.section_id: part.full_text for part in sections[selected]}
         forms = sum(escaped(short) - escaped(full[name]) for name, short in addressed.items())
-        return max(1, (base + forms + floor.json_chars(story) + floor.json_chars(room) + 3) // 4) + schemas + envelope_overhead_tokens
+        return max(1, (base + forms + story + room + 3) // 4) + schemas + envelope_overhead_tokens
     asked = (saving or {}).get(start or preferred, 0)  # the shown request's saving, in estimator tokens
     original_fixed = measure(start or preferred, select_tool_schemas(tool_schemas or [], context_mode=mode,
         schema_names=names), section_views(sections[start or preferred], previous))
@@ -758,10 +758,11 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             calibration_ratio=ratio, work_room_levels=levels, boundary_tokens=boundary)
         held = [None]  # the frame's one shortest level: a host step's receipt re-prices it, a miss walks again
         def shortest(forms, physical):  # what a start sends once its own walk took each form before uncovered owner rows
-            price = held[0] and measure(selected, sent, forms, *view(selected, sent, forms, window, boundary, level=held[0])[:2])
+            shown = held[0] and view(selected, sent, forms, window, boundary, level=held[0])
+            price = shown and measure(selected, sent, forms, shown.story_chars, shown.room_chars)
             if price is None or price > physical:  # no walk yet, or its level no longer fits beside these host forms
-                story, room, facts = view(selected, sent, forms, window, boundary, shortest=True)
-                held[0], price = floor.kept_level(snapshot, facts), measure(selected, sent, forms, story, room)
+                shown = view(selected, sent, forms, window, boundary, shortest=True)
+                held[0], price = floor.kept_level(snapshot, shown.facts), measure(selected, sent, forms, shown.story_chars, shown.room_chars)
             return price
         receipts, _ = floor._host_steps(sections[selected], previous,  # every frame starts from what was shown
             measure=lambda addressed: measure(selected, sent, addressed, story_before, room_before),
@@ -785,9 +786,9 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             snapshot.spec.work_room_levels if snapshot else work_room_levels)
 
     # Max names whole books. Story is the last rung: change books before taking its pages.
-    whole_story = render_story(snapshot) if snapshot else ""
+    whole_story = story_chars(snapshot) if snapshot else 0
     room_fact = floor.max_room_fact(snapshot, rendered_texts(core, section_views(sections[mode], receipts)),
-        render_governance(governance[form[mode]], section_views(sections[mode], receipts)), story=whole_story,
+        render_governance(governance[form[mode]], section_views(sections[mode], receipts)), story=floor.tokens_of(whole_story),
         fixed=fixed, ratio=ratio, schemas=tool_schema_tokens(list(sent.schemas)), window=window, reserve=reserve,
         work=work(), allowance=allowances["margin"]) if (kept is None or start_work) and mode == "max" else None
     if room_fact and floor.max_room_lost(room_fact):
@@ -796,30 +797,33 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
 
     def render():  # this frame's own completed memory view, its floor receipt included
         return view(mode, sent, section_views(sections[mode], receipts), window, boundary, saving=owed(fixed, reserve),
-                    fixed=fixed, kept=None if kept is None else kept.get(start or preferred)) if snapshot else ("", "", {})
+                    fixed=fixed, kept=None if kept is None else kept.get(start or preferred)) if snapshot else floor.NO_VIEW
 
-    def overflows(story="", room=""):  # the known window cannot hold this frame's request beside this memory view
-        memory = floor.view_tokens(story) + floor.view_tokens(room)
+    def overflows(fit=floor.NO_VIEW):  # the known window cannot hold this frame's request beside this memory view
+        memory = floor.tokens_of(fit.story_chars) + floor.tokens_of(fit.room_chars)
         return known_window and math.ceil((fixed + memory) * ratio) + reserve > window
 
     # Books step down on the frame's own completed view, never on a price of one. Max keeps whole books only beside
     # the whole story and the work room (a start's rule); the same ordinary Nano is the last physical rescue for every
-    # Main route, a view already shown included. A frame whose core alone cannot fit steps down unrendered.
+    # Main route, a view already shown included. A frame whose core alone cannot fit steps down unrendered. A frame
+    # is judged by its pieces' prices: a frame the fit walks away from is never drawn.
     while True:
-        story, room, facts = ("", "", {}) if mode != "nano" and overflows() else render()
+        shown = floor.NO_VIEW if mode != "nano" and overflows() else render()
         books_lost = (kept is None or start_work) and mode == "max" and allowances["margin"] is not None and (
-            story != whole_story or floor.view_tokens(story) + floor.view_tokens(room) > allowances["margin"])
-        if mode == "nano" or not (books_lost or overflows(story, room)):
+            shown.story_chars != whole_story or (shown.level is not None and not whole_story_at(snapshot, shown.level))
+            or floor.tokens_of(shown.story_chars) + floor.tokens_of(shown.room_chars) > allowances["margin"])
+        if mode == "nano" or not (books_lost or overflows(shown)):
             break
         mode = "low" if mode == "max" else "nano"
         sent, fixed, reserve, window, boundary, allowances = frame(mode)
-    if kept is None and overflows(story, room):  # a start's refusal names its last view, never a work room's shortfall
+    if kept is None and overflows(shown):  # a start's refusal names its last view, never a work room's shortfall
         core_alone = overflows()
         raise MinimumViewUnfit("Core, assignment, resident control tools and work room cannot fit" if core_alone
                                else "Protected owner words and the minimum view cannot fit the usable input",
-                               fixed_tokens=fixed, memory_tokens=floor.view_tokens(story) + floor.view_tokens(room),
+                               fixed_tokens=fixed, memory_tokens=floor.tokens_of(shown.story_chars) + floor.tokens_of(shown.room_chars),
                                reserve_tokens=reserve, window_tokens=window, ratio=ratio,
                                work_room_tokens=work() if core_alone else 0)
+    story, room, facts = shown.story, shown.room, shown.facts  # the one view this start delivers: drawn here
     book = whole_core.required_book_tokens(mode)
     ordinary = book and fixed + floor.view_tokens(story) + floor.view_tokens(room)  # the ordinary admission's estimate
     note = floor.required_book_note(lowered=bool(room_fact) and mode == "low", book_tokens=math.ceil(book * ratio), work=work(),
@@ -845,17 +849,18 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
 
 
 def _whole_request(core, governance, mode, tool_schemas):
-    """Uncut selected text for a route's comparable density witness, before any floor step."""
-    from ouroboros.memory_view import snapshot_from_json, render_story, render_room
+    """Uncut selected request for a route's comparable density witness, before any floor step: the request with
+    one-letter memory texts, its tools, and the characters the whole story and room add beyond those letters."""
+    from ouroboros.memory_view import room_chars, snapshot_from_json, story_chars
     from ouroboros.tool_policy import select_tool_schemas
 
     snapshot = snapshot_from_json(core.memory_view_json) if core.memory_view_json else None
-    story, room = (render_story(snapshot), render_room(snapshot)) if snapshot else ("", "")
+    story, room = (story_chars(snapshot), room_chars(snapshot)) if snapshot else (0, 0)
     form = "low" if core.compact_reference_docs or mode == "nano" else mode
-    messages = [{"role": "system", "content": _system_blocks(core, governance[form], story, room, mode)},
+    messages = [{"role": "system", "content": _system_blocks(core, governance[form], "s" if story else "", "r" if room else "", mode)},
                 {"role": "user", "content": json.loads(core.user_content_json)},
                 *json.loads(core.supplementary_messages_json)]
-    return messages, list(select_tool_schemas(tool_schemas or [], context_mode=mode).schemas)
+    return messages, list(select_tool_schemas(tool_schemas or [], context_mode=mode).schemas), story + room - bool(story) - bool(room)
 
 
 START_CAUSES = ("", "memory", "route", "window")  # ``memory_floor.start_cause``
@@ -929,10 +934,10 @@ def build_context_fit_plan(
     role = view_role(view_task)
     view_kind = {"consciousness": "own_wake", "presence": "focus", "integrator": "owner_turn"}.get(role, role)
     # Select density before the single start walk, comparing the whole captured request at the size that can be sent.
-    rows, schemas = _whole_request(core, governance, preferred, tool_schemas)
+    rows, schemas, memory_chars = _whole_request(core, governance, preferred, tool_schemas)
     counted("request_forms", key=("whole", preferred))
-    sendable = min(estimate_context_prompt_tokens(rows, schemas, provider=str(route.get("provider") or "")),
-                   window_record.usable or math.inf)
+    sendable = min(max(1, (estimate_context_prompt_tokens(rows, schemas, provider=str(route.get("provider") or ""), chars=True)
+                           + memory_chars + 3) // 4), window_record.usable or math.inf)
     ratio = 1.0 if window_basis == "estimator" else _route_calibration_ratio(
         None, str(evidence.route_fp or ""), str(route["model"] or ""), sendable, view_kind=view_kind)
     levels, delivered = start_room(view_task, role), {}
@@ -946,13 +951,18 @@ def build_context_fit_plan(
         # the known window holds it, a wake's bound projection first (``context_input_selection.rescued_start``).
         from ouroboros.context_input_selection import rescued_start
         contents, initial_mode, delivered = rescued_start(env, task, core.user_content_json, unfit, preferred, fit)
+    estimates = {}  # projections that read alike are one form of the request
+
     def _projection(mode: str) -> ContextFitProjection:
         system_content, memory_facts = contents[mode]
         system_content_json = json.dumps(system_content, ensure_ascii=False, sort_keys=True)
         user_projection = delivered.get(mode)
-        counted("request_forms", key=("delivered", mode))
-        estimated = _request_tokens(system_content, user_projection or core.user_content_json,
-                                    supplementary_messages_json=core.supplementary_messages_json)
+        form = (system_content_json, user_projection)
+        counted("request_forms", key=("delivered", hash(form)))
+        if form not in estimates:
+            estimates[form] = _request_tokens(system_content, user_projection or core.user_content_json,
+                                              supplementary_messages_json=core.supplementary_messages_json)
+        estimated = estimates[form]
         return ContextFitProjection(
             mode=mode,
             system_content_json=system_content_json,

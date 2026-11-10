@@ -1,73 +1,65 @@
 """Count complete measurements, not just the rendered size of a small fixture."""
 import dataclasses
-import hashlib
 import json
-import time
 from types import SimpleNamespace
 
 import pytest
 
 from ouroboros import context_fit as cf, memory_floor as mf, memory_view as mv
 from ouroboros.section_floor import HostSection
+from ouroboros.context_timing import measured_sections, section_spans
 from tests import _memory_scale_fixture as scale, _memory_view_synthetic as syn
 
 
-def test_owner_floor_measures_each_selected_form_once(monkeypatch):
+def test_a_floor_walk_prices_from_pieces_and_chooses_as_a_drawn_view_would():
+    """Owner shape under a zero bound: the walk prices every level from the snapshot's pieces, so no form of the view is
+    drawn, no piece is made twice, and the level is exactly the one a walk that draws each form chooses."""
     snapshot = scale.snapshot()
-    calls = []
 
-    def measure(level):
-        calls.append(level.addressed)
+    def drawn(level):
         return mf.view_tokens(mv.render_story(snapshot, level)) + mf.view_tokens(mv.render_room(snapshot, level))
 
-    start = time.perf_counter()
-    level = mf.fit_memory_view(snapshot, {'margin': 0, 'physical': 0}, measure=measure)
-    elapsed = time.perf_counter() - start
-    rendered = mv.render_story(snapshot, level) + mv.render_room(snapshot, level)
-    print('FLOOR_MEASUREMENTS ' + json.dumps({'rows': 158, 'calls': len(calls),
-        'unique': len(set(calls)), 'seconds': elapsed, 'sha256': hashlib.sha256(rendered.encode()).hexdigest()}))
-    assert len(calls) == len(set(calls)), 'a selected form must never be re-tokenized in the same walk'
-    with monkeypatch.context() as uncached:
-        uncached.setattr(mf, '_memoized_measure', lambda measure: measure)
-        reference = mf.fit_memory_view(snapshot, {'margin': 0, 'physical': 0}, measure=measure)
-    assert level == reference
-    assert rendered == mv.render_story(snapshot, reference) + mv.render_room(snapshot, reference)
+    with measured_sections():
+        level = mf.fit_memory_view(snapshot, {'margin': 0, 'physical': 0})
+        work = section_spans()['work']
+    assert not work.get('view_renders') and not work.get('view_pieces_again')
+    assert level == mf.fit_memory_view(snapshot, {'margin': 0, 'physical': 0}, measure=drawn)
 
 
 def test_no_note_measurement_without_a_physical_bound():
     calls = []
     mf.fit_memory_view(scale.snapshot(), {'margin': None, 'physical': None},
                        measure=lambda level: calls.append(level.addressed) or 100)
-    assert len(calls) == 1, f'unpressured view: one initial measurement, got {len(calls)}'
+    assert len(set(calls)) == 1, f'unpressured view: one form measured, got {set(calls)}'
 
 
-@pytest.mark.parametrize('rows', [158, 300, 600])
-def test_ordinary_scale_fit_measurements(tmp_path, monkeypatch, rows):
-    calls = 0
-    original = cf._request_tokens
+def test_a_start_s_request_is_serialized_once_per_form_at_every_row_count(tmp_path, monkeypatch):
+    """Serializations equal the request's forms and do not follow the rows: a form is a frame's shape, never a probe."""
+    seen = {}
+    for rows in (158, 300, 600):
+        root = tmp_path / str(rows)
+        root.mkdir()
+        with measured_sections():
+            plan = scale.build(root, monkeypatch, snap=scale.snapshot(rows=rows))
+            work = section_spans()['work']
+        assert plan.initial_mode == 'nano'
+        assert work['request_serializations'] == work['request_forms'] - work.get('request_forms_again', 0)
+        seen[rows] = work['request_serializations']
+    assert len(set(seen.values())) == 1, seen
 
-    def count(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        return original(*args, **kwargs)
 
-    monkeypatch.setattr(cf, '_request_tokens', count)
-    start = time.perf_counter()
-    plan = scale.build(tmp_path, monkeypatch, snap=scale.snapshot(rows=rows))
-    elapsed = time.perf_counter() - start
-    projection = plan.projection(plan.initial_mode)
-    print('ORDINARY_FIT_MEASUREMENTS ' + json.dumps({'rows': rows, 'calls': calls, 'seconds': elapsed,
-        'mode': plan.initial_mode, 'input': projection.calibrated_tokens,
-        'sha256': hashlib.sha256(projection.system_content_json.encode()).hexdigest()}))
-    assert plan.initial_mode == 'nano'
-    assert calls <= rows // 3 + 15, f'{rows} rows: at most rows/3 + 15 complete envelope measurements, got {calls}'
+def _drawn_prices(monkeypatch):
+    """The control of every price: story and room characters read from the drawn text, what the pieces must sum to."""
+    monkeypatch.setattr(mv, 'story_chars', lambda snapshot, level=mv.FULL_VIEW: mv.json_chars(mv.render_story(snapshot, level)))
+    monkeypatch.setattr(mv, 'room_chars', lambda snapshot, level=mv.FULL_VIEW, *, floor_note='': mv.json_chars(
+        mv.render_room(snapshot, level, floor_note=floor_note)))
 
 
 def test_one_start_lists_a_snapshot_s_floor_elements_once(tmp_path, monkeypatch):
     """Live scale (520 other conversations, ~17,000 words of people, no owner text): every walk, level, receipt and
     Max-room measure of one start reads one listing of the snapshot's elements; a changed snapshot lists its own. The
-    frame walks its shortest view once and re-prices that level beside each later host form: 33 full room renders
-    here, where a walk beside every host form took 60."""
+    frame walks its shortest view once and re-prices that level beside each later host form; the walk draws nothing, so
+    the one full room render is the view this start delivers."""
     listed, probes, renders = [], [], []
     original, render, room = mf._list_elements, mf.render_view_for_mode, mv.render_room
     monkeypatch.setattr(mf, '_list_elements', lambda snapshot: listed.append(snapshot) or original(snapshot))
@@ -86,7 +78,7 @@ def test_one_start_lists_a_snapshot_s_floor_elements_once(tmp_path, monkeypatch)
     assert plan.initial_mode == 'max' and facts['floor']['steps'].get('F6w')  # the walk ran at this scale
     assert len(listed) == 1, f'one listing per snapshot object, got {len(listed)}'
     assert probes[0] == 'walk' and probes.count('walk') == 1, probes  # one Max frame, one walk
-    assert probes.count('re-price') <= len(facts['host_sections_addressed']) and len(renders) <= 33
+    assert probes.count('re-price') <= len(facts['host_sections_addressed']) and len(renders) == 1
     fewer = dataclasses.replace(snap, conversations=snap.conversations[:1])
     assert len(mf.floor_elements(fewer)) < len(mf.floor_elements(listed[0])) and len(listed) == 2
 
@@ -149,7 +141,7 @@ def test_each_host_address_walks_its_own_shortest_forms(tmp_path, monkeypatch, w
     again, beside its own host forms, and chooses other forms; one that fits (the index stays whole) walks no more. A tie
     within a token takes the whole request's two measures, and a walk that measures every optional form whole chooses
     exactly the same at every probe."""
-    render, probes, ties = mf.render_view_for_mode, [], []
+    render, probes = mf.render_view_for_mode, []
 
     def recorded(*args, **kwargs):
         result = render(*args, **kwargs)
@@ -158,18 +150,14 @@ def test_each_host_address_walks_its_own_shortest_forms(tmp_path, monkeypatch, w
                            mf.kept_level(args[0], result[2]).addressed, result[1]))
         return result
 
-    prices = mf._shortest_prices
     monkeypatch.setattr(mf, 'render_view_for_mode', recorded)
-    monkeypatch.setattr(mf, '_shortest_prices', lambda sent, measure: prices(
-        sent, lambda level: ties.append(level.addressed) or measure(level)))
     settled = _near_even_plan(tmp_path / 'settled', monkeypatch, window, **shape)
     assert _hosts(settled) == hosts and settled.projection(settled.initial_mode).memory_facts['floor']['steps'] == steps
     walks = {str(forms) for kind, _mode, forms, _room in probes if kind == 'walk'}
     assert [kind for kind, *_ in probes] == ['walk', 're-price', 'walk', 're-price']  # the last re-price fit: no walk
-    assert ties and len(walks) == 2  # a tie was measured; the walk after the missed re-price chose other forms
+    assert len(walks) == 2  # the walk after the missed re-price chose other forms
     chosen, probes[:] = list(probes), []
-    monkeypatch.setattr(mf, '_shortest_prices', lambda sent, measure: (
-        measure, lambda taken, trial: (measure(taken), measure(trial))))  # the control: every optional form measured whole
+    _drawn_prices(monkeypatch)  # the control: every level priced by drawing it
     measured = _near_even_plan(tmp_path / 'measured', monkeypatch, window, **shape)
     assert probes == chosen and measured.initial_mode == settled.initial_mode
     for mode in mf.MODES:
@@ -201,23 +189,20 @@ def test_a_host_step_that_grows_the_receipt_walks_the_shortest_view_again(tmp_pa
     assert seen == probes and _hosts(plan) == hosts
 
 
-def test_a_shortest_walk_measures_no_form_its_text_settles(tmp_path, monkeypatch):
+def test_a_shortest_walk_walks_again_only_when_its_level_no_longer_fits(tmp_path, monkeypatch):
     """Owner shape at 92K: Max and Low cannot hold even their least request, so neither walks; Nano walks once, then at
     each of its next three host forms re-prices that level, misses the window (even its shortest view does not fit) and
-    walks again. Those walks' forms all differ by far more than a token, so none takes a whole measurement."""
-    render, probes, ties = mf.render_view_for_mode, [], []
+    walks again."""
+    render, probes = mf.render_view_for_mode, []
 
     def recorded(*args, **kwargs):
         if kwargs.get('shortest') or kwargs.get('level') is not None:
             probes.append(('walk' if kwargs.get('level') is None else 're-price', kwargs['mode']))
         return render(*args, **kwargs)
 
-    prices = mf._shortest_prices
     monkeypatch.setattr(mf, 'render_view_for_mode', recorded)
-    monkeypatch.setattr(mf, '_shortest_prices', lambda sent, measure: prices(
-        sent, lambda level: ties.append(level.addressed) or measure(level)))
     assert scale.build(tmp_path, monkeypatch).initial_mode == 'nano'
-    assert probes == [('walk', 'nano')] + [('re-price', 'nano'), ('walk', 'nano')] * 3 and ties == []
+    assert probes == [('walk', 'nano')] + [('re-price', 'nano'), ('walk', 'nano')] * 3
 
 
 @pytest.mark.parametrize("step, target, outlined", [

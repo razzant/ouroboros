@@ -31,19 +31,6 @@ TURN_GAPS: Dict[Tuple[str, str], Tuple[str, Dict[str, int]]] = {
         "read again (knowledge._navigation_row). NEVER: both listings are what the turn shows (the shelf's "
         "index; the rescue scan, kept by decision); the row stays so that any other work per item fails.",
         {"dir_entries": 122, "scandir": 4, "listdir": 3}),
-    ("L7a", "T:main"): (
-        "One build of Main's first turn (Max -> Low, k=1 and k=30 alike) draws a form of the view again 67 times of its "
-        "80 renders (every probe of the floor walk re-renders the story and the room: memory_floor.render_view_for_mode's "
-        "``size`` and ``sent``, one level up to three times) and serializes a request form twice. Removers: K1 "
-        "(the measured edits, then the pieces).", {"view_renders_again": 80, "request_serializations_again": 6}),
-    ("L7a", "T:mainw"): (
-        "The next turn's build, the same 67 forms of the view drawn again and a request form twice; the same removers.",
-        {"view_renders_again": 80, "request_serializations_again": 6}),
-    ("L7b", "T:main"): (
-        "80 full renders of the view for the 2 texts this start delivers (k=1 and k=30): the floor walk, the receipts, the "
-        "host steps' measure and the Max frame's abandoned view all draw it. Remover: K1 (price by pieces; only the "
-        "delivered view is drawn).", {"view_renders": 110}),
-    ("L7b", "T:mainw"): ("The same 80 renders for 2 delivered texts; the same remover.", {"view_renders": 110}),
     ("L7d", "T:main"): (
         "A capture reads every tail row to find the open ones: 6,630 rows for 31 shown or new at k=30 (250 for 31 at "
         "k=1; live 74,963 for 13,834). NEVER in this PR (owner's decision 1A): an exact skip of sealed rows needs its own "

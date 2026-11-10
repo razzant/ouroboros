@@ -1153,7 +1153,22 @@ def render_story(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW) ->
     """
     key = tuple(item for item in level.addressed if item[0] in STORY_STEPS)
     counted("view_renders", key=("story", id(snapshot), key))
-    return snapshot.piece(("story", key), lambda: _story_text(snapshot, dict(key)))[0]
+    return _story_piece(snapshot, level)[0]
+
+
+def _story_piece(snapshot: MemoryViewSnapshot, level: FloorLevel) -> Tuple[str, int]:
+    key = tuple(item for item in level.addressed if item[0] in STORY_STEPS)
+    return snapshot.piece(("story", key), lambda: _story_text(snapshot, dict(key)))
+
+
+def story_chars(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW) -> int:
+    """``json_chars(render_story(snapshot, level))``, read from the snapshot's pieces: what pricing a level costs."""
+    return _story_piece(snapshot, level)[1]
+
+
+def whole_story_at(snapshot: MemoryViewSnapshot, level: FloorLevel) -> bool:
+    """Whether this level's story is the whole story's text (read from the snapshot's pieces, nothing is drawn)."""
+    return _story_piece(snapshot, level)[0] == _story_piece(snapshot, FULL_VIEW)[0]
 
 
 def _story_text(snapshot: MemoryViewSnapshot, gone: Mapping[str, Tuple[str, ...]]) -> str:
@@ -1331,6 +1346,14 @@ def render_room(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, 
     counted("view_renders", key=("room", id(snapshot), level.addressed, floor_note))
     texts = [text for text, _chars in _room_parts(snapshot, dict(level.addressed))]
     return "\n\n".join(part for part in (*texts, floor_note if snapshot.active else "") if part)
+
+
+def room_chars(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, floor_note: str = "") -> int:
+    """``json_chars(render_room(snapshot, level, floor_note=...))`` from the snapshot's pieces and the blank lines joining them."""
+    chars = [count for text, count in _room_parts(snapshot, dict(level.addressed)) if text]
+    if floor_note and snapshot.active:
+        chars.append(json_chars(floor_note))
+    return sum(chars) + 4 * max(0, len(chars) - 1)  # JSON spells a newline in two characters
 
 
 _ROOM_STEPS = ("F1", "F2", "F4", "F7", "F7p", "F7a", "F8", "F8a")  # the steps ``_room_text`` reads

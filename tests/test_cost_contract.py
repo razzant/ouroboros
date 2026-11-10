@@ -462,6 +462,7 @@ def test_b10_a_build_never_repeats_a_view_form_or_a_request_form(measured, tag):
     ``_again`` is zero. A repeated piece is the class of 222 story renders per build, in one equality."""
     works = _build_work(measured, tag)
     hold_work_equal("L7a", tag, {**_pairs(works, "view_renders_again", lambda _work: 0),
+                                 **_pairs(works, "view_pieces_again", lambda _work: 0),
                                  **_pairs(works, "request_serializations_again", lambda _work: 0)})
 
 

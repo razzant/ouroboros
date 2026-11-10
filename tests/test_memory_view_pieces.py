@@ -98,3 +98,37 @@ def test_the_counted_rung_and_the_group_lines_join_like_the_plain_text(lined, co
     gone = {**({"F6g": keys} if keys else {}), **({"F6a": ["conversations"]} if counted else {})}
     assert conversations.render(snapshot.conversations, gone, piece=snapshot.piece) == conversations.render(
         snapshot.conversations, gone)
+
+
+@pytest.mark.parametrize("note", ["", "### Physical floor\nThis view keeps \"quotes\" and a \\ backslash."])
+def test_a_level_is_priced_by_its_pieces_exactly_as_its_drawn_text(note):
+    """The price of a level is the sum of its pieces and the separators that join them: at any level, with or without the
+    floor note, ``story_chars`` and ``room_chars`` are the JSON characters of the drawn texts. A piece whose key forgets
+    what its text reads would differ here."""
+    snapshot = _snapshot()
+    for level in _levels(snapshot):
+        assert mv.story_chars(snapshot, level) == mv.json_chars(mv.render_story(snapshot, level))
+        assert mv.room_chars(snapshot, level, floor_note=note) == mv.json_chars(mv.render_room(snapshot, level, floor_note=note))
+
+
+def test_an_unactivated_snapshot_is_priced_without_the_floor_note():
+    """Before activation the room is one line and the note is not added: the price says the same as the text."""
+    import dataclasses
+
+    snapshot = _snapshot()
+    inactive = dataclasses.replace(snapshot, store_status={"state": "importing", "reason": "not yet"})
+    assert mv.room_chars(inactive, mv.FULL_VIEW, floor_note="### Physical floor") == mv.json_chars(
+        mv.render_room(inactive, mv.FULL_VIEW, floor_note="### Physical floor"))
+    assert "### Physical floor" not in mv.render_room(inactive, mv.FULL_VIEW, floor_note="### Physical floor")
+
+
+def test_a_view_fit_is_drawn_only_when_read():
+    """A frame the fit walks away from is priced, never drawn: ``ViewFit`` draws its texts on the first read."""
+    snapshot = _snapshot()
+    fit = mf.ViewFit(snapshot, mv.FULL_VIEW, "", {})
+    with measured_sections():
+        assert fit.story_chars and fit.room_chars
+        assert not section_spans()["work"].get("view_renders")
+        story, room, facts = fit
+        assert section_spans()["work"]["view_renders"] == 2
+    assert (story, room, facts) == (mv.render_story(snapshot), mv.render_room(snapshot), {}) and fit[1] == room
