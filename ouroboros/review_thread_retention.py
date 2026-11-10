@@ -41,8 +41,8 @@ Candidates are the tasks written terminal since the pass last looked (``task_sto
 each with the timeout-retried predecessors its reciprocal retry links name, and the tasks the step still
 waits on, kept on the ``runtime_retirement`` job row. The first pass pins its position and time; a managed import's
 prior ``floor`` (``maintenance_retirement.release_opened``) makes it process that older interval in the same pass.
-A thread whose host runs started before activation is never a candidate, so thread material predating this code is not
-released. No timer, poller or retry count: a waiting task is asked again whenever the maintenance child runs
+A thread whose host runs started before activation is a candidate only of the one historical walk
+(``historical_retirement``), never of this pass. No timer, poller or retry count: a waiting task is asked again whenever the maintenance child runs
 (``owed``), never a reason to start one. A pass its caller stops between tasks or between a task's operations (a
 delegate capture arrived) leaves the rest waiting for that next run. Each candidate's managed document imports go
 through the same pass (``delegate_documents.release_owed_imports``, holds named ``document_<why>``); a task waits
@@ -606,8 +606,8 @@ def _patch(root: Any, task_id: str, thread_id: str, change: Callable[[Dict[str, 
     return (document.get(RELEASES) or {}).get(thread_id) or {}
 
 
-def _bind(root: Any, task_id: str, receipt: Dict[str, Any], receipt_ref: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
-    """Durably bind one release operation under the keep gate: ``("", record)``, or why it was not bound."""
+def _bind(root: Any, task_id: str, receipt: Dict, receipt_ref: Dict, *, historical: bool = False) -> Tuple[str, Dict]:
+    """Durably bind one release under the keep gate (``historical``: the one historical walk's own): ``("", record)``, or why not."""
     from ouroboros.owner_keep import gate
     from ouroboros.utils import utc_now_iso
 
@@ -618,9 +618,9 @@ def _bind(root: Any, task_id: str, receipt: Dict[str, Any], receipt_ref: Dict[st
         record = _patch(root, task_id, receipt["thread_id"], lambda prior: None if prior.get("state") in (
             "bound", "accepted") else {
             "state": "bound", "operation_id": operation, "thread_id": receipt["thread_id"],
-            "store_id": receipt["store_id"], "export_id": receipt["export_id"],
+            "store_id": receipt["store_id"], "export_id": receipt["export_id"], "bound_at": utc_now_iso(),
             "closure_digest": receipt["closure_digest"], "content_digest": receipt["content_digest"],
-            "lane_digest": receipt["lane_digest"], "receipt": receipt_ref, "bound_at": utc_now_iso()})
+            "lane_digest": receipt["lane_digest"], "receipt": receipt_ref, **({"historical": True} if historical else {})})
     return ("", record) if record.get("operation_id") == operation else ("release_exists", record)
 
 
@@ -744,7 +744,7 @@ class _Pass:
         from ouroboros.execution_domain import EngineClients
         self.work = EngineClients(self.engine)  # each engine-held object through its own engine (``execution_domain``)
         self._work_supported: Dict[Any, str] = {}
-        self.stop, self.stopped = stop, False
+        self.stop, self.stopped, self.walk_states = stop, False, {}  # walk_states: what an ask of the walk settled
         self.report: Dict[str, Any] = {"tasks": 0, "retained": 0, "accepted": 0, "refused": 0, "abandoned": 0,
                                        "unknown": 0, "holds": {}, "errors": [], "observed": []}
 
@@ -794,7 +794,7 @@ class _Pass:
                 log.debug("engine close failed", exc_info=True)
         self.work.drop()
 
-    def task(self, task_id: str) -> str:
+    def task(self, task_id: str, historical: bool = False) -> str:
         """``WAIT`` keeps the task for a later pass; ``DONE`` lets it go until its next terminal write."""
         from ouroboros.owner_keep import is_kept
         from ouroboros.task_store import read_document
@@ -831,7 +831,7 @@ class _Pass:
             if self.between(done):
                 return WAIT
             verdict, done = self.thread(task_id, thread_id, threads[thread_id], host.get(thread_id) or [],
-                                        releases.get(thread_id) or {}) or verdict, done + 1
+                                        releases.get(thread_id) or {}, historical) or verdict, done + 1
         return verdict
 
     def documents(self, task_id: str) -> bool:
@@ -856,8 +856,9 @@ class _Pass:
             self.hold(self.usable(engine))
             return WAIT
         state = drive_release(self.root, task_id, record, engine, may_send=may_send)
-        key = "unknown" if state == "bound" else state
-        self.report[key] = self.report.get(key, 0) + 1
+        if record.get("historical"):
+            self.walk_states[record["operation_id"]] = state  # the walk's count must not need a later read of the task
+        self.report["unknown" if state == "bound" else state] += 1
         return WAIT if state == "bound" else None
 
     def held(self, task_id: str, thread_id: str, receipt: Dict[str, Any], receipt_ref: Dict[str, Any],
@@ -894,12 +895,12 @@ class _Pass:
         return None
 
     def thread(self, task_id: str, thread_id: str, seats: List[Tuple[str, str]], runs: List[Any],
-               prior: Dict[str, Any]) -> Optional[str]:
+               prior: Dict[str, Any], historical: bool = False) -> Optional[str]:
         from ouroboros.gateways.claudexor import ClaudexorUnavailable
         from ouroboros.task_store import read_document
 
-        if not runs or not all(_after(entry.started_ts, self.activated_at) for entry in runs):
-            self.hold("predates_activation" if runs else "no_host_runs")  # never this code's to release
+        if not runs or not (historical or all(_after(entry.started_ts, self.activated_at) for entry in runs)):
+            self.hold("predates_activation" if runs else "no_host_runs")  # only the historical walk's to release
             return None
         engine = self.work.reach(runs[0])  # the thread's own engine, which its host runs were started on
         if self.usable(engine):  # that engine cannot be asked now: the thread waits for a later pass
@@ -942,7 +943,7 @@ class _Pass:
         if why:
             self.held(task_id, thread_id, receipt, receipt_ref, [why])
             return WAIT
-        why, record = _bind(self.root, task_id, receipt, receipt_ref)
+        why, record = _bind(self.root, task_id, receipt, receipt_ref, historical=historical)
         if why:
             self.hold(why)
             return WAIT if why == "busy" else None
@@ -963,7 +964,7 @@ def retire_finished_review_threads(root: Any, *, engine: Any = None, live: Optio
     that already holds them). ``should_stop`` is asked between tasks and between a task's operations; a pass it ends
     keeps the rest waiting (reported ``stopped``), which the maintenance child's next run takes up (``owed``). A pass
     that changed neither the cursor, the waiting tasks, the engine's hold nor the walk's record writes nothing."""
-    from ouroboros import maintenance_jobs, store
+    from ouroboros import historical_retirement, maintenance_jobs, store
     from ouroboros.delegate_result_taken import empty_walk, tell_engine, walk
     from ouroboros.maintenance_retirement import JOB
     from ouroboros.task_status import task_has_live_queue_ownership
@@ -979,7 +980,7 @@ def retire_finished_review_threads(root: Any, *, engine: Any = None, live: Optio
         floor = state.get("floor")  # a managed document import owed since (``maintenance_retirement.release_opened``)
         pin = min(counter, floor) if type(floor) is int else counter
         state = {"activated_at": utc_now_iso(), "counter": pin, "waiting": state.get("waiting") or []}
-        over = empty_walk(root)  # nothing delegated yet: the one-time ``taken`` walk is over before it begins
+        over = {**empty_walk(root), **historical_retirement.empty_walk(root)}  # nothing delegated: both walks are over
         maintenance_jobs.record(root, JOB, **{JOB_FIELD: state}, **over)
         if pin == counter and not state["waiting"] and over:
             return {"activated": True}
@@ -1008,7 +1009,7 @@ def retire_finished_review_threads(root: Any, *, engine: Any = None, live: Optio
                     log.warning("Runtime retirement failed for task %s", task_id, exc_info=True)
             if wait:
                 waiting.append(task_id)
-        walked = walk(run, tasks, row, waiting)  # the one-time ``taken`` walk; what it cannot decide joins ``waiting``
+        walked = {**walk(run, tasks, row, waiting), **historical_retirement.walk(run, row)}  # the one-time walks (each module)
     finally:
         run.close()
     after = {"activated_at": state["activated_at"], "counter": counter, "waiting": sorted(set(waiting))}

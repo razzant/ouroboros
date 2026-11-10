@@ -384,6 +384,9 @@ def test_direct_provider_history_keeps_refusal_text_and_omits_stop_metadata(setu
     ("create", "http_400", 400, False, False),
     ("create", "auth_required", 401, False, False),
     ("get", "subscription_window_exhausted", 429, False, True),
+    # After engine retention, missing request bytes/receipts prove no old non-dispatch.
+    ("create", "resource_not_found", 404, False, False),
+    ("get", "model_operation_not_found", 404, False, True),
 ])
 def test_only_exact_pre_admission_create_refusal_releases_the_attempt(setup, monkeypatch, phase, code, status, not_sent, asynchronous):
     root, gateway, client = setup

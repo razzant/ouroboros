@@ -444,6 +444,9 @@ def backlog(tmp_path):
 
     queue()
     engine = Engine()
+    # These tests read the ``taken`` walk alone: the step's historical walk (its own tests,
+    # tests/test_historical_retirement.py) is recorded over, so it neither lists custody nor writes the row here.
+    maintenance_jobs.record(root, JOB, historical_walk={"done_at": utc_now_iso(), "waiting": []})
 
     def run(**kwargs):
         queue()

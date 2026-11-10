@@ -316,6 +316,7 @@ def _prune_drives(base: pathlib.Path, parent: pathlib.Path, *, drive_of: Any, no
     from ouroboros.store import StoreBusy, StoreError
     from ouroboros.task_custody import (arrived_drives, forget_departed, layout_basis, record_rest, rested_verdict,
                                         settle_child_drive)
+    from ouroboros.tools.kept_service_outputs import owed_declarations
 
     days = _resolve_retention_days(retention_days)
     cutoff = age_cutoff(days, now)
@@ -347,6 +348,7 @@ def _prune_drives(base: pathlib.Path, parent: pathlib.Path, *, drive_of: Any, no
     if names is None:
         forget_departed(verdicts(), base.name, _drive_names(base))
     attempts, busy, youngest = 0, False, (None if names is None else rest.get("youngest"))
+    owed = owed_declarations(parent)  # one read of the kept-output debts for this whole pass
     for task_id, status, retention_at, inside_wait, fact in drive_candidates(base, parent, cutoff, stop, after=after,
                                                                                names=names):
         if chosen is not None and task_id not in chosen:
@@ -394,7 +396,7 @@ def _prune_drives(base: pathlib.Path, parent: pathlib.Path, *, drive_of: Any, no
             attempts += 1
             report["cursor"] = task_id
             if (outcome := settle_child_drive(parent, task_id, drive_of(task_dir), live=live, guard=guard, stop=stop,
-                                              report=report))["status"] == "removed":
+                                              report=report, owed=owed))["status"] == "removed":
                 report["pruned"].append({"task_id": task_id, "path": str(task_dir)})
             record_rest(verdicts(), base.name, parent, task_id, task_dir, drive_of(task_dir), outcome)
             if progress is not None:
