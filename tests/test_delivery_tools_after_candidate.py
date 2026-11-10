@@ -3,15 +3,18 @@
 import json
 import queue
 
+import pytest
+
 
 def _finish(answer):
     return {"content": None, "tool_calls": [{"id": "complete", "type": "function", "function": {
         "name": "finish_task", "arguments": json.dumps({"action": "finish", "answer": answer})}}]}
 
 
-def _run_loop(tmp_path, monkeypatch, responses, *, nudges=(True,)):
+def _run_loop(tmp_path, monkeypatch, responses, *, nudges=(True,), mode="off"):
     """Main through the real loop. A finalization nudge meets the first plain answer: the host
-    retains that answer and offers the completion door (``_arm_delivery_control``)."""
+    retains that answer and offers the completion door (``_arm_delivery_control``); ``mode``: the
+    task review mode."""
     import ouroboros.loop as loop
     from ouroboros.tools.registry import ToolRegistry
 
@@ -35,7 +38,7 @@ def _run_loop(tmp_path, monkeypatch, responses, *, nudges=(True,)):
 
     monkeypatch.setattr(loop, "call_llm_with_retry", fake_call)
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", nudge)
-    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", mode)
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry._ctx.task_metadata = {"budget_drive_root": str(tmp_path), "root_task_id": "parent1"}
     result, usage, trace = loop.run_llm_loop(
@@ -64,3 +67,21 @@ def test_further_write_then_complete_replacement_remain_available(tmp_path, monk
     assert trace["delivery_candidate"]["revision"] == 2
     assert trace["delivery_candidate"]["finalization_control"] == "candidate"
     assert trace["delivery_candidate"]["degraded"] is False
+
+
+@pytest.mark.parametrize("mode", ["off", "auto"])
+def test_the_selection_door_promises_no_check_the_delivery_does_not_run(tmp_path, monkeypatch, mode):
+    """The retained answer's door says what finish and stop do in every task review mode and names no check: under
+    Off and under Auto (the default) the delivery starts no result review (``review_result.result_review_at_delivery``
+    records why), so a promise of completion checks would be false there; finish still delivers the selection."""
+    answer = "The requested effect is in place."
+    result, _usage, trace, calls = _run_loop(tmp_path, monkeypatch, ["The first answer is retained.", _finish(answer)],
+                                             mode=mode)
+    prompt = json.dumps(calls[1])
+    door = prompt[prompt.index("[DELIVERY_FINALIZATION_CONTROL]"):]
+    door = door[:door.index("not a new completion selection.")]
+    assert "action=finish delivers the selection unless the host holds it" in door
+    assert "action=stop with a rationale records unfinished work without cancelling children" in door
+    assert "check" not in door.lower() and "review" not in door.lower(), door
+    assert trace["review_decision"] == {"mode": mode, "trigger": {"off": "mode_off", "auto": "not_requested"}[mode]}
+    assert result == answer
