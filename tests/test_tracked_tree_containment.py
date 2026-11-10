@@ -39,7 +39,7 @@ POSIX_HANDLE = pytest.mark.skipif(os.name == "nt", reason="a retained POSIX lead
 def fake_tree_read(monkeypatch, proc, *, remains):
     """A unit double's explicit containment measurement, independent of poll()."""
     read = shell_process._tree_remains
-    monkeypatch.setattr(shell_process, "_tree_remains", lambda child: remains if child is proc else read(child))
+    monkeypatch.setattr(shell_process, "_tree_remains", lambda child, **kw: remains if child is proc else read(child, **kw))
 
 
 @POSIX_ONLY
@@ -83,31 +83,118 @@ def test_fast_roots_keep_exact_results_and_reap_zombie_only_groups(registry):
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux /proc maintenance census")
-def test_busy_owner_maintenance_reaps_previous_quiet_tree(registry):
-    """A busy owner must settle a prior tree without a global waitpid sweep."""
-    with shell_process.tracked_start() as publish:
-        first = publish(shell_process.contained_popen(
-            subprocess.Popen, ["sh", "-c", "sleep .15 & exit 0"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **subprocess_new_group_kwargs()))
-    assert first.wait(timeout=5) == 0
-    # The command itself is quiet, but its retained leader may still await the
-    # next maintenance boundary.  A second command models a non-idle worker.
-    time.sleep(.25)
-    with shell_process.tracked_start() as publish:
-        second = publish(shell_process.contained_popen(
-            subprocess.Popen, [sys.executable, "-c", "pass"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **subprocess_new_group_kwargs()))
-    assert second.wait(timeout=5) == 0
-    with pytest.raises(ChildProcessError):
-        platform_layer.observe_child_exit(first.pid)
-    time.sleep(.25)
-    with shell_process.tracked_start() as publish:
-        third = publish(shell_process.contained_popen(
-            subprocess.Popen, [sys.executable, "-c", "pass"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **subprocess_new_group_kwargs()))
-    assert third.wait(timeout=5) == 0
-    with pytest.raises(ChildProcessError):
-        platform_layer.observe_child_exit(first.pid)
+@pytest.mark.parametrize("unknown", [False, True])
+def test_busy_owner_maintenance_reaps_previous_quiet_tree(registry, monkeypatch, unknown):
+    """Real retained leader: live descendant, unreadable census, then quiet group."""
+    from ouroboros import process_containment
+
+    result = shell_process._tracked_subprocess_run(
+        ["sh", "-c", "sleep 60 >/dev/null 2>&1 & echo $!; exit 7"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
+    assert result.returncode == 7
+    [first] = shell_process._active_subprocesses
+    child = int(result.stdout)
+    registry.append((first, child))
+    census = process_containment.process_groups_have_live_members
+    assert census({first.pid}) == {first.pid: True}
+    shell_process.maintain_tracked_children()
+    assert first in shell_process._active_subprocesses
+    assert platform_layer.observe_child_exit(first.pid)[0] == first.pid
+    _end_own_group(first, child)
+    assert census({first.pid}) == {first.pid: False}
+    if unknown:
+        with monkeypatch.context() as patch:
+            patch.setattr(process_containment, "process_groups_have_live_members", lambda _groups: None)
+            patch.setattr(process_containment, "process_group_has_live_members", lambda _pid: pytest.fail("no ps fallback"))
+            shell_process.maintain_tracked_children()
+            assert first in shell_process._active_subprocesses
+            assert platform_layer.observe_child_exit(first.pid)[0] == first.pid
+    # A non-registry caller still owns its own nonzero exit status.
+    outsider = subprocess.Popen([sys.executable, "-c", "raise SystemExit(29)"])
+    try:
+        result = shell_process._tracked_subprocess_run([sys.executable, "-c", "pass"], timeout=5)
+        assert result.returncode == 0 and outsider.wait(timeout=5) == 29
+        assert first not in shell_process._active_subprocesses
+        assert first.wait() == first.poll() == 7
+        with pytest.raises(ChildProcessError):
+            platform_layer.observe_child_exit(first.pid)
+    finally:
+        if outsider.poll() is None:
+            outsider.kill()
+        outsider.wait(timeout=5)
+
+
+@POSIX_HANDLE
+def test_maintenance_census_is_call_local(registry, monkeypatch):
+    """Another caller's retirement must never borrow a maintenance snapshot."""
+    from ouroboros import process_containment
+
+    class Child(_Child):
+        pass
+
+    child = Child(777777, 7)
+    child._ouroboros_pgid = child.pid
+    child._ouroboros_group_held = True
+    shell_process._active_subprocesses.add(child)
+    monkeypatch.setattr(shell_process, "retained_child_group", lambda *_a, **_k: True)
+    monkeypatch.setattr(process_containment, "process_groups_have_live_members", lambda _groups: {child.pid: False})
+    monkeypatch.setattr(process_containment, "process_group_has_live_members", lambda _pid: True)
+    original = shell_process.retire_tracked
+    calls = []
+
+    def interleaved(proc, **kwargs):
+        calls.append(original(proc))  # independent caller must use its own probe
+        return original(proc, **kwargs)
+
+    monkeypatch.setattr(shell_process, "retire_tracked", interleaved)
+    shell_process.maintain_tracked_children()
+    assert calls == [False] and child not in shell_process._active_subprocesses
+    assert "_ouroboros_live_group_census" not in child.__dict__
+    assert child.returncode == 7
+
+
+def test_maintenance_interruption_settles_admission(registry, monkeypatch):
+    def interrupt():
+        raise KeyboardInterrupt()
+    monkeypatch.setattr(shell_process, "maintain_tracked_children", interrupt)
+    with pytest.raises(KeyboardInterrupt), shell_process.tracked_start():
+        pytest.fail("interrupted maintenance cannot admit the command")
+    assert shell_process._spawning_subprocesses == 0
+    assert shell_process.unsettled_tracked_children() is None
+
+
+@POSIX_HANDLE
+@pytest.mark.parametrize("census", [None, {}, {777777: True}])
+def test_live_or_unknown_maintenance_never_acquires_leader_lock(registry, monkeypatch, census):
+    from ouroboros import process_containment
+    child = _Child(777777, 7)
+    child._ouroboros_pgid = child.pid
+    child._ouroboros_group_held = True
+    shell_process._active_subprocesses.add(child)
+    monkeypatch.setattr(process_containment, "process_groups_have_live_members", lambda _groups: census)
+    monkeypatch.setattr(shell_process, "retained_child_group", lambda *_a, **_k: pytest.fail("no releasable group"))
+    shell_process.maintain_tracked_children()
+    assert child in shell_process._active_subprocesses and child.wait() == 7
+
+
+def test_maintenance_census_unreadable_never_means_empty(monkeypatch):
+    import io
+    from ouroboros import process_containment as pc
+
+    monkeypatch.setattr(platform_layer, "IS_WINDOWS", False)
+    real_isdir, real_listdir = pc.os.path.isdir, pc.os.listdir
+    monkeypatch.setattr(pc.os.path, "isdir", lambda path: True if path == "/proc" else real_isdir(path))
+    monkeypatch.setattr(pc.os, "listdir", lambda path: ["10", "11"] if path == "/proc" else real_listdir(path))
+    rows = {"/proc/10/stat": b"10 (a name )) Z 1 10 10 0 0", "/proc/11/stat": b"11 (child) S 10 10 10 0 0"}
+    monkeypatch.setattr(pc, "open", lambda path, *_a, **_k: io.BytesIO(rows[path]), raising=False)
+    assert pc.process_groups_have_live_members({10, 99}) == {10: True}
+    rows["/proc/11/stat"] = b"malformed"
+    assert pc.process_groups_have_live_members({10}) is None
+    monkeypatch.setattr(pc, "open", lambda *_a, **_k: (_ for _ in ()).throw(PermissionError()))
+    assert pc.process_groups_have_live_members({10}) is None
+    monkeypatch.setattr(pc.os.path, "isdir", lambda _path: False)
+    monkeypatch.setattr(pc.subprocess, "run", lambda *_a, **_k: pytest.fail("maintenance must not spawn ps"))
+    assert pc.process_groups_have_live_members({10}) is None
 
 
 @POSIX_ONLY

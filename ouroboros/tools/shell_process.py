@@ -175,13 +175,6 @@ def tracked_start():
             _spawning_subprocesses += 1
     if refusal:
         raise CommandAdmissionClosed(refusal)
-    # Every contained spawn is a maintenance boundary, including direct callers
-    # such as git_ops that do not use _tracked_subprocess_run.  Admission is
-    # checked first so Panic never launches census work.
-    try:
-        maintain_tracked_children()
-    except Exception:
-        log.debug("Tracked-child maintenance failed before spawn", exc_info=True)
     stopping: list = []
 
     def publish(proc):
@@ -192,6 +185,12 @@ def tracked_start():
         return proc
 
     try:
+        # Direct git/skill callers share this boundary; interruption must still
+        # settle admission. The census starts no process and holds no start lock.
+        try:
+            maintain_tracked_children()
+        except Exception:
+            log.debug("Tracked-child maintenance failed before spawn", exc_info=True)
         yield publish
     finally:
         try:
@@ -418,7 +417,7 @@ def _kill_process_group(proc):
     kill_process_tree(proc)
 
 
-def _tree_remains(proc) -> Optional[bool]:
+def _tree_remains(proc, *, live_groups: Optional[dict[int, bool]] = None) -> Optional[bool]:
     """After its root's exit: whether what its containment holds still runs (its recorded group, or its Job's
     members). None when nothing measured holds it, so an exited root never stands for its tree."""
     held = _held(proc)
@@ -428,8 +427,7 @@ def _tree_remains(proc) -> Optional[bool]:
         if "_ouroboros_group_held" not in held or not retained_child_group(proc):
             return None  # an unknown/reaped/recycled leader cannot vouch for this number
         from ouroboros.process_containment import process_group_has_live_members
-        if "_ouroboros_live_group_census" in held:
-            live_groups = held["_ouroboros_live_group_census"]
+        if live_groups is not None:
             return live_groups.get(held["_ouroboros_pgid"])
         return process_group_has_live_members(held["_ouroboros_pgid"])
     if held.get("_ouroboros_job") is None:
@@ -437,7 +435,7 @@ def _tree_remains(proc) -> Optional[bool]:
     return job_has_running_member(held["_ouroboros_job"])
 
 
-def retire_tracked(proc) -> bool:
+def retire_tracked(proc, *, live_groups: Optional[dict[int, bool]] = None) -> bool:
     """Release only an exited root AND a measured empty tree; otherwise retain it.
 
     A task-group record is discovery, not transfer of this live OS witness.
@@ -447,7 +445,7 @@ def retire_tracked(proc) -> bool:
     held = _held(proc)
     if proc.poll() is None:
         return False
-    remains = _tree_remains(proc)
+    remains = _tree_remains(proc) if live_groups is None else _tree_remains(proc, live_groups=live_groups)
     if remains is not False:
         return False
     held["_ouroboros_tree_settled"] = True
@@ -528,28 +526,25 @@ def unsettled_tracked_children() -> Optional[dict]:
     return {"state": "unconfirmed", "pids": alive, "unpublished": unpublished} if alive or unpublished else None
 
 
-def maintain_tracked_children() -> Optional[dict]:
-    """Retire quiet tracked trees while their owner stays busy, without global waitpid."""
+def maintain_tracked_children() -> None:
+    """Retry exited trees at spawn boundaries; Linux batches a non-spawning census.
+
+    The snapshot belongs to this call, never to the shared process handles. An
+    unreadable census retains POSIX groups without falling back to per-group ps;
+    Windows still measures each owned Job. No global waitpid consumes others' status.
+    """
     from ouroboros.process_containment import process_groups_have_live_members
 
     candidates = [proc for proc in _active_subprocesses.copy() if proc.poll() is not None]
     if not candidates:
-        with _start_settled:
-            return {"state": "unconfirmed", "pids": [], "unpublished": _spawning_subprocesses} \
-                if _spawning_subprocesses else None
+        return
     pgids = {int(_held(proc).get("_ouroboros_pgid", 0) or 0) for proc in candidates}
-    census = process_groups_have_live_members(pgids)
+    census = process_groups_have_live_members(pgids) or {}
     for proc in candidates:
-        _held(proc)["_ouroboros_live_group_census"] = census or {}
-        try:
-            retire_tracked(proc)
-        finally:
-            _held(proc).pop("_ouroboros_live_group_census", None)
-    with _start_settled:
-        unpublished = _spawning_subprocesses
-    alive = sorted(proc.pid for proc in _active_subprocesses.copy()
-                   if proc.poll() is not None)
-    return {"state": "unconfirmed", "pids": alive, "unpublished": unpublished} if alive or unpublished else None
+        pgid = int(_held(proc).get("_ouroboros_pgid", 0) or 0)
+        if pgid and census.get(pgid) is not False:
+            continue  # no identity lock/probe for a live or unknown POSIX group
+        retire_tracked(proc, live_groups=census)
 
 
 def _shell_env_for_cwd(ctx: ToolContext, work_dir: pathlib.Path) -> dict:

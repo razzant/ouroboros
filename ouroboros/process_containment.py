@@ -166,11 +166,11 @@ def process_group_has_live_members(pgid: int) -> bool:
 
 
 def process_groups_have_live_members(pgids: "set[int]") -> Optional[dict[int, bool]]:
-    """Take one bounded POSIX census for several groups without spawning ``ps``.
+    """Take one Linux process-table census without spawning another process.
 
-    ``None`` means the process table could not be read and is deliberately not an empty
-    result.  Linux callers use ``/proc`` so retirement remains possible when the process
-    limit itself is exhausted; macOS keeps the existing per-group ``ps`` path.
+    ``None`` means unreadable or unsupported, never an empty table. Linux uses
+    ``/proc`` even at process exhaustion. macOS maintenance remains unknown; its
+    ordinary caller/idle retirement keeps the existing per-group probe.
     """
     wanted = {int(pgid) for pgid in pgids if int(pgid) > 0}
     if not wanted:
@@ -199,7 +199,7 @@ def process_groups_have_live_members(pgids: "set[int]") -> Optional[dict[int, bo
         except OSError:
             return None
         return {pgid: any(not state.startswith("Z") for state in members)
-                for pgid, members in states.items()}
+                for pgid, members in states.items() if members}
     # Do not spawn an untracked census process on macOS.  Unknown is fail-closed;
     # the existing per-group ps probe remains available outside maintenance.
     return None
