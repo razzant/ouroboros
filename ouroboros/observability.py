@@ -104,13 +104,14 @@ def _json_bytes(payload: Any) -> bytes:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
 
 
-def _publish_blob_file(path: pathlib.Path, raw: bytes) -> None:
-    """Publish ``raw`` as gzip-1 at ``path`` (temp + atomic replace, 0600); a present file is kept."""
+def _publish_blob_file(path: pathlib.Path, raw: bytes) -> bool:
+    """Publish ``raw`` as gzip-1 at ``path`` (temp + atomic replace, 0600); a present file is kept.
+    True when this call stored the bytes."""
     path.parent.mkdir(parents=True, exist_ok=True)
     _chmod_private_dir(path.parent)
     if path.exists():
         _chmod_private(path)
-        return
+        return False
     tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex[:8]}")
     try:
         with gzip.open(tmp, "wb", compresslevel=1) as fh:
@@ -118,6 +119,7 @@ def _publish_blob_file(path: pathlib.Path, raw: bytes) -> None:
         _chmod_private(tmp)
         replace_atomic(tmp, path)
         _chmod_private(path)
+        return True
     except Exception:
         try:
             tmp.unlink()
@@ -128,6 +130,7 @@ def _publish_blob_file(path: pathlib.Path, raw: bytes) -> None:
         # Concurrent reviewers can legitimately publish the same content-addressed blob. On
         # Windows the losing os.replace may raise while the winning blob is already durable.
         _chmod_private(path)
+        return False
 
 
 def _blob_ref(path: pathlib.Path, digest: str, kind: str, size: int) -> Dict[str, Any]:
@@ -147,6 +150,17 @@ def write_blob(drive_root: pathlib.Path, payload: Any, *, kind: str = "json") ->
     """Persist a full private payload as a content-addressed gzip blob."""
     raw = _json_bytes(payload) if kind == "json" else str(payload).encode("utf-8", errors="replace")
     return write_blob_bytes(drive_root, raw, kind=kind)
+
+
+def write_part(drive_root: pathlib.Path, digest: str, raw: bytes) -> Dict[str, Any]:
+    """Store one shared element (``shared_values``) as the blob of its bytes, ``digest`` their sha256 as the tokenizer
+    computed it; bytes stored for the first time count as the window's ``new_parts`` (``context_timing.counted``).
+    Returns the part's ref as a manifest lists it."""
+    from ouroboros.context_timing import counted
+
+    if _publish_blob_file(_observability_root(pathlib.Path(drive_root)) / "blobs" / f"{digest}.json.gz", raw):
+        counted("new_parts", len(raw), key=digest)
+    return {"sha256": digest, "kind": "json", "encoding": "gzip", "size": len(raw)}
 
 
 def write_shared_blob(drive_root: pathlib.Path, payload: Any, parts: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
@@ -172,8 +186,7 @@ def write_shared_blob(drive_root: pathlib.Path, payload: Any, parts: Dict[str, D
         return _blob_ref(loose, digest, "json", size)
     for part_digest, raw in tokenized.parts.items():
         if part_digest not in parts:
-            ref = write_blob_bytes(drive_root, raw)
-            parts[part_digest] = {key: ref[key] for key in ("sha256", "kind", "encoding", "size")}
+            parts[part_digest] = write_part(drive_root, part_digest, raw)
     placement = loose.with_name(f"{digest}.json{SHARED_PLACEMENT_SUFFIX}")
     _publish_blob_file(placement, tokenized.skeleton)
     return {**_blob_ref(loose, digest, "json", size), "compressed_size": placement.stat().st_size}
@@ -1006,7 +1019,8 @@ def persist_call(
 
     from ouroboros.anthropic_native_custody import observability_custody_projection
 
-    redacted = redact_projection(observability_custody_projection(payload))
+    shared = call_type in SHARED_ELEMENT_CALL_TYPES
+    redacted = redact_projection(observability_custody_projection(payload), parts=shared)
     effective_keep_raw = keep_raw
     if effective_keep_raw is None:
         effective_keep_raw = (
@@ -1016,7 +1030,6 @@ def persist_call(
     # A request view stores each element once; a public view names only public parts, because its
     # parts are the bytes of the redacted value (an element redaction changes is a different part).
     parts: Dict[str, Dict[str, Any]] = {}
-    shared = call_type in SHARED_ELEMENT_CALL_TYPES
 
     def store(value: Any) -> Dict[str, Any]:
         return write_shared_blob(drive_root, value, parts) if shared else write_blob(drive_root, value, kind="json")

@@ -14,7 +14,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros.secret_masking import SCHEMA_KINDS, SCHEMA_MAPS, SCHEMA_NOTES, SECRET_TOKEN_PATTERNS
 
@@ -274,7 +274,9 @@ def _schema_names(item: Any) -> bool:
 
 
 def _redact_any(value: Any, records: List[RedactionRecord], path: str, *, secret_literals: bool = False,
-                schema: bool = False) -> Any:
+                schema: bool = False, part: Optional[Callable[..., Any]] = None) -> Any:
+    """The masked copy of ``value`` at ``path``, its records appended in walk order; ``part``, when given, redacts
+    each dict element of a list reached from the root through dicts only (a request view's part, ``shared_values``)."""
     if secret_literals and not isinstance(value, (dict, list, tuple, bool)) and value not in (None, ""):
         records.append(RedactionRecord(path=path, rule="secret_key_name"))
         return _secret_value_fingerprint(value)
@@ -288,7 +290,7 @@ def _redact_any(value: Any, records: List[RedactionRecord], path: str, *, secret
             key_text = str(key)
             item_path = f"{path}.{key_text}" if path else key_text
             if schema and key_text in SCHEMA_MAPS and _schema_names(item):
-                out[key_text] = {str(name): _redact_any(sub, records, f"{item_path}.{name}", schema=True,
+                out[key_text] = {str(name): _redact_any(sub, records, f"{item_path}.{name}", schema=True, part=part,
                                                         secret_literals=secret_literals or _is_secret_key_name(str(name)))
                                  for name, sub in item.items()}
             elif _is_secret_key_name(key_text):
@@ -298,17 +300,28 @@ def _redact_any(value: Any, records: List[RedactionRecord], path: str, *, secret
                     _secret_value_fingerprint(item) if item not in (None, "", False) else item
                 )
             else:
-                out[key_text] = _redact_any(item, records, item_path,
+                out[key_text] = _redact_any(item, records, item_path, part=part,
                                             secret_literals=secret_literals and key_text not in SCHEMA_NOTES)
         return out
     if isinstance(value, (list, tuple)):
-        return [_redact_any(item, records, f"{path}[{idx}]", secret_literals=secret_literals)
+        return [part(item, records, f"{path}[{idx}]", secret_literals) if part is not None and isinstance(item, dict)
+                else _redact_any(item, records, f"{path}[{idx}]", secret_literals=secret_literals)
                 for idx, item in enumerate(value)]
     if isinstance(value, str):
         return _redact_text(value, records, path)
     return value
 
 
-def redact_projection(value: Any) -> RedactionResult:
+def redact_projection(value: Any, *, parts: bool = False) -> RedactionResult:
+    """``value`` with its secret values masked and one record per rule that fired. ``parts``: ``value`` is a request
+    view, and the bytes of each part a scan reads are counted for the round's receipt (``context_timing.counted``,
+    verb ``secret_scan``, keyed by the part's bytes and its parent's flags)."""
+    from ouroboros.context_timing import counted
+
+    def scanned(item: Any, records: List[RedactionRecord], path: str, secret_literals: bool) -> Any:
+        raw = json.dumps(item, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        counted("secret_scan", len(raw), key=(hashlib.sha256(raw).hexdigest(), secret_literals))
+        return _redact_any(item, records, path, secret_literals=secret_literals)
+
     records: List[RedactionRecord] = []
-    return RedactionResult(_redact_any(value, records, "$"), records)
+    return RedactionResult(_redact_any(value, records, "$", part=scanned if parts else None), records)

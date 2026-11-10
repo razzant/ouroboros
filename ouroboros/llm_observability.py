@@ -1,16 +1,19 @@
 """Model-call evidence and event transport, independent of admission and retry decisions.
 
 The Main call publishes lifecycle and optional context through this existing observation
-owner; the provider loop chooses what happened, never how the public event is shaped.
+owner; the provider loop chooses what happened, never how the public event is shaped. A
+round's ``llm_round`` also carries what the host did to prepare it (``round_window``).
 """
 
 from __future__ import annotations
 
+import contextlib
 import pathlib
 import logging
 import queue
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterator, Optional, Tuple
 
+from ouroboros.context_timing import measured_sections, section_spans
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.anthropic_native_custody import public_custody_projection
 from ouroboros.utils import emit_cognitive_operation_event, sanitize_tool_result_for_log
@@ -39,6 +42,21 @@ def emit_main_call_state(event_queue: Optional[queue.Queue], identity: Tuple[Any
         })
     except Exception:
         logging.getLogger(__name__).debug("Failed to emit main LLM call state event", exc_info=True)
+
+
+@contextlib.contextmanager
+def round_window() -> Iterator[None]:
+    """One round's preparation receipt (a ``context_timing`` window): from the end of a tool batch, or the loop's
+    start, to the round's ``llm_round``, which carries the host work counted in it (``round_receipt``). Facts for
+    the log only: nothing reads them to decide."""
+    with measured_sections():
+        yield
+
+
+def round_receipt() -> Dict[str, Any]:
+    """The open round window's counted ``work`` for its ``llm_round``, or nothing outside one."""
+    spans = section_spans()
+    return {"work": spans["work"]} if spans else {}
 
 
 def retain_cancelled_response(request, response, capture, *, control_reason: str = "caller_cancelled") -> dict:

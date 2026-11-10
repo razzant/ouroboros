@@ -16,7 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import logging
 
 from ouroboros import model_concurrency, working_checkpoint
-from ouroboros.llm_observability import persist_observed_call, emit_main_call_state as _emit_main_llm_call_state
+from ouroboros.llm_observability import persist_observed_call, round_receipt, emit_main_call_state as _emit_main_llm_call_state
 from ouroboros.config import get_finalization_grace_sec, NETWORK_WAIT_BACKOFF_MAX_SEC  # noqa: F401 - legacy monkeypatch seam
 from ouroboros.deadline_utils import (
     owner_deadline_exhausted,
@@ -1542,6 +1542,7 @@ def call_llm_with_retry(
                 "ledger_attempt_ids": ledger_ids, "physical_attempt_id": ledger_ids[-1] if ledger_ids else None,
                 "request_ref": request_ref.get("manifest_ref") if request_ref else None,
                 "response_ref": response_ref.get("manifest_ref") if response_ref else None,
+                **round_receipt(),  # what the host did to prepare this round, counted (``llm_observability``)
             }
             _emit_live_log(event_queue, {
                 "type": "llm_round_finished", "task_id": task_id, "task_type": task_type, **call_ids,

@@ -375,7 +375,7 @@ def test_dispatch_persists_once_without_a_readback_projection(data_root, monkeyp
     real_redact = observability.redact_projection
     monkeypatch.setattr(
         observability, "redact_projection",
-        lambda value: redact_calls.append(1) or real_redact(value),
+        lambda value, **kwargs: redact_calls.append(1) or real_redact(value, **kwargs),
     )
     _dispatch(data_root, "task-cost-shape")
     # 2 for measurement (raw + context), 2 for the seam's identity re-check;
