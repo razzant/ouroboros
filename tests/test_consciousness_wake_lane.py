@@ -601,7 +601,7 @@ def test_consciousness_status_answers_the_caller_only_with_sourced_persisted_fac
     def unpublished():
         raise AssertionError("status must not be published")
 
-    sent, clock = [], SimpleNamespace(start=lambda: "enabled", stop=lambda: "disabled", status_snapshot=unpublished)
+    sent, clock = [], SimpleNamespace(start=lambda source: "enabled", stop=lambda source: "disabled", status_snapshot=unpublished)
     supervisor = SimpleNamespace(consciousness=clock, load_state=lambda: {"owner_chat_id": 5},
                                  send_with_budget=lambda chat, text, **kw: sent.append((chat, text, kw)))
     events_runtime_controls._handle_toggle_consciousness({"action": "status"}, supervisor)

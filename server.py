@@ -460,11 +460,11 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
             parts = lowered.split()
             action = parts[1] if len(parts) > 1 else "status"
             if action in ("start", "on", "1", "stop", "off", "0"):
-                from supervisor.events_runtime_controls import persist_consciousness_choice
+                from ouroboros.consciousness import OWNER_STOP
 
-                on = action in ("start", "on", "1")
-                result = ctx.consciousness.start() if on else ctx.consciousness.stop()
-                reply(f"🧠 {result}{persist_consciousness_choice(on)}")
+                on = action in ("start", "on", "1")  # the owner's door: app, Telegram and onboarding all send /bg
+                result = ctx.consciousness.start() if on else ctx.consciousness.stop(source=OWNER_STOP)
+                reply(f"🧠 {result}")
             else:
                 from supervisor.state import control_value
 

@@ -308,7 +308,7 @@ def test_command_voice_survives_live_delivery_and_history(tmp_path, monkeypatch)
     bridge._broadcast_fn = live.append
     ctx = Ctx({"owner_id": 1, "owner_chat_id": 1, "bg_consciousness_enabled": True})
     ctx.consciousness = SimpleNamespace(start=lambda: "Background consciousness enabled",
-                                        stop=lambda: "Background consciousness disabled")
+                                        stop=lambda source="": "Background consciousness disabled")
     ctx.send_with_budget = message_bus.send_with_budget
     ctx.WORKERS, ctx.PENDING, ctx.RUNNING = {}, [], {}
     monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
