@@ -6,14 +6,24 @@ import pytest
 from ouroboros import chronicle_store
 from ouroboros.chronicle_store import ChronicleStore, capture
 from ouroboros.context_timing import measured_sections, section_spans
+from ouroboros import chat_chain
 from ouroboros import memory_view as mv
-from tests.test_common_story import _rooms, _snapshot
+from ouroboros.tools.chronicle import page_covers
+from tests import _memory_inventory_shared as shared
+
+
+MAIN = {"id": "turn0001", "chat_id": 1}
 
 
 @pytest.fixture
 def root(tmp_path):
-    """The shared small world: rooms with open rows and a few published pages."""
-    _rooms(tmp_path)
+    """The shared small world: rooms with open rows and two published pages."""
+    rooms = shared.world(tmp_path)
+    addresses = {pos: address for address, _row, pos in chat_chain.iter_rows(tmp_path)}
+    store = ChronicleStore(tmp_path)
+    for room, first, last in ((str(rooms["alpha"]), 13, 13), ("1", 10, 11)):
+        covers = page_covers(tmp_path, room, from_addr=addresses[first], to_addr=addresses[last])["covers"]
+        assert store.publish_page(room_id=room, text=f"Page {room} {first}-{last}.", covers=covers, author=shared.MIND).ok
     return tmp_path
 
 
@@ -81,5 +91,5 @@ def test_a_capture_s_readers_never_change_what_a_record_holds_inside(root, monke
         return parsed
 
     monkeypatch.setattr(chronicle_store._Snapshot, "body", frozen)
-    snapshot = _snapshot(root)
+    snapshot = mv.capture_memory_view(root, MAIN, mv.view_spec_for_task(MAIN, root))
     assert mv.render_story(snapshot) and mv.render_room(snapshot)
