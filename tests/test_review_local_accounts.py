@@ -35,10 +35,13 @@ def apply_local(ctx, messages, note, *, remove=(), all_units=False, fit_check=No
     messages = deepcopy(messages)
     ctx.messages, ctx.active_context_mode = messages, "max"
     record_context_view(ctx, messages, [])
-    keep = [u.unit_id for u in context_units(messages, scope="dialogue") if u.unit_id not in remove]
+    units = context_units(messages, scope="dialogue")
+    keep = [u.unit_id for u in units if u.unit_id not in remove]
     args = {"working_note": note, **options}
     if remove or all_units:
         args["keep_unit_ids"] = [] if all_units else keep
+    if named := [u.unit_id for u in units if u.unit_id in remove and unit_kind(messages, u) == "capsule"]:
+        args["replace_note_ids"] = named  # an earlier note leaves only when named
     response = _compact_context(ctx, **args)
     assert "requested" in response, response
     messages.append(call("compact_context", args, "compact-local"))

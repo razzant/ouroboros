@@ -492,7 +492,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         }
 
     def _apply_working_view(self, messages: list, schemas: list, round_idx: int) -> bool:
-        from ouroboros.context_budget import ContextReclaimRequest
+        from ouroboros.context_budget import ContextReclaimRequest, authored_view_fields
         from ouroboros.context_compaction import compact_tool_history_llm, context_reclaim_transcript_sha256
 
         pending = getattr(self._inspection_ctx, "_pending_compaction", None)
@@ -512,7 +512,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
             route_fp=f"reviewer:{self.assignment.slot.slot_id}", round_id=str(round_idx),
             transcript_sha256=context_reclaim_transcript_sha256(messages),
             measurement_basis="cold_estimate", measurement_density=1.0, reclaim_goal_tokens=0,
-            **{key: pending[key] for key in ("working_note", "expected_view_revision", "keep_unit_ids", "restore_unit_refs", "schema_names")})
+            **authored_view_fields(pending))
         def fit(candidate, selected_tools):
             return {"accepted": True, "input_chars": _wire_size(candidate, selected_tools),
                     "output_reserve_tokens": int(self.assignment.request.max_tokens or self.assignment.slot.max_tokens),
@@ -530,7 +530,9 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
             self._view_changes += 1
         if receipt.status != "no_op":
             notice = {"role": "user", "content": json.dumps({"context_view_status": receipt.status,
-                       "receipt_source": ref, "reclaimed_tokens": receipt.reclaimed_tokens}, ensure_ascii=False)}
+                       "receipt_source": ref, "reclaimed_tokens": receipt.reclaimed_tokens,
+                       **({"replaced_notes": receipt.replaced_notes} if receipt.replaced_notes else {})},
+                       ensure_ascii=False)}
             messages.append(notice)
         return receipt.status == "applied"
 

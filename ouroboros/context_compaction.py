@@ -48,6 +48,9 @@ _CAPSULE_CONTRACT_DIGEST = "98d43b93d717fc52dbc84e872923b2469de2b54ead0527189160
 _LEGACY_CAPSULE_CONTRACT_DIGEST = "6bd892aa2479a9c8b65036b0c18e53ccc076cb5bf5a0d87e351ea38182fa3402"
 _MIN_CAPSULE_BYTES = 512
 _SHA256_HEX = frozenset("0123456789abcdef")
+_ACTOR_NOTE_LABEL = "Actor-authored working view; exact source retained by checkpoint"
+# A receipt names a replaced note by the head of its first line; the whole note stays in the checkpoint.
+_REPLACED_NOTE_LINE_CHARS = 240
 
 
 def _canonical_json(value: Any) -> str:
@@ -589,7 +592,7 @@ def _capsule_message(
             "checkpoint_ref": dict(checkpoint_ref), "unit_id": unit.unit_id, "raw_sha256": unit.raw_sha256}
         text = f"[{label}]\nSource reference: {_canonical_json(address)}\n" + str(body or "").strip()
     else:
-        label = label or "Actor-authored working view; exact source retained by checkpoint"
+        label = label or _ACTOR_NOTE_LABEL
         text = f"[{label}]\n" + str(body or "").strip()
     source_hashes = _unique_strings([
         *unit.lineage_hashes, unit.raw_sha256, unit.source_sha256,
@@ -721,6 +724,12 @@ def _restored_source_views(refs: Sequence[Mapping[str, Any]], *, drive_root: pat
     return messages, capsule_refs
 
 
+def _first_line(capsule: Mapping[str, Any]) -> str:
+    """How a receipt names a replaced note: the first line of its text after the label, its head when longer."""
+    line = str(capsule["content"][0].get("text") or "").partition("\n")[2].partition("\n")[0]
+    return line if len(line) <= _REPLACED_NOTE_LINE_CHARS else line[:_REPLACED_NOTE_LINE_CHARS] + "…"
+
+
 def _authored_view(
     messages: list, request: ContextReclaimRequest, *, observed_messages: Optional[Sequence[Mapping[str, Any]]],
     observed_tool_schemas: Optional[Sequence[Mapping[str, Any]]],
@@ -730,7 +739,8 @@ def _authored_view(
 ) -> Tuple[list, ContextReclaimReceipt]:
     """Materialize one actor's selection through the existing unit/checkpoint/capsule engine
     over the dialogue scope (tool units, capsules, the actor's own completed replies, host
-    prose). Rows typed as people's words (``owner_protected_unit_ids``) stay whole."""
+    prose). Rows typed as people's words (``owner_protected_unit_ids``) stay whole; earlier
+    notes stay unless ``replace_note_ids`` names them."""
     restore_refs = []
     for ref in request.restore_unit_refs:
         checkpoint = ref.get("checkpoint_ref") if isinstance(ref, Mapping) else None
@@ -758,9 +768,15 @@ def _authored_view(
                                   fit={"accepted": False, "reason": "fit_callback_missing"}, **facts)
     units = context_units(observed, scope="dialogue", trace_refs_by_tool_call_id=trace_refs,
                           measurement_density=request.measurement_density)
+    # Earlier notes (capsule units, whatever their authorship) stay unless the mind names them for
+    # replacement: no keep selection, explicit or derived, replaces one, nor may an explicit keep name one too.
+    notes = {u.unit_id for u in units if unit_kind(observed, u) == "capsule"}
+    named = set(request.replace_note_ids)
     keep = set(request.keep_unit_ids) if request.keep_unit_ids is not None else {u.unit_id for u in units}
-    if not keep <= {u.unit_id for u in units}:
+    if (not keep <= {u.unit_id for u in units} or not named <= notes
+            or request.keep_unit_ids is not None and keep & named):
         return messages, _receipt("binding_mismatch", before_sha=before_sha, **facts)
+    keep = (keep | notes) - named
     protected = owner_protected_unit_ids(observed, units)
     authored = [u for u in units if (_capsule_metadata(observed[u.start])[1] or {}).get("authorship") == "actor"]
     removed = [u for u in units if u.unit_id not in keep and u.unit_id not in protected]
@@ -782,7 +798,7 @@ def _authored_view(
     no_op = messages_unchanged and schemas_unchanged
     if messages_unchanged:
         facts["retained_unit_ids"] = tuple(u.unit_id for u in units)
-    checkpoint_ref, selection, capsule_refs = None, None, []
+    checkpoint_ref, selection, capsule_refs, replaced_notes = None, None, [], None
     if same_note is not None and messages_unchanged:
         # A transfer-only request names this exact observed account, never the
         # first of several notes. No new source or actor text is manufactured.
@@ -817,8 +833,18 @@ def _authored_view(
             combined = replace(combined, unit_id=f"view:{fingerprint}", generation=max((u.generation for u in removed), default=0),
                                lineage_hashes=_unique_strings([h for u in removed for h in u.lineage_hashes]),
                                source_refs=source_refs)
-            note, note_ref = _capsule_message(combined, request.working_note,
-                                             [_part(combined.unit_id, combined.source_text)], checkpoint_ref, request)
+            replaced, label = [u for u in removed if u.unit_id in named], None
+            if replaced:
+                # The new note itself keeps the restorable addresses of the notes it replaces, since a later fold may
+                # take this receipt; the receipt also names their first lines. Both point into this fold's checkpoint.
+                address = {"checkpoint_ref": {key: checkpoint_ref[key] for key in ("kind", "root", "path", "size", "sha256")
+                                              if key in checkpoint_ref},
+                           "notes": [{"unit_id": u.unit_id, "raw_sha256": u.raw_sha256} for u in replaced]}
+                label = f"{_ACTOR_NOTE_LABEL}; replaced notes: {_canonical_json(address)}"
+                replaced_notes = {**address, "notes": [{**entry, "first_line": _first_line(observed[u.start])}
+                                                       for entry, u in zip(address["notes"], replaced)]}
+            note, note_ref = _capsule_message(combined, request.working_note, [_part(combined.unit_id, combined.source_text)],
+                                             checkpoint_ref, request, label=label)
             note["role"] = "assistant"
             replacements = {u.start: (u.end, [], []) for u in removed}
             at = removed[0].start if removed else len(observed)
@@ -844,7 +870,7 @@ def _authored_view(
     return candidate, _receipt("no_op" if no_op else "applied", before_sha=before_sha, after_sha=after_sha,
                                selection=selection, checkpoint_ref=checkpoint_ref, capsule_refs=capsule_refs,
                                reclaimed_tokens=reclaimed, goal_reached=reclaimed >= request.reclaim_goal_tokens,
-                               **facts)
+                               replaced_notes=replaced_notes, **facts)
 
 
 # Emergency representation shares this materializer but never writes a summary.
@@ -872,7 +898,8 @@ def compact_tool_history_llm(
     observed snapshot/selection binds the view, the non-generating ``fit_candidate(messages,
     tools)`` must accept the complete candidate, and missing fit evidence leaves current
     messages intact. Supply observed schemas to prove a whole-view no-op when selecting
-    schemas. Rows typed as people's words stay whole.
+    schemas. Rows typed as people's words stay whole, and so do earlier notes the request
+    does not name for replacement.
     """
     before_sha = context_reclaim_transcript_sha256(messages)
     if str(request.transcript_sha256 or "") != before_sha:
