@@ -120,6 +120,20 @@ def test_the_collector_rests_for_a_block_and_resumes_after_it():
         gc.enable()
 
 
+def test_overlapping_builds_keep_the_collector_at_rest_until_the_last_one_ends():
+    """Two builds of one process overlap (the server's inline turns): the first to end does not wake the collector under
+    the other, and the last one out restores it, whichever order they end in."""
+    assert gc.isenabled()
+    for first_out, last_out in ((0, 1), (1, 0)):
+        builds = collector_rests(), collector_rests()
+        builds[0].__enter__()
+        builds[1].__enter__()
+        builds[first_out].__exit__(None, None, None)
+        assert not gc.isenabled()
+        builds[last_out].__exit__(None, None, None)
+        assert gc.isenabled()
+
+
 @pytest.mark.parametrize("realtime", [False, True])
 def test_the_agent_measures_its_context_build(tmp_path, monkeypatch, realtime):
     """The agent opens the measured scope around its context build, so the receipt can carry the spans."""

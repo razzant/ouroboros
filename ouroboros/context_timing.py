@@ -24,6 +24,7 @@ import contextlib
 import contextvars
 import functools
 import gc
+import threading
 import time
 from typing import Any, Callable, Dict, Hashable, Iterator, List, Optional, Set, Tuple
 
@@ -84,17 +85,27 @@ def measured_sections() -> Iterator[None]:
         _SPANS.reset(token)
 
 
+_REST = threading.Lock()
+_rest = [0, False]  # context builds resting the collector now; whether it ran when the first of them began
+
+
 @contextlib.contextmanager
 def collector_rests() -> Iterator[None]:
     """The cyclic collector waits while a context build runs and resumes in ``finally``: the build allocates millions of
-    short-lived objects and creates no cycles, so each collection only walks the process's long-lived heap again."""
-    resume = gc.isenabled()
-    gc.disable()
+    short-lived objects and creates no cycles, so each collection only walks the process's long-lived heap again.
+    Builds overlap in one process (the server's inline turns), so the rest is counted: the last one out restores it."""
+    with _REST:
+        _rest[0] += 1
+        if _rest[0] == 1:
+            _rest[1] = gc.isenabled()
+            gc.disable()
     try:
         yield
     finally:
-        if resume:
-            gc.enable()
+        with _REST:
+            _rest[0] -= 1
+            if not _rest[0] and _rest[1]:
+                gc.enable()
 
 
 def section_spans() -> Dict[str, Dict[str, int]]:
