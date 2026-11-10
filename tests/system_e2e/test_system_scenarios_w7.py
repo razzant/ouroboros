@@ -13,8 +13,8 @@ does with the affordance is a separate, parent-owned live probe.
   native children on their own stub slots. Each announces itself to P (child → parent
   `peer_task` contribution), P hands A its sibling's id (ancestor steering), A opens
   with an interim position to B, B answers A, A replies, and each publishes ONE
-  selected original to P. Every participant waits with `await_messages` (worker slot
-  held, no model rounds) and ends its participation with a `FINAL:` answer only AFTER
+  selected original to P. Every participant waits with `await_messages` (a sleep: no
+  slot held, no model rounds, mail wakes it) and ends its participation with a `FINAL:` answer only AFTER
   the reply it waited for landed — a contribution is not the end of participation.
   P then plans with `plan_task` (one revision, one ask of the council) attaching
   `task:<A>`/`task:<B>` evidence: every participant's delivery and the durable plan
@@ -540,16 +540,16 @@ def test_s28_native_peers_exchange_addressed_turns_and_the_planner_receives_sele
                     assert f"[Message from my human]\n{original}" not in text
                     assert not re.search(r"\[Message from ancestor task [0-9a-f]{8}\]\n" + re.escape(original), text)
 
-            # (c) await_messages rows: the wait held the slot and returned typed.
-            for drive in (a_drive, b_drive, p_drive):
+            # (c) await_messages with no named mode SLEEPS (owner Q2 = A): each row is the sleep's own receipt, armed
+            # or answered at once by a source already ready, never a held slot; and mail, not only the clock, ended a
+            # wait of every participant (answered at once by its mail, or waking it at a later request).
+            for drive, text in ((a_drive, a_text), (b_drive, b_text), (p_drive, p_text)):
                 rows = _tool_rows(drive, "await_messages")
                 assert rows, f"no await_messages call in {drive.data_root}"
-                assert any(json.loads(str(row.get("result_preview") or "{}")) .get("reason") ==
-                           "owner_mailbox_pending" for row in rows), "only timeout polling, no mailbox wake"
-                for row in rows:
-                    out = json.loads(str(row.get("result_preview") or ""))
-                    assert out["reason"] in {"owner_mailbox_pending", "timeout"} and out["slot"] == "held", out
-                    assert out["window_sec"] <= _AWAIT_SEC and out["requested_sec"] == _AWAIT_SEC, out
+                outs = [json.loads(str(row.get("result_preview") or "{}")) for row in rows]
+                assert all(out.get("reason") in {"sleep_armed", "ready"} and "slot" not in out for out in outs), outs
+                assert (any(str(out.get("woke_by") or "").startswith("mail:") for out in outs)
+                        or "were woken by mail from" in text), "only the clock ended its waits, no mail"
 
             # (d)+(e) a contribution is not the end of participation: the awaited reply was
             # injected (server-level event carrying the RELATION) BEFORE the recipient's terminal.
