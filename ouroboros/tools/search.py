@@ -6,6 +6,7 @@ import json
 import logging
 import pathlib
 import time
+import uuid
 from dataclasses import replace
 from typing import Any, Dict, List, Optional
 
@@ -28,11 +29,17 @@ from ouroboros.config import runtime_setting
 
 log = logging.getLogger(__name__)
 
-from ouroboros.search_routes import SEARCH_MODELS, named_connection_routes, resolve_web_search_route
+from ouroboros.search_routes import SEARCH_MODELS, _MODELLESS_SOURCES, named_connection_routes, resolve_web_search_route
+from ouroboros.external_charge import record_external_charge
 
 DEFAULT_SEARCH_MODEL = SEARCH_MODELS["openai"]
 DEFAULT_SEARCH_CONTEXT_SIZE = "medium"
 DEFAULT_REASONING_EFFORT = "high"
+
+#: Published price of ONE successful DeepSeek Search request (api-docs.deepseek.com/guides/search,
+#: read 2026-10-29): $0.75 per 1000 requests, independent of how many results one returns. The vendor
+#: bills per request, so the leg never enters the token-priced physical-attempt ledger on its own.
+DEEPSEEK_SEARCH_USD_PER_REQUEST = 0.00075
 
 
 def _wrapped_provider_error(provider: str, exc: Exception) -> RuntimeError:
@@ -289,13 +296,14 @@ def _web_search_outer_timeout_sec() -> int:
         attempts = 2
     elif pinned in {"openrouter", "anthropic"}:
         attempts = 1
-    elif pinned == "ddgs":
+    elif pinned in _MODELLESS_SOURCES:
         attempts = 0
     else:
         backends = set(_available_web_search_backends())
         attempts = 2 * ("openai_responses" in backends)
         attempts += "openrouter_server_tool" in backends
         attempts += "anthropic_server_tool" in backends
+        attempts += "deepseek_search_tool" in backends
     return max(
         600,
         int(max(2, attempts) * get_websearch_timeout_sec() + get_finalization_grace_sec()),
@@ -518,6 +526,103 @@ def _web_search_ddgs(query: str, *, _max_attempts: int = 3) -> str:
             break
     detail = sanitize_tool_result_for_log(str(last_exc))[:500]
     raise RuntimeError(f"DDGS web search failed ({type(last_exc).__name__}): {detail}") from last_exc
+
+
+def _book_deepseek_search_request(ctx: ToolContext) -> Dict[str, Any]:
+    """Book the leg's per-request price as a priced ESTIMATE, or say plainly that it could not be booked.
+
+    A per-request HTTP call is outside the physical-attempt ledger, so without this row the leg reads as
+    free. ``external_charge.record_external_charge`` owns the row (priced, estimated, never final -- a
+    published tariff is not a provider receipt); a ledger fault is DISCLOSED in the result rather than
+    turned into a tool error for a search the provider already answered.
+    """
+    try:
+        scope = _accounting_scope(ctx, "web_search.deepseek")
+        record_external_charge(
+            f"deepseek-search:{uuid.uuid4().hex}",
+            cost_usd=DEEPSEEK_SEARCH_USD_PER_REQUEST,
+            drive_root=scope.drive_root or None,
+            provider="deepseek", model="deepseek-search",
+            task_id=scope.task_id, root_task_id=scope.root_task_id,
+            parent_task_id=scope.parent_task_id,
+            category=scope.category, source=scope.source,
+        )
+    except Exception as exc:  # not swallowed: named in the result the model reads
+        log.warning("Failed to book the DeepSeek search request price", exc_info=True)
+        return {"usd": DEEPSEEK_SEARCH_USD_PER_REQUEST, "basis": "per_successful_request",
+                "final": False, "recorded": False, "error": type(exc).__name__}
+    return {"usd": DEEPSEEK_SEARCH_USD_PER_REQUEST, "basis": "per_successful_request",
+            "final": False, "recorded": True}
+
+
+def _web_search_deepseek(ctx: ToolContext, query: str, connection: str = "") -> str:
+    """DeepSeek's own Search API: plain JSON, billed per successful request, never per token.
+
+    It follows the free ddgs leg. ``need_content`` stays false on purpose: page content runs to
+    megabytes and this leg contributes a summary lead, not a fetched corpus.
+    """
+    import urllib.error
+    import urllib.request
+
+    from ouroboros.llm_routing import DEEPSEEK_BASE_URL
+
+    if _web_search_deadline_exhausted(ctx):
+        return _web_search_deadline_result()
+    api_key = _search_key("deepseek", connection)
+    if not api_key:
+        raise RuntimeError(f"DeepSeek connection {connection} is not configured" if connection
+                           else "DEEPSEEK_API_KEY is not configured")
+    base = str(DEEPSEEK_BASE_URL).rstrip("/")
+    # One documented endpoint: `{DEEPSEEK_BASE_URL}/tools/search` (api-docs.deepseek.com/guides/search).
+    url = f"{base}/tools/search"
+    # The endpoint takes 1..128 characters of query and ignores unknown fields.
+    body = json.dumps({"query": query.strip()[:128], "count": 5, "need_content": False}).encode("utf-8")
+    request = urllib.request.Request(url, data=body, method="POST", headers={
+        "Authorization": f"Bearer {api_key}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=_web_search_transport_timeout(ctx)) as response:
+            raw = response.read()
+    except urllib.error.HTTPError as exc:
+        detail = ""
+        try:  # a refusal whose body cannot be read is still a typed refusal
+            detail = exc.read().decode("utf-8", "replace")
+        except Exception:
+            pass
+        raise RuntimeError(f"DeepSeek web search failed (HTTP {exc.code}): "
+                           f"{sanitize_tool_result_for_log(detail)[:300]}") from exc
+    # Delivered and answered: the per-request price is owed from here, before the body is parsed,
+    # so a malformed payload cannot lose the booking of a request the provider already billed.
+    charge = _book_deepseek_search_request(ctx)
+    try:
+        payload = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError as exc:  # billed and unreadable: the leg fails, the price stays booked
+        raise RuntimeError(f"DeepSeek web search returned an unreadable body ({type(exc).__name__})") from exc
+    sources: List[Dict[str, Any]] = []
+    answers: List[str] = []
+    for item in (payload.get("results") or []) if isinstance(payload, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        summary = str(item.get("summary") or item.get("snippet") or "")
+        source: Dict[str, Any] = {
+            "url": sanitize_tool_result_for_log(str(item.get("url") or "")),
+            "title": sanitize_tool_result_for_log(str(item.get("title") or "")),
+            "snippet": sanitize_tool_result_for_log(summary),
+        }
+        for key in ("date", "authority", "rerank_score", "site_name"):
+            if item.get(key) is not None:
+                source[key] = item[key]
+        sources.append(source)
+        if summary:
+            answers.append(f"- {source['title']}: {summary} ({source['url']})")
+    return json.dumps({
+        "answer": "\n".join(answers) or "(no answer)",
+        "answer_type": "summary",
+        "sources": sources,
+        "backend": "deepseek",
+        # The leg's own price, disclosed next to the result it bought: an estimated row in the ledger
+        # (a published tariff, not a provider receipt) and never silently absent.
+        "cost": charge,
+    }, ensure_ascii=False, indent=2)
 
 
 def _is_timeout_error(exc: Exception) -> bool:
@@ -909,7 +1014,7 @@ def _web_search(ctx: ToolContext, query: str, model: str = "", search_context_si
                     raw = _web_search_anthropic(ctx, query, model="anthropic::" + leg["model"], processing_preference=preference,
                                                 **named)
                 else:
-                    raw = _web_search_ddgs(query)
+                    raw = _web_search_ddgs(query) if leg["source"] == "ddgs" else _web_search_deepseek(ctx, query, **named)
             result = json.loads(raw)
         except UsageAccountingError:
             raise
@@ -954,7 +1059,8 @@ def _web_search(ctx: ToolContext, query: str, model: str = "", search_context_si
     return text
 
 
-_SOURCE_LABELS = {"openai": "OpenAI", "openrouter": "OpenRouter", "anthropic": "Anthropic", "ddgs": "DDGS"}
+_SOURCE_LABELS = {"openai": "OpenAI", "openrouter": "OpenRouter", "anthropic": "Anthropic",
+                  "ddgs": "DDGS", "deepseek": "DeepSeek"}
 
 
 def _search_progress(ctx: ToolContext, text: str) -> None:
@@ -977,7 +1083,7 @@ def get_tools() -> List[ToolEntry]:
             ),
             "parameters": {"type": "object", "properties": {
                 "query": {"type": "string", "description": "A single focused search query (split compound asks into separate calls)."},
-                "model": {"type": "string", "description": "This call's model: native id or routed source[@connection]::model; must agree with a pinned Source (ddgs takes none). Omit for the configured one."},
+                "model": {"type": "string", "description": "This call's model: native id or routed source[@connection]::model; must agree with a pinned Source (ddgs and DeepSeek take none). Omit for the configured one."},
                 "search_context_size": {"type": "string", "enum": ["low", "medium", "high"],
                                         "description": f"How much context to fetch (default: {DEFAULT_SEARCH_CONTEXT_SIZE})"},
                 "reasoning_effort": {"type": "string", "enum": ["low", "medium", "high"],

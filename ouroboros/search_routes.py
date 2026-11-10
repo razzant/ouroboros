@@ -19,8 +19,15 @@ from ouroboros.provider_models import legacy_openai_base
 # Anthropic lists claude-sonnet-5-5 (platform.claude.com/docs/en/about-claude/models/overview), and its
 # web_search_20250305 tool (llm_anthropic.py) serves every model. If stale: a retired id fails its own
 # leg loudly (Auto then tries the next source); a superseded one keeps answering until a release moves it.
-SEARCH_MODELS = {"openai": "gpt-5.5", "openrouter": "openai/gpt-5.5", "anthropic": "claude-sonnet-5-5", "ddgs": ""}
-SEARCH_BACKENDS = {"openai": "openai_responses", "openrouter": "openrouter_server_tool", "anthropic": "anthropic_server_tool", "ddgs": "ddgs"}
+SEARCH_MODELS = {"openai": "gpt-5.5", "openrouter": "openai/gpt-5.5", "anthropic": "claude-sonnet-5-5",
+                 "ddgs": "", "deepseek": ""}
+SEARCH_BACKENDS = {"openai": "openai_responses", "openrouter": "openrouter_server_tool",
+                   "anthropic": "anthropic_server_tool", "ddgs": "ddgs", "deepseek": "deepseek_search_tool"}
+
+# Legs that fetch with no model of their own: ddgs is a keyless scraper, DeepSeek's own Search API is billed
+# per request. A saved model of any route says nothing about them, so it must neither ride along nor be
+# reported as the model that answered; a call that names a model may not fall back to them.
+_MODELLESS_SOURCES = frozenset({"ddgs", "deepseek"})
 
 
 def resolve_web_search_route(*, backend=None, model=None, settings=None, per_call=False) -> dict:
@@ -41,7 +48,7 @@ def resolve_web_search_route(*, backend=None, model=None, settings=None, per_cal
     result = {"scope": "builtin_web_search", "source": source, "model": selected, "legs": [], "unavailable": [],
               "note": "Applies only to built-in web_search; skills, MCP and browser tools remain independent choices."
                       + (" This call named its model: only these legs send it (a routed model or named connection has one),"
-                         " and no other model or ddgs substitutes." if strict else "")}
+                         " and no other model or a model-less leg (ddgs, DeepSeek) substitutes." if strict else "")}
     if source not in {"auto", *SEARCH_MODELS}:
         return {**result, "error": "Unknown web search source"}
     from ouroboros.provider_models import parse_model_route
@@ -56,10 +63,11 @@ def resolve_web_search_route(*, backend=None, model=None, settings=None, per_cal
                    if sep and (prefix not in {"openai", "anthropic", "openrouter"} or not native or not parsed.valid) else
                    "Direct search sources require a native model id"
                    if sep and prefix in {"openai", "anthropic"} and "/" in native else "")
-    if source == "ddgs":
+    if source in _MODELLESS_SOURCES:
         if strict:  # a named model is never silently dropped
-            return {**result, "error": "The ddgs source takes no model; omit model to search with ddgs"}
-        candidates = [("ddgs", "")]  # ddgs takes no model: a saved model of any route is irrelevant here
+            return {**result, "error": f"The {source} source takes no model; omit model to search with {source}"}
+        # No model to send: a saved model of any route is irrelevant here.
+        candidates = [(source, "")]
     elif unsupported and (strict or source != "auto"):
         return {**result, "error": unsupported}  # a strict source or a named model never substitutes another
     elif source == "auto":
@@ -67,7 +75,7 @@ def resolve_web_search_route(*, backend=None, model=None, settings=None, per_cal
             # Auto keeps the legs that need no model and says the selection is not applied.
             result["unapplied_model"] = selected
             result["note"] += f" {unsupported}, so Auto does not apply the saved model and uses the recommended models."
-            candidates = [("anthropic", SEARCH_MODELS["anthropic"]), ("ddgs", "")]
+            candidates = [("anthropic", SEARCH_MODELS["anthropic"]), ("ddgs", ""), ("deepseek", "")]
         elif not selected:
             candidates = list(SEARCH_MODELS.items())
         else:
@@ -77,14 +85,15 @@ def resolve_web_search_route(*, backend=None, model=None, settings=None, per_cal
                     native = f"openai/{native}"
                 own = ([("openai", native), ("openrouter", f"openai/{native}")] if prefix == "openai" and not strict
                        else [(prefix, native)])  # a named route or connection is the call's whole choice
-                rest = [("ddgs", "")]
+                rest = [("ddgs", ""), ("deepseek", "")]
             elif "/" in selected:
                 # A legacy anthropic/<model> keeps the owner's model on the direct Anthropic leg too.
                 own = [("openrouter", selected)] + ([("anthropic", legacy_anthropic)] if legacy_anthropic else [])
-                rest = ([] if legacy_anthropic else [("anthropic", SEARCH_MODELS["anthropic"])]) + [("ddgs", "")]
+                rest = (([] if legacy_anthropic else [("anthropic", SEARCH_MODELS["anthropic"])])
+                        + [("ddgs", ""), ("deepseek", "")])
             else:
                 own = [("openai", selected), ("openrouter", f"openai/{selected}")]
-                rest = [("anthropic", SEARCH_MODELS["anthropic"]), ("ddgs", "")]
+                rest = [("anthropic", SEARCH_MODELS["anthropic"]), ("ddgs", ""), ("deepseek", "")]
             candidates = own if strict else own + rest
     else:
         if sep and prefix != source:
@@ -108,14 +117,15 @@ def resolve_web_search_route(*, backend=None, model=None, settings=None, per_cal
         candidates = [(source, chosen or SEARCH_MODELS[source])]
     for name, wire_model in candidates:
         reason, leg_connection = "", connection if name == prefix else ""
+        # ddgs alone needs no key; DeepSeek's Search API is paid and authenticated, so its leg keeps the check.
         if name != "ddgs" and not _leg_configured(name, leg_connection, settings):
             reason = "no_credentials"
         elif name == "openai" and not leg_connection and legacy_openai_base(settings):
             reason = "legacy_openai_base_url"  # Legacy compatible credentials are not official Responses access.
         elif name in _SDK_PACKAGES and not _package_discoverable(_SDK_PACKAGES[name]):
             reason = "package_missing"  # discoverable is not proof of a working import; dispatch still reports that
-        explicit_model = (bool(selected) and name != "ddgs" and not result.get("ignored_legacy_model")
-                          and not result.get("unapplied_model"))
+        explicit_model = (bool(selected) and name not in _MODELLESS_SOURCES
+                          and not result.get("ignored_legacy_model") and not result.get("unapplied_model"))
         if source == "auto" and name == "anthropic" and prefix != "anthropic" and not legacy_anthropic:
             explicit_model = False
         leg = {"source": name, "backend": SEARCH_BACKENDS[name], "model": wire_model,
@@ -133,7 +143,8 @@ def named_connection_routes() -> list[dict]:
     from ouroboros.provider_models import connection_id
 
     return [resolve_web_search_route(model=f"{connection_id(kind, name)}::{SEARCH_MODELS[kind]}", per_call=True)
-            for kind, name in configured_connections() if name and kind in SEARCH_MODELS]
+            for kind, name in configured_connections()
+            if name and kind in SEARCH_MODELS and kind not in _MODELLESS_SOURCES]
 
 
 def _leg_configured(source: str, connection: str, settings) -> bool:
