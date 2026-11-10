@@ -12,13 +12,13 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D02 | LLM client, routing & providers | 48 | 0 |
 | D03 | Context assembly, fit & compaction | 34 | 0 |
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
-| D05 | Tool surfaces: files, code, shell, media, external | 54 | 0 |
+| D05 | Tool surfaces: files, code, shell, media, external | 55 | 0 |
 | D06 | Review stack | 99 | 0 |
-| D07 | Delegation, subagents & Claudexor | 111 | 0 |
+| D07 | Delegation, subagents & Claudexor | 112 | 0 |
 | D08 | Supervisor: queue, workers, events & runtime control | 76 | 0 |
 | D09 | Cancellation, owner control & process custody | 27 | 0 |
 | D10 | Git, update & release machinery | 40 | 0 |
-| D11 | Gateway, server & Web UI | 115 | 0 |
+| D11 | Gateway, server & Web UI | 116 | 0 |
 | D12 | Settings & configuration | 28 | 0 |
 | D13 | Safety, guards & runtime mode | 12 | 0 |
 | D14 | Skills & extensions | 73 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 40 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 26 | 0 |
-| **total** | | **1012** | **0** |
+| **total** | | **1015** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -425,6 +425,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/tools/edit_ops.py`
 - `ouroboros/tools/health.py`
 - `ouroboros/tools/imagegen.py`
+- `ouroboros/tools/kept_service_outputs.py`
 - `ouroboros/tools/mcp_sign_in.py`
 - `ouroboros/tools/media.py`
 - `ouroboros/tools/owner_delivery.py`
@@ -617,6 +618,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/gateways/claudexor_uploads.py`
 - `ouroboros/genesis_project.py`
 - `ouroboros/harness_maintenance.py`
+- `ouroboros/historical_retirement.py`
 - `ouroboros/nanny_pacing.py`
 - `ouroboros/owner_keep.py`
 - `ouroboros/owner_stop_receipt.py`
@@ -849,6 +851,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/gateway/host_notify.py`
 - `ouroboros/gateway/host_service.py`
 - `ouroboros/gateway/host_service_places.py`
+- `ouroboros/gateway/kept_services.py`
 - `ouroboros/gateway/logs.py`
 - `ouroboros/gateway/main_decisions.py`
 - `ouroboros/gateway/management_contracts.py`

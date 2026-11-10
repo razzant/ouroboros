@@ -751,7 +751,7 @@ def observe_owned_processes(targets: Iterable[Mapping[str, Any]], *,
     ONE census.
 
     The same targets and reach as ``end_owned_processes``. Each key answers ``live`` (a member its
-    reach names is alive: leader by birth, group under rule 2, an owed identity, a marker carrier or
+    reach names is alive, never a zombie: leader by birth, group under rule 2, an owed identity, a marker carrier or
     a descendant of one), ``unknown`` (the table or an identity could not be read, the daemon roots
     are unknown (``spared=None``) for a member only a parent chain reached, or nothing was recorded to
     judge by) or ``settled``. A reused leader pid is another process, never this target's member.
@@ -787,7 +787,10 @@ def observe_owned_processes(targets: Iterable[Mapping[str, Any]], *,
         def mine(pid: Any, key: Any = item["key"]) -> bool:
             return key in (origins.get(int(pid)) or every)
 
-        live = any(mine(pid) for pid in view["members"] if pid not in held)
+        # A zombie runs nothing: its parent (a worker still holding the Popen) has not reaped it yet. The stop already
+        # counts it ended (``owned_shutdown._exit_proven``); a reader calling it live would keep an ended launch open.
+        live = any(mine(pid) for pid, row in view["members"].items()
+                   if pid not in held and row.state != IDENTITY_ZOMBIE)
         unsure = any(mine(pid) for pid in held if pid in view["members"]) or any(
             mine(entry["pid"]) for entry in view["captured_unverified"]) or item["pid"] in unmeasured
         states[item["key"]] = "live" if live else "unknown" if unsure else "settled"

@@ -465,17 +465,20 @@ def release_finished_scratch(data_root: Any, live: Any, *, stop: Any = None) -> 
     process (``session_scratch.release_session_scratch``). A note whose record already retired with its
     drive, or that names no record of its task, is dropped; every record kept is reported as a typed
     hold with its reason and since when (``holds``: ``session_scratch.task_hold`` words, ``seat_open``,
-    ``owner_keep``, ``busy``, ``task_not_terminal``); a busy custody lock or a failed step keeps it for the next
-    pass. Links and junctions are never followed."""
+    ``owner_keep``, ``busy``, ``task_not_terminal``, ``kept_service_capture_owed``: a kept service's declared
+    outputs in this scratch still owe their capture, read once for the pass); a busy custody lock or a failed
+    step keeps it for the next pass. Links and junctions are never followed."""
     from ouroboros.body_candidate import _recorded_terminal
     from ouroboros.owner_keep import gate
-    from ouroboros.session_scratch import aggregate_holds, seat_hold, task_hold
+    from ouroboros.session_scratch import aggregate_holds, scratch_capture_owed, seat_hold, task_hold
     from ouroboros.task_custody import _STAGING_DIR
     from ouroboros.task_results import validate_task_id
+    from ouroboros.tools.kept_service_outputs import owed_declarations
 
     root = pathlib.Path(data_root)
     report: Dict[str, Any] = {"released": [], "holds": [], "errors": []}
     held: List[Tuple[str, str, Any]] = []
+    owed = owed_declarations(root)
     with contextlib.suppress(OSError):  # one pass at a time (the custody latch): staged entries are a stopped pass's
         for staged in sorted((root / _STAGING_DIR).glob(f"*{_RELEASE_MARK}*")):
             try:
@@ -524,6 +527,8 @@ def release_finished_scratch(data_root: Any, live: Any, *, stop: Any = None) -> 
                     why = kept
                 if not why and note not in seats and not _recorded_terminal(task_id, root):
                     why = "task_not_terminal"  # continued since it was proven over, read again under the lock
+                if not why:
+                    why = scratch_capture_owed(owner, owed)
                 if why:
                     if os.path.lexists(owner / "scratch.json"):
                         held.append((why, str(owner), since(note)))

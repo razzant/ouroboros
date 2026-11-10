@@ -141,3 +141,41 @@
  * @property {'bound'|'admitted'=} state
  * @property {string=} action_nonce
  */
+/**
+ * Mirrors `launch_custody.py`, which states what each field means: a service a task kept running, read now.
+ * @typedef {Object} KeptService
+ * @property {string=} launch_id  // the durable launch a Stop names
+ * @property {string=} name
+ * @property {string=} task_id
+ * @property {string=} task_title
+ * @property {('running'|'unknown'|'capture_owed')=} state  // capture_owed: ended, declared outputs not captured
+ * @property {string=} since
+ * @property {string=} address  // first loopback URL its log printed; '' when none
+ * @property {string=} log_path
+ * @property {('host'|'local_executor'|'docker'|'')=} backend  // '' on a capture_owed row: no live launch to name
+ * @property {number=} pid
+ */
+/**
+ * @typedef {Object} KeptServicesResponse
+ * @property {KeptService[]} services
+ * @property {boolean} complete  // false: a custody store was unreadable; the list may miss one
+ * @property {string} note
+ */
+/**
+ * @typedef {Object} KeptServiceStopRequest
+ * @property {string} reason
+ */
+/**
+ * @typedef {Object} KeptServiceStopResponse
+ * @property {boolean=} ok  // true only when it ended and its outputs were captured or none declared (a not_found capture-only retry included)
+ * @property {('stopped'|'not_confirmed'|'unknown'|'not_found'|'refused')=} outcome
+ * @property {string=} launch_id
+ * @property {string=} name
+ * @property {string=} task_id
+ * @property {string=} actor
+ * @property {string=} reason
+ * @property {string=} detail
+ * @property {string=} log_path
+ * @property {string=} stopped_at
+ * @property {Object=} outputs  // {task_id, state: captured|incomplete|none_declared|unavailable|not_attempted, detail}
+ */
