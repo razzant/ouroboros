@@ -774,15 +774,16 @@ def extension_catalog_identity(skill, drive_root, settings_reader=None):
 
 def catalog_extension_surfaces(skill: Any, *, drive_root: pathlib.Path, repo_dir: pathlib.Path,
                                skills_repo_path: pathlib.Path | None = None, settings_reader=None) -> Dict[str, Any]:
-    """The skill's surfaces from one dry run per source identity: ``extension_catalog.json`` keeps the last run's
-    result with its identity, and a load with the same identity takes it instead of running the child; concurrent
-    loads share one run. A run is recorded only when it loaded the key's bytes with Host Service access; a failed
-    run, a busy record or a load without identity records nothing and runs its own child, as before."""
+    """The skill's surfaces. ``extension_catalog.json`` keeps the last dry run's result with its identity, and only a
+    worker with the same identity takes it instead of running the child: every other load (the server's boot,
+    reconcile, enable, reload) runs the child and replaces the record, which is how a registration reading past the key
+    is run anew. Concurrent loads share one run. A run is recorded only when it loaded the key's bytes with Host Service
+    access; a failed run leaves no earlier result to take, and a busy record or a load without identity runs its own."""
     from contextlib import ExitStack
 
     from ouroboros.context_timing import counted
     from ouroboros.extension_import_staging import extension_cache_lock
-    from ouroboros.utils import atomic_write_json, read_json_dict
+    from ouroboros.utils import atomic_write_json, in_worker_process, read_json_dict
 
     identity, env, settings = _catalog_context(skill, drive_root, repo_dir, settings_reader)
     state_dir = skill_state_dir(drive_root, skill.name)
@@ -794,11 +795,13 @@ def catalog_extension_surfaces(skill: Any, *, drive_root: pathlib.Path, repo_dir
         except RuntimeError:  # another load holds the record past the wait
             recorded = False
         cached = (read_json_dict(path) or {}) if recorded else {}
-        if recorded and cached.get("identity") == identity and isinstance(cached.get("catalog"), dict):
+        if recorded and in_worker_process() and cached.get("identity") == identity and isinstance(cached.get("catalog"), dict):
             counted("catalog_reused", key=skill.name)
             return {**cached["catalog"], "_cache_identity": identity}
         access = _host_service_access(pathlib.Path(drive_root), skill.name, skill.skill_dir)
         counted("catalog_child", key=skill.name)
+        if recorded:
+            path.unlink(missing_ok=True)
         catalog = _catalog_child(skill, drive_root, repo_dir, skills_repo_path, {**env, **access}, settings)
         if recorded and access and catalog.get("content_hash") == skill.content_hash:
             atomic_write_json(path, {"identity": identity, "catalog": catalog})

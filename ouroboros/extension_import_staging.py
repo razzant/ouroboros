@@ -191,8 +191,8 @@ def catalog_identity(skill: LoadedSkill, settings: dict, environ: dict, grants: 
     """The source identity of one catalog dry run: the payload and its runtime, the executing host code, the
     grants, and the settings and environment the child receives (all of them, or the declared ones). ``None``
     when the host code has no identity (no executing-source baseline): such a process records and reuses nothing.
-    What a registration reads past these inputs (its own files, the clock, the network) is not in the key: it
-    keeps the catalog its first dry run on them produced, as a live publication does until it is reloaded."""
+    What a registration reads past these inputs (its own files, the clock, the network) is not in the key: a worker
+    publishes what the last load on the server produced (``catalog_extension_surfaces``)."""
     from ouroboros.preflight_receipts import capture_executing_source_baseline
 
     host = capture_executing_source_baseline()

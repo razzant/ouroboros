@@ -68,6 +68,7 @@ def test_shared_tree_sweep_requires_no_current_hash_and_dead_owners(tmp_path, mo
 
 
 def test_catalog_reload_counts_and_declared_input_invalidation(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_IN_WORKER", "1")  # only a worker takes the record; declared inputs narrow its key
     plugin = (
         "import os\n"
         "def register(api):\n"
@@ -156,6 +157,27 @@ def settled(monkeypatch):
 
     monkeypatch.setattr(reuse, "_RACY_NS", 0)
     monkeypatch.setattr(skill_identity, "_RACY_NS", 0)
+    monkeypatch.setenv("OUROBOROS_IN_WORKER", "1")  # ``_birth`` is a worker's
+
+
+def _on_the_server(monkeypatch, drive, repo, settings, name):
+    """One load of ``name`` in the server's role (boot, reconcile, enable, reload): not a worker's process."""
+    with monkeypatch.context() as server:
+        server.delenv("OUROBOROS_IN_WORKER")
+        return _birth(drive, repo, settings, name)
+
+
+def _catalog_children(monkeypatch) -> list:
+    """The catalog children spawned from now on, by skill."""
+    children, popen = [], subprocess.Popen
+
+    def counted(cmd, *args, **kwargs):
+        if "ouroboros.extension_process_runner" in cmd:
+            children.append(json.loads(pathlib.Path(cmd[-1]).read_text(encoding="utf-8"))["skill_name"])
+        return popen(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", counted)
+    return children
 
 
 def test_undeclared_catalog_is_one_dry_run_per_source_identity(tmp_path, monkeypatch, settled):
@@ -170,15 +192,7 @@ def test_undeclared_catalog_is_one_dry_run_per_source_identity(tmp_path, monkeyp
                                             env_from_settings=["OUROBOROS_UI_LANGUAGE"],
                                             extra_frontmatter="dependencies: [dummy_pkg]\n")
     _mark_isolated_deps_installed(drive, skill)
-    children = []
-    popen = subprocess.Popen
-
-    def counted(cmd, *args, **kwargs):
-        if "ouroboros.extension_process_runner" in cmd:
-            children.append(json.loads(pathlib.Path(cmd[-1]).read_text(encoding="utf-8"))["skill_name"])
-        return popen(cmd, *args, **kwargs)
-
-    monkeypatch.setattr(subprocess, "Popen", counted)
+    children = _catalog_children(monkeypatch)
     settings = {"OUROBOROS_UI_LANGUAGE": "one", "OUROBOROS_UPDATE_CHANNEL": "one"}
 
     def described():
@@ -196,6 +210,63 @@ def test_undeclared_catalog_is_one_dry_run_per_source_identity(tmp_path, monkeyp
     settings["OUROBOROS_UI_LANGUAGE"] = "two"
     assert _birth(drive, repo, settings, "dynamic")[1]["catalog_child"] == 1
     assert (described(), children) == ("two", ["dynamic", "dynamic"])
+
+
+def test_a_load_on_the_server_runs_registration_anew_and_workers_take_its_result(tmp_path, monkeypatch, settled):
+    """A registration may read its own state, which no key holds. A worker with an unchanged record runs no child and
+    publishes what the server published; a load on the server runs the child and replaces the record, so the worker
+    born after it publishes the new catalog."""
+    plugin = (
+        "from pathlib import Path\n"
+        "def register(api):\n"
+        "    path = Path(api.get_state_dir()) / 'selected.txt'\n"
+        "    selected = path.read_text() if path.exists() else 'first'\n"
+        "    api.register_tool(selected, lambda ctx: 'ok', description='Selected capability', schema={})\n"
+    )
+    skill, repo, drive = _prepare_extension(tmp_path, "stateful", plugin, ["tool"],
+                                            extra_frontmatter="dependencies: [dummy_pkg]\n")
+    _mark_isolated_deps_installed(drive, skill)
+    children = _catalog_children(monkeypatch)
+
+    def published():
+        return [tool for tool in ("first", "second") if loader.get_tool(loader.extension_surface_name("stateful", tool))]
+
+    assert _on_the_server(monkeypatch, drive, repo, {}, "stateful")[0] is None
+    assert (published(), children) == (["first"], ["stateful"])
+    assert _birth(drive, repo, {}, "stateful")[0] is None  # a worker on the unchanged record: no child, the same catalog
+    assert (published(), children) == (["first"], ["stateful"])
+    (skill_state_dir(drive, "stateful") / "selected.txt").write_text("second", encoding="utf-8")
+    assert _birth(drive, repo, {}, "stateful")[0] is None  # nothing has run registration since the state changed
+    assert (published(), children) == (["first"], ["stateful"])
+    assert _on_the_server(monkeypatch, drive, repo, {}, "stateful")[0] is None
+    assert (published(), children) == (["second"], ["stateful", "stateful"])  # the reload: a child and the new catalog
+    assert _birth(drive, repo, {}, "stateful")[0] is None  # the worker born after it publishes that catalog
+    assert (published(), children) == (["second"], ["stateful", "stateful"])
+
+
+def test_a_server_load_that_fails_leaves_no_earlier_catalog_for_a_worker(tmp_path, monkeypatch, settled):
+    """A dry run that fails on the server records nothing and takes the earlier result away: the next worker runs its
+    own child instead of publishing what no longer loads."""
+    from ouroboros import extension_process_runner as runner
+
+    skill, repo, drive = _prepare_extension(tmp_path, "fragile", "def register(api): pass\n", [],
+                                            extra_frontmatter="dependencies: [dummy_pkg]\n")
+    _mark_isolated_deps_installed(drive, skill)
+    record = skill_state_dir(drive, "fragile") / "extension_catalog.json"
+    runs, child = [], {"fails": False}
+
+    def run_child(payload, **_kw):
+        runs.append(payload["skill_name"])
+        if child["fails"]:
+            raise runner.ExtensionProcessError("register() raised")
+        return {"ok": True, "content_hash": skill.content_hash}
+
+    monkeypatch.setattr(runner, "_run_child", run_child)
+    assert _on_the_server(monkeypatch, drive, repo, {}, "fragile")[0] is None and record.exists() and len(runs) == 1
+    assert _birth(drive, repo, {}, "fragile")[0] is None and len(runs) == 1
+    child["fails"] = True
+    assert _on_the_server(monkeypatch, drive, repo, {}, "fragile")[0] is not None and not record.exists()
+    assert _birth(drive, repo, {}, "fragile")[0] is not None and len(runs) == 3  # the worker's own child, not a record
 
 
 def test_catalog_record_follows_its_inputs_and_never_holds_a_failure(tmp_path, monkeypatch, settled):
