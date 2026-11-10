@@ -34,7 +34,7 @@ from ouroboros import context_budget
 from ouroboros.context_window import WindowRecord, resolve_window, route_observation_scope
 from ouroboros.tool_result_delivery import project_tool_result_batch  # noqa: F401
 from ouroboros.utils import estimate_tokens
-from ouroboros.context_timing import counted, timed_section
+from ouroboros.context_timing import counted, timed, timed_section
 
 log = logging.getLogger(__name__)
 
@@ -779,7 +779,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             calibration_ratio=ratio, work_room_levels=levels, boundary_tokens=boundary)
         return sent, fixed, reserve, window, boundary, allowances
 
-    sent, fixed, reserve, window, boundary, allowances = frame(mode)
+    sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
     def work():
         target = context_budget.context_mode_limits(mode, preferred, output_reserve)[0]
         return math.ceil(min(boundary or window, target or window) / context_budget.RECLAIM_LOW_WATER_DIVISOR) * (
@@ -793,7 +793,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         work=work(), allowance=allowances["margin"]) if (kept is None or start_work) and mode == "max" else None
     if room_fact and floor.max_room_lost(room_fact):
         mode = "low"
-        sent, fixed, reserve, window, boundary, allowances = frame(mode)
+        sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
 
     def render():  # this frame's own completed memory view, its floor receipt included
         return view(mode, sent, section_views(sections[mode], receipts), window, boundary, saving=owed(fixed, reserve),
@@ -815,7 +815,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         if mode == "nano" or not (books_lost or overflows(shown)):
             break
         mode = "low" if mode == "max" else "nano"
-        sent, fixed, reserve, window, boundary, allowances = frame(mode)
+        sent, fixed, reserve, window, boundary, allowances = timed(f"fit.frame_{mode}", frame, mode)
     if kept is None and overflows(shown):  # a start's refusal names its last view, never a work room's shortfall
         core_alone = overflows()
         raise MinimumViewUnfit("Core, assignment, resident control tools and work room cannot fit" if core_alone
@@ -953,6 +953,7 @@ def build_context_fit_plan(
         contents, initial_mode, delivered = rescued_start(env, task, core.user_content_json, unfit, preferred, fit)
     estimates = {}  # projections that read alike are one form of the request
 
+    @timed_section("fit.projections")
     def _projection(mode: str) -> ContextFitProjection:
         system_content, memory_facts = contents[mode]
         system_content_json = json.dumps(system_content, ensure_ascii=False, sort_keys=True)

@@ -33,6 +33,7 @@ from collections import Counter
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 from ouroboros import chat_chain, memory_inventory
+from ouroboros.context_timing import timed_section
 from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
 from ouroboros.dialogue_provenance import (owner_speech, place_row_facts, recorded_person, recorded_speaker, row_class,
                                            warm_lineage)
@@ -94,6 +95,7 @@ def _task_line(root_id: str, group: List[Tuple[Entry, Dict[str, Any]]]) -> Dict[
             "pos": first[2], "last_pos": last[2], "chars": sum(int(e[1].get("text_chars") or 0) for e, _c in group)}
 
 
+@timed_section("memory_view.conversations")
 def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room: Mapping[str, List[Entry]],
             notes: Mapping[str, List[Dict[str, Any]]], lineage: Mapping[str, Any], *, quiet: Mapping[str, List[Entry]],
             sealed: Mapping[str, List[Entry]], gaps: Mapping[str, set], projects: Any) -> List[Dict[str, Any]]:

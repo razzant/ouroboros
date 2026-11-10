@@ -58,7 +58,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Opt
 
 from ouroboros import store, store_timing
 from ouroboros.chronicle_quotes import QuoteResolver, quote_refusal
-from ouroboros.context_timing import counted
+from ouroboros.context_timing import counted, timed
 from ouroboros.platform_layer import (acquire_exclusive_file_lock, kernel_file_locks_enforced,
                                       release_exclusive_file_lock)
 from ouroboros.utils import append_jsonl, assert_test_data_path, utc_now_iso
@@ -455,11 +455,7 @@ def capture(data_root: Any, *, tail: str = "all", proposed: Optional[Mapping[str
         yield None if snapshot is None else snapshot.memo
         return
     if snapshot is None:
-        terminal_only = _TAIL_SCOPES[tail]
-        with store._index() as db:
-            texts = [db.execute(sql).fetchone()[0] for sql in _SNAPSHOT_SQL]
-            held = () if terminal_only is None else (_tail_rows(db, terminal_only),)
-        snapshot = _Snapshot([*(json.loads(text or "[]") for text in texts), *held], tail)
+        snapshot = timed("memory_view.chronicle", _read_snapshot, store, tail)
     if proposed is not None:  # read as published after every record: [sequence, id, kind, room, target, body]
         rows, kept = snapshot.tables[0], {key: snapshot.memo[key] for key in _SELECTION_FREE if key in snapshot.memo}
         snapshot = _Snapshot([[*rows, [max((row[0] for row in rows), default=0) + 1, proposed["id"], proposed["kind"],
@@ -471,6 +467,15 @@ def capture(data_root: Any, *, tail: str = "all", proposed: Optional[Mapping[str
         yield snapshot.memo
     finally:
         _CAPTURE.reset(token)
+
+
+def _read_snapshot(store: "ChronicleStore", tail: str) -> _Snapshot:
+    """One state of the index in one read transaction, then parsed outside it (``capture``)."""
+    terminal_only = _TAIL_SCOPES[tail]
+    with store._index() as db:
+        texts = [db.execute(sql).fetchone()[0] for sql in _SNAPSHOT_SQL]
+        held = () if terminal_only is None else (_tail_rows(db, terminal_only),)
+    return _Snapshot([*(json.loads(text or "[]") for text in texts), *held], tail)
 
 
 def capture_memo(data_root: Any, key: str, compute: Callable[[], Any]) -> Any:

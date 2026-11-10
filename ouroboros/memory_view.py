@@ -55,7 +55,7 @@ from ouroboros.mark_anchors import describe as describe_anchor
 from ouroboros.memory_view_account import (account_entries, account_lines, accounts_line, fix_map, quote_line,
                                          told_here, told_map)
 from ouroboros.memory_view_legacy import INDENT, indented as _indented, retold_lines
-from ouroboros.context_timing import counted
+from ouroboros.context_timing import counted, timed_section
 from ouroboros.utils import append_jsonl, sha256_text, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -467,6 +467,7 @@ _STORIES: "OrderedDict[str, Tuple[int, List[memory_inventory.LegacyUnit], _Story
 _STORIES_KEPT = 4
 
 
+@timed_section("memory_view.story")
 def capture_story(store: ChronicleStore, root: pathlib.Path, label: Callable[..., str],
                    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], List[Dict[str, Any]]]:
     """``(story entries, story status, helper refusals)``; folded or not is ``memory_inventory``'s verdict.

@@ -53,7 +53,7 @@ from typing import Any, Callable, Dict, FrozenSet, Iterable, Iterator, List, Map
 from ouroboros import chat_chain
 from ouroboros.chronicle_import import legacy_frontier
 from ouroboros.chronicle_store import ChronicleStore, capture, capture_memo, source_time_span
-from ouroboros.context_timing import counted
+from ouroboros.context_timing import counted, timed_section
 from ouroboros.dialogue_provenance import (in_reading_order, place_message_facts, recorded_person, rooms_read_by_time,
                                            row_class, row_provenance)
 
@@ -267,6 +267,7 @@ def _tail(root: Any, frontier: Mapping[str, Any]) -> Tail:
     return capture_memo(root, "tail", lambda: _read_tail(root, frontier))
 
 
+@timed_section("memory_view.tail")
 def _read_tail(root: Any, frontier: Mapping[str, Any], *, terminal_only: bool = False) -> Tail:
     """``_tail``'s read; ``terminal_only`` keeps the rows with a terminal status (the stored ones read alone)."""
     from ouroboros import dialogue_store as ds

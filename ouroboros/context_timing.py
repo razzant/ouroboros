@@ -7,7 +7,8 @@ the ``context_memory_view`` receipt in ``logs/events.jsonl`` carries them as ``s
 ``sections_cpu_ms``, with ``total``: the build's own time up to that receipt, so time no marked section
 covers shows as the difference. Wall time far above CPU time is waiting (a lock, the disk, the
 interpreter's other threads), so a slow start is read from the log instead of sampled. Spans are inclusive
-and only for the marked builders. Outside a measured build a marked builder costs one variable lookup and
+and only for the marked builders; a dotted name (``memory_view.story``) is a span inside its parent, the time the
+next reading must not sum in with it. Outside a measured build a marked builder costs one variable lookup and
 records nothing.
 
 ``counted`` is the same receipt for work instead of time: the host adds what it did (a render, a parsed

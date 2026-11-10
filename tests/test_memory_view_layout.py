@@ -730,7 +730,10 @@ def test_a_measured_build_times_each_section_on_its_receipt(tmp_path, monkeypatc
     assert discoveries == [memory.drive_root, memory.drive_root]
     plain = receipt()
     assert {"memory_view", "knowledge", "health", "runtime", "registry", "installed_skills",
-            "drive_state", "review_records", "review_context", "fit", "total"} == set(timed["sections_ms"])
+            "drive_state", "review_records", "review_context", "fit", "total"} == {
+        name for name in timed["sections_ms"] if "." not in name}  # dotted names are spans inside these
+    assert {"memory_view.chronicle", "memory_view.tail", "memory_view.conversations", "memory_view.story", "fit.frame_max",
+            "fit.projections"} <= set(timed["sections_ms"])
     assert set(timed["sections_cpu_ms"]) == set(timed["sections_ms"])
     assert timed["sections_ms"]["total"] >= max(timed["sections_ms"].values())  # the build's own time
     assert all(isinstance(ms, int) and ms >= 0 for ms in [*timed["sections_ms"].values(), *timed["sections_cpu_ms"].values()])

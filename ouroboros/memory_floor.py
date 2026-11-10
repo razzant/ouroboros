@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from ouroboros import context_budget
+from ouroboros.context_timing import timed_section
 from ouroboros import memory_view as mv
 from ouroboros import memory_view_conversations as conversations
 from ouroboros import memory_view_legacy as legacy
@@ -366,6 +367,7 @@ def required_book_note(*, lowered: bool, book_tokens: int, free: Optional[int], 
     return "\n".join(lines)
 
 
+@timed_section("fit.walk")
 def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Optional[int]], *,
                     kept: mv.FloorLevel = mv.FULL_VIEW, saving: int = 0,
                     measure: Optional[Callable[[mv.FloorLevel], int]] = None) -> mv.FloorLevel:
