@@ -43,7 +43,7 @@ def test_a_start_s_request_is_serialized_once_per_form_at_every_row_count(tmp_pa
             plan = scale.build(root, monkeypatch, snap=scale.snapshot(rows=rows))
             work = section_spans()['work']
         assert plan.initial_mode == 'nano'
-        assert work['request_serializations'] == work['request_forms'] - work.get('request_forms_again', 0)
+        assert work['request_serializations'] == work['request_forms']
         seen[rows] = work['request_serializations']
     assert len(set(seen.values())) == 1, seen
 

@@ -1136,10 +1136,11 @@ def _record_memory_view(env: Any, memory: Memory, task: Dict[str, Any], ctx: Any
         from ouroboros.memory_floor import trace_facts
 
         ctx.memory_view_facts = trace_facts(facts)
+    from ouroboros.transcript_prefix import _running_code
     from ouroboros.utils import append_jsonl
 
     root = pathlib.Path(task.get("budget_drive_root") or getattr(env, "budget_drive_root", None) or memory.drive_root)
-    if not append_jsonl(root / "logs/events.jsonl", {"ts": utc_now_iso(), "type": "context_memory_view",
+    if not append_jsonl(root / "logs/events.jsonl", {"ts": utc_now_iso(), "type": "context_memory_view", "code": _running_code(),
                                                      "task_id": str(task.get("id") or ""), **facts, **section_spans()}):
         log.warning("Context memory view receipt could not be written")
     return facts

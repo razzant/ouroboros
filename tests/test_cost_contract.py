@@ -478,8 +478,7 @@ def test_b10_a_build_serializes_the_request_once_per_form_at_every_size(measured
     """L7c. The whole request is serialized once for each of its forms and the number of forms does not grow with the
     history: a form is a frame's shape (mode, schemas, whether memory is present), never a probe of the walk."""
     works = _build_work(measured, tag)
-    hold_work_equal("L7c", tag, {**_pairs(works, "request_serializations",
-                                          lambda work: work.get("request_forms", 0) - work.get("request_forms_again", 0)),
+    hold_work_equal("L7c", tag, {**_pairs(works, "request_serializations", lambda work: work.get("request_forms", 0)),
                                  "request_serializations(k=30 vs k=1)": (works[measured["large"]].get("request_serializations", 0),
                                                                          works[K_SMALL].get("request_serializations", 0))})
 

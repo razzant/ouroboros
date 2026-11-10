@@ -16,7 +16,7 @@ import json
 import pathlib
 import re
 from collections import Counter
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping
 
 from ouroboros.jsonl_tail import cached_tail_objects
 from ouroboros.utils import read_json_dict, read_text
@@ -44,6 +44,32 @@ def safe_read(path: pathlib.Path, fallback: str = "") -> str:
 def _iter_recent_jsonl(path: pathlib.Path, max_bytes: int = 256_000):
     """The log's bounded tail, read once per file identity and shared with the Runtime section's body fact."""
     yield from cached_tail_objects(path, max_bytes)
+
+
+def _host_work_line(receipts: List[Mapping[str, Any]]) -> str:
+    """What the running code's recent builds did past one pass, from their ``context_memory_view`` receipts: work repeated
+    on the same input (a ``<verb>_again`` above zero) and rows read past those shown and new. A fact for the mind, and
+    only when one of the two is there: in a healthy state nothing is added."""
+    from ouroboros.transcript_prefix import _running_code
+
+    code = _running_code()
+    builds = [dict(receipt.get("work") or {}) for receipt in receipts if receipt.get("code") == code and receipt.get("work")]
+    if not builds:
+        return ""
+    repeats: Counter = Counter()
+    repeating = 0
+    for work in builds:
+        again = {verb[:-len("_again")]: n for verb, n in work.items() if verb.endswith("_again") and n}
+        repeats.update(again)
+        repeating += bool(again)
+    newest = builds[-1]
+    read, shown, new = (int(newest.get(name) or 0) for name in ("rows_read", "rows_open", "rows_new"))
+    facts = [f"the newest capture read {read:,} rows of the chat tail for {shown:,} shown and {new:,} new"] if read > shown + new else []
+    if repeats:
+        facts.append(f"{repeating} of {len(builds)} recent builds did work again on an input they already had "
+                     f"({', '.join(f'{verb} {n:,}' for verb, n in repeats.most_common())})")
+    return (f"INFO: HOST WORK BEYOND ONE PASS under the running code ({code if ' ' in code else code[:12]}) — {'; '.join(facts)}. "
+            "Receipts: logs/events.jsonl, context_memory_view, field work.") if facts else ""
 
 
 def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:
@@ -86,6 +112,7 @@ def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:
         llm_error_models: Counter = Counter()
         local_overflow_models: Counter = Counter()
         remote_overflow_models: Counter = Counter()
+        view_receipts: List[Dict[str, Any]] = []
         for ev in _iter_recent_jsonl(events_path):
             evt_type = str(ev.get("type") or "")
             model = str(ev.get("model") or "unknown")
@@ -95,6 +122,11 @@ def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:
                 local_overflow_models[model] += 1
             elif evt_type == "remote_context_overflow":
                 remote_overflow_models[model] += 1
+            elif evt_type == "context_memory_view":
+                view_receipts.append(ev)
+        host_work = _host_work_line(view_receipts)
+        if host_work:
+            checks.append(host_work)
         if llm_error_models:
             top = ", ".join(f"{model} x{count}" for model, count in llm_error_models.most_common(3))
             checks.append(f"WARNING: PROVIDER/ROUTING ERRORS — {sum(llm_error_models.values())} recent failures ({top}). Reliability or failover may need attention.")

@@ -720,8 +720,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
         return text_chars[text]
     def measure(selected, sent, addressed, story=0, room=0):  # ``story``, ``room``: the memory texts' characters
         key = (selected, sent.chosen, bool(story), bool(room))
-        counted("request_forms", key=("frame", *key))
         if key not in shapes:  # one-letter memory texts hold the shape; only presence changes separators and blocks
+            counted("request_forms")
             whole = _request_tokens(_system_blocks(core, governance[form[selected]], "s" if story else "", "r" if room else "",
                 mode=selected, addressed={}), user_content_json, supplementary_messages_json=core.supplementary_messages_json,
                 current_messages=current_messages, chars=True)
@@ -935,7 +935,7 @@ def build_context_fit_plan(
     view_kind = {"consciousness": "own_wake", "presence": "focus", "integrator": "owner_turn"}.get(role, role)
     # Select density before the single start walk, comparing the whole captured request at the size that can be sent.
     rows, schemas, memory_chars = _whole_request(core, governance, preferred, tool_schemas)
-    counted("request_forms", key=("whole", preferred))
+    counted("request_forms")
     sendable = min(max(1, (estimate_context_prompt_tokens(rows, schemas, provider=str(route.get("provider") or ""), chars=True)
                            + memory_chars + 3) // 4), window_record.usable or math.inf)
     ratio = 1.0 if window_basis == "estimator" else _route_calibration_ratio(
@@ -958,8 +958,8 @@ def build_context_fit_plan(
         system_content_json = json.dumps(system_content, ensure_ascii=False, sort_keys=True)
         user_projection = delivered.get(mode)
         form = (system_content_json, user_projection)
-        counted("request_forms", key=("delivered", hash(form)))
         if form not in estimates:
+            counted("request_forms")
             estimates[form] = _request_tokens(system_content, user_projection or core.user_content_json,
                                               supplementary_messages_json=core.supplementary_messages_json)
         estimated = estimates[form]
