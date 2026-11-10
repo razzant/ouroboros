@@ -38,7 +38,8 @@ if str(Path(__file__).resolve().parents[1]) not in sys.path:
 from tests.ci_verdicts import (  # noqa: E402 -- stdlib only, as everything above `import pytest` below
     DURATIONS_ENV, PHASES as _PHASES, ROUND_DIR as _ROUND_DIR, SECTIONS as _SECTIONS, TEST_DURATIONS_ENV,
     attempt_text as _attempt, cell as _cell, durations_command, error_text as _error, final as _final,
-    journal_rows as _journal_rows, record_session_durations, run_verdict_command, system_of as _system, valid as _valid,
+    journal_projection as _journal_projection, journal_rows as _journal_rows, record_session_durations,
+    run_verdict_command, system_of as _system, valid as _valid,
     verdict_counts as _verdict_counts, verdict_file as _verdict_file, verdict_passes as _verdict_passes, write_json,
 )
 
@@ -86,22 +87,6 @@ def _journal(root: Path) -> tuple[list[str], list[dict]] | None:
             if row["outcome"] == "failed":
                 failed.append(row)
     return list(running), failed
-
-
-def _journal_projection(root: Path) -> dict | None:
-    """A killed session's stand-in for its export: the lane blocks its journal recorded at
-    collection (with that session's identity and system) and the reports it got to; None
-    when the journal names no lane. Its exit status is unknown."""
-    projection = None
-    for row in _journal_rows(root) or []:
-        if (row.get("event") == "lane" and isinstance(row.get("block"), str)
-                and isinstance(row.get("lane"), dict) and isinstance(row.get("github"), dict)):
-            projection = projection or {"session_exit_code": None, "reports": [], "github": row["github"],
-                                        "environment": row.get("environment") or {}}
-            projection[row["block"]] = row["lane"]
-        elif row.get("event") == "report" and _valid(row) and projection is not None:
-            projection["reports"].append(row)
-    return projection
 
 
 def _executed(reports) -> set[str]:

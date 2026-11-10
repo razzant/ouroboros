@@ -24,10 +24,24 @@ permissions:
 # another. Full manual runs exercise the complete lane regardless of path changes.
 
 jobs:
-  # Exactly one job runs: the complete lane for `full`, otherwise one scenario.
+  # The complete lane's one weight table, frozen once before its first leg, as ci.yml's `shard-plan` does.
+  shard-plan:
+    name: shard-plan
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.diagnostic == 'full' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/shard-plan
+
+  # Exactly one of the next two jobs runs: the complete lane for `full`, otherwise one scenario.
   ui-smoke:
     name: ui-smoke
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.diagnostic == 'full' }}
+    needs: shard-plan
     uses: ./.github/workflows/ui-browser.yml
     # A called workflow cannot raise its caller's token: the lane reads this run's
     # shard plan (actions) and the accepted-failure issues (issues), as from ci.yml.

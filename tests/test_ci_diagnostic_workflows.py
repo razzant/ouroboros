@@ -252,7 +252,7 @@ def test_manual_ui_selection_is_fixed_partial_and_never_a_paid_or_full_check():
     assert selection["type"] == "choice" and selection["default"] == "full"
     assert selection["options"] == ["full", "viewport", "inflight"]
     assert "PARTIAL DIAGNOSTIC" in caller["run-name"]
-    assert list(caller["jobs"]) == ["ui-smoke", "ui-diagnostic"] and "secrets" not in str(caller)
+    assert list(caller["jobs"]) == ["shard-plan", "ui-smoke", "ui-diagnostic"] and "secrets" not in str(caller)
     lane, partial_job = caller["jobs"]["ui-smoke"], caller["jobs"]["ui-diagnostic"]
     # Exactly one job runs for a dispatch: full or a clearly partial diagnostic.
     for event, choice, runs_lane in (("workflow_dispatch", "full", True),
@@ -262,7 +262,7 @@ def test_manual_ui_selection_is_fixed_partial_and_never_a_paid_or_full_check():
         assert _selected(lane, event, choice) is runs_lane, (event, choice)
         assert _selected(partial_job, event, choice) is not runs_lane, (event, choice)
     # The lane job is the shared lane and carries no selection into it.
-    assert set(lane) == {"name", "if", "uses", "permissions"} and lane["name"] == "ui-smoke"
+    assert set(lane) == {"name", "if", "needs", "uses", "permissions"} and lane["name"] == "ui-smoke"
     assert lane["uses"] == "./.github/workflows/ui-browser.yml"
     # A partial run is named as one wherever it shows; the lane's names never say so.
     assert "format('PARTIAL DIAGNOSTIC UI - {0}', inputs.diagnostic)" in partial_job["name"]

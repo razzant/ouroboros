@@ -1,15 +1,21 @@
-"""Shards weighed by recorded durations, retry verdicts in the lane proof, and the run's verdict list."""
+"""Shards weighed by recorded durations, the run's frozen plan, retry verdicts in the proof, the run's verdict list."""
 from __future__ import annotations
 
 from collections import Counter
+import importlib.util
+import io
 import json
 import os
 from pathlib import Path
+import shutil
+import stat
 import subprocess
 import sys
 from types import SimpleNamespace
+import zipfile
 
 import pytest
+import yaml
 
 from ouroboros.preflight_runner import LANE_EXCLUSION_EXPR
 from ouroboros.test_evidence import TEST_DURATIONS_ENV as OWNERS_TABLE_KEY
@@ -52,6 +58,12 @@ def _row(node, seconds, phase="call", outcome="passed", subtest=False):
     return {"nodeid": node, "phase": phase, "outcome": outcome, "duration_seconds": seconds, "is_subtest": subtest}
 
 
+def _test(node, *seconds, outcome="passed"):
+    """One test's reports: setup, call and teardown seconds, as many phases as given (fewer: it never ended)."""
+    return [_row(node, value, phase, outcome if phase == "call" else "passed")
+            for phase, value in zip(("setup", "call", "teardown"), seconds)]
+
+
 def _projection(directory, reports, *, system="Windows", attempt="1", **blocks):
     return _write(Path(directory) / "results.json", {
         "format": 1, "session_exit_code": 0, "reports": reports, "collection_failures": [],
@@ -81,19 +93,21 @@ def test_durations_sum_each_file_per_system_and_each_ui_node(tmp_path):
         _projection(root / artifact / "serial", [_row("tests/test_a.py::test_s", 2.0),
                                                  _row("tests/test_x.py::test_alone", 1.0)], attempt="2",
                     default_serial=_block("serial", [1, 2]))
-    # Another system; a manifest, a retry round, another producer and an unknown system add nothing.
+    # Another system; a manifest, a default lane's retry round (even one its verdict lists), another producer and
+    # an unknown system add nothing.
     _projection(root / "default-ci-shard-Linux-1" / "parallel", [_row(a, 0.5)], system="Linux",
                 default_parallel=_block("parallel", [1, 4]))
     _projection(root / "default-ci-manifest-Linux" / "parallel", [], system="Linux",
                 default_parallel=_block("parallel"))
     _projection(root / "default-ci-shard-Linux-1" / "parallel" / "retry-1", [_row(a, 60.0)], system="Linux")
+    _verdict(root / "default-ci-shard-Linux-1" / "parallel", flaky=[a])
     _projection(root / "ci-evidence-full-test-linux" / "size", [_row("tests/test_size.py::t", 3.0)], system="Linux")
     _projection(root / "elsewhere" / "parallel", [_row(a, 3.0)], system="Plan9")
     # An unsharded full-suite pass: a `parallel` or `serial` directory without a lane block.
     _projection(root / "ci-evidence-full-test-macos" / "parallel", [_row("tests/test_m.py::t", 0.125)], system="Darwin")
-    _projection(root / "ui-ci-full-shard-1" / "host", [_row("tests/test_ui.py::page[chromium]", 4.0, "setup"),
-                                                       _row("tests/test_ui.py::page[chromium]", 1.0)],
-                system="Linux", ui_browser={"full": [], "shard": [1, 8], "assigned": []})
+    page = "tests/test_ui.py::page[chromium]"
+    _projection(root / "ui-ci-full-shard-1" / "host", _test(page, 4.0, 1.0, 0.0),
+                system="Linux", ui_browser={"full": [page], "shard": [1, 8], "assigned": [page]})
     table = {"format": 1, "platforms": {"darwin": {"tests/test_m.py": 125}, "linux": {"tests/test_a.py": 500},
                                         "windows": {"tests/test_a.py": 4000, "tests/test_b.py": 0, "tests/test_x.py": 1000}},
              "source": {"run_id": RUN, "sha": SHA}, "ui_nodes": {"tests/test_ui.py::page[chromium]": 5000}}
@@ -109,6 +123,76 @@ def test_durations_sum_each_file_per_system_and_each_ui_node(tmp_path):
     empty = subprocess.run(CLI + ["durations", "--evidence-root", str(tmp_path / "none"), "--run-id", RUN,
                                   "--sha", SHA, "--out", str(out)], capture_output=True, text=True, timeout=30)
     assert empty.returncode == 0 and "::warning::" in empty.stdout and _json(out)["platforms"] == {}
+
+
+def _killed(directory, rows, *, block=None, lane=None, system="Linux"):
+    """A session killed before its export: its journal holds the lane block it recorded at collection (a round
+    records none), then the reports it got to; the kill tore the last line."""
+    lines = [{"event": "lane", "nodeid": "", "block": block, "lane": lane, "environment": {"platform": system},
+              "github": {"sha": SHA, "run_id": RUN, "run_attempt": "1"}}] if block else []
+    lines += [dict(row, event="report") for row in rows]
+    _write(Path(directory) / "events.jsonl", "".join(json.dumps(line) + "\n" for line in lines) + '{"event": "rep')
+
+
+def test_a_ui_test_weighs_its_first_complete_execution_in_its_session_or_a_round(tmp_path):
+    """A UI shard session stops at its deadline and scripts/ci_retry.py runs the rest in a round (run 42412862321:
+    45 of 2504 tests first ran there). Each test of a pass's assignment weighs its first complete execution, the
+    session's else a round's in its verdict's order, a red one too; its retry adds nothing; a crashed or
+    interrupted execution has no whole time, even one whose teardown reached xdist's controller before its
+    worker died (the crash report names the test still pending there); a round's test of another shard is
+    that shard's alone."""
+    root = tmp_path / "evidence"
+    a, b, c, d, e, f, g, x, y = (f"tests/test_ui.py::test_{name}" for name in "abcdefgxy")
+    full = [a, b, c, d, e, f, g, x, y]
+    one = root / "ui-ci-full-shard-1-1" / "host"
+    _projection(one, [*_test(a, 1.0, 2.0, 0.5), _row(a, 9.0, subtest=True),
+                      *_test(b, 0.5, 10.0, 0.5, outcome="failed"),
+                      _row(d, 0.4, "setup"), _row(d, 0.0, "crash", "failed"), _row(e, 0.4, "setup"),
+                      *_test(g, 0.5, 0.5, 0.5), _row(g, 0.0, "crash", "failed")],
+                system="Linux", ui_browser={"full": full, "shard": [1, 2], "assigned": [a, b, c, d, e, f, g]})
+    _projection(one / "retry-1", [*_test(b, 0.1, 0.1, 0.1), *_test(c, 0.2, 1.0, 0.3), *_test(d, 0.3, 2.0, 0.2),
+                                  _row(e, 0.1, "setup"), _row(e, 0.0, "crash", "failed"),
+                                  *_test(g, 0.25, 0.25, 0.25), *_test(x, 5.0, 5.0, 5.0)], system="Linux")
+    _verdict(one, "red", flaky=[b, d, g], failed=[e], not_run=[f])
+    # Shard 2 was killed before its export, with y in flight; the round that completed y was killed after it.
+    two = root / "ui-ci-full-shard-2-1" / "host"
+    _killed(two, [*_test(x, 1.0, 1.0, 1.0), _row(y, 0.5, "setup")], block="ui_browser",
+            lane={"full": full, "shard": [2, 2], "assigned": [x, y]})
+    _killed(two / "retry-1", _test(y, 0.2, 0.2, 0.2))
+    _verdict(two, flaky=[y])
+    assert collect_durations(root, run_id=RUN, sha=SHA)["ui_nodes"] == {a: 3500, b: 11000, c: 1500, d: 2500,
+                                                                         g: 750, x: 3000, y: 600}
+
+
+def test_of_one_ui_shard_only_the_highest_attempt_that_timed_a_test_counts(tmp_path):
+    """A shard re-run in a later attempt replaces the earlier one whole, rounds included; one that timed nothing
+    replaces nothing; a pass downloaded twice counts once. A round no verdict lists is no part of its pass, and a
+    killed default-lane session adds nothing."""
+    root = tmp_path / "evidence"
+    a, b, c = (f"tests/test_ui.py::test_{name}" for name in "abc")
+    lane = {"full": [a, b, c], "shard": [1, 1], "assigned": [a, b, c]}
+    first = root / "ui-ci-full-shard-1-1" / "host"
+    _projection(first, _test(a, 1.0, 1.0, 1.0), system="Linux", ui_browser=lane)
+    _projection(first / "retry-1", [*_test(b, 2.0, 2.0, 2.0), *_test(c, 3.0, 3.0, 3.0)], system="Linux")
+    verdict = _verdict(first)
+    _killed(root / "default-ci-shard-Linux-1" / "parallel", _test("tests/test_d.py::test_d", 1.0, 1.0, 1.0),
+            block="default_parallel", lane=_block("parallel", [1, 1]))
+
+    def table():
+        return collect_durations(root, run_id=RUN, sha=SHA)
+    assert table()["ui_nodes"] == {a: 3000, b: 6000, c: 9000} and table()["platforms"] == {}
+    verdict.unlink()
+    assert table()["ui_nodes"] == {a: 3000}
+    _verdict(first)
+    _projection(root / "ui-ci-full-shard-1-2" / "host", _test(a, 0.5, 0.5, 0.5), system="Linux", attempt="2",
+                ui_browser=lane)
+    _projection(root / "ui-ci-full-shard-1-3" / "host", [_row(a, 0.1, "setup"), _row(a, 0.0, "crash", "failed")],
+                system="Linux", attempt="3", ui_browser=lane)
+    _projection(root / "ui-ci-full-shard-1-3" / "host" / "retry-1", _test(b, 1.0, 1.0), system="Linux")
+    _verdict(root / "ui-ci-full-shard-1-3" / "host", "red", failed=[a], attempt="3")
+    assert table()["ui_nodes"] == {a: 1500}
+    shutil.copytree(root / "ui-ci-full-shard-1-2", root / "ui-ci-full-shard-1-2-copy")
+    assert table()["ui_nodes"] == {a: 1500}
 
 
 def test_an_owned_session_folds_its_whole_file_times_into_the_owners_table(tmp_path, monkeypatch):
@@ -392,6 +476,389 @@ def _ui_run(tmp_path, *, change=None):
 def test_a_packed_ui_lane_reconciles_only_against_the_manifests_packing(tmp_path, change, gap):
     gaps, _ = _ui_run(tmp_path, change=change)
     assert gaps == [] if gap is None else any(gap in text for text in gaps), gaps
+
+
+# ---------------------------------------------------------------- the run's frozen plan
+
+
+PLANNED, BEGAN = "500", "2026-11-08T12:00:00Z"
+ACTION = REPO / ".github" / "actions" / "shard-plan" / "action.yml"
+WORKFLOWS = REPO / ".github" / "workflows"
+_POSIX_STEP = pytest.mark.skipif(os.name == "nt", reason="these workflow steps run on the Linux runner only")
+
+
+@pytest.fixture(scope="module")
+def shard_plan():
+    spec = importlib.util.spec_from_file_location("ci_shard_plan_script", REPO / "scripts" / "ci_shard_plan.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _hour(hour):
+    return f"2026-11-08T{hour:02}:00:00Z"
+
+
+def _artifact(run, created, *, ui=None, files=None, number=None, source=None, source_sha=None, expired=False):
+    """One earlier run's `ci-durations` artifact as GitHub serves it: (its listing row, its real zip).
+    Without `ui` its table has no `ui_nodes` key at all, a shape `durations_table` accepts."""
+    body = io.BytesIO()
+    with zipfile.ZipFile(body, "w") as archive:
+        archive.writestr("ci-durations.json", json.dumps({
+            "format": 1, "platforms": {} if files is None else {SYSTEM: files},
+            "source": {"run_id": str(run) if source is None else source,
+                       "sha": "b" * 40 if source_sha is None else source_sha},
+            **({} if ui is None else {"ui_nodes": ui})}))
+    return {"id": number or int(run) * 10, "expired": expired, "created_at": created,
+            "workflow_run": {"id": int(run), "head_sha": "b" * 40}}, body.getvalue()
+
+
+def _answers(*artifacts, began=BEGAN):
+    """Every `gh api` answer the plan needs, by path."""
+    return {f"repos/o/r/actions/runs/{PLANNED}": json.dumps({"created_at": began}).encode(),
+            "repos/o/r/actions/artifacts?name=ci-durations&per_page=30":
+                json.dumps({"artifacts": [row for row, _ in artifacts]}).encode(),
+            **{f"repos/o/r/actions/artifacts/{row['id']}/zip": body for row, body in artifacts}}
+
+
+def _prepared(module, answers):
+    # A path the fixture does not hold is an unreadable answer, as `gh api` failing is.
+    return module.prepare("o/r", PLANNED, SHA, attempt="1", read=lambda path: answers[path])
+
+
+def _reasons(plan):
+    return {str(row.get("run_id")): row["reason"] for row in plan["skipped"]}
+
+
+def test_a_ui_node_weighs_the_median_low_of_the_last_three_earlier_tables_and_files_the_newest_table(shard_plan):
+    """Median_low stays an integer some table observed; a node three tables do not all time takes the median of those
+    that do, and the plan says how many did; the fourth table and the older file weights do not count."""
+    a, b, c, d = (f"tests/test_ui.py::test_{name}" for name in "abcd")
+    plan, table = _prepared(shard_plan, _answers(
+        _artifact(38, _hour(9), ui={a: 200, c: 8, d: 5}),
+        _artifact(40, _hour(11), ui={a: 100, b: 10}, files={"tests/x.py": 1000}),
+        _artifact(37, _hour(8), ui={a: 99_999, d: 99_999}, files={"tests/x.py": 7}),
+        _artifact(39, _hour(10), ui={a: 300, b: 20, c: 7}, files={"tests/x.py": 5000})))
+    assert table == {"format": 1, "platforms": {SYSTEM: {"tests/x.py": 1000}},
+                     "source": {"run_id": f"shard-plan-{PLANNED}", "sha": SHA},
+                     "ui_nodes": {a: 200, b: 10, c: 7, d: 5}}
+    assert plan["durations"] == "ci-durations.json"
+    assert plan["target"] == {"run_id": PLANNED, "run_attempt": "1", "sha": SHA, "created_at": BEGAN}
+    assert [row["run_id"] for row in plan["ui_sources"]] == ["40", "39", "38"]
+    assert plan["ui_sources"][0] == {"artifact": 400, "run_id": "40", "sha": "b" * 40, "created_at": _hour(11),
+                                     "ui_nodes": 2}
+    assert plan["platform_source"]["run_id"] == "40"
+    assert plan["ui_node_observations"] == {a: 3, b: 2, c: 2, d: 1}
+    assert plan["skipped"] == []  # The planner stopped reading at the third table that had both.
+
+
+def test_only_another_runs_earlier_table_weighs_a_run_and_a_run_counts_once(shard_plan):
+    """Neither this run, a later table, an expired one, an older copy of a run's table nor a table naming another
+    run can reach the weights, whatever the listing shows."""
+    node = "tests/test_ui.py::test_a"
+    plan, table = _prepared(shard_plan, _answers(
+        _artifact(int(PLANNED), _hour(11), ui={node: 9000}),  # Its own earlier attempt, before the cutoff in time.
+        _artifact(70, BEGAN, ui={node: 9001}),  # The cutoff itself is not earlier.
+        _artifact(71, _hour(13), ui={node: 9002}),
+        _artifact(72, _hour(5), ui={node: 9003}, expired=True),
+        _artifact(40, _hour(10), ui={node: 10}, files={"tests/x.py": 1}),
+        _artifact(40, _hour(9), ui={node: 9004}, number=401),  # An older artifact of the same run.
+        _artifact(41, _hour(8), ui={node: 9005}, source=PLANNED),  # A copy: it names another run.
+        _artifact(38, _hour(7), ui={node: 30})))
+    assert table["ui_nodes"] == {node: 10}  # median_low of 10 and 30
+    assert [row["run_id"] for row in plan["ui_sources"]] == ["40", "38"] and plan["ui_node_observations"] == {node: 2}
+    assert _reasons(plan) == {
+        PLANNED: "this run's own", "70": "created after this run", "71": "created after this run", "72": "expired",
+        "40": "a newer artifact of its run was read", "41": "not a table this run recorded"}
+
+
+def test_a_table_must_prove_the_same_commit_as_its_workflow_run(shard_plan):
+    node = "tests/test_ui.py::test_a"
+    plan, table = _prepared(shard_plan, _answers(
+        _artifact(40, _hour(10), ui={node: 10}, source_sha="c" * 40)))
+    assert table is None and plan["durations"] is None
+    assert _reasons(plan)["40"] == "not a table this run recorded"
+
+
+def test_artifact_history_paginates_past_a_full_first_page(shard_plan):
+    node = "tests/test_ui.py::test_from_page_two"
+    first_page = [_artifact(100 + index, _hour(5), expired=True) for index in range(30)]
+    second = _artifact(40, _hour(10), ui={node: 25})
+    answers = _answers(*first_page, second)
+    # _answers models page one; the planner must explicitly ask for page two when it is full.
+    answers["repos/o/r/actions/artifacts?name=ci-durations&per_page=30"] = json.dumps({
+        "artifacts": [row for row, _ in first_page]}).encode()
+    answers["repos/o/r/actions/artifacts?name=ci-durations&per_page=30&page=2"] = json.dumps({
+        "artifacts": [second[0]]}).encode()
+    plan, table = _prepared(shard_plan, answers)
+    assert table["ui_nodes"] == {node: 25}
+    assert plan["ui_sources"][0]["run_id"] == "40"
+
+
+@pytest.mark.parametrize("no_ui", [{}, {"ui": {}}], ids=["no-ui-nodes-key", "empty-ui-nodes"])
+def test_a_ui_only_table_cannot_displace_the_file_weights_nor_a_file_only_table_a_ui_place(
+        shard_plan, tmp_path, monkeypatch, no_ui):
+    """A file-only table in either shape the table's reader accepts keeps its file weights and takes no UI place."""
+    node = "tests/test_ui.py::test_a"
+    file_only = _artifact(39, _hour(10), files={"tests/x.py": 700}, **no_ui)
+    plan, table = _prepared(shard_plan, _answers(
+        _artifact(40, _hour(11), ui={node: 100}),
+        file_only,
+        _artifact(38, _hour(9), ui={node: 300}),
+        _artifact(37, _hour(8), ui={node: 500}, files={"tests/x.py": 9})))
+    assert table["platforms"] == {SYSTEM: {"tests/x.py": 700}} and plan["platform_source"]["run_id"] == "39"
+    assert table["ui_nodes"] == {node: 300} and [row["run_id"] for row in plan["ui_sources"]] == ["40", "38", "37"]
+    # Alone it still weighs the files: the real readers pack by them, and the UI lane says why it keeps its positions.
+    plan, table = _prepared(shard_plan, _answers(file_only))
+    assert table == {"format": 1, "platforms": {SYSTEM: {"tests/x.py": 700}},
+                     "source": {"run_id": f"shard-plan-{PLANNED}", "sha": SHA}, "ui_nodes": {}}
+    assert plan["durations"] == "ci-durations.json" and plan["platform_source"]["run_id"] == "39"
+    assert plan["ui_sources"] == [] and plan["ui_node_observations"] == {}
+    monkeypatch.setenv(DURATIONS_ENV, str(_write(tmp_path / "ci-durations.json", table)))
+    assert default_lane.file_weights({"tests/x.py": 3}) == ({"tests/x.py": 700}, f"durations:shard-plan-{PLANNED}")
+    assert _ui_lane(tmp_path, UI, "1/2")[0]["weights_source"] == (
+        f"positions: the durations of run shard-plan-{PLANNED} record no UI node")
+
+
+@pytest.mark.parametrize("damage, reason", [
+    (lambda answers: answers.pop(f"repos/o/r/actions/runs/{PLANNED}"),
+     "the artifact history is unavailable (KeyError)"),
+    (lambda answers: answers.__setitem__(f"repos/o/r/actions/runs/{PLANNED}", b"{}"),
+     "the artifact history is unavailable (KeyError)"),
+    (lambda answers: answers.pop("repos/o/r/actions/artifacts?name=ci-durations&per_page=30"),
+     "the artifact history is unavailable (KeyError)"),
+    (lambda answers: answers.__setitem__(f"repos/o/r/actions/artifacts/{400}/zip", b"not a zip"),
+     "no earlier ci-durations table is usable"),
+], ids=["no-run", "no-created-at", "no-listing", "unreadable-table"])
+def test_a_plan_that_could_not_read_the_history_freezes_the_positional_split_and_says_why(shard_plan, damage, reason):
+    answers = _answers(_artifact(40, _hour(11), ui={"tests/test_ui.py::test_a": 100}, files={"tests/x.py": 1}))
+    damage(answers)
+    plan, table = _prepared(shard_plan, answers)
+    assert table is None and plan["durations"] is None and plan["reason"] == reason
+    assert plan["format"] == 1 and plan["target"]["run_id"] == PLANNED
+
+
+@pytest.mark.parametrize("damage, error", [("container", "BadZipFile"), ("deflate", "error")])
+def test_an_unreadable_newest_table_is_passed_over_by_name_and_the_rest_still_weigh(shard_plan, damage, error):
+    node = "tests/test_ui.py::test_a"
+    answers = _answers(_artifact(40, _hour(11), ui={node: 100}, files={"tests/x.py": 1}),
+                       _artifact(39, _hour(10), ui={node: 300}, files={"tests/x.py": 3}))
+    address = "repos/o/r/actions/artifacts/400/zip"
+    if damage == "container":
+        answers[address] = b"truncated"
+    else:
+        with zipfile.ZipFile(io.BytesIO(answers[address])) as archive:
+            content = archive.read("ci-durations.json")
+        body = io.BytesIO()
+        with zipfile.ZipFile(body, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("ci-durations.json", content)
+            info = archive.getinfo("ci-durations.json")
+        # The ZIP directory is intact; reserved DEFLATE block type 3 makes its payload unreadable.
+        offset = info.header_offset + 30 + len(info.filename.encode()) + len(info.extra)
+        broken = bytearray(body.getvalue())
+        broken[offset] = 0x07
+        answers[address] = bytes(broken)
+    plan, table = _prepared(shard_plan, answers)
+    assert table["ui_nodes"] == {node: 300} and table["platforms"] == {SYSTEM: {"tests/x.py": 3}}
+    assert _reasons(plan) == {"40": f"unreadable ({error})"}
+
+
+def test_nothing_weighs_nothing_and_the_collector_table_is_what_the_plan_reads(shard_plan, tmp_path):
+    """A table of no weights is no plan; a table the real collector wrote passes the plan's own reader unchanged."""
+    plan, table = _prepared(shard_plan, _answers(_artifact(40, _hour(11))))
+    assert table is None and _reasons(plan) == {"40": "no weight this plan still needs"}
+    page = "tests/test_ui.py::page[chromium]"
+    root = tmp_path / "evidence"
+    _projection(root / "ui-ci-full-shard-1-1" / "host", _test(page, 1.0, 2.0, 0.5), system="Linux",
+                ui_browser={"full": [page], "shard": [1, 8], "assigned": [page]})
+    body = io.BytesIO()
+    with zipfile.ZipFile(body, "w") as archive:
+        archive.writestr("ci-durations.json", json.dumps(collect_durations(root, run_id="40", sha="b" * 40)))
+    row = {"id": 400, "expired": False, "created_at": _hour(11), "workflow_run": {"id": 40, "head_sha": "b" * 40}}
+    plan, table = _prepared(shard_plan, _answers((row, body.getvalue())))
+    assert table["ui_nodes"] == {page: 3500} and plan["ui_sources"][0]["run_id"] == "40"
+
+
+UI_SHARDED = [f"tests/test_ui.py::test_{index:02}" for index in range(24)]
+
+
+def _frozen_lane(tmp_path, monkeypatch, shard_plan):
+    """Every leg of one frozen plan: the real table on disk, each shard's and the manifest's real lane block."""
+    history = [_artifact(run, _hour(11 - index), files={"tests/x.py": 900},
+                         ui={node: (position + 1) * (100 + 50 * index) for position, node in enumerate(UI_SHARDED)})
+               for index, run in enumerate((40, 39, 38))]
+    plan, table = _prepared(shard_plan, _answers(*history))
+    frozen = _write(tmp_path / "plan" / "ci-durations.json", table)
+    monkeypatch.setenv(DURATIONS_ENV, str(frozen))
+    blocks = {shard: _ui_lane(tmp_path, UI_SHARDED, f"{shard}/8")[0] for shard in range(1, 9)}
+    return plan, table, frozen, _ui_lane(tmp_path, UI_SHARDED)[0], blocks
+
+
+def _prove(tmp_path, manifest, blocks):
+    root = tmp_path / "proof"
+    _projection(root / "manifest" / "m1" / "host", [], system="Linux", ui_browser=manifest)
+    for shard, block in blocks.items():
+        _projection(root / "shards" / f"s{shard}" / "host", [_row(node, 1.0) for node in block["assigned"]],
+                    system="Linux", ui_browser=block)
+    return reconcile_shards(root / "manifest", root / "shards", count=8, sha=SHA, run_id=RUN)
+
+
+def test_the_manifest_and_all_eight_shards_pack_by_the_one_frozen_table(tmp_path, monkeypatch, shard_plan):
+    """The real readers over the real table: one weight list, one honest source, a complete proof; a leg that read
+    anything else is a gap in the same reconciliation."""
+    plan, table, frozen, manifest, blocks = _frozen_lane(tmp_path, monkeypatch, shard_plan)
+    assert manifest["weights_source"] == f"durations:shard-plan-{PLANNED}"
+    assert all(block["node_weights"] == manifest["node_weights"] and block["weights_source"] == manifest["weights_source"]
+               for block in blocks.values())
+    assert sorted(node for block in blocks.values() for node in block["assigned"]) == UI_SHARDED
+    assert [row[1] for row in manifest["node_weights"]] == [table["ui_nodes"][node] for node in UI_SHARDED]
+    gaps, notes = _prove(tmp_path, manifest, blocks)
+    assert gaps == [] and notes[0].endswith(f"weights durations:shard-plan-{PLANNED}")
+    assert default_lane.file_weights({"tests/x.py": 3, "tests/y.py": 2}) == (
+        {"tests/x.py": 900, "tests/y.py": 600}, f"durations:shard-plan-{PLANNED}")
+    # A leg that read another table: the weights differ from the manifest, by name.
+    data = _json(frozen)
+    data["ui_nodes"][UI_SHARDED[0]] += 100_000
+    other = _write(tmp_path / "plan" / "other.json", data)
+    monkeypatch.setenv(DURATIONS_ENV, str(other))
+    blocks[3] = _ui_lane(tmp_path, UI_SHARDED, "3/8")[0]
+    gaps, _ = _prove(tmp_path / "second", manifest, blocks)
+    assert "shard 3/8: node weights differ from the manifest" in gaps, gaps
+
+
+def _gh_shim(tmp_path, answers):
+    """`gh` and `python3` for a workflow step: `gh api PATH [...]` prints the saved answer of PATH or fails."""
+    bin_dir, saved = tmp_path / "bin", tmp_path / "gh-answers"
+    bin_dir.mkdir(exist_ok=True)
+    saved.mkdir(exist_ok=True)
+    for path, body in answers.items():
+        name = "".join(character if character.isalnum() else "_" for character in path)
+        (saved / name).write_bytes(body)
+    shim = bin_dir / "gh"
+    shim.write_text('#!/usr/bin/env bash\nname="$(printf %s "$2" | tr -c "[:alnum:]" _)"\n'
+                    'test "$1" = api && test -f "$GH_ANSWERS/$name" && cat "$GH_ANSWERS/$name"\n', encoding="utf-8")
+    interpreter = bin_dir / "python3"
+    interpreter.write_text(f'#!/usr/bin/env bash\nexec {sys.executable!r} "$@"\n', encoding="utf-8")
+    for tool in (shim, interpreter):
+        tool.chmod(tool.stat().st_mode | stat.S_IEXEC)
+    return {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "GH_ANSWERS": str(saved)}
+
+
+def _step(step, tmp_path, tools):
+    """Run a workflow step's own shell, with the expressions a runner would have rendered."""
+    summary, values = tmp_path / "step-summary", tmp_path / "github-env"
+    render = {"${{ github.token }}": "t", "${{ github.repository }}": "o/r", "${{ github.run_id }}": PLANNED,
+              "${{ github.run_attempt }}": "2", "${{ github.sha }}": SHA, "${{ runner.temp }}": str(tmp_path)}
+    env = {key: value for key, value in os.environ.items() if key != "GITHUB_ENV"}
+    for key, value in step.get("env", {}).items():
+        for expression, rendered in render.items():
+            value = value.replace(expression, rendered)
+        env[key] = value
+    env.update(tools, RUNNER_TEMP=str(tmp_path), GITHUB_ENV=str(values), GITHUB_STEP_SUMMARY=str(summary))
+    completed = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", step["run"]], cwd=REPO, env=env,
+                               capture_output=True, text=True, encoding="utf-8", timeout=60)
+    return completed, *(path.read_text(encoding="utf-8") if path.exists() else "" for path in (values, summary))
+
+
+def _action_steps():
+    return yaml.safe_load(ACTION.read_text(encoding="utf-8"))["runs"]["steps"]
+
+
+@_POSIX_STEP
+def test_the_actions_own_step_freezes_the_plan_and_says_what_it_read(tmp_path):
+    step = next(step for step in _action_steps() if "scripts/ci_shard_plan.py" in step.get("run", ""))
+    node = "tests/test_ui.py::test_a"
+    tools = _gh_shim(tmp_path, _answers(_artifact(40, _hour(11), ui={node: 100}, files={"tests/x.py": 1000}),
+                                        _artifact(39, _hour(10), ui={node: 300})))
+    completed, _, summary = _step(step, tmp_path, tools)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    plan, table = _json(tmp_path / "shard-plan" / "plan.json"), _json(tmp_path / "shard-plan" / "ci-durations.json")
+    assert table["source"] == {"run_id": f"shard-plan-{PLANNED}", "sha": SHA} and table["ui_nodes"] == {node: 100}
+    assert plan["target"] == {"run_id": PLANNED, "run_attempt": "2", "sha": SHA, "created_at": BEGAN}
+    assert summary == f"Shard plan shard-plan-{PLANNED}: UI weights: median_low of runs 40, 39 (1 node(s) timed by 2); file weights: run 40.\n"
+    # A history holding only a table with no `ui_nodes` key: its file weights stand and the summary names the gap.
+    (tmp_path / "second").mkdir()
+    completed, _, summary = _step(step, tmp_path / "second", _gh_shim(tmp_path / "second", _answers(
+        _artifact(39, _hour(10), files={"tests/x.py": 700}))))
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert _json(tmp_path / "second" / "shard-plan" / "ci-durations.json")["platforms"] == {SYSTEM: {"tests/x.py": 700}}
+    assert summary == f"Shard plan shard-plan-{PLANNED}: no earlier table records UI nodes; file weights: run 39.\n"
+
+
+@_POSIX_STEP
+def test_the_actions_step_freezes_an_explicit_fallback_when_gh_fails(tmp_path):
+    step = next(step for step in _action_steps() if "scripts/ci_shard_plan.py" in step.get("run", ""))
+    completed, _, summary = _step(step, tmp_path, _gh_shim(tmp_path, {}))
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert not (tmp_path / "shard-plan" / "ci-durations.json").exists()
+    assert _json(tmp_path / "shard-plan" / "plan.json")["durations"] is None
+    assert summary == ("Shard plan: the artifact history is unavailable (CalledProcessError); "
+                       "shards keep their positions and node counts.\n")
+
+
+def _lane_answers(*, table=True):
+    """This run's plan as the lane's fetch step reads it: the artifact id its --jq leaves, then the real zip."""
+    body = io.BytesIO()
+    with zipfile.ZipFile(body, "w") as archive:
+        archive.writestr("plan.json", json.dumps({"format": 1, "durations": "ci-durations.json" if table else None}))
+        if table:
+            archive.writestr("ci-durations.json", json.dumps({"frozen": True}))
+    return {f"repos/o/r/actions/runs/{PLANNED}/artifacts?name=shard-plan-{PLANNED}": b"77\n",
+            "repos/o/r/actions/artifacts/77/zip": body.getvalue()}
+
+
+def _lane_step(job):
+    steps = yaml.safe_load((WORKFLOWS / "ui-browser.yml").read_text(encoding="utf-8"))["jobs"][job]["steps"]
+    return next(step for step in steps if step.get("name") == "Fetch this run's shard plan")
+
+
+@_POSIX_STEP
+@pytest.mark.parametrize("job", ["ui-shard", "ui-manifest"])
+def test_every_lane_job_reads_the_frozen_plan_and_cannot_choose_its_own_weights(tmp_path, job):
+    step = _lane_step(job)
+    tools = _gh_shim(tmp_path, _lane_answers())
+    completed, values, _ = _step(step, tmp_path, tools)
+    table = tmp_path / "shard-plan" / "ci-durations.json"
+    assert completed.returncode == 0 and values == f"OUROBOROS_CI_DURATIONS={table}\n", completed.stdout + completed.stderr
+    assert _json(table) == {"frozen": True}
+
+    # The plan's own positional fallback: the same for every leg, and said so.
+    (tmp_path / "second").mkdir()
+    completed, values, _ = _step(step, tmp_path / "second", _gh_shim(tmp_path / "second", _lane_answers(table=False)))
+    assert completed.returncode == 0 and values == "" and "keeps the positional split" in completed.stdout
+
+    # No plan published, or an unreadable API, stops the leg: neither is a positional split of its own.
+    for name, answers, said in (
+            ("third", {f"repos/o/r/actions/runs/{PLANNED}/artifacts?name=shard-plan-{PLANNED}": b"\n"},
+             "published no shard plan"), ("fourth", {}, "")):
+        (tmp_path / name).mkdir()
+        completed, values, _ = _step(step, tmp_path / name, _gh_shim(tmp_path / name, answers))
+        assert completed.returncode != 0 and values == "" and said in completed.stdout, completed.stdout + completed.stderr
+
+
+def test_one_action_freezes_the_plan_for_ci_and_the_manual_full_lane_and_the_lane_only_reads_it():
+    def workflow(name):
+        return yaml.safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))
+    ci, manual, lane = workflow("ci.yml"), workflow("ui-browser-push.yml"), workflow("ui-browser.yml")
+    for caller in (ci, manual):
+        job = caller["jobs"]["shard-plan"]
+        assert [step.get("uses") for step in job["steps"]][-1] == "./.github/actions/shard-plan"
+        assert any(str(step.get("uses", "")).startswith("actions/checkout") for step in job["steps"])
+        assert {"contents": "read", "actions": "read"}.items() <= job["permissions"].items()
+        assert caller["jobs"]["ui-smoke"]["needs"] == "shard-plan"
+    assert manual["jobs"]["shard-plan"]["if"] == manual["jobs"]["ui-smoke"]["if"]
+    assert "needs" not in manual["jobs"]["ui-diagnostic"]  # A partial scenario packs nothing.
+    # The lane is no second producer: no step of it calls the plan action or uploads a plan.
+    assert not [step for job in lane["jobs"].values() for step in job.get("steps", [])
+                if "actions/shard-plan" in str(step.get("uses"))
+                or ("upload-artifact" in str(step.get("uses")) and "shard-plan" in str(step.get("with")))]
+    # A re-run keeps the published plan; only a run that has none freezes one and uploads it, unconditionally named.
+    steps = {step["name"]: step for step in _action_steps()}
+    reuse, freeze, upload = (steps[name] for name in ("Reuse this run's plan on a re-run", "Freeze the weights from the prior tables",
+                                                      "Upload the plan of this run"))
+    assert reuse["continue-on-error"] is True and reuse["with"]["name"] == "shard-plan-${{ github.run_id }}"
+    assert freeze["if"] == upload["if"] == "${{ steps.existing.outcome != 'success' }}"
+    assert upload["with"]["name"] == reuse["with"]["name"] and "overwrite" not in upload["with"]
 
 
 # ---------------------------------------------------------------- retry verdicts in the lane proof
