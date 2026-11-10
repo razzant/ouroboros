@@ -20,7 +20,6 @@ from ouroboros import memory_view_legacy as legacy
 from ouroboros.chat_chain import parse_address
 from ouroboros.context_layout import WHOLE_OR_OUTLINE_STEPS
 from ouroboros.section_floor import PROTECTED, relocated_text, retain_section, section_views
-from ouroboros.utils import estimate_tokens
 
 log = logging.getLogger(__name__)
 
@@ -41,9 +40,15 @@ _SHOWN += (("F8", "{} unsealed notes by label"), ("F8a", "{} aggregate note list
 _SEALING_TOOLS = frozenset({"chronicle_write", "enable_tools"})  # sent, or loadable through enable_tools
 
 
+@lru_cache(maxsize=4)  # a walk prices one story and one room many times; a memory bound, not a policy
+def json_chars(text: str) -> int:
+    """What a text adds to a request's JSON: its escaped characters, quotes excluded."""
+    return len(json.dumps(text, ensure_ascii=False)) - 2
+
+
 def view_tokens(text: str) -> int:
     """The host's estimate of a text inside a request: its JSON-escaped characters / 4."""
-    return estimate_tokens(json.dumps(str(text), ensure_ascii=False)) if text else 0
+    return max(1, (json_chars(str(text)) + 5) // 4) if text else 0
 
 
 def sealed_owner_rows(room: Mapping[str, Any]) -> List[Dict[str, Any]]:

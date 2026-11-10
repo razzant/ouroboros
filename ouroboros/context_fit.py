@@ -456,8 +456,9 @@ def estimate_context_prompt_tokens(
     *,
     provider: str = "",
     reasoning_effort: str = "",
+    chars: bool = False,
 ) -> int:
-    """Estimate the complete inspectable context shape with bounded images."""
+    """Estimate the complete inspectable context shape with bounded images (``chars``: its JSON characters)."""
     from ouroboros.anthropic_native_custody import (
         context_custody_proxy,
         custody_private_key,
@@ -510,7 +511,8 @@ def estimate_context_prompt_tokens(
         counted("request_serializations", key=hash(text))
         return text
 
-    return max(int(estimate_tokens(serialized(*projection))) for projection in projections)
+    longest = max(len(serialized(*projection)) for projection in projections)
+    return longest if chars else max(1, (longest + 3) // 4)
 
 
 def _route_calibration_ratio(
@@ -636,10 +638,11 @@ def _request_tail(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _request_tokens(system_content: List[Dict[str, Any]], user_content_json: str, *,
-                    supplementary_messages_json: str = "[]", current_messages: Optional[List[Dict[str, Any]]] = None) -> int:
+                    supplementary_messages_json: str = "[]", current_messages: Optional[List[Dict[str, Any]]] = None,
+                    chars: bool = False) -> int:
     tail = (_request_tail(current_messages) if current_messages is not None else
             [{"role": "user", "content": json.loads(user_content_json)}, *json.loads(supplementary_messages_json)])
-    return estimate_context_prompt_tokens([{"role": "system", "content": system_content}, *tail])
+    return estimate_context_prompt_tokens([{"role": "system", "content": system_content}, *tail], chars=chars)
 
 
 class MinimumViewUnfit(ValueError):
@@ -708,12 +711,17 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     held = (kept or {}).get(start or preferred) or FULL_VIEW
     story_before, room_before = (render_story(snapshot, held), render_room(snapshot, held)) if snapshot else ("", "")
 
+    shapes = {}  # one serialization per request shape: a memory text adds only its own characters (json_chars)
     def measure(selected, sent, addressed, story="", room=""):
+        key = (selected, sent.chosen, tuple(sorted(addressed.items())), bool(story), bool(room))
         counted("request_forms", key=("frame", selected, sent.chosen, bool(story), bool(room)))
-        return _request_tokens(_system_blocks(core, governance[form[selected]], story, room,
-            mode=selected, addressed=addressed), user_content_json,
-            supplementary_messages_json=core.supplementary_messages_json,
-            current_messages=current_messages) + tool_schema_tokens(list(sent.schemas)) + envelope_overhead_tokens
+        if key not in shapes:
+            whole = _request_tokens(_system_blocks(core, governance[form[selected]], story, room, mode=selected,
+                addressed=addressed), user_content_json, supplementary_messages_json=core.supplementary_messages_json,
+                current_messages=current_messages, chars=True)
+            shapes[key] = whole - floor.json_chars(story) - floor.json_chars(room), tool_schema_tokens(list(sent.schemas))
+        base, schemas = shapes[key]
+        return max(1, (base + floor.json_chars(story) + floor.json_chars(room) + 3) // 4) + schemas + envelope_overhead_tokens
     asked = (saving or {}).get(start or preferred, 0)  # the shown request's saving, in estimator tokens
     original_fixed = measure(start or preferred, select_tool_schemas(tool_schemas or [], context_mode=mode,
         schema_names=names), section_views(sections[start or preferred], previous))
