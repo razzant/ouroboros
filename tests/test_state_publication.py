@@ -201,6 +201,32 @@ def test_an_unchanged_revision_serves_the_held_publication_without_reading_a_tas
     assert len(productions) == 1 and third.headers[publication.GENERATION_HEADER] == "2"
 
 
+def test_publication_reprobes_an_effective_child_root_after_it_changes(serving, monkeypatch):
+    """A split-drive effective result is a publication dependency, not only a budget root."""
+    child = str(serving.root / "child-drive")
+    revision = [1]
+    productions = []
+
+    def fake_probe(_root, roots=frozenset(), **_kwargs):
+        return (tuple(sorted(roots)), revision[0])
+
+    def produce(_direct):
+        productions.append(1)
+        return {"fields": {}, "task_bindings": {}, "roots": [child], "jobs": {}}
+
+    monkeypatch.setattr(publication, "probe", fake_probe)
+    held = publication.Publisher(str(serving.root))
+    held.refresh(produce)
+    held.refresh(produce)
+    # The first refresh learns the split-drive dependency; the following
+    # refresh publishes that expanded probe key, then the key is stable.
+    held.refresh(produce)
+    assert productions == [1, 1]
+    revision[0] = 2
+    held.refresh(produce)
+    assert productions == [1, 1, 1]
+
+
 def test_bindings_the_client_holds_are_not_sent_again(serving):
     first = _payload(_get(serving.app))
     revision = first["task_bindings_revision"]
@@ -263,6 +289,12 @@ def test_each_source_the_body_reads_moves_the_revision(serving):
     after_running = _key(serving)
     serving.workers.RUNNING["new-task"]["active_llm_call"] = {"model_activity": {"phase": "reasoning"}}
     assert _key(serving) != after_running, "a live model activity the queue documents omit"
+    after_activity = _key(serving)
+    serving.workers.RUNNING["new-task"]["turn_phase"] = "context_building"
+    assert _key(serving) != after_activity, "a start step its frames land (#2862) the queue documents omit"
+    after_activity = _key(serving)
+    serving.workers.RUNNING["new-task"]["context_attempt"] = {"attempt_id": "a1", "ledger_state": "dispatched"}
+    assert _key(serving) != after_activity, "a sent attempt's context the queue documents omit"
     after_activity = _key(serving)
     supervisor_state.STATE_PATH.write_text(json.dumps({"evolution_cycle": 3}), encoding="utf-8")
     after_state = _key(serving)

@@ -881,8 +881,9 @@ def _refuse_exhausted(ctx: ToolContext, wave: _Wave, exhausted: Dict[str, Any]) 
         task_id=str(getattr(ctx, "task_id", "") or ""), cycles_paid=int(exhausted["cycles_paid"]),
         cap=int(exhausted["cap"]), enforcement=wave.enforcement, root_task_id=wave.root_task_id,
         fingerprint=str(wave.frozen.diff_sha), root=str(wave.root))
-    outcome = {"blocked": True, "block_reason": "review_cycles_exhausted",
-               "dispatch_refusal": {"kind": "review_cycles_exhausted", "message": str(exhausted["message"])}}
+    outcome = {"blocked": True, "block_reason": "review_cycles_exhausted",  # ``cap``: the ceiling it met, a raise lifts it
+               "dispatch_refusal": {"kind": "review_cycles_exhausted", "message": str(exhausted["message"]),
+                                    "cap": int(exhausted["cap"])}}
     result = _settle(ctx, wave, wave_facts(ctx, wave, outcome=outcome, forensic={}), outcome)
     result["message"] = str(exhausted["message"])
     return result
@@ -1321,7 +1322,9 @@ _DESCRIPTION = (
     "result does what was asked, judged on the result, and on the method only where the owner's words or "
     "explicit choice fixed it. On a Required root, Blocking widens a "
     "named subset to every ticked reviewer; Advisory names ticked reviewers and needs a reason when narrowed "
-    "(else a typed $0 refusal); if you did not review before delivery the host seats the whole pool. "
+    "(else a typed $0 refusal); if you did not review before delivery the host seats the whole pool. Under Blocking any "
+    "settled review of the result you deliver holds it until one passes; under Advisory a result you revise after a "
+    "review reached you is reviewed again only if you ask, and delivering it is your own acceptance. "
     "Auto composes the rows you name in every strictness. Cyber Pro composes freely and never holds. A child's "
     "own result review composes freely. Under Auto ask when another mind's "
     "check could change what you deliver, or when your human asks for a careful check. Task review Off refuses "

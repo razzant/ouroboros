@@ -11,6 +11,9 @@
     {"kind": "control_store_wait", "rows": [["a", "ended", 75.2], ["b", "ended", 9.96]], "line": "Control storage waits ×2 · longest 1 min 15 s"},
     {"kind": "control_store_wait", "rows": [["a", "ended", 9.96]], "line": "Control storage wait ended · 10.0 s"},
     {"kind": "usage_lock_wait", "rows": [["a", "ended", null], ["b", "ended", null]], "line": "Accounting waits ×2"},
-    {"kind": "usage_lock_wait", "rows": [["a", "ended", null]], "line": "Accounting wait ended"}
+    {"kind": "usage_lock_wait", "rows": [["a", "ended", null]], "line": "Accounting wait ended"},
+    {"kind": "safety_check_wait", "rows": [["a", "entered", 0.0]], "line": "Checking safety"},
+    {"kind": "safety_check_wait", "rows": [["a", "entered", 0.0], ["a", "ended", 8.04]], "line": "Safety check ended · 8.0 s"},
+    {"kind": "safety_check_wait", "rows": [["a", "ended", 1.2], ["b", "entered", 0.0], ["c", "entered", 0.0], ["c", "ended", 0.4]], "line": "Checking safety · Safety checks ×2 · longest 1.2 s"}
   ]
 }

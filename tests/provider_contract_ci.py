@@ -94,8 +94,9 @@ _OPTIONAL_DIRECT_CANARIES = (
         "DEEPSEEK_API_KEY", False, "medium", continue_to_final=True,
     ),
     ProviderCanary(
-        "cloudru_direct", "cloudru::zai-org/GLM-4.7", "cloudru",
-        "CLOUDRU_FOUNDATION_MODELS_API_KEY", False, "none",
+        # GLM-5.3 accepts low/high/max; the former canary's "none" is a request error.
+        "cloudru_direct", "cloudru::zai-org/GLM-5.3", "cloudru",
+        "CLOUDRU_FOUNDATION_MODELS_API_KEY", False, "low",
     ),
     ProviderCanary(
         "gigachat_direct", "gigachat::GigaChat-2-Max", "gigachat",

@@ -137,7 +137,11 @@ def test_snapshot_continuation_preserves_source_coverage(
 
     class AnswerGateway:
         def handshake(self, **_kwargs): return {}
-        def answer_interaction(self, run_id, interaction_id, answers):
+        def get_run(self, run_id, **_kwargs):  # the questions the engine holds the run on (legacy rows)
+            ids = [f"range-{new['source']['task_id']}-0", f"range-{old['source']['task_id']}-{midpoint}"]
+            return {"summary": {"state": "running", "waitingOnUser": True}, "lastSeq": 1, "pendingInteractions": [
+                {"interactionId": iid, "questions": [{"id": "source", "question": "Send it."}]} for iid in ids]}
+        def answer_interaction(self, run_id, interaction_id, answers, *, timeout_sec=None):
             deliveries.append((run_id, interaction_id, answers))
             return {"accepted": True, "status": "delivered"}
         def close(self): pass

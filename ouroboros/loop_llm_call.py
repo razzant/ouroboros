@@ -28,14 +28,14 @@ from ouroboros.llm_claudexor import propagate_model_error, presence_refusal_unst
 from ouroboros.llm_substitution import same_route_refusal, stamp_substitutions
 from ouroboros.model_wait import current_model_wait, model_wait_reason, propagate_model_control
 from ouroboros.openai_chat_dispatch import CUSTOM_RECEIPTS_USAGE_KEY, pop_custom_validation_receipts
-from ouroboros.llm_attempt import PROVIDER_POLICY_REFUSAL, _is_provider_policy_refusal, single_physical_send
+from ouroboros.llm_attempt import PROVIDER_POLICY_REFUSAL, _is_provider_policy_refusal, single_physical_send, track_physical_attempts
 from ouroboros.observability import new_call_id, new_execution_id, persist_call
 from ouroboros.pricing import emit_llm_usage_event, infer_model_category, normalize_usage_cost as _normalize_usage_cost
 from ouroboros.send_clock import main_send_scope
 from ouroboros.task_pacing import main_loop_wire_options
 from ouroboros.task_custody import canonical_owner_root
 from ouroboros.transport_custody import attempt_custody_event_fields, is_pre_dispatch_transport_failure, is_retryable_transport_death, outcome_unknown_on_chain
-from ouroboros._usage_response import CONTENT_REFUSAL_FINISH_REASONS, OUTPUT_LIMIT_FINISH_REASONS, output_exhaustion_facts, response_finish_reason
+from ouroboros._usage_response import CONTENT_REFUSAL_FINISH_REASONS, OUTPUT_LIMIT_FINISH_REASONS, TOOL_CALL_FINISH_REASONS, output_exhaustion_facts, response_finish_reason
 from ouroboros.usage_accounting import PhysicalAttemptContext, UsageAccountingError, bind_physical_attempt_context, current_usage_scope, last_physical_attempt_capture, physical_attempt_capture_from_exception
 from ouroboros.physical_attempt_context import observe_dispatch
 from ouroboros.contracts.record_contract import RECORD_CONTRACT_VERSION
@@ -516,9 +516,8 @@ from ouroboros.context_budget import (  # one overflow vocabulary for every seam
     context_overflow_message as _context_overflow_message,
     output_or_body_size_message as _output_or_body_size_message,
 )
-_FORCED_TOOL_FINISH_REASONS = frozenset({"tool_calls", "function_call", "tool_use"})
 _FORCED_INCOMPLETE_FINISH_REASONS = (_STRUCTURED_CONTEXT_OVERFLOW_CODES | OUTPUT_LIMIT_FINISH_REASONS
-                                     | _FORCED_TOOL_FINISH_REASONS)
+                                     | TOOL_CALL_FINISH_REASONS)
 
 
 def forced_response_is_incomplete(response_meta: Optional[Dict[str, Any]], *, completion_request: bool = False) -> bool:
@@ -531,7 +530,7 @@ def forced_response_is_incomplete(response_meta: Optional[Dict[str, Any]], *, co
         return False
     finish_reason = response_meta.get("finish_reason")
     reasons = _FORCED_INCOMPLETE_FINISH_REASONS - (
-        _FORCED_TOOL_FINISH_REASONS | OUTPUT_LIMIT_FINISH_REASONS if completion_request else frozenset())
+        TOOL_CALL_FINISH_REASONS | OUTPUT_LIMIT_FINISH_REASONS if completion_request else frozenset())
     return int(response_meta.get("tool_call_count") or 0) > int(completion_request) or (
         response_meta.get("finish_reason_present") is True
         and (
@@ -1442,8 +1441,8 @@ def call_llm_with_retry(
             _emit_main_llm_call_state(event_queue, call_identity, "started")
             repeat = TIMEOUT_REPEAT_KEY in accumulated_usage
             if repeat: kwargs["wait_for_resources"] = False
-            claim = (lambda reservation: _claim_timeout_repeat(accumulated_usage, call_ids, reservation)) if repeat else physical_send_claim
-            with single_physical_send(claim) if claim is not None else contextlib.nullcontext(), observe_dispatch(
+            strict = single_physical_send(lambda reservation: _claim_timeout_repeat(accumulated_usage, call_ids, reservation)) if repeat else contextlib.nullcontext()
+            with strict, track_physical_attempts(physical_send_claim), observe_dispatch(
                     lambda capture, identity=call_identity: _emit_main_llm_call_state(event_queue, identity, "dispatched", capture=capture)):
                 msg, usage = _send_main_candidate(
                     llm, kwargs, model=model, use_local=use_local, deadline_ts=deadline_ts,

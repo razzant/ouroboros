@@ -988,10 +988,10 @@ def _task_attributed_commit_paths(
     attached = body_candidate.attach_attribution(ctx) if bound else {}
     results_root = body_candidate._results_root(ctx)
     root_task_id = str(body_candidate._metadata(ctx).get("root_task_id") or "").strip() or task_id
-    evidence_task_id = attribution_task_id(results_root, (root_task_id, task_id))
+    evidence_task_id = attribution_task_id(results_root, (root_task_id, task_id), **({"surface_type": "system_repo"} if bound else {"repo_root": ctx.repo_dir}))
     if not evidence_task_id:
-        # No host-captured baseline (manual ToolContext, external dry-run
-        # review): the legacy explicit/whole-tree staging contract applies.
+        # No host baseline of this repo, or for a bound candidate of the body (a manual ToolContext, a dry-run review,
+        # a chat turn's folder-only baseline): the legacy explicit/whole-tree staging contract applies.
         return paths, None, "", None
     selected, attribution, error = resolve_attributed_git_paths(
         results_root,

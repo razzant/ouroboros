@@ -25,9 +25,10 @@ from ouroboros.observability import task_timing_scope, timed_phase
 from ouroboros.tool_policy import CAPABILITY_OMISSION_HEADER, format_capability_omissions, initial_tool_schemas, list_non_core_tools  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.llm_claudexor import ModelTurnState
+from ouroboros.anthropic_native_custody import custody_private_key
 from ouroboros.model_wait import ModelWaitInterrupted
 from ouroboros._usage_wait import receiver_abandonable
-from ouroboros import working_checkpoint
+from ouroboros import loop_output_exhaustion as output_recovery, working_checkpoint
 from ouroboros.context import build_user_content  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.context_compaction import compact_tool_history_llm, context_reclaim_transcript_sha256  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.deadline_utils import parse_deadline_ts, utc_now  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
@@ -110,6 +111,8 @@ def _finalize_loop_candidate(content, limit_ctx, tools, emit_progress, *, after_
                              resume_candidate=False):
     """One completion request owner, with ordinary first/direct prose compatibility."""
     from ouroboros.loop_delivery import consume_completion_request, hold_completion_response, observe_completion_hold
+    if assistant_message is not None and (unfinished := output_recovery.unfinished_reply(limit_ctx, assistant_message)) is not False:
+        return unfinished  # a typed cut or tool-call finish: never selected, consumed or parked as an answer
     ctx = tools._ctx
     if resume_candidate:
         content = ctx._delivery_candidate.full_text
@@ -157,12 +160,11 @@ def _finalize_loop_candidate(content, limit_ctx, tools, emit_progress, *, after_
                 hold_completion_response(content, tools, limit_ctx, limit_ctx.llm_trace,
                                          response_start=response_start, selected=selected)
         if assistant_message is not None and not selected:
-            # Enrich only this round's already-retained row, using the hold owner's
-            # complete row comparison. Earlier equal answers keep their own continuation.
+            # Enrich only this round's complete held row; earlier equal answers keep their own continuation.
             for row in limit_ctx.messages[response_start:]:
                 if row == {"role": "assistant", "content": content}:
-                    row.update({key: assistant_message[key] for key in ("reasoning_details", "reasoning_content")
-                                if key in assistant_message})
+                    row.update({key: value for key, value in assistant_message.items()
+                                if key in ("reasoning_details", "reasoning_content") or custody_private_key(key)})
     return result
 
 
@@ -759,7 +761,6 @@ def run_llm_loop(
             limit_ctx.active_use_local = ctx.active_use_local = active_use_local
             ctx.context_fit_plan, ctx.active_context_mode = context_fit_plan, active_context_mode
             ctx._current_llm_call_meta = dict(accumulated_usage.get("_last_llm_call_meta") or {})  # after a recovered route too
-            from ouroboros import loop_output_exhaustion as output_recovery
             if msg is None and (output_step := output_recovery.next_step(accumulated_usage)):
                 if output_step == "finish":
                     return output_recovery.finish(limit_ctx)

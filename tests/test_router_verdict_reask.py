@@ -22,7 +22,7 @@ import pytest
 
 from ouroboros import usage_accounting as ua
 from ouroboros.llm import LLMClient
-from ouroboros.llm_attempt import single_physical_send
+from ouroboros.llm_attempt import single_physical_send, track_physical_attempts
 from ouroboros.llm_routing import _resolve_or_provider
 from ouroboros.llm_stream import AssembledResponse, ProviderStreamError
 from ouroboros.loop_llm_call import classify_llm_exception
@@ -254,6 +254,30 @@ def test_no_reask_inside_a_single_physical_send_scope(isolated, asynchronous):
 
     assert len(sends) == 1
     assert classify_llm_exception(outcome).kind == "quota_exhausted"
+
+
+class _Tracker:
+    """Records each attempt before dispatch and hears each end (``track_physical_attempts``)."""
+
+    def __init__(self):
+        self.claimed, self.heard = [], []
+
+    def __call__(self, reservation):
+        self.claimed.append(reservation.attempt_id)
+
+    def attempt_ended(self, capture, error):
+        self.heard.append((capture.attempt_id, capture.provider_status_code, error is None))
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_tracking_keeps_the_reask_and_records_every_attempt(isolated, asynchronous):
+    tracker = _Tracker()
+    with track_physical_attempts(tracker):
+        outcome, sends = drive([Wire(MASKED), Wire(ANSWER, b"data: [DONE]\n\n")], asynchronous=asynchronous)
+
+    assert len(sends) == 2 and outcome.model_dump()["choices"][0]["message"]["content"] == "answer"
+    assert len(set(tracker.claimed)) == 2 and [attempt for attempt, *_rest in tracker.heard] == tracker.claimed
+    assert [(status, read) for _attempt, status, read in tracker.heard] == [(402, False), (None, True)]
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])

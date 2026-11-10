@@ -716,7 +716,7 @@ class ActiveDirectTurn(TypedDict):
     task_attempt: NotRequired[int]
     turn_phase: NotRequired[str]  # the last start fact its execution passed (TURN_PHASES); display only
     executor: NotRequired[str]  # where the turn runs: worker, inline_call or inline_degraded (task_carrier.EXECUTORS)
-    carrier: NotRequired[str]  # a lane row: awaiting (no carrier holds it yet) or worker
+    carrier: NotRequired[str]  # a lane row: awaiting (no carrier holds it yet) or worker; a worker-held running root: worker
 
 
 class ActiveChatActivity(ActiveDirectTurn):  # global root census (kind also presence); phase and control facts keep their own authority
@@ -1099,6 +1099,8 @@ class TaskCreateRequest(_TaskCreateRequestRequired, total=False):
     # v6.60.0: "" | "final_answer_line" — adapter-declared machine-extractable answer
     # protocol; flows into task_contract.answer_protocol and inherits to subagents.
     answer_protocol: str
+    # true: task review Required reviews the whole final answer even without files (task_contract.review_answer).
+    review_answer: bool
     allowed_resources: Dict[str, Any]
     resource_policy: Dict[str, Any]
     disabled_tools: list[str]

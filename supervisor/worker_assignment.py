@@ -575,6 +575,10 @@ def _launch_attempt(queue, candidate, worker, token: str, *, lane: bool, generat
                     return None  # committed, row mark unwritten: the same process retries it
                 continuation = candidate.get("_owner_wait_resume") or candidate.get("_budget_pause_resume") or candidate.get("_working_recovery") or {}
                 launched = _settled_running_task(candidate, continuation)
+                # Each physical handoff gets a fresh phase-generation token.  Attempt and
+                # worker identity can both be reused by Resume, so they cannot fence a
+                # buffered phase frame from the previous execution.
+                launched["_phase_generation"] = uuid.uuid4().hex
                 # The handoff boundary: from here this worker may hold the task.
                 _COMMITTED_UNSENT.pop(str(candidate.get("id") or ""), None)
                 worker.quiescence_token = ""
@@ -616,6 +620,7 @@ def _bind_running(queue, task, worker) -> None:
         "budget_paused_sec": budget_paused_seconds(resume),
         **({"sleep_parked_at": float(sleeping)} if sleeping is not None else {}),
         "soft_sent": False, "attempt": int(task.get("_attempt") or 1), **lane,
+        "phase_generation": str(task.get("_phase_generation") or ""),
     }
     # A started task publishes no row: its own card says so (the agent's `task_started` live event).
     queue.persist_queue_snapshot(reason="assign_task")

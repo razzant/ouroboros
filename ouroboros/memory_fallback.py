@@ -430,7 +430,9 @@ def _stamp_line(entry: Mapping[str, Any], lane_rows: int) -> str:
     for label, key in (("outcome", "outcome"), ("phase", "outcome_phase"), ("review", "review_verdict"),
                        ("reason", "reason_code"), ("objective", "objective_status")):
         if entry.get(key):
-            facts.append(f"{label} {entry[key]}")
+            facts.append(f"{label} {entry[key]}" + (f" by {entry['objective_source']}" + (
+                f" ({entry['objective_reason']})" if entry.get("objective_reason") else "")
+                if key == "objective_status" and entry.get("objective_source") else ""))
     finality = recorded_finality(entry.get("outcome_final"), entry.get("outcome_authority"),
                                  host_facts=entry.get("source") == "host_task_facts")
     if finality:

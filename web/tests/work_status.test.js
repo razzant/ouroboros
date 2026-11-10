@@ -318,6 +318,8 @@ test('a known outcome beside Finalizing… is a dot in its tone: Done with warni
     assert.deepEqual(said('rejected_duplicate'), ['Done with warnings', 'Finalizing…', 'done', 'warn', { shape: 'dot', hue: 'ok' }]);
     assert.deepEqual(said('cancelled'), ['Stopped', 'Finalizing…', 'stopped', 'cancelled', { shape: 'dot', hue: 'neutral' }]);
     assert.deepEqual(said('failed'), ['Failed', 'Finalizing…', 'failed', 'error', { shape: 'dot', hue: 'failed' }]);
+    // #2801: a lifecycle that has not settled is no outcome: plain Finalizing…, never Done.
+    assert.deepEqual(said('running').slice(0, 4), ['Finalizing…', '', 'live', '']);
     assert.deepEqual(OUTCOME_TONES, { done: 'done', warn: 'done', cancelled: 'stopped', error: 'failed', timeout: 'failed',
         lifecycle_error: 'failed' });
 });

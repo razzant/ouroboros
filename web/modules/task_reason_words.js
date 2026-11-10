@@ -9,6 +9,7 @@ export const TASK_CAUSE_PHRASES = {
     author_stop: "Ouroboros stopped with unfinished work.",
     review_outcome_received: "Ouroboros received the reviewers' outcome and finished on that.",
     author_finish: "Ouroboros delivered this answer without the reviewers' sign-off.",
+    author_finish_pending: "Ouroboros delivered this answer before the reviewers answered; their verdict is kept when it arrives.",
     review_degraded: "The reviewers did not reach a verdict on this answer.",
     infra_failure: "The review could not run because of an infrastructure failure, so there is no verdict.",
     acceptance_preparation_failed: "Ouroboros could not assemble the evidence for this answer's review, so this preparation attempt dispatched no new reviewers; the work itself is kept.",
@@ -57,7 +58,7 @@ export const TASK_CAUSE_PHRASES = {
     context_overflow: "The task outgrew its context before it could finish cleanly",
     context_capacity: "This route's window cannot hold the task's context",
     required_reference_unavailable: "The handbook this task requires could not be read",
-    output_recovery_exhausted: "Empty length-limited replies exhausted recovery; saved work remains available",
+    output_recovery_exhausted: "Incomplete model replies exhausted recovery; saved work remains available",
     children_unabsorbed: "Some sub-task results were never folded in, so the task had to wrap up",
     // The supervisor's timeout rails (queue_timeouts.TIMEOUT_TERMINAL_REASONS): the reaper's task_done reason_code.
     absolute_ceiling: "The task reached its maximum running time",

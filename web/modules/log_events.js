@@ -1,4 +1,4 @@
-import { accountedUpperBound, accountedUpperBoundWithChildren, formatUsd4, plainCauseText, projectMarkdownLines, savedTerminalRowNote } from './utils.js';
+import { accountedUpperBound, accountedUpperBoundWithChildren, formatUsd4, isoMicros, plainCauseText, projectMarkdownLines, savedTerminalRowNote } from './utils.js';
 import { cancelCauseClauses, ownerStopEnding } from './cancel_presentation.js';
 import { TASK_CAUSE_PHRASES, UNSTARTED_REASONS, taskReasonPhrase, describedCause, reasonCodesNote, residualToolErrorsPhrase } from './task_reason_words.js';
 export { taskReasonPhrase, reasonCodesNote } from './task_reason_words.js';
@@ -498,8 +498,8 @@ function joinCauseClauses(clauses) {
 // cause when the review rounds ran out. The twin of review_records.recorded_author_stop.
 const explicitAuthorStop = (d) => d?.reason === 'author_stop' || (d?.reason === 'review_cycles_exhausted'
     && d.author_action === 'stop' && d.author_disposition?.action === 'stop');
-// Its AUTHOR's reason beside the typed sentence (never a finish's or reviewer prose). Twin: project_dialogue._author_stop_rationale.
-const authorStopRationale = (d) => (explicitAuthorStop(d) ? String(d.author_disposition?.rationale || '').split(/\s+/).filter(Boolean).join(' ') : '');
+// Its AUTHOR's reason (a stop's, or an acceptance the reviewers did not approve; never reviewer prose). Twin: project_dialogue._author_stop_rationale.
+const authorStopRationale = (d) => (explicitAuthorStop(d) || ['author_finish', 'author_finish_pending'].includes(d?.reason) ? String(d.author_disposition?.rationale || '').split(/\s+/).filter(Boolean).join(' ') : '');
 
 // Recorded standing limitations: deferred children and terminal_plan_review_open, worded by its class when present.
 // Twin: project_dialogue._terminal_limitations. Open classes exclude the merely awaited case; all but unreadable (an
@@ -657,7 +657,7 @@ export function taskOutcomeSeverity(evt) {
         lifecycle === 'rejected_duplicate'
         || ['degraded', 'best_effort'].includes(execution)
         || ['degraded', 'best_effort'].includes(objective)
-        || (review === 'degraded' && !authorFinished)
+        || review === 'degraded' || (authorFinished && ['fail', 'awaiting'].includes(review))  // an unapproved author acceptance is always flagged
         || objectiveWarned(record)
     ) {
         return 'warn';
@@ -1459,7 +1459,6 @@ function summarizeChatLiveEventView(evt) {
             dedupeKey: key(evt.round || ''),
         });
     }
-
     if (t === 'task_start_settings_reload_failed') {
         // #285 loud disclosure: the task runs on the previously applied
         // configuration — the owner must see that in the chat timeline, not
@@ -1475,7 +1474,6 @@ function summarizeChatLiveEventView(evt) {
             dedupeKey: key(),
         });
     }
-
     if (t === 'tool_call_timeout' || t === 'tool_timeout') {
         return chatView({
             phase: 'warn',
@@ -1485,7 +1483,6 @@ function summarizeChatLiveEventView(evt) {
             toolCall: toolObservation(evt, groupId, 'wait_ended'),
         });
     }
-
     if (['tool_call_finished', 'tool_call'].includes(t) && evt.is_error) {
         const failed = toolObservation(evt, groupId, 'error');
         const commandText = describeText(extractCommandText(evt.args), 120);
@@ -1512,7 +1509,8 @@ function summarizeChatLiveEventView(evt) {
     }
 
     if (t === 'task_done') return taskTerminalSummary(evt);
-
+    // A late review that resolved its ended task carries the CURRENT outcome a reload reads (late_review_marks).
+    if (t === 'review_late_result' && evt.current_outcome) return { ...taskTerminalSummary({ ...evt.current_outcome, task_id: evt.task_id, outcome_final: true }), currentOutcome: true };
     if (t === 'task_cost_finalized') {
         const unavailable = evt.cost_accounting_status === 'unavailable';
         const ownCost = unavailable ? 'cost unavailable' : formatLogMoney(accountedUpperBound(evt));
@@ -1567,6 +1565,9 @@ export function getLogTaskGroupId(evt) {
     return '';
 }
 
+// A late review's current outcome is as old as the row it read (its revision), not its later publication; it repaints only a shown, finished card, never over a newer frame of it (the card clock, chat.js, read to the microsecond).
+export const lateOutcomeIsCurrent = (record, evt) => Boolean(record?.finished) && !(isoMicros(evt?.current_outcome?.revision || evt?.ts) < isoMicros(record.latestSourceTs));
+
 export function isGroupedTaskEvent(evt) {
     const groupId = getLogTaskGroupId(evt);
     if (!groupId) return false;
@@ -1576,9 +1577,8 @@ export function isGroupedTaskEvent(evt) {
         || t.startsWith('task_')
         || t.startsWith('llm_')
         || t.startsWith('tool_')
-        || t === 'context_building_started'
-        || t === 'context_building_finished'
-        || t === 'send_message'
+        || t === 'context_building_started' || t === 'context_building_finished' || t === 'send_message'
+        || (t === 'review_late_result' && Boolean(evt.current_outcome))  // only one that carries its task's outcome
     );
 }
 

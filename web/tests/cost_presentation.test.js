@@ -9,7 +9,7 @@ import {
     taskCostProjection,
 } from '../modules/chat_activity.js';
 import { costPresentationDetail, costPresentationMeta, renderLiveCardMeta } from '../modules/chat_activity.js';
-import { costBucketPresentation, costDashboardPresentation } from '../modules/costs.js';
+import { TABLES, breakdownRowName, costBucketPresentation, costDashboardPresentation } from '../modules/costs.js';
 import { summarizeLogEvent } from '../modules/log_events.js';
 import {
     accountedUpperBound,
@@ -728,4 +728,23 @@ test('#2828 a closed-empty carrier is a versioned clear; closed custody without 
         renderLiveCardMeta(record);
         assert.doesNotMatch(record.metaEl.innerHTML, /Cost|\$/);
     } finally { globalThis.document = priorDocument; }
+});
+
+test('Costs tables say what they group by: provider, a model over every provider, the roles set now (Track09 A)', () => {
+    assert.deepEqual(TABLES.map(([id, title, column, key]) => [id, title, column, key]), [
+        ['cost-by-model', 'By model', 'Model', 'by_model'],
+        ['cost-by-key', 'By provider', 'Provider', 'by_api_key'],
+        ['cost-by-model-cat', 'By current role', 'Role', 'by_model_category'],
+        ['cost-by-task-cat', 'By task category', 'Category', 'by_task_category'],
+    ]);
+    const notes = Object.fromEntries(TABLES.map(([id, , , , note]) => [id, note]));
+    assert.match(notes['cost-by-model'], /over every provider and connection/);
+    assert.match(notes['cost-by-model-cat'], /roles set in Settings now, not when each call ran/);
+    assert.equal(breakdownRowName('cost-by-key', 'openrouter'), 'OpenRouter');
+    assert.equal(breakdownRowName('cost-by-key', 'claude'), 'Claude Code');
+    assert.equal(breakdownRowName('cost-by-key', 'some-new-provider'), 'some-new-provider', 'an unknown key stays itself');
+    assert.equal(breakdownRowName('cost-by-model-cat', 'other'), 'No current role');
+    assert.equal(breakdownRowName('cost-by-model-cat', 'main'), 'Main');
+    assert.equal(breakdownRowName('cost-by-model-cat', 'unattributed'), 'unattributed');
+    assert.equal(breakdownRowName('cost-by-model', 'anthropic/claude-opus-5.5'), 'anthropic/claude-opus-5.5');
 });

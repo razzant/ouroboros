@@ -1,3 +1,5 @@
+import { statusMarkHtml } from './status_mark.js';
+
 // Producer census: loop_model_call/round_limits/nudges/budget, task_pacing,
 // transcript_prefix, loop_forced_finalization, owner_pause and agent budget-pause events.
 export const CHECKPOINT_LABELS = {
@@ -28,6 +30,8 @@ export const CHECKPOINT_LABELS = {
 const WAIT_LABELS = {
     usage_lock_wait: ['Waiting for accounting access', 'Accounting wait ended', 'Accounting waits'],
     control_store_wait: ['Waiting for control storage', 'Control storage wait ended', 'Control storage waits'],
+    // The Safety Supervisor's check of one tool call; an open one also shows on the closed card's face (chat.js).
+    safety_check_wait: ['Checking safety', 'Safety check ended', 'Safety checks'],
 };
 
 function waitSeconds(s) {
@@ -36,7 +40,7 @@ function waitSeconds(s) {
     return whole < 60 ? `${whole} s` : `${Math.floor(whole / 60)} min${whole % 60 ? ` ${whole % 60} s` : ''}`;
 }
 
-/** A host wait (accounting, control storage) is how the host ran, not the turn's work. Its episode
+/** A host wait (accounting, control storage, a Safety check) is how the host ran, not the turn's work. Its episode
  *  facts, or null for any other checkpoint; the producer still writes both phases of every episode.
  *  Python twin: ``ouroboros/checkpoint_waits.py`` (cases in ``web/tests/fixtures/wait_fold_parity.json``). */
 export function waitEpisode(evt = {}) {
@@ -70,6 +74,7 @@ export function foldWaitRow(record, summary, { ts = '', sourceTs = '', earliest 
     episodes.set(id, { ended: Boolean(seen?.ended) || ended, elapsed: ended ? elapsed : seen?.elapsed ?? null });
     const headline = waitFoldLine(kind, episodes);
     const phase = [...episodes.values()].every((episode) => episode.ended) ? 'result' : 'thinking';
+    syncWaitFace(record);
     const index = record.items.findIndex((item) => item.dedupeKey === summary.dedupeKey);
     if (index !== -1) {
         const item = record.items[index];
@@ -82,6 +87,34 @@ export function foldWaitRow(record, summary, { ts = '', sourceTs = '', earliest 
         evidenceRef: null, receipt: true, ts, sourceTs, count: 1, dedupeKey: summary.dedupeKey,
         lineKey: `wait-${String(summary.dedupeKey).replace(/[^A-Za-z0-9_-]/g, '-')}` });
     return { changed: true, index: -1, moved: false };
+}
+
+// Only a Safety check names its wait on a closed card's face: the tool the card shows is waiting on it (owner,
+// Track09 A, 9 Nov 2026). Accounting and storage waits stay in Details.
+const FACE_WAITS = ['safety_check_wait'];
+
+/** The quiet line under a live card's current action while one of its calls' Safety checks is open: the still mark of
+ *  a wait (DESIGN "Subscription waits": no animation or counter), gone once every episode ended or the card finished.
+ *  Concurrent checks are one line; the folded Details row keeps each check and the longest. Returns whether it changed. */
+export function syncWaitFace(record) {
+    const anchor = record?.activityEl;
+    if (!anchor?.ownerDocument) return false;
+    const open = !record.finished && FACE_WAITS.some((kind) =>
+        [...(record.waitFolds?.[kind]?.values?.() || [])].some((episode) => !episode.ended));
+    let el = record.waitFaceEl;
+    if (!el && !open) return false;
+    if (!el) {
+        el = record.waitFaceEl = anchor.ownerDocument.createElement('div');
+        el.className = 'chat-live-hostwait';
+        el.dataset.liveHostwait = '';
+        el.setAttribute('role', 'status');
+        anchor.after(el);
+    }
+    const html = open ? `${statusMarkHtml('', { shape: 'still', hue: 'ink' })}<span>${WAIT_LABELS.safety_check_wait[0]}</span>` : '';
+    if (el.innerHTML === html && el.hidden === !open) return false;
+    el.innerHTML = html;
+    el.hidden = !open;
+    return true;
 }
 
 // What a cost crossing measured (the producer's typed `budget_axis`). A row without one comes

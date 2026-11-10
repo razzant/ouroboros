@@ -8,6 +8,7 @@ import os
 import pathlib
 import time
 from contextlib import nullcontext
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, Optional
 
 from starlette.requests import Request
@@ -277,8 +278,9 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
                                        activities_complete=activity_availability["complete"],
                                        bindings_complete=bindings_complete)
     from ouroboros.gateway.work_projection import works_snapshot
+    publication_roots = set()
     works = works_snapshot(drive_root, decision_owners, work_facts, complete=activity_availability["complete"],
-                           bindings=task_bindings)
+                           bindings=task_bindings, publication_roots=publication_roots)
     # Registered-project facts (never raise): the compact sidebar list, and the
     # COMPLETE (uncapped, all-status) project chat_ids for the live WS fan-out
     # isolation SSOT — distinct from the capped/filtered sidebar list, so
@@ -310,7 +312,7 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         "jobs": jobs,
         # Other data roots the census read (a task's ledger root): the next revision probe stamps them too.
         "roots": sorted({str(facts["budget_drive_root"]) for facts in work_facts.values()
-                         if isinstance(facts, dict) and facts.get("budget_drive_root")}),
+                         if isinstance(facts, dict) and facts.get("budget_drive_root")} | publication_roots),
         "pending_count": len(PENDING),
         "running_count": len(RUNNING),
         "limit": limit,
@@ -664,6 +666,8 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
                     or (meta.get("task") or {}).get("_attempt") or 1),
                     "model_activity": (meta.get("active_llm_call") or {}).get("model_activity"),
                     "context_attempt": meta.get("context_attempt"),
+                    "turn_phase": meta.get("turn_phase"), "_census_carrier": "worker" if meta.get(
+                        "worker_id") is not None else "",
                     "owner_wait": dict(meta.get("owner_wait") or {}),
                     # The live silence fact is the RUNNING row's, never its task's (silence_attention.observe).
                     "silence_attention": dict(meta.get("silence_attention") or {}),
@@ -831,11 +835,13 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                    and row["model_activity"].get("task_attempt") == int(row.get("_attempt") or 1) else {}),
                 **({"context_attempt": row["context_attempt"]} if isinstance(row.get("context_attempt"), dict)
                    and row["context_attempt"].get("task_attempt") == int(row.get("_attempt") or 1) else {}),
+                # A running root a worker holds, and the start step its own frames reached (#2862: the RUNNING
+                # row's ``turn_phase``), as a conversation-lane row says them (``lane_turn_rows``).
+                **({"carrier": row["_census_carrier"]} if root and row.get("_census_carrier") else {}),
+                **({"turn_phase": str(row["turn_phase"])} if root and row.get("turn_phase") else {}),
                 **({"project_admission_hold": project_hold_fact(row)}
                    if row.get("_project_admission_restore_hold") else {}),
             }
-
-        from types import SimpleNamespace
 
         from ouroboros.work_stop import owner_fence_state, queue_control
 

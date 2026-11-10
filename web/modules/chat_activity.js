@@ -878,7 +878,7 @@ export function clearStickyCardState(record) {
     // The folded evidence is cycle state too: a recycled slot must not count
     // the previous cycle's invocations.
     record.toolFold = null;
-    record.waitFolds = null;
+    record.waitFolds = null; if (record.waitFaceEl) record.waitFaceEl.hidden = true;  // and its face line (syncWaitFace)
     record.durationSec = null;
     record.historicalUnavailable = false;
     record.historicalUnconfirmed = false;
