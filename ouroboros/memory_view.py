@@ -586,8 +586,35 @@ def _typed_fact(meta: Mapping[str, Any]) -> str:
     return name
 
 
-def _task_line(root_id: str, group: List[Tuple[Entry, Dict[str, Any]]], texts: Mapping[str, Dict[str, Any]]) -> str:
-    """One line for a task's lane-2 rows: the host's status, never a child's report or a retelling."""
+@timed_section("memory_view.working_notes")
+def _working_notes(root: pathlib.Path, tasks: List[str]) -> Dict[str, str]:
+    """Per root task whose result names working notes (``main_context_authority.WORKING_NOTES_FIELD``: what its latest
+    applied fold kept), their count and the reader that returns them from any task; their words stay there, read by
+    choice (owner, 3A). The results are read at once; a result naming none, or unreadable, makes no entry, and a
+    named source that cannot be read now is said so."""
+    from ouroboros.artifacts import read_actor_source_bytes  # D03->D05 is lazy-only
+    from ouroboros.main_context_authority import WORKING_NOTES_FIELD, retained_reader
+    from ouroboros.task_results import load_task_results
+
+    facts: Dict[str, str] = {}
+    for task, saved in load_task_results(root, tasks).items():
+        ref = saved.get(WORKING_NOTES_FIELD) if isinstance(saved, Mapping) else None
+        if not isinstance(ref, Mapping):
+            continue
+        try:  # one unreadable source is this line's fact, never the whole view's failure
+            reader = source_reader({}, retained_reader(root, task, ref))
+            count = len(json.loads(read_actor_source_bytes(root, task, dict(ref)))["notes"])
+        except Exception as exc:
+            facts[task] = f"working notes named in its result, unreadable now ({type(exc).__name__})"
+            continue
+        facts[task] = f"working notes kept {count}: {reader}"
+    return facts
+
+
+def _task_line(root_id: str, group: List[Tuple[Entry, Dict[str, Any]]], texts: Mapping[str, Dict[str, Any]],
+               notes: str = "") -> str:
+    """One line for a task's lane-2 rows: the host's status, never a child's report or a retelling; ``notes``: the
+    working notes its result names (``_working_notes``)."""
     def summary(kinds: frozenset, task: str, kind: str = "task_summary") -> Optional[Entry]:
         return next((entry for entry, _cls in reversed(group) if entry[1].get("type") == kind
                      and entry[1].get("summary_kind") in kinds and str(entry[1].get("task_id") or "") == task), None)
@@ -623,7 +650,7 @@ def _task_line(root_id: str, group: List[Tuple[Entry, Dict[str, Any]]], texts: M
     parts += [f"rows {len(group)}", f"get_task_result(task_id='{root_id}')",
               f"{chat_chain.format_address(first[0])}..{chat_chain.format_address(last[0])}"]
     parts += [f"{name}: {chat_chain.format_address(entry[0])}" for entry, _cls in group
-              if (name := _typed_fact(entry[1]))]
+              if (name := _typed_fact(entry[1]))] + ([notes] if notes else [])
     return f"[{first[1].get('ts') or 'time not recorded'}; host; task {root_id}] " + "; ".join(parts)
 
 
@@ -662,11 +689,12 @@ def _lanes(root: pathlib.Path, entries: List[Entry], lineage: Mapping[str, Any])
                 not task and cls["author"].get("kind") == "host"):
             needed.append(entry)
     texts = _row_texts(root, needed)
+    notes = _working_notes(root, list(groups))
     lane1 = [_spoken(entry, cls["author"], texts) for entry, cls in classed if cls["lane"] == 1]
     lane2 = []
     for pos, task, loose in order:
         rows = groups[task] if task else [loose]
-        line = _task_line(task, rows, texts) if task else _loose_line(loose[0], loose[1], texts)
+        line = _task_line(task, rows, texts, notes.get(task, "")) if task else _loose_line(loose[0], loose[1], texts)
         lane2.append({"line": line, "task": task, "ts": rows[0][0][1].get("ts"), "pos": pos,
                       "first": chat_chain.format_address(rows[0][0][0]), "last_ts": rows[-1][0][1].get("ts"),
                       "last": chat_chain.format_address(rows[-1][0][0]), "last_pos": rows[-1][0][2]})
