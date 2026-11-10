@@ -692,8 +692,8 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
                          measure_text: Optional[Callable[[str, str], int]] = None,
                          start_work: bool = False,
                          max_room: Optional[Mapping[str, Any]] = None,
-                         shortest: bool = False, level: Optional[mv.FloorLevel] = None) -> Tuple[str, str, Dict[str, Any]]:
-    """``(story text, room text, facts)`` of one mode's projection, the floor decided once.
+                         shortest: bool = False, level: Optional[mv.FloorLevel] = None) -> ViewFit:
+    """One mode's projection, the floor decided once.
 
     The window counts only when known and fresh (``known_window``). An owner target binds
     only the mode the owner selected: task-local Low and a mode the window lowered have
@@ -707,7 +707,7 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     completed receipt -- what a start's host walk judges beside the window (``_host_steps``).
     ``level``: such a walk's level again, without walking, its receipt priced beside this request's host forms.
     A level is priced from the snapshot's pieces, never by drawing it; ``measure_text(story_chars, room_chars)`` prices
-    the two memory texts of a whole request (by default their own tokens). The result is a ``ViewFit``.
+    the two memory texts of a whole request (by default their own tokens).
     """
     target, reserve = context_budget.context_mode_limits(mode, owner_mode, output_reserve, working_reserve_tokens=working_reserve_tokens)
     if kept is not None:
