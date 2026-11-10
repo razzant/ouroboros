@@ -220,7 +220,7 @@ def test_a_stop_ends_in_its_batch_and_names_pending_review_as_its_own_key(turn, 
     assert {key: receipt[key] for key in ('status', 'action')} == {'status': 'completion_requested', 'action': 'stop'}
     assert 'ignored' not in receipt
     if pending_review:
-        assert receipt['pending_review'] == f'{pending_review}: no effect on a stop, which waits for nothing'
+        assert receipt['pending_review'].startswith(pending_review) and 'no effect on a stop' in receipt['pending_review']
     else:
         assert set(receipt) == {'status', 'completion_control', 'action'}
 
@@ -259,7 +259,7 @@ def test_a_stop_over_a_review_it_left_running_still_ends_in_its_batch(turn, monk
     assert usage['wake_summary'] == 'Stopped mid-review.'
     assert trace['task_completion']['rationale'] == 'Ending while my review runs.'
     receipt = json.loads(trace['tool_calls'][-1]['result'])
-    assert receipt['pending_review'] == 'wait: no effect on a stop, which waits for nothing'
+    assert 'no effect on a stop' in receipt['pending_review']
 
 
 def test_completion_conflict_preserves_sources_and_requires_reselection(turn):

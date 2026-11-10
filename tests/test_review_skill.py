@@ -633,8 +633,8 @@ def _leave(L):
     write_owner_message(L.h.drive, "How is the review going?", "task-skill")
     text = L.join(thread, box, timeout=60)
     assert "The review is still running" in text and len(_physical_sends(L.h)) == 1, text
-    assert ("a wave a message left sends one [Review settled] notice while this task runs; after this task ends, the "
-            "outcome is kept as late feedback") in text and "review_reference is this task's alone." in text, text
+    for fact in ("if a message left it", "while this task runs", "stays in its record", "this task's alone"):
+        assert fact in text, (fact, text)
     return json.loads(text.rsplit("Review reference: ", 1)[1])
 
 

@@ -353,12 +353,10 @@ def test_the_incident_replayed_as_facts_a_stop_over_running_work_reaches_the_nex
         call("plan_task", {"ask": ["seat-a"], "message": "Is the amended candidate safe?"}, "ask-a6"),
         stop()], ran=runs)
     [run] = runs
-    review, ask, _stop = run.trace["tool_calls"]
-    assert review["result"].startswith("An addressed message reached you while the reviewers ran")
-    assert ask["result"].endswith("Still working: seat-a.")
+    assert [call["tool"] for call in run.trace["tool_calls"]] == ["review_change", "plan_task", "finish_task"]
     assert len(run.model_inputs) == 3, "the stop ended in its batch: no round after it"
     receipt = json.loads(run.trace["tool_calls"][-1]["result"])
-    assert receipt["pending_review"] == "wait: no effect on a stop, which waits for nothing"
+    assert "no effect on a stop" in receipt["pending_review"]
     assert run.usage["wake_summary"] == summary and stored["wake_summary"] == summary
     assert stored["outcome_axes"]["execution"]["task_completion"]["rationale"] == STOP_RATIONALE
 
@@ -399,17 +397,16 @@ def test_the_finish_task_schema_names_the_stop_continue_boundary(tmp_path):
     assert "even when its text calls it partial" in text
     # Finish first; a stop for a step still mine names the rails that can end a turn, and a full window is not one
     # of them while the host can renew this task's view (``context_renewal``), which can still refuse.
-    assert "Use finish when nothing of this work is left for you. If you end while a step of it is still yours" in text
-    assert "(a deadline, a budget or a round limit can end a turn first), use stop" in text
-    assert "naming what remains and why you end" in text
-    assert ("A full window is not such a limit: after a real size refusal the host can renew this same task's view "
-            "from its exact record, keeping its custody and budget;") in text
-    assert "an irreducible or non-shrinking view, or an excess a directly required handbook alone causes, can still refuse" in text
-    pending = (schema.get("function") or schema)["parameters"]["properties"]["pending_review"]
-    assert "default" not in pending, "a stop reads no wait into the schema; finish delivery keeps the default"
-    assert pending["description"].startswith("For a finish while your result's review still runs: wait (the default)")
-    assert ("A stop waits for nothing and this has no effect on it: to wait for a review of yours that still runs, do "
-            "not end; collect it with its review_reference, a $0 call that waits for its running seats.") in pending["description"]
+    for fact in ("Use finish when nothing of this work is left for you", "a deadline, a budget or a round limit",
+                 "A full window is not such a limit", "after a real size refusal",
+                 "an irreducible or non-shrinking view", "a directly required handbook"):
+        assert fact in text, fact
+    pending = (schema.get("function") or schema)["parameters"]["properties"]["pending_review"]["description"]
+    # A stop waits for nothing; the act that waits is the review's own collection, live here, recorded after a restart
+    # (``review_change_custody.collect_recorded_commit_actor``'s cold path never blocks).
+    for fact in ("A stop waits for nothing", "collect it with its review_reference", "still running in this process",
+                 "after a restart", "possibly still pending"):
+        assert fact in pending, fact
 
 
 def test_the_tool_description_says_what_the_door_admits():

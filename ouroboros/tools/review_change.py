@@ -1246,20 +1246,20 @@ def _handle_new_review_change(
         event = ("A selected outcome or wake time was ready" if any(row.get("reason") in {"helper_result", "review_result", "wake_at"} for row in
                  getattr(ctx, "_review_detached_operations", []) or []) else "An addressed message reached you")
         result["message"] = (event + " while the reviewers ran: this call returned and their paid work continues "
-                             "separately; a [Review settled] notice follows the whole wave while this task runs; "
-                             + after_left_wave() + " " + str(result.get("message") or ""))
+                             "separately; " + left_wave_terms() + " " + str(result.get("message") or ""))
     text = json.dumps(result, ensure_ascii=False, indent=2, default=str)
     return f"{result['message']}\n\n{text}" if result.get("message") else text
 
 
-def after_left_wave(*, commit: bool = False) -> str:
-    """What becomes of a wave its author left once that author's task ends, for every pending return that
-    names the wave's settlement notice (a notice only a running task receives, ``review_pause.watch_left_review``):
-    the room's late feedback, placed only where ownership is proven (``late_review_marks.owning_room``), its
-    ledger record readable by id, and collection by reference limited to its author or, for a commit review,
-    its recorded Continue successor (``review_collection.resolve_reference``)."""
-    return ("after this task ends, the outcome is kept as late feedback (in this room when the room is known) and "
-            "its record stays readable by id; collecting it through review_reference is "
+def left_wave_terms(*, commit: bool = False) -> str:
+    """The one sentence every pending return gives about a wave its author left: the settlement notice reaches
+    only a task that still runs (``review_pause.watch_left_review``); after the task ends the ledger record
+    keeps the outcome, readable by id, and a late mark shows it only where the room's ownership is proven
+    (``late_review_marks.owning_room``); collection by reference is its author's or, for a commit review, its
+    recorded Continue successor's (``review_collection.resolve_reference``)."""
+    return ("a [Review settled] notice follows the whole wave while this task runs; after this task ends, the "
+            "outcome stays in its record, readable by id, and shows as late feedback in this room when the room "
+            "is known; collecting it through review_reference is "
             + ("this task's or its recorded Continue successor's." if commit else "this task's alone."))
 
 

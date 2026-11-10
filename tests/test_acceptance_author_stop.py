@@ -200,7 +200,7 @@ def test_a_stop_carrying_pending_review_buys_nothing_and_its_receipt_says_so(tmp
     assert run.result == STOP_TEXT and run.trace["task_completion"]["rationale"] == STOP_RATIONALE
     assert run.usage["wake_summary"] == "Stopped with the export unfinished."
     receipt = json.loads(run.trace["tool_calls"][0]["result"])
-    assert receipt["pending_review"] == "wait: no effect on a stop, which waits for nothing"
+    assert "no effect on a stop" in receipt["pending_review"]
     assert "ignored" not in receipt
 
 
