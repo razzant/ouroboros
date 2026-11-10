@@ -231,11 +231,13 @@ def test_after_the_index_is_lost_a_view_reads_live_until_the_job_refills_it(tmp_
 
 
 def test_each_focus_holds_in_its_one_capture_the_stored_rows_its_view_shows(tmp_path, monkeypatch):
-    """A view with live rooms holds every stored row (their open rows); one without them, the terminal rows its
-    pages link (presence, a child, a nanny's own room): the view it would read holding every row, with the
-    chronicle entered twice (activation and the capture), never again for a row the capture lacks."""
-    from ouroboros import chronicle_store, memory_view as mv
+    """A view with live rooms holds every stored row (their open rows; the cold set aside, ``test_memory_tail_cold``);
+    one without them, the terminal rows its pages link (presence, a child, a nanny's own room): the view it would
+    read holding every row, with the chronicle entered twice (activation and the capture), never again for a row
+    the capture lacks."""
+    from ouroboros import chronicle_store, memory_tail_cold, memory_view as mv
 
+    monkeypatch.setattr(memory_tail_cold, "gate", lambda _store: None)
     rooms = shared.world(tmp_path)
     assert _fill(tmp_path)["state"] == "done"
     writer = {"kind": "mind", "task_id": "t2", "focus": {"role": "root", "task_id": "t2"}}
@@ -244,8 +246,8 @@ def test_each_focus_holds_in_its_one_capture_the_stored_rows_its_view_shows(tmp_
                                                  covers={"rows": [sealed["row_sha256"]], "stream_span": [11, 11]})
     assert page.ok, page  # its writer's later terminal row (16) stands under it
     held, init = [], chronicle_store._Snapshot.__init__
-    monkeypatch.setattr(chronicle_store._Snapshot, "__init__", lambda self, texts, scope: init(self, texts, scope)
-                        or held.append((scope, [row[0] for row in self.tail_rows])))
+    monkeypatch.setattr(chronicle_store._Snapshot, "__init__", lambda self, texts, scope, memo=(): init(
+        self, texts, scope, memo) or held.append((scope, [row[0] for row in self.tail_rows])))
     entered, index = [], ChronicleStore._index
     monkeypatch.setattr(ChronicleStore, "_index", lambda self: entered.append(1) or index(self))
     task, scoped = {"id": "turn0001", "chat_id": 1}, mv.capture

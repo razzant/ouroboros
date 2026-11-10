@@ -224,8 +224,8 @@ class Chain:
         for _ in range(14):
             self.row()
         _fill(root)
-        for _ in range(4):
-            self.seal()
+        for room, rows in sorted(mi.open_rows_by_room(root).items()):  # most of the history sealed, as on a lived install
+            self._publish(room, sorted(rows, key=lambda entry: entry[2])[:-1], "mind")
 
     def ts(self) -> str:
         self.minute += 1
@@ -352,12 +352,16 @@ class Chain:
     def seal(self) -> None:
         opened = mi.open_rows_by_room(self.root)
         rooms = sorted(room for room, rows in opened.items() if rows and room.lstrip("-").isdigit())
-        if not rooms:
+        if rooms:
+            room = self.rng.choice(rooms)
+            rows = sorted(opened[room], key=lambda entry: entry[2])
+            self._publish(room, rows[:self.rng.randint(1, max(1, len(rows) - 1))],
+                          self.rng.choice(("mind", "writer", "draft", "candidate")))
+
+    def _publish(self, room: str, rows: list, style: str) -> None:
+        if not rows or not room.lstrip("-").isdigit():
             return
-        room = self.rng.choice(rooms)
-        rows = sorted(opened[room], key=lambda entry: entry[2])[:self.rng.randint(1, 5)]
         covers = {"rows": [entry[0]["row_sha256"] for entry in rows], "stream_span": [rows[0][2], rows[-1][2]]}
-        style = self.rng.choice(("mind", "writer", "draft", "candidate"))
         chronicle = ChronicleStore(self.root)
         if style == "mind":
             result = chronicle.publish_page(room_id=room, text="A page.", covers=covers, author=shared.MIND)
@@ -409,8 +413,8 @@ class Chain:
         mi.fill_tail(self.root, lambda: False)
 
     STEPS = ("row", "row", "row", "row", "bind", "bind_origin", "new_project", "relineage", "direct_write", "remove_task",
-             "admit", "restore_target", "seal", "seal", "reject", "accept", "correct", "revise_chat", "revise_progress",
-             "fill", "rebuild")
+             "admit", "restore_target", "seal", "seal", "seal", "reject", "accept", "correct", "revise_chat",
+             "revise_progress", "fill", "fill", "rebuild")
 
     def step(self) -> str:
         name = self.rng.choice(self.STEPS)
@@ -418,7 +422,7 @@ class Chain:
         return name
 
 
-@pytest.mark.parametrize("seed", [1, 2, 15, 29])  # together they take every change in STEPS
+@pytest.mark.parametrize("seed", [1, 5, 8, 29])  # together they take every change in STEPS
 def test_after_every_change_the_normal_path_equals_the_whole_tail_warm_and_fresh(monkeypatch, tmp_path, seed):
     chain = Chain(tmp_path, seed)
     _same(monkeypatch, tmp_path, chain.rooms)
@@ -702,6 +706,17 @@ def test_a_rebuilt_index_holds_no_set_until_a_whole_pass(monkeypatch, tmp_path):
     assert chronicle.ensure_activated()
     _fill(tmp_path)
     assert not _in_use(tmp_path)
+    _same(monkeypatch, tmp_path, rooms)
+    assert _in_use(tmp_path)
+
+
+def test_a_tail_projected_anew_under_the_same_source_holds_no_set(monkeypatch, tmp_path):
+    rooms, _row = _sealed_main_row(tmp_path)
+    chronicle = ChronicleStore(tmp_path)
+    state = chronicle.tail_state()  # its last row no longer answers (rewritten in place): the prefix is projected anew
+    assert chronicle.extend_tail(state, [], {**state, "anchor": [state["anchor"][0], "0" * 64]})
+    _fill(tmp_path)
+    assert chronicle.tail_state()["source"] == state["source"] and not _in_use(tmp_path)
     _same(monkeypatch, tmp_path, rooms)
     assert _in_use(tmp_path)
 

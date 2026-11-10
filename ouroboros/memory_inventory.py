@@ -48,9 +48,9 @@ from __future__ import annotations
 import hashlib
 import pathlib
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, FrozenSet, Iterable, Iterator, List, Mapping, NamedTuple, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, Iterable, Iterator, List, Mapping, NamedTuple, Optional, Set, Tuple
 
-from ouroboros import chat_chain
+from ouroboros import chat_chain, memory_tail_cold
 from ouroboros.chronicle_import import legacy_frontier
 from ouroboros.chronicle_store import ChronicleStore, capture, capture_memo, source_time_span
 from ouroboros.context_timing import counted, timed_section
@@ -159,11 +159,13 @@ def _transport_facts(transport: Mapping[str, Any]) -> Dict[str, Any]:
 
 class MembershipFacts(NamedTuple):
     """The registry facts room membership reads, taken once per call; ``rooms`` is the room rule over the same
-    ``bindings`` snapshot. The first three are compared as they are (``legacy_units``), never through a digest."""
+    ``bindings`` snapshot. The first three are compared as they are (``legacy_units``), never through a digest.
+    ``lineage`` is the task store's lineage writes the rule's lineage is read under (``store_hot_facts.lineage_writes``)."""
     project_chat_ids: FrozenSet[int]
     bindings: Dict[str, int]
     projects_by_source_key: Dict[Tuple[Any, ...], FrozenSet[int]]
     rooms: Any
+    lineage: Any = None
 
 
 def membership_facts(root: Any) -> MembershipFacts:
@@ -174,8 +176,12 @@ def membership_facts(root: Any) -> MembershipFacts:
 
 def _membership_facts(root: Any) -> MembershipFacts:
     from ouroboros.project_dialogue import _source_ref_identity  # D15->D17 is lazy-only
-    from ouroboros.projects_registry import all_task_bindings, list_reserved_projects, project_task_bindings, RoomResolver
+    from ouroboros.projects_registry import (all_task_bindings, forget_lineage, list_reserved_projects,
+                                             project_task_bindings, RoomResolver)
+    from ouroboros.store_hot_facts import lineage_writes
 
+    lineage = lineage_writes(root)
+    forget_lineage(root, lineage)  # a lineage written since this process read it is read again, as a fresh one would
     projects = frozenset(int(project["chat_id"]) for project in list_reserved_projects(root))
     by_key: Dict[Tuple[Any, ...], set] = {}
     for binding in project_task_bindings(root).values():
@@ -188,7 +194,7 @@ def _membership_facts(root: Any) -> MembershipFacts:
         if key is not None:
             by_key.setdefault(key, set()).add(chat)
     return MembershipFacts(projects, dict(all_task_bindings(root)),
-                           {key: frozenset(chats) for key, chats in by_key.items()}, RoomResolver(root))
+                           {key: frozenset(chats) for key, chats in by_key.items()}, RoomResolver(root), lineage)
 
 
 def rooms_of_row(meta: Mapping[str, Any], facts: MembershipFacts) -> FrozenSet[str]:
@@ -268,13 +274,14 @@ def _tail(root: Any, frontier: Mapping[str, Any]) -> Tail:
 
 
 @timed_section("memory_view.tail")
-def _read_tail(root: Any, frontier: Mapping[str, Any], *, terminal_only: bool = False) -> Tail:
-    """``_tail``'s read; ``terminal_only`` keeps the rows with a terminal status (the stored ones read alone)."""
+def _read_tail(root: Any, frontier: Mapping[str, Any], *, terminal_only: bool = False, whole: bool = False) -> Tail:
+    """``_tail``'s read; ``terminal_only`` keeps the rows with a terminal status (the stored ones read alone);
+    ``whole`` reads the index again for every stored row a capture standing on the cold set left unread."""
     from ouroboros import dialogue_store as ds
 
     store, source = ChronicleStore(root), _tail_source(root, frontier)
     end = ds.stream_end(root, "chat")
-    held = store.tail_facts(source, terminal_only=terminal_only)
+    held = store.tail_facts(source, terminal_only=terminal_only, whole=whole)
     if held is not None:
         state, stored = held
         anchor = state.get("anchor")
@@ -396,40 +403,80 @@ def open_rows_by_room(root: Any, gaps: Optional[Dict[str, set]] = None,
     saved target cannot be read is Main's here and a gap of each Project it could join
     (``room_membership.unknown_target_rooms``). ``quiet`` collects typed quiet finishes, including sealed ones,
     from the same tail; they can consider earlier words of a room, never seal them. ``sealed`` collects each
-    place room's sealed rows in append order: who spoke there before its pages (``memory_view_conversations``)."""
+    place room's sealed rows in append order: who spoke there before its pages (``memory_view_conversations``).
+    A capture standing on the cold set (``memory_tail_cold``) holds every row these answers come from; one where a
+    room became a place since reads the whole tail again here, and a pass over the whole tail composes the set."""
     store = ChronicleStore(root)
-    with capture(root):  # one state of the chronicle: its frontier and every room's sealed set
+    with capture(root) as derived:  # one state of the chronicle: its frontier and every room's sealed set
         frontier = _active_frontier(store)
         if frontier is None:
             return {}
-        facts = membership_facts(root)
-        grouped: Dict[str, List[Entry]] = {}
-        projected = _projection_rows(root, frontier)
-        # The rows' task lineages in one read a generation (``RoomResolver.warm``), not one read per task.
-        facts.rooms.warm({str(entry[1].get(key) or "") for entry in projected
-                          for key in ("task_id", "parent_task_id", "root_task_id")} - {""})
-        if gaps is not None:
-            from ouroboros.room_appearances import REPLY_TARGET_UNREADABLE  # D15->D17 is lazy-only
-            from ouroboros.room_membership import unknown_target_rooms
-        for entry in projected:
-            for room in rooms_of_row(entry[1], facts):
-                grouped.setdefault(room, []).append(entry)
-                if quiet is not None and entry[1].get("quiet_finish") is True:
-                    quiet.setdefault(room, []).append(entry)
-            if gaps is not None and isinstance(entry[1].get("reply_to"), dict):
-                for room in unknown_target_rooms(entry[1], facts.project_chat_ids, facts.rooms):
-                    gaps.setdefault(str(room), set()).add(REPLY_TARGET_UNREADABLE)
-        rooms: Dict[str, List[Entry]] = {}
-        timed = rooms_read_by_time(root, (entry[1] for entry in projected))  # every room at once, sealed rows or not
-        for room, entries in grouped.items():
-            refs = store.sealed_row_refs(room)
-            kept = [entry for entry in entries if entry[0]["row_sha256"] not in refs]
-            if kept:
-                rooms[room] = in_reading_order(kept, timed, lambda entry: entry[1])
-            if sealed is not None and refs and len(kept) < len(entries) and row_provenance(entries[-1][1]) == "place":
+        facts, tail = membership_facts(root), _tail(root, frontier)
+        wants = (gaps is not None, quiet is not None, sealed is not None)
+        found = _open_pass(root, store, facts, tail, *wants)
+        if memory_tail_cold.short(derived, tail, found.places):  # a new place's sealed rows may be among those unread
+            derived["tail"] = tail = _read_tail(root, frontier, whole=True)  # type: ignore[index]
+            found = _open_pass(root, store, facts, tail, *wants)
+        memory_tail_cold.settle(store, derived, tail, found)
+    for into, got in ((gaps, found.gaps), (quiet, found.quiet), (sealed, found.sealed)):
+        if into is not None:
+            into.update(got)
+    counted("rows_open", len({entry[0]["row_sha256"] for entries in found.rooms.values() for entry in entries}))
+    return found.rooms
+
+
+class _Pass(NamedTuple):
+    """One pass of the room rule over a capture's tail rows (``open_rows_by_room``)."""
+    rooms: Dict[str, List[Entry]]
+    gaps: Dict[str, set]
+    quiet: Dict[str, List[Entry]]
+    sealed: Dict[str, List[Entry]]
+    places: Set[str]  # the rooms whose newest row is a place's
+    kept: Set[int]  # what no cold set may leave unread: open, a room's newest, a place's, an answer not settled
+
+
+def _open_pass(root: Any, store: ChronicleStore, facts: MembershipFacts, tail: Tail, want_gaps: bool, want_quiet: bool,
+               want_sealed: bool) -> _Pass:
+    projected = [(address, meta, pos) for pos, address, meta, _terminal in tail.rows]
+    # The rows' task lineages in one read a generation (``RoomResolver.warm``), not one read per task.
+    facts.rooms.warm({str(entry[1].get(key) or "") for entry in projected
+                      for key in ("task_id", "parent_task_id", "root_task_id")} - {""})
+    if want_gaps:
+        from ouroboros.room_appearances import REPLY_TARGET_UNREADABLE  # D15->D17 is lazy-only
+        from ouroboros.room_membership import unknown_target_rooms
+    watch = memory_tail_cold.Watch(facts.rooms)
+    judged = facts._replace(rooms=watch)
+    grouped: Dict[str, List[Entry]] = {}
+    gaps: Dict[str, set] = {}
+    quiet: Dict[str, List[Entry]] = {}
+    kept: Set[int] = set()
+    for entry in projected:
+        for room in rooms_of_row(entry[1], judged):
+            grouped.setdefault(room, []).append(entry)
+            if want_quiet and entry[1].get("quiet_finish") is True:
+                quiet.setdefault(room, []).append(entry)
+        if watch.unsure():
+            kept.add(entry[2])
+        if want_gaps and isinstance(entry[1].get("reply_to"), dict):
+            for room in unknown_target_rooms(entry[1], facts.project_chat_ids, facts.rooms):
+                gaps.setdefault(str(room), set()).add(REPLY_TARGET_UNREADABLE)
+    rooms: Dict[str, List[Entry]] = {}
+    sealed: Dict[str, List[Entry]] = {}
+    places: Set[str] = set()
+    timed = rooms_read_by_time(root, (entry[1] for entry in projected))  # every room at once, sealed rows or not
+    for room, entries in grouped.items():
+        refs = store.sealed_row_refs(room)
+        open_ = [entry for entry in entries if entry[0]["row_sha256"] not in refs]
+        if open_:
+            rooms[room] = in_reading_order(open_, timed, lambda entry: entry[1])
+        kept.update(entry[2] for entry in open_)
+        kept.add(entries[-1][2])  # the room's newest row says whether it is a place
+        if row_provenance(entries[-1][1]) == "place":
+            places.add(room)
+            kept.update(entry[2] for entry in entries)  # its repeats and who of ours spoke there read every row
+            if want_sealed and refs and len(open_) < len(entries):
                 sealed[room] = [entry for entry in entries if entry[0]["row_sha256"] in refs]
-    counted("rows_open", len({entry[0]["row_sha256"] for entries in rooms.values() for entry in entries}))
-    return rooms
+    return _Pass(rooms, gaps, quiet, sealed, places, kept)
 
 
 def _room_entries(root: Any, store: ChronicleStore, room: str,

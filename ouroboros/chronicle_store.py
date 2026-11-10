@@ -56,7 +56,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Tuple
 
-from ouroboros import store, store_timing
+from ouroboros import memory_tail_cold, store, store_timing
 from ouroboros.chronicle_quotes import QuoteResolver, quote_refusal
 from ouroboros.context_timing import counted, timed
 from ouroboros.platform_layer import (acquire_exclusive_file_lock, kernel_file_locks_enforced,
@@ -101,10 +101,14 @@ _SCHEMA = """
     CREATE TABLE IF NOT EXISTS told (record TEXT NOT NULL, account TEXT NOT NULL, sequence INTEGER NOT NULL,
                                      PRIMARY KEY (record, account));
     CREATE INDEX IF NOT EXISTS told_account ON told(account);
+    CREATE TABLE IF NOT EXISTS tail_cold (pos INTEGER PRIMARY KEY, task TEXT);
+    CREATE INDEX IF NOT EXISTS tail_cold_task ON tail_cold(task) WHERE task IS NOT NULL;
 """
+# ``tail_cold`` (``memory_tail_cold``) takes no SCHEMA_VERSION step: a lock-free reader reaches it only through its marks
+# in ``state``, which a locked open that created it wrote, and every reset takes the marks with it.
 _RESET = ("DELETE FROM records; DELETE FROM state; DELETE FROM active_marks; DELETE FROM page_rows; "
-          "DELETE FROM folded; DELETE FROM tail_rows; DELETE FROM told; DELETE FROM sqlite_sequence WHERE name='records'; "
-          f"PRAGMA user_version={SCHEMA_VERSION};")
+          "DELETE FROM folded; DELETE FROM tail_rows; DELETE FROM told; DELETE FROM tail_cold; "
+          f"DELETE FROM sqlite_sequence WHERE name='records'; PRAGMA user_version={SCHEMA_VERSION};")
 
 
 class PublishResult(NamedTuple):
@@ -293,8 +297,9 @@ class _IndexLookups:
 # One page of the stored tail facts after a position (``_tail_rows``): its rows [pos, seq, row_sha256, legacy, meta,
 # terminal] and its last position. ``_TAIL_PAGE`` rows a page is an I/O size, never a bound on the rows read.
 _TAIL_PAGE_SQL = ("SELECT json_group_array(json_array(pos,seq,row_sha256,json(legacy),json(meta),terminal)), max(pos) "
-                  "FROM (SELECT * FROM tail_rows WHERE pos>?{terminal} ORDER BY pos LIMIT ?)")
+                  "FROM (SELECT * FROM tail_rows WHERE pos>?{terminal}{cold} ORDER BY pos LIMIT ?)")
 _TERMINAL = " AND terminal IS NOT NULL"
+_UNREAD = " AND NOT EXISTS (SELECT 1 FROM tail_cold c WHERE c.pos=tail_rows.pos)"  # a standing cold set's rows
 _TAIL_PAGE = 2_000
 # The acting pages are those whose rows a seal holds (``page_rows``: a final page, a draft not rejected, an adopted
 # candidate); the parts that fold (``folded``) act unless ``_status`` names them a candidate. No body is read whole.
@@ -314,7 +319,8 @@ _SNAPSHOT_SQL = ("SELECT json_group_array(json_array(sequence,id,kind,room,targe
                  "SELECT json_group_array(json_array(sequence,room,scope,body)) FROM active_marks",
                  "SELECT json_group_array(json_array(key,value)) FROM state", _ACTING_PAGES, _ACTING_PARTS)
 _TAIL_SCOPES = {"all": False, "terminal": True, "none": None}  # a view's tail: every row, terminal rows only, none
-_SELECTION_FREE = ("membership", "tail", "terminal_tail", "legacy_pointers")  # memo facts a selection never changes
+# Memo facts a selection never changes.
+_SELECTION_FREE = ("membership", "tail", "terminal_tail", "legacy_pointers", *memory_tail_cold.MEMO)
 
 
 def _page_refs(record: Mapping[str, Any]) -> List[Tuple[str, str, str]]:
@@ -325,11 +331,13 @@ def _page_refs(record: Mapping[str, Any]) -> List[Tuple[str, str, str]]:
     return [(str(room), str(record["id"]), str(ref)) for room, refs in rooms.items() for ref in refs]
 
 
-def _tail_rows(db, terminal_only: bool) -> List[List[Any]]:
-    """The stored tail facts (only those with a terminal status: ``terminal_only``) by position, read on the
-    caller's one read transaction a page at a time: one statement and one step a page, parsed as it arrives,
-    so no answer is a string the size of the tail (whose one astral character would widen all of it)."""
-    sql, rows, after = _TAIL_PAGE_SQL.format(terminal=_TERMINAL if terminal_only else ""), [], -(1 << 63)
+def _tail_rows(db, terminal_only: bool, cold: bool = False) -> List[List[Any]]:
+    """The stored tail facts (only those with a terminal status: ``terminal_only``; outside a standing cold set:
+    ``cold``) by position, read on the caller's one read transaction a page at a time: one statement and one step a
+    page, parsed as it arrives, so no answer is a string the size of the tail (whose one astral character would widen
+    all of it)."""
+    sql = _TAIL_PAGE_SQL.format(terminal=_TERMINAL if terminal_only else "", cold=_UNREAD if cold else "")
+    rows, after = [], -(1 << 63)
     while True:
         text, last = db.execute(sql, (after, _TAIL_PAGE)).fetchone()
         if last is None:
@@ -470,12 +478,15 @@ def capture(data_root: Any, *, tail: str = "all", proposed: Optional[Mapping[str
 
 
 def _read_snapshot(store: "ChronicleStore", tail: str) -> _Snapshot:
-    """One state of the index in one read transaction, then parsed outside it (``capture``)."""
+    """One state of the index in one read transaction, then parsed outside it (``capture``). A capture of every row
+    compares the cold set's marks in this same read and, while they stand, leaves its rows unread (``memory_tail_cold``)."""
     terminal_only = _TAIL_SCOPES[tail]
+    gate = memory_tail_cold.gate(store) if tail == "all" else None
     with store._index() as db:
         texts = [db.execute(sql).fetchone()[0] for sql in _SNAPSHOT_SQL]
-        held = () if terminal_only is None else (_tail_rows(db, terminal_only),)
-    return _Snapshot([*(json.loads(text or "[]") for text in texts), *held], tail)
+        held = memory_tail_cold.stands(db, gate) if gate is not None else None
+        rows = () if terminal_only is None else (_tail_rows(db, terminal_only, held is not None),)
+    return _Snapshot([*(json.loads(text or "[]") for text in texts), *rows], tail, memory_tail_cold.memo(gate, held))
 
 
 def capture_memo(data_root: Any, key: str, compute: Callable[[], Any]) -> Any:
@@ -1328,14 +1339,15 @@ class ChronicleStore:
 
     # --- the dialogue tail's facts: a projection of state/dialog.sqlite kept beside the journal's ------
 
-    def tail_facts(self, source: Mapping[str, Any], *,
-                   terminal_only: bool = False) -> Optional[Tuple[Dict[str, Any], List[List[Any]]]]:
+    def tail_facts(self, source: Mapping[str, Any], *, terminal_only: bool = False,
+                   whole: bool = False) -> Optional[Tuple[Dict[str, Any], List[List[Any]]]]:
         """``(state, rows)`` of the stored facts of the chat rows after the legacy frontier (only those with a
         terminal status: ``terminal_only``), when they were projected from ``source`` (``memory_inventory`` names
         the dialogue store and frontier, projects the rows and checks the state's ``anchor``); rows
-        ``[pos, seq, row_sha256, legacy, meta, terminal]`` by position."""
+        ``[pos, seq, row_sha256, legacy, meta, terminal]`` by position. ``whole``: every stored row, past a
+        capture that left its cold set unread."""
         snapshot = self._pinned()  # a capture that holds less of the tail than asked leaves it to the index
-        with self._reading(pinned=snapshot is not None and snapshot.holds_tail(terminal_only)) as look:
+        with self._reading(pinned=snapshot is not None and snapshot.holds_tail(terminal_only) and not whole) as look:
             state = look.state("tail")
             return ((state, look.tail(terminal_only)) if isinstance(state, dict) and state.get("source") == source
                     else None)
@@ -1354,8 +1366,9 @@ class ChronicleStore:
             with self._publishing(wait_sec) as db:
                 if self._state(db, "tail") != expected:
                     return False
-                if replace:
+                if replace:  # a prefix projected anew: a cold set judged the old one (``memory_tail_cold``)
                     db.execute("DELETE FROM tail_rows")
+                    db.execute("DELETE FROM state WHERE key=?", (memory_tail_cold.MARKS,))
                 chunk = [[pos, seq, sha, None if legacy is None else _json(legacy), _json(meta), terminal]
                          for pos, seq, sha, legacy, meta, terminal in rows]
                 if chunk:
