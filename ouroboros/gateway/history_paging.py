@@ -86,6 +86,28 @@ _AROUND_OLDER_SHARE = 4
 log = logging.getLogger(__name__)
 
 
+def chat_quota_predicate(row_matches_thread, stored_chat_id):
+    """Human-row quota predicate shared by the rotated chat read and the
+    window-truncation accounting (must equal the render loop's filter)."""
+
+    def _counts_toward_thread(e):
+        if not isinstance(e, dict):
+            return False
+        if str(e.get("direction", "")).lower() not in ("in", "out"):
+            return False
+        if e.get("type") == "routing_options":
+            # LLM-grounding rows (#198) are skipped by the render loop, so
+            # they must not consume the human-row quota either — a run of
+            # picker refusals would silently evict real messages.
+            return False
+        if is_a2a_chat_id(e.get("chat_id", 1)):
+            return False
+        ec = stored_chat_id(e.get("chat_id"), 1)
+        return row_matches_thread(ec, e)
+
+    return _counts_toward_thread
+
+
 def progress_quota_predicate(row_matches_thread, stored_chat_id):
     def counts(entry):
         # A host wait row rides along in the page without spending its quota (``checkpoint_waits``).

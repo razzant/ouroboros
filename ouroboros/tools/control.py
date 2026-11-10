@@ -399,14 +399,14 @@ def get_tools() -> List[ToolEntry]:
         }, _update_scratchpad),
         ToolEntry("send_user_message", {
             "name": "send_user_message",
-            "description": "Send a separate reply to the owner while work continues: the first line of longer work (what "
-                           "I am about to do and why), a question the work does not wait on, an invitation to "
-                           "collaborate, or anything else that needs the owner now; a decision this work needs from "
-                           "the owner is an escalate card, which shows its options, stays listed as waiting and brings "
-                           "the answer back here. It appears in this work's room as a normal reply, calls the owner back "
-                           "and leaves the work running; work news goes on update_focus, later progress stays in the "
-                           "card. For Presence-bound work that room is local, not the place conversation: a connector "
-                           "tool reaches that, and your final answer only where your context names that route.",
+            "description": "Reach the owner while work continues: an opening that says what I will check and why, "
+                           "a substantial interim result they need now, a non-blocking question or an invitation to "
+                           "collaborate. Do not pre-send a duplicate of the final answer: it already reaches this work's "
+                           "answer room. A needed owner decision uses escalate: its card shows options, stays listed "
+                           "as waiting and brings the answer here. This tool sends a normal reply in this work's room, "
+                           "calls the owner back and leaves work running; routine news goes on update_focus, later "
+                           "progress stays in the card. For Presence work that room is local, not the place conversation: "
+                           "a connector reaches that, and the final answer only where context names that route.",
             "parameters": {"type": "object", "properties": {
                 "text": {"type": "string", "description": "Message text"},
                 "reason": {"type": "string", "description": "Why you're reaching out (logged, not sent)"},

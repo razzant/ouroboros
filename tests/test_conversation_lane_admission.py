@@ -158,6 +158,105 @@ def test_conversation_rows_have_no_project_execution_ceiling():
     assert resolve_task_execution_timeout_sec(pooled, global_ceiling=3600) == 3600
 
 
+def test_a_rows_start_phase_belongs_to_the_first_execution_of_its_attempt(pool):
+    """#2862: a pooled root's RUNNING row is fresh for each dispatch; a Resume may keep its attempt, so a late frame
+    of the execution before it (or of any other) moves nothing, and a frame naming none keeps the attempt rule."""
+    ctx = SimpleNamespace(RUNNING=workers.RUNNING)
+    workers.RUNNING["pooled"] = {"task": {"id": "pooled"}, "attempt": 1, "worker_id": 4,
+                                  "phase_generation": "gen-new"}
+    frame = {"task_id": "pooled", "task_attempt": 1, "phase_generation": "gen-new"}
+    conversation_lane.handle_direct_turn_phase({**frame, "execution_id": "new", "phase": "context_building"}, ctx)
+    conversation_lane.handle_direct_turn_phase({**frame, "phase_generation": "gen-old", "execution_id": "old",
+                                                "phase": "dispatched"}, ctx)
+    assert workers.RUNNING["pooled"]["turn_phase"] == "context_building"
+    conversation_lane.handle_direct_turn_phase({**frame, "execution_id": "new", "phase": "requested"}, ctx)
+    conversation_lane.handle_direct_turn_phase({**frame, "execution_id": "new", "phase": "context_built"}, ctx)
+    assert workers.RUNNING["pooled"]["turn_phase"] == "requested"  # never back after its own call started
+    # The next dispatch's row starts clean: the earlier execution's step does not carry into it.
+    workers.RUNNING["pooled"] = {"task": {"id": "pooled"}, "attempt": 1, "worker_id": 5,
+                                  "phase_generation": "gen-newer"}
+    conversation_lane.handle_direct_turn_phase({**frame, "phase_generation": "gen-newer", "execution_id": "newer",
+                                                "phase": "context_building"}, ctx)
+    assert workers.RUNNING["pooled"]["turn_phase"] == "context_building"
+    workers.RUNNING.pop("pooled")
+
+
+def test_a_stale_execution_reporting_first_never_owns_the_next_dispatchs_row(pool):
+    """#2862: after a Resume that kept the attempt, the earlier execution's late frame may reach the fresh row
+    before the new execution reports. Its slot no longer holds the row, so it binds nothing; on the same slot the
+    pooled producer's own first frame binds the row at once, before the execution's later frames."""
+    import queue as stdqueue
+
+    ctx = SimpleNamespace(RUNNING=workers.RUNNING)
+    workers.RUNNING["pooled"] = {"task": {"id": "pooled"}, "attempt": 1, "worker_id": 5,
+                                  "phase_generation": "gen-new"}
+    frame = {"task_id": "pooled", "task_attempt": 1, "phase_generation": "gen-new"}
+    conversation_lane.handle_direct_turn_phase({**frame, "worker_id": 4, "execution_id": "old",
+                                                "phase": "dispatched"}, ctx)
+    assert "turn_phase" not in workers.RUNNING["pooled"] and "turn_execution" not in workers.RUNNING["pooled"]
+    out_q = stdqueue.Queue()
+    frames = worker_chat_lane.pooled_turn_phases({"id": "pooled", "chat_id": 7, "_attempt": 1,
+                                                  "_phase_generation": "gen-new"}, out_q, worker_id=5)
+    first = out_q.get_nowait()
+    assert first == {"type": "direct_turn_phase", "task_id": "pooled", "task_attempt": 1, "worker_id": 5,
+                     "phase_generation": "gen-new",
+                     "execution_id": frames.execution.execution_id, "phase": "started"}
+    conversation_lane.handle_direct_turn_phase(first, ctx)
+    # A same-slot late frame of another execution, after the new one bound the row, moves nothing.
+    conversation_lane.handle_direct_turn_phase({**frame, "phase_generation": "gen-old", "worker_id": 5,
+                                                "execution_id": "old",
+                                                "phase": "requested"}, ctx)
+    assert workers.RUNNING["pooled"]["turn_phase"] == "started"
+    frames.observe("log_event", {"type": "context_building_started", "task_id": "pooled"})
+    conversation_lane.handle_direct_turn_phase(out_q.get_nowait(), ctx)
+    assert workers.RUNNING["pooled"]["turn_phase"] == "context_building"
+    assert workers.RUNNING["pooled"]["turn_execution"] == frames.execution.execution_id
+    workers.RUNNING.pop("pooled")
+
+
+def test_direct_resume_dispatch_stamps_a_fresh_phase_generation(pool):
+    """A direct-lane Resume fences a late frame even when its worker is reused."""
+    task = {"id": "direct-resume", "chat_id": 7, "_attempt": 1,
+            "_conversation_prepare": {"quiet": False}}
+    meta = {"task": task, "worker_id": None, "attempt": 1,
+            "lane": LANE_CONVERSATION, "last_heartbeat_at": time.time(),
+            "last_progress_at": time.time(), "phase_generation": "awaiting-generation"}
+    slot = workers.Worker(5, Process(5005), InputQueue(), lane=LANE_CONVERSATION)
+    affirm_ready(slot)
+    workers.WORKERS[5] = slot
+    workers.RUNNING[task["id"]] = meta
+    ctx = SimpleNamespace(RUNNING=workers.RUNNING)
+    try:
+        conversation_lane.handle_direct_turn_phase(
+            {"task_id": task["id"], "task_attempt": 1, "worker_id": 5,
+             "phase_generation": "old-generation", "execution_id": "old",
+             "phase": "dispatched"}, ctx)
+        assert "turn_phase" not in meta and "turn_execution" not in meta
+
+        assert conversation_lane.hand_to_carrier(meta, slot)
+        dispatched = slot.in_q.get_nowait()
+        generation = dispatched["_phase_generation"]
+        assert generation and meta["phase_generation"] == generation
+
+        # The old execution used the same attempt and slot. It must not claim
+        # the fresh row after the new dispatch boundary.
+        conversation_lane.handle_direct_turn_phase(
+            {"task_id": task["id"], "task_attempt": 1, "worker_id": 5,
+             "phase_generation": "old-generation", "execution_id": "old",
+             "phase": "dispatched"}, ctx)
+        assert "turn_phase" not in meta and "turn_execution" not in meta
+
+        conversation_lane.handle_direct_turn_phase(
+            {"task_id": task["id"], "task_attempt": 1, "worker_id": 5,
+             "phase_generation": generation, "execution_id": "new",
+             "phase": "started"}, ctx)
+        assert meta["turn_phase"] == "started"
+        assert meta["turn_execution"] == "new"
+    finally:
+        workers.RUNNING.pop(task["id"], None)
+        workers.WORKERS.pop(5, None)
+
+
 def test_carrier_turn_receipt_measures_the_owner_wait_from_the_admission(tmp_path):
     out_q = stdqueue.Queue()
     admitted_at = time.time() - 5.0
@@ -171,7 +270,8 @@ def test_carrier_turn_receipt_measures_the_owner_wait_from_the_admission(tmp_pat
     assert receipt["handler_wait_sec"] >= 4.9 and receipt["census"] == {"direct_turns_at_entry": 2}
     assert receipt["phases"]["started"] >= 0.0 and turn.execution.phase == "started"
     turn.observe("log_event", {"type": "context_building_started", "task_id": "t9"})
-    assert out_q.get_nowait() == {"type": "direct_turn_phase", "task_id": "t9", "task_attempt": 1, "phase": "context_building"}
+    assert out_q.get_nowait() == {"type": "direct_turn_phase", "task_id": "t9", "task_attempt": 1,
+                                  "execution_id": turn.execution.execution_id, "phase": "context_building"}
 
 
 def _wake_doubles(monkeypatch):

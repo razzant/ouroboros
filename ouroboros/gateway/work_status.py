@@ -194,8 +194,9 @@ def _waits_on(sleep: Any) -> List[str]:
 def _start_step(row: Mapping[str, Any]) -> str:
     """The start step a turn stands at before its own Main call, else ''. An inline executor's row says it by
     its census phase (``preparing``); a conversation-lane row's phase says only whether a carrier holds it
-    (``conversation_lane.lane_turn_rows``), so a row its carrier holds says it by its frame-fed ``turn_phase``
-    until a call of its own is observed."""
+    (``conversation_lane.lane_turn_rows``) and a pooled root's only that a worker runs it (``carrier``, from
+    ``gateway.state``), so a row its worker holds says it by its frame-fed ``turn_phase`` until a call of its
+    own is observed."""
     step = str(row.get("turn_phase") or "")
     if step not in _TURN_STEPS:
         return ""

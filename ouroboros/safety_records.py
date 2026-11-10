@@ -1,9 +1,12 @@
 """Parse, retain and account for reported Safety verdicts without assigning them execution authority."""
 
+import contextlib
 import json
 import logging
 import pathlib
 import threading
+import time
+import uuid
 from typing import Any, Dict, Optional
 
 from ouroboros.utils import utc_now_iso
@@ -267,3 +270,35 @@ def _emit_safety_mode_skip(ctx: Optional[Any], tool_name: str, mode: str, policy
         "safety_mode": mode,
         "policy": policy,
     })
+
+
+@contextlib.contextmanager
+def safety_check_wait(ctx: Optional[Any], tool_name: str):
+    """One host wait episode in the task's progress stream while a tool call waits on its Safety check
+    (``checkpoint_waits``): ``entered`` before the first attempt, ``ended`` however the check ends (an answer,
+    a failure or a cancellation). Presentation only: it never changes or fails the check."""
+    episode_id, started = uuid.uuid4().hex, time.monotonic()
+
+    def say(phase):
+        queue_, task_id = getattr(ctx, "event_queue", None), str(getattr(ctx, "task_id", "") or "")
+        if queue_ is None or not task_id:
+            return
+        try:
+            from ouroboros.loop_messages import _emit_checkpoint_event
+
+            detail = "Checking safety" if phase == "entered" else "Safety check ended"
+            drive_root, chat_id = getattr(ctx, "drive_root", None), getattr(ctx, "current_chat_id", None)
+            _emit_checkpoint_event(queue_, task_id, pathlib.Path(drive_root) / "logs" if drive_root else None, {
+                "checkpoint_kind": "safety_check_wait", "owner_visible": True, "tool": tool_name,
+                "phase": phase, "episode_id": episode_id, "elapsed_sec": time.monotonic() - started,
+                "detail": detail, "content": detail, "text": detail, "role": "system", "system_type": "task_checkpoint",
+                **({"chat_id": chat_id} if chat_id is not None else {}),
+            })
+        except Exception:
+            log.debug("Could not disclose the Safety check wait", exc_info=True)
+
+    say("entered")
+    try:
+        yield
+    finally:
+        say("ended")

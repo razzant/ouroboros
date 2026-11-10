@@ -2560,6 +2560,13 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     row-gap: var(--space-1);
 }
 .chat-live-card > .chat-live-summary-button .chat-live-activity:empty { display: none; }
+/* An open Safety check under a closed card's current action: a quiet wait line (task_checkpoints.syncWaitFace). */
+.chat-live-hostwait {
+    display: flex; align-items: center; gap: var(--space-2); flex: 1 1 100%; min-width: 0;
+    color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta);
+}
+.chat-live-hostwait[hidden],
+.chat-live-card:is([data-expanded="1"], [data-finished="1"]) > .chat-live-summary-button > .chat-live-hostwait { display: none; }
 
 /* The notes count stays the disclosure's name (`36 notes · 1 child Details`) but leaves its row: the
    collapsed header shows the one word and the chevron (owner, refined A 21.10). */
@@ -5749,6 +5756,8 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .costs-spend-bar > i { display: block; width: var(--spend-share, 0%); height: 100%; border-radius: inherit; background: var(--text-meta); }
 .costs-spend-bar[data-reached="1"] > i { background: var(--amber); }
 .costs-budget, .costs-table-card { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+/* A table's one-line scope note under its title: what it groups by (costs.js TABLES). */
+.costs-table-note { margin: calc(-1 * var(--space-2)) 0 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .costs-budget-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: var(--space-3) var(--space-5); align-items: start; }
 .costs-copy { margin: 0; max-width: 72ch; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .costs-tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: var(--space-4); align-items: start; }

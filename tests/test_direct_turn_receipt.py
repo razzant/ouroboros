@@ -112,6 +112,17 @@ def test_a_wake_leaves_no_receipt_on_its_frame():
     assert execution.phase == "dispatched" and "direct_turn" not in frames.get_nowait()
 
 
+def test_a_pooled_review_operation_advances_past_preparing_without_a_main_call():
+    execution = TurnExecution(chat_id=0, task_id="deep-review", owner_turn=False)
+
+    execution.observe("cognitive_operation", {
+        "task_id": "deep-review", "operation_id": "review-1", "kind": "review", "phase": "started",
+    })
+
+    assert execution.phase == "requested"
+    assert [phase for phase, _ in execution.marks] == ["accepted", "context_built", "requested"]
+
+
 def test_a_turn_that_never_dispatches_records_not_observed_from_its_unregister(monkeypatch):
     rows: list = []
     monkeypatch.setattr("supervisor.state.append_jsonl", lambda path, row, *a, **k: rows.append(dict(row)) or True)
