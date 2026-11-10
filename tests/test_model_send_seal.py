@@ -1,10 +1,10 @@
 """Pins the ``model-visible ⟺ logged`` invariant at the model_send seam.
 
 Design contract: ``docs/MODEL_SEND_OBSERVABILITY.md``.
-Forward — every physical attempt seals its exact send copy before dispatch and
-the seam reconstructs that durable record and byte-compares it ON THE CALL;
-a mismatch is a typed durable fact, never a second dispatch gate. Exclusions
-form a CLOSED enum; delegated lanes disclose ``unobserved`` instead of sealing.
+Forward — every physical attempt seals its exact send copy before dispatch; the
+explicit audit reconstructs that durable record and byte-compares it, and a
+mismatch is a typed durable fact, never a dispatch gate. Exclusions form a
+CLOSED enum; delegated lanes disclose ``unobserved`` instead of sealing.
 Reverse — the bounded reconciliation sweep joins seals and attempts both ways.
 """
 
