@@ -873,7 +873,9 @@ export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRan
         row.style.setProperty('--capsule-value-cap', `${Math.max(0, Math.floor(cap))}px`);
         row.dataset.ownerCompact = 'values';
     }
-    const shared = { showToast, refreshState, onLayout, onSettled: fitNames, win, doc };
+    // A capsule settled closed refits the names and asks the fold again (a short keyboard room folds the row then).
+    let fold = null;
+    const shared = { showToast, refreshState, onLayout, onSettled: () => { fitNames(); fold?.sync(); }, win, doc };
     const contextEl = byId('context-mode');
     const context = contextEl ? createContextModeControl({ el: contextEl, row: row || contextEl.parentElement, saveContextMode, ...shared }) : null;
     const effort = row ? createEffortRangeControl({ row, saveEffortRange: saveRoomEffort, ...shared }) : null;
@@ -912,7 +914,7 @@ export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRan
     const textObserver = row && typeof win?.MutationObserver === 'function' ? new win.MutationObserver(onText) : null;
     textObserver?.observe(row, { childList: true, characterData: true, subtree: true });
     // On a phone the row folds away while the owner reads back through the room's history (composer_fold.js).
-    const fold = box ? createComposerFold({ feed: box.querySelector('#chat-messages, .chat-messages'),
+    fold = box ? createComposerFold({ feed: box.querySelector('#chat-messages, .chat-messages'),
         wrap: row?.closest?.('.chat-input-wrap'), row, win, doc, readingBack }) : null;
 
     return {

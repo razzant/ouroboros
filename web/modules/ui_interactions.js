@@ -112,10 +112,12 @@ export function bindPopoverPosition(popup, { anchor, point, align = 'start', onA
         if (disposed || !popup.isConnected || (anchor && !anchor.isConnected)) return;
         const viewport = win.visualViewport;
         const margin = 8;
+        // Below the screen's top inset (ui.css --ui-popup-inset-top; 0 where unregistered or none).
+        const inset = parseFloat(win.getComputedStyle?.(popup)?.getPropertyValue?.('--ui-popup-inset-top')) || 0;
         const leftEdge = (viewport?.offsetLeft || 0) + margin;
-        const topEdge = (viewport?.offsetTop || 0) + margin;
+        const topEdge = (viewport?.offsetTop || 0) + inset + margin;
         const width = Math.max(0, (viewport?.width || win.innerWidth) - margin * 2);
-        const height = Math.max(0, (viewport?.height || win.innerHeight) - margin * 2);
+        const height = Math.max(0, (viewport?.height || win.innerHeight) - inset - margin * 2);
         const target = anchor?.getBoundingClientRect();
         popup.style.setProperty('--ui-popup-max-width', `${width}px`);
         popup.style.setProperty('--ui-popup-max-height', `${height}px`);
