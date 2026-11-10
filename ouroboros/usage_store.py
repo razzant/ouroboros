@@ -389,16 +389,21 @@ class Txn:
         and abandoned settlements that keep their late-receipt right."""
         return decode_attempts(self.open_attempt_rows(root_task_id=root_task_id))
 
-    def open_attempt_rows(self, *, root_task_id: Optional[str] = None,
-                          root_task_ids: Optional[Iterable[str]] = None) -> Captured:
-        """``open_attempts``' rows captured (``attempt_rows``), for ``decode_attempts`` after the read closed;
-        ``root_task_ids`` names several roots in the one step."""
-        if root_task_ids is not None:
-            return self.attempt_rows(f"{_OPEN_PREDICATE} AND root_task_id IN (SELECT value FROM json_each(?))",
-                                     (_json(sorted(map(str, root_task_ids))),))
+    def open_attempt_rows(self, *, root_task_id: Optional[str] = None) -> Captured:
+        """``open_attempts``' rows captured (``attempt_rows``), for ``decode_attempts`` after the read closed."""
         if root_task_id is None:
             return self.attempt_rows(_OPEN_PREDICATE)
         return self.attempt_rows(f"{_OPEN_PREDICATE} AND root_task_id=?", (str(root_task_id),))
+
+    def handoff_attempt_rows(self, root_task_ids: Iterable[str]) -> Captured:
+        """The open set's sent, unanswered rows (dispatched, unresolved) of several roots in ONE step, for
+        ``decode_attempts`` after the read closed: the model handoffs a display names. The open-set index
+        addresses them, its predicate repeated verbatim (``INDEXED BY`` refuses a plan that walks the roots'
+        history); reserved rows and abandoned settlements stay with ``open_attempt_rows``."""
+        return capture(self.conn, f"SELECT {', '.join(_ATTEMPT_CAPTURE)} FROM attempts INDEXED BY attempts_open "
+                       f"WHERE {_OPEN_PREDICATE} AND state IN ('dispatched','unresolved') "
+                       "AND root_task_id IN (SELECT value FROM json_each(?))",
+                       (_json(sorted(map(str, root_task_ids))),), _ATTEMPT_CAPTURE)
 
     def summary_rows(self, reads: Sequence[Tuple[str, str, str]]) -> Captured:
         """The summary rows ``reads`` names, in ONE step, for ``SummaryRows`` after the read closed: ``(scope,

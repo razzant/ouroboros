@@ -979,13 +979,15 @@ def tree_model_requests(root_drive: Any, root_task_id: str) -> list:
 
 
 def trees_model_requests(root_drive: Any, root_task_ids: Iterable[str]) -> Dict[str, list]:
-    """``tree_model_requests`` of many roots in ONE read: a reader over every paused tree pays one
-    transaction, not one per tree. Raises when unreadable: unknown, never none."""
+    """The model requests still awaiting an answer (dispatched, unresolved) of many roots in ONE read: the
+    handoffs a display names over every paused tree, one transaction, not one per tree. Admission's
+    ``tree_model_requests`` keeps the whole open set, whose reserved rows tie damaged members to their
+    tree. Raises when unreadable: unknown, never none."""
     from ouroboros import usage_store
 
     roots = sorted({str(root) for root in root_task_ids})
     with usage_store.read(root_drive) as txn:
-        captured = txn.open_attempt_rows(root_task_ids=roots)
+        captured = txn.handoff_attempt_rows(roots)
     grouped: Dict[str, list] = {root: [] for root in roots}
     for attempt in usage_store.decode_attempts(captured):
         grouped.setdefault(str(attempt.get("root_task_id") or ""), []).append(attempt)

@@ -376,9 +376,10 @@ def model_handoffs(custody_root, predecessor, *, member_results=None, for_contin
 
 
 def trees_model_handoffs(custody_root: Any, roots: Any) -> Dict[str, List[Dict[str, Any]]]:
-    """``model_handoffs`` of many trees over ONE read of their open attempts: the display reader's seam over
-    every paused root. Only a tree that has an open attempt touches its members, from the memo. An unreadable
-    attempt store answers each tree as unreadable, as a single read would: unknown, never none."""
+    """``model_handoffs`` of many trees over ONE read of their dispatched/unresolved attempts, the only states
+    it names: the display reader's seam over every paused root. Only a tree with such an attempt touches its
+    members, from the memo. An unreadable attempt store answers each tree as unreadable, as a single read
+    would: unknown, never none."""
     from ouroboros.owner_pause import trees_model_requests
 
     roots = [str(root) for root in roots]

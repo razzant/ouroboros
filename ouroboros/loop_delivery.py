@@ -27,6 +27,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from ouroboros import working_checkpoint
 from ouroboros.config import get_context_mode
 from ouroboros.conversation_lease import follow_loop_admission
+from ouroboros.finalization_timing import finalization_child_scope
 from ouroboros.observability import timed_phase
 from ouroboros.outcomes import reviewable_effect_projection
 from ouroboros.task_finalization import set_terminal_host_notice, set_terminal_plan_review_open
@@ -1236,72 +1237,74 @@ def _no_tool_final_answer(
             _void_presence_completion(tools._ctx, messages)
         observe_completion_hold(tools, limit_ctx, origin, reason, subreason)
         return None
-    ready, content = _prepare_delivery_candidate(content, tools, limit_ctx, llm_trace,
-                                                 explicit=explicit_candidate, resumed=resume_candidate)
-    if not ready:  # prose under armed control, or a resumed quiet selection lost with its execution
-        return held("quiet_selection_lost" if resume_candidate else "selection_required")
+    # Each wait-free segment reads its children once; they may advance between segments (services stop, review, drain).
+    with finalization_child_scope():
+        ready, content = _prepare_delivery_candidate(content, tools, limit_ctx, llm_trace,
+                                                     explicit=explicit_candidate, resumed=resume_candidate)
+        if not ready:  # prose under armed control, or a resumed quiet selection lost with its execution
+            return held("quiet_selection_lost" if resume_candidate else "selection_required")
 
-    stopping = (getattr(tools._ctx, "_completion_selected", None) or {}).get("action") == "stop"
-    if not stopping:
-        if _loop()._enforce_plan_gate(
-            str(content or ""), messages, tools, llm_trace, emit_progress,
-        ):
-            return held("plan_gate")
-        handoff_msg = _loop()._compute_subagent_handoff(tools, limit_ctx.drive_root, limit_ctx.task_id, content)
-        if handoff_msg:
-            if content and content.strip():
-                messages.append({"role": "assistant", "content": content})
-            _loop()._append_or_merge_user_message(messages, f"[SYSTEM REMINDER]\n{handoff_msg}")
-            emit_progress("Subagent handoff status refreshed before final response.")
-            llm_trace["reasoning_notes"].append("Subagent handoff status refreshed before final response.")
-            _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
-            return held("subagent_handoff")
-        from ouroboros.owner_hurry import latched
-        # The mind reads its review before it decides (owner 11.10); the rows themselves are the news.
-        review_rows, review_present = ([], False) if resume_candidate or latched(tools._ctx) else (
-            _unread_review_updates(tools._ctx, messages, selected=explicit_candidate))
-        if review_rows or review_present:
-            if content and content.strip() and not explicit_candidate:  # a selection is already its own row
-                messages.append({"role": "assistant", "content": content})
-            messages.extend(review_rows)
-            emit_progress("Review answers that arrived before delivery were shown first.")
-            _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
-            tools._ctx._completion_pair_appended = bool(explicit_candidate)
-            return held("review_update")
-        absorption_result = _loop()._maybe_enforce_child_absorption_gate(
-            tools, limit_ctx, content, messages, emit_progress, llm_trace,
-        )
-        if absorption_result == "continue":
-            # Preserve the child action reason until disposition or explicit stop.
-            _hold_delivery_for_skill_action(
-                tools, llm_trace, control=_CHILD_ABSORPTION_HOLD_CONTROL,
-            )
-            return held("child_absorption")
-        if absorption_result is not None:
-            return absorption_result
-        skill_finalization_was_injected = bool(
-            getattr(tools._ctx, "_skill_finalization_injected", False)
-        )
-        handover = getattr(tools._ctx, "_authoring_handover", None)
-        handover_was_prompted = bool(handover and handover.get("recovery_prompted"))
-        if _loop()._maybe_inject_finalization_nudges(
-            tools, limit_ctx.drive_root, limit_ctx.task_id, llm_trace, content, messages, emit_progress,
-        ):
-            skill_finalization_injected_now = (
-                not skill_finalization_was_injected
-                and bool(getattr(tools._ctx, "_skill_finalization_injected", False))
-            )
-            # Completion-only calls do not reset this action nudge or imply work.
-            if skill_finalization_injected_now:
-                _hold_delivery_for_skill_action(tools, llm_trace)
-            elif handover and not handover_was_prompted and handover.get("recovery_prompted"):
-                _hold_delivery_for_skill_action(
-                    tools, llm_trace,
-                    control=_AUTHORING_HANDOVER_HOLD_CONTROL,
-                )
-            else:
+        stopping = (getattr(tools._ctx, "_completion_selected", None) or {}).get("action") == "stop"
+        if not stopping:
+            if _loop()._enforce_plan_gate(
+                str(content or ""), messages, tools, llm_trace, emit_progress,
+            ):
+                return held("plan_gate")
+            handoff_msg = _loop()._compute_subagent_handoff(tools, limit_ctx.drive_root, limit_ctx.task_id, content)
+            if handoff_msg:
+                if content and content.strip():
+                    messages.append({"role": "assistant", "content": content})
+                _loop()._append_or_merge_user_message(messages, f"[SYSTEM REMINDER]\n{handoff_msg}")
+                emit_progress("Subagent handoff status refreshed before final response.")
+                llm_trace["reasoning_notes"].append("Subagent handoff status refreshed before final response.")
                 _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
-            return held("finalization_nudge", _hold_cause(tools._ctx))
+                return held("subagent_handoff")
+            from ouroboros.owner_hurry import latched
+            # The mind reads its review before it decides (owner 11.10); the rows themselves are the news.
+            review_rows, review_present = ([], False) if resume_candidate or latched(tools._ctx) else (
+                _unread_review_updates(tools._ctx, messages, selected=explicit_candidate))
+            if review_rows or review_present:
+                if content and content.strip() and not explicit_candidate:  # a selection is already its own row
+                    messages.append({"role": "assistant", "content": content})
+                messages.extend(review_rows)
+                emit_progress("Review answers that arrived before delivery were shown first.")
+                _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
+                tools._ctx._completion_pair_appended = bool(explicit_candidate)
+                return held("review_update")
+            absorption_result = _loop()._maybe_enforce_child_absorption_gate(
+                tools, limit_ctx, content, messages, emit_progress, llm_trace,
+            )
+            if absorption_result == "continue":
+                # Preserve the child action reason until disposition or explicit stop.
+                _hold_delivery_for_skill_action(
+                    tools, llm_trace, control=_CHILD_ABSORPTION_HOLD_CONTROL,
+                )
+                return held("child_absorption")
+            if absorption_result is not None:
+                return absorption_result
+            skill_finalization_was_injected = bool(
+                getattr(tools._ctx, "_skill_finalization_injected", False)
+            )
+            handover = getattr(tools._ctx, "_authoring_handover", None)
+            handover_was_prompted = bool(handover and handover.get("recovery_prompted"))
+            if _loop()._maybe_inject_finalization_nudges(
+                tools, limit_ctx.drive_root, limit_ctx.task_id, llm_trace, content, messages, emit_progress,
+            ):
+                skill_finalization_injected_now = (
+                    not skill_finalization_was_injected
+                    and bool(getattr(tools._ctx, "_skill_finalization_injected", False))
+                )
+                # Completion-only calls do not reset this action nudge or imply work.
+                if skill_finalization_injected_now:
+                    _hold_delivery_for_skill_action(tools, llm_trace)
+                elif handover and not handover_was_prompted and handover.get("recovery_prompted"):
+                    _hold_delivery_for_skill_action(
+                        tools, llm_trace,
+                        control=_AUTHORING_HANDOVER_HOLD_CONTROL,
+                    )
+                else:
+                    _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
+                return held("finalization_nudge", _hold_cause(tools._ctx))
 
     # Declared service outputs and teardown failures are evidence of the result:
     # finalize them before its review and, when that changes evidence,
@@ -1315,47 +1318,47 @@ def _no_tool_final_answer(
         accumulated_usage=limit_ctx.accumulated_usage,
         llm_trace=llm_trace,
     )
-    if _loop()._finalize_task_services(service_exit_ctx) and not stopping:
-        evidence_revision, evidence_fingerprint = _loop()._delivery_evidence_state(
-            tools, limit_ctx, llm_trace,
-        )
-        candidate = getattr(tools._ctx, "_delivery_candidate", None)
-        if (
-            isinstance(candidate, _loop().DeliveryCandidate)
-            and (
-                candidate.evidence_revision != evidence_revision
-                or candidate.evidence_fingerprint != evidence_fingerprint
-            )
-        ):
-            if content and str(content).strip():
-                messages.append({"role": "assistant", "content": str(content)})
-            llm_trace["reasoning_notes"].append(
-                "Task services were finalized before delivery; the complete answer must bind the resulting evidence."
-            )
-            _loop()._disclose_service_finalization(limit_ctx, llm_trace)
-            _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
-            return held("service_evidence_changed")
+    services_finalized = _loop()._finalize_task_services(service_exit_ctx)
+    with finalization_child_scope():  # the stopped services' facts, up to the result review
+        if services_finalized and not stopping:
+            evidence_revision, evidence_fingerprint = _loop()._delivery_evidence_state(tools, limit_ctx, llm_trace)
+            candidate = getattr(tools._ctx, "_delivery_candidate", None)
+            if (
+                isinstance(candidate, _loop().DeliveryCandidate)
+                and (
+                    candidate.evidence_revision != evidence_revision
+                    or candidate.evidence_fingerprint != evidence_fingerprint
+                )
+            ):
+                if content and str(content).strip():
+                    messages.append({"role": "assistant", "content": str(content)})
+                llm_trace["reasoning_notes"].append(
+                    "Task services were finalized before delivery; the complete answer must bind the resulting evidence."
+                )
+                _loop()._disclose_service_finalization(limit_ctx, llm_trace)
+                _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
+                return held("service_evidence_changed")
 
-    _loop()._project_child_result_dispositions(limit_ctx, llm_trace)
-    # No plan gate decided a stop: its disclosure reads the plan now, never an earlier hold's view.
-    plan_suffix = (_loop()._plan_gate_disclosure(tools._ctx, llm_trace, author_stop=True) if stopping
-                   else _loop()._plan_gate_disclosure(tools._ctx, llm_trace))
-    # The forced rails already type this fact; the single degraded_reason slot below
-    # cannot hold it beside an unsettled child, so the normal rail types it too.
-    set_terminal_plan_review_open(limit_ctx.accumulated_usage, plan_suffix)
-    orphan_suffix = _loop()._forced_orphan_note(limit_ctx, include_terminal=False)
-    set_terminal_host_notice(limit_ctx.accumulated_usage, plan_suffix, orphan_suffix)
-    candidate = getattr(tools._ctx, "_delivery_candidate", None)
-    if isinstance(candidate, _loop().DeliveryCandidate):
-        mark = ("host_child_status_suffix" if orphan_suffix else
-                "plan_review_advisory" if plan_suffix and not _plan_review_only_awaited(llm_trace) else "")
-        # Each mark states a suffix of THIS exit: a held answer kept for a later exit drops one whose cause has
-        # gone. Another owner's degradation of the candidate is neither written over nor cleared here.
-        own = not candidate.degraded or candidate.degraded_reason in _SUFFIX_MARKS
-        if own and (mark or candidate.degraded):
-            candidate.degraded, candidate.degraded_reason = bool(mark), mark
-            _loop()._publish_delivery_candidate(tools, candidate, llm_trace)
-        content = candidate.full_text
+        _loop()._project_child_result_dispositions(limit_ctx, llm_trace)
+        # No plan gate decided a stop: its disclosure reads the plan now, never an earlier hold's view.
+        plan_suffix = (_loop()._plan_gate_disclosure(tools._ctx, llm_trace, author_stop=True) if stopping
+                       else _loop()._plan_gate_disclosure(tools._ctx, llm_trace))
+        # The forced rails already type this fact; the single degraded_reason slot below
+        # cannot hold it beside an unsettled child, so the normal rail types it too.
+        set_terminal_plan_review_open(limit_ctx.accumulated_usage, plan_suffix)
+        orphan_suffix = _loop()._forced_orphan_note(limit_ctx, include_terminal=False)
+        set_terminal_host_notice(limit_ctx.accumulated_usage, plan_suffix, orphan_suffix)
+        candidate = getattr(tools._ctx, "_delivery_candidate", None)
+        if isinstance(candidate, _loop().DeliveryCandidate):
+            mark = ("host_child_status_suffix" if orphan_suffix else
+                    "plan_review_advisory" if plan_suffix and not _plan_review_only_awaited(llm_trace) else "")
+            # Each mark states a suffix of THIS exit: a held answer kept for a later exit drops one whose cause has
+            # gone. Another owner's degradation of the candidate is neither written over nor cleared here.
+            own = not candidate.degraded or candidate.degraded_reason in _SUFFIX_MARKS
+            if own and (mark or candidate.degraded):
+                candidate.degraded, candidate.degraded_reason = bool(mark), mark
+                _loop()._publish_delivery_candidate(tools, candidate, llm_trace)
+            content = candidate.full_text
 
     def _hold_for_review(text: str) -> None:
         if content and str(content).strip():
@@ -1446,30 +1449,31 @@ def _no_tool_final_answer(
         from ouroboros.place_intake import reopen_for_place_mail
         if not stopping and reopen_for_place_mail(tools._ctx, post_controls):
             return held("place_mail")  # keep the answer; the accepted place context gets a model round
-    _loop()._project_child_result_dispositions(limit_ctx, llm_trace)
-    # UNKNOWN evidence delivers a candidate retained over it as published; a KNOWN candidate is re-retained below.
-    evidence_revision, evidence_fingerprint = _loop()._delivery_evidence_state(tools, limit_ctx, llm_trace)
-    candidate = getattr(tools._ctx, "_delivery_candidate", None)
-    if (
-        not stopping and isinstance(candidate, _loop().DeliveryCandidate)
-        and (
-            candidate.evidence_revision != evidence_revision
-            or candidate.evidence_fingerprint != evidence_fingerprint
-        )
-    ):
-        if candidate.full_text:
-            messages.append({"role": "assistant", "content": candidate.full_text})
-        llm_trace["reasoning_notes"].append(
-            "Delivery evidence changed after the answer was retained; a complete replacement answer is required."
-            if evidence_fingerprint else
-            "Delivery evidence can no longer be verified; the complete answer must be restated and is retained over unknown evidence."
-        )
-        _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
-        solving_again()
-        return held("evidence_changed", "" if evidence_fingerprint else "unverifiable")
-    if isinstance(candidate, _loop().DeliveryCandidate):
-        _loop()._publish_delivery_candidate(tools, candidate, llm_trace)
-        content = candidate.full_text
+    with finalization_child_scope():  # after the drain: the delivery decision and what it publishes
+        _loop()._project_child_result_dispositions(limit_ctx, llm_trace)
+        # UNKNOWN evidence delivers a candidate retained over it as published; a KNOWN candidate is re-retained below.
+        evidence_revision, evidence_fingerprint = _loop()._delivery_evidence_state(tools, limit_ctx, llm_trace)
+        candidate = getattr(tools._ctx, "_delivery_candidate", None)
+        if (
+            not stopping and isinstance(candidate, _loop().DeliveryCandidate)
+            and (
+                candidate.evidence_revision != evidence_revision
+                or candidate.evidence_fingerprint != evidence_fingerprint
+            )
+        ):
+            if candidate.full_text:
+                messages.append({"role": "assistant", "content": candidate.full_text})
+            llm_trace["reasoning_notes"].append(
+                "Delivery evidence changed after the answer was retained; a complete replacement answer is required."
+                if evidence_fingerprint else
+                "Delivery evidence can no longer be verified; the complete answer must be restated and is retained over unknown evidence."
+            )
+            _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
+            solving_again()
+            return held("evidence_changed", "" if evidence_fingerprint else "unverifiable")
+        if isinstance(candidate, _loop().DeliveryCandidate):
+            _loop()._publish_delivery_candidate(tools, candidate, llm_trace)
+            content = candidate.full_text
     if stopping:
         request = tools._ctx._completion_selected
         record_stopped_completion(tools, limit_ctx, llm_trace, request, candidate)
