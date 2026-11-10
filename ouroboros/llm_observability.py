@@ -1,14 +1,44 @@
-"""Observed LLM call helpers for non-loop decision surfaces."""
+"""Model-call evidence and event transport, independent of admission and retry decisions.
+
+The Main call publishes lifecycle and optional context through this existing observation
+owner; the provider loop chooses what happened, never how the public event is shaped.
+"""
 
 from __future__ import annotations
 
 import pathlib
 import logging
-from typing import Any, Dict, Tuple
+import queue
+from typing import Any, Dict, Optional, Tuple
 
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.anthropic_native_custody import public_custody_projection
-from ouroboros.utils import sanitize_tool_result_for_log
+from ouroboros.utils import emit_cognitive_operation_event, sanitize_tool_result_for_log
+from ouroboros.physical_attempt_context import attempt_fact
+
+
+def emit_main_call_state(event_queue: Optional[queue.Queue], identity: Tuple[Any, ...],
+                        phase: str, activity: Any = None, capture: Any = None) -> None:
+    """Exact-call lifecycle and display observations; only terminal facts close the idle lease. Once this round's
+    attempt is dispatched, its frames carry its context (``physical_attempt_context.attempt_fact`` of ``capture``).
+    Event delivery failure cannot change the provider loop's send or retry decision."""
+    task_id, task_attempt, llm_call_id, execution_id, round_id, call_attempt = identity
+    if phase in {"finished", "failed"}:
+        emit_cognitive_operation_event(event_queue, task_id=task_id, operation_id=llm_call_id, phase=phase,
+                                       kind="llm", task_attempt=task_attempt, execution_id=execution_id, round_id=round_id)
+    fact = attempt_fact(capture, str(round_id or ""))  # ``dispatched``: the ledger's own dispatch, while it waits
+    if event_queue is None or (phase == "observed" and not isinstance(activity, dict)) or (phase == "dispatched" and not fact):
+        return
+    try:
+        event_queue.put({
+            "type": "main_llm_call_state", "task_id": str(task_id or ""), "task_attempt": task_attempt,
+            "llm_call_id": str(llm_call_id or ""), "execution_id": str(execution_id or ""),
+            "round_id": str(round_id or ""), "call_attempt": int(call_attempt), "phase": phase,
+            **({"model_activity": activity} if phase == "observed" else {}),
+            **({"context_attempt": fact} if fact else {}),
+        })
+    except Exception:
+        logging.getLogger(__name__).debug("Failed to emit main LLM call state event", exc_info=True)
 
 
 def retain_cancelled_response(request, response, capture, *, control_reason: str = "caller_cancelled") -> dict:

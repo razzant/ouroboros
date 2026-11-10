@@ -1500,10 +1500,10 @@ def check_safety(
         return True, "⚠️ SAFETY_ADVICE: " + advice
     # Who sends flagged words, read when they are sent: the mind for SUSPICIOUS, and for DANGEROUS in Cyber Pro;
     # else my human's card. ``gated``: these declared words to this destination were flagged DANGEROUS elsewhere.
-    mind_may = flag == "SUSPICIOUS" or (cyber and repeat)
     gated = gates.get(_words_key(subject())) if gates and speech else None
+    mind_may = (cyber and repeat) or (flag == "SUSPICIOUS" and not gated)
     basis = prior.get("verdicts") or (gated or {}).get("verdicts")  # the verdicts a release overrides
-    level = flag or ("DANGEROUS" if gated else "")  # what a send now overrides; "" for a call no verdict judged
+    level = "DANGEROUS" if gated else flag  # the words' gate outranks an older exact-call flag
     card_open = level != "DANGEROUS" or release_dangerous
     closed = level == "DANGEROUS" and not (mind_may or card_open)
     exits = (_REPEAT_CLOSED if closed else _owner_line(subject(), _SEND_DESPITE if mind_may else _WAIT)
@@ -1511,13 +1511,16 @@ def check_safety(
     if flag and (not call or call == prior.get("llm_call_id")):  # the flagged decision re-presented, not a later one
         return False, _NOT_SENT[flag] + ": this exact call was flagged in this same step. " + exits
     if flag and closed:
-        return False, _NOT_SENT[flag] + ": this exact call was refused before. " + _REPEAT_CLOSED
+        return False, _NOT_SENT[level] + ": this exact call was refused before. " + _REPEAT_CLOSED
     # My human's card reaches words (declared, or marked by a verdict) and an MCP call no verdict judged an action; a
     # call no verdict judged only through an open release, and never one whose verdict was reached but not kept.
     if (speech or prior.get("marked") or (is_mcp and not prior.get("verdicts"))) and call and (
             call != prior.get("llm_call_id")) and card_open and (level or (release and not prior.get("judged"))) and (
             quiz := _owner_yes(ctx, subject)):
         return released(quiz, prior.get("marked"))
+    if gated and not cyber:  # owner's answer above may release it; an older SUSPICIOUS flag cannot
+        return False, (f"{_NOT_SENT['DANGEROUS']}: these words were flagged DANGEROUS in this work for this place or "
+                       f"recipient. {exits}")
     if flag:
         if not mind_may:  # it waits for my human: no fresh check re-rolls it
             return False, _NOT_SENT[flag] + ". " + exits
@@ -1525,9 +1528,6 @@ def check_safety(
             return False, refusal
         return sent("safety_sent_despite_check", "Identical re-issue from a later step; sent despite the check:\n"
                     + _reasons(prior["verdicts"]), detail="sent despite the check by a later model call")
-    if gated and not cyber:
-        return False, (f"{_NOT_SENT['DANGEROUS']}: these words were flagged DANGEROUS in this work for this place or "
-                       f"recipient. {exits}")
 
     try:
         assessment = _run_llm_check(tool_name, arguments, messages, ctx, resolved_binding, ext_tool)

@@ -258,3 +258,140 @@ def test_the_slack_alone_never_outlines_the_knowledge_index(tmp_path, monkeypatc
     lmc._apply_refusal_step(ctx, step, fit, target, 12_500)  # a known target holds the 12,500 slack
     hosts = ctx.context_fit_plan.projection(ctx.active_context_mode).memory_facts.get("host_sections_addressed", [])
     assert [row["section_id"] for row in hosts] == outlined
+
+
+def _files(root):
+    return sorted((str(path.relative_to(root)), path.stat().st_size) for path in root.rglob('*') if path.is_file())
+
+
+def test_a_pairwise_start_fit_is_the_production_start_fit_and_writes_nothing(tmp_path, monkeypatch):
+    """``memory_floor.counterfactual_starts`` refits a memory in this plan's one captured frame by the start's own
+    fitter: fed the very view this task captured, it chooses the start's mode, Max room and host steps; each host
+    step is priced at the digest address its capture would publish, and nothing reaches the artifact store."""
+    from ouroboros import artifacts
+    from ouroboros.section_floor import predicted_section, retain_section
+
+    for window in (92000, 84000, 76000, 68000):  # a frame tight enough that the start addresses a host section
+        plan = scale.build(tmp_path, monkeypatch, window=window)
+        shown = plan.projection(plan.initial_mode).memory_facts
+        if shown.get('host_sections_addressed'):
+            break
+    assert shown.get('host_sections_addressed'), 'no fixture window made the start address a host section'
+    captured = mv.snapshot_from_json(plan.core.memory_view_json)
+    files = _files(tmp_path)
+    monkeypatch.setattr(artifacts, 'store_actor_source_bytes', lambda *a, **kw: pytest.fail('a pairwise fit wrote'))
+    fit = mf.counterfactual_starts(plan, {'as captured': captured})
+    assert _files(tmp_path) == files
+    arm = fit['arms']['as captured']
+    assert fit['measured'] and arm['mode'] == plan.initial_mode and arm['max_room'] == shown['max_room']
+    assert arm['host'] == [(row['section_id'], row['tokens_saved']) for row in shown['host_sections_addressed']]
+    sections = {part.section_id: part for part in (*plan.core.semi_stable_sections, *plan.core.dynamic_head_sections,
+                                                    *plan.core.dynamic_sections)}
+    for row in shown['host_sections_addressed']:  # the same address, hence the same pointer cost
+        assert predicted_section(sections[row['section_id']])['reader'] == row['reader']
+    # Both arms: one captured frame, only the memory view differs; nothing is fetched or captured again.
+    from ouroboros import context as context_module, tool_policy
+
+    calls, fit_projections = [], cf._view_projections
+    monkeypatch.setattr(tool_policy, 'initial_tool_schemas', lambda *a, **kw: pytest.fail('schemas refetched'))
+    monkeypatch.setattr(context_module, '_capture_context_core', lambda *a, **kw: pytest.fail('core recaptured'))
+    monkeypatch.setattr(cf, '_view_projections', lambda *a, **kw: (calls.append((a, kw)), fit_projections(*a, **kw))[1])
+    other = dataclasses.replace(captured, story=captured.story[:-1])  # a different story, the same everything else
+    mf.counterfactual_starts(plan, {'now': captured, 'proposed': other})
+    (core_a, governance_a, user_a), kw_a = calls[0][0], calls[0][1]
+    (core_b, governance_b, user_b), kw_b = calls[1][0], calls[1][1]
+    assert core_a.memory_view_json != core_b.memory_view_json and governance_a is governance_b and user_a == user_b
+    assert dataclasses.replace(core_a, memory_view_json='') == dataclasses.replace(core_b, memory_view_json='') == (
+        dataclasses.replace(plan.core, memory_view_json=''))  # runtime, knowledge, marks text, assignment, books
+    assert kw_a == kw_b and kw_a['tool_schemas'] == json.loads(plan.start_tool_schemas_json) == scale.tools()
+    assert mv.snapshot_from_json(core_b.memory_view_json).marks == captured.marks
+    monkeypatch.undo()
+    retained = retain_section(sections[shown['host_sections_addressed'][0]['section_id']], root=str(tmp_path),
+                              task_id='scale-fit')
+    assert {**retained, 'predicted': True} == predicted_section(sections[retained['section_id']])
+    text = '\n'.join(mf.counterfactual_lines(fit))
+    assert f"- as captured: starts {plan.initial_mode.capitalize()}; Max room {shown['max_room']['cause']}: " in text
+    assert f"This task started in {plan.initial_mode} (its start projection, a separate fact" in text
+    # Without the inputs the frame needs, the fit is named as not measured, never guessed.
+    for missing, bare in (('the tool schemas its start priced', dataclasses.replace(plan, start_tool_schemas_json=None)),
+                          ('its window record', dataclasses.replace(plan, window_record=None)),
+                          ('the captured context core and memory view', dataclasses.replace(plan, core=None))):
+        assert mf.counterfactual_starts(bare, {'as captured': captured}) == {'measured': False, 'missing': [missing]}
+    monkeypatch.setattr(cf, '_view_projections', lambda *a, **kw: {}['broken'])
+    unknown = mf.counterfactual_starts(plan, {'as captured': captured})
+    assert unknown['arms'] == {'as captured': {'unmeasured': 'KeyError'}}
+    assert mf.counterfactual_lines(unknown)[-1] == '- as captured: not measured (KeyError); its mode is unknown'
+    assert mf.counterfactual_lines({'measured': False, 'missing': ['x']})[-1] == (
+        'not measured: this task\'s plan does not hold x.')
+
+
+def test_a_lower_mode_names_its_cause_from_the_plans_own_start_facts(tmp_path, monkeypatch):
+    """``context_measurement.mode_cause`` reads why a candidate renders below the owner's mode from the plan alone:
+    a start the window lowered because memory crowded its Max room is ``memory``; a Max start renders no cause; a
+    lower mode the task took after a Max start is ``after_start``. The physical context carries both facts."""
+    from ouroboros.context_measurement import measure_main_fit, mode_cause
+
+    def plan_at(window):
+        return scale.build(tmp_path, monkeypatch, window=window)
+
+    held, crowded = plan_at(1_000_000), None
+    for window in (300_000, 200_000, 150_000, 120_000, 100_000, 92_000):
+        candidate = plan_at(window)
+        if candidate.initial_mode == 'low' and mf.crowded_by_memory(
+                candidate.projection('low').memory_facts.get('max_room')):
+            crowded = candidate
+            break
+    assert held.initial_mode == 'max' and crowded is not None
+    assert mode_cause(crowded, 'low') == 'memory' and mode_cause(held, 'max') == ''
+    assert mode_cause(held, 'low') == 'after_start' and mode_cause(crowded, 'nano') == 'after_start'
+    disposition = measure_main_fit(crowded, crowded.messages_for('low'), scale.tools(), profile='task_local_low',
+                                   rendered_mode='low', round_id='e:round:1')
+    physical = cf._physical_context_for_fit(disposition)
+    assert (physical.preferred_mode, physical.rendered_mode, physical.mode_cause) == ('max', 'low', 'memory')
+    # The start is its own fact (``ContextFitPlan.start``): a route rebind that lowers a Max start for a smaller
+    # window (``initial_mode`` follows that selection) is a lower mode taken after the start, and the next-start
+    # read says the task started in Max; a Low start narrowed again keeps its start's cause.
+    assert held.start == ('max', '') and crowded.start == ('low', 'memory')
+    for window in (300_000, 200_000, 150_000, 120_000, 100_000):  # as ``loop_model_call`` rebinds: the new record
+        record = plan_at(window).window_record
+        rebound = dataclasses.replace(held, window_record=record, window_tokens=record.total_equivalent).reproject_for_route(
+            window_tokens=record.total_equivalent, known_window=True, ratio=1.0, output_reserve=held.output_reserve_tokens,
+            tool_schemas=scale.tools(), start_mode='max', current_messages=held.messages_for('max'))
+        if rebound.initial_mode == 'low':
+            break
+    assert rebound.initial_mode == 'low' and rebound.start == held.start
+    assert (rebound.projection('low').memory_facts.get('floor') or {}).get('mode_switch')  # the rebind's own switch
+    assert mode_cause(rebound, 'low') == 'after_start'
+    fit = mf.counterfactual_starts(rebound, {'as captured': mv.snapshot_from_json(rebound.core.memory_view_json)})
+    assert fit['frame']['started'] == 'max'
+    narrowed = crowded.reproject_for_route(
+        window_tokens=crowded.window_tokens, known_window=True, ratio=1.0, output_reserve=crowded.output_reserve_tokens,
+        tool_schemas=scale.tools(), start_mode='low', refused_tokens=2_000, current_messages=crowded.messages_for('low'))
+    assert narrowed.initial_mode == 'low' and mode_cause(narrowed, 'low') == 'memory'
+
+
+def test_a_pairwise_start_fit_reaches_the_starts_own_rescued_input(tmp_path, monkeypatch):
+    """A large owner-Nano assignment no view of the window holds whole starts on its retained exact input pointer
+    (``context_input_selection.rescued_start``): fed the very view it captured, the pairwise next-start fit applies
+    that captured rescue as production does and chooses the same start; it neither reads nor writes for it. Without a
+    captured rescue the next start's input is unknown: not measured, never a refusal."""
+    from ouroboros import artifacts
+
+    big = dataclasses.replace(scale.core(tmp_path), user_content_json=json.dumps("Large assignment line. " * 90_000))
+    plan = scale.build(tmp_path, monkeypatch, window=140_000, mode='nano', captured=big)
+    shown = plan.projection('nano')
+    assert plan.initial_mode == 'nano' and shown.user_content_json and plan.projection('max').user_content_json is None
+    captured = mv.snapshot_from_json(plan.core.memory_view_json)
+    files = _files(tmp_path)
+    monkeypatch.setattr(artifacts, 'store_actor_source_bytes', lambda *a, **kw: pytest.fail('a pairwise fit wrote'))
+    arm = mf.counterfactual_starts(plan, {'as captured': captured})['arms']['as captured']
+    assert _files(tmp_path) == files
+    assert (arm['mode'], arm['input']) == ('nano', 'rescued')
+    assert arm['steps'] == shown.memory_facts['floor']['steps']
+    assert arm['host'] == [(row['section_id'], row['tokens_saved'])
+                           for row in shown.memory_facts.get('host_sections_addressed', ())]
+    assert '- as captured: starts Nano on the input this start rescued' in '\n'.join(
+        mf.counterfactual_lines(mf.counterfactual_starts(plan, {'as captured': captured})))
+    bare = dataclasses.replace(plan, nano_projection=dataclasses.replace(shown, user_content_json=None))
+    assert mf.counterfactual_starts(bare, {'as captured': captured})['arms']['as captured'] == {
+        'unmeasured': 'the whole input does not fit and this start captured no rescue of it'}

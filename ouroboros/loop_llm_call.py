@@ -16,7 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import logging
 
 from ouroboros import model_concurrency, working_checkpoint
-from ouroboros.llm_observability import persist_observed_call
+from ouroboros.llm_observability import persist_observed_call, emit_main_call_state as _emit_main_llm_call_state
 from ouroboros.config import get_finalization_grace_sec, NETWORK_WAIT_BACKOFF_MAX_SEC  # noqa: F401 - legacy monkeypatch seam
 from ouroboros.deadline_utils import (
     owner_deadline_exhausted,
@@ -36,7 +36,8 @@ from ouroboros.task_pacing import main_loop_wire_options
 from ouroboros.task_custody import canonical_owner_root
 from ouroboros.transport_custody import attempt_custody_event_fields, is_pre_dispatch_transport_failure, is_retryable_transport_death, outcome_unknown_on_chain
 from ouroboros._usage_response import CONTENT_REFUSAL_FINISH_REASONS, OUTPUT_LIMIT_FINISH_REASONS, output_exhaustion_facts, response_finish_reason
-from ouroboros.usage_accounting import PhysicalAttemptContext, UsageAccountingError, bind_physical_attempt_context, current_usage_scope, last_physical_attempt_capture
+from ouroboros.usage_accounting import PhysicalAttemptContext, UsageAccountingError, bind_physical_attempt_context, current_usage_scope, last_physical_attempt_capture, physical_attempt_capture_from_exception
+from ouroboros.physical_attempt_context import observe_dispatch
 from ouroboros.contracts.record_contract import RECORD_CONTRACT_VERSION
 from ouroboros.event_usage import REPORTED_TOKENS_KEY, event_token_counts
 from ouroboros.utils import (
@@ -477,6 +478,7 @@ class _LlmErrorContext:
     stop_retry_check: Optional[Callable[[], bool]] = None
     requested_profile: Optional[str] = None
     configured_api_child: bool = False  # its parent chose this exact API actor (``TIMEOUT_REPEAT_KEY``)
+    prior_attempt_id: Optional[str] = None  # the attempt last captured before this call began (``_own_capture``)
 
 
 @dataclass(frozen=True)
@@ -1258,30 +1260,19 @@ def _take_response_facts(usage: Dict[str, Any], msg: Dict[str, Any], accumulated
         accumulated_usage[CUSTOM_RECEIPTS_USAGE_KEY] = receipts
 
 
-def _emit_main_llm_call_state(event_queue: Optional[queue.Queue], identity: Tuple[Any, ...],
-                              phase: str, activity: Any = None) -> None:
-    """Exact-call lifecycle and display observations; only terminal facts close the idle lease."""
-    task_id, task_attempt, llm_call_id, execution_id, round_id, call_attempt = identity
-    if phase in {"finished", "failed"}:
-        _emit_llm_operation(event_queue, task_id, llm_call_id, phase, task_attempt, execution_id, round_id)
-    if event_queue is None or (phase == "observed" and not isinstance(activity, dict)):
-        return
-    try:
-        event_queue.put({
-            "type": "main_llm_call_state", "task_id": str(task_id or ""), "task_attempt": task_attempt,
-            "llm_call_id": str(llm_call_id or ""), "execution_id": str(execution_id or ""),
-            "round_id": str(round_id or ""), "call_attempt": int(call_attempt), "phase": phase,
-            **({"model_activity": activity} if phase == "observed" else {}),
-        })
-    except Exception:
-        log.debug("Failed to emit main LLM call state event", exc_info=True)
+def _own_capture(capture: Any, prior_attempt_id: Optional[str]) -> Any:
+    """``capture`` when it is the current logical call's own physical attempt, else None: the attempt captured last
+    before the call began (``prior_attempt_id``) stays its own call's fact, so a call that dispatched nothing (a
+    fallback refused before its send) carries none rather than borrowing the preceding attempt's."""
+    return capture if capture is not None and getattr(capture, "attempt_id", None) != prior_attempt_id else None
 
 
 def _handle_main_llm_call_exception(
     error: Exception, ctx: _LlmErrorContext, call_identity: Tuple[Any, ...],
 ) -> bool:
     """Close the exact call and decide whether the attempt loop must stop."""
-    _emit_main_llm_call_state(ctx.event_queue, call_identity, "failed")
+    _emit_main_llm_call_state(ctx.event_queue, call_identity, "failed",
+                              capture=_own_capture(physical_attempt_capture_from_exception(error), ctx.prior_attempt_id))
     ctx.accumulated_usage.pop(CUSTOM_RECEIPTS_USAGE_KEY, None)
     propagate_model_control(error)  # Task control never enters provider fallback/retry.
     repeat = TIMEOUT_REPEAT_KEY in ctx.accumulated_usage
@@ -1382,6 +1373,7 @@ def call_llm_with_retry(
             return None, None
         llm_call_id = new_call_id("llm")
         call_identity = (task_id, activity_attempt, llm_call_id, execution_id, round_id, attempt + 1)
+        prior = getattr(last_physical_attempt_capture(), "attempt_id", None)  # never this call's context
         call_ids = {"llm_call_id": llm_call_id, "execution_id": execution_id, "round_id": round_id,
                     "round": round_idx, "attempt": attempt + 1}  # this physical call in every record of it below
         request_ref: Dict[str, Any] = {}
@@ -1402,8 +1394,9 @@ def call_llm_with_retry(
             kwargs = {
                 "messages": send_messages, "tools": tools, "model": model,
                 "model_role": model_role, "model_turn_state": model_turn_state,
-                "model_operation_observer": lambda fact, identity=call_identity: _emit_main_llm_call_state(
-                    event_queue, identity, "observed", fact.get("model_activity")),
+                "model_operation_observer": lambda fact, identity=call_identity, prior=prior: _emit_main_llm_call_state(
+                    event_queue, identity, "observed", fact.get("model_activity"),
+                    _own_capture(last_physical_attempt_capture(), prior)),  # sent: its own attempt's fact
                 "model_account_override": model_account_override,
                 "processing_preference": processing_preference,
                 "reasoning_effort": effort,
@@ -1450,7 +1443,8 @@ def call_llm_with_retry(
             repeat = TIMEOUT_REPEAT_KEY in accumulated_usage
             if repeat: kwargs["wait_for_resources"] = False
             claim = (lambda reservation: _claim_timeout_repeat(accumulated_usage, call_ids, reservation)) if repeat else physical_send_claim
-            with single_physical_send(claim) if claim is not None else contextlib.nullcontext():
+            with single_physical_send(claim) if claim is not None else contextlib.nullcontext(), observe_dispatch(
+                    lambda capture, identity=call_identity: _emit_main_llm_call_state(event_queue, identity, "dispatched", capture=capture)):
                 msg, usage = _send_main_candidate(
                     llm, kwargs, model=model, use_local=use_local, deadline_ts=deadline_ts,
                     physical_context=physical_context, candidate_predicate=candidate_predicate if attempt == 0 else None,
@@ -1561,7 +1555,8 @@ def call_llm_with_retry(
                 "has_text": bool(content and str(content).strip()),
             })
             append_jsonl(drive_logs / "events.jsonl", _round_event)
-            _emit_main_llm_call_state(event_queue, call_identity, "finished")
+            _emit_main_llm_call_state(event_queue, call_identity, "finished",
+                                      capture=_own_capture(last_physical_attempt_capture(), prior))
             return msg, cost
         except UsageAccountingError:
             _emit_main_llm_call_state(event_queue, call_identity, "failed")
@@ -1586,6 +1581,7 @@ def call_llm_with_retry(
                     transport_death_retries=transport_death_retries, transport_reserve_sec=transport_reserve_sec,
                     stop_retry_check=stop_retry_check, configured_api_child=configured_api_child,
                     requested_profile=host_route.get("credential_profile_id", model_account_override),
+                    prior_attempt_id=prior,
                 ),
                 call_identity,
             ):

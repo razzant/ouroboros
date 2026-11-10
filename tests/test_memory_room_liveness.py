@@ -421,3 +421,55 @@ def test_a_row_with_no_recorded_speaker_is_nobody_and_only_a_persons_word_waits_
     assert "people 1, mine 2, reactions 1, author not recorded 1, " in text
     assert not silent["engaged"] and "; 1 words nobody considered; " in silent["silent"]  # the person alone
 
+
+
+def test_one_row_several_rooms_hold_is_whole_once_and_my_humans_copy_keeps_its_f6_protection(tmp_path, monkeypatch):
+    """My human's message in Main that a Project's binding names as its origin is one canonical row in both rooms
+    (``memory_inventory.rooms_of_row``): whole once, in the room it was written in; the Project keeps its entry as one
+    line naming that room and the row's reader, its text never read. The whole copy survives its group's line (F6g)
+    and the count (F6a); only F7 addresses it, and it is the copy F7 and an owner-note capsule
+    (``memory_floor.owner_rows``) see; the line folds as a word (F6w). Equal words of another row stay whole."""
+    from ouroboros import memory_inventory
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.projects_registry import bind_task_to_project, list_projects
+
+    rooms, _rows_ = _install(tmp_path)
+    ids = {int(project["chat_id"]): project["id"] for project in list_projects(tmp_path)}
+    words = "Take the parser migration to Alpha; keep the old one until it lands."
+    for task, room, cmid, minute in (("alpha2", rooms["alpha"], "o2", 40), ("betaroot", rooms["beta"], "b0", 39)):
+        ref = build_owner_message_ref(chat_id=1, client_message_id=cmid, ts=_ts(minute), text=words)
+        bind_task_to_project(tmp_path, task, ids[room], origin={"ref": ref, "text": words})
+    origin = shared.msg(_ts(40), words, client_message_id="o2")
+    again = shared.msg(_ts(42), words, client_message_id="o3")  # the same words, another row: not a copy
+    shared.append(tmp_path / "logs" / "chat.jsonl", origin, again)
+    alpha, address = str(rooms["alpha"]), _addr(origin)
+    assert memory_inventory.rooms_of_row(memory_inventory.row_meta(origin), memory_inventory.membership_facts(
+        tmp_path)) == {"1", alpha}
+    asked, read = [], mv._row_texts
+    monkeypatch.setattr(mv, "_row_texts", lambda root, entries: (
+        asked.extend((entry[0]["row_sha256"], entry[2]) for entry in entries), read(root, entries))[1])
+    snapshot, _text = _view(tmp_path, {"id": "betaroot", "type": "task", "chat_id": rooms["beta"]})
+    assert snapshot.spec.room_id == str(rooms["beta"])  # a third room: Main and Alpha are both other conversations
+    copies = {item["room_id"]: word for group in snapshot.conversations for item in group["rooms"]
+              for word in item["words"] if word["address"] == address}
+    assert set(copies) == {"1", alpha}  # both memberships stay
+    assert words in copies["1"]["line"] and not copies["1"].get("again")
+    assert copies[alpha]["line"] == (f"{copies[alpha]['head']} delivered again: the same row as in room 1: {address}; "
+                                     f"memory_read(room_id='1', rows=true, from='{address}', to='{address}')")
+    assert copies[alpha]["owner_side"] and copies[alpha]["again"] == address  # the author stays my human
+    assert sum(sha == chat_chain.row_address(origin)["row_sha256"] for sha, _pos in asked) == 1  # read once
+    second = [word for group in snapshot.conversations for item in group["rooms"] for word in item["words"]
+              if word["address"] == _addr(again)]
+    assert second and all(words in word["line"] and not word.get("again") for word in second)
+    steps = {step: [ident for ident, *_ in elements] for step, elements in conversations.floor_steps(
+        snapshot.conversations).items()}
+    assert f"1:{address}" in steps["F7"] and f"{alpha}:{address}" not in steps["F7"]
+    assert f"{alpha}:{address}" in steps["F6w"] and f"1:{address}" not in steps["F6w"]
+    assert set(memory_floor.owner_rows(snapshot)) & {f"1:{address}", f"{alpha}:{address}"} == {f"1:{address}"}
+    keys = [group["key"] for group in snapshot.conversations]
+    for gone in ({"F6g": ["main"]}, {"F6g": keys}, {"F6g": keys, "F6a": ["conversations"]},
+                 {"F6w": list(steps["F6w"]), "F6g": keys}):  # the group holding it lined, every group, the count
+        shown = conversations.render(snapshot.conversations, gone)
+        assert shown.count(f"{words}") == 1 + len(second), gone  # once, besides the other row's own copies
+    folded = conversations.render(snapshot.conversations, {"F7": [f"1:{address}"]})
+    assert folded.count(words) == len(second) and address in folded  # F7 alone turns it into its address
