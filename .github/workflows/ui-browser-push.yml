@@ -52,13 +52,14 @@ jobs:
           interpreter: shipped  # the SQLite and journal mode fresh installs run, as the full lane
           install-project: 'false'
         id: setup_python
+      # Bounded downloads with one retry, as the full lane installs them (#2895).
       - name: Install UI smoke Chromium and WebKit
         id: install_browsers
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
         timeout-minutes: 45
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
-        run: python -m playwright install --with-deps chromium webkit
+        run: python -I -S scripts/ci_browser_install.py chromium webkit
       - name: Run PARTIAL DIAGNOSTIC host UI scenario
         id: ui_diagnostic
         if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}

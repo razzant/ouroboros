@@ -125,15 +125,16 @@ jobs:
           tar -xzf "$ARCHIVE" -C "$TOOL_DIR" caddy
           "$TOOL_DIR/caddy" version | grep -F "v$CADDY_VERSION "
           echo "path=$TOOL_DIR/caddy" >> "$GITHUB_OUTPUT"
+      # Playwright's packages, browsers and the browser tools' pinned Chromium. Every download has a
+      # ten-minute attempt and one retry; dpkg installs once from the fetched archives and is never
+      # stopped there (#2895). The two download stages take at most 41 minutes of this step's ceiling.
       - name: Install UI smoke Chromium and WebKit
         id: install_browsers
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
         timeout-minutes: 45
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
-        run: |
-          python -m playwright install --with-deps chromium webkit
-          python -m ouroboros.chromium_runtime install
+        run: python -I -S scripts/ci_browser_install.py --pinned-chromium chromium webkit
       # `--session-timeout` stops the session BETWEEN tests, so a slow shard still
       # ends through its session finish: the guard names the nodes it did not run
       # and the evidence is exported. The per-test timeout (SIGALRM on this Linux
@@ -141,7 +142,7 @@ jobs:
       # test once outside the lane guard and records FLAKY tests in verdict.json; the
       # `ui-smoke` reconciliation reads that verdict, never a hidden red.
       # Native tab-visibility cases need a display even though most tests are headless.
-      # Playwright's --with-deps above installs Xvfb; keep it around both retry rounds.
+      # The packages installed above include Playwright's Xvfb; keep it around both retry rounds.
       # Each safe_test invocation keeps its own run directory (custom frames, startup logs) under
       # ci-raw, outside the proof; a retry round's go beneath its retry-<k> (scripts/ci_retry.py).
       - name: Run complete host UI lane with collection and availability guards

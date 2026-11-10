@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -14,8 +15,10 @@ import pytest
 import yaml
 from tests._cases import chosen_rows
 import hashlib
+import importlib.util
 import io
 import tarfile
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 UPLOAD_ACTION = "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02"
@@ -1046,3 +1049,340 @@ def test_published_evidence_is_quiet_for_green_passes(tmp_path):
     assert errors == []
     assert "## CI test evidence — parallel pass" in summary and "passed=1, failed=0" in summary
     assert "serial pass" not in summary and "diagnostics_incomplete" not in summary
+
+
+# ---------------------------------------------------------------- bounded browser install (#2895)
+
+INSTALLER = ROOT / "scripts" / "ci_browser_install.py"
+_POSIX_RUNNER = pytest.mark.skipif(os.name == "nt", reason="the install helper runs on the Linux runner: "
+                                                          "POSIX process groups, sudo and apt-get")
+# One POSIX-shell stand-in for sudo, apt-get and the interpreter, shell builtins only so that it stays fast
+# on a loaded host: it logs each call in $FAKE/calls and acts as line N of $FAKE/plan/<kind> says for its
+# Nth call (ok by default). A hang keeps the shell and its `sleep` in the command's process group and
+# records both pids in $FAKE/hung; a deaf one also ignores SIGTERM. Real sudo keeps root's command beyond
+# this user's signals instead; test_a_stopped_download_beyond_this_users_signals_is_refused covers that.
+_STAND_IN = r'''#!/bin/sh
+role=${0##*/}
+if [ "$role" = sudo ]; then
+  [ "$1" = -n ] && [ "$2" = -- ] || exit 98
+  shift 2
+  echo "sudo $*" >> "$FAKE/calls"
+  exec "$@"
+fi
+case "$role $*" in
+  "apt-get update") kind=update ;;
+  "apt-get install -y --no-install-recommends --download-only "*) kind=download ;;
+  "apt-get install -y --no-install-recommends --no-download "*) kind=dpkg ;;
+  "python -m playwright install-deps --dry-run "*) kind=resolve ;;
+  "python -m playwright install "*) kind=browsers ;;
+  "python -m ouroboros.chromium_runtime install") kind=cft ;;
+  *) echo "unexpected call: $role $*" >&2; exit 97 ;;
+esac
+n=0
+[ -f "$FAKE/count.$kind" ] && read -r n < "$FAKE/count.$kind"
+echo $((n + 1)) > "$FAKE/count.$kind"
+echo "$kind $role $*" >> "$FAKE/calls"
+act=ok i=0
+if [ -f "$FAKE/plan/$kind" ]; then
+  while read -r line; do
+    [ "$i" -eq "$n" ] && { act=$line; break; }
+    i=$((i + 1))
+  done < "$FAKE/plan/$kind"
+fi
+case "$act" in
+  ok) [ "$kind" = resolve ] || exit 0
+      printf 'Missing system dependencies (2):\n  libasound2t64\n  xvfb\n'; exit 1 ;;
+  present) echo "All system dependencies are installed."; exit 0 ;;
+  garbled) printf "Failed to install browser dependencies\nError: 'apt-get install -s' exited with code 100:\nE: Unable to locate package xvfb\n"; exit 1 ;;
+  fail) exit 100 ;;
+  hang|deaf) [ "$act" = deaf ] && trap '' TERM
+      sleep 600 & echo "$$ $!" >> "$FAKE/hung"; wait ;;
+esac
+exit 96
+'''
+CLEAN = ["update", "resolve", "download", "dpkg", "browsers", "cft"]
+METADATA = "packages: apt-get update and its dependency report (playwright install-deps --dry-run)"
+
+
+@pytest.fixture
+def browser_install():
+    spec = importlib.util.spec_from_file_location("ci_browser_install_script", INSTALLER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def stand_ins(tmp_path, monkeypatch):
+    """The stand-ins first on PATH, so no real sudo or apt-get can run; ``plan(kind=[acts])`` scripts them."""
+    bin_dir, fake = tmp_path / "bin", tmp_path / "fake"
+    bin_dir.mkdir()
+    (fake / "plan").mkdir(parents=True)
+    for role in ("sudo", "apt-get", "python"):
+        (bin_dir / role).write_text(_STAND_IN, encoding="utf-8")
+        (bin_dir / role).chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("FAKE", str(fake))
+    assert [shutil.which(role) for role in ("sudo", "apt-get")] == [str(bin_dir / "sudo"), str(bin_dir / "apt-get")]
+
+    def plan(**kinds):
+        for kind, acts in kinds.items():
+            (fake / "plan" / kind).write_text("".join(f"{act}\n" for act in acts), encoding="utf-8")
+
+    def lines(name):
+        return (fake / name).read_text(encoding="utf-8").splitlines() if (fake / name).exists() else []
+
+    return SimpleNamespace(python=str(bin_dir / "python"), dir=fake, plan=plan,
+                           calls=lambda: [line for line in lines("calls") if not line.startswith("sudo ")],
+                           sudo=lambda: [line for line in lines("calls") if line.startswith("sudo ")],
+                           hung=lambda: [int(pid) for line in lines("hung") for pid in line.split()])
+
+
+def _install(module, stand_ins, capsys, *flags, attempt="600"):
+    code = module.main(["--attempt-seconds", attempt, "--python", stand_ins.python, *flags, "chromium", "webkit"])
+    return code, capsys.readouterr().out, [line.split()[0] for line in stand_ins.calls()]
+
+
+def _gone(pid, within=5.0):
+    """The pid runs no longer: absent, someone else's again, or a zombie its new parent has yet to reap."""
+    deadline = time.monotonic() + within
+    while True:
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return True
+        state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True,
+                               timeout=10).stdout.strip()
+        if not state or state.startswith("Z"):
+            return True
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _until_hung(stand_ins):
+    deadline = time.monotonic() + 60
+    while not stand_ins.hung() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert stand_ins.hung(), "the planned hang never started"
+
+
+@pytest.mark.parametrize("workflow, job, arguments", [
+    ("ui-browser.yml", "ui-shard", "--pinned-chromium chromium webkit"), (*PARTIAL, "chromium webkit")],
+    ids=["full-lane", "partial"])
+def test_ui_browser_installs_bound_each_download_below_their_step_ceiling(browser_install, workflow, job, arguments):
+    """#2895: an Ubuntu mirror serving 30 KB/s held `playwright install --with-deps` to the 45-minute step ceiling."""
+    install = _steps(workflow, job)["install_browsers"]
+    assert install["run"] == f"python -I -S scripts/ci_browser_install.py {arguments}"
+    assert install["timeout-minutes"] == 45 and "continue-on-error" not in install
+    assert install["env"] == {"PLAYWRIGHT_BROWSERS_PATH": "${{ runner.temp }}/ui-browsers"}
+    text = (ROOT / ".github/workflows" / workflow).read_text(encoding="utf-8")
+    assert "playwright install" not in text and "--with-deps" not in text and "apt-get" not in text
+    # Two bounded stages of two attempts, each stop's three graces included, take at most 41 minutes and
+    # leave the rest of the step's unchanged ceiling to dpkg's single run.
+    assert browser_install.ATTEMPTS == 2 and browser_install.ATTEMPT_SEC == 600
+    bounded = 2 * browser_install.ATTEMPTS * (browser_install.ATTEMPT_SEC + 3 * browser_install.STOP_GRACE_SEC)
+    assert bounded <= 41 * 60 < install["timeout-minutes"] * 60
+
+
+@_POSIX_RUNNER
+@pytest.mark.parametrize("flags, kinds, euid", [(["--pinned-chromium"], CLEAN, 1001), ([], CLEAN[:-1], 0)],
+                         ids=["full-lane-through-sudo", "partial-as-root"])
+def test_a_clean_install_fetches_every_package_before_one_dpkg_run_and_retries_nothing(
+        browser_install, stand_ins, capsys, monkeypatch, flags, kinds, euid):
+    monkeypatch.setattr(browser_install.os, "geteuid", lambda: euid)
+    code, out, called = _install(browser_install, stand_ins, capsys, *flags)
+    assert code == 0, out
+    assert called == kinds and "::warning" not in out and "::error" not in out
+    packages = "-y --no-install-recommends {} libasound2t64 xvfb"  # Playwright's own apt options and its report
+    assert stand_ins.calls()[:5] == [
+        "update apt-get update", "resolve python -m playwright install-deps --dry-run chromium webkit",
+        "download apt-get install " + packages.format("--download-only"),
+        "dpkg apt-get install " + packages.format("--no-download"),
+        "browsers python -m playwright install chromium webkit"]
+    assert stand_ins.sudo() == ([] if euid == 0 else [
+        "sudo apt-get update", "sudo apt-get install " + packages.format("--download-only"),
+        "sudo apt-get install " + packages.format("--no-download")])
+
+
+@_POSIX_RUNNER
+@pytest.mark.parametrize("plan, stopped, kinds", [
+    ({"download": ["fail"]}, "packages: apt-get install --download-only",
+     ["update", "resolve", "download", "download", "dpkg", "browsers", "cft"]),
+    ({"update": ["fail"]}, METADATA, ["update", *CLEAN]),
+    ({"resolve": ["garbled"]}, METADATA, ["update", "resolve", *CLEAN]),  # The update exited 0 with unusable indices.
+    ({"browsers": ["fail"]}, "browsers: playwright install",
+     ["update", "resolve", "download", "dpkg", "browsers", "browsers", "cft"]),
+    ({"cft": ["fail"]}, "browsers: chromium_runtime install", [*CLEAN, "cft"]),
+], ids=["apt-download", "apt-update", "unusable-indices", "playwright-cdn", "chrome-for-testing"])
+def test_a_failed_download_gets_one_retry_that_starts_where_it_stopped(browser_install, stand_ins, capsys, plan,
+                                                                       stopped, kinds):
+    """Only the failed step and the rest of its stage run again: what succeeded keeps its result, and
+    dpkg and each browser install still run once. The update and its report are one step, so a report
+    the indices left unreadable repeats the update too."""
+    stand_ins.plan(**plan)
+    code, out, called = _install(browser_install, stand_ins, capsys, "--pinned-chromium")
+    assert code == 0, out
+    assert called == kinds
+    assert [line for line in out.splitlines() if line.startswith("::")] == [
+        f"::warning title=Browser install retried::{stopped} failed or outlived the attempt's 600 s; "
+        "its one retry starts again there"]
+
+
+@_POSIX_RUNNER
+@pytest.mark.parametrize("plan, refused, kinds", [
+    ({"download": ["fail", "fail"]}, "packages: apt-get install --download-only",
+     ["update", "resolve", "download", "download"]),
+    ({"browsers": ["fail", "fail"]}, "browsers: playwright install", [*CLEAN[:5], "browsers"]),
+], ids=["apt-download", "playwright-cdn"])
+def test_a_download_that_fails_its_one_retry_too_is_refused(browser_install, stand_ins, capsys, plan, refused, kinds):
+    stand_ins.plan(**plan)
+    code, out, called = _install(browser_install, stand_ins, capsys, "--pinned-chromium")
+    assert code == 1 and called == kinds
+    assert out.splitlines()[-1] == f"::error title=Browser install refused::{refused} failed in both attempts of 600 s"
+
+
+@_POSIX_RUNNER
+@pytest.mark.parametrize("act", ["hang", "deaf"], ids=["stops-on-sigterm", "ignores-sigterm"])
+def test_a_stop_leaves_no_member_of_the_commands_group(browser_install, stand_ins, monkeypatch, act):
+    """SIGTERM stops a hung command with its group; one deaf to SIGTERM is killed after the grace."""
+    monkeypatch.setattr(browser_install, "STOP_GRACE_SEC", 0.5)
+    stand_ins.plan(update=[act])
+    process = subprocess.Popen(["apt-get", "update"], start_new_session=True)
+    try:
+        _until_hung(stand_ins)
+        assert browser_install._stop(process)
+        assert len(stand_ins.hung()) == 2 and all(_gone(pid) for pid in stand_ins.hung())
+    finally:
+        # The negative control can break _stop itself; assertion failure must still clean our group.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=10)
+
+
+@_POSIX_RUNNER
+def test_a_stopped_download_beyond_this_users_signals_is_refused(browser_install, stand_ins, capsys, monkeypatch):
+    """Without a terminal, real sudo runs root's apt-get in its own process group: this user's SIGTERM
+    reaches sudo, which relays it, and SIGKILL stops only sudo (the #2895 VM probe). A member that
+    outlives both is named, and no retry starts beside it."""
+    real_killpg = os.killpg
+
+    def as_if_root(pgid, sig):  # Every member is root's: alive (EPERM) or gone (ESRCH), never signalled.
+        real_killpg(pgid, 0)
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(browser_install, "STOP_GRACE_SEC", 0.5)
+    monkeypatch.setattr(browser_install.os, "geteuid", lambda: 1001)  # sudo's case, on a root host too
+    monkeypatch.setattr(browser_install.os, "killpg", as_if_root)
+    stand_ins.plan(update=["hang"])  # The first command, so that no earlier one spends this attempt.
+    try:
+        code, out, _ = _install(browser_install, stand_ins, capsys, attempt="2")
+        _until_hung(stand_ins)  # No signal reaches it, so it gets there even past the deadline.
+    finally:
+        for pid in stand_ins.hung():
+            os.kill(pid, signal.SIGKILL)
+    assert code == 1 and [line.split()[0] for line in stand_ins.calls()] == ["update"] and "::warning" not in out, out
+    assert re.fullmatch(r"::error title=Browser install refused::`sudo -n -- apt-get update` outlived SIGTERM and "
+                        r"SIGKILL: its process group \d+ still has members this user cannot signal, so no "
+                        r"retry starts beside them", out.splitlines()[-1]), out
+    assert all(_gone(pid) for pid in stand_ins.hung())
+
+
+@_POSIX_RUNNER
+def test_without_root_or_sudo_nothing_runs(browser_install, stand_ins, capsys, monkeypatch):
+    monkeypatch.setattr(browser_install.os, "geteuid", lambda: 1001)
+    monkeypatch.setattr(browser_install.shutil, "which", lambda name, *args, **kwargs: None)
+    code, out, called = _install(browser_install, stand_ins, capsys)
+    assert (code, called) == (1, [])
+    assert out.splitlines()[-1] == ("::error title=Browser install refused::packages: apt-get needs root, "
+                                    "and this user has no sudo")
+
+
+@_POSIX_RUNNER
+def test_a_dpkg_failure_is_an_installation_failure_and_is_never_retried(browser_install, stand_ins, capsys):
+    stand_ins.plan(dpkg=["fail"])
+    code, out, called = _install(browser_install, stand_ins, capsys, "--pinned-chromium")
+    assert code == 1 and called == ["update", "resolve", "download", "dpkg"] and "::warning" not in out
+    assert out.splitlines()[-1] == (
+        "::error title=Browser install refused::dpkg: apt-get install --no-download exited 100; "
+        "an installation failure is not a download, so it is not retried")
+
+
+@_POSIX_RUNNER
+@pytest.mark.parametrize("reports, kinds, code", [
+    (["present"], ["update", "resolve", "browsers"], 0),  # Nothing to fetch or install: browsers only.
+    (["garbled", "garbled"], ["update", "resolve", "update", "resolve"], 1),  # Unreadable after its one retry too.
+], ids=["all-present", "unreadable-twice"])
+def test_the_package_stage_follows_playwrights_own_report(browser_install, stand_ins, capsys, reports, kinds, code):
+    stand_ins.plan(resolve=reports)
+    result, out, called = _install(browser_install, stand_ins, capsys)
+    assert (result, called) == (code, kinds), out
+    assert out.count("::warning") == len(reports) - 1
+    if code:
+        assert "without the report this helper reads (Playwright 1.62)" in out
+        assert "Failed to install browser dependencies" in out
+        assert "E: Unable to locate package xvfb" in out.splitlines()[-1]  # apt's own reason reaches the refusal
+
+
+@pytest.mark.parametrize("report, status, expected", [
+    ("Missing system dependencies (2):\n  libasound2t64\n  xvfb\n", 1, ["libasound2t64", "xvfb"]),
+    ("BEWARE: your OS is not officially supported\nMissing system dependencies (1):\n  libicu74:amd64\n", 1,
+     ["libicu74:amd64"]),
+    ("All system dependencies are installed.\n", 0, []),
+    ("Missing system dependencies (3):\n  libasound2t64\n  xvfb\n", 1, None),  # fewer rows than counted
+    ("Missing system dependencies (1):\nxvfb\n", 1, None),  # not the indented list
+    ("Missing system dependencies (1):\n  xvfb; reboot\n", 1, None),  # not a package name
+    ("Missing system dependencies (0):\n", 1, None),
+    ("Missing system dependencies (1):\n  xvfb\n", 0, None),  # Playwright exits 1 when it names packages
+    ("All system dependencies are installed.\n", 1, None),
+    ("", 0, None),
+])
+def test_the_dependency_report_is_read_exactly_or_refused(browser_install, report, status, expected):
+    if expected is None:
+        with pytest.raises(browser_install.Refused, match=r"Playwright 1\.62"):
+            browser_install.missing_packages(report, status)
+    else:
+        assert browser_install.missing_packages(report, status) == expected
+
+
+@_POSIX_RUNNER
+def test_the_entry_point_stops_a_hung_download_group_and_a_sigterm_stops_it_too(stand_ins):
+    """The process-boundary witness, under -I -S as the workflow runs it: the deadline stops the hung
+    command's whole group and its one retry then installs everything; a SIGTERM to the helper leaves
+    no download running."""
+    command = [sys.executable, "-I", "-S", str(INSTALLER), "--python", stand_ins.python, "chromium", "webkit"]
+    stand_ins.plan(update=["hang"])  # The first command: the attempt's deadline times the hang alone.
+    done = subprocess.run([*command, "--attempt-seconds", "6"], capture_output=True, text=True, timeout=120)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert [line.split()[0] for line in stand_ins.calls()] == ["update", *CLEAN[:5]]
+    assert (f"::warning title=Browser install retried::{METADATA} failed or outlived the "
+            "attempt's 6 s; its one retry starts again there") in done.stdout.splitlines()
+    assert len(stand_ins.hung()) == 2 and all(_gone(pid) for pid in stand_ins.hung())
+
+    for spent in (*stand_ins.dir.glob("count.*"), stand_ins.dir / "calls", stand_ins.dir / "hung"):
+        spent.unlink()
+    stand_ins.plan(update=["ok"], download=["hang"])
+    helper = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        deadline = time.monotonic() + 60
+        while not stand_ins.hung() and helper.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert stand_ins.hung(), "the planned hang never started"
+        helper.send_signal(signal.SIGTERM)
+        output, _ = helper.communicate(timeout=60)
+        assert helper.returncode == 128 + signal.SIGTERM, output
+        assert [line.split()[0] for line in stand_ins.calls()] == ["update", "resolve", "download"]
+        assert all(_gone(pid) for pid in stand_ins.hung())
+    finally:
+        if helper.poll() is None:
+            helper.kill()
+        helper.wait(timeout=10)
+        for pid in stand_ins.hung():
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if helper.stdout is not None:
+            helper.stdout.close()
