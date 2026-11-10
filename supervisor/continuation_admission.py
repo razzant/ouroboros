@@ -478,11 +478,11 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
     # an absent handbook choice into false before deciding whether to copy it.
     metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
     model_role = str(metadata.get("model_role") or "").strip()
-    # The same work keeps the chat model its room admitted it on, Main's reference included (route_choice),
+    # The same work keeps its primary, a recorded follow included (route_choice),
     # never the room's newer choice.
-    from ouroboros.route_choice import ROOM_ROUTE_KEY, room_route_snapshot
+    from ouroboros.route_choice import LEAD_KEY, lead_snapshot
 
-    room = room_route_snapshot(metadata.get(ROOM_ROUTE_KEY)) if not model_role else None
+    lead = lead_snapshot(metadata.get(LEAD_KEY))
     stored = metadata.get("task_contract") if isinstance(metadata.get("task_contract"), dict) else {}
     canonical = result.get("task_contract") if isinstance(result.get("task_contract"), dict) else {}
     contract = {**stored, **canonical}
@@ -515,7 +515,7 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
             **presence_binding_authority_metadata(metadata, task_contract=contract), **presence_relation_metadata(metadata),
             **({"project_id": binding["project_id"]} if binding.get("project_id") else {}),
             **({"model_role": model_role} if model_role else {}),
-            **({ROOM_ROUTE_KEY: room} if room else {}),
+            **({LEAD_KEY: lead} if lead else {}),
             **({"resource_intent": dict(intent)} if isinstance(intent, dict) and intent.get("kind") else {}),
             # The same work's withheld tools, protected artifacts, resources, criteria, executor and teardown.
             **_recorded_work_limits(result, metadata, contract),

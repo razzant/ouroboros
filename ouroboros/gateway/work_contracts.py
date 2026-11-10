@@ -13,6 +13,13 @@ except ImportError:  # pragma: no cover - CI supports Python 3.10.
     from typing_extensions import NotRequired, TypedDict  # type: ignore[assignment]
 
 
+class ChatModelRoute(TypedDict):
+    """A model route shared by room choices, Main and owner recents."""
+
+    model: str
+    use_local: bool
+
+
 class WorkReason(TypedDict):
     """One typed reason: ``code`` is closed per release, ``text`` its English sentence (unknown codes stay raw)."""
 

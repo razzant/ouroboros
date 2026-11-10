@@ -433,7 +433,7 @@ def produced_fields(snap: Dict[str, Any]) -> Dict[str, Any]:
         "spent_calls": int(snap["breakdown"].get("physical_calls") or 0) if available else None,
         "subagents_mode": snap["subagents_mode"],
         "subagents_availability": snap["subagents_availability"],
-        "model_choice": snap["model_choice"], "model_routes": snap["model_routes"],  # Main chat's model picker
+        "main_route": snap["main_route"],
         "github_token_configured": snap["github_token_configured"],
         "accounting": _accounting_block(snap["accounting"], available, limit),
         "projects": snap["projects"],

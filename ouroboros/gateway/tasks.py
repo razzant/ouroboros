@@ -90,7 +90,7 @@ log = logging.getLogger(__name__)
 
 _RESERVED_METADATA_KEYS = frozenset({
     "work_kind", "schedule_writer_kind", "wake_cause", "focus", "consciousness_cause", "origin_wake_task_id",
-    "task_id",
+    "task_id", "lead",
     "parent_task_id",
     "root_task_id",
     "session_id",
@@ -744,13 +744,6 @@ def _create_task_from_body(request: Request, body: Any) -> JSONResponse:
         "_admission_token": admission_token,
     }
     try:
-        from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
-        from ouroboros.route_choice import capture_room_route
-
-        # Read the admitted room in the canonical drive, not its empty/forked execution copy.
-        # Unbound hidden API work is not Main chat; explicit routes/snapshots stay with the helper.
-        if _task_project_id or chat_id == WEB_UI_CHAT_ID:
-            capture_room_route(task, drive_root)
         task = attach_task_contract(task)
     except Exception as exc:
         _cleanup_api_admission_attempt(drive_root, task_id, admission_token, child_drive)

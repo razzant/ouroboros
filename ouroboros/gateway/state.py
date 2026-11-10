@@ -183,7 +183,7 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
     """
     from ouroboros.tools.github import github_token_from_env_or_settings
     from ouroboros.config import load_settings
-    from ouroboros.composer_cognition import main_cognition, main_model_choice
+    from ouroboros.composer_cognition import main_cognition
     from ouroboros.route_choice import configured_references
     from ouroboros.subagent_runtime import subagents_availability
 
@@ -328,7 +328,7 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         "github_token_configured": bool(github_token_from_env_or_settings()),
         "subagents_mode": main_cognition(settings)["subagents_mode"],
         "subagents_availability": subagents_availability(settings),
-        "model_choice": main_model_choice(settings), "model_routes": configured_references(),
+        "main_route": configured_references()["main"],
         "projects": projects,
         "project_messages_revision": messages_revision,
         "project_listable_count": project_listable_count,

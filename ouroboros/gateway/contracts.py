@@ -797,8 +797,7 @@ class StateResponse(WorkStateFields):
     subagents_availability: Literal["available", "disabled", "unsaved"]
     context_mode_auto_low: bool  # frozen compatibility field, always False (persistent auto-Low is retired)
     effort_range: EffortRange  # the owner's effort range (POST /api/owner/effort-range), the tolerant read
-    model_choice: NotRequired[ChatModelChoice]  # Main chat's model for new owner work (POST /api/owner/chat-model)
-    model_routes: NotRequired[ChatModelRoutes]  # what Main's and the first Fallback's references resolve to now
+    main_route: ChatModelRoute  # Main itself, written by POST /api/owner/chat-model without project_id
     safety_mode: str
     skills_repo_configured: bool
     github_token_configured: bool
@@ -1480,7 +1479,7 @@ class OnboardingPresetFailureResponse(TypedDict):
 # Human/test-visible contract index; routers own executable Route objects.
 from ouroboros.gateway.endpoint_index import HTTP_ENDPOINTS
 from ouroboros.gateway.client_contracts import (  # noqa: E402,F401
-    ChatModelChoice, ChatModelRoutes, FileBrowserListResponse, ServedUiState, SettingsPolicyState,
+    ChatModelChoice, ChatModelRoute, FileBrowserListResponse, ServedUiState, SettingsPolicyState,
 )
 
 WS_MESSAGE_TYPES: tuple[str, ...] = (

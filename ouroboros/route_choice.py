@@ -25,15 +25,11 @@ adopted fallback, the room's chat model) stays until the mind returns to its pri
 ``route`` block; a checkpoint written without one is classified from what it did carry
 (``classify_legacy``: a disclosed migration policy, never reconstructed intent).
 
-Room route. A room's chat model (``composer_cognition``) reaches only new owner work: admission
-snapshots it once onto the task (``capture_room_route`` → ``metadata.room_route``), so a later picker
-change never retargets work already admitted; a Continue, and a ``start_task`` of the same request in
-the same room, keep the snapshot. Main's reference is recorded as such and binds nothing (the task
-follows Main live, as before); the first Fallback's reference snapshots that entry and runs on its
-role ``fallback:0``; a chosen route runs on role ``room``: Auto account and route defaults, never
-Main's account, processing or window. Delegated, Presence and autonomous work never carry one, nor
-does a call turn, which arrives with its engine's own route. Automatic fallback after it is the
-ordinary chain walk.
+Lead. Admission records a room's choice once in ``metadata.lead`` (``capture_lead``),
+including a recorded follow of Main. Continue, Resume and placement keep it; a separately
+started root reads its own destination. A carried model uses role ``lead``: Auto account,
+the model's own window and default processing. Delegated, Presence and autonomous work,
+role-named tasks and call turns keep their own routing. Failures use the ordinary chain walk.
 """
 
 from __future__ import annotations
@@ -53,11 +49,11 @@ from ouroboros.settings_defaults import SETTINGS_DEFAULTS, settings_env_keys
 from ouroboros.settings_integrity import PROJECTED_PROPOSALS_ENV, PROJECTED_SETTINGS_ENV, runtime_setting
 
 #: Why an acting route is the task's own: the record names the chooser, never a model string.
-ROUTE_SOURCES = ("task_argument", "configured_row", "switch_model", "wait_card", "fallback", "presence", "room_choice")
-ROOM_ROUTE_KEY = "room_route"  # the admitted owner work's snapshot of its room's chat model (``capture_room_route``)
-ROOM_ROLE = "room"  # the role a chosen room route runs on: no configured options, so Auto account and route defaults
+ROUTE_SOURCES = ("task_argument", "configured_row", "switch_model", "wait_card", "fallback", "presence", "room", "owner", "owner_words")
+LEAD_KEY = "lead"  # host-minted primary, including a recorded follow
+LEAD_ROLE = "lead"  # no settings slot or role options
 ROLE_LABELS = {"main": "Main", "light": "Light", "safety": "Supervisor", "vision": "Vision",
-               "consciousness": "Consciousness", "deep_review": "Deep self-review", "websearch": "Web search"}
+               "consciousness": "Consciousness", "deep_review": "Deep self-review", "websearch": "Web search", LEAD_ROLE: "This work's model"}
 
 ROUTE_CREDENTIAL_SETTING_KEYS: frozenset = frozenset(provider_models.ROUTE_CREDENTIAL_SETTING_KEYS)  # the kind table's
 ROUTE_SETTING_KEYS: frozenset = frozenset({
@@ -264,81 +260,70 @@ def _local_flag(key: str) -> bool:
 
 
 def configured_references() -> dict:
-    """What a room's two references resolve to now: Main, and the first Fallback (``None`` when the chain
-    is empty, so a Fallback reference then admits work on Main)."""
-    from ouroboros.model_slots import _main_model, parse_fallback_chain
+    """Main's current route, which rooms without a chosen model follow live."""
+    from ouroboros.model_slots import _main_model
 
-    chain = parse_fallback_chain()
-    return {"main": {"model": _main_model(), "use_local": _local_flag("USE_LOCAL_MAIN")},
-            "fallback": {"model": chain[0], "use_local": _local_flag("USE_LOCAL_FALLBACK")} if chain else None}
+    return {"main": {"model": _main_model(), "use_local": _local_flag("USE_LOCAL_MAIN")}}
 
 
-def room_route_snapshot(value: Any) -> Optional[dict]:
-    """A typed snapshot of a room's chat model as admission recorded it, else ``None``: Main's reference
-    (``{"kind": "main"}``, recorded so nothing later re-reads the room) or a route with its locality."""
+def lead_snapshot(value: Any) -> Optional[dict]:
+    """Validate the host carrier: a recorded follow or an owner-chosen primary."""
     if not isinstance(value, Mapping):
         return None
-    if value.get("kind") == "main":
-        return {"kind": "main"}
-    if (value.get("kind") not in ("fallback", "model") or not isinstance(value.get("model"), str)
-            or not value["model"].strip() or not isinstance(value.get("use_local"), bool)):
+    source = value.get("source")
+    if source == "main":
+        return {"source": "main"}
+    if (source not in ROUTE_SOURCES or source not in ("room", "owner", "owner_words")
+            or not isinstance(value.get("model"), str) or not value["model"].strip()
+            or not isinstance(value.get("use_local"), bool)):
         return None
-    return {"kind": value["kind"], "model": value["model"].strip(), "use_local": value["use_local"]}
+    return {"source": source, "model": value["model"].strip(), "use_local": value["use_local"]}
 
 
-def room_route(metadata: Any) -> Optional[dict]:
-    """The route root owner work was admitted with (``metadata.room_route``), else ``None``: Main's reference
-    and every delegated child follow their roles as before, and nothing else here accepts an arbitrary model."""
+def task_lead(metadata: Any) -> Optional[dict]:
+    """A root's carried model, else None; stray ``metadata.model`` never binds a root."""
     if not isinstance(metadata, Mapping) or str(metadata.get("delegation_role") or "").lower() == "subagent":
         return None
-    carrier = room_route_snapshot(metadata.get(ROOM_ROUTE_KEY))
-    return carrier if carrier and carrier["kind"] != "main" else None
+    carrier = lead_snapshot(metadata.get(LEAD_KEY))
+    return carrier if carrier and carrier["source"] != "main" else None
 
 
-def room_route_role(carrier: Optional[Mapping]) -> str:
-    """The role a carried room route runs on, ``""`` for none: the Fallback reference keeps its entry's options."""
-    return "" if not carrier else "fallback:0" if carrier["kind"] == "fallback" else ROOM_ROLE
+def capture_lead(task: dict, drive_root: Any, *, project: Mapping | None = None,
+                 admitted: bool = False) -> None:
+    """Stamp new owner roots once, from the canonical room, never an execution copy.
 
-
-def room_route_carrier(choice: Mapping) -> dict:
-    """What new owner work snapshots from a room choice (``composer_cognition``). A Fallback reference with no
-    Fallback configured admits the work on Main's reference, the binding it then has."""
-    kind = choice.get("kind")
-    if kind == "model":
-        return {"kind": "model", "model": str(choice["model"]), "use_local": bool(choice.get("use_local"))}
-    fallback = configured_references()["fallback"] if kind == "fallback" else None
-    return {"kind": "fallback", **fallback} if fallback else {"kind": "main"}
-
-
-def capture_room_route(task: dict, drive_root: Any) -> None:
-    """Admission of new owner work: snapshot its room's chat model onto the task, once (Main's reference too, so
-    a later promotion or Continue of the same work never reads a newer choice). Work that brings its own route
-    carries none: a call turn (its engine's ``task["model"]``), a role-named task and a consciousness wake.
-
-    The room is the task's Project, else Main. A room whose saved choice cannot be read (an unreadable or
-    malformed registry or settings document, a Project no longer active) admits the work on Main's reference,
-    its documented default, recorded and logged; the owner's message is never refused for it."""
-    from ouroboros.composer_cognition import read_model_choice
-    from ouroboros.consciousness_authority import is_consciousness_origin
-    from ouroboros.settings_integrity import SettingsIntegrityError
+    Queue admission supplies its committed registry row under Q (``admitted=True``, None for Main),
+    so this stamp performs no IO under Q. Conversation admission reads the canonical root.
+    An existing carrier wins, including a recorded follow. Unreadable rooms follow Main
+    with a warning; a programming error never masquerades as an unreadable room.
+    """
+    from ouroboros.composer_cognition import project_model_choice, read_model_choice
+    from ouroboros.settings_integrity import _actor_scope, SettingsIntegrityError
 
     given = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
-    if (task.get("model") or given.get("model_role") or task.get("actor_id") == "consciousness"
-            or is_consciousness_origin(given)):
+    canonical_root, actor = _actor_scope(task, drive_root)
+    if (LEAD_KEY in given or task.get("model") or task.get("model_role") or given.get("model_role")
+            or actor.get("parent_task_id") or actor.get("autonomous")
+            or str(task.get("delegation_role") or given.get("delegation_role") or "").lower() == "subagent"
+            or (task.get("actor_id") == "consciousness" and not actor.get("scheduled"))):
         return
     metadata = task.setdefault("metadata", {})
-    if not isinstance(metadata, dict) or ROOM_ROUTE_KEY in metadata:
+    if not isinstance(metadata, dict):
         return
     project_id = str(task.get("project_id") or metadata.get("project_id") or "")
     try:
-        choice = read_model_choice(drive_root, project_id)
+        if admitted:
+            choice = project_model_choice(project) if project is not None else {"kind": "main"}
+        else:
+            choice = read_model_choice(canonical_root, project_id)
     except (OSError, ValueError, SettingsIntegrityError):
         import logging
 
         logging.getLogger(__name__).warning("Room model choice unreadable for %s; admitted on Main",
                                             project_id or "Main", exc_info=True)
         choice = {"kind": "main"}
-    metadata[ROOM_ROUTE_KEY] = room_route_carrier(choice)
+    metadata[LEAD_KEY] = ({"source": "room", "model": choice["model"], "use_local": choice["use_local"]}
+                          if choice["kind"] == "model" else {"source": "main"})
 
 
 def _metadata(ctx: Any) -> dict:
@@ -396,17 +381,17 @@ def _dispatch_source(metadata: Mapping) -> str:
 
 def bind_task_route(ctx: Any, task_metadata: Mapping, *, presence: bool) -> None:
     """At dispatch, the model a task carries binds its route: a configured row, a Presence turn, a lane child,
-    a nanny of a parent that chose its own route, owner work its room's admitted chat model. A nanny of a
+    a nanny of a parent that chose its own route, owner work its admitted lead. A nanny of a
     following parent and a role-named task carry none and open on that role's current binding instead
     (``open_route``). Idempotent: an amended resolution rebinds."""
     ctx.task_model_override = ctx.task_use_local_override = ctx.task_route_source = None
     delegated = str(task_metadata.get("delegation_role") or "").lower() == "subagent"
     cognitive, kind = _cognition(task_metadata)
     if not (delegated or presence):
-        carrier = room_route(task_metadata)
+        carrier = task_lead(task_metadata)
         if carrier:
             ctx.task_model_override, ctx.task_use_local_override = carrier["model"], carrier["use_local"]
-            ctx.task_route_source = "room_choice"
+            ctx.task_route_source = carrier["source"]
         return
     if delegated and kind == "agent_session" and cognitive.get("follows_role"):
         return

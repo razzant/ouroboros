@@ -6,9 +6,8 @@ their Main snapshot before the registry lock, never acquiring settings under it.
 Actor lifetimes and room resolution belong to the task-settings owner.
 
 The model choice is the room's alone and is never copied: absent, a room follows the configured
-Main. Main's lives in the settings document (``MAIN_CHAT_MODEL_KEY``, never exported to an
-environment, never a role slot), a Project's on its registry row (``model_choice``). What new owner
-work snapshots from it, and how that runs, belongs to ``route_choice``.
+Main. A Project keeps its choice on its registry row (``model_choice``); Main chat writes
+Main itself. Admission and the work's lead belong to ``route_choice``.
 """
 from __future__ import annotations
 
@@ -23,11 +22,9 @@ from ouroboros.context_mode_compat import normalize_context_mode, owner_declared
 from ouroboros.settings_scales import EFFORT_RANGE_KEYS, effort_range, normalize_subagents_mode
 
 COGNITION_KEYS = ("OUROBOROS_CONTEXT_MODE", *EFFORT_RANGE_KEYS, "OUROBOROS_SUBAGENTS_MODE")
-MAIN_CHAT_MODEL_KEY = "OUROBOROS_MAIN_CHAT_MODEL"
-# The discriminated choice: the configured Main's reference (the default and the reset), the first
-# configured Fallback's reference, or one explicit raw route. A reference is never the same model pinned.
+# A room follows Main (the default and reset) or chooses one route; a reference is never a pin.
 MAIN_REFERENCE = {"kind": "main"}
-MODEL_CHOICE_KINDS = ("main", "fallback", "model")
+MODEL_CHOICE_KINDS = ("main", "model")
 _MAX_ROUTE_CHARS = 400
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -48,10 +45,10 @@ def normalize_model_choice(raw: Any) -> dict:
     if not isinstance(raw, Mapping):
         raise ValueError("The model choice must be an object with a kind")
     kind = raw.get("kind")
-    if kind in ("main", "fallback"):
+    if kind == "main":
         return {"kind": kind}
     if kind != "model":
-        raise ValueError("The model choice kind must be main, fallback or model")
+        raise ValueError("The model choice kind must be main or model")
     from ouroboros.provider_models import parse_claudexor_model, parse_model_route
 
     model, use_local = raw.get("model"), raw.get("use_local", False)
@@ -72,13 +69,6 @@ def normalize_model_choice(raw: Any) -> dict:
     return {"kind": "model", "model": model, "use_local": use_local}
 
 
-def model_choice_setting(choice: Mapping[str, Any]) -> str:
-    """The settings spelling of Main's choice: empty for Main's reference, else canonical JSON."""
-    current = normalize_model_choice(choice)
-    return "" if current == MAIN_REFERENCE else json.dumps(current, ensure_ascii=False, sort_keys=True,
-                                                           separators=(",", ":"))
-
-
 def _tolerant_choice(raw: Any, where: str) -> dict:
     try:
         return normalize_model_choice(raw)
@@ -89,25 +79,15 @@ def _tolerant_choice(raw: Any, where: str) -> dict:
         return dict(MAIN_REFERENCE)
 
 
-def main_model_choice(settings: Mapping[str, Any] | None = None) -> dict:
-    """Main's saved choice, read from the document; an unreadable value reads as the default it runs as."""
-    if settings is None:
-        from ouroboros import config
-
-        settings = config.load_settings()
-    return _tolerant_choice(settings.get(MAIN_CHAT_MODEL_KEY), "Main")
-
-
 def project_model_choice(project: Mapping[str, Any]) -> dict:
     """A Project's saved choice; a row without one follows Main (it was never copied)."""
     return _tolerant_choice(project.get("model_choice"), f"Project {project.get('id')!r}")
 
 
-def read_model_choice(drive_root: Any, project_id: str = "", *, settings: Mapping[str, Any] | None = None) -> dict:
-    """The room's saved choice from its authority: the settings document for Main, the strict registry row
-    for a Project (``ValueError``/``OSError`` when that row cannot be read or is no longer active)."""
+def read_model_choice(drive_root: Any, project_id: str = "") -> dict:
+    """The Project's strict registry choice, or a recorded follow for work without a room."""
     if not project_id:
-        return main_model_choice(settings)
+        return dict(MAIN_REFERENCE)
     from ouroboros import projects_registry as registry
 
     project = registry.get_reserved_project(drive_root, project_id, strict=True)

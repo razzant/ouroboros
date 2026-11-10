@@ -401,3 +401,26 @@ def test_only_a_dated_system_surface_is_a_checkout_observation(evidence, expecte
     from ouroboros.owner_continue import recorded_system_checkout
 
     assert recorded_system_checkout({"mutation_evidence": evidence}) == expected
+
+
+@pytest.mark.parametrize("lead", [{"source": "main"}, {"source": "owner", "model": "openai::chosen", "use_local": False}])
+@pytest.mark.parametrize("acting_source", ["fallback", "switch_model"])
+def test_continue_keeps_whole_lead_after_room_change_never_the_acting_departure(tmp_path, monkeypatch, lead, acting_source):
+    from ouroboros.composer_cognition import update_project_model_choice
+    from ouroboros.projects_registry import create_project
+    from ouroboros.task_results import load_task_result
+    from supervisor.continuation_admission import admit_continuation
+
+    _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    create_project(tmp_path, "room", origin="owner_ui")
+    update_project_model_choice(tmp_path, "room", {"kind": "model", "model": "openai::new-room"})
+    _interrupted(tmp_path, project_id="room", metadata={"lead": lead, "model": "openai::acting"},
+                 model="openai::acting", route={"active_model": "openai::acting", "active_model_override": "openai::acting",
+                                               "route_choice": {"kind": "explicit", "source": acting_source}})
+    ack = admit_continuation("pred-1", action_nonce=NONCE)
+    assert ack["ok"] is True, ack
+    successor = next(row for row in workers.PENDING if row["id"] == ack["successor_task_id"])
+    assert successor["metadata"]["lead"] == lead
+    assert "model" not in successor and "model" not in successor["metadata"]
+    assert "route" not in successor
+    assert load_task_result(tmp_path, successor["id"])["metadata"]["lead"] == lead

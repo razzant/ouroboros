@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from ouroboros.delegate_custody_usage import CostCustody
 from ouroboros.cost_projection import CostPresentation
+from ouroboros.gateway.work_contracts import ChatModelRoute
 
 try:  # Python 3.11+
     from typing import Literal, NotRequired, Required, TypedDict  # type: ignore[attr-defined]
@@ -365,40 +366,31 @@ class OwnerSubagentsModeRequest(TypedDict):
 
 
 class OwnerChatModelRequest(TypedDict):
-    """The room's model for new owner work: ``main`` or ``fallback`` (the configured reference) or ``model``."""
+    """A Project follows Main or chooses a model; without project_id this writes Main itself."""
 
-    kind: Literal["main", "fallback", "model"]
+    kind: Literal["main", "model"]
     model: NotRequired[str]  # kind ``model`` only: the raw route, its source included
     use_local: NotRequired[bool]  # kind ``model`` only
     project_id: NotRequired[str]
 
 
 class ChatModelChoice(TypedDict):
-    """A room's model for new owner work (``composer_cognition``): the configured Main's or first
-    Fallback's reference, or one raw route; a reference is never the same model pinned."""
+    """A room follows Main or chooses a route; a reference is never the same model pinned."""
 
-    kind: Literal["main", "fallback", "model"]
+    kind: Literal["main", "model"]
     model: NotRequired[str]  # kind ``model`` only: the raw route, its source included
     use_local: NotRequired[bool]  # kind ``model`` only
-
-
-class ChatModelRoute(TypedDict):
-    model: str
-    use_local: bool
-
-
-class ChatModelRoutes(TypedDict):
-    """What a room's two references resolve to now (``route_choice.configured_references``)."""
-
-    main: ChatModelRoute
-    fallback: Optional[ChatModelRoute]  # null: no Fallback configured, so its reference admits work on Main
 
 
 class OwnerChatModelResponse(TypedDict):
     ok: bool
     project_id: str
-    model_choice: ChatModelChoice
-    previous_model_choice: ChatModelChoice
+    model_choice: NotRequired[ChatModelChoice]  # Project response
+    previous_model_choice: NotRequired[ChatModelChoice]
+    main_route: NotRequired[ChatModelRoute]  # Main response
+    previous_main_route: NotRequired[ChatModelRoute]
+    account: NotRequired[Literal["kept", "auto", "none"]]
+    window_reset: NotRequired[bool]
 
 
 class OwnerSafetyModeRequest(TypedDict):
@@ -942,7 +934,7 @@ __all__ = [
     "SettingsDeploymentPolicy", "SettingsWriteRefusal",
     "AuthLoginRequest", "AuthLoginResponse",
     "ContractBody", "ContractHttpEntry", "ContractWsEntry", "ContractWs", "GatewayContractResponse",
-    "OwnerRuntimeModeRequest", "OwnerContextModeRequest", "OwnerEffortRangeRequest", "OwnerSubagentsModeRequest", "OwnerChatModelRequest", "ChatModelChoice", "ChatModelRoute", "ChatModelRoutes", "OwnerChatModelResponse", "OwnerSafetyModeRequest", "OwnerSafetyRulesRequest", "OwnerSafetyRulesResponse", "OwnerSafetyModelRequest", "OwnerSafetyModelResponse", "OwnerEnabledRequest",
+    "OwnerRuntimeModeRequest", "OwnerContextModeRequest", "OwnerEffortRangeRequest", "OwnerSubagentsModeRequest", "OwnerChatModelRequest", "ChatModelChoice", "ChatModelRoute", "OwnerChatModelResponse", "OwnerSafetyModeRequest", "OwnerSafetyRulesRequest", "OwnerSafetyRulesResponse", "OwnerSafetyModelRequest", "OwnerSafetyModelResponse", "OwnerEnabledRequest",
     "RecentWake", "RecentWakeCheck", "RecentWakesView",
     "PlaceConnectRequest", "PlaceIcon", "PlaceReadiness", "PlaceModelRoute", "PlaceSummary", "PlaceDisconnectRequest",
     "PlaceOwnerAccountRequest", "PlaceUpdateRequest", "PlaceCircleChoice", "PlaceDescription",

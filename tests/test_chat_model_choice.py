@@ -1,18 +1,11 @@
-"""The room's chat model (DESIGN "Composer owner controls"; ``composer_cognition``, ``route_choice``).
+"""Room choices, Main's writer and one-time canonical lead admission.
 
-A room saves its own choice — the configured Main's or first Fallback's reference, or one raw route — through
-``POST /api/owner/chat-model``: Main in its own settings key (never a role slot, never exported to an environment), a
-Project on its registry row, neither copied to the other, Light and every role slot untouched. New owner work
-snapshots it once at admission, Main's reference recorded as such: a Continue and a same-room ``start_task`` keep the
-snapshot, a later picker change never retargets admitted work, delegated and Presence work and call turns never carry
-one. A chosen route binds as the task's own route on role ``room`` — Auto account, route-default processing, Auto
-window, from the first context plan on — never Main's pins; the Fallback reference runs on ``fallback:0`` with that
-entry's options.
+A chosen primary uses an option-less role from the first plan; a recorded follow
+tracks Main live. Every separately started owner root reads its own destination.
 """
 from __future__ import annotations
 
 import json
-import os
 import types
 
 import pytest
@@ -22,14 +15,14 @@ from starlette.testclient import TestClient
 
 from ouroboros import config, projects_registry as projects
 from ouroboros.composer_cognition import (
-    MAIN_CHAT_MODEL_KEY, normalize_model_choice, read_model_choice,
+    normalize_model_choice, read_model_choice,
 )
 from ouroboros.gateway.owner_effort import api_owner_chat_model
 from ouroboros.model_slots import (
     MODEL_CONTEXT_WINDOWS_KEY, model_role_option, task_model_binding, task_processing_preference,
 )
 from ouroboros import route_choice
-from tests.test_task_settings_snapshot import isolated_runtime, save_owner  # noqa: F401 -- the shared isolated root
+from tests._task_settings_helpers import isolated_runtime, save_owner  # noqa: F401 -- the shared isolated root
 
 ASTRA = "claudexor::codex=gpt-6-astra"
 SOL = "claudexor::codex=gpt-6.1-sol"
@@ -43,10 +36,17 @@ OWNER = {
     "OUROBOROS_MODEL_CONTEXT_WINDOWS": json.dumps({"main": 123456, "fallback": [654321]}),
 }
 CHOSEN = {"kind": "model", "model": ASTRA, "use_local": False}
+LEAD = {"source": "room", "model": ASTRA, "use_local": False}
 
 
 @pytest.fixture
-def room(isolated_runtime):  # noqa: F811 -- the imported fixture, used by name
+def room(isolated_runtime, monkeypatch):  # noqa: F811 -- the imported fixture, used by name
+    from supervisor import workers
+
+    monkeypatch.setattr(workers, "WORKERS", {0: types.SimpleNamespace()})
+    monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "")
+    monkeypatch.setattr(workers, "_worker_pool_execution_state",
+                        lambda *_a, **_kw: {"available": True, "disabled_reason": "", "worker_count": 1})
     save_owner(OWNER)
     for pid in ("alpha", "beta"):
         projects.create_project(isolated_runtime, pid, origin="owner_ui")
@@ -66,12 +66,11 @@ def _registry_row(root, pid: str) -> dict:
 
 def test_the_choice_is_checked_by_the_route_grammar_never_by_a_catalog():
     assert normalize_model_choice("") == normalize_model_choice(None) == {"kind": "main"}
-    assert normalize_model_choice({"kind": "fallback", "model": "ignored"}) == {"kind": "fallback"}
     # An unlisted model, a named connection and a bare OpenRouter id are routes like any other.
     for model in ("claudexor::codex=gpt-7-unreleased", "openai-compatible@work::my/model", "vendor/model"):
         assert normalize_model_choice({"kind": "model", "model": f" {model} "}) == {"kind": "model", "model": model, "use_local": False}
     assert normalize_model_choice({"kind": "model", "model": "qwen3 (local)"}) == {"kind": "model", "model": "qwen3", "use_local": True}
-    for bad in ({"kind": "pin"}, {"kind": "model", "model": ""}, {"kind": "model", "model": "claudexor::codex"},
+    for bad in ({"kind": "fallback"}, {"kind": "pin"}, {"kind": "model", "model": ""}, {"kind": "model", "model": "claudexor::codex"},
                 {"kind": "model", "model": "claudexor@x::codex=m"}, {"kind": "model", "model": "a\nb"},
                 {"kind": "model", "model": ASTRA, "use_local": True}, {"kind": "model", "model": ASTRA, "use_local": "yes"},
                 "not json", [CHOSEN]):
@@ -79,39 +78,93 @@ def test_the_choice_is_checked_by_the_route_grammar_never_by_a_catalog():
             normalize_model_choice(bad)
 
 
-def test_main_and_each_project_keep_their_own_choice_and_no_role_slot_moves(room):
+def test_main_and_each_project_keep_their_own_choice(room):
     root, client = room
     reply = client.post("/api/owner/chat-model", json={"kind": "model", "model": ASTRA})
     assert reply.status_code == 200, reply.text
-    assert reply.json() == {"ok": True, "project_id": "", "model_choice": CHOSEN, "previous_model_choice": {"kind": "main"}}
+    assert reply.json() == {"ok": True, "project_id": "", "main_route": {"model": ASTRA, "use_local": False},
+                            "previous_main_route": {"model": SOL, "use_local": False},
+                            "account": "kept", "window_reset": True}
     saved = _saved()
-    assert json.loads(saved[MAIN_CHAT_MODEL_KEY]) == CHOSEN
-    assert {key: saved[key] for key in ("OUROBOROS_MODEL", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_FALLBACKS")} == {
-        "OUROBOROS_MODEL": SOL, "OUROBOROS_MODEL_LIGHT": "openai::light-model", "OUROBOROS_MODEL_FALLBACKS": LUNA}
-    assert MAIN_CHAT_MODEL_KEY not in os.environ and MAIN_CHAT_MODEL_KEY not in config.settings_env_keys()
+    assert saved["OUROBOROS_MODEL"] == ASTRA
+    assert saved["OUROBOROS_MODEL_LIGHT"] == "openai::light-model"
+    assert saved["OUROBOROS_MODEL_FALLBACKS"] == LUNA
     assert config.get_light_model() == "openai::light-model"
-
-    reply = client.post("/api/owner/chat-model", json={"kind": "fallback", "project_id": "alpha"})
-    assert reply.status_code == 200 and reply.json()["model_choice"] == {"kind": "fallback"}
-    assert _registry_row(root, "alpha")["model_choice"] == {"kind": "fallback"}
+    reply = client.post("/api/owner/chat-model", json={**CHOSEN, "project_id": "alpha"})
+    assert reply.status_code == 200 and reply.json()["model_choice"] == CHOSEN
+    assert _registry_row(root, "alpha")["model_choice"] == CHOSEN
     assert "model_choice" not in _registry_row(root, "beta")
-    assert read_model_choice(root) == CHOSEN and read_model_choice(root, "alpha") == {"kind": "fallback"}
-    assert read_model_choice(root, "beta") == {"kind": "main"}
-    # A new room starts on Main's reference: Main chat's own choice is never copied into it.
+    assert read_model_choice(root) == {"kind": "main"}
+    assert read_model_choice(root, "alpha") == CHOSEN
     projects.create_project(root, "gamma", origin="owner_ui")
-    assert read_model_choice(root, "gamma") == {"kind": "main"}
     rows = {row["id"]: row["model_choice"] for row in projects.projects_summary(root, limit=10)}
-    assert rows == {"alpha": {"kind": "fallback"}, "beta": {"kind": "main"}, "gamma": {"kind": "main"}}
-
-    # The reset is Main's reference again: the row forgets, the settings key goes blank.
-    assert client.post("/api/owner/chat-model", json={"kind": "main", "project_id": "alpha"}).json()["previous_model_choice"] == {"kind": "fallback"}
+    assert rows == {"alpha": CHOSEN, "beta": {"kind": "main"}, "gamma": {"kind": "main"}}
+    assert client.post("/api/owner/chat-model", json={"kind": "main", "project_id": "alpha"}).json()["previous_model_choice"] == CHOSEN
     assert "model_choice" not in _registry_row(root, "alpha")
-    assert client.post("/api/owner/chat-model", json={"kind": "main"}).json()["model_choice"] == {"kind": "main"}
-    assert _saved()[MAIN_CHAT_MODEL_KEY] == ""
+
+
+@pytest.mark.parametrize("model,local,account,pin,reset", [
+    (ASTRA, False, "kept", "acc-main", True),
+    ("claudexor::claude=some-model", False, "auto", "", True),
+    (OPUS, False, "none", "", True),
+    ("local-model", True, "none", "", True),
+    (SOL, False, "kept", "acc-main", False),
+])
+def test_main_write_keeps_only_same_subscription_source_pin_and_resets_only_changed_model(
+        room, model, local, account, pin, reset):
+    _root, client = room
+    response = client.post("/api/owner/chat-model", json={"kind": "model", "model": model, "use_local": local})
+    assert response.status_code == 200, response.text
+    assert response.json()["account"] == account and response.json()["window_reset"] is reset
+    saved = _saved()
+    assert saved["OUROBOROS_MODEL"] == model and saved["USE_LOCAL_MAIN"] is local
+    assert json.loads(saved["OUROBOROS_MODEL_ACCOUNTS"])["main"] == pin
+    windows = json.loads(saved[MODEL_CONTEXT_WINDOWS_KEY])
+    assert ("main" not in windows) is reset
+    assert windows["fallback"] == [654321]
+    if not reset:
+        assert windows["main"] == 123456
+
+
+def test_main_locality_only_keeps_the_manual_window_and_records_the_writers_receipt(room, monkeypatch):
+    root, client = room
+    save_owner({**OWNER, "OUROBOROS_MODEL": "owner/model", "OUROBOROS_MODEL_ACCOUNTS": "{}"})
+    changes = []
+    monkeypatch.setattr("ouroboros.gateway.owner_effort.record_settings_change", lambda request, receipt: changes.append(receipt))
+    reply = client.post("/api/owner/chat-model", json={"kind": "model", "model": "owner/model", "use_local": True})
+    assert reply.status_code == 200 and reply.json()["window_reset"] is False
+    assert json.loads(_saved()[MODEL_CONTEXT_WINDOWS_KEY])["main"] == 123456
+    assert changes[0]["USE_LOCAL_MAIN"]["new"] is True
+    assert "OUROBOROS_MODEL" not in changes[0]
+    recents = json.loads((root / "state/ui_preferences.json").read_text(encoding="utf-8"))["model_recents"]
+    assert recents == [{"model": "owner/model", "use_local": True}]
+
+
+@pytest.mark.parametrize("refusal,status,code", [
+    ("DeploymentPolicyRefusal", 403, "managed_by_deployment"),
+    ("SettingsPreconditionFailed", 409, "settings_precondition_failed"),
+    ("SettingsLockUnavailable", 503, "settings_locked"),
+])
+def test_main_writer_refusals_pass_through_without_recording_a_recent(room, monkeypatch, refusal, status, code):
+    from ouroboros import deployment_policy
+    from ouroboros.gateway import owner_settings
+
+    root, client = room
+    error = getattr(deployment_policy if refusal == "DeploymentPolicyRefusal" else owner_settings, refusal)
+    before = _saved()
+    def refuse(*args, **kwargs):
+        raise error("OUROBOROS_MODEL")
+    monkeypatch.setattr("ouroboros.gateway.owner_effort._owner_update_settings", refuse)
+    response = client.post("/api/owner/chat-model", json=CHOSEN)
+    assert response.status_code == status and response.json()["code"] == code
+    assert response.json()["saved"] is False and _saved() == before
+    assert not (root / "state/ui_preferences.json").exists()
 
 
 @pytest.mark.parametrize("body,status,code", [
     ({"kind": "pinned"}, 400, "chat_model_invalid"),
+    ({"kind": "main"}, 400, "chat_model_invalid"),
+    ({"kind": "fallback", "project_id": "alpha"}, 400, "chat_model_invalid"),
     ({"kind": "model", "model": "claudexor::codex"}, 400, "chat_model_invalid"),
     ({"kind": "model", "model": ASTRA, "project_id": "../alpha"}, 400, "chat_model_invalid"),
     ({"kind": "model", "model": ASTRA, "project_id": "nowhere"}, 404, "project_unavailable"),
@@ -126,91 +179,97 @@ def test_a_refused_choice_says_nothing_was_saved(room, body, status, code):
 
 def test_admission_snapshots_the_room_once_and_records_mains_reference(room, monkeypatch):
     root, client = room
-    main_task, project_task = {"id": "m1"}, {"id": "p1", "project_id": "alpha"}
-    route_choice.capture_room_route(main_task, root)
-    assert main_task["metadata"]["room_route"] == {"kind": "main"}  # recorded, so nothing later re-reads the room
-    client.post("/api/owner/chat-model", json={"kind": "model", "model": ASTRA})
-    client.post("/api/owner/chat-model", json={"kind": "fallback", "project_id": "alpha"})
-    route_choice.capture_room_route(main_task, root)  # already admitted: the newer choice never reaches it
-    assert main_task["metadata"]["room_route"] == {"kind": "main"}
-    later = {"id": "m2"}
-    route_choice.capture_room_route(later, root)
-    route_choice.capture_room_route(project_task, root)
-    assert later["metadata"]["room_route"] == CHOSEN
-    assert project_task["metadata"]["room_route"] == {"kind": "fallback", "model": LUNA, "use_local": False}
-    client.post("/api/owner/chat-model", json={"kind": "model", "model": OPUS})
-    assert later["metadata"]["room_route"] == CHOSEN  # a snapshot, never a live reference to the picker
-
-    save_owner({**OWNER, "OUROBOROS_MODEL_FALLBACKS": ""})  # the first Fallback is gone: the reference admits on Main
-    no_fallback = {"id": "p2", "project_id": "alpha"}
-    route_choice.capture_room_route(no_fallback, root)
-    assert no_fallback["metadata"]["room_route"] == {"kind": "main"}
-
-    gone = {"id": "p3", "project_id": "nowhere"}  # a room that cannot be read admits the work on Main's reference
-    route_choice.capture_room_route(gone, root)
-    assert gone["metadata"]["room_route"] == {"kind": "main"}
-
+    main, follower = {"id": "main"}, {"id": "follower", "project_id": "alpha"}
+    for task in (main, follower):
+        route_choice.capture_lead(task, root)
+        assert task["metadata"]["lead"] == {"source": "main"}
+    client.post("/api/owner/chat-model", json={**CHOSEN, "project_id": "alpha"})
+    chosen = {"id": "chosen", "project_id": "alpha"}
+    route_choice.capture_lead(chosen, root)
+    assert chosen["metadata"]["lead"] == LEAD
+    for task in (main, follower):
+        route_choice.capture_lead(task, root)
+        assert task["metadata"]["lead"] == {"source": "main"}
+    # Move/detach and retry keep the same work's primary, even if the room changes.
+    for pid in ("beta", "", "alpha"):
+        chosen["project_id"] = pid
+        route_choice.capture_lead(chosen, root)
+        assert chosen["metadata"]["lead"] == LEAD
+    gone = {"id": "gone", "project_id": "nowhere"}
+    route_choice.capture_lead(gone, root)
+    assert gone["metadata"]["lead"] == {"source": "main"}
     def broken(*_args, **_kwargs):
-        raise TypeError("a programming error is never mistaken for an unreadable room")
+        raise TypeError("programming error")
     monkeypatch.setattr("ouroboros.composer_cognition.read_model_choice", broken)
     with pytest.raises(TypeError):
-        route_choice.capture_room_route({"id": "m3"}, root)
+        route_choice.capture_lead({"id": "new"}, root)
 
 
-def test_continue_and_a_same_room_start_task_keep_the_admitted_snapshot(room, monkeypatch):
+@pytest.mark.parametrize("extra,stamp", [
+    ({}, True),
+    ({"metadata": {"schedule_writer_kind": "owner"}}, True),
+    ({"actor_id": "consciousness", "metadata": {"schedule_writer_kind": "consciousness", "work_kind": "consciousness"}}, True),
+    ({"metadata": {"schedule_writer_kind": "owner", "presence_binding_authority": {"binding_id": "place"}}}, True),
+    ({"_presence_turn": True}, False),
+    ({"metadata": {"presence_binding_authority": {"binding_id": "place"}}}, False),
+    ({"metadata": {"work_kind": "consciousness"}}, False),
+    ({"actor_id": "consciousness"}, False),
+    ({"type": "evolution"}, False),
+    ({"metadata": {"evolution_transaction": "transaction"}}, False),
+    ({"parent_task_id": "parent"}, False),
+    ({"metadata": {"delegation_role": "subagent"}}, False),
+    ({"metadata": {"model_role": "light"}}, False),
+    ({"model_role": "consciousness"}, False),
+    ({"model": "synthetic::voice"}, False),
+])
+def test_admission_stamps_owner_roots_only(room, extra, stamp):
     root, client = room
+    client.post("/api/owner/chat-model", json={**CHOSEN, "project_id": "alpha"})
+    task = {"id": "admission", "project_id": "alpha", **extra}
+    route_choice.capture_lead(task, root)
+    assert task.get("metadata", {}).get("lead") == (LEAD if stamp else None)
+
+
+def test_a_separately_started_root_reads_its_destination_on_its_own_admission(room, monkeypatch):
     from ouroboros.tools.control import _start_task
-    from supervisor.continuation_admission import _successor_task
-    import supervisor.workers as workers
+    from supervisor import queue, workers
 
-    for admitted in ({"kind": "main"}, CHOSEN):
-        successor = _successor_task(None, "previous", {"objective": "The work", "metadata": {"room_route": admitted}},
-                                    {"successor_task_id": "next", "chat_id": 1}, {"cause": "budget"},
-                                    {"original": {"content": "The work"}}, {})
-        assert successor["metadata"]["room_route"] == admitted
-    client.post("/api/owner/chat-model", json={"kind": "model", "model": OPUS})  # the picker moves after admission
-
+    root, client = room
+    client.post("/api/owner/chat-model", json={**CHOSEN, "project_id": "alpha"})
     monkeypatch.setattr("ouroboros.tools.control_events._wait_for_promotion_admission",
-                        lambda *_a, **_k: {"status": "scheduled", "effective_project_id": ""})
+                        lambda *_a, **_k: {"status": "scheduled", "effective_project_id": "alpha"})
     events = []
     ctx = types.SimpleNamespace(pending_events=events, event_queue=None, current_chat_id=1, drive_root=root,
-                                project_id="", task_id="owner-turn", task_metadata={"room_route": {"kind": "main"}})
+                                project_id="alpha", task_id="owner-turn",
+                                task_metadata={"origin_suppressed": True, "lead": {"source": "main"}})
     assert _start_task(ctx, "Do the long part", title="Long part", workspace="none").startswith("OK: task")
-    assert events[0]["room_route"] == {"kind": "main"}
-    _start_task(ctx, "Elsewhere", title="Elsewhere", project_id="beta")
-    assert "room_route" not in events[1]  # another room's new work starts on that room's choice
-
-    monkeypatch.setattr(workers, "DRIVE_ROOT", root)
-    enqueued = []
-    host = types.SimpleNamespace(enqueue_task=lambda task: enqueued.append(task) or True,
-                                 persist_queue_snapshot=lambda **_kwargs: True, load_state=lambda: {"owner_chat_id": 1})
-    assert workers.promote_chat_to_task(events[0], host)["status"] == "scheduled"
-    assert enqueued[-1]["metadata"]["room_route"] == {"kind": "main"}  # the same request, the model it was admitted on
-    fresh = {key: value for key, value in events[0].items() if key != "room_route"}
-    assert workers.promote_chat_to_task({**fresh, "task_id": "host-started", "routing_token": "host-token"},
-                                        host)["status"] == "scheduled"
-    assert enqueued[-1]["metadata"]["room_route"] == {"kind": "model", "model": OPUS, "use_local": False}
+    assert "lead" not in events[0]
+    client.post("/api/owner/chat-model", json={"kind": "model", "model": OPUS, "project_id": "alpha"})
+    host = types.SimpleNamespace(enqueue_task=queue.enqueue_task, persist_queue_snapshot=lambda **_kwargs: True,
+                                 load_state=lambda: {"owner_chat_id": 1})
+    reservation = queue.reserve_task_admission(events[0]["task_id"], events[0]["routing_token"], drive_root=root)
+    assert reservation["status"] == "reserved", reservation
+    outcome = workers.promote_chat_to_task(events[0], host)
+    assert outcome["status"] == "scheduled", outcome
+    assert queue.PENDING[-1]["metadata"]["lead"] == {"source": "room", "model": OPUS, "use_local": False}
 
 
-def test_a_call_turn_keeps_its_engine_while_a_typed_turn_takes_the_rooms_choice(room, monkeypatch):
-    # A live call reaches the turn's first step already carrying its engine's route (the inline executor sets it on
-    # the seed before the lane admits it, ``inline_carrier``): the room's chat model never tags it, so nothing
-    # downstream reads the room's route as the one the call runs on.
-    from supervisor import worker_chat_lane, workers
+def test_a_call_turn_keeps_its_engine_while_a_project_turn_takes_the_rooms_choice(room):
+    from supervisor import worker_chat_lane
 
     root, client = room
-    client.post("/api/owner/chat-model", json={"kind": "model", "model": ASTRA})
-    monkeypatch.setattr(workers, "DRIVE_ROOT", root)
-    call = worker_chat_lane._seed_task(1, "Opening", None, None, {
-        "execution_transport": {"kind": "live_conversation", "call_id": "room-call"}})
+    client.post("/api/owner/chat-model", json={**CHOSEN, "project_id": "alpha"})
+    project = projects.get_project(root, "alpha")
+    call = worker_chat_lane._seed_task(project["chat_id"], "Opening", None, None, {
+        "project_id": "alpha", "execution_transport": {"kind": "live_conversation", "call_id": "room-call"}})
     call["model"], call["use_local_model"] = "synthetic::voice", False
-    typed = worker_chat_lane._seed_task(1, "Hello", None, None, None)
+    typed = worker_chat_lane._seed_task(project["chat_id"], "Hello", None, None, {"project_id": "alpha"})
     for task in (call, typed):
+        task["project_id"] = "alpha"
         task["_conversation_prepare"] = {"quiet": False}
         worker_chat_lane.prepare_conversation_task(types.SimpleNamespace(), task, root)
-    assert call["model"] == "synthetic::voice"
-    assert route_choice.ROOM_ROUTE_KEY not in call["metadata"]
-    assert typed["metadata"][route_choice.ROOM_ROUTE_KEY] == CHOSEN
+    assert call["model"] == "synthetic::voice" and "lead" not in call["metadata"]
+    assert typed["metadata"]["lead"] == LEAD
 
 
 def _ctx(metadata: dict) -> types.SimpleNamespace:
@@ -222,29 +281,21 @@ def test_a_chosen_route_runs_on_auto_and_route_defaults_from_its_first_plan(room
     from ouroboros.agent_dispatch import main_model_named_effort
     from ouroboros.context_fit import _context_route
 
-    metadata = {"room_route": CHOSEN}
+    metadata = {"lead": LEAD}
     ctx = _ctx(metadata)
     route_choice.bind_task_route(ctx, metadata, presence=False)
-    assert (ctx.task_model_override, ctx.task_use_local_override, ctx.task_route_source) == (ASTRA, False, "room_choice")
-    assert route_choice.open_route(ctx, None) == (ASTRA, False, {"kind": "explicit", "source": "room_choice"})
+    assert (ctx.task_model_override, ctx.task_use_local_override, ctx.task_route_source) == (ASTRA, False, "room")
+    assert route_choice.open_route(ctx, None) == (ASTRA, False, {"kind": "explicit", "source": "room"})
     # Main's account pin, processing and window stay Main's: the room's route has none of its own.
-    assert task_model_binding({"task_metadata": metadata}) == ("room", "")
-    assert task_processing_preference({"task_metadata": metadata}, model_role="room") == ""
-    assert model_role_option(MODEL_CONTEXT_WINDOWS_KEY, "room") == 0
+    assert task_model_binding({"task_metadata": metadata}) == ("lead", "")
+    assert task_processing_preference({"task_metadata": metadata}, model_role="lead") == ""
+    assert model_role_option(MODEL_CONTEXT_WINDOWS_KEY, "lead") == 0
     plan_route, _settings = _context_route({"metadata": metadata})
-    assert (plan_route["model"], plan_route["model_role"], plan_route["options"]["credential_profile_id"]) == (ASTRA, "room", "")
-    assert main_model_named_effort({"room_route": {**CHOSEN, "model": "claudexor::cursor=gpt-5-high"}}) == "high"
+    assert (plan_route["model"], plan_route["model_role"], plan_route["options"]["credential_profile_id"]) == (ASTRA, "lead", "")
+    assert main_model_named_effort({"lead": {**LEAD, "model": "claudexor::cursor=gpt-5-high"}}) == "high"
     assert main_model_named_effort(metadata) == ""  # the carried model names no level; Main's is never consulted
 
-    fallback = {"room_route": {"kind": "fallback", "model": LUNA, "use_local": False}}
-    assert task_model_binding({"task_metadata": fallback}) == ("fallback:0", None)  # its entry's own account
-    assert task_processing_preference({"task_metadata": fallback}, model_role="fallback:0") == "economy"
-    plan_route, _settings = _context_route({"metadata": fallback})
-    assert (plan_route["model"], plan_route["model_role"], plan_route["options"]["credential_profile_id"]) == (
-        LUNA, "fallback:0", "acc-fallback")
-    assert model_role_option(MODEL_CONTEXT_WINDOWS_KEY, "fallback:0") == 654321
-
-    main = {"room_route": {"kind": "main"}}
+    main = {"lead": {"source": "main"}}
     ctx = _ctx(main)
     route_choice.bind_task_route(ctx, main, presence=False)
     assert ctx.task_model_override is None and task_model_binding({"task_metadata": main}) == ("main", None)
@@ -254,7 +305,7 @@ def test_a_chosen_route_runs_on_auto_and_route_defaults_from_its_first_plan(room
     for meta, presence in (({**metadata, "delegation_role": "subagent", "model": OPUS}, False), (metadata, True)):
         ctx = _ctx(meta)
         route_choice.bind_task_route(ctx, meta, presence=presence)
-        assert ctx.task_route_source != "room_choice"
+        assert ctx.task_route_source != "room"
     assert task_model_binding({"task_metadata": {**metadata, "delegation_role": "subagent"}})[0] == "main"
 
 
@@ -269,89 +320,60 @@ def test_a_connected_direct_openai_route_chosen_in_a_room_runs_through_the_opena
     chosen = {"kind": "model", "model": "openai::gpt-6.1", "use_local": False}
     assert client.post("/api/owner/chat-model", json={**chosen, "project_id": "alpha"}).json()["model_choice"] == chosen
     task = {"id": "p-openai", "project_id": "alpha"}
-    route_choice.capture_room_route(task, root)
-    assert task["metadata"]["room_route"] == chosen
+    route_choice.capture_lead(task, root)
+    assert task["metadata"]["lead"] == {"source": "room", "model": chosen["model"], "use_local": False}
     plan_route, settings = _context_route({"metadata": task["metadata"]})
-    assert (plan_route["provider"], plan_route["model"], plan_route["model_role"]) == ("openai", "openai::gpt-6.1", "room")
+    assert (plan_route["provider"], plan_route["model"], plan_route["model_role"]) == ("openai", "openai::gpt-6.1", "lead")
     target = resolve_target(plan_route["model"], settings)
     assert (target["base_url"], target["api_key"]) == ("https://api.openai.com/v1", "sk-test-not-a-real-key")
 
 
-def test_a_room_route_on_a_wait_card_is_switched_for_the_task_never_persisted_into_settings():
+def test_a_lead_on_a_wait_card_is_switched_for_the_task_never_persisted_into_settings():
     from ouroboros.model_slots import apply_model_role_override
 
-    with pytest.raises(ValueError, match="composer"):
-        apply_model_role_override(dict(OWNER), role="room", model=OPUS, credential_profile_id="", use_local=False)
+    with pytest.raises(ValueError, match="work"):
+        apply_model_role_override(dict(OWNER), role="lead", model=OPUS, credential_profile_id="", use_local=False)
 
 
-def test_both_references_resolve_from_the_live_settings(room):
-    assert route_choice.configured_references() == {
-        "main": {"model": SOL, "use_local": False}, "fallback": {"model": LUNA, "use_local": False}}
-    save_owner({**OWNER, "OUROBOROS_MODEL_FALLBACKS": ""})
-    assert route_choice.configured_references()["fallback"] is None
+def test_main_reference_resolves_from_live_settings(room):
+    assert route_choice.configured_references() == {"main": {"model": SOL, "use_local": False}}
+    save_owner({**OWNER, "OUROBOROS_MODEL": ASTRA})
+    assert route_choice.configured_references() == {"main": {"model": ASTRA, "use_local": False}}
 
 
-def test_the_main_chat_key_is_never_exported_and_an_unreadable_value_reads_as_mains_reference():
-    from ouroboros.composer_cognition import main_model_choice, model_choice_setting
+@pytest.mark.parametrize("value", [{"kind": "fallback"}, "garbage", {"kind": "pin"}])
+def test_stored_invalid_room_choice_reads_as_main_with_warning(value, caplog):
+    from ouroboros.composer_cognition import project_model_choice
 
-    assert MAIN_CHAT_MODEL_KEY in config.SETTINGS_KEYS_NOT_EXPORTED_TO_ENV
-    assert json.loads(model_choice_setting({"kind": "model", "model": ASTRA})) == CHOSEN
-    assert model_choice_setting({"kind": "main"}) == ""
-    for unreadable in ("garbage", '{"kind": "pin"}', "{'kind': 'model'}", ""):
-        assert main_model_choice({MAIN_CHAT_MODEL_KEY: unreadable}) == {"kind": "main"}
+    assert project_model_choice({"id": "alpha", "model_choice": value}) == {"kind": "main"}
+    assert "Unreadable model choice" in caplog.text
 
 
-def test_stars_are_bounded_route_strings_and_never_checked_against_a_catalog():
-    from ouroboros.gateway.ui_preferences import DEFAULT_UI_PREFERENCES, _normalize_preferences
-
-    assert DEFAULT_UI_PREFERENCES["model_favorites"] == []
-    assert _normalize_preferences({"model_favorites": [f" {ASTRA} ", ASTRA, OPUS, "", "unknown/model"]},
-                                  fill_defaults=False) == {"model_favorites": [ASTRA, OPUS, "unknown/model"]}
-    assert _normalize_preferences({"model_favorites": None}, fill_defaults=False) == {"model_favorites": []}
-    for bad in ("one", [1], ["a\tb"], ["x" * 401], [f"vendor/model-{i}" for i in range(201)]):
-        with pytest.raises(ValueError):
-            _normalize_preferences({"model_favorites": bad}, fill_defaults=False)
-
-
-@pytest.mark.parametrize("carrier", [{"presence": {"binding_id": "fixture-place"}},
-                                    {"presence_binding_authority": {"binding_id": "fixture-place"}}])
-@pytest.mark.parametrize("carried", [None, CHOSEN])
-def test_presence_promotions_never_copy_or_capture_the_main_chat_route(room, monkeypatch, carrier, carried):
-    from supervisor import workers
-
-    root, client = room
-    client.post("/api/owner/chat-model", json={"kind": "model", "model": OPUS})
-    monkeypatch.setattr(workers, "DRIVE_ROOT", root)
-    enqueued = []
-    host = types.SimpleNamespace(enqueue_task=lambda task: enqueued.append(task) or True,
-                                 persist_queue_snapshot=lambda **_kwargs: True, load_state=lambda: {"owner_chat_id": 1})
-    event = {"task_id": "presence-promotion", "routing_token": "fixture-token", "objective": "Inspect the report",
-             "chat_id": 1, "workspace": "none", **carrier}
-    if carried is not None:
-        event[route_choice.ROOM_ROUTE_KEY] = carried
-    assert workers.promote_chat_to_task(event, host)["status"] == "scheduled"
-    metadata = enqueued[-1].get("metadata", {})
-    assert route_choice.ROOM_ROUTE_KEY not in metadata
+@pytest.mark.parametrize("source", ["room", "owner", "owner_words"])
+def test_lead_sources_are_validated_and_a_stray_root_model_stays_inert(source):
+    metadata = {"lead": {**LEAD, "source": source}, "model": OPUS}
     ctx = _ctx(metadata)
     route_choice.bind_task_route(ctx, metadata, presence=False)
-    assert route_choice.open_route(ctx, None)[:2] == (SOL, False)
+    assert ctx.task_model_override == ASTRA and ctx.task_route_source == source
+    for bad in ("unknown", "switch_model", "fallback"):
+        metadata["lead"]["source"] = bad
+        route_choice.bind_task_route(ctx, metadata, presence=False)
+        assert ctx.task_model_override is None
 
 
 @pytest.mark.parametrize("address,metadata,expected", [
-    ({"project_id": "alpha"}, {}, CHOSEN),
-    ({"project_id": "beta"}, {}, {"kind": "main"}),
-    ({"chat_id": 1, "source": "web"}, {}, {"kind": "model", "model": OPUS, "use_local": False}),
-    ({}, {}, None),  # A hidden, unbound API task has no chat whose choice to borrow.
+    ({"project_id": "alpha"}, {}, LEAD),
+    ({"project_id": "beta"}, {}, {"source": "main"}),
+    ({"chat_id": 1, "source": "web"}, {}, {"source": "main"}),
+    ({}, {}, {"source": "main"}),
     ({"project_id": "alpha"}, {"model_role": "light"}, None),
-    ({"project_id": "alpha"}, {"room_route": {"kind": "main"}}, {"kind": "main"}),
 ])
 def test_api_room_admission_reads_the_canonical_choice_not_the_fork(room, tmp_path, monkeypatch, address, metadata, expected):
     from ouroboros.gateway.tasks import api_tasks_create
     from ouroboros.task_results import load_task_result
-    from supervisor import workers
+    from supervisor import queue, workers
 
     root, client = room
-    client.post("/api/owner/chat-model", json={"kind": "model", "model": OPUS})
     client.post("/api/owner/chat-model", json={**CHOSEN, "project_id": "alpha"})
     repo = tmp_path / "api-repo"
     repo.mkdir()
@@ -359,18 +381,61 @@ def test_api_room_admission_reads_the_canonical_choice_not_the_fork(room, tmp_pa
     app.state.drive_root, app.state.repo_dir = root, repo
     monkeypatch.setattr(workers, "WORKERS", {0: types.SimpleNamespace()})
     monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "")
-    admitted = []
-    monkeypatch.setattr("supervisor.queue.enqueue_task", lambda task: admitted.append(task) or task)
-    monkeypatch.setattr("supervisor.queue.persist_queue_snapshot", lambda reason="": True)
+    monkeypatch.setattr(queue, "persist_queue_snapshot", lambda reason="": True)
     monkeypatch.setattr("ouroboros.workspace_admission.bootstrap_process_path", lambda: [])
     response = TestClient(app).post("/api/tasks", json={"description": "Read the report", "memory_mode": "empty",
                                                      "metadata": metadata, **address})
     assert response.status_code == 200, response.text
-    task = admitted[-1]
+    task = queue.PENDING[-1]
     assert task["drive_root"] != str(root), "exercise the distinct empty execution drive"
-    assert task["metadata"].get(route_choice.ROOM_ROUTE_KEY) == expected
+    assert task["metadata"].get("lead") == expected
     stored = load_task_result(root, response.json()["task_id"])
-    assert stored["metadata"].get(route_choice.ROOM_ROUTE_KEY) == expected
-    # Later room edits do not retarget the admission or its durable continuation source.
+    assert stored["metadata"].get("lead") == expected
     client.post("/api/owner/chat-model", json={"kind": "main", "project_id": "alpha"})
-    assert task["metadata"].get(route_choice.ROOM_ROUTE_KEY) == expected
+    assert task["metadata"].get("lead") == expected
+
+
+def test_api_clients_cannot_mint_a_lead(room, monkeypatch):
+    from ouroboros.gateway.tasks import api_tasks_create
+
+    root, _client = room
+    app = Starlette(routes=[Route("/api/tasks", api_tasks_create, methods=["POST"])])
+    app.state.drive_root, app.state.repo_dir = root, config.REPO_DIR
+    monkeypatch.setattr("ouroboros.workspace_admission.bootstrap_process_path", lambda: [])
+    response = TestClient(app).post("/api/tasks", json={"description": "Read", "metadata": {"lead": LEAD}})
+    assert response.status_code == 200, response.text
+    from supervisor import queue
+    assert queue.PENDING[-1]["metadata"]["lead"] == {"source": "main"}
+
+
+def test_queue_admission_keeps_an_existing_lead_and_restart_never_recaptures(room):
+    from supervisor import queue
+
+    root, client = room
+    client.post("/api/owner/chat-model", json={**CHOSEN, "project_id": "alpha"})
+    for n, lead in enumerate(({"source": "main"}, {**LEAD, "source": "owner"})):
+        task = {"id": f"queue-{n}", "type": "task", "project_id": "alpha", "metadata": {"lead": lead}}
+        admitted = queue.enqueue_task(task)
+        assert "_admission_blocked" not in admitted
+        assert admitted["metadata"]["lead"] == lead
+        queue.PENDING.clear()
+        assert queue.enqueue_task(admitted, restoring_snapshot=True)["metadata"]["lead"] == lead
+        queue.PENDING.clear()
+    restored = queue.enqueue_task({"id": "legacy", "type": "task", "metadata": {}}, restoring_snapshot=True)
+    assert "lead" not in restored["metadata"]
+
+
+def test_conversation_capture_uses_canonical_registry_even_with_an_execution_copy(room, tmp_path):
+    root, client = room
+    client.post("/api/owner/chat-model", json={**CHOSEN, "project_id": "alpha"})
+    execution = tmp_path / "execution"
+    projects.create_project(execution, "alpha", origin="owner_ui")
+    task = {"id": "split-turn", "project_id": "alpha", "budget_drive_root": str(root)}
+    route_choice.capture_lead(task, execution)
+    assert task["metadata"]["lead"] == LEAD
+
+
+def test_an_owner_lead_uses_no_options_from_a_previously_followed_role(room):
+    metadata = {"lead": {**LEAD, "source": "owner"}, "model_role": "light"}
+    assert task_model_binding({"metadata": metadata}) == ("lead", "")
+    assert task_processing_preference({"metadata": metadata}) == ""
