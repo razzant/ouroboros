@@ -8,25 +8,13 @@ disable/reload can tear them down and purge modules cleanly.
 
 from __future__ import annotations
 
-import functools  # noqa: F401
 import importlib
 import importlib.util
-import inspect  # noqa: F401
-import hashlib  # noqa: F401
-import json  # noqa: F401
 import logging
 import os
 import pathlib
-import re  # noqa: F401
-import secrets  # noqa: F401
-import shutil  # noqa: F401 — facade compatibility
 import sys
 import threading
-import time  # noqa: F401
-import urllib.request  # noqa: F401
-import uuid  # noqa: F401
-from dataclasses import dataclass, field  # noqa: F401
-from types import ModuleType  # noqa: F401
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from ouroboros.contracts.plugin_api import (
