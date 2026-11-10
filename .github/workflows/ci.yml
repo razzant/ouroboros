@@ -359,8 +359,8 @@ jobs:
 
   # ──────────────────────────────────────────────────────────────────
   # Tier 2: Full 3-OS matrix on manual runs and release tags. Every OS runs the
-  # default suite in whole-file shards packed by the durations the previous run
-  # recorded (`shard-plan`); shard 1 of each OS also collects the two unsharded
+  # default suite in whole-file shards packed by the run's frozen plan
+  # (`shard-plan`); shard 1 of each OS also collects the two unsharded
   # manifests that `full-test` reconciles every shard of that OS against.
   # ──────────────────────────────────────────────────────────────────
   full-test-runs:
@@ -1156,9 +1156,11 @@ jobs:
         run: docker build -t ouroboros-web:test .
       - uses: ./.github/actions/setup-python-env
         id: setup_python
+      # Bounded downloads with one retry, as the UI lane installs them (#2895).
       - name: Install UI smoke browser binaries
         id: install_browsers
         if: ${{ !cancelled() && steps.docker_build.outcome == 'success' && steps.setup_python.outcome == 'success' }}
+        timeout-minutes: 45
         run: python -I -S scripts/ci_browser_install.py chromium webkit
       - name: Run Docker UI smoke
         if: ${{ !cancelled() && steps.docker_build.outcome == 'success' && steps.setup_python.outcome == 'success' && steps.install_browsers.outcome == 'success' }}
@@ -1395,9 +1397,11 @@ jobs:
         if: env.HAS_E2E_LIVE_KEY == 'true'
         with:
           node-version: '22'
+      # Bounded downloads with one retry, as the UI lane installs them (#2895).
       - name: Install the UI probe browser (Playwright Chromium)
         if: env.HAS_E2E_LIVE_KEY == 'true'
-        run: python -m playwright install --with-deps chromium
+        timeout-minutes: 45
+        run: python -I -S scripts/ci_browser_install.py chromium
       - name: Rehearse SM1 with the keyless scripted model
         id: rehearsal
         if: env.HAS_E2E_LIVE_KEY == 'true'

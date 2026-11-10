@@ -1185,6 +1185,21 @@ def test_ui_browser_installs_bound_each_download_below_their_step_ceiling(browse
     assert bounded <= 41 * 60 < install["timeout-minutes"] * 60
 
 
+def test_every_ubuntu_browser_install_is_the_bounded_one():
+    """The Docker UI lane and the live stand's probe wait on the same mirrors as #2895. The one direct Playwright
+    install left is Windows': no `--with-deps`, so no packages to wait for, under its own step ceiling."""
+    jobs = _workflow("ci.yml")["jobs"]
+    for job, arguments in (("docker-ui-smoke", "chromium webkit"), ("e2e-live", "chromium")):
+        install = next(step for step in jobs[job]["steps"] if "ci_browser_install.py" in step.get("run", ""))
+        assert install["run"] == f"python -I -S scripts/ci_browser_install.py {arguments}", job
+        assert install["timeout-minutes"] == 45 and "continue-on-error" not in install, job
+    workflows = sorted((ROOT / ".github/workflows").glob("*.yml"))
+    assert workflows and not [path.name for path in workflows if "--with-deps" in path.read_text(encoding="utf-8")]
+    windows = _steps("ci.yml", "full-test-runs")["attachment_browser_install"]
+    assert "runner.os == 'Windows'" in windows["if"] and windows["timeout-minutes"] == 20
+    assert "-m playwright install chromium" in windows["run"]
+
+
 @_POSIX_RUNNER
 @pytest.mark.parametrize("flags, kinds, euid", [(["--pinned-chromium"], CLEAN, 1001), ([], CLEAN[:-1], 0)],
                          ids=["full-lane-through-sudo", "partial-as-root"])

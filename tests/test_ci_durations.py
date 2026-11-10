@@ -11,6 +11,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 import zipfile
 
@@ -499,31 +500,43 @@ def _hour(hour):
     return f"2026-11-08T{hour:02}:00:00Z"
 
 
-def _artifact(run, created, *, ui=None, files=None, number=None, source=None, source_sha=None, expired=False):
+def _artifact(run, created, *, ui=None, files=None, number=None, source=None, expired=False, commit="b" * 40,
+              head_sha="b" * 40):
     """One earlier run's `ci-durations` artifact as GitHub serves it: (its listing row, its real zip).
-    Without `ui` its table has no `ui_nodes` key at all, a shape `durations_table` accepts."""
+    Without `ui` its table has no `ui_nodes` key at all, a shape `durations_table` accepts; `commit=None` leaves
+    `sha` out of its `source`."""
     body = io.BytesIO()
     with zipfile.ZipFile(body, "w") as archive:
         archive.writestr("ci-durations.json", json.dumps({
             "format": 1, "platforms": {} if files is None else {SYSTEM: files},
-            "source": {"run_id": str(run) if source is None else source,
-                       "sha": "b" * 40 if source_sha is None else source_sha},
+            "source": {"run_id": str(run) if source is None else source, **({} if commit is None else {"sha": commit})},
             **({} if ui is None else {"ui_nodes": ui})}))
     return {"id": number or int(run) * 10, "expired": expired, "created_at": created,
-            "workflow_run": {"id": int(run), "head_sha": "b" * 40}}, body.getvalue()
+            "workflow_run": {"id": int(run), "head_sha": head_sha}}, body.getvalue()
+
+
+def _listing(page=1):
+    return f"repos/o/r/actions/artifacts?name=ci-durations&per_page=100&page={page}"
+
+
+def _paged(*pages, began=BEGAN):
+    """Every `gh api` answer the plan needs, by path, its artifacts listed page by page."""
+    return {f"repos/o/r/actions/runs/{PLANNED}": json.dumps({"created_at": began}).encode(),
+            **{_listing(number): json.dumps({"artifacts": [row for row, _ in page]}).encode()
+               for number, page in enumerate(pages, 1)},
+            **{f"repos/o/r/actions/artifacts/{row['id']}/zip": body for page in pages for row, body in page}}
 
 
 def _answers(*artifacts, began=BEGAN):
-    """Every `gh api` answer the plan needs, by path."""
-    return {f"repos/o/r/actions/runs/{PLANNED}": json.dumps({"created_at": began}).encode(),
-            "repos/o/r/actions/artifacts?name=ci-durations&per_page=30":
-                json.dumps({"artifacts": [row for row, _ in artifacts]}).encode(),
-            **{f"repos/o/r/actions/artifacts/{row['id']}/zip": body for row, body in artifacts}}
+    return _paged(artifacts, began=began)
 
 
-def _prepared(module, answers):
-    # A path the fixture does not hold is an unreadable answer, as `gh api` failing is.
-    return module.prepare("o/r", PLANNED, SHA, attempt="1", read=lambda path: answers[path])
+def _prepared(module, answers, asked=None):
+    def read(path, _seconds):
+        if asked is not None:
+            asked.append(path)
+        return answers[path]  # A path the fixture does not hold is an unreadable answer, as `gh api` failing is.
+    return module.prepare("o/r", PLANNED, SHA, attempt="1", read=read)
 
 
 def _reasons(plan):
@@ -572,29 +585,6 @@ def test_only_another_runs_earlier_table_weighs_a_run_and_a_run_counts_once(shar
         "40": "a newer artifact of its run was read", "41": "not a table this run recorded"}
 
 
-def test_a_table_must_prove_the_same_commit_as_its_workflow_run(shard_plan):
-    node = "tests/test_ui.py::test_a"
-    plan, table = _prepared(shard_plan, _answers(
-        _artifact(40, _hour(10), ui={node: 10}, source_sha="c" * 40)))
-    assert table is None and plan["durations"] is None
-    assert _reasons(plan)["40"] == "not a table this run recorded"
-
-
-def test_artifact_history_paginates_past_a_full_first_page(shard_plan):
-    node = "tests/test_ui.py::test_from_page_two"
-    first_page = [_artifact(100 + index, _hour(5), expired=True) for index in range(30)]
-    second = _artifact(40, _hour(10), ui={node: 25})
-    answers = _answers(*first_page, second)
-    # _answers models page one; the planner must explicitly ask for page two when it is full.
-    answers["repos/o/r/actions/artifacts?name=ci-durations&per_page=30"] = json.dumps({
-        "artifacts": [row for row, _ in first_page]}).encode()
-    answers["repos/o/r/actions/artifacts?name=ci-durations&per_page=30&page=2"] = json.dumps({
-        "artifacts": [second[0]]}).encode()
-    plan, table = _prepared(shard_plan, answers)
-    assert table["ui_nodes"] == {node: 25}
-    assert plan["ui_sources"][0]["run_id"] == "40"
-
-
 @pytest.mark.parametrize("no_ui", [{}, {"ui": {}}], ids=["no-ui-nodes-key", "empty-ui-nodes"])
 def test_a_ui_only_table_cannot_displace_the_file_weights_nor_a_file_only_table_a_ui_place(
         shard_plan, tmp_path, monkeypatch, no_ui):
@@ -625,8 +615,7 @@ def test_a_ui_only_table_cannot_displace_the_file_weights_nor_a_file_only_table_
      "the artifact history is unavailable (KeyError)"),
     (lambda answers: answers.__setitem__(f"repos/o/r/actions/runs/{PLANNED}", b"{}"),
      "the artifact history is unavailable (KeyError)"),
-    (lambda answers: answers.pop("repos/o/r/actions/artifacts?name=ci-durations&per_page=30"),
-     "the artifact history is unavailable (KeyError)"),
+    (lambda answers: answers.pop(_listing()), "the artifact history is unavailable (KeyError)"),
     (lambda answers: answers.__setitem__(f"repos/o/r/actions/artifacts/{400}/zip", b"not a zip"),
      "no earlier ci-durations table is usable"),
 ], ids=["no-run", "no-created-at", "no-listing", "unreadable-table"])
@@ -677,6 +666,162 @@ def test_nothing_weighs_nothing_and_the_collector_table_is_what_the_plan_reads(s
     row = {"id": 400, "expired": False, "created_at": _hour(11), "workflow_run": {"id": 40, "head_sha": "b" * 40}}
     plan, table = _prepared(shard_plan, _answers((row, body.getvalue())))
     assert table["ui_nodes"] == {page: 3500} and plan["ui_sources"][0]["run_id"] == "40"
+
+
+@pytest.mark.parametrize("commit, head_sha", [
+    ("a" * 40, "b" * 40), ("", "b" * 40), (None, "b" * 40), ("b" * 40, ""), ("b" * 40, None), ("", ""),
+], ids=["another-commit", "empty-sha", "no-sha", "listing-empty", "listing-null", "both-empty"])
+def test_a_table_speaks_only_for_the_commit_its_artifacts_run_was_on(shard_plan, commit, head_sha):
+    """Naming its run is not enough: a stale or copied file can do that. The commit is compared with the artifact's own
+    `head_sha` (the planned commit, `SHA` here, is another one by construction). Unprovable is passed over, by name."""
+    node = "tests/test_ui.py::test_a"
+    foreign = _artifact(41, _hour(11), ui={node: 9000}, files={"tests/x.py": 9}, commit=commit, head_sha=head_sha)
+    plan, table = _prepared(shard_plan, _answers(foreign, _artifact(40, _hour(10), ui={node: 10}, files={"tests/x.py": 1})))
+    assert table["ui_nodes"] == {node: 10} and table["platforms"] == {SYSTEM: {"tests/x.py": 1}}
+    assert [row["run_id"] for row in plan["ui_sources"]] == ["40"] and plan["platform_source"]["run_id"] == "40"
+    passed_over = {"artifact": 410, "run_id": "41", "sha": head_sha or "", "created_at": _hour(11),
+                   "reason": "not a table of this run's commit"}
+    assert plan["skipped"] == [passed_over]
+    plan, table = _prepared(shard_plan, _answers(foreign))
+    assert table is None and plan["reason"] == "no earlier ci-durations table is usable"
+    assert plan["skipped"] == [passed_over] and plan["stopped_early"] is None
+
+
+def _ruled_out(count, ui, first=1000):
+    """Artifacts the listing alone rules out, so that none costs a table read: newer than the planned run."""
+    return [_artifact(first + index, _hour(13), ui=ui) for index in range(count)]
+
+
+def _zips(asked):
+    return [int(path.split("/")[-2]) for path in asked if path.endswith("/zip")]
+
+
+def test_the_search_reads_past_a_full_page_and_the_newest_three_still_decide(shard_plan):
+    """A listing page of passed-over artifacts is no reason for positions: the tables behind it weigh the run, the newest
+    three of them and no fourth, one table per run; what the listing rules out costs no table read."""
+    node, wrong = "tests/test_ui.py::test_a", {"tests/test_ui.py::test_a": 9}
+    ruled_out = [*_ruled_out(60, wrong), *(_artifact(2000 + index, _hour(5), ui=wrong, expired=True) for index in range(37)),
+                 _artifact(int(PLANNED), _hour(11), ui=wrong)]
+    stale, copied = _artifact(90, _hour(11), ui=wrong, commit="a" * 40), _artifact(91, _hour(11), ui=wrong, source=PLANNED)
+    assert len(ruled_out) + 2 == shard_plan.PAGE
+    older = [_artifact(40, _hour(10), ui={node: 100}, files={"tests/x.py": 7}), _artifact(39, _hour(9), ui={node: 300}),
+             _artifact(38, _hour(8), ui={node: 200}), _artifact(37, _hour(7), ui=wrong, files={"tests/x.py": 9})]
+    asked = []
+    plan, table = _prepared(shard_plan, _paged([*ruled_out, stale, copied], older), asked)
+    assert table["ui_nodes"] == {node: 200} and table["platforms"] == {SYSTEM: {"tests/x.py": 7}}
+    assert [row["run_id"] for row in plan["ui_sources"]] == ["40", "39", "38"] and plan["platform_source"]["run_id"] == "40"
+    assert _zips(asked) == [910, 900, 400, 390, 380] and _listing(3) not in asked
+    assert Counter(row["reason"] for row in plan["skipped"]) == {
+        "created after this run": 60, "expired": 37, "this run's own": 1,
+        "not a table this run recorded": 1, "not a table of this run's commit": 1}
+    assert plan["stopped_early"] is None
+
+
+def test_a_full_page_that_holds_what_the_plan_wants_ends_the_listing(shard_plan):
+    node, asked = "tests/test_ui.py::test_a", []
+    usable = [_artifact(40 - age, _hour(10 - age), ui={node: 100}, files={"tests/x.py": 7}) for age in range(3)]
+    _prepared(shard_plan, _paged([*_ruled_out(shard_plan.PAGE - 3, {node: 9}), *usable]), asked)
+    assert _listing(1) in asked and _listing(2) not in asked and _zips(asked) == [400, 390, 380]
+
+
+def test_a_later_listing_page_that_fails_keeps_what_the_earlier_ones_proved_and_says_so(shard_plan):
+    node = "tests/test_ui.py::test_a"
+    usable = _artifact(40, _hour(10), ui={node: 100})
+    plan, table = _prepared(shard_plan, _paged([*_ruled_out(shard_plan.PAGE - 1, {node: 9}), usable]))
+    assert table["ui_nodes"] == {node: 100} and [row["run_id"] for row in plan["ui_sources"]] == ["40"]
+    assert plan["stopped_early"] == "listing page 2 is unreadable (KeyError)"
+    plan, table = _prepared(shard_plan, _paged(_ruled_out(shard_plan.PAGE, {node: 9})))
+    assert table is None and plan["reason"] == "no earlier ci-durations table is usable"
+    assert plan["stopped_early"] == "listing page 2 is unreadable (KeyError)"
+    assert "Its search stopped early: listing page 2 is unreadable (KeyError)." in shard_plan._summary(plan)
+
+
+def test_the_search_stops_at_its_page_and_table_bounds_and_says_so(shard_plan):
+    node, asked = "tests/test_ui.py::test_a", []
+    pages = [_ruled_out(shard_plan.PAGE, {node: 9}, first=1000 * (number + 1)) for number in range(shard_plan.PAGES + 1)]
+    plan, table = _prepared(shard_plan, _paged(*pages), asked)
+    assert table is None and plan["stopped_early"] == f"the {shard_plan.PAGES} listing pages it may read are used up"
+    assert asked[1:] == [_listing(page) for page in range(1, shard_plan.PAGES + 1)]  # Asked for no table of them.
+
+    asked = []
+    unusable = [_artifact(1000 + index, _hour(10), ui={node: 9}, commit="a" * 40) for index in range(shard_plan.READS + 5)]
+    plan, table = _prepared(shard_plan, _answers(*unusable, _artifact(40, _hour(9), ui={node: 100})), asked)
+    assert table is None and len(_zips(asked)) == shard_plan.READS
+    assert plan["stopped_early"] == f"its {shard_plan.READS} table reads are used up"
+
+
+def _on_a_slow_clock(shard_plan, answers, taken):
+    """The plan over `gh api` reads that take `taken(path)` seconds on a clock only they move, so no test waits. A read
+    that outlasts what it was allowed is stopped there, as `subprocess.run` stops `gh`."""
+    now, allowed = [0.0], []
+
+    def read(path, seconds):
+        allowed.append(seconds)
+        now[0] += min(taken(path), seconds)
+        if taken(path) > seconds:
+            raise subprocess.TimeoutExpired("gh", seconds)
+        return answers[path]
+    plan, table = shard_plan.prepare("o/r", PLANNED, SHA, attempt="1", read=read, clock=lambda: now[0])
+    return plan, table, allowed, now[0]
+
+
+HANG = 10_000
+HISTORY = [_artifact(40 - age, _hour(10), ui={"tests/test_ui.py::test_a": 100}) for age in range(20)]
+FULL_PAGE = [_artifact(1000 + index, _hour(13), ui={"tests/test_ui.py::test_a": 9}) for index in range(100)]
+
+
+@pytest.mark.parametrize("pages, taken, allowed, reason, stopped", [
+    # The run's record and the listing are slow, then every table hangs: the last read gets only what is left.
+    ([HISTORY], lambda path: HANG if path.endswith("/zip") else 45, [120, 120, 120, 90],
+     "no earlier ci-durations table is usable", "its 300 s of reads ran out"),
+    # A stalled run record or first listing leaves nothing to search: the plan says so after that one read.
+    ([HISTORY], lambda path: HANG, [120], "the artifact history is unavailable (TimeoutExpired)", None),
+    ([HISTORY], lambda path: HANG if "artifacts?" in path else 1, [120, 120],
+     "the artifact history is unavailable (TimeoutExpired)", None),
+    # Listing page after listing page is slow: the budget covers them as it covers the tables.
+    ([FULL_PAGE, FULL_PAGE, FULL_PAGE, FULL_PAGE, FULL_PAGE], lambda path: 100, [120, 120, 100],
+     "no earlier ci-durations table is usable", "its 300 s of reads ran out"),
+], ids=["tables-hang", "run-record-hangs", "listing-hangs", "listing-pages-slow"])
+def test_slow_reads_share_one_budget_and_still_leave_a_positional_plan(shard_plan, pages, taken, allowed, reason, stopped):
+    plan, table, reads, elapsed = _on_a_slow_clock(shard_plan, _paged(*pages), taken)
+    assert table is None and plan["durations"] is None and plan["reason"] == reason and plan["stopped_early"] == stopped
+    assert reads == allowed and elapsed <= shard_plan.BUDGET_SEC == 300
+    assert plan["format"] == 1 and plan["target"]["run_id"] == PLANNED
+
+
+def test_a_search_out_of_time_uses_the_tables_it_verified_and_names_the_rest(shard_plan):
+    plan, table, reads, elapsed = _on_a_slow_clock(
+        shard_plan, _answers(*HISTORY), lambda path: 1 if not path.endswith("/zip") or path.endswith("/400/zip") else HANG)
+    assert table["ui_nodes"] == {"tests/test_ui.py::test_a": 100} and [row["run_id"] for row in plan["ui_sources"]] == ["40"]
+    assert plan["stopped_early"] == "its 300 s of reads ran out" and elapsed <= shard_plan.BUDGET_SEC
+    assert _reasons(plan) == {run: "unreadable (TimeoutExpired)" for run in ("39", "38", "37")}
+    assert reads == [120, 120, 120, 120, 120, 57]
+
+
+@_POSIX_STEP
+def test_a_real_gh_that_never_answers_is_stopped_and_the_plan_is_still_written(shard_plan, tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "gh").write_text("#!/usr/bin/env bash\nexec sleep 60\n", encoding="utf-8")
+    (bin_dir / "gh").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    monkeypatch.setattr(shard_plan, "BUDGET_SEC", 0.2)
+    began = time.monotonic()
+    code = shard_plan.main(["--out", str(tmp_path / "plan"), "--repo", "o/r", "--run-id", PLANNED, "--run-attempt", "1",
+                            "--sha", SHA])
+    assert code == 0 and time.monotonic() - began < 30
+    plan = _json(tmp_path / "plan" / "plan.json")
+    assert plan["durations"] is None and plan["reason"] == "the artifact history is unavailable (TimeoutExpired)"
+    assert not (tmp_path / "plan" / "ci-durations.json").exists()
+
+
+def test_the_whole_search_fits_well_inside_both_callers_job_ceiling(shard_plan):
+    """All the reads share half of the job's 10 minutes; checkout, the re-run check and the upload have the other half."""
+    assert shard_plan._GH_SECONDS == 120 and shard_plan.BUDGET_SEC == 300
+    for name in ("ci.yml", "ui-browser-push.yml"):
+        job = yaml.safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))["jobs"]["shard-plan"]
+        assert job["timeout-minutes"] == 10 and shard_plan.BUDGET_SEC * 2 <= job["timeout-minutes"] * 60, name
 
 
 UI_SHARDED = [f"tests/test_ui.py::test_{index:02}" for index in range(24)]

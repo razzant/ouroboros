@@ -8,9 +8,11 @@ A run prepares its plan once, before its first leg (`.github/actions/shard-plan`
 published, so legs of different attempts pack alike. No leg ever reads the history itself.
 
 The history is the repository's `ci-durations` artifacts (tests/ci_verdicts.py `collect_durations`),
-read through `gh api`. Prior only: a table counts if another run's artifact existed before THIS run's
-original creation, so neither this run, nor any of its attempts, nor a table that appeared while it
-waited weighs it. DIR receives:
+read through `gh api` page by page, newest first, only until the plan holds what it wants. Prior only:
+a table counts if another run's artifact existed before THIS run's original creation, so neither this
+run, nor any of its attempts, nor a table that appeared while it waited weighs it. A table speaks only
+for its artifact's own run: its `source` must name the run id and the `head_sha` the listing gives that
+artifact (never the commit being planned, which no earlier run measured). DIR receives:
 
 - `ci-durations.json`, the format-1 table `durations_table` reads, when some table weighs anything:
   `platforms` exactly as the newest usable table with file times has them (so a table that holds only
@@ -22,7 +24,12 @@ waited weighs it. DIR receives:
   creation time, how many tables timed each node (`ui_node_observations`) and every artifact it
   looked at and passed over, with why. With nothing usable `durations` is null, `reason` says why
   and no table is written: that is the plan, frozen and shared like any other, and the legs keep
-  their positions or node counts. Stdlib only.
+  their positions or node counts.
+
+The search is bounded, so that the plan reaches its upload inside its job's 10 minutes: BUDGET_SEC for
+all its reads together (the run's own record, the listing and the tables; a read still running when
+they end is stopped), PAGES listing pages and READS tables. A search cut short uses what it verified
+and says why in `plan.json`'s `stopped_early` (null when it ended by itself). Stdlib only.
 """
 from __future__ import annotations
 
@@ -36,6 +43,7 @@ from pathlib import Path
 import statistics
 import subprocess
 import sys
+import time
 import zipfile
 import zlib
 
@@ -47,20 +55,17 @@ from tests.ci_verdicts import _table_shape_holds, write_json  # noqa: E402  -- s
 
 ARTIFACT, TABLE, PLAN = "ci-durations", "ci-durations.json", "plan.json"
 UI_TABLES = 3
-PAGE = 30
-# The planner runs in a ten-minute producer job.  Keep the history walk bounded so a
-# slow Actions API cannot consume the whole job before it can publish a positional plan.
-MAX_PAGES = 4
-MAX_TABLE_READS = 8
-PLAN_SECONDS = 480
-_GH_SECONDS = 30
+PAGE, PAGES = 100, 5  # GitHub's largest page, and how many the search may list: 90 days of tables are far fewer.
+READS = 30  # Tables it may download: the plan wants at most four, the others pass over unusable ones.
+BUDGET_SEC = 300  # All of one plan's reads: half of its job's 10 minutes, the rest is for checkout and upload.
+_GH_SECONDS = 120  # One read.
 _UNREADABLE = (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError,
                zipfile.BadZipFile, zlib.error)
 
 
-def gh(path: str) -> bytes:
+def gh(path: str, seconds: float) -> bytes:
     """The body of one `gh api` GET: GitHub's own client, which follows an artifact's storage redirect."""
-    return subprocess.run(["gh", "api", path], capture_output=True, check=True, timeout=_GH_SECONDS).stdout
+    return subprocess.run(["gh", "api", path], capture_output=True, check=True, timeout=seconds).stdout
 
 
 def _when(value) -> datetime:
@@ -89,61 +94,71 @@ def _candidates(listed, *, run_id: str, cutoff: datetime) -> tuple[list[dict], l
     return [row for _, row in rows], skipped
 
 
-def prepare(repo: str, run_id: str, sha: str, *, attempt: str = "", read=gh) -> tuple[dict, dict | None]:
-    """(plan.json, the frozen table or None): the module's contract, over `read(api path) -> bytes`."""
+def prepare(repo: str, run_id: str, sha: str, *, attempt: str = "", read=gh,
+            clock=time.monotonic) -> tuple[dict, dict | None]:
+    """(plan.json, the frozen table or None): the module's contract, over `read(api path, seconds) -> bytes`."""
     target = {"run_id": run_id, "run_attempt": attempt, "sha": sha}
+    deadline = clock() + BUDGET_SEC
 
-    def positional(reason, skipped=()):
-        return {"format": 1, "durations": None, "reason": reason, "target": target, "skipped": list(skipped)}, None
-    import time
-    deadline = time.monotonic() + PLAN_SECONDS
+    def fetch(path):
+        return read(path, min(_GH_SECONDS, max(deadline - clock(), 0)))
 
-    def bounded_read(path: str) -> bytes:
-        if time.monotonic() >= deadline:
-            raise TimeoutError("shard-plan history budget exhausted")
-        return read(path)
+    def artifacts_on(page):
+        path = f"repos/{repo}/actions/artifacts?name={ARTIFACT}&per_page={PAGE}&page={page}"
+        return json.loads(fetch(path))["artifacts"]
 
+    def positional(reason, skipped=(), stopped=None):
+        return {"format": 1, "durations": None, "reason": reason, "target": target, "skipped": list(skipped),
+                "stopped_early": stopped}, None
     try:
-        created = json.loads(bounded_read(f"repos/{repo}/actions/runs/{run_id}"))["created_at"]
+        created = json.loads(fetch(f"repos/{repo}/actions/runs/{run_id}"))["created_at"]
         cutoff = _when(created)
-        listed = []
-        for page in range(1, MAX_PAGES + 1):
-            path = (f"repos/{repo}/actions/artifacts?name={ARTIFACT}&per_page={PAGE}"
-                    if page == 1 else
-                    f"repos/{repo}/actions/artifacts?name={ARTIFACT}&per_page={PAGE}&page={page}")
-            page_rows = json.loads(bounded_read(path))["artifacts"]
-            listed.extend(page_rows)
-            if len(page_rows) < PAGE:
-                break
+        listed = artifacts_on(1)
         rows, skipped = _candidates(listed, run_id=run_id, cutoff=cutoff)
     except _UNREADABLE as error:
         return positional(f"the artifact history is unavailable ({type(error).__name__})")
     target["created_at"] = created
-    ui, platform, seen = [], None, set()
-    table_reads = 0
-    for row in rows:
-        if len(ui) == UI_TABLES and platform is not None:
+    ui, platform, seen, page, reads, stopped = [], None, set(), 1, 0, None
+    while len(ui) < UI_TABLES or platform is None:
+        if clock() >= deadline:
+            stopped = f"its {BUDGET_SEC} s of reads ran out"
             break
-        if table_reads >= MAX_TABLE_READS:
-            skipped.append({**row, "reason": "history table-read budget exhausted"})
-            break
+        if not rows:  # GitHub lists newest first; a row a new artifact pushed onto the next page meets `seen`.
+            if len(listed) < PAGE:
+                break
+            if page == PAGES:
+                stopped = f"the {PAGES} listing pages it may read are used up"
+                break
+            page += 1
+            try:
+                listed = artifacts_on(page)
+                rows, passed = _candidates(listed, run_id=run_id, cutoff=cutoff)
+            except _UNREADABLE as error:
+                stopped = f"listing page {page} is unreadable ({type(error).__name__})"
+                break
+            skipped += passed
+            continue
+        row = rows.pop(0)
         if row["run_id"] in seen:
             skipped.append({**row, "reason": "a newer artifact of its run was read"})
             continue
+        if reads == READS:
+            stopped = f"its {READS} table reads are used up"
+            break
+        reads += 1
         seen.add(row["run_id"])
-        table_reads += 1
         try:
-            with zipfile.ZipFile(io.BytesIO(bounded_read(
-                    f"repos/{repo}/actions/artifacts/{row['artifact']}/zip"))) as archive:
+            with zipfile.ZipFile(io.BytesIO(fetch(f"repos/{repo}/actions/artifacts/{row['artifact']}/zip"))) as archive:
                 table = json.loads(archive.read(TABLE).decode("utf-8"))
         except _UNREADABLE as error:
             skipped.append({**row, "reason": f"unreadable ({type(error).__name__})"})
             continue
-        # The artifact's own run is the only identity of a distinct measurement: a copy or a plan is not one.
-        if (not _table_shape_holds(table)
-                or table["source"]["run_id"] != row["run_id"]
-                or table["source"].get("sha") != row["sha"]):
+        # Only the artifact's own run and commit identify a distinct measurement: a copy or a plan is not one.
+        if not _table_shape_holds(table) or table["source"]["run_id"] != row["run_id"]:
             skipped.append({**row, "reason": "not a table this run recorded"})
+            continue
+        if not row["sha"] or table["source"].get("sha") != row["sha"]:
+            skipped.append({**row, "reason": "not a table of this run's commit"})
             continue
         wants_ui = bool(table.get("ui_nodes")) and len(ui) < UI_TABLES
         wants_files = platform is None and any(table["platforms"].values())
@@ -154,7 +169,7 @@ def prepare(repo: str, run_id: str, sha: str, *, attempt: str = "", read=gh) -> 
         if not wants_ui and not wants_files:
             skipped.append({**row, "reason": "no weight this plan still needs"})
     if not ui and platform is None:
-        return positional(f"no earlier {ARTIFACT} table is usable", skipped)
+        return positional(f"no earlier {ARTIFACT} table is usable", skipped, stopped)
     observed: dict[str, list[int]] = {}
     for _, table in ui:
         for node, milliseconds in table["ui_nodes"].items():
@@ -166,19 +181,20 @@ def prepare(repo: str, run_id: str, sha: str, *, attempt: str = "", read=gh) -> 
             "platform_source": platform[0] if platform else None,
             "ui_sources": [{**row, "ui_nodes": len(table["ui_nodes"])} for row, table in ui],
             "ui_node_observations": {node: len(observed[node]) for node in sorted(observed)},
-            "skipped": skipped}, frozen
+            "skipped": skipped, "stopped_early": stopped}, frozen
 
 
 def _summary(plan: dict) -> str:
+    stopped = f" Its search stopped early: {plan['stopped_early']}." if plan["stopped_early"] else ""
     if plan["durations"] is None:
-        return f"Shard plan: {plan['reason']}; shards keep their positions and node counts."
+        return f"Shard plan: {plan['reason']}; shards keep their positions and node counts.{stopped}"
     sources, counts = plan["ui_sources"], Counter(plan["ui_node_observations"].values())
     ui = ("UI weights: median_low of runs " + ", ".join(row["run_id"] for row in sources) + " ("
           + ", ".join(f"{counts[k]} node(s) timed by {k}" for k in sorted(counts, reverse=True)) + ")"
           if sources else "no earlier table records UI nodes")
     platform = plan["platform_source"]
     files = f"file weights: run {platform['run_id']}" if platform else "no earlier table records file times"
-    return f"Shard plan shard-plan-{plan['target']['run_id']}: {ui}; {files}."
+    return f"Shard plan shard-plan-{plan['target']['run_id']}: {ui}; {files}.{stopped}"
 
 
 def main(argv: list[str] | None = None) -> int:
