@@ -16,7 +16,7 @@ Tasks privately keep their entry Context/Effort, review settings and catalog (`T
 
 `OUROBOROS_MAX_WORKERS` migration: unmarked saved 10, or Colab's first-launch 1, reads as empty until the next save writes `_owner_cap_format=1`; other values stay, explicit Colab launch values win. Malformed values fall back to finite 10. Normalization drops retired `OUROBOROS_DELEGATE_WAIT_SEC`/`OUROBOROS_DELEGATE_WAIT_MAX_SEC`; no wait-window setting remains.
 
-`HOST_MEMORY_RESERVE_FRACTION = 0.10` is a shared code constant, not a setting: project process admission, test admission and the owned-test overload stop reserve this fraction of physical memory.
+`HOST_MEMORY_RESERVE_FRACTION = 0.10` is the shared code constant for process/test memory admission and the test overload stop (DEVELOPMENT §9), not an owner setting.
 
 Optional bounds: `OUROBOROS_MAX_ROUNDS`/`OUROBOROS_TASK_ABS_CEILING_SEC` use `parse_positive_or_unlimited` (also review cycles). Money, deadlines and Stop/Panic still bind; silence triggers attention (§5). Legacy missing keys retain 200 rounds/21600 s (`OPTIONAL_BOUND_LEGACY`); blank, zero, negative or malformed values also take those finite defaults, logged and announced once by `upgrade_notices.py`. Readers return `None` for unlimited. Operations take only true bounds (window, deadline, finite execution), else none.
 
