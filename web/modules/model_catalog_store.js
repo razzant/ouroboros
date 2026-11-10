@@ -3,7 +3,8 @@
 // server on each of his model acts) and, only when a saved choice names an API source the catalog did not list,
 // the settings document's connection list that says why. A read happens when a Model capsule opens and then only
 // when stale or failed, never on a timer; a failed read keeps what an earlier one listed and says so. Settings ›
-// Models refreshing its own catalog feeds this one without another request.
+// Models refreshing its own catalog feeds this one without another request. The circle editor's Model field takes
+// its suggestions from the same read (circles.js).
 import { apiClient, apiFetch } from './api_client.js';
 import { apiConnections } from './route_editor_primitives.js';
 import { MODEL_CATALOG_TIMEOUT_MS, mergeModelCatalog } from './settings_catalog.js';
@@ -95,6 +96,8 @@ export function createModelCatalogStore({ readCatalog = fetchCatalog, readPrefer
         read, readRecents, readConnections,
         /** Another reader's `/api/model-catalog` answer (Settings › Models' Refresh). */
         adopt(data) { if (Array.isArray(data?.items)) { adopt(data); notify(); } },
+        /** The catalog as last read (the merged `/api/model-catalog` answer), or null before any read. */
+        catalog: () => state.catalog,
         /** The index of the catalog as last read (chat_model_routes.js), built once per change. */
         index() { return state.index ||= buildModelIndex({ catalog: state.catalog || {}, connections: state.connections }); },
         recents: () => state.recents,

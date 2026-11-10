@@ -16,6 +16,8 @@ export const failureText = (error) => (error instanceof TypeError && error.respo
 export const PLACES_CHANGED_EVENT = 'ouro:places-changed';
 
 const text = (value) => (value === null || value === undefined ? '' : String(value));
+// Where a place's model comes from (`PlaceModelRoute.layer`).
+const MODEL_LAYERS = ['place', 'circle', 'consciousness'];
 const list = (value) => (Array.isArray(value) ? value : []);
 const object = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : null);
 const count = (value) => (Number.isInteger(Number(value)) && value !== null && value !== '' ? Number(value) : null);
@@ -92,7 +94,11 @@ export function normalizePlace(raw) {
             actorId: text(account?.platform_actor_id), label: text(account?.label || account?.display_name),
         })).filter((account) => account.actorId),
         workingFolder: text(place.working_folder),
+        // Its own model (empty inherits), and what it thinks with now with the scope that chose it: `place`, `circle`
+        // or `consciousness`; null from a server that does not say.
         model: text(place.model),
+        modelRoute: object(place.model_route) && MODEL_LAYERS.includes(place.model_route.layer)
+            ? { value: text(place.model_route.value), layer: place.model_route.layer } : null,
         readiness: placeReadiness(place.readiness),
         safetyMode: text(place.safety_mode),
         labels: placeLabels(place.labels),
@@ -111,11 +117,12 @@ export function normalizePlace(raw) {
     };
 }
 
-/** One CircleSummary: its name, its whole words and who wrote them, its revision. */
+/** One CircleSummary: its name, its whole words and who wrote them, its model (empty inherits), its revision. */
 export function normalizeCircle(raw) {
     const circle = object(raw) || {};
     return { id: text(circle.circle_id), name: text(circle.name), text: text(circle.text),
-        textAuthor: text(circle.text_author), textAt: text(circle.text_at), revision: count(circle.revision) };
+        textAuthor: text(circle.text_author), textAt: text(circle.text_at), model: text(circle.model),
+        revision: count(circle.revision) };
 }
 
 /** An installed connector with a valid place declaration (`GET /api/places` `connectors`). */
@@ -315,14 +322,15 @@ function circleAnswer(data, what) {
     return normalizeCircle(data.circle);
 }
 
-/** A new circle, last in the order: `{name, text}`. */
-export async function createCircle({ name, text: words = '' }) {
-    const circle = circleAnswer(await jsonPost('/api/circles', { name, text: words }), 'The circle');
+/** A new circle, last in the order: `{name, text}`, and `model` when it has one of its own. */
+export async function createCircle({ name, text: words = '', model = '' }) {
+    const circle = circleAnswer(await jsonPost('/api/circles', { name, text: words, ...(model ? { model } : {}) }), 'The circle');
     announce({ circle });
     return circle;
 }
 
-/** Rename or reword one circle: `change` holds `name` and/or `text`; the revision guards a concurrent edit. */
+/** Rename or reword one circle, or change its model: `change` holds `name`, `text` and/or `model` (empty clears it);
+ *  the revision guards a concurrent edit. */
 export async function updateCircle(circleId, change, expectedRevision) {
     const body = { ...change, ...(expectedRevision === null || expectedRevision === undefined ? {} : { expected_revision: expectedRevision }) };
     const circle = circleAnswer(await jsonPost(`/api/circles/${encodeURIComponent(circleId)}`, body), 'The circle');

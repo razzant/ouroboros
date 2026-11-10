@@ -733,6 +733,7 @@
 /** @typedef {import('./place_contract_types.js').PlaceConnectRequest} PlaceConnectRequest */
 /** @typedef {import('./place_contract_types.js').PlaceIcon} PlaceIcon */
 /** @typedef {import('./place_contract_types.js').PlaceReadiness} PlaceReadiness */
+/** @typedef {import('./place_contract_types.js').PlaceModelRoute} PlaceModelRoute */
 /** @typedef {import('./place_contract_types.js').PlaceSummary} PlaceSummary */
 /** @typedef {import('./place_contract_types.js').PlaceIdentityAccount} PlaceIdentityAccount */
 /** @typedef {import('./place_contract_types.js').PlaceIdentity} PlaceIdentity */

@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-    circleFoldHtml, circleWordsHtml, groupPlaces, initCircles, lastEventText, migrationProblemLines, placeCountText,
+    circleFoldHtml, circleWordsHtml, groupPlaces, initCircles, lastEventText, migrationProblemLines, ownModelsText, placeCountText,
     placeRowHtml, placeRowsHtml, unassignedFoldHtml,
 } from '../modules/circles.js';
 import { normalizePlacesResponse } from '../modules/consciousness_api.js';
@@ -111,8 +111,72 @@ test('the directory: places grouped by their circle in the owner\'s order; a los
         ['Could not move an old connection: gone. Connect it again.']);
 });
 
+const MODELS = { items: [
+    { provider_id: 'openrouter', provider: 'Z.ai (GLM)', id: 'z-ai/glm-5.3', name: 'GLM 5.3', value: 'z-ai/glm-5.3', label: 'OpenRouter · GLM 5.3' },
+    { provider_id: 'local', provider: 'Local', id: 'qwen3.gguf', name: 'qwen3.gguf', value: 'local::qwen3.gguf', label: 'Local · qwen3.gguf', use_local: true },
+] };
+
+// A circle may have a model (owner 10.11): its places think with it unless one has its own; the default is the
+// consciousness model. Team has one here; alpha inherits it, beta keeps its own, and Home has none.
+const GLM = 'z-ai/glm-5.3';
+const WITH_MODELS = {
+    ...RESPONSE,
+    circles: [{ ...RESPONSE.circles[0], model: GLM }, { ...RESPONSE.circles[1], model: '' }],
+    places: [
+        { ...RESPONSE.places[0], model: '', model_route: { value: GLM, layer: 'circle' } },
+        { ...RESPONSE.places[1], model: 'openai::gpt-6', model_route: { value: 'openai::gpt-6', layer: 'place' } },
+        raw('delta', { circle: { circle_id: 'home', placed_by: 'owner', placed_at: '' }, model: '', model_route: { value: 'claudexor::codex=gpt-6-astra', layer: 'consciousness' } }),
+        raw('epsilon', { circle: { circle_id: 'home', placed_by: 'owner', placed_at: '' }, model: 'main', model_route: { value: 'claudexor::codex=gpt-6-astra', layer: 'place' } }),
+    ],
+};
+const MODELLED = normalizePlacesResponse(WITH_MODELS);
+
+test('a circle\'s head names its model only when it has one; an alias is named by its role', () => {
+    const [teamModel, homePlain] = MODELLED.circles;
+    assert.deepEqual([teamModel.model, homePlain.model, team.model], [GLM, '', ''], 'a server that does not say is no model');
+    const head = (circle, places) => strip(circleFoldHtml(circle, places).match(/<summary[\s\S]*?<\/summary>/)[0]);
+    const members = MODELLED.places.slice(0, 2);
+    assert.match(head(teamModel, members), /2 places · 1 paused · model glm-5\.3$/);
+    assert.match(circleFoldHtml(teamModel, members), /<span data-i18n-fmt="model \{model\}">model glm-5\.3<\/span><\/span>\s*<\/summary>/, 'a model\'s name is not chrome');
+    assert.match(head(homePlain, []), /0 places$/, 'a circle without a model says nothing: its places follow the consciousness model');
+    assert.doesNotMatch(circleFoldHtml(team, [alpha, beta]), /model/);
+    assert.match(head({ ...teamModel, model: 'main' }, members), /· model Main$/);
+    assert.match(head({ ...teamModel, model: 'claudexor::codex=gpt-6-astra' }, members), /· model gpt-6-astra$/);
+});
+
+test('a place row shows a model only when the place overrides; an inheriting place shows none', () => {
+    const [inherits, overrides, follows, aliased] = MODELLED.places;
+    assert.deepEqual([inherits.modelRoute, overrides.modelRoute], [{ value: GLM, layer: 'circle' }, { value: 'openai::gpt-6', layer: 'place' }]);
+    const own = placeRowHtml(overrides, { title: 'beta', source: 'Chat' });
+    assert.match(strip(own), /^beta Chat paused · Off in Skills · no captured event · model gpt-6$/);
+    assert.match(own, /aria-label="Open beta \(Chat\): paused; Off in Skills; last event no captured event; model gpt-6"/);
+    assert.match(strip(placeRowHtml(aliased, { title: 'epsilon', source: 'Chat' })), /· model Main$/, 'a kept alias is named as it was chosen');
+    for (const place of [inherits, follows, alpha]) {
+        assert.doesNotMatch(placeRowHtml(place, { title: 'x', source: 'Chat' }), /model/, 'the circle\'s, the consciousness model, or a server that does not say');
+    }
+    // A layer the contract does not name is no layer.
+    assert.equal(normalizePlacesResponse({ ...RESPONSE, places: [{ ...RESPONSE.places[0], model_route: { value: GLM, layer: 'elsewhere' } }] }).places[0].modelRoute, null);
+});
+
+test('an open circle says how many of its places keep a model of their own, since the circle\'s does not reach them', () => {
+    const [teamModel, homePlain] = MODELLED.circles;
+    const [inherits, overrides, follows, aliased] = MODELLED.places;
+    assert.equal(ownModelsText(teamModel, [inherits, overrides]), '1 place here keeps a model of its own and does not follow the circle\'s.');
+    assert.equal(ownModelsText(teamModel, [overrides, aliased]), '2 places here keep a model of their own and do not follow the circle\'s.');
+    assert.equal(ownModelsText(homePlain, [follows, aliased]), '1 place here uses a model of its own.');
+    assert.equal(ownModelsText(homePlain, [aliased, overrides]), '2 places here use a model of their own.');
+    assert.equal(ownModelsText(teamModel, [inherits]), '', 'every place follows: nothing to say');
+    assert.equal(ownModelsText(teamModel, [alpha, beta]), '');
+    const open = circleFoldHtml(teamModel, [inherits, overrides], { open: 'team' });
+    assert.match(open, /<p class="consciousness-copy" data-circle-own-models>1 place here keeps a model of its own and does not follow the circle&#39;s\.<\/p>/);
+    assert.doesNotMatch(circleFoldHtml(teamModel, [inherits], { open: 'team' }), /data-circle-own-models/);
+    // The editor says it under the Model field, where the circle's model is chosen.
+    const editing = strip(circleFoldHtml(teamModel, [inherits, overrides], { open: 'team', editing: 'team' }));
+    assert.match(editing, /Model The model its places think with when they wake; empty uses the Consciousness model in Models\. A place may keep its own\. 1 place here keeps a model of its own and does not follow the circle&#39;s\./);
+});
+
 function page(t, { response = RESPONSE, writes = {}, askConfirm = async () => true, openSheet = () => {}, openConnect = () => {},
-    readStatus = async () => ({}) } = {}) {
+    readStatus = async () => ({}), readModels = async () => MODELS } = {}) {
     const cleanups = [];
     const env = setup({ after: (cleanup) => cleanups.push(cleanup) });  // restored after the page is destroyed
     // The shared header binder toggles its desk attribute; the stub DOM has no toggleAttribute of its own.
@@ -127,7 +191,7 @@ function page(t, { response = RESPONSE, writes = {}, askConfirm = async () => tr
     let reads = 0, current = response, gate = null;
     const opened = [], connects = [], confirms = [];
     const controller = initCircles({ state, showPage: async () => true, read: async () => { reads += 1; await gate; return normalizePlacesResponse(current); },
-        readStatus, openSheet: (place, options) => opened.push([place.id, options]), askConfirm: async (options) => { confirms.push(options); return askConfirm(options); },
+        readStatus, readModels, openSheet: (place, options) => opened.push([place.id, options]), askConfirm: async (options) => { confirms.push(options); return askConfirm(options); },
         openConnect: (options) => { connects.push(options); openConnect(options); },
         writes: { createCircle: async () => { throw new Error('unexpected'); }, updateCircle: async () => { throw new Error('unexpected'); },
             deleteCircle: async () => { throw new Error('unexpected'); }, ...writes },
@@ -541,4 +605,85 @@ test('a connector that changes or loses its status route never revives an older 
     await changedElsewhere(view);
     assert.equal(titleOf(view), 'Chat', 'no route, no status');
     assert.equal(status.calls.length, 2);
+});
+
+test('Edit holds the circle\'s model in the place sheet\'s chooser; it saves with the circle under its revision, and shows', async (t) => {
+    const calls = [];
+    let catalogReads = 0;
+    const view = page(t, { response: WITH_MODELS, readModels: async () => { catalogReads += 1; return MODELS; },
+        writes: { updateCircle: async (id, change, revision) => { calls.push([id, change, revision]); return { ...MODELLED.circles[1], ...change, id, revision: revision + 1 }; } } });
+    await settled();
+    assert.equal(catalogReads, 0, 'the catalog is not read for a page nobody edits');
+    await view.press('[data-circles-act="edit"][data-circle="home"]');
+    await settled();
+    const field = () => view.body.querySelector('[data-circles-draft="home:model"]');
+    assert.equal(field().getAttribute('value'), '', 'a circle without a model holds none');
+    assert.equal(field().getAttribute('placeholder'), 'Empty uses the consciousness model');
+    assert.ok(field().hasAttribute('data-model-chooser') && field().getAttribute('role') === 'combobox', 'the shared editable chooser');
+    // Suggestions come once, a route each: the local model has none and is not offered.
+    await view.controller.refresh();
+    assert.deepEqual(view.body.querySelectorAll('.ui-model-option').map((node) => node.getAttribute('data-model-value')), [GLM]);
+    await view.press('[data-circles-act="cancel"][data-circle="home"]');
+    await view.press('[data-circles-act="edit"][data-circle="home"]');
+    assert.equal(catalogReads, 1);
+    // Typed and saved: only what changed is sent, under the revision the page read.
+    await view.type('home:model', ` ${GLM} `);
+    view.serve({ ...WITH_MODELS, circles: [WITH_MODELS.circles[0], { ...WITH_MODELS.circles[1], model: GLM, revision: 5 }] });
+    await view.press('[data-circles-act="save"][data-circle="home"]');
+    await settled();
+    assert.deepEqual(calls, [['home', { model: GLM }, 4]]);
+    const head = () => strip(view.body.querySelectorAll('.circle-fold').find((node) => node.getAttribute('data-circle') === 'home').querySelector('summary').innerHTML);
+    assert.match(head(), /2 places · model glm-5\.3$/, 'a circle with a model names it');
+    // Emptied and saved: the circle has no model again and its head says nothing.
+    await view.press('[data-circles-act="edit"][data-circle="home"]');
+    assert.equal(field().getAttribute('value'), GLM);
+    await view.type('home:model', '');
+    view.serve(WITH_MODELS);
+    await view.press('[data-circles-act="save"][data-circle="home"]');
+    await settled();
+    assert.deepEqual(calls[1], ['home', { model: '' }, 5]);
+    assert.match(head(), /2 places$/);
+    // Unchanged, nothing is written.
+    await view.press('[data-circles-act="edit"][data-circle="home"]');
+    await view.press('[data-circles-act="save"][data-circle="home"]');
+    assert.equal(calls.length, 2);
+    assert.match(view.body.textContent, /Nothing to save\./);
+});
+
+test('a new circle may be made with a model; suggestions that cannot be read say so and keep what was typed', async (t) => {
+    const made = [];
+    const view = page(t, { readModels: async () => { throw new Error('offline'); },
+        writes: { createCircle: async (circle) => { made.push(circle); return { id: 'work', name: circle.name, text: '', model: circle.model || '', revision: 1 }; } } });
+    await settled();
+    await view.press('[data-circles-act="new"]');
+    await settled();
+    assert.match(view.body.textContent, /Model suggestions could not be read; your model is kept\./);
+    await view.type('new:name', 'Work');
+    await view.type('new:model', 'openai::gpt-6');
+    await view.controller.refresh();
+    assert.equal(view.body.querySelector('[data-circles-draft="new:model"]').getAttribute('value'), 'openai::gpt-6', 'a repaint keeps the draft');
+    await view.press('[data-circles-act="create"]');
+    await settled();
+    assert.deepEqual(made, [{ name: 'Work', text: '', model: 'openai::gpt-6' }]);
+    assert.equal(view.body.querySelector('[data-circles-draft="new:model"]'), null, 'made once: no second New circle');
+});
+
+test('a model typed while Save is out stays a draft on the revision that Save made', async (t) => {
+    let finish;
+    const calls = [];
+    const view = page(t, { response: WITH_MODELS, writes: { updateCircle: (id, change, revision) => { calls.push([change, revision]);
+        return new Promise((resolve) => { finish = () => resolve({ ...MODELLED.circles[1], ...change, id, revision: revision + 1 }); }); } } });
+    await settled();
+    await view.press('[data-circles-act="edit"][data-circle="home"]');
+    await view.type('home:model', GLM);
+    const saving = view.press('[data-circles-act="save"][data-circle="home"]');
+    await view.type('home:model', 'openai::gpt-6');
+    finish(); await saving; await settled();
+    assert.equal(view.body.querySelector('[data-circles-draft="home:model"]').getAttribute('value'), 'openai::gpt-6');
+    assert.match(view.body.textContent, /Saved\. Newer edits are still unsaved\./);
+    view.serve({ ...WITH_MODELS, circles: [WITH_MODELS.circles[0], { ...WITH_MODELS.circles[1], model: GLM, revision: 5 }] });
+    await view.controller.refresh();
+    const next = view.press('[data-circles-act="save"][data-circle="home"]');
+    await settled(); finish(); await next;
+    assert.deepEqual(calls, [[{ model: GLM }, 4], [{ model: 'openai::gpt-6' }, 5]]);
 });

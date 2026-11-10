@@ -31,7 +31,7 @@
  */
 
 /**
- * One circle, named once per list: its whole words and who wrote them.
+ * One circle, named once per list: its whole words, who wrote them, and its model (empty inherits consciousness).
  * @typedef {Object} CircleSummary
  * @property {string} circle_id
  * @property {string} name
@@ -39,6 +39,7 @@
  * @property {string} text_author
  * @property {string} text_at
  * @property {number} revision
+ * @property {string} model
  */
 
 /**
@@ -46,13 +47,15 @@
  * @typedef {Object} CircleCreateRequest
  * @property {string} name
  * @property {string=} text
+ * @property {string=} model
  */
 
 /**
- * Rename or reword; expected_revision compares the circle's revision before writing.
+ * Rename, reword or change the model; expected_revision compares the circle's revision before writing.
  * @typedef {Object} CircleUpdateRequest
  * @property {string=} name
  * @property {string=} text
+ * @property {string=} model
  * @property {number=} expected_revision
  */
 
@@ -101,6 +104,14 @@
  */
 
 /**
+ * The model a place thinks with now, and the scope that chose it: its own, its circle's, or the consciousness
+ * model. A stored alias (`main`, `light`) reads here as the model it resolves to now.
+ * @typedef {Object} PlaceModelRoute
+ * @property {string} value
+ * @property {'place'|'circle'|'consciousness'} layer
+ */
+
+/**
  * One projection for list, write/conflict responses and the model's place map.
  * @typedef {Object} PlaceSummary
  * @property {string} place_id
@@ -116,6 +127,7 @@
  * @property {Array<Object<string,string>>} owner_accounts
  * @property {string} working_folder
  * @property {string} model
+ * @property {PlaceModelRoute} model_route
  * @property {Array<string>} context_topics
  * @property {Array<string>} legacy_binding_ids
  * @property {number} revision

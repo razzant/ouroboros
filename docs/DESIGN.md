@@ -2127,12 +2127,17 @@ position until closure. Host words use `tr`/`fmt`; summaries, notes and names us
 Circles (first tool) is the one home of places; Dashboard, Settings and a connector's Skills sheet
 point to it. One card: circles in the owner's order, one open, then “Not in a circle” (open while
 no circle exists). An open circle shows its words whole in their author's voice (owner tint for
-the owner's only), Edit (name, words, Delete), Add a place and its rows; Delete names how many
+the owner's only), Edit (name, words, model, Delete), Add a place and its rows; Delete names how many
 places keep their connection and lose its words. No feed, summary or wake list: Main holds attention.
+A circle may have a model, in the place sheet's own chooser: its places think with it unless one has
+its own, and without one they use the consciousness model; the head names it only when it has one
+(“model glm-5.3”), and the open circle says how many of its places keep a model of their own (owner
+10.11, 7: «Место наследует модель круга, но можно заоверрайдить. По дефолту модель сознания»).
 
 A row: mark, the place's own name, service, state word (with “· consciousness off” and the muted dot while Off
 leaves a place that is not Paused only hearing), readiness only when not simply on, the
-last captured event (“no captured event”, never “no activity”) and the optional description,
+last captured event (“no captured event”, never “no activity”), its model only when the place
+overrides, and the optional description,
 ellipsized: its own field, empty until written, never a note's first line; purpose, not a rule.
 
 Add asks “What is this place, and what am I here for?” (its first note) and the optional
@@ -2159,7 +2164,9 @@ Title: the row's name; meta: service and state. First the context: the circle as
 change moves the place), “Edit in circle ›”, its words in two lines with who wrote them and who
 placed the place (an Ouroboros placement offers “Keep it in {circle}”), the place's own notes in
 brief in their authors' voices and the description; then “Open conversation”, three recent rows,
-“All N ›”.
+“All N ›”. More › Model holds only the place's own model: empty, its placeholder and help say what
+it uses, “Uses {circle}'s model: {model}” or “Uses the consciousness model: {model}”, and clearing
+the field returns the place to that (owner 10.11, 7).
 
 “Your accounts here” uses status: “It writes here as {label}
 · reads as {labels}”. Only users match confirmed accounts: unconfirmed senders
