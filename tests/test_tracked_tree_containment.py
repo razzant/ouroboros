@@ -82,6 +82,34 @@ def test_fast_roots_keep_exact_results_and_reap_zombie_only_groups(registry):
             platform_layer.observe_child_exit(proc.pid)
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux /proc maintenance census")
+def test_busy_owner_maintenance_reaps_previous_quiet_tree(registry):
+    """A busy owner must settle a prior tree without a global waitpid sweep."""
+    with shell_process.tracked_start() as publish:
+        first = publish(shell_process.contained_popen(
+            subprocess.Popen, ["sh", "-c", "sleep .15 & exit 0"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **subprocess_new_group_kwargs()))
+    assert first.wait(timeout=5) == 0
+    # The command itself is quiet, but its retained leader may still await the
+    # next maintenance boundary.  A second command models a non-idle worker.
+    time.sleep(.25)
+    with shell_process.tracked_start() as publish:
+        second = publish(shell_process.contained_popen(
+            subprocess.Popen, [sys.executable, "-c", "pass"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **subprocess_new_group_kwargs()))
+    assert second.wait(timeout=5) == 0
+    with pytest.raises(ChildProcessError):
+        platform_layer.observe_child_exit(first.pid)
+    time.sleep(.25)
+    with shell_process.tracked_start() as publish:
+        third = publish(shell_process.contained_popen(
+            subprocess.Popen, [sys.executable, "-c", "pass"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **subprocess_new_group_kwargs()))
+    assert third.wait(timeout=5) == 0
+    with pytest.raises(ChildProcessError):
+        platform_layer.observe_child_exit(first.pid)
+
+
 @POSIX_ONLY
 @pytest.mark.parametrize("retired", [False, True])
 def test_retained_popen_is_quiet_at_interpreter_shutdown(retired):

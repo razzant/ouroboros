@@ -165,6 +165,46 @@ def process_group_has_live_members(pgid: int) -> bool:
     return _pl.process_group_is_alive(pgid)
 
 
+def process_groups_have_live_members(pgids: "set[int]") -> Optional[dict[int, bool]]:
+    """Take one bounded POSIX census for several groups without spawning ``ps``.
+
+    ``None`` means the process table could not be read and is deliberately not an empty
+    result.  Linux callers use ``/proc`` so retirement remains possible when the process
+    limit itself is exhausted; macOS keeps the existing per-group ``ps`` path.
+    """
+    wanted = {int(pgid) for pgid in pgids if int(pgid) > 0}
+    if not wanted:
+        return {}
+    if _pl.IS_WINDOWS:
+        return None
+    if os.path.isdir("/proc"):
+        states = {pgid: [] for pgid in wanted}
+        try:
+            names = os.listdir("/proc")
+            for name in names:
+                if not name.isdigit():
+                    continue
+                try:
+                    with open(f"/proc/{name}/stat", "rb") as handle:
+                        fields = handle.read().rpartition(b")")[2].split()
+                    if len(fields) < 5:
+                        return None
+                    pgid = int(fields[2])
+                    if pgid in states:
+                        states[pgid].append(fields[0].decode("ascii", "replace"))
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+                except (OSError, ValueError, IndexError):
+                    return None
+        except OSError:
+            return None
+        return {pgid: any(not state.startswith("Z") for state in members)
+                for pgid, members in states.items()}
+    # Do not spawn an untracked census process on macOS.  Unknown is fail-closed;
+    # the existing per-group ps probe remains available outside maintenance.
+    return None
+
+
 def _unattributed_candidate(pid: int, since_ticks: int) -> bool:
     """Select plausible unreadable strangers for disclosure, never membership.
 

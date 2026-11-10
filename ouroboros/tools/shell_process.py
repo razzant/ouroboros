@@ -175,6 +175,13 @@ def tracked_start():
             _spawning_subprocesses += 1
     if refusal:
         raise CommandAdmissionClosed(refusal)
+    # Every contained spawn is a maintenance boundary, including direct callers
+    # such as git_ops that do not use _tracked_subprocess_run.  Admission is
+    # checked first so Panic never launches census work.
+    try:
+        maintain_tracked_children()
+    except Exception:
+        log.debug("Tracked-child maintenance failed before spawn", exc_info=True)
     stopping: list = []
 
     def publish(proc):
@@ -421,6 +428,9 @@ def _tree_remains(proc) -> Optional[bool]:
         if "_ouroboros_group_held" not in held or not retained_child_group(proc):
             return None  # an unknown/reaped/recycled leader cannot vouch for this number
         from ouroboros.process_containment import process_group_has_live_members
+        if "_ouroboros_live_group_census" in held:
+            live_groups = held["_ouroboros_live_group_census"]
+            return live_groups.get(held["_ouroboros_pgid"])
         return process_group_has_live_members(held["_ouroboros_pgid"])
     if held.get("_ouroboros_job") is None:
         return None
@@ -435,7 +445,10 @@ def retire_tracked(proc) -> bool:
     keep this registry alive; stop/idle probes retire naturally ended trees.
     """
     held = _held(proc)
-    if proc.poll() is None or _tree_remains(proc) is not False:
+    if proc.poll() is None:
+        return False
+    remains = _tree_remains(proc)
+    if remains is not False:
         return False
     held["_ouroboros_tree_settled"] = True
     if held.get("_ouroboros_group_held") and not retained_child_group(proc, release=True):
@@ -512,6 +525,30 @@ def unsettled_tracked_children() -> Optional[dict]:
     alive = sorted(proc.pid for proc in _active_subprocesses.copy() if not retire_tracked(proc))
     with _start_settled:
         unpublished = _spawning_subprocesses
+    return {"state": "unconfirmed", "pids": alive, "unpublished": unpublished} if alive or unpublished else None
+
+
+def maintain_tracked_children() -> Optional[dict]:
+    """Retire quiet tracked trees while their owner stays busy, without global waitpid."""
+    from ouroboros.process_containment import process_groups_have_live_members
+
+    candidates = [proc for proc in _active_subprocesses.copy() if proc.poll() is not None]
+    if not candidates:
+        with _start_settled:
+            return {"state": "unconfirmed", "pids": [], "unpublished": _spawning_subprocesses} \
+                if _spawning_subprocesses else None
+    pgids = {int(_held(proc).get("_ouroboros_pgid", 0) or 0) for proc in candidates}
+    census = process_groups_have_live_members(pgids)
+    for proc in candidates:
+        _held(proc)["_ouroboros_live_group_census"] = census or {}
+        try:
+            retire_tracked(proc)
+        finally:
+            _held(proc).pop("_ouroboros_live_group_census", None)
+    with _start_settled:
+        unpublished = _spawning_subprocesses
+    alive = sorted(proc.pid for proc in _active_subprocesses.copy()
+                   if proc.poll() is not None)
     return {"state": "unconfirmed", "pids": alive, "unpublished": unpublished} if alive or unpublished else None
 
 
