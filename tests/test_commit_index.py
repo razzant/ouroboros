@@ -867,7 +867,7 @@ def test_a_compacted_attempt_collected_with_its_exact_bytes_returns_its_outcome_
     if evidence == "settled_record":
         assert result.startswith("Review outcome already settled, returned read-only: its attempt row was compacted"), result
         shown = json.JSONDecoder().raw_decode(result, result.index("{"))[0]
-        assert shown["aggregate"] == "FAIL" and shown["review_reference"] == reference, shown
+        assert shown["aggregate"] == "FAIL" and shown["review_reference"] == {**reference, "shown_outcomes": shown["review_reference"]["shown_outcomes"]}, shown
         assert [row["seat_id"] for row in shown["rows"]] == ["critic"] and shown["findings"]["critical_findings"], shown
     else:
         assert "missing or no longer has its exact evidence" in result, result

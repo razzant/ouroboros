@@ -230,8 +230,8 @@ def build_review_status_payload(projection: Dict[str, Any], *, next_step: str, i
         if get_review_enforcement() == "advisory" and received:
             payload["review_reference"] = {"surface": "commit", **{key: getattr(selected_attempt, key) for key in
                 ("repo_key", "task_id", "tool_name", "attempt", "pre_review_fingerprint", "review_record_id")}}
-            payload["next_step"] = ("Read the returned findings. You may revise and request another permitted review, stop, or call "
-                "commit_reviewed with this review_reference and an explicit author_disposition/rationale to commit the current bytes of the paths it reviewed (or the paths you name) without a new panel. Independent checks still apply.")
+            payload["next_step"] = ("Read the returned findings. You may revise and request another permitted review, stop, or collect the whole outcome at $0 with "
+                "commit_reviewed, this review_reference and no author_disposition; the review_reference that call returns, with an explicit author_disposition/rationale, commits the current bytes of the paths it reviewed (or the paths you name) without a new panel. Independent checks still apply.")
     if projection.get("canonical_attempts_unreadable"):
         payload["canonical_attempts_unreadable"] = projection["canonical_attempts_unreadable"]
     if projection.get("advisory_run_archive"):

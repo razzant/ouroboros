@@ -1145,7 +1145,9 @@ def test_a_decision_written_beside_its_review_lands_only_with_the_reference_it_r
     assert [effect[:2] for effect in effects] == [(False, False), (False, False)], effects
     refusal = effects[1][2]
     assert "Nothing was staged or committed" in refusal and "review_reference=" in refusal
-    reference = json.loads(refusal.split("review_reference=", 1)[1].strip().rstrip("."))
+    assert json.loads(refusal.split("review_reference=", 1)[1].split(" and no author_disposition", 1)[0])["attempt"]
+    first = effects[0][2]  # the outcome that reached the mind names what it carried; the refusal rendered no outcome
+    reference = json.JSONDecoder().raw_decode(first, first.index("\n{") + 1)[0]["review_reference"]
     turn({"commit_message": "", "author_disposition": decided, "review_reference": reference})
     assert effects[2][:2] == (True, True), effects[2][2]
     assert _git(a.repo, "log", "-1", "--format=%s") == "Change value"
@@ -1241,3 +1243,32 @@ def test_a_settled_left_wave_frees_the_corrected_candidate_and_reads_back_withou
     else:
         assert result.startswith("Review outcome returned before commit."), result
     assert load_record(a.data, left.review_record_id)["verdict"]["aggregate"] == "FAIL"
+
+
+def test_a_late_outcome_is_collected_from_the_exact_staged_bytes_before_a_new_decision(author):
+    """#2902 with the reviewed bytes still staged: the first handback left the second seat running; once it settles, the
+    old decision is refused with the index untouched, the same reference resumes its own gate at $0 and returns a new
+    reference, and the decision on that lands. No seat is sent again."""
+    from ouroboros.review_ledger import ledger_root, load_record
+
+    a, out = author, {}
+    reference = _open_uncertain_wave(a, out, feedback=True)
+    a.reviewer.release()
+    until(lambda: load_record(ledger_root(a.ctx), reference["review_record_id"])["state"] == "settled")
+    rounds, head, tree = list(a.reviewer.rounds), _git(a.repo, "rev-parse", "HEAD"), _git(a.repo, "write-tree")
+    decision = {"disposition": "accepted", "rationale": "I read the review and accept these bytes."}
+    with _parent(a):
+        refused = a.git._commit_reviewed(a.ctx, "Change value", paths=["change.py", "maybe.txt"], review_reference=reference,
+                                         author_disposition=decision)
+    assert "REVIEW_AUTHOR_CONTINUATION_INVALID" in refused and "no author_disposition" in refused, refused
+    assert (_git(a.repo, "rev-parse", "HEAD"), _git(a.repo, "write-tree")) == (head, tree), "refused before staging or Git"
+    with _parent(a):
+        collected = a.git._commit_reviewed(a.ctx, review_reference=reference)
+    assert collected.startswith("Review outcome returned before commit"), collected
+    assert _git(a.repo, "rev-parse", "HEAD") == head and a.reviewer.rounds == rounds, "collection sent nothing and landed nothing"
+    fresh = json.JSONDecoder().raw_decode(collected, collected.index("\n{") + 1)[0]["review_reference"]
+    assert fresh["shown_outcomes"] != reference["shown_outcomes"]
+    with _parent(a):
+        landed = a.git._commit_reviewed(a.ctx, "Change value", paths=["change.py", "maybe.txt"], review_reference=fresh,
+                                        author_disposition=decision)
+    assert _git(a.repo, "rev-parse", "HEAD") != head and a.reviewer.rounds == rounds, landed
