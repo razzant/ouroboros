@@ -756,9 +756,7 @@ def _assign_returned_turns(queue, remaining, unresolved_invalid_id_set) -> bool:
     from supervisor.conversation_lane import note_returns_waiting, ready_idle_carrier, resumes_on_lane
     from supervisor.dispatch_choice import choose
 
-    waiting: set = set()
-    refused: set = set()
-    deferred: set = set()
+    waiting, refused, deferred = set(), set(), set()
     while True:
         with _queue_lock:
             if not any(resumes_on_lane(task) for task in _pool().PENDING):
