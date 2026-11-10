@@ -173,7 +173,7 @@ def test_a_conversion_invalidates_room_answers_and_a_store_commit_does_not(tmp_p
     rooms = _world(tmp_path)
     assert pr.project_chat_for_task_tree(tmp_path, "kid-1") == rooms["a"]
     write_task_result(tmp_path, "kid-1", "cancelled", progress_note="a later commit")
-    assert pr.RoomResolver(tmp_path).answers.get("kid-1") == rooms["a"], "a commit keeps the warm answer"
+    assert pr.RoomResolver(tmp_path).answers.get(pr._answer_key("kid-1", "", "")) == rooms["a"], "a commit keeps the warm answer"
     c = pr.create_project(tmp_path, "room-c", name="room-c")
     pr.bind_task_to_project(tmp_path, "kid-1", c["id"], origin={"absent": "system"})
     assert pr.project_chat_for_task_tree(tmp_path, "kid-1") == c["chat_id"], "the nearest conversion wins at once"
@@ -220,10 +220,10 @@ def test_an_unavailable_ancestor_read_is_never_memoized(tmp_path, monkeypatch):
     _busy_store(monkeypatch, busy)
     contended = pr.project_chat_for_task_tree(tmp_path, "leaf")
     assert contended in (0, a["chat_id"]), "a best-effort answer while the middle is unreadable"
-    assert "leaf" not in pr.RoomResolver(tmp_path).answers, "an incomplete ancestry read is not memoized"
+    assert not pr.RoomResolver(tmp_path).settled("leaf"), "an incomplete ancestry read is not memoized"
     busy["on"] = False
     assert pr.project_chat_for_task_tree(tmp_path, "leaf") == b["chat_id"], "the retried read finds the nearer conversion"
-    assert pr.RoomResolver(tmp_path).answers["leaf"] == b["chat_id"], "a complete read is memoized"
+    assert pr.RoomResolver(tmp_path).answers[pr._answer_key("leaf", "", "")] == b["chat_id"], "a complete read is memoized"
 
 
 def test_a_healthy_warm_frame_still_opens_no_store(tmp_path, monkeypatch):

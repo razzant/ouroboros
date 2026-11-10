@@ -597,6 +597,7 @@ def _emit_origin_ambiguous(drive_root: Any, key: tuple, candidates: list, chosen
 _TASK_LINEAGE: Dict[tuple, Dict[str, Any]] = {}
 _TASK_LINEAGE_LIMIT = 50_000  # a memory bound, not a policy: the facts are re-read on the next sight
 _ROOM_ANSWERS: Dict[str, tuple] = {}
+_LINEAGE_SEEN: Dict[str, Any] = {}  # each root's task-store lineage writes its remembered lineage was read under
 # One capture (``store_capture``). ``chat_id`` is the column its writer derived (``store_hot_facts.admitted_chat``);
 # only a row an older writer left underived, and every row of a store before that column, reads its body for it:
 # text or, from a JSON real, its integer part (what ``int()`` gave). A derived row's body is never read
@@ -607,10 +608,27 @@ _LINEAGE_SELECT = ("SELECT t.task_id, t.parent_task_id, t.root_task_id, t.delega
                    "FROM tasks t WHERE t.task_id IN (SELECT value FROM json_each(?))")
 
 
+def forget_lineage(drive_root: Any, writes: Any) -> None:
+    """Drop the lineage facts and room answers this process remembers for ``drive_root`` unless they were read under
+    these lineage writes (``store_hot_facts.lineage_writes``): a task whose lineage changed is read again, as a fresh
+    process reads it. Writes the store cannot answer change nothing."""
+    root = str(drive_root)
+    if writes is None or _LINEAGE_SEEN.get(root) == writes:
+        return
+    _LINEAGE_SEEN[root] = writes
+    for key in [key for key in _TASK_LINEAGE if key[0] == root]:
+        del _TASK_LINEAGE[key]
+    _ROOM_ANSWERS.pop(str(_bindings_path(drive_root)), None)
+
+
+def _answer_key(task_id: Any, parent_task_id: Any, root_task_id: Any) -> tuple:
+    return str(task_id or "").strip(), str(parent_task_id or "").strip(), str(root_task_id or "").strip()
+
+
 def _read_lineage(drive_root: Any, task_ids: Any, *, strict: bool = False) -> Optional[Dict[str, Dict[str, Any]]]:
     """ONE indexed read of the lineage facts of ``task_ids`` (parent, root, role and the
-    admitted ``chat_id``), remembered per task id for the process (an existing task's
-    lineage never changes); an id the store does not hold is absent from the answer
+    admitted ``chat_id``), remembered per task id until a capture finds the store's lineage
+    writes moved (``forget_lineage``); an id the store does not hold is absent from the answer
     (admission creates it later); ``None`` when the store cannot answer right now, except
     that a ``strict`` reader keeps positive contention typed (``StoreBusy``) for its
     acquisition owner to wait out: contention is not unknown lineage."""
@@ -648,9 +666,10 @@ class RoomResolver:
     """One rule for live/history/cognition: nearest explicit binding on task→parent→…,
     then root; else own admitted registered Project chat (never project_id), else 0
     preserves the caller's address. Caller/store lineage is shared. Answers cache per
-    bindings snapshot: conversion invalidates, commit does not; unavailable ancestors
-    retry, absent ids read once per resolver. Strict publication uses fresh bindings
-    and propagates unreadable authority instead of pinning a guessed room."""
+    bindings snapshot by the rule's whole input (a row's own parent and root): conversion
+    invalidates, commit does not; an answer resting on a task not held or not read now is
+    never kept (``settled``), absent ids read once per resolver. Strict publication uses
+    fresh bindings and propagates unreadable authority instead of pinning a guessed room."""
 
     __slots__ = ("root", "bindings", "answers", "misses", "_projects", "strict")
 
@@ -663,7 +682,7 @@ class RoomResolver:
             cached = (self.bindings, {})
             if not strict:
                 _ROOM_ANSWERS[key] = cached
-        self.answers: Dict[str, int] = cached[1]
+        self.answers: Dict[tuple, int] = cached[1]
         self.misses: set = set()
         self._projects: Optional[frozenset] = None
 
@@ -698,16 +717,22 @@ class RoomResolver:
         except (TypeError, ValueError):
             return 0
 
+    def settled(self, task_id: Any, parent_task_id: Any = "", root_task_id: Any = "") -> bool:
+        """Whether this input's answer rests on held facts only (``__call__`` keeps no other); no task rests on none."""
+        key = _answer_key(task_id, parent_task_id, root_task_id)
+        return not key[0] or key in self.answers
+
     def __call__(self, task_id: Any, parent_task_id: Any = "", root_task_id: Any = "") -> int:
-        tid = str(task_id or "").strip()
+        key = _answer_key(task_id, parent_task_id, root_task_id)
+        tid = key[0]
         if not tid:
             return 0
-        answer = self.answers.get(tid)
+        answer = self.answers.get(key)
         if answer is not None:
             return answer
-        reads: List[Optional[Dict[str, Any]]] = []  # ``None``: an ancestor the store could not answer
+        reads: List[Optional[Dict[str, Any]]] = []  # each task the walk read: ``{}`` not held, ``None`` not answered
         chain: List[str] = []
-        cur, parent, chat = tid, str(parent_task_id or "").strip(), 0
+        cur, parent, chat = tid, key[1], 0
         while cur and cur not in chain:
             chain.append(cur)
             if chat := self._bound(cur):
@@ -717,18 +742,18 @@ class RoomResolver:
                 parent = (reads[-1] or {}).get("parent_task_id", "")
             cur, parent = parent, ""
         own = {} if chat else self._facts(tid)
-        reads.append(own)
+        complete = all(reads) and bool(chat or own)  # the walk and, without a binding, the task itself held
         own = own or {}
         if not chat:
-            root = str(root_task_id or "").strip() or own.get("root_task_id", "")
+            root = key[2] or own.get("root_task_id", "")
             chat = self._bound(root) if root and root not in chain else 0
             if not chat and own.get("chat_id"):
                 if self._projects is None:
                     self._projects = (frozenset(reserved_project_chat_ids(self.root, strict=True)) if self.strict
                                       else project_thread_chat_ids(self.root))
                 chat = own["chat_id"] if own["chat_id"] in self._projects else 0
-        if (chat or own) and None not in reads:  # an incomplete ancestry read is never memoized
-            self.answers[tid] = chat
+        if complete:  # an answer that may move when a task appears or answers is asked again
+            self.answers[key] = chat
         return chat
 
     def warm(self, task_ids: Any) -> bool:
