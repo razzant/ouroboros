@@ -249,17 +249,16 @@ def _dispatch_route(route: dict) -> tuple:
 
 def probe_response_limit(drive_root, evidence, route: dict, *, read_failed: bool = False,
                          read: dict | None = None) -> ResponseLimit:
-    """The output fact beside a window probe, bound to the endpoint its send reaches. A subscription's catalog is
-    read once, for the window: the output limit is that read's own (``read``), names the read that failed
-    (``read_failed``), or comes from the store when the window did."""
+    """The output fact beside a window probe, bound to the endpoint its send reaches: that probe's own catalog read
+    answers it (``read``), or is named as failed (``read_failed``), instead of a second read."""
     provider, base_url, api_key = _dispatch_route(route)
     options = dict(route.get("options") or {})
     if provider == "claudexor" and evidence.account_fingerprint:
         options.update(source_id=evidence.source_id, credential_profile_id=evidence.credential_profile_id,
                        account_fingerprint=evidence.account_fingerprint)
     return resolve_response_limit(drive_root, provider=provider, model=route["model"], base_url=base_url,
-        options=options or None, allow_fetch=route.get("allow_fetch", True) and (provider != "claudexor" or read_failed),
-        api_key=api_key, read_failed=read_failed, observed=read or None)
+        options=options or None, allow_fetch=route.get("allow_fetch", True), api_key=api_key, read_failed=read_failed,
+        observed=read or None)
 
 
 def response_limit_preview(drive_root, route: dict, *, account="", settings=None, role="main", window=None) -> dict:

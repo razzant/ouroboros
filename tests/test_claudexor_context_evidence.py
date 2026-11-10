@@ -97,11 +97,20 @@ def test_auto_capacity_uses_model_compatible_account_and_keeps_exact_binding(tmp
     assert wrong.window_tokens == 0
 
 
-def test_an_auto_start_plans_by_its_last_reads_account_while_that_statement_is_fresh(tmp_path, catalog):
-    """K4 (10.11.2026): an unbound Auto start takes the account its route's last catalog read advertised, with that
-    read's window, output limit and date, reading and writing nothing; one read answers window and output limit even
-    when the output record is older than its ten minutes; a statement stale by its own date is read once, and the
-    same statement read again is not written again. Another account or pin is another route: nothing carries over."""
+def test_auto_does_not_reuse_last_discovered_accounts_capacity(tmp_path, catalog):
+    first = _probe(tmp_path)
+    catalog["value"] = _catalog("account-b", "identity-b", 500_000)
+    second = _probe(tmp_path)
+    assert second.window_tokens == 500_000
+    assert first.route_fp != second.route_fp
+    assert second.credential_profile_id == "account-b"
+    assert len(catalog["calls"]) == 2
+
+
+def test_an_auto_start_reads_the_catalog_once_and_rewrites_nothing_it_already_holds(tmp_path, catalog):
+    """Every Auto start reads the engine's catalog live, exactly once: that read answers the window and the output
+    limit even when the output record is past its ten minutes, the same statement read again is not written again,
+    and another advertisement is what the very next start plans by."""
     from ouroboros import context_timing
 
     def start(**kwargs):
@@ -112,23 +121,13 @@ def test_an_auto_start_plans_by_its_last_reads_account_while_that_statement_is_f
     catalog["value"]["observedAt"] = hours_ago  # no maximum and an output record already past its ten minutes
     first, work = start()
     assert (first.window_tokens, first.credential_profile_id, len(catalog["calls"])) == (872_000, "account-a", 1)
-    assert work == {"catalog_calls": 1, "evidence_writes": 3}  # probe, its Auto copy, the output limit; no second read
-    catalog["value"] = _catalog("account-b", "identity-b", 500_000)  # the engine would now advertise another account
-    second, work = start()
-    assert (second.to_json(), len(catalog["calls"]), work) == (first.to_json(), 1, {})
-    data = ce._load(tmp_path)
-    data["probes"][ce.route_fingerprint(provider="claudexor", model=MODEL)]["ts"] = "2020-01-01T00:00:00Z"
-    ce._save(tmp_path, data)  # the recorded statement is now stale by its own date
-    third, work = start()
-    assert (third.window_tokens, third.credential_profile_id, len(catalog["calls"])) == (500_000, "account-b", 2)
+    assert work == {"catalog_calls": 1, "evidence_writes": 2}  # the probe and the output limit; no second read
+    again, work = start()
+    assert (again.to_json(), len(catalog["calls"]), work) == (first.to_json(), 2, {"catalog_calls": 1})
+    catalog["value"] = _catalog("account-b", "identity-b", 500_000)
+    changed, work = start()
+    assert (changed.window_tokens, changed.credential_profile_id, len(catalog["calls"])) == (500_000, "account-b", 3)
     assert work["catalog_calls"] == 1 and "catalog_calls_again" not in work
-    assert start(force=True)[1] == {"catalog_calls": 1}  # the same statement again: nothing rewritten
-    catalog["value"] = _catalog("account-c", "identity-c", 400_000)
-    pinned, work = start(options={"source_id": "test-source", "credential_profile_id": "account-c"})
-    assert (pinned.credential_profile_id, pinned.window_tokens, work["catalog_calls"]) == ("account-c", 400_000, 1)
-    exact = _probe(tmp_path, allow_fetch=False, options={"source_id": "test-source", "credential_profile_id": "account-d",
-                                                        "account_fingerprint": "identity-d"})
-    assert exact.window_tokens == 0 and len(catalog["calls"]) == 4  # an exact other account inherits no statement
 
 
 def test_one_catalog_read_serves_window_and_output_and_a_failed_read_is_not_repeated(tmp_path, monkeypatch):
@@ -165,11 +164,11 @@ def test_a_failed_auto_catalog_read_plans_by_the_pools_smallest_fresh_statement(
 
     for account, window in (("account-a", 872_000), ("account-b", 500_000)):  # two Auto reads advertised two accounts
         catalog["value"] = _catalog(account, f"identity-{account[-1]}", window)
-        assert _probe(tmp_path, force=True).window_tokens == window
+        assert _probe(tmp_path).window_tokens == window
     reads = []
     monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(
         lambda *_a, **_kw: reads.append(1) or (_ for _ in ()).throw(TimeoutError("controlled daemon timeout"))))
-    bound = _probe(tmp_path, force=True)  # a read the Auto route's own record does not answer
+    bound = _probe(tmp_path)
     assert (bound.window_tokens, bound.status, bound.source) == (500_000, ce.STATUS_CONFIRMED, "pool") and reads == [1]
     assert not (bound.account_fingerprint or bound.credential_profile_id or bound.server_window)
     assert bound.ts == max(row["ts"] for row in ce._read(tmp_path)["probes"].values() if row["status"] == "confirmed")

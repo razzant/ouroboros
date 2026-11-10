@@ -183,8 +183,7 @@ def test_subscription_reviewer_sizing_reads_the_maximum_of_the_account_its_windo
         "source_id": "codex", "credential_profile_id": "account-a", "account_fingerprint": "fingerprint-a"})
     assert per_slot_input_token_limits([MODEL], output_reserve=65536, tokenizer_margin=50_000,
                                        slots=[slot]) == {"one": limit(2048)}
-    # the ack's own exact-account read; the second sizing takes the account the first one's read advertised
-    assert (reads_per_sizing, len(reads)) == (1, 2)
+    assert len(reads) == 2 * reads_per_sizing + 1  # the ack's own exact-account read; sizing adds none
 
 
 def test_gigachat_numeric_field_is_capped_before_its_real_accounted_send(transport, monkeypatch):

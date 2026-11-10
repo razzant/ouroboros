@@ -105,10 +105,7 @@ def test_ack_is_reachable_after_fresh_binding_without_an_extra_fetch_and_stays_o
     assert a.source == "owner_ack" and a.window_tokens == 1_200_000
     assert len(accounts["calls"]) == calls + 1
     accounts["auto"] = "account-b"
-    if mode == "auto":  # K4: while A's advertisement is fresh, an Auto start plans by it (and its ack), reading nothing
-        assert ce.probe(tmp_path, provider="claudexor", model=MODEL, options=options).to_json() == a.to_json()
-        assert len(accounts["calls"]) == calls + 1
-    b = ce.probe(tmp_path, provider="claudexor", model=MODEL, force=True,  # a later read: the engine advertises B
+    b = ce.probe(tmp_path, provider="claudexor", model=MODEL,
                  options={"source_id": "test-source", "credential_profile_id": "account-b" if mode == "pin" else ""})
     assert b.source == "provider_metadata" and b.window_tokens == 800_000
     assert b.route_fp != a.route_fp
