@@ -13,7 +13,8 @@ then environment, then the data root's basis (`state/state.initialized.json`):
 `<APP_ROOT>/<folder>` for data first initialized by this release or later,
 `~/Ouroboros/<folder>` for older data. An unreadable basis makes a default work root
 refuse until its key is set; nothing is moved, copied or deleted. Compose/systemd/shell
-may load an env file; Ouroboros does not. A direct server uses its checkout and
+may load an env file; Ouroboros does not. A direct server uses its checkout (Restart keeps it as is, or
+refuses before the stop if dependencies or the import fail) and
 `<APP_ROOT>/data`; while DATA_DIR is unset and `~/Ouroboros/data` holds memory (or cannot
 be examined), it exits 2 naming both choices: that data with the old
 `<APP_ROOT>/data/settings.json`, or `<APP_ROOT>/data` (ARCHITECTURE §7).
