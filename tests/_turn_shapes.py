@@ -23,7 +23,10 @@ BREADTH = 40  # live rooms the breadth step adds at k=1, with a quarter as many 
 MORE_ROWS = 650  # open rows the rows step adds over the same rooms (B9's 650 -> 1,300, in the real turn)
 ARCHIVED = 40  # archived knowledge notes and old rescue snapshots the archive step adds at k=1
 RESCUE_AGE_SEC = 3 * 86_400.0  # an old restart's rescue snapshot: older than the health block's two hours
-CATALOGUE_WINDOW = 118_000  # tokens: tight for both root sizes, so a turn's start walks Max -> Low as a live install's does
+CATALOGUE_WINDOW = 118_000  # tokens: tight for both root sizes, so a turn's start walks Max -> Low as a live install's does.
+#                             Picked by hand: the books, the tool schemas and this fixture's history set the band, and growth
+#                             past it fails the Max -> Low precondition in test_cost_contract._build_work. Deriving it would
+#                             take a calibration boot per root size; re-pick the number when that precondition fails.
 
 
 def _author(task_id: str) -> Dict[str, Any]:
