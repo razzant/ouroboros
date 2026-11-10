@@ -34,7 +34,7 @@ from ouroboros import context_budget
 from ouroboros.context_window import WindowRecord, resolve_window, route_observation_scope
 from ouroboros.tool_result_delivery import project_tool_result_batch  # noqa: F401
 from ouroboros.utils import estimate_tokens
-from ouroboros.context_timing import timed_section
+from ouroboros.context_timing import counted, timed_section
 
 log = logging.getLogger(__name__)
 
@@ -503,16 +503,14 @@ def estimate_context_prompt_tokens(
     projections = direct_openai_context_projections(
         messages, tools, provider=provider, reasoning_effort=reasoning_effort,
     )
-    return max(
-        int(estimate_tokens(json.dumps(
-            {"messages": project(projected_messages), "tools": projected_tools},
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        )))
-        for projected_messages, projected_tools in projections
-    )
+
+    def serialized(projected_messages: Any, projected_tools: Any) -> str:
+        text = json.dumps({"messages": project(projected_messages), "tools": projected_tools}, ensure_ascii=False,
+                          sort_keys=True, separators=(",", ":"), default=str)
+        counted("request_serializations", key=hash(text))
+        return text
+
+    return max(int(estimate_tokens(serialized(*projection))) for projection in projections)
 
 
 def _route_calibration_ratio(
@@ -711,6 +709,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     story_before, room_before = (render_story(snapshot, held), render_room(snapshot, held)) if snapshot else ("", "")
 
     def measure(selected, sent, addressed, story="", room=""):
+        counted("request_forms", key=("frame", selected, sent.chosen, bool(story), bool(room)))
         return _request_tokens(_system_blocks(core, governance[form[selected]], story, room,
             mode=selected, addressed=addressed), user_content_json,
             supplementary_messages_json=core.supplementary_messages_json,
@@ -824,6 +823,7 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
             raise MinimumViewUnfit("This task's directly required handbook cannot fit beside its ordinary view",
                                    fixed_tokens=fixed + book, memory_tokens=memory, reserve_tokens=max(reserve, reply),
                                    window_tokens=window, ratio=ratio, required_book_tokens=book)
+    counted("view_texts_kept", 2 if snapshot else 0)  # the story and the room text this fit delivers
     return {m: (_system_blocks(whole_core, whole_governance[form[m]], story, room, m,
         section_views(sections[m], receipts)), receipt) for m in floor.MODES}, mode
 
@@ -914,6 +914,7 @@ def build_context_fit_plan(
     view_kind = {"consciousness": "own_wake", "presence": "focus", "integrator": "owner_turn"}.get(role, role)
     # Select density before the single start walk, comparing the whole captured request at the size that can be sent.
     rows, schemas = _whole_request(core, governance, preferred, tool_schemas)
+    counted("request_forms", key=("whole", preferred))
     sendable = min(estimate_context_prompt_tokens(rows, schemas, provider=str(route.get("provider") or "")),
                    window_record.usable or math.inf)
     ratio = 1.0 if window_basis == "estimator" else _route_calibration_ratio(
@@ -933,6 +934,7 @@ def build_context_fit_plan(
         system_content, memory_facts = contents[mode]
         system_content_json = json.dumps(system_content, ensure_ascii=False, sort_keys=True)
         user_projection = delivered.get(mode)
+        counted("request_forms", key=("delivered", mode))
         estimated = _request_tokens(system_content, user_projection or core.user_content_json,
                                     supplementary_messages_json=core.supplementary_messages_json)
         return ContextFitProjection(

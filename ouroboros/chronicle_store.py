@@ -58,6 +58,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Opt
 
 from ouroboros import store, store_timing
 from ouroboros.chronicle_quotes import QuoteResolver, quote_refusal
+from ouroboros.context_timing import counted
 from ouroboros.platform_layer import (acquire_exclusive_file_lock, kernel_file_locks_enforced,
                                       release_exclusive_file_lock)
 from ouroboros.utils import append_jsonl, assert_test_data_path, utc_now_iso
@@ -367,10 +368,16 @@ class _Snapshot:
 
     def get(self, record_id):
         row = self.by_id.get(str(record_id))
-        return {**json.loads(row[5]), "sequence": row[0]} if row else None
+        if not row:
+            return None
+        counted("records_parsed", key=row[0])
+        return {**json.loads(row[5]), "sequence": row[0]}
 
     def targeting(self, record_id, kinds):
-        return [(row[0], json.loads(row[5])) for row in self.by_target.get(str(record_id), ()) if row[2] in kinds]
+        found = [row for row in self.by_target.get(str(record_id), ()) if row[2] in kinds]
+        for row in found:
+            counted("records_parsed", key=row[0])
+        return [(row[0], json.loads(row[5])) for row in found]
 
     def part_of(self, record_id):
         return self.folded.get(str(record_id))
@@ -1400,8 +1407,10 @@ class ChronicleStore:
                     sources: bool = True) -> List[Dict[str, Any]]:
         """``records`` interpreted in the same one read: a listing costs one index open, never one per record."""
         with self._reading() as look:
-            return [self._interpret(look, {**json.loads(body), "sequence": seq}, sources=sources) for seq, body in look.rows(
-                room_id, tuple(kinds), after_seq, -1 if limit is None else int(limit), author_kind, unfolded)]
+            rows = look.rows(room_id, tuple(kinds), after_seq, -1 if limit is None else int(limit), author_kind, unfolded)
+            for seq, _body in rows:
+                counted("records_parsed", key=seq)
+            return [self._interpret(look, {**json.loads(body), "sequence": seq}, sources=sources) for seq, body in rows]
 
     def targeting(self, record_id: Any, kinds: Iterable[str], *, after_seq: int = 0,
                   limit: Optional[int] = None) -> List[Dict[str, Any]]:

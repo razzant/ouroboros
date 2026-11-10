@@ -55,6 +55,7 @@ from ouroboros.mark_anchors import describe as describe_anchor
 from ouroboros.memory_view_account import (account_entries, account_lines, accounts_line, fix_map, quote_line,
                                          told_here, told_map)
 from ouroboros.memory_view_legacy import INDENT, indented as _indented, retold_lines
+from ouroboros.context_timing import counted
 from ouroboros.utils import append_jsonl, sha256_text, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -1119,6 +1120,9 @@ def _status_lines(status: Mapping[str, Any], refusals: Tuple[Dict[str, Any], ...
     return lines
 
 
+STORY_STEPS = ("F3", "F5l", "F5", "F5a")  # the only steps ``render_story``'s text reads
+
+
 def render_story(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW) -> str:
     """Block B's tail, ``## My story``: the settled retellings, then the pages not yet folded, then the status.
 
@@ -1130,6 +1134,7 @@ def render_story(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW) ->
     page first sentences, then F5 addresses pages and parts by covered-period age, independently
     of display order. Selected accounts stay whole.
     """
+    counted("view_renders", key=("story", id(snapshot), tuple(item for item in level.addressed if item[0] in STORY_STEPS)))
     spec = snapshot.spec
     if not spec.story:
         return ""
@@ -1301,6 +1306,7 @@ def render_room(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, 
     """
     from ouroboros import memory_view_conversations as conversations
 
+    counted("view_renders", key=("room", id(snapshot), level.addressed, floor_note))
     parts = [snapshot.owner_words]
     spec = snapshot.spec  # a view drawing nothing of its room (a declared request's) prints no ``## This room``
     room = snapshot.room if spec.room_page or spec.room_lanes or spec.origin_words else None

@@ -76,6 +76,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import contextlib
 import functools
 import json
 import math
@@ -587,6 +588,24 @@ def _turn_ends(log: pathlib.Path, start: int) -> List[Dict[str, Any]]:
             if isinstance(row, dict) and str(row.get("type") or "").startswith("direct_chat_")]
 
 
+def _view_receipt(root: pathlib.Path) -> Dict[str, Any]:
+    """The newest ``context_memory_view`` receipt of ``logs/events.jsonl``, read after the turn that wrote it (one
+    build per turn up to its first model request): the floor it chose and the work it counted (``work``)."""
+    receipt: Dict[str, Any] = {}
+    path = root / "logs" / "events.jsonl"
+    if path.exists():
+        with open(path, "rb") as handle:
+            for line in handle:
+                if b'"context_memory_view"' in line:
+                    with contextlib.suppress(ValueError):
+                        row = json.loads(line)
+                        receipt = row if row.get("type") == "context_memory_view" else receipt
+    floor = receipt.get("floor") or {}
+    return {"work": receipt.get("work") or {}, "mode": floor.get("mode"), "mode_switch": floor.get("mode_switch"),
+            "steps": floor.get("steps") or {}, "window_tokens": floor.get("window_tokens"),
+            "blocks": receipt.get("blocks") or {}, "max_room": receipt.get("max_room") or {}}
+
+
 def _boot_census(srv: Any, root: pathlib.Path) -> None:
     """What precedes the owner's first turn on a live install and is not that turn's: the boot's first worker
     verifies the server generation and stamps it (no worker is spawned here), and the health block's stray-server
@@ -648,7 +667,9 @@ def _measure_turns(meter: CostMeter, srv: Any, result: Dict[str, Any], root: pat
             start = log.stat().st_size if log.exists() else 0
             _boundary(meter, result, tag, lambda chat_id=chat_id, index=index: _owner_turn(
                 srv, ctx, chat_id, f"cost-turn-{index}"), timeout=600.0)
-            if f"{tag}@request" not in result:  # how it ended instead, as the product recorded it
+            if f"{tag}@request" in result:  # the build of this turn, as its own receipt counted it
+                result[f"{tag}@request"]["view"] = _view_receipt(root)
+            else:  # how it ended instead, as the product recorded it
                 result["responses"][tag]["ended"] = _turn_ends(log, start)
             _lane_rows_ended()
 

@@ -31,6 +31,39 @@ TURN_GAPS: Dict[Tuple[str, str], Tuple[str, Dict[str, int]]] = {
         "read again (knowledge._navigation_row). NEVER: both listings are what the turn shows (the shelf's "
         "index; the rescue scan, kept by decision); the row stays so that any other work per item fails.",
         {"dir_entries": 122, "scandir": 4, "listdir": 3}),
+    ("L7a", "T:main"): (
+        "One build of Main's first turn (Max -> Low, k=1 and k=30 alike) draws a form of the view again 67 times of its "
+        "80 renders (every probe of the floor walk re-renders the story and the room: memory_floor.render_view_for_mode's "
+        "``size`` and ``sent``, one level up to three times) and serializes a request form twice. Removers: K1 "
+        "(the measured edits, then the pieces).", {"view_renders_again": 80, "request_serializations_again": 6}),
+    ("L7a", "T:mainw"): (
+        "The next turn's build, the same 67 forms of the view drawn again and a request form twice; the same removers.",
+        {"view_renders_again": 80, "request_serializations_again": 6}),
+    ("L7b", "T:main"): (
+        "80 full renders of the view for the 2 texts this start delivers (k=1 and k=30): the floor walk, the receipts, the "
+        "host steps' measure and the Max frame's abandoned view all draw it. Remover: K1 (price by pieces; only the "
+        "delivered view is drawn).", {"view_renders": 110}),
+    ("L7b", "T:mainw"): ("The same 80 renders for 2 delivered texts; the same remover.", {"view_renders": 110}),
+    ("L7c", "T:main"): (
+        "The whole request is serialized 44 times for its 8 forms (k=1 and k=30): each probe of the floor walk and of "
+        "the host steps serializes the whole request again. Remover: K1 (the measured price of a request form, then "
+        "host steps by arithmetic).", {"request_serializations": 60}),
+    ("L7c", "T:mainw"): ("The same 44 serializations for 8 forms; the same remover.", {"request_serializations": 60}),
+    ("L7d", "T:main"): (
+        "A capture reads every tail row to find the open ones: 6,630 rows for 31 shown or new at k=30 (250 for 31 at "
+        "k=1; live 74,963 for 13,834). NEVER in this PR (owner's decision 1A): an exact skip of sealed rows needs its own "
+        "design (membership stored with its target facts, consensus T1). The row stays so the debt is visible and "
+        "anything beyond this read fails.", {"rows_read": 7000}),
+    ("L7d", "T:mainw"): (
+        "The same whole-tail read as T:main's L7d row (6,631 rows for 32 at k=30); the same owner decision.",
+        {"rows_read": 7000}),
+    ("L7e", "T:main"): (
+        "A capture parses chronicle records again: 303 repeated parses at k=30 (13 at k=1), the same page body up to 17 "
+        "times: story reuse, sealed_by and linked_rows each read the records themselves. Remover: K2 (one parse "
+        "per record per snapshot).", {"records_parsed_again": 400}),
+    ("L7e", "T:mainw"): (
+        "The next turn's capture parses records again: 152 repeats at k=30 (7 at k=1), warm caches take the rest; the same "
+        "remover.", {"records_parsed_again": 250}),
     ("host", "census"): (
         "check_stray_server_processes spawns one ps per listed process: 2 children for one, 25 for 24 (26.10); a "
         "process's first owner turn on the owner's Mac paid 373 to 632. Remover: razzant/ouroboros#2025 (one ps "
@@ -57,6 +90,20 @@ def hold_turn_law(law: str, tag: str, growth: Dict[str, int], allowed: Dict[str,
         assert not unexcused, f"{law} {tag} grew past its gap (growth, ceiling): {unexcused}; readers: {named}"
     if breaches:
         raise TurnLawBreach(f"{law} {tag} grew {breaches}; readers: {named}")
+
+
+def hold_work_equal(law: str, tag: str, pairs: Dict[str, Tuple[int, int]]) -> None:
+    """Each pair ``(done, delivered)`` is equal: an equality, no ceiling. ``name(...)`` in a pair's name is its
+    measurement; a ``TURN_GAPS`` row excuses a pair by its bare name, only while ``done`` stays within that row's
+    recorded work; anything else fails for real."""
+    breaches = {name: pair for name, pair in pairs.items() if pair[0] != pair[1]}
+    if not breaches:
+        return
+    ceilings = TURN_GAPS.get((law, tag), ("", {}))[1]
+    unexcused = {name: pair for name, pair in breaches.items()
+                 if pair[0] > ceilings.get(name.split("(", 1)[0], -1)}
+    assert not unexcused, f"{law} {tag}: done != delivered, unexcused: {unexcused} (its gap: {ceilings})"
+    raise TurnLawBreach(f"{law} {tag}: done != delivered: {breaches}")
 
 
 def readers_of(before: Dict[str, Any], after: Dict[str, Any]) -> Callable[[Dict[str, int]], List[tuple]]:

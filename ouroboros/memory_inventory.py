@@ -53,6 +53,7 @@ from typing import Any, Callable, Dict, FrozenSet, Iterable, Iterator, List, Map
 from ouroboros import chat_chain
 from ouroboros.chronicle_import import legacy_frontier
 from ouroboros.chronicle_store import ChronicleStore, capture, capture_memo, source_time_span
+from ouroboros.context_timing import counted
 from ouroboros.dialogue_provenance import (in_reading_order, place_message_facts, recorded_person, rooms_read_by_time,
                                            row_class, row_provenance)
 
@@ -282,11 +283,21 @@ def _read_tail(root: Any, frontier: Mapping[str, Any], *, terminal_only: bool = 
             gap = _projected(live[1:] if anchor else live)
             if state.get("complete") and end > state["upper"]:  # one zero-wait attempt; a busy lock leaves it
                 store.extend_tail(state, gap, {**state, "upper": end, "anchor": gap[-1][1:3] if gap else anchor})
-            return Tail([_entry(fact) for fact in stored + gap if not terminal_only or fact[5] is not None],
-                        bool(state.get("complete")))
+            return _counted_tail([_entry(fact) for fact in stored + gap if not terminal_only or fact[5] is not None],
+                                 bool(state.get("complete")), len(gap), terminal_only)
     lower = chat_chain.position_boundary(root, source["frontier"])
-    return Tail([_entry(fact) for fact in _projected(chat_chain.iter_stream(root, lower=lower, upper=end))
-                 if not terminal_only or fact[5] is not None], False)
+    return _counted_tail([_entry(fact) for fact in _projected(chat_chain.iter_stream(root, lower=lower, upper=end))
+                          if not terminal_only or fact[5] is not None], False, None, terminal_only)
+
+
+def _counted_tail(rows: List[Tuple[int, Dict[str, Any], Dict[str, Any], Optional[str]]], complete: bool,
+                  new: Optional[int], terminal_only: bool) -> Tail:
+    """``Tail`` of what this reader holds: the whole tail's reads count as work (``new``: the rows past the stored
+    facts this read projected, ``None`` when none were stored and every row is read live)."""
+    if not terminal_only:
+        counted("rows_read", len(rows))
+        counted("rows_new", len(rows) if new is None else new)
+    return Tail(rows, complete)
 
 
 _FILL_ROWS = 2_000  # rows per index transaction: bounds one publication-lock hold, so publishers interleave
@@ -422,6 +433,7 @@ def open_rows_by_room(root: Any, gaps: Optional[Dict[str, set]] = None,
                 rooms[room] = in_reading_order(kept, timed, lambda entry: entry[1])
             if sealed is not None and refs and len(kept) < len(entries) and row_provenance(entries[-1][1]) == "place":
                 sealed[room] = [entry for entry in entries if entry[0]["row_sha256"] in refs]
+    counted("rows_open", len({entry[0]["row_sha256"] for entries in rooms.values() for entry in entries}))
     return rooms
 
 
