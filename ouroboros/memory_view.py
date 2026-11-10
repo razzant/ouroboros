@@ -1148,16 +1148,12 @@ def render_story(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW) ->
     chronicle, the room labels, the helper route and ``level`` (the physical floor's; the
     empty level renders the full view): F3 turns a room's retold records into one line; F5l keeps
     page first sentences, then F5 addresses pages and parts by covered-period age, independently
-    of display order. Selected accounts stay whole. Only those steps (``STORY_STEPS``) reach the text, so a
-    snapshot keeps its latest story with them as its key: a walk prices many levels that differ in the room alone.
+    of display order. Selected accounts stay whole. Only those steps (``STORY_STEPS``) reach the text, so it is one
+    piece of the snapshot per their selection.
     """
     key = tuple(item for item in level.addressed if item[0] in STORY_STEPS)
     counted("view_renders", key=("story", id(snapshot), key))
-    held = snapshot.__dict__.get("_story_text")
-    if held is None or held[0] != key:  # a non-field attribute, like the floor's element table
-        held = (key, _story_text(snapshot, dict(key)))
-        object.__setattr__(snapshot, "_story_text", held)
-    return held[1]
+    return snapshot.piece(("story", key), lambda: _story_text(snapshot, dict(key)))[0]
 
 
 def _story_text(snapshot: MemoryViewSnapshot, gone: Mapping[str, Tuple[str, ...]]) -> str:
@@ -1331,42 +1327,43 @@ def render_room(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, 
     ``level`` is the physical floor's (the empty level renders the full view);
     ``floor_note`` (``### Physical floor``) closes the block. Before the import has completed
     the room is one line naming the reason and a reader that works without the chronicle.
-    A snapshot keeps its two latest levels' texts without the note: a level's receipt sizes it bare, then its request adds the note.
     """
     counted("view_renders", key=("room", id(snapshot), level.addressed, floor_note))
-    held = snapshot.__dict__.setdefault("_room_texts", {})  # a non-field attribute, like ``_story_text``
-    if level.addressed not in held:
-        if len(held) > 1:
-            held.pop(next(iter(held)))
-        held[level.addressed] = _room_text_bare(snapshot, dict(level.addressed))
-    return "\n\n".join(part for part in (held[level.addressed], floor_note if snapshot.active else "") if part)
+    texts = [text for text, _chars in _room_parts(snapshot, dict(level.addressed))]
+    return "\n\n".join(part for part in (*texts, floor_note if snapshot.active else "") if part)
 
 
-def _room_text_bare(snapshot: MemoryViewSnapshot, gone: Mapping[str, Tuple[str, ...]]) -> str:
+_ROOM_STEPS = ("F1", "F2", "F4", "F7", "F7p", "F7a", "F8", "F8a")  # the steps ``_room_text`` reads
+
+
+def _room_parts(snapshot: MemoryViewSnapshot, gone: Mapping[str, Tuple[str, ...]]) -> List[Tuple[str, int]]:
+    """The block's parts before the floor note, in order and joined by a blank line: each a piece of the snapshot."""
     from ouroboros import memory_view_conversations as conversations
 
-    parts = [snapshot.owner_words]
+    parts = [snapshot.piece(("owner_words",), lambda: snapshot.owner_words)]
     spec = snapshot.spec  # a view drawing nothing of its room (a declared request's) prints no ``## This room``
     room = snapshot.room if spec.room_page or spec.room_lanes or spec.origin_words else None
     if not snapshot.active:
         if room:
-            parts.append(f"## This room ({room.get('label')})\n\nOpen conversation unavailable until my memory is "
-                         f"activated ({snapshot.store_status.get('reason')}); read it: chat_history(count=100) — every "
-                         f"room, newest first; this room is chat_id {room['room_id']}.")
-        return "\n\n".join(part for part in parts if part)
+            parts.append(snapshot.piece(("inactive_room",), lambda: (
+                f"## This room ({room.get('label')})\n\nOpen conversation unavailable until my memory is "
+                f"activated ({snapshot.store_status.get('reason')}); read it: chat_history(count=100) — every "
+                f"room, newest first; this room is chat_id {room['room_id']}.")))
+        return parts
     # A snapshot persisted before other rooms' late reviews left this view (a pointer entry: ``own_room`` False, no
     # words) is re-rendered after an update (``context_fit``); such an entry draws nothing.
     late = [mark for mark in snapshot.marks if mark.get("late_review") and mark["late_review"].get("own_room") is not False]
     ordinary = [mark for mark in snapshot.marks if not mark.get("late_review")]
     if late:
-        parts.append(_late_reviews_text(late, snapshot.spec.role))
+        parts.append(snapshot.piece(("late_reviews",), lambda: _late_reviews_text(late, snapshot.spec.role)))
     if ordinary:
-        parts.append(_marks_text(ordinary))
+        parts.append(snapshot.piece(("marks",), lambda: _marks_text(ordinary)))
     if room:
-        parts.append(_room_text(room, gone))
-    if snapshot.spec.other_conversations:
-        parts.append(conversations.render(snapshot.conversations, gone, piece=snapshot.piece))
-    return "\n\n".join(part for part in parts if part)
+        parts.append(snapshot.piece(("room", tuple((step, gone.get(step, ())) for step in _ROOM_STEPS)),
+                                    lambda: _room_text(room, gone)))
+    if snapshot.spec.other_conversations and snapshot.conversations:
+        parts.extend(conversations.pieces(list(snapshot.conversations), gone, snapshot.piece))
+    return parts
 
 
 # --- the role line ----------------------------------------------------------------------------------

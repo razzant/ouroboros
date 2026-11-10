@@ -400,7 +400,7 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
     return "\n".join(lines)
 
 
-def _pieces(groups: List[Mapping[str, Any]], gone: Mapping[str, Iterable[str]],
+def pieces(groups: List[Mapping[str, Any]], gone: Mapping[str, Iterable[str]],
             piece: Callable[..., Tuple[str, int]]) -> List[Tuple[str, int]]:
     """``## Other conversations`` at a floor level, each local form made once through ``piece`` (a snapshot's, or plain):
     the authority sentence first, then every group in its form; at the last rung (F6a) my human's words of the counted
@@ -443,9 +443,9 @@ def _plain_piece(_key: Any, make: Callable[[], str]) -> Tuple[str, int]:
 
 def render(groups: Iterable[Mapping[str, Any]], gone: Mapping[str, Iterable[str]],
            piece: Callable[..., Tuple[str, int]] = _plain_piece) -> str:
-    """``## Other conversations`` at a floor level (``_pieces``); empty without a group."""
+    """``## Other conversations`` at a floor level (``pieces``); empty without a group."""
     groups = list(groups)
-    return "\n\n".join(text for text, _chars in _pieces(groups, gone, piece)) if groups else ""
+    return "\n\n".join(text for text, _chars in pieces(groups, gone, piece)) if groups else ""
 
 
 def owed(groups: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
