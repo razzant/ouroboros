@@ -478,7 +478,8 @@ def test_case3_a_room_that_becomes_a_place_reads_its_earlier_sealed_rows(monkeyp
     _append(tmp_path, shared.msg(_ts(2), "Mine there.", chat_id=PLACE, direction="out"))
     _append(tmp_path, shared.msg(_ts(3), "Latest main.", client_message_id="latest"))
     _fill(tmp_path)
-    _seal(tmp_path, _entry(tmp_path, "Same words."), PLACE)
+    for room in (PLACE, 1):  # sealed in both its rooms (a row of a room that is no place stands in Main too)
+        _seal(tmp_path, _entry(tmp_path, "Same words."), room)
     _compose(tmp_path)
     _append(tmp_path, shared.msg(_ts(4), "Same words.", chat_id=PLACE, type="presence_delivery",
                                  presence_provenance={"provider": "slack"}))  # the room's newest row is a place's now
@@ -579,7 +580,8 @@ def test_a_rooms_newest_row_stays_read_so_a_standing_set_needs_no_second_pass(mo
     _append(tmp_path, shared.msg(_ts(2), "A plain word.", chat_id=PLACE, transport=_TRANSPORT, client_message_id="plain"))
     _append(tmp_path, shared.msg(_ts(3), "Latest main.", client_message_id="latest"))
     _fill(tmp_path)
-    _seal(tmp_path, _entry(tmp_path, "A plain word."), PLACE)  # the room's newest row: it is no place
+    for room in (PLACE, 1):  # the room's newest row, no place's, sealed in both its rooms: only that rule keeps it read
+        _seal(tmp_path, _entry(tmp_path, "A plain word."), room)
     _compose(tmp_path)
     work = _work(tmp_path, rooms)
     assert work.get("tail_whole", 0) == 0 and "rows_cold" in work, work
@@ -613,6 +615,24 @@ def test_a_row_whose_task_the_store_does_not_hold_yet_stays_read(monkeypatch, tm
     write_task_result(tmp_path, "ghost", "completed", result="done", chat_id=gamma)  # admitted late: no mark moves
     assert _in_use(tmp_path)
     assert row[2] in _open_in(tmp_path, gamma)
+    _same(monkeypatch, tmp_path, rooms)
+
+
+def test_a_row_whose_parent_the_store_does_not_hold_yet_stays_read(monkeypatch, tmp_path):
+    rooms = _settled(tmp_path)
+    write_task_result(tmp_path, "orphan", "completed", result="done", chat_id=1, parent_task_id="elder",
+                      root_task_id="elder")
+    _append(tmp_path, shared.msg(_ts(1), "Orphan row.", direction="out", task_id="orphan"))
+    _append(tmp_path, shared.msg(_ts(2), "Later word.", client_message_id="later"))
+    _fill(tmp_path)
+    row = _entry(tmp_path, "Orphan row.")
+    _seal(tmp_path, row, 1)
+    _compose(tmp_path)
+    # its parent is admitted late, under the task bound to alpha: no mark moves, the walk reaches that binding now
+    write_task_result(tmp_path, "elder", "completed", result="done", chat_id=1, parent_task_id="bound",
+                      root_task_id="bound")
+    assert _in_use(tmp_path)
+    assert row[2] in _open_in(tmp_path, rooms["alpha"])
     _same(monkeypatch, tmp_path, rooms)
 
 
@@ -698,6 +718,34 @@ def test_a_revised_and_refilled_text_reads_the_whole_tail(monkeypatch, tmp_path)
     rooms, row = _sealed_main_row(tmp_path)
     ds.revise_text(tmp_path, "chat", row[0]["hint"]["seq"], "Sealed row, revised.")
     _fill(tmp_path)  # the stored facts of the revised store: complete again, under another source
+    assert not _in_use(tmp_path)
+    assert row[2] in _open_in(tmp_path, 1)  # its new words are under no seal
+    _same(monkeypatch, tmp_path, rooms)
+
+
+def test_marks_an_older_body_left_beside_a_tail_it_projected_anew_do_not_stand(monkeypatch, tmp_path):
+    """This body's refill drops the set's marks with the rows it replaces (``ChronicleStore.extend_tail``); an older
+    body's keeps marks it does not know. Beside a tail still filling, or one of another source, they never stand."""
+    rooms, row = _sealed_main_row(tmp_path)
+    chronicle = ChronicleStore(tmp_path)
+    with sqlite3.connect(chronicle.index_path) as db:
+        marks = db.execute("SELECT value FROM state WHERE key='tail_cold'").fetchone()[0]
+
+    def older_body_kept_them():
+        with sqlite3.connect(chronicle.index_path) as db:
+            db.execute("INSERT OR REPLACE INTO state VALUES ('tail_cold', ?)", (marks,))
+
+    state = chronicle.tail_state()  # the same source: its last row no longer answers, the prefix is projected anew
+    assert chronicle.extend_tail(state, [], {**state, "anchor": [state["anchor"][0], "0" * 64]})
+    monkeypatch.setattr(mi, "_FILL_ROWS", row[2] - 9)  # the refill stops after the chunk that holds the cold row
+    assert mi.fill_tail(tmp_path, lambda: True)["state"] == "pending"
+    older_body_kept_them()
+    assert chronicle.tail_state()["source"] == state["source"] and not _in_use(tmp_path)
+    _same(monkeypatch, tmp_path, rooms)
+    _fill(tmp_path)
+    ds.revise_text(tmp_path, "chat", row[0]["hint"]["seq"], "Sealed row, revised.")  # another source, filled whole
+    _fill(tmp_path)
+    older_body_kept_them()
     assert not _in_use(tmp_path)
     assert row[2] in _open_in(tmp_path, 1)  # its new words are under no seal
     _same(monkeypatch, tmp_path, rooms)
