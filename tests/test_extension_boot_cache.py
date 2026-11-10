@@ -5,6 +5,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import types
 
 import pytest
 
@@ -180,9 +181,16 @@ def _catalog_children(monkeypatch) -> list:
     return children
 
 
-def test_undeclared_catalog_is_one_dry_run_per_source_identity(tmp_path, monkeypatch, settled):
+@pytest.mark.parametrize("change_keys", ["platform", "absent"])
+def test_undeclared_catalog_is_one_dry_run_per_source_identity(tmp_path, monkeypatch, settled, change_keys):
     """K5 law: with unchanged inputs a second worker runs zero catalog children and publishes the same surfaces,
-    hashing each payload once; a value the skill's PluginAPI cannot read is not an input, one it reads is."""
+    hashing each payload once where its change key is trusted (``skill_discovery_reuse.keeps``); where none is
+    (Windows, a filesystem the store does not call local; forced here on every platform) the load hashes the payload
+    again, that platform's repeat. A value the skill's PluginAPI cannot read is not an input, one it reads is."""
+    from ouroboros import skill_discovery_reuse as reuse, skill_identity
+
+    if change_keys == "absent":
+        monkeypatch.setattr(skill_identity, "os", types.SimpleNamespace(name="nt"))  # the one name ``_change_key`` reads
     plugin = (
         "def register(api):\n"
         "    label = api.get_settings(['OUROBOROS_UI_LANGUAGE']).get('OUROBOROS_UI_LANGUAGE', 'unset')\n"
@@ -198,12 +206,17 @@ def test_undeclared_catalog_is_one_dry_run_per_source_identity(tmp_path, monkeyp
     def described():
         return loader.get_tool(loader.extension_surface_name("dynamic", "ping"))["description"]
 
+    keeps = reuse.keeps(skill.skill_dir)  # the rule ``reused_digest`` itself follows
+    assert change_keys == "platform" or not keeps
+
+    def hashes(forms: int) -> dict:  # each digest form once; the load takes discovery's, or hashes it again unkept
+        return ({"skill_hash": forms, "skill_hash_reused": 1} if keeps
+                else {"skill_hash": forms + 1, "skill_hash_again": 1})
+
     # The first birth runs the child; its Host Service token binds a second digest form of the payload.
-    assert _birth(drive, repo, settings, "dynamic") == (None, {"skills": 1, "skill_hash": 2, "skill_hash_reused": 1,
-                                                             "catalog_child": 1})
+    assert _birth(drive, repo, settings, "dynamic") == (None, {"skills": 1, **hashes(2), "catalog_child": 1})
     first = described()
-    assert _birth(drive, repo, settings, "dynamic") == (None, {"skills": 1, "skill_hash": 1, "skill_hash_reused": 1,
-                                                             "catalog_reused": 1})
+    assert _birth(drive, repo, settings, "dynamic") == (None, {"skills": 1, **hashes(1), "catalog_reused": 1})
     assert (described(), children) == (first, ["dynamic"]) and first == "one"
     settings["OUROBOROS_UPDATE_CHANNEL"] = "two"  # outside its allowlist: not what its registration can read
     assert _birth(drive, repo, settings, "dynamic")[1].get("catalog_child", 0) == 0
