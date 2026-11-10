@@ -5,6 +5,7 @@ import { createChatInstance } from '../modules/chat.js';
 import { buildTimelineItemHtml, cardRowSummary } from '../modules/chat_activity.js';
 import { applyPayload, tx } from '../modules/i18n.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
+import { PREVIEW_KEY } from '../modules/chat_preview.js';
 
 // The owner's own press (ouroboros/pause_notices.notice_text); rows an earlier body wrote keep their bytes.
 const ENGLISH = 'You paused this task. Its work is retained; Resume continues it.';
@@ -39,8 +40,9 @@ test('typed System pause card rows translate through the installed memory withou
 });
 
 for (const history of [false, true]) test(`pause notice without a card translates ${history ? 'on history replay' : 'live'} but preserves model speech and stored English`, async () => {
+    const source = { ...notice, history_id: 'chat:pause-one' }, original = JSON.stringify(source);
     const env = installDom(async url => ({ ok: true, json: async () => String(url).startsWith('/api/chat/history')
-        ? { messages: history ? [notice] : [], window: { complete: true } } : { active_direct_turns: [] } }));
+        ? { messages: history ? [source] : [], page_cursor: 'page:pause', window: { complete: true } } : { active_direct_turns: [] } }));
     let instance;
     try {
         russian();
@@ -54,15 +56,20 @@ for (const history of [false, true]) test(`pause notice without a card translate
                 gate() { return Promise.resolve(this.begin()); }, isCurrent: () => true, apply() {} },
         });
         await instance.refreshHistory({ revision: 1 });
-        if (!history) handlers.get('chat')({ ...notice });
+        if (!history) handlers.get('chat')(source);
         const feed = document.byId.get('chat-messages');
         const bubble = feed.children.find(node => node.classList.contains('system') && node.classList.contains('chat-bubble'));
         assert.ok(bubble, 'a missing card leaves the real System fallback');
         assert.ok(bubble.innerHTML.includes(TRANSLATED));
         assert.equal(bubble.innerHTML.includes(ENGLISH), false);
         assert.equal(feed.children.some(node => node.classList.contains('chat-live-card')), false);
-        const saved = JSON.parse(sessionStorage.getItem('ouro_chat'));
-        assert.equal(saved.find(row => row.systemType === 'task_pause_notice').text, ENGLISH);
+        assert.equal(JSON.stringify(source), original, 'live and canonical input keep their English bytes');
+        // The saved preview (chat_preview.js) holds the newest read's stored words, never a live frame or a translation.
+        const saved = JSON.parse(localStorage.getItem(PREVIEW_KEY));
+        const rows = saved.rooms.flatMap(room => room.rows);
+        if (history) assert.equal(rows.find(row => row.id === source.history_id).text, ENGLISH);
+        else assert.equal(rows.length, 0, 'a live-only notice does not enter the newest read\'s preview');
+        assert.equal(JSON.stringify(saved).includes(TRANSLATED), false, 'the display translation never enters saved text');
         handlers.get('chat')({ ...notice, role: 'assistant', task_id: 'model-root' });
         const speech = feed.children.find(node => node.classList.contains('assistant')
             && node.classList.contains('chat-bubble') && !node.classList.contains('typing-bubble'));

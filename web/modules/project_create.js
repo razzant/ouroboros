@@ -316,7 +316,9 @@ export function openProjectRowMenu(project, {
             });
             if (ok === true) {
                 onChanged?.({ projectId: project.id, lifecycle: 'deleting', optimistic: true });
-                try { await apiClient.projectDelete(project.id); }
+                // Its answer is the registry's own word: the Project was fenced `deleting` before the reply came.
+                let fenced = false;
+                try { await apiClient.projectDelete(project.id); fenced = true; }
                 catch (e) {
                     await openConfirmDialog({
                         title: 'Delete did not finish',
@@ -324,7 +326,7 @@ export function openProjectRowMenu(project, {
                         alert: true,
                     });
                 }
-                finally { onChanged?.({ authoritative: true }); }
+                finally { onChanged?.({ authoritative: true, ...(fenced && { projectId: project.id, lifecycle: 'deleting' }) }); }
             }
             focusBack();
         }
