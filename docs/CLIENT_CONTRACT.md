@@ -713,8 +713,7 @@ module again by itself after a start of that revision the page did not outlive; 
 
 `GET`/`POST /api/ui/preferences` persist `voice: {stt:"", tts:"", tts_voice:""}`
 (`tts_voice`: the chosen tts provider's voice id, empty for its own pick),
-`contributions: {hidden:[], order:[]}` in the install-wide preference file. The same handlers also serve
-`GET`/`POST /api/ui-preferences`. GET carries `model_recents:[{model,use_local}]`, at most four routes,
+`contributions: {hidden:[], order:[]}` in the install-wide preference file. GET carries `model_recents:[{model,use_local}]`, at most four routes,
 newest first without duplicates (locality is part of identity). The server records an owner model choice
 on a room save or Main write; POST naming `model_recents` returns 400 without writing, like
 `read_ahead_revisions`. Recents are suggestions, never an allowlist.

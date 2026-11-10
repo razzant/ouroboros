@@ -16,8 +16,6 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | GET | `/api/health` | 200 during boot too; the `boot` document: §2 Boot order |
 | GET | `/api/contract` | |
 | GET | `/api/state` | |
-| GET | `/api/ui-preferences` | |
-| POST | `/api/ui-preferences` | |
 | GET | `/api/consciousness` | the consciousness panel: status, spend by cause, places and recent wakes (read-only) |
 | GET | `/api/extensions` | installed-skill projection; never fetches |
 | POST | `/api/skills/{skill}/publish-preflight` | |

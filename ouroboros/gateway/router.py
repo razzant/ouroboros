@@ -38,8 +38,6 @@ def _ui_client_routes() -> list[BaseRoute]:
 
     return [
         Route("/api/ui/contributions", endpoint=api_ui_contributions, methods=["GET"]),
-        Route("/api/ui-preferences", endpoint=api_ui_preferences_get, methods=["GET"]),
-        Route("/api/ui-preferences", endpoint=api_ui_preferences_post, methods=["POST"]),
         Route("/api/ui/preferences", endpoint=api_ui_preferences_get, methods=["GET"]),
         Route("/api/ui/preferences", endpoint=api_ui_preferences_post, methods=["POST"]),
         Route("/api/ui/holds", endpoint=api_ui_holds_post, methods=["POST"]),
