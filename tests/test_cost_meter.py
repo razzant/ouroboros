@@ -333,7 +333,7 @@ def test_a_broken_measurement_is_not_a_performance_assertion(tmp_path, monkeypat
     # The inline R_late allowance must not bypass the generic gap's error distinction.
     late = next(row for mark in contract.test_room_history_is_flat.pytestmark if mark.name == "parametrize"
                 for row in mark.args[1] if getattr(row, "values", None) == ("R_late",))
-    assert next(mark.kwargs.get("raises") for mark in late.marks if mark.name == "xfail") is AssertionError
+    assert next(mark.kwargs.get("raises") for mark in late.marks if mark.name == "xfail") is contract.KnownBreach
 
     def child(args, **_kwargs):
         module = args[2]
@@ -431,3 +431,137 @@ def test_a_stand_in_use_makes_nobody_wait_and_a_killed_build_publishes_nothing(t
     monkeypatch.setattr(cache, "build", _stand_build(built))
     with cache.stand(2) as whole:
         assert (whole / "data" / "logs.jsonl").is_file() and built[-1] == (2, "")
+
+
+def _table(tmp_path, rows: int):
+    """A store of one table of ``rows`` rows, written before any meter is installed."""
+    import sqlite3
+
+    db = tmp_path / "db.sqlite"
+    seed = sqlite3.connect(db)
+    seed.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+    seed.executemany("INSERT INTO t VALUES (?, ?)", ((i, f"value-{i}") for i in range(rows)))
+    seed.commit()
+    seed.close()
+    return db
+
+
+def test_vm_steps_are_exact_whatever_the_connection_ran_before(tmp_path):
+    """#2691: the same statements count the same after any earlier work on their connection, and a statement shorter
+    than a progress period is not read as nothing. With a period of N, SQLite credits each prepared statement at its own
+    multiples of N, a phase it keeps across executions and boundaries: 27 steps read 0 or 100 by what ran before."""
+    import sqlite3
+
+    db, counted = _table(tmp_path, 200), []
+    for earlier in range(1, 5):  # the connection's first statement also loads the schema: every count starts after one
+        with CostMeter(tmp_path) as meter:
+            conn = sqlite3.connect(db)
+            tagged("before", lambda: [conn.execute("SELECT v FROM t WHERE id = ?", (i,)).fetchall()
+                                      for i in range(earlier)])
+            tagged("same", lambda: [conn.execute("SELECT v FROM t WHERE id = ?", (i,)).fetchall() for i in (5, 6, 7)])
+            conn.close()
+        counted.append(meter.snapshot("same")["counts"].get("vm_steps", 0))
+    assert counted[0] > 0 and len(set(counted)) == 1, counted
+
+
+def test_vm_steps_go_to_the_reader_that_steps_the_statement(tmp_path):
+    """A scan's steps stay its own while it queries again row by row (the shape a hidden scan takes): ``callers``
+    names the reader stack stepping each instruction, so a breach names the reader that grew, not the statement
+    started last."""
+    import collections
+    import sqlite3
+
+    db, readers = _table(tmp_path, 300), {}
+
+    def scan(conn, inner=None):
+        for index, _row in enumerate(conn.execute("SELECT v FROM t")):
+            if inner is not None and index % 100 == 0:
+                inner()
+
+    def look(conn):
+        conn.execute("SELECT count(*) FROM t WHERE v LIKE '%7%'").fetchone()
+
+    for name, run in (("apart", lambda conn: (scan(conn), [look(conn) for _ in range(3)])),
+                      ("interleaved", lambda conn: scan(conn, lambda: look(conn)))):
+        with CostMeter(tmp_path) as meter:
+            conn = sqlite3.connect(db)
+            conn.execute("SELECT 1 FROM t LIMIT 1").fetchall()  # the schema load, before the count
+            tagged(name, lambda: run(conn))
+            conn.close()
+        readers[name] = collections.Counter()
+        for key, steps in meter.snapshot(name)["callers"].items():
+            if key.startswith("vm_steps <- "):
+                readers[name][key.split(" <- ")[1].rsplit(".", 1)[-1]] += steps  # by the innermost reader
+    assert readers["interleaved"] == readers["apart"] and set(readers["apart"]) == {"scan", "look"}, readers
+
+
+def test_one_reader_called_by_two_callers_in_turn_credits_each_its_own_steps(tmp_path):
+    """A returned frame's address serves the next call in CPython, so the same helper stepping for first() and then
+    for second() can sit at one address: a reader is known by the codes its stack runs through, never by a frame."""
+    import collections
+    import sqlite3
+
+    db = _table(tmp_path, 200)
+
+    def helper(conn):
+        conn.execute("SELECT count(*) FROM t WHERE v LIKE '%7%'").fetchone()
+
+    def first(conn):
+        helper(conn)
+
+    def second(conn):
+        helper(conn)
+
+    with CostMeter(tmp_path) as meter:
+        conn = sqlite3.connect(db)
+        conn.execute("SELECT 1 FROM t LIMIT 1").fetchall()  # the schema load, before the count
+        helper(conn)  # and the statement's first run, which steps once more than its cached reruns
+        tagged("turns", lambda: (first(conn), second(conn)))
+        conn.close()
+    steps = collections.Counter()
+    for key, count in meter.snapshot("turns")["callers"].items():
+        if key.startswith("vm_steps <- "):
+            steps[key.split(" <- ")[2].rsplit(".", 1)[-1]] += count  # by the reader's caller
+    assert steps["first"] == steps["second"] > 0 and set(steps) == {"first", "second"}, steps
+
+
+def test_naming_a_reader_keeps_none_of_its_locals_alive(tmp_path):
+    """The meter keeps a reader's codes, not its frame: what the reader held (an open cursor's statement, a file) goes
+    when it returns, in the measured thread and in a worker that outlives the meter."""
+    import sqlite3
+    import threading
+    import weakref
+
+    db, kept, measured = _table(tmp_path, 50), [], threading.Event()
+    release = threading.Event()
+
+    class Held:
+        pass
+
+    def reader(conn):
+        held = Held()
+        conn.execute("SELECT count(*) FROM t").fetchone()
+        return weakref.ref(held)
+
+    def worker():
+        conn = sqlite3.connect(db)
+        kept.append(reader(conn))
+        conn.close()
+        measured.set()
+        release.wait(30)  # this thread, and whatever it cached, outlives the meter
+
+    thread = threading.Thread(target=worker, name="reader-worker")
+    try:
+        with CostMeter(tmp_path) as meter:
+            conn = sqlite3.connect(db)
+            ref = tagged("held", lambda: reader(conn))
+            assert ref() is None
+            thread.start()
+            assert measured.wait(30)
+            conn.close()
+        assert kept and kept[0]() is None and thread.is_alive()
+        assert meter.snapshot("held")["counts"].get("vm_steps", 0) > 0
+    finally:
+        release.set()
+        if thread.is_alive():  # an assertion can end the test before the worker starts, and join would then raise
+            thread.join(30)
