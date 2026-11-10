@@ -234,21 +234,24 @@ def session_file_durations(reports) -> dict:
 def _complete_times(reports) -> dict:
     """Seconds per node of the tests one session completed: setup, call and teardown, subtests excluded.
 
-    A test is complete once its teardown is reported, whatever its outcome: a red phase took its
-    time too. One a crashed worker's report names, or one the session left before its teardown
-    (stopped or killed while it ran), has no whole time."""
-    seconds, ended, broken = {}, set(), set()
+    A test is complete once its setup passed and its call and teardown are reported, whatever those two's
+    outcomes: a red phase took its time too. A failed or skipped setup ran no body (pytest still reports a
+    teardown), so its short time must not stand for the execution a retry really makes. One a crashed worker's
+    report names, or one the session left before its teardown (stopped or killed while it ran), has no whole
+    time."""
+    seconds, seen, broken = {}, set(), set()
     for row in reports:
         node = row["nodeid"]
         if row["phase"] == "crash":
             broken.add(node)
         elif not row.get("is_subtest"):
-            if row["phase"] == "teardown":
-                ended.add(node)
+            if row["phase"] != "setup" or row["outcome"] == "passed":
+                seen.add((node, row["phase"]))
             value = row.get("duration_seconds")
             value = max(value, 0) if type(value) in (int, float) and math.isfinite(value) else 0
             seconds[node] = seconds.get(node, 0) + value
-    return {node: value for node, value in seconds.items() if node in ended and node not in broken}
+    return {node: value for node, value in seconds.items()
+            if node not in broken and all((node, phase) in seen for phase in PHASES)}
 
 
 def record_session_durations(path, reports, *, system: str, rootpath, run_id: str, sha: str = "") -> str:

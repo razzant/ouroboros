@@ -65,6 +65,11 @@ def _test(node, *seconds, outcome="passed"):
             for phase, value in zip(("setup", "call", "teardown"), seconds)]
 
 
+def _no_body(node, setup, teardown, outcome):
+    """pytest's reports of a test whose setup failed or skipped: that setup and a teardown, no call."""
+    return [_row(node, setup, "setup", outcome), _row(node, teardown, "teardown")]
+
+
 def _projection(directory, reports, *, system="Windows", attempt="1", **blocks):
     return _write(Path(directory) / "results.json", {
         "format": 1, "session_exit_code": 0, "reports": reports, "collection_failures": [],
@@ -141,7 +146,9 @@ def test_a_ui_test_weighs_its_first_complete_execution_in_its_session_or_a_round
     session's else a round's in its verdict's order, a red one too; its retry adds nothing; a crashed or
     interrupted execution has no whole time, even one whose teardown reached xdist's controller before its
     worker died (the crash report names the test still pending there); a round's test of another shard is
-    that shard's alone."""
+    that shard's alone. A complete execution ran its body: its setup passed and its call and teardown are on
+    record, whatever those two's outcomes. A failed or skipped setup or a missing phase holds no place ahead of
+    a later real execution, a test that never ran whole stays out, and a default lane's times do not change."""
     root = tmp_path / "evidence"
     a, b, c, d, e, f, g, x, y = (f"tests/test_ui.py::test_{name}" for name in "abcdefgxy")
     full = [a, b, c, d, e, f, g, x, y]
@@ -161,8 +168,37 @@ def test_a_ui_test_weighs_its_first_complete_execution_in_its_session_or_a_round
             lane={"full": full, "shard": [2, 2], "assigned": [x, y]})
     _killed(two / "retry-1", _test(y, 0.2, 0.2, 0.2))
     _verdict(two, flaky=[y])
-    assert collect_durations(root, run_id=RUN, sha=SHA)["ui_nodes"] == {a: 3500, b: 11000, c: 1500, d: 2500,
-                                                                         g: 750, x: 3000, y: 600}
+    # Shard 3: the 500 ms of a failed setup must not stand for the 31 s its retry really took.
+    failed, skipped, no_setup, no_call, late, earlier, unrun, only_skipped, red_teardown, body_skip, called = (
+        f"tests/test_ui.py::test_{name}" for name in ("failed", "skipped", "no_setup", "no_call", "late", "earlier",
+                                                      "unrun", "only_skipped", "red_teardown", "body_skip", "called"))
+    three = root / "ui-ci-full-shard-3-1" / "host"
+    assigned = [failed, skipped, no_setup, no_call, late, earlier, unrun, only_skipped, red_teardown, body_skip, called]
+    _projection(three, [*_no_body(failed, 0.4, 0.1, "failed"), *_no_body(skipped, 0.2, 0.0, "skipped"),
+                        _row(no_setup, 2.0), _row(no_setup, 0.5, "teardown"),
+                        _row(no_call, 0.5, "setup"), _row(no_call, 9.0, subtest=True), _row(no_call, 0.5, "teardown"),
+                        _row(called, 0.4, "setup", "failed"), _row(called, 1.0), _row(called, 0.1, "teardown"),
+                        *_no_body(earlier, 0.1, 0.1, "failed"), *_no_body(unrun, 0.1, 0.1, "failed"),
+                        *_no_body(only_skipped, 0.1, 0.0, "skipped"), _row(red_teardown, 0.5, "setup"),
+                        _row(red_teardown, 1.0), _row(red_teardown, 0.5, "teardown", "failed"),
+                        *_test(body_skip, 0.5, 1.0, 0.5, outcome="skipped")],
+                system="Linux", ui_browser={"full": assigned, "shard": [3, 3], "assigned": assigned})
+    _projection(three / "retry-1", [*_test(failed, 1.0, 29.0, 1.0), *_test(skipped, 1.0, 4.0, 1.0),
+                                    *_test(no_setup, 1.0, 1.0, 1.0), *_test(no_call, 2.0, 2.0, 2.0),
+                                    *_no_body(late, 0.1, 0.1, "failed"), *_test(earlier, 1.0, 1.0, 1.0),
+                                    *_no_body(unrun, 0.1, 0.1, "failed"), *_test(red_teardown, 9.0, 9.0, 9.0),
+                                    *_test(called, 1.0, 2.0, 1.0)],
+                system="Linux")
+    _projection(three / "retry-2", [*_test(late, 3.0, 3.0, 1.0), *_test(earlier, 9.0, 9.0, 9.0)], system="Linux")
+    _verdict(three, "red", rounds=(".", "retry-1", "retry-2"), flaky=[failed, late], failed=[unrun])
+    _projection(root / "default-ci-shard-Linux-1-1" / "parallel",
+                _no_body("tests/test_d.py::test_d", 0.4, 0.1, "failed"), system="Linux",
+                default_parallel=_block("parallel", [1, 1]))
+    table = collect_durations(root, run_id=RUN, sha=SHA)
+    assert table["ui_nodes"] == {a: 3500, b: 11000, c: 1500, d: 2500, g: 750, x: 3000, y: 600,
+                                 failed: 31000, skipped: 6000, no_setup: 3000, no_call: 6000, late: 7000, earlier: 3000,
+                                 red_teardown: 2000, body_skip: 2000, called: 4000}
+    assert table["platforms"] == {"linux": {"tests/test_d.py": 500}}
 
 
 def test_of_one_ui_shard_only_the_highest_attempt_that_timed_a_test_counts(tmp_path):
@@ -194,6 +230,9 @@ def test_of_one_ui_shard_only_the_highest_attempt_that_timed_a_test_counts(tmp_p
     assert table()["ui_nodes"] == {a: 1500}
     shutil.copytree(root / "ui-ci-full-shard-1-2", root / "ui-ci-full-shard-1-2-copy")
     assert table()["ui_nodes"] == {a: 1500}
+    _projection(root / "ui-ci-full-shard-1-4" / "host", _no_body(a, 0.1, 0.1, "failed"), system="Linux", attempt="4",
+                ui_browser=lane)
+    assert table()["ui_nodes"] == {a: 1500}  # a whole attempt of failed setups timed nothing
 
 
 def test_an_owned_session_folds_its_whole_file_times_into_the_owners_table(tmp_path, monkeypatch):
