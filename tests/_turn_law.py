@@ -67,14 +67,14 @@ def hold_turn_law(law: str, tag: str, growth: Dict[str, int], allowed: Dict[str,
         raise TurnLawBreach(f"{law} {tag} grew {breaches}; readers: {named}")
 
 
-def hold_work_equal(law: str, tag: str, pairs: Dict[str, Tuple[int, int]]) -> None:
+def hold_work_equal(law: str, tag: str, pairs: Dict[str, Tuple[int, int]], *, scale: float = 1.0) -> None:
     """Each pair ``(done, delivered)`` is equal: an equality, no ceiling. ``name(...)`` in a pair's name is its
     measurement; a ``TURN_GAPS`` row excuses a pair by its bare name, only while ``done`` stays within that row's
-    recorded work; anything else fails for real."""
+    recorded work (times ``scale``, as in ``hold_turn_law``); anything else fails for real."""
     breaches = {name: pair for name, pair in pairs.items() if pair[0] != pair[1]}
     if not breaches:
         return
-    ceilings = TURN_GAPS.get((law, tag), ("", {}))[1]
+    ceilings = {name: math.ceil(ceiling * scale) for name, ceiling in TURN_GAPS.get((law, tag), ("", {}))[1].items()}
     unexcused = {name: pair for name, pair in breaches.items()
                  if pair[0] > ceilings.get(name.split("(", 1)[0], -1)}
     assert not unexcused, f"{law} {tag}: done != delivered, unexcused: {unexcused} (its gap: {ceilings})"

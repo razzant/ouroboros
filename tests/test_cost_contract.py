@@ -489,7 +489,8 @@ def test_b10_a_capture_reads_what_it_shows_and_what_is_new(measured, tag):
     since the stored facts. The one named debt of this class (``TURN_GAPS``): whole tail reads stay until the exact
     skip of sealed rows is designed."""
     works = _build_work(measured, tag)
-    hold_work_equal("L7d", tag, _pairs(works, "rows_read", lambda work: work.get("rows_open", 0) + work.get("rows_new", 0)))
+    hold_work_equal("L7d", tag, _pairs(works, "rows_read", lambda work: work.get("rows_open", 0) + work.get("rows_new", 0)),
+                    scale=(measured["large"] - K_SMALL) / 29)
 
 
 @pytest.mark.parametrize("tag", [pytest.param(tag, marks=turn_gap("L7e", tag)) for tag in WORK_TURNS])
