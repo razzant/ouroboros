@@ -291,8 +291,7 @@ def _read_tail(root: Any, frontier: Mapping[str, Any], *, terminal_only: bool = 
     lower = chat_chain.position_boundary(root, source["frontier"])
     rows = [_entry(fact) for fact in _projected(chat_chain.iter_stream(root, lower=lower, upper=end))
             if not terminal_only or fact[5] is not None]
-    counted("rows_read", 0 if terminal_only else len(rows))  # nothing stored: every row of the tail is read live
-    counted("rows_new", 0 if terminal_only else len(rows))
+    counted("rows_read", 0 if terminal_only else len(rows))  # nothing stored: every row is read live, and none is new
     return Tail(rows, False)
 
 

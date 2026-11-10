@@ -48,7 +48,7 @@ def _iter_recent_jsonl(path: pathlib.Path, max_bytes: int = 256_000):
 
 def _host_work_line(receipts: List[Mapping[str, Any]]) -> str:
     """What the running code's recent builds did past one pass, from their ``context_memory_view`` receipts: work repeated
-    on the same input (a ``<verb>_again`` above zero) and rows read past those shown and new. A fact for the mind, and
+    on the same input (a ``<verb>_again`` above zero) and rows read past those open and new. A fact for the mind, and
     only when one of the two is there: in a healthy state nothing is added."""
     from ouroboros.transcript_prefix import _running_code
 
@@ -63,8 +63,8 @@ def _host_work_line(receipts: List[Mapping[str, Any]]) -> str:
         repeats.update(again)
         repeating += bool(again)
     newest = builds[-1]
-    read, shown, new = (int(newest.get(name) or 0) for name in ("rows_read", "rows_open", "rows_new"))
-    facts = [f"the newest capture read {read:,} rows of the chat tail for {shown:,} shown and {new:,} new"] if read > shown + new else []
+    read, opened, new = (int(newest.get(name) or 0) for name in ("rows_read", "rows_open", "rows_new"))
+    facts = [f"the newest capture read {read:,} rows of the chat tail for {opened:,} open and {new:,} new"] if read > opened + new else []
     if repeats:
         facts.append(f"{repeating} of {len(builds)} recent builds did work again on an input they already had "
                      f"({', '.join(f'{verb} {n:,}' for verb, n in repeats.most_common())})")
