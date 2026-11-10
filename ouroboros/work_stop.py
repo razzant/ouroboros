@@ -618,12 +618,13 @@ def model_handoff_words(block: dict) -> str:
 
 def acceptable_unknown(blockers) -> list:
     """The ids a caller may name to go on past (``control_actor.accepting_unknown``): every
-    blocker is a held call whose outcome is unknown, else none (``[]``)."""
+    blocker is a held call or merge request whose outcome is unknown, else none (``[]``)."""
     from ouroboros.local_custody_repair import ACCEPTABLE_UNKNOWN
 
     rows = [b for b in blockers or () if isinstance(b, dict)]
-    ids = [str(b.get("operation_id") or b.get("attempt_id") or "") for b in rows
-           if b.get("kind") in {"tool_handoff", "model_handoff"} and b.get("reason") in ACCEPTABLE_UNKNOWN]
+    ids = [str(b.get("operation_id") or b.get("attempt_id") or b.get("receipt_id") or "") for b in rows
+           if b.get("kind") in {"tool_handoff", "model_handoff", "merge_operation"}
+           and b.get("reason") in ACCEPTABLE_UNKNOWN]
     return ids if rows and len(ids) == len(rows) and all(ids) else []
 
 
@@ -659,10 +660,14 @@ def resume_outcome(outcome: dict) -> dict:
         if kind in {"tool_handoff", "model_handoff"}:
             words.append(tool_handoff_words(block) if kind == "tool_handoff" else model_handoff_words(block))
             continue
+        if kind == "merge_operation":  # ``merge_receipts.held_receipts``; the web mirrors these words
+            words.append({"merge_effect_unknown": f"the outcome of a merge request of task {tid} is unknown",
+                          "merge_queued": f"a merge of task {tid} is queued on GitHub"}.get(
+                              str(block.get("reason") or ""), f"a merge of task {tid} is not settled"))
+            continue
         words.append({"running_member": f"task {tid} is still running",
                       "dispatchable_member": f"task {tid} is queued to run",
                       "owned_process": f"a process of task {tid} is still alive",
-                      "merge_operation": f"a merge of task {tid} is not settled",
                       "workspace_executor": f"a workspace process of task {tid} is not settled"}.get(
                           kind, str(kind or "unknown").replace("_", " ")))
     accept = acceptable_unknown(outcome.get("blockers"))
