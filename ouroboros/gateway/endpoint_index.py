@@ -461,8 +461,8 @@ HTTP_SHAPES: dict[str, Shape] = {
                                                          note="starts a background fetch and answers at once"),
     "GET /api/skill-catalog": Shape("200:SkillCatalogResponse 500:ErrorResponse", query="refresh",
                                     note="local cache only; a stale cache or refresh=1 starts a background fetch"),
-    "GET /api/skill-catalog/search": Shape("200:SkillCatalogSearchResponse 500:ErrorResponse", query="q source",
-                                           note="registry (ClawHub) hits need the network; a failure is registry_error"),
+    "GET /api/skill-catalog/search": Shape("200:SkillCatalogSearchResponse 500:ErrorResponse", query="q source sort cursor",
+                                           note="registry (ClawHub) answers need the network; a failure is registry_error"),
     "GET /api/skill-catalog/item/{source_id}/{name}": Shape(
         "200:SkillCatalogItemDetailResponse 404,500:ErrorResponse",
         note="a pointer entry's files are fetched at its exact commit"),

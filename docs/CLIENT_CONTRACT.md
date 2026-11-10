@@ -755,7 +755,7 @@ provider declaration, never a host exception by skill name.
 
 **The catalog** shares git clones by repository/ref and snapshots by repository/ref/path. Official/recommended mean exact endorsement through a hub row with `part: "official"`, or the bundled release; other hub repositories keep their entries without these marks. It answers from local data; a stale cache or `?refresh=1` starts a background fetch, and a source never read shows `state: "reading"`:
 - `GET /api/skill-catalog` (`SkillCatalogResponse`): `items` (`SkillCatalogItem`, id `<source_id>/<name>`) with `official`, `recommended`, `category`, `owner`, `updated_at` (when the release last changed in its source: a git source's newest commit touching it, a registry's update time; absent when unknown), `signals` (`null` means no data, never zero), `withdrawn` and `installed` (`installed`, or `name_taken` by another source's skill); `categories`; `sources` with their read state.
-- `GET /api/skill-catalog/search?q=&source=` (`SkillCatalogSearchResponse`) adds registry (ClawHub) results to a text search; `registry_error` reports an unreachable registry.
+- `GET /api/skill-catalog/search?q=&source=&sort=&cursor=` (`SkillCatalogSearchResponse`) adds registry (ClawHub) results to a text search; with no `q` only a registry named by `source` is asked, for one page (`sort` `popular` by default, `updated` or `recommended`; `cursor` from `next_cursor`, absent on the last). `registry_error` reports an unreachable registry.
 - `GET /api/skill-catalog/item/{source_id}/{name}` (`SkillCatalogItemDetailResponse`): the skill's own text, what it can use, versions and links; 404 for an unknown item.
 
 **Install, update, uninstall** (the lifecycle lane, §11):

@@ -6705,6 +6705,8 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
 /* Browse: groups and the masonry board (masonry.js writes only custom properties; these rules apply them). */
 .skills-browse { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
 .skills-browse-status { margin-bottom: var(--space-1); color: var(--text-meta); font-size: var(--type-meta); }
+.skills-browse-more { display: flex; justify-content: center; margin-top: var(--space-2); }
+.skills-browse-more[hidden] { display: none; }
 .skills-group-head {
     display: flex;
     flex-wrap: wrap;
