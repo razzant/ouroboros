@@ -1002,9 +1002,10 @@ class _Results:
     def _record_durations(self, session):
         """Fold this session's whole file times into the owner's table (ouroboros.test_evidence.durations_path for the
         gate, the evidence parent's for scripts/run_tests.py). A session that measured no whole file writes nothing:
-        one narrowed by `-k`, `--deselect` or `--lf`, or one that stopped before its end."""
+        one narrowed by `-k`, `--deselect`, `--ci-listed` or `--lf`, or one that stopped before its end."""
         option = self.config.option
         if not self.durations or getattr(option, "keyword", "") or getattr(option, "deselect", None) \
+                or getattr(option, "ci_listed", None) \
                 or getattr(option, "lf", False) or session.exitstatus in (
                     pytest.ExitCode.INTERRUPTED, pytest.ExitCode.USAGE_ERROR, pytest.ExitCode.NO_TESTS_COLLECTED):
             return

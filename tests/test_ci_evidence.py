@@ -691,6 +691,28 @@ def test_listed_ids_need_the_evidence_directory_they_are_exported_to():
         ci_evidence.pytest_configure(config)
 
 
+def test_ci_listed_session_does_not_overwrite_whole_file_durations(tmp_path):
+    """The real narrowed producer keeps its owner's complete table; an ordinary full-file session updates it."""
+    from tests.ci_verdicts import TEST_DURATIONS_ENV
+    from tests.test_ci_durations import SYSTEM, _session, _suite, _table
+
+    suite, entry = _suite(tmp_path, {"test_a.py": "def test_one(): pass\ndef test_two(): pass\n"})
+    table = _table(tmp_path, {SYSTEM: {"tests/test_a.py": 10_000}})
+    original = table.read_bytes()
+    listed = tmp_path / "listed.txt"
+    listed.write_text("tests/test_a.py::test_one\n", encoding="utf-8")
+    result, data = _session(tmp_path, suite, entry, "parallel", tmp_path / "narrow", "--ci-listed", str(listed),
+                            env={TEST_DURATIONS_ENV: str(table)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert [row["nodeid"] for row in data["reports"] if row["phase"] == "call"] == ["tests/test_a.py::test_one"]
+    assert table.read_bytes() == original
+    result, data = _session(tmp_path, suite, entry, "parallel", tmp_path / "whole",
+                            env={TEST_DURATIONS_ENV: str(table)})
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len([row for row in data["reports"] if row["phase"] == "call"]) == 2
+    assert table.read_bytes() != original and json.loads(table.read_text())["source"]["run_id"].startswith("session ")
+
+
 def test_a_recheck_cut_by_its_budget_finishes_the_test_at_the_edge_starts_no_other_and_keeps_its_collection(tmp_path):
     """#2834 with the real producer: pytest-timeout checks the budget between tests, so the test that crosses it
     reports all three phases, the next never starts and stays unknown, as does the module the cut left unrun, and the
