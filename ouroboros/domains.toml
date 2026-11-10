@@ -577,6 +577,7 @@ D20 = "Presence"
 "ouroboros/presence_carrier.py" = "D20"  # a Host turn's body in a conversation-lane carrier
 "ouroboros/presence_executions.py" = "D20"  # the Host's live Presence turns and their frame waiters
 "ouroboros/pricing.py" = "D02"
+"ouroboros/price_evidence.py" = "D02"
 "ouroboros/process_census.py" = "D09"
 "ouroboros/process_containment.py" = "D09"
 "ouroboros/process_lifeline.py" = "D09"  # POSIX owner-death guardian of a test run's process tree
