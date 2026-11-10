@@ -569,8 +569,8 @@ class _PartCache:
     def put(self, key: tuple, raw: bytes) -> None:
         if len(raw) > self.limit:
             return
+        self.size += len(raw) - len(self.parts.pop(key, b""))  # a part offered again replaces its copy, newest
         self.parts[key] = raw
-        self.size += len(raw)
         while self.size > self.limit:
             _, old = self.parts.popitem(last=False)
             self.size -= len(old)

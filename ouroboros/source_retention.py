@@ -402,6 +402,21 @@ def log_retention_change(parent, task_id, result, *, memo, stop=None):
         pass  # A failed diagnostic append is attempted again; custody stays in the result.
 
 
+def _vouches(read, data, node) -> bool:
+    """Whether the bytes ``read``'s own read verified also verify ``node``'s claims, so reading it would only repeat
+    that check: the same task source, or a blob of the same sha256 and kind at a size its ref allows. One (pack,
+    offset) alone is not enough: an empty member starts where the next one does, and a carrier may claim another
+    size."""
+    if node["kind"] == "source":
+        return node["task_id"] == read["task_id"] and all(
+            str(node["ref"].get(key)) == str(read["ref"].get(key)) for key in ("root", "path", "sha256", "size"))
+    try:
+        sha256, kind, size = packs.blob_ref_fields(node["ref"])
+    except ValueError:
+        return False
+    return (sha256, kind) == packs.blob_ref_fields(read["ref"])[:2] and size in (-1, len(data[0]))
+
+
 class RetentionWalk:
     """One operation's compact, role/owner/destination-bound reference work."""
 
@@ -747,7 +762,7 @@ class RetentionWalk:
         from ouroboros import observability as obs
         from ouroboros.task_custody import PublicationClosed
 
-        held_member, held_data = None, None  # one member, for the carriers that name it: they sort adjacently
+        held = None  # (member, node, data): one member, for the carriers that name it: they sort adjacently
         while True:
             _check_open()
             node, position = self._next_node()
@@ -755,11 +770,11 @@ class RetentionWalk:
                 return
             member = (node["kind"], position) if position else None
             try:
-                if member is not None and member == held_member:
-                    data = held_data
-                else:
+                if held and held[0] == member and _vouches(held[1], held[2], node):
+                    data = held[2]
+                else:  # any other claim is checked by its own read, as if no carrier came before it
                     data, _source = self._read_source(node)
-                    held_member, held_data = member, data if member is not None else None
+                    held = (member, node, data) if member is not None else None
                     if node["kind"] == "blob" and node["carrier"] == "response_ref" and node["ref"]["kind"] == "json":
                         # Under the root that physically held these bytes (``_read_source`` names the root it tried).
                         packs.remember_part(pathlib.Path(*data[1].parts[:-3]), node["ref"]["sha256"], data[0])

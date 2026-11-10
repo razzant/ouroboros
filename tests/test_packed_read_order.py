@@ -181,3 +181,84 @@ def test_a_part_cached_for_one_root_never_answers_for_another(root, tmp_path):
             packs.blob_bytes(root, whole)
         packs.remember_part(root, digest, raw)
         assert packs.blob_bytes(root, whole)
+
+
+def test_a_carrier_claiming_another_size_is_checked_by_its_own_read(root, tmp_path):
+    """Two carriers name one packed member and the later one claims a size the bytes lack. The read that verified
+    the member for the first carrier never vouches for the second: it is read and checked itself, so it stays
+    unavailable, as when every carrier was read alone."""
+    task = "packed-claims"
+    child = headless.prepare_task_drive(root, task, "empty")
+    named = obs.persist_call(child, task_id=task, call_id="call_00", call_type="tool_call",
+                             payload={"result": "y" * 4000})
+    ref = obs.read_call_manifest_ref(child, named["manifest_ref"], task_id=task)["full_payload_ref"]
+    wrong = {**ref, "size": int(ref["size"]) + 1}
+    # Smaller, so it packs first: the sweep discovers the wrong carrier there, and it sorts right after the member's
+    # own carrier (queued earlier), the order a forward sweep reads them in.
+    namer = obs.persist_call(child, task_id=task, call_id="call_01", call_type="tool_call",
+                             payload={"source_ref": wrong})
+    namer_ref = obs.read_call_manifest_ref(child, namer["manifest_ref"], task_id=task)["full_payload_ref"]
+    assert obs.read_blob_ref(child, namer_ref) == {"source_ref": wrong}
+    write_task_result(child, task, "completed", result="saved answer", artifact_status="ready")
+    assert packer.run_pass(child)["packed"] == 1
+    state = _walk(root, child, task)
+    assert [fact.get("size") for fact in state["unavailable_refs"]] == [wrong["size"]], state
+    assert json.loads(packs.blob_bytes(root, {**ref, "path": ""})) == {"result": "y" * 4000}
+
+
+def test_members_sharing_an_offset_are_each_read_as_themselves(root, tmp_path):
+    """An empty member takes no bytes, so the member after it starts at the same offset: one (pack, offset) is not
+    one member. A carrier of each gets its own member's bytes."""
+    task = "packed-empty"
+    child = headless.prepare_task_drive(root, task, "empty")
+    empty = obs.write_blob_bytes(child, b"", kind="txt")
+    # The manifest keeps the empty member in the pack; the payload names it, so the walk meets it right after
+    # reading the payload, the smallest other member, at the empty member's offset.
+    call = obs.persist_call(child, task_id=task, call_id="call_00", call_type="tool_call",
+                            payload={"source_ref": empty}, manifest={"empty_ref": empty})
+    payload = obs.read_call_manifest_ref(child, call["manifest_ref"], task_id=task)["full_payload_ref"]
+    assert obs.read_blob_ref(child, payload) == {"source_ref": empty}
+    write_task_result(child, task, "completed", result="saved answer", artifact_status="ready")
+    assert packer.run_pass(child)["packed"] == 1
+    _path, sidecar = next(iter(packs.list_sidecars(child)))
+    offsets = {(member["sha256"], member["kind"]): member["offset"] for member in sidecar["members"]}
+    assert offsets[(empty["sha256"], "txt")] == offsets[(payload["sha256"], "json")], sidecar["members"]
+    _proven(_walk(root, child, task))
+    assert packs.blob_bytes(root, {**empty, "path": ""}) == b""
+
+
+def test_a_part_offered_again_is_counted_once():
+    """A part offered again replaces its copy: the bound counts its bytes once and evicts nothing that fits."""
+    cache = packs._PartCache(10)
+    cache.put(("root", "a"), b"12345")
+    cache.put(("root", "b"), b"1234")
+    cache.put(("root", "a"), b"12345")
+    assert cache.size == sum(len(raw) for raw in cache.parts.values()) == 9
+    assert (cache.get(("root", "a")), cache.get(("root", "b"))) == (b"12345", b"1234")
+
+
+def test_a_response_two_carriers_read_apart_is_counted_once_by_the_part_cache(root, tmp_path, monkeypatch):
+    """Two carriers name one packed response and another read comes between them, so each reads it and offers it to
+    the walk's part cache. The second offer replaces the first: the cache's bound keeps counting its real bytes."""
+    settled = obs.persist_call(root, task_id="settled", call_id="call_00", call_type="tool_call",
+                               payload={"answer": "z" * 3000})
+    write_task_result(root, "settled", "completed", result="saved answer", artifact_status="ready")
+    assert packer.run_pass(root)["packed"] == 1
+    ref = obs.read_call_manifest_ref(root, settled["manifest_ref"], task_id="settled")["full_payload_ref"]
+    task = "two-carriers"
+    child = headless.prepare_task_drive(root, task, "empty")
+    # The same response at the canonical address and at the one a child drive writes: two carriers, one member.
+    at_child = {**ref, "path": str(child / "observability" / "blobs" / f"{ref['sha256']}.json.gz")}
+    for index, carried in enumerate((ref, at_child)):
+        obs.persist_call(child, task_id=task, call_id=f"call_{index:02d}", call_type="tool_call",
+                         payload={"response_ref": carried})
+    offers, put = [], packs._PartCache.put
+
+    def accounted(cache, key, raw):
+        offers.append(key in cache.parts)
+        put(cache, key, raw)
+        assert cache.size == sum(len(part) for part in cache.parts.values()), (cache.size, offers)
+
+    monkeypatch.setattr(packs._PartCache, "put", accounted)
+    _proven(_walk(root, child, task))
+    assert True in offers, offers  # the second carrier's read offered the cached response again
