@@ -28,14 +28,17 @@ STOP_AXES = {"execution": {"status": "ok", "reason_code": "final_message", "task
     "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}}
 
 
-def _stored_author_end(tmp_path, monkeypatch, responses, *, settle=True):
+def _stored_author_end(tmp_path, monkeypatch, responses, *, settle=True, ran=None):
     """The real loop's ending, stored by the real terminal writer beside the room's owner words; ``settle``
-    runs the real post-task phase (its paid stages stubbed), whose open checkpoint holds any Continue."""
+    runs the real post-task phase (its paid stages stubbed), whose open checkpoint holds any Continue; ``ran``
+    (a list) receives the loop's run (its model inputs, trace and usage)."""
     from ouroboros import agent_task_pipeline as pipeline
     from ouroboros.owner_mailbox import KIND_OWNER_TEXT, write_owner_message
     from ouroboros.task_results import STATUS_RUNNING, load_task_result, write_task_result
 
     run = _run_stop_loop(tmp_path, monkeypatch, responses, stop_services=False)
+    if ran is not None:
+        ran.append(run)
     data = tmp_path / "data"
     write_task_result(data, "stop-root", STATUS_RUNNING, chat_id=7, project_id="", billing_group=GROUP,
                       origin_message_text="Ship the export endpoint.",
@@ -304,6 +307,85 @@ def test_a_stop_offer_holds_no_resources_while_an_interruption_still_does(tmp_pa
     assert load_task_result(data, "stop-root")["continued_by"]["successor_task_id"] == ack["successor_task_id"]
     assert still_continuable(data, _line("stop-root"), {ack["successor_task_id"]}) is True
     assert [row["id"] for row in workers.PENDING] == [ack["successor_task_id"]]
+
+
+def test_the_incident_replayed_as_facts_a_stop_over_running_work_reaches_the_next_turn_and_its_continue(
+        tmp_path, monkeypatch):
+    """10.11: a root left its change review for an addressed message, asked a plan seat, and at a full window called
+    finish_task(action="stop", pending_review="wait"). It ended in that batch, as a stop does; the owner's next turn
+    asked why and answered from `status: completed`. Replayed as facts (the review and the plan seat are their tools'
+    own returns): the stop ends in its batch, its receipt says the argument had no effect, its summary is kept; the
+    next owner-started turn's metadata names the stopped work, its card word, its own reason as its author's account
+    and its open Continue; continue_task from that turn admits one successor and a second request names the same one.
+    Nothing here asserts what a model then does."""
+    import queue
+
+    from ouroboros import projects_registry
+    from ouroboros.review_pause import PROCESS_TOKEN
+    from ouroboros.server_routing_context import STOP_REASON_LABEL, _decision_turn_metadata
+    from ouroboros.tool_call_log import invocation_scope
+    from ouroboros.tools import plan_review, review_change
+    from ouroboros.tools.control_mind import _continue_task
+    from supervisor.events_mind_controls import _apply
+
+    def leave_the_wave(ctx, review_reference=None, *, continue_seats=None, _resolved_binding=None, **_args):
+        ctx._left_review_wait = {"surface": "change", "binding": "change-review:k2", "retry_key": "k2",
+                                 "owner": PROCESS_TOKEN, "done": False, "msg_id": "change-review-settled:k2",
+                                 "record_id": "rl-review-2"}
+        return ("An addressed message reached you while the reviewers ran: this call returned and their paid work "
+                "continues separately.\n\n" + json.dumps({"record_id": "rl-review-2", "state": "pending"}))
+
+    monkeypatch.setattr(review_change, "_handle_review_change", leave_the_wave)
+    monkeypatch.setattr(plan_review, "_handle_plan_task", lambda _ctx, **_kw: "Ask a6 sent. Still working: seat-a.")
+    summary = "Stopped at an honest midpoint: fixes ready, the fresh review not finished."
+
+    def call(name, arguments, call_id):
+        return {"content": None, "tool_calls": [{"id": call_id, "type": "function", "function": {
+            "name": name, "arguments": json.dumps(arguments)}}]}
+
+    def stop():
+        return call("finish_task", {"action": "stop", "answer": STOP_TEXT, "rationale": STOP_RATIONALE,
+                                    "pending_review": "wait", "summary": summary}, "stop-1")
+
+    runs = []
+    data, stored = _stored_author_end(tmp_path, monkeypatch, [
+        call("review_change", {"subject": "index"}, "review-2"),
+        call("plan_task", {"ask": ["seat-a"], "message": "Is the amended candidate safe?"}, "ask-a6"),
+        stop()], ran=runs)
+    [run] = runs
+    review, ask, _stop = run.trace["tool_calls"]
+    assert review["result"].startswith("An addressed message reached you while the reviewers ran")
+    assert ask["result"].endswith("Still working: seat-a.")
+    assert len(run.model_inputs) == 3, "the stop ended in its batch: no round after it"
+    receipt = json.loads(run.trace["tool_calls"][-1]["result"])
+    assert receipt["pending_review"] == "wait: no effect on a stop, which waits for nothing"
+    assert run.usage["wake_summary"] == summary and stored["wake_summary"] == summary
+    assert stored["outcome_axes"]["execution"]["task_completion"]["rationale"] == STOP_RATIONALE
+
+    projects_registry.create_project(data, "elsewhere", name="Elsewhere")  # Main lists its rooms beside results
+    ctx = SimpleNamespace(DRIVE_ROOT=data, PENDING=[], RUNNING={}, load_state=lambda: {"owner_id": 1, "owner_chat_id": 1},
+                          update_state=lambda fn: fn({"owner_id": 1, "owner_chat_id": 1}))
+    metadata = _decision_turn_metadata(ctx, 7, "cm-why-stopped", {})  # «почему остановился? доделали?»
+    reference = next(row for row in metadata["main_routing_manifest"]["final_results"] if row["task_id"] == "stop-root")
+    assert (reference["status"], reference["outcome"]) == ("completed", "Stopped")
+    assert reference["continuation_offer"] == {"eligible": True, "cause": "author_stop", "refusal": ""}
+    assert reference["stop_reason"] == {"verbatim": STOP_RATIONALE, "label": STOP_REASON_LABEL}
+    assert "continue_task" in metadata["routing_contract"]["valid_actions"]
+
+    _queue, _state, workers = _install_queue(data, monkeypatch)
+    turn = SimpleNamespace(task_id="why-turn", drive_root=data, event_queue=queue.Queue())
+    outcomes = []
+    for call_id in ("continue-1", "continue-2"):
+        with invocation_scope({"tool_call_id": call_id}):
+            assert json.loads(_continue_task(turn, "stop-root", "My human asked me to go on."))["status"] == "requested"
+        outcomes.append(_apply(turn.event_queue.get_nowait()))
+    first, second = outcomes
+    assert first["ok"] is True and [task["id"] for task in workers.PENDING] == [first["successor_task_id"]]
+    assert second == {"ok": False, "error": "already_continued", "successor_task_id": first["successor_task_id"]}
+    again = _decision_turn_metadata(ctx, 7, "cm-after", {})
+    reference = next(row for row in again["main_routing_manifest"]["final_results"] if row["task_id"] == "stop-root")
+    assert reference["continuation_offer"]["successor_task_id"] == first["successor_task_id"]
+    assert reference["continuation_offer"]["eligible"] is False
 
 
 def test_the_finish_task_schema_names_the_stop_continue_boundary(tmp_path):

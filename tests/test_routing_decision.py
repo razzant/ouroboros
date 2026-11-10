@@ -665,6 +665,100 @@ def test_decision_turn_reads_every_recorded_act_on_the_same_message_as_facts(tmp
     assert "message_routing_acts" not in single and single["message_routing_receipt"]["target"] == "root-c"
 
 
+# --- how each listed result's work ended: the facts the consciousness wake already reads ---
+
+STOP_REASON = "Ending at a full window while my review runs; next: read its verdict and fix what it finds."
+_STOPPED_AXES = {"execution": {"status": "ok", "reason_code": "final_message", "task_completion": {
+    "action": "stop", "rationale": STOP_REASON, "answer_sha256": "a" * 64, "source": "finish_task"}},
+    "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}}
+
+
+def _ended(root, task_id, ts, status="completed", *, stop=False, **fields):
+    """One root result of project ``room`` through the real lifecycle writer, its terminal time observed;
+    ``stop`` is the author's own typed ``finish_task(action="stop")``."""
+    from ouroboros.task_results import write_task_result
+
+    write_task_result(root, task_id, status, _terminal_observed=True, project_id="room", root_task_id=task_id,
+                      delegation_role="root", objective=f"work {task_id}", ts=ts,
+                      **({"outcome_axes": _STOPPED_AXES} if stop else {}),
+                      **{"reason_code": "final_message", **fields})
+
+
+def test_every_listed_result_says_how_its_work_ended_and_whether_its_continue_is_open(tmp_path):
+    """The incident: a root stopped with its review running; the owner asked why in the room, and the turn that
+    answered read only `status: completed`. Every reference now carries the card's word, the recorded cause, the
+    end time, the Continue offer and the stop's own reason labelled as that author's account (never an owner
+    instruction), computed on the loaded row; an answer-only turn newer than the stop moves the room's pointer,
+    never the stopped root's open offer; continue_task is a valid action."""
+    from ouroboros.projects_registry import create_project
+    from ouroboros.server_routing_context import STOP_REASON_LABEL, _decision_turn_metadata, _main_routing_manifest
+    from ouroboros.task_results import load_task_result
+
+    project = create_project(tmp_path, "room", name="Room")
+    _ended(tmp_path, "r-bound", "2026-11-10T09:00:00Z", stop=True,
+           continued_by={"successor_task_id": "r-next", "state": "bound", "action_nonce": "nonce-0001"})
+    _ended(tmp_path, "r-owner", "2026-11-10T10:00:00Z", "cancelled", stop=True, reason_code="",
+           cancel_origin={"source": "http_single", "reason": "owner stopped it"})
+    _ended(tmp_path, "r-finish", "2026-11-10T11:00:00Z")
+    _ended(tmp_path, "r-stop", "2026-11-10T11:23:57Z", stop=True, reason_code="plan_review_advisory")
+    _ended(tmp_path, "r-answer", "2026-11-10T11:42:29Z")  # the owner asked why; this turn answered and ended
+
+    metadata = _decision_turn_metadata(_decision_ctx(tmp_path), int(project["chat_id"]), "cm-why", {"project_id": "room"})
+    listed = {row["task_id"]: row for row in metadata["project_routing_manifest"]["final_results"]}
+    assert list(listed) == ["r-answer", "r-stop", "r-finish", "r-owner", "r-bound"]
+    stopped = listed["r-stop"]
+    assert (stopped["status"], stopped["outcome"], stopped["cause"]) == ("completed", "Stopped", "plan_review_advisory")
+    assert stopped["ended_at"] == load_task_result(tmp_path, "r-stop")["terminal_time"]["occurred_at"]
+    assert stopped["continuation_offer"] == {"eligible": True, "cause": "author_stop", "refusal": ""}
+    assert stopped["stop_reason"] == {"verbatim": STOP_REASON, "label": STOP_REASON_LABEL}
+    assert "not an owner instruction" in STOP_REASON_LABEL
+    finished = listed["r-finish"]
+    assert finished["outcome"] == "Done" and "stop_reason" not in finished
+    assert finished["continuation_offer"] == {"eligible": False, "cause": "finished", "refusal": "author_finished"}
+    assert listed["r-owner"]["outcome"] == "Stopped" and listed["r-owner"]["continuation_offer"]["refusal"] == "stopped_by_owner"
+    assert "stop_reason" not in listed["r-owner"], "an owner's Stop is never the author's account"
+    assert listed["r-bound"]["continuation_offer"] == {"eligible": False, "refusal": "continuation_unconfirmed",
+                                                       "state": "bound", "successor_task_id": "r-next"}  # no nonce
+    pointer = metadata["project_last_task_result"]
+    assert pointer["task_id"] == "r-answer" and pointer["continuation_offer"]["refusal"] == "author_finished"
+    assert "continue_task" in metadata["routing_contract"]["valid_actions"]
+    main = {row["task_id"]: row for row in _main_routing_manifest(_decision_ctx(tmp_path))["final_results"]}
+    assert main["r-stop"]["continuation_offer"]["eligible"] is True and main["r-stop"]["stop_reason"] == stopped["stop_reason"]
+
+
+def test_an_unreadable_listed_result_is_unknown_never_a_finished_author(tmp_path, monkeypatch):
+    """A row that cannot be read now, or whose facts cannot be read from it, stays listed with its reader and an
+    explicit unknown; the rest of the window keeps its facts."""
+    from ouroboros import owner_continue, task_results
+    from ouroboros.projects_registry import create_project
+    from ouroboros.server_routing_context import _decision_turn_metadata
+    from ouroboros.store import StoreBusy
+
+    project = create_project(tmp_path, "room", name="Room")
+    _ended(tmp_path, "r-stop", "2026-11-10T11:23:57Z", stop=True)
+    _ended(tmp_path, "r-torn", "2026-11-10T11:30:00Z", stop=True)
+    _ended(tmp_path, "r-busy", "2026-11-10T11:40:00Z", stop=True)
+    real_load, real_offer = task_results.load_task_result, owner_continue.offer_view
+
+    def load(root, task_id, **kwargs):
+        if task_id == "r-busy":
+            raise StoreBusy("row busy", reason="contention")
+        return real_load(root, task_id, **kwargs)
+
+    monkeypatch.setattr(task_results, "load_task_result", load)
+    monkeypatch.setattr(owner_continue, "offer_view", lambda row, task_id: (
+        (_ for _ in ()).throw(ValueError("torn facts")) if task_id == "r-torn" else real_offer(row, task_id)))
+    metadata = _decision_turn_metadata(_decision_ctx(tmp_path), int(project["chat_id"]), "cm-gap", {"project_id": "room"})
+    listed = {row["task_id"]: row for row in metadata["project_routing_manifest"]["final_results"]}
+    assert listed["r-busy"] == {"task_id": "r-busy", "status": "unknown", "title": "",
+                                "authority_source": listed["r-busy"]["authority_source"], "outcome": "unknown",
+                                "continuation_offer": "unknown", "read_error": "StoreBusy"}
+    assert listed["r-busy"]["authority_source"]["arguments"] == {"task_id": "r-busy", "include_authority": True}
+    assert (listed["r-torn"]["outcome"], listed["r-torn"]["continuation_offer"], listed["r-torn"]["read_error"]) == (
+        "unknown", "unknown", "ValueError")
+    assert listed["r-stop"]["continuation_offer"]["eligible"] is True
+
+
 def _boundary(tmp_path, metadata, messages, *, delivery=None, own=None):
     from types import SimpleNamespace
 

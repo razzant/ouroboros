@@ -9,7 +9,10 @@ Main's manifest lists each project's registry ``working_dir`` and addresses of
 the last 20 spoken rows; the memory view holds their text. Project rooms and Main read recent root results and live roots as
 bounded typed projections, never raw result text; a project's last result is
 found through the registry row's ``last_task_result_id`` pointer (stamped by
-roots only), with a bounded scan as fallback.
+roots only), with a bounded scan as fallback. Every such result reference, the
+pointer and both windows, also says how its work ended (``_ended_work_facts``):
+an author stop's open Continue is a fact the next focus reads, not one it must
+dig for, and ``continue_task`` is among the valid actions it may choose.
 """
 
 from __future__ import annotations
@@ -217,9 +220,55 @@ def _chat_running_tasks(ctx: Any, chat_id: int) -> list:
     return [row for row in _addressable_root_tasks(ctx, chat_id) if row.get("status") == "running"]
 
 
+STOP_REASON_LABEL = "the stopping author's own account, not an owner instruction"
+_REFERENCE_KEYS = ("task_id", "status", "title", "authority_source", "outcome", "cause", "ended_at",
+                   "continuation_offer", "stop_reason", "read_error")
+
+
+def _ended_work_facts(row: Dict[str, Any], task_id: str) -> Dict[str, Any]:
+    """How this result's work ended, as the consciousness wake reads it (``consciousness_wake``'s terminal line):
+    the card's word, the recorded cause, the terminal time, the Continue offer (``owner_continue.offer_view``, the
+    one projection ``get_task_result``'s short views share) and an author stop's own reason verbatim, labelled as
+    that author's account. Computed on the LOADED row, whose stop the stripped projection no longer holds; a row
+    these facts cannot be read from is unknown, never ``author_finished``."""
+    try:
+        from ouroboros.outcomes import recorded_cause
+        from ouroboros.owner_continue import offer_view
+        from ouroboros.project_dialogue import OUTCOME_PHASE_HEADLINE, outcome_phase
+        from ouroboros.review_records import recorded_stop_rationale
+        from ouroboros.terminal_time import terminal_time_fact
+
+        ended = {**row, "root_phase_checkpoint": {}}  # an open post-task synthesis is not how the work ended
+        facts: Dict[str, Any] = {
+            "outcome": "Interrupted" if row.get("status") == "interrupted" else OUTCOME_PHASE_HEADLINE[outcome_phase(ended, {})],
+            "cause": recorded_cause(row), "ended_at": terminal_time_fact(row).get("occurred_at")}
+        offer = offer_view(row, task_id)
+        if offer is not None:
+            facts["continuation_offer"] = offer
+        reason = recorded_stop_rationale(row)
+        if reason:
+            facts["stop_reason"] = {"verbatim": reason, "label": STOP_REASON_LABEL}
+        return facts
+    except Exception as exc:  # a malformed row's gap, named
+        log.debug("ended-work facts unreadable for %s", task_id, exc_info=True)
+        return {"outcome": "unknown", "continuation_offer": "unknown", "read_error": type(exc).__name__}
+
+
+def _result_reader(task_id: str, human_label: str) -> Dict[str, Any]:
+    return {"kind": "task_result", "task_id": task_id, "human_label": human_label, "tool": "get_task_result",
+            "arguments": {"task_id": task_id, "include_authority": True}}
+
+
+def _unreadable_result(task_id: str, exc: BaseException) -> Dict[str, Any]:
+    """A listed root whose row could not be read now: its id, its reader and unknown facts, never a guess."""
+    return {"task_id": task_id, "status": "unknown", "title": "", "authority_source": _result_reader(task_id, task_id),
+            "outcome": "unknown", "continuation_offer": "unknown", "read_error": type(exc).__name__}
+
+
 def _task_result_ground_truth(row: Dict[str, Any]) -> Dict[str, Any]:
     """Bounded typed projection of one task result for a routing/promote turn:
-    identity, outcome, and WHERE THE WORK LIVES (workspace facts + artifact refs).
+    identity, outcome (``_ended_work_facts`` beside the lifecycle ``status``), and
+    WHERE THE WORK LIVES (workspace facts + artifact refs).
     Never raw result text — a router turn that reconstructs prior work from chat
     memory instead of these facts invents false premises (the saga's "continue"
     promotion rebuilt a finished game from scratch)."""
@@ -246,13 +295,8 @@ def _task_result_ground_truth(row: Dict[str, Any]) -> Dict[str, Any]:
             str(item.get("path") or item.get("name") or "")
             for item in artifacts[:8] if isinstance(item, dict)
         ],
-        "authority_source": {
-            "kind": "task_result",
-            "task_id": task_id,
-            "human_label": human_label,
-            "tool": "get_task_result",
-            "arguments": {"task_id": task_id, "include_authority": True},
-        },
+        "authority_source": _result_reader(task_id, human_label),
+        **_ended_work_facts(row, task_id),
     }
     if isinstance(row.get("promotion_admission"), dict):
         from ouroboros.promotion_intent import promotion_intent_notice
@@ -277,8 +321,8 @@ def _task_result_ground_truth(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _result_reference(facts: Dict[str, Any]) -> Dict[str, Any]:
-    """A historical result's identity and exact reader, without its evidence body."""
-    return {key: facts[key] for key in ("task_id", "status", "title", "authority_source")}
+    """A historical result's identity, exact reader and how its work ended, without its evidence body."""
+    return {key: facts[key] for key in _REFERENCE_KEYS if key in facts}
 
 
 def _is_child_result(facts: Dict[str, Any]) -> bool:
@@ -322,8 +366,15 @@ def _recent_root_results(ctx: Any, project_id: str = "") -> tuple:
         counted = project_result_counts(ctx.DRIVE_ROOT, project_id) if project_id else None
     except StoreError as exc:
         return [], {"final_results": None, "final_results_error": f"result_store_unreadable: {exc}", "children": None}
-    finals = [_task_result_ground_truth(row) for row in
-              (load_task_result(ctx.DRIVE_ROOT, task_id) for task_id in ids[:cap]) if row is not None]
+    finals = []
+    for task_id in ids[:cap]:
+        try:
+            row = load_task_result(ctx.DRIVE_ROOT, task_id)
+        except Exception as exc:  # one unreadable row is its reference's named gap, not the window's
+            finals.append(_unreadable_result(task_id, exc))
+            continue
+        if row is not None:
+            finals.append(_task_result_ground_truth(row))
     roots, children = counted if counted is not None else (None, None)
     return finals, {
         # Kept meaning: results cut by the row cap. Skipped children are a DIFFERENT
@@ -560,7 +611,7 @@ def _decision_turn_metadata(ctx: Any, chat_id: int, client_message_id: str, task
         "llm_first": True,
         "source_lane": "main" if is_main_lane else "project",
         "valid_actions": [
-            "answer_inline", "tell_task", "start_task", "move_to_project",
+            "answer_inline", "tell_task", "start_task", "move_to_project", "continue_task",
         ],
         # Unknown, never none: the roots of this chat and of Main could not be read now.
         **({"live_roots_unavailable": roots.gap} if roots.gap else {}),

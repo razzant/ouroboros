@@ -203,3 +203,30 @@ def test_every_short_view_keeps_current_handoff_disclosures(tmp_path, view, unch
     answer_hash = value["answer_sha256"]
     answer = json.loads(results._get_task_result(ctx, "child", view="answer", known_result_sha256=answer_hash))
     assert "answer" in answer and not answer.get("result_unchanged")
+
+
+def test_a_roots_short_views_carry_its_continue_offer_on_every_read_and_a_childs_carry_none(tmp_path):
+    """The offer the routing references show (``owner_continue.offer_view``), in every short view: recomputed on
+    each read, so an answer the reader already holds never freezes a Continue admitted since; a child's work is
+    its root's, so a child's view names no offer."""
+    stop = {"execution": {"status": "ok", "reason_code": "final_message", "task_completion": {
+        "action": "stop", "rationale": "The review still runs.", "answer_sha256": "a" * 64, "source": "finish_task"}},
+        "objective": {"status": "fail", "source": "task_completion", "reason": "author_stop"}}
+    write_task_result(tmp_path, "stopped-root", "completed", result="Stopped: the review still runs.",
+                      terminal_origin="model_final", root_task_id="stopped-root", delegation_role="root",
+                      reason_code="final_message", outcome_axes=stop)
+    _write(tmp_path)
+    ctx = _ctx(tmp_path)
+    views = {view: json.loads(results._get_task_result(ctx, "stopped-root", view=view))
+             for view in ("answer", "summary", "evidence")}
+    for payload in views.values():
+        assert payload["continuation_offer"] == {"eligible": True, "cause": "author_stop", "refusal": ""}
+    write_task_result(tmp_path, "stopped-root", "completed",
+                      continued_by={"successor_task_id": "next-root", "state": "admitted"})
+    again = json.loads(results._get_task_result(ctx, "stopped-root", view="answer",
+                                                known_result_sha256=views["answer"]["child_result_sha256"]))
+    assert again["result_unchanged"] is True and "answer" not in again
+    assert again["continuation_offer"] == {"eligible": False, "refusal": "already_continued",
+                                           "successor_task_id": "next-root", "state": "admitted"}
+    for view in ("answer", "summary", "evidence"):
+        assert "continuation_offer" not in json.loads(results._get_task_result(ctx, "child", view=view))
