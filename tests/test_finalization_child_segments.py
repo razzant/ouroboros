@@ -151,9 +151,9 @@ def test_a_delivered_answer_lists_its_children_once_per_segment(tree, monkeypatc
     scoped = run_gate(root, monkeypatch, ["Final answer."])
     scoped_rows, scoped_views, passes = list(listings.rows), listings.views, listings.passes()
     assert scoped["result"] == "Final answer." and scoped["model_calls"] == 1
-    # Three wait-free segments (candidate and gates, after the services, the delivery decision): one listing each.
-    assert len(passes) == 3
-    assert [sum(row["pass"] is known for row in scoped_rows) for known in passes] == [1, 1, 1]
+    # Candidate/gates and post-service reducers share reads; the final evidence check reads fresh.
+    assert len(passes) == 2
+    assert [sum(row["pass"] is known for row in scoped_rows) for known in passes] == [1, 1]
     assert all(row["direct"] is True for row in scoped_rows if row["pass"] is not None), "a direct read stays direct"
 
     listings.rows.clear()
@@ -212,6 +212,8 @@ def _inject_once(monkeypatch, owner, name, act, *, after=False, when=lambda *a, 
 @pytest.mark.parametrize("boundary,kind", [
     ("services", "registration"), ("review", "status"), ("drain", "late_output"), ("services", "deletion"),
     ("inside_first_segment", "status"),
+    ("last_projection", "status"), ("last_projection", "registration"),
+    ("last_projection", "late_output"), ("last_projection", "deletion"),
 ])
 def test_a_child_change_between_or_inside_segments_holds_the_retained_answer(tree, monkeypatch, boundary, kind):
     import ouroboros.loop as loop
@@ -237,6 +239,15 @@ def test_a_child_change_between_or_inside_segments_holds_the_retained_answer(tre
         done = _inject_once(monkeypatch, loop, "_drain_incoming_messages", act,  # the final close's drain only
                             when=lambda *a, **k: getattr(getattr(k.get("owner_ctx"), "owner_message_admission_agent",
                                                                  None), "_accepting_owner_messages", True) is False)
+    elif boundary == "last_projection":
+        projections = []
+
+        def third_projection(*args, **kwargs):
+            projections.append(True)
+            return len(projections) == 3
+
+        done = _inject_once(monkeypatch, loop, "_project_child_result_dispositions", act,
+                            after=True, when=third_projection)
     else:
         done = _inject_once(monkeypatch, loop, "_maybe_enforce_child_absorption_gate", act, after=True)
     gate = run_gate(root, monkeypatch, ["First answer.", _finish("Second answer.")], admission=boundary == "drain")

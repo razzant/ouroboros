@@ -1449,31 +1449,30 @@ def _no_tool_final_answer(
         from ouroboros.place_intake import reopen_for_place_mail
         if not stopping and reopen_for_place_mail(tools._ctx, post_controls):
             return held("place_mail")  # keep the answer; the accepted place context gets a model round
-    with finalization_child_scope():  # after the drain: the delivery decision and what it publishes
-        _loop()._project_child_result_dispositions(limit_ctx, llm_trace)
-        # UNKNOWN evidence delivers a candidate retained over it as published; a KNOWN candidate is re-retained below.
-        evidence_revision, evidence_fingerprint = _loop()._delivery_evidence_state(tools, limit_ctx, llm_trace)
-        candidate = getattr(tools._ctx, "_delivery_candidate", None)
-        if (
-            not stopping and isinstance(candidate, _loop().DeliveryCandidate)
-            and (
-                candidate.evidence_revision != evidence_revision
-                or candidate.evidence_fingerprint != evidence_fingerprint
-            )
-        ):
-            if candidate.full_text:
-                messages.append({"role": "assistant", "content": candidate.full_text})
-            llm_trace["reasoning_notes"].append(
-                "Delivery evidence changed after the answer was retained; a complete replacement answer is required."
-                if evidence_fingerprint else
-                "Delivery evidence can no longer be verified; the complete answer must be restated and is retained over unknown evidence."
-            )
-            _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
-            solving_again()
-            return held("evidence_changed", "" if evidence_fingerprint else "unverifiable")
-        if isinstance(candidate, _loop().DeliveryCandidate):
-            _loop()._publish_delivery_candidate(tools, candidate, llm_trace)
-            content = candidate.full_text
+    _loop()._project_child_result_dispositions(limit_ctx, llm_trace)
+    # Fresh after projection too: a child can finish between these synchronous calls on another worker.
+    evidence_revision, evidence_fingerprint = _loop()._delivery_evidence_state(tools, limit_ctx, llm_trace)
+    candidate = getattr(tools._ctx, "_delivery_candidate", None)
+    if (
+        not stopping and isinstance(candidate, _loop().DeliveryCandidate)
+        and (
+            candidate.evidence_revision != evidence_revision
+            or candidate.evidence_fingerprint != evidence_fingerprint
+        )
+    ):
+        if candidate.full_text:
+            messages.append({"role": "assistant", "content": candidate.full_text})
+        llm_trace["reasoning_notes"].append(
+            "Delivery evidence changed after the answer was retained; a complete replacement answer is required."
+            if evidence_fingerprint else
+            "Delivery evidence can no longer be verified; the complete answer must be restated and is retained over unknown evidence."
+        )
+        _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
+        solving_again()
+        return held("evidence_changed", "" if evidence_fingerprint else "unverifiable")
+    if isinstance(candidate, _loop().DeliveryCandidate):
+        _loop()._publish_delivery_candidate(tools, candidate, llm_trace)
+        content = candidate.full_text
     if stopping:
         request = tools._ctx._completion_selected
         record_stopped_completion(tools, limit_ctx, llm_trace, request, candidate)

@@ -208,8 +208,8 @@ def finalization_child_scope():
     """One child projection per query during a synchronous finalization pass.
 
     End before a model wait, a service stop, a review, admission or a later pass: children may
-    advance, and the next pass reads them. One that advances after the last pass's read misses
-    this delivery, as it did after a reducer's own last read. Nested reducers reuse the pass.
+    advance, and the next pass reads them. The final delivery evidence check stays outside every
+    scope, reading fresh even after the preceding projection. Nested reducers reuse the pass.
     Scope (direct or subtree) and artifact-materialization modes stay separate projections: a
     direct reader never pays for, nor sees, a subtree.
     """
