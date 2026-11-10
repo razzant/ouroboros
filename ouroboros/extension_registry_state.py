@@ -218,6 +218,17 @@ SURFACE_KINDS: Sequence[tuple[str, Dict[str, Any], str]] = (
 DISPATCH_SURFACE_KINDS = frozenset({"tools", "routes", "ws_handlers", "realtime_providers", "conversation_features"})
 
 
+def record_load_failure(name: str, skill: Any, error: str) -> None:
+    """The one record of a failed load of ``name``: its words, bound to the bytes and folder that failed, so liveness
+    tells it only while they are current (the words come from ``deployment_extensions.failure_words``)."""
+    try:
+        skill_dir = str(skill.skill_dir.resolve())
+    except OSError:
+        skill_dir = str(skill.skill_dir)
+    with _lock:
+        _load_failures[name] = _ExtensionLoadFailure(content_hash=skill.content_hash, skill_dir=skill_dir, error=error)
+
+
 def _lifecycle_lock_for(skill_name: str) -> threading.RLock:
     with _lock:
         lock = _lifecycle_locks.get(skill_name)

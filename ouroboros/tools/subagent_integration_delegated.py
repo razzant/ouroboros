@@ -502,10 +502,9 @@ def _locked_apply(
         # A task copy recorded from clean HEAD/index instead keeps three-way
         # synthesis. Both paths stage touched results and never commit.
         has_patch = patch_path.is_file() and patch_path.stat().st_size > 0
-        proc = subprocess.run(
-            ["git", "apply", *(["--3way", "--index"] if three_way else []), str(patch_path)],
-            cwd=str(target), capture_output=True, text=True,
-        ) if has_patch else subprocess.CompletedProcess([], 0, "", "")
+        from ouroboros.tools.patch_staging import git_apply  # a work target applies it as the work domain
+        proc = git_apply(target, patch_path, ["--3way", "--index"] if three_way else [],
+                         text=True) if has_patch else subprocess.CompletedProcess([], 0, "", "")
         result["proc"] = proc
         if proc.returncode != 0:
             return result
@@ -650,9 +649,9 @@ def _integrate_delegated_patch_locked(
             return refusal
     from ouroboros.delegate_directory import is_directory_run, integrate_directory_result
     if is_directory_run(entry):
-        from ouroboros.claudexor_daemon import read_owned_gateway
+        from ouroboros import claudexor_daemon, execution_domain  # the run's own engine applies or rejects its result
         try:
-            with read_owned_gateway() as gateway:
+            with execution_domain.run_gateway(entry, claudexor_daemon.read_owned_gateway) as gateway:
                 return integrate_directory_result(ctx, entry, decision, reason, gateway,
                                                   acknowledge_ambiguous=acknowledge_ambiguous,
                                                   paths=paths, orphan=bool(orphan_of),
@@ -803,11 +802,12 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
 
     # Only the recorded target is writable: orphan recovery never rebinds the
     # caller's workspace or selects a replacement destination.
+    from ouroboros import work_domain  # a work target keeps its spelling: the container resolves it
     try:
-        active_root = pathlib.Path(ctx.active_repo_dir()).resolve(strict=False)
+        active_root = work_domain.settle(ctx.active_repo_dir())
     except Exception as exc:
         return f"⚠️ INTEGRATE_TARGET_ERROR: could not resolve active repo: {type(exc).__name__}: {exc}."
-    target = pathlib.Path(str(entry.target_root or "")).resolve(strict=False)
+    target = work_domain.settle(str(entry.target_root or ""))
     target_ok = orphan_apply_target_ok(target, active_root) if orphan_of else target == active_root
     if not str(entry.target_root or "").strip() or not target_ok:
         return (
@@ -816,7 +816,7 @@ def _integrate_git_capture(ctx, entry, decision, reason, manifest, cap_dir, orph
             "Only a terminal owner's orphan targeting a folder inside the configured projects/worktrees "
             "roots may apply outside the active folder, under current write rights, regardless of creator."
         )
-    if not (target / ".git").exists():
+    if not work_domain.exists(target / ".git"):
         return f"⚠️ INTEGRATE_TARGET_NOT_GIT: target {target} is not a git working tree."
 
     patch_touched, parse_error = (_si()._patch_touched_paths(patch_path, target)

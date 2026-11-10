@@ -714,8 +714,8 @@ def release_owed_imports(root: Any, task_id: str, *, engine: Callable[[], Any], 
                          observed: Callable[[Dict[str, Any]], None]) -> bool:
     """Release each managed import TASK_ID still owes once nothing can name it in a new operation; True while one is
     still owed (the task waits for a later pass). Nothing is asked while the owner keeps the task or the whole work
-    holds (``review_thread_retention.tree_hold`` with ``every_offer``). ``engine`` opens the engine on first need
-    (``None``: none), ``hold`` counts why a release waits, ``stop`` ends the pass between two releases and
+    holds (``review_thread_retention.tree_hold`` with ``every_offer``). ``engine(store_id)`` opens the engine of
+    that store on first need (``None``: none), ``hold`` counts why a release waits, ``stop`` ends the pass between two releases and
     ``observed`` receives each settlement. Never called inside the keep gate or a custody lock."""
     from ouroboros.delegate_custody_current import marks
     from ouroboros.owner_keep import is_kept
@@ -772,7 +772,7 @@ def _release_one(drive: pathlib.Path, task_id: str, entry: Dict[str, Any], engin
         return settle("released", resource=resource, released_at=entry.get("released_at"))
     if not resource.get("resourceId") and state in _UNASKED:
         return settle(_UNASKED[state])  # never sent, or a key no answer can name a resource for
-    gateway = engine()
+    gateway = engine(entry["store_id"])  # the engine whose store holds the import (``execution_domain``)
     why = _release_unusable(gateway, entry["store_id"])
     if why:
         return why

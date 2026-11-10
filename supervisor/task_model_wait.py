@@ -27,7 +27,9 @@ def handle_task_model_wait(event: dict, ctx: Any) -> None:
             or revision <= 0 or not isinstance(attempt, int) or isinstance(attempt, bool)
             or event.get("state") not in {"waiting", "resolved"}):
         return
-    payload = copy.deepcopy(event)
+    from ouroboros.deployment_policy import served_wait
+
+    payload = served_wait(copy.deepcopy(event))  # as the decision door now answers, whenever the row was written
     row = {key: value for key, value in payload.items()
            if key not in {"type", "ts", "task_id", "quota_clock", "is_progress"}}
     operation_event = False

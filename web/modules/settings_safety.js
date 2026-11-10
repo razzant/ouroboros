@@ -7,7 +7,8 @@ import { renderSegmentedField } from './page_header.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { APP_SETTINGS_ORIGIN, apiClient } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
-import { settingsSection, settingsWriteFailure, syncEffortSegments } from './settings_controls.js';
+import { bindEffortSegments, settingsSection, settingsWriteFailure, syncEffortSegments } from './settings_controls.js';
+import { deploymentOf, offerAllowedChoices, safetyExitsNote } from './settings_policy.js';
 import { parseModelSource } from './route_editor_primitives.js';
 import { modelRoleMap } from './model_roles.js';
 import { subagentSettingsFingerprint } from './subagents_settings.js';
@@ -49,7 +50,9 @@ export function safetySectionHtml() {
         </div>
         <p class="safety-line" data-safety-checker></p>
         <p class="safety-line" data-safety-second-check></p>
+        <p class="safety-line" data-safety-exits hidden></p>
         <p class="safety-line" data-safety-unmeasured hidden>Not measured yet: no replay of real checks exists.</p>
+        <p class="safety-line" data-safety-organization-rules hidden>Your organization’s rules apply too; its administrator sets them.</p>
         <div class="form-field ui-field">
             <label for="s-safety-rules">Your rules</label>
             <textarea id="s-safety-rules" class="ui-control consciousness-owner-words" rows="3" spellcheck="false" aria-describedby="s-safety-rules-help"></textarea>
@@ -96,12 +99,24 @@ export function agentRowHandle(rowId, settings = {}) {
 }
 
 function paintLines(root, settings) {
-    const meta = settings?._meta || {};
-    const recheck = recheckFromSettings(settings);
+    const deployment = deploymentOf(settings?._meta);
     const set = (selector, html) => { const node = root.querySelector(selector); if (node) node.innerHTML = html; };
-    set('[data-safety-checker]', `${escapeHtml(checkerText(settings))} · ${settingsLinkHtml('models', 'Change in Models')}`);
-    set('[data-safety-second-check]', `${escapeHtml(secondCheckText(recheck, settings))}${recheck.known
-        ? ` · ${settingsLinkHtml('agents', 'Change in Agents')}` : ''}`);
+    const organizationRules = root.querySelector('[data-safety-organization-rules]');
+    if (organizationRules) organizationRules.hidden = !deployment?.organization_rules;
+    // The organization's checker decides alone (deployment_policy): its route is said, never offered for change,
+    // and no Agents row takes the second check (a mark saved before stays in the roster, unshown and unused).
+    const recheck = deployment?.checker ? { known: false, rowId: '', offReason: '', eligibleRows: [], measured: false }
+        : recheckFromSettings(settings);
+    set('[data-safety-checker]', deployment?.checker
+        ? `${escapeHtml(checkerText({ [SAFETY_MODEL_KEY]: deployment.checker.model }))} · Set by your organization`
+        : `${escapeHtml(checkerText(settings))} · ${settingsLinkHtml('models', 'Change in Models')}`);
+    set('[data-safety-second-check]', deployment?.checker ? 'Second check: none. Your organization’s Supervisor decides alone.'
+        : `${escapeHtml(secondCheckText(recheck, settings))}${recheck.known ? ` · ${settingsLinkHtml('agents', 'Change in Agents')}` : ''}`);
+    const exits = root.querySelector('[data-safety-exits]');
+    if (exits) {
+        exits.textContent = safetyExitsNote(deployment);
+        exits.hidden = !exits.textContent;
+    }
     // Said wherever the second check is offered, the default Off included: no replay has measured it.
     const unmeasured = root.querySelector('[data-safety-unmeasured]');
     if (unmeasured) unmeasured.hidden = !(recheck.known && !recheck.measured);
@@ -116,6 +131,11 @@ function syncCheckFully(root) {
 
 /** Paint the section from a loaded settings document (values, facts, lines). */
 export function applySafetySettings(root, settings = {}) {
+    // A deployment's coverage floor leaves only the levels it allows (none to choose at Full).
+    for (const target of ['s-safety-mode', 's-consciousness-safety-mode']) {
+        offerAllowedChoices(root, { target, options: LEVEL_OPTIONS, axis: 'coverage' }, deploymentOf(settings._meta),
+            { render: renderSegmentedField, bind: bindEffortSegments });
+    }
     const yourWork = root.querySelector('#s-safety-mode');
     if (yourWork) yourWork.value = settings.OUROBOROS_SAFETY_MODE || 'full';
     const consciousness = root.querySelector('#s-consciousness-safety-mode');

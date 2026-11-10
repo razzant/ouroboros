@@ -12,11 +12,7 @@ from typing import Any, Callable, Optional
 from ouroboros import delegate_custody as custody
 from ouroboros.delegate_shared import _fail, delegate_result, refusal_host_code
 from ouroboros.owner_mailbox import (
-    KIND_FINALIZE_NOW,
-    KIND_HURRY,
-    KIND_TASK_MESSAGE,
-    drain_owner_entries,
-    place_arrival_wake,
+    KIND_FINALIZE_NOW, KIND_HURRY, KIND_TASK_MESSAGE, drain_owner_entries, place_arrival_wake,
 )
 from ouroboros.tools.tool_result import ToolResult
 from ouroboros.utils import utc_now_iso
@@ -27,20 +23,16 @@ _TICK_SEC = 3
 _QUIET_STATUSES = {"progress", "no_progress", "observation_pending"}
 _LOOP_CONTROL_KINDS = {KIND_FINALIZE_NOW, KIND_HURRY}
 _MAX_COORDINATION_SEEN = 256
-# The gateway's typed code for a read that delivered no daemon answer at all
-# (``gateways.claudexor._request``): a quiet renewal here, never a model wake.
+# No daemon answer (``gateways.claudexor._request``): quiet renewal, not a model wake.
 _DAEMON_UNREACHABLE = "daemon_unreachable"
-# The hold's in-slot mark outlives one slow observation read (60 s), then renews; an
-# observation older than a few ticks says nothing current about the run's work.
+# The hold outlives a slow 60s read, then renews; an observation older than a few ticks says nothing current.
 _HOLD_MARK_SEC = 120.0
 _OBSERVATION_CURRENT_SEC = 4 * _TICK_SEC
 _OBSERVED: dict = {}  # state path -> ((mtime_ns, size), parsed observation fields)
 
 
 def _owner_line(ctx: Any, text: str, key: str, tone: str) -> None:
-    """One owner-visible line per unreachable-daemon episode, through the task's
-    existing progress channel; the typed ``task_incident``/``toast_once`` pair is
-    what the client toasts once, so no host state is written for the dedup."""
+    """One line per outage through existing progress; ``task_incident``/``toast_once`` deduplicates in the client."""
     fn = getattr(ctx, "emit_progress_fn", None)
     if not callable(fn):
         return
@@ -54,28 +46,43 @@ def _owner_line(ctx: Any, text: str, key: str, tone: str) -> None:
         pass
 
 
-# A tick that returned NO DAEMON ANSWER: either a read the daemon never answered,
-# or a refusal raised before any byte left the host (a missing descriptor, an
-# unreadable token, an engine below the floor). It drops the loop's transport, so
-# the next tick re-reads the descriptor and re-handshakes, and it cannot close an
-# open outage episode either: silence of a different shape is not contact.
+# No answer or a pre-send refusal drops the transport for fresh discovery on the next tick.
+# Neither closes an outage episode: a missing descriptor/token or version floor is not contact.
 _NO_DAEMON_ANSWER_STATUSES = frozenset({"observation_pending", "refused"})
-# A tick text the host could not read as a JSON object (``_payload``): no daemon
-# answer is established either, whatever the text was.
+# A tick text not readable as a JSON object (``_payload``) establishes no daemon answer.
 _OBSERVATION_MALFORMED = "observation_malformed"
 
 
-def _loop_gateway() -> Any:
-    """The loop's own transport, built WITHOUT a handshake: the observing wait
-    handshakes it once (``engine_version`` is the receipt) and classifies any refusal
-    through its own typed path. An unreadable descriptor leaves the tick to its
-    per-call transport, which reports the same fact the same way."""
+def _loop_gateway(entry: Any = None) -> Any:
+    """Use the recorded engine: work proves its store first; the owned engine handshakes in the observing wait.
+    An unreadable descriptor leaves the tick to its per-call transport and that reader's typed failure."""
+    from ouroboros.execution_domain import run_gateway
     from ouroboros.gateways.claudexor import ClaudexorGateway, ClaudexorUnavailable
 
     try:
-        return ClaudexorGateway()
+        return run_gateway(entry, ClaudexorGateway)
     except ClaudexorUnavailable:
         return None
+
+
+def _run_transport(ctx: Any, run_id: str, gateway: Any) -> Any:
+    """``gateway`` while it reaches ``run_id``'s recorded engine, else the loop's transport to that engine."""
+    from ouroboros.execution_domain import same_engine
+
+    try:
+        _status, entry = custody.lookup(custody.custody_root(ctx), str(getattr(ctx, "task_id", "") or ""), run_id)
+    except Exception:
+        _drop_gateway(gateway)
+        return None  # the per-call reader must recover custody; unreadable is never an owned-engine binding
+    if gateway is not None and same_engine(gateway, entry):
+        return gateway
+    _drop_gateway(gateway)
+    return _engine_transport(entry)
+
+
+def _engine_transport(entry: Any) -> Any:
+    """The loop's transport for ``entry``: the owned engine's built exactly as before, a work engine's bound to it."""
+    return _loop_gateway(entry) if getattr(entry, "engine_ref", None) else _loop_gateway()
 
 
 def _drop_gateway(gateway: Any) -> None:
@@ -84,7 +91,6 @@ def _drop_gateway(gateway: Any) -> None:
             gateway.close()
         except Exception:
             pass
-    return None
 
 
 def _attempt_key(ctx: Any) -> str:
@@ -1141,7 +1147,7 @@ def _leaf_live_input(ctx: Any, run_id: str, gateway: Any) -> str:
         route = str(getattr(entry, "route_id", "") or "")
     except Exception:
         return "unknown"
-    reader = (gateway if gateway is not None else _loop_gateway()) if route else None
+    reader = (gateway if gateway is not None else _engine_transport(entry)) if route else None
     if reader is None:
         return "unknown"
     try:
@@ -1330,8 +1336,8 @@ def supervised_wait(
             state = _load_state(ctx, run_id)
             retained = retained_runs.pop(run_id, None)
             if run_id not in live_inputs:
-                if owns_transport and gateway is None and retained is None:
-                    gateway = _loop_gateway()
+                if owns_transport and retained is None:
+                    gateway = _run_transport(ctx, run_id, gateway)
                 live_inputs[run_id] = _leaf_live_input(ctx, run_id, gateway) if retained is None else "unknown"
             live_input = live_inputs[run_id]
             if hold_until - time.time() < _HOLD_MARK_SEC / 2:
@@ -1344,8 +1350,8 @@ def supervised_wait(
             elif retained is not None:
                 raw, retained = json.dumps(retained), None
             else:
-                if owns_transport and gateway is None:
-                    gateway = _loop_gateway()
+                if owns_transport:
+                    gateway = _run_transport(ctx, run_id, gateway)
                 lease.renew(run_id)
                 raw = wait_once(ctx, run_id, _TICK_SEC, int(state.get("journal_cursor") or 0),
                                 **({"gateway": gateway} if gateway is not None else {}))
@@ -1580,9 +1586,7 @@ def delegate_wait_entry(
     try:
         return supervised_wait(
             ctx, runs if runs is not None else run_id, since_seq=since_seq,
-            checkpoint_after_sec=checkpoint_after_sec,
-            checkpoint_reason=checkpoint_reason,
-        )
+            checkpoint_after_sec=checkpoint_after_sec, checkpoint_reason=checkpoint_reason)
     except OSError as exc:  # Only a save failure names supervision_stage; other errors keep their handling.
         if not (stage := getattr(exc, "supervision_stage", "")):
             raise

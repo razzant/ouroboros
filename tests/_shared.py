@@ -164,8 +164,8 @@ def wait_test_child_stop(pid: int, *, timeout_sec: float = 3.0) -> dict:
 
 # Every function in the tree that persists a settings document, as (repo-relative POSIX
 # path, function name). Three route through `config.prepare_settings_for_persist`; the
-# context-pair migration and the Colab generator are exempt from it by design and carry
-# their reason in the prologue tripwire's exempt table. Two pins read this one list: the
+# context-pair migration and the Colab generator (for a foreign root) are exempt from it by
+# design and carry their reason in the prologue tripwire's exempt table. Two pins read this one list: the
 # tripwire in tests/test_runtime_mode_elevation.py proves the scanned roots hold exactly
 # these writers (plus its declared non-writer matches), and the byte pin in
 # tests/test_settings_read_seam.py drives every one of them through its real entry point.

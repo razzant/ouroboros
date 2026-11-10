@@ -31,6 +31,11 @@ async def api_settings_secret(request: Request) -> JSONResponse:
         return JSONResponse({"error": "The secret selector must be a nonempty string.",
                              "code": "invalid_secret_selector"}, status_code=400, headers=headers)
     settings, _, _ = apply_runtime_provider_defaults(load_settings())
+    from ouroboros.deployment_policy import fixed_settings
+
+    if "key" in body and selector in fixed_settings():  # the organization's value is not the employee's to read
+        return JSONResponse({"error": f"{selector} is set by your organization's deployment policy and is not shown.",
+                             "code": "managed_by_deployment"}, status_code=403, headers=headers)
     if "key" in body:
         if selector not in MASKED_SECRET_SETTING_KEYS and not (
             selector in settings and is_custom_secret_setting_key(

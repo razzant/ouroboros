@@ -97,17 +97,27 @@ def search_skip_reason(path: pathlib.Path) -> str:
     for glob_pat in SEARCH_SKIP_GLOBS:
         if fnmatch.fnmatch(name, glob_pat):
             return "excluded_name"
-    try:
-        if path.is_symlink():
-            # Never follow symlinks: one inside an allowed root can point outside it,
-            # letting search_code read bytes beyond the resource confinement boundary.
+    from ouroboros import work_domain
+
+    if work_domain.is_work(path):  # a work file's own metadata through the confined descent, never followed
+        try:
+            st = work_domain.lstat(path)
+        except OSError:
+            return "stat_error"
+        if stat.S_ISLNK(st.st_mode):
             return "symlink"
-    except OSError:
-        return "stat_error"
-    try:
-        st = path.stat()
-    except OSError:
-        return "stat_error"
+    else:
+        try:
+            if path.is_symlink():
+                # Never follow symlinks: one inside an allowed root can point outside it,
+                # letting search_code read bytes beyond the resource confinement boundary.
+                return "symlink"
+        except OSError:
+            return "stat_error"
+        try:
+            st = path.stat()
+        except OSError:
+            return "stat_error"
     if not stat.S_ISREG(st.st_mode):
         return "not_regular_file"
     if st.st_size > MAX_FILE_SIZE_BYTES:

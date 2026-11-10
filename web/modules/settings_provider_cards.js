@@ -144,6 +144,7 @@ export function connectionRowHtml(card, row = {}) {
             <div class="harness-account-main">
                 <strong data-connection-title${builtin ? '' : ' data-i18n-skip'}>${builtin ? 'Default' : escapeHtml(keyName || `New ${card.title} key`)}</strong>
                 <span class="ui-status" data-tone="neutral" data-connection-status hidden></span>
+                <span class="ui-chip skills-chip" data-tone="neutral" data-connection-fixed hidden>Set by your organization</span>
             </div>
             <div class="harness-account-meta muted" data-connection-meta hidden></div>
             <div class="harness-account-actions">
@@ -155,6 +156,7 @@ export function connectionRowHtml(card, row = {}) {
                 <div class="form-row">${fields}</div>
                 <div class="settings-inline-status" data-connection-test-status${builtin ? ` data-provider-test-status="${card.kind}"` : ''} role="status" aria-live="polite" aria-atomic="true"></div>
                 <div class="connection-note" data-connection-cache hidden></div>
+                <div class="connection-note" data-connection-fixed-fields hidden></div>
             </div>
         </div>`;
 }

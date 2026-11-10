@@ -701,6 +701,10 @@ def _candidate_ineligible(queue, candidate, remaining, running, *, selected=(), 
         return True
     if not _pool().repo_writer_task_allowed(candidate):
         return True
+    from ouroboros.deployment_extensions import queue_held
+
+    if queue_held():  # a deployment's hold: queued work waits for its required extensions; the carrier rechecks
+        return True
     if (isinstance(candidate.get("_budget_pause"), dict) or budget_hold_fact(candidate) is not None
             or continuation_refusal(candidate)):
         # Durable #1196 hold: sibling unselected after root release, unrestorable

@@ -11,7 +11,6 @@ import logging
 import os
 import pathlib
 import re as _re
-import subprocess
 import threading
 import time
 import uuid
@@ -1200,9 +1199,10 @@ def run_cmd(
     # depend on the operator's locale: a Russian-locale git answers «метка … уже
     # существует» where the code and its tests match "already exists".
     from ouroboros.git_observation import host_git_env
+    from ouroboros.work_domain import run  # a command in a work folder runs as the work domain, never here
 
     env = host_git_env()
-    res = subprocess.run(
+    res = run(
         cmd, cwd=str(cwd) if cwd else None, capture_output=True, text=True, env=env,
         timeout=timeout,
     )

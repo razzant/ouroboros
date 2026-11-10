@@ -246,10 +246,12 @@ def _check_data_shrink_guard(
 
     if force or mode_has_unrestricted_agency(get_runtime_mode()):
         return None
+    from ouroboros import work_domain  # a work file's previous bytes: the confined intake
+
     try:
-        if not target.exists():
+        if not work_domain.exists(target):
             return None
-        old_len = len(target.read_text(encoding="utf-8"))
+        old_len = len(work_domain.read_text(target))
         new_len = len(new_content)
         if old_len > 0 and new_len < old_len * 0.7:
             pct = round(new_len / old_len * 100)
@@ -479,13 +481,22 @@ def _data_write(
             repair_task=bool(existing_tc and existing_tc.has_selected_skill))
         if _cas:
             return _cas
-    p.parent.mkdir(parents=True, exist_ok=True)
+    from ouroboros import work_domain  # a payload in a work checkout is written as the work domain
+
+    work = work_domain.is_work(p)
+    if not work:
+        p.parent.mkdir(parents=True, exist_ok=True)
     if mode == "overwrite":
         # Deferral 5: block likely-accidental truncation of an existing data-plane file
         # (e.g. settings.json, skill state) unless force=true. Append is exempt.
         if (shrink := _check_data_shrink_guard(p, content, force)):
             return shrink
-        write_text_atomic(p, content)  # crash-safe full overwrite (G)
+        if work:
+            work_domain.write_text(p, content)
+        else:
+            write_text_atomic(p, content)  # crash-safe full overwrite (G)
+    elif work:
+        work_domain.write_text(p, content, append=True)
     else:
         with p.open("a", encoding="utf-8") as f:
             f.write(content)  # append is intentionally NOT atomized
@@ -530,6 +541,23 @@ def _data_write(
     if short_form is not None and short_form.ignored_reason:
         result += f"\n⚠️ SKILL_SHORT_FORM_IGNORED: {short_form.ignored_reason}."
     return result
+
+
+def _land_root_bytes(target: pathlib.Path, content: str, *, append: bool = False) -> None:
+    """Land a non-repository root's file: a work path AS THE WORK DOMAIN (``work_domain.write_text``: made, written
+    and resolved in its container), any other path exactly as before (its folder made, an atomic overwrite or a
+    non-atomic append)."""
+    from ouroboros import work_domain
+
+    if work_domain.is_work(target):
+        work_domain.write_text(target, content, append=append)
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if append:
+        with target.open("a", encoding="utf-8", newline="") as fh:
+            fh.write(content)
+    else:
+        write_text_atomic(target, content)
 
 
 def _join_write_results(results: List[str]) -> str:
@@ -654,21 +682,19 @@ def _write_file(
                     if block_reason:
                         results.append(f"⚠️ WRITE_FILE_BLOCKED: artifact_store path blocked: {block_reason}")
                         continue
-                target.parent.mkdir(parents=True, exist_ok=True)
                 body = str(item.get("content") or "")
                 if mode == "append":
                     # Batch items honor the declared mode like the single-file path below:
                     # silently overwriting here destroyed every prior chunk of a chunked
                     # large-file write while reporting success (#447 D2).
-                    with target.open("a", encoding="utf-8", newline="") as fh:
-                        fh.write(body)  # append is intentionally NOT atomized
+                    _land_root_bytes(target, body, append=True)  # append is intentionally NOT atomized
                 else:
                     # Deferral 5: batch items overwrite too — shrink-guard each (parity with the
                     # single-file path), force=true bypasses.
                     if (shrink := _check_data_shrink_guard(target, body, force)):
                         results.append(shrink)
                         continue
-                    write_text_atomic(target, body)  # crash-safe (G)
+                    _land_root_bytes(target, body)  # crash-safe (G)
                 result = f"OK: wrote {_root_display_path(normalized, rel_path)} ({len(body)} chars)"
                 if normalized == "user_files":
                     record = copy_file_to_task_artifacts(ctx, target, kind="user_file")
@@ -683,16 +709,14 @@ def _write_file(
             )
             if block_reason:
                 return f"⚠️ WRITE_FILE_BLOCKED: artifact_store path blocked: {block_reason}"
-        target.parent.mkdir(parents=True, exist_ok=True)
         if mode == "append":
-            with target.open("a", encoding="utf-8", newline="") as fh:
-                fh.write(content)  # append is intentionally NOT atomized
+            _land_root_bytes(target, content, append=True)  # append is intentionally NOT atomized
         else:
             # Deferral 5: shrink-guard the full overwrite (e.g. active_workspace rewrites)
             # — force=true bypasses, matching the tool-schema `force` description.
             if (shrink := _check_data_shrink_guard(target, content, force)):
                 return shrink
-            write_text_atomic(target, content)  # crash-safe full overwrite (G)
+            _land_root_bytes(target, content)  # crash-safe full overwrite (G)
         result = f"OK: wrote {_root_display_path(normalized, path)} ({len(content)} chars)"
         if normalized == "user_files":
             record = copy_file_to_task_artifacts(ctx, target, kind="user_file")
@@ -779,8 +803,10 @@ def _edit_text(
     selected_payload = normalized == "skill_payload" or bound_skill_payload
     try:
         target = binding.target_path
+        from ouroboros import work_domain  # a work file is read and written as the work domain
+
         try:
-            text = target.read_text(encoding="utf-8")
+            text = work_domain.read_text(target)
         except FileNotFoundError:
             return publish_no_effect(ctx, f"⚠️ EDIT_TEXT_ERROR: file not found: {_root_display_path(normalized, path)}", tool_name="edit_text")
         except OSError as exc:
@@ -809,7 +835,10 @@ def _edit_text(
 
         replacement_offset = text.index(old_str)
         replacement_line = edit_source_line(text, replacement_offset)
-        write_text_atomic(target, new_text)
+        if work_domain.is_work(target):
+            work_domain.write_text(target, new_text)
+        else:
+            write_text_atomic(target, new_text)
         if repair:
             from ouroboros.skill_repair_admission import advance_repair_expected_hash
 
@@ -922,16 +951,23 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
         return protected_root_block
     # An admitted, absent path is an ordinary discovery miss: a typed warning
     # (parity with list_files/read_file), never a denial or an invalid query.
+    from ouroboros import work_domain
     from ouroboros.evidence_packs import materialize_tree
-    materialize_tree(search_root)  # a task's packed checkpoint handles are written back before the walk
-    if not search_root.exists():
+
+    # A work root is searched by held descriptors only (``work_domain``): no service process opens its paths, so the
+    # ripgrep path is the service's own roots' and a link is named, never followed.
+    work = work_domain.is_work(search_root)
+    search_kind = work_domain.kind(search_root) if work else ""
+    if not work:
+        materialize_tree(search_root)  # a task's packed checkpoint handles are written back before the walk
+    if not (search_kind not in ("", "missing") if work else search_root.exists()):
         return f"⚠️ SEARCH_NOT_FOUND: path not found: {display_search_path}"
     protected_root_read_block = block_reason_for_path(
         ctx, search_root, "read_bytes", binding
     )
-    if protected_root_read_block and search_root.is_file():
+    if protected_root_read_block and (search_kind == "file" if work else search_root.is_file()):
         return protected_root_read_block
-    root_resolved = root_path.resolve(strict=False)
+    root_resolved = work_domain.settle(root_path)  # a work root keeps its spelling; any other resolves as before
     _rt_search_root = str(root_resolved) if normalized == "runtime_data" else ""
     # Filter receipt (D3, capinv-447): every file present under the search root
     # but excluded before reading is COUNTED by typed reason, so "No matches"
@@ -970,7 +1006,7 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     try:
         from ouroboros.code_search_rg import format_search_result, search_with_rg
 
-        if search_root.is_dir():
+        if not work and search_root.is_dir():
             rg_result = search_with_rg(
                 search_root, query, regex=bool(regex), include=include,
                 max_results=max_results, path_allowed=_path_allowed_for_rg,
@@ -1002,10 +1038,10 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     deadline_hit = False
     # search_code on a single FILE: os.walk yields nothing for a file path, which
     # would make the search a silent no-op. Feed the scanner a one-file "walk".
-    if search_root.is_file():
+    if (search_kind == "file") if work else search_root.is_file():
         _walker = [(str(search_root.parent), [], [search_root.name])]
     else:
-        _walker = os.walk(str(search_root))
+        _walker = work_domain.walk(search_root) if work else os.walk(str(search_root))
     # Bound TOTAL (rg attempt + this fallback walk) to one budget, but always grant
     # the fallback a small floor so an rg that ate the budget still makes some progress.
     _search_deadline = max(_search_t0 + _search_wall_clock_sec(), _time.monotonic() + 5.0)
@@ -1061,7 +1097,7 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
             # and _list_dir): a resolved file escaping the root — e.g. an in-tree symlink in an
             # untrusted child project/deliverable tree — must never have its target read out.
             try:
-                fp.resolve(strict=False).relative_to(root_resolved)
+                work_domain.settle(fp).relative_to(root_resolved)
             except (OSError, ValueError):
                 _drop("escapes_root")
                 continue
@@ -1071,7 +1107,7 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
                 break
 
             try:
-                text, decodable = search_text(fp.read_bytes())
+                text, decodable = search_text(work_domain.read_bytes(fp) if work else fp.read_bytes())
             except Exception:
                 _drop("read_error")
                 continue

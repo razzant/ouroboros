@@ -212,17 +212,28 @@ def build_colab_settings(
 def write_colab_settings(data_dir: pathlib.Path, settings: Dict[str, Any]) -> pathlib.Path:
     """Persist the generated document for the Drive data root, in the one on-disk spelling.
 
-    Deliberately NOT routed through the persistence prologue: it proves the owner-only
-    ratchets against THIS process's ``config.SETTINGS_PATH``, and the Drive root is another
-    path (the quickstart exports the Colab paths only after this write). The bytes are
-    still ``serialize_settings`` bytes, so the next reader of the Drive file meets the
-    spelling every other writer produces. The one prologue duty it shares: a review-pool
+    Exempt from the persistence prologue only for ANOTHER root, judged by the physical target:
+    the prologue proves the ratchets and a deployment policy against THIS process's
+    ``config.SETTINGS_PATH``, and the Drive root is normally another path (the quickstart exports
+    the Colab paths only after this write). A target that is this process's own document under
+    any spelling (a symlinked alias included) is this deployment's write: the owner's whole-document
+    writer persists the notebook owner's document, as onboarding's, so a deployment policy judges
+    it first while the owner-only ratchets pass it as before. The foreign bytes are still ``serialize_settings`` bytes, so the
+    next reader of the Drive file meets the spelling every other writer produces. The one prologue
+    duty it shares: a review-pool
     migration ``build_colab_settings`` computed for the Drive document gets its durable
     receipts under the Drive root (``review_pool_receipts.persist_write_receipts``) BEFORE this
     write replaces the pre-image — the kernel is a different process from the server that later tells the owner."""
+    from ouroboros import config
+    from ouroboros.gateway.owner_settings import _owner_write_settings
+    from ouroboros.launch_roots import same_location
     from ouroboros.review_pool_receipts import persist_write_receipts
 
     path = pathlib.Path(data_dir) / "settings.json"
+    if same_location(path, config.SETTINGS_PATH):
+        _owner_write_settings(dict(settings), authored_keys=tuple(settings),
+                              allow_context_lowering=True, allow_safety_lowering=True)
+        return path
     path.parent.mkdir(parents=True, exist_ok=True)
     persist_write_receipts(data_dir, settings, path)
     write_text_atomic(path, serialize_settings(dict(settings)))

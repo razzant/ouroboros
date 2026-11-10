@@ -521,6 +521,10 @@ def install_item(drive_root: pathlib.Path, item_id: str, *, replace: bool = Fals
             "official": bool(item.get("official"))}
     if plan["already_installed"]:
         return {**base, "name": plan["name"], "already_installed": True, "version": item.get("version", "")}
+    from ouroboros.deployment_extensions import install_refusal
+
+    if managed := install_refusal(drive_root, plan["name"]):  # before settling, landing or replacing anything
+        raise SkillInstallError("managed_by_deployment", managed, 403)
     _select_check(plan, check=check, check_notes=check_notes, task_id=task_id)
     if plan.get("occupant"):
         settle_before_replacement(drive_root, plan["name"])
@@ -652,6 +656,10 @@ def update_installed(drive_root: pathlib.Path, name: str, *, mode: str, digest: 
         raise SkillInstallError("bad_mode", "mode is replace, keep or merge.", 400)
     if skip_review and mode != "replace":
         raise SkillInstallError("bad_mode", "skip_review applies only to mode replace.", 400)
+    from ouroboros.deployment_extensions import change_refusal
+
+    if mode != "keep" and (managed := change_refusal(name, "update")):  # Keep only records a skipped release
+        raise SkillInstallError("managed_by_deployment", managed, 403)
     record = read_install_record(pathlib.Path(drive_root), name)
     loaded = find_skill(pathlib.Path(drive_root), name, repo_path=get_skills_repo_path())
     if record is None or loaded is None:
@@ -728,10 +736,13 @@ def _update_registry(drive_root: pathlib.Path, name: str, *, mode: str, digest: 
 def uninstall_installed(drive_root: pathlib.Path, name: str) -> Dict[str, Any]:
     """One uninstall for every source (inside the lane). Grants and the publication receipt survive."""
     from ouroboros.config import get_skills_repo_path
+    from ouroboros.deployment_extensions import change_refusal
     from ouroboros.marketplace.isolated_deps import DEPS_STATE_FILENAME
     from ouroboros.skill_loader import find_skill, skill_state_dir_path
     from ouroboros.skill_uninstall_state import removal_action, write_uninstall_tombstone
 
+    if managed := change_refusal(name, "uninstall"):  # before the unload and the removal
+        raise SkillInstallError("managed_by_deployment", managed, 403)
     loaded = find_skill(pathlib.Path(drive_root), name, repo_path=get_skills_repo_path())
     if loaded is None:
         raise SkillInstallError("not_installed", f"{name} is not installed.", 404)
