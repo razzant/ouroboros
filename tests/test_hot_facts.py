@@ -705,11 +705,18 @@ _SCHEMA_NINE_UNDERIVED = (
     "IS NULL OR owner_wait_reason IS NULL OR control_valid IS NULL OR list_stable IS NULL OR root_task_id IS NULL")
 
 
+def _drop_lineage_triggers(txn):
+    """An older body's store counted no lineage writes: the schema-12 step adds these triggers (``LINEAGE_TRIGGERS``)."""
+    for name in ("tasks_lineage_replaced", "tasks_lineage_updated", "tasks_lineage_removed"):
+        txn.conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+
+
 def schema_nine(root):
     """The store an older body left: no origin or chat column or index, its index predicate and version."""
     with store.open_store(root, write=True) as txn:
         for index in ("tasks_origin", "tasks_underived_origin", "tasks_underived_chat", "tasks_underived_hot"):
             txn.conn.execute(f"DROP INDEX IF EXISTS {index}")
+        _drop_lineage_triggers(txn)
         txn.conn.execute("ALTER TABLE tasks DROP COLUMN origin")
         txn.conn.execute("ALTER TABLE tasks DROP COLUMN chat_id")
         txn.conn.execute(f"CREATE INDEX tasks_underived_hot ON tasks(task_id) WHERE {_SCHEMA_NINE_UNDERIVED}")
@@ -894,6 +901,7 @@ def schema_ten(root):
     """The store an older body left before the chat step: no chat column or index, version 10."""
     with store.open_store(root, write=True) as txn:
         txn.conn.execute("DROP INDEX IF EXISTS tasks_underived_chat")
+        _drop_lineage_triggers(txn)
         txn.conn.execute("ALTER TABLE tasks DROP COLUMN chat_id")
         txn.conn.execute("UPDATE meta SET value='10' WHERE key='schema_version'")
     store.close_connections(store.store_path(root))
@@ -957,7 +965,7 @@ def test_a_store_before_the_chat_step_reads_bodies_and_upgrades_without_a_body_d
         patch.setattr(store.Txn, "body_text", lambda *_: pytest.fail("the schema step decoded a body"))
         upgrade_current_schema(tmp_path)
     with store.open_store(tmp_path, write=False) as txn:
-        assert txn.meta("schema_version") == store.SCHEMA_VERSION == hot.CHAT_VERSION
+        assert txn.meta("schema_version") == store.SCHEMA_VERSION == hot.LINEAGE_VERSION
         assert txn.row("legacy", "chat_id") is None and txn.meta("job:" + hot.JOB)["state"] == "pending"
     assert _lineage_chats(tmp_path, ["legacy", "other"]) == {"legacy": 4242, "other": None}  # underived: its body
     assert maintenance.run_job(tmp_path, "hot_facts")["state"] == "done"

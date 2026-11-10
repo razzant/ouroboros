@@ -36,7 +36,8 @@ VERSION = 6
 LIST_VERSION = 9
 ORIGIN_VERSION = 10
 CHAT_VERSION = 11
-VERSIONS = (VERSION, LIST_VERSION, ORIGIN_VERSION, CHAT_VERSION)  # each schema step that adds these columns
+LINEAGE_VERSION = 12
+VERSIONS = (VERSION, LIST_VERSION, ORIGIN_VERSION, CHAT_VERSION, LINEAGE_VERSION)  # each step that adds these facts
 JOB = "hot_facts"
 TASK_COLUMNS = {
     "owner_pause_state": "TEXT", "owner_pause_fence_id": "TEXT", "owner_pause_facts": "TEXT",
@@ -87,11 +88,26 @@ output_unread=NULL, payload_held=NULL, write_seq=OLD.write_seq+1 WHERE run_id=NE
 INVALIDATE_REQUEST = """CREATE TRIGGER IF NOT EXISTS custody_request_invalidate_hot
 AFTER UPDATE OF facts ON obligations WHEN NEW.set_name IN ('custody_open','custody_refused')
 BEGIN UPDATE obligations SET request_root_task_id=NULL WHERE set_name=NEW.set_name AND id=NEW.id; END"""
+# A task's lineage as the room rule reads it (``projects_registry._read_lineage``: parent, root, role, admitted chat)
+# changes on an existing task only through a statement one of these triggers watches: a REPLACE (``Txn.store_task``, an
+# older body's), an UPDATE (the derivation job, any direct writer) or a DELETE. Each moves one counter in that writer's
+# own transaction; a new task moves nothing. The cold tail set's mark (``memory_tail_cold``, ``lineage_writes``).
+LINEAGE_WRITES = "task_lineage_writes"
+_LINEAGE = ("parent_task_id", "root_task_id", "delegation_role", "chat_id")
+_MOVE = (f"INSERT OR IGNORE INTO meta (key, value) VALUES ('{LINEAGE_WRITES}', '0'); "
+         f"UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = '{LINEAGE_WRITES}';")
+LINEAGE_TRIGGERS = (
+    "CREATE TRIGGER IF NOT EXISTS tasks_lineage_replaced BEFORE INSERT ON tasks WHEN EXISTS (SELECT 1 FROM tasks t WHERE "
+    f"t.task_id = NEW.task_id AND ({' OR '.join(f't.{name} IS NOT NEW.{name}' for name in _LINEAGE)})) BEGIN {_MOVE} END",
+    f"CREATE TRIGGER IF NOT EXISTS tasks_lineage_updated AFTER UPDATE OF {', '.join(_LINEAGE)} ON tasks WHEN "
+    f"{' OR '.join(f'OLD.{name} IS NOT NEW.{name}' for name in _LINEAGE)} BEGIN {_MOVE} END",
+    f"CREATE TRIGGER IF NOT EXISTS tasks_lineage_removed AFTER DELETE ON tasks BEGIN {_MOVE} END",
+)
 SCHEMA = ";\n".join([
     *(f"ALTER TABLE {table} ADD COLUMN {name} {kind}" for table, columns in
       (("tasks", TASK_COLUMNS), ("custody_runs", CUSTODY_COLUMNS)) for name, kind in columns.items()),
     "ALTER TABLE obligations ADD COLUMN request_root_task_id TEXT",
-    *INDEXES, INVALIDATE_CUSTODY, INVALIDATE_REQUEST,
+    *INDEXES, INVALIDATE_CUSTODY, INVALIDATE_REQUEST, *LINEAGE_TRIGGERS,
 ]) + ";\n"
 
 
@@ -106,7 +122,7 @@ def upgrade(txn) -> None:
         txn.conn.execute("ALTER TABLE obligations ADD COLUMN request_root_task_id TEXT")
     # Schema 9 extends the underived predicate; replace its schema-6 definition.
     txn.conn.execute("DROP INDEX IF EXISTS tasks_underived_hot")
-    for sql in (*INDEXES, INVALIDATE_CUSTODY, INVALIDATE_REQUEST):
+    for sql in (*INDEXES, INVALIDATE_CUSTODY, INVALIDATE_REQUEST, *LINEAGE_TRIGGERS):
         txn.conn.execute(sql)
     owed = not _settled(txn, {})  # a fresh store has nothing to classify
     txn.set_meta("job:" + JOB, {"state": "pending" if owed else "done", "cursor": None, "done": 0, "total": None})
@@ -201,6 +217,24 @@ def lineage_root(document: dict) -> str:
     meta = document.get("metadata")
     return str(document.get("root_task_id") or (meta.get("root_task_id") if isinstance(meta, dict) else "")
                or document["task_id"])
+
+
+def lineage_writes(root: Any) -> Any:
+    """The mark of every task lineage this store has changed (``LINEAGE_WRITES``), with the store file's identity: a
+    store replaced counts from nothing again. No store yet is a mark too; ``None`` when the store cannot answer now
+    or predates the count."""
+    from ouroboros.store import file_identity, open_store, store_path  # the store imports this module
+
+    try:
+        identity = file_identity(store_path(root))
+        if identity is None:
+            return [None, 0]
+        with open_store(root, write=False) as txn:
+            if int(txn.meta("schema_version") or 1) < LINEAGE_VERSION:
+                return None
+            return [list(identity), int(txn.meta(LINEAGE_WRITES) or 0)]
+    except Exception:
+        return None
 
 
 def admitted_chat(value: Any) -> str:
