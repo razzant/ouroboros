@@ -286,8 +286,25 @@ class MemoryViewSnapshot:
     def active(self) -> bool:
         return self.store_status.get("state") == "active"
 
+    def piece(self, key: Any, make: Callable[[], str]) -> Tuple[str, int]:
+        """``(text, the characters it adds to a request's JSON)`` of one local form of this view, made once for this
+        snapshot; a whole text is a join of pieces and its price their sum (``render_room``). A non-field attribute,
+        like the floor's element table: ``snapshot_json``, equality and ``dataclasses.replace`` never see it, and it
+        lives as long as the snapshot object."""
+        pieces = self.__dict__.setdefault("_pieces", {})
+        if key not in pieces:
+            counted("view_pieces", key=(id(self), key))
+            text = make()
+            pieces[key] = text, json_chars(text)
+        return pieces[key]
+
 
 _TUPLES = ("story", "conversations", "marks", "fallback_refusals")
+
+
+def json_chars(text: str) -> int:
+    """What a text adds to a request's JSON: its escaped characters, quotes excluded."""
+    return len(json.dumps(text, ensure_ascii=False)) - 2
 
 
 def snapshot_json(snapshot: MemoryViewSnapshot) -> str:
@@ -1348,7 +1365,7 @@ def _room_text_bare(snapshot: MemoryViewSnapshot, gone: Mapping[str, Tuple[str, 
     if room:
         parts.append(_room_text(room, gone))
     if snapshot.spec.other_conversations:
-        parts.append(conversations.render(snapshot.conversations, gone))
+        parts.append(conversations.render(snapshot.conversations, gone, piece=snapshot.piece))
     return "\n\n".join(part for part in parts if part)
 
 
