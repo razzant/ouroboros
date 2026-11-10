@@ -50,7 +50,8 @@ _PLACE_EDITS = [("connect", {"connector": "bridge"}), ("disconnect", {}), ("set_
                 ("remove_note", {"note_id": "n"}), ("set_working_folder", {"working_folder": "/tmp"}),
                 ("set_model", {"model": "m"}), ("confirm_owner_account", {"platform_actor_id": "a"}),
                 ("revoke_owner_account", {"platform_actor_id": "a"}), ("update", {}), ("List", {}), ("list ", {}),
-                ("", {})]
+                ("create_circle", {"name": "Team", "model": "circle/model"}),
+                ("edit_circle", {"circle_id": "c", "model": "circle/next"}), ("", {})]
 
 
 def test_every_level_below_full_reads_places_and_changes_none(tmp_path, monkeypatch):
@@ -447,3 +448,28 @@ def test_evolution_stats_artifact_write_is_withheld_from_observe(tmp_path, monke
     assert "generate_evolution_stats" in ca.OBSERVE_DISABLED
     wake = _registry(tmp_path, _wake_task("observe")["metadata"])
     assert "RESOURCE_CONSTRAINT_BLOCKED" in wake.execute("generate_evolution_stats", {})
+
+
+def test_full_can_create_and_edit_circle_models_through_dispatch(tmp_path, monkeypatch):
+    from ouroboros import places
+    from tests._safety_fixtures import disable_safety
+    disable_safety(monkeypatch)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _root: [])
+    wake = _registry(tmp_path, _wake_task("full")["metadata"])
+    root = tmp_path / "drive"
+    place = places.connect_place(root, connector="bridge", provider="chat")
+    created = json.loads(wake.execute("configure_presence", {
+        "action": "create_circle", "name": "Team", "model": "circle/model"}))["circle"]
+    assert created["model"] == "circle/model"
+    places.edit_place(root, place.place_id, "set_circle", author="owner", circle_id=created["circle_id"])
+    edited = json.loads(wake.execute("configure_presence", {
+        "action": "edit_circle", "circle_id": created["circle_id"], "model": "circle/next",
+        "expected_revision": created["revision"]}))["circle"]
+    assert edited["model"] == "circle/next" and edited["revision"] > created["revision"]
+    inspected = json.loads(wake.execute("configure_presence", {"action": "inspect", "place_id": place.place_id}))
+    assert inspected["place"]["model_route"] == {"value": "circle/next", "layer": "circle"}
+    cleared = json.loads(wake.execute("configure_presence", {
+        "action": "edit_circle", "circle_id": created["circle_id"], "model": "",
+        "expected_revision": edited["revision"]}))["circle"]
+    assert cleared["model"] == ""

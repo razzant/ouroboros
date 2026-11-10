@@ -514,7 +514,7 @@ class PlaceDescription(TypedDict):
 
 
 class CircleSummary(TypedDict):
-    """One circle, named once per list: its whole words and who wrote them."""
+    """One circle's words, authorship and model; an empty model inherits consciousness."""
 
     circle_id: str
     name: str
@@ -522,6 +522,7 @@ class CircleSummary(TypedDict):
     text_author: str
     text_at: str
     revision: int
+    model: str
 
 
 class CircleCreateRequest(TypedDict):
@@ -529,13 +530,15 @@ class CircleCreateRequest(TypedDict):
 
     name: str
     text: NotRequired[str]
+    model: NotRequired[str]
 
 
 class CircleUpdateRequest(TypedDict, total=False):
-    """Rename or reword; expected_revision compares the circle's revision before writing."""
+    """Change name, words or model; expected_revision compares the circle's revision before writing."""
 
     name: str
     text: str
+    model: str
     expected_revision: int
 
 
@@ -556,6 +559,13 @@ class PlaceReadiness(TypedDict):
     tone: str
 
 
+class PlaceModelRoute(TypedDict):
+    """The model a place thinks with now, and the scope that chose it."""
+
+    value: str
+    layer: Literal["place", "circle", "consciousness"]
+
+
 class PlaceSummary(TypedDict):
     """One projection for list, write/conflict responses and the model's place map."""
 
@@ -572,6 +582,7 @@ class PlaceSummary(TypedDict):
     owner_accounts: List[Dict[str, str]]
     working_folder: str
     model: str
+    model_route: PlaceModelRoute
     context_topics: List[str]
     legacy_binding_ids: List[str]
     revision: int
@@ -933,7 +944,7 @@ __all__ = [
     "ContractBody", "ContractHttpEntry", "ContractWsEntry", "ContractWs", "GatewayContractResponse",
     "OwnerRuntimeModeRequest", "OwnerContextModeRequest", "OwnerEffortRangeRequest", "OwnerSubagentsModeRequest", "OwnerChatModelRequest", "ChatModelChoice", "ChatModelRoute", "ChatModelRoutes", "OwnerChatModelResponse", "OwnerSafetyModeRequest", "OwnerSafetyRulesRequest", "OwnerSafetyRulesResponse", "OwnerSafetyModelRequest", "OwnerSafetyModelResponse", "OwnerEnabledRequest",
     "RecentWake", "RecentWakeCheck", "RecentWakesView",
-    "PlaceConnectRequest", "PlaceIcon", "PlaceReadiness", "PlaceSummary", "PlaceDisconnectRequest",
+    "PlaceConnectRequest", "PlaceIcon", "PlaceReadiness", "PlaceModelRoute", "PlaceSummary", "PlaceDisconnectRequest",
     "PlaceOwnerAccountRequest", "PlaceUpdateRequest", "PlaceCircleChoice", "PlaceDescription",
     "CircleSummary", "CircleCreateRequest", "CircleUpdateRequest", "CircleDeleteRequest",
     "SettingsSecretRequest", "SettingsSecretResponse", "ChatUploadDeleteRequest", "ChatUploadDeleteResponse",

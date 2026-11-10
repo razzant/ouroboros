@@ -845,3 +845,61 @@ def test_a_presence_focus_reads_a_foreign_project_journal_but_never_writes_it(fo
     child = SimpleNamespace(task_id="child", project_id="", drive_root=focus[0], task_contract={},
                             task_metadata={"parent_task_id": "root-1", "delegation_role": "subagent"})
     assert "TOOL_FORBIDDEN" in _resolve_project_id(child, "nova", write=False)[1]
+
+
+@pytest.mark.parametrize("place_model,circle_model,model,layer", [
+    ("place/chosen", "circle/chosen", "place/chosen", "place"),
+    ("", "circle/chosen", "circle/chosen", "circle"),
+    ("", "", None, None),
+    ("place/chosen", None, "place/chosen", "place"),
+    ("", None, None, None),
+])
+def test_focus_model_inherits_the_admitted_scope(focus, monkeypatch, place_model, circle_model, model, layer):
+    from ouroboros.presence_context import frame_focus_content
+    root, place, _, event = focus
+    p.edit_place(root, place.place_id, "set_model", author="owner", model=place_model)
+    if circle_model is not None:
+        circle = p.create_circle(root, name="Team", text="Shared words", model=circle_model, author="owner")
+        p.edit_place(root, place.place_id, "set_circle", author="owner", circle_id=circle["circle_id"])
+    admission = admit_presence_turn(drive_root=root, authenticated_transport_skill="bridge", binding_id=place.place_id)
+    if circle_model is not None:
+        p.edit_circle(root, circle["circle_id"], author="owner", model="circle/later")
+    task = task_for((root, admission.place, admission, event))
+    metadata = task["metadata"]
+    assert metadata["model_role"] == "consciousness"
+    assert metadata.get("model") == model and metadata.get("model_layer") == layer
+    if model is None:
+        assert "model" not in metadata and "model_layer" not in metadata
+    rendered = frame_focus_content(task, event.text)
+    assert "circle/chosen" not in rendered and "circle/later" not in rendered
+    if circle_model is not None:
+        assert "Shared words" in rendered
+
+
+@pytest.mark.parametrize("layer", ["place", "circle"])
+@pytest.mark.parametrize("alias", ["main", "light"])
+@pytest.mark.parametrize("local", [False, True])
+def test_focus_aliases_remain_admission_snapshots(focus, monkeypatch, layer, alias, local):
+    root, place, _, event = focus
+    settings = {"main": "main/first", "light": "light/first", "local": local}
+    monkeypatch.setattr("ouroboros.model_slots._main_model", lambda: settings["main"])
+    monkeypatch.setattr("ouroboros.config.get_light_model", lambda: settings["light"])
+    from ouroboros.config import runtime_setting
+    monkeypatch.setattr("ouroboros.config.runtime_setting", lambda key, default="": (
+        str(settings["local"]).lower() if key == "USE_LOCAL_LIGHT" else runtime_setting(key, default)))
+    circle = p.create_circle(root, name="Team", model=alias if layer == "circle" else "circle/model", author="owner")
+    p.edit_place(root, place.place_id, "set_circle", author="owner", circle_id=circle["circle_id"])
+    if layer == "place":
+        p.edit_place(root, place.place_id, "set_model", author="owner", model=alias)
+    admission = admit_presence_turn(drive_root=root, authenticated_transport_skill="bridge", binding_id=place.place_id)
+    frozen = task_for((root, admission.place, admission, event))["metadata"]
+    settings.update(main="main/next", light="light/next", local=not local)
+    current = task_for((root, admission.place, admission, event))["metadata"]
+    assert frozen["model"] == alias + "/first" and current["model"] == alias + "/next"
+    assert frozen["model_layer"] == current["model_layer"] == layer
+    if alias == "light":
+        assert frozen["use_local_model"] is local and current["use_local_model"] is not local
+    else:
+        assert "use_local_model" not in frozen and "use_local_model" not in current
+    records = p.place_records(root)
+    assert (records.places[place.place_id].model if layer == "place" else records.circle(circle["circle_id"])["model"]) == alias
