@@ -775,9 +775,6 @@ def test_a_wakes_read_over_a_reclaimed_journal_reads_detail_and_delivers_the_sam
     attention = {"wakeReason": "attention", "attention": [0],
                  "summaries": [{"status": "succeeded", "pending": False, "token": "a" * 43, "problem": None}]}
     monkeypatch.setattr(delegate, "_capture_terminal_patch", lambda *a, **k: None)
-    clock = [0.0]
-    monkeypatch.setattr(delegate_activity, "time", SimpleNamespace(
-        monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds)))
     seen = {}
     for case, journal, tail in (
             ("kept", [_harness(1, "message", text="Working on it."), _run_event(2, "run.completed")], "event: end\ndata: {}\n\n"),
@@ -786,7 +783,6 @@ def test_a_wakes_read_over_a_reclaimed_journal_reads_detail_and_delivers_the_sam
         (tmp_path / case).mkdir()
         ctx = _nanny_ctx(tmp_path / case, task_id="child")
         ctx.task_attempt = 0
-        _agent_obj, events = _agent(ctx)
         monkeypatch.setitem(delegate._CUSTODY, "run-1", RunCustody(task_id="child", run_id="run-1", route_id="claude",
                                                                     model="m", access="readonly"))
         engine = LoopbackEngine(journal, tail=tail, detail=detail, attention=attention)

@@ -707,7 +707,7 @@ def test_the_body_observes_a_work_run_through_its_own_engine(env, tmp_path, monk
     def runtime(root, factory):  # a stopped body runtime: its observation methods, no loop
         stop = threading.Event()
         stop.set()
-        result = body.BodyRuntime(root, stop_event=stop, gateway_factory=factory, max_workers=2)
+        result = body.BodyRuntime(root, stop_event=stop, gateway_factory=factory)
         result.thread.join(10)
         assert not result.thread.is_alive()
         return result

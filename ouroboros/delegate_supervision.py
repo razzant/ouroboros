@@ -53,6 +53,21 @@ def _loop_gateway(entry: Any = None) -> Any:
         return None
 
 
+def _run_transport(ctx: Any, run_id: str, gateway: Any) -> Any:
+    """``gateway`` while it reaches ``run_id``'s recorded engine, else the transport to that engine."""
+    from ouroboros.execution_domain import same_engine
+
+    try:
+        _status, entry = custody.lookup(custody.custody_root(ctx), str(getattr(ctx, "task_id", "") or ""), run_id)
+    except Exception:
+        _drop_gateway(gateway)
+        return None  # the per-call reader must recover custody; unreadable is never an owned-engine binding
+    if gateway is not None and same_engine(gateway, entry):
+        return gateway
+    _drop_gateway(gateway)
+    return _engine_transport(entry)
+
+
 def _engine_transport(entry: Any) -> Any:
     """The transport for ``entry``: the owned engine's built exactly as before, a work engine's bound to it."""
     return _loop_gateway(entry) if getattr(entry, "engine_ref", None) else _loop_gateway()
@@ -1208,7 +1223,7 @@ def _publish(ctx: Any, descriptor: dict[str, Any], woke_by: str = "") -> ToolRes
     # Exact retained bytes answer before any transport; one transport otherwise, only for a run with a route (no
     # route, no catalog read). An engine this cannot discover reads its live input as unknown.
     retained = None if _control_wakes(ctx) else retained_terminal_result(ctx, target, retry_money=True)
-    gateway = _engine_transport(held) if getattr(held, "route_id", "") and retained is None else None
+    gateway = _run_transport(ctx, target, None) if getattr(held, "route_id", "") and retained is None else None
     try:
         live_input = _leaf_live_input(ctx, target, gateway) if gateway is not None else "unknown"
         while True:  # a cancel or a spent deadline already there never waits behind another read

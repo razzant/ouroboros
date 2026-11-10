@@ -13,8 +13,9 @@ one made for a run:
   record, published as the wait published it (``delegate_progress.emit_stream``) and committed only once
   the frame was handed over. A new body resumes at the last retained range (re-read once: a reader keeps
   each seq once). After the body records the run's terminal the follow drains the journal to its end. An
-  engine without the stream keeps the window view: each detail the body reads (every beat there) gives
-  the record of its new timeline rows (``delegate_progress.emit``).
+  engine without the stream, or a journal the engine refused for good (``journal_refused``: what it served is
+  shown first, it is never read again), keeps the window view: each detail the body reads gives the record of
+  its new timeline rows (``delegate_progress.emit``).
 * **Engine unreachable.** A pass nothing answered (a socket that carried nothing, never a slow read or
   a refusal) opens one episode; the first answer closes it. Each live task holding an observed run hears
   both once per episode through its own progress channel.
