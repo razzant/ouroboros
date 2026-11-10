@@ -144,7 +144,7 @@ def _stage(geo, ctx, monkeypatch, run_id="run-1", engine=None):
         run_id=run_id, task_id=ctx.task_id, route_id="r", model="m", project_id="p",
         project_owned=False, root_task_id=ctx.task_metadata.get("root_task_id") or ctx.task_id,
         ledger_root=str(geo.canonical)))
-    out = json.loads(delegate._delegate_wait(ctx, run_id, wait_sec=1))
+    out = json.loads(delegate._read_run(ctx, run_id))
     custody._CUSTODY.clear()
     return out
 
@@ -594,7 +594,7 @@ def test_review_owned_unread_and_pre_retention_runs_add_no_second_line(tmp_path,
     monkeypatch.setattr(gw, "ClaudexorGateway", lambda *a, **k: engine)
     assert custody.record_started(tmp_path, custody.RunCustody(
         run_id="run-big", task_id="root", route_id="r", model="m", ledger_root=str(tmp_path)))
-    out = json.loads(delegate._delegate_wait(ctx, "run-big", wait_sec=1))
+    out = json.loads(delegate._read_run(ctx, "run-big"))
     custody._CUSTODY.clear()
     health = _health(tmp_path)
     assert "DELEGATED RESULT NEVER READ — run run-big" in health

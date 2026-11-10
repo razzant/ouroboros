@@ -57,7 +57,7 @@ def _retained_for_main(f, monkeypatch, run_id="run-canonical"):
     assert custody.record_started(drive, custody.RunCustody(
         run_id=run_id, task_id=TASK, route_id="r", model="m", project_id="p",
         project_owned=False, root_task_id=TASK, ledger_root=str(drive)))
-    delivery = json.loads(delegate._delegate_wait(f.ctx, run_id, wait_sec=1))["output_delivery"]
+    delivery = json.loads(delegate._read_run(f.ctx, run_id))["output_delivery"]
     artifact = delivery["artifact"]
     assert artifact["root"] == "artifact_store" and artifact["source"]["task_id"] == TASK
     target = pathlib.Path(artifact["path"])

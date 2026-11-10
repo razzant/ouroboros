@@ -307,7 +307,7 @@ def test_the_wake_read_is_one_detail_read_and_never_the_journal(tmp_path):
             return lambda *_a, **_k: {}
 
     ctx.emit_progress_fn = lambda *_a, **_k: pytest.fail("a wake's read publishes no speech")
-    payload = json.loads(delegate._delegate_wait(ctx, "run-1", since_seq=2, observation_only=True, gateway=Gateway()))
+    payload = json.loads(delegate._read_run(ctx, "run-1", 2, gateway=Gateway()))
     assert payload["status"] in {"progress", "no_progress"} and payload["last_seq"] == 4
     assert calls.count(("get_run", "run-1")) == 1
 
@@ -389,6 +389,8 @@ def test_the_frozen_delegate_wait_contract_says_its_result_is_owed_to_the_next_r
     assert "this wait's result is then owed to your next model request" in text
     assert "it returns sleep_armed" in text and "holds no slot" in text and "with no further call" in text
     assert "Each wake is delivered once and counts as shown only when shown whole" in text
+    assert "a wait_sec an old transcript passes is accepted and sizes nothing" in text
+    assert "wait_sec" in inspect.signature(delegate_wait_entry).parameters, "accepted, though the schema offers none"
 
 
 def test_a_warm_park_acknowledges_what_its_stored_source_holds_as_a_cold_park_does(tmp_path):

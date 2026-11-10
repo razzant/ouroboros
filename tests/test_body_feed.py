@@ -308,22 +308,21 @@ def test_the_body_holds_every_observed_run_to_its_recorded_grant(world, monkeypa
     assert not current.run(world.root, "run-fine").containment_fault, "a run within its grant is left alone"
 
 
-def test_a_supervised_beat_leaves_the_floor_to_the_body_and_the_windowed_wait_keeps_its_own(tmp_path, monkeypatch):
-    """The nanny's beat (``observation_only``) no longer cancels: the body holds that run's floor. The windowed wait,
-    which no body read precedes, still halts the same wide run."""
+def test_the_wake_read_leaves_a_recorded_grant_to_the_body_and_holds_a_row_without_one(tmp_path, monkeypatch):
+    """A wake's one read (``tools/delegate._read_run``) does not cancel a run whose start row recorded its grant: the
+    body holds that run's floor. A row with no recorded grant has only the read's live derivation, which halts it."""
     from tests._delegated_transport_shared import _delegating_ctx, _isolation_stub
     from ouroboros.tools import delegate
 
     ctx = _delegating_ctx(tmp_path, acting=False)
-    for observation_only, status in ((True, "progress"), (False, "refused")):
+    for access, status in (("readonly", "progress"), ("", "refused")):
         cancelled = _isolation_stub(monkeypatch, run_dir=tmp_path / "run-1", effective_access="full")
         delegate._CUSTODY.clear()
         delegate._CUSTODY["run-1"] = delegate._RunCustody(task_id=ctx.task_id, route_id="some-route", model="m",
-                                                          project_id="prj", access="readonly", mode="ask")
-        out = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1, since_seq=0,
-                                                 observation_only=observation_only))
-        assert out["status"] == status, (observation_only, out)
-        assert bool(cancelled) is (not observation_only)
+                                                          project_id="prj", access=access, mode="ask")
+        out = json.loads(delegate._read_run(ctx, "run-1", 0))
+        assert out["status"] == status, (access, out)
+        assert bool(cancelled) is (not access)
     delegate._CUSTODY.clear()
 
 

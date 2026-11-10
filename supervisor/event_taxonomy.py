@@ -111,8 +111,6 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
         "supervisor.events_runtime_controls", "ouroboros/tools/control_runtime.py"),
     "ensure_project_scope": _handled(
         "supervisor.events_project_routing", "ouroboros/tools/control_delegation.py"),
-    "external_wait_lease": _handled(
-        "supervisor.events_worker_reports", "ouroboros/delegate_progress.py", idle_input=True),
     "llm_usage": _handled(
         "supervisor.events_budget", "ouroboros/agent.py",
         "ouroboros/pricing.py", "ouroboros/tools/search.py", "ouroboros/tools/vision.py",

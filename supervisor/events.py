@@ -296,7 +296,6 @@ from supervisor.events_task_done import (  # noqa: E402, F401 -- intentional pub
 )
 from supervisor.events_worker_reports import (  # noqa: E402, F401 -- intentional public re-exports
     _handle_acceptance_fence,
-    _handle_external_wait_lease,
     _handle_log_event,
     _handle_mcp_signed_in,
     _handle_skill_lifecycle,
@@ -332,7 +331,6 @@ from supervisor.events_mind_controls import handle_mind_task_control
 
 EVENT_HANDLERS = {
     "llm_usage": _handle_llm_usage,
-    "external_wait_lease": _handle_external_wait_lease,
     "owner_wait": handle_owner_wait,
     "worker_quiescent": handle_worker_quiescent,
     # A conversation carrier's frames: its start phases for the census, its coined title.

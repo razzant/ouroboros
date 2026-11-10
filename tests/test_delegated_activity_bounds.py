@@ -3,7 +3,6 @@
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 import errno
-import json
 import os
 from pathlib import Path
 import stat
@@ -159,51 +158,6 @@ def test_zero_reader_allowance_opens_no_stream(tmp_path, monkeypatch):
     _ctx_value, gateway, _clock, requests = _transport(tmp_path, monkeypatch)
     read = run_events.read_run_events(gateway, "run-1", after_seq=0, through_seq=None, timeout_sec=0)
     assert requests == [] and read.through_seq == 0 and read.stop == "time" and not read.events
-
-
-@pytest.mark.parametrize(("spent_in", "terminal"), [("detail", False), ("source_lookup", True)])
-def test_spent_wait_admits_no_new_activity_read(tmp_path, monkeypatch, terminal, spent_in):
-    from ouroboros.delegate_custody import RunCustody
-    from ouroboros.tools import delegate
-    from tests._delegated_transport_shared import _nanny_ctx
-
-    def spend(request, clock):
-        if request.url.path == "/v2/runs/run-1" and spent_in == "detail":
-            clock.now += 1
-
-    _unused, gateway, clock, requests = _transport(tmp_path, monkeypatch, spend)
-    if not terminal:
-        original = gateway._client
-
-        def running(request):
-            response = original.send(request)
-            if request.url.path == "/v2/runs/run-1":
-                body = response.json()
-                body["summary"]["state"] = "running"
-                return httpx.Response(200, json=body)
-            return response
-
-        gateway._client = httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(running))
-    ctx = _nanny_ctx(tmp_path, task_id="child")
-    activities = []
-    ctx.emit_progress_fn = lambda _text, **meta: activities.append(meta["delegated_activity"])
-    monkeypatch.setitem(delegate._CUSTODY, "run-1", RunCustody(
-        task_id="child", run_id="run-1", route_id="claude", model="m", access="readonly"))
-    monkeypatch.setattr(delegate, "_capture_terminal_patch", lambda *a, **k: None)
-    monkeypatch.setattr(delegate, "time", clock)
-    if spent_in == "source_lookup":
-        real = delegate_activity._retained_range
-
-        def spend_lookup(*args):
-            clock.now += 1
-            return real(*args)
-
-        monkeypatch.setattr(delegate_activity, "_retained_range", spend_lookup)
-    result = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1, since_seq=0, gateway=gateway))
-    assert result["status"] == ("terminal" if terminal else "progress")
-    assert not any(r.url.path.endswith(("/operations", "/events")) for r in requests)
-    assert activities[0]["gaps"][0]["reason"] == "read_bound:time"
-    assert activities[0]["gaps"][0].get("final", False) is terminal
 
 
 @pytest.mark.parametrize(("entry", "flag_name", "errors"), [

@@ -429,7 +429,7 @@ def test_delegate_wait_entry_never_acks_an_undelivered_pending_wake(tmp_path, mo
     assert acknowledge_pending_wake(ctx, "truncated-not-json") is False
     monkeypatch.setattr(
         delegate_module,
-        "_delegate_wait",
+        "_read_run",
         lambda *_a, **_k: (_ for _ in ()).throw(
             AssertionError("pending wake must replay before another physical poll")
         ),

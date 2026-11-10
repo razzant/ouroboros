@@ -332,11 +332,11 @@ def _write_failed_attempt(run_dir, *, attempt="a01"):
 
 
 def _waiting(tmp_path, monkeypatch, *, acting=True, access=""):
-    """One ``delegate_wait`` window over ``run-1``.
+    """One wake's read of ``run-1`` (``tools/delegate._read_run``).
 
     ``access`` records the GRANTED shape on the custody entry, as a STARTED row does
-    (#1609: technical access alone decides it); "" keeps a legacy entry with none, whose
-    wait re-derives its entitlement from the live context.
+    (#1609: technical access alone decides it), whose floor the body holds; "" keeps a
+    legacy entry with none, whose read re-derives its entitlement from the live context.
     """
     import ouroboros.tools.delegate as delegate
 
@@ -349,10 +349,8 @@ def _waiting(tmp_path, monkeypatch, *, acting=True, access=""):
         **({"access": granted.access, "mode": granted.mode, "isolation": granted.isolation,
             "delegated": granted.delegated} if granted else {}),
     )
-    # since_seq=0 so a HEALTHY run records its advance and answers `progress` when the
-    # one-second window expires; a BREACH is what returns immediately, mid-window. The
-    # distinguishing signal is "was this halted as a containment fault", not the timing.
-    out = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1, since_seq=0))
+    # since_seq=0 so a HEALTHY run answers `progress`; a BREACH is halted as a containment fault.
+    out = json.loads(delegate._read_run(ctx, "run-1", 0))
     delegate._CUSTODY.clear()
     return out
 

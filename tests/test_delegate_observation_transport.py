@@ -261,7 +261,7 @@ def test_observation_read_failure_carries_the_gateway_typed_code(tmp_path, monke
     refusals.append(gateway_module.ClaudexorUnavailable(
         "daemon_unreachable", "ConnectError: [Errno 61]", observation_timeout=True,
         observation_reason="daemon_unreachable"))
-    quiet = json.loads(delegate._delegate_wait(ctx, "run-dead", observation_only=True))
+    quiet = json.loads(delegate._read_run(ctx, "run-dead"))
     assert quiet["status"] == "observation_pending" and quiet["run_id"] == "run-dead"
     assert quiet["reason"] == "daemon_unreachable"
     # A slow but LIVE daemon is the same quiet hole with a different typed reason,
@@ -269,11 +269,11 @@ def test_observation_read_failure_carries_the_gateway_typed_code(tmp_path, monke
     refusals.append(gateway_module.ClaudexorUnavailable(
         "daemon_unreachable", "ReadTimeout", observation_timeout=True,
         observation_reason="observation_read_timeout"))
-    slow = json.loads(delegate._delegate_wait(ctx, "run-dead", observation_only=True))
+    slow = json.loads(delegate._read_run(ctx, "run-dead"))
     assert slow["status"] == "observation_pending" and "primary" in slow["engine_pool"]
     assert slow["reason"] == "observation_read_timeout"
     refusals.append(gateway_module.ClaudexorUnavailable("http_401", "unauthorized", status_code=401))
-    refused = json.loads(delegate._delegate_wait(ctx, "run-dead", observation_only=True))
+    refused = json.loads(delegate._read_run(ctx, "run-dead"))
     assert refused["status"] == "refused" and refused["reason"] == "http_401"
 
 
@@ -526,7 +526,7 @@ def _repaired_engine(tmp_path, monkeypatch, *, events, wait_many=None, catalog=N
         return detail(request) if detail else httpx.Response(200, json=running)
 
     monkeypatch.setattr(gateway_module, "ClaudexorGateway", lambda *a, **k: _scripted_gateway(handler))
-    result = json.loads(delegate._delegate_wait(ctx, "run-x", since_seq=0, observation_only=True))
+    result = json.loads(delegate._read_run(ctx, "run-x", 0))
     delegate_activity.reset_process_memo()
     return result, frames
 

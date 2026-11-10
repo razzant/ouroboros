@@ -23,7 +23,6 @@ import httpx
 import pytest
 
 from ouroboros import delegate_activity, delegate_progress
-from ouroboros.delegate_custody import RunCustody
 from ouroboros.gateway.history import make_chat_history_endpoint
 from ouroboros.subagent_messages import delegated_activity_meta
 from ouroboros.utils import truncate_within_limit
@@ -271,7 +270,7 @@ def test_window_rows_carry_the_key_whole_and_fold_one_utterance(tmp_path):
         {"type": "harness.event", "title": "Checking.", "detail": "Checking.", "textKind": "message", "textFinal": True,
          "harnessId": "claude", "attemptId": "a01"},
     ]}
-    advance = delegate_progress.WindowObservations().record(detail, 5, 0)
+    advance = delegate_progress.WindowObservations().record(detail, 5)
     assert [row.get("speechKey") for row in advance.events] == [key, key, key, "claude:x:2:0", None]
     assert advance.events[-1]["textFinal"] is True and "textFinal" not in advance.events[0]
     assert delegate_progress.live_line("run-1", advance).endswith(": Checking. · [claude/a01] status · Checking.")
@@ -576,23 +575,12 @@ def test_a_later_records_recap_keeps_the_abandon_and_the_answer_it_recalls(tmp_p
 
 
 def _waited(tmp_path, monkeypatch, daemon):
-    """The frames ``delegate_wait`` hands to the progress transport while it watches ``daemon``'s run."""
-    from ouroboros.tools import delegate
-    from tests._delegated_transport_shared import _nanny_ctx
+    """The frames the body's follow of ``daemon``'s run hands to the progress transport (``delegate_feed``)."""
+    from tests.test_delegated_activity import _followed
 
-    ctx = _nanny_ctx(tmp_path, task_id="child")
-    ctx.task_attempt = 0
+    ctx = SimpleNamespace(task_id="child", task_attempt=0, drive_root=tmp_path, task_metadata={})
     _agent_obj, events = _agent(ctx)
-    monkeypatch.setitem(delegate._CUSTODY, daemon.run_id, RunCustody(
-        task_id="child", run_id=daemon.run_id, route_id="claude", model="m", access="readonly"))
-    monkeypatch.setattr(delegate, "_capture_terminal_patch", lambda *a, **k: None)
-    clock = SimpleNamespace(now=0.0)
-    with monkeypatch.context() as timing:
-        timing.setattr(delegate.time, "monotonic", lambda: clock.now)
-        timing.setattr(delegate.time, "sleep", lambda seconds: setattr(clock, "now", clock.now + seconds))
-        result = json.loads(delegate._delegate_wait(ctx, daemon.run_id, wait_sec=60, since_seq=0,
-                                                    gateway=_gateway(daemon)))
-    assert result["status"] == "terminal", result
+    _followed(ctx, daemon)
     return [row for row in (events.get_nowait() for _ in range(events.qsize())) if row["type"] == "send_message"]
 
 
@@ -801,7 +789,7 @@ def test_the_engines_timeline_rows_fold_the_same_way_in_the_window_view(subtests
                 gateway, ctx = _gateway(daemon), _ctx(tmp_path / ("cut-" + "-".join(map(str, cuts))), [])
                 seen, records = delegate_progress.WindowObservations(), []
                 for index, bound in enumerate((*cuts, len(rows))):
-                    advance = seen.record({"timeline": rows[:bound], "lastSeq": bound}, bound, index)
+                    advance = seen.record({"timeline": rows[:bound], "lastSeq": bound}, bound)
                     assert not advance.events_omitted
                     line = delegate_progress.live_line(daemon.run_id, advance)
                     for key, facts in keys.items():

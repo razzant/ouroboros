@@ -64,10 +64,6 @@ _OPTION_PREVIEW_CHARS = 200
 _SCALAR_PREVIEW_CHARS = 200
 _MAX_INLINE_QUESTIONS = 3
 _MAX_INLINE_OPTIONS = 12
-# The compact advances ride-along on the immediate waiting_on_user return (F17):
-# enough for the window's journal spine, small enough that the QUESTION stays
-# the payload's point.
-_WAITING_ADVANCES_BUDGET_CHARS = 2_000
 
 
 def _interactions_are_news(run_id: str, pending: List[Dict[str, Any]]) -> bool:
@@ -171,8 +167,7 @@ SAME_SESSION_CONTINUATION: Dict[str, str] = {
 
 def _waiting_on_user_payload(ctx: ToolContext, run_id: str, state: str,
                              last_seq: int, pending: List[Dict[str, Any]],
-                             seen: Any = None, source_request: Any = None,
-                             source_verification: Any = None) -> str:
+                             source_request: Any = None, source_verification: Any = None) -> str:
     """The IMMEDIATE typed return for a run that is waiting on an answer.
 
     The full question text rides inline when it fits the tool budget; otherwise
@@ -182,10 +177,6 @@ def _waiting_on_user_payload(ctx: ToolContext, run_id: str, state: str,
     (``<run>.<sha12>.interactions.json``, F15): a different pending set writes a
     different file, so a receipt handed out for an earlier set keeps describing
     bytes that still exist instead of being silently overwritten.
-
-    ``seen`` is the wait's ``WindowObservations`` (F17): the window's observed
-    journal advances ride the immediate return too — compact and bounded — so
-    cutting the window short for a question does not lose the run's sequence.
     """
     pending = addressed_questions(str(getattr(ctx, "task_id", "") or ""), run_id, pending)
     full: Dict[str, Any] = {
@@ -201,8 +192,6 @@ def _waiting_on_user_payload(ctx: ToolContext, run_id: str, state: str,
         full["work_order_source_request"] = dict(source_request)
     if isinstance(source_verification, dict) and source_verification:
         full["work_order_verification"] = dict(source_verification)
-    if seen is not None and getattr(seen, "advances", None):
-        full["advances"] = seen.rows(_WAITING_ADVANCES_BUDGET_CHARS)
     artifact_payload = {key: full[key] for key in (
         "run_id", "pending_interactions", "work_order_source_request", "work_order_verification",
     ) if key in full}

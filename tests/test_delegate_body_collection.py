@@ -398,7 +398,7 @@ def test_body_output_remains_readable_when_engine_is_gone(tmp_path, monkeypatch,
             pass
     monkeypatch.setattr(gateway, "ClaudexorGateway", lambda *a, **kw: Gone())
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=entry.task_id)
-    payload = json.loads(delegate._delegate_wait(ctx, entry.run_id, wait_sec=1))
+    payload = json.loads(delegate._read_run(ctx, entry.run_id))
     assert payload["status"] == "terminal"
     assert payload["primary_output"]["text"] == "complete answer"
     assert payload["current_observation"]["status"] == "retained" and not contacted

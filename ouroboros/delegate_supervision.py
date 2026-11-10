@@ -1159,13 +1159,12 @@ def _target_run(ctx: Any, run_ids: list[str], woke_by: str) -> str:
 
 
 def _observe_once(ctx: Any, run_id: str, since_seq: int, gateway: Any = None) -> str:
-    """The one addressed read a wake makes of the run it speaks for (``tools/delegate._delegate_wait``
-    as an observation: no window, no journal read, no speech; the body owns those): its retained or
-    newly collected terminal, a new question set whole, else its present state."""
-    from ouroboros.tools.delegate import _delegate_wait
+    """The one addressed read a wake makes of the run it speaks for (``tools/delegate._read_run``: no
+    journal read, no speech; the body owns those): its retained or newly collected terminal, a new
+    question set whole, else its present state."""
+    from ouroboros.tools.delegate import _read_run
 
-    return _delegate_wait(ctx, run_id, since_seq=since_seq, observation_only=True,
-                          **({"gateway": gateway} if gateway is not None else {}))
+    return _read_run(ctx, run_id, since_seq, gateway=gateway)
 
 
 def _replay(ctx: Any, run_ids: list[str]) -> tuple[Optional[ToolResult], dict[str, dict[str, Any]]]:

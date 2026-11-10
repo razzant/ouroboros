@@ -20,7 +20,6 @@ import functools
 import json
 import logging
 import time
-import uuid
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, NamedTuple
 
 from ouroboros import delegate_custody as custody
@@ -157,7 +156,6 @@ from ouroboros.delegate_containment import (  # noqa: E402
     home_nested_under_operator_home,  # noqa: F401  (leaf reads it through _delegate() at call time)
 )
 from ouroboros.delegate_containment import granted_shape, halt_breached  # noqa: E402
-_POLL_INTERVAL_SEC = 3.0
 # Claudexor's own schema bound on maxSeconds (packages/schema/src/control.ts).
 _CLAUDEXOR_MAX_SECONDS = 604_800
 
@@ -993,44 +991,31 @@ def _halt_breached_run(ctx: ToolContext, gateway: Any, entry: _RunCustody,
     ).text
 
 
-# The typed external-wait lease lives in `delegate_progress` (the wait-liveness
-# module); re-bound here because the wait's own seams and the tests name it on
-# this surface, exactly like the staged-output cluster above.
-_external_wait_lease_until = progress.external_wait_lease_until
-_emit_external_wait_lease = progress.emit_external_wait_lease
-
-
-def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None,
-                   since_seq: Optional[int] = None, *, observation_only: bool = False,
-                   gateway: Any = None) -> str:
-    """One run's read: a caller-named window, or the one addressed read of a wake (``observation_only``).
+def _read_run(ctx: ToolContext, run_id: str, since_seq: Optional[int] = None, *, gateway: Any = None) -> str:
+    """The one addressed read a ``delegate_wait`` wake makes of the run it speaks for
+    (``delegate_supervision._observe_once``): its retained or newly collected terminal, a new
+    question set whole, else its present state past the wake's cursor ``since_seq``.
 
     ``gateway`` is a transport BORROWED from its caller: it replaces the per-call
     ``ClaudexorGateway()``, is handshaken here only when it has not been yet
     (``engine_version`` is the handshake receipt), and is never closed here; the
     owner closes it. Absent, the call builds, handshakes and closes its own.
 
-    A windowed read HOLDS the window its caller names (none named: one second; docs/DEVELOPMENT.md
-    "Timeout & Wait Control"). It returns early only on a terminal state or a containment fault; a
-    journal-cursor advance past ``since_seq`` is RECORDED and streamed live, and the caller gets the
-    whole sequence in ``advances`` at expiry. Only the journal cursor proves progress, never SSE
-    ``: ping``. NARROW-ONLY, like ``bounded_max_seconds``: it may not outlive the caller's deadline
-    minus finalization grace; a SPENT deadline clamps to the floor and every call is BOUNDED by what it
-    has left (``progress.poll_bound``). Legacy caller-sized waits keep their last-poll expiry contract.
-
-    ``observation_only`` is what ``delegate_wait``'s wake reads of the run it speaks for
-    (``delegate_supervision._observe_once``): ONE detail read under the ordinary transport bound
-    narrowed by the real deadline, with no window, no lease, no journal read and no speech (the body
-    observes runs and follows their speech). A transport failure that delivered no daemon answer
-    (``observation_read_timeout``, ``daemon_unreachable``, the engine's own ``DAEMON_BUSY_CODES``)
-    is an ``observation_pending`` fact, never a refusal.
+    ONE detail read under the transport's read bound, narrowed by the real deadline: no journal
+    read and no speech (the body follows each run's speech), and the rights floor of a run whose
+    start row recorded its grant is the body's (``delegate_containment.hold_to_grant``); a row with
+    no recorded grant is held here to the live derivation. A transport failure that delivered no
+    daemon answer (``observation_read_timeout``, ``daemon_unreachable``, the engine's own
+    ``DAEMON_BUSY_CODES``) is an ``observation_pending`` fact, never a refusal.
     """
-    from ouroboros.config import DELEGATE_WAIT_WINDOW_MAX_SEC
+    from ouroboros.deadline_utils import parse_deadline_ts, window_within_deadline
     from ouroboros.gateways.claudexor import (
+        _READ_TIMEOUT_SEC,
         ClaudexorGateway,
         ClaudexorUnavailable,
         pending_interactions as _cx_pending,
     )
+    from ouroboros.tools.delegate_terminal_evidence import retained_terminal_result
 
     rid = str(run_id or "").strip()
     if not rid:
@@ -1039,146 +1024,67 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
     if not_mine:
         from ouroboros.tools.delegate_terminal_evidence import retry_terminal_result
         return retry_terminal_result(ctx, rid, gateway=gateway).text
-    if not_mine or entry is None:
-        return (not_mine or _fail("delegate_wait", "run_ownership_unknown",
-                                  "custody unresolved", run_id=rid)).text
-    from ouroboros.tools.delegate_terminal_evidence import retained_terminal_result
+    if entry is None:
+        return _fail("delegate_wait", "run_ownership_unknown", "custody unresolved", run_id=rid).text
     retained = retained_terminal_result(ctx, rid, retry_money=True)
     if retained is not None:
         return json.dumps(retained, ensure_ascii=False, indent=2)
-    try:
-        window = int(wait_sec) if wait_sec is not None else 1
-    except (TypeError, ValueError):
-        window = 1
-    from ouroboros.deadline_utils import parse_deadline_ts, window_within_deadline
-
-    window = window_within_deadline(ctx, max(1, min(window, DELEGATE_WAIT_WINDOW_MAX_SEC)))
-
-    # Handshake and first poll spend this call's window too; start its clock before connecting.
     started = time.monotonic()
-    deadline = started + window
-    from ouroboros.gateways.claudexor import _READ_TIMEOUT_SEC
 
-    def read_window() -> float:
-        return (float(window_within_deadline(ctx, int(_READ_TIMEOUT_SEC)))
-                if observation_only else deadline - time.monotonic())
+    def bound() -> float:
+        return float(window_within_deadline(ctx, int(_READ_TIMEOUT_SEC)))
 
     borrowed = gateway is not None
-
-    # The GRANTED shape replays from the durable custody row (R1 item 2): the run
-    # was admitted under host-derived authority recorded on its STARTED row, and a
-    # top-level payload delegation has no acting/workspace context to re-derive
-    # from — re-derivation read `readonly` and cancelled the run as widened on its
-    # first wait. Ownership was already proven above (`_owned_run`), and a lost or
-    # legacy custody record (no recorded access) keeps the live derivation, so a
-    # missing record still cannot become a wider run.
+    # The GRANTED shape replays from the durable custody row (R1 item 2): a top-level payload
+    # delegation has no acting/workspace context to re-derive from. A lost or legacy custody
+    # record (no recorded access) keeps the live derivation, so it cannot become a wider run.
     authority = granted_shape(entry) if entry.access else _derive_authority(ctx)
-    # FACTS against premature cancels: how long the run has actually been going and
-    # what its cap really is, from the durable start row. A nanny that cannot see
-    # these confabulates "exceeded the cap" out of its own impatience. Absent facts
-    # (an old row, an unknown run) stay null — never invented.
-    _started_ts, _run_max_seconds = custody.run_timing(custody.custody_root(ctx), rid)
-    _started_at = parse_deadline_ts(_started_ts)
-    _elapsed = lambda: None if _started_at is None else max(0, int(  # noqa: E731
-        (_dt.datetime.now(tz=_dt.timezone.utc) - _started_at).total_seconds()))
-    # The idle-rail lease for THIS window: granted before the loop, released in the
-    # finally below — the supervisor's idle enforcer spares a leased task while
-    # every other rail (deadline, ceiling, budget, cancel) still cuts through.
-    # The grant carries a unique lease_id (F5b) and the release names the SAME
-    # id, so an abandoned, executor-killed wait thread's late release can never
-    # blank a newer grant made by this task's next wait. An observation read leases
-    # nothing: it is one bounded read, and a sleeping wait holds no slot to spare.
-    _lease_id = uuid.uuid4().hex
-    if not observation_only:
-        _emit_external_wait_lease(ctx, rid, _external_wait_lease_until(ctx, window, _started_at, _run_max_seconds),
-                                  lease_id=_lease_id)
     try:
         if gateway is None:
             gateway = ClaudexorGateway()
         if not getattr(gateway, "engine_version", ""):
-            gateway.handshake(timeout_sec=progress.poll_bound(read_window()))
-        detail = progress.bounded_poll(gateway, rid, read_window())
-        baseline = int(since_seq) if since_seq is not None else int(detail.get("lastSeq") or 0)
-        seen = progress.WindowObservations()
-        seen.observe_baseline(detail, baseline)
-        while True:
-            summary = custody.summary_of(detail)
-            state = str(summary.get("state") or "")
-            last_seq = int(detail.get("lastSeq") or 0)
-            # A wake's read leaves the run's speech and its rights floor to the body, which holds them for
-            # every run it observes (``delegate_feed``, ``delegate_containment.hold_to_grant``); a row with
-            # no recorded grant has only this read's live derivation to hold it to.
-            breach = None if observation_only and entry.access else _containment_breach(detail, authority)
-            if breach:
-                return _halt_breached_run(ctx, gateway, entry, breach)
-            if last_seq > baseline or state in _TERMINAL_STATES:
-                # The STREAM is not collapsed — the TIMER is: every advance reaches the live progress
-                # surface the instant this loop sees it; only waking the MODEL per batch stops. At the
-                # end it drains the unread tail within this wait's read allowance before settlement returns.
-                advance = seen.record(detail, last_seq, int(time.monotonic() - started))
-                if not observation_only:
-                    progress.emit(ctx, rid, advance, detail=detail, entry=entry, gateway=gateway,
-                                  after_seq=baseline, read_remaining=read_window,
-                                  drain_sec=read_window() if state in _TERMINAL_STATES else None)
-                baseline = last_seq          # so the NEXT advance is counted once
-            if state in _TERMINAL_STATES:
-                from ouroboros.tools.delegate_terminal_evidence import collect_and_deliver_terminal
-                return json.dumps(collect_and_deliver_terminal(ctx, rid, detail, authority, entry, gateway),
-                                  ensure_ascii=False, indent=2)
-            pending = _cx_pending(detail)
-            if pending and _interactions_are_news(rid, pending):
-                # A NEW question returns IMMEDIATELY: the old wait kept only the
-                # waitingOnUser boolean and showed it at window expiry, so a paused
-                # run burned the rest of the window (up to the engine's whole
-                # answer timeout) in dead metered polling. A question the model
-                # ALREADY saw does not re-trigger — a nanny that escalated it
-                # up the hierarchy keeps holding windows instead of busy-looping, and the
-                # engine timeout stays the backstop.
-                return _waiting_on_user_payload(ctx, rid, state, last_seq, pending,
-                                                seen=seen,
-                                                source_request=entry.work_order_source_request,
-                                                source_verification=(
-                                                    custody.work_order_source_verification(entry)
-                                                    if entry.work_order_source_request else {}
-                                                ))
-            def _expired() -> str:
-                # The window payload is a DICT; a wake adds its own whole-sleep facts
-                # (``sleep``, one cache-horizon note) as fields at its one publication,
-                # never after the rendered JSON.
-                payload = progress.window_payload(
-                    run_id=rid, state=state, last_seq=last_seq,
-                    window=(time.monotonic() - started) if observation_only else window,
-                    elapsed_seconds=_elapsed(), max_seconds=_run_max_seconds or None,
-                    waiting_on_user=bool(summary.get("waitingOnUser")) or bool(pending),
-                    pending_interactions=_bounded_interactions(pending) if pending else None,
-                    detail=detail, seen=seen,
-                    budget=tool_result_limit("delegate_wait"))
-                return json.dumps(payload, ensure_ascii=False, indent=2)
-
-            if observation_only or time.monotonic() >= deadline:
-                return _expired()
-            time.sleep(min(_POLL_INTERVAL_SEC, max(0.0, deadline - time.monotonic())))
-            # BOUNDED whether or not the window is spent (the clamp must bound the waiting,
-            # not only the sleeping). The last poll of a spent window is bounded and never
-            # skipped — terminal state and breach are judged on fresh data or not at all —
-            # and a daemon too slow to answer it is this window's expiry; earlier, the typed
-            # refusal propagates — a daemon that died mid-window is no quiet completed wait.
-            left = deadline - time.monotonic()
-            fresh = (progress.expiring_poll(gateway, rid) if left <= 0
-                     else progress.bounded_poll(gateway, rid, left))
-            if fresh is None:
-                return _expired()   # unanswered AT expiry: expire on what is already held
-            detail = fresh
+            gateway.handshake(timeout_sec=progress.poll_bound(bound()))
+        detail = progress.bounded_poll(gateway, rid, bound())
+        summary = custody.summary_of(detail)
+        state = str(summary.get("state") or "")
+        breach = None if entry.access else _containment_breach(detail, authority)
+        if breach:
+            return _halt_breached_run(ctx, gateway, entry, breach)
+        if state in _TERMINAL_STATES:
+            from ouroboros.tools.delegate_terminal_evidence import collect_and_deliver_terminal
+            return json.dumps(collect_and_deliver_terminal(ctx, rid, detail, authority, entry, gateway),
+                              ensure_ascii=False, indent=2)
+        last_seq = int(detail.get("lastSeq") or 0)
+        pending = _cx_pending(detail)
+        if pending and _interactions_are_news(rid, pending):
+            # A question the model already saw does not return as news again: a nanny that escalated it
+            # keeps sleeping on the run instead of being woken by the same question.
+            return _waiting_on_user_payload(ctx, rid, state, last_seq, pending,
+                                            source_request=entry.work_order_source_request,
+                                            source_verification=(custody.work_order_source_verification(entry)
+                                                                 if entry.work_order_source_request else {}))
+        # FACTS against premature cancels: how long the run has gone and its real cap, from the
+        # durable start row; absent facts (an old row, an unknown run) stay null, never invented.
+        started_ts, max_seconds = custody.run_timing(custody.custody_root(ctx), rid)
+        started_at = parse_deadline_ts(started_ts)
+        return json.dumps(progress.present_payload(
+            run_id=rid, state=state, last_seq=last_seq,
+            moved=since_seq is not None and last_seq > int(since_seq),
+            elapsed_seconds=None if started_at is None else max(0, int(
+                (_dt.datetime.now(tz=_dt.timezone.utc) - started_at).total_seconds())),
+            max_seconds=max_seconds or None,
+            waiting_on_user=bool(summary.get("waitingOnUser")) or bool(pending),
+            pending_interactions=_bounded_interactions(pending) if pending else None,
+            detail=detail, budget=tool_result_limit("delegate_wait")), ensure_ascii=False, indent=2)
     except ClaudexorUnavailable as exc:
         from ouroboros.tools.delegate_terminal_evidence import retained_terminal_after_gap
         retained = retained_terminal_after_gap(ctx, rid, str(exc.code))
         if retained is not None:
             return json.dumps(retained, ensure_ascii=False, indent=2)
-        if observation_only and exc.observation_timeout:
-            # The gateway's per-class reason, not the generic transport code: a
-            # read bound that expired against a live daemon is a quiet hole and
-            # nothing more, while a socket that carried no answer is the outage
-            # the owner is told about once per episode.
+        if exc.observation_timeout:
+            # The gateway's per-class reason, not the generic transport code: a read bound that
+            # expired against a live daemon is a quiet hole and nothing more, while a socket that
+            # carried no answer is the outage the owner is told about once per episode.
             return json.dumps({
                 "status": "observation_pending", "run_id": rid,
                 "reason": exc.observation_reason or exc.code, "detail": str(exc),
@@ -1187,8 +1093,6 @@ def _delegate_wait(ctx: ToolContext, run_id: str, wait_sec: Optional[int] = None
             })
         return _fail("delegate_wait", exc.code, str(exc), run_id=rid).text
     finally:
-        if not observation_only:
-            _emit_external_wait_lease(ctx, rid, 0.0, lease_id=_lease_id)
         if gateway is not None and not borrowed:
             gateway.close()
 
@@ -1401,7 +1305,8 @@ def get_tools() -> List[ToolEntry]:
                 "run you own, addressed owner/task mail, a direct child's attention/terminal, a cancel, your "
                 "deadline or the one-shot checkpoint wakes you, and this wait's result is then owed to your next "
                 "model request: it arrives there as a host notice, with no further call. Each wake is delivered "
-                "once and counts as shown only when shown whole. Host-marked context-only place arrivals stay unread until a genuine wake. "
+                "once and counts as shown only when shown whole. There is no wait window: a wait_sec an old "
+                "transcript passes is accepted and sizes nothing. Host-marked context-only place arrivals stay unread until a genuine wake. "
                 "A host-confirmed retry successor may retrieve a predecessor's proven terminal result; live control stays with its starter. "
                 "Usable terminal output returns before pending host capture/accounting; "
                 "rereading it is immediate, not a wait for that preparation. A wake's leaf_live_input is the "

@@ -133,7 +133,7 @@ def test_explicit_wait_retries_owed_money_with_retained_output(tmp_path, monkeyp
     if surface == "delivery":
         result = collect_and_deliver_terminal(ctx, entry.run_id, terminal(), body._shape(first), first, None)
     elif surface == "wait":
-        result = json.loads(delegate._delegate_wait(ctx, entry.run_id))
+        result = json.loads(delegate._read_run(ctx, entry.run_id))
     else:
         result = json.loads(delegate_supervision.run_wait(ctx, entry.run_id).text)
     final = current.run(tmp_path, entry.run_id)

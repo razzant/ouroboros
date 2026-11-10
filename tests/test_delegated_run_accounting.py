@@ -110,7 +110,7 @@ def test_the_agent_facing_cost_tells_the_same_story_as_the_ledger(tmp_path, monk
         ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
         ctx.task_id = "t-a"
         ctx.task_metadata = {"root_task_id": "t-a"}
-        out = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
+        out = json.loads(delegate._read_run(ctx, "run-1"))
         delegate._CUSTODY.clear()
         return out
 
@@ -154,7 +154,7 @@ def test_settlement_reads_the_harnesss_own_spend_field(tmp_path, monkeypatch):
     ctx.task_id = "t-a"
     ctx.task_metadata = {"root_task_id": "t-a"}
 
-    json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
+    json.loads(delegate._read_run(ctx, "run-1"))
     delegate._CUSTODY.clear()
 
     rows = ledger_rows(tmp_path)
@@ -268,7 +268,7 @@ def _settled_run(tmp_path, monkeypatch, summary, observed=None):
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
     ctx.task_id = "t-a"
     ctx.task_metadata = {"root_task_id": "t-a"}
-    payload = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
+    payload = json.loads(delegate._read_run(ctx, "run-1"))
     delegate._CUSTODY.clear()
     rows = ledger_rows(tmp_path)
     events = [json.loads(line) for line
@@ -303,7 +303,7 @@ def _waited_run(tmp_path, monkeypatch, summary, requested_model="m", observed=No
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
     ctx.task_id = "t-a"
     ctx.task_metadata = {"root_task_id": "t-a"}
-    payload = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
+    payload = json.loads(delegate._read_run(ctx, "run-1"))
     delegate._CUSTODY.clear()
     return payload
 
@@ -651,7 +651,7 @@ def test_a_failed_ledger_write_leaves_the_session_retryable(tmp_path, monkeypatc
     ctx.task_id = "t-a"
     ctx.task_metadata = {"root_task_id": "t-a"}
 
-    failed = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
+    failed = json.loads(delegate._read_run(ctx, "run-1"))
     assert failed["output_delivery"]["complete"] and not failed["settlement"]["settled"]
     assert custody.settled is False, "a lost write must stay retryable"
     pending = dcust.replay(tmp_path)["run-1"]
@@ -660,7 +660,7 @@ def test_a_failed_ledger_write_leaves_the_session_retryable(tmp_path, monkeypatc
     assert retired == [], "failed accounting must preserve the continuation's project"
     monkeypatch.setattr(ua, "record_subscription_session", record_session)
     assert not retained_terminal_result(ctx, "run-1")["settlement"]["settled"], "a plain read does not retry money"
-    ready = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
+    ready = json.loads(delegate._read_run(ctx, "run-1"))
     assert ready["output_delivery"]["complete"] and ready["settlement"]["settled"]
     assert ready["settlement"]["ledger_recorded"] and not ready["settlement"]["project_retired"]
     custody = dcust.replay(tmp_path)["run-1"]

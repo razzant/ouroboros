@@ -370,8 +370,6 @@ def _hold(world, ctx, run_id, monkeypatch):
 def test_a_held_delegated_run_prepares_while_observed_running_and_not_while_it_waits(world, body, monkeypatch):
     """A held run is a working helper only while the body observer currently sees it running and not paused on
     its question; the hold itself is a wait, and the run's terminal ends it."""
-    from ouroboros.delegate_progress import emit_external_wait_lease
-
     supervisor = _Supervisor(world)
     monkeypatch.setattr(world.workers, "get_event_q", lambda **_kw: supervisor)
     root = _pooled(world, "root-n", chat_id=6)
@@ -381,8 +379,7 @@ def test_a_held_delegated_run_prepares_while_observed_running_and_not_while_it_w
     ctx = SimpleNamespace(task_id="nanny", task_attempt=1, drive_root=world.root, budget_drive_root=str(world.root),
                           task_metadata={"root_task_id": "root-n", "parent_task_id": "root-n",
                                          "delegation_role": "subagent"}, event_queue=supervisor, current_chat_id=6)
-    emit_external_wait_lease(ctx, "run-1", time.time() + 60, lease_id="lease-1")
-    assert _chats(world) == [6], "the idle-rail lease alone is no wait: its semantics stay the idle rail's"
+    assert _chats(world) == [6], "a helper with no held run is no wait"
     body.engine.fail = True
     thread = _hold(world, ctx, "run-1", monkeypatch)
     try:

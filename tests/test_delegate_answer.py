@@ -218,7 +218,7 @@ def test_a_new_question_returns_immediately_with_the_full_text(tmp_path, monkeyp
     _waiting_stub(monkeypatch, [_pending_row()])
     ctx = _wait_ctx(tmp_path)
     _own_run(delegate)
-    out = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=600, since_seq=5))
+    out = json.loads(delegate._read_run(ctx, "run-1", 5))
     delegate._CUSTODY.clear()
     assert out["status"] == "waiting_on_user"
     assert out["last_seq"] == 5
@@ -238,9 +238,9 @@ def test_the_same_question_does_not_busy_loop_the_next_wait(tmp_path, monkeypatc
     _waiting_stub(monkeypatch, [_pending_row()])
     ctx = _wait_ctx(tmp_path)
     _own_run(delegate)
-    first = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=600, since_seq=5))
+    first = json.loads(delegate._read_run(ctx, "run-1", 5))
     assert first["status"] == "waiting_on_user"
-    second = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1, since_seq=5))
+    second = json.loads(delegate._read_run(ctx, "run-1", 5))
     delegate._CUSTODY.clear()
     assert second["status"] == "no_progress"
     assert second["waiting_on_user"] is True
@@ -254,10 +254,9 @@ def test_a_reask_with_a_new_interaction_id_is_news_again(tmp_path, monkeypatch):
     _waiting_stub(monkeypatch, rows)
     ctx = _wait_ctx(tmp_path)
     _own_run(delegate)
-    assert json.loads(delegate._delegate_wait(
-        ctx, "run-1", wait_sec=600, since_seq=5))["status"] == "waiting_on_user"
+    assert json.loads(delegate._read_run(ctx, "run-1", 5))["status"] == "waiting_on_user"
     rows[0] = _pending_row(iid="int-2")
-    out = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=600, since_seq=5))
+    out = json.loads(delegate._read_run(ctx, "run-1", 5))
     delegate._CUSTODY.clear()
     assert out["status"] == "waiting_on_user"
     assert out["pending_interactions"][0]["interaction_id"] == "int-2"
@@ -271,7 +270,7 @@ def test_an_oversized_question_set_spills_whole_with_a_receipt(tmp_path, monkeyp
     _waiting_stub(monkeypatch, big)
     ctx = _wait_ctx(tmp_path)
     _own_run(delegate)
-    out = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=600, since_seq=5))
+    out = json.loads(delegate._read_run(ctx, "run-1", 5))
     delegate._CUSTODY.clear()
     assert out["status"] == "waiting_on_user"
     delivery = out["interactions_delivery"]
@@ -815,23 +814,31 @@ def test_answer_rows_are_validated_strictly_before_the_post(tmp_path, monkeypatc
 
 
 def _expiry_payload(pending_rows, *, advances=0, budget=None):
-    from ouroboros.delegate_progress import WindowObservations, window_payload
+    """A wake's read of a live run (``delegate_progress.present_payload``): ``advances`` timeline rows past the
+    cursor, a known question riding beside them."""
+    from ouroboros.delegate_progress import present_payload
     from ouroboros.gateways.claudexor import pending_interactions
     from ouroboros.tool_capabilities import tool_result_limit
     from ouroboros.tools.delegate import _bounded_interactions
 
-    seen = WindowObservations()
-    timeline = []
-    for i in range(advances):
-        timeline = timeline + [{"title": f"event {i}", "type": "tool"}]
-        seen.record({"timeline": list(timeline)}, i + 1, i)
+    timeline = [{"title": f"event {i}", "type": "tool"} for i in range(advances)]
     pending = pending_interactions({"pendingInteractions": pending_rows})
-    return window_payload(
-        run_id="run-1", state="running", last_seq=max(5, advances),
-        window=600, elapsed_seconds=600, max_seconds=1800,
-        waiting_on_user=bool(pending), detail={"timeline": timeline}, seen=seen,
+    return present_payload(
+        run_id="run-1", state="running", last_seq=max(5, advances), moved=bool(advances),
+        elapsed_seconds=600, max_seconds=1800,
+        waiting_on_user=bool(pending), detail={"timeline": timeline},
         pending_interactions=_bounded_interactions(pending) if pending else None,
         budget=budget if budget is not None else tool_result_limit("delegate_wait"))
+
+
+def _woken(payload):
+    """The wake's one publication of a read's payload (``delegate_supervision._publish_wake_facts``)."""
+    from types import SimpleNamespace
+
+    from ouroboros.delegate_supervision import _publish_wake_facts
+
+    _publish_wake_facts(SimpleNamespace(task_id="t-nanny"), {}, "", payload, "unknown")
+    return payload
 
 
 def _giant_header_row(iid="int-1", header_chars=50_000):
@@ -870,7 +877,7 @@ def test_expiry_payload_with_giant_headers_fits_and_parses(n_rows):
     assert _truncate_tool_result(raw, "delegate_wait", {}) == raw
     assert json.loads(raw) == payload
     assert payload["status"] == "progress"
-    assert payload["advances"], "the advance sequence survived beside the questions"
+    assert payload["timeline_tail"], "the run's timeline survived beside the questions"
     shown = len(payload.get("pending_interactions") or [])
     assert shown + int(payload.get("interactions_omitted") or 0) == n_rows
 
@@ -916,7 +923,7 @@ def test_answer_keys_ride_whole_through_the_inline_preview(tmp_path, monkeypatch
     _waiting_stub(monkeypatch, [row])
     ctx = _wait_ctx(tmp_path)
     _own_run(delegate)
-    out = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=600, since_seq=5))
+    out = json.loads(delegate._read_run(ctx, "run-1", 5))
     assert out["status"] == "waiting_on_user"
     shown = out["pending_interactions"][0]
     assert shown["interaction_id"] == iid
@@ -927,7 +934,7 @@ def test_answer_keys_ride_whole_through_the_inline_preview(tmp_path, monkeypatch
     big["questions"][0]["id"] = "S" * 200
     _waiting_stub(monkeypatch, [big])
     delegate._REPORTED_INTERACTIONS.clear()
-    out = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=600, since_seq=5))
+    out = json.loads(delegate._read_run(ctx, "run-1", 5))
     delegate._CUSTODY.clear()
     assert out["status"] == "waiting_on_user"
     assert out["interactions_delivery"]["complete"] is False
@@ -1014,40 +1021,31 @@ def test_waiting_notes_key_the_expiry_claim_on_timeout_at(tmp_path):
     assert "benign-declines" not in note
     assert "waits until answered" in note
 
-    # Both expiry-branch notes follow the same key.
-    paused = _expiry_payload([_pending_row()], advances=0)
+    # A wake of a run still paused on a known question follows the same key, quiet or moved.
+    paused = _woken(_expiry_payload([_pending_row()], advances=0))
     assert "benign-declines" in paused["note"]
     no_expiry_row = _pending_row()
     no_expiry_row["timeoutAt"] = ""
-    paused = _expiry_payload([no_expiry_row], advances=0)
+    paused = _woken(_expiry_payload([no_expiry_row], advances=0))
     assert "benign-declines" not in paused["note"]
     assert "waits until answered" in paused["note"]
-    paused_progress = _expiry_payload([no_expiry_row], advances=4)
+    paused_progress = _woken(_expiry_payload([no_expiry_row], advances=4))
     assert "benign-declines" not in paused_progress["note"]
     assert "waits until answered" in paused_progress["note"]
-    with_progress = _expiry_payload([_pending_row()], advances=4)
+    with_progress = _woken(_expiry_payload([_pending_row()], advances=4))
     assert "benign-declines" in with_progress["note"]
 
 
-def test_the_paused_expiry_note_never_hints_a_cancel(tmp_path):
-    """F13 (owner 7=A): a run paused on its own question is not 'stuck' — the
-    expiry note says answer / escalate / keep waiting, in BOTH branches, and the
-    generic delegate_cancel hint appears only for a genuinely silent run."""
-    paused = _expiry_payload([_pending_row()], advances=0)
-    assert paused["waiting_on_user"] is True
-    assert "delegate_answer" in paused["note"]
-    assert "Do not cancel" in paused["note"]
-    assert "delegate_cancel if it is stuck" not in paused["note"]
-
-    silent = _expiry_payload([], advances=0)
-    assert silent["waiting_on_user"] is False
-    assert "delegate_cancel if it is stuck" in silent["note"]
-
-    paused_progress = _expiry_payload([_pending_row()], advances=4)
-    assert "do not cancel over it" in paused_progress["note"]
-
-    silent_progress = _expiry_payload([], advances=4)
-    assert "do not cancel over it" not in silent_progress["note"]
+def test_the_paused_wake_note_never_hints_a_cancel(tmp_path):
+    """F13 (owner 7=A): a run paused on its own question is not 'stuck': its wake says answer / escalate / keep
+    waiting, quiet or moved, and never hints a cancel; a wake of a silent run carries no note of its own."""
+    for advances in (0, 4):
+        paused = _woken(_expiry_payload([_pending_row()], advances=advances))
+        assert paused["waiting_on_user"] is True
+        assert "delegate_answer" in paused["note"] and "Do not cancel" in paused["note"]
+        assert "delegate_cancel" not in paused["note"]
+        silent = _woken(_expiry_payload([], advances=advances))
+        assert silent["waiting_on_user"] is False and "note" not in silent
 
 
 def test_interaction_spill_name_is_interaction_addressed_and_immutable(tmp_path, monkeypatch):
@@ -1060,14 +1058,14 @@ def test_interaction_spill_name_is_interaction_addressed_and_immutable(tmp_path,
     _waiting_stub(monkeypatch, rows)
     ctx = _wait_ctx(tmp_path)
     _own_run(delegate)
-    first = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=600, since_seq=5))
+    first = json.loads(delegate._read_run(ctx, "run-1", 5))
     first_artifact = first["interactions_delivery"]["artifact"]
 
     # A NEW question set (new ids) spills again — to a NEW name.
     rows2 = [_pending_row(iid=f"reask-{i}", question=("Again %d? " % i) + "y" * 900)
              for i in range(24)]
     _waiting_stub(monkeypatch, rows2)
-    second = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=600, since_seq=5))
+    second = json.loads(delegate._read_run(ctx, "run-1", 5))
     delegate._CUSTODY.clear()
     second_artifact = second["interactions_delivery"]["artifact"]
 
@@ -1081,44 +1079,6 @@ def test_interaction_spill_name_is_interaction_addressed_and_immutable(tmp_path,
         data = _pathlib.Path(artifact["abs_path"]).read_bytes()
         assert _hashlib.sha256(data).hexdigest() == artifact["sha256"]
         assert len(data) == artifact["bytes"]
-
-
-def test_the_immediate_waiting_payload_carries_the_windows_advances(tmp_path, monkeypatch):
-    """F17 (grok): a window cut short by a question must not lose the journal
-    sequence it already observed — a compact `advances` list rides the immediate
-    waiting_on_user return."""
-    import ouroboros.tools.delegate as delegate
-    from ouroboros.gateways import claudexor as gw
-
-    run_calls = {"n": 0}
-
-    class _AdvancingThenAsking:
-        engine_version = "3.3.6"
-
-        def handshake(self, **_kw): return {}
-        def get_run(self, rid, *, timeout_sec=None):
-            run_calls["n"] += 1
-            if run_calls["n"] == 1:
-                return {"lastSeq": 5, "summary": {"state": "running",
-                                                  "effectiveAccess": "readonly"},
-                        "timeline": [{"type": "tool", "title": "step one"}]}
-            return {"lastSeq": 6,
-                    "pendingInteractions": [_pending_row()],
-                    "summary": {"state": "running", "effectiveAccess": "readonly",
-                                "waitingOnUser": True},
-                    "timeline": [{"type": "tool", "title": "step one"},
-                                 {"type": "tool", "title": "step two"}]}
-        def close(self): pass
-
-    monkeypatch.setattr(gw, "ClaudexorGateway", lambda *a, **k: _AdvancingThenAsking())
-    ctx = _wait_ctx(tmp_path)
-    _own_run(delegate)
-    out = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=600, since_seq=5))
-    delegate._CUSTODY.clear()
-    assert out["status"] == "waiting_on_user"
-    assert out["advances"], out
-    assert any("step two" in json.dumps(row, ensure_ascii=False)
-               for row in out["advances"])
 
 
 # -- codex lane: the terminal question ------------------------------------------

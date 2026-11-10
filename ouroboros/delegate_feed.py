@@ -345,7 +345,7 @@ class Feed:
             state.window = delegate_progress.WindowObservations()
             state.window.observe_baseline(detail, state.seq)
         if seq > state.seq:
-            delegate_progress.emit(ctx, entry.run_id, state.window.record(detail, seq, 0), detail=detail,
+            delegate_progress.emit(ctx, entry.run_id, state.window.record(detail, seq), detail=detail,
                                    entry=entry, gateway=gateway, after_seq=state.seq)
             if handed:
                 state.seq = seq

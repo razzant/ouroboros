@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros.delegate_progress import (
-    WindowObservations, emit, live_line, timeline_tail, window_payload,
+    WindowObservations, emit, live_line, present_payload, timeline_tail,
 )
 
 
@@ -20,7 +20,7 @@ def text_event(text, *, kind="thinking", delta=True, attempt="a01", harness="cur
 
 
 def render(*events):
-    advance = WindowObservations().record({"timeline": list(events)}, 18, 3)
+    advance = WindowObservations().record({"timeline": list(events)}, 18)
     return live_line("run-1", advance)
 
 
@@ -98,8 +98,8 @@ def test_poll_advances_remain_independent_and_emit_immediately():
     baseline = text_event("already shown ")
     seen.observe_baseline({"lastSeq": 5, "timeline": [baseline]}, 5)
     rows = [baseline, text_event("UX and interaction "), text_event("plan")]
-    first = seen.record({"timeline": rows}, 18, 3)
-    second = seen.record({"timeline": [*rows, text_event("more "), text_event("text")]}, 30, 6)
+    first = seen.record({"timeline": rows}, 18)
+    second = seen.record({"timeline": [*rows, text_event("more "), text_event("text")]}, 30)
     output = []
     ctx = SimpleNamespace(emit_progress_fn=output.append)
     emit(ctx, "run-1", first)
@@ -109,33 +109,31 @@ def test_poll_advances_remain_independent_and_emit_immediately():
         "🛰 delegated run run-1 @seq 30: more text",
     ]
     assert len(first.events) == len(second.events) == 2
-    assert [row["seq"] for row in seen.rows(10000)] == [18, 30]
+    assert [first.seq, second.seq] == [18, 30]
 
 
 def test_large_batch_keeps_the_existing_omission_count():
     events = [text_event(f"part{i} ") for i in range(16)]
     seen = WindowObservations()
-    advance = seen.record({"timeline": events}, 38, 3)
+    advance = seen.record({"timeline": events}, 38)
     assert advance.events_omitted == 4
     assert len(advance.events) == 12
     assert live_line("run-1", advance) == (
         "🛰 delegated run run-1 @seq 38: " + "".join(event["detail"] for event in events[4:])
         + " (+4 earlier in this batch, on the run's timeline)"
     )
-    row, = seen.rows(400)
-    assert row["events"] == [] and row["events_omitted"] == 16
 
 
 def test_verbose_text_remains_disclosed_and_the_payload_fits():
     events = [text_event("x" * 20000, kind="message", delta=False) for _ in range(16)]
     seen = WindowObservations()
-    advance = seen.record({"timeline": events}, 38, 3)
+    advance = seen.record({"timeline": events}, 38)
     assert all("original length 20000" in row["title"] for row in advance.events)
     assert all("detail" not in row for row in advance.events)
-    payload = window_payload(
-        run_id="run-1", state="running", last_seq=38, window=120,
+    payload = present_payload(
+        run_id="run-1", state="running", last_seq=38, moved=True,
         elapsed_seconds=120, max_seconds=1800, waiting_on_user=False,
-        detail={"timeline": events}, seen=seen, budget=15000,
+        detail={"timeline": events}, budget=15000,
     )
     raw = json.dumps(payload, ensure_ascii=False, indent=2)
     assert len(raw) <= 15000
@@ -153,11 +151,11 @@ def test_reviewer_events_preserve_the_known_actor_in_payload_and_live_progress(e
              "harnessId": "review-harness", "attemptId": "a02"}
     assert timeline_tail({"timeline": [event]}) == [event]
     seen = WindowObservations()
-    advance = seen.record({"timeline": [event]}, 9, 3)
+    advance = seen.record({"timeline": [event]}, 9)
     output = []
     emit(SimpleNamespace(emit_progress_fn=output.append), "run-1", advance)
     assert output == ["🛰 delegated run run-1 @seq 9: [review-harness/a02] Reviewer setup failed"]
-    assert seen.rows(10000)[0]["events"] == [event]
+    assert advance.events == [event]
 
 
 def test_start_receipt_names_the_serving_engine_without_claiming_review_success():

@@ -1,8 +1,8 @@
 """Qualify #1350 in the served SPA without a model call.
 
-A root and a child task each observe a delegated run through the real producer
-(``delegate_progress.emit`` → ``delegate_activity.observations`` over the engine's event
-stream, served by a fixture daemon), the real progress transport (``agent._emit_progress`` →
+A root and a child task each observe a delegated run through the real reader
+(``delegate_activity.observations`` over the engine's event stream, served by a fixture
+daemon), the real progress transport (``agent._emit_progress`` →
 ``events_chat_delivery`` → ``message_bus``) and the real history endpoint. The page receives
 the live frames over its WebSocket, then reconnects and reloads; every retained original is
 downloaded through the real task-file route. Screenshots and the raw frames, history and
@@ -23,7 +23,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ouroboros import delegate_activity, delegate_progress
+from ouroboros import delegate_activity
 from ouroboros.agent import OuroborosAgent
 from ouroboros.gateway.history import make_chat_history_endpoint
 from ouroboros.subagent_messages import subagent_message_meta
@@ -110,11 +110,16 @@ class Producer:
         return self._deliver(events)
 
     def observe(self, worker, gateway, run_id, through, *, after, drain=None):
-        """One wait advance through the seam ``delegate_wait`` uses."""
+        """One advance through the activity reader (``delegate_activity.observations``; ``drain`` reads an ended
+        run's tail within that allowance), each record emitted and committed as the progress seam does."""
+        from ouroboros.gateways.claudexor import SHORT_POLL_TIMEOUT_SEC
+
         ctx, events = worker
-        entry = SimpleNamespace(run_id=run_id, task_id=ctx.task_id)
-        delegate_progress.emit(ctx, run_id, SimpleNamespace(seq=through, events=[], events_omitted=0),
-                               entry=entry, gateway=gateway, after_seq=after, drain_sec=drain)
+        advance = SimpleNamespace(seq=through, events=[], events_omitted=0)
+        for activity, commit in delegate_activity.observations(ctx, gateway, run_id, advance, after_seq=after,
+                                                               read_sec=SHORT_POLL_TIMEOUT_SEC, drain_sec=drain):
+            ctx.emit_progress_fn(delegate_activity.progress_text(activity), delegated_activity=activity)
+            commit()
         return self._deliver(events)
 
     def lifecycle(self, text, event):
@@ -280,7 +285,7 @@ def test_delegated_rows_live_reconnect_reload_root_child_source_and_final_gap(en
     capture(page, "1350-live-stretch-expanded")
     stretch_row.locator("[data-live-line-toggle]").click()
 
-    # A later wait on the ended run catches the tail up: no new run, only the journal read.
+    # A later read of the ended run catches the tail up: no new run, only the journal read.
     push(producer.observe(kid_worker, child_gateway, "run-kid", 19, after=19, drain=30))
     page.wait_for_function(f"() => !document.querySelector('#chat-live-timeline-{KID} .chat-delegated-final')")
     caught_up = page.evaluate(SNAPSHOT, [ROOT, KID])

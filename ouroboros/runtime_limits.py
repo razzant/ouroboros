@@ -379,13 +379,6 @@ def get_max_subagent_depth() -> int:
     )
 
 
-# One windowed run read (``tools/delegate._delegate_wait`` with a caller-named window) with its
-# teardown, above the hard max WINDOW per call (F5) and below the external-wait lease
-# (delegate_progress): 1800 < 2100 < 2400. ``delegate_wait`` itself is a sleep on runs.
-DELEGATE_WAIT_CEILING_SEC = 2100
-DELEGATE_WAIT_WINDOW_MAX_SEC = 1800
-
-
 # Consciousness wake-ups. The interval between wakes is the MODEL's choice (``set_next_wakeup``),
 # clamped to [``get_bg_wakeup_min_sec``, ``get_bg_wakeup_max_sec``]; WAKE_DEFAULT_SEC is the interval
 # used when it has chosen none — 55 minutes, just under the default ``OUROBOROS_PROMPT_CACHE_TTL``

@@ -497,29 +497,28 @@ def test_end_before_the_observed_fence_discloses_a_gap_and_remains_readable(tmp_
     assert [part["text"] for part in resumed["parts"]] == ["second"]
 
 
-def test_wait_streams_exact_ranges_drains_the_terminal_tail_and_replays_the_same_parts(tmp_path, monkeypatch):
-    from ouroboros.tools import delegate
-    from tests._delegated_transport_shared import _nanny_ctx
+def _followed(ctx, daemon):
+    """The body's follow of ``daemon``'s run, one beat per revealed step (``delegate_feed.Feed._beat``): each beat
+    reads the journal from the shown cursor and publishes that read (``delegate_progress.emit_stream``); the cursor
+    moves only once a frame was handed over, so a beat whose frame failed reads the same range again."""
+    gateway = _gateway(daemon)
+    for step in range(1, len(daemon.steps) + 1):
+        daemon.revealed = step
+        after = delegate_activity.shown_cursor(ctx, ctx.task_id, daemon.run_id)
+        read = read_run_events(gateway, daemon.run_id, after_seq=after, through_seq=None, timeout_sec=2.0)
+        delegate_progress.emit_stream(ctx, daemon.run_id, read, after_seq=after)
+    return gateway
 
+
+def test_the_follow_streams_exact_ranges_and_delivery_replays_the_same_parts(tmp_path, monkeypatch):
     steps = [
         [_harness(1, "tool_call", tool={"name": "Read"}), _harness(2, "message", text="Reading the consumer.")],
         [_harness(3, "tool_call", tool={"name": "Bash"}), _harness(4, "message", text="Reading the consumer.")],
         [_harness(5, "message", text="All done; summary follows."), _run_event(6, "run.completed")],
     ]
-    daemon = Daemon(steps)
-    gateway = _gateway(daemon)
-    ctx = _nanny_ctx(tmp_path, task_id="child")
-    ctx.task_attempt = 0
+    ctx = _ctx(tmp_path, [])
     _agent_obj, events = _agent(ctx)
-    monkeypatch.setitem(delegate._CUSTODY, "run-1", RunCustody(task_id="child", run_id="run-1", route_id="claude",
-                                                                model="m", access="readonly"))
-    monkeypatch.setattr(delegate, "_capture_terminal_patch", lambda *a, **k: None)
-    clock = SimpleNamespace(now=0.0)
-    with monkeypatch.context() as timing:
-        timing.setattr(delegate.time, "monotonic", lambda: clock.now)
-        timing.setattr(delegate.time, "sleep", lambda seconds: setattr(clock, "now", clock.now + seconds))
-        result = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=60, since_seq=0, gateway=gateway))
-    assert result["status"] == "terminal", result
+    _followed(ctx, Daemon(steps))
     frames = [row for row in (events.get_nowait() for _ in range(events.qsize())) if row["type"] == "send_message"]
     activities = [frame["progress_meta"]["delegated_activity"] for frame in frames]
     assert [(a["after_seq"], a["through_seq"]) for a in activities] == [(0, 2), (2, 4), (4, 6)]
@@ -554,15 +553,13 @@ def test_wait_streams_exact_ranges_drains_the_terminal_tail_and_replays_the_same
 
 
 @pytest.mark.parametrize("restart_memo", [False, True])
-def test_a_later_wait_on_an_ended_run_catches_up_what_no_frame_carried(tmp_path, monkeypatch, restart_memo):
+def test_a_terminal_delivery_catches_up_what_no_follow_frame_carried(tmp_path, monkeypatch, restart_memo):
     from ouroboros.tools import delegate
     from tests._delegated_transport_shared import _nanny_ctx
 
     steps = [[_harness(1, "message", text="Working on it.")],
              [_harness(2, "message", text="Finished."), _run_event(3, "run.completed")]]
     daemon = Daemon(steps)
-    gateway = _gateway(daemon)
-    handshaken = len(daemon.requests)
     ctx = _nanny_ctx(tmp_path, task_id="child")
     ctx.task_attempt = 0
     _agent_obj, events = _agent(ctx)
@@ -578,32 +575,22 @@ def test_a_later_wait_on_an_ended_run_catches_up_what_no_frame_carried(tmp_path,
     monkeypatch.setitem(delegate._CUSTODY, "run-1", RunCustody(task_id="child", run_id="run-1", route_id="claude",
                                                                 model="m", access="readonly"))
     monkeypatch.setattr(delegate, "_capture_terminal_patch", lambda *a, **k: None)
-    clock = SimpleNamespace(now=0.0)
-    with monkeypatch.context() as timing:
-        timing.setattr(delegate.time, "monotonic", lambda: clock.now)
-        timing.setattr(delegate.time, "sleep", lambda seconds: setattr(clock, "now", clock.now + seconds))
-        first = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=60, since_seq=0, gateway=gateway))
-        assert first["status"] == "terminal" and events.empty(), "no frame left, so nothing counts as shown"
-        channel["open"] = True
-        if restart_memo:
-            from ouroboros.delegate_activity import reset_process_memo
-            reset_process_memo()
-        requests_before = list(daemon.requests)
-        second = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=60, gateway=gateway))
-        assert daemon.requests == requests_before, "retained output and activity never wait on remote I/O"
+    gateway = _followed(ctx, daemon)  # every read retained, no frame handed over
+    first = json.loads(delegate._read_run(ctx, "run-1", 0, gateway=gateway))
+    assert first["status"] == "terminal" and events.empty(), "no frame left, so nothing counts as shown"
+    channel["open"] = True
+    if restart_memo:
+        delegate_activity.reset_process_memo()
+    requests_before = list(daemon.requests)
+    second = json.loads(delegate._read_run(ctx, "run-1", gateway=gateway))
+    assert daemon.requests == requests_before, "retained output and activity never wait on remote I/O"
     assert second["status"] == "terminal"
     frames = [row for row in (events.get_nowait() for _ in range(events.qsize())) if row["type"] == "send_message"]
-    activity, = [frame["progress_meta"]["delegated_activity"] for frame in frames]
-    assert (activity["after_seq"], activity["source"]["read_through"]) == (0, 3)
-    if restart_memo:
-        assert "ended" not in activity["source"], "the raw source did not retain the stream's end-frame receipt"
-    else:
-        assert activity["source"]["ended"] is True
-    assert [p["text"] for p in activity["parts"]] == ["Working on it.", "Finished."]
-    assert json.loads(delegate._delegate_wait(ctx, "run-1", gateway=gateway))["status"] == "terminal"
+    activities = [frame["progress_meta"]["delegated_activity"] for frame in frames]
+    assert activities and activities[0]["after_seq"] == 0 and activities[-1]["source"]["read_through"] == 3
+    assert [p["text"] for activity in activities for p in activity["parts"]] == ["Working on it.", "Finished."]
+    assert json.loads(delegate._read_run(ctx, "run-1", gateway=gateway))["status"] == "terminal"
     assert events.empty(), "only the successful frame commits the local activity cursor"
-    assert {method for method, _path, _cursor in daemon.requests[handshaken:]} == {"GET"}, \
-        "catching up reads the ended run's journal: no new run, answer or control request"
 
 
 def test_the_binder_delivery_and_replay_drop_a_foreign_or_malformed_record(tmp_path):
@@ -630,7 +617,7 @@ def test_the_binder_delivery_and_replay_drop_a_foreign_or_malformed_record(tmp_p
 
 
 def test_plain_emit_without_the_waits_transport_keeps_the_one_argument_contract():
-    advance = delegate_progress.WindowObservations().record({"timeline": [{"title": "read"}]}, 3, 0)
+    advance = delegate_progress.WindowObservations().record({"timeline": [{"title": "read"}]}, 3)
     plain = []
     delegate_progress.emit(SimpleNamespace(emit_progress_fn=plain.append, task_id="child"), "run-1", advance)
     assert plain == [delegate_progress.live_line("run-1", advance)]
