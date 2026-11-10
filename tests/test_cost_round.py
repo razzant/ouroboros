@@ -3,7 +3,8 @@
 A round's request is recorded three times before it leaves (the logical request, the physical candidate and the
 Claudexor request: docs/MODEL_SEND_OBSERVABILITY.md), each a request view whose parts are the elements of its
 messages and tools (``shared_values``). The loop runs each round's model call in one receipt window
-(``llm_observability.round_window``, its first step timed from the batch's end), and the round's ``llm_round``
+(``llm_observability.round_window``, its first step timed from the batch's end; a failed call's recovery in a window
+of its own), and the round's ``llm_round``
 carries what the host counted in it (``work``): the bytes of parts scanned for secrets (``secret_scan``, repeated
 keys again as ``secret_scan_again``) and of parts the CAS stored for the first time (``new_parts``,
 ``observability.write_part``). R1: on round 2 the two are equal and nothing is scanned twice in the round, whether
@@ -125,6 +126,44 @@ def test_the_loop_opens_one_receipt_window_per_round(tmp_path, monkeypatch):
                       drive_root=tmp_path)
     assert (tmp_path / "effect.txt").read_text(encoding="utf-8") == "one effect"
     assert seen == [(1, set()), (1, {"round_top"})], seen
+    assert section_spans() == {}
+
+
+def test_a_round_s_recovery_calls_run_in_their_own_window(tmp_path, monkeypatch):
+    """When the round's own call fails, its recovery (a configured fallback here, an owner-wait resend alike) runs in
+    a window of its own: the answering call's ``llm_round`` carries what the recovery counted, not the failed call's
+    (``probe`` 1), with no ``round_top``, and the batch's end still times the next round's own call."""
+    import ouroboros.loop as loop
+    from ouroboros import fallback_cooldown
+    from ouroboros.llm_observability import round_receipt
+    from ouroboros.tools.registry import ToolRegistry
+
+    seen = []
+    replies = iter([{"content": None, "tool_calls": [{"id": "write-1", "type": "function", "function": {
+        "name": "write_file", "arguments": json.dumps({"path": "effect.txt", "content": "one effect"})}}]},
+        {"content": "Done."}])
+
+    def fake_call(_llm, _messages, model, *args, **_kwargs):
+        counted("probe", key="same")
+        seen.append((model, section_spans().get("work", {}).get("probe"),
+                     set(round_receipt().get("host_steps", {}).get("steps", ()))))
+        if model == "test-model":  # the round's own call fails before any answer
+            args[7]["_last_llm_error_kind"] = "provider_unavailable"
+            return None, 0.0
+        return {"role": "assistant", **next(replies)}, 0.0
+
+    monkeypatch.setattr(loop, "call_llm_with_retry", fake_call)
+    monkeypatch.setattr(loop, "_rebind_context_fit_plan", lambda plan, *_a, **_kw: (plan, "max"))
+    monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_a: False)
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "fb/one")
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    loop.run_llm_loop(messages=[{"role": "user", "content": "write the effect"}], tools=registry,
+                      llm=type("FakeLLM", (), {"default_model": lambda self: "test-model"})(), drive_logs=tmp_path,
+                      emit_progress=lambda *_a, **_k: None, incoming_messages=queue.Queue(), task_id="recovery-task",
+                      drive_root=tmp_path)
+    assert (tmp_path / "effect.txt").read_text(encoding="utf-8") == "one effect"
+    assert seen == [("test-model", 1, set()), ("fb/one", 1, set()), ("fb/one", 1, {"round_top"})], seen
     assert section_spans() == {}
 
 

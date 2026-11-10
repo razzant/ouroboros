@@ -72,8 +72,9 @@ def round_starts(slot: Any) -> None:
 def round_window(slot: Any = None) -> Iterator[None]:
     """One round's model call as a ``context_timing`` window, receipted on its ``llm_round`` (``round_receipt``): the
     counted work, each marked section's wall time, the steps between ``host_step`` marks (``round_top`` from
-    ``round_starts`` on ``slot``, used once) and the process's ``_rusage`` since the round's start. Facts for the log
-    only: nothing reads them to decide."""
+    ``round_starts`` on ``slot``, used once) and the process's ``_rusage`` since the round's start. When that call
+    fails the loop opens another, without ``slot``, around the recovery (a configured fallback, an owner-wait resend),
+    whose answer carries the recovery's own facts. Facts for the log only: nothing reads them to decide."""
     since = getattr(slot, "_round_prep_since", None)
     if since is not None:
         slot._round_prep_since = None
