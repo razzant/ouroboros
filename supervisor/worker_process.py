@@ -349,6 +349,15 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
     if transport_no_proxy is not None:
         _os.environ["OUROBOROS_TRANSPORT_NO_PROXY"] = "1" if transport_no_proxy else "0"
     write_bytecode_to_prefix_only(drive_root)  # before the agent's import graph
+    # The birth's own receipt on ``worker_ready``: wall and thread CPU of its steps (``import``,
+    # ``reload_all``, ``make_agent``) and the work they counted (``context_timing``).
+    import contextlib
+    import importlib
+
+    from ouroboros.context_timing import measured_sections, section_spans, timed
+
+    birth_window = contextlib.ExitStack()
+    birth_window.enter_context(measured_sections())
     # Pin the executing source before this process loads the agent, and so before
     # worker_ready lets an assisted update land another generation (preflight_receipts).
     from ouroboros.preflight_receipts import capture_executing_source_baseline
@@ -452,8 +461,8 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
     extensions_owned = True
     try:
         from ouroboros.config import get_skills_repo_path, load_settings as _load_settings
-        from ouroboros.extension_loader import reload_all as _reload_extensions
 
+        _reload_extensions = timed("import", importlib.import_module, "ouroboros.extension_loader").reload_all
         pytest_default_real_data_dir = (
             "pytest" in _sys.modules
             and not _os.environ.get("OUROBOROS_DATA_DIR")
@@ -472,19 +481,21 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
                 pass
         else:
             _repo_path = get_skills_repo_path()
-            _reload_extensions(_drive, _load_settings, repo_path=_repo_path or None)
+            timed("reload_all", lambda: _reload_extensions(_drive, _load_settings, repo_path=_repo_path or None))
     except Exception as _e:
         try:
             _log_worker_crash(wid, _drive, "extension_reload", _e, _tb.format_exc())
         except Exception:
             pass
     try:
-        from ouroboros.agent import make_agent
         from functools import partial
+
+        make_agent = timed("import", importlib.import_module, "ouroboros.agent").make_agent
         from ouroboros.owner_wait import worker_owner_wait
-        agent = make_agent(repo_dir=repo_dir, drive_root=drive_root, event_queue=out_q)
+        agent = timed("make_agent", lambda: make_agent(repo_dir=repo_dir, drive_root=drive_root, event_queue=out_q))
         agent.owner_wait_callback = partial(worker_owner_wait, wid, in_q, out_q)
     except Exception as _e:
+        birth_window.close()
         _log_worker_crash(wid, _drive, "make_agent", _e, _tb.format_exc())
         return
     # The births are measured first, in their own try: a failing checkout read must
@@ -513,9 +524,12 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
             "pid": _os.getpid(), "process_birth": birth, "kernel_birth": kernel_birth,
             "git_branch": _branch, "git_sha": _sha,
             **carrier_rss(),  # a fresh worker's own size, on every install (the plan's per-install measurement)
+            **section_spans(),  # the birth: sections_ms / sections_cpu_ms of its steps and their counted work
         })
     except Exception as _e:
         _log_worker_crash(wid, _drive, "worker_ready", _e, _tb.format_exc())
+    finally:
+        birth_window.close()  # a task's own windows are its own
     import queue as _queue
     from ouroboros.budget_pause import _HOLD_POLL_SEC
 
@@ -588,7 +602,7 @@ def run_worker_task(agent: Any, task: dict, *, wid: int, out_q: Any, repo_dir: s
     if task.get("_conversation_prepare"):
         from supervisor.worker_chat_lane import CarrierTurn
 
-        carrier_turn = CarrierTurn(task, task_drive_root, out_q)
+        carrier_turn = CarrierTurn(task, task_drive_root, out_q, wid)
     # The task's own endpoint (the direct lane's TurnEventQueue shape): every
     # telemetry frame this task emits — live, or from a callback that
     # outlives it — carries its chat and lineage by value, so the

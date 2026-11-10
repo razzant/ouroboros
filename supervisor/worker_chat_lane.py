@@ -770,7 +770,7 @@ class CarrierTurn:
     frame observer that also publishes each start phase as a ``direct_turn_phase`` frame), the
     thread's store meter and an owner turn's intake fact, held from the take to the end."""
 
-    def __init__(self, task: Dict[str, Any], drive_root: Any, out_q: Any) -> None:
+    def __init__(self, task: Dict[str, Any], drive_root: Any, out_q: Any, wid: Any = None) -> None:
         from supervisor.active_activity import TurnExecution, get_direct_activity_registry
         from supervisor.conversation_lane import PREPARE_KEY
 
@@ -785,6 +785,7 @@ class CarrierTurn:
             self.execution = entry.execution  # one execution per turn; the liveness read sees the body's phases
         self.execution.accepted_at = str((task.get("origin_message_ref") or {}).get("ts") or "")
         self.execution.census = dict(facts.get("census") or {})
+        self.execution.worker_id = wid
         admitted_at = float(facts.get("admitted_at") or 0.0)
         if admitted_at:
             # The owner's wait is measured from the admission's wall clock: the dispatch wait

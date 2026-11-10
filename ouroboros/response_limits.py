@@ -146,7 +146,8 @@ def record_response_ack(drive_root, *, provider, model, base_url="", options=Non
 
 
 def resolve_response_limit(drive_root, *, provider, model, base_url="", options=None,
-                           allow_fetch=False, api_key=None, read_failed=False) -> ResponseLimit:
+                           allow_fetch=False, api_key=None, read_failed=False, observed=None) -> ResponseLimit:
+    """``observed``: the limit the caller's own metadata read just stated, which a second read could only repeat."""
     from ouroboros.capability_evidence import (_read, _age_seconds,
         _CONFIRMED_TTL_SEC, _FAILED_TTL_SEC, _openai_compatible_metadata_window, _claudexor_metadata_evidence)
 
@@ -155,6 +156,9 @@ def resolve_response_limit(drive_root, *, provider, model, base_url="", options=
     ack = data.get("response_acks", {}).get(fp)
     if ack:
         return ResponseLimit(**ack)
+    if observed:
+        ttl = _CONFIRMED_TTL_SEC if observed.get("max_output_tokens") else _FAILED_TTL_SEC
+        return ResponseLimit(**{**observed, "stale": _age_seconds(observed.get("observed_at", "")) > ttl})
     cached = data.get("response_limits", {}).get(fp)
     if cached:
         ttl = _CONFIRMED_TTL_SEC if cached.get("max_output_tokens") else _FAILED_TTL_SEC
@@ -243,16 +247,19 @@ def _dispatch_route(route: dict) -> tuple:
     return provider, base_url, key if key is not None else target.get("api_key")
 
 
-def probe_response_limit(drive_root, evidence, route: dict, *, read_failed: bool = False) -> ResponseLimit:
-    """The output fact beside a window probe, bound to the endpoint its send reaches; when that probe's catalog
-    read failed (``read_failed``), the output limit names that read as its source instead of reading again."""
+def probe_response_limit(drive_root, evidence, route: dict, *, read_failed: bool = False,
+                         read: dict | None = None) -> ResponseLimit:
+    """The output fact beside a window probe, bound to the endpoint its send reaches. A subscription's catalog is
+    read once, for the window: the output limit is that read's own (``read``), names the read that failed
+    (``read_failed``), or comes from the store when the window did."""
     provider, base_url, api_key = _dispatch_route(route)
     options = dict(route.get("options") or {})
     if provider == "claudexor" and evidence.account_fingerprint:
         options.update(source_id=evidence.source_id, credential_profile_id=evidence.credential_profile_id,
                        account_fingerprint=evidence.account_fingerprint)
     return resolve_response_limit(drive_root, provider=provider, model=route["model"], base_url=base_url,
-        options=options or None, allow_fetch=route.get("allow_fetch", True), api_key=api_key, read_failed=read_failed)
+        options=options or None, allow_fetch=route.get("allow_fetch", True) and (provider != "claudexor" or read_failed),
+        api_key=api_key, read_failed=read_failed, observed=read or None)
 
 
 def response_limit_preview(drive_root, route: dict, *, account="", settings=None, role="main", window=None) -> dict:

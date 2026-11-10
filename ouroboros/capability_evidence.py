@@ -328,18 +328,30 @@ def _store_transaction(drive_root: Any) -> Iterator[None]:
         yield
 
 
-def _store_evidence(drive_root: Any, kind: str, fp: str, value: Dict[str, Any]) -> bool:
-    """One ``_store_transaction`` writing one evidence entry of namespace ``kind``.
+def _store_evidence(drive_root: Any, kind: str, fp: str, value: Dict[str, Any], *, also: tuple = ()) -> bool:
+    """One ``_store_transaction`` writing one evidence entry of namespace ``kind`` (and under the ``also`` keys).
 
     It re-reads the CURRENT file inside the transaction, so no writer in any process saves a
-    stale snapshot over another's record; the network read runs OUTSIDE it. Returns whether
-    the entry was saved and never raises: a write that fails or finds the store busy leaves
-    the previous file as it was, including an older record of this key."""
+    stale snapshot over another's record; the network read runs OUTSIDE it. An entry the store
+    already holds as it is is not written again, and nothing is saved when every entry holds.
+    Returns whether the entries are stored and never raises: a write that fails or finds the store
+    busy leaves the previous file as it was, including an older record of this key. The measured
+    window counts each entry written (``evidence_writes``, by kind and key)."""
+    from ouroboros.context_timing import counted
+
+    keys = (fp, *also)
+    if all((_read(drive_root).get(kind) or {}).get(key) == value for key in keys):
+        return True
     try:
         with _store_transaction(drive_root):
             data = _load(drive_root)
+            changed = [key for key in keys if data.get(kind, {}).get(key) != value]
+            if not changed:
+                return True
             _drop_expired_probes(data)
-            data.setdefault(kind, {})[fp] = value
+            for key in changed:
+                data.setdefault(kind, {})[key] = value
+                counted("evidence_writes", key=(kind, key))
             return _save(drive_root, data)
     except Exception:
         log.debug("capability evidence store failed (%s)", kind, exc_info=True)
@@ -802,12 +814,14 @@ def _claudexor_metadata_evidence(model: str, base_url: str, headers: Any,
     an account fingerprint cannot reuse a prior account's cached capacity. The same
     read's output maximum is returned beside it and stored unless ``record`` is off.
     """
+    from ouroboros.context_timing import counted
     from ouroboros.llm import LLMClient
     from ouroboros.provider_models import parse_claudexor_model
 
     source, native_model = parse_claudexor_model(model)
     options = dict(options or {})
     requested_profile = str(options.get("credential_profile_id") or "")
+    counted("catalog_calls", key=(source, requested_profile, native_model))
     catalog = LLMClient.claudexor_model_catalog(source, requested_profile or None,
                                               requested_model=native_model)
     profile = str(catalog.get("credentialProfileId") or "")
@@ -1002,20 +1016,24 @@ def _probe_window(
         )
 
     cached = data.get("probes", {}).get(fp)
-    if subscription and not account_bound and str((cached or {}).get("status") or "") in _KNOWN_STATUS:
-        # Model-only legacy evidence cannot certify any subscription account.
+    # An unbound Auto route's record is the account its last catalog read advertised, bound and dated by that read
+    # (a start plans by it, as by a fresh read); model-only legacy evidence cannot certify any subscription account.
+    advertised = subscription and not account_bound and all((cached or {}).get(key) for key in (
+        "credential_profile_id", "account_fingerprint", "provenance", "route_fp"))
+    if subscription and not account_bound and not advertised and str((cached or {}).get("status") or "") in _KNOWN_STATUS:
         cached = None
+    cached_fp = str(cached["route_fp"]) if advertised else fp
     if cached and not force:
         age = _age_seconds(str(cached.get("ts") or ""))
         ttl = _CONFIRMED_TTL_SEC if cached.get("status") == STATUS_CONFIRMED else _FAILED_TTL_SEC
         if age <= ttl:
-            return _cached_evidence(cached, fp, model, provider)
+            return _cached_evidence(cached, cached_fp, model, provider)
 
     if not allow_fetch:
         # Hot path: never block on the network. Return the (possibly stale) cache
         # marked stale, else unprobeable — both retain unknown sizing evidence.
         if cached:
-            return _cached_evidence(cached, fp, model, provider, stale=True,
+            return _cached_evidence(cached, cached_fp, model, provider, stale=True,
                                     detail="stale (no fetch on hot path)")
         return CapabilityEvidence(0, STATUS_UNPROBEABLE, SOURCE_NONE, fp, model, provider, detail="not probed")
 
@@ -1023,14 +1041,16 @@ def _probe_window(
         try:
             ev = _claudexor_metadata_evidence(model, base_url, headers, options, evidence_root=drive_root)
         except Exception as exc:
-            # Prior evidence may survive only on this exact account binding.
+            # Prior evidence may survive only on this exact account binding (an Auto read's failure plans by the pool).
             # Catalog/auth failures never authorize a generation probe or fallback.
-            if cached and str(cached.get("status") or "") in _KNOWN_STATUS:
+            if cached and not advertised and str(cached.get("status") or "") in _KNOWN_STATUS:
                 return _cached_evidence(cached, fp, model, provider, stale=True,
                                         detail="kept prior account evidence (catalog unavailable)")
             ev = CapabilityEvidence(0, STATUS_FAILED, SOURCE_NONE, fp, model, provider,
                                     ts=utc_now_iso(), detail=f"model catalog unavailable: {type(exc).__name__}")
-        _store_evidence(drive_root, "probes", ev.route_fp, ev.to_json())
+        # An unbound route also keeps the account its read advertised, in the same write.
+        _store_evidence(drive_root, "probes", ev.route_fp, ev.to_json(),
+                        also=(fp,) if not account_bound and ev.account_fingerprint and ev.route_fp != fp else ())
         return ev
 
     window, observed_at = _provider_metadata_window(provider, model, base_url, allow_fetch=allow_fetch, api_key=api_key)
@@ -1077,7 +1097,8 @@ def _pool_bound(drive_root: Any, evidence: CapabilityEvidence, route: Dict[str, 
     options = route.get("options") or {}
     if route.get("provider") != "claudexor" or options.get("credential_profile_id") or options.get("account_fingerprint"):
         return None
-    stated = [row for row in (_read(drive_root).get("probes") or {}).values() if isinstance(row, dict)
+    stated = [row for key, row in (_read(drive_root).get("probes") or {}).items() if isinstance(row, dict)
+              and row.get("route_fp") == key  # an account's own record, never an Auto route's copy of it
               and row.get("provider") == "claudexor" and row.get("model") == route.get("model")
               and row.get("account_fingerprint") and row.get("status") == STATUS_CONFIRMED
               and int(row.get("window_tokens") or 0) > 0 and _age_seconds(str(row.get("ts") or "")) <= _CONFIRMED_TTL_SEC]
@@ -1093,8 +1114,8 @@ def _pool_bound(drive_root: Any, evidence: CapabilityEvidence, route: Dict[str, 
 def probe(drive_root: Any, **route) -> CapabilityEvidence:
     """Resolve independent context and output facts; one owner's window ack cannot suppress output discovery.
 
-    One catalog read serves both: a read that failed (live, or its ten-minute record) is not repeated for the
-    output limit, which names that failed read; a read that succeeded without a window still reads it.
+    One catalog read serves both: the output limit is that read's own statement, or names the failed read (live,
+    or its ten-minute record); a subscription window taken from the store takes its output limit from there too.
     After a failed read a fetching probe of an unpinned Auto route plans by the pool's smallest fresh statement
     (``_pool_bound``); a reader that may not fetch keeps it unknown.
     """
@@ -1102,7 +1123,7 @@ def probe(drive_root: Any, **route) -> CapabilityEvidence:
     from ouroboros.response_limits import probe_response_limit
 
     evidence = _probe_window(drive_root, **route)
-    read_failed = evidence.status == STATUS_FAILED
+    read_failed, read = evidence.status == STATUS_FAILED, dict(evidence.response_limit or {})
     if is_known(evidence, require_fresh=True):
         evidence.server_window = dict(tokens=evidence.window_tokens, kind=evidence.window_kind,
                                       source=evidence.source, observed_at=evidence.ts)
@@ -1121,7 +1142,7 @@ def probe(drive_root: Any, **route) -> CapabilityEvidence:
             ts=str(ack.get("ts") or ""), detail=f"owner-ack by {ack.get('owner') or 'owner'}",
             **{key: str(options.get(key) or "") for key in (
                 "source_id", "credential_profile_id", "account_fingerprint")})
-    evidence.response_limit = asdict(probe_response_limit(drive_root, evidence, route, read_failed=read_failed))
+    evidence.response_limit = asdict(probe_response_limit(drive_root, evidence, route, read_failed=read_failed, read=read))
     return evidence
 
 

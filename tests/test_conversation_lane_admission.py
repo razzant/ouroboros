@@ -6,6 +6,7 @@ project crash storm is admitted to the lane, never into PENDING. The carrier's f
 owner's input onto the admitted seed, and the census lists the turn from its RUNNING row.
 """
 
+import os
 import queue as stdqueue
 import time
 from types import SimpleNamespace
@@ -166,9 +167,10 @@ def test_carrier_turn_receipt_measures_the_owner_wait_from_the_admission(tmp_pat
             "metadata": {"client_message_id": "cm"},
             "_conversation_prepare": {"admitted_at": admitted_at, "reply_expected": True, "client_message_id": "cm",
                                       "census": {"direct_turns_at_entry": 2}}}
-    turn = worker_chat_lane.CarrierTurn(task, tmp_path, out_q)
+    turn = worker_chat_lane.CarrierTurn(task, tmp_path, out_q, 7)
     receipt = turn.execution.receipt()
     assert receipt["handler_wait_sec"] >= 4.9 and receipt["census"] == {"direct_turns_at_entry": 2}
+    assert (receipt["worker_id"], receipt["pid"]) == (7, os.getpid())  # the carrier slot and process it ran in (S11)
     assert receipt["phases"]["started"] >= 0.0 and turn.execution.phase == "started"
     turn.observe("log_event", {"type": "context_building_started", "task_id": "t9"})
     assert out_q.get_nowait() == {"type": "direct_turn_phase", "task_id": "t9", "task_attempt": 1, "phase": "context_building"}
