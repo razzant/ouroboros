@@ -727,7 +727,7 @@ class ModelCatalogItem(TypedDict, total=False):
     ``<provider_id>::<id>`` for another API provider, ``<kind>@<name>::<id>`` for a named API
     connection (its ``provider``/``provider_id`` = ``<kind>@<name>``, ``provider_label`` its
     picker label), ``claudexor::<source>=<model>`` for an agent account's model, which adds
-    that account's facts."""
+    that account's facts. The local model's row says ``use_local``; its ``value`` is a label."""
 
     provider_id: Required[str]
     provider: Required[str]
@@ -753,6 +753,7 @@ class ModelCatalogItem(TypedDict, total=False):
     availability: Any
     problem: Any
     processing: Any
+    use_local: bool
 
 
 class ModelCatalogResponse(TypedDict, total=False):

@@ -174,6 +174,12 @@ def test_a_configured_local_model_is_one_catalog_row_that_says_it_is_local(monke
     assert row.get("context_window") == expected.get("context_window")
     # No API source claims the row: every picker that lists a source's models by its route prefix leaves it out.
     assert row["value"] == f'local::{expected["id"]}'
+    # The published shape declares the field the row is told apart by.
+    from ouroboros.gateway.management_contracts import ModelCatalogItem, ModelCatalogResponse
+    from ouroboros.gateway.schema import validate_ingress
+
+    assert "use_local" in ModelCatalogItem.__annotations__
+    assert not validate_ingress(payload, ModelCatalogResponse)
 
 
 def test_no_local_row_without_a_configured_local_model(monkeypatch):

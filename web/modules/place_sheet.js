@@ -329,6 +329,13 @@ export function showSheet(dialog, { returnFocus, onClose, onBack }) {
     return { close, body, get closed() { return closed; } };
 }
 
+/** What one `/api/model-catalog` answer suggests for a place's or a circle's Model field. Both store a route string,
+ *  and the local model has none (its row says `use_local`), so that row is left out. Throws for an unread catalog. */
+export function modelSuggestions(data) {
+    if (!Array.isArray(data?.items) || data.read_state === 'failed') throw new Error('The model catalog could not be read.');
+    return data.items.filter((item) => !item?.use_local);
+}
+
 /** The one write a press on the sheet asks for, as the contract's change; null when it needs no write. */
 export function placeChangeFor(action, place, { value = '', fact = '', note = '', actor = '', actorLabel = '', drafts = {} } = {}) {
     const facts = place.wakes.map((item) => item.fact);
@@ -569,9 +576,7 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
         if (!ui.moreOpen || modelsRead) return;
         modelsRead = true;
         try {
-            const data = await readModels({ cache: 'no-store', signal: abort.signal });
-            if (!Array.isArray(data?.items) || data.read_state === 'failed') throw new Error();
-            ui.models = data.items.filter((item) => !item?.use_local);  // a place's model is a route; a local model has none
+            ui.models = modelSuggestions(await readModels({ cache: 'no-store', signal: abort.signal }));
             if (!sheet.closed) updateModelChooser(body.querySelector('[data-model-chooser]'), ui.models);
         } catch { ui.status.more = { text: tr('places.models.unavailable', 'Model suggestions could not be read; your model is kept.'), tone: 'warn' }; paint(); }
     }, true);
