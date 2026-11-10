@@ -181,6 +181,68 @@ def _knows_the_journal(runtime, factory):
     runtime._compact_wait = True
 
 
+@pytest.mark.parametrize("outcome", ["prepared", "delivery_unknown"])
+def test_fresh_body_reconstructs_pending_owner_frame_retry(world, monkeypatch, outcome):
+    from ouroboros import delegate_message_store as frames
+    from tests.test_delegate_message import _Stub, _install
+    from tests.test_owner_words_at_receipt import _open_run
+
+    entry = _open_run(world.root, "run-live", task_id="t-nanny", root_task_id="t-nanny")
+    _asleep(world, "t-nanny")
+    ctx = frames.starter(world.root, entry)
+    row, _prior = frames.place_frame(ctx, entry, "Keep the original scope", owner_words={
+        "address": "chat 7 / owner-m1", "chat_id": 7, "ts": "2026-11-09T10:00:00+00:00"}, host=True)
+    message_id, wire = row["frame"]["message_id"], row["wire_text"]
+    if outcome != "prepared":
+        frames.record_outcome(ctx, entry.run_id, message_id, outcome, "daemon_unreachable")
+    stub = _install(monkeypatch, _Stub(result={"outcome": "delivered", "reason": ""}))
+    details = {entry.run_id: [{"summary": {"runId": entry.run_id, "state": "running"}, "lastSeq": 1}]}
+    with _body(world, _engine(details=details, routes=())) as (runtime, tick):
+        assert not runtime.feed.owed
+        tick()
+        assert _until(lambda: runtime.observation(entry.run_id).get("answered"))
+        tick()
+        assert _until(lambda: bool(stub.posts)), "the durable frame needs no process-local hint"
+        runtime.feed.placing[entry.run_id].result(timeout=10)
+        tick()
+        assert [(post["key"], post["text"]) for post in stub.posts] == [(message_id, wire)]
+        assert frames.pending_frames(ctx, entry.run_id) == [] and not runtime.feed.owed
+
+
+def test_an_answered_run_without_pending_frames_costs_only_one_followed_set_read(world, monkeypatch):
+    from types import SimpleNamespace
+    from ouroboros import delegate_message_store as frames, store
+
+    entries = [started(world.root, rid, "task") for rid in ("run-empty", "run-delivered", "run-elsewhere")]
+    ctx = frames.starter(world.root, entries[1])
+    for entry in entries[1:]:
+        row, _prior = frames.place_frame(ctx, entry, "scope", {"address": "owner:1"}, host=True)
+        if entry.run_id == "run-delivered":
+            frames.record_outcome(ctx, entry.run_id, row["frame"]["message_id"], "delivered", "")
+    opened, queries, real_open = [], [], store.open_store
+
+    @contextlib.contextmanager
+    def counted(*args, **kwargs):
+        opened.append(kwargs["write"])
+        with real_open(*args, **kwargs) as txn:
+            txn.conn.set_trace_callback(queries.append)
+            try:
+                yield txn
+            finally:
+                txn.conn.set_trace_callback(None)
+
+    monkeypatch.setattr(store, "open_store", counted)
+    monkeypatch.setattr(frames, "starter", lambda *_a: pytest.fail("no starter read without a pending frame"))
+    runtime = SimpleNamespace(observation=lambda _rid: {"answered": True}, observers=SimpleNamespace(
+        submit=lambda *_a: pytest.fail("no job without a pending frame in a followed run")))
+    feed = delegate_feed.Feed(world.root)
+    held = {entry.run_id: SimpleNamespace(entry=entry) for entry in entries[:2]}
+    for _ in range(2):
+        feed.place(runtime, held)
+    assert opened == [False, False] and not feed.owed
+    assert len([query for query in queries if "FROM obligations" in query]) == 2
+
+
 def test_the_feed_reaches_the_owner_once_per_new_journal_span_with_the_nanny_asleep(world):
     entry = started(world.root, "run-s", "task-s")
     _asleep(world, "task-s")

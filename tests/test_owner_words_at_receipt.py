@@ -310,11 +310,12 @@ def test_each_ingress_carries_at_receipt(tmp_path, monkeypatch):
     assert entry["source_task_id"] == "root-b"
 
 
+@pytest.mark.parametrize("receipt_before_body", [False, True])
 def test_frames_the_receipt_could_not_send_wait_for_the_body_which_sends_them_once_the_engine_answers(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, receipt_before_body):
     """An engine that cannot be discovered at receipt sends nothing: the host writes the frames ahead (``prepared``,
-    untold) and owes them to the body of its process, which sends them on its own observation pass once the engine
-    answers the run again, one frame per row and run, with no timer of its own. The starter's round top stays the
+    untold). A relay published without any body leaves the same durable obligation as a receipt beside a live
+    body. Its next observation pass sends one frame per row and run. The starter's round top stays the
     idempotent catch-up: it sends nothing the body ended and tells the outcome once."""
     import time
 
@@ -347,9 +348,27 @@ def test_frames_the_receipt_could_not_send_wait_for_the_body_which_sends_them_on
 
     monkeypatch.setattr(delegate_supervision, "_TICK_SEC", 0.05)  # the body's pass, quickened
     monkeypatch.setattr(gw, "ClaudexorGateway", undiscovered)
+    if receipt_before_body:
+        from ouroboros import owner_relay
+        from tests.test_owner_relay import context
+
+        assert delegate_collection.body_runtime(tmp_path) is None
+        quotes, error = owner_relay.quote_rows(context(tmp_path, row), [address])
+        assert not error
+        relay, _ = owner_relay.write_relay(tmp_path, "t-root", relay_id="outside-body", note="Carry these words",
+                                          quotes=quotes, chat_id=1, teller_task_id="teller")
+        threads, carry = [], owner_relay.carry_relay_at_receipt
+        monkeypatch.setattr(owner_relay, "carry_relay_at_receipt",
+                            lambda *args: threads.append(carry(*args)) or threads[-1])
+        owner_relay.publish_relay(tmp_path, "t-root", relay, None)
+        assert len(threads) == 1 and threads[0] is not None
+        threads[0].join(10)
+        assert not threads[0].is_alive()
+        assert written("run-live") == written("run-root") == [("prepared", True)]
     runtime = delegate_collection.start_body_runtime(tmp_path, gateway_factory=Engine)
     try:
-        _receive(tmp_path)
+        if not receipt_before_body:
+            _receive(tmp_path)
         assert written("run-live") == written("run-root") == [("prepared", True)], "written ahead, nothing sent"
         assert written("run-review") == written("run-foreign") == []
         assert until(lambda: runtime.observation("run-live").get("answered")) and {"run-live", "run-root"} <= runtime.feed.owed

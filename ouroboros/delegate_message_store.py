@@ -180,6 +180,24 @@ def pending_frames(ctx: Any, run_id: str) -> list:
     return [row for row in last.values() if row.get("outcome") in PLACEMENT_REPLAYS]
 
 
+def pending_runs(root: Any, run_ids: Any) -> set:
+    """Runs owing owner frames, in one indexed read of the followed sets, without loading starters or journals.
+
+    The last frame per owner address is authoritative, as in ``pending_frames``; process-local hints are not.
+    """
+    names = {_set(run_id): run_id for run_id in run_ids}
+    if not names:
+        return set()
+    with store.open_store(root, write=False) as txn:
+        return {names[row["set_name"]] for row in txn.conn.execute(
+            "SELECT DISTINCT set_name FROM (SELECT set_name, json_extract(facts,'$.outcome') AS outcome, "
+            "row_number() OVER (PARTITION BY set_name, json_extract(facts,'$.frame.owner_words.address') "
+            "ORDER BY json_extract(facts,'$.frame.ts') DESC, rowid DESC) AS latest FROM obligations "
+            "WHERE set_name IN (SELECT value FROM json_each(?)) "
+            "AND json_type(facts,'$.frame.owner_words')='object') "
+            "WHERE latest=1 AND outcome IN (?,?)", (json.dumps(list(names)), *sorted(PLACEMENT_REPLAYS)))}
+
+
 def replay_frames(root: Any, run: Any) -> bool:
     """The body's send of my human's frames still pending for one run it observes: each replayed under its id
     and bytes (``delegate_interactions._post_live_message``), its outcome recorded as the starter's round-top
