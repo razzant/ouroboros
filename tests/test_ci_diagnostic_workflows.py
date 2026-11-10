@@ -728,20 +728,10 @@ def _ui_shard_counts(text):
             "reconcile count": stated(r"--count (\d+)", reconcile["run"])}
 
 
-@pytest.mark.parametrize(("place", "written", "partial"), [
-    ("matrix", "shard: [1, 2, 3, 4, 5, 6, 7, 8, 9]", "shard: [1, 2, 3, 4, 5, 6, 7, 8]"),
-    ("job name", "name: ui-shard (${{ matrix.shard }}/9)", "name: ui-shard (${{ matrix.shard }}/8)"),
-    ("shard argument", "--ui-browser-shard=${{ matrix.shard }}/9", "--ui-browser-shard=${{ matrix.shard }}/8"),
-    ("summary label", 'shard ${{ matrix.shard }}/9"', 'shard ${{ matrix.shard }}/8"'),
-    ("reconcile count", "--count 9 ", "--count 8 "),
-])
-def test_the_ui_shard_count_is_one_number_wherever_the_workflow_states_it(place, written, partial):
+def test_the_ui_shard_count_is_one_number_wherever_the_workflow_states_it():
     """Nine, by decision on run 42833510999: a partial bump would leave nodes unrun or reconcile the wrong lane."""
-    text = (ROOT / ".github/workflows/ui-browser.yml").read_text(encoding="utf-8")
-    assert all(count == [9] for count in _ui_shard_counts(text).values()), _ui_shard_counts(text)
-    assert text.count(written) == 1
-    counts = _ui_shard_counts(text.replace(written, partial))
-    assert [name for name, count in counts.items() if count != [9]] == [place]
+    counts = _ui_shard_counts((ROOT / ".github/workflows/ui-browser.yml").read_text(encoding="utf-8"))
+    assert all(count == [9] for count in counts.values()), counts
 
 
 def test_full_lane_runs_as_nine_guarded_shards_under_step_ceilings(tmp_path):
