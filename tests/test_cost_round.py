@@ -2,13 +2,14 @@
 
 A round's request is recorded three times before it leaves (the logical request, the physical candidate and the
 Claudexor request: docs/MODEL_SEND_OBSERVABILITY.md), each a request view whose parts are the elements of its
-messages and tools (``shared_values``). The loop opens one receipt window per round, from a batch's end to the
-round's ``llm_round`` (``llm_observability.round_window``), and that event carries what the host counted in it
-(``work``): the bytes of parts scanned for secrets (``secret_scan``, repeated keys again as ``secret_scan_again``)
-and of parts the CAS stored for the first time (``new_parts``, ``observability.write_part``). R1: on round 2 the two are equal and nothing is
-scanned twice in the round, whether the request started with a few messages or with many (BIBLE P5: dialogue does
-not wait for bookkeeping over unrelated history). A breach in today's code is a ``TURN_GAPS`` row
-(tests/_turn_law.py), its numbers measured on this fixture.
+messages and tools (``shared_values``). The loop runs each round's model call in one receipt window
+(``llm_observability.round_window``, its first step timed from the batch's end), and the round's ``llm_round``
+carries what the host counted in it (``work``): the bytes of parts scanned for secrets (``secret_scan``, repeated
+keys again as ``secret_scan_again``) and of parts the CAS stored for the first time (``new_parts``,
+``observability.write_part``). R1: on round 2 the two are equal and nothing is scanned twice in the round, whether
+the request started with a few messages or with many (BIBLE P5: dialogue does not wait for bookkeeping over
+unrelated history). A breach is a ``TURN_GAPS`` row (tests/_turn_law.py); the one this law opened with recorded
+450,834 bytes scanned for 93 new after a 60-turn start, until each part's redaction became a fact kept per task.
 """
 
 from __future__ import annotations
@@ -86,9 +87,9 @@ def _rounds(root, task_id: str, start: list) -> list:
 @pytest.mark.parametrize("turns", [pytest.param(turns, marks=turn_gap("R1", "round:2"), id=f"{turns}_turns")
                                    for turns in (2, 60)])
 def test_r1_round_two_scans_only_the_bytes_it_adds(engine, turns):
-    """R1. Round 2 scans for secrets exactly the bytes its records store for the first time, and no part twice; the
-    count is the same after a short start and after a long one. The counters themselves count: round 2 always
-    stores something new (its answer and the owner's next message)."""
+    """R1. Round 2 scans for secrets exactly the bytes its records store for the first time, and no part twice, after
+    a short start and after a long one alike. The counters themselves count: round 2 always stores something new
+    (its answer and the owner's next message)."""
     first, second = _rounds(engine, f"task-{turns}", _history(turns))
     assert first["work"]["secret_scan"] > 0 and second["work"]["new_parts"] > 0, (first["work"], second["work"])
     work = second["work"]

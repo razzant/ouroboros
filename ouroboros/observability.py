@@ -962,11 +962,15 @@ def write_call_manifest(
     # The packer's deletion sections and other manifests hold this lock briefly; a model call
     # waits for them rather than failing its task (issue #1754).
     kind = str(payload.get("call_type") or "manifest")
+
+    def publish() -> None:
+        evidence_packs.note_manifest_publication(drive_root, payload)
+        atomic_write_json(path, payload, trailing_newline=True)
+
     with ExitStack() as held:
         timed(f"{kind}.lock_wait", held.enter_context, store.name_lock(
             pathlib.Path(drive_root), evidence_packs.PUBLICATION_LOCK_NAME, timeout_sec=evidence_packs.PUBLICATION_WAIT_SEC))
-        timed(f"{kind}.manifest_write", lambda: (evidence_packs.note_manifest_publication(drive_root, payload),
-                                                 atomic_write_json(path, payload, trailing_newline=True)))
+        timed(f"{kind}.manifest_write", publish)
     _chmod_private(path)
     try:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -1042,8 +1046,9 @@ def persist_call(
     parts: Dict[str, Dict[str, Any]] = {}
 
     def store(value: Any) -> Dict[str, Any]:
-        return timed(f"{call_type}.blobs", write_shared_blob, drive_root, value, parts) if shared else timed(
-            f"{call_type}.blobs", write_blob, drive_root, value, kind="json")
+        if shared:
+            return timed(f"{call_type}.blobs", write_shared_blob, drive_root, value, parts)
+        return timed(f"{call_type}.blobs", write_blob, drive_root, value, kind="json")
 
     if effective_keep_raw:
         full_ref = store(payload)
