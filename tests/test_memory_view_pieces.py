@@ -129,6 +129,6 @@ def test_a_view_fit_is_drawn_only_when_read():
     with measured_sections():
         assert fit.story_chars and fit.room_chars
         assert not section_spans()["work"].get("view_renders")
-        story, room, facts = fit
+        story, room = fit.story, fit.room
         assert section_spans()["work"]["view_renders"] == 2
-    assert (story, room, facts) == (mv.render_story(snapshot), mv.render_room(snapshot), {}) and fit[1] == room
+    assert (story, room) == (mv.render_story(snapshot), mv.render_room(snapshot)) and fit.facts == {}

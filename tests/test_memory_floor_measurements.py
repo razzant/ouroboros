@@ -163,7 +163,7 @@ def test_each_host_address_walks_its_own_shortest_forms(tmp_path, monkeypatch, w
         result = render(*args, **kwargs)
         if kwargs.get('shortest') or kwargs.get('level') is not None:
             probes.append(('walk' if kwargs.get('level') is None else 're-price', kwargs['mode'],
-                           mf.kept_level(args[0], result[2]).addressed, result[1]))
+                           mf.kept_level(args[0], result.facts).addressed, result.room))
         return result
 
     monkeypatch.setattr(mf, 'render_view_for_mode', recorded)

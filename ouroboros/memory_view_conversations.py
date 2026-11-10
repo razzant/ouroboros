@@ -437,15 +437,9 @@ def pieces(groups: List[Mapping[str, Any]], gone: Mapping[str, Iterable[str]],
     return parts
 
 
-def _plain_piece(_key: Any, make: Callable[[], str]) -> Tuple[str, int]:
-    """A piece made here and kept nowhere: a reader outside a snapshot."""
-    text = make()
-    return text, 0
-
-
 def render(groups: Iterable[Mapping[str, Any]], gone: Mapping[str, Iterable[str]],
-           piece: Callable[..., Tuple[str, int]] = _plain_piece) -> str:
-    """``## Other conversations`` at a floor level (``pieces``); empty without a group."""
+           piece: Callable[..., Tuple[str, int]] = lambda _key, make: (make(), 0)) -> str:
+    """``## Other conversations`` at a floor level (``pieces``; a reader outside a snapshot keeps none); empty without a group."""
     groups = list(groups)
     return "\n\n".join(text for text, _chars in pieces(groups, gone, piece)) if groups else ""
 

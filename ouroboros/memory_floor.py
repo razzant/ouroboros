@@ -54,8 +54,7 @@ def view_tokens(text: str) -> int:
 
 class ViewFit:
     """One frame's memory view: ``level``, its receipt ``note`` and ``facts``, priced from the snapshot's pieces. Its
-    texts are drawn only when read, so a frame the fit walks away from is never drawn; iterating gives the
-    ``(story, room, facts)`` of the delivered view."""
+    texts are drawn only when read, so a frame the fit walks away from is never drawn."""
 
     def __init__(self, snapshot: mv.MemoryViewSnapshot, level: mv.FloorLevel, note: str, facts: Dict[str, Any]):
         self.snapshot, self.level, self.note, self.facts = snapshot, level, note, facts
@@ -75,12 +74,6 @@ class ViewFit:
     @cached_property
     def room_chars(self) -> int:
         return mv.room_chars(self.snapshot, self.level, floor_note=self.note)
-
-    def __iter__(self):
-        return iter((self.story, self.room, self.facts))
-
-    def __getitem__(self, index: int) -> Any:
-        return (self.story, self.room, self.facts)[index]
 
 
 NO_VIEW = SimpleNamespace(story="", room="", facts={}, level=None, story_chars=0, room_chars=0)  # a frame with no memory

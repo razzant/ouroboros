@@ -435,7 +435,7 @@ def test_a_nano_floor_names_only_the_path_its_own_request_sends(tmp_path, monkey
         non_memory_tokens=10_000_000, lowered_from=None if owner == "nano" else owner,  # no room: its last view
         tool_names=select_tool_schemas(schemas, context_mode="nano").chosen)
     window = (10_000_000 - roomy.projection("nano").memory_facts["floor"]["physical_allowance_tokens"]
-              + view_tokens(shortest[0]) + view_tokens(shortest[1]) + 50)
+              + view_tokens(shortest.story) + view_tokens(shortest.room) + 50)
     start = plan(window)
     from ouroboros.context_budget import context_mode_limits
     from ouroboros.context_fit import tool_schema_tokens
