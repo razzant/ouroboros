@@ -287,11 +287,11 @@ class MemoryViewSnapshot:
         return self.store_status.get("state") == "active"
 
     def piece(self, key: Any, make: Callable[[], str]) -> int:
-        """The characters one local form of this view adds to a request's JSON, made once for this snapshot; a whole
-        text's price is their sum (``room_chars``). Only the count stays, as the floor prices far more forms than it
-        delivers, and delivery draws its text once (``render_story``, ``render_room``). A non-field attribute, like the
-        floor's element table: ``snapshot_json``, equality and ``dataclasses.replace`` never see it, and it lives as
-        long as the snapshot object."""
+        """The characters one local form of this view adds to a request's JSON, made once for this snapshot by building
+        its text (``view_pieces``); a whole text's price is their sum (``room_chars``). Only the count stays, as the
+        floor prices far more forms than it delivers: delivery builds its texts again (``render_story`` and
+        ``render_room``). A non-field attribute like the floor's element table: ``snapshot_json``, equality and
+        ``dataclasses.replace`` never see it, and it lives as long as the snapshot object."""
         pieces = self.__dict__.setdefault("_pieces", {})
         if key not in pieces:
             counted("view_pieces", key=(id(self), key))

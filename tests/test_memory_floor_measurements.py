@@ -15,7 +15,8 @@ from tests import _memory_scale_fixture as scale, _memory_view_synthetic as syn
 
 def test_a_floor_walk_prices_from_pieces_and_chooses_as_a_drawn_view_would():
     """Owner shape under a zero bound: the walk prices every level from the snapshot's pieces, so no form of the view is
-    drawn, no piece is made twice, and the level is exactly the one a walk that draws each form chooses."""
+    drawn whole (a piece's text is built to be measured), no piece is made twice, and the level is exactly the one a
+    walk that draws each form chooses."""
     snapshot = scale.snapshot()
 
     def drawn(level):
@@ -540,7 +541,8 @@ def test_an_unactivated_snapshot_is_priced_without_the_floor_note():
 
 
 def test_a_view_fit_is_drawn_only_when_read():
-    """A frame the fit walks away from is priced, never drawn: ``ViewFit`` draws its texts on the first read."""
+    """A frame the fit walks away from is priced by its pieces, never drawn whole: ``ViewFit`` draws its texts on the
+    first read."""
     snapshot = _snapshot()
     fit = mf.ViewFit(snapshot, mv.FULL_VIEW, "", {})
     with measured_sections():
@@ -549,3 +551,30 @@ def test_a_view_fit_is_drawn_only_when_read():
         story, room = fit.story, fit.room
         assert section_spans()["work"]["view_renders"] == 2
     assert (story, room) == (mv.render_story(snapshot), mv.render_room(snapshot)) and fit.facts == {}
+
+
+def test_a_start_builds_a_story_or_room_text_only_as_a_counted_piece_or_render(tmp_path, monkeypatch):
+    """Counted at the builders themselves: a start builds a story or room text once per piece key to price it, keeping
+    its length (``view_pieces``), and whole for what it delivers (``view_renders``), never elsewhere. One text built
+    outside those two paths breaks the equality."""
+    from ouroboros import context_timing
+
+    built = []
+    for name in ("_story_text", "_room_text"):
+        def building(*args, _build=getattr(mv, name), **kwargs):
+            built.append(name)
+            return _build(*args, **kwargs)
+
+        monkeypatch.setattr(mv, name, building)
+
+    def counted():  # the story and room pieces the window counted, and its whole renders
+        work, seen = context_timing._WORK.get()
+        return sum(verb == "view_pieces" and key[1][0] in ("story", "room") for verb, key in seen) + work["view_renders"]
+
+    snapshot = scale.snapshot()
+    mv._parsed_view.cache_clear()  # a fresh process's parse: no piece priced by an earlier test of this worker
+    with measured_sections():
+        scale.build(tmp_path, monkeypatch, snap=snapshot)
+        assert section_spans()["work"]["view_renders"] == 2 and len(built) == counted() > 2
+        mv._story_text(snapshot, {})  # a text built outside a piece and a render
+        assert len(built) == counted() + 1

@@ -48,7 +48,8 @@ L3/L4 (k=1): after 40 live rooms and 10 running roots, 650 open rows, or 40 arch
 rescue snapshots, only the dialogue's page reads may grow, by B9's allowance per page (their statements by the
 lease's per transaction); L5: each turn reaches its request and nothing it does reaches the network; L6: the
 request carries the newest open row; L7 (the build's own equalities, on a window where both sizes walk Max -> Low):
-no form of the view or the request is produced twice, full renders of the view equal the texts delivered, whole-request
+no piece or whole render of the view and no form of the request is produced twice, whole renders of the view equal the
+texts delivered (the walk builds a piece's text once per key to price it and keeps only its length), whole-request
 serializations equal the request's forms at every size, a capture reads what it shows and what is new, a chronicle
 record is parsed once. A breach in today's code is a ``TURN_GAPS`` row (tests/_turn_law.py): a
 strict xfail with its numbers, its remover or why it has none, and a ceiling its growth may not pass.
@@ -436,7 +437,8 @@ def test_b10_main_s_turn_carries_the_newest_open_row(measured):
 
 # ---- L7: one build does each piece of work once, and delivers what it did ------------------------
 # The equalities the build owes on the branch a live install walks (Max -> Low, a window tight for both sizes): what the
-# host rendered, serialized, read and parsed is what it delivered. Each stands beside a turn's own receipt
+# host rendered whole, serialized, read and parsed is what it delivered, and a piece of the view is built once per key
+# to be priced. Each stands beside a turn's own receipt
 # (``context_memory_view.work``); a breach in today's code is a ``TURN_GAPS`` row with its numbers.
 
 WORK_TURNS = ("T:main", "T:mainw")  # Main's first turn of the process and the next one, at both sizes
@@ -458,8 +460,9 @@ def _pairs(works: Dict[int, Dict[str, int]], verb: str, delivered: Callable[[Dic
 
 @pytest.mark.parametrize("tag", [pytest.param(tag, marks=turn_gap("L7a", tag)) for tag in WORK_TURNS])
 def test_b10_a_build_never_repeats_a_view_form_or_a_request_form(measured, tag):
-    """L7a. No form of the view is rendered twice and no form of the request is serialized twice in one build: every
-    ``_again`` is zero. A repeated piece is the class of 222 story renders per build, in one equality."""
+    """L7a. No piece of the view is built twice, no form of it is rendered whole twice and no form of the request is
+    serialized twice in one build: every ``_again`` is zero. A repeated piece is the class of 222 story renders per
+    build, in one equality. A delivered form is built twice by design, once as a piece and once whole (L7b)."""
     works = _build_work(measured, tag)
     hold_work_equal("L7a", tag, {**_pairs(works, "view_renders_again", lambda _work: 0),
                                  **_pairs(works, "view_pieces_again", lambda _work: 0),
@@ -468,8 +471,9 @@ def test_b10_a_build_never_repeats_a_view_form_or_a_request_form(measured, tag):
 
 @pytest.mark.parametrize("tag", [pytest.param(tag, marks=turn_gap("L7b", tag)) for tag in WORK_TURNS])
 def test_b10_a_build_renders_the_view_it_delivers(measured, tag):
-    """L7b. Full renders of the view equal the texts this start delivers (a story and a room for the projection it
-    ships): the walk prices forms without drawing them."""
+    """L7b. Whole renders of the view equal the texts this start delivers (a story and a room for the projection it
+    ships). The walk prices a form by its pieces: each piece's text is built once per key to take its length and is
+    dropped (``view_pieces``, L7a), and only the delivered texts are built whole (``view_renders``)."""
     hold_work_equal("L7b", tag, _pairs(_build_work(measured, tag), "view_renders", lambda work: work.get("view_texts_kept", 0)))
 
 
