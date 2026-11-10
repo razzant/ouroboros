@@ -7,7 +7,6 @@ import pytest
 
 from ouroboros import memory_floor as mf
 from ouroboros import memory_view as mv
-from ouroboros import memory_view_conversations as conversations
 from ouroboros.context_timing import measured_sections, section_spans
 from tests import _memory_view_synthetic as syn
 
@@ -43,7 +42,7 @@ def test_conversation_pieces_join_to_the_plain_text_at_every_level():
     snapshot = _snapshot()
     for level in _levels(snapshot):
         gone = dict(level.addressed)
-        assert conversations.render(snapshot.conversations, gone, piece=snapshot.piece) == conversations.render(
+        assert syn.conversations_text(snapshot.conversations, gone, snapshot.piece) == syn.conversations_text(
             snapshot.conversations, gone)
 
 
@@ -52,12 +51,12 @@ def test_a_repeated_level_makes_no_new_piece_and_a_new_form_makes_only_its_own()
     a level that changes one group's form makes only that group's new piece, and nothing repeats."""
     snapshot, level_gone = _snapshot(), {"F6w": []}
     with measured_sections():
-        conversations.render(snapshot.conversations, level_gone, piece=snapshot.piece)
+        syn.conversations_text(snapshot.conversations, level_gone, snapshot.piece)
         first = section_spans()["work"]["view_pieces"]
-        conversations.render(snapshot.conversations, level_gone, piece=snapshot.piece)
+        syn.conversations_text(snapshot.conversations, level_gone, snapshot.piece)
         assert section_spans()["work"]["view_pieces"] == first
         word = snapshot.conversations[0]["rooms"][0]["words"][0]["id"]
-        conversations.render(snapshot.conversations, {"F6w": [word]}, piece=snapshot.piece)
+        syn.conversations_text(snapshot.conversations, {"F6w": [word]}, snapshot.piece)
         work = section_spans()["work"]
     assert work["view_pieces"] == first + 1 and not work.get("view_pieces_again")
 
@@ -73,8 +72,8 @@ def test_without_the_memo_the_counter_names_the_repeat(monkeypatch):
         return make(), 0
 
     with measured_sections():
-        conversations.render(snapshot.conversations, {}, piece=unkept)
-        conversations.render(snapshot.conversations, {}, piece=unkept)
+        syn.conversations_text(snapshot.conversations, {}, unkept)
+        syn.conversations_text(snapshot.conversations, {}, unkept)
         work = section_spans()["work"]
     assert work["view_pieces_again"] == work["view_pieces"] / 2
 
@@ -85,7 +84,7 @@ def test_pieces_never_reach_the_snapshot_s_canonical_form():
 
     snapshot = _snapshot()
     before = mv.snapshot_json(snapshot)
-    conversations.render(snapshot.conversations, {}, piece=snapshot.piece)
+    syn.conversations_text(snapshot.conversations, {}, snapshot.piece)
     assert mv.snapshot_json(snapshot) == before and "_pieces" in snapshot.__dict__
     assert "_pieces" not in dataclasses.replace(snapshot).__dict__
 
@@ -96,7 +95,7 @@ def test_the_counted_rung_and_the_group_lines_join_like_the_plain_text(lined, co
     snapshot = _snapshot()
     keys = [group["key"] for group in snapshot.conversations][:lined]
     gone = {**({"F6g": keys} if keys else {}), **({"F6a": ["conversations"]} if counted else {})}
-    assert conversations.render(snapshot.conversations, gone, piece=snapshot.piece) == conversations.render(
+    assert syn.conversations_text(snapshot.conversations, gone, snapshot.piece) == syn.conversations_text(
         snapshot.conversations, gone)
 
 

@@ -404,7 +404,7 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
 
 def pieces(groups: List[Mapping[str, Any]], gone: Mapping[str, Iterable[str]],
             piece: Callable[..., Tuple[str, int]]) -> List[Tuple[str, int]]:
-    """``## Other conversations`` at a floor level, each local form made once through ``piece`` (a snapshot's, or plain):
+    """``## Other conversations`` at a floor level, each local form made once through ``piece`` (``snapshot.piece``):
     the authority sentence first, then every group in its form; at the last rung (F6a) my human's words of the counted
     groups stay, whole or by the address F7 folded them to. The pieces are joined by a blank line."""
     from ouroboros.memory_view import _rooms_line, _row_pointer
@@ -435,13 +435,6 @@ def pieces(groups: List[Mapping[str, Any]], gone: Mapping[str, Iterable[str]],
                 f"{kinds['silent']} other rooms; memory_read(room_id='*') lists every open room.")
     parts.append(piece(("conversations", "foot"), foot))
     return parts
-
-
-def render(groups: Iterable[Mapping[str, Any]], gone: Mapping[str, Iterable[str]],
-           piece: Callable[..., Tuple[str, int]] = lambda _key, make: (make(), 0)) -> str:
-    """``## Other conversations`` at a floor level (``pieces``; a reader outside a snapshot keeps none); empty without a group."""
-    groups = list(groups)
-    return "\n\n".join(text for text, _chars in pieces(groups, gone, piece)) if groups else ""
 
 
 def owed(groups: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:

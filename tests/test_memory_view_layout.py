@@ -45,8 +45,8 @@ def test_note_labels_and_aggregate_keep_readers_and_do_not_change_other_rooms():
     assert '6 notes not yet sealed, 2026-09-02 → 2026-09-03, by child, root; ids:' in text
     assert all(note['id'] in text for note in snap.room['notes'])
     assert '(memory_read(node_id=…))' in text
-    from ouroboros import memory_view_conversations as conversations
-    assert conversations.render(snap.conversations, {}) in text  # this room's note forms leave the other groups be
+    from tests import _memory_view_synthetic as syn
+    assert syn.conversations_text(snap.conversations, {}) in text  # this room's note forms leave the other groups be
     assert mv.render_story(snap, aggregate) == mv.render_story(snap)
 
 
