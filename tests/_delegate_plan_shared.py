@@ -67,7 +67,8 @@ class PlanEngine:
         if self.fail_next:
             self.fail_next = False
             raise ClaudexorUnavailable("transport_unavailable", "Lost response after acceptance")
-        return self.accepted[key]
+        named = {"storeId": "store-plan"} if headers.get("X-Claudexor-Store-Identity") == "1" else {}
+        return {**self.accepted[key], **named}  # only an opted-in receipt names its store
 
     def get_thread(self, thread_id): return copy.deepcopy(self.threads[thread_id])
     def get_run(self, run_id, **kwargs):

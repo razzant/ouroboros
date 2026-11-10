@@ -14,6 +14,13 @@ def request_shape(body):
             "execution": bool(body.get("execution"))}
 
 
+def store_facts(row: Dict[str, Any]) -> Dict[str, Any]:
+    """The engine-store facts of one START_REQUESTED row, as ``replay_store_unproven`` reads them."""
+    return {"daemon_store_id": str(row.get("daemon_store_id") or ""),
+            "handshake_store_id": str(row.get("handshake_store_id") or ""),
+            "store_identity_unproven": row.get("store_identity_unproven") is True}
+
+
 def pending_invocations(
     drive_root: Any, rows: Optional[List[Dict[str, Any]]] = None, *, materialize: bool = True,
 ) -> List[Dict[str, Any]]:
@@ -54,6 +61,7 @@ def pending_invocations(
                 **({"project_persistent": bool(row["project_persistent"])}
                    if "project_persistent" in row else {}),
                 "idempotency_key": str(row.get("idempotency_key") or ""),
+                **store_facts(row),  # the facts replay_store_unproven reads
                 "root_task_id": str(row.get("root_task_id") or ""),
                 "parent_task_id": str(row.get("parent_task_id") or ""),
                 "category": str(row.get("category") or "subagent"),
@@ -110,6 +118,8 @@ def current_rows(root, rows):
         projected = (copy.deepcopy(facts["pending"]) if "pending" in facts else
                      pending_invocations(root, [facts["request"]], materialize=False))
         source = facts["request"]
+        for record in projected:
+            record.update(store_facts(source))  # a cached projection may predate a store fact its row holds
         if source.get("request_ref") is not None and not (isinstance(source.get("request"), dict) and source["request"]):
             for record in projected:
                 # Older projections cached a body without its ref. The source row
@@ -156,6 +166,39 @@ def backfill(root, should_stop):
     return {"state": "done", "items": done}
 
 
+def replay_store_unproven(record: Dict[str, Any], serving_store_id: Any) -> str:
+    """Why a recorded invocation key must not be re-sent to the serving store now, or "".
+
+    Claudexor keeps idempotency keys inside each store's own database, so only the store that
+    received the original POST can answer its key with the run it accepted; another store would
+    start a second run while the first may live on where it was accepted. A row whose admitting
+    store is still unproven (``store_identity_unproven``: a fresh start, before its POST receipt)
+    is not replayed into a named store; ``handshake_store_id``, only the store its handshake saw,
+    refuses a store that differs from it and never proves admission. A row naming the store it
+    is for (``daemon_store_id``, as a review continuation names the stopped run's admitting store)
+    replays only while the serving store is that one; a row naming none keeps the earlier replay.
+    A refusal decides nothing about whether the first POST started a run."""
+    if record.get("store_identity_unproven") is True:
+        # Engines naming no identity retain legacy single-store replay. A handshake observed before
+        # an unknown POST cannot certify its admission: the store may have changed before that POST.
+        recorded_handshake = str(record.get("handshake_store_id") or "")
+        serving = str(serving_store_id or "")
+        if not recorded_handshake and not serving:
+            return ""
+        if recorded_handshake and recorded_handshake != serving:
+            return (f"the original handshake named store {recorded_handshake}, but the current handshake "
+                    f"names {serving or 'no store identity'}; the unknown POST is not replayable here")
+        return ("the original POST's admitting store was not proven by a receipt; the current handshake "
+                "identity cannot authorize replay, so the outcome remains unknown")
+    recorded = str(record.get("daemon_store_id") or "")
+    serving = str(serving_store_id or "")
+    if not recorded or recorded == serving:
+        return ""
+    return (f"this start is for Claudexor store {recorded}, but the engine now serves "
+            f"{'store ' + serving if serving else 'a store that names no identity'}, which is not shown to hold "
+            "its key or the run it continues")
+
+
 def request_body(drive_root: Any, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Resolve the canonical replay envelope, legacy inline first, then raw CAS.
 
@@ -179,4 +222,4 @@ def request_body(drive_root: Any, row: Dict[str, Any]) -> Optional[Dict[str, Any
     return body if isinstance(body, dict) and body else None
 
 
-__all__ = ["pending_invocations", "request_body"]
+__all__ = ["pending_invocations", "replay_store_unproven", "request_body"]

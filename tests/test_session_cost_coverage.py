@@ -544,7 +544,9 @@ def _observe_terminal(root, entry):
 
 def _close_absent(root, entry):
     from ouroboros import delegate_custody_current as current
-    custody.close_absent_run(root, GATEWAY, current.run(root, entry.run_id), "synthetic: the engine has no such run")
+    from tests._shared import run_absent_in
+    custody.close_absent_run(root, GATEWAY, current.run(root, entry.run_id), "synthetic: the engine has no such run",
+                            absence=run_absent_in(str(getattr(GATEWAY, "store_identity", "") or "")))
 
 
 def _ledger_claim(root, entry):

@@ -268,7 +268,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     # control_subagent_spec/control_task_results leaves carry no handle reads
     # and stay off this table (D08 control-leaf precedent).
     "ouroboros/delegate_custody_reconcile.py": ("ouroboros/delegate_custody.py", "_custody", frozenset({
-        "RECONCILED", "RunCustody", "START_FAILED", "_reconcile_one",
+        "RECONCILED", "RunCustody", "START_FAILED", "_reconcile_one", "admitted_store_id",
         "cancel_and_verify", "close_absent_run", "daemon_says_absent", "emit",
         "is_terminal", "output_disposition", "pending_invocations",
         "record_containment_fault", "record_settled_unread", "record_started",

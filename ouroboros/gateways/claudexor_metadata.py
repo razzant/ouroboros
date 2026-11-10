@@ -12,6 +12,7 @@ import pathlib
 import threading
 from concurrent.futures import Future, TimeoutError
 
+STORE_IDENTITY = {"X-Claudexor-Store-Identity": "1"}  # opt-in ``storeId``: handshake, run start, thread turn
 _lock = threading.Lock()
 _key = None
 _handshake = None
