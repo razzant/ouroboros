@@ -12,6 +12,7 @@ import contextvars
 import pathlib
 import logging
 import queue
+import threading
 import time
 from typing import Any, Dict, Iterator, Optional, Tuple
 
@@ -68,7 +69,8 @@ def round_window() -> Iterator[None]:
     each marked section's time, the time of each step between ``host_step`` marks and the process's ``_rusage`` over
     the window. Facts for the log only: nothing reads them to decide."""
     with measured_sections():
-        token = _STEPS.set({"steps": {}, "mark": (time.perf_counter(), time.thread_time()), "rusage": _rusage()})
+        token = _STEPS.set({"steps": {}, "rusage": _rusage(),
+                            "mark": (time.perf_counter(), time.thread_time(), threading.get_ident())})
         try:
             yield
         finally:
@@ -77,26 +79,31 @@ def round_window() -> Iterator[None]:
 
 def host_step(name: str) -> None:
     """The round's step ``name`` ends here: its wall and thread CPU time since the previous mark, or since the window
-    opened, add to its span (nothing outside a window)."""
+    opened, add to its span (nothing outside a window). A step that ends on another thread than it began (the model
+    sender's, which runs in a copy of this context) has no one thread's CPU time: unknown (None)."""
     state = _STEPS.get()
     if state is None:
         return
-    now = (time.perf_counter(), time.thread_time())
+    now = (time.perf_counter(), time.thread_time(), threading.get_ident())
+    wall, cpu, thread = state["mark"]
     span = state["steps"].setdefault(name, [0.0, 0.0])
-    span[0], span[1] = span[0] + now[0] - state["mark"][0], span[1] + now[1] - state["mark"][1]
+    span[0] += now[0] - wall
+    span[1] = None if span[1] is None or now[2] != thread else span[1] + now[1] - cpu
     state["mark"] = now
 
 
 def round_receipt() -> Dict[str, Any]:
-    """``work`` and ``host_steps`` of the open round window for its ``llm_round``, or nothing outside one."""
+    """``work`` and ``host_steps`` of the open round window for its ``llm_round``, or nothing outside one:
+    ``steps`` as ``[wall ms, thread CPU ms or None]``, the sections' wall ms (``total``: the window so far) and ``rusage``.
+    The line lands in an archive kept for good, so it holds about a kilobyte, one entry per name."""
     spans, state = section_spans(), _STEPS.get()
     if not spans or state is None:
         return {}
     rusage = _rusage()
     return {"work": spans["work"], "host_steps": {
-        "steps_ms": {name: round(span[0] * 1000) for name, span in state["steps"].items()},
-        "steps_cpu_ms": {name: round(span[1] * 1000) for name, span in state["steps"].items()},
-        "sections_ms": spans["sections_ms"], "sections_cpu_ms": spans["sections_cpu_ms"],
+        "steps": {name: [round(span[0] * 1000), None if span[1] is None else round(span[1] * 1000)]
+                  for name, span in state["steps"].items()},
+        "sections_ms": spans["sections_ms"],
         **({"rusage": {name: count - state["rusage"].get(name, count) for name, count in rusage.items()}}
            if rusage else {})}}
 

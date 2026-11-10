@@ -138,11 +138,15 @@ def test_the_round_receipt_names_each_preparation_step_and_what_the_request_reco
     Only facts: a call outside any window carries none of it."""
     _first, second = _rounds(engine, "task-steps", _history(2))
     steps = second["host_steps"]
-    assert tuple(steps["steps_ms"]) == STEPS and set(steps["steps_cpu_ms"]) == set(STEPS)
+    assert tuple(steps["steps"]) == STEPS
+    assert all(wall >= 0 and (cpu is None or cpu >= 0) for wall, cpu in steps["steps"].values()), steps["steps"]
+    assert steps["steps"]["create_operation"][1] is None, "the engine's create runs on the sender's thread"
+    assert all(cpu is not None for name, (_wall, cpu) in steps["steps"].items() if name != "create_operation")
     sections = set(steps["sections_ms"])
     assert {f"{record}.{part}" for record in RECORDS for part in ("redact", "blobs", "lock_wait", "manifest_write")} <= sections
     assert {"daemon.gateway", "daemon.operations", "daemon.upload", "daemon.create", "event_put", "total"} <= sections
-    assert all(isinstance(value, int) and value >= 0 for value in (*steps["steps_ms"].values(), *steps["sections_ms"].values()))
+    assert all(isinstance(value, int) and value >= 0 for value in steps["sections_ms"].values())
+    assert len(json.dumps(steps)) < 2048, "a round's line lands in an archive kept for good"
     if sys.platform != "win32":
         assert set(steps["rusage"]) == {"nvcsw", "nivcsw", "majflt", "oublock"} and min(steps["rusage"].values()) >= 0
     usage: dict = {}
@@ -162,4 +166,4 @@ def test_a_platform_without_rusage_counters_leaves_them_out(monkeypatch):
     with round_window():
         llm_observability.host_step("model_call")
         receipt = llm_observability.round_receipt()
-    assert "rusage" not in receipt["host_steps"] and set(receipt["host_steps"]["steps_ms"]) == {"model_call"}
+    assert "rusage" not in receipt["host_steps"] and set(receipt["host_steps"]["steps"]) == {"model_call"}
