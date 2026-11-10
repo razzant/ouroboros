@@ -40,7 +40,7 @@ Judgment, not a gate. Review: CHECKLISTS Plan row 6 and `capability_placement` (
 - A `type: extension` skill with a reviewed isolated dependency env or a payload-native marker (`.so`, `.dylib`, `.dll`, `.pyd`) never imports `plugin.py` or runs handlers inside `server.py`, even when the dependency tree looks pure-Python: `extension_process_runner` dispatches it in short-lived child processes; only no-dependency pure-Python extensions use `extension_loader`'s in-process PluginAPI. Containment, not admission: a native payload still faces skill review.
 - A child crash, invalid JSON, timeout or abort answers as a normal tool error, HTTP 502 or WS log message; a child `SIGABRT` is a handled extension failure, not a server crash. Add no host-process fallback importing native-risk modules.
 
-Only workers reuse a catalog run, per source identity, never by time; a failure is never recorded (ARCHITECTURE §13). `tests/test_extension_boot_cache.py`: a repeated birth makes zero copies and catalog children, changed inputs invalidate only the affected extensions; isolation: `tests/test_extension_process_runner.py`.
+Only workers reuse a catalog run, per source identity, never by time; a failure is never recorded (ARCHITECTURE §13). `tests/test_extension_boot_cache.py`: a second birth makes zero copies and catalog children, changed inputs invalidate only the affected extensions; isolation: `tests/test_extension_process_runner.py`.
 
 ### Declared skill resources and builds
 
