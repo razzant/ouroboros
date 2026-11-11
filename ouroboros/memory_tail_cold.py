@@ -28,7 +28,8 @@ wrote a page record; a row whose answer rested on a task the store did not hold 
 other place room (its earlier deliveries of the same words, who of ours spoke there) are read for the rooms a reader
 shows, when it asks (``older_of``): the set keeps each row's room key, the chat ``chat_chain._row_chat_id`` reads, as
 the room rule reads it, and no other room holds a row of that chat. A Project that became a place since the set was
-composed may hold earlier rows among those the set left unread (``again``).
+composed may hold earlier rows among those the set left unread: the capture that finds it takes the set's marks away
+(``again``), and the next whole pass composes the set with that Project among its places.
 
 One capture, one state: the marks and the facts the rule decides rooms by are read together (the gate's one object),
 and a task's lineage, read later as the rule asks, is checked against its mark after the pass and after the readers
@@ -181,17 +182,38 @@ def again(store: Any, derived: Optional[Dict[str, Any]], tail: Any, places: Iter
     """After the pass of a capture standing on the set: ``Moved`` where the set no longer serves it — a task's lineage
     written since the marks were read leaves the pass's rooms on lineage the set was not composed under; a Project that
     is a place now and was none when the set was composed may hold earlier rows among those left unread (no room key
-    finds them). A capture whose rows were read live (the stored facts stand for another source) left none unread: it
-    stands no more."""
+    finds them). There no mark moved, and a set left standing would begin every later capture again: its marks go
+    first (``_retire``), so the next capture reads the whole tail with its marks and composes the set with that Project
+    among its places. A capture whose rows were read live (the stored facts stand for another source) left none unread:
+    it stands no more."""
     from ouroboros.store_hot_facts import lineage_writes
 
     if not (derived and derived.get(STANDS)):
         return
-    if lineage_writes(store.data_root) != derived[HELD]["marks"]["lineage"] or tail.complete and not set(
-            places) <= set(derived[HELD].get("places") or ()):
+    held = derived[HELD]
+    if lineage_writes(store.data_root) != held["marks"]["lineage"]:
+        raise Moved
+    if tail.complete and not set(places) <= set(held.get("places") or ()):
+        _retire(store, held)
         raise Moved
     if not tail.complete:
         derived[STANDS] = False
+
+
+def _retire(store: Any, held: Mapping[str, Any]) -> None:
+    """Take the stored set's marks away while they are still ``held``, in one zero-wait index transaction, as
+    ``_compose`` writes them: nothing stands on the set until a whole pass composes it anew, and a capture that stood on
+    it begins again at its next read of the set's rows (``_read``). A busy index leaves the marks: the next capture
+    finds the same and tries again."""
+    import sqlite3
+
+    try:
+        with store._publishing(0) as db:
+            if store._state(db, MARKS) == held:
+                db.execute("DELETE FROM state WHERE key=?", (MARKS,))
+                db.commit()
+    except (TimeoutError, sqlite3.Error):
+        return
 
 
 def standing(derived: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:

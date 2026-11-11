@@ -1480,6 +1480,59 @@ def test_a_project_that_becomes_a_place_reads_the_whole_tail(monkeypatch, tmp_pa
     assert "delivered again" in _texts(views)
 
 
+def test_a_project_that_became_a_place_begins_one_start_again_and_the_next_composes(monkeypatch, tmp_path):
+    """A Project's newest row becomes a place's under a set composed when it was none. No mark moved, so the start that
+    finds it takes the set's marks away before it begins again: it pays the dropped read and a whole one, the next start
+    reads the whole tail with its marks and composes the set with the Project among its places, and the third stands.
+    Under a busy index the marks stay: that start is begun again all the same, and the next one tries again. Every view
+    is the whole tail's; a capture that stood on the marks taken away begins again at its next read of the set's rows."""
+    import contextlib
+
+    rooms = _settled(tmp_path)
+    _project_place(tmp_path, rooms)
+    _fill(tmp_path)
+    _seal(tmp_path, _entry(tmp_path, "Alpha twice."), rooms["alpha"])
+    _compose(tmp_path)  # alpha is no place yet: its sealed row is left unread
+    index = ChronicleStore(tmp_path)
+
+    def marks():
+        with index._index() as db:
+            return ChronicleStore._state(db, cold.MARKS)
+
+    def start() -> dict:  # one start of Main: its receipt, its view held to the whole tail's
+        with measured_sections():
+            view, work = _main_view(tmp_path), section_spans()["work"]
+        assert view == want, _first_difference({"main": view}, {"main": want})
+        return work
+
+    stood = marks()
+    assert stood["places"] == [] and _entry(tmp_path, "Alpha twice.")[2] in _cold_positions(tmp_path)
+    cold._retire(index, {**stood, "sequence": -1})  # marks another capture composed since are not this one's to take
+    assert marks() == stood
+    _done_in_place(tmp_path, 4)
+    want = _whole_main(monkeypatch, tmp_path)
+
+    @contextlib.contextmanager
+    def busy(self, wait_sec=10):
+        raise TimeoutError("chronicle publication lock unavailable")
+        yield
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ChronicleStore, "_publishing", busy)
+        work = start()
+    assert work.get("capture_restarts") == 1 and work.get("tail_whole") == 1 and marks() == stood, (work, marks())
+    work = start()  # the index answers: the marks go, this start still reads twice
+    assert work.get("capture_restarts") == 1 and work.get("tail_whole") == 1 and marks() is None, (work, marks())
+    with pytest.raises(cold.Moved):  # a capture that stood on them: its next read of the set's rows
+        cold.older_of(index, stood, [(PLACE, None, 8)])
+    work = start()  # reads the whole tail once, with its marks, and composes
+    assert not work.get("capture_restarts") and work.get("tail_whole") == 1, work
+    assert marks()["places"] == [str(rooms["alpha"])], marks()
+    work = start()
+    assert not work.get("capture_restarts") and not work.get("tail_whole") and "rows_cold" in work and _law_l7d(work), work
+    assert "delivered again" in _texts(_same(monkeypatch, tmp_path, rooms))
+
+
 def test_a_capture_begun_again_names_the_read_it_shows_and_the_read_it_dropped(monkeypatch, tmp_path):
     """A task's lineage written after a capture's marks: its pass stops at its own check, before the block reads any
     place's rows, and the capture begins again once — two passes. Its receipt holds the read it shows (the whole pass's
