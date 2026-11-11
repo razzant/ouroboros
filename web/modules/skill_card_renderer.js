@@ -704,7 +704,7 @@ function submitHubReady(skill, githubTokenConfigured) {
     const visible = ['external', 'self_authored', 'user_repo', 'ouroboroshub', 'clawhub'].includes(sourceTag(skill));
     if (!visible) return { visible: false, disabled: true, reason: '' };
     if (githubTokenConfigured !== true) return { visible: true, disabled: true, reason: githubTokenConfigured === false
-        ? 'Publishing needs a GitHub token: Settings → Secrets → GITHUB_TOKEN.' : 'GitHub token status unavailable. Refresh to retry.' };
+        ? 'Publishing needs a GitHub token: Settings › Accounts and keys › GitHub.' : 'GitHub token status unavailable. Refresh to retry.' };
     return { visible: true, publication_ready: false, task_start_allowed: true, disabled: false, reason: '' };
 }
 

@@ -313,7 +313,7 @@ test('Publish follows the host verdict: task_start_allowed decides, a missing to
     assert.match(allowed, /skills-submit-hub"[^>]*data-submit-disabled="false"[^>]*>Publish…</);
     const legacy = renderInstalledSkillCard(skill(), new Set(), new Set(), {}, { githubTokenConfigured: false });
     assert.match(legacy, /data-submit-disabled="true"/);
-    assert.match(legacy, /Publishing needs a GitHub token: Settings → Secrets → GITHUB_TOKEN\./);
+    assert.match(legacy, /Publishing needs a GitHub token: Settings › Accounts and keys › GitHub\./);
     assert.doesNotMatch(renderInstalledSkillCard(skill({ source: 'native' })), /skills-submit-hub/);
 });
 
