@@ -336,12 +336,15 @@ def test_a_verdict_larger_than_the_bound_is_kept_and_ends_the_hold_it_answered(
     assert not [event for event in h.events if event["type"] == "safety_sent_without_assessment"]
 
 
+@pytest.mark.parametrize("gate", [False, True])
 @pytest.mark.parametrize("rootless", [False, True])
-def test_a_judged_call_does_not_become_unchecked_when_a_card_arrives(supervisor, exits, monkeypatch, rootless):
+def test_a_judged_call_does_not_become_unchecked_when_a_card_arrives(supervisor, exits, monkeypatch, rootless, gate):
     """Judged DANGEROUS with only the unjudged release open, rootless or not: kept whatever its verdict's size, its
-    refusal answers the identical call, and my human's card releases nothing (their answer earns one new reading).
-    Once the work's bound no longer keeps it, it is read afresh and never leaves unread: while the checker is down
-    the card still releases nothing. A call no reading judged keeps its card."""
+    refusal answers the identical call. Once the work's bound no longer keeps it, before any word of my human, it is
+    read afresh and never leaves unread: while the checker is down my human's card then releases nothing, nor, for
+    words to a known place (``gate``), the same words there under a new request_id. A call no reading judged keeps
+    its card."""
+    from ouroboros import place_guard
     h = supervisor
     exits("release")  # only unchecked release, not a known-DANGEROUS override
     ctx = SimpleNamespace(task_metadata={"work_kind": "owner"}, drive_root=h.ctx.drive_root) if rootless else h.ctx
@@ -351,21 +354,23 @@ def test_a_judged_call_does_not_become_unchecked_when_a_card_arrives(supervisor,
         ctx._current_llm_call_meta = {"llm_call_id": f"step-{next(steps)}"}
         return h.module.check_safety("place_reply", arguments, ctx=ctx)
     monkeypatch.setattr(h.module, "_SAFETY_PRIOR_BYTE_BUDGET", 1000)
+    if gate:
+        monkeypatch.setattr(place_guard, "call_place_facts", lambda *a, **kw: {"places": [
+            {"place_id": "p", "place_label": "Telegram · Team", "conversation_id": "-100"}], "targets": {}})
     args, down = {"text": "kept words", "destination": "room"}, RuntimeError("provider_failed: down")
+    again = {**args, "request_id": "r-2"} if gate else args
     h.replies.append({"status": "DANGEROUS", "reason": "Not permitted. " * 300})
     assert not check(args)[0]
     h.replies.append({"status": "SAFE", "reason": "An unrelated ordinary message."})
     assert check({**args, "text": "other words"}) == (True, "")
     assert not check(args)[0] and len(h.calls) == 2, "its kept verdict answers"
-    _answered(h, "card-later", "place_reply", args, ctx)
-    h.replies.append({"status": "DANGEROUS", "reason": "Still not permitted."})
-    assert not check(args)[0] and len(h.calls) == 3, "the card releases nothing"
     h.replies.append({"status": "DANGEROUS", "reason": "Not permitted either. " * 300})
     assert not check({**args, "text": "newer words"})[0]
     assert h.module._subject_digest("place_reply", args) not in h.module._PRIOR_VERDICTS[h.module._work_key(ctx)]
-    for calls in (5, 6):  # no longer kept: read afresh, and the card answers nothing while the checker is down
+    _answered(h, "card-later", "place_reply", again, ctx)  # my human's first row in this work
+    for calls in (4, 5):  # no longer kept: read afresh, and the card answers nothing while the checker is down
         h.replies.append(down)
-        ok, message = check(args)
+        ok, message = check(again)
         assert not ok and message.startswith("⚠️ SAFETY_UNAVAILABLE") and SAID[RELEASE] not in message
         assert len(h.calls) == calls
     assert not [e for e in h.events if e["type"] == "safety_sent_without_assessment"]
@@ -375,7 +380,7 @@ def test_a_judged_call_does_not_become_unchecked_when_a_card_arrives(supervisor,
     assert not ok and SAID[RELEASE] in message
     _answered(h, "card-fresh", "place_reply", fresh, ctx)
     ok, message = check(fresh)
-    assert ok and "(card-fresh), without a reading." in message and len(h.calls) == 7
+    assert ok and "(card-fresh), without a reading." in message and len(h.calls) == 6
     assert [e["quiz_id"] for e in h.events if e["type"] == "safety_sent_without_assessment"] == ["card-fresh"]
 
 
