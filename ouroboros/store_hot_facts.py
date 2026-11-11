@@ -95,15 +95,15 @@ BEGIN UPDATE obligations SET request_root_task_id=NULL WHERE set_name=NEW.set_na
 # statements name no conflict policy: a trigger's take the firing statement's, and an ``INSERT OR IGNORE`` fired by a
 # REPLACE replaced the count with its seed.
 LINEAGE_WRITES = "task_lineage_writes"
-_LINEAGE = ("parent_task_id", "root_task_id", "delegation_role", "chat_id")
+LINEAGE_COLUMNS = ("parent_task_id", "root_task_id", "delegation_role", "chat_id")  # a task record's own fields too
 _MOVE = (f"INSERT INTO meta (key, value) SELECT '{LINEAGE_WRITES}', '0' WHERE NOT EXISTS "
          f"(SELECT 1 FROM meta WHERE key = '{LINEAGE_WRITES}'); "
          f"UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = '{LINEAGE_WRITES}';")
 LINEAGE_TRIGGERS = (
     "CREATE TRIGGER IF NOT EXISTS tasks_lineage_replaced BEFORE INSERT ON tasks WHEN EXISTS (SELECT 1 FROM tasks t WHERE "
-    f"t.task_id = NEW.task_id AND ({' OR '.join(f't.{name} IS NOT NEW.{name}' for name in _LINEAGE)})) BEGIN {_MOVE} END",
-    f"CREATE TRIGGER IF NOT EXISTS tasks_lineage_updated AFTER UPDATE OF {', '.join(_LINEAGE)} ON tasks WHEN "
-    f"{' OR '.join(f'OLD.{name} IS NOT NEW.{name}' for name in _LINEAGE)} BEGIN {_MOVE} END",
+    f"t.task_id = NEW.task_id AND ({' OR '.join(f't.{name} IS NOT NEW.{name}' for name in LINEAGE_COLUMNS)})) BEGIN {_MOVE} END",
+    f"CREATE TRIGGER IF NOT EXISTS tasks_lineage_updated AFTER UPDATE OF {', '.join(LINEAGE_COLUMNS)} ON tasks WHEN "
+    f"{' OR '.join(f'OLD.{name} IS NOT NEW.{name}' for name in LINEAGE_COLUMNS)} BEGIN {_MOVE} END",
     f"CREATE TRIGGER IF NOT EXISTS tasks_lineage_removed AFTER DELETE ON tasks BEGIN {_MOVE} END",
 )
 SCHEMA = ";\n".join([

@@ -52,6 +52,7 @@ from ouroboros.agent_task_pipeline import (
 )
 from ouroboros.task_finalization import TERMINAL_ORIGIN_HOST_NOTICE, terminal_result_fields
 from ouroboros.task_results import STATUS_RUNNING, write_task_result
+from ouroboros.store_hot_facts import LINEAGE_COLUMNS
 from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.consciousness_authority import apply_consciousness_authority
 from ouroboros.contracts.task_contract import attach_task_contract
@@ -526,13 +527,10 @@ class OuroborosAgent:
                 **({"queued_at": task["queued_at"]} if task.get("queued_at") is not None else {}),
                 **{key: task[key] for key in ("suggested_name",) if task.get(key)},  # the name its queue row carries
                 _field_projector=lambda current, fields: {k: v for k, v in fields.items() if k != "suggested_name" or not current.get(k)},
-                chat_id=task.get("chat_id"),
+                **{key: task.get(key) for key in LINEAGE_COLUMNS},  # as a fresh turn's first record carried them
                 _is_direct_chat=bool(task.get("_is_direct_chat")),
-                parent_task_id=task.get("parent_task_id"),
-                root_task_id=task.get("root_task_id"),
                 session_id=task.get("session_id"),
                 actor_id=task.get("actor_id"),
-                delegation_role=task.get("delegation_role"),
                 # The producer's raw origin marker (promote_chat_to_task, presence_promote,
                 # api, ...): ``dialogue_provenance.run_origin`` reads it from this record.
                 source=task.get("source"),
@@ -1032,11 +1030,13 @@ class OuroborosAgent:
             from ouroboros.owner_wait import fresh_input
             if task.get("_fresh_identity") and task_id == root_task_id and fresh_input(task):
                 # An id the host minted for this input starts with the proven-empty fan-out base, so
-                # finalization reads no unrelated history; an absent row alone proves nothing (#1528).
+                # finalization reads no unrelated history; an absent row alone proves nothing (#1528). It carries the
+                # lineage its running record writes, so that record moves no lineage mark (``store_hot_facts``).
                 from ouroboros.task_results import STATUS_REQUESTED, write_task_result
+                lineage = {key: task.get(key) for key in LINEAGE_COLUMNS}
                 try:
-                    retry_presend(lambda: write_task_result(budget_root, task_id, STATUS_REQUESTED, create_only=True),
-                                  check=False, before_task_start=True)
+                    retry_presend(lambda: write_task_result(budget_root, task_id, STATUS_REQUESTED, create_only=True,
+                                                            **lineage), check=False, before_task_start=True)
                 except ValueError:  # a quarantined identity: the pin below refuses it as before
                     log.warning("Fresh fan-out base not written for %s", task_id, exc_info=True)
             try:
