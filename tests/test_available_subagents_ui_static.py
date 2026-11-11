@@ -172,16 +172,18 @@ def test_every_status_tone_the_card_emits_has_a_shared_rule_in_both_documents() 
         assert f'href="{prefix}/ui.css"' in _read(ROOT / "web" / document), document
 
 
-def test_the_per_row_switch_is_one_shared_checkbox_saved_by_the_common_save() -> None:
-    """docs/DESIGN.md §3 "Controls and editable choices" + "List editors": the
-    per-row owner switch is the shared `.ui-checkbox` primitive with its own
-    accessible name and hit target, it leads the card head BEFORE the title, and
-    it is held as a draft that the section's ONE Save writes — no instant-save
-    request, and no dimming of the card it switches off."""
+def test_the_per_row_switch_is_a_draft_in_setup_and_one_roster_write_in_settings() -> None:
+    """docs/DESIGN.md §3 "Controls and editable choices" + "List editors": in setup the per-row owner switch is
+    the shared `.ui-checkbox`, a draft its Finish writes; in Settings it is the shared `.ui-switch` and writes at
+    once, but only as one entry of the roster through the row helper (`writeEntry`) and the checker's adapter:
+    the module itself posts no settings. A switched-off card is never dimmed."""
     editor = _read(MODULES / "subagents_settings.js")
-    # The Node consumer covers checkbox markup and the saved-value round trip.
+    # The Node consumers cover the markup and the written bodies (subagents_settings.test.js, agents_settings.test.js).
     # Keep the separate one-writer and stylesheet boundaries here.
-    assert "apiClient" not in editor and "fetch(" not in editor
+    assert "saveSettings" not in editor and "fetch(" not in editor and "/api/settings" not in editor
+    assert "await writeEntry(KEY, id, change," in editor
+    assert "checker: ({ body }) => saveCheckerSettings({ [KEY]:" in editor
+    assert editor.count("writeEntry(") == 1, "every roster write of Settings takes the one path"
     for shell in ("settings.css", "onboarding.css"):
         sheet = _read(ROOT / "web" / shell)
         assert ".available-subagent-enable {" in sheet, shell
