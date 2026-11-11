@@ -503,9 +503,15 @@ def estimate_context_prompt_tokens(
         {key: value for key, value in block.items() if key not in HOST_ONLY_MESSAGE_KEYS}
         if isinstance(block, dict) else block for block in message["content"]]}
         if isinstance(message.get("content"), list) else message for message in messages]
-    projections = direct_openai_context_projections(
-        messages, tools, provider=provider, reasoning_effort=reasoning_effort,
-    )
+    # Only this route/effort can use the custom/function ladder. Other estimates
+    # read canonical data without borrowing the public helper's owned deep copies.
+    if (str(provider or "").strip().lower() == "openai"
+            and str(reasoning_effort or "").strip().lower() not in {"", "none"}):
+        projections = direct_openai_context_projections(
+            messages, tools, provider=provider, reasoning_effort=reasoning_effort,
+        )
+    else:
+        projections = ((messages, [dict(item) for item in tools or []]),)
 
     def serialized(projected_messages: Any, projected_tools: Any) -> str:
         text = json.dumps({"messages": project(projected_messages), "tools": projected_tools}, ensure_ascii=False,
