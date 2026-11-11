@@ -37,8 +37,7 @@ def primary_basis(ctx: Any) -> str:
     if source == "switch_model":
         return "mind"
     if source == "presence":
-        metadata = getattr(ctx, "task_metadata", {}) or {}
-        return str(metadata.get("model_layer") or "place")
+        return "place"
     return str((getattr(ctx, "primary_route", None) or {}).get("role") or "main")
 
 

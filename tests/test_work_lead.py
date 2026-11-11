@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import queue
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from ouroboros import lead_fact as leads, route_choice
 from ouroboros.primary_route_observation import record_round_route_result, route_facts_text
 from tests._task_settings_helpers import isolated_runtime, save_owner  # noqa: F401
+from tests.test_place_focus import focus as focus
 
 A, B, C = "openai::a", "openai::b", "openai::c"
 
@@ -28,8 +30,6 @@ def context(source="main", *, model=A, local=False, role="main", metadata=None):
 @pytest.mark.parametrize("source,role,metadata,basis", [
     ("main", "main", {}, "main"), ("consciousness", "consciousness", {"model_role": "consciousness"}, "consciousness"),
     ("room", "lead", {}, "room"), ("owner", "lead", {}, "owner"), ("owner_words", "lead", {}, "owner_words"),
-    ("presence", "lead", {"model_layer": "circle"}, "circle"),
-    ("presence", "lead", {"model_layer": "place"}, "place"), ("presence", "lead", {}, "place"),
 ])
 def test_primary_fact_names_its_chooser_without_a_departure(source, role, metadata, basis):
     ctx = context(source, role=role, metadata=metadata)
@@ -38,6 +38,54 @@ def test_primary_fact_names_its_chooser_without_a_departure(source, role, metada
     leads.publish_lead(ctx)
     assert ctx.event_queue.qsize() == 1
     assert ctx.event_queue.get()["lead"]["basis"] == basis
+
+
+def place_context(focus, source):
+    from ouroboros.presence_context import focus_metadata
+
+    root, place, admission, event = focus
+    admission = replace(admission, place=replace(place, model=A if source == "place" else ""),
+                        circle={"model": A} if source == "circle" else None)
+    metadata = focus_metadata(admission, event, "work", 7, root)
+    ctx = context("consciousness", role="consciousness", metadata=metadata)
+    ctx.context_fit_plan = None
+    route_choice.bind_task_route(ctx, metadata, presence=True)
+    model, _effort, local, *_ = route_choice.initial_round_route(ctx, None, "medium")
+    ctx.active_model, ctx.active_use_local = model, local
+    return ctx
+
+
+@pytest.mark.parametrize("source", ["place", "circle", "consciousness"])
+def test_place_turn_publishes_the_carriers_chooser_or_follows_consciousness(focus, source):
+    save_owner({"OUROBOROS_MODEL_CONSCIOUSNESS": C})
+    ctx = place_context(focus, source)
+    assert ctx.task_metadata["model_role"] == "consciousness"
+    carried = source != "consciousness"
+    assert ctx.primary_route["role"] == ("lead" if carried else "consciousness")
+    assert ("lead" in ctx.task_metadata) is carried
+    leads.publish_lead(ctx)
+    assert ctx.event_queue.get_nowait()["lead"] == {
+        "model": A if carried else C, "use_local": False, "basis": source}
+
+
+@pytest.mark.parametrize("obsolete_layer", [None, "circle"])
+def test_legacy_light_presence_keeps_its_basis_without_a_place_carrier(focus, obsolete_layer):
+    from ouroboros.presence_runner import _build_task
+
+    save_owner({"OUROBOROS_MODEL_LIGHT": B})
+    root, _place, admission, event = focus
+    task = _build_task(replace(admission, place=None, circle=None, model_slot="light"), event,
+                       drive_root=root, staged_files=())
+    if obsolete_layer:
+        task["metadata"]["model_layer"] = obsolete_layer  # this annotation cannot claim circle provenance
+    ctx = context(metadata=task["metadata"])
+    ctx.context_fit_plan = None
+    route_choice.bind_task_route(ctx, ctx.task_metadata, presence=True)
+    model, _effort, local, *_ = route_choice.initial_round_route(ctx, None, "medium")
+    ctx.active_model, ctx.active_use_local = model, local
+    assert ctx.task_route_source == "presence" and "lead" not in ctx.task_metadata
+    leads.publish_lead(ctx)
+    assert ctx.event_queue.get_nowait()["lead"] == {"model": B, "use_local": False, "basis": "place"}
 
 
 @pytest.mark.parametrize("source,basis", [("switch_model", "mind"), ("fallback", "fallback")])
@@ -270,10 +318,11 @@ def test_direct_turn_folds_only_its_live_attempt(tmp_path, monkeypatch):
     assert registry.snapshot() == []
 
 
-def test_inline_presence_uses_the_same_published_fact(tmp_path, monkeypatch):
+@pytest.mark.parametrize("source", ["place", "circle"])
+def test_inline_presence_uses_the_same_published_fact(focus, monkeypatch, source):
     from ouroboros import conversation_lease, task_results
 
-    ctx = context("presence", role="lead", metadata={"model_layer": "circle"})
+    ctx = place_context(focus, source)
     leads.publish_lead(ctx)
     actor = SimpleNamespace(tools=SimpleNamespace(_ctx=ctx))
     monkeypatch.setattr(conversation_lease, "live_presence_roots", lambda root: {
@@ -281,5 +330,5 @@ def test_inline_presence_uses_the_same_published_fact(tmp_path, monkeypatch):
     monkeypatch.setattr(conversation_lease, "presence_author_agent", lambda *args: actor)
     monkeypatch.setattr(task_results, "load_task_result", lambda *args, **kwargs: {
         "status": "running", "execution_owner": {"kind": "presence"}})
-    [fact] = conversation_lease.resolved_presence_turns(tmp_path)["roots"]
-    assert fact["row"]["lead"] == ctx._lead_last_sent
+    [fact] = conversation_lease.resolved_presence_turns(focus[0])["roots"]
+    assert fact["row"]["lead"] == ctx._lead_last_sent == {"model": A, "use_local": False, "basis": source}

@@ -28,7 +28,8 @@ adopted fallback, the room's chat model) stays until the mind returns to its pri
 Lead. Admission records a room's choice once in ``metadata.lead`` (``capture_lead``),
 including a recorded follow of Main. Continue, Resume and placement keep it; a separately
 started root reads its own destination. A carried model uses role ``lead``: Auto account,
-the model's own window and default processing. Delegated, Presence and autonomous work,
+the model's own window and default processing. Place and circle models use the same carrier
+and derived role for place turns. Other Presence turns, delegated and autonomous work,
 role-named tasks and call turns keep their own routing. Failures use the ordinary chain walk.
 """
 
