@@ -36,8 +36,10 @@ transaction (``_read``). Where any moved, the capture reads the whole tail again
 (``Moved``, ``memory_inventory.over_one_state``), as when no gate was read.
 
 The set is a projection: a reset of the chronicle index takes it with its marks (``_RESET``), and the first whole pass
-after an update, a rebuild or any change composes it again; nothing to migrate or fill. A doubt is a whole pass: a
-stale set costs one, a needed row left unread would cost a word.
+after an update, a rebuild or any change composes it again; nothing to migrate or fill. It ages while it stands: rows a
+page sealed after it was composed are read at every start until the next whole pass (``rows_stale``, named in the
+receipt and the health line). A doubt is a whole pass: a stale set costs one, a needed row left unread would cost a
+word.
 """
 from __future__ import annotations
 

@@ -48,9 +48,9 @@ def _iter_recent_jsonl(path: pathlib.Path, max_bytes: int = 256_000):
 
 def _host_work_line(receipts: List[Mapping[str, Any]]) -> str:
     """What the running code's recent builds did past one pass, from their ``context_memory_view`` receipts: work repeated
-    on the same input (a ``<verb>_again`` above zero) and a capture that read the whole chat tail (no cold set stood,
-    ``memory_tail_cold``). A fact for the mind, and only when one of the two is there: in a healthy state nothing is
-    added."""
+    on the same input (a ``<verb>_again`` above zero), a capture that read the whole chat tail (no cold set stood,
+    ``memory_tail_cold``), and rows a standing set reads only because it aged (sealed since it was composed, read until
+    the next whole pass). A fact for the mind, and only when one is there: in a healthy state nothing is added."""
     from ouroboros.transcript_prefix import _running_code
 
     code = _running_code()
@@ -66,7 +66,9 @@ def _host_work_line(receipts: List[Mapping[str, Any]]) -> str:
     newest = builds[-1]
     read, opened, new = (int(newest.get(name) or 0) for name in ("rows_read", "rows_open", "rows_new"))
     facts = [f"the newest capture read the whole chat tail, {read:,} rows for {opened:,} open and {new:,} new"
-             ] if newest.get("tail_whole") else []
+             ] if newest.get("tail_whole") else [
+        f"the newest capture read {int(newest['rows_stale']):,} rows sealed since its cold set was composed"
+        ] if newest.get("rows_stale") else []
     if repeats:
         facts.append(f"{repeating} of {len(builds)} recent builds did work again on an input they already had "
                      f"({', '.join(f'{verb} {n:,}' for verb, n in repeats.most_common())})")

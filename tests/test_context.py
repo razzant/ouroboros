@@ -553,6 +553,14 @@ class TestHostWorkBeyondOnePass:
         assert _host_checks(_host_events(root, _host_receipt(rows_read=31139, rows_open=13834, rows_kept=17305,
                                                               rows_cold=43824))) == []
 
+    def test_rows_a_standing_set_reads_only_because_it_aged_are_named(self, tmp_path):
+        """A set stands until the next whole pass, and rows a page sealed since it was composed are read on every start
+        till then (``rows_stale``): the line says how many, a fact, while a set that has not aged adds nothing."""
+        env = _host_events(tmp_path, _host_receipt(rows_read=31152, rows_open=13834, rows_kept=17305, rows_stale=13,
+                                                   rows_cold=43824))
+        [line] = _host_checks(env)
+        assert "13 rows sealed since its cold set was composed" in line and "should" not in line
+
     def test_an_unfilled_tail_names_the_rows_it_read_past_the_open_ones(self, tmp_path):
         """Until the stored prefix stands every row of the tail is read live, and none is new after a stored end: a row
         sealed long ago stays in what was read past the open ones, so the health line says so on this path too."""
