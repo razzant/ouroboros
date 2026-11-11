@@ -431,8 +431,7 @@ def _forget_lineage(root):
     """A fresh process's lineage: nothing remembered for this root (``projects_registry``'s per-process memos)."""
     from ouroboros import projects_registry as registry
 
-    for key in [key for key in registry._TASK_LINEAGE if key[0] == str(root)]:
-        del registry._TASK_LINEAGE[key]
+    registry._TASK_LINEAGE.pop(str(root), None)
     registry._ROOM_ANSWERS.clear()
 
 

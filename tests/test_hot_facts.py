@@ -891,8 +891,7 @@ def _lineage_chats(root, ids):
     """The room rule's read (``projects_registry._read_lineage``), fresh: each id's admitted chat, None unanswered."""
     from ouroboros import projects_registry as registry
 
-    for key in [key for key in registry._TASK_LINEAGE if key[0] == str(root)]:
-        del registry._TASK_LINEAGE[key]
+    registry._TASK_LINEAGE.pop(str(root), None)
     read = registry._read_lineage(root, ids)
     return None if read is None else {tid: facts["chat_id"] for tid, facts in read.items()}
 
@@ -944,8 +943,8 @@ def test_a_derived_rows_lineage_reads_no_body_and_an_underived_row_still_does(tm
     from ouroboros import projects_registry as registry
 
     assert _lineage_chats(tmp_path, ["kid", "mid"]) == {"kid": 7, "mid": None}
-    assert registry._TASK_LINEAGE[(str(tmp_path), "kid")] == {"parent_task_id": "mid", "root_task_id": "top",
-                                                             "delegation_role": "subagent", "chat_id": 7}
+    assert registry._TASK_LINEAGE[str(tmp_path)]["kid"] == {"parent_task_id": "mid", "root_task_id": "top",
+                                                            "delegation_role": "subagent", "chat_id": 7}
     assert _lineage_chats(tmp_path, ["kid", "older"]) is None  # the store cannot answer the older row's chat now
 
 

@@ -32,7 +32,7 @@ def test_real_task_store_contention_preserves_accepted_notice_for_catchup(tmp_pa
 
     monkeypatch.setattr(store, "_journal_mode", lambda *_args: "PERSIST")
     chat = _world(tmp_path)
-    pr._TASK_LINEAGE.pop((str(tmp_path), "nova-root"), None)
+    pr._TASK_LINEAGE.get(str(tmp_path), {}).pop("nova-root", None)
     pr._ROOM_ANSWERS.clear()
     before = ra.mark(tmp_path)
     blocker = sqlite3.connect(store.store_path(tmp_path), isolation_level=None)

@@ -594,7 +594,10 @@ def _emit_origin_ambiguous(drive_root: Any, key: tuple, candidates: list, chosen
         log.debug("project_origin_ambiguous row failed", exc_info=True)
 
 
-_TASK_LINEAGE: Dict[tuple, Dict[str, Any]] = {}
+# Each root's lineage facts by task id, one object a generation: ``forget_lineage`` puts a new one in its place and
+# never empties the old, so a read begun before it (``_read_lineage``) stores into the object it took, which no later
+# reader looks in.
+_TASK_LINEAGE: Dict[str, Dict[str, Dict[str, Any]]] = {}
 _TASK_LINEAGE_LIMIT = 50_000  # a memory bound, not a policy: the facts are re-read on the next sight
 _ROOM_ANSWERS: Dict[str, tuple] = {}
 _LINEAGE_SEEN: Dict[str, Any] = {}  # each root's lineage writes and Project rooms its remembered answers were read under
@@ -616,8 +619,7 @@ def forget_lineage(drive_root: Any, writes: Any, projects: Any = None) -> None:
     root = str(drive_root)
     if writes is None or _LINEAGE_SEEN.get(root) == (writes, projects):
         return
-    for key in [key for key in list(_TASK_LINEAGE) if key[0] == root]:  # a copy: another thread may add meanwhile
-        _TASK_LINEAGE.pop(key, None)
+    _TASK_LINEAGE[root] = {}  # a new generation: what an earlier read still brings stays in the old one
     _ROOM_ANSWERS.pop(str(_bindings_path(drive_root)), None)
     _LINEAGE_SEEN[root] = (writes, projects)  # last: a failure midway leaves the next capture to forget again
 
@@ -633,6 +635,8 @@ def _read_lineage(drive_root: Any, task_ids: Any, *, strict: bool = False) -> Op
     (admission creates it later); ``None`` when the store cannot answer right now, except
     that a ``strict`` reader keeps positive contention typed (``StoreBusy``) for its
     acquisition owner to wait out: contention is not unknown lineage."""
+    # The generation is taken before the read: forgotten meanwhile, it keeps these rows and no later reader looks in it.
+    held = _TASK_LINEAGE.setdefault(str(drive_root), {})
     try:
         with open_store(drive_root, write=False) as txn:
             typed = int(txn.meta("schema_version") or 1) >= CHAT_VERSION
@@ -648,8 +652,8 @@ def _read_lineage(drive_root: Any, task_ids: Any, *, strict: bool = False) -> Op
     except Exception:
         log.debug("task lineage read failed", exc_info=True)
         return None
-    if len(_TASK_LINEAGE) >= _TASK_LINEAGE_LIMIT:
-        _TASK_LINEAGE.clear()
+    if len(held) >= _TASK_LINEAGE_LIMIT:
+        held.clear()
     facts = {}
     for record in records:
         try:
@@ -658,8 +662,7 @@ def _read_lineage(drive_root: Any, task_ids: Any, *, strict: bool = False) -> Op
             chat = None
         facts[str(record[0])] = {"parent_task_id": str(record[1] or ""), "root_task_id": str(record[2] or ""),
                                  "delegation_role": str(record[3] or ""), "chat_id": chat}
-    for tid, row in facts.items():
-        _TASK_LINEAGE[(str(drive_root), tid)] = row
+    held.update(facts)
     return facts
 
 
@@ -689,7 +692,7 @@ class RoomResolver:
 
     def _facts(self, task_id: str) -> Optional[Dict[str, Any]]:
         """Cached or read facts; ``{}`` for a known miss; ``None`` when unavailable now."""
-        facts = _TASK_LINEAGE.get((str(self.root), task_id))
+        facts = _TASK_LINEAGE.get(str(self.root), {}).get(task_id)
         if facts is None and task_id not in self.misses:
             read = _read_lineage(self.root, [task_id], strict=self.strict)
             if read is None:
@@ -765,14 +768,15 @@ class RoomResolver:
         wanted, seen = {str(tid) for tid in task_ids if tid}, set()
         while wanted:
             seen |= wanted
-            unseen = {tid for tid in wanted if (str(self.root), tid) not in _TASK_LINEAGE} - self.misses
+            held = _TASK_LINEAGE.get(str(self.root), {})
+            unseen = {tid for tid in wanted if tid not in held} - self.misses
             read = _read_lineage(self.root, unseen, strict=self.strict) if unseen else {}
             if read is None:
                 return False
             self.misses.update(unseen - read.keys())
             fresh = {row[key] for row in read.values() for key in ("parent_task_id", "root_task_id") if row[key]}
             walked = {row["parent_task_id"] for tid in wanted - unseen if not self._ends_walk(tid)
-                      and (row := _TASK_LINEAGE.get((str(self.root), tid))) and row["parent_task_id"]}
+                      and (row := held.get(tid)) and row["parent_task_id"]}
             wanted = (fresh | {tid for tid in walked if not self._ends_walk(tid)}) - seen
         return True
 

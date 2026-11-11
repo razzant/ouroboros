@@ -256,8 +256,7 @@ def test_a_warm_follows_the_ancestors_of_remembered_tasks_and_says_when_it_could
     for leaf in leaves:
         write_task_result(tmp_path, leaf, "running", delegation_role="subagent", parent_task_id="grand-1",
                           root_task_id="root-1", chat_id=1)
-    for key in [key for key in pr._TASK_LINEAGE if key[0] == str(tmp_path)]:
-        del pr._TASK_LINEAGE[key]
+    pr._TASK_LINEAGE.pop(str(tmp_path), None)
     assert set(pr._read_lineage(tmp_path, leaves)) == set(leaves)  # the leaves are remembered, their ancestors not
     attempts, real = [], pr._read_lineage
     monkeypatch.setattr(pr, "_read_lineage", lambda *args, **_kwargs: attempts.append(sorted(args[1])))  # None: busy
@@ -273,8 +272,7 @@ def test_a_warm_stops_where_the_rule_stops_at_a_remembered_tasks_binding(tmp_pat
     """A remembered task whose walk ends at a bound parent needs no further lineage: the warm reads none
     (not the bound parent, not the root), even while the store is busy, and the rule still answers."""
     rooms = _world(tmp_path)
-    for key in [key for key in pr._TASK_LINEAGE if key[0] == str(tmp_path)]:
-        del pr._TASK_LINEAGE[key]
+    pr._TASK_LINEAGE.pop(str(tmp_path), None)
     assert set(pr._read_lineage(tmp_path, ["grand-1"])) == {"grand-1"}  # remembered; its parent mid-1 is bound to B
     attempts, real = [], pr._read_lineage
     monkeypatch.setattr(pr, "_read_lineage", lambda *args, **_kwargs: attempts.append(sorted(args[1])))  # None: busy

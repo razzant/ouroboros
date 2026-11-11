@@ -208,8 +208,7 @@ def test_legacy_units_counted_while_the_lineage_store_was_busy_are_recounted_onc
     shared.world(tmp_path)
     seed_result(tmp_path, "t1", {"status": "completed", "chat_id": 1, "root_task_id": "bound", "parent_task_id": "bound"})
     store, fresh = ChronicleStore(tmp_path), _legacy_units_fresh(tmp_path)
-    for key in [key for key in pr._TASK_LINEAGE if key[0] == str(tmp_path)]:
-        del pr._TASK_LINEAGE[key]  # t1's lineage is not remembered yet, so the busy store decides its room
+    pr._TASK_LINEAGE.pop(str(tmp_path), None)  # t1's lineage is not remembered yet, so the busy store decides its room
     pr._ROOM_ANSWERS.pop(str(pr._bindings_path(tmp_path)), None)
     with monkeypatch.context() as busy:
         attempts = []

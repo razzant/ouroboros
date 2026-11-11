@@ -1881,28 +1881,95 @@ def test_a_process_that_failed_to_forget_a_moved_lineage_forgets_it_at_its_next_
     next capture to forget again, never a fact read before the move under the new writes."""
     root = str(tmp_path)
 
-    class Failing(dict):  # this process's lineage memory, its first removal failing
+    class Failing(dict):  # this process's lineage memory, its first change failing
         failed = False
 
-        def _fail(self) -> None:
+        def __setitem__(self, key, value):
             if not Failing.failed:
                 Failing.failed = True
-                raise RuntimeError("a removal failed")
+                raise RuntimeError("a change failed")
+            super().__setitem__(key, value)
 
-        def __delitem__(self, key):
-            self._fail()
-            super().__delitem__(key)
-
-        def pop(self, key, *default):
-            self._fail()
-            return super().pop(key, *default)
-
-    memory = Failing({(root, "old"): {"parent_task_id": "", "root_task_id": "", "delegation_role": "", "chat_id": 1}})
+    old = {"old": {"parent_task_id": "", "root_task_id": "", "delegation_role": "", "chat_id": 1}}
+    memory = Failing({root: old})
     monkeypatch.setattr(pr, "_TASK_LINEAGE", memory)
     with pytest.raises(RuntimeError):
         pr.forget_lineage(tmp_path, [None, 1], frozenset())
     pr.forget_lineage(tmp_path, [None, 1], frozenset())
-    assert (root, "old") not in memory
+    assert memory[root] == {} and memory[root] is not old and old  # a new generation; the old one is not emptied
+
+
+def _in_thread(run) -> None:
+    """``run`` on another thread of this process, to its end; what it raised is raised here."""
+    import threading
+
+    failed = []
+
+    def target() -> None:
+        try:
+            run()
+        except BaseException as exc:
+            failed.append(exc)
+
+    thread = threading.Thread(target=target)
+    thread.start()
+    thread.join(600)
+    assert not thread.is_alive() and not failed, failed
+
+
+def test_a_lineage_read_begun_before_this_process_forgot_its_lineage_reaches_no_later_reader(monkeypatch, tmp_path):
+    """One process, two readers. A capture's lineage read holds the task store's answer (the task admitted in Main) and
+    has not remembered it yet; the task moves to a Project, and another reader of this process, finding the count moved,
+    forgets the process's lineage. The first read is then remembered in the generation it was begun under, where no later
+    reader looks: the capture begun again, the next whole pass and the set it composes under the moved count rest on the
+    lineage the store holds, and a fresh process standing on that set shows what its whole tail shows. What is
+    remembered since still serves: a capture under the same marks asks the store for no task it remembers."""
+    import threading
+
+    from ouroboros.tools import chronicle as chronicle_tools
+
+    rooms = _moving_task(tmp_path, 1)
+    _forget_process_memos()
+    real, reader, held, between = pr.capture, threading.get_ident(), [], []
+
+    def other_reader() -> None:  # the story read asks no task of the tail: it only finds the count moved
+        store.update_task(tmp_path, "moving", lambda doc: {**doc, "chat_id": rooms["alpha"]})
+        assert chronicle_tools._read_story(tmp_path, ChronicleStore(tmp_path), 0, 20_000).startswith("My story:")
+        between.append("moving" in pr._TASK_LINEAGE.get(str(tmp_path), {}))
+
+    class Answer:  # the store's own answer, held between its read and its remembering
+        def __init__(self, captured) -> None:
+            self.captured = captured
+
+        def tuples(self) -> list:
+            records = self.captured.tuples()
+            if not held and any(record[0] == "moving" for record in records):
+                held.append([record[4] for record in records if record[0] == "moving"])
+                _in_thread(other_reader)
+            return records
+
+    def capture(conn, sql, *rest):
+        captured = real(conn, sql, *rest)
+        return Answer(captured) if threading.get_ident() == reader and "AS chat_id" in sql else captured
+
+    with monkeypatch.context() as patch:
+        patch.setattr(pr, "capture", capture)
+        got = _main_view(tmp_path)  # begun again: the count moved under it
+    assert [[str(chat) for chat in chats] for chats in held] == [["1"]] and between == [False], (held, between)
+    asked, read = [], pr._read_lineage
+    with monkeypatch.context() as patch:
+        patch.setattr(pr, "_read_lineage", lambda root, ids, **how: asked.append(set(ids)) or read(root, ids, **how))
+        composing = _main_view(tmp_path)  # the next start: a whole pass that composes under the moved count
+    assert not any("moving" in ids for ids in asked), asked  # remembered by the capture begun again, under these marks
+    assert _in_use(tmp_path)
+    assert _child(tmp_path, rooms, whole=False) == _child(tmp_path, rooms, whole=True)
+    _forget_process_memos()
+    want = _whole_main(monkeypatch, tmp_path)
+    assert got == want, _first_difference({"main": got}, {"main": want})
+    assert composing == want, _first_difference({"main": composing}, {"main": want})
+    with monkeypatch.context() as patch:  # and that is the state after the move: the sealed row is open in the Project
+        patch.setattr(cold, "gate", lambda _store: None)
+        assert _entry(tmp_path, "Moving words.")[2] in _open_in(tmp_path, rooms["alpha"])
 
 
 def test_a_task_store_before_the_lineage_count_decides_nothing(monkeypatch, tmp_path):
