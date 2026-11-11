@@ -28,11 +28,13 @@ export const PLACE_STATES = Object.freeze([
 /** What Silent enforces, said by the host (verbatim, owner 21.10). */
 export const SILENT_CARD = "Writes through this connector's declared tools and delivery queue are blocked. Scripts, browser actions and unintegrated code may still write.";
 
-/** Safety levels, each kind its own row; stored off / light / full. */
+/** Safety levels, each kind its own row, named by what the Supervisor reads before it runs (owner, 11 Nov 2026:
+ *  Off / Outgoing / + Commands); stored off / light / full. The Settings rows restate these words as data
+ *  (settings_rows.js); a test holds the two together. */
 export const SAFETY_LEVELS = Object.freeze([
     { value: 'off', label: 'Off', note: 'No model checks. Fixed rules still guard protected files.' },
-    { value: 'light', label: 'Light', note: 'A second model checks steps that reach other people and services: messages, posts, skills, connectors, starting work. Not shell commands.' },
-    { value: 'full', label: 'Full', note: 'Also shell commands and scripts. File edits are not model-checked.' },
+    { value: 'light', label: 'Outgoing', note: 'Messages, posts, skills, connectors and starting work are read first.' },
+    { value: 'full', label: '+ Commands', note: 'Shell commands and scripts are read first too. File edits are not.' },
 ]);
 export const SAFETY_RANK = Object.freeze({ off: 0, light: 1, full: 2 });
 export const SAFETY_KINDS = Object.freeze({ your_work: 'Your work', consciousness: 'Consciousness' });

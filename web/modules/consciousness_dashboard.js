@@ -12,15 +12,16 @@ import { chipHtml } from './skill_presentation.js';
 import { tr, fmt } from './i18n.js';
 import { failureText, readConsciousness, readConsciousnessFromState, readPlaces } from './consciousness_api.js';
 import { autonomyOf } from './consciousness_autonomy.js';
-import { CHECK_CHIPS, allowanceText, clockText, consciousnessMark, splitWakes, durationText, sendsAsHtml, usdText, wakePhaseText, wakeFactsText, wakeCheckChip, wakeCheckText, wakeCostText } from './consciousness_words.js';
+import { CHECK_CHIPS, allowanceText, clockText, consciousnessMark, safetyLevelOf, splitWakes, durationText, sendsAsHtml, usdText, wakePhaseText, wakeFactsText, wakeCheckChip, wakeCheckText, wakeCostText } from './consciousness_words.js';
 import { mountChatMarkdown, enhanceChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
 import { confirmAndSendRestart, costPresentationDetail } from './chat_activity.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { openCircles, openPlaceSheet } from './place_sheet.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
-import { WRITERS } from './settings_controls.js';
+import { CODECS, GUARDED_WRITERS, WRITERS } from './settings_controls.js';
 import { mountTabSettings } from './dashboard.js';
 import { parseModelSource } from './route_editor_primitives.js';
+import { whenName } from './evolution.js';
 
 const SEP = ' · ';
 const REFRESH_MS = 20000;
@@ -36,6 +37,7 @@ const dots = () => statusMarkHtml('consciousness-mark', { shape: 'moving', hue: 
 WRITERS.wakeRange = (row, value, options) => (Number(value?.[0]) > Number(value?.[1])
     ? { state: 'refused', effect: '', withheld: '', message: 'The shortest wait is above the longest.', code: 'invalid_value' }
     : WRITERS.generic(row, value, options));
+GUARDED_WRITERS.add('wakeRange');  // Undo's token and unset keys go to the generic write with the rest
 
 /** Seconds as the words a person reads: minutes below an hour, hours from there. */
 export function waitWords(seconds) {
@@ -46,7 +48,9 @@ export function waitWords(seconds) {
 }
 
 /** What the settings cards say from the last settings read besides their rows (dashboard.js `words`): the chosen level
- *  in its own sentence, the wake range in minutes or hours, and the values behind the allowance and the model doors. */
+ *  in its own sentence, the wake range in minutes or hours, and the values behind the doors: the allowance, the model,
+ *  the Safety level of its own life in the scale's words (consciousness_words.js SAFETY_LEVELS) and the evolution
+ *  choice by its name. A key the document does not carry is not said. */
 export function cardWords(settings) {
     const [min, max] = [waitWords(settings.OUROBOROS_BG_WAKEUP_MIN), waitWords(settings.OUROBOROS_BG_WAKEUP_MAX)];
     const model = String(settings.OUROBOROS_MODEL_CONSCIOUSNESS ?? '').trim();
@@ -57,6 +61,8 @@ export function cardWords(settings) {
         OUROBOROS_BG_WAKEUP: { caption: !min || !max ? '' : min === max ? `It wakes every ${min}.` : `It picks a moment between ${min} and ${max}.` },
         'consciousness-allowance': { value: Number.isFinite(allowance) ? `${Number.isInteger(allowance) ? `$${allowance}` : usdText(allowance)} a day` : '' },
         'consciousness-model': { value: model ? parseModelSource(model).model || model : 'Main model' },
+        'consciousness-safety': { value: safetyLevelOf(settings.OUROBOROS_CONSCIOUSNESS_SAFETY_MODE)?.label || '' },
+        'consciousness-evolution': { value: 'OUROBOROS_POST_TASK_EVOLUTION' in settings ? whenName(CODECS.evolutionWhen.read(settings)) : '' },
     };
 }
 
@@ -235,19 +241,23 @@ export function paintWakeRows(region, wakes, coverage, opened, put, release = de
 }
 
 /** The tab's settings (dashboard.js mountTabSettings): the card "On its own" with what it does as rows that save
- *  themselves and its fold, then the doors of "Around it". The allowance door opens its row in Costs; the model door
- *  opens its role in Models, which leads back here; its places are the Circles page. */
+ *  themselves and its fold, then the doors of "Around it", so what concerns consciousness is reached from here. The
+ *  allowance door opens its row in Costs and the evolution door its row on the Evolution tab; the model door opens its
+ *  role in Models and the Safety door its row in Permissions and checks, both leading back here; its places are the
+ *  Circles page. */
 function mountSettingsCards(host, { state, openSettings, openDashboardTab }) {
     if (!host) return { dispose() {} };
     const back = { label: 'Consciousness', go: () => openDashboardTab?.('consciousness') };
     const doors = {
         'consciousness-allowance': () => openDashboardTab?.('costs', { row: 'OUROBOROS_CONSCIOUSNESS_DAILY_USD' }),
         'consciousness-model': () => openSettings?.('models/role/consciousness', { back }),
+        'consciousness-safety': () => openSettings?.('permissions', { row: 'OUROBOROS_CONSCIOUSNESS_SAFETY_MODE', back }),
         'consciousness-places': () => openCircles(),
+        'consciousness-evolution': () => openDashboardTab?.('evolution', { row: 'OUROBOROS_POST_TASK_EVOLUTION' }),
     };
     const cards = mountTabSettings(host, 'consciousness', { state, words: cardWords, openDoor: (row) => doors[row.id]?.(),
         cards: [{ title: 'On its own', fold: 'More: conversations at once' },
-            { title: 'Around it', rows: ['consciousness-model', 'consciousness-places'] }] });
+            { title: 'Around it', rows: ['consciousness-model', 'consciousness-safety', 'consciousness-places', 'consciousness-evolution'] }] });
     // The range reads "[shortest] to [longest] s".
     const range = Array.from(host.querySelectorAll('[data-setting-row]')).find((node) => node.dataset.settingRow === 'OUROBOROS_BG_WAKEUP');
     const longest = range?.querySelectorAll('[data-setting-control]')[1];

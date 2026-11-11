@@ -1,13 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_WELCOME_TEXT, mountEmptyChatWelcome, welcomeText } from '../modules/welcome_preference.js';
-import { accountsPanel, advancedPanel, appearancePanel, behaviorPanel, secretSettingsSection } from '../modules/settings_ui.js';
-import { HOME_ROWS } from '../modules/settings_rows.js';
+import { accountsPanel, advancedPanel, secretSettingsSection } from '../modules/settings_ui.js';
+import { HOME_ROWS, ROWS } from '../modules/settings_rows.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 
-// The Settings sections settings_ui.js still holds (unmounted until their pages are rebuilt).
-const settingsSections = () => [accountsPanel(), secretSettingsSection(), behaviorPanel(), appearancePanel(),
-    advancedPanel()].join('');
+// Everything Settings can draw: its rows as data, and the sections settings_ui.js still holds for the editor lanes.
+const settingsSections = () => [accountsPanel(), secretSettingsSection(), advancedPanel(), JSON.stringify(ROWS)].join('');
 
 test('welcome mode resolves exactly without treating custom text as markup', () => {
     assert.equal(welcomeText({ mode: 'default', text: 'ignored' }), DEFAULT_WELCOME_TEXT);

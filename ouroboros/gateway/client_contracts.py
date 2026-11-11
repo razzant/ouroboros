@@ -93,7 +93,6 @@ class SetupBudgetField(TypedDict):
     stateKey: str
     settingKey: str
     inputId: str
-    settingsInputId: str
     title: str
     label: str
     note: str

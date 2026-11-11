@@ -2,7 +2,7 @@
 themselves (settings_controls.js), drawn once outside every region the tab repaints (dashboard.js mountTabSettings),
 and Costs carries the subscriptions block from the passive quota read.
 
-The real SPA in headless Chromium over the shared fixture's endpoints, the settings endpoint answered here: on each
+The real SPA in headless Chromium and WebKit over the shared fixture's endpoints, the settings endpoint answered here: on each
 tab a field the owner is in keeps its text and caret through the tab's own periodic refresh and a settings read, and
 leaving it shows the row's result line; the Updates channel keeps its focused choice through a status read; the
 Evolution choice "Every N tasks" posts both keys in one body and says itself in its own sentence; the doors of
@@ -10,8 +10,9 @@ Consciousness and Costs lead where they say and Settings leads back. Every one o
 Settings home shows Back first, and Escape, Back itself or the system's Back return to Settings at the scroll position
 it was left at, in a window (1087 x 740) and at the 320 x 640 floor, where the menu stays and no tab scrolls sideways.
 
-INTEGRATED: the save's `changes` receipt and `_meta.effects` (lane A) are answered here until lane A lands; the result
-lines' "was ..." and effect words need them.
+The settings endpoint is answered here the way the server answers it: `_meta.effects` on a read, the receipt
+(`changes`: old, new, token) on a save. Undo's precondition and its refusal are the node test's
+(web/tests/dashboard_settings.test.js).
 """
 from __future__ import annotations
 
@@ -30,8 +31,9 @@ ON, CADENCE, BUDGET = "OUROBOROS_POST_TASK_EVOLUTION", "OUROBOROS_POST_TASK_EVOL
 CHANNEL, RETENTION = "OUROBOROS_UPDATE_CHANNEL", "OUROBOROS_GC_RETENTION_DAYS"
 STORED = {"OUROBOROS_CONSCIOUSNESS_AUTONOMY": "act", "OUROBOROS_BG_WAKEUP_MIN": 300, "OUROBOROS_BG_WAKEUP_MAX": 7200, MAX_TASKS: 2,
           "OUROBOROS_PRESENCE_MAX_ACTIVE": 3, ALLOWANCE: 20, ON: False, CADENCE: "llm", BUDGET: 5,
+          "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "light",
           "OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE": "", CHANNEL: "stable", RETENTION: 7}
-# INTEGRATED (lane A): when each key's change applies, as GET /api/settings `_meta.effects` says it.
+# When each key's change applies, as GET /api/settings `_meta.effects` says it.
 EFFECTS = {MAX_TASKS: "next_wake", "OUROBOROS_BG_WAKEUP_MIN": "next_wake", "OUROBOROS_BG_WAKEUP_MAX": "next_wake",
            ON: "next_task", CADENCE: "next_task", BUDGET: "next_task", CHANNEL: "now", RETENTION: "now"}
 VOLUME = {"free_bytes": 170e9, "total_bytes": 4e12, "observed_at": "2026-11-11T10:00:00Z"}
@@ -42,9 +44,9 @@ NOW = "window.dispatchEvent(new CustomEvent('ouro:settings-updated', { detail: {
 TABS = ("consciousness", "costs", "updates", "storage", "evolution")
 
 
-@pytest.fixture
+@pytest.fixture(params=["chromium", "webkit"])
 def ui(request, monkeypatch):
-    monkeypatch.setenv("OUROBOROS_UI_BROWSER_ENGINE", "chromium")
+    monkeypatch.setenv("OUROBOROS_UI_BROWSER_ENGINE", request.param)
     return request.getfixturevalue("subscription_ui")
 
 
@@ -68,7 +70,7 @@ def _quota():
 
 
 def _open(ui, *, tab=None, width=1087, height=740):
-    """The app with the stored settings above; a save stores its body and answers the receipt (INTEGRATED, lane A)."""
+    """The app with the stored settings above; a save stores its body and answers the receipt."""
     ui["settings"].update(STORED)
     ui["settings"]["_meta"] = {**ui["settings"]["_meta"], "effects": EFFECTS}
     page = ui["new_page"](viewport={"width": width, "height": height})
@@ -100,6 +102,22 @@ def _open(ui, *, tab=None, width=1087, height=740):
         page.click(f'[data-dashboard-tab="{tab}"]')
     page.quota_reads = quota_reads
     return page, saves
+
+
+def _scale_word(page, value):
+    """The Safety scale's own word for a stored level, from the one list the page uses (consciousness_words.js)."""
+    return page.evaluate("""async (value) => { const app = [...document.scripts].find((script) => /app\\.js/.test(script.src)).src;
+        const words = await import(new URL('modules/consciousness_words.js', app).href);
+        return words.SAFETY_LEVELS.find((level) => level.value === value).label; }""", value)
+
+
+def _serve(page, prefix):
+    """Settings opens a level only for a path some page registered; any other lands on its home with a search
+    (settings.js `go`). Where the lane that owns `prefix` has not registered its page yet, a stand-in does, so a door
+    and its way back are checked here without waiting for that lane."""
+    page.evaluate("""async (prefix) => { const app = [...document.scripts].find((script) => /app\\.js/.test(script.src)).src;
+        const pages = await import(new URL('modules/settings_pages.js', app).href);
+        if (!pages.settingsPageFor(prefix)) pages.registerSettingsPage(prefix, { title: prefix, mount() {} }); }""", prefix)
 
 
 def _reads(path, method="GET"):
@@ -182,12 +200,12 @@ def test_every_n_tasks_shows_its_count_and_saves_both_keys_in_one_body(ui):
     page.click(f'{card} [data-evo-when="every_n"]')
     page.wait_for_selector(f'{card} [data-evo-when="every_n"][aria-pressed="true"]')
     assert saves == [{ON: True, CADENCE: "every_n:3"}], saves
-    page.wait_for_function("(id) => document.getElementById(id)?.textContent === 'Saved · applies to new tasks · was Off'", arg=result)
+    page.wait_for_function("(id) => document.getElementById(id)?.textContent === 'Saved · applies to new tasks · was Off · Undo'", arg=result)
     page.wait_for_function("(s) => document.querySelector(s)?.textContent.startsWith('After every 3 tasks, chats included,')", arg=caption)
     page.fill(f"{card} [data-evo-n]", "5")
     assert len(saves) == 1, "typing the count saves nothing"
     page.keyboard.press("Tab")
-    page.wait_for_function("(id) => document.getElementById(id)?.textContent === 'Saved · applies to new tasks · was Every 3 tasks'", arg=result)
+    page.wait_for_function("(id) => document.getElementById(id)?.textContent === 'Saved · applies to new tasks · was Every 3 tasks · Undo'", arg=result)
     assert saves[-1] == {ON: True, CADENCE: "every_n:5"}, saves
     page.fill(f"{card} [data-evo-n]", "0")
     page.keyboard.press("Tab")
@@ -214,13 +232,33 @@ def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(
     assert page.locator(row("OUROBOROS_BG_WAKEUP")).evaluate(
         "(el) => [...el.querySelectorAll('.settings-row-field > *')].map((n) => n.tagName === 'INPUT' ? n.value : n.textContent)") == ["300", "to", "7200", "s"]
     # The model door opens its role in Models, whose Back names this tab and returns to it.
+    _serve(page, "models")
+    _serve(page, "permissions")
     page.click(row("consciousness-model"))
     back = page.locator('#page-settings [data-settings-page="models/role/consciousness"] [data-settings-back]')
     back.wait_for()
     assert back.inner_text().strip() == "Consciousness"
     back.click()
     page.wait_for_selector("#dashboard-panel-consciousness.active")
-    # The allowance door opens its row in Costs: a door inside the Dashboard leaves no Back.
+    # The four doors of "Around it" stand in the picture's order, each with its value before its chevron.
+    around = page.locator('#page-dashboard [data-cx-settings] > section[aria-label="Around it"] [data-setting-door]')
+    assert [" ".join(text.split()) for text in around.evaluate_all(
+        "(doors) => doors.map((door) => [door.querySelector('.ui-row-title').textContent, door.querySelector('[data-row-value]')?.textContent ?? ''].join(' | '))")] == [
+        "Thinks with | Main model", f"Its actions are checked | {_scale_word(page, 'light')}", "Where it lives |", "Improving itself | Off"]
+    # The Safety door opens its row's page in Settings, whose Back names this tab and returns to it.
+    page.click(row("consciousness-safety"))
+    back = page.locator('#page-settings [data-settings-page="permissions"] [data-settings-back]')
+    back.wait_for()
+    assert back.inner_text().strip() == "Consciousness"
+    back.click()
+    page.wait_for_selector("#dashboard-panel-consciousness.active")
+    # The evolution door opens its row on the Evolution tab, and the allowance door its row in Costs: a door inside
+    # the Dashboard leaves no Back.
+    page.click(row("consciousness-evolution"))
+    page.wait_for_selector("#dashboard-panel-evolution.active")
+    page.wait_for_function("() => document.activeElement?.dataset.evoWhen === 'off'")
+    assert page.locator("#dashboard-panel-evolution > .dashboard-back").count() == 0
+    page.click('[data-dashboard-tab="consciousness"]')
     page.click(row("consciousness-allowance"))
     page.wait_for_selector("#dashboard-panel-costs.active")
     page.wait_for_function("(id) => document.activeElement?.id === id", arg=f"setting-{ALLOWANCE}")
@@ -236,6 +274,7 @@ def test_costs_shows_subscriptions_from_the_passive_view_alone_and_its_doors_ope
     assert page.quota_reads and all(urlparse(url).query == "view=quota" for url in page.quota_reads)
     assert not [url for url in ui["reads"] if "/api/claudexor/" in url and "view=quota" not in url], "no other account read from this tab"
     assert not [path for path, _ in ui["posts"] if "/api/claudexor/" in path], "nothing is woken or refreshed"
+    _serve(page, "accounts")
     door.click()
     back = page.locator('#page-settings [data-settings-page="accounts/codex"] [data-settings-back]')
     back.wait_for()
