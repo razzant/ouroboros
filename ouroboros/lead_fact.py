@@ -129,7 +129,8 @@ def adopt_fallback(ctx: Any, is_primary: bool, failure: Mapping, role: str) -> N
 
 
 def requested_return(ctx: Any) -> None:
-    previous = getattr(ctx, "_lead_last_sent", None)
+    # A cold worker has no publication cache, but its saved route dates the departure.
+    previous = getattr(ctx, "_lead_last_sent", None) or lead_fact(ctx)
     if isinstance(previous, dict) and previous.get("basis") == "fallback":
         ctx._lead_return_from = copy.deepcopy(previous)
 

@@ -392,7 +392,7 @@ def control_probe_requires_current() -> bool:
 
 def control_probe_active() -> bool:
     return _STRICT_CONTROL_PROBE.get() is not None
-_REPREPARE: contextvars.ContextVar[dict[str, tuple[Callable, Callable | None]] | None] = contextvars.ContextVar(
+_REPREPARE: contextvars.ContextVar[dict[str, tuple[Callable, Callable | None, bool]] | None] = contextvars.ContextVar(
     "ouroboros_model_wait_reprepare", default=None)
 _CALENDAR: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
     "ouroboros_model_wait_calendar", default=())
@@ -705,10 +705,14 @@ class TaskModelWait:
 
     @contextlib.contextmanager
     def register_reprepare(self, role: str, callback: Callable[[dict], dict], *,
-                           resource_reason: Callable[[Exception], str] | None = None) -> Iterator[None]:
-        """Bind one caller's reprepare and optional confirmed-refusal classification."""
+                           resource_reason: Callable[[Exception], str] | None = None,
+                           owner_model_wake: bool = False) -> Iterator[None]:
+        """Bind one caller's reprepare and optional confirmed-refusal classification.
+
+        Only ordinary round calls opt into primary wakes. Nested helpers keep their waits.
+        """
         bindings = dict(_REPREPARE.get() or {})
-        bindings[role] = (callback, resource_reason)
+        bindings[role] = (callback, resource_reason, owner_model_wake)
         token = _REPREPARE.set(bindings)
         try:
             yield
@@ -932,6 +936,8 @@ class TaskModelWait:
         from ouroboros.provider_models import parse_claudexor_model
 
         role = kwargs["model_role"]
+        binding = (_REPREPARE.get() or {}).get(role)
+        owner_model_wake = bool(binding and binding[2])
         try:
             source, native_model = parse_claudexor_model(kwargs["model"])
         except ValueError:
@@ -981,7 +987,8 @@ class TaskModelWait:
                 from ouroboros.owner_model import waiting_wake
 
                 control = ("caller_cancelled" if caller_cancel is not None and caller_cancel.is_set()
-                           else self.control_reason() or self.pre_dispatch_pause() or waiting_wake(self))
+                           else self.control_reason() or self.pre_dispatch_pause()
+                           or (waiting_wake(self) if owner_model_wake else None))
                 callback = kwargs.get("model_poll_control")
                 if not control and callback is not None:
                     control = callback()

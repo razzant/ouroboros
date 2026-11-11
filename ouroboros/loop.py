@@ -5,8 +5,7 @@ from __future__ import annotations
 from ouroboros.config import runtime_setting  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 
 import functools  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
-import json  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
-import hashlib  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
+from ouroboros.owner_model import apply_current
 import queue
 import pathlib
 import time  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
@@ -476,6 +475,7 @@ def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dic
         resumed = (*resumed, _resolve_task_cost_ceiling(tools._ctx, budget_remaining_usd), tool_tail, no_tool, not tool_tail)
     else:
         resumed = (*route, cost_ceiling, False, False, False)
+        apply_current(tools._ctx)
         from ouroboros.place_reply import seed_no_send
         seed_no_send(tools._ctx, trace)  # a fresh place-carrying lineage starts having said nothing there
     if carried is not None:

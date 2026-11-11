@@ -181,6 +181,9 @@ def preserve_carrier(existing: Mapping, fields: dict) -> dict:
 
 def primary_action(ctx: Any, action: str) -> str:
     """The same symbolic return/wait for the mind's tool and the owner's card."""
+    from ouroboros.lead_fact import requested_return
+
+    requested_return(ctx)
     route = ctx.primary_route
     waiter = getattr(ctx, "model_wait_context", None)
     chosen = ((getattr(waiter, "overrides", None) or {}).get(route["role"]) or {})
@@ -205,18 +208,32 @@ def read_current(ctx: Any) -> dict:
 def waiting_wake(waiter: Any) -> str | None:
     """A refused call's resource wait can yield to the loop; a sent call never polls this."""
     from pathlib import Path
-    from ouroboros.owner_mailbox import KIND_OWNER_MODEL, drain_owner_entries
+    from ouroboros.owner_mailbox import KIND_OWNER_MODEL, OwnerMailboxPeek, drain_owner_entries
+    from ouroboros.store import StoreBusy, acquisition_budget
 
     ctx = waiter.tool_context
     if ctx is None:
         return None
     seen = set(getattr(ctx, "_loop_mailbox_seen_ids", ()) or ())
-    if not drain_owner_entries(Path(waiter.drive_root), waiter.task_id, seen, waiter.attempt,
-                               kinds={KIND_OWNER_MODEL}):
-        return None
-    control = read_current(ctx).get("owner_model") or {}
-    return "owner_model" if control.get("request_id") and control["request_id"] != getattr(
-        ctx, "_owner_model_applied_id", None) else None
+    root = Path(waiter.drive_root)
+    applied = getattr(ctx, "_owner_model_applied_id", None)
+    try:
+        stamp = (OwnerMailboxPeek._fingerprint(root, waiter.task_id, waiter.attempt, seen), applied)
+        if stamp == getattr(waiter, "_owner_model_mail_stamp", None):
+            return None
+        status = {}
+        entries = drain_owner_entries(root, waiter.task_id, seen, waiter.attempt,
+                                      kinds={KIND_OWNER_MODEL}, _read_status=status)
+        if not status.get("complete"):
+            return None
+        with acquisition_budget(0):
+            control = read_current(ctx).get("owner_model") or {} if entries else {}
+    except (OSError, StoreBusy):
+        return None  # leave the read owed; contention is not a task control
+    if control.get("request_id") and control["request_id"] != applied:
+        return "owner_model"
+    waiter._owner_model_mail_stamp = stamp
+    return None
 
 
 def apply_current(ctx: Any) -> bool:
@@ -269,7 +286,12 @@ def apply_current(ctx: Any) -> bool:
     return True
 
 
-def restore_current(ctx: Any) -> None:
+def restore_current(ctx: Any, messages: list | None = None) -> None:
     """A saved route never outranks a primary written since that checkpoint."""
     if apply_current(ctx):
+        from ouroboros.llm import LLMClient
+
+        if messages is not None:
+            messages[:] = LLMClient.sanitize_reasoning_on_model_switch(
+                messages, ctx.active_model, ctx.active_model_override)
         ctx.active_model, ctx.active_use_local = ctx.active_model_override, ctx.active_use_local_override

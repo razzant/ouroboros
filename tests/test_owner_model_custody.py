@@ -257,6 +257,44 @@ def test_resume_after_ack_uses_the_durable_primary_with_or_without_a_new_checkpo
     assert not drain_and_apply(host, fresh_tools, fresh).get("owner_model")  # ACK already survived
 
 
+@pytest.mark.parametrize("newer_primary", [False, True])
+def test_resume_orders_primary_acts_after_saved_wait_card_choices(host, monkeypatch, newer_primary):
+    from ouroboros.agent import _restore_saved_clocks
+    from ouroboros.loop_routes import bind_round_route
+    from ouroboros.model_slots import task_model_binding
+    from ouroboros.model_wait import TaskModelWait
+
+    task = running(host)
+    tools, ctx = turn(host, monkeypatch)
+    assert act(host, model=B).status_code == 200
+    drain_and_apply(host, tools, ctx)
+    ctx.model_wait_context = TaskModelWait(task=task, drive_root=host[0], event_queue=queue.Queue(),
+                                              worker_slot_held=True)
+    chosen = {"model": C, "use_local": False, "model_account_override": "chosen-account"}
+    ctx.model_wait_context.overrides["lead"] = chosen
+    ctx.active_model, ctx.route_choice = C, route_choice.explicit("wait_card")
+    saved = json.loads(json.dumps(owner_wait.continuation_state(ctx, [], {}, {}, 3, [], set())))
+    if newer_primary:
+        assert act(host, model=A, request_id="later").status_code == 200
+
+    fresh_tools, fresh = turn(host, monkeypatch, task["metadata"])
+    fresh.model_wait_context = TaskModelWait(task=task, drive_root=host[0], event_queue=queue.Queue(),
+                                              worker_slot_held=True)
+    fresh.task_started_at = None
+    _restore_saved_clocks(fresh, task, saved)
+    # The agent restores wait choices before the loop opens and restores its transcript.
+    loop._reset_turn_state(fresh)
+    route_choice.initial_round_route(fresh, None, "medium")
+    owner_wait.restore_continuation_state(fresh_tools, saved, [], {}, {}, set())
+    bind_round_route(fresh_tools, [], (fresh.active_model, fresh.active_use_local, "medium"),
+                     None, "max", "max", [])
+    assert fresh.active_model == (A if newer_primary else C)
+    assert fresh.model_wait_context.overrides == ({} if newer_primary else {"lead": chosen})
+    assert task_model_binding({"task_metadata": fresh.task_metadata},
+                              overrides=fresh.model_wait_context.overrides) == (
+                                  "lead", "" if newer_primary else "chosen-account")
+
+
 def test_stale_worker_results_keep_the_host_primary_and_follow_choice(host):
     task = queued(host, metadata={"lead": {"source": "room", "model": A, "use_local": False}, "model_role": "consciousness"})
     stale = copy.deepcopy(task)
@@ -337,6 +375,54 @@ def test_return_preserves_the_role_of_a_carrierless_primary(host, monkeypatch):
     drain_and_apply(host, tools, ctx)
     assert ctx.active_model == B and ctx.primary_route["role"] == "consciousness"
     assert ctx.route_choice == route_choice.following("consciousness")
+
+
+@pytest.mark.parametrize("action", ["return", "wait"])
+def test_cold_return_publishes_fallback_until_an_accepted_primary_reply(host, monkeypatch, action):
+    from ouroboros.loop_routes import bind_round_route
+    from ouroboros.primary_route_observation import record_round_route_result
+
+    running(host)
+    _, ctx = turn(host, monkeypatch)
+    ctx.active_model = B
+    lead_fact.adopt_fallback(ctx, False, {"failure_code": "quota"}, "fallback:0")
+    fallback = lead_fact.lead_fact(ctx)
+    host[2].RUNNING["work"]["lead"] = fallback
+    saved = json.loads(json.dumps(owner_wait.continuation_state(ctx, [], {}, {}, 3, [], set())))
+    assert act(host, action).status_code == 200
+    tools, fresh = turn(host, monkeypatch)
+    owner_wait.restore_continuation_state(tools, saved, [], {}, {}, set())
+    assert fresh._lead_last_sent is None  # a new process owes the first publication
+    bind_round_route(tools, [], (fresh.active_model, fresh.active_use_local, "medium"),
+                     None, "max", "max", [])
+    assert fresh.route_wait_on_primary is (action == "wait")
+    assert list(fresh.event_queue.queue)[0]["lead"] == fallback
+    call = SimpleNamespace(tools=tools, active_model=A, active_use_local=False, accumulated_usage={})
+    record_round_route_result(call, "main", accepted=False)
+    assert lead_fact.lead_fact(fresh) == fallback
+    record_round_route_result(call, "main", accepted=True)
+    assert lead_fact.lead_fact(fresh) == {"model": A, "use_local": False, "basis": "main"}
+
+
+@pytest.mark.parametrize("target", [B, "anthropic/claude-sonnet-4"])
+def test_cold_retarget_uses_shared_reasoning_handover(host, monkeypatch, target):
+    from ouroboros.llm import LLMClient
+    from ouroboros.loop_routes import bind_round_route
+
+    running(host)
+    _, ctx = turn(host, monkeypatch)
+    before = [{"role": "assistant", "content": "Prior answer", "reasoning_details": [
+        {"type": "reasoning.encrypted", "data": "old-route-private-bytes", "id": "r1"}]}]
+    saved = json.loads(json.dumps(owner_wait.continuation_state(ctx, before, {}, {}, 3, [], set())))
+    assert act(host, model=target).status_code == 200
+    tools, fresh = turn(host, monkeypatch)
+    messages = []
+    owner_wait.restore_continuation_state(tools, saved, messages, {}, {}, set())
+    bind_round_route(tools, messages, (fresh.active_model, fresh.active_use_local, "medium"),
+                     None, "max", "max", [])
+    assert fresh.active_model == target
+    assert messages == LLMClient.sanitize_reasoning_on_model_switch(copy.deepcopy(before), A, target)
+    assert (messages == before) is (target == B)
 
 
 def test_a_recent_model_write_failure_can_be_retried_without_changing_the_primary(host, monkeypatch):
@@ -486,13 +572,148 @@ def test_owner_model_wakes_a_refused_call_wait_but_never_interrupts_a_sent_call(
     assert waiting_wake(waiter) is None
     assert act(host, model=B).status_code == 200
     assert waiter.control_reason() is None  # the physical sender's polling reader stays quiet
-    with pytest.raises(ModelWaitInterrupted) as interrupted:
+    with waiter.register_reprepare("main", lambda values: values, owner_model_wake=True), \
+            pytest.raises(ModelWaitInterrupted) as interrupted:
         waiter.wait(None, RuntimeError("resource unavailable"), {"model": A, "model_role": "main",
                     "model_poll_control": lambda: "test_wait_limit"})
     assert interrupted.value.control_reason == "owner_model"
     assert loop._handle_model_wait_control(SimpleNamespace(), interrupted.value) is None
     drain_and_apply(host, tools, ctx)
     assert ctx.active_model == B and waiting_wake(waiter) is None
+
+
+@pytest.mark.parametrize("role", ["vision", "safety", "reviewer:seat", "light", "main"])
+def test_non_round_wait_keeps_its_call_and_leaves_the_model_act_for_the_loop(host, monkeypatch, role):
+    from ouroboros import model_wait, owner_model
+
+    task = running(host)
+    tools, ctx = turn(host, monkeypatch)
+    waiter = model_wait.TaskModelWait(task=task, drive_root=host[0], event_queue=queue.Queue(),
+                                     worker_slot_held=True, owner_control=lambda: None)
+    waiter.tool_context = ctx
+    assert act(host, model=B).status_code == 200
+    reads = []
+    monkeypatch.setattr(owner_model, "waiting_wake", lambda *_: reads.append(True) or "owner_model")
+    with waiter.register_reprepare("main", lambda values: values, owner_model_wake=True), \
+            waiter.register_reprepare(role, lambda values: values), \
+            pytest.raises(model_wait.ModelWaitInterrupted) as stopped:
+        waiter.wait(None, RuntimeError("unavailable"), {"model": C, "model_role": role,
+                    "model_poll_control": lambda: "test_wait_limit"})
+    assert stopped.value.control_reason == "test_wait_limit" and not reads
+    assert ctx.active_model == A
+    drain_and_apply(host, tools, ctx)
+    assert ctx.active_model == B
+
+
+def test_model_wait_wake_memoizes_only_complete_reads_and_retries_store_contention(host, monkeypatch):
+    from ouroboros import owner_mailbox, owner_model
+    from ouroboros.model_wait import TaskModelWait
+    from ouroboros.store import StoreBusy
+
+    task = running(host)
+    tools, ctx = turn(host, monkeypatch)
+    waiter = TaskModelWait(task=task, drive_root=host[0], event_queue=queue.Queue(), worker_slot_held=True)
+    waiter.tool_context = ctx
+    drain, read = owner_mailbox.drain_owner_entries, owner_model.read_current
+    reads = []
+    def counted(*args, **kwargs):
+        reads.append(True)
+        return drain(*args, **kwargs)
+    monkeypatch.setattr(owner_mailbox, "drain_owner_entries", counted)
+    assert owner_model.waiting_wake(waiter) is None
+    assert owner_model.waiting_wake(waiter) is None
+    assert len(reads) == 1
+    assert act(host, model=B).status_code == 200
+    def busy(_ctx):
+        raise StoreBusy("writer is busy", reason="contention")
+    monkeypatch.setattr(owner_model, "read_current", busy)
+    assert owner_model.waiting_wake(waiter) is None
+    monkeypatch.setattr(owner_model, "read_current", read)
+    assert owner_model.waiting_wake(waiter) == "owner_model"
+    drain_and_apply(host, tools, ctx)
+    assert owner_model.waiting_wake(waiter) is None
+    count = len(reads)
+    assert owner_model.waiting_wake(waiter) is None and len(reads) == count
+
+
+def test_owner_model_act_during_a_tools_helper_wait_keeps_the_loop_running(host, monkeypatch):
+    from ouroboros.model_wait import task_model_wait_scope
+    from tests.test_completion_selection import finish
+
+    task = running(host)
+    tools, ctx = turn(host, monkeypatch)
+    calls, ticks = [], []
+    execute = tools.execute_result
+    def helper_wait(name, arguments, **kwargs):
+        if name != "read_file":
+            return execute(name, arguments, **kwargs)
+        def poll():
+            ticks.append(True)
+            if len(ticks) == 1:
+                assert act(host, model=B).status_code == 200
+            else:
+                for row in waiter.waits.values():
+                    row["_action"] = {"action": "retry", "request_id": "helper-ready"}
+            return None
+        values = {"model": C, "model_role": "vision", "model_poll_control": poll}
+        assert waiter.wait(None, RuntimeError("unavailable"), values) == values
+        from ouroboros.tools.tool_result import ToolResult
+        return ToolResult(text="The helper finished.")
+    def call(_llm, _messages, model, *_args, **_kwargs):
+        calls.append(model)
+        if len(calls) == 1:
+            return {"role": "assistant", "content": None, "tool_calls": [{"id": "read", "type": "function",
+                "function": {"name": "read_file", "arguments": '{"path":"note.txt"}'}}]}, 0.0
+        return finish("done"), 0.0
+    monkeypatch.setattr(tools, "execute_result", helper_wait)
+    monkeypatch.setattr(loop, "call_llm_with_retry", call)
+    monkeypatch.setattr("ouroboros.config.CLAUDEXOR_MODEL_POLL_INTERVAL_SEC", 0)
+    with task_model_wait_scope(task=task, drive_root=host[0], event_queue=ctx.event_queue,
+                               worker_slot_held=True) as waiter:
+        waiter.tool_context = ctx
+        ctx.model_wait_context = waiter
+        text, _, _ = loop.run_llm_loop([{"role": "user", "content": "Read the note"}], tools,
+            SimpleNamespace(default_model=lambda: A), host[0], lambda *_a, **_k: None,
+            queue.Queue(), task_id="work", drive_root=host[0], event_queue=ctx.event_queue)
+    assert text == "done" and calls == [A, B] and len(ticks) == 2
+
+
+def test_forced_finalization_wait_does_not_spin_or_consume_a_primary_act(host, monkeypatch):
+    from ouroboros import loop_forced_finalization as forced
+    from ouroboros.loop_round_limits import _RoundLimitContext
+    from ouroboros.model_wait import task_model_wait_scope
+
+    task = running(host)
+    tools, ctx = turn(host, monkeypatch)
+    limit = _RoundLimitContext(messages=[{"role": "user", "content": "Finish"}], llm=None,
+        active_model=A, active_effort="medium", max_retries=1, drive_logs=host[0], task_id="work",
+        round_idx=1, event_queue=ctx.event_queue, accumulated_usage={}, task_type="task",
+        active_use_local=False, max_rounds=2, drive_root=host[0], tools=tools, tool_schemas=[])
+    polls, calls = [], []
+    def send(*_args, **kwargs):
+        calls.append(True)
+        def poll():
+            polls.append(True)
+            if len(polls) == 1:
+                assert act(host, model=B).status_code == 200
+            else:
+                for row in waiter.waits.values():
+                    row["_action"] = {"action": "retry", "request_id": "final-ready"}
+            return None
+        waiter.wait(None, RuntimeError("unavailable"), {"model": A, "model_role": kwargs["model_role"],
+                    "model_poll_control": poll})
+        return {"role": "assistant", "content": "Final answer"}, 0.0
+    monkeypatch.setattr(loop, "call_llm_with_retry", send)
+    monkeypatch.setattr(forced, "_forced_physical_context", lambda *_: None)
+    monkeypatch.setattr("ouroboros.config.CLAUDEXOR_MODEL_POLL_INTERVAL_SEC", 0)
+    with task_model_wait_scope(task=task, drive_root=host[0], event_queue=ctx.event_queue,
+                               worker_slot_held=True) as waiter:
+        waiter.tool_context = ctx
+        ctx.model_wait_context = waiter
+        assert forced._call_forced_model_once(limit) == "Final answer"
+        assert ctx.active_model == A and len(calls) == 1 and len(polls) == 2
+        drain_and_apply(host, tools, ctx)
+        assert ctx.active_model == B
 
 
 @pytest.mark.parametrize("kind", ["presence", "direct"])

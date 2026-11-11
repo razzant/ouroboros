@@ -1207,7 +1207,7 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     ctx._route_binding = None  # the first round compares to the restored acting route (route_choice.round_route)
     from ouroboros.owner_model import restore_current
 
-    restore_current(ctx)
+    restore_current(ctx, messages)
     candidate = state.get("delivery_candidate")
     ctx._delivery_candidate = DeliveryCandidate(**{key: value for key, value in candidate.items()
         if key != "repair_attempted"}) if candidate else None
