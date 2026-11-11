@@ -1005,7 +1005,7 @@ def _shown_questions(ctx: ToolContext, run_id: str) -> Any:
 
 def _read_run(ctx: ToolContext, run_id: str, since_seq: Optional[int] = None, *, gateway: Any = None) -> str:
     """The one addressed read a ``delegate_wait`` wake makes of the run it speaks for
-    (``delegate_supervision._observe_once``): its retained or newly collected terminal, a new
+    (``delegate_supervision._publish``): its retained or newly collected terminal, a new
     question set whole, else its present state past the wake's cursor ``since_seq``.
 
     ``gateway`` is a transport BORROWED from its caller: it replaces the per-call

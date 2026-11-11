@@ -791,29 +791,19 @@ def test_a_taken_decision_reaches_the_engine_that_holds_the_result(env, tmp_path
     assert told == ["run-1"] and owned_told == [] and read_document(root, task)[taken.RECORDS]["run-1"]["state"] == "taken"
 
 
-def test_supervision_reopens_its_transport_for_each_runs_engine(env, tmp_path, monkeypatch):
+def test_supervision_uses_the_runs_recorded_engine(env, tmp_path, monkeypatch):
     from ouroboros import delegate_supervision as supervision
 
-    ctx = _delegate_ctx(tmp_path, monkeypatch)
     started(tmp_path, "run-w", engine_ref=work_ref(env), store=STORE)
     started(tmp_path, "run-s", store="store-s")
-    closed = []
-    work = SimpleNamespace(store_identity=STORE, engine_ref=work_ref(env), close=lambda: closed.append("work"))
-    owned = SimpleNamespace(store_identity="store-s", engine_ref=None, close=lambda: closed.append("owned"))
+    work, owned = object(), object()
     monkeypatch.setattr(domain, "work_gateway", lambda r, **_kw: work)
-    monkeypatch.setattr(supervision, "_loop_gateway", lambda entry=None: work if entry is not None else owned)
-    first = supervision._run_transport(ctx, "run-s", None)
-    assert first is owned and supervision._run_transport(ctx, "run-s", first) is owned and not closed
-    assert supervision._run_transport(ctx, "run-w", first) is work and closed == ["owned"]
-    assert supervision._run_transport(ctx, "run-s", work) is owned and closed == ["owned", "work"]
-
-    def unreadable(*_args):
-        raise OSError("custody temporarily unreadable")
-
-    monkeypatch.setattr(custody, "lookup", unreadable)
-    monkeypatch.setattr(supervision, "_loop_gateway", lambda *_args: pytest.fail("unknown custody chose an engine"))
-    assert supervision._run_transport(ctx, "run-w", work) is None
-    assert closed == ["owned", "work", "work"]  # the per-call reader owns the retry; no guessed fallback
+    monkeypatch.setattr(wire, "ClaudexorGateway", lambda: owned)
+    assert supervision._loop_gateway(current.run(tmp_path, "run-w")) is work
+    assert supervision._loop_gateway(current.run(tmp_path, "run-s")) is owned
+    monkeypatch.setattr(domain, "work_gateway", lambda *_a, **_kw: (_ for _ in ()).throw(
+        ClaudexorUnavailable("daemon_unreachable", "down")))
+    assert supervision._loop_gateway(current.run(tmp_path, "run-w")) is None
 
 
 # --- attached launches: stdio MCP servers, skill scripts and dependency builds run in the pinned executor ----------

@@ -4,7 +4,7 @@ Driven through the real arming (``delegate_supervision.run_wait`` -> ``model_sle
 sleep's own readiness (``model_sleep.wake_reason`` with the ``run_wait`` sources), the owed delivery at the round
 top (``native_task_wait.deliver_owed``), the one wake seam (``deliver_wake``) and the deferred acknowledgement the
 next saved state flushes (``working_checkpoint``). Only the one addressed read of the run a wake speaks for is
-scripted (``delegate_supervision._observe_once``); the body that records terminals and questions is the custody
+scripted (``tools.delegate._read_run``); the body that records terminals and questions is the custody
 writer itself (``delegate_collection.observe_run``). Each guard is shown firing beside the case it lets through.
 """
 from __future__ import annotations
@@ -58,7 +58,7 @@ def _nanny(root, task_id=_NANNY):
 @pytest.fixture
 def reads(monkeypatch):
     """The one addressed read a wake makes: a terminal for an ended run, its question set, else a quiet state."""
-    from ouroboros import delegate_custody_current as current, delegate_supervision as ds
+    from ouroboros import delegate_custody_current as current
 
     made = []
 
@@ -73,7 +73,7 @@ def reads(monkeypatch):
                                                         for iid in run.pending_interaction_ids]})
         return json.dumps({"status": "no_progress", "run_id": run_id, "state": "running", "last_seq": since_seq})
 
-    monkeypatch.setattr(ds, "_observe_once", observe)
+    monkeypatch.setattr("ouroboros.tools.delegate._read_run", observe)
     return made
 
 

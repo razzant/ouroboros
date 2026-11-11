@@ -51,34 +51,6 @@ def _loop_gateway(entry: Any = None) -> Any:
         return None
 
 
-def _run_transport(ctx: Any, run_id: str, gateway: Any) -> Any:
-    """``gateway`` while it reaches ``run_id``'s recorded engine, else the transport to that engine."""
-    from ouroboros.execution_domain import same_engine
-
-    try:
-        _status, entry = custody.lookup(custody.custody_root(ctx), str(getattr(ctx, "task_id", "") or ""), run_id)
-    except Exception:
-        _drop_gateway(gateway)
-        return None  # the per-call reader must recover custody; unreadable is never an owned-engine binding
-    if gateway is not None and same_engine(gateway, entry):
-        return gateway
-    _drop_gateway(gateway)
-    return _engine_transport(entry)
-
-
-def _engine_transport(entry: Any) -> Any:
-    """The transport for ``entry``: the owned engine's built exactly as before, a work engine's bound to it."""
-    return _loop_gateway(entry) if getattr(entry, "engine_ref", None) else _loop_gateway()
-
-
-def _drop_gateway(gateway: Any) -> None:
-    if gateway is not None:
-        try:
-            gateway.close()
-        except Exception:
-            pass
-
-
 def _attempt_key(ctx: Any) -> str:
     return str(getattr(ctx, "task_attempt", None) or 1)
 
@@ -91,15 +63,7 @@ def _state_path(ctx: Any) -> pathlib.Path:
 def _load_state(ctx: Any, run_id: str) -> dict[str, Any]:
     data = checkpoints.read(_state_path(ctx))
     selected = run_id or (next(iter(data["runs"])) if len(data["runs"]) == 1 else "")
-    return supervision_state_for_run(data, selected)
-
-
-def supervision_state_for_run(data: Any, run_id: str) -> dict[str, Any]:
-    return checkpoints.run_view(data, run_id)
-
-
-def task_scoped_supervision(data: Any) -> dict[str, Any]:
-    return checkpoints.task_facts(data)
+    return checkpoints.run_view(data, selected)
 
 
 def _save_state(ctx: Any, state: dict[str, Any], stage: str = "") -> None:
@@ -347,12 +311,6 @@ def _coordination_cursor(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _coordination_row_id(row: dict[str, Any]) -> str:
-    from ouroboros.task_tree_ledger import tree_ledger_row_id
-
-    return tree_ledger_row_id(row)
-
-
 def _direct_children(ctx: Any, materialize: bool = True) -> dict[str, dict[str, Any]]:
     """Read the existing durable direct-child projection for this nanny (a readiness check needs no artifacts)."""
     task_id = str(getattr(ctx, "task_id", "") or "").strip()
@@ -397,6 +355,8 @@ def _coordination_wakes(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Collect direct-child beacons and terminal transitions on one cursor (pure: the next cursor is
     returned, committed only by the acknowledgement of the wake that showed them)."""
+    from ouroboros.task_tree_ledger import tree_ledger_row_id
+
     cursor = _coordination_cursor(state)
     children = _direct_children(ctx, materialize)
     markers = {
@@ -419,7 +379,7 @@ def _coordination_wakes(
         )
     except Exception:
         attention = []
-    new_attention = [row for row in attention if _coordination_row_id(row) not in seen]
+    new_attention = [row for row in attention if tree_ledger_row_id(row) not in seen]
     terminal_events: list[dict[str, Any]] = []
     prior_children = cursor.get("children") if isinstance(cursor.get("children"), dict) else {}
     from ouroboros.task_status import SETTLED_STATUSES
@@ -457,7 +417,7 @@ def _coordination_wakes(
             )
         next_cursor["attention_seen"] = list(dict.fromkeys([
             *next_cursor["attention_seen"],
-            *(_coordination_row_id(row) for row in new_attention),
+            *(tree_ledger_row_id(row) for row in new_attention),
         ]))[-_MAX_COORDINATION_SEEN:]
     return events, next_cursor
 
@@ -1038,32 +998,17 @@ def _control_wakes(ctx: Any) -> list[dict[str, Any]]:
     return wakes
 
 
-def _leaf_live_input(ctx: Any, run_id: str, gateway: Any) -> str:
-    """The leaf route's DECLARED live-input capability (engine-static), read ONCE per
-    publication through its transport (a one-read transport when none is given) and stamped
-    on the wake: the route row's ``liveInput`` in the engine catalog. A capability, never a
-    liveness verdict; an unreadable catalog, an unknown route or a read slower than one beat
-    is ``unknown`` (never a refusal). A row without the field is an engine that has no
-    live-input channel at all: ``none``. One catalog read (the engine's full harness doctor)
-    per exact engine build serves every later wake (``claudexor_run_events.declared_live_input``)."""
+def _leaf_live_input(entry: Any, gateway: Any) -> str:
+    """The leaf route's declared live-input capability, stamped once on the wake. The engine catalog
+    is cached per exact build (``declared_live_input``); an unreadable catalog or unknown route is
+    ``unknown``, never a refusal, and an absent field means ``none``. The publication owns the transport.
+    """
     from ouroboros.gateways.claudexor_run_events import declared_live_input
 
     try:
-        _status, entry = custody.lookup(
-            custody.custody_root(ctx), str(getattr(ctx, "task_id", "") or ""), run_id)
-        route = str(getattr(entry, "route_id", "") or "")
-    except Exception:
-        return "unknown"
-    reader = (gateway if gateway is not None else _engine_transport(entry)) if route else None
-    if reader is None:
-        return "unknown"
-    try:
-        value = declared_live_input(reader, route, timeout_sec=_TICK_SEC)
+        value = declared_live_input(gateway, str(entry.route_id), timeout_sec=_TICK_SEC)
     except Exception:
         value = None
-    finally:
-        if reader is not gateway:
-            _drop_gateway(reader)
     return "unknown" if value is None else value
 
 
@@ -1161,15 +1106,6 @@ def _target_run(ctx: Any, run_ids: list[str], woke_by: str) -> str:
     return run_ids[0]
 
 
-def _observe_once(ctx: Any, run_id: str, since_seq: int, gateway: Any = None) -> str:
-    """The one addressed read a wake makes of the run it speaks for (``tools/delegate._read_run``: no
-    journal read, no speech; the body owns those): its retained or newly collected terminal, a new
-    question set whole, else its present state."""
-    from ouroboros.tools.delegate import _read_run
-
-    return _read_run(ctx, run_id, since_seq, gateway=gateway)
-
-
 def _replay(ctx: Any, run_ids: list[str]) -> tuple[Optional[ToolResult], dict[str, dict[str, Any]]]:
     """``(replay, states)``: an earlier wake of a selected run still unacknowledged, rendered marked
     (``replay_of``) — the only retry of a refused or lost acknowledgement, returned before any sleep is
@@ -1205,24 +1141,29 @@ def _publish(ctx: Any, descriptor: dict[str, Any], woke_by: str = "", *, questio
         _ownership, held = custody.lookup(custody.custody_root(ctx), str(getattr(ctx, "task_id", "") or ""), target)
     except Exception:
         held = None
+    from ouroboros.tools.delegate import _read_run
     from ouroboros.tools.delegate_terminal_evidence import retained_terminal_result
 
     # Exact retained bytes answer before any transport; one transport otherwise, only for a run with a route (no
     # route, no catalog read). An engine this cannot discover reads its live input as unknown.
     retained = None if _control_wakes(ctx) else retained_terminal_result(ctx, target, retry_money=True)
-    gateway = _run_transport(ctx, target, None) if getattr(held, "route_id", "") and retained is None else None
+    gateway = _loop_gateway(held) if getattr(held, "route_id", "") and retained is None else None
     try:
-        live_input = _leaf_live_input(ctx, target, gateway) if gateway is not None else "unknown"
+        live_input = _leaf_live_input(held, gateway) if gateway is not None else "unknown"
         while True:  # a cancel or a spent deadline already there never waits behind another read
             raw = (json.dumps({"status": "no_progress", "run_id": target, "last_seq": cursor}) if _control_wakes(ctx)
-                   else json.dumps(retained) if retained is not None else _observe_once(ctx, target, cursor, gateway))
+                   else json.dumps(retained) if retained is not None else _read_run(ctx, target, cursor, gateway=gateway))
             payload, _readable, retained = *_payload(raw, target), None
             if (payload.get("status") != "observation_pending" or payload.get("reason") != "collection_in_progress"
                     or _control_wakes(ctx)):
                 break
             time.sleep(_TICK_SEC)  # the collector that holds this terminal retains it first
     finally:
-        _drop_gateway(gateway)
+        if gateway is not None:
+            try:
+                gateway.close()
+            except Exception:
+                pass
     wakes = _addressed_wakes(ctx, state) + _control_wakes(ctx)
     coordination_events, next_coordination_cursor = _coordination_wakes(ctx, state)
     wakes += coordination_events

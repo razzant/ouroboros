@@ -1,7 +1,7 @@
 """Shared fixtures of the suites that drive ``delegate_wait`` as a sleep on runs.
 
 The body records a run's terminal and questions in custody (``delegate_collection.observe_run``); a wake then
-makes ONE addressed read of the run it speaks for (``delegate_supervision._observe_once``). Suites that pin the
+makes ONE addressed read of the run it speaks for (``tools.delegate._read_run``). Suites that pin the
 delivery and acknowledgement of that wake script only that read: ``scripted_reads`` keeps the retired tick's
 observer call shape ``(ctx, run_id, wait_sec, since_seq, **kw)``, so an observer written for the tick answers
 the one read a wake makes, and ``held_run`` gives the run the custody facts the wake's readiness reads.
@@ -33,11 +33,12 @@ def held_run(root, run_id, task_id, *, ended="", asks="", **facts):
 def scripted_reads(monkeypatch, observe):
     """Script the one addressed read a wake makes with a tick-shaped observer."""
     from ouroboros import delegate_supervision as ds
+    from ouroboros.tools import delegate
 
     def read(ctx, run_id, since_seq, gateway=None):
         return observe(ctx, run_id, ds._TICK_SEC, since_seq, **({"gateway": gateway} if gateway is not None else {}))
 
-    monkeypatch.setattr(ds, "_observe_once", read)
+    monkeypatch.setattr(delegate, "_read_run", read)
     return read
 
 
@@ -58,6 +59,7 @@ def wake_now(ctx, run_id, wait_once=None, *, woke_by="", since_seq=None, checkpo
     (the tick's observer shape; ``None`` replays only). ``woke_by`` is what made it ready (``timeout`` with a
     ``checkpoint_reason``: the inspection time)."""
     from ouroboros import delegate_supervision as ds
+    from ouroboros.tools import delegate
 
     import time
 
@@ -67,14 +69,14 @@ def wake_now(ctx, run_id, wait_once=None, *, woke_by="", since_seq=None, checkpo
     descriptor = {"tool": "delegate_wait", "runs": runs, "armed_at": utc_now_iso(), "armed_epoch": time.time(),
                   **({"since_seq": since_seq} if since_seq is not None else {}),
                   **({"checkpoint": {"reason": checkpoint_reason}} if checkpoint_reason else {})}
-    saved = ds._observe_once
+    saved = delegate._read_run
 
     def read(ctx_, rid, seq, gateway=None):
         if wait_once is None:
             raise AssertionError("an unacknowledged wake replays before the run is read")
         return wait_once(ctx_, rid, ds._TICK_SEC, seq)
 
-    ds._observe_once = read
+    delegate._read_run = read
     try:
         from ouroboros.delegate_recovery import restore_bound_handoff
 
@@ -82,4 +84,4 @@ def wake_now(ctx, run_id, wait_once=None, *, woke_by="", since_seq=None, checkpo
             restore_bound_handoff(ctx, selected)
         return ds._publish(ctx, descriptor, woke_by)
     finally:
-        ds._observe_once = saved
+        delegate._read_run = saved

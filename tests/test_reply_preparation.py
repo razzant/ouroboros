@@ -355,7 +355,7 @@ def _hold(world, ctx, run_id, monkeypatch):
     from ouroboros import delegate_custody as custody, delegate_supervision
     from tests._run_wait_shared import scripted_reads
 
-    monkeypatch.setattr(delegate_supervision, "_loop_gateway", lambda: None)
+    monkeypatch.setattr(delegate_supervision, "_loop_gateway", lambda _entry: None)
     scripted_reads(monkeypatch, lambda _ctx, rid, *_a, **_k: json.dumps(
         {"status": "completed", "run_id": rid, "state": "succeeded", "last_seq": 2}))
     assert custody.emit(world.root, custody.STARTED, {

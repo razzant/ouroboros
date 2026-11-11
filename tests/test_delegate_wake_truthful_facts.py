@@ -157,7 +157,7 @@ def test_every_wake_measures_the_whole_sleep_and_replays_it_exactly(tmp_path, mo
     tick's quiet-renewal counters are gone. A replay repeats the recorded facts, nothing added since."""
     clock = _Clock()
     _fake_time(monkeypatch, clock)
-    monkeypatch.setattr(supervision, "_observe_once", lambda _ctx, run_id, _seq, gateway=None: json.dumps(
+    monkeypatch.setattr("ouroboros.tools.delegate._read_run", lambda _ctx, run_id, _seq, gateway=None: json.dumps(
         {"status": "completed", "run_id": run_id, "last_seq": 7}))
     ctx = _ctx(tmp_path)
     armed = {"tool": "delegate_wait", "runs": ["run-1"], "armed_at": "2026-11-09T00:00:00+00:00",
@@ -266,7 +266,7 @@ def test_leaf_live_input_is_read_once_per_publication_and_replayed_as_recorded(
 ):
     _owned(tmp_path, monkeypatch)
     catalog = _Catalog(rows, fail)
-    monkeypatch.setattr(supervision, "_loop_gateway", lambda: catalog)
+    monkeypatch.setattr(supervision, "_loop_gateway", lambda _entry: catalog)
 
     def wait_once(_ctx, run_id, *_a, **_k):
         return json.dumps({"status": "completed", "run_id": run_id, "last_seq": 4})
@@ -281,7 +281,7 @@ def test_leaf_live_input_is_read_once_per_publication_and_replayed_as_recorded(
 
 
 def test_an_unowned_run_reads_no_catalog(tmp_path, monkeypatch):
-    monkeypatch.setattr(supervision, "_loop_gateway", lambda: (_ for _ in ()).throw(
+    monkeypatch.setattr(supervision, "_loop_gateway", lambda _entry: (_ for _ in ()).throw(
         AssertionError("no route, no catalog read")))
     wake = json.loads(wake_now(_ctx(tmp_path), "run-x", wait_once=_settled("run-x")).text)
     assert wake["leaf_live_input"] == "unknown"

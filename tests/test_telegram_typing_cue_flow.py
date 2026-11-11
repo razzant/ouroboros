@@ -404,7 +404,7 @@ def test_a_held_delegated_run_types_while_it_works_and_resumes_by_itself(flow, m
 
     engine = Engine()
     monkeypatch.setattr(delegate_feed, "_TICK_SEC", 0.05)
-    monkeypatch.setattr(delegate_supervision, "_loop_gateway", lambda: None)
+    monkeypatch.setattr(delegate_supervision, "_loop_gateway", lambda _entry: None)
     scripted_reads(monkeypatch, lambda _ctx, rid, *_a, **_k: json.dumps(
         {"status": "terminal", "run_id": rid, "state": "succeeded", "last_seq": 2}))
     _running(flow, "root-n", owner_wait={"reason": "owner"})
