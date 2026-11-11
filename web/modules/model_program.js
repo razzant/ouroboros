@@ -137,7 +137,10 @@ export function bindModelProgramFooter(input, footer, changed) {
             const same = producers(programs) === producers(next);
             programs = next;
             if (opened) view.render();
-            if (opened && !same) read();
+            if (opened && !same && programs.some((program) => {
+                const selected = programsController().view(program.harness).entry?.selection;
+                return program.programs.some((source) => source.path !== selected?.path || source.version !== selected?.version);
+            })) read();
         },
         open() {
             if (opened) return;
