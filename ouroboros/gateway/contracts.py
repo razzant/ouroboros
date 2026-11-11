@@ -1239,12 +1239,17 @@ class ClaudexorCredentialProfileDeleteResponse(TypedDict):
 class ClaudexorLoginJobProblem(TypedDict, total=False):
     """Typed job errors preserve engine prose/status/code and bounded actions
     (16 strings, 512 chars each). Covers absent jobs, input/reconcile conflicts,
-    setup 400/409 and marked retryable terminal-probe 503. Other daemon 5xx and
-    unmarked transport/discovery failures use the generic proxy 503."""
+    setup 400/409, terminal-probe 503 and Connect maintenance problems/context.
+    Other unmarked transport/discovery failures use the generic proxy 503."""
 
     error: Required[str]
     code: str
     required_actions: List[str]
+    context: Dict[str, Any]
+    retryable: bool
+    requiredActions: List[str]
+    fieldErrors: Dict[str, Any]
+    evidenceRefs: List[str]
 
 
 class TaskEventCursor(TypedDict):

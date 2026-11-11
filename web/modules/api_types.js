@@ -1341,6 +1341,11 @@
  * @property {string} error
  * @property {string=} code
  * @property {Array<string>=} required_actions
+ * @property {Object<string, *>=} context
+ * @property {boolean=} retryable
+ * @property {Array<string>=} requiredActions
+ * @property {Object<string, *>=} fieldErrors
+ * @property {Array<string>=} evidenceRefs
  */
 /**
  * @typedef {Object} ClaudexorVendorCredentialDisposition
