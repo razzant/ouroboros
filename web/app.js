@@ -230,10 +230,10 @@ async function openSettingsTab(tabName) {
     return true;
 }
 
-async function openDashboardTab(tabName) {
+async function openDashboardTab(tabName, options = {}) {
     if (!await showPage('dashboard')) return false;
     if (dashboardControls && typeof dashboardControls.activateTab === 'function') {
-        dashboardControls.activateTab(tabName);
+        dashboardControls.activateTab(tabName, options);
     }
 }
 
@@ -1344,7 +1344,7 @@ ws.on('projects_changed', (msg) => {
 setInterval(function pollShownRoomState() { if (state.activePage === 'chat' && !document.hidden) refreshProjectsNav(false); }, 3000);
 setInterval(() => refreshProjectsNav(false), 20000);
 settingsControls = initSettings(ctx);
-dashboardControls = initDashboard(ctx);
+dashboardControls = initDashboard({ ...ctx, layers });
 initLogs({ ...ctx, mount: document.getElementById('dashboard-panel-logs') });
 evolution = initEvolution({ ...ctx, mount: document.getElementById('dashboard-panel-evolution') });
 initUpdates({ ...ctx, mount: document.getElementById('dashboard-panel-updates') });

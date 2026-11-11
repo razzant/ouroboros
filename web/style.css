@@ -6447,6 +6447,15 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 /* A Dashboard card's title (16/600) and its list of facts (label, value): the tabs' cards share these two parts of the
    tab body (Costs, Consciousness, Updates, Activity, Evolution). */
 .dashboard-card-title { margin: 0; color: var(--text-primary); font-size: var(--type-section); line-height: var(--line-title); font-weight: 600; }
+/* A tab's settings card (dashboard.js mountTabSettings): rows that save themselves (settings.css "settings rows")
+   under its title, the rarer ones in its fold. A door's value stands before its chevron. */
+.dashboard-settings > .dashboard-card-title { margin-bottom: var(--space-3); }
+.dashboard-settings-more { margin-top: var(--space-3); }
+.dashboard-settings .ui-row-actions > .settings-row-value { color: var(--text-secondary); font-size: var(--type-body); line-height: var(--line-body); }
+/* A tab opened from Settings leads back there with its first row (dashboard.js settingsReturn). The row stands above
+   the tab's scroller, so it stays in place while the tab scrolls. */
+.dashboard-back { flex: none; padding: var(--space-2) 20px 0; }
+html[data-layout="stack"] .dashboard-back { padding-inline: var(--space-3); }
 .dashboard-facts {
     display: grid;
     grid-template-columns: fit-content(14rem) minmax(0, 1fr);
