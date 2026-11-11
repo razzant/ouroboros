@@ -16,6 +16,9 @@ record, a scanned character) to the window it runs in, and work done again on th
 ``<verb>_again``, so "done once" reads as a zero in the log and an equality in a test. ``section_spans``
 carries the counts as ``work`` beside the two time maps. A window opens around any block that owes one
 receipt (a context build, a round's preparation); windows nest and never mix.
+
+``host_step`` marks where one named step of a round's window ends; ``llm_observability.round_window`` opens
+that window and receipts the steps on the round's ``llm_round``.
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ from typing import Any, Callable, Dict, Hashable, Iterator, List, Optional, Set,
 _SPANS: contextvars.ContextVar[Optional[Dict[str, List[float]]]] = contextvars.ContextVar("context_section_spans", default=None)
 _STARTED: contextvars.ContextVar[Optional[Tuple[float, float]]] = contextvars.ContextVar("context_build_started", default=None)
 _WORK: contextvars.ContextVar[Optional[Tuple[Dict[str, int], Set[Tuple[str, Hashable]]]]] = contextvars.ContextVar("context_build_work", default=None)
+STEPS: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar("round_host_steps", default=None)
 TOTAL = "total"
 
 
@@ -71,6 +75,21 @@ def counted(verb: str, n: int = 1, key: Optional[Hashable] = None) -> None:
     if (verb, key) in seen:
         work[f"{verb}_again"] = work.get(f"{verb}_again", 0) + n
     seen.add((verb, key))
+
+
+def host_step(name: str) -> None:
+    """The round's step ``name`` ends here: its wall and thread CPU time since the previous mark, or since the window
+    opened, add to its span (nothing outside a window). A step that ends on another thread than it began (the model
+    sender's, which runs in a copy of this context) has no one thread's CPU time: unknown (None)."""
+    state = STEPS.get()
+    if state is None:
+        return
+    now = (time.perf_counter(), time.thread_time(), threading.get_ident())
+    wall, cpu, thread = state["mark"]
+    span = state["steps"].setdefault(name, [0.0, 0.0])
+    span[0] += now[0] - wall
+    span[1] = None if span[1] is None or now[2] != thread else span[1] + now[1] - cpu
+    state["mark"] = now
 
 
 @contextlib.contextmanager
