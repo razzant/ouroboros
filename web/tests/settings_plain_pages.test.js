@@ -340,11 +340,13 @@ test('Voice and calls says the saved choices and opens the form of whoever regis
     const facts = voiceFacts({
         speech: hub({ engine: { key: 'whisper-voice:stt', label: 'Whisper', available: true }, voice: 'milena',
             reader: { key: 'device:tts', label: 'This device', available: true, impl: { voices: () => voices } } }),
-        store: store([{ provides: 'conversation', skill: 'some_call_skill', skill_label: 'Calls', label: 'Live Conversation' },
-            { provides: 'conversation', skill: 'some_call_skill', label: 'A second entry of the same skill' }, { provides: 'stt', skill: 'whisper-voice' }]),
+        store: store([{ provides: 'conversation', skill: 'some_call_skill', skill_label: 'some_call_skill', label: 'Live Conversation' },
+            { provides: 'conversation', skill: 'some_call_skill', label: 'A second entry of the same skill' }, { provides: 'stt', skill: 'whisper-voice' },
+            { provides: 'conversation', skill: 'bare_skill', skill_label: 'Bare skill' }]),
     });
     assert.deepEqual([facts.dictation, facts.readAloud], ['Whisper', 'Milena · This device']);
-    assert.deepEqual(facts.calls, [{ skill: 'some_call_skill', name: 'Calls' }], 'one door per skill, named by the skill');
+    assert.deepEqual(facts.calls, [{ skill: 'some_call_skill', name: 'Live Conversation' }, { skill: 'bare_skill', name: 'Bare skill' }],
+        'one door per skill, named by the feature it registered, else by the skill');
     // An engine that cannot run here says so, with the reason as the row's line.
     const broken = voiceFacts({ speech: hub({ engine: { key: 'x:stt', label: 'Whisper', available: false, reason: 'The chosen engine has not started.' },
         reader: { key: 'y:tts', label: 'Cloud voice', available: false, reason: 'Read aloud is unavailable here.' } }), store: store([]) });

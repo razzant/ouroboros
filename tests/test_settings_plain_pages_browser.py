@@ -125,7 +125,7 @@ def _page(ui, width, height, theme="dark", **values):
         {"language": "en", "english": True, "chosen": False, "languages": [], "revision": 1, "entries": {}})))
     # A skill that registered a live conversation, as the contributions projection lists it (no page module to load).
     page.route("**/api/ui/contributions", lambda route: route.fulfill(content_type="application/json", body=json.dumps(
-        {"contributions": [{"key": "talk_skill:call", "id": "call", "skill": "talk_skill", "skill_label": "Calls (beta)",
+        {"contributions": [{"key": "talk_skill:call", "id": "call", "skill": "talk_skill", "skill_label": "talk_skill",
                             "provides": "conversation", "runtime": "client", "label": "Live Conversation", "revision": "1"}],
          "offers": {}, "preferences": {}, "voice": {}, "icons": [], "problems": {}})))
     page.goto(ui["url"] + "/#settings")
@@ -281,7 +281,7 @@ def test_voice_and_calls_says_the_saved_choices_and_opens_the_form_of_the_skill_
     assert dictation.locator('[data-fact="voice:dictation"]').inner_text() == "Not chosen"
     assert setting_row(page, "voice:read-aloud").locator("[data-setting-meta]").inner_text().startswith("Chosen in a reply")
     door = setting_row(page, "voice:skill:talk_skill")
-    assert door.locator(".ui-row-title").inner_text() == "Calls (beta)"
+    assert door.locator(".ui-row-title").inner_text() == "Live Conversation"
     setup_browser.capture(page, "c2-voice-with-calls-1087x740-dark")
     door.click()
     opened = settings_page(page, "skill/talk_skill")

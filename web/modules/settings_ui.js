@@ -238,7 +238,8 @@ export function voiceFacts({ speech = getSpeech(), store = getContributions() } 
             : `${voices.find((each) => each.id === voice)?.label || 'Automatic'}${reader.label ? ` · ${reader.label}` : ''}`,
         readAloudNote: reader && !reader.available ? reader.reason || '' : '',
         calls: store.providers('conversation').filter((item) => item.skill && !seen.has(item.skill) && seen.add(item.skill))
-            .map((item) => ({ skill: item.skill, name: item.skill_label || item.label || item.skill })),
+            // Named by the feature's own label: a skill's label is its folder name when its manifest gives no other.
+            .map((item) => ({ skill: item.skill, name: item.label || item.skill_label || item.skill })),
     };
 }
 
