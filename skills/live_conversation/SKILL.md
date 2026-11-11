@@ -1,7 +1,7 @@
 ---
 name: live_conversation
 description: Talk with Ouroboros using this room's ordinary memory, tools and controls.
-version: 0.1.32
+version: 0.1.33
 type: extension
 runtime: python3
 entry: plugin.py
@@ -19,7 +19,7 @@ contributes:
 ---
 
 Calls are a beta, off by default. The call skills are on by default. To talk,
-turn on Calls (beta), choose an engine and add its API key in Settings → Secrets,
+turn on Calls (beta), choose an engine and add its API key in Settings → Accounts and keys,
 under the keys the skills request.
 Gemini, Grok and OpenAI supply the engine, model and voice choices from their
 loaded catalogs. The owner's skill auto-grant setting still applies; with it off,

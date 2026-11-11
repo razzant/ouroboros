@@ -501,7 +501,7 @@ def test_catalog_settings_save_and_client_devices(subscription_ui, monkeypatch, 
     catalogs = subscription_ui['call_config']['catalogs']
     expect(page.locator('#page-settings')).to_contain_text(
         'The call skills are on by default. To talk, turn on Calls (beta), choose an engine and add its API key in '
-        'Settings → Secrets, under the keys the skills request. Gemini and OpenAI do not serve Russia or Belarus.')
+        'Settings → Accounts and keys, under the keys the skills request. Gemini and OpenAI do not serve Russia or Belarus.')
     by_id = {catalog['id']: catalog for catalog in catalogs}
     expect(form.locator('[name="provider"] option')).to_have_count(len(catalogs))
     assert form.locator('[name="provider"] option').evaluate_all('(nodes) => nodes.map(n => n.value)') == list(by_id)
