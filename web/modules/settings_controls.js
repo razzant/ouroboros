@@ -659,7 +659,7 @@ function parseTyped(row, text) {
     const number = trimmed === '' ? NaN : Number(trimmed);
     if (control.noLimit) return { value: Number.isFinite(number) ? number : trimmed };
     const [min, max] = [bound(control.min), bound(control.max)];
-    if (!Number.isFinite(number) || (min !== null && number < min) || (max !== null && number > max)) return { refuse: NUMBER_RULE(min, max) };
+    if (!Number.isFinite(number) || (control.integer && !Number.isInteger(number)) || (min !== null && number < min) || (max !== null && number > max)) return { refuse: NUMBER_RULE(min, max) };
     return { value: number };
 }
 

@@ -197,6 +197,22 @@ test('a refusal keeps the typed text and says the server\'s sentence; a value re
     assert.equal(view.line(ALLOWANCE), '', 'an edit of the row ends its result');
 });
 
+test('the model concurrency row refuses a fraction and accepts zero, negative and positive whole numbers', async (t) => {
+    const row = rowById('OUROBOROS_MODEL_MAX_CONCURRENCY');
+    const { server, view } = await start(t, [row, TOTAL], { values: { [row.id]: 3 } });
+    await view.type(row, '2.5');
+    assert.equal(server.posts.length, 0, 'a fraction must not reach the server that rounds it');
+    assert.match(view.line(row), /^Not saved\./);
+    assert.equal(view.field(row).value, '2.5');
+    for (const value of [0, -1, 7]) {
+        await view.type(row, String(value));
+        assert.deepEqual(server.posts.at(-1), { [row.id]: value });
+        assert.match(view.line(row), /^Saved/);
+    }
+    await view.type(TOTAL, '250.5');
+    assert.deepEqual(server.posts.at(-1), { TOTAL_BUDGET: 250.5 }, 'money still accepts a fraction');
+});
+
 test('"No limit" is its own choice beside the number', async (t) => {
     const { server, view } = await start(t, [ROUNDS], { values: { OUROBOROS_MAX_ROUNDS: 40 } });
     const none = view.container.querySelector('[data-setting-no-limit]');
