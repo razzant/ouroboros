@@ -401,7 +401,9 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
                 continue
             if step == "F5" and ("F5l", ident) in taken:
                 whole = previous['F5l', ident]
-            delta = work_prices.saving(ident, taken) if step == "F2" and ident.startswith("work:") else max(0, whole - short)
+            delta = work_prices.saving(ident, taken) if step == "F2" and ident.startswith("work:") else whole - short
+            if delta <= 0:
+                continue
             current -= delta
             taken.add(pair)
         added.append((pair, delta))

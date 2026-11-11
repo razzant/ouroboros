@@ -167,9 +167,10 @@ def floor_steps(groups: Iterable[Mapping[str, Any]], *, index=None) -> Dict[str,
                           render_group(group, theirs, set(), 0, data=data, event_count=True)))
         if ordinary:
             lines.append((group["key"], whole, render_group(group, theirs, set(), 1, data=data)))
-        if not ordinary or any(r['notes'] or r['tasks'] or any(w.get('gist') for w in r['words']) for r in group['rooms']):
-            lines.extend((prefix + group["key"], whole, render_group(group, theirs, set(), form, data=data))
-                         for prefix, form in (("all:", 2), ("last:", 3)))
+        hidden = data["untold"] or any(r["notes"] for r in group["rooms"])
+        for prefix, form in (("all:", 2), ("last:", 3)):
+            if hidden or form == 3 and len(data["gists"]) > 1:
+                lines.append((prefix + group["key"], whole, render_group(group, theirs, set(), form, data=data)))
         # The shared count header is priced at its first group. Later groups keep
         # only these rows; the walk measures the actual combined header at bounds.
         retained = _counted_text([group], set(), False, index=index).partition("\n")[2]
@@ -215,9 +216,10 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
         if as_line >= 2:
             untold = data["untold"]
             notes = sum(len(room["notes"]) for room in group["rooms"])
-            lines.append(f"Emergency: {untold} untold rows" + (f"; {notes} notes by count" if notes else "")
-                         + (f"; {len(gists)} works, " + ("only the last gist shown." if as_line == 3 else "every gist shown.")
-                            if gists else "."))
+            if untold or notes or as_line == 3 and len(gists) > 1:
+                lines.append(f"Emergency: {untold} untold rows" + (f"; {notes} notes by count" if notes else "")
+                             + (f"; {len(gists)} works, " + ("only the last gist shown." if as_line == 3 else "every gist shown.")
+                                if gists else "."))
         for room in group["rooms"]:
             lines += [_note_pointer(note) for note in room["notes"]] if as_line == 1 else []
             if (unread := data["rooms"][room["room_id"]]["unread"]) and not room.get("overheard"):

@@ -8,6 +8,52 @@ from ouroboros import memory_view_work as work
 from tests import _memory_view_synthetic as syn
 
 
+@pytest.mark.parametrize("hidden", ["none", "notes", "words", "older gist"])
+def test_emergency_conversation_forms_require_hidden_sources(hidden):
+    from ouroboros import memory_view_conversations as conv
+
+    snap, gist = completed_room()
+    group = snap.conversations[0]
+    remote = group["rooms"][0]
+    if hidden == "notes":
+        remote["notes"] = syn.conversation(8, notes=1)["rooms"][0]["notes"]
+    elif hidden == "words":
+        remote["words"][0].pop("gist")
+    elif hidden == "older gist":
+        remote["tasks"].append(dict(remote["tasks"][0], task="later", work_id="later",
+                                    gist=dict(gist, summary="Another completed work.", ts="2027-01-01")))
+    elements = {i for s, i, *_ in mf.floor_elements(snap) if s == "F6g"}
+    assert ("all:" + group["key"] in elements) is (hidden in ("notes", "words"))
+    assert ("last:" + group["key"] in elements) is (hidden != "none")
+    for form, prefix in ((2, "all:"), (3, "last:")):
+        level = mv.FloorLevel((("F6g", (prefix + group["key"],)),))
+        text = conv.render_group(group, set(), set(), form)
+        missing = hidden in ("notes", "words") or hidden == "older gist" and form == 3
+        assert ("Emergency:" in text) is missing
+        assert bool(forms.form_counts(snap, level)["emergency"]) is missing
+
+
+@pytest.mark.parametrize("extra", [0, 20])
+def test_walk_does_not_take_a_form_without_savings(monkeypatch, extra):
+    snap = syn.snapshot(story=syn.pages(1, 3000))
+    monkeypatch.setattr(mf, "LADDER", ("F5",))
+    table = mf._elements(snap)
+    table.__dict__["priced"] = (("F5", "page-000", 20, 20 + extra),)
+    level = mf.fit_memory_view(snap, frame(0))
+    assert level == mv.FULL_VIEW
+
+
+def test_first_counted_conversation_can_pay_the_shared_header(monkeypatch):
+    groups = [syn.conversation(i) for i in range(3)]
+    snap = syn.snapshot(conversations=groups)
+    monkeypatch.setattr(mf, "LADDER", ("F6a",))
+    # The first count costs more; the second amortizes the shared header.
+    def price(level):
+        return (300, 310, 200, 100)[len(dict(level.addressed).get("F6a", ()))]
+    level = mf.fit_memory_view(snap, frame(250), measure=price)
+    assert dict(level.addressed)["F6a"] == tuple(g["key"] for g in groups[:2])
+
+
 def test_three_sentence_completion_is_whole_here_and_one_sentence_in_another_conversation(tmp_path):
     from ouroboros import dialogue_store as ds, memory_view_conversations as conv
     from tests import _memory_inventory_shared as shared
@@ -202,7 +248,8 @@ def test_emergency_conversation_line_names_omitted_notes_only_when_present():
         group = syn.conversation(1, notes=notes)
         for form in (2, 3):
             text = conv.render_group(group, set(), set(), form)
-            emergency = next(line for line in text.splitlines() if line.startswith("Emergency:"))
+            emergency = next((line for line in text.splitlines() if line.startswith("Emergency:")), "")
+            assert bool(emergency) is bool(notes)
             assert ("2 notes by count" in emergency) is bool(notes)
             assert "0 notes" not in emergency
 

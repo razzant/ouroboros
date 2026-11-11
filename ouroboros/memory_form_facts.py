@@ -132,7 +132,7 @@ def _group_counts(group, data, sources, state, aggregate_unread):
         add("retold", "work gists", len(shown), len(shown))
         if form >= 2:
             missing = data["untold"] + len(gists) - len(shown) + sum(len(r["notes"]) for r in group["rooms"])
-            add("emergency", "all gists" if form == 2 else "last gist", 1, max(1, missing))
+            add("emergency", "all gists" if form == 2 else "last gist", 1, missing)
         no_gist = sum(not t.get("gist") for r in group["rooms"] for t in r["tasks"])
         add("host", "tasks without gist", int(bool(no_gist)), no_gist)
     elif not count and data["gists"]:
