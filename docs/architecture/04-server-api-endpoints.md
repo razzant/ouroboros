@@ -76,8 +76,8 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/onboarding/complete` | |
 | GET | `/api/onboarding/complete` | |
 | POST | `/api/onboarding/subagents/preview` | |
-| GET | `/api/settings` | |
-| POST | `/api/settings` | origin, change record (§7) |
+| GET | `/api/settings` | masked values, effects and per-key tokens (§7) |
+| POST | `/api/settings` | partial write, conditional Undo, sanitized receipt (§7) |
 | POST | `/api/settings/secret` | |
 | GET | `/api/review-pool` | |
 | GET | `/api/claudexor/status` | `last_exit`/`memory` (§9), resource-catalog evidence (§3); never wakes |
