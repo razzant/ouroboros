@@ -468,16 +468,17 @@ def open_rows_by_room(root: Any, gaps: Optional[Dict[str, set]] = None,
 
 def over_one_state(root: Any, read: Callable[[], Any]) -> Any:
     """``read()``, inside a capture: its pass and every reader that asks its places' rows, over one state. Where what
-    the capture's cold set stood on moved before ``read`` was done (another set or stored tail under a read of its rows,
-    a task's lineage or the registry's facts written since its marks: ``memory_tail_cold.Moved``, ``moved``), the
-    capture stands on nothing from there and ``read`` runs again over the whole tail and the facts as they are now."""
+    the capture read with its marks moved before ``read`` was done (another set or stored tail under a read of its rows,
+    a task's lineage or the registry's facts written since: ``memory_tail_cold.Moved``, ``moved``; standing on the set
+    or not, its rule took those facts), the capture stands on nothing from there and ``read`` runs again over the whole
+    tail and the facts as they are now."""
     store = ChronicleStore(root)
     derived = store._pinned().memo if store._pinned() is not None else None
     if derived is None:
         return read()
+    gate = derived.get(memory_tail_cold.GATE)  # its rule's facts came with the marks, whether or not the set stands
     try:
         got = read()
-        gate = derived.get(memory_tail_cold.GATE) if memory_tail_cold.standing(derived) is not None else None
         if gate is None or not memory_tail_cold.moved(store, gate):
             return got
     except memory_tail_cold.Moved:

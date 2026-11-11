@@ -773,6 +773,25 @@ def test_a_project_made_inside_a_capture_leaves_one_state(monkeypatch, tmp_path)
     _one_state(monkeypatch, tmp_path, lambda: create_project(tmp_path, "gamma", name="Gamma"), "gate")
 
 
+def test_a_binding_made_inside_a_capture_that_reads_its_tail_live_leaves_one_state(monkeypatch, tmp_path):
+    """A text revised and not filled yet: the capture reads its rows live and stands on no set, yet its rule decides rooms
+    by the registry's facts read with its marks. A binding naming an owner message as its Project's origin, made after
+    them, makes it read again over the facts as they are then, as one standing on the set would (seed 28 of the sweep)."""
+    rooms = _settled(tmp_path)
+    owner = shared.msg(_ts(1), "Start beta, please.", client_message_id="origin-b")
+    _append(tmp_path, owner)
+    _append(tmp_path, shared.msg(_ts(2), "Later word.", client_message_id="later"))
+    _fill(tmp_path)
+    _seal(tmp_path, _entry(tmp_path, "Start beta, please."), 1)
+    _compose(tmp_path)
+    ds.revise_text(tmp_path, "chat", _entry(tmp_path, "Later word.")[0]["hint"]["seq"], "Later word, edited.")
+    assert not mi._tail(tmp_path, mi._active_frontier(ChronicleStore(tmp_path))).complete  # read live until a fill
+    ref = build_owner_message_ref(chat_id=1, client_message_id="origin-b", ts=owner["ts"], text=owner["text"])
+    _one_state(monkeypatch, tmp_path, lambda: bind_task_to_project(
+        tmp_path, "starter", "beta", origin={"ref": ref, "text": owner["text"]}), "gate")
+    _same(monkeypatch, tmp_path, rooms)
+
+
 # Writes a capture may meet from another thread or process, by the chain's changes ("revise_fill": a text revised and
 # the stored tail filled anew; an index rebuilt is the same class as a refill and stays out of a reader's way here).
 INSIDE = ("row", "bind", "bind_origin", "new_project", "relineage", "direct_write", "remove_task", "admit",
