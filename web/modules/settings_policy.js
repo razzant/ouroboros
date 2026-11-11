@@ -104,12 +104,6 @@ export function cyberReviewNote(state) {
         : 'Enforced now. Not enforced after the restart that applies Cyber Pro.';
 }
 
-/** A value's running level when a restart must apply the saved one (`policy_state.access`), else undefined. */
-export function accessRunning(settings) {
-    const access = settings?._meta?.policy_state?.access;
-    return access?.restart_required ? access.current_process || access.effective : undefined;
-}
-
 const AXES = { OUROBOROS_RUNTIME_MODE: 'access', OUROBOROS_SAFETY_MODE: 'coverage', OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: 'coverage' };
 
 /**

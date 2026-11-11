@@ -79,7 +79,7 @@ test('the network rows say whether a password is set and when the way it was sta
     assert.equal(open['computer:address'].meta, 'Type it in a browser on the same network.');
     // A saved choice that waits for a restart is the row helper's "Running … after restart" line: no note here competes with it.
     const waiting = tuned({ OUROBOROS_SERVER_HOST: '0.0.0.0', OUROBOROS_NETWORK_PASSWORD: '***set***',
-        _meta: { bind_host: '127.0.0.1', restart_state: { restart_keys: ['OUROBOROS_SERVER_HOST'] } } });
+        _meta: { bind_host: '127.0.0.1', restart_state: { restart_keys: ['OUROBOROS_SERVER_HOST'], running: { OUROBOROS_SERVER_HOST: '127.0.0.1' } } } });
     assert.equal(waiting.OUROBOROS_SERVER_HOST.control.options[1].note, 'Any device on your network, with the password.');
     // Started with its own address (an environment or a command line): the choice does not decide, and says so.
     const outside = tuned({ OUROBOROS_SERVER_HOST: '127.0.0.1', OUROBOROS_NETWORK_PASSWORD: 'x', _meta: { bind_host: '0.0.0.0', restart_state: { restart_keys: [] } } });

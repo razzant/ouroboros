@@ -15,9 +15,10 @@ import { modelRolesHost } from './model_roles.js';
 import { getNotifier } from './notifications.js';
 import { bindAutostartControl } from './settings_autostart.js';
 import { CODECS, HIDDEN_WHEN, bindSettingRows, settingsRow, settingsSection } from './settings_controls.js';
+import { readSkills, skillFormTitle, skillForms } from './settings_extension_forms.js';
 import { bindLanguageSettings, languageBlockHtml } from './settings_language.js';
 import { registerSettingsPage } from './settings_pages.js';
-import { accessRunning, applyPolicyToRows } from './settings_policy.js';
+import { applyPolicyToRows } from './settings_policy.js';
 import { PROVIDER_CARDS, providerSettingsCard } from './settings_provider_cards.js';
 import { rowById, rowsOf } from './settings_rows.js';
 import { mountRulesPage, refreshSafetySkipCounter, safetyFacts } from './settings_safety.js';
@@ -125,9 +126,6 @@ function rowsPage(path, { ids, draw, tune = null, bind = null, paint = null, sho
 
 /* ---- Permissions and checks ---------------------------------------------------------------------------------------- */
 
-// Access is bound at start: while the saved level waits for a restart, the level in force is the server's.
-CODECS.access = { running: accessRunning };
-
 /** The rows as this installation's policy and Safety facts leave them (pure; `rows` are the page's copies). */
 export function tunePermissionRows(rows, settings, row = (id) => rows.find((each) => each.id === id)) {
     applyPolicyToRows(rows, settings, rowById);
@@ -222,28 +220,32 @@ function mountNotifications(container, { ctx }) {
 
 /* ---- Voice and calls ----------------------------------------------------------------------------------------------- */
 
-/** The saved dictation engine and read-aloud voice in words, and the skills that registered a live conversation
- *  (`store`: the contributions store; `speech`: the speech hub). Pure over the two. */
-export function voiceFacts({ speech = getSpeech(), store = getContributions() } = {}) {
+const skillFormPath = (skill) => `skill/${encodeURIComponent(skill)}`;
+
+/** The saved dictation engine and read-aloud voice in words, and the skills that registered a live conversation and a
+ *  settings form, each named by its form's own title (`store`: the contributions store; `speech`: the speech hub;
+ *  `forms`: the skill forms the last read of the skills knows). Pure over the three. */
+export function voiceFacts({ speech = getSpeech(), store = getContributions(), forms = skillForms(),
+    title = (skill) => skillFormTitle(skillFormPath(skill)) } = {}) {
     const engine = speech.selected('stt');
     const reader = speech.readAloud();
     let voices = [];
     try { voices = reader?.available ? reader.impl?.voices?.() || [] : []; } catch { voices = []; }
     const voice = speech.voiceId();
-    const seen = new Set();
+    const formed = new Set(forms.map((form) => form.skill));
+    const talking = new Set(store.providers('conversation').map((item) => item.skill).filter((skill) => skill && formed.has(skill)));
     return {
         dictation: !engine.key ? 'Not chosen' : engine.label ? `${engine.label}${engine.available ? '' : ' · not ready here'}` : 'Chosen engine is not here',
         dictationNote: engine.key && !engine.available ? engine.reason || '' : '',
         readAloud: !reader ? 'No voice on this device' : !reader.available ? `${reader.label || 'Chosen engine'} · not ready here`
             : `${voices.find((each) => each.id === voice)?.label || 'Automatic'}${reader.label ? ` · ${reader.label}` : ''}`,
         readAloudNote: reader && !reader.available ? reader.reason || '' : '',
-        calls: store.providers('conversation').filter((item) => item.skill && !seen.has(item.skill) && seen.add(item.skill))
-            // Named by the feature's own label: a skill's label is its folder name when its manifest gives no other.
-            .map((item) => ({ skill: item.skill, name: item.label || item.skill_label || item.skill })),
+        calls: [...talking].map((skill) => ({ skill, name: title(skill) })),
     };
 }
 
-// No setting lives here: each row says a saved choice and where it is made. A skill's own form is one press away.
+// No setting lives here: each row says a saved choice and where it is made. A skill's own form is one press away: the
+// skills are read when the page is shown (a passive read), which is how the page knows who has a form and its title.
 function mountVoice(container, { ctx }) {
     const speech = getSpeech();
     const store = getContributions();
@@ -253,7 +255,7 @@ function mountVoice(container, { ctx }) {
     const render = () => {
         const facts = voiceFacts({ speech, store });
         const doors = facts.calls.map((call) => ({ id: `voice:skill:${call.skill}`, keys: [], page: 'voice', fold: false, name: call.name,
-            meta: 'Its own settings, on its own page.', more: '', control: { kind: 'door', to: `skill/${call.skill}` } }));
+            meta: 'Its own settings, on its own page.', more: '', control: { kind: 'door', to: skillFormPath(call.skill) } }));
         const rows = [{ ...base['voice:dictation'], meta: facts.dictationNote || base['voice:dictation'].meta },
             { ...base['voice:read-aloud'], meta: facts.readAloudNote || base['voice:read-aloud'].meta }, ...doors];
         const shape = JSON.stringify([rows.map((row) => [row.id, row.name, row.meta]), facts.dictation, facts.readAloud]);
@@ -268,8 +270,17 @@ function mountVoice(container, { ctx }) {
         handle = bindSettingRows(container, { rows, openDoor: (door) => ctx.openSettings?.(door.control.to) });
     };
     render();
-    const offs = [speech.onChange(render), store.onChange(render)];
-    return { unmount() { offs.forEach((off) => off?.()); handle?.dispose(); } };
+    let gone = false;
+    const read = () => readSkills().then(() => { if (!gone) render(); }, () => {});  // a failed read keeps what is drawn
+    const onShown = (event) => { if (event.detail?.path === 'voice') void read(); };
+    globalThis.window?.addEventListener?.('ouro:settings-page-shown', onShown);
+    const offs = [speech.onChange(render), store.onChange(() => { render(); void read(); })];
+    return { unmount() {
+        gone = true;
+        globalThis.window?.removeEventListener?.('ouro:settings-page-shown', onShown);
+        offs.forEach((off) => off?.());
+        handle?.dispose();
+    } };
 }
 
 /* ---- This computer ------------------------------------------------------------------------------------------------- */
@@ -292,8 +303,8 @@ CODECS.network = {
         return { [HOST_KEY]: value, ...(password ? { [PASSWORD_KEY]: password } : {}) };
     },
     running: (settings) => {
-        const state = settings?._meta?.restart_state;
-        const applied = state?.running?.[HOST_KEY] ?? (state?.restart_keys?.includes(HOST_KEY) ? settings._meta.bind_host : undefined);
+        // The address in force while the saved one waits for a restart, as one of the two choices.
+        const applied = settings?._meta?.restart_state?.running?.[HOST_KEY];
         return applied === undefined ? undefined : hostChoice(applied);
     },
 };

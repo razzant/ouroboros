@@ -36,8 +36,7 @@ function fakeServer(routes, values = {}) {
             policy_state: { access: { configured: now.OUROBOROS_RUNTIME_MODE, current_process: running.OUROBOROS_RUNTIME_MODE,
                 effective: running.OUROBOROS_RUNTIME_MODE, restart_required: now.OUROBOROS_RUNTIME_MODE !== running.OUROBOROS_RUNTIME_MODE },
             review: { configured: now.OUROBOROS_REVIEW_ENFORCEMENT, next_task: now.OUROBOROS_REVIEW_ENFORCEMENT } },
-            // An older server says which keys wait and not what runs: `running` is the newer answer (server.withRunning).
-            restart_state: { restart_keys: pending, ...(server.withRunning ? { running: Object.fromEntries(pending.map((key) => [key, running[key]])) } : {}) } } };
+            restart_state: { restart_keys: pending, running: Object.fromEntries(pending.map((key) => [key, running[key]])) } } };
     };
     const write = (changed) => Object.fromEntries(Object.entries(changed).filter(([key, value]) => String(server.values[key]) !== String(value))
         .map(([key, value]) => { const old = server.values[key]; server.values[key] = value; return [key, { old, new: value }]; }));
@@ -58,16 +57,17 @@ function fakeServer(routes, values = {}) {
     routes.set('/api/desktop/autostart', response({ state: 'on' }));
     routes.set('/api/desktop/background', response({ state: 'off' }));
     routes.set('/api/state', response({ served_ui: { source: 'builtin' } }));
+    routes.set('/api/extensions', response({ live: { settings_sections: [] }, skills: [] }));
     server.writes = (path) => server.posts.filter(([posted]) => posted === path).map(([, body]) => body);
     return server;
 }
 
 /** Mount `path` the way the shell does and show it; `asked` collects the questions the page asked first. */
-async function open(t, path, { values = {}, answer = true, withRunning = false } = {}) {
+async function open(t, path, { values = {}, answer = true } = {}) {
     forgetSettingRows();
     forgetUnsavedRules();
     const env = setup(t);
-    const server = Object.assign(fakeServer(env.routes, values), { withRunning });
+    const server = fakeServer(env.routes, values);
     const asked = [];
     const opened = [];
     const container = new NodeStub();
@@ -137,43 +137,41 @@ test('the Safety scale reads Off, Outgoing, + Commands wherever it is drawn, and
 });
 
 test('Access is four choices, each with its line; its meta says both values while a restart waits and one line otherwise', async (t) => {
-    for (const withRunning of [false, true]) {  // an older server's policy_state alone, and the newer `restart_state.running`
-        const page = await open(t, 'permissions', { withRunning });
-        const access = page.row('OUROBOROS_RUNTIME_MODE');
-        assert.equal(access.dataset.kind, 'choices');
-        const options = access.querySelectorAll('[role="radio"]');
-        assert.deepEqual(options.map((button) => button.querySelector('.settings-choice-name').textContent), ['Light', 'Advanced', 'Pro', 'Cyber Pro']);
-        assert.equal(options[3].querySelector('.settings-choice-note').textContent, 'Full say over itself and this computer. Reviews advise, it decides.');
-        assert.equal(access.querySelector('[role="radiogroup"]').getAttribute('aria-labelledby'), 'setting-OUROBOROS_RUNTIME_MODE-name');
-        assert.deepEqual(options.map((button) => button.getAttribute('aria-checked')), ['false', 'false', 'true', 'false']);
-        assert.deepEqual(options.map((button) => button.tabIndex), [-1, -1, 0, -1], 'one tab stop: the chosen level');
-        assert.equal(page.meta('OUROBOROS_RUNTIME_MODE'), 'How far it reaches into its own code and this computer.');
-        assert.deepEqual(access.querySelectorAll('[data-setting-mark]').map((mark) => mark.textContent), ['', '', '', ''], 'nothing waits: no mark');
+    const page = await open(t, 'permissions');
+    const access = page.row('OUROBOROS_RUNTIME_MODE');
+    assert.equal(access.dataset.kind, 'choices');
+    const options = access.querySelectorAll('[role="radio"]');
+    assert.deepEqual(options.map((button) => button.querySelector('.settings-choice-name').textContent), ['Light', 'Advanced', 'Pro', 'Cyber Pro']);
+    assert.equal(options[3].querySelector('.settings-choice-note').textContent, 'Full say over itself and this computer. Reviews advise, it decides.');
+    assert.equal(access.querySelector('[role="radiogroup"]').getAttribute('aria-labelledby'), 'setting-OUROBOROS_RUNTIME_MODE-name');
+    assert.deepEqual(options.map((button) => button.getAttribute('aria-checked')), ['false', 'false', 'true', 'false']);
+    assert.deepEqual(options.map((button) => button.tabIndex), [-1, -1, 0, -1], 'one tab stop: the chosen level');
+    assert.equal(page.meta('OUROBOROS_RUNTIME_MODE'), 'How far it reaches into its own code and this computer.');
+    assert.deepEqual(access.querySelectorAll('[data-setting-mark]').map((mark) => mark.textContent), ['', '', '', ''], 'nothing waits: no mark');
 
-        // Raising asks first; declined, nothing is sent and nothing changes.
-        page.asked.length = 0;
-        const declined = await open(t, 'permissions', { withRunning, answer: false });
-        await declined.press(declined.option('OUROBOROS_RUNTIME_MODE', 'cyber_pro'));
-        assert.equal(declined.asked[0].title, 'Raise Access');
-        assert.deepEqual(declined.server.writes('/api/owner/runtime-mode'), []);
-        assert.equal(declined.option('OUROBOROS_RUNTIME_MODE', 'pro').getAttribute('aria-checked'), 'true');
+    // Raising asks first; declined, nothing is sent and nothing changes.
+    page.asked.length = 0;
+    const declined = await open(t, 'permissions', { answer: false });
+    await declined.press(declined.option('OUROBOROS_RUNTIME_MODE', 'cyber_pro'));
+    assert.equal(declined.asked[0].title, 'Raise Access');
+    assert.deepEqual(declined.server.writes('/api/owner/runtime-mode'), []);
+    assert.equal(declined.option('OUROBOROS_RUNTIME_MODE', 'pro').getAttribute('aria-checked'), 'true');
 
-        const raised = await open(t, 'permissions', { withRunning });
-        await raised.press(raised.option('OUROBOROS_RUNTIME_MODE', 'cyber_pro'));
-        assert.match(raised.asked[0].body, /^Raise Access from Pro to Cyber Pro\?/);
-        assert.deepEqual(raised.server.writes('/api/owner/runtime-mode'), [{ mode: 'cyber_pro' }]);
-        assert.equal(raised.meta('OUROBOROS_RUNTIME_MODE'), 'Running: Pro · after restart: Cyber Pro', 'both values, from the read after the write');
-        assert.equal(raised.line('OUROBOROS_RUNTIME_MODE'), 'Saved · applies after restart');
-        const marks = raised.row('OUROBOROS_RUNTIME_MODE').querySelectorAll('[data-setting-mark]').map((mark) => mark.textContent);
-        assert.deepEqual(marks, ['', '', 'Now', 'After restart'], 'the level in force and the chosen one, in words');
-        assert.equal(raised.option('OUROBOROS_RUNTIME_MODE', 'cyber_pro').getAttribute('aria-checked'), 'true');
-        // Lowering back to the level in force asks nothing, and nothing waits any more.
-        raised.asked.length = 0;
-        await raised.press(raised.option('OUROBOROS_RUNTIME_MODE', 'pro'));
-        assert.deepEqual(raised.asked, []);
-        assert.equal(raised.meta('OUROBOROS_RUNTIME_MODE'), 'How far it reaches into its own code and this computer.');
-        assert.deepEqual(raised.row('OUROBOROS_RUNTIME_MODE').querySelectorAll('[data-setting-mark]').map((mark) => mark.textContent), ['', '', '', '']);
-    }
+    const raised = await open(t, 'permissions');
+    await raised.press(raised.option('OUROBOROS_RUNTIME_MODE', 'cyber_pro'));
+    assert.match(raised.asked[0].body, /^Raise Access from Pro to Cyber Pro\?/);
+    assert.deepEqual(raised.server.writes('/api/owner/runtime-mode'), [{ mode: 'cyber_pro' }]);
+    assert.equal(raised.meta('OUROBOROS_RUNTIME_MODE'), 'Running: Pro · after restart: Cyber Pro', 'both values, from the read after the write');
+    assert.equal(raised.line('OUROBOROS_RUNTIME_MODE'), 'Saved · applies after restart');
+    const marks = raised.row('OUROBOROS_RUNTIME_MODE').querySelectorAll('[data-setting-mark]').map((mark) => mark.textContent);
+    assert.deepEqual(marks, ['', '', 'Now', 'After restart'], 'the level in force and the chosen one, in words');
+    assert.equal(raised.option('OUROBOROS_RUNTIME_MODE', 'cyber_pro').getAttribute('aria-checked'), 'true');
+    // Lowering back to the level in force asks nothing, and nothing waits any more.
+    raised.asked.length = 0;
+    await raised.press(raised.option('OUROBOROS_RUNTIME_MODE', 'pro'));
+    assert.deepEqual(raised.asked, []);
+    assert.equal(raised.meta('OUROBOROS_RUNTIME_MODE'), 'How far it reaches into its own code and this computer.');
+    assert.deepEqual(raised.row('OUROBOROS_RUNTIME_MODE').querySelectorAll('[data-setting-mark]').map((mark) => mark.textContent), ['', '', '', '']);
 });
 
 test('a choices group is one radio group: the arrows, Home and End move between its options and only a press chooses', async (t) => {
@@ -334,29 +332,33 @@ test('Notifications keeps the notifier\'s own switches, as switches that act at 
 test('Voice and calls says the saved choices and opens the form of whoever registered a live conversation', async (t) => {
     const hub = ({ engine = { key: '' }, reader = null, voice = '' }) => ({ selected: () => engine, readAloud: () => reader, voiceId: () => voice });
     const store = (items) => ({ providers: (kind) => items.filter((item) => item.provides === kind) });
-    assert.deepEqual(voiceFacts({ speech: hub({}), store: store([]) }),
+    const title = (skill) => ({ some_call_skill: 'Calls (beta)' }[skill] || skill);
+    assert.deepEqual(voiceFacts({ speech: hub({}), store: store([]), forms: [], title }),
         { dictation: 'Not chosen', dictationNote: '', readAloud: 'No voice on this device', readAloudNote: '', calls: [] });
     const voices = [{ id: 'milena', label: 'Milena' }];
+    const talking = store([{ provides: 'conversation', skill: 'some_call_skill', skill_label: 'some_call_skill', label: 'Live Conversation' },
+        { provides: 'conversation', skill: 'some_call_skill', label: 'A second entry of the same skill' }, { provides: 'stt', skill: 'whisper-voice' },
+        { provides: 'conversation', skill: 'formless_skill', label: 'Talks, with no form of its own' }]);
     const facts = voiceFacts({
         speech: hub({ engine: { key: 'whisper-voice:stt', label: 'Whisper', available: true }, voice: 'milena',
             reader: { key: 'device:tts', label: 'This device', available: true, impl: { voices: () => voices } } }),
-        store: store([{ provides: 'conversation', skill: 'some_call_skill', skill_label: 'some_call_skill', label: 'Live Conversation' },
-            { provides: 'conversation', skill: 'some_call_skill', label: 'A second entry of the same skill' }, { provides: 'stt', skill: 'whisper-voice' },
-            { provides: 'conversation', skill: 'bare_skill', skill_label: 'Bare skill' }]),
+        store: talking, forms: [{ skill: 'some_call_skill' }, { skill: 'whisper-voice' }], title,
     });
     assert.deepEqual([facts.dictation, facts.readAloud], ['Whisper', 'Milena · This device']);
-    assert.deepEqual(facts.calls, [{ skill: 'some_call_skill', name: 'Live Conversation' }, { skill: 'bare_skill', name: 'Bare skill' }],
-        'one door per skill, named by the feature it registered, else by the skill');
+    assert.deepEqual(facts.calls, [{ skill: 'some_call_skill', name: 'Calls (beta)' }],
+        'one door per skill that registered a live conversation and a form, named by the form\'s own title');
+    assert.deepEqual(voiceFacts({ speech: hub({}), store: talking, forms: [], title }).calls, [], 'no form known, no door to open');
     // An engine that cannot run here says so, with the reason as the row's line.
     const broken = voiceFacts({ speech: hub({ engine: { key: 'x:stt', label: 'Whisper', available: false, reason: 'The chosen engine has not started.' },
-        reader: { key: 'y:tts', label: 'Cloud voice', available: false, reason: 'Read aloud is unavailable here.' } }), store: store([]) });
+        reader: { key: 'y:tts', label: 'Cloud voice', available: false, reason: 'Read aloud is unavailable here.' } }), store: store([]), forms: [], title });
     assert.deepEqual([broken.dictation, broken.dictationNote, broken.readAloud, broken.readAloudNote],
         ['Whisper · not ready here', 'The chosen engine has not started.', 'Cloud voice · not ready here', 'Read aloud is unavailable here.']);
-    // The page has no control of its own, and core code names no skill: the door's target comes from the store.
+    // The page has no control of its own, and core code names no skill: the door's target comes from the two stores.
     const page = await open(t, 'voice');
     assert.deepEqual(page.container.querySelectorAll('[data-setting-row]').map((row) => row.dataset.settingRow), ['voice:dictation', 'voice:read-aloud']);
     assert.equal(page.container.querySelectorAll('[data-setting-control], input, select').length, 0);
     assert.equal(page.meta('voice:dictation'), 'Chosen at the message field: +, then Add dictation.');
+    assert.ok(page.calls.includes('/api/extensions'), 'the skills are read when the page is shown');
     assert.doesNotMatch(settingsPageSource(), /live_conversation|skill\/[a-z]/, 'no skill id is written in the page');
 });
 

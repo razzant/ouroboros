@@ -44,7 +44,7 @@ export const ROWS = [
             { value: 'pro', label: 'Pro', note: 'May change its protected core. Every change passes review.' },
             { value: 'cyber_pro', label: 'Cyber Pro', note: 'Full say over itself and this computer. Reviews advise, it decides.' }] },
         aliases: ['Runtime mode', 'self-modification', 'own code', 'Light', 'Advanced', 'Pro', 'Cyber Pro'],
-        writer: 'runtimeMode', codec: 'access', confirm: 'raiseAccess', hiddenWhen: '' },
+        writer: 'runtimeMode', codec: '', confirm: 'raiseAccess', hiddenWhen: '' },
     { id: 'OUROBOROS_SAFETY_MODE', keys: ['OUROBOROS_SAFETY_MODE'], page: 'permissions', fold: false,
         name: 'Work you gave it', meta: 'What a second model reads before a step of your tasks runs.',
         more: 'Outside Cyber Pro Ouroboros cannot lower its own checks; under Cyber Pro it may set them too. Every step a lower level lets through is recorded.',
