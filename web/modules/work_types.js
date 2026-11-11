@@ -3,10 +3,17 @@
 // Words come from the server's codes through tr(); a client never derives a state, mark or control.
 
 /**
+ * The owner's cited words, bounded for publication (CLIENT_CONTRACT §5); text stays authored.
+ * @typedef {Object} CitedModelWords
+ * @property {string} text
+ * @property {boolean} clipped  // the durable citation is longer than this published span
+ */
+/**
  * A work's primary route and whose choice it is.
  * @typedef {Object} WorkPrimaryRoute
  * @property {string} model
  * @property {boolean} use_local
+ * @property {CitedModelWords=} cited
  * @property {string} basis  // main | a role it follows | room | owner | owner_words | mind | fallback | place | circle
  */
 /**
@@ -15,6 +22,7 @@
  * @typedef {Object} WorkLead
  * @property {string} model
  * @property {boolean} use_local
+ * @property {CitedModelWords=} cited
  * @property {string} basis
  * @property {string=} role  // a fallback's chain row (`fallback:<n>`, n from 0): tells apart two rows of one model
  * @property {WorkPrimaryRoute=} primary  // only when the acting route is not the primary
