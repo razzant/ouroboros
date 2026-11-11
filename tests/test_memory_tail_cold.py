@@ -1012,6 +1012,21 @@ def test_two_rows_of_one_task_with_different_lineage_fields_get_their_own_answer
     _same(monkeypatch, tmp_path, rooms)
 
 
+def test_a_row_a_page_sealed_after_the_set_was_composed_is_read_and_counted_until_a_whole_pass(tmp_path):
+    """A page published since the set (no rejection, no writer of a row it left unread) keeps the set standing; the rows
+    it sealed were open when the set was composed, so they are read until the next whole pass, and the receipt says so."""
+    rooms = _settled(tmp_path)
+    _append(tmp_path, shared.msg(_ts(1), "Open then.", client_message_id="then"))
+    _append(tmp_path, shared.msg(_ts(2), "Later word.", client_message_id="later"))
+    _fill(tmp_path)
+    _compose(tmp_path)
+    _seal(tmp_path, _entry(tmp_path, "Open then."), 1)
+    work = _work(tmp_path, rooms)
+    assert work.get("tail_whole", 0) == 0 and "rows_cold" in work, work
+    assert work.get("rows_stale") == 1, work  # read: the set named it read while it was open
+    assert work["rows_read"] == work["rows_open"] + work["rows_kept"] + work["rows_stale"], work  # law L7d
+
+
 def test_a_build_receipt_says_whether_the_set_acted_and_what_it_left_unread(tmp_path):
     rooms, row = _sealed_main_row(tmp_path)
     create_project(tmp_path, "gamma", name="Gamma")

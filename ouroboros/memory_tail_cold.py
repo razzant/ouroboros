@@ -164,10 +164,12 @@ def rows_of(store: Any, held: Mapping[str, Any], chats: Iterable[int]) -> Option
 
 def settle(store: Any, derived: Optional[Mapping[str, Any]], tail: Any, found: Any) -> None:
     """Count what this capture's pass read: on the set, the rows it left unread (``rows_cold``) and the rows it read
-    that no room shows open, each kept by a rule or new since the stored facts (``rows_kept``: with the open rows, all
-    it reads, law L7d); else a pass over the whole tail (``tail_whole``). After a whole pass of a capture that read the
-    marks over a complete stored tail, store what no reader used as the set, with those marks, in one index
-    transaction. A busy index or a stored tail replaced meanwhile stores nothing: the next whole pass does."""
+    that no room shows open, each kept by a rule or new since the stored facts (``rows_kept``), or read only because
+    the set, composed while they were still needed (open then), names them read until the next whole pass
+    (``rows_stale``: a page sealed them since); with the open rows, all it reads (law L7d). Else a pass over the whole
+    tail (``tail_whole``). After a whole pass of a capture that read the marks over a complete stored tail, store what
+    no reader used as the set, with those marks, in one index transaction. A busy index or a stored tail replaced
+    meanwhile stores nothing: the next whole pass does."""
     from ouroboros.context_timing import counted
 
     snapshot = store._pinned()
@@ -175,8 +177,11 @@ def settle(store: Any, derived: Optional[Mapping[str, Any]], tail: Any, found: A
         stored, writers = {row[0] for row in snapshot.tail_rows}, _writers(snapshot)
         shown = {entry[2] for entries in found.rooms.values() for entry in entries}
         counted("rows_cold", int(derived[HELD].get("rows") or 0))
-        counted("rows_kept", sum(1 for pos, _address, meta, terminal in tail.rows if pos not in shown and (
-            pos not in stored or pos in found.kept or _kept(meta, terminal, writers))))
+        kept = [pos not in stored or pos in found.kept or _kept(meta, terminal, writers)
+                for pos, _address, meta, terminal in tail.rows if pos not in shown]
+        counted("rows_kept", sum(kept))
+        if not all(kept):
+            counted("rows_stale", len(kept) - sum(kept))
         return
     counted("tail_whole")
     if derived and derived.get(GATE) and tail.complete and snapshot is not None and not snapshot.proposed:
