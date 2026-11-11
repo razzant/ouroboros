@@ -753,7 +753,6 @@
  */
 
 /** @typedef {import('./client_contract_types.js').ProjectMirrorHistoryFields} ProjectMirrorHistoryFields */
-/** @typedef {import('./management_contract_types.js').SkillReviewHistoryDetailResponse} SkillReviewHistoryDetailResponse */
 
 /** Additive /api/chat/history terminality projection.
  * @typedef {Object} TaskOutcomeHistoryFields
@@ -955,12 +954,6 @@
  * @property {string} safety_mode  // full | light | off (v6.54.3)
  */
 
-/** @typedef {import('./management_contract_types.js').InstalledSkill} InstalledSkill */
-
-/** @typedef {import('./management_contract_types.js').SkillToggleResponse} SkillToggleResponse */
-
-/** @typedef {import('./management_contract_types.js').SkillReconcileResponse} SkillReconcileResponse */
-
 /**
  * One Widgets card from `GET /api/widgets` (`gateway/widgets.py::WidgetTab`).
  * `revision` is the owning skill's live payload content hash — a change
@@ -1045,8 +1038,6 @@
  * @property {string} summary
  * @property {string} repair_hint
  */
-
-/** @typedef {import('./management_contract_types.js').SkillReviewResponse} SkillReviewResponse */
 
 /**
  * `POST /api/skills/{skill}/grants`; refusals use `SkillActionRefusal`, slow setup {ok, pending: true, job_id, message}.
