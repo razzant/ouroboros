@@ -321,6 +321,14 @@ def test_every_published_and_owned_shape_has_one_field_identical_browser_twin():
         "ouroboros.gateway.management_contracts", "ouroboros.gateway.history_contracts"))
 
 
+@pytest.mark.parametrize("name", ["WorkLead", "WorkPrimaryRoute", "CitedModelWords"])
+def test_nested_lead_provenance_has_a_field_identical_browser_twin(name):
+    # Inline schemas do not appear in the published document's top-level name list.
+    text = (REPO / "web" / "modules" / "work_types.js").read_text(encoding="utf-8")
+    assert re.search(rf"@typedef \{{Object\}} {name}\b", text), f"work contract twins lack {name}"
+    assert _js_typedef_fields(text, name) == set(typing.get_type_hints(contract_typed_dict(name), include_extras=True)), name
+
+
 def test_every_request_and_header_fact_is_published_for_the_journeys():
     requests = {token: entry.get("request", {}).get("schemas") for token, entry in BY_TOKEN.items()}
     for token in ("POST /api/files/write", "POST /api/projects/from-task", "POST /api/skills/{skill}/toggle",
