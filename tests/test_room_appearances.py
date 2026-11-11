@@ -627,11 +627,12 @@ class TestSavedTargetRecovery:
         assert mi.rooms_of_row(mi.row_meta(stored.row), mi.membership_facts(tmp_path)) == {str(written), str(nova)}
         assert ds.row_at(tmp_path, "chat", stored.seq).row == stored.row
 
-    def test_a_target_in_a_planned_segment_is_never_cached_absent_and_is_found_once_imported(self, tmp_path):
+    def test_a_target_in_a_planned_segment_is_never_cached_absent_and_is_found_once_imported(self, tmp_path, monkeypatch):
         """The stream ends are the cache's change counter, and the archive import fills intervals planned before it
         without moving them. While such a segment waits no read can decide its rows absent (the store answers
-        importing and nothing is kept), so its import finds no stale decision. A segment restored later is placed past
-        the ends and imported by the replan itself: the ends move then."""
+        importing and nothing is kept), and a read whose lookup the import's end overtakes looks again before it
+        keeps an absence, so the import leaves no stale decision. A segment restored later is placed past the ends
+        and imported by the replan itself: the ends move then."""
         from ouroboros import dialogue_import, room_membership
         from ouroboros.projects_registry import RoomResolver
         from ouroboros.store import StoreMigrating
@@ -648,7 +649,19 @@ class TestSavedTargetRecovery:
         with pytest.raises(StoreMigrating):
             room_membership._saved_target(RoomResolver(tmp_path), legacy)
         assert (str(tmp_path), legacy["address"]) not in room_membership._SAVED_TARGETS
-        import_all(tmp_path)
+        looked, overtaken = ds.rows_by_identity, []
+
+        def lookup(*args, **kwargs):  # the job imports the last segment right after this read's first lookup
+            rows = looked(*args, **kwargs)
+            if not overtaken:
+                overtaken.append(True)
+                import_all(tmp_path)
+            return rows
+
+        with monkeypatch.context() as racing:
+            racing.setattr(ds, "rows_by_identity", lookup)
+            assert room_membership._saved_target(RoomResolver(tmp_path), legacy)[0] == room_membership.TARGET_WORK
+        assert overtaken and not dialogue_import.pending_segments(tmp_path)
         assert room_membership._stream_ends(tmp_path) == planned  # the import filled the planned interval in place
         assert room_membership._saved_target(RoomResolver(tmp_path), legacy)[0] == room_membership.TARGET_WORK
 
@@ -692,7 +705,8 @@ class TestSavedTargetRecovery:
 
     def test_a_target_not_found_is_read_again_only_after_the_store_moved(self, tmp_path, monkeypatch):
         """The bound of the recovery: a found target is read again only when a chat text was revised since;
-        one not found, also when a stream's end moved (an append, a planned segment): never on every read."""
+        one not found, also when a stream's end moved (an append, a planned segment): never on every read.
+        A miss looks twice in each stream (an import may end during its first look)."""
         from ouroboros import chat_chain, room_membership
         from ouroboros.projects_registry import RoomResolver
 
@@ -708,17 +722,17 @@ class TestSavedTargetRecovery:
         for _ in range(3):
             assert room_membership._saved_target(rooms, found)[0] == room_membership.TARGET_WORK
             assert room_membership._saved_target(rooms, missing)[0] == room_membership.TARGET_ABSENT
-        assert reads.count(found["address"]) == 1 and reads.count(missing["address"]) == 2  # chat, then progress
+        assert reads.count(found["address"]) == 1 and reads.count(missing["address"]) == 4  # chat, progress: twice
         later = ds.append(tmp_path, "chat", {"ts": "2026-10-01T07:00:00Z", "direction": "out", "chat_id": 1, "text": "later"})
         for _ in range(3):
             room_membership._saved_target(rooms, found)
             room_membership._saved_target(rooms, missing)
-        assert reads.count(found["address"]) == 1 and reads.count(missing["address"]) == 4
+        assert reads.count(found["address"]) == 1 and reads.count(missing["address"]) == 8
         ds.revise_text(tmp_path, "chat", later.seq, "later, as corrected")  # any row's address may answer anew
         for _ in range(3):
             assert room_membership._saved_target(rooms, found)[0] == room_membership.TARGET_WORK
             assert room_membership._saved_target(rooms, missing)[0] == room_membership.TARGET_ABSENT
-        assert reads.count(found["address"]) == 2 and reads.count(missing["address"]) == 6
+        assert reads.count(found["address"]) == 2 and reads.count(missing["address"]) == 12
 
     def test_a_revised_target_is_decided_at_its_exact_address_now_by_a_running_and_a_new_process(self, tmp_path):
         """Owner decision 2026-11-11: a Reply whose room its target row decides (one saved without

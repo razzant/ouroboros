@@ -73,10 +73,11 @@ def _text_revision(root: Any) -> int:
 def _stream_ends(root: Any) -> tuple:
     """The dialogue streams' ends (``dialogue_store.stream_end``, the readers' change counter): an append and
     a newly planned segment move them. The archive import stores rows under unchanged ends, but only into
-    intervals planned before it, and while one is pending ``resolve_row`` answers importing, so no not-found
-    decision is kept. Apart from a text revision (``_text_revision``) no code rewrites the rows or skipped lines
-    of an imported interval in place; were it done by hand, this process would see it after the next append,
-    text revision or restart."""
+    intervals planned before it: while one is pending ``resolve_row`` answers importing, and a miss is looked up
+    once more after both streams answered imported (``_target_facts``), so no not-found decision outlives an
+    import. Apart from a text revision (``_text_revision``) no code rewrites the rows or skipped lines of an
+    imported interval in place; were it done by hand, this process would see it after the next append, text
+    revision or restart."""
     from ouroboros import dialogue_store as ds
 
     return tuple(ds.stream_end(root, stream) for stream in ds.STREAMS)
@@ -115,13 +116,16 @@ def _target_facts(rooms: Any, ref: Mapping[str, Any]) -> tuple:
     from ouroboros.chat_chain import _row_chat_id, resolve_row
     from ouroboros.presence_owner_contact import private_main_row
 
-    target, statuses = None, set()
-    for stream in ("chat", "progress"):
-        target, found = resolve_row(root, address, stream=stream)
+    for _look in range(2):  # a miss looks once more: a stream that answered it was imported by then, so the rows
+        target, statuses = None, set()  # an import stored during the first look, under unchanged marks, are read
+        for stream in ("chat", "progress"):
+            target, found = resolve_row(root, address, stream=stream)
+            if target:
+                break
+            status = found.get("status")
+            statuses.add("row_unreadable" if status == "row_mismatch" and dp.skipped_between(root, stream) else status)
         if target:
             break
-        status = found.get("status")
-        statuses.add("row_unreadable" if status == "row_mismatch" and dp.skipped_between(root, stream) else status)
     if target:
         decision, ends = (reply_target_home(target), str(target.get("task_id") or ""), _row_chat_id(target),
                           private_main_row(dict(target))), None
