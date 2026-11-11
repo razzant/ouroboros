@@ -478,8 +478,7 @@ def get_tools() -> List[ToolEntry]:
             "description": (
                 'Switch model or reasoning effort on the next round. No arguments lists available models. After a host '
                 "fallback, primary='return' or 'wait' returns to this turn's primary route. "
-                "A model beyond Main and Light needs your human's cited words. Verified owner_words choose "
-                "this work's primary, its room's saved model, or Main itself through the owner's settings paths."
+                "A model beyond Main and Light needs your human's cited words (owner_words, scope)."
             ),
             "parameters": {"type": "object", "properties": {
                 "model": {"type": "string", "description": "Exact model route. Cited work/Main choices require it; cited scope room accepts empty or main to follow Main. An uncited empty work switch keeps its acting route."},
