@@ -89,7 +89,8 @@ export function createModelList({ el, input, id, store, main, current, recents, 
                     + '<span class="chat-model-row-id">Add a subscription or a key in Settings › Accounts</span></div>');
             } else if (index.sources.length === 1) {
                 // One source: its models at once, no source step.
-                listRows(searchModels(index, '', index.sources[0].id));
+                section(index.sources[0].label);
+                listRows(mainRow && mainRoute ? others : index.rows);
             } else {
                 section('Sources');
                 for (const entry of index.sources) {

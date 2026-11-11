@@ -484,10 +484,12 @@ server offers no model control for has no tick. Each tick is one act after the M
 again; a room's own model is cleared), there is no batch, and a second sheet says each one's own result. Its strip is `Main · the two most recent models · Search` (one recent in the stack layout)
 under a neutral thumb; a press chooses, arrows only move. **Search is a field in the row; its suggestions float
 above the row like the hint and never move the composer**: Main, the recents, then the sources
-that can lead a work (those Settings offers the Main role, never agent sessions; with one source, its models at
-once). A row is one model through one source, however many accounts list it, never an account: the source, whether
+that can lead a work (those Settings offers the Main role, never agent sessions). With one source, its models stand
+under its own name without a source step; when Main has a row above, its model is omitted from this section.
+A recent may also appear under its source. A row is one model through one source, however many accounts list it, never an account: the source, whether
 it is a subscription or paid by key, its window when known (an unknown window is omitted), `Unavailable` when no
-account can serve it now; where a line cannot hold both, the facts go under the model's name, which keeps its line. Search spans the sources, a model once per provider; a key that cannot send keeps
+account can serve it now; where a line cannot hold both, the facts go under the model's name, which keeps its line,
+and wrapped facts read from the same start on each line. Search spans the sources, a model once per provider; a key that cannot send keeps
 Settings' "(no key)", "(off)", "(removed)"; where only Main can lead, the list says so and leads to Settings ›
 Accounts. The catalog suggests and never admits: any id can be used as typed. It is read when the capsule opens,
 never polled. Under a finger opening raises no keyboard: the field takes focus on its own press. Escape clears the

@@ -5369,7 +5369,7 @@ html[data-layout="stack"] .chat-model-mode[data-search="true"] .chat-capsule-hea
 /* The suggestions: the popups' floating material above the row (as wide as the row in the stack layout), scrolling
    inside itself under the rule line. A row is one model through one source: the source's mark, the model, then its
    window when known, the source and how the source is paid. Where a row cannot hold both on one line (a narrow pane,
-   a long model name) the facts go under the name, at the line's end, and the name keeps its line. */
+   a long model name) the facts go under the name; wrapped lines share its start, and the name keeps its line. */
 .ui-popup.chat-model-list {
     display: flex;
     flex-direction: column;
@@ -5415,11 +5415,11 @@ html[data-layout="stack"] .ui-popup.chat-model-list { width: var(--ui-popup-anch
 .chat-model-row-facts {
     flex: 0 1 auto;
     min-width: 0;
-    max-width: 100%;
+    max-width: calc(100% - 14px - var(--space-2));
     margin-inline-start: auto;
     white-space: normal;
     overflow-wrap: anywhere;
-    text-align: end;
+    text-align: start;
 }
 :is(.chat-model-typed, .chat-model-door) .chat-model-row-id { color: var(--text-secondary); }
 .chat-model-section, .chat-model-note, .chat-model-rule {

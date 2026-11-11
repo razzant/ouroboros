@@ -76,6 +76,23 @@ _WIDE = "() => document.documentElement.scrollWidth - window.innerWidth"
 _FACTS_OVER = """() => [...document.querySelectorAll('.chat-model-row-facts')]
     .filter((node) => node.getClientRects().length && node.scrollWidth > node.clientWidth + 0.5)
     .map((node) => node.textContent)"""
+_LIST_GROUPS = """() => {
+    const list = document.querySelector('.ui-popup.chat-model-list .chat-model-rows, .card-model-pop .chat-model-rows');
+    const groups = [{heading: '', models: []}];
+    for (const node of list.children) {
+        if (node.classList.contains('chat-model-section')) groups.push({heading: node.textContent, models: []});
+        else if (node.classList.contains('chat-model-row')) groups.at(-1).models.push(node.querySelector('.chat-model-row-id').textContent);
+    }
+    return groups;
+}"""
+_FACT_LINES = """() => [...document.querySelectorAll('.ui-popup.chat-model-list .chat-model-row')].map(row => {
+    const facts = row.querySelector('.chat-model-row-facts');
+    const name = row.querySelector('.chat-model-row-id').getBoundingClientRect();
+    const range = document.createRange();
+    range.selectNodeContents(facts);
+    return {text: facts.textContent, nameLeft: name.left, nameBottom: name.bottom,
+        lines: [...range.getClientRects()].map(r => ({left: r.left, top: r.top, right: r.right}))};
+})"""
 
 # ---------------------------------------------------------------------------------------------------------------------
 # 1. The capsule on a large catalog
@@ -296,6 +313,24 @@ def test_model_choice_on_the_real_server(direct_server_with_data, monkeypatch, t
                 page.screenshot(path=str(shots / f"{number}-{name}-{tag}-{theme}.png"), animations="disabled")
                 assert page.evaluate(_WIDE) <= 0, (number, name, tag, "nothing is wider than the screen")
                 assert page.evaluate(_FACTS_OVER) == [], (number, name, tag, "the route's facts fit inside its row")
+                if number in {"04", "09", "10"}:
+                    groups = page.evaluate(_LIST_GROUPS)
+                    assert [group["heading"] for group in groups] == ["", "Recent", "OpenAI-compatible endpoint"], groups
+                    for group in groups:
+                        assert len(group["models"]) == len(set(group["models"])), (number, tag, "each section lists a model once", group)
+                    assert sum(group["models"].count("mock-main") for group in groups) == 1, groups
+                    seen[f"list-{number}-{tag}-{theme}"] = groups
+                if number == "04":
+                    facts = page.evaluate(_FACT_LINES)
+                    seen[f"facts-{tag}-{theme}"] = facts
+                    if tag == "282":
+                        wrapped = [fact for fact in facts if len(fact["lines"]) > 1]
+                        assert wrapped, (tag, "the long source facts wrap at this width", facts)
+                        for fact in wrapped:
+                            first = fact["lines"][0]
+                            assert first["top"] >= fact["nameBottom"] - 0.5, fact
+                            assert abs(first["left"] - fact["nameLeft"]) <= 0.5, fact
+                            assert all(abs(line["left"] - first["left"]) <= 0.5 for line in fact["lines"][1:]), fact
             _theme(page, "dark")
 
         def everywhere(number: str, name: str, stage, leave=lambda page: None) -> None:

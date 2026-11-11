@@ -370,8 +370,8 @@ test('one source is no source step; nothing but Main says so and offers the way 
     await one.open();
     await one.press('Search');
     assert.deepEqual(one.rows().map((row) => row.text), ['gpt-6-astra Main 872K · Codex · subscription', 'gpt-6.1-sol Codex · subscription',
-        'gpt-6-astra Main 872K · Codex · subscription', 'gpt-5-old Codex · subscription Unavailable']);
-    assert.deepEqual(one.notes(), [], 'no Sources step');
+        'gpt-5-old Codex · subscription Unavailable']);
+    assert.deepEqual(one.notes(), ['Codex'], 'the source names its models, without a Sources step');
     await one.type('gpt-9');
     assert.deepEqual(one.rows().at(-1), { key: 'typed:route|claudexor::codex=gpt-9', selected: false, text: 'Use “gpt-9” as typed Codex' });
     one.controls.destroy();
