@@ -236,5 +236,3 @@ def _close_project(page) -> None:
 
 def _work_of(state: dict, task_id: str) -> dict | None:
     return next((work for work in state.get("works", []) if work["episode"]["task_id"] == task_id), None)
-
-
