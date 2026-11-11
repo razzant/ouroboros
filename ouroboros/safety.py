@@ -495,8 +495,9 @@ def _card(subject):
             else f"these exact words on their own lines and the destination {', '.join(destinations)}")
 
 
-def _waits(subject):
-    return (f"In this mode a DANGEROUS reading waits for your human. If you still judge it right, ask them privately on "
+def _waits(subject, cyber):
+    where = "Under this organization's deployment policy" if cyber else "In this mode"  # Cyber Pro waits only there
+    return (f"{where} a DANGEROUS reading waits for your human. If you still judge it right, ask them privately on "
             f"a card holding {_card(subject)}. {_CARD_CHECK} A changed call is read again; another tool is no way "
             "around this.")
 
@@ -1468,7 +1469,7 @@ def _assess_call(tool_name, arguments, messages, ctx, python_resolution, resolve
                            quiz_id=quiz, **held)
 
     def close(waits):  # who releases a returned call, read at its issue: the mind, else my human's card
-        return (_waits(subject()) if release_dangerous else _CLOSED) if waits else _MIND_DECIDES
+        return (_waits(subject(), cyber) if release_dangerous else _CLOSED) if waits else _MIND_DECIDES
     # The mind releases SUSPICIOUS, and DANGEROUS in Cyber Pro. ``gated``: these declared words to this destination
     # were read DANGEROUS in this work, through whatever tool or request_id.
     gated = gates.get(_words_key(subject())) if gates and speech else None

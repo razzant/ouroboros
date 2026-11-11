@@ -23,10 +23,10 @@ SOURCE_AUTHORS = {
                       "about an earlier stage)",
     "owner_mailbox": "the owner: a later message to this work",
     "direct_incoming": "the owner: a later message to this work",
-    "owner_quiz_answer": "the owner: his answer to the card quoted in reply_to (the card's text was written by "
-                         "Ouroboros)",
-    "place_confirmed": "the owner: his own message in this chat, from an account he confirmed",
-    "place_owner": "the owner: his own message in this chat, from an account he confirmed",
+    "owner_quiz_answer": "the owner: the owner's answer to the card quoted in reply_to (the card's text was written "
+                         "by Ouroboros)",
+    "place_confirmed": "the owner: the owner's own message in this chat, from a confirmed owner account",
+    "place_owner": "the owner: the owner's own message in this chat, from a confirmed owner account",
     "owner_corpus": "the owner",
     "principal_task_message": "the parent task (Ouroboros), not the owner",
     "relayed_peer_message": "a sibling task (Ouroboros), not the owner",
