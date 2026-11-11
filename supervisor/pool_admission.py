@@ -8,9 +8,10 @@ of the live workers' own heartbeat reports, both lanes; else this generation's l
 unknown) and ``B`` the processes of both lanes still starting. With no project process acting or starting one start is
 admitted even under pressure (the floor), within the owner's cap and readiness fence;
 with measured memory but unknown ``T``, only that floor admits. Readiness parks since the last successful ``worker_ready`` stop growth only when they
-outnumber live ready project processes (finiteness); an unknown reading admits the owner's cap when set, else one
-starting process at a time (beyond the floor, both lanes' booting processes must finish), and says why
-(``memory_unmeasured: ...``); the owner's ``OUROBOROS_MAX_WORKERS``, when set, caps acting tasks and claims.
+outnumber live ready project processes (finiteness); an unknown reading admits what the owner's cap leaves when set
+(``max(floor, room)``, ``room = cap - acting - idle - booting``), else one starting process at a time (beyond the
+floor, both lanes' booting processes must finish), and says why (``memory_unmeasured: ...``); the owner's
+``OUROBOROS_MAX_WORKERS``, when set, caps acting tasks and claims.
 
 Reuse of an idle process, a warm return and a crash replacement never ask; the conversation lane's starts stay
 outside (4A: spawn success). The machine is read at most once a pass, outside Q and the lifecycle serializer, only

@@ -23,8 +23,9 @@ root's latch, the queue facts of its root and of the root's physical actor, that
 ``store_hot_facts.CONTROL_WRITES``), so an unchanged root is not read again; only an admission is kept.
 
 Nothing here authorizes a start: the launch (``worker_assignment._launch_attempt``) takes the owner's launch lock, the
-schedule's table hold and the restart boundary, reads again, and revalidates memory and C2 at the put.
-A launch refusal forgets the chooser's kept admission so the next pass can repair it.
+schedule's table hold and the restart boundary, reads again, and revalidates memory and C2 at the put. Only C2's
+refusal at the put (``resume_admits``) forgets the chooser's kept admission, so the next pass can repair the
+selection; the launch's other refusals keep it (``run_pass``).
 
 ``run_pass``: ``worker_pool_lifecycle.admissible_starts`` says how many new processes the pass may start; with no idle
 worker and no start it chooses nothing and reads nothing. Otherwise one walk in queue order (``queue._queue_sort_key``:
