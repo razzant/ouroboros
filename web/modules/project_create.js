@@ -243,6 +243,11 @@ function statusLine({ view, word = '', text = '' }) {
     return line;
 }
 
+/** A row's Pin or Unpin in words, for the state it shows: this menu's item and the row's own glyph (projects_nav.js)
+ *  say it alike, and each asks for the state its words name. A pin still being saved reads as such. */
+export const pinWords = (pinned, pending = false) => (pending ? (pinned ? 'Unpinning…' : 'Pinning…')
+    : (pinned ? 'Unpin' : 'Pin'));
+
 // Accessible row menu: Pin/Unpin, Rename, Delete. `project` is a sidebar read model;
 // callbacks refresh the authoritative registry projection. `onPin` receives the state
 // the label named; a pin still being saved reads as such and cannot be pressed again.
@@ -266,7 +271,7 @@ export function openProjectRowMenu(project, {
     menu.setAttribute('aria-label', `Actions for ${name}${status?.text ? ` · ${status.text}` : ''}`);
     menu.innerHTML = `
         <button type="button" role="menuitem" data-prm="pin"${pinPending ? ' aria-disabled="true"' : ''}>${
-            pinPending ? (pinned ? 'Unpinning…' : 'Pinning…') : (pinned ? 'Unpin' : 'Pin')}</button>
+            pinWords(pinned, pinPending)}</button>
         <button type="button" role="menuitem" data-prm="rename">Rename…</button>
         <button type="button" role="menuitem" class="danger" data-prm="delete">Delete project…</button>
     `;
