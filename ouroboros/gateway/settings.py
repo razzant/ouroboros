@@ -284,7 +284,7 @@ def _merge_settings_payload(current: Dict[str, Any], body: Dict[str, Any]) -> Di
         merged["OUROBOROS_CONTEXT_MODE_AUTO_LOW"] = "false"
     for key, value in body.items():
         text_key = str(key or "").strip().upper()
-        if text_key in _SETTINGS_DEFAULTS or text_key == "OUROBOROS_RUNTIME_MODE":
+        if key in {"if_unchanged", "unset"} or text_key in _SETTINGS_DEFAULTS or text_key == "OUROBOROS_RUNTIME_MODE":
             continue
         if not is_custom_secret_setting_key(
             text_key, known_setting_keys=_SETTINGS_DEFAULTS

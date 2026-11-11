@@ -111,6 +111,24 @@ def test_a_float_setting_resent_as_text_is_not_a_change(monkeypatch, isolated_se
     assert data.get("next_task_changed") is True  # a real value change still counts
 
 
+def test_write_preconditions_are_not_custom_settings(monkeypatch, isolated_settings):
+    first = _save(monkeypatch, isolated_settings, {"TOTAL_BUDGET": 201, "SERVICE_API_KEY": "synthetic-key"})
+    token = first["changes"]["TOTAL_BUDGET"]["token"]
+    before = isolated_settings.read_text(encoding="utf-8")
+    same = _save(monkeypatch, isolated_settings, {
+        "TOTAL_BUDGET": 201, "if_unchanged": {"TOTAL_BUDGET": token}, "unset": []})
+    assert same.get("no_changes") is True
+    assert isolated_settings.read_text(encoding="utf-8") == before
+    stored = json.loads(before)
+    assert stored["SERVICE_API_KEY"] == "synthetic-key"
+    assert not {"IF_UNCHANGED", "UNSET"}.intersection(stored)
+    _save(monkeypatch, isolated_settings, {"TOTAL_BUDGET": 202})
+    client = TestClient(_settings_app(monkeypatch, isolated_settings))
+    refused = client.post("/api/settings", json={"TOTAL_BUDGET": 203, "if_unchanged": {"TOTAL_BUDGET": token}})
+    assert refused.status_code == 409, refused.text
+    assert json.loads(isolated_settings.read_text(encoding="utf-8"))["TOTAL_BUDGET"] == 202
+
+
 def test_skills_repo_path_requires_a_restart_for_pooled_workers(monkeypatch, isolated_settings):
     """Pooled workers load the extension registry once at spawn and never
     reload it per task; the server-side hot reload alone cannot make the key
