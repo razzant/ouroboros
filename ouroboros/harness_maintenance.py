@@ -166,7 +166,7 @@ def cancel_maintenance(operation_id: str, *, ctx=None, timeout_sec=None) -> dict
 def install_for_connect(harness: str) -> dict:
     """One explicit Connect install, bounded by the existing installer wait ceiling.
 
-    Repeat only unanswered reads; another explicit Connect joins an active install.
+    Repeat unanswered reads and retryable refusals; another Connect joins an active install.
     The engine keeps custody after this observer's deadline; expiry cancels nothing.
     """
     from ouroboros.config import get_claudexor_harness_install_timeout_sec
