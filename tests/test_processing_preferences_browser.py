@@ -115,6 +115,10 @@ def test_agent_processing_save_reopen_and_catalog_refresh(role_ui):
     assert actor.locator('[data-processing-details]').evaluate('e => e.open')
     assert actor.locator('[data-subagent-field="processing_preference"]').input_value() == 'economy'
     roles.capture(page, 'processing-actor-reference-and-inline')
+    # The always-mounted Circles listener rejects this deliberately failed catalogue, independently of the editor.
+    refused = 'The model catalog could not be read.'
+    assert not [error for error in ui['errors'].unexpected() if refused not in error], ui['errors'].report()
+    ui['errors'].clear()
     assert press_editor_save(page).startswith('Saved')
     saved = roles.saved_catalog(ui)
     assert saved['items'][0]['processing_preference'] == 'economy'
