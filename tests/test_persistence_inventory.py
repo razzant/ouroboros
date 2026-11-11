@@ -184,7 +184,8 @@ def _module_constants(tree: ast.AST, *, exact_strings: bool = False) -> dict[str
     excluding path expressions, partially known f-strings and function locals.
     """
     seen: dict[str, set] = {}
-    for node in _own_nodes(tree):
+    for node in _own_nodes(
+            tree, skip_classes=isinstance(tree, (ast.FunctionDef, ast.AsyncFunctionDef))):
         if not isinstance(node, (ast.Assign, ast.AnnAssign)):
             continue
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
@@ -207,8 +208,8 @@ def _module_constants(tree: ast.AST, *, exact_strings: bool = False) -> dict[str
     }
 
 
-def _own_nodes(scope: ast.AST) -> list[ast.AST]:
-    """Every node of one scope, NOT descending into nested function bodies.
+def _own_nodes(scope: ast.AST, *, skip_classes: bool = False) -> list[ast.AST]:
+    """Own nodes without nested functions; constants also exclude nested classes.
 
     Return statements of a nested helper describe that helper, not its parent;
     attributing them to the parent made both prefixes ambiguous and dropped.
@@ -218,6 +219,8 @@ def _own_nodes(scope: ast.AST) -> list[ast.AST]:
     def walk(node: ast.AST) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                continue
+            if skip_classes and isinstance(child, ast.ClassDef):
                 continue
             out.append(child)
             walk(child)
@@ -315,6 +318,18 @@ class _PathResolver:
                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
             for path, tree in self.trees.items()
         }
+        # Function -> the functions around it, outermost first. A class body is
+        # no scope for its methods' names; a function around the class is.
+        self.enclosing: dict[int, tuple] = {}
+        pending = [(tree, ()) for tree in self.trees.values()]
+        while pending:
+            node, around = pending.pop()
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    self.enclosing[id(child)] = around
+                    pending.append((child, around + (child,)))
+                else:
+                    pending.append((child, around))
         self.prefixes: dict[str, str] = {}
         self.file_prefixes: dict[pathlib.Path, dict[str, str]] = {}
         # The file whose scopes are being resolved right now: name/attribute
@@ -324,6 +339,8 @@ class _PathResolver:
         # so it dies with the parsed trees it describes; the prefix fixed point
         # would otherwise re-walk every scope once per round.
         self._nodes: dict[int, list] = {}
+        # Constants depend only on these fixed trees, not on the prefix round.
+        self._scoped: dict[int, dict[str, str]] = {}
         self._resolve_prefixes()
 
     def own_nodes(self, scope: ast.AST) -> list[ast.AST]:
@@ -459,14 +476,32 @@ class _PathResolver:
                 local[node.target.id] = f"{rel}/{leaf}"
         return local
 
+    def _bound_names(self, scope: ast.AST) -> set[str]:
+        """Parameters and stored names of a function and of every function around it.
+
+        Python reads a free name of a nested function from the nearest enclosing
+        function that binds it, never from the module, so neither a file constant
+        nor a repository one may stand in for such a name. Conservative: no value
+        flows in from outside, and a ``global`` declaration stays unknown too.
+        """
+        names: set[str] = set()
+        for fn in self.enclosing.get(id(scope), ()) + (scope,):
+            names.update(node.arg for node in ast.walk(fn.args) if isinstance(node, ast.arg))
+            names.update(node.id for node in self.own_nodes(fn)
+                         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store))
+        return names
+
     def _scope_constants(self, path: pathlib.Path, scope: ast.AST):
+        cached = self._scoped.get(id(scope))
+        if cached is not None:
+            return cached
         consts = dict(self.consts[path])
         if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
             # A truthy unknown masks the repository fallback as well as file constants.
-            consts.update({node.id: "*" for node in self.own_nodes(scope)
-                           if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)})
-            consts.update({node.arg: "*" for node in ast.walk(scope.args) if isinstance(node, ast.arg)})
+            # Only the function's own single literal is known; an enclosing one is not read.
+            consts.update(dict.fromkeys(self._bound_names(scope), "*"))
             consts.update(_module_constants(scope))
+        self._scoped[id(scope)] = consts
         return consts
 
     def _scopes(self, path: pathlib.Path):
@@ -542,11 +577,8 @@ class _PathResolver:
         and truncation before becoming a filename. Only exact strings can be
         resolved here; a guessed wildcard must not stand in for those bytes.
         """
-        shadowed = ({arg.arg for arg in ast.walk(scope.args) if isinstance(arg, ast.arg)}
+        shadowed = (self._bound_names(scope)
                     if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)) else set())
-        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            shadowed.update(node.id for node in self.own_nodes(scope)
-                            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store))
         own_bindings = {node.id for node in self.own_nodes(self.trees[self.current])
                         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)}
         imports = {}
@@ -943,11 +975,13 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # and ``task_results/artifacts/*/*.*.zip``; both are still written, under their artifacts row.
 # 456 -> 457 (owner A, 07.11): the open Low episode of memory-lowered starts, ``state/low_start_episode.json``
 # (``ouroboros/context_view_facts.py``); its own row.
+# 457 -> 459 (pool-capacity WP5b): the body's dated record of each held run for a parent's wait_task,
+# ``state/delegate_observation/<run_id>.json`` and its directory (``ouroboros/delegate_feed.py``); its own row.
 # Result-review retained material/restored source views and published kept-service declarations
 # share the existing inventory; the combined AST census below pins their union.
-# Audited independent-tree census after function-local isolation. This is a
-# spelling correction, not retirement of writers; other proposals add their own paths.
-EXPECTED_SCAN_PATHS = 462
+# Audited census after function-local isolation, including the pool's two
+# delegate_observation paths. The -5/+3 spelling correction retires no writers.
+EXPECTED_SCAN_PATHS = 464
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
@@ -1456,6 +1490,10 @@ def test_function_constants_and_parameters_do_not_rename_other_writers(tmp_path)
         "    LEAF = 'unrelated.json'\n"
         "def constant(data_dir):\n"
         "    return Path(data_dir) / 'state' / LEAF\n"
+        "def class_scope(data_dir):\n"
+        "    class Holder:\n"
+        "        LEAF = 'wrong-class.json'\n"
+        "    return Path(data_dir) / 'state' / LEAF\n"
         "def dynamic(data_dir, relative):\n"
         "    return Path(data_dir) / 'uploads' / relative\n"
         "def positional(data_dir, LEAF, /):\n"
@@ -1477,3 +1515,31 @@ def test_function_constants_and_parameters_do_not_rename_other_writers(tmp_path)
     assert scan_data_paths(tmp_path) == frozenset({
         'state/module.json', 'state/*', 'uploads/*', 'state/payload.json',
         'state/outer.json', 'state/inner.json', 'state/payload.json/child.json'})
+
+
+def test_an_enclosing_binding_is_unknown_never_the_module_literal(tmp_path):
+    """A nested function reads ``LEAF`` from the function around it (through a
+    class body too), so the module's literal names no file here; the scan says
+    unknown. The same holds for an exact source-store argument."""
+    module = tmp_path / 'ouroboros' / 'synthetic_writer.py'
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "from pathlib import Path\n"
+        "LEAF = 'wrong.json'\n"
+        "SOURCE = 'presence-transport-queue'\n"
+        "def outer(data_dir, root, source):\n"
+        "    LEAF = 'right.json'\n"
+        "    SOURCE = source\n"
+        "    def inner():\n"
+        "        return Path(data_dir) / 'state' / LEAF\n"
+        "    def deeper():\n"
+        "        class Holder:\n"
+        "            def method(self):\n"
+        "                return Path(data_dir) / 'logs' / LEAF\n"
+        "        return Holder\n"
+        "    def store():\n"
+        "        store_actor_source_bytes(root, 'inventory', category='context_checkpoints',\n"
+        "                                 source_id=SOURCE, extension='json')\n"
+        "    return inner, deeper, store\n",
+        encoding='utf-8')
+    assert scan_data_paths(tmp_path) == frozenset({'state/*', 'logs/*'})

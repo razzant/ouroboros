@@ -45,7 +45,7 @@ Iframes inherit no host tokens or choice; `render.appearance` declares their pol
 - `toast.js`, `masonry.js`, `widget_frame.js`, `widget_job.js` ← toasts (DESIGN §4), layout, framed-widget bootstrap/lifecycle, bounded widget request/job policy.
 - `result_files.js` ← Files and validated question materials via canonical artifacts, the reader and explicit downloads.
 - `history_retention.js` ← history-transfer details and storage problems for Chat and Logs; routine transfer alters no task outcome.
-- `settled_card.js` ← `syncSettledItems`: the settled card's Files row and Continue action follow one detail.
+- `settled_card.js` ← `syncSettledItems`: the settled card's Files row and Continue action follow one detail; `review_gate_card.js`, every detail's review-gate field.
 - `task_continue.js` ← Continue projects the host's `continuation_offer` (who may: §6 Continue); `hard_limit_reached` is one neutral reason that buys no model call; one stored nonce per task makes a retry return the same admission.
 - `task_control_menu.js` ← Chat and Activity share Wrap up, Hurry up, Pause, Stop earlier attempt and Stop now with the same endpoints, stop policy, request-id retry and verbatim refusals, offering a work only the controls it lists; Pause is root-only and its `request_id` survives uncertain or `latch_pending` replies until a confirmed Pause or Resume retires it.
 
@@ -55,7 +55,7 @@ Iframes inherit no host tokens or choice; `render.appearance` declares their pol
 
 #### Timeline ownership and ordering
 
-`chat.js` owns timelines/cards/routing, runtime/budget, subscriptions/threads/unread/reconnect and focus. Media/paste/drop/transient sheets: `chat_media.js` (living cards: `chat_cards.js`); staged/owner files: `chat_attachments.js`; field height: `chat_input_sizing.js`. ACKs update only the owner's `client_message_id` sidecar. Share: `message_actions.js` → `message_share.js` (answer or card → Text, PNG, `message_share_file.js` page; Telegram: its skill).
+`chat.js` owns timelines/cards/routing, runtime/budget, subscriptions/threads/unread/reconnect and focus. Text: `chat_text_bubble.js`; media/paste/drop/transient sheets: `chat_media.js` (living cards: `chat_cards.js`); staged/owner files: `chat_attachments.js`; field height: `chat_input_sizing.js`. ACKs update only the owner's `client_message_id` sidecar. Share: `message_actions.js` → `message_share.js` (`message_share_file.js` page; Telegram: its skill).
 
 Rows order by time then arrival (DESIGN). Keyed replay preserves nodes, disclosure, focus, selection and child lifecycle; current results win. Bounds: `LIVE_CARD_CAP` live cards; `chat_history.js` pages; `chat_preview.js` unread saved text without actions/coverage/receipts. `historyCoverage` proves bytes, not EOF/IDs/time. Anchors: `chat_reading_position.js`; newest arrival: `showLatest({arrive})`/`project_read_state.js`. `createHistoryControls` puts gaps at the feed edge, not notices over newest rows. Floating headers reserve measured height. Origins: `project_dialogue.project_origin_identity`.
 

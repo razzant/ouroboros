@@ -91,11 +91,14 @@ def _depth_reservation_admits(
 
 
 def _subagent_cap_blocks(root_task_id: str, parent_id: Any, pending: list, running: dict, max_active: int) -> bool:
-    """A subagent schedule is rejected when the tree is at the per-root active cap AND
-    the FR2 depth-aware reservation does not admit it."""
+    """Queue behind awake pending + acting children unless depth reserves a place; the hard bound counts every child."""
+    from supervisor.pool_admission import acting_children, cold_sleeping
+
+    awake = [task for task in pending if not cold_sleeping(task)]
     return (
-        _active_subagent_count(root_task_id, pending, running) >= max_active
-        and not _depth_reservation_admits(root_task_id, parent_id, pending, running, max_active)
+        _active_subagent_count(root_task_id, pending, running) >= MAX_ACTIVE_SUBAGENTS_HARD_CAP
+        or (_active_subagent_count(root_task_id, awake, {}) + acting_children(root_task_id, running.values()) >= max_active
+            and not _depth_reservation_admits(root_task_id, parent_id, pending, running, max_active))
     )
 
 

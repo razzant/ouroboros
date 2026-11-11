@@ -25,7 +25,8 @@ exact commit on ``request_restart``; this module carries that one transition.
 * ``settle_on_boot`` gives every outcome to the task that authorized it: its task
   result keeps ``body_adoptions`` and its card gets the row in the task's own room
   (a room it cannot name gets none); only a handoff that names no task stays an
-  owner-wide runtime notice.
+  owner-wide runtime notice. The outcome names the adopted range's commits that landed over a review
+  Blocking would have stopped, "running" only when ``adopted`` (``review_overrides.landed_line``).
 """
 
 from __future__ import annotations
@@ -826,6 +827,14 @@ def settle_on_boot(data_dir: Any, repo_dir: Any, *, supervisor_ready: bool) -> D
     def published(sentence: str) -> None:
         lines.append(sentence)
         result["note"] += f" {sentence}"
+
+    if result.get("note") and result.get("outcome") in ("adopted", "unconfirmed"):  # the adoption record: running
+        from ouroboros.review_overrides import landed_line
+
+        gate = landed_line(repo_dir, data_dir, base=str(result.get("previous") or ""), target=result["candidate"],
+                           running=result["outcome"] == "adopted")
+        if gate:
+            published(gate)
 
     def record_and_push() -> None:
         from supervisor.git_ops import push_to_remote

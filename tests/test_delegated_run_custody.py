@@ -52,16 +52,16 @@ def test_custody_survives_the_worker_that_started_the_run(tmp_path, monkeypatch)
     assert json.loads(delegate._delegate_start(ctx, "review the diff").text)["status"] == "started"
 
     delegate._CUSTODY.clear()          # the worker died; only the durable rows remain
-    resumed = json.loads(delegate._delegate_wait(ctx, "run-live", wait_sec=1))
+    resumed = json.loads(delegate._read_run(ctx, "run-live"))
     assert resumed["status"] == "no_progress", resumed
     cancelled = json.loads(delegate._delegate_cancel(ctx, "run-live", reason="restart").text)
     assert cancelled["status"] in {"requested", "confirmed"}, cancelled
     assert stub.cancels, "the restarted owner must be able to actually stop its own run"
 
     delegate._CUSTODY.clear()
-    sibling = json.loads(delegate._delegate_wait(_nanny_ctx(tmp_path, "t-b"), "run-live", wait_sec=1))
+    sibling = json.loads(delegate._read_run(_nanny_ctx(tmp_path, "t-b"), "run-live"))
     assert sibling["reason"] == "run_not_owned", sibling
-    unknown = json.loads(delegate._delegate_wait(ctx, "run-never-seen", wait_sec=1))
+    unknown = json.loads(delegate._read_run(ctx, "run-never-seen"))
     assert unknown["reason"] == "run_ownership_unknown", unknown
     delegate._CUSTODY.clear()
 
@@ -420,7 +420,7 @@ def test_delegated_spend_settles_into_the_canonical_budget_ledger(tmp_path, monk
     ctx.task_metadata = {"root_task_id": "t-a", "budget_drive_root": str(canonical)}
 
     assert json.loads(delegate._delegate_start(ctx, "review the diff").text)["status"] == "started"
-    done = json.loads(delegate._delegate_wait(ctx, "run-live", wait_sec=1))
+    done = json.loads(delegate._read_run(ctx, "run-live"))
     assert done["settlement"]["settled"] is True
     assert done["settlement"]["ledger_recorded"] is True
 

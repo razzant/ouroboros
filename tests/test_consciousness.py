@@ -1021,6 +1021,157 @@ def test_off_says_how_many_places_only_hear_until_start(clock, monkeypatch, stor
     assert clock.clock.stop() == "Background consciousness is already disabled."
 
 
+# --- who stopped it (owner 11.11, 5A): the owner's and Panic's stops are the owner's to lift -----------------------
+
+
+@pytest.fixture
+def held(monkeypatch, tmp_path):
+    """A clock over the REAL state store (locked writes, recovery, unavailability), consciousness on, nothing live."""
+    from supervisor import queue, state, workers
+
+    prior = state.DRIVE_ROOT
+    state.init(tmp_path)
+    state.save_state({"owner_chat_id": 7, "bg_consciousness_enabled": True})
+    for module in (workers, queue):
+        monkeypatch.setattr(module, "RUNNING", {})
+        monkeypatch.setattr(module, "PENDING", [])
+    get_direct_activity_registry().clear()
+
+    def saved():
+        projection = state.read_state(tmp_path).projection()
+        return (state.control_value(projection, "bg_consciousness_enabled"),
+                state.control_value(projection, clock_module.STOP_SOURCE_KEY))
+
+    yield SimpleNamespace(clock=BackgroundConsciousness(tmp_path, tmp_path, lambda: 7, now=T0), root=tmp_path,
+                          saved=saved, state=state)
+    state.init(prior)
+
+
+@pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])  # cyber_pro: no mode makes the owner's stop the mind's
+def test_the_owners_stop_holds_against_the_minds_start_until_the_owners_own_start(held, monkeypatch, mode):
+    from ouroboros.consciousness import AGENT_STOP, OWNER_STOP, held_stop_text
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
+    held.clock.stop(source=OWNER_STOP)
+    assert held.saved() == ((True, False), (True, "owner"))
+    assert held.clock.start(source=AGENT_STOP) == held_stop_text("owner") and held.clock.enabled is False
+    restarted = BackgroundConsciousness(held.root, held.root, lambda: 7, now=T0)  # a restart reads the saved stop
+    assert restarted.start(source=AGENT_STOP).startswith("Background consciousness stayed off: the owner turned it off")
+    assert held.saved() == ((True, False), (True, "owner")) and restarted.enabled is False
+    assert restarted.start().startswith("Background consciousness enabled; next wake-up at ")  # /bg start, any door
+    assert held.saved() == ((True, True), (True, None)) and restarted.enabled is True
+
+
+def test_the_minds_own_stop_stays_its_own_and_never_relabels_another(held):
+    from ouroboros.consciousness import AGENT_STOP, OWNER_STOP, held_stop_text
+
+    held.clock.stop(source=AGENT_STOP)
+    assert held.saved() == ((True, False), (True, "agent_tool"))
+    assert held.clock.start(source=AGENT_STOP).startswith("Background consciousness enabled")
+    assert held.saved() == ((True, True), (True, None))
+    held.clock.stop(source=OWNER_STOP)
+    held.clock.stop(source=AGENT_STOP)  # a later stop of its own never makes the owner's stop the mind's
+    assert held.saved() == ((True, False), (True, "owner"))
+    assert held.clock.start(source=AGENT_STOP) == held_stop_text("owner")
+
+
+def test_panic_and_an_unrecorded_stop_need_the_owners_start(held):
+    from ouroboros import server_control
+    from ouroboros.consciousness import AGENT_STOP, held_stop_text
+
+    held.state.update_state(server_control._panic_controls, confirm=server_control.PANIC_CONTROL_KEYS)
+    clock = BackgroundConsciousness(held.root, held.root, lambda: 7, now=T0)
+    clock.stop(source=AGENT_STOP)
+    assert held.saved() == ((True, False), (True, "panic"))
+    assert clock.start(source=AGENT_STOP) == held_stop_text("panic") and "Panic turned it off" in held_stop_text("panic")
+    # Migration: off with no recorded source (an earlier body's stop) is unknown until the owner starts it once.
+    held.state.update_state(lambda st: st.pop(clock_module.STOP_SOURCE_KEY))
+    assert clock.start(source=AGENT_STOP) == held_stop_text("")
+    assert "who turned it off is not recorded" in held_stop_text("") and clock.enabled is False
+    assert clock.start().startswith("Background consciousness enabled") and held.saved()[1] == (True, None)
+
+
+def test_unknown_or_unwritable_state_refuses_the_mind_and_the_owners_stop_still_holds_here(held, monkeypatch):
+    from ouroboros.consciousness import AGENT_STOP, OWNER_STOP, held_stop_text
+    from supervisor.state import StateUnavailable, mark_unconfirmed
+
+    def recovered(st):  # a backup recovery: the mind's own earlier stop is no longer proven
+        st.update(bg_consciousness_enabled=False, bg_consciousness_stop_source="agent_tool")
+        mark_unconfirmed(st, "bg_consciousness_enabled")
+        mark_unconfirmed(st, clock_module.STOP_SOURCE_KEY)
+
+    held.state.update_state(recovered)
+    clock = BackgroundConsciousness(held.root, held.root, lambda: 7, now=T0)
+    assert clock.start(source=AGENT_STOP) == held_stop_text("") and clock.enabled is False
+    assert clock.start().startswith("Background consciousness enabled")  # the owner's start confirms both again
+    real = held.state.update_state
+
+    def unwritable(*_args, **_kwargs):
+        raise StateUnavailable("lock_timeout", "update")
+
+    monkeypatch.setattr(held.state, "update_state", unwritable)
+    said = clock.stop(source=OWNER_STOP)
+    assert said.startswith("Consciousness off") and clock.enabled is False
+    assert " Not saved (runtime state unavailable, lock_timeout): the stop holds in this process only." in said
+    assert clock.start(source=AGENT_STOP) == held_stop_text("owner")
+    stayed = "Background consciousness stayed off: runtime state is unavailable (lock_timeout); nothing was started."
+    assert clock.start() == stayed and clock.enabled is False, "a failed enable never turns the clock on first"
+    monkeypatch.setattr(held.state, "update_state", real)
+    assert held.saved()[0] == (True, True), "the stale saved choice: only this process holds the owner's stop"
+    assert clock.start(source=AGENT_STOP) == held_stop_text("owner") and clock.enabled is False
+    assert held.saved()[0] == (True, True), "a refused start writes nothing"
+    clock.stop(source=AGENT_STOP)  # the mind's next stop saves the stop this process holds as the owner's
+    assert held.saved() == ((True, False), (True, "owner"))
+    assert clock.start(source=AGENT_STOP) == held_stop_text("owner")
+
+
+def test_a_backup_only_failure_says_what_was_saved_and_the_next_tick_agrees(held, monkeypatch):
+    """The primary copy holds the change and only its backup failed (``primary_written``): the reply says it was
+    saved, never "nothing was started" or "this process only", and the clock, then and on its next tick, is what the
+    saved state says; a restart reads the same."""
+    from ouroboros.consciousness import AGENT_STOP, OWNER_STOP
+
+    real = held.state.atomic_write_text
+
+    def no_backup(path, content):
+        if path == held.state.STATE_LAST_GOOD_PATH:
+            raise OSError("backup unwritable")
+        return real(path, content)
+
+    note = " Saved, but the state's backup copy was not written (backup_write_failed)."
+    held.clock.stop(source=AGENT_STOP)
+    clock = BackgroundConsciousness(held.root, held.root, lambda: 7, now=T0)  # a fresh process over the mind's own stop
+    monkeypatch.setattr(held.state, "atomic_write_text", no_backup)
+    said = clock.start(source=AGENT_STOP)
+    assert said.startswith("Background consciousness enabled; next wake-up at ") and said.endswith(note), said
+    assert held.saved() == ((True, True), (True, None)) and clock.enabled is True
+    clock.tick(now=T0)
+    assert clock.enabled is True, "the next tick reads the enable the reply named"
+    said = clock.stop(source=OWNER_STOP)
+    assert note in said and "this process only" not in said, said
+    assert held.saved() == ((True, False), (True, "owner"))
+    clock.tick(now=T0)
+    restarted = BackgroundConsciousness(held.root, held.root, lambda: 7, now=T0)
+    assert clock.enabled is False and restarted.enabled is False, "the stop the reply named is the saved one"
+
+
+def test_a_queued_tool_start_meets_the_stop_the_owner_placed_after_it(held):
+    """The tool only queues; the clock decides when the supervisor runs the event, against the stop standing then."""
+    from ouroboros.consciousness import OWNER_STOP, held_stop_text
+    from ouroboros.tools import control
+    from supervisor import events_runtime_controls
+
+    tool = SimpleNamespace(task_id="t1", pending_events=[], drive_root=held.root, task_metadata={})
+    assert control._toggle_consciousness(tool, "start") == "OK: consciousness 'start' requested."
+    held.clock.stop(source=OWNER_STOP)  # /bg stop from the phone lands before the event is drained
+    sent: list = []
+    ctx = SimpleNamespace(consciousness=held.clock, load_state=held.state.load_state,
+                          send_with_budget=lambda chat, text, **kw: sent.append((chat, text, kw)))
+    events_runtime_controls._handle_toggle_consciousness(tool.pending_events[-1], ctx)
+    assert sent == [(7, f"🧠 {held_stop_text('owner')}", {"role": "system", "system_type": "consciousness_notice"})]
+    assert held.clock.enabled is False and held.saved() == ((True, False), (True, "owner"))
+
+
 def test_status_snapshot_carries_the_alarm_facts(clock):
     snapshot = clock.clock.status_snapshot()
     assert set(snapshot) == {

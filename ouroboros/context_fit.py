@@ -362,9 +362,9 @@ def seal_task_transcript(messages: List[Dict[str, Any]], min_prefix_tokens: int 
     The mark is host-only, a message-level ``cache_control``: the send copies
     of marker-carrying routes render it on the row's last non-empty text block
     and every other copy drops it, so canonical content, host-row bindings and
-    a marker-free route's bytes never change. Anthropic permits four
-    breakpoints: A', optional D, B and this one; the finalizer marks schemas
-    only if a slot remains. The old in-place seal is undone without another
+    a marker-free route's bytes never change. Anthropic builders may add a
+    system-tail endpoint in a spare slot (llm_messages); the payload finalizer
+    owns the breakpoint cap and TTL. The old in-place seal is undone without another
     shape change: a text-only tool list flattens to its exact text, as every
     seal has done, and a block-list task message only loses its markers.
     """
@@ -503,9 +503,15 @@ def estimate_context_prompt_tokens(
         {key: value for key, value in block.items() if key not in HOST_ONLY_MESSAGE_KEYS}
         if isinstance(block, dict) else block for block in message["content"]]}
         if isinstance(message.get("content"), list) else message for message in messages]
-    projections = direct_openai_context_projections(
-        messages, tools, provider=provider, reasoning_effort=reasoning_effort,
-    )
+    # Only this route/effort can use the custom/function ladder. Other estimates
+    # read canonical data without borrowing the public helper's owned deep copies.
+    if (str(provider or "").strip().lower() == "openai"
+            and str(reasoning_effort or "").strip().lower() not in {"", "none"}):
+        projections = direct_openai_context_projections(
+            messages, tools, provider=provider, reasoning_effort=reasoning_effort,
+        )
+    else:
+        projections = ((messages, [dict(item) for item in tools or []]),)
 
     def serialized(projected_messages: Any, projected_tools: Any) -> str:
         text = json.dumps({"messages": project(projected_messages), "tools": projected_tools}, ensure_ascii=False,

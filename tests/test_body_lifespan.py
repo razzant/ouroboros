@@ -103,7 +103,7 @@ def test_real_body_cold_terminal_wakes_before_money_and_saved_carrier_is_not_orp
             pass
     monkeypatch.setattr(usage_accounting, "record_subscription_session",
                         lambda *a, **kw: (_ for _ in ()).throw(OSError("controlled money store busy")))
-    runtime = body.start_body_runtime(tmp_path, gateway_factory=Gateway, max_workers=2)
+    runtime = body.start_body_runtime(tmp_path, gateway_factory=Gateway)
     env.runtime = runtime
     monkeypatch.setattr(sc, "_runtime", body.body_runtime)
     try:

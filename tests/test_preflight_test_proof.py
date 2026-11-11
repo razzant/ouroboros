@@ -371,12 +371,12 @@ def test_scrubbed_owner_settings_do_not_change_test_workload(candidate, monkeypa
 
 def test_free_memory_does_not_change_test_workload(candidate, monkeypatch):
     """Memory admits workers at run time; the workload names the requested count."""
-    from ouroboros import test_parallelism as budget
+    from ouroboros import host_memory, test_parallelism as budget
 
     gib = 1024 ** 3
-    monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(64 * gib, 48 * gib))
+    monkeypatch.setattr(budget, "physical_memory", lambda: host_memory.MemorySnapshot(64 * gib, 48 * gib))
     before = capture_preflight_test_subject(candidate.repo_dir)
-    monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(64 * gib, 7 * gib))
+    monkeypatch.setattr(budget, "physical_memory", lambda: host_memory.MemorySnapshot(64 * gib, 7 * gib))
     assert budget.admission(os.cpu_count()).workers == 1  # the tight sample really admits fewer workers
     assert before.covers(capture_preflight_test_subject(candidate.repo_dir))
 

@@ -25,6 +25,8 @@ from ouroboros.openai_chat_custom import (
 )
 from ouroboros.request_wire_contract import canonical_json
 from ouroboros.request_wire_receipts import WireCandidateSpec, bind_wire_candidate
+from tests.test_mcp_headers_loopback import loopback  # noqa: F401
+from tests.test_mcp_redirects import recorder  # noqa: F401
 
 _SCHEMA_CLAUSE = "Input must be one JSON object matching this schema: "
 
@@ -479,6 +481,139 @@ def test_missing_local_schema_ref_returns_typed_non_executable_receipt():
     }], candidate)
 
     assert receipts[0].decoded_object is True
+    assert receipts[0].error_code == "invalid_schema"
+    assert not receipts[0].allows_execution
+    assert custom_receipts_prove_wire_acceptance(receipts)
+
+
+def _mcp_input_schema_app(schema):
+    from mcp import types
+    from mcp.server.fastmcp import FastMCP
+
+    server = FastMCP("custom-schema-refs", host="127.0.0.1", log_level="WARNING")
+
+    @server._mcp_server.list_tools()
+    async def list_tools():
+        return [types.Tool(name="probe", inputSchema=schema)]
+
+    return server.streamable_http_app()
+
+
+@pytest.mark.parametrize(("keyword", "dialect", "relative"), [
+    ("$ref", None, False),
+    ("$dynamicRef", None, False),
+    ("$ref", "http://json-schema.org/draft-07/schema#", False),
+    ("$ref", None, True),
+])
+def test_mcp_custom_arguments_never_fetch_external_schema_refs(loopback, recorder, monkeypatch, tmp_path, keyword, dialect, relative):  # noqa: F811
+    """A real MCP listing reaches the custom consumer, without a hidden GET."""
+    from ouroboros import config, mcp_client
+    from ouroboros.tools.registry_core import _dynamic_tool_schema
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    body = b'{"type":"string","enum":["ok"]}'
+    target = recorder(reply=b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode()
+                      + b"\r\nConnection: close\r\n\r\n" + body)
+    schema = {"type": "object", "properties": {
+        "marker": {keyword: "marker" if relative else target.url("/marker")},
+    }}
+    if relative:
+        schema["$id"] = target.url("/tool")
+    if dialect:
+        schema["$schema"] = dialect
+    _app, url = loopback("http", {}, wrap=lambda _app: _mcp_input_schema_app(schema))
+    manager = mcp_client.get_manager()
+    manager.reconfigure({"MCP_ENABLED": True, "MCP_TOOL_TIMEOUT_SEC": 20, "MCP_SERVERS": [
+        {"id": "ref_probe", "enabled": True, "url": url},
+    ]})
+    listing = manager.refresh_server("ref_probe")
+    assert listing["ok"] and [tool["name"] for tool in listing["tools"]] == ["probe"], listing
+    catalog = [_dynamic_tool_schema(tool) for tool in manager.list_tools_for_registry()]
+    assert len(catalog) == 1
+    candidate = _wire_candidate(catalog)
+    name = catalog[0]["function"]["name"]
+    assert candidate.custom_catalog.schema_binding(name).schema() == schema
+    _, receipts = normalize_openai_custom_tool_calls([{
+        "id": "call_external_ref", "type": "custom",
+        "custom": {"name": name, "input": '{"marker":"ok"}'},
+    }], candidate)
+    assert target.connections == [], target.connections
+    assert receipts[0].error_code == "invalid_schema"
+    assert not receipts[0].allows_execution
+    assert custom_receipts_prove_wire_acceptance(receipts)
+
+
+@pytest.mark.parametrize(("dialect", "definitions", "reference", "identifier"), [
+    ("http://json-schema.org/draft-07/schema#", "definitions", "#/definitions/marker", {}),
+    ("https://json-schema.org/draft/2020-12/schema", "$defs", "#/$defs/marker", {}),
+    ("https://json-schema.org/draft/2020-12/schema", "$defs", "#marker", {"$anchor": "marker"}),
+    ("https://json-schema.org/draft/2020-12/schema", "$defs", "marker", {"$id": "marker"}),
+    ("https://json-schema.org/draft/2020-12/schema", "$defs", "https://schema.example/marker", {
+        "$id": "https://schema.example/marker",
+    }),
+])
+def test_custom_argument_local_refs_preserve_validation(monkeypatch, dialect, definitions, reference, identifier):
+    import urllib.request
+
+    def no_retrieval(*_args, **_kwargs):
+        pytest.fail("an in-document reference tried to retrieve a resource")
+
+    monkeypatch.setattr(urllib.request, "urlopen", no_retrieval)
+    tools = _tools()
+    tools[0]["function"]["parameters"] = {
+        "$schema": dialect, "$id": "https://schema.example/tool",
+        "type": "object", "properties": {"marker": {"$ref": reference}},
+        definitions: {"marker": {"type": "string", "enum": ["ok"], **identifier}},
+    }
+    candidate = _wire_candidate(tools)
+    for marker, expected in (("ok", ""), ("wrong", "schema_validation_failed")):
+        _, receipts = normalize_openai_custom_tool_calls([{
+            "id": "call_local_ref", "type": "custom",
+            "custom": {"name": "probe", "input": json.dumps({"marker": marker})},
+        }], candidate)
+        assert receipts[0].error_code == expected
+        assert receipts[0].allows_execution is (not expected)
+        assert custom_receipts_prove_wire_acceptance(receipts)
+
+
+@pytest.mark.parametrize(("schema", "valid", "invalid"), [
+    ({"type": "object", "properties": {
+        "marker": {"type": "string"}, "child": {"$ref": "#"},
+    }}, {"child": {"marker": "ok"}}, {"child": {"marker": 3}}),
+    ({"$ref": "https://json-schema.org/draft/2020-12/schema"},
+     {"type": "string"}, {"type": "not-a-schema-type"}),
+])
+def test_custom_argument_refs_keep_recursion_and_bundled_metaschemas(monkeypatch, schema, valid, invalid):
+    import urllib.request
+
+    def no_retrieval(*_args, **_kwargs):
+        pytest.fail("a local resource tried to retrieve an external document")
+
+    monkeypatch.setattr(urllib.request, "urlopen", no_retrieval)
+    tools = _tools()
+    tools[0]["function"]["parameters"] = schema
+    candidate = _wire_candidate(tools)
+    for arguments, expected in ((valid, ""), (invalid, "schema_validation_failed")):
+        _, receipts = normalize_openai_custom_tool_calls([{
+            "id": "call_resource", "type": "custom",
+            "custom": {"name": "probe", "input": json.dumps(arguments)},
+        }], candidate)
+        assert receipts[0].error_code == expected
+        assert receipts[0].allows_execution is (not expected)
+        assert custom_receipts_prove_wire_acceptance(receipts)
+
+
+def test_custom_argument_validation_does_not_load_file_references(tmp_path):
+    referenced = tmp_path / "marker.json"
+    referenced.write_text('{"type":"string","const":"ok"}', encoding="utf-8")
+    tools = _tools()
+    tools[0]["function"]["parameters"] = {
+        "type": "object", "properties": {"marker": {"$ref": referenced.as_uri()}},
+    }
+    _, receipts = normalize_openai_custom_tool_calls([{
+        "id": "call_file_ref", "type": "custom",
+        "custom": {"name": "probe", "input": '{"marker":"ok"}'},
+    }], _wire_candidate(tools))
     assert receipts[0].error_code == "invalid_schema"
     assert not receipts[0].allows_execution
     assert custom_receipts_prove_wire_acceptance(receipts)

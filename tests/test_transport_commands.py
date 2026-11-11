@@ -138,6 +138,40 @@ def test_accepted_restart_ends_current_batch_without_processing_later_command(mo
     assert ctx.sent == [(1, "♻️ Restarting.")]
 
 
+def test_the_owners_restart_reply_names_commits_landed_over_a_review(tmp_path, monkeypatch):
+    """The agent restart notice's line (``server_process.restart_gate_line``): commits since this body started that Git
+    recorded over a review Blocking would have stopped, deployment unconfirmed. Without one the reply is unchanged."""
+    import json
+    import subprocess
+
+    import server
+    from ouroboros import server_process
+    from supervisor import message_bus
+
+    repo, data = tmp_path / "repo", tmp_path / "data"
+    (data / "state").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    for name in ("base", "change"):
+        subprocess.run(["git", "-c", "user.name=T", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", name],
+                       cwd=repo, check=True, capture_output=True)
+    base, landed = (subprocess.run(["git", "rev-parse", ref], cwd=repo, check=True, capture_output=True,
+                                   encoding="utf-8").stdout.strip() for ref in ("HEAD~1", "HEAD"))
+    (data / "state" / "advisory_overrides.json").write_text(json.dumps({"landed": [
+        {"sha": landed, "reason": "critical_findings", "task_id": "t", "at": "2026-11-11T10:00:00+00:00"}]}),
+        encoding="utf-8")
+    monkeypatch.setattr(server, "REPO_DIR", repo)
+    monkeypatch.setattr(server, "DATA_DIR", data)
+    monkeypatch.setattr(server_process, "server_source_baseline", lambda: base)
+    monkeypatch.setattr(message_bus, "log_chat", lambda *_a, **_k: None)
+    monkeypatch.setattr(server, "_perform_owner_restart", lambda *_a: (True, ""))
+    ctx = Ctx({"owner_id": 1, "owner_chat_id": 1})
+    server._process_bridge_updates(Bridge([{"chat": {"id": 1}, "from": {"id": 1}, "text": "/restart", "source": "web"}]),
+                                   0, ctx)
+    assert ctx.sent == [(1, "♻️ Restarting.\nCommitted over a review Blocking would have stopped (the review gate did "
+                            f"not prohibit continuation): {landed[:12]} (critical findings); deployment unconfirmed, as "
+                            "no record yet binds a running process to them.")]
+
+
 def _real_bridge(*texts, chat_id=1, user_id=1, source="web"):
     """The real queue-backed bridge with a batch already waiting."""
     from supervisor.message_bus import LocalChatBridge
@@ -308,7 +342,7 @@ def test_command_voice_survives_live_delivery_and_history(tmp_path, monkeypatch)
     bridge._broadcast_fn = live.append
     ctx = Ctx({"owner_id": 1, "owner_chat_id": 1, "bg_consciousness_enabled": True})
     ctx.consciousness = SimpleNamespace(start=lambda: "Background consciousness enabled",
-                                        stop=lambda: "Background consciousness disabled")
+                                        stop=lambda source="": "Background consciousness disabled")
     ctx.send_with_budget = message_bus.send_with_budget
     ctx.WORKERS, ctx.PENDING, ctx.RUNNING = {}, [], {}
     monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)

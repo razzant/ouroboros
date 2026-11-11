@@ -172,8 +172,10 @@ def completion_notice(record: dict) -> dict:
 
     Neutral means a finished, execution-ok record has only technical caveats,
     never success or reviewer approval. Unknown/partial rows retain their causes.
+    ``review_gate`` is the work's review-gate field (``review_overrides.card_line``) for its Telegram copy.
     """
     from ouroboros import project_dialogue as dialogue
+    from ouroboros.review_overrides import WORK_KEY, card_line
     axes = record.get("outcome_axes") or {}
     execution, objective = axes.get("execution") or {}, axes.get("objective") or {}
     delivery = record.get("terminal_delivery") or {}
@@ -184,7 +186,9 @@ def completion_notice(record: dict) -> dict:
     full, phase = dialogue._completion_verdict(record, {}), dialogue.outcome_phase(record, {})
     neutral = (not detail and bool(full) and execution.get("status") == "ok"
                and objective.get("status") in {"pass", "not_evaluated"} and phase in {"done", "warn"})
-    return {"neutral": neutral, "detail": detail or ("" if neutral else full or str(record.get("reason_detail") or "")), "phase": phase}
+    gate = card_line(record.get(WORK_KEY))
+    return {"neutral": neutral, "detail": detail or ("" if neutral else full or str(record.get("reason_detail") or "")), "phase": phase,
+            **({"review_gate": gate} if gate else {})}
 
 
 def completion_event_view(root: Any, event: dict, record: dict) -> dict:

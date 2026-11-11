@@ -9,7 +9,7 @@ import pytest
 
 from ouroboros import delegate_collection as body
 from ouroboros import delegate_custody_current as current
-from ouroboros.delegate_supervision import _TICK_SEC
+from ouroboros.delegate_feed import _TICK_SEC
 from ouroboros.gateways import claudexor_observation as obs
 from ouroboros.gateways import claudexor_run_events as run_events
 from ouroboros.gateways.claudexor import ClaudexorUnavailable
@@ -17,6 +17,9 @@ from tests.test_delegate_body_collection import started, terminal
 
 TOKEN_A = "a" * 43
 TOKEN_B = "b" * 43
+# A running run past its first event as the engine shows it: with the profile it enforced, which the
+# body's rights floor reads on every detail it fetches (the narrowest never breaches a grant).
+RUNNING = {"state": "running", "effectiveAccess": "readonly"}
 
 
 def _summary(status="running", pending=False, token=TOKEN_A):
@@ -111,7 +114,7 @@ def runtime(tmp_path, monkeypatch):
         assert release.wait(10)
 
     monkeypatch.setattr(body.BodyRuntime, "tick", park)
-    instance = body.start_body_runtime(tmp_path, gateway_factory=Engine, max_workers=2)
+    instance = body.start_body_runtime(tmp_path, gateway_factory=Engine)
     assert entered.wait(3)
     # Support is learned from the engine's catalog by the first read of any run
     # (``test_support_is_learned_by_the_first_read``); these tests start past that point.
@@ -151,7 +154,7 @@ def test_a_quiet_run_is_watched_without_a_detail_read(tmp_path, runtime):
 def test_attention_fetches_the_question_before_the_token_is_acknowledged(tmp_path, runtime):
     instance, step = runtime
     entry = started(tmp_path)
-    asked = {"summary": {"runId": entry.run_id, "state": "running", "waitingOnUser": True},
+    asked = {"summary": {"runId": entry.run_id, **RUNNING, "waitingOnUser": True},
              "lastSeq": 2, "pendingInteractions": [_question()]}
     Engine.details[entry.run_id] = asked
     Engine.wakes.append(_wake("attention", [_summary(pending=True, token=TOKEN_B)], attention=[0]))
@@ -202,7 +205,7 @@ def test_a_hole_is_remembered_as_unanswered_and_never_raises_out_of_the_pass(tmp
 def test_a_problem_row_takes_the_addressed_read_that_may_say_absent_then_acknowledges_it(tmp_path, runtime, kind):
     instance, step = runtime
     entry = started(tmp_path)
-    Engine.details[entry.run_id] = {"summary": {"runId": entry.run_id, "state": "running"}, "lastSeq": 1,
+    Engine.details[entry.run_id] = {"summary": {"runId": entry.run_id, **RUNNING}, "lastSeq": 1,
                                     "pendingInteractions": []}
     Engine.wakes.append(_wake("problems", [{"status": None, "pending": None, "token": None, "problem": kind}]))
     step()
@@ -231,7 +234,7 @@ def test_an_engine_whose_route_rejects_the_acknowledgement_keeps_todays_beat_of_
     entry = started(tmp_path)
     other = started(tmp_path, rid="run-two", tid="task-two")
     for rid in (entry.run_id, other.run_id):
-        Engine.details[rid] = {"summary": {"runId": rid, "state": "running"}, "lastSeq": 1, "pendingInteractions": []}
+        Engine.details[rid] = {"summary": {"runId": rid, **RUNNING}, "lastSeq": 1, "pendingInteractions": []}
     step()
     assert Engine.requests == [] and sorted(Engine.detail_reads) == [entry.run_id, other.run_id]
     assert Engine.probes == [0], "probed once, remembered for this engine identity"
@@ -243,7 +246,7 @@ def test_support_is_learned_by_the_first_read_then_the_pass_takes_over(tmp_path,
     instance, step = runtime
     instance._compact_wait = False
     entry = started(tmp_path)
-    Engine.details[entry.run_id] = {"summary": {"runId": entry.run_id, "state": "running"}, "lastSeq": 1,
+    Engine.details[entry.run_id] = {"summary": {"runId": entry.run_id, **RUNNING}, "lastSeq": 1,
                                     "pendingInteractions": []}
     step()
     assert Engine.detail_reads == [entry.run_id] and Engine.requests == []
@@ -273,7 +276,7 @@ def test_a_catalog_hole_never_blocks_the_old_read(tmp_path, runtime):
     instance, step = runtime
     instance._compact_wait = False
     entry = started(tmp_path)
-    Engine.details[entry.run_id] = {"summary": {"runId": entry.run_id, "state": "running"}, "lastSeq": 1,
+    Engine.details[entry.run_id] = {"summary": {"runId": entry.run_id, **RUNNING}, "lastSeq": 1,
                                     "pendingInteractions": []}
     Engine.catalog.append(ClaudexorUnavailable("daemon_unreachable", "read bound expired", observation_timeout=True,
                                                observation_reason="observation_read_timeout"))
@@ -297,7 +300,7 @@ def test_a_persistently_refused_probe_never_blocks_the_old_read_and_is_asked_aga
     assert Engine.probes == [0] and instance._compact_wait is False
     assert obs._SUPPORT == {}, "nothing remembered of the refusal"
     other = started(tmp_path, rid="run-two", tid="task-two")
-    Engine.details[other.run_id] = {"summary": {"runId": other.run_id, "state": "running"}, "lastSeq": 1,
+    Engine.details[other.run_id] = {"summary": {"runId": other.run_id, **RUNNING}, "lastSeq": 1,
                                     "pendingInteractions": []}
     step()
     assert len(Engine.probes) == 2 and other.run_id in Engine.detail_reads, "asked again next beat; read regardless"
@@ -321,7 +324,7 @@ def test_a_retryable_refusal_of_the_pass_is_a_hole_not_a_verdict(tmp_path, runti
 def test_a_plain_refusal_of_the_pass_forgets_once(tmp_path, runtime, caplog):
     instance, step = runtime
     entry = started(tmp_path)
-    Engine.details[entry.run_id] = {"summary": {"runId": entry.run_id, "state": "running"}, "lastSeq": 1,
+    Engine.details[entry.run_id] = {"summary": {"runId": entry.run_id, **RUNNING}, "lastSeq": 1,
                                     "pendingInteractions": []}
     Engine.wakes.append(ClaudexorUnavailable("conflict", "another writer", status_code=409))
     caplog.set_level(logging.WARNING, logger=body.__name__)
@@ -335,7 +338,7 @@ def test_a_plain_refusal_of_the_pass_forgets_once(tmp_path, runtime, caplog):
 def test_a_refused_or_malformed_pass_returns_the_observer_to_its_old_beat_once(tmp_path, runtime, caplog):
     instance, step = runtime
     entry = started(tmp_path)
-    Engine.details[entry.run_id] = {"summary": {"runId": entry.run_id, "state": "running"}, "lastSeq": 1,
+    Engine.details[entry.run_id] = {"summary": {"runId": entry.run_id, **RUNNING}, "lastSeq": 1,
                                     "pendingInteractions": []}
     Engine.wakes.append({"wakeReason": "attention", "attention": [], "summaries": []})  # a batch of the wrong size
     caplog.set_level(logging.WARNING, logger=body.__name__)
@@ -352,13 +355,13 @@ def test_a_refused_or_malformed_pass_returns_the_observer_to_its_old_beat_once(t
 def test_an_answered_question_is_cleared_by_one_addressed_read_and_other_quiet_rows_stay_read_free(tmp_path, runtime):
     instance, step = runtime
     entry = started(tmp_path)
-    Engine.details[entry.run_id] = {"summary": {"runId": entry.run_id, "state": "running", "waitingOnUser": True},
+    Engine.details[entry.run_id] = {"summary": {"runId": entry.run_id, **RUNNING, "waitingOnUser": True},
                                     "lastSeq": 2, "pendingInteractions": [_question()]}
     Engine.wakes.append(_wake("attention", [_summary(pending=True, token=TOKEN_B)], attention=[0]))
     step()
     assert current.run(tmp_path, entry.run_id).pending_interaction_ids == ["int-1"]
     answered = "c" * 43
-    Engine.details[entry.run_id] = {"summary": {"runId": entry.run_id, "state": "running", "waitingOnUser": False},
+    Engine.details[entry.run_id] = {"summary": {"runId": entry.run_id, **RUNNING, "waitingOnUser": False},
                                     "lastSeq": 3, "pendingInteractions": []}
     Engine.wakes.append(_wake("timeout", [_summary(pending=False, token=answered)]))
     step()
@@ -372,7 +375,7 @@ def test_an_answered_question_is_cleared_by_one_addressed_read_and_other_quiet_r
 def test_an_engine_that_lost_the_route_returns_the_observer_to_its_old_beat(tmp_path, runtime):
     instance, step = runtime
     entry = started(tmp_path)
-    Engine.details[entry.run_id] = {"summary": {"runId": entry.run_id, "state": "running"}, "lastSeq": 1,
+    Engine.details[entry.run_id] = {"summary": {"runId": entry.run_id, **RUNNING}, "lastSeq": 1,
                                     "pendingInteractions": []}
     Engine.wakes.append(ClaudexorUnavailable("not_found", "no such route", status_code=404))
     step()
@@ -385,7 +388,7 @@ def test_an_engine_that_lost_the_route_returns_the_observer_to_its_old_beat(tmp_
 def test_a_quiet_async_question_keeps_the_run_working_as_its_detail_said(tmp_path, runtime):
     """claudexor #628: the compact row an opted-in engine marks ``blocking: false`` says what the
     full detail said (a working run with attention), so the quiet pass never rewrites it as paused."""
-    from ouroboros.delegate_supervision import run_activity
+    from ouroboros.delegate_feed import run_activity
 
     instance, step = runtime
     entry = started(tmp_path)
@@ -407,7 +410,7 @@ def test_a_quiet_async_question_keeps_the_run_working_as_its_detail_said(tmp_pat
 
 
 def test_an_unknown_blocking_fact_keeps_the_paused_meaning(tmp_path, runtime):
-    from ouroboros.delegate_supervision import run_activity
+    from ouroboros.delegate_feed import run_activity
 
     instance, step = runtime
     entry = started(tmp_path)

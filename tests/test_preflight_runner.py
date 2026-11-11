@@ -482,11 +482,11 @@ def test_plugin_verification_ignores_the_candidate_working_directory(tmp_path):
 
 def test_worker_count_respects_physical_room_and_the_parent_allocation(monkeypatch):
     """CPU defaults and operator requests cannot spend unavailable worker slots."""
-    from ouroboros import config, test_parallelism as budget
+    from ouroboros import config, host_memory, test_parallelism as budget
 
     monkeypatch.delenv(budget.NESTED_WORKERS_ENV, raising=False)
     peak = config.TEST_WORKER_PEAK_RSS_BYTES
-    monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(10 * peak, 4 * peak))
+    monkeypatch.setattr(budget, "physical_memory", lambda: host_memory.MemorySnapshot(10 * peak, 4 * peak))
     monkeypatch.setattr(budget, "other_runs", lambda: budget.HostRuns())  # a quiet host; the ledger has its own test
     monkeypatch.setenv(WORKERS_ENV, "1")
     assert preflight_probe._preflight_worker_count() == 1

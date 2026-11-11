@@ -38,8 +38,6 @@ log = logging.getLogger(__name__)
 
 
 DATA_DIR = None  # pathlib.Path
-TOTAL_BUDGET_LIMIT: float = 0.0
-BUDGET_REPORT_EVERY_MESSAGES: int = 10
 _BRIDGE: Optional["LocalChatBridge"] = None
 
 
@@ -134,16 +132,9 @@ def notification_chat_route(*candidates: Any) -> Optional[int]:
     return None
 
 
-def init(
-    drive_root,
-    total_budget_limit: float,
-    budget_report_every: int,
-    chat_bridge: "LocalChatBridge",
-) -> None:
-    global DATA_DIR, TOTAL_BUDGET_LIMIT, BUDGET_REPORT_EVERY_MESSAGES, _BRIDGE
+def init(drive_root, chat_bridge: "LocalChatBridge") -> None:
+    global DATA_DIR, _BRIDGE
     DATA_DIR = drive_root
-    TOTAL_BUDGET_LIMIT = total_budget_limit
-    BUDGET_REPORT_EVERY_MESSAGES = budget_report_every
     _BRIDGE = chat_bridge
     if drive_root is not None:
         try:  # the dispatches a crash left owed: handed over once, through the bus that opens now
@@ -160,15 +151,6 @@ def get_bridge() -> "LocalChatBridge":
 def try_get_bridge() -> "Optional[LocalChatBridge]":
     """Return initialized bridge, if any."""
     return _BRIDGE
-
-
-def refresh_budget_limit(new_limit: Optional[float]) -> None:
-    """Hot-reload budget limit for status messages."""
-    global TOTAL_BUDGET_LIMIT
-    try:
-        TOTAL_BUDGET_LIMIT = float(new_limit) if new_limit is not None else 0.0
-    except (TypeError, ValueError):
-        pass
 
 
 class LocalChatBridge:
@@ -1209,85 +1191,6 @@ def _send_markdown(
         role=role,
         system_type=system_type,
     )
-
-
-def _format_budget_line(st: Dict[str, Any]) -> str:
-    sha = (st.get("current_sha") or "")[:8]
-    branch = st.get("current_branch") or "?"
-    if st.get("_budget_accounting_available") is False:
-        return f"—\nBudget: unavailable (physical-attempt ledger error) | {branch}@{sha}"
-    spent = float(st.get("spent_usd") or 0.0)
-    total = float(TOTAL_BUDGET_LIMIT or 0.0)
-    pct = (spent / total * 100.0) if total > 0 else 0.0
-    accounting = st.get("usage_accounting")
-    if not isinstance(accounting, dict):
-        accounting = {}
-    confirmed = float(accounting.get("confirmed_usd") or 0.0)
-    reserved = float(accounting.get("reserved_usd") or 0.0)
-    unresolved = float(accounting.get("unresolved_upper_bound_usd") or 0.0)
-    unknown = int(accounting.get("unknown_unmetered") or 0)
-    cost_final = "yes" if accounting.get("cost_final") else "no"
-    integrity = "DEGRADED (quarantined ledger tail)" if accounting.get("integrity_degraded") else "ok"
-    detail = (
-        f"confirmed ${confirmed:.4f}; reserved ${reserved:.4f}; "
-        f"unresolved <=${unresolved:.4f}; unknown/unmetered {unknown}; "
-        f"cost_final {cost_final}; ledger_integrity {integrity}"
-    )
-    return (
-        f"—\nBudget: ${spent:.4f} / ${total:.2f} ({pct:.2f}%) "
-        f"[{detail}] | {branch}@{sha}"
-    )
-
-
-def budget_line(force: bool = False) -> str:
-    try:
-        from supervisor.state import update_state
-
-        every = max(1, int(BUDGET_REPORT_EVERY_MESSAGES))
-        report_box: Dict[str, Any] = {"emit": False}
-
-        def _tick_counter(live: Dict[str, Any]) -> None:
-            if force:
-                live["budget_messages_since_report"] = 0
-                report_box["emit"] = True
-                return
-            counter = int(live.get("budget_messages_since_report") or 0) + 1
-            if counter < every:
-                live["budget_messages_since_report"] = counter
-                return
-            live["budget_messages_since_report"] = 0
-            report_box["emit"] = True
-
-        from supervisor.state import StateUnavailable
-
-        try:
-            st = update_state(_tick_counter)
-        except StateUnavailable:  # a budget report is bookkeeping; the message itself proceeds
-            return ""
-        if not report_box["emit"]:
-            return ""
-        display_state = dict(st)
-        try:
-            if DATA_DIR is None:
-                raise RuntimeError("message bus data root is not initialized")
-            from ouroboros.usage_accounting import usage_projection, usage_writer_snapshot
-
-            total = float(TOTAL_BUDGET_LIMIT or 0.0)
-            accounting = (  # display of scalars, sent from the supervisor loop too: no per-root map
-                usage_projection(DATA_DIR, global_limit_usd=total, include_roots=False, allow_stale=True)
-                if total > 0
-                else usage_writer_snapshot(DATA_DIR, allow_stale=True)
-            )
-            display_state["spent_usd"] = float(accounting.get("settled_usd") or 0.0)  # known; holds in the detail
-            display_state["usage_accounting"] = accounting
-            display_state["_budget_accounting_available"] = True
-        except Exception:
-            log.error("Physical-attempt ledger unavailable for budget line", exc_info=True)
-            display_state["_budget_accounting_available"] = False
-        return _format_budget_line(display_state)
-    except Exception:
-        log.debug("Suppressed exception in budget_line", exc_info=True)
-        return ""
 
 
 def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,

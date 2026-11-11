@@ -157,7 +157,7 @@ def test_absence_fault_requires_an_unknown_terminal_outcome(
         assert fresh.containment_fault["reason"] == "run_absence_identity_unproven"
 
 
-@pytest.mark.parametrize("surface", ["delivery", "wait", "supervised_wait"])
+@pytest.mark.parametrize("surface", ["delivery", "wait", "run_wait"])
 def test_explicit_money_waits_use_the_live_capture_generation(
         tmp_path, monkeypatch, driven_runtime, surface):  # noqa: F811
     from ouroboros import delegate_supervision
@@ -193,9 +193,9 @@ def test_explicit_money_waits_use_the_live_capture_generation(
         if surface == "delivery":
             collect_and_deliver_terminal(ctx, entry.run_id, terminal(entry.run_id), body._shape(first), first, None)
         elif surface == "wait":
-            delegate._delegate_wait(ctx, entry.run_id)
+            delegate._read_run(ctx, entry.run_id)
         else:
-            result = json.loads(delegate_supervision.supervised_wait(ctx, entry.run_id).text)
+            result = json.loads(delegate_supervision.run_wait(ctx, entry.run_id).text)
             assert delegate_supervision.acknowledge_pending_wake(ctx, result)
         tick()
         tick()
@@ -227,13 +227,13 @@ def test_unreadable_money_source_keeps_retained_delivery(tmp_path, monkeypatch, 
         source.unlink()
     else:
         source.write_bytes(b"invalid source")
-    result = json.loads(delegate._delegate_wait(ctx, entry.run_id))
+    result = json.loads(delegate._read_run(ctx, entry.run_id))
     assert result["primary_output"]["text"] == "complete answer" and result["output_delivery"]["complete"]
     assert not result["settlement"]["settled"]
     assert current.run(tmp_path, entry.run_id).output_source == fresh.output_source
     source.write_bytes(raw)
     monkeypatch.setattr(usage_accounting, "record_subscription_session", lambda *a, **k: "session")
-    assert json.loads(delegate._delegate_wait(ctx, entry.run_id))["settlement"]["settled"]
+    assert json.loads(delegate._read_run(ctx, entry.run_id))["settlement"]["settled"]
 
 
 def test_failed_evidence_cleanup_preserves_prepared_patch(tmp_path, monkeypatch, driven_runtime):  # noqa: F811
