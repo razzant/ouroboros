@@ -402,8 +402,8 @@ def rows_after_frontier(root: Any) -> List[Entry]:
 class PlaceRows:
     """Each place room's sealed rows, for the rooms a reader asks: who spoke there before its pages and its earlier
     deliveries of the same words (``memory_view_conversations``). ``rooms`` answers each asked place room as a
-    ``PlaceRoom``; ``rows`` every sealed row of each asked room in append order. A place nobody asks for is not read;
-    ``open_rows_by_room`` answers it for its capture, nothing before it does."""
+    ``PlaceRoom``. A place nobody asks for is not read; ``open_rows_by_room`` answers it for its capture, nothing before
+    it does."""
 
     def __init__(self) -> None:
         self._reads: Optional[_PlaceReads] = None
@@ -414,13 +414,10 @@ class PlaceRows:
         earlier copies of, by room; ``warm`` sees each batch of rows as it is read (a reader's cache, nothing more)."""
         return {} if self._reads is None else self._reads.rooms([str(room) for room in rooms], words or {}, warm)
 
-    def rows(self, rooms: Iterable[Any]) -> Dict[str, List[Entry]]:
-        return {room: whole for room, place in self.rooms(rooms).items() if (whole := place.whole())}
-
 
 class PlaceRoom:
     """One place room's sealed rows: ``reversed`` walks them newest first, reading what a standing cold set left unread
-    only as far as the walk goes; ``whole`` all of them in append order; ``copies`` those with the words its reader
+    only as far as the walk goes; ``copies`` every one in hand, among them each earlier copy of the words its reader
     asked for (``memory_view_conversations._repeats`` compares words only with their own earlier copies)."""
 
     def __init__(self, reads: "_PlaceReads", room: str) -> None:
@@ -428,12 +425,6 @@ class PlaceRoom:
 
     def __reversed__(self) -> Iterator[Entry]:
         return self._reads.newest(self.room)
-
-    def __bool__(self) -> bool:
-        return next(reversed(self), None) is not None
-
-    def whole(self) -> List[Entry]:
-        return self._reads.whole(self.room)
 
     def copies(self) -> List[Entry]:
         return self._reads.copies(self.room)
@@ -546,16 +537,8 @@ class _PlaceReads:
                 return
             self._older(room)
 
-    def whole(self, room: str) -> List[Entry]:
-        if room in self.edge:
-            self._older(room, every=True)
-        return list(self._known(room)[0])
-
     def copies(self, room: str) -> List[Entry]:
-        rows = self._known(room)[0]
-        if room not in self.edge:  # every sealed row of the room is in hand
-            return list(rows)
-        return [entry for entry in rows if words_of(entry[1]) in self.words[room]]
+        return list(self._known(room)[0])
 
     def _known(self, room: str) -> Tuple[List[Entry], List[int]]:
         if room not in self.known:
@@ -566,13 +549,13 @@ class _PlaceReads:
             self.known[room] = rows, [entry[2] for entry in rows]
         return self.known[room]
 
-    def _older(self, room: str, every: bool = False) -> None:
-        count = -1 if every else self.page.get(room, 2 * self._NEWEST)
+    def _older(self, room: str) -> None:
+        count = self.page.get(room, 2 * self._NEWEST)
         older = memory_tail_cold.older_of(self.store, self.held, int(room), self.edge[room], count)
         if older is None:
             self._live([room])
             return
-        if every or len(older) < count:  # nothing of the chat is left unread
+        if len(older) < count:  # nothing of the chat is left unread
             del self.edge[room]
         else:
             self.edge[room], self.page[room] = min(fact[0] for fact in older), 2 * count

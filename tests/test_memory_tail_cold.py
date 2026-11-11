@@ -98,9 +98,15 @@ def _views(root: pathlib.Path, rooms: dict) -> dict:
     sealed = mi.PlaceRows() if hasattr(mi, "PlaceRows") else {}
     opened = mi.open_rows_by_room(root, gaps=gaps, quiet=quiet, sealed=sealed)
     if not isinstance(sealed, dict):  # step 3a: a place's sealed rows are read for the rooms a reader asks
-        sealed = sealed.rows(sorted({*opened, str(PLACE), str(PLACE2), *(str(chat) for chat in rooms.values())}))
+        sealed = _every_sealed(sealed, {*opened, str(PLACE), str(PLACE2), *(str(chat) for chat in rooms.values())})
     out["open"] = json.loads(json.dumps([opened, {room: sorted(kinds) for room, kinds in gaps.items()}, quiet, sealed]))
     return out
+
+
+def _every_sealed(sealed, rooms) -> dict:
+    """Every sealed row of each asked place room in append order: a walk that goes to its oldest row."""
+    walked = {room: list(reversed(list(reversed(place)))) for room, place in sealed.rooms(sorted(rooms)).items()}
+    return {room: rows for room, rows in walked.items() if rows}
 
 
 def _digest(views: dict) -> str:
@@ -725,7 +731,7 @@ def test_a_set_composed_anew_after_a_capture_read_it_answers_that_capture_from_t
         patch.setattr(cold, "gate", lambda _store: None)
         reference = mi.PlaceRows()
         mi.open_rows_by_room(tmp_path, sealed=reference)
-        want = reference.rows([PLACE])
+        want = _every_sealed(reference, [PLACE])
     assert [entry[2] for entry in want[str(PLACE)]] == [_entry(tmp_path, w)[2] for w in ("Early place.", "Middle place.")]
     with cs.capture(tmp_path, tail="all") as derived:
         assert derived.get("tail_cold")
@@ -735,7 +741,7 @@ def test_a_set_composed_anew_after_a_capture_read_it_answers_that_capture_from_t
             marks = json.loads(db.execute("SELECT value FROM state WHERE key='tail_cold'").fetchone()[0])
             db.execute("UPDATE state SET value=? WHERE key='tail_cold'", (json.dumps({**marks, "sequence": -1}),))
             db.execute("DELETE FROM tail_cold WHERE chat=?", (PLACE,))  # under its marks the place's rows stay read
-        got = sealed.rows([PLACE])
+        got = _every_sealed(sealed, [PLACE])
     assert json.loads(json.dumps(got)) == json.loads(json.dumps(want))
 
 

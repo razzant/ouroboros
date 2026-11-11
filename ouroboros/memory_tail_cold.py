@@ -44,11 +44,10 @@ MEMO = (STANDS, GATE, HELD)
 MARKS = "tail_cold"  # the set's marks, in the index's ``state``
 _SINCE = "SELECT body FROM records WHERE sequence>? AND kind IN ('decision','page') ORDER BY sequence"
 # One page of the set's rows a selection of positions names (its parameters first), stored facts as
-# ``chronicle_store._tail_rows`` reads them; the selections: every row of some chats, the newest few of each, the rows
-# of one chat older than a position, the rows of some chats with given words.
+# ``chronicle_store._tail_rows`` reads them; the selections: the newest few of some chats, the rows of one chat older
+# than a position, the rows of some chats with given words.
 _FACTS = ("SELECT json_group_array(json_array(t.pos,t.seq,t.row_sha256,json(t.legacy),json(t.meta),t.terminal)), "
           "max(c.pos) FROM (SELECT pos FROM ({}) WHERE pos>? ORDER BY pos LIMIT ?) c JOIN tail_rows t ON t.pos=c.pos")
-_IN_CHATS = "SELECT pos FROM tail_cold WHERE chat IN (SELECT value FROM json_each(?))"
 _NEWEST = ("SELECT pos FROM (SELECT pos, row_number() OVER (PARTITION BY chat ORDER BY pos DESC) AS n FROM tail_cold "
            "WHERE chat IN (SELECT value FROM json_each(?))) WHERE n<=?")
 _OLDER = "SELECT pos FROM (SELECT pos FROM tail_cold WHERE chat=? AND pos<? ORDER BY pos DESC LIMIT ?)"
@@ -145,16 +144,14 @@ def standing(derived: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
     return derived[HELD] if derived and derived.get(STANDS) else None
 
 
-def rows_of(store: Any, held: Mapping[str, Any], chats: Iterable[int], newest: Optional[int] = None) -> Optional[list]:
-    """The stored facts of the rows the set leaves unread in these chats (the room key stored with each, ``_compose``),
-    by position; with ``newest``, only that many of each chat, its newest."""
-    keys = json.dumps(sorted(set(chats)))
-    return _read(store, held, _IN_CHATS, (keys,)) if newest is None else _read(store, held, _NEWEST, (keys, newest))
+def rows_of(store: Any, held: Mapping[str, Any], chats: Iterable[int], newest: int) -> Optional[list]:
+    """The stored facts of the ``newest`` rows the set leaves unread in each of these chats (the room key stored with
+    each, ``_compose``), by position."""
+    return _read(store, held, _NEWEST, (json.dumps(sorted(set(chats))), newest))
 
 
-def older_of(store: Any, held: Mapping[str, Any], chat: int, before: int, count: int = -1) -> Optional[list]:
-    """The stored facts of the set's rows in one chat before a position, the ``count`` newest of them (-1: all), by
-    position."""
+def older_of(store: Any, held: Mapping[str, Any], chat: int, before: int, count: int) -> Optional[list]:
+    """The stored facts of the set's rows in one chat before a position, the ``count`` newest of them, by position."""
     return _read(store, held, _OLDER, (chat, before, count))
 
 
