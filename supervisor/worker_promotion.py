@@ -396,7 +396,7 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
         # ordinary Main flow, no presence-style project/workspace/source stripping).
         if origin.get("initiator") == "consciousness":
             task["actor_id"] = "consciousness"
-        task.setdefault("metadata", {}).update(origin)
+        task["metadata"].update(origin)
         apply_consciousness_authority(task)
     inherited_attachment_manifest = _pool()._apply_presence_promotion_authority(
         evt, task, objective=objective, expected_output=expected_output,
@@ -556,8 +556,6 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     # message seam (tests/test_heartbeat_presentation.py). While it is still
     # PENDING the Dashboard Activity row cancels it; the card action appears once
     # it starts.
-    # A project root may execute from a forked child drive.  Its budget-root
-    # result therefore receives this admitted contract before worker startup.
     from ouroboros.route_choice import OWNER_LEAD_SOURCES, lead_snapshot
 
     chosen = lead_snapshot(model_metadata.get("lead"))
@@ -568,6 +566,8 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
             record_model_recent(_pool().DRIVE_ROOT, chosen["model"], chosen["use_local"])
         except Exception:
             log.warning("Promoted model saved; recent suggestion could not be recorded for %s", tid, exc_info=True)
+    # A project root may execute from a forked child drive. Its budget-root
+    # result therefore receives this admitted contract before worker startup.
     outcome = _pool()._promoted_scheduled_outcome(task, admitted, tid)
     outcome["_admitted_suggested_name"] = task["suggested_name"]
     # The receipt keeps the admitted metadata, so a root interrupted before its first

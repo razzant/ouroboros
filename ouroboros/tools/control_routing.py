@@ -440,7 +440,7 @@ def _start_task(
         # The owner's own work related to a place (#2482): an ordinary owner start
         # with its own contract; only the relation the place reads it by rides along.
         evt.update(presence_root_relation(metadata))
-        # A promote from a consciousness turn/tree mints a consciousness root: the
+    # A promote from a consciousness turn/tree mints a consciousness root: the
     # origin label, ledger category and level ride the event by value; the
     # supervisor stamps them on the new root (worker_promotion) — no presence-style
     # stripping, the wake chooses project/workspace like any Main turn (В9').
