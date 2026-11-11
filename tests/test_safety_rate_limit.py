@@ -147,7 +147,7 @@ def test_exception_shaped_rate_limit_blocks_unchecked_after_one_retry(monkeypatc
 
     assert ok is False, "an unchecked guarded call must not execute in full mode"
     assert msg.startswith("⚠️ SAFETY_UNAVAILABLE:"), "typed non-verdict outcome, not a verdict"
-    assert "NOT a verdict" in msg and "Retry the same call" in msg
+    assert "that is no verdict either way" in msg and "Issue the identical call again in a later step" in msg
     assert "SAFETY_VIOLATION" not in msg and "_BLOCKED" not in msg.splitlines()[0]
     assert len(stub.calls) == 2, "exactly one retry, then the typed blocked outcome"
 
@@ -247,8 +247,8 @@ def test_http200_body_rate_limit_blocks_unchecked_after_one_retry(monkeypatch, t
 
 def test_safety_unavailable_classifies_as_plain_error_never_safety_violation():
     """The downstream status contract the typed outcome rides on: a first line carrying
-    `_UNAVAILABLE` (and no `_VIOLATION`/`_BLOCKED`) classifies as a plain tool `error`,
-    so telemetry and the agent never see a rate-limited check as `safety_violation`."""
+    `SAFETY_UNAVAILABLE` (and no `_VIOLATION`/`_BLOCKED`) is a missing reading, so
+    telemetry and the agent never see a rate-limited check as `safety_violation`."""
     from ouroboros.safety import _safety_unavailable_blocked
 
     ok, msg = _safety_unavailable_blocked(None, "run_command", "provider_transient: 429")
@@ -353,8 +353,9 @@ def test_structured_insufficient_quota_with_429_still_blocks(monkeypatch, tmp_pa
 
     assert ok is False
     assert msg == (
-        "⚠️ SAFETY_UNAVAILABLE: Safety check failed with error: "
-        "_QuotaError: Rate limit exceeded (insufficient_quota). This call was not checked: that is no verdict. Retry later."
+        "⚠️ SAFETY_UNAVAILABLE: not run. The Safety Supervisor could not read this call (its check failed: "
+        "_QuotaError: Rate limit exceeded (insufficient_quota)); that is no verdict either way. Issue the identical "
+        "call again in a later step; do not reword it as if it had been judged."
     )
     assert len(stub.calls) == 1, "a permanent class must not buy a retry"
     assert _read_events(ctx, "safety_check_rate_limited") == []
@@ -372,7 +373,9 @@ def test_non_rate_limit_exception_is_an_unavailable_hold(monkeypatch, tmp_path, 
 
     assert ok is False
     assert msg == (
-        "⚠️ SAFETY_UNAVAILABLE: Safety check failed with error: RuntimeError: network down. This call was not checked: that is no verdict. Retry later."
+        "⚠️ SAFETY_UNAVAILABLE: not run. The Safety Supervisor could not read this call (its check failed: "
+        "RuntimeError: network down); that is no verdict either way. Issue the identical call again in a later step; "
+        "do not reword it as if it had been judged."
     )
     assert len(stub.calls) == 1
     assert _read_events(ctx, "safety_check_rate_limited") == []
@@ -464,8 +467,9 @@ def test_server_outage_is_not_a_rate_limit_and_still_blocks(monkeypatch, tmp_pat
 
     assert ok is False
     assert msg == (
-        "⚠️ SAFETY_UNAVAILABLE: Safety check failed with error: "
-        "_ServerError: Service Unavailable. This call was not checked: that is no verdict. Retry later."
+        "⚠️ SAFETY_UNAVAILABLE: not run. The Safety Supervisor could not read this call (its check failed: "
+        "_ServerError: Service Unavailable); that is no verdict either way. Issue the identical call again in a later "
+        "step; do not reword it as if it had been judged."
     )
     assert len(stub.calls) == 1, "an outage must not buy the rate-limit retry"
     assert _read_events(ctx, "safety_check_rate_limited") == []
@@ -515,8 +519,8 @@ def test_local_fallback_lane_rate_limit_takes_the_audited_fail_open(monkeypatch,
     """Disclosed nuance: the local-FALLBACK lane keeps its documented fail-open contract
     (ARCHITECTURE "Safety and runtime mode" case (c)) — a genuine 429 there takes the two-attempt fail-open WITH the
     audit row (a 429 must not be stricter than the RuntimeError beside it), while every
-    other error keeps its unchanged one-attempt 'Local safety runtime unreachable'
-    warning. Both allow; the remote lanes are the ones that block typed."""
+    other error keeps its one-attempt 'the local Safety runtime is unreachable' note.
+    Both allow; the remote lanes are the ones that hold typed."""
     from ouroboros.safety import check_safety
 
     for k in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "MINIMAX_API_KEY",
@@ -544,7 +548,7 @@ def test_local_fallback_lane_rate_limit_takes_the_audited_fail_open(monkeypatch,
     ctx2 = _DriveCtx(tmp_path / "second")
     ok2, msg2 = check_safety("totally_new_tool_mixed_config", {"arg": 1}, ctx=ctx2)
     assert ok2 is True
-    assert "Local safety runtime unreachable" in msg2
+    assert "the local Safety runtime is unreachable" in msg2
     assert len(other.calls) == 1
     assert _read_events(ctx2) == []
 
@@ -717,8 +721,8 @@ class _MustNotBeCalled:
 def test_oversized_subject_blocks_without_a_model_call(monkeypatch, tmp_path):
     """A subject above ``_SAFETY_SUBJECT_CHAR_BUDGET`` is refused fail-closed BEFORE
     any provider call: never truncated (the reviewer would miss the tail), never
-    executed unchecked, and classified as a policy denial (first-line ``_BLOCKED``
-    marker), not as SAFETY_VIOLATION — the command was not judged, only its size."""
+    executed unchecked, and typed as a missing reading (``SAFETY_UNAVAILABLE``), not as
+    a verdict — the command was not judged, only its size."""
     import ouroboros.safety as safety
     from ouroboros.safety import check_safety
 
@@ -729,9 +733,10 @@ def test_oversized_subject_blocks_without_a_model_call(monkeypatch, tmp_path):
     ok, msg = check_safety("github_write", {"method": "create_issue", "title": huge}, ctx=ctx)
 
     assert ok is False, "an unreviewable guarded call must not execute"
-    assert msg.splitlines()[0].startswith("⚠️ SAFETY_SUBJECT_TOO_LARGE_BLOCKED:")
-    assert "SAFETY_VIOLATION" not in msg
-    assert "split" in msg, "the refusal carries the working alternative"
+    assert msg.startswith("⚠️ SAFETY_UNAVAILABLE: not run. The Safety Supervisor could not read this call (its "
+                          "arguments serialize to ")
+    assert "SAFETY_VIOLATION" not in msg and "nothing was truncated" in msg
+    assert "A smaller call may fit" in msg, "the refusal carries the working alternative"
     # The first version of this refusal told the agent to stage the body with
     # write_file (a POLICY_SKIP tool) and run the staged file. That is a route
     # around the supervisor: it reviews the call it is handed, and a script run

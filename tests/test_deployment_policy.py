@@ -785,10 +785,10 @@ def test_an_unavailable_mandatory_checker_holds_only_the_action_that_needs_it(in
     allowed, message = safety.check_safety("write_remote", {"path": "notes.txt"}, ctx=ctx)
     assert safety.check_safety("read_file", {"path": "notes.txt"}, ctx=ctx) == (True, ""), "reads stay available"
     if managed:
-        assert not allowed and message.startswith("⚠️ SAFETY_UNAVAILABLE") and "not checked" in message
+        assert not allowed and message.startswith("⚠️ SAFETY_UNAVAILABLE: not run.") and "no verdict" in message
         assert events[-1]["type"] == "safety_hold"
     else:
-        assert allowed and message.startswith("⚠️ SAFETY_WARNING")
+        assert allowed and message.startswith("⚠️ SAFETY_NOTE: let through without a Safety reading (")
 
 
 @pytest.fixture
@@ -891,7 +891,7 @@ def test_a_walk_without_any_answer_holds_the_action(install, monkeypatch, walk, 
         SUBSCRIPTION_FALLBACK if fallback_answer == "definite" else FALLBACK]}}})
     walk.answers[SUBSCRIPTION_FALLBACK] = [RuntimeError("provider error 503: unavailable")]
     allowed, message = walk.check()
-    assert not allowed and message.startswith("⚠️ SAFETY_UNAVAILABLE") and "not checked" in message
+    assert not allowed and message.startswith("⚠️ SAFETY_UNAVAILABLE: not run.") and "no verdict" in message
     assert [call["light_model"] for call in walk.calls] == (
         [SUBSCRIPTION_FALLBACK] if fallback_answer == "definite" else [])
     route_event = next(event for event in walk.events if event["type"] == "safety_route_fallback")

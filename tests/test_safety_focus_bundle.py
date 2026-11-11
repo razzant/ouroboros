@@ -118,7 +118,7 @@ def test_a_flagged_reply_returns_once_and_its_later_send_leaves_a_note(focus, mo
     _initialize_owner_directives(ctx, [{"role": "user", "content": content}])
     monkeypatch.setattr("ouroboros.presence_context.confirmed_delivery_receipts", lambda _ctx: frozenset())
     ok, message = prepare_focus_reply(ctx, "A short reply")
-    assert ok is (status == "SAFE") and ("Message not sent" in message) is (status == "SUSPICIOUS")
+    assert ok is (status == "SAFE") and message.startswith("⚠️ SAFETY_RETURNED: not run;") is (status == "SUSPICIOUS")
     if status == "SUSPICIOUS":
         ctx._current_llm_call_meta = {"llm_call_id": "round-2"}
         assert prepare_focus_reply(ctx, "A short reply")[0] and len(checker) == 1

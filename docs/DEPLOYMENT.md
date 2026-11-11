@@ -371,16 +371,16 @@ Supervisor route checks.
   the document's own value. A local checker's server starts only with the model, template and
   port its saved settings name; Stop stays available.
 - `safety.allowed_exits` lists the exits left open, each once; `[]` closes these three at every
-  Access level. `repeat_after_dangerous`: the agent's later identical re-issue sends DANGEROUS
-  words in Cyber Pro. `release_after_dangerous`: an employee's answered card containing the exact
-  words and destination (for undeclared speech, the exact call) releases a known DANGEROUS refusal.
-  `release_unjudged`: the same card releases a call without a verdict. A card may precede the send;
-  it proves no assessment. Closed exits leave a saved refusal in force, or an unjudged call waiting
-  for a check. Unretained verdicts still prevent unchecked release in the same context; losing all
-  state requires a fresh check unless unchecked release is enabled. An explicit list never gains
-  another exit implicitly. Omitted, the ordinary exits remain except `release_unjudged` under
-  `safety.checker`, where naming it weakens mandatory checking. SUSPICIOUS and non-speech Cyber rules
-  are unchanged.
+  Access level. `repeat_after_dangerous`: the agent's identical call from a later step lets a
+  returned DANGEROUS call of any tool through in Cyber Pro. `release_after_dangerous`: an employee's
+  answered card holding the exact words and destination (any other call: the exact call) releases
+  a returned DANGEROUS call, which outside that Cyber exit waits for it. `release_unjudged`: the
+  same card releases a call without a verdict. A card may precede the send; it proves no
+  assessment. Closed exits leave a returned call refused, or an unjudged call waiting for a check.
+  Unretained verdicts still prevent unchecked release in the same context; losing all state
+  requires a fresh check unless unchecked release is enabled. An explicit list never gains another
+  exit implicitly. Omitted, the ordinary exits remain except `release_unjudged` under `safety.checker`,
+  where naming it weakens mandatory checking. A SUSPICIOUS call passes on a later identical call.
 - `rules` (at most 64,000 UTF-8 bytes) reach every acting mind, delegated session and Safety
   check as the organization's rules, beside the employee's own, which cannot relax them.
 - `extensions.required` names up to 16 installed extensions that must run, each by `name` (its

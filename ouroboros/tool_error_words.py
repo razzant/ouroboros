@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from ouroboros._outcome_tool_errors import SAFETY_HELD_STATUSES
+
 # The steps that most often stay failed at an ending; any other reads "A tool step".
 _TOOL_NOUNS = {
     "run_command": "A command",
@@ -51,17 +53,19 @@ def _int(value: Any) -> Any:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-def _loud(errors: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _loud(errors: List[Dict[str, Any]], held: bool) -> List[Dict[str, Any]]:
     """The errors the main view names: a failed read (owner 06.11, A) and a details-only leftover (owner 09.11, A)
-    stay in the details. Twin of ``_outcome_tool_errors.warns_without_review``."""
-    return [error for error in errors if not (error.get("read_only") or error.get("details_only"))]
+    stay in the details; a call Safety held is named apart (``held``). Twin of ``_outcome_tool_errors.warns_without_review``."""
+    return [error for error in errors if not (error.get("read_only") or error.get("details_only"))
+            and (error.get("status") in SAFETY_HELD_STATUSES) is held]
 
 
-def residual_tool_errors_phrase(execution: Any) -> str:
-    """The clause naming the first recorded loud tool error, or "" when the record names none."""
+def residual_tool_errors_phrase(execution: Any, held: bool = False) -> str:
+    """The clause naming the first recorded loud tool error, or with ``held`` the first call Safety returned or could
+    not read that nothing replaced (named on Done, never a warning); "" when the record names none."""
     execution = execution if isinstance(execution, dict) else {}
     listed_unresolved, listed_cosmetic = _errors(execution, "unresolved_tool_errors"), _errors(execution, "cosmetic_tool_errors")
-    unresolved, cosmetic = _loud(listed_unresolved), _loud(listed_cosmetic)
+    unresolved, cosmetic = _loud(listed_unresolved, held), _loud(listed_cosmetic, held)
     errors = unresolved or cosmetic
     if not errors:
         return ""
@@ -78,6 +82,10 @@ def residual_tool_errors_phrase(execution: Any) -> str:
         subject = f"{noun} timed out"
     elif status == "argument_error":
         subject = f"{noun} was called with invalid arguments"
+    elif status == "safety_returned":
+        subject = f"{noun} was returned by the Safety Supervisor"
+    elif status == "safety_unavailable":
+        subject = f"{noun} was not run: the Safety Supervisor could not read it"
     else:
         subject = f"{noun} failed"
     more = len(unresolved) + len(cosmetic) - 1
@@ -85,6 +93,6 @@ def residual_tool_errors_phrase(execution: Any) -> str:
     # loud errors are counted exactly (details-only entries never stand in for an unseen loud one).
     capped = any(len(listed) >= _LISTED and len(loud) == len(listed)
                  for listed, loud in ((listed_unresolved, unresolved), (listed_cosmetic, cosmetic)))
-    tail = (", plus more tool errors" if capped else ", plus 1 more tool error" if more == 1
+    tail = ("" if held else ", plus more tool errors" if capped else ", plus 1 more tool error" if more == 1
             else f", plus {more} more tool errors" if more else "")
     return f"{subject}{tail}."

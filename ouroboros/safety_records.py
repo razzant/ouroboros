@@ -20,9 +20,9 @@ _CHIP_LOCK = threading.RLock()
 
 
 def parse_safety_response(text: str) -> Optional[Dict[str, Any]]:
-    """Parse the ``{"status", "reason", "speech", "quote"}`` verdict from a Safety model response.
+    """Parse the ``{"status", "reason", "quote"}`` verdict from a Safety model response.
 
-    ``speech`` is kept only as a boolean and ``quote`` only as non-empty text; both are the checker's claims.
+    ``quote`` is kept only as non-empty text, the checker's claim. Words are a host fact, so any other key is dropped.
     Models occasionally wrap the JSON in prose or code fences despite the prompt.
     The whole reply and every outermost ``{...}`` in it are candidates; the
     strictest recognized status wins (DANGEROUS > SUSPICIOUS > SAFE, first of
@@ -67,7 +67,6 @@ def parse_safety_response(text: str) -> Optional[Dict[str, Any]]:
             return None
         quote = obj.get("quote")
         return {"status": status, "reason": str(obj.get("reason") or ""),
-                **({"speech": obj["speech"]} if isinstance(obj.get("speech"), bool) else {}),
                 **({"quote": quote} if isinstance(quote, str) and quote.strip() else {})}
 
     for candidate in candidates:

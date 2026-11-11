@@ -575,7 +575,7 @@ def test_registry_native_guards_precede_safety_and_physical_dispatch(
         LegacyTextResultAdapter, "from_text", lambda *_args, **_kwargs: pytest.fail("legacy adapter used"),
     )
     assert denied.execute_result("read_file", {"path": "missing.txt"}) == ToolResult(
-        status="blocked", code="SAFETY_VIOLATION", text=_SAFETY_DENIAL_TEXT,
+        status="blocked", code="SAFETY_RETURNED", text=_SAFETY_DENIAL_TEXT,
     )
     assert safety_calls == ["safety"]
     assert handler_calls == []
@@ -588,6 +588,8 @@ def test_registry_native_guards_precede_safety_and_physical_dispatch(
         # line happened to carry no generic marker were recorded as clean successes.
         (ToolResult(status="blocked", code="ACCESS_BLOCKED", text=_HISTORICAL_EPHEMERAL_BUILTIN_TEXT), True, "blocked"),
         (ToolResult(status="blocked", code="SAFETY_VIOLATION", text=_SAFETY_DENIAL_TEXT), True, "safety_violation"),
+        (ToolResult(status="blocked", code="SAFETY_RETURNED", text=_SAFETY_DENIAL_TEXT), True, "safety_returned"),
+        (ToolResult(status="unavailable", code="SAFETY_UNAVAILABLE", text=_SAFETY_DENIAL_TEXT), True, "safety_unavailable"),
         (
             ToolResult(status="unavailable", code="CAPABILITY_UNAVAILABLE", text=_MANAGED_UNAVAILABLE_TEXT),
             True,

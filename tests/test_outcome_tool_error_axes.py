@@ -88,6 +88,8 @@ def test_advisory_review_cannot_clear_unreviewed_tool_error_warning():
     pytest.param({"tool": "enable_tools", "status": "unknown_tool"}, False, "details_only", id="call-named-no-tool"),
     pytest.param({"tool": "mcp_gitlab__get_commit", "status": "mcp_error"}, True, "", id="unknown-kind"),
     pytest.param({"tool": "skill_exec", "status": "error"}, True, "", id="unknown-builtin-kind-that-ran"),
+    pytest.param({"tool": "github_write", "status": "safety_returned"}, False, "", id="write-safety-returned"),
+    pytest.param({"tool": "run_command", "status": "safety_unavailable"}, False, "", id="command-safety-could-not-read"),
 ])
 def test_only_a_loud_leftover_warns_without_review(call, loud, flag):
     """Owner 06.11 («A — изменения и команды») revised 09.11 («Q1: A»): with no review, Done turns into Done with
@@ -103,6 +105,34 @@ def test_only_a_loud_leftover_warns_without_review(call, loud, flag):
     [error] = axes["execution"]["unresolved_tool_errors"] or axes["execution"]["cosmetic_tool_errors"]
     assert error["tool"] == call["tool"]
     assert {key for key in ("read_only", "details_only") if error.get(key)} == ({flag} if flag else set())
+
+
+@pytest.mark.parametrize(("call", "clause"), [
+    ({"tool": "github_write", "status": "safety_returned"}, "A GitHub write was returned by the Safety Supervisor."),
+    ({"tool": "run_command", "status": "safety_unavailable"},
+     "A command was not run: the Safety Supervisor could not read it."),
+])
+def test_a_call_safety_held_is_no_failure_and_stays_named_on_done(call, clause):
+    """A call Safety returned or could not read counts as no tool failure and alone never makes a task Done with
+    warnings; while nothing replaced it, the Done card names it as held. A later call through its tool replaces it,
+    and an old record's ``safety_violation`` stays a loud failure."""
+    from ouroboros.outcomes import build_verification_ledger
+    from ouroboros.project_dialogue import _completion_verdict, outcome_phase
+
+    def card(calls):
+        trace = {"tool_calls": [{"args": {}, **item} for item in calls]}
+        outcome = derive_loop_outcome("Delivered answer.", {}, trace)
+        record = {"status": "completed", "reason_code": "final_message", "outcome_axes": outcome["outcome_axes"]}
+        ledger = build_verification_ledger(task={}, loop_outcome=outcome, llm_trace=trace, artifact_bundle={})
+        return outcome_phase(record, {}), _completion_verdict(record, {}), ledger["summary"]["has_failures"], outcome
+
+    held = {**call, "is_error": True}
+    phase, line, failed, outcome = card([held])
+    assert (phase, line, failed, outcome["failure"]) == ("done", clause, False, None)
+    assert not outcome["outcome_axes"]["objective"].get("warning")
+    assert card([held, {"tool": call["tool"], "status": "ok"}])[:3] == ("done", "", False)
+    phase, line, failed, _ = card([{**held, "status": "safety_violation"}])
+    assert phase == "warn" and "returned" not in line and failed
 
 
 def test_a_record_written_before_the_flags_stays_loud():

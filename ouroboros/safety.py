@@ -444,10 +444,10 @@ _PENDING_NOTE = ("host fact: the last call this work presented through this tool
 
 
 class _Assessment(tuple):
-    """Keep the public pair ABI while distinguishing flags from infrastructure holds."""
-    def __new__(cls, allowed, message, *, status="", verdicts=(), destination=""):
+    """Keep the public pair ABI while distinguishing flags from missing readings (``cause``: why none was reached)."""
+    def __new__(cls, allowed, message, *, status="", verdicts=(), destination="", cause=""):
         result = super().__new__(cls, (allowed, message))
-        result.status, result.verdicts, result.destination = status, tuple(verdicts), destination
+        result.status, result.verdicts, result.destination, result.cause = status, tuple(verdicts), destination, cause
         return result
 
 
@@ -469,16 +469,48 @@ def _subject_digest(tool_name, arguments):
     return hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
 
 
-# A flag is overridden by a decision, never by bytes re-presented: the re-issue must come from a later model call.
-_SEND_DESPITE = ("To send despite this flag, repeat the identical call (its request_id too, if it has one) in a "
-                 "later step; any changed argument is checked again. ")
+# A returned call is released by a decision, never by bytes re-presented: the identical call from a later model call.
+_MIND_DECIDES = ("You decide: change the call (a changed call is read again), drop it, or run it as it is by issuing "
+                 "the identical call in a later step.")
 # When neither applicable DANGEROUS exit is open, the saved verdict still answers.
-_REPEAT_CLOSED = ("This deployment's policy lets no repeat send it: a changed call is checked again, and only the "
-                  "organization's administrator changes that policy.")
+_CLOSED = ("This organization's deployment policy lets neither a repeat nor a card release it. A changed call is read "
+           "again; only the organization's administrator changes that policy.")
+_CARD_CHECK = ("The host checks only that they answered that card, not what they answered: issue the identical call "
+               "again only if they said yes.")
 
 
-# How returned words open: their level, and that nothing was sent.
-_NOT_SENT = {"SUSPICIOUS": "⚠️ SAFETY_WARNING: Message not sent", "DANGEROUS": "⚠️ SAFETY_VIOLATION: Message not sent"}
+def _returned_head(level, verdicts, destination=""):
+    """How a returned call opens: nothing ran, the reading, its flagged words and where they would land."""
+    quote = next((v["quote"] for v in reversed(verdicts) if v.get("quote")), "")
+    return (f"⚠️ SAFETY_RETURNED: not run; nothing was sent or changed. The Safety Supervisor read this call as {level}:\n"
+            + _reasons(verdicts) + (f"\nFlagged words: {json.dumps(quote, ensure_ascii=False)}" if quote else "")
+            + (f"\n{destination}" if destination else "")
+            + "\nIt read this call and the host's facts about it, not your whole work.")
+
+
+def _card(subject):
+    """What my human's card must hold for ``_owner_yes`` (``_exit_subject``)."""
+    words, destinations, exact, _ = subject
+    return (f"this exact call on its own line: {words}" if exact
+            else f"these exact words on their own lines and the destination {', '.join(destinations)}")
+
+
+def _waits(subject):
+    return (f"In this mode a DANGEROUS reading waits for your human. If you still judge it right, ask them privately on "
+            f"a card holding {_card(subject)}. {_CARD_CHECK} A changed call is read again; another tool is no way "
+            "around this.")
+
+
+def _unread(cause, status=""):
+    """A missing reading that holds the call: no verdict either way."""
+    again = "A smaller call may fit" if status == "TOO_LARGE" else "Issue the identical call again in a later step"
+    return (f"⚠️ SAFETY_UNAVAILABLE: not run. The Safety Supervisor could not read this call ({cause}); that is no "
+            f"verdict either way. {again}; do not reword it as if it had been judged.")
+
+
+def _let_through(cause):
+    """A missing reading that lets the call through: the line trails the tool's own result."""
+    return f"⚠️ SAFETY_NOTE: let through without a Safety reading ({cause}); the tool's result says what happened."
 
 
 def _authoring_call(ctx):
@@ -487,8 +519,8 @@ def _authoring_call(ctx):
     return str(meta.get("llm_call_id") or "") if isinstance(meta, dict) else ""
 
 
-def _remember(ctx, digest, tool_name, assessment, *, flagged="", marked=False, gate="", held=""):
-    """Keep a returned call (``flagged``: its level) or a held one (``held``: its cause) for this work, with its
+def _remember(ctx, digest, tool_name, assessment, *, flagged="", gate="", held=""):
+    """Keep a returned call (``flagged``: its level) or a held one (``held``: UNAVAILABLE or TOO_LARGE), with its
     verdicts, the model call that authored it and, for DANGEROUS declared words, their words-and-destination key
     (``gate``). Past the byte bound the oldest calls leave first, never the newest; a call no longer kept is read
     afresh. Without a root nothing is kept (False), but a verdict stays known for this context's lifetime, so a
@@ -504,8 +536,7 @@ def _remember(ctx, digest, tool_name, assessment, *, flagged="", marked=False, g
         rows[digest] = {"digest": digest, "tool": tool_name,
                         "verdicts": coalesce_verdicts(before.get("verdicts", ()), assessment.verdicts),
                         **({"flagged": flagged} if flagged else {"held": held} if held else {}),
-                        "llm_call_id": _authoring_call(ctx),
-                        **({"marked": True} if flagged and marked else {}), **({"gate": gate} if gate else {})}
+                        "llm_call_id": _authoring_call(ctx), **({"gate": gate} if gate else {})}
         while len(rows) > 1 and verdict_history_bytes(rows) > _SAFETY_PRIOR_BYTE_BUDGET:
             rows.pop(next(iter(rows)))
         _PRIOR_VERDICTS[root] = rows
@@ -541,26 +572,9 @@ def _needs_checker(ctx):
 
 
 def _hold(ctx, tool_name, reason, *, status="UNAVAILABLE"):
-    """Hold this one call: no reading was reached."""
+    """Hold this one call: no reading was reached (``_unread``)."""
     _emit_durable_safety_event(ctx, {"type": "safety_hold", "tool": tool_name, "reason": reason, "hold": status})
-    marker = "SAFETY_SUBJECT_TOO_LARGE_BLOCKED" if status == "TOO_LARGE" else "SAFETY_UNAVAILABLE"
-    told = "This call was not checked: that is no verdict. " + ("A smaller call may fit." if status == "TOO_LARGE" else "Retry later.")
-    return _Assessment(False, f"⚠️ {marker}: {reason}. {told}", status=status)
-
-
-_WAIT = ("In this mode words flagged DANGEROUS wait for your human: never route them through another tool; changed words "
-         "are checked again. ")  # outside Cyber Pro, as a dangerous action stops there
-_RELEASE_CLOSED = ": this deployment's policy lets no answer of your human release a call unjudged."
-
-
-def _owner_line(subject, head=""):
-    """How my human releases a waiting call: the exact card its ``_exit_subject`` needs (answered, whatever it says)."""
-    words, destinations, exact, _ = subject
-    card = (f"with this exact call on its own line of the card: {words}\n" if exact
-            else f"with these exact words on their own lines, unprefixed, and the destination {', '.join(destinations)} "
-                 "on the card; ")
-    return (f"{head}Or ask your human privately {card}their answer lets your identical call send it. The host checks "
-            "that they answered that card, not what they answered: send only on their approval.")
+    return _Assessment(False, _unread(reason, status), status=status, cause=reason)
 
 
 def _declared_speech(tool_name, effect):
@@ -577,7 +591,7 @@ def _exact_call(tool_name, arguments):
 def _exit_subject(ctx, tool_name, arguments, effect, ext_tool=None):
     """What my human's card must hold, as ``(words, destinations, exact, labels)``: declared words with each place's
     label and every recipient outside a place's own conversation (one place never covers another recipient), else the
-    exact call (``_exact_call``): an MCP tool, words only the verdict saw, or words or recipients the host cannot tell."""
+    exact call (``_exact_call``): any other call, or words or recipients the host cannot tell."""
     from ouroboros.place_guard import call_place_facts
     from ouroboros.tool_effects import argument_value, target_values
 
@@ -596,7 +610,7 @@ def _exit_subject(ctx, tool_name, arguments, effect, ext_tool=None):
 
 def _owner_yes(ctx, subject):
     """The id of my human's answer in this work whose card (the quiz it answers, never a chat message) holds the words
-    and every destination ``subject()`` resolves; "" if none. A draft answered before the send counts, as does an
+    and every destination ``subject()`` resolves; "" if none. A card answered before the call counts, as does an
     answer that started a fresh head (its card rides in the head's owner rows). The host checks bytes and destination
     only: the mind's call after reading the answer is its judgment that it approves."""
     from ouroboros.owner_words import OWNER_SOURCES, is_answered_card
@@ -766,7 +780,7 @@ def _route_has_access(model: str, use_local: bool) -> bool:
 def _resolve_safety_routing() -> Tuple[bool, bool, Optional[str]]:
     """Choose local/remote safety backend; unreachable fallback fails open.
 
-    Only no-backend cases fail open with ``SAFETY_WARNING``: no local lane and either no provider key or one not
+    Only no-backend cases fail open with a ``SAFETY_NOTE``: no local lane and either no provider key or one not
     covering the light model's provider; a fallback local runtime that fails or is rate-limited, never a chain route
     (``_unanswered``). An explicit local runtime (``USE_LOCAL_LIGHT``) that fails holds."""
     selected = get_safety_model()
@@ -792,26 +806,15 @@ def _resolve_safety_routing() -> Tuple[bool, bool, Optional[str]]:
         if not explicit and _any_local_routing_enabled():
             # Provider mismatch: local is fallback, so local outage is tolerated.
             return True, True, None
-        return False, False, (
-            f"Safety Supervisor model provider key missing for {light_model} "
-            f"(other remote keys are set but they don't cover this provider); "
-            "skipping check."
-        )
+        return False, False, (f"its model's provider key is missing for {light_model}: other remote keys are set "
+                              "but none covers this provider")
 
     if not explicit and _any_local_routing_enabled():
         # Local-only configs should warn, not hard-block, on local outage.
         return True, True, None
 
-    return False, False, (
-        "No safety LLM available (neither remote provider keys nor local "
-        "routing are configured); skipping check."
-    )
+    return False, False, "no Safety model is available: neither remote provider keys nor local routing are configured"
 
-
-_UNCHECKED_WARNING_SUFFIX = (
-    "The tool call was allowed so the agent is not hard-blocked on a misconfigured "
-    "runtime. The selected task and physical resource binding still describe the operation."
-)
 
 # Only a genuine THROUGHPUT signal may wave a safety check through, so the predicate is
 # narrower than "retryable". `classify_llm_exception` folds every transient class —
@@ -942,7 +945,7 @@ def _safety_rate_limit_backoff(ctx: Optional[Any]) -> None:
 
 def _rate_limited_outcome(
     ctx: Optional[Any], tool_name: str, error: str, *, local_fallback: bool, attempts: int = 2,
-) -> Tuple[bool, str]:
+) -> "_Assessment":
     'Terminal outcome of a rate-limited safety check, split by lane. The local-FALLBACK'
     if local_fallback:
         log.warning(
@@ -953,16 +956,14 @@ def _rate_limited_outcome(
             "type": "safety_check_rate_limited", "tool": tool_name,
             "action": "fail_open_local_fallback", "error": error,
         })
-        return True, (
-            f"⚠️ SAFETY_WARNING: The local fallback Safety Supervisor was rate-limited "
-            f"and could not check this call ({error}). {_UNCHECKED_WARNING_SUFFIX}"
-        )
+        return _Assessment(True, _let_through(f"the local fallback Safety Supervisor was rate-limited: {error}"),
+                           status="UNAVAILABLE")
     return _safety_unavailable_blocked(ctx, tool_name, error, attempts=attempts)
 
 
 def _safety_unavailable_blocked(
     ctx: Optional[Any], tool_name: str, error: str, *, attempts: int = 2,
-) -> Tuple[bool, str]:
+) -> "_Assessment":
     'Rate-limited safety lane: BLOCK this one call with a typed non-verdict outcome (``_mark_storm`` closes the route).'
     shape, action = (("storm latch, no attempt", "blocked_unchecked_storm_latched") if not attempts else
                      ("deadline expired before the retry", "blocked_unchecked_deadline_expired") if attempts < 2 else
@@ -972,18 +973,12 @@ def _safety_unavailable_blocked(
                                      "error": error})
     # The provider error goes on its own line: downstream status classification scans
     # only the FIRST line for outcome markers, and a raw error body could carry one.
-    return False, (
-        "⚠️ SAFETY_UNAVAILABLE: The Safety Supervisor is rate-limited and could not check "
-        "this call. This is infrastructure back-pressure, NOT a verdict about your "
-        "command — the call was not executed. Retry the same call shortly; do not "
-        f"reword it as if it had been judged unsafe.\n(provider error: {error})"
-    )
+    cause = "its provider is rate-limited"
+    return _Assessment(False, f"{_unread(cause)}\n(provider error: {error})", status="UNAVAILABLE", cause=cause)
 
 
-def _subject_too_large_blocked(
-    ctx: Optional[Any], tool_name: str, subject_chars: int,
-) -> Tuple[bool, str]:
-    'Over-budget subject: BLOCK this one call with a typed policy denial.'
+def _subject_too_large_blocked(ctx: Optional[Any], tool_name: str, subject_chars: int) -> "_Assessment":
+    'Over-budget subject: no reading, and never a truncated one (a partially read call must never run).'
     log.error(
         "Safety subject for %s is %d chars (budget %d); refusing the unreviewable call",
         tool_name, subject_chars, _SAFETY_SUBJECT_CHAR_BUDGET,
@@ -993,14 +988,9 @@ def _subject_too_large_blocked(
         "subject_chars": int(subject_chars),
         "budget_chars": _SAFETY_SUBJECT_CHAR_BUDGET,
     })
-    return False, (
-        "⚠️ SAFETY_SUBJECT_TOO_LARGE_BLOCKED: this call's arguments serialize to "
-        f"{subject_chars:,} characters, above the {_SAFETY_SUBJECT_CHAR_BUDGET:,}-character "
-        "budget the Safety Supervisor can review in one prompt. The call was NOT executed "
-        "and the subject was NOT truncated (a partially reviewed call must never run). "
-        "Reshape it: split the payload into smaller calls that each fit the budget, so "
-        "every byte that runs is a byte the supervisor saw."
-    )
+    cause = (f"its arguments serialize to {subject_chars:,} characters, above the {_SAFETY_SUBJECT_CHAR_BUDGET:,} it "
+             "reads in one prompt; nothing was truncated")
+    return _Assessment(False, _unread(cause, "TOO_LARGE"), status="TOO_LARGE", cause=cause)
 
 
 def _safety_model_call(
@@ -1119,16 +1109,15 @@ def _unanswered(ctx: Optional[Any], tool_name: str, error: Exception, *, fail_op
     """The outcome of a route that answered nothing: the one-route rule. Only the Supervisor's own fallback
     local route may ``fail_open``; any storm is already marked (``_mark_storm``)."""
     if isinstance(error, _SafetyRateLimited):
-        return _Assessment(*_rate_limited_outcome(
-            ctx, tool_name, str(error), local_fallback=fail_open, attempts=error.attempts), status="UNAVAILABLE")
+        return _rate_limited_outcome(ctx, tool_name, str(error), local_fallback=fail_open, attempts=error.attempts)
     from ouroboros.llm_claudexor import propagate_model_error
     propagate_model_error(error)
     safe_error = sanitize_tool_result_for_log(f"{type(error).__name__}: {error}")
     if fail_open:  # a fallback local outage warns instead of blocking all unknown tools
         log.warning("Safety local-fallback LLM call failed for %s (%s); proceeding with warning", tool_name, safe_error)
-        return _Assessment(True, f"⚠️ SAFETY_WARNING: Local safety runtime unreachable ({safe_error}). {_UNCHECKED_WARNING_SUFFIX}", status="UNAVAILABLE")
+        return _Assessment(True, _let_through(f"the local Safety runtime is unreachable: {safe_error}"), status="UNAVAILABLE")
     log.error("Safety check LLM call failed for %s: %s", tool_name, safe_error)
-    return _hold(ctx, tool_name, f"Safety check failed with error: {safe_error}")
+    return _hold(ctx, tool_name, f"its check failed: {safe_error}")
 
 
 def _run_llm_check(
@@ -1142,19 +1131,19 @@ def _run_llm_check(
     """Run a single light-model safety check and classify the verdict."""
     args_json = _render_subject_json(arguments)
     if len(args_json) > _SAFETY_SUBJECT_CHAR_BUDGET:
-        return _Assessment(*_subject_too_large_blocked(ctx, tool_name, len(args_json)), status="TOO_LARGE")
+        return _subject_too_large_blocked(ctx, tool_name, len(args_json))
     evidence = {}
     prompt = _build_check_prompt(tool_name, arguments, messages, args_json=args_json,
                                  ctx=ctx, resolved_binding=resolved_binding, evidence=evidence, ext_tool=ext_tool)
     if len(prompt.encode("utf-8")) > _SAFETY_BUNDLE_BYTE_BUDGET:
-        return _hold(ctx, tool_name, "The complete mandatory evidence bundle is too large", status="TOO_LARGE")
+        return _hold(ctx, tool_name, "the complete mandatory evidence bundle is too large", status="TOO_LARGE")
     # A deployment's walk judges each of its own routes (below): its primary's access never stops the others.
     managed = checker()
     _use_local_light, _is_local_fallback, _skip_reason = (False, False, None) if managed else _resolve_safety_routing()
     if _skip_reason is not None:
         if _needs_checker(ctx):
             return _hold(ctx, tool_name, _skip_reason)
-        return _Assessment(True, f"⚠️ SAFETY_WARNING: Safety backend is not configured ({_skip_reason}). {_UNCHECKED_WARNING_SUFFIX}", status="UNAVAILABLE")
+        return _Assessment(True, _let_through(_skip_reason), status="UNAVAILABLE")
     client = LLMClient()
     system_prompt = _get_safety_prompt()
     light_model = get_safety_model().removesuffix(" (local)")
@@ -1205,7 +1194,7 @@ def _run_llm_check(
         routes = [row for row in routes if _route_has_access(row[0], row[1])]
         if not routes:
             record_skips(None)
-            return _hold(ctx, tool_name, "No route of the deployment's Safety Supervisor has its connection's credential")
+            return _hold(ctx, tool_name, "no route of the deployment's Safety Supervisor has its connection's credential")
     alone, own_failure, own_reply = len(routes) == 1, None, None
 
     for index, (light_model, _use_local_light, role, binding) in enumerate(routes):
@@ -1279,7 +1268,7 @@ def _run_llm_check(
             repair_prompt = (
                 "Your previous Safety Supervisor response was not parseable as the required JSON object.\n"
                 "Return ONLY this strict JSON shape, with no markdown and no prose:\n"
-                "{\"status\":\"SAFE|SUSPICIOUS|DANGEROUS\",\"reason\":\"short reason\",\"speech\":true|false,\"quote\":\"\"}\n\n"
+                "{\"status\":\"SAFE|SUSPICIOUS|DANGEROUS\",\"reason\":\"short reason\",\"quote\":\"\"}\n\n"
                 "Original proposed tool call follows again.\n\n"
                 f"{prompt}"
             )
@@ -1305,51 +1294,46 @@ def _run_llm_check(
                 "tool": tool_name,
                 "failure_class": failure_class,
             })
-            return _hold(ctx, tool_name, f"Safety Supervisor returned unparseable response (class={failure_class}) after one repair retry")
+            return _hold(ctx, tool_name, f"its answer stayed unparseable (class={failure_class}) after one repair retry")
 
-    verdicts = [{"stage": "first", **result}]
-    row = None
+    verdicts, row, failure, second = [{"stage": "first", **result}], None, "", None
     if result["status"] != "SAFE" and managed is None:  # a deployment's Supervisor decides alone
         from ouroboros.configured_subagents import normalize_configured_subagents
         try:
             catalog, _ = normalize_configured_subagents(runtime_setting("OUROBOROS_SUBAGENTS", "") or {"enabled": False, "items": []})
+            row = next((r for r in catalog.items if r.rechecks_flags and r.enabled), None) if catalog.enabled else None
         except ValueError as exc:
-            return _hold(ctx, tool_name, f"Second-check roster unavailable after a first-stage flag: {sanitize_tool_result_for_log(str(exc))}")
-        row = next((r for r in catalog.items if r.rechecks_flags and r.enabled), None) if catalog.enabled else None
+            failure = f"its roster is unreadable: {sanitize_tool_result_for_log(str(exc))}"
     if row is not None:
         second_prompt = ("You review a flag a first checker raised; overturning it needs a reason.\n"
                          + prompt + "\nFirst verdict:\n" + _render_subject_json(result))
-        if len(second_prompt.encode("utf-8")) > _SAFETY_BUNDLE_BYTE_BUDGET:
-            return _hold(ctx, tool_name, "The mandatory second-check bundle is too large", status="TOO_LARGE")
         light_model = row.route.target_id.removesuffix(" (local)")
         _use_local_light = row.route.target_id.endswith(" (local)")
-        try:
-            msg, _ = _safety_model_call(
-                client=client, ctx=ctx, tool_name=tool_name, light_model=light_model, use_local=_use_local_light,
-                call_type="safety_second_check", user_prompt=second_prompt, on_usage=_emit_safety_usage, system_prompt=system_prompt,
-                model_role="subagent:" + row.subagent_id, effort=row.effort or "low",
-                account=row.route.credential_profile_id, processing=row.processing_preference or None, attempts_limit=1,
-                latch=False)
-            second = _parse_safety_response(msg.get("content") or "")
-        except Exception as exc:
-            from ouroboros.llm_claudexor import propagate_model_error
-            propagate_model_error(exc)
-            return _hold(ctx, tool_name, f"Second check unavailable: {sanitize_tool_result_for_log(str(exc))}")
-        if second is None or (second["status"] == "SAFE" and not str(second.get("reason") or "").strip()):
-            return _hold(ctx, tool_name, "Second check did not return a verdict with a reason")
-        result = second
-        verdicts.append({"stage": "second", "row_id": row.subagent_id, **result})
+        if len(second_prompt.encode("utf-8")) > _SAFETY_BUNDLE_BYTE_BUDGET:
+            failure = "its bundle is too large"
+        else:
+            try:
+                msg, _ = _safety_model_call(
+                    client=client, ctx=ctx, tool_name=tool_name, light_model=light_model, use_local=_use_local_light,
+                    call_type="safety_second_check", user_prompt=second_prompt, on_usage=_emit_safety_usage,
+                    system_prompt=system_prompt, model_role="subagent:" + row.subagent_id, effort=row.effort or "low",
+                    account=row.route.credential_profile_id, processing=row.processing_preference or None,
+                    attempts_limit=1, latch=False)
+                second = _parse_safety_response(msg.get("content") or "")
+            except Exception as exc:
+                from ouroboros.llm_claudexor import propagate_model_error
+                propagate_model_error(exc)
+                failure = sanitize_tool_result_for_log(f"{type(exc).__name__}: {exc}")
+        if second is not None and (second["status"] != "SAFE" or str(second.get("reason") or "").strip()):
+            result = second
+            verdicts.append({"stage": "second", "row_id": row.subagent_id, **result})
+        else:
+            failure = failure or "it returned no verdict with a reason"
+    if failure:  # an optional second check that answered nothing leaves the first verdict standing
+        _emit_durable_safety_event(ctx, {"type": "safety_second_check_failed", "tool": tool_name, "error": failure})
     status = result["status"]
-    reasons = _reasons(verdicts)
-    if status == "SAFE":
-        return _Assessment(True, "", status=status, verdicts=verdicts)
-    if status == "SUSPICIOUS":
-        return _Assessment(True, "⚠️ SAFETY_WARNING: The Safety Supervisor flagged this action as suspicious.\n"
-                           + reasons + "\nThe command was allowed, but consider whether this is the right approach.",
-                           status=status, verdicts=verdicts, destination="\n".join(_destination_lines(evidence)))
-    return _Assessment(False, "⚠️ SAFETY_VIOLATION: The Safety Supervisor blocked this command.\n"
-                       + reasons + "\nReconsider whether and how to proceed.", status=status, verdicts=verdicts,
-                       destination="\n".join(_destination_lines(evidence)))
+    return _Assessment(status == "SAFE", "", status=status, verdicts=verdicts,
+                       destination="" if status == "SAFE" else "\n".join(_destination_lines(evidence)))
 
 
 def _reasons(verdicts):
@@ -1391,27 +1375,26 @@ def _assess_call(tool_name, arguments, messages, ctx, python_resolution, resolve
 
     ``declared_policy`` is a first-party ``ToolEntry``'s own declaration; a
     ``TOOL_POLICY`` entry outranks it and an invalid value is ``DEFAULT_POLICY``.
-    Speech, known before a verdict from declarations or marked by the verdict's ``speech``, follows the final
-    assessment: SUSPICIOUS or DANGEROUS returns it unsent once, with the reason, the verdict's ``quote`` and the
-    destination's notes. An identical re-issue (request_id included) from a later model call sends SUSPICIOUS words in
-    every mode and DANGEROUS words in Cyber Pro, the mode read when they are sent; elsewhere DANGEROUS words wait for
-    my human, keyed on the declared words and destination, so a new request_id buys no fresh check. My human's answer
-    whose card holds the exact words as whole lines and the destination (a call declaring neither: the exact call)
-    sends them in every mode, one given before the send included (``_owner_yes``): the host checks that the card was
-    answered, never what the answer says. A hold on speech, or on an MCP call without a verdict, binds in every mode
-    and names the same exit. Deployment exits separately govern an agent's DANGEROUS repeat, a human's card after
-    DANGEROUS and a card without a verdict. Permissions are read at sending; a closed exit buys no second roll of
-    a kept exact-call verdict; a call no longer kept is read afresh. The speech mark is the final
-    stage's; words only it saw meet the one-author guard first. ``ext_tool`` is the extension descriptor being
-    dispatched: its effect and the brief's place facts are the publication it was read with
-    (``tool_effects.bound_declaration``)."""
+    Words are a host fact from declarations alone (``_declared_speech``). A flagged call, SUSPICIOUS or DANGEROUS and
+    whatever its tool, returns once before any effect with the reasons, the verdict's ``quote`` and the destination's
+    notes (the final stage's verdict, a second check included). The identical call (request_id included) from a later
+    model call is let through unread for SUSPICIOUS in every mode and for DANGEROUS in Cyber Pro, the mode read at
+    that issue; elsewhere DANGEROUS waits for my human, declared words keyed on words and destination so a new
+    request_id or another tool buys no fresh reading. My human's answer whose card holds the exact words as whole lines
+    and the destination (any other call: the exact call) lets it through, one given before the issue included
+    (``_owner_yes``): the host checks that the card was answered, never what the answer says. The step that received a
+    return never releases it. A hold on words, or on an MCP call, binds in every mode and names the same card.
+    Deployment exits separately govern the mind's DANGEROUS repeat, my human's card after DANGEROUS and a card without
+    a reading; a closed exit buys no second roll of a kept verdict, and a call no longer kept is read afresh.
+    ``ext_tool`` is the extension descriptor being dispatched: its effect and the brief's place facts are the
+    publication it was read with (``tool_effects.bound_declaration``)."""
     declared = declared_policy if isinstance(declared_policy, str) else ""
     policy = TOOL_POLICY.get(tool_name) or (declared if declared in POLICY_VALUES else DEFAULT_POLICY)
 
     from ouroboros.tool_effects import effect_of
     is_mcp = tool_name.startswith("mcp_")
     effect = effect_of(tool_name, ext_tool=ext_tool, ctx=ctx, is_mcp=is_mcp, args=arguments)
-    speech = _declared_speech(tool_name, effect)  # a verdict may add the mark (below); an unjudged MCP call waits too
+    speech = _declared_speech(tool_name, effect)  # an unread MCP call waits too
     if tool_name == "manage_schedules" and arguments.get("action") in {"create", "update", "restore"}:
         policy = POLICY_CHECK
     if effect.declared and effect.effect == "read":
@@ -1470,54 +1453,44 @@ def _assess_call(tool_name, arguments, messages, ctx, python_resolution, resolve
         resolved or resolved.append(_exit_subject(ctx, tool_name, arguments, effect, ext_tool))
         return resolved[0]
 
-    def one_author():  # the place guard a message meets at dispatch, for words only a verdict saw
-        from ouroboros.place_guard import verdict_speech_refusal
-        return verdict_speech_refusal(ctx, tool_name, arguments, is_mcp=is_mcp, ext_tool=ext_tool)
-
-    def released(quiz, words_by_verdict):  # my human's answered card holds these exact words: no new check
-        if words_by_verdict and (refusal := one_author()):
-            return False, refusal
-        said = "\nThe check had said:\n" + _reasons(basis) if any(v["status"] != "SAFE" for v in basis or ()) else ""
-        return sent("safety_sent_despite_check" if flag or gated else "safety_sent_without_assessment",
-                    f"Sent on your human's answer ({quiz}), without a new check. The host checked that they answered "
-                    "a card with these exact words, not what they answered." + said,
-                    quiz_id=quiz, **({"hold": prior["held"]} if prior.get("held") else {}))
-
-    def sent(event, advice, **facts):
+    def let_through(event, text, **facts):  # released without a new reading, audited
         _emit_durable_safety_event(ctx, {"type": event, "tool": tool_name, "subject_digest": digest, "sent_by": call,
                                          **({"verdicts": basis} if basis else {}),
                                          **({"flagged_in": prior.get("llm_call_id", "")} if flag else {}), **facts})
-        return True, "⚠️ SAFETY_ADVICE: " + advice
-    # Who sends flagged words, read when they are sent: the mind for SUSPICIOUS, and for DANGEROUS in Cyber Pro;
-    # else my human's card. ``gated``: these declared words to this destination were flagged DANGEROUS elsewhere.
+        return True, text
+
+    def released(quiz):  # my human's answered card holds this exact call, or these exact words and destination
+        held = {"hold": prior["held"]} if prior.get("held") else {}
+        return let_through("safety_sent_despite_check" if level else "safety_sent_without_assessment",
+                           f"⚠️ SAFETY_NOTE: let through on your human's answer ({quiz}), without a new reading. The "
+                           "host checked that they answered a card holding this exact "
+                           f"{'call' if subject()[2] else 'text and destination'}, not what they answered.",
+                           quiz_id=quiz, **held)
+
+    def close(waits):  # who releases a returned call, read at its issue: the mind, else my human's card
+        return (_waits(subject()) if release_dangerous else _CLOSED) if waits else _MIND_DECIDES
+    # The mind releases SUSPICIOUS, and DANGEROUS in Cyber Pro. ``gated``: these declared words to this destination
+    # were read DANGEROUS in this work, through whatever tool or request_id.
     gated = gates.get(_words_key(subject())) if gates and speech else None
-    mind_may = (cyber and repeat) or (flag == "SUSPICIOUS" and not gated)
-    basis = prior.get("verdicts") or (gated or {}).get("verdicts")  # the verdicts a release overrides
     level = "DANGEROUS" if gated else flag  # the words' gate outranks an older exact-call flag
-    card_open = level != "DANGEROUS" or release_dangerous
-    closed = level == "DANGEROUS" and not (mind_may or card_open)
-    exits = (_REPEAT_CLOSED if closed else _owner_line(subject(), _SEND_DESPITE if mind_may else _WAIT)
-             if card_open else _SEND_DESPITE) if level else ""
-    if flag and (not call or call == prior.get("llm_call_id")):  # the flagged decision re-presented, not a later one
-        return False, _NOT_SENT[flag] + ": this exact call was flagged in this same step. " + exits
-    if flag and closed:
-        return False, _NOT_SENT[level] + ": this exact call was refused before. " + _REPEAT_CLOSED
-    # My human's card reaches words (declared, or marked by a verdict) and an MCP call no verdict judged an action; a
-    # call no verdict judged only through an open release, and never one judged in this context.
-    if (speech or prior.get("marked") or (is_mcp and not prior.get("verdicts"))) and call and (
-            call != prior.get("llm_call_id")) and card_open and (level or (release and not prior.get("judged"))) and (
-            quiz := _owner_yes(ctx, subject)):
-        return released(quiz, prior.get("marked"))
-    if gated and not cyber:  # owner's answer above may release it; an older SUSPICIOUS flag cannot
-        return False, (f"{_NOT_SENT['DANGEROUS']}: these words were flagged DANGEROUS in this work for this place or "
-                       f"recipient. {exits}")
+    basis = (gated or prior).get("verdicts") or []  # the reading a release overrides
+    waits = level == "DANGEROUS" and not (cyber and repeat)
+    same_step = not call or call in {row.get("llm_call_id") for row in (prior, gated) if row}
+    if flag and same_step:  # the returned decision re-presented, not a later one
+        return _Assessment(False, "⚠️ SAFETY_RETURNED: not run. This exact call was returned earlier in this same "
+                           f"step; decide in a later step. {close(waits)}", status=level, verdicts=basis)
+    if waits and release_dangerous and not same_step and (quiz := _owner_yes(ctx, subject)):
+        return released(quiz)
+    if waits:  # no fresh reading re-rolls it
+        return _Assessment(False, f"{_returned_head(level, basis)} {close(waits)}", status=level, verdicts=basis)
     if flag:
-        if not mind_may:  # it waits for my human: no fresh check re-rolls it
-            return False, _NOT_SENT[flag] + ". " + exits
-        if prior.get("marked") and (refusal := one_author()):
-            return False, refusal
-        return sent("safety_sent_despite_check", "Identical re-issue from a later step; sent despite the check:\n"
-                    + _reasons(prior["verdicts"]), detail="sent despite the check by a later model call")
+        return let_through("safety_sent_despite_check", "⚠️ SAFETY_NOTE: let through on your later identical call, "
+                           "without a new reading; the tool's result says what happened. The Supervisor had read it "
+                           f"as {flag}: {_reasons(basis)}", detail="sent despite the check by a later model call")
+    # Words or an MCP call no reading judged leave on my human's card where this deployment leaves that release open.
+    if (speech or is_mcp) and release and not prior.get("judged") and not same_step and (
+            quiz := _owner_yes(ctx, subject)):
+        return released(quiz)
 
     try:
         assessment = _run_llm_check(tool_name, arguments, messages, ctx, resolved_binding, ext_tool)
@@ -1526,57 +1499,32 @@ def _assess_call(tool_name, arguments, messages, ctx, python_resolution, resolve
         from ouroboros.model_wait import propagate_model_control
         (propagate_model_control if cyber else propagate_model_error)(exc)
         assessment = _hold(ctx, tool_name, sanitize_tool_result_for_log(f"{type(exc).__name__}: {exc}"))
-    allowed, message = assessment
-    verdicts = getattr(assessment, "verdicts", ())
+    verdicts, status = getattr(assessment, "verdicts", ()), getattr(assessment, "status", "")
     if verdicts:
-        # Words follow the final assessment (a second check included): any flag returns them unsent once.
-        marked = not speech and verdicts[-1].get("speech") is True  # words only the final verdict saw
-        speech = speech or marked
-        status = getattr(assessment, "status", "")
-        flag = status if speech and status in ("SUSPICIOUS", "DANGEROUS") else ""
-        mind_may = flag == "SUSPICIOUS" or (cyber and repeat)
-        card_open = flag != "DANGEROUS" or release_dangerous
-        closed = flag == "DANGEROUS" and not (mind_may or card_open)
-        # Every refusal of words is kept, whatever its exit is now: its next issue reads the exit as it then stands.
-        kept = bool(flag or not allowed) and _remember(ctx, digest, tool_name, assessment, flagged=flag, marked=marked,
-                                                       gate=_words_key(subject()) if flag == "DANGEROUS" else "")
         _emit_durable_safety_event(ctx, {"type": "safety_verdict", "tool": tool_name,
                                        "subject_digest": digest, "verdicts": verdicts})
-        if flag and marked and call and card_open and (quiz := _owner_yes(ctx, subject)):  # answered before the send
-            prior = {"verdicts": list(verdicts), "llm_call_id": call}
-            basis = prior["verdicts"]
-            return released(quiz, True)
-        if flag:  # private to the mind: the words, the rule, where they would land and a kept exit
-            quote = next((v["quote"] for v in reversed(verdicts) if v.get("quote")), "")
-            tail = (_REPEAT_CLOSED if closed else _owner_line(subject(), _SEND_DESPITE if mind_may else _WAIT)
-                    if card_open else _SEND_DESPITE) if kept else ""
-            return _Assessment(False, _NOT_SENT[flag] + ".\n" + _reasons(verdicts)
-                               + (f"\nFlagged words: {json.dumps(quote, ensure_ascii=False)}" if quote else "")
-                               + (f"\n{assessment.destination}" if getattr(assessment, "destination", "") else "")
-                               + (f"\n{tail}" if tail else ""), status=flag, verdicts=verdicts)
-        if marked and allowed and (refusal := one_author()):  # the guard a message meets at dispatch
-            return False, refusal
-    # A call never judged a non-SAFE action leaves on my human's card for its exact form (a pre-approved github_write),
-    # where this deployment leaves that release open. Speech holds bind in every mode, as does an MCP call's (built-in
-    # undeclared tools' holds stay advice).
-    if not allowed and not verdicts and all(v["status"] == "SAFE" for v in prior.get("verdicts", ())) and call and (
-            call != prior.get("llm_call_id")) and release and not prior.get("judged") and (
-            quiz := _owner_yes(ctx, subject)):
-        return released(quiz, False)
-    if not allowed and (speech or (is_mcp and not getattr(assessment, "verdicts", ()))):
-        if verdicts:  # a judged call is no hold: no wait for a check, no exit
+        if status not in ("SUSPICIOUS", "DANGEROUS"):
             return assessment
-        held = _remember(ctx, digest, tool_name, assessment, held=getattr(assessment, "status", "") or "UNAVAILABLE")
-        head = ("This call waits until a check judges it: its server does not mark it read-only, so it may deliver "
-                "words." if effect.source == "mcp" else "These words wait until a check judges them.")
-        if held and release:
-            return False, (message + "\n" + _owner_line(subject(), head + " Retry in a later step. ")
-                           + " Never route these words through another tool.")
-        retry = _RELEASE_CLOSED if held else "."  # nothing kept names no exit
-        return False, f"{message}\n{head} Retry in a later step{retry} Never route these words through another tool."
-    if cyber and not allowed:
+        # Q2 = A: every flagged call returns once before any effect; its next issue reads the exits as they then stand.
+        kept = _remember(ctx, digest, tool_name, assessment, flagged=status,
+                         gate=_words_key(subject()) if status == "DANGEROUS" else "")
+        tail = f" {close(status == 'DANGEROUS' and not (cyber and repeat))}" if kept else ""  # nothing kept, no exit
+        return _Assessment(False, _returned_head(status, verdicts, assessment.destination) + tail, status=status,
+                           verdicts=verdicts)
+    allowed, message = assessment
+    if allowed:  # no reading, let through (``_let_through``)
+        return assessment
+    cause = getattr(assessment, "cause", "") or message
+    # A call no reading judged leaves on my human's card for its exact form (a pre-approved github_write).
+    if release and not prior.get("judged") and not same_step and (quiz := _owner_yes(ctx, subject)):
+        return released(quiz)
+    if speech or is_mcp:  # a hold on words or on an MCP call binds in every mode
+        held = _remember(ctx, digest, tool_name, assessment, held=status or "UNAVAILABLE")
+        card = (f"\nOr ask your human privately on a card holding {_card(subject())}: their answer lets the identical "
+                f"call through unread. {_CARD_CHECK}") if held and release else ""
+        return _Assessment(False, message + card, status=status, cause=cause)
+    if cyber:  # a built-in tool's hold is advice in Cyber Pro
         _emit_durable_safety_event(ctx, {"type": "safety_advisory", "tool": tool_name,
             "assessment_allowed": False, "assessment": message, "runtime_mode": _runtime_mode(ctx), "execution_allowed": True})
-        return True, ("⚠️ SAFETY_ADVICE: Cyber Pro leaves the decision to Ouroboros. "
-                      "Assessment recorded before execution:\n" + message)
+        return True, _let_through(cause)
     return assessment

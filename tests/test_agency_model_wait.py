@@ -55,7 +55,7 @@ def test_resource_refusal_does_not_suspend_cyber_execution(live_wait, tmp_path, 
         assert len(waits) == 1 and not (work / "once.txt").exists()
     else:
         result = registry.execute_result("run_command", command)
-        assert result.status == "ok" and "SAFETY_ADVICE" in result.text
+        assert result.status == "ok" and "⚠️ SAFETY_NOTE: let through without a Safety reading (" in result.text
         assert (work / "once.txt").read_text() == "x" and not waits
         events = [json.loads(line) for line in (root / "logs/events.jsonl").read_text(encoding="utf-8").splitlines()]
         advisory = next(row for row in events if row["type"] == "safety_advisory")
