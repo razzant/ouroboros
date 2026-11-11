@@ -1205,7 +1205,7 @@ html[data-layout="docked"] .app-page-header[data-empty] {
 }
 /* While a card is dragged the band lets the pointer through to the board, whose top edge is where the engine scrolls
    a drag upward; at rest the band is the window's handle. */
-:root[data-window-chrome="integrated"][data-layout="docked"] #page-widgets .app-page-header[data-empty]:has(~ .widgets-scroll .widgets-card.dragging) {
+:root[data-window-chrome="integrated"][data-layout="docked"] #page-widgets .app-page-header[data-empty]:has(~ .widgets-scroll .widgets-card[data-widget-lifted]) {
     pointer-events: none;
 }
 
@@ -4781,8 +4781,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .chat-send-inline:not(:disabled):active { filter: var(--press); }
 .chat-send-inline:disabled { box-shadow: none; }
 
-/* Owner capsules (DESIGN "Composer owner controls"): Context and Effort, each a glass capsule of
-   the pills' height (ring glyph · name · value) that opens inline into its strip. Siblings of the
+/* Owner capsules (DESIGN "Composer owner controls"): Model, Subagents, Context and Effort, each a glass
+   capsule of the pills' height (glyph · name · value) that opens inline into its strip. Siblings of the
    pills; the same vocabulary as Swarm. The open strip never takes a second line: beside the other
    controls when it fits, alone while they step aside, scrolling inside itself only when nothing
    else fits (composer_owner_controls.js sets data-fit, data-tight, data-label and
@@ -4939,9 +4939,10 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 /* A room's ☰ is one of the controls that step aside: the fit gives the open strip the whole line. */
 .chat-toolbar-row[data-owner-solo] > .composer-menu,
 .chat-toolbar-row[data-owner-solo] .chat-composer-chips,
-.chat-toolbar-row[data-owner-solo="effort"] :is(.chat-context-mode, .chat-subagents-mode),
-.chat-toolbar-row[data-owner-solo="context"] :is(.chat-effort-range, .chat-subagents-mode),
-.chat-toolbar-row[data-owner-solo="subagents"] :is(.chat-context-mode, .chat-effort-range) {
+.chat-toolbar-row[data-owner-solo="effort"] :is(.chat-model-mode, .chat-context-mode, .chat-subagents-mode),
+.chat-toolbar-row[data-owner-solo="context"] :is(.chat-model-mode, .chat-effort-range, .chat-subagents-mode),
+.chat-toolbar-row[data-owner-solo="subagents"] :is(.chat-model-mode, .chat-context-mode, .chat-effort-range),
+.chat-toolbar-row[data-owner-solo="model"] :is(.chat-subagents-mode, .chat-context-mode, .chat-effort-range) {
     display: none;
 }
 /* Alone, a strip grows from its capsule and folds back into it (capsule_morph.js). While it moves, the capsule's
@@ -4990,13 +4991,27 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 /* A line too narrow for every name (a 360 px phone, a longer translation) keeps the closed capsules' rings and values:
    composer_owner_controls.js measures the settled row and lets the names give way one at a time, the longest first
-   (U123), and where that still wraps it cuts the longest values to one measured width. An open capsule keeps its name. */
+   (U123), and where that still wraps it cuts the longest values to one measured width. An open capsule keeps its name.
+   Before that cut reaches the model's value, Subagents, Context and Effort fold to their glyphs, which still say
+   their values (owner 10.11, «10. A»): a round capsule each, opening with its words on a press. */
 .chat-capsule[data-name-fit="off"]:not([data-open="true"]) .chat-capsule-name {
     display: none;
 }
 .chat-toolbar-row[data-owner-compact="values"] .chat-capsule:not([data-open="true"]) .chat-capsule-value {
     max-width: var(--capsule-value-cap);
     text-overflow: ellipsis;
+}
+.chat-toolbar-row[data-owner-glyphs="true"] .chat-capsule:not(.chat-model-mode):not([data-open="true"]) .chat-subagents-lock {
+    display: none;
+}
+/* A folded value is not drawn, and stays in the button: it is the button's accessible name (no hover-only title). */
+.chat-toolbar-row[data-owner-glyphs="true"] .chat-capsule:not(.chat-model-mode):not([data-open="true"]) .chat-capsule-value {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
 }
 /* While a drag runs, and when the layout itself changes (opening, a resize, a new padding),
    the marks land with the words at once, so a pill never trails behind the word it names. */
@@ -5040,7 +5055,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     align-self: stretch;
     margin-inline-end: var(--capsule-end-gutter);
 }
-:is(.chat-context-mode, .chat-subagents-mode)[data-disabled="true"] .chat-context-strip {
+:is(.chat-model-mode, .chat-context-mode, .chat-subagents-mode)[data-disabled="true"] .chat-context-strip {
     opacity: 0.5;
     pointer-events: none;
 }
@@ -5056,7 +5071,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     pointer-events: none;
     transition: left 0.2s cubic-bezier(0.2, 0.8, 0.2, 1), width 0.2s, background 0.2s;
 }
-:is(.chat-context-mode, .chat-subagents-mode) .chat-seg {
+:is(.chat-model-mode, .chat-context-mode, .chat-subagents-mode) .chat-seg {
     position: relative;
     display: flex;
     align-items: center;
@@ -5074,12 +5089,12 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .chat-seg-text {
     display: block;
 }
-:is(.chat-context-mode, .chat-subagents-mode) .chat-seg:focus-visible {
+:is(.chat-model-mode, .chat-context-mode, .chat-subagents-mode) .chat-seg:focus-visible {
     outline: 2px solid var(--focus-accent-border);
     outline-offset: -2px;
 }
 @media (hover: hover) {
-    :is(.chat-context-mode, .chat-subagents-mode) .chat-seg[aria-checked="false"]:not([data-disabled="true"]):hover {
+    :is(.chat-model-mode, .chat-context-mode, .chat-subagents-mode) .chat-seg:not([aria-checked="true"]):not([data-disabled="true"]):hover {
         color: var(--text-primary);
     }
 }
@@ -5097,7 +5112,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     --mode-ink: var(--status-neutral-fg);
     --mode-fill: var(--status-neutral-bg);
 }
-.chat-subagents-strip .chat-context-thumb { left: var(--thumb-left, 0); width: var(--thumb-width, 0); }
+:is(.chat-subagents-strip, .chat-model-strip) .chat-context-thumb { left: var(--thumb-left, 0); width: var(--thumb-width, 0); }
 .chat-subagents-mode .chat-seg { justify-content: center; min-width: var(--touch-target-min); box-sizing: border-box; }
 .chat-subagents-mode .chat-seg[data-disabled="true"] { color: var(--text-disabled); cursor: default; }
 .chat-subagents-core { color: var(--text-meta); }
@@ -5293,6 +5308,304 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
         transition: none;
     }
 }
+
+/* Model (DESIGN "Composer owner controls"; composer_model.js): the first capsule, the model new work in this room
+   starts on. Its glyph is the mark of the source that model is reached through, lit like a ring's arc only while the
+   room chose its own; the capsule itself stays neutral, like its neighbours. Its strip is the family's mode strip
+   (Main · the recent models · Search) under a neutral thumb: a model is not a level. */
+.chat-model-mode { --mode-fill: rgba(var(--neutral-rgb), 0.14); }
+.chat-model-mode .chat-capsule-glyph { color: var(--text-meta); }
+.chat-model-mode[data-own="true"] .chat-capsule-glyph { color: var(--tone-crimson-word); }
+.chat-model-mode .chat-capsule-glyph .model-source-mark { width: 15px; height: 15px; }
+.model-source-mark { display: block; flex: 0 0 auto; }
+.model-source-initial {
+    display: grid;
+    place-items: center;
+    box-sizing: border-box;
+    border-radius: var(--space-1);
+    box-shadow: inset 0 0 0 1.5px currentColor;
+    font-size: var(--type-meta);
+    font-weight: 700;
+    line-height: 1;
+}
+.chat-model-mode .chat-seg[aria-checked="true"] { color: var(--text-primary); }
+.chat-model-mode .chat-seg-text { display: flex; align-items: center; gap: 5px; }
+.chat-model-find svg { flex: 0 0 auto; width: 13px; height: 13px; }
+html[data-layout="stack"] .chat-model-find-word { display: none; }
+/* Search: the strip becomes a field on the composer's line and the capsule takes the line, the other controls stepping
+   aside; its suggestions float above the row, where the hint stood. */
+.chat-toolbar-row[data-owner-search] > :not(.chat-model-mode) { display: none; }
+.chat-model-mode[data-search="true"] { flex: 1 1 auto; }
+.chat-model-mode[data-search="true"]:focus-within { border-color: var(--focus-accent-border); }
+.chat-model-mode[data-search="true"] :is(.chat-capsule-body, .chat-model-strip) { flex: 1 1 auto; min-width: 0; max-width: none; }
+.chat-model-mode[data-search="true"] > .ui-hint { display: none; }
+html[data-layout="stack"] .chat-model-mode[data-search="true"] .chat-capsule-head { display: none; }
+.chat-model-search {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 100%;
+    padding: 0 var(--space-3) 0 var(--space-2);
+    color: var(--text-meta);
+    cursor: text;
+}
+.chat-model-search svg { flex: 0 0 auto; width: 14px; height: 14px; }
+.chat-model-query {
+    flex: 1 1 auto;
+    width: 100%;
+    min-width: 0;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    letter-spacing: inherit;
+}
+.chat-model-query::placeholder { color: var(--text-disabled); }
+/* The suggestions: the popups' floating material above the row (as wide as the row in the stack layout), scrolling
+   inside itself under the rule line. A row is one model through one source: the source's mark, the model, then its
+   window when known, the source and how the source is paid. Where a row cannot hold both on one line (a narrow pane,
+   a long model name) the facts go under the name; wrapped lines share its start, and the name keeps its line. */
+.ui-popup.chat-model-list {
+    display: flex;
+    flex-direction: column;
+    width: 400px;
+    max-height: min(440px, var(--ui-popup-max-height));
+    padding: var(--space-1);
+    overflow: hidden;
+}
+html[data-layout="stack"] .ui-popup.chat-model-list { width: var(--ui-popup-anchor-width); }
+.chat-model-rows {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+}
+.chat-model-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0 var(--space-2);
+    min-height: 34px;
+    padding: 5px var(--space-3);
+    border-radius: var(--radius-inner);
+    color: var(--text-primary);
+    font-size: var(--type-body);
+    line-height: var(--line-body);
+    cursor: pointer;
+}
+.chat-model-row[data-active="true"] { background: var(--menu-item-hover); }
+@media (hover: hover) {
+    .chat-model-row:hover { background: var(--menu-item-hover); }
+}
+@media (pointer: coarse) {
+    .chat-model-row { min-height: var(--touch-target-min); }
+}
+.chat-model-row[aria-selected="true"] { background: var(--accent-12); color: var(--accent-light); }
+.chat-model-row :is(svg, .model-source-mark) { flex: 0 0 auto; width: 14px; height: 14px; color: var(--text-meta); }
+.chat-model-row[aria-selected="true"] :is(svg, .model-source-mark) { color: inherit; }
+/* The name never leaves its mark's line: it is at most the line less the mark, so only the facts ever wrap. */
+.chat-model-row-id { flex: 1 1 auto; min-width: 0; max-width: calc(100% - 14px - var(--space-2)); overflow: hidden; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+.chat-model-row-facts, .chat-model-row-tag { flex: 0 0 auto; color: var(--text-meta); font-size: var(--type-meta); white-space: nowrap; }
+.chat-model-row-facts {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: calc(100% - 14px - var(--space-2));
+    margin-inline-start: auto;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    text-align: start;
+}
+:is(.chat-model-typed, .chat-model-door) .chat-model-row-id { color: var(--text-secondary); }
+.chat-model-section, .chat-model-note, .chat-model-rule {
+    margin: 0;
+    padding: var(--space-2) var(--space-3) 2px;
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+}
+.chat-model-section { font-weight: 500; }
+.chat-model-rule {
+    flex: 0 0 auto;
+    margin-top: var(--space-1);
+    padding-bottom: var(--space-1);
+    border-top: 1px solid rgba(var(--neutral-rgb), 0.08);
+    color: var(--text-secondary);
+}
+/* The Main chat's confirming sheet (the shared confirm dialog's content): what Main becomes, and its facts. */
+.chat-model-sheet-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    margin: 0 0 var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
+    font-size: var(--type-body);
+}
+.chat-model-sheet-row .model-source-mark { flex: 0 0 auto; width: 14px; height: 14px; color: var(--text-meta); }
+.chat-model-sheet-row b { flex: 1 1 12ch; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.chat-model-sheet-row span { flex: 0 1 auto; max-width: 100%; color: var(--text-meta); font-size: var(--type-meta); overflow-wrap: anywhere; }
+.chat-model-sheet-fact { margin: 0 0 2px; color: var(--text-secondary); font-size: var(--type-meta); }
+/* The sheet's lists (owner 10.11, «5. A», «6. A»): what is not on Main now, each row a name over its facts with
+   its own tick; nothing is ticked until the owner ticks it. After the change the same rows say each one's result. */
+.chat-model-sheet-sub { margin: var(--space-3) 0 var(--space-1); color: var(--text-meta); font-size: var(--type-meta); }
+.chat-model-off-list { margin: 0 calc(-1 * var(--space-2)); padding: 0; list-style: none; }
+.chat-model-off {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 2px var(--space-3);
+    align-items: center;
+    padding: var(--space-2);
+    border-radius: var(--radius-inner);
+}
+label.chat-model-off { cursor: pointer; }
+@media (hover: hover) {
+    label.chat-model-off:hover { background: var(--menu-item-hover); }
+}
+.chat-model-off-name { min-width: 0; overflow: hidden; font-size: var(--type-body); text-overflow: ellipsis; white-space: nowrap; }
+.chat-model-off-meta { grid-column: 1; min-width: 0; color: var(--text-meta); font-size: var(--type-meta); overflow-wrap: anywhere; }
+.chat-model-off .ui-checkbox { grid-row: 1 / span 2; grid-column: 2; width: 18px; height: 18px; }
+.chat-model-off[data-result="refused"] .chat-model-off-meta { color: var(--status-error-fg); }
+
+/* A work's model on its card (card_model.js; DESIGN "A work's model on its card"): the first fact of the meta line,
+   in a node of its own before the rest of the line, whose parts stay items of the line itself. Where the server
+   offers the control it is a quiet capsule in the line's own ink, stronger for a model of the work's own; the words
+   beside it say why this model. On a narrow card what leads (the source) gives way before the model's name. */
+.card-model-rest { display: contents; }
+.chat-live-meta-part.card-model {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 5px 6px;
+    max-width: 100%;
+}
+.card-model-fact-group { display: inline-flex; align-items: center; gap: var(--space-1); min-width: 0; max-width: 100%; }
+.card-model-fact-group > .chat-live-meta-sep { flex: 0 0 auto; }
+.card-model-fact {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+    max-width: 100%;
+    color: var(--text-secondary);
+    font: inherit;
+    letter-spacing: inherit;
+}
+button.card-model-fact {
+    min-height: 22px;
+    margin-block: -3px;
+    padding: 0 7px;
+    border: 0;
+    border-radius: var(--radius-inner);
+    background: rgba(var(--neutral-rgb), 0.08);
+    cursor: pointer;
+    text-align: start;
+    transition: var(--motion-tone);
+}
+button.card-model-fact[aria-expanded="true"] { background: rgba(var(--neutral-rgb), 0.16); }
+@media (hover: hover) {
+    button.card-model-fact:hover { background: rgba(var(--neutral-rgb), 0.16); }
+}
+button.card-model-fact:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 1px; }
+.card-model[data-basis="own"] .card-model-fact { color: var(--text-primary); font-weight: 600; }
+.card-model[data-basis="fallback"] .card-model-fact { font-weight: 600; }
+/* Amber for a work that went to a fallback by itself, until that is resolved (owner 10.11, «4. A»): the card's fact,
+   and the same work's word in the Main sheet's list. Its end is the server's fact, never a timer here. */
+.model-fallback { color: var(--status-warn-fg); }
+.card-model-mark { display: inline-flex; flex: 0 0 auto; }
+.card-model-mark .model-source-mark { width: 13px; height: 13px; }
+.card-model-name { display: flex; min-width: 0; white-space: nowrap; }
+.card-model-lead { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.card-model-id { flex: 0 0 auto; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.card-model-tail { flex: 0 0 auto; }
+/* A fallback's line is read whole: it wraps instead of giving way. */
+.card-model[data-basis="fallback"] .card-model-name { flex-wrap: wrap; }
+.card-model[data-basis="fallback"] .card-model-lead { flex-shrink: 0; }
+.card-model-caret { display: inline-flex; flex: 0 0 auto; color: var(--text-meta); }
+.card-model-pending { color: var(--text-primary); }
+/* Its popover, on the popups' floating material and anchored to the fact, so nothing in the transcript moves: whose
+   model this is, this work's own acts, then the capsule's field and list of models. */
+.ui-popup.card-model-pop {
+    display: flex;
+    flex-direction: column;
+    width: min(400px, var(--ui-popup-max-width));
+    max-height: min(480px, var(--ui-popup-max-height));
+    padding: var(--space-1);
+    overflow: hidden;
+}
+.card-model-pop[aria-busy="true"] { pointer-events: none; opacity: 0.6; }
+.card-model-pop-title {
+    flex: 0 0 auto;
+    margin: 0;
+    padding: var(--space-2) var(--space-3) var(--space-1);
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    overflow-wrap: anywhere;
+}
+.card-model-pop-line { margin: 0; }
+.card-model-cited { color: var(--user-sender); white-space: pre-wrap; }
+.card-model-cited-note { display: block; margin-top: var(--space-1); }
+/* An expanded quotation scrolls within the popover, leaving its toggle and model choices reachable. */
+.card-model-pop-line.chat-clamp[data-expanded="1"] {
+    max-height: calc(var(--ui-popup-max-height) / 3);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+.card-model-refusal {
+    display: flex;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+    margin: 0;
+    padding: var(--space-1) var(--space-3) var(--space-2);
+    color: var(--status-error-fg);
+    font-size: var(--type-meta);
+}
+.card-model-refusal-words { flex: 1 1 16ch; min-width: 0; overflow-wrap: anywhere; }
+.card-model-acts { display: flex; flex: 0 0 auto; flex-direction: column; }
+.card-model-act {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0 var(--space-2);
+    min-height: 34px;
+    padding: 5px var(--space-3);
+    border: 0;
+    border-radius: var(--radius-inner);
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    font-size: var(--type-body);
+    line-height: var(--line-body);
+    text-align: start;
+    cursor: pointer;
+}
+@media (hover: hover) {
+    .card-model-act:hover { background: var(--menu-item-hover); }
+}
+@media (pointer: coarse) {
+    .card-model-act { min-height: var(--touch-target-min); align-content: center; }
+}
+.card-model-act:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: -2px; }
+.card-model-act-label { flex: 0 0 auto; font-weight: 500; }
+/* What the act does goes under its name where the line cannot hold both. */
+.card-model-act-sub { flex: 1 1 14ch; min-width: 0; color: var(--text-meta); font-size: var(--type-meta); overflow-wrap: anywhere; }
+.card-model-pop > .chat-model-search {
+    flex: 0 0 auto;
+    height: 34px;
+    margin: var(--space-1) 0;
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
+}
+.card-model-pop > .chat-model-search:focus-within { box-shadow: inset 0 0 0 1px var(--focus-accent-border); }
+.card-model-list { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
 
 
 /* Trays (DESIGN.md design bible; an object is ui.css .ui-card, which every card takes in its markup). Inside an object
@@ -5760,6 +6073,15 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .costs-table-note { margin: calc(-1 * var(--space-2)) 0 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .costs-budget-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: var(--space-3) var(--space-5); align-items: start; }
 .costs-copy { margin: 0; max-width: 72ch; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+/* The consciousness allowance under its field (costs.js allowancePresentation): the clock's own spend in its words, what
+   that leaves out in the meta ink and the door to Consciousness; then at most two status sentences (.ui-status), each
+   its fact in the line's tone and what follows from it in the meta ink, a held wake's ending in its card's door. */
+.costs-allowance-spend { margin: 0; }
+.costs-allowance-spend .cost-cell-note { display: inline; }
+.costs-allowance-state { display: grid; gap: var(--space-2); }
+.costs-allowance-state:empty { display: none; }
+.costs-allowance-line { margin: 0; max-width: 72ch; }
+.costs-allowance-note { color: var(--text-meta); }
 .costs-tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: var(--space-4); align-items: start; }
 .cost-cell-name { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cost-table .cost-cell-right { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -6631,6 +6953,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 }
 .skills-detail-label { min-width: 72px; color: var(--text-meta); font-size: var(--type-meta); font-weight: 500; }
 .skills-detail-value { min-width: 0; flex: 1 1 240px; overflow-wrap: anywhere; color: var(--text-primary); }
+.skills-detail-row[data-contribution-row] .skills-detail-value { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-1) var(--space-2); }
 .skills-detail-row code { padding: 1px 6px; border-radius: var(--radius-inner); background: rgba(var(--neutral-rgb), 0.05); font-size: var(--type-meta); }
 .skills-review-block { display: grid; gap: var(--space-1); color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .skills-review-block:empty { display: none; }
@@ -6981,67 +7304,201 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
     height: var(--masonry-h, auto);
 }
 
+/* One surface per card (docs/DESIGN.md "Widgets board"): the frame lies on the card itself, with no inner box, its
+   bottom corners rounded to the card's; a host-drawn card keeps its own inset. Nothing clips the card, so its edges
+   can reach into the gap beside it rather than cover its content. */
 .widgets-card {
     position: absolute;
     left: 0;
     top: 0;
     width: var(--masonry-w, auto);
     transform: translate(var(--masonry-x, 0px), var(--masonry-y, 0px));
+    padding: 0;
 }
 
-.widgets-card.dragging {
-    opacity: 0.68;
-}
-
-/* A widget being dropped on or resized wears the focus ring over its lift. */
-.widgets-card.drag-over,
+/* A card being carried floats over the board in the pointer's hand; the place it would take is outlined, the cards
+   after it glide to make room, and it glides into place when dropped. A card being resized wears the same ring. */
+.widgets-card[data-widget-lifted],
 .widgets-card.resizing {
+    z-index: 2;
     box-shadow: var(--elev-float), 0 0 0 2px var(--focus-accent-border);
 }
 
-/* While a width is dragged: no text selection, and frames ignore the pointer so
-   the drag keeps its events over them. */
+.widgets-card[data-widget-lifted] {
+    cursor: grabbing;
+}
+
+.widgets-list[data-widget-arranging] .widgets-card:not([data-widget-lifted]) {
+    transition: transform var(--motion-fade) var(--ease-sheet);
+}
+
+.widgets-list[data-widget-moving]::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: var(--widget-slot-w, 0px);
+    height: var(--widget-slot-h, 0px);
+    transform: translate(var(--widget-slot-x, 0px), var(--widget-slot-y, 0px));
+    border: 2px dashed rgba(var(--neutral-rgb), 0.28);
+    border-radius: var(--radius-object);
+    background: rgba(var(--neutral-rgb), 0.04);
+    pointer-events: none;
+    transition: transform var(--motion-fade) var(--ease-sheet);
+}
+
+/* While a card is carried or resized: no text selection, and frames ignore the pointer so the gesture keeps its
+   events over them, from the press on (widget_reorder.js). */
+.widgets-list[data-widget-arranging],
 .widgets-list.resizing {
-    cursor: col-resize;
     -webkit-user-select: none;
     user-select: none;
 }
 
+.widgets-list[data-widget-pressed] iframe,
+.widgets-list[data-widget-arranging] iframe,
 .widgets-list.resizing iframe {
     pointer-events: none;
 }
 
-/* The width handle: a thin strip on the card's right edge, the edge vocabulary
-   of the side-panel `.resize-handle`. A list too narrow for two columns
-   ignores widths, and a card no step can widen or narrow (the only card on the
-   board) is width-fixed: neither offers the handle; the card menu sets widths
-   everywhere. */
-.widgets-card-resize {
+/* The edges: the right one sets the width, the bottom one the height, the corner both. Each lies mostly in the gap
+   beside the card (3 px over it), so a frame's own scrollbar and its controls near the edge stay the widget's. Quiet
+   until the pointer is on the card, then a short pill on the card's edge marks where to take them; a finger always
+   sees them. A list too narrow for two columns ignores widths and a card no step can widen or narrow (the only card on
+   the board) is width-fixed: neither offers the right edge or the corner; the card menu sizes every card everywhere. */
+.widgets-card-resize,
+.widgets-card-edge,
+.widgets-card-corner {
     position: absolute;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    width: 8px;
+    z-index: 3;
     padding: 0;
     border: 0;
-    border-radius: 0 var(--radius-object) var(--radius-object) 0;
+    border-radius: 0;
     background: transparent;
-    cursor: col-resize;
     touch-action: none;
 }
 
-.widgets-card-resize:hover,
-.widgets-card.resizing .widgets-card-resize {
-    background: var(--accent-10);
+.widgets-card-resize { top: 12px; right: -9px; bottom: 12px; width: 12px; cursor: ew-resize; }
+.widgets-card-edge { left: 12px; right: 12px; bottom: -9px; height: 12px; cursor: ns-resize; }
+.widgets-card-corner { right: -9px; bottom: -9px; width: 20px; height: 20px; cursor: nwse-resize; }
+
+.widgets-card-resize::after,
+.widgets-card-edge::after {
+    content: "";
+    position: absolute;
+    border-radius: 999px;
+    background: rgba(var(--neutral-rgb), 0.34);
+    opacity: 0;
+    transition: opacity var(--motion-fade) ease;
 }
 
-.widgets-card-resize:focus-visible {
+.widgets-card-resize::after { top: 50%; right: 7px; width: 4px; height: 36px; margin-top: -18px; }
+.widgets-card-edge::after { left: 50%; bottom: 7px; width: 36px; height: 4px; margin-left: -18px; }
+
+@media (prefers-reduced-motion: reduce) {
+    .widgets-list[data-widget-arranging] .widgets-card:not([data-widget-lifted]),
+    .widgets-list[data-widget-moving]::before,
+    .widgets-card-resize::after,
+    .widgets-card-edge::after { transition: none; }
+}
+
+.widgets-card.resizing > .widgets-card-resize::after,
+.widgets-card.resizing > .widgets-card-edge::after {
+    opacity: 1;
+}
+
+.widgets-card-resize:focus-visible::after,
+.widgets-card-edge:focus-visible::after {
+    opacity: 1;
+    background: var(--focus-accent-border);
+}
+
+/* Only a pointer that can hover reveals the edges: a tap leaves no stuck mark. */
+@media (hover: hover) {
+    .widgets-card:hover > .widgets-card-resize::after,
+    .widgets-card:hover > .widgets-card-edge::after {
+        opacity: 1;
+    }
+
+    .widgets-card-resize:hover::after,
+    .widgets-card-edge:hover::after {
+        opacity: 1;
+        background: var(--focus-accent-border);
+    }
+}
+
+/* A finger sizes a card from the card's own foot, never from a gap or over what the widget draws: under a coarse
+   pointer every card keeps a strip the touch minimum tall at its bottom, inside the card, and the bottom edge's button
+   is its grip at the strip's right end (up and down set the height, sideways the width where widths apply:
+   widget_reorder.js). A card that shows its Show all / Back line puts the grip in that line's row, the button centred
+   in the rest. The gaps scroll the board; the thin right edge and the corner are not offered. */
+@media (pointer: coarse) {
+    .widgets-list .widgets-card { padding-bottom: var(--touch-target-min); }
+    .widgets-list .widgets-card[data-widget-more-shown] { padding-bottom: 0; }
+    .widgets-list .widgets-card:not([data-widget-framed]) .widgets-card-body,
+    .widgets-list .widgets-card-body:has(> .skills-load-error) { padding-bottom: 0; }
+    .widgets-list .widgets-card-more {
+        min-height: var(--touch-target-min);
+        padding-right: calc(var(--touch-target-min) + var(--space-3));
+    }
+    .widgets-card-edge {
+        left: auto;
+        right: var(--space-2);
+        bottom: 0;
+        width: var(--touch-target-min);
+        height: var(--touch-target-min);
+    }
+    .widgets-card-edge::after { bottom: calc(50% - 2px); opacity: 0.8; }
+    .widgets-card-resize,
+    .widgets-card-corner { display: none; }
+    #page-widgets .widgets-card :is(.widgets-frame, .widgets-facade) { border-radius: 0; }
+    /* Where the finger on the grip does not cover it. */
+    .widgets-list .widgets-card[data-widget-size-chip]::after { left: var(--space-3); right: auto; bottom: 10px; }
+}
+
+.widgets-card-resize:focus-visible,
+.widgets-card-edge:focus-visible {
     outline: 2px solid var(--focus-accent-border);
     outline-offset: -2px;
 }
 
-.widgets-list[data-widget-layout="stack"] .widgets-card-resize,
-.widgets-card[data-widget-width-fixed] .widgets-card-resize {
+.widgets-list[data-widget-layout="stack"] :is(.widgets-card-resize, .widgets-card-corner),
+.widgets-card[data-widget-width-fixed] :is(.widgets-card-resize, .widgets-card-corner) {
+    display: none;
+}
+
+/* What an edge being dragged would leave, on the card: a capsule floating over its content. */
+.widgets-card[data-widget-size-chip]::after {
+    content: attr(data-widget-size-chip);
+    position: absolute;
+    right: 16px;
+    bottom: 20px;
+    z-index: 4;
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: var(--surface-float);
+    color: var(--text-primary);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    white-space: nowrap;
+    box-shadow: var(--elev-float);
+    pointer-events: none;
+}
+
+/* A host-drawn card under an owner height scrolls in its body (the one scroller the host gives it); a frame scrolls
+   its own document, and the line under the card says how much an owner height keeps out of view. */
+.widgets-card-body[data-widget-bounded] {
+    height: var(--widget-body-height);
+    overflow-y: auto;
+}
+
+.widgets-card-more {
+    display: flex;
+    justify-content: center;
+    padding: var(--space-2) var(--space-3) var(--space-3);
+}
+
+.widgets-card-more[hidden] {
     display: none;
 }
 
@@ -7075,9 +7532,10 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
 .widgets-card-head {
     display: flex;
     justify-content: space-between;
-    gap: 12px;
-    align-items: flex-start;
-    margin-bottom: 12px;
+    gap: var(--space-2);
+    align-items: center;
+    min-height: 48px;
+    padding: var(--space-2) var(--space-2) 6px var(--space-4);
 }
 
 .widgets-card-title {
@@ -7088,16 +7546,21 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
     align-items: baseline;
     gap: 4px 8px;
     min-width: 0;
-    min-height: 32px;
     /* A title breaks between its words: the card's own overflow-wrap (anywhere) split it inside one. */
     overflow-wrap: break-word;
-    hyphens: auto;
+    hyphens: manual;
+}
+
+.widgets-card-title strong {
+    font-size: var(--type-body);
+    font-weight: 600;
 }
 
 /* The menu and the move handle are one quiet icon control twice: the ⋮ of every card menu (its rule is the Skills
-   card menu's) and the ↕ share the shared small capsule without a body (.btn.btn-ghost.btn-sm), its touch reach
+   card menu's) and the move grip share the shared small capsule without a body (.btn.btn-ghost.btn-sm), its touch reach
    included (DESIGN §3, bible principle 4). */
-.widgets-card-drag { --control-pad-x: 0; --button-font-size: var(--type-section); width: var(--control-h); cursor: grab; }
+.widgets-card-drag { --control-pad-x: 0; width: var(--control-h); color: var(--text-meta); cursor: grab; touch-action: none; }
+.widgets-card-drag svg { display: block; margin: 0 auto; }
 .widgets-card-drag:active { cursor: grabbing; }
 
 /* Framed-card head controls (widgets lifecycle phase 2): status as dot + text
@@ -7163,14 +7626,16 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
 }
 
 /* A narrow card (under 360px; widget_reorder.js marks it from the board's plan, a card being no query container of
-   its own width) keeps only ⋮ and ↕ beside its title and puts its lifecycle row under it, so the title keeps the
+   its own width) keeps only ⋮ and the move grip beside its title and puts its lifecycle row under it, so the title keeps the
    card's width and breaks between words. */
 .widgets-card[data-widget-narrow] .widgets-card-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .widgets-card[data-widget-narrow] .widgets-card-controls { display: contents; }
 .widgets-card[data-widget-narrow] .widgets-card-title { grid-column: 1; grid-row: 1; }
 .widgets-card[data-widget-narrow] .widgets-card-tools { grid-column: 2; grid-row: 1; align-self: start; }
 .widgets-card[data-widget-narrow] .widgets-card-run { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; }
-/* Under a finger the lifecycle row parts from ⋮ and ↕ above it by the two small capsules' reaches. */
+/* Start (stopped, starting) and the status alone (running) share one row height, so a card that starts moves nothing. */
+.widgets-card[data-widget-narrow] .widgets-card-run:not(:empty) { min-height: var(--control-h-sm); }
+/* Under a finger the lifecycle row parts from ⋮ and the move grip above it by the two small capsules' reaches. */
 @media (pointer: coarse) {
     .widgets-card[data-widget-narrow] .widgets-card-head { row-gap: var(--space-4); }
 }
@@ -7209,9 +7674,10 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
     color: var(--text-meta);
 }
 
-/* A stopped framed card stands in for its frame: same box, same declared
-   height (the `--widget-frame-height` custom property the frame itself uses),
-   so Start does not move the layout. */
+/* A stopped framed card stands in for its frame: same box, same height (the
+   `--widget-frame-height` custom property the frame itself uses), so Start does
+   not move the layout. On the board it is a tray on the card, as the frame lies
+   on the card; the 320 px is the loading height only. */
 .widgets-facade {
     display: flex;
     flex-direction: column;
@@ -7255,6 +7721,13 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
     margin-top: 0;
 }
 
+/* A host-drawn card's body keeps the card's inset; so does a framed card's body that holds its failed start's words
+   instead of a frame. */
+.widgets-card:not([data-widget-framed]) .widgets-card-body,
+.widgets-card-body:has(> .skills-load-error) {
+    padding: 2px var(--space-4) var(--space-4);
+}
+
 .widgets-frame {
     width: 100%;
     height: var(--widget-frame-height, 320px);
@@ -7263,6 +7736,43 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
     border: 1px solid rgba(var(--neutral-rgb), 0.08);
     border-radius: var(--radius-inner);
     background: rgba(var(--shell-rgb), 0.88);
+}
+
+/* The board's frame is no second box: no edge, no fill, no 320 px floor under short content (the board gives it its
+   height); a frame in a message keeps its own rule (cards.css). */
+#page-widgets .widgets-frame,
+#page-widgets .widgets-facade {
+    border: 0;
+    border-radius: 0 0 calc(var(--radius-object) - 1px) calc(var(--radius-object) - 1px);
+}
+
+#page-widgets .widgets-frame {
+    min-height: 0;
+    background: transparent;
+}
+
+/* Exactly as tall as its frame, however short (a facade too short for its title shows its top). */
+#page-widgets .widgets-facade {
+    min-height: 0;
+    overflow: hidden;
+    justify-content: safe center;
+    background: var(--surface-tray);
+}
+
+/* With the line under it shown, the frame no longer meets the card's bottom corners. */
+#page-widgets .widgets-card[data-widget-more-shown] :is(.widgets-frame, .widgets-facade) {
+    border-radius: 0;
+}
+
+/* A phone-wide page (a phone, the Telegram mini app) keeps its widgets nearly edge to edge; the page's own width
+   decides. Wider pages keep the board's margins, so the width at which the list stacks does not move. */
+#page-widgets { container: widgetspage / inline-size; }
+
+@container widgetspage (max-width: 560px) {
+    .widgets-scroll {
+        padding-left: var(--space-3);
+        padding-right: var(--space-3);
+    }
 }
 
 .widget-form,
@@ -9815,6 +10325,221 @@ html[data-layout="stack"] .project-panel {
     .document-reader.is-image-scene .document-reader-body.is-image {
         padding: calc(var(--space-3) + var(--inset-top)) var(--space-3) calc(var(--space-4) + var(--inset-bottom));
     }
+}
+
+/* Share (message_share.js, DESIGN "Replies"): the reader's chrome around exactly what would leave, as tall as that
+   and no taller; on a phone the reader's full sheet with the ways out at its foot. */
+.message-share[open] { display: flex; flex-direction: column; container: message-share / inline-size; }
+.message-share .document-reader-panel { flex: 1 1 auto; height: auto; }
+
+@media (min-width: 621px) {
+    .message-share {
+        width: min(var(--message-share-width), calc(100vw - 2 * var(--space-5)));
+        height: -webkit-fit-content;
+        height: fit-content;
+        max-height: min(var(--document-reader-size), calc(100vh - 2 * var(--space-5)));
+        max-height: min(var(--document-reader-size), calc(100dvh - 2 * var(--space-5)));
+    }
+}
+
+.message-share-text {
+    max-width: var(--document-reader-measure);
+    margin: 0 auto;
+    color: var(--text-primary);
+    font: inherit;
+    font-size: var(--type-section);
+    line-height: var(--line-body);
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+    unicode-bidi: plaintext;
+    tab-size: 4;
+}
+
+/* The card is the PNG itself, at its own size where it fits. */
+.message-share-card {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    margin: 0 auto;
+}
+
+/* The File is the file itself (message_share_file.js): a page without script at its own height, an app's page in a
+   frame that scrolls inside. It paints its own room, so the frame adds none. */
+.message-share-file {
+    display: block;
+    width: 100%;
+    height: var(--message-share-file-height, min(70vh, 640px));
+    border: 0;
+    border-radius: var(--radius-inner);
+    background: transparent;
+}
+
+.message-share-file-note {
+    margin: var(--space-2) 0 0;
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+}
+
+/* Where a card's charts are drawn once for the File's pictures: laid out at the card's width, never seen. */
+.message-share-stage {
+    position: fixed;
+    top: 0;
+    left: -10000px;
+    width: var(--message-share-stage-width);
+    visibility: hidden;
+    pointer-events: none;
+}
+
+.message-share-parts {
+    display: grid;
+    gap: var(--space-1);
+    max-width: var(--document-reader-measure);
+    margin: 0 auto;
+    color: var(--text-primary);
+    font-size: var(--type-section);
+    line-height: var(--line-body);
+}
+
+.message-share-part {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: start;
+    column-gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    /* Depth indents at most 40% of the list's width, so a deep leaf's words stay on screen. */
+    padding-inline-start: calc(var(--space-3) + min(var(--share-depth, 0) * var(--space-5), 40%));
+    border-radius: var(--radius-inner);
+    cursor: pointer;
+    transition: var(--motion-tone);
+}
+
+.message-share-part:hover { background: var(--menu-item-hover); }
+.message-share-part[aria-checked="true"] { background: var(--accent-12); }
+.message-share-part:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: -2px; }
+
+@media (pointer: coarse) {
+    .message-share-part { min-height: var(--touch-target-min); align-content: center; }
+}
+
+.message-share-marker {
+    min-width: 1.5em;
+    color: var(--text-meta);
+    font-variant-numeric: tabular-nums;
+}
+
+.message-share-marker:empty { display: none; }
+
+/* Exact words are selectable inside the preview; a part's own words start where an item's marker does. */
+.message-share-words {
+    grid-column: 2;
+    min-width: 0;
+    margin: 0;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+    unicode-bidi: plaintext;
+    cursor: text;
+}
+
+.message-share-part:not(.is-item) .message-share-words { grid-column: 1 / span 2; }
+.message-share-words[data-level] { font-weight: 600; line-height: var(--line-title); }
+.message-share-words:is([data-level="1"], [data-level="2"]) { font-size: var(--md-heading-major); }
+.message-share-words[data-level="3"] { font-size: var(--md-heading-minor); }
+.message-share-words .is-bold { font-weight: 600; }
+.message-share-words .is-italic { font-style: italic; }
+.message-share-words .is-strike { text-decoration: line-through; }
+.message-share-words .is-link { color: var(--accent-light); text-decoration: underline; text-underline-offset: 2px; }
+
+.message-share-part:is(.is-code, .is-diagram, .is-chart, .is-table) .message-share-words {
+    padding: var(--space-2) var(--space-3);
+    overflow-x: auto;
+    border-radius: var(--radius-inner);
+    background: var(--code-bg);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    font-size: var(--type-body);
+    white-space: pre;
+    unicode-bidi: normal;
+}
+
+.message-share-part:not(.is-code, .is-diagram, .is-chart, .is-table) .is-code {
+    padding: 0 0.2em;
+    border-radius: 4px;
+    background: var(--code-bg);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    font-size: 0.9em;
+}
+
+.message-share-part.is-quoted .message-share-words {
+    padding-inline-start: var(--space-3);
+    border-inline-start: 3px solid var(--field-border);
+}
+
+.message-share-words hr {
+    margin: 0.75em 0;
+    border: 0;
+    border-top: 1px solid var(--divider);
+}
+
+.message-share-check {
+    grid-column: 3;
+    display: inline-flex;
+    padding-top: 0.2em;
+    color: var(--tone-crimson-word);
+    opacity: 0;
+}
+
+.message-share-part[aria-checked="true"] .message-share-check { opacity: 1; }
+
+.message-share-foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+    padding: var(--space-3) var(--space-4) var(--space-3) var(--space-5);
+    border-top: 1px solid var(--divider);
+}
+
+/* Two groups: the count with Choose excerpt, and the ways out, which keep together at the end. */
+.message-share-scope {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+    min-width: 0;
+}
+
+.message-share-count {
+    margin: 0;
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    font-variant-numeric: tabular-nums;
+}
+
+.message-share-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: var(--space-2);
+    margin-inline-start: auto;
+}
+
+.message-share-status {
+    flex: 1 0 100%;
+    margin: 0;
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+}
+
+.message-share-status[data-tone="ok"] { color: var(--status-ok-fg); }
+.message-share-status[data-tone="warn"] { color: var(--status-warn-fg); }
+.message-share-status[data-tone="error"] { color: var(--status-error-fg); }
+
+@container message-share (max-width: 620px) {
+    .message-share .document-reader-body { padding-bottom: var(--space-4); }
+    .message-share-foot { padding: var(--space-2) var(--space-3) calc(var(--space-2) + var(--inset-bottom)); }
+    .message-share-scope { flex: 1 0 100%; }
 }
 
 .chat-media-player {

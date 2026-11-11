@@ -2,8 +2,9 @@
 
 Keys: ``voice`` (``stt``, ``tts``, ``tts_voice``), ``contributions``, ``widget_order``, ``widget_size``, ``widget_start_mode`` (values from
 ``extension_ui_validation.WIDGET_START_MODES``), ``nested_subagents_expanded``, the
-empty-Main ``welcome`` copy, the two side-section widths, the read cursors and
-``read_ahead_revisions``. A POST may carry any subset of keys; an unknown key answers 400.
+empty-Main ``welcome`` copy, the two side-section widths, the read cursors,
+``read_ahead_revisions`` and up to four recent model routes (``model_recents``).
+The latter two are server-written; a POST naming either or an unknown key answers 400.
 ``shared_read`` (row addresses) is an input only: the host records it as read-ahead.
 """
 from __future__ import annotations
@@ -32,11 +33,11 @@ DEFAULT_UI_PREFERENCES: dict[str, Any] = {
     # checked against live widgets, so a temporarily disabled or removed skill keeps
     # the owner's choice instead of losing it with the next discovery.
     "widget_start_mode": {},
-    # Owner width of a Widgets card, keyed like widget_start_mode: {"w": masonry columns
-    # the card spans, 12 = full width; "h": 0}. ``h`` is reserved for a pinned card height
-    # and is stored as 0 until that exists. A POST merges by key and a null value deletes
-    # one (the card falls back to its author ``span``); keys are never checked
-    # against live widgets. Semantics: docs/DESIGN.md "Widgets board".
+    # Owner size of a Widgets card, keyed like widget_start_mode: {"w": masonry columns the
+    # card spans, 12 = full width, 0 = the author's span; "h": the content's height in px,
+    # 0 = as tall as its content}. The two are independent; a size with neither is no size.
+    # A POST merges by key and a null value deletes one (author width, natural height); keys
+    # are never checked against live widgets. Semantics: docs/DESIGN.md "Widgets board".
     "widget_size": {},
     "nested_subagents_expanded": False,
     # Resizable side sections (0 = use the CSS default). Clamped to sane ranges so
@@ -63,6 +64,8 @@ DEFAULT_UI_PREFERENCES: dict[str, Any] = {
     # Main's empty-state copy, a hidden install-wide preference (no Settings control):
     # never a model reply or a chat-history row.
     "welcome": {"mode": "default", "text": ""},
+    # Server-written owner choices, newest first; suggestions never authorize a model.
+    "model_recents": [],
 }
 _KNOWN_KEYS = frozenset(DEFAULT_UI_PREFERENCES)
 _MAX_WIDGET_ORDER_ITEMS = 200
@@ -70,12 +73,37 @@ _MAX_WIDGET_START_MODE_ITEMS = 200
 _MAX_WIDGET_KEY_LENGTH = 200
 _MAX_WIDGET_SIZE_ITEMS = 200
 WIDGET_GRID_COLUMNS = 12  # the bound of w and its full-width value (web/modules/widget_size.js WIDGET_FULL_SPAN)
+WIDGET_HEIGHT_MIN, WIDGET_HEIGHT_MAX = 120, 8192  # bounds of a set h (widget_size.js WIDGET_HEIGHT_MIN / _MAX)
 _SIDEBAR_WIDTH_MIN, _SIDEBAR_WIDTH_MAX = 180, 560
 _PROJECT_PANEL_WIDTH_MIN, _PROJECT_PANEL_WIDTH_MAX = 320, 1100
 _MAX_PROJECT_CURSORS = 1000
 _MAX_PROJECT_ID_LENGTH = 64
 _MAX_WELCOME_CHARS = 500
 _MAX_SHARED_READS = 64  # addresses one POST may name; recorded facts are never capped
+_MAX_MODEL_RECENTS = 4
+_MAX_CONTRIBUTION_KEYS = 64  # the bound _normalize_preferences enforces on contributions lists
+
+
+def _contribution_visibility_ops(body: dict[str, Any]) -> dict[str, list[str]]:
+    """Pop the atomic ``contributions.hide`` / ``contributions.show`` key lists from a POST body.
+
+    They change single keys of ``contributions.hidden`` under the preferences lock, so two windows that hide
+    different controls never overwrite each other's choice; the full-list ``hidden`` form stays as it was."""
+    group = body.get("contributions")
+    if not isinstance(group, dict):
+        return {}
+    ops: dict[str, list[str]] = {}
+    for op in ("hide", "show"):
+        if op not in group:
+            continue
+        values = group.pop(op)
+        if (not isinstance(values, list) or len(values) > _MAX_CONTRIBUTION_KEYS
+                or any(not isinstance(v, str) or not v.strip() or len(v) > 120 for v in values)):
+            raise ValueError(f"contributions.{op} must be a list of at most {_MAX_CONTRIBUTION_KEYS} keys of at most 120 characters")
+        ops[op] = list(dict.fromkeys(v.strip() for v in values))
+    if ops and not group:
+        body.pop("contributions")
+    return ops
 
 
 @contextmanager
@@ -105,7 +133,7 @@ def _normalize_width(value: Any, lo: int, hi: int) -> int:
 
 
 def _normalize_widget_size(value: Any) -> dict[str, dict[str, int] | None]:
-    """Owner card widths clamped to the board; ``None`` is a key a POST deletes."""
+    """Owner card sizes clamped to the board; ``None`` is a key a POST deletes, as is a size with neither axis set."""
     if not isinstance(value, dict):
         raise ValueError("widget_size must be an object of {widget_key: {w, h}}")
     sizes: dict[str, dict[str, int] | None] = {}
@@ -119,7 +147,9 @@ def _normalize_widget_size(value: Any) -> dict[str, dict[str, int] | None]:
         w, h = (size.get("w"), size.get("h", 0)) if isinstance(size, dict) else (None, None)
         if not all(isinstance(n, int) and not isinstance(n, bool) for n in (w, h)):
             raise ValueError("widget_size values must be null or objects of integer w and h")
-        sizes[key] = {"w": max(1, min(WIDGET_GRID_COLUMNS, w)), "h": 0}
+        w = max(0, min(WIDGET_GRID_COLUMNS, w))
+        h = 0 if h <= 0 else max(WIDGET_HEIGHT_MIN, min(WIDGET_HEIGHT_MAX, h))
+        sizes[key] = {"w": w, "h": h} if w or h else None
     return sizes
 
 
@@ -195,6 +225,22 @@ def _normalize_preferences(
     if "widget_size" in raw:
         value = raw.get("widget_size")
         prefs["widget_size"] = {} if value is None else _normalize_widget_size(value)
+    if "model_recents" in raw:
+        from ouroboros.composer_cognition import normalize_model_choice
+
+        routes = []
+        value = raw["model_recents"]
+        for item in value if isinstance(value, list) else []:
+            try:
+                choice = normalize_model_choice({**item, "kind": "model"})
+            except (TypeError, ValueError):
+                continue
+            route = {key: choice[key] for key in ("model", "use_local")}
+            if route not in routes:
+                routes.append(route)
+            if len(routes) == _MAX_MODEL_RECENTS:
+                break
+        prefs["model_recents"] = routes
     if "nested_subagents_expanded" in raw:
         value = raw.get("nested_subagents_expanded")
         if not isinstance(value, bool):
@@ -335,6 +381,19 @@ def _stored_preferences(path: pathlib.Path) -> dict[str, Any]:
     return _normalize_preferences(stored)
 
 
+def record_model_recent(drive_root: Any, model: str, use_local: bool = False) -> None:
+    """Record an owner model act in the shared bounded store, under its existing lock."""
+    from ouroboros.composer_cognition import normalize_model_choice
+
+    choice = normalize_model_choice({"kind": "model", "model": model, "use_local": use_local})
+    route = {key: choice[key] for key in ("model", "use_local")}
+    path = pathlib.Path(drive_root) / "state" / "ui_preferences.json"
+    with _preferences_lock(path):
+        prefs = _stored_preferences(path)
+        prefs["model_recents"] = [route, *(item for item in prefs["model_recents"] if item != route)][:_MAX_MODEL_RECENTS]
+        atomic_write_json(path, prefs, trailing_newline=True)
+
+
 async def api_ui_preferences_get(request: Request) -> JSONResponse:
     drive_root = request_drive_root(request)
     path = pathlib.Path(drive_root) / "state" / "ui_preferences.json"
@@ -353,6 +412,8 @@ async def api_ui_preferences_post(request: Request) -> JSONResponse:
     unknown = sorted(set(body) - _KNOWN_KEYS)
     if unknown:
         return json_error(f"unknown ui preference key: {unknown[0]}", 400)
+    if "model_recents" in body:
+        return json_error("model_recents is recorded by the host on owner model choices", 400)
     if "read_ahead_revisions" in body:
         return json_error("read_ahead_revisions is recorded by the host; post shared_read addresses", 400)
     if shared is not None and (not isinstance(shared, list) or len(shared) > _MAX_SHARED_READS
@@ -360,13 +421,21 @@ async def api_ui_preferences_post(request: Request) -> JSONResponse:
         return json_error(f"shared_read must be a list of at most {_MAX_SHARED_READS} row addresses", 400)
     drive_root = request_drive_root(request)
     path = pathlib.Path(drive_root) / "state" / "ui_preferences.json"
+    contributions_changed = "contributions" in body
     try:
+        visibility = _contribution_visibility_ops(body)
         with _preferences_lock(path):
             prefs = _stored_preferences(path)
             incoming = _normalize_preferences(body, fill_defaults=False)
             for group in ("voice", "contributions"):
                 if group in incoming:
                     prefs[group] = {**prefs[group], **incoming.pop(group)}
+            if visibility:
+                hidden = [key for key in prefs["contributions"].get("hidden", []) if key not in visibility.get("show", [])]
+                hidden += [key for key in visibility.get("hide", []) if key not in hidden]
+                if len(hidden) > _MAX_CONTRIBUTION_KEYS:
+                    raise ValueError(f"contributions.hidden holds at most {_MAX_CONTRIBUTION_KEYS} keys")
+                prefs["contributions"] = {**prefs["contributions"], "hidden": hidden}
             if "project_seen_revision" in incoming:
                 from ouroboros.projects_registry import get_project
 
@@ -417,6 +486,14 @@ async def api_ui_preferences_post(request: Request) -> JSONResponse:
         return json_error(str(exc), 503)
     except StoreError as exc:
         return json_error(f"dialogue history unavailable: {exc}", 503)
+    if contributions_changed:
+        # Other windows re-read their contributions projection (one coalesced read each).
+        try:
+            from ouroboros.gateway.ws import broadcast_ws_sync
+
+            broadcast_ws_sync({"type": "ui_preferences_changed", "keys": ["contributions"]})
+        except Exception:  # a missing socket loop must not fail a committed write
+            pass
     return JSONResponse({"ok": True, **prefs})
 
 
@@ -425,4 +502,5 @@ __all__ = [
     "api_ui_preferences_get",
     "api_ui_preferences_post",
     "main_room_revision",
+    "record_model_recent",
 ]

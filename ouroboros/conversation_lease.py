@@ -752,6 +752,11 @@ def resolved_presence_turns(drive_root: Any) -> dict:
             complete = False
             continue
         if row:
+            from ouroboros.lead_fact import lead_fields
+
+            actor = presence_author_agent(drive_root, task_id) if fact["local"] else None
+            owner = getattr(getattr(actor, "tools", None), "_ctx", None)
+            row.update(lead_fields(getattr(owner, "_lead_last_sent", None)))
             roots.append({**fact, "state": "running", "row": row})
             continue
         with _AUTHORS_LOCK:

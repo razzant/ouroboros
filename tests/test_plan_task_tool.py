@@ -430,6 +430,12 @@ def test_pending_seats_settle_from_the_custody_hook_and_wake_the_mailbox(harness
     record = _record(harness)
     assert [p["status"] for p in record["asks"][0]["participants"]] == ["pending", "pending", "answered"]
     assert result.meta["plan_pending_asks"] == 1 and "Still working: s1, s2" in text
+    # A pending ask holds no ending; a reply after the task ends stays in its plan record and shows as late feedback
+    # only where the room is known (``late_review_marks``): neither text promises an answer "before your final".
+    for words in (text, pr._SCHEMA["description"]):
+        for fact in ("a pending ask holds no ending", "kept in its plan record", "when the room is known"):
+            assert fact in words, fact
+        assert "before your final" not in words and "before an unhurried finish" not in words
     decision = plan_record.gate_projection(record, enforcement="blocking", cyber_pro=False, hurry=False)
     assert decision["status"] == "awaiting" and decision["allow"] is True  # silence never holds
     from ouroboros.review_records import ReviewActorRecord

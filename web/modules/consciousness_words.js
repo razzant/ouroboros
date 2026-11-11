@@ -1,4 +1,5 @@
 import { tr, fmt } from './i18n.js';
+import { shortName } from './chat_model_routes.js';
 import { taskPresentation } from './log_events.js';
 import { taskCostMeta } from './chat_activity.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
@@ -117,6 +118,24 @@ const TITLE_SEP = ' · ';
 export const sameWords = (a, b) => String(a || '').toLowerCase().replace(/\s+/g, '') === String(b || '').toLowerCase().replace(/\s+/g, '');
 /** The service a place is on, as its row and its sheet name it quietly. */
 export const placeService = (place) => String(place.serviceLabel || place.provider || '');
+
+// A model a place or a circle is given, as a row says it: the two aliases by their role's name, a route by the
+// model's own short name (`z-ai/glm-5.3` reads `glm-5.3`).
+const MODEL_ALIASES = Object.freeze({ main: ['places.model.main', 'Main'], light: ['places.model.light', 'Light'] });
+export const isModelAlias = (value) => Object.hasOwn(MODEL_ALIASES, String(value || ''));
+export const placeModelWord = (value) => (isModelAlias(value) ? tr(...MODEL_ALIASES[value]) : shortName({ model: String(value || '') }));
+/** What an empty Model field of a place uses, from its `model_route` and its circle as last read (a circle's model
+ *  edit does not revise its places' rows): `{circle, model}`, `circle` empty for the consciousness model and `model`
+ *  empty when this read does not say which one that is. */
+export function inheritedModel(place, circle = null) {
+    const route = place.modelRoute;
+    if (circle?.model) {
+        // An alias is named by what it resolves to now, which only a place that inherits it carries.
+        const resolved = isModelAlias(circle.model) && route?.layer === 'circle' && route.value ? route.value : circle.model;
+        return { circle: circle.name, model: placeModelWord(resolved) };
+    }
+    return { circle: '', model: route?.layer === 'consciousness' && route.value ? placeModelWord(route.value) : '' };
+}
 /** One title for a place's row and its sheet: its label without the service it is on and without its circle's own
  *  name; a whole-account place with nothing left takes the account's name from its connector's status; the service
  *  itself is the last resort. */
@@ -162,16 +181,28 @@ export function allowanceText(snapshot) {
     const { spentUsd, dailyUsd } = snapshot;
     if (spentUsd === null || dailyUsd === null) return '';
     const floor = snapshot.unknownUnmetered > 0 ? '≥ ' : '';
+    // Open accounting keeps "so far" (DESIGN): a call still open may add more, so even $0.00 is no final total.
+    const sofar = !floor && snapshot.allowanceOpenRows > 0 ? ' so far' : '';
     const degraded = snapshot.integrityDegraded ? ' (ledger integrity degraded)' : '';
-    return `${floor}${formatUsd(spentUsd)} of ${formatUsd(dailyUsd)} in the last 24 hours${degraded}`;
+    return `${floor}${formatUsd(spentUsd)}${sofar} of ${formatUsd(dailyUsd)} in the last 24 hours${degraded}`;
 }
 
-// The owner's move (DESIGN "Status marks", amber): consciousness stopped by its spending limit or waiting for a first
-// conversation. A failure is an outcome's red dot, an unconfirmed outcome a ring, a paused wake two bars, a due wake
-// the still mark.
+// The owner's move (DESIGN "Status marks", amber): consciousness stopped by its spending limit (new starts refused, or
+// its own wake held at the allowance it started with) or waiting for a first conversation. A failure is an outcome's
+// red dot, an unconfirmed outcome a ring, any other paused wake two bars, a due wake the still mark.
 const OWNER_MOVE = new Set(['allowance_exhausted', 'waiting_for_first_conversation']);
 const FAILED = new Set(['wake_failed', 'wake_rejected', 'stopped']);
 const UNCONFIRMED = new Set(['wake_outcome_unknown', 'allowance_unknown']);
+const ALLOWANCE_HOLDS = new Set(['allowance', 'allowance_and_cap']);
+
+/** Whether its own wake is held, proven, at the allowance it started with (consciousness_view.hold_cause): the
+ *  status word stays `wake_paused`; the cause is its own fact. */
+export const allowanceHold = (snapshot) => snapshot.enabled === true && snapshot.status === 'wake_paused'
+    && snapshot.liveWakeHeld === true && ALLOWANCE_HOLDS.has(snapshot.holdCause);
+
+/** Whether the next step is the allowance, edited in Costs: new starts refused by it, or a wake held at it. */
+export const allowanceMove = (snapshot) => snapshot.enabled === true
+    && (snapshot.status === 'allowance_exhausted' || allowanceHold(snapshot));
 
 /** The one status mark of a consciousness state, for the bar's chip and the Dashboard's headline alike; `owner` adds
  *  an owner's move the caller knows of (an Evolution campaign that waits for the owner). */
@@ -179,7 +210,7 @@ export function consciousnessMark(snapshot, { owner = false } = {}) {
     const off = snapshot.enabled === false;
     const unknown = snapshot.enabled === null;
     const status = snapshot.status;
-    if (owner || (!off && !unknown && OWNER_MOVE.has(status))) return { shape: 'dot', hue: 'owner' };
+    if (owner || (!off && !unknown && (OWNER_MOVE.has(status) || allowanceHold(snapshot)))) return { shape: 'dot', hue: 'owner' };
     if (status === 'thinking') return { shape: 'moving', hue: 'ink' };
     if (off) return { shape: 'none', hue: 'ink' };
     if (FAILED.has(status)) return { shape: 'dot', hue: 'failed' };

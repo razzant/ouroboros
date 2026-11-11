@@ -83,7 +83,7 @@ async def api_places(request):
 
 
 async def api_circles(request):
-    """Create, rename or reword, and delete a circle: the owner's words, one locked writer with the places."""
+    """The owner's circle choices: name, words and model, one locked writer with the places."""
     root = request_drive_root(request)
     circle_id = str(request.path_params.get("circle_id") or "")
     try:
@@ -98,14 +98,14 @@ async def api_circles(request):
                                                    expected_revision=body.get("expected_revision"))
             return JSONResponse({"ok": True, "circle": circle_summary(removed["circle"]), "detached": removed["detached"]})
         if circle_id:
-            if not body or set(body) - {"name", "text", "expected_revision"}:
+            if not body or set(body) - {"name", "text", "model", "expected_revision"}:
                 raise PlaceError("circle_update_invalid")
             saved = await run_sync_to_completion(edit_circle, root, circle_id, author=AUTHOR_OWNER, **body)
         else:
-            if set(body) - {"name", "text"}:
+            if set(body) - {"name", "text", "model"}:
                 raise PlaceError("circle_update_invalid")
             saved = await run_sync_to_completion(create_circle, root, name=body.get("name"), text=body.get("text", ""),
-                                                 author=AUTHOR_OWNER)
+                                                 model=body.get("model", ""), author=AUTHOR_OWNER)
         return JSONResponse({"ok": True, "circle": circle_summary(saved)})
     except (ValueError, TypeError) as exc:
         conflict = getattr(exc, "code", "") == "circle_revision_conflict"

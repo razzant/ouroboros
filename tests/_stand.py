@@ -155,7 +155,7 @@ def _turns(meter: Any, srv: Any, result: Dict[str, Any], root: pathlib.Path, fac
     utils._RACY_NS = skill_identity._RACY_NS = 0  # as in B10: a file read within a clock tick of its write is read again
     no_carrier_can_start()
     ctx, k = _event_ctx(srv), int(facts.get("k") or 1)
-    out: Dict[str, Any] = {"history": shapes.turn_history(root, k), "steady": shapes.steady_state(root, refused=refused)}
+    out: Dict[str, Any] = {"history": shapes.turn_history(root, k), "steady": shapes.steady_state(root, refused=refused, window=shapes.WIDE_WINDOW)}
     _boot_census(srv, root)
     out["rooms"] = lay_rooms(root, stand.rooms, stand.story_tokens)
     requests = _Requests(result, stand.rooms)

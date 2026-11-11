@@ -41,6 +41,7 @@
  * @property {"available"|"disabled"|"unsaved"} subagents_availability
  * @property {boolean} context_mode_auto_low  // frozen compatibility field; always false
  * @property {EffortRange} effort_range  // the owner's effort range (POST /api/owner/effort-range), the tolerant read
+ * @property {ChatModelRoute} main_route  // Main itself, written by POST /api/owner/chat-model without project_id
  * @property {string} safety_mode
  * @property {boolean} skills_repo_configured
  * @property {boolean} github_token_configured
@@ -85,6 +86,7 @@
  * @property {boolean} enabled
  * @property {string} status  // disabled | starting | stopped | thinking | due | sleeping | waiting_for_first_conversation | allowance_exhausted | allowance_unknown | wake_rejected | wake_failed | wake_paused | wake_outcome_unknown
  * @property {string} detail  // one honest owner-readable line (e.g. "Sleeping until 14:05.")
+ * @property {string=} detail_note  // what follows from that state, said beneath it; only a proven allowance hold has one
  * @property {string} level  // observe | act | full
  * @property {string} next_wake_at  // next attempt, moved by skips/refusals; ISO instant or ""
  * @property {string} appointment_at  // scheduled time, retained through retries; "" on legacy state
@@ -99,8 +101,12 @@
  * @property {number} max_tasks
  * @property {string} live_wake_task_id  // own wake through direct custody, queue and settlement; "" when absent
  * @property {boolean} live_wake_held  // own wake in PENDING: paused, held or awaiting dispatch
+ * @property {?{cause: string, ceiling_usd: ?number}} live_wake_hold  // what its records prove holds it (consciousness_view.hold_cause); null when not held
  * @property {number} unknown_unmetered  // window rows without a price: spent_24h_usd is then a floor ("at least")
  * @property {boolean} integrity_degraded  // the ledger was quarantined/repaired; the numbers are best-effort
+ * @property {string} allowance_status  // the current window's verdict: available | exhausted | allowance_unknown
+ * @property {?number} allowance_open_rows  // window rows that may still settle; null unknown
+ * @property {string} allowance_room_after  // ISO instant after which known spend falls below the limit if nothing more is charged; "" withheld
  */
 /** @typedef {import('./task_activity_types.js').ActiveDirectTurn} ActiveDirectTurn */
 /** @typedef {import('./task_activity_types.js').ActiveChatActivity} ActiveChatActivity */
@@ -716,6 +722,11 @@
  * @property {number=} chat_id  // new project thread; client learns it before /api/state (v6.32.0)
  */
 
+/** @typedef {Object} UiPreferencesChangedOutbound A committed POST /api/ui/preferences change: read it again.
+ * @property {"ui_preferences_changed"} type
+ * @property {string[]} keys  // the changed groups, e.g. ["contributions"]
+ */
+
 /** @typedef {Object} MessageAnnotationOutbound Bubble-free update for an existing owner message.
  * @property {"message_annotation"} type
  * @property {"routing_ack"} annotation_type
@@ -798,6 +809,7 @@
  * @property {string=} last_task_result_id
  * @property {boolean=} created
  * @property {ProjectCognition} cognition
+ * @property {ChatModelChoice=} model_choice  // the room's own model for new owner work; never copied from Main
  */
 
 /** @typedef {Object} ProjectDeleteResponse
@@ -933,6 +945,9 @@
  * @property {string} context_mode
  * @property {EffortRange} effort_range
  */
+
+/** @typedef {import('./client_contract_types.js').ChatModelChoice} ChatModelChoice */
+/** @typedef {import('./client_contract_types.js').ChatModelRoute} ChatModelRoute */
 
 /**
  * @typedef {Object} OwnerSafetyModeResponse
@@ -1500,7 +1515,7 @@
  * @property {{hidden:string[],order:string[]}} contributions
  * @property {string[]} widget_order
  * @property {Object.<string,'auto'|'manual'|'retain'>} widget_start_mode  // owner per-card launch-policy override, keyed "<skill>:<tab_id>"
- * @property {Object.<string,{w:number,h:number}>} widget_size  // owner Widgets card width: w masonry columns the card spans (12 = full width), h 0 (reserved)
+ * @property {Object.<string,{w:number,h:number}>} widget_size  // owner Widgets card size: w columns spanned (12 = full, 0 = author's), h content px (0 = natural)
  * @property {boolean} nested_subagents_expanded
  * @property {number} sidebar_width  // px; 0 = CSS default (v6.33.0)
  * @property {number} project_panel_width  // px; 0 = CSS default
@@ -1508,6 +1523,7 @@
  * @property {?number} main_seen_revision  // Main's monotonic paint ACK; null until a client first reads Main
  * @property {Object.<string,number[][]>} read_ahead_revisions  // per chat id: revisions read in full in another room (host-owned)
  * @property {{mode:'default'|'hidden'|'custom',text:string}} welcome  // install-wide empty-Main UI copy, not chat history
+ * @property {ChatModelRoute[]} model_recents  // server-written on each owner model act: newest first, at most four distinct routes; a POST may not carry it
  * @property {boolean=} ok
  */
 /**

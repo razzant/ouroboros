@@ -151,9 +151,11 @@ export const RELAY_CARD_LINES = 2;
  * Clamp `text` to six lines (cut on a word, never `.…`; text_fit.js) and add a `Show all` / `Show less` toggle
  * into `host`, a row that already exists (the relay panel's head), so no
  * control floats on a row of its own. The toggle shows only while the clamp hides text or the text is open.
+ * `fit` may measure a CSS-only clamp when authored child nodes must remain intact.
  */
-export function clampWithToggle(text, host, { onDomWrite = (write) => write() } = {}) {
+export function clampWithToggle(text, host, { onDomWrite = (write) => write(), fit = fitText } = {}) {
     if (!text || !host) return null;
+    const document = text.ownerDocument || globalThis.document;
     const words = text.textContent;
     text.classList.add('chat-clamp');
     const toggle = document.createElement('button');
@@ -171,11 +173,11 @@ export function clampWithToggle(text, host, { onDomWrite = (write) => write() } 
         toggle.setAttribute('aria-expanded', String(open));
         toggle.textContent = open ? tr('chat.clamp.show_less', 'Show less') : tr('chat.clamp.show_all', 'Show all');
         toggle.hidden = false;
-        fitText(text, words, open ? 0 : CLAMP_LINES, onFit);
+        fit(text, words, open ? 0 : CLAMP_LINES, onFit);
         return true;
     }));
     host.append(toggle);
-    fitText(text, words, CLAMP_LINES, onFit);
+    fit(text, words, CLAMP_LINES, onFit);
     return toggle;
 }
 

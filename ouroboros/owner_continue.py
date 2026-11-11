@@ -1069,3 +1069,16 @@ def continuation_offer(result: Dict[str, Any], task_id: str) -> Dict[str, Any]:
         return {"eligible": False, "refusal": "already_continued",
                 "successor_task_id": str(claim["successor_task_id"]), "state": str(claim.get("state") or "")}
     return continuation_eligibility(result, task_id)
+
+
+OFFER_VIEW_KEYS = ("eligible", "cause", "refusal", "successor_task_id", "state")
+
+
+def offer_view(result: Dict[str, Any], task_id: str) -> Optional[Dict[str, Any]]:
+    """The offer a later reader of a ROOT's whole stored row is shown, recomputed on every read: the card's own
+    ``continuation_offer`` without a claim's nonce. ``None`` for a non-root row, live or settled (a child's work
+    is its root's): decided first, since eligibility names a live row ``predecessor_live`` before it asks."""
+    if not _is_root(result, task_id):
+        return None
+    offer = continuation_offer(result, task_id)
+    return {key: offer[key] for key in OFFER_VIEW_KEYS if key in offer}

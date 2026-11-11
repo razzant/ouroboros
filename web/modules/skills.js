@@ -354,7 +354,8 @@ export function initSkills(ctx = {}) {
         const facts = host?.pageModuleFacts?.() || { faults: contributions?.faults?.() || [], held: [] };
         return { ...facts, startHeldModule: (key) => host?.startHeldModule?.(key) === true };
     };
-    const cardOptions = () => ({ githubTokenConfigured: snapshot?.githubTokenConfigured, pageModules: pageModuleFacts() });
+    const cardOptions = () => ({ githubTokenConfigured: snapshot?.githubTokenConfigured, pageModules: pageModuleFacts(),
+        contributionVisibility: (name) => contributions?.visibilityForSkill?.(name) || [] });
 
     // ---- Installed view -------------------------------------------------------------------------
     function paintFilters(skills) {
@@ -402,7 +403,7 @@ export function initSkills(ctx = {}) {
         if (!snapshot?.rawSkills || destroyed) return;
         const skills = projected();
         const pageFacts = pageModuleFacts();
-        const options = () => ({ githubTokenConfigured: snapshot?.githubTokenConfigured, pageModules: pageFacts });
+        const options = cardOptions;
         const cards = new Map(Array.from(container.querySelectorAll(':scope > .skills-card')).map((card) => [card.dataset.skill, card]));
         let replacementFocus = null;
         if (replace) {
@@ -807,6 +808,14 @@ export function initSkills(ctx = {}) {
 
     /** One installed-skill action by name (cards, the menu, Browse and the sheet share it). */
     async function runInstalledAction(name, action, options = {}) {
+        if (action === 'toggle_contribution') {
+            const key = String(options.contributionKey || '');
+            if (!key || !contributions?.setHidden) throw new Error('Composer control is unavailable.');
+            const hidden = options.contributionHidden !== 'true';
+            await contributions.setHidden(key, hidden);
+            showToast(`${contributions.byKey(key)?.label || 'Composer control'} ${hidden ? 'hidden' : 'shown'}`, 'ok');
+            return false;
+        }
         if (action === 'open_detail') { openInstalledSheet(name, options.node); return false; }
         if (action === 'open_widgets') { document.querySelector('[data-nav-page="widgets"]')?.click(); return false; }
         if (action === 'open_secrets') { if (typeof ctx.openSettingsTab === 'function') ctx.openSettingsTab('secrets'); return false; }
@@ -905,19 +914,25 @@ export function initSkills(ctx = {}) {
             showToast(`${name}: ${actionTarget.dataset.submitReason || 'publishing is not available now'}`, 'warn');
             return;
         }
+        // Disabling a focused button drops focus to the page in Chromium; the keyboard owner gets it back below.
+        const hadFocus = document.activeElement === actionTarget;
         actionTarget.disabled = true;
         let refresh = true;
         try {
             if (action === 'start_host_module') {
                 refresh = pageModuleFacts().startHeldModule(actionTarget.dataset.hostModuleKey || '') === true;
             } else {
-                refresh = await runInstalledAction(name, action, { keys: actionTarget.dataset.keys || '', payloadRoot: actionTarget.dataset.payloadRoot || '', node: actionTarget }) !== false;
+                refresh = await runInstalledAction(name, action, { keys: actionTarget.dataset.keys || '', payloadRoot: actionTarget.dataset.payloadRoot || '', node: actionTarget,
+                    contributionKey: actionTarget.dataset.contributionKey || '', contributionHidden: actionTarget.dataset.contributionHidden || '' }) !== false;
             }
         } catch (err) {
             if (err.cancelled) refresh = false;
             showToast(`${name}: ${err.message || err}`, err.cancelled ? 'warn' : 'danger');
         } finally {
             actionTarget.disabled = false;
+            if (hadFocus && actionTarget.isConnected && (!document.activeElement || document.activeElement === document.body)) {
+                actionTarget.focus({ preventScroll: true });
+            }
             if (refresh) await readInstalled({ quiet: true });
         }
     };

@@ -332,7 +332,7 @@ OWNER_REPLY_OWED_REFUSAL = "owner_reply_owed: your human wrote after your last l
 
 
 def owner_reply_owed(ctx: Any) -> bool:
-    """Owner rows arrived after this run's latest LIVE text send (``tools/owner_delivery.py``).
+    """Owner rows arrived after this run's latest LIVE text send to my human (``tools/owner_delivery.py``).
 
     A failed or deferred send discharges nothing; queue admission is not a read receipt, and
     whether a sent line answered completely remains the author's judgment, not the host's.
@@ -695,7 +695,8 @@ def context_facts_line(ctx: Any, *, money: Optional[Dict[str, Any]] = None, meas
     accepted = usage.get("_context_accepted_input_tokens") if measured else None
     from ouroboros.context_anchor import refused_input
     refused = refused_input(usage, getattr(ctx, "context_fit_plan", None)) if measured else None
-    parts = [_round_fact(ctx, tool_ctx), f"mode {ctx.active_context_mode}", f"model {ctx.active_model}"]
+    from ouroboros.lead_fact import model_fact_words
+    parts = [_round_fact(ctx, tool_ctx), f"mode {ctx.active_context_mode}", model_fact_words(tool_ctx, ctx.active_model)]
     notes = [note for note in (f"largest accepted input {int(accepted):,}" if accepted else "",
                                f"refused at ~{int(refused):,}" if refused else "") if note]
     largest = f" ({'; '.join(notes)})" if notes else ""

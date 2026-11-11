@@ -453,8 +453,9 @@ const taken = lateOutcomeIsCurrent(card, current), view = summarizeChatLiveEvent
 card.latestSourceTs = current.current_outcome.revision;  // the clock chat.js sets when it takes the frame
 console.log(JSON.stringify([taken, view.phase, view.headline, lateOutcomeIsCurrent(card, stale),
   lateOutcomeIsCurrent(card, current)]));"""
-    checked = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True, text=True, check=True,
-                             input=json.dumps([event, stale, ended_at]), cwd=pathlib.Path(__file__).resolve().parents[1])
+    checked = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True, text=True,
+                             encoding="utf-8", check=True, input=json.dumps([event, stale, ended_at]),
+                             cwd=pathlib.Path(__file__).resolve().parents[1])
     assert json.loads(checked.stdout) == [True, "warn", "Done with warnings", False, True], checked.stdout
 
 
@@ -494,7 +495,8 @@ const [older, newer, later] = JSON.parse(text).map((current_outcome) => ({ts: ''
 const card = (frame) => ({finished: true, latestSourceTs: frame.current_outcome.revision});
 console.log(JSON.stringify([lateOutcomeIsCurrent(card(newer), older), lateOutcomeIsCurrent(card(newer), newer),
   lateOutcomeIsCurrent(card(newer), later), lateOutcomeIsCurrent(card(later), newer)]));"""
-    checked = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True, text=True, check=True,
+    checked = subprocess.run([node, "--input-type=module", "-e", script], capture_output=True, text=True,
+                             encoding="utf-8", check=True,
                              input=json.dumps([late.current_outcome(row) for row in (older, newer, later)]),
                              cwd=pathlib.Path(__file__).resolve().parents[1])
     assert json.loads(checked.stdout) == [False, True, True, False], checked.stdout
@@ -565,8 +567,9 @@ let text = ''; for await (const chunk of process.stdin) text += chunk;
 const view = (s) => s && [s.phase, s.headline, s.body, s.activityPreview || ''];
 console.log(JSON.stringify(JSON.parse(text).map(([row, late]) => [taskOutcomeSeverity(row), taskReasonDetail(row),
   view(late ? summarizeChatLiveEvent(late) : taskTerminalSummary({...row, outcome_final: true}))])));"""
+    # Node writes UTF-8 to a pipe whatever the locale; decoding with the default codec (cp1252 on Windows) breaks "·".
     checked = subprocess.run([node, "--input-type=module", "-e", script], input=json.dumps(rows), capture_output=True,
-                             text=True, check=True, cwd=pathlib.Path(__file__).resolve().parents[1])
+                             text=True, encoding="utf-8", check=True, cwd=pathlib.Path(__file__).resolve().parents[1])
     return json.loads(checked.stdout)
 
 

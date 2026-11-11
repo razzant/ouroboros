@@ -13,10 +13,11 @@ tree-origin channel (``origin_metadata``) into every descendant's ``task.metadat
 marker (``initiator=consciousness``) or ``not_recorded``: no vocabulary of reasons of its own.
 
 ``work_words`` is the set a handoff renders (a helper's birth, a reviewer's ask, a direct
-start): the tree's rows first, then the rows the run holds as context, the bound Project
-room's rows read once at that render, the Project's retained origin rows and the rows that
-marks in force target. One message is one row whichever carrier holds it — its room and
-client id; a row with no id at all by its words and its time — and the first carrier keeps
+start) and the mind reads itself (``memory_read(owner_words=true)``): the tree's rows first,
+then the rows the run holds as context, the bound Project room's rows read once at that
+render, the Project's retained origin rows and the rows that marks in force target. One
+message is one row whichever carrier holds it — its room and client id; a row with no id
+at all by its words and its time — and the first carrier keeps
 the row. Every row carries the time the room accepted it, or ``received``, when the host
 got it, or none: never an invented date. An answer travels with the card it answers, under
 the asking task's name. A room or a mark store that cannot be read is one gap line beside
@@ -470,7 +471,7 @@ def _my_post(ctx: Any, item: Mapping[str, Any]) -> bool:
     return identity in sent_identities(canonical_data_root(ctx))
 
 
-def cited_owner_basis(ctx: Any, owner_words: Any) -> Tuple[Dict[str, Any] | None, str]:
+def cited_owner_basis(ctx: Any, owner_words: Any, *, call_speech: bool = False) -> Tuple[Dict[str, Any] | None, str]:
     """``(basis, error)`` for words a run cites as my human's order for the work it starts.
 
     The host verifies provenance and nothing else: the exact bytes (``chronicle_quotes.quote_in``, emphasis
@@ -481,7 +482,10 @@ def cited_owner_basis(ctx: Any, owner_words: Any) -> Tuple[Dict[str, Any] | None
     human's words) with the cited span as ``cited``, labelled by its real source: the owner door it came through,
     or ``place_owner`` for a confirmed account's place words, read again at the cite: a row my send receipt now names
     is my own echo (``_my_post``). Words not found: a typed refusal, nothing started.
-    Whether the words ask for this work is the citing mind's reading, visible on the card."""
+    Whether the words ask for this work is the citing mind's reading, visible on the card.
+    The owner's decision of 11 November 2026 admits their own call speech only for a model choice:
+    its caller opts in with ``call_speech`` and carries the returned ``live_call`` span only on the lead,
+    never as the new work's owner corpus (the caption rules of 7 November otherwise stand)."""
     from ouroboros.chronicle_quotes import quote_in
 
     wanted = str(owner_words or "").strip()
@@ -496,6 +500,13 @@ def cited_owner_basis(ctx: Any, owner_words: Any) -> Tuple[Dict[str, Any] | None
                 and quote_in(wanted, str(item.get("content") or "")) and not _my_post(ctx, item)):
             return {"source": "place_owner", "content": str(item.get("content") or ""), "cited": wanted, "basis": CITED,
                     "carried": True, **{key: item[key] for key in ("msg_id", "reply_to") if item.get(key)}}, ""
+    # Only the own-call owner-caption branch records live_call directives; heard speech and
+    # Presence calls do not. A model choice may cite it without granting authority to the work.
+    for item in (getattr(ctx, "_owner_directives", None) or []) if call_speech else ():
+        if (isinstance(item, dict) and item.get("source") == "live_call"
+                and quote_in(wanted, str(item.get("content") or ""))):
+            return {"source": "live_call", "cited": wanted,
+                    **({"msg_id": item["msg_id"]} if item.get("msg_id") else {})}, ""
     return None, ("owner_words were not found verbatim in any message of your human that reached this run (their "
                   "confirmed account, not forwarded): nothing was started. Copy their exact words, or omit owner_words "
                   "to start the work as your own.")
@@ -1145,12 +1156,17 @@ def words_stamp(row: Mapping[str, Any]) -> str:
     return "[" + " · ".join(part for part in stamp if part) + "]"
 
 
-def owner_words_text(ctx: Any, *, audience: str = "reviewer") -> str:
-    """``render_owner_words`` over this run's set at this handoff (``work_words``), then the schedule text the run
-    holds (``render_schedule_text``)."""
+def work_words_text(ctx: Any, *, audience: str = "reviewer") -> str:
+    """``render_owner_words`` over this run's set at this handoff (``work_words``): my human's words alone. Reviewers
+    and the plan council read it with the schedule text appended; ``memory_read(owner_words=true)`` returns it whole."""
     rows, absent, gaps = work_words(ctx)
     root = str(_ctx_metadata(ctx).get("root_task_id") or getattr(ctx, "task_id", "") or "")
-    words = render_owner_words(rows, absent, audience=audience, root_task_id=root, gaps=gaps)
+    return render_owner_words(rows, absent, audience=audience, root_task_id=root, gaps=gaps)
+
+
+def owner_words_text(ctx: Any, *, audience: str = "reviewer") -> str:
+    """``work_words_text``, then the schedule text the run holds (``render_schedule_text``)."""
+    words = work_words_text(ctx, audience=audience)
     schedule = render_schedule_text(schedule_items(ctx), audience=audience)
     return "\n\n".join(part for part in (words, schedule) if part)
 

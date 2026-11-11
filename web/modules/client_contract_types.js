@@ -631,6 +631,43 @@
  */
 
 /**
+ * A Project follows Main (`main`) or chooses a model (`model`); without `project_id` the write is Main itself, and
+ * then only `model` is a choice.
+ * @typedef {Object} OwnerChatModelRequest
+ * @property {"main"|"model"} kind
+ * @property {string=} model  // kind "model" only: the raw route, its source included
+ * @property {boolean=} use_local  // kind "model" only
+ * @property {string=} project_id
+ */
+/**
+ * A room follows Main or chooses a route; following is a reference, never the same model pinned.
+ * @typedef {Object} ChatModelChoice
+ * @property {"main"|"model"} kind
+ * @property {string=} model  // kind "model" only: the raw route, its source included
+ * @property {boolean=} use_local  // kind "model" only
+ */
+
+/** A model route shared by room choices, Main, a work's lead and the owner's recent models.
+ * @typedef {Object} ChatModelRoute
+ * @property {string} model
+ * @property {boolean} use_local
+ */
+
+/**
+ * A Project's answer carries its choice; Main's own carries what Main is and was, what became of its pinned account
+ * (`kept`, dropped to `auto`, or `none` on a route without accounts) and whether a window set by hand was cleared.
+ * @typedef {Object} OwnerChatModelResponse
+ * @property {boolean} ok
+ * @property {string} project_id  // '' for Main
+ * @property {ChatModelChoice=} model_choice  // Project response
+ * @property {ChatModelChoice=} previous_model_choice
+ * @property {ChatModelRoute=} main_route  // Main response
+ * @property {ChatModelRoute=} previous_main_route
+ * @property {"kept"|"auto"|"none"=} account
+ * @property {boolean=} window_reset
+ */
+
+/**
  * @typedef {Object} OwnerSafetyModeRequest
  * @property {'your_work'|'consciousness'=} kind
  * @property {'full'|'light'|'off'} mode
@@ -698,6 +735,7 @@
 /** @typedef {import('./place_contract_types.js').PlaceConnectRequest} PlaceConnectRequest */
 /** @typedef {import('./place_contract_types.js').PlaceIcon} PlaceIcon */
 /** @typedef {import('./place_contract_types.js').PlaceReadiness} PlaceReadiness */
+/** @typedef {import('./place_contract_types.js').PlaceModelRoute} PlaceModelRoute */
 /** @typedef {import('./place_contract_types.js').PlaceSummary} PlaceSummary */
 /** @typedef {import('./place_contract_types.js').PlaceIdentityAccount} PlaceIdentityAccount */
 /** @typedef {import('./place_contract_types.js').PlaceIdentity} PlaceIdentity */

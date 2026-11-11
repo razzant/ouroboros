@@ -120,6 +120,23 @@ def test_my_answer_a_note_and_a_closing_sentence_each_move_the_point_and_time_or
     assert "completed; «Answered the late question.»; rows 1; get_task_result(task_id='tb2')" in text
 
 
+def test_a_task_line_in_another_conversation_reads_the_cards_word_else_its_status(tmp_path):
+    """Another conversation's line for a task reads the word its card stored, as the task's own room does: a stopped
+    root reads Stopped, a finished one Done; a row that stored no word keeps its lifecycle status."""
+    _install(tmp_path)
+    room, _said, delivered = _thread()
+    ended = [shared.msg(_ts(32 + index), text, chat_id=int(room), direction="system", type="task_summary",
+                        task_id=task, root_task_id=task, summary_kind="terminal_root_projection", status="completed",
+                        **stored)
+             for index, (task, text, stored) in enumerate((("tstop", "Stopped.", {"outcome": "Stopped"}),
+                                                           ("tdone", "Done.", {"outcome": "Done"}),
+                                                           ("tbare", "Done.", {})))]
+    shared.append(tmp_path / "logs" / "chat.jsonl", delivered(28), *ended)
+    text = _view(tmp_path, MAIN_TASK)[1]
+    for task, word in (("tstop", "Stopped"), ("tdone", "Done"), ("tbare", "completed")):
+        assert f"; host; task {task}] {word}; rows 1; get_task_result(task_id='{task}')" in text, text
+
+
 def test_running_work_names_itself_in_its_conversation_and_its_completion_takes_the_line_away(tmp_path):
     from tests.test_memory_view_room import _section
 
