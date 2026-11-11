@@ -245,7 +245,7 @@ Connect renders typed URL/code: `credential_profile_required` + `add_named_accou
 
 `harness_maintenance.js` adds one program row per family, including maintenance-only families without account actions. Engine facts supply selected/baseline versions and update/return/latest-check capabilities. Exact engine text waits under Details. Lost replies keep key/body; inventory rejoins accepted operations with progress, cancel and partial effects. Existing visible ticks poll; drafts survive refresh and controls wrap across desktop/mobile/embedded clients. Inspection never wakes or logs in; Update never retries a task (§6 Vendor program maintenance).
 
-**Restart Claudexor** (`claudexor_restart.js`, Accounts toolbar) replaces the engine process after the owner confirms which runs end (DESIGN §7; CLIENT_CONTRACT §13); the header Restart keeps it. The CLI update flow and the missing-executable banner point here.
+**Restart Claudexor** (`claudexor_restart.js`, Accounts toolbar) replaces the engine process after the owner confirms which runs end (DESIGN §7; CLIENT_CONTRACT §13); the header Restart keeps it. The missing-executable banner points here.
 
 #### Available subagents and the review pool
 

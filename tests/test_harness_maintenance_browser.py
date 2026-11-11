@@ -196,44 +196,6 @@ def test_historical_unknown_effect_preserves_newer_version(subscription_ui, term
     capture(page, f"maintenance-historical-{termination}")
 
 
-@pytest.mark.parametrize("theme", ["light", "dark"])
-def test_packaged_update_preparation_requires_an_explicit_restart_without_fake_operation(subscription_ui, theme):
-    from playwright.sync_api import expect
-
-    ui, page = subscription_ui, subscription_ui["page"]
-    page.add_init_script("localStorage.setItem('ouroboros.theme', %s)" % repr(theme))
-    row = _inventory_row("codex")
-    posts = []
-    message = ("Environment preparation complete; CLI update not started. "
-               "Use Restart Claudexor in Accounts, then repeat Update. It ends every run on the engine; "
-               "its confirmation says how many and whose.")
-
-    def maintenance(route):
-        if route.request.method == "GET":
-            route.fulfill(json={"harnesses": [row]})
-        else:
-            posts.append(route.request.post_data_json)
-            route.fulfill(status=409, json={"error": {"code": "maintenance_restart_required", "message": message,
-                "context": {"acceptance": "not_submitted", "scope": "this_attempt", "preparation": "ready"}}})
-
-    page.route("**/api/claudexor/maintenance/**", maintenance)
-    page.goto(ui["url"] + "/#settings")
-    page.locator('[data-settings-tab="providers"]').click()
-    family = page.locator('.agent-family-card[data-family="codex"]')
-    family.get_by_role("button", name="Update", exact=True).click()
-    expect(family).to_contain_text(message)
-    expect(family.get_by_role("button", name="Update", exact=True)).to_be_enabled()
-    expect(family.locator(".harness-maintenance-line")).to_contain_text("Program 2.0.0")
-    assert family.get_by_role("button", name="Cancel update", exact=True).count() == 0
-    assert "Operation completed" not in family.inner_text() and "acceptance unconfirmed" not in family.inner_text()
-    assert posts == [{"harness": "codex", "target": {"kind": "latest"}}]
-    assert not any("restart" in path or "login" in path for path, _ in ui["posts"])
-    family.locator(".harness-maintenance-row").scroll_into_view_if_needed()
-    capture(page, f"maintenance-preparation-{theme}")
-    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-    assert not ui["errors"]
-
-
 PINNED_SPAWN_FAILURE = json.loads((Path(__file__).parent / "fixtures/claudexor_maintenance_spawn_enoent.json").read_text(encoding="utf-8"))
 ROW_OBSERVED = "2026-10-09T12:00:00Z"
 

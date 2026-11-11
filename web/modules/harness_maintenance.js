@@ -370,18 +370,17 @@ export function createHarnessMaintenanceController({
                 }
                 // A typed pre-acceptance refusal has no installation effect.
                 // Network/5xx/non-JSON replies retain exactly this key/body.
-                const preparation = problem?.context?.scope === 'this_attempt'
+                const notSubmitted = problem?.context?.scope === 'this_attempt'
                     && problem.context.acceptance === 'not_submitted';
-                // A local preparation response knows only THIS attempt. It
+                // A local acquisition refusal knows only THIS attempt. It
                 // cannot erase an earlier lost POST using the same key.
-                if ((preparation || [400, 409].includes(error.status) && problem?.code)
-                    && !(preparation && request.mayHaveSubmitted)) state.request = null;
-                if (state.request && !preparation) request.mayHaveSubmitted = true;
+                if ((notSubmitted || [400, 409].includes(error.status) && problem?.code)
+                    && !(notSubmitted && request.mayHaveSubmitted)) state.request = null;
+                if (state.request && !notSubmitted) request.mayHaveSubmitted = true;
                 if (state.request?.mayHaveSubmitted) state.unknownCurrent = true;
                 state.operationError = state.request
                     ? `Update acceptance unconfirmed: ${error.message || error}. Retry the same request to recover its result.`
-                    : preparation && ['maintenance_restart_required', 'maintenance_preparation_failed'].includes(problem?.code)
-                        ? String(error.message || error) : `Update not started: ${error.message || error}`;
+                    : `Update not started: ${error.message || error}`;
                 return null;
             }).finally(() => { state.busy = null; render(); });
         render();

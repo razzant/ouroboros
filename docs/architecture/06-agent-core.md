@@ -418,7 +418,7 @@ Disclosed isolation residuals: a non-owner orphan's verdict stays with its dispo
 
 ### Vendor program maintenance
 
-`harness_maintenance.py`: Accounts and `ouroboros/tools/control_maintenance.py`; `ouroboros/gateways/claudexor_maintenance.py`: engine targets/keys/evidence. Inspection is read-only. Update prepares pinned Node/npm only on serving `embedded_npm_missing`, then asks for Restart Claudexor (§3) and repeat Update; no auto-restart. External/attach-only: repair externally. Failed optional GET permits POST/rejoin; registry checks add ≤30s. Preparation shares install lock/cache; downloads delay starts. Pre-submit: this attempt; keep earlier unknown POST keys. Readers rank ready exact full runtimes (legacy schema2 too), schema1/Node-only, then bundled Node. Publish `.g-*` siblings; prior trees stay. Authority/Pause apply; no auth changes, replay or host job ledger.
+`harness_maintenance.py` serves Accounts and the native tools; `gateways/claudexor_maintenance.py` passes engine inventory and receipts through. The engine owns vendor selection, newest-version reads, actions and installation. Inspection is passive; explicit Update submits directly. No runtime preparation, host version ordering, auth changes, automatic replay or host job ledger. Authority/Pause apply. A pre-submit refusal covers this attempt only; earlier unknown POSTs retain their key/body. Runtime delivery still selects immutable exact Node generations for the engine and its CLI; it never replaces a live tree.
 
 ### Own-body candidates
 
