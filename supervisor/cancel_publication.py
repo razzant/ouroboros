@@ -55,6 +55,8 @@ CANCEL_SOURCE_PHRASES = {
     # Historical rows of the retired silence diagnostic (#1376, removed 09.11.2026):
     # a silence check whose observed work moved on, settled or stopped.
     "silence_resolved": "Silence check withdrawn: the observed work no longer needed it",
+    # ``ended_work_helpers``: a helper still paused when the work it helped truly ended.
+    "work_finished": "Closed with the work it helped",
 }
 # The fixed label a producer writes as ``reason`` restates its phrase, so that
 # exact label is not repeated beside it; any other reason text still shows.
@@ -62,6 +64,7 @@ CANCEL_SOURCE_LABELS = {
     "http_graceful": "owner requested finalize-then-stop",
     "owner_restart": "Owner restart",
     "snapshot_restore": "server_shutdown",
+    "work_finished": "the work it helped has ended",
 }
 # A recorded cause is producer free text; bound it before it joins an owner line.
 # The bound is a PREVIEW of a reason the record keeps whole, and says so.

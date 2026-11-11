@@ -538,6 +538,7 @@ def cancel_task_custody(
     """
     q = _queue_module()
     from supervisor import workers
+    from supervisor.ended_work_helpers import closes_only_parked_row, yield_to_dispatch
 
     task_id = str(task_id or "").strip()
     if not task_id:
@@ -691,6 +692,11 @@ def cancel_task_custody(
                     captured_worker.reaping = True
                     break
 
+    if captured_worker is not None and not cascade_claim and closes_only_parked_row(intent):
+        # A dispatch that got there first keeps its process; a Stop or cascade that joined the closure is carried out.
+        intent = yield_to_dispatch(q, task_id, intent, captured_worker, captured_was_reaping)
+        if isinstance(intent, str):
+            return intent
     if captured_pending is None and captured_worker is None:
         from ouroboros.review_operation import task_has_live_review_operation
 
@@ -761,7 +767,8 @@ def cancel_task_custody(
         return CANCEL_FAILED
     try:
         if captured_pending is not None:
-            return _finish_captured_pending(task_id, captured_pending, intent=intent, awaiting=captured_awaiting)
+            return _finish_captured_pending(task_id, captured_pending, intent=intent, awaiting=captured_awaiting,
+                                            may_close=not cascade_claim)
         if captured_worker is not None:
             # ``settled_status`` (GR6-1b): a settled RESULT with a live WORKER
             # goes through the SAME kill/join path — the stored terminal truth
@@ -945,21 +952,10 @@ def _cancel_live_retry_successor(
     """
     intent_before = _active_intent(q, intent_task_id)
     try:
-        from ouroboros.cancel_intents import (
-            SCOPE_CASCADE,
-            STOP_POLICY_FINALIZE,
-            stop_policy,
-        )
+        from ouroboros.cancel_intents import SCOPE_CASCADE, STOP_POLICY_FINALIZE, stop_policy
 
-        if (
-            str(intent_before.get("scope") or "") == SCOPE_CASCADE
-            or stop_policy(intent_before) == STOP_POLICY_FINALIZE
-        ):
-            log.error(
-                "Refusing legacy retry-intent transfer for policy-owned task %s -> %s",
-                intent_task_id,
-                retry_task_id,
-            )
+        if str(intent_before.get("scope") or "") == SCOPE_CASCADE or stop_policy(intent_before) == STOP_POLICY_FINALIZE:
+            log.error("Refusing legacy retry-intent transfer for policy-owned task %s -> %s", intent_task_id, retry_task_id)
             return CANCEL_FAILED
     except Exception:
         return CANCEL_FAILED
@@ -970,18 +966,11 @@ def _cancel_live_retry_successor(
         # A2: no durable request on the logical root mints none on its retry.
         return CANCEL_NOT_FOUND
     try:
-        from ouroboros.cancel_intents import (
-            request_cancel,
-        )
+        from ouroboros.cancel_intents import request_cancel
 
-        request_cancel(
-            q.DRIVE_ROOT,
-            retry_task_id,
-            reason=str(intent.get("reason") or "logical retry cancellation"),
-            source="timeout_retry_lineage",
-            requested_by=str(intent.get("requested_by") or ""),
-            allow_settled_target=True,
-        )
+        request_cancel(q.DRIVE_ROOT, retry_task_id, reason=str(intent.get("reason") or "logical retry cancellation"),
+                       source="timeout_retry_lineage", requested_by=str(intent.get("requested_by") or ""),
+                       allow_settled_target=True)
     except Exception:
         log.error(
             "Could not carry cancellation from retry ancestor %s to %s",
@@ -1096,33 +1085,44 @@ def _restore_custody(
 
 def _finish_captured_pending(
     task_id: str, task: Dict[str, Any], *, intent: Optional[Dict[str, Any]] = None, awaiting: Any = None,
+    may_close: bool = True,
 ) -> str:
-    """A queued task (or a lane turn ``awaiting`` its carrier) has no process: persist first, publish second."""
+    """A queued task (or a lane turn ``awaiting`` its carrier) has no process: persist first, publish second. Under a
+    cascade (``may_close`` False) a closure intent it joined is an ordinary cancel of the row."""
     q = _queue_module()
     from ouroboros.task_results import STATUS_CANCELLED, load_task_result, write_task_result
+    from supervisor.ended_work_helpers import prepare_closure, stop_closed_runs
 
     cost_fields = _reconstructed_cost_fields(q, task_id, task)
+    closure = prepare_closure(q, task_id, task, intent, awaiting, cost_fields) if may_close else None
+    if isinstance(closure, str):
+        return closure
+    closing = closure or {}
     try:
         existing = load_task_result(q.DRIVE_ROOT, task_id) or {}
         stored = write_task_result(
-            q.DRIVE_ROOT, task_id, STATUS_CANCELLED,
-            **_cancel_result_fields(
-                task, existing=existing, result="Task cancelled by user/agent request.",
-                **cost_fields, **_intent_outcome_fields(intent or {}),
-            ),
+            q.DRIVE_ROOT, task_id, STATUS_CANCELLED, _last_word=closing.get("last_word"),
+            **{**closing.get("lineage", {}), **_cancel_result_fields(
+                task, existing=existing, result=closing.get("result") or "Task cancelled by user/agent request.",
+                **closing.get("cancel_fields", {}), **cost_fields, **_intent_outcome_fields(intent or {}),
+            )},
         )
     except Exception:
         log.warning("Cancel persistence failed for pending task %s", task_id, exc_info=True)
         _restore_custody(task_id, pending=None if awaiting else task, awaiting=awaiting)
         _release_intent_claim(q, task_id, error="pending cancel persistence failed", intent=intent)
         return CANCEL_FAILED
+    if closing.get("refused"):  # the closure's own transaction saw the work's control change: the row returns
+        return closing["withdraw"]()
     if str((stored or {}).get("status") or "") != STATUS_CANCELLED:
         # The writer's monotonic guard refused it: the task settled on its own
         # between capture and write. Its outcome and event stand.
         _settle_intent(q, task_id, outcome=SETTLED_ALREADY,
                        detail=str((stored or {}).get("status") or ""), intent=intent)
         return CANCEL_ALREADY_SETTLED
-    _settle_intent(q, task_id, outcome="cancelled", detail="cancelled while pending", intent=intent)
+    if closing:  # the closure won its write; its helper's delegated runs stop only now, before the intent settles
+        stop_closed_runs(q, task_id)
+    _settle_intent(q, task_id, outcome="cancelled", detail=closing.get("detail") or "cancelled while pending", intent=intent)
     q._emit_cancel_task_done(task, task_id, cost_fields=cost_fields)
     q.persist_queue_snapshot(reason="cancel_pending")
     return CANCEL_CANCELLED
@@ -1182,7 +1182,6 @@ def _finish_captured_running(
     with q._queue_lock:
         from supervisor.worker_health import retire_confirmed_worker_consumers
         retire_confirmed_worker_consumers(worker, captured_running)
-
 
     # A terminal checkpoint can precede split-drive adoption and artifact capture.
     # Keep fully published CURRENT byte-identical; complete only work still owed.

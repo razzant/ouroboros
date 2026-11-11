@@ -193,10 +193,9 @@ def _fence_snapshot_running_rows(rows: Any, *, restored_ids: "set[str]") -> "lis
     not_found and write nothing, leaving the boot notice naming a cancellation
     that never happens. Returns the fenced task ids.
     """
-    from ouroboros.cancel_intents import has_active_intent, request_cancel
-    from ouroboros.task_results import (
-        _TRULY_TERMINAL_STATUSES, STATUS_CANCEL_REQUESTED, load_task_result,
-    )
+    from ouroboros.cancel_intents import request_cancel
+    from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, STATUS_CANCEL_REQUESTED, load_task_result
+    from supervisor.ended_work_helpers import restore_custody_owns
 
     fenced: list[str] = []
     unreadable: list[str] = []
@@ -222,8 +221,8 @@ def _fence_snapshot_running_rows(rows: Any, *, restored_ids: "set[str]") -> "lis
             status = str(stored.get("status") or "")
             if status in _TRULY_TERMINAL_STATUSES or status == STATUS_CANCEL_REQUESTED:
                 continue
-            if has_active_intent(_queue().DRIVE_ROOT, task_id, strict=True):
-                continue  # cancellation custody already owns this row
+            if restore_custody_owns(_queue().DRIVE_ROOT, task_id, running=True):
+                continue  # cancellation custody already owns this row (a closure owns only a parked one)
             intent = request_cancel(
                 _queue().DRIVE_ROOT, task_id,
                 reason="server_shutdown", source="snapshot_restore",
@@ -1099,12 +1098,10 @@ def _restore_pending(key: str, max_age_sec: int, terminalized: Optional[list]) -
                         skip_revival = True
                     elif not isinstance(task.get("_terminalization_retry"), dict):
                         try:
-                            from ouroboros.cancel_intents import has_active_intent
+                            from supervisor.ended_work_helpers import restore_custody_owns
 
-                            if has_active_intent(
-                                _queue().DRIVE_ROOT, str(task.get("id")), strict=True,
-                            ):
-                                # Cancellation custody owns it; never revive a pending row.
+                            if restore_custody_owns(_queue().DRIVE_ROOT, str(task.get("id"))):
+                                # Cancellation custody owns it; never revive a pending row (a parked closure's returns).
                                 skip_revival = True
                         except Exception:
                             # This is an UNKNOWN cancel fact, not a terminal

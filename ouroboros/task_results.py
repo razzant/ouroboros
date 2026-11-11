@@ -414,6 +414,7 @@ def write_task_result(
     status: str,
     *,
     _field_projector: Optional[Callable[[Dict[str, Any], Dict[str, Any]], Optional[Dict[str, Any]]]] = None,
+    _last_word: Optional[Callable[[Any, Dict[str, Any], Dict[str, Any]], Optional[Dict[str, Any]]]] = None,
     strict_existing_dict: bool = False,
     create_only: bool = False,
     _terminal_observed: bool = False,
@@ -428,6 +429,8 @@ def write_task_result(
     ``_field_projector`` runs after review-publication selection under the same
     lock, deriving fields/status from CURRENT or publishing its verified refs;
     repeating the incoming-review merge afterward would undo that handoff.
+    ``_last_word`` (``store.update_task``) judges the finished document against other addressed
+    tasks in this transaction; a refusal leaves no write and no follow-up of one.
     ``strict_existing_dict`` is accepted for its callers: every stored row is a dict.
     ``create_only`` initializes only absence, before projection or timestamps.
     The body is one store transaction: the merge over CURRENT, the typed columns and
@@ -450,7 +453,14 @@ def write_task_result(
         # (what an earlier round prepared is kept, not read again).
         if "mail" not in prepared and (status in _TRULY_TERMINAL_STATUSES or "mail" in needs):
             prepared["mail"] = (capture_unread_mail(results_drive_root, task_id), capture_owner_mail(results_drive_root, task_id))
-        return patch_document(results_drive_root, task_id, lambda existing: _merge(existing, prepared))
+        return patch_document(results_drive_root, task_id, lambda existing: _merge(existing, prepared),
+                              last_word=_judged if _last_word else None)
+
+    def _judged(txn: Any, current: Dict[str, Any], document: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        judged = _last_word(txn, current, document)
+        if judged is None:
+            transition.clear()
+        return judged
 
     def _merge(existing: Dict[str, Any], prepared: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         transition.clear()

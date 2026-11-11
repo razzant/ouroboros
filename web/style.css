@@ -7460,20 +7460,29 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
     }
 }
 
-/* A finger sizes a card from the card's own foot, never from a gap or over what the widget draws: under a coarse
-   pointer every card keeps a strip the touch minimum tall at its bottom, inside the card, and the bottom edge's button
-   is its grip at the strip's right end (up and down set the height, sideways the width where widths apply:
-   widget_reorder.js). A card that shows its Show all / Back line puts the grip in that line's row, the button centred
-   in the rest. The gaps scroll the board; the thin right edge and the corner are not offered. */
+/* A finger sizes a card from the card's own foot, never from a gap or over what the widget draws, and only the one card
+   it chose to adjust (the menu's Resize: widget_reorder.js) has that foot: a strip the touch minimum tall under its
+   content and under its Show all / Back line, with Done at the left and the bottom edge's button as the grip at the
+   right (up and down set the height, sideways the width where widths apply). Every other card under a finger has
+   neither the strip nor the grip; its Show all / Back line is the touch minimum tall. The gaps scroll the board; the
+   thin right edge and the corner are not offered. The card being adjusted wears the ring of a card being resized. */
+.widgets-card-adjust {
+    display: flex;
+    align-items: center;
+    min-height: var(--touch-target-min);
+    padding: 0 calc(var(--touch-target-min) + var(--space-3)) 0 var(--space-4);
+}
+
+.widgets-card:not([data-widget-adjusting]) > .widgets-card-adjust {
+    display: none;
+}
+
+.widgets-card[data-widget-adjusting] {
+    box-shadow: var(--elev-float), 0 0 0 2px var(--focus-accent-border);
+}
+
 @media (pointer: coarse) {
-    .widgets-list .widgets-card { padding-bottom: var(--touch-target-min); }
-    .widgets-list .widgets-card[data-widget-more-shown] { padding-bottom: 0; }
-    .widgets-list .widgets-card:not([data-widget-framed]) .widgets-card-body,
-    .widgets-list .widgets-card-body:has(> .skills-load-error) { padding-bottom: 0; }
-    .widgets-list .widgets-card-more {
-        min-height: var(--touch-target-min);
-        padding-right: calc(var(--touch-target-min) + var(--space-3));
-    }
+    .widgets-list .widgets-card-more { min-height: var(--touch-target-min); }
     .widgets-card-edge {
         left: auto;
         right: var(--space-2);
@@ -7481,12 +7490,17 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
         width: var(--touch-target-min);
         height: var(--touch-target-min);
     }
+    .widgets-card:not([data-widget-adjusting]) > .widgets-card-edge { display: none; }
     .widgets-card-edge::after { bottom: calc(50% - 2px); opacity: 0.8; }
     .widgets-card-resize,
     .widgets-card-corner { display: none; }
-    #page-widgets .widgets-card :is(.widgets-frame, .widgets-facade) { border-radius: 0; }
-    /* Where the finger on the grip does not cover it. */
-    .widgets-list .widgets-card[data-widget-size-chip]::after { left: var(--space-3); right: auto; bottom: 10px; }
+    #page-widgets .widgets-card[data-widget-adjusting] :is(.widgets-frame, .widgets-facade) { border-radius: 0; }
+    /* Above the foot, where the finger on the grip does not cover it. */
+    .widgets-list .widgets-card[data-widget-size-chip]::after {
+        left: var(--space-3);
+        right: auto;
+        bottom: calc(var(--touch-target-min) + var(--space-2));
+    }
 }
 
 .widgets-card-resize:focus-visible,

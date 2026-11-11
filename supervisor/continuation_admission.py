@@ -43,8 +43,9 @@ import logging
 import pathlib
 from typing import Any, Dict, List, Optional
 
-from ouroboros.utils import append_jsonl, utc_now_iso
+from ouroboros.project_naming import CONTINUE_TITLE_PREFIX
 from ouroboros.task_store import patch_document
+from ouroboros.utils import append_jsonl, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -178,9 +179,6 @@ def action_writers(q: Any, predecessor: str, *, drive_root: Any = None, owner_pa
                                purpose=purpose, gaps=gaps)
 
 
-CONTINUE_TITLE_PREFIX = "Continue: "
-
-
 # Integrity bound only: a recorded chain is a handful of Continues; a corrupted one
 # must never make one admission walk its edges without limit.
 _WORK_CHAIN_MAX_HOPS = 64
@@ -188,19 +186,16 @@ _WORK_CHAIN_MAX_HOPS = 64
 
 def _work_name(record: Dict[str, Any]) -> str:
     """An episode's name as its card shows it (coined, else authored), without Continue prefixes."""
-    for field in ("suggested_name", "title"):
-        name = str(record.get(field) or "").lstrip()
-        while name.startswith(CONTINUE_TITLE_PREFIX):
-            name = name[len(CONTINUE_TITLE_PREFIX):].lstrip()
-        if name.strip():
-            return name.strip()
-    return ""
+    from ouroboros.project_naming import work_shown_name
+
+    return work_shown_name(record)
 
 
-def _work_identity(q: Any, predecessor: str, result: Dict[str, Any]) -> tuple[str, str]:
-    """``(work_id, work_name)`` of the work a Continue of ``predecessor`` belongs to.
+def _work_identity(q: Any, predecessor: str, result: Dict[str, Any]) -> tuple[str, str, Dict[str, Any]]:
+    """``(work_id, work_name, first root's record or {})`` of the work a Continue of ``predecessor`` belongs to.
 
-    A stamped episode names its work. An older one is walked back over its
+    A stamped episode names its work: the first root's current name, else the
+    stamped copy. An older one is walked back over its
     recorded ``predecessor_task_id`` edges to the first root, whose id and card
     name are the work's. As in the work projection's walk over the same edges,
     an edge to a record that cannot be read ends at the last episode read, and a
@@ -215,10 +210,15 @@ def _work_identity(q: Any, predecessor: str, result: Dict[str, Any]) -> tuple[st
         metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
         continuation = metadata.get("continuation") if isinstance(metadata.get("continuation"), dict) else {}
         if continuation.get("work_id"):
-            return str(continuation["work_id"]), str(continuation.get("work_name") or "") or _work_name(record)
+            work_id = str(continuation["work_id"])
+            try:
+                origin = (load_task_result(q.DRIVE_ROOT, work_id) if q is not None else None) or {}
+            except Exception:
+                origin = {}
+            return work_id, _work_name(origin) or str(continuation.get("work_name") or "") or _work_name(record), origin
         earlier = str(continuation.get("predecessor_task_id") or "")
         if not earlier:
-            return current, _work_name(record)
+            return current, _work_name(record), record
         if earlier in seen:
             break
         try:
@@ -226,10 +226,10 @@ def _work_identity(q: Any, predecessor: str, result: Dict[str, Any]) -> tuple[st
         except Exception:
             earlier_record = None
         if not isinstance(earlier_record, dict) or not earlier_record:
-            return current, _work_name(record)
+            return current, _work_name(record), {}
         current, record = earlier, earlier_record
         seen.add(earlier)
-    return predecessor, _work_name(result)
+    return predecessor, _work_name(result), {}
 
 
 def _recorded_work_limits(result: Dict[str, Any], metadata: Dict[str, Any], contract: Dict[str, Any]) -> Dict[str, Any]:
@@ -433,9 +433,10 @@ def _tree_note(q: Any, predecessor: str) -> str:
 
 def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: Dict[str, Any],
                     verdict: Dict[str, Any], sources: Dict[str, Any], admission: Dict[str, Any]) -> Dict[str, Any]:
-    from ouroboros.owner_continue import AUTHOR_STOP_CAUSE, owner_corpus_rows, recorded_system_checkout, work_order_text
     from ouroboros.consciousness_authority import consciousness_origin_metadata
     from ouroboros.dialogue_provenance import presence_binding_authority_metadata, presence_relation_metadata
+    from ouroboros.owner_continue import AUTHOR_STOP_CAUSE, owner_corpus_rows, recorded_system_checkout, work_order_text
+    from ouroboros.project_naming import work_name_open
     from ouroboros.task_pacing import recorded_producer_ceiling
 
     authority_source: Dict[str, Any] = {}
@@ -450,15 +451,15 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
         log.debug("Predecessor authority pointer unavailable for %s", predecessor, exc_info=True)
     deadline_at = str(binding.get("deadline_at") or "")
     drive = _successor_drive_fields(q, binding)
+    # Every episode carries its work: the first root's id and name. The title is
+    # that name under ONE prefix, however long the chain.
+    work_id, work_name, origin = _work_identity(q, predecessor, result)
     text = work_order_text(predecessor, verdict["cause"], sources, deadline_at=deadline_at,
                            authority_source=authority_source, checkout=recorded_system_checkout(result),
                            successor_task_id=str(binding.get("successor_task_id") or ""),
                            drive_mode=drive.get("memory_mode", ""),
                            stop_note=_author_stop_note(result) if verdict["cause"] == AUTHOR_STOP_CAUSE else "",
-                           tree_note=_tree_note(q, predecessor))
-    # Every episode carries its work: the first root's id and name. The title is
-    # that name under ONE prefix, however long the chain.
-    work_id, work_name = _work_identity(q, predecessor, result)
+                           tree_note=_tree_note(q, predecessor), work_name_open=bool(origin) and work_name_open(origin))
     work_name = (work_name or _work_name(result)
                  or (_work_name({"title": result.get("objective")}) or predecessor)[:80])
     title = work_name[:80]
@@ -645,8 +646,9 @@ def _prepare_project_room(q: Any, predecessor: str, task: Dict[str, Any]) -> Dic
     return basis
 
 
-def admit_continuation(predecessor_task_id: str, *, action_nonce: str) -> Dict[str, Any]:
-    """Admit (or replay) Continue of one eligible root (module docstring)."""
+def admit_continuation(predecessor_task_id: str, *, action_nonce: str, declared_by: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Admit (or replay) Continue of one eligible root (module docstring). ``declared_by`` is an HTTP caller's own
+    statement of who pressed, recorded as ``admission.by`` and never a permission; a mind's door binds ``control_actor``."""
     from ouroboros.owner_continue import (
         AUTHOR_STOP_CAUSE, VERB, BINDING_VERSION, binding_sha, carried_execution_fields, claim_on_predecessor, continuation_eligibility,
         continuation_room, declared_inputs, execution_carry, owner_sources, successor_id, valid_nonce,
@@ -711,7 +713,7 @@ def admit_continuation(predecessor_task_id: str, *, action_nonce: str) -> Dict[s
     binding["admission_token"] = f"continue:{binding_sha({k: v for k, v in binding.items() if k != 'admission_token'})[:40]}"
     if not claim:
         try:
-            claim, _created = claim_on_predecessor(q.DRIVE_ROOT, predecessor, nonce, binding)
+            claim, _created = claim_on_predecessor(q.DRIVE_ROOT, predecessor, nonce, binding, declared_by=declared_by)
         except ValueError as exc:
             text = str(exc)
             if text.startswith("already_continued:"):

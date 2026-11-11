@@ -715,7 +715,7 @@ def run_llm_loop(
                 limit_ctx.active_model, limit_ctx.active_use_local = active_model, active_use_local
                 if msg is None and TIMEOUT_REPEAT_KEY in accumulated_usage:  # before any route, wait or renewal
                     return _timeout_repeat_handover(limit_ctx, transport_wait, llm_trace)
-                # Configured routes before any wait; an active episode owns its own outcome.
+                # Configured routes before any wait but a primary's first lost answer; an active episode owns its outcome.
                 # Fallbacks and an owner-wait resend are author calls too, receipted in their own window.
                 # Their physical sender retains any late answer after this wait leaves.
                 with round_window(), receiver_abandonable(), working_checkpoint.model_call_scope(limit_ctx):

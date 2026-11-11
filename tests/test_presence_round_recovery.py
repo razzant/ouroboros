@@ -94,8 +94,9 @@ def run(root, model, *, registry=None, notes=None):
 def test_configured_fallback_keeps_completed_tools_pins_and_ceiling(data_root, monkeypatch, prior_tools):
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", FALLBACK)
     monkeypatch.setenv(MODEL_ACCOUNTS_KEY, json.dumps({"main": "primary-pin", "fallback": ["fallback-pin"]}))
-    monkeypatch.setattr(loop_transport, "upstream_transport_reachable",
-                        lambda *_a, **_kw: pytest.fail("configured fallback precedes any probe"))
+    probes = []  # the primary's own lost answer takes one observation first; a miss walks its configured fallback
+    monkeypatch.setattr(loop_transport, "upstream_transport_reachable", lambda *_a, **kw: probes.append(kw) or {})
+    monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", lambda *_a: False)
     registry = ToolRegistry(repo_dir=data_root, drive_root=data_root)
     completed = []
     registry.override_handler("chat_history", lambda _ctx, **_kw: completed.append("history") or "Retained room evidence")
@@ -132,7 +133,8 @@ def test_configured_fallback_keeps_completed_tools_pins_and_ceiling(data_root, m
     assert usage["transport_recovery"]["old_outcome"] == "unknown"
     assert TRANSPORT_DEATHS_KEY not in usage
     assert [row["retry_same_request"] for row in _events(data_root / "logs", "llm_api_error")] == [False]
-    assert _events(data_root / "logs", "network_wait") == []
+    assert len(probes) == 1 and [(row["phase"], row.get("detail", "")) for row in _events(data_root / "logs", "network_wait")] == [
+        ("entered", ""), ("waiting", ""), ("continued", "upstream_not_observed"), ("ended", "configured_route_answered")]
 
 
 def test_same_operation_recoverable_never_dials_a_fallback(data_root, monkeypatch):
@@ -170,9 +172,14 @@ def test_stop_during_unknown_wait_preserves_one_attempt(data_root, monkeypatch):
     assert usage["_last_llm_error_kind"] == "provider_outcome_unknown"
 
 
-def test_known_budget_exhaustion_blocks_new_physical_fallback(data_root, monkeypatch):
+@pytest.mark.parametrize("observed", [{}, {"kind": "upstream_http", "status_code": 200}], ids=["missed", "reached"])
+def test_known_budget_exhaustion_blocks_every_new_physical_send(data_root, monkeypatch, observed):
+    """The budget gate refuses the next physical send on whichever route recovery asks: the primary's own
+    continuation (upstream reached) or its configured fallback (missed)."""
     monkeypatch.setenv("TOTAL_BUDGET", "1.5")
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", FALLBACK)
+    monkeypatch.setattr(loop_transport, "upstream_transport_reachable", lambda *_a, **_kw: observed)
+    monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", lambda *_a: False)
 
     def spent():
         ua.record_subscription_session("other-known-charge", drive_root=data_root, route="subscription",
@@ -182,6 +189,7 @@ def test_known_budget_exhaustion_blocks_new_physical_fallback(data_root, monkeyp
     model = Model(data_root, spent, finish("message", "must not be sent"))
     _text, usage, _trace, _registry = run(data_root, model)
     rows = _ledger(data_root)
+    assert [send["model"] for send in model.sends] == [PRIMARY, PRIMARY if observed else FALLBACK]
     assert [row["state"] for row in rows] == ["unresolved"]
     assert rows[0].get("cost_usd") is None
     assert usage["reason_code"] == "budget_exhausted"

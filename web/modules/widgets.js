@@ -71,8 +71,9 @@ function pageTemplate() {
 }
 
 // One card: its head (title; a framed card's status and Start; the menu and the move grip), its body (the frame or
-// the host-drawn components), the line that shows what an owner height keeps out of view (Show all / Back), and its
-// right edge (width), bottom edge (height) and corner (both).
+// the host-drawn components), the line that shows what an owner height keeps out of view (Show all / Back), the foot
+// a finger adjusts it from (Done; shown on the one card being adjusted), and its right edge (width), bottom edge
+// (height; the foot's grip) and corner (both).
 function renderCardHtml(tab, contributionVisibility = null) {
     // The card's own title names it; the skill's id is no owner word, so only a card kept from the chat says where from.
     const title = tab.title || tab.tab_id || tab.skill;
@@ -98,6 +99,7 @@ function renderCardHtml(tab, contributionVisibility = null) {
             </div>
             <div class="widgets-card-body" data-widget-mount></div>
             <div class="widgets-card-more" data-widget-more hidden><button type="button" class="btn btn-default btn-sm" data-widget-expand aria-expanded="false"></button></div>
+            <div class="widgets-card-adjust"><button type="button" class="btn btn-default btn-sm" data-widget-adjust-done>Done</button></div>
             <button class="widgets-card-resize" type="button" data-widget-resize-handle title="Resize width: drag or use arrow keys" aria-label="Resize width: drag or use arrow keys"></button>
             <button class="widgets-card-edge" type="button" data-widget-height-handle title="Resize widget: drag; arrow keys change height" aria-label="Resize widget: drag; arrow keys change height"></button>
             <span class="widgets-card-corner" data-widget-corner-handle aria-hidden="true" title="Resize width and height: drag"></span>

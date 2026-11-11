@@ -1,6 +1,6 @@
 # 5. Supervisor Loop
 
-`server.py::_run_supervisor()` owns the pooled scheduling tick and lifecycle lock. Cancellation intent precedes teardown; intent, outcome and money stay separate.
+`server.py::_run_supervisor()` owns the pooled scheduling tick and lifecycle lock. Intent precedes teardown; intent, outcome and money stay separate.
 
 ### Tick and locks
 
@@ -46,15 +46,15 @@ Crashes, timeouts, restart and update-abort use §6 Saved working state.
 
 ### Cancellation
 
-Cancellation is intent-then-custody (§10 invariants 14-15), intent and outcome separate fields:
+Intent precedes custody; intent and outcome are separate fields (§10.14–15):
 
-1. **Intent.** Every cancel ingress (`cancel_task`, HTTP single/cascade, evolution stop, project deletion, cascade sweep, boot recovery of `cancel_requested` files) writes one durable row (`cancel_intents.request_cancel`, locked `state/cancel_intents.json`); a failed write stops nothing (`CANCEL_INTENT_WRITE_FAILED`, HTTP 503).
+1. **Intent.** Ingresses (`cancel_task`, HTTP single/cascade, evolution stop, project deletion, cascade sweep, ended work's parked-helper closure, boot recovery of `cancel_requested` files) use `cancel_intents.request_cancel` to write one durable locked row in `state/cancel_intents.json`. Failed writes stop nothing (`CANCEL_INTENT_WRITE_FAILED`, HTTP 503).
 2. **Scope.** Recorded scope only widens (single to cascade; Stop-now cannot shrink a cascade). Reaping is no cancel ingress: its custody survives health hand-back until replay settles. Stop needs explicit intent; a replay in flight keeps it pending.
-3. **Claim.** `task_lifecycle.cancel_task_custody`, the one settle owner, takes the exclusive claim (§10 invariant 14): racing custodies never double-settle; the `cancel_task` event only wakes it. A lane turn stops like any worker; an inline executor's actor gets one typed `finalize_now` (`inline_carrier.stop_direct_chat_turn`), ending at its next round boundary without another model call. Stop during post-task synthesis discloses skipped paid stages as `post_task_stop_reason`. A still-live turn releases the claim for the sweep, never publishing a fabricated `cancelled` row.
+3. **Claim.** `task_lifecycle.cancel_task_custody` claims exclusively (§10.14): racing custodies never double-settle; `cancel_task` only wakes it. Custody/boot restore may withdraw obsolete helper closures without cancelling. Lane turns stop like workers; inline actors get one typed `finalize_now` (`inline_carrier.stop_direct_chat_turn`), ending next round boundary without another model call. Stop during post-task synthesis records skipped paid stages in `post_task_stop_reason`. Live turns release their claim for the sweep without publishing `cancelled`.
 4. **Kill and re-check.** Custody confirms process death, then rereads the settled result; natural completion wins (§10).
 5. **Reconcile, capture, settle.** Open delegated runs are re-audited from durable custody rows; workspace artifacts come from the real tree (a failed or unrunnable capture is `failed`, never `missing`); the result carries reconstructed-or-unknown cost, never a fabricated `$0`; only here is `parent_decision` stamped; `cancel_publication` keeps `cancel_origin`; restore-fence receipts name its cause. HTTP proves transport, not owner intent.
 6. **Owe, then publish.** After claim re-check, owe the terminal answer before the terminal row, settled intent and `task_done`; pending-deadline expiry owes inside its lock too. Winning completion withdraws salvage; crash after settlement replays debt. Cascades send one root digest (`cascade:<root_tid>:<request_id>`). `terminal_projection.py` holds Done until no `final:`, `cancel:<tid>:<request_id>` or `cascade:` debt stays; unknown/exhausted delivery stays visible (`_delivery_disposition`, `events_chat_delivery._handoff_delivered_review`).
-7. **Watchdog.** The tick's off-drain sweep (`server_maintenance.py`, `sweep_cancel_intents`) re-feeds unclaimed/abandoned intents to custody (cascades as cascades): a lost control event or custody dead mid-teardown cannot wedge cancellation.
+7. **Watchdog.** The off-drain tick sweep (`server_maintenance.py`, `sweep_cancel_intents`) re-feeds unclaimed/abandoned intents to custody (cascades as cascades): a lost control event or custody dead mid-teardown cannot wedge cancellation.
 
 Effective results show typed `cancel_state: "pending"` with `cancel_reason` until settlement (§3). Steering writes (`tell_task`, mailbox follow-ups, `forward_to_worker`) are refused typed while pending; restore and pre-assignment read the projection under Q, so a cancelled pending task never starts. `task_done` asserts a settled outcome validated against the durable result (`events_task_done`); a mismatch is a lifecycle fault, left to custody while cancellation is pending.
 

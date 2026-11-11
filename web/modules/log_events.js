@@ -1171,7 +1171,7 @@ export function taskTerminalSummary(evt = {}) {
         ...(evt.model_execution && typeof evt.model_execution === 'object'
             ? { modelExecution: evt.model_execution } : {}),
         ...(Number.isInteger(evt.tool_calls) ? { toolCalls: evt.tool_calls } : {}),
-        ...(evt.initiator ? { initiator: String(evt.initiator) } : {}),
+        ...(evt.initiator && { initiator: String(evt.initiator) }), ...(evt.continue_requester && { continueRequester: String(evt.continue_requester) }),
     };
 }
 
@@ -1202,12 +1202,12 @@ export function modelExecutionLabel(fact) {
     return !view ? '' : view.label ? `${view.label}: ${view.value}` : view.value;
 }
 
-// The turn's origin label rides every projected frame of the turn (progress,
-// tool, heartbeat, terminal) so the block's meta line can name it whichever
-// frame minted the card; the projection branches below stay label-blind.
+// The turn's origin label and its Continue's requester ride every frame of the turn, so whichever
+// frame minted the card names them; the projection branches below stay label-blind.
 export function summarizeChatLiveEvent(evt) {
     const view = summarizeChatLiveEventView(evt);
     if (view && evt?.initiator) view.initiator = String(evt.initiator);
+    if (view && evt?.continue_requester) view.continueRequester = String(evt.continue_requester);
     return view;
 }
 

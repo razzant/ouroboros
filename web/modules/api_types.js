@@ -390,6 +390,7 @@
  *   Generated speech and actual playback evidence; retained on history replay.
  * @property {string=} initiator
  *   The turn's origin label: "consciousness" on every frame and row of a self-initiated wake-up (and the roots it starts); absent on an owner's turn.
+ * @property {('owner'|'ouroboros'|'unknown')=} continue_requester  // Continue's declared requester; unknown if undeclared, absent on other work.
  * @property {boolean=} cancelable
  *   v6.82 (P5): host-attested — this frame's task is a supervisor-queue task that
  *   POST /api/tasks/{id}/cancel can force-cancel: a lineage-resolved pooled root or

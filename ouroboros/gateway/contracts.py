@@ -258,6 +258,7 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame):
     reasoning: NotRequired[bool]  # true only on narration that is the model's display reasoning: details, never title/line
     spoken: NotRequired[Dict[str, Any]]  # call_id, item_id, played_ms, status: played/generated/interrupted
     initiator: NotRequired[str]  # origin label: "consciousness" on a wake-up's frames/rows (and its roots); absent on an owner's turn
+    continue_requester: NotRequired[str]  # who asked for this Continue, read from its admission: owner|ouroboros|unknown; absent elsewhere
     # Monetary projections are nullable when the physical-attempt ledger cannot be read: ``None`` is distinct from a
     # confirmed $0. The honest names (accounted upper bounds, not settled receipts), the only outbound spellings since
     # ABI 7.0 dropped the ``cost_usd[_with_children]`` aliases; cost_projection.py is the one author.
@@ -1176,8 +1177,7 @@ class TaskDetailResponse(TypedDict, total=False):
     history_retention: HistoryRetentionProjection
     model_waits: Dict[str, Any]
     question_rooms: Dict[str, QuestionRoom]
-    # Open cancel intent/teardown: "pending" drives "Cancelling…", not lifecycle status.
-    # Absent for settled or unrequested cancellation; running/scheduled status stays truthful.
+    # "pending" means "Cancelling…"; running/scheduled stays truthful. Absent when settled or unrequested.
     cancel_state: str
     # Pending intent's recorded reason (owner text or subtree cause); absent if none (GR2-11).
     cancel_reason: str
