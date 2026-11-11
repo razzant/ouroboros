@@ -8,6 +8,7 @@ import { RECOVERY_RETRY, UPDATE_STAGE_LABELS, afterUpdateRows, assistedUpdatePha
 import { destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
 import { updateEffectsText } from './update_effects.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
+import { mountTabSettings } from './dashboard.js';
 
 // Known non-state warnings are folded into their verdict states; everything
 // else is surfaced verbatim so a backend warning class can never vanish.
@@ -123,7 +124,7 @@ export function updateVerdict(data = {}, phase = '', appVersion = '') {
     const chips = appVersion ? [{ label: 'App', value: appVersion }] : [];
     if (data.official_repo_url) chips.push({ label: 'Official repo', value: repoSlug(data.official_repo_url) });
     if (data.target_ref) chips.push({ label: 'Target', value: data.target_ref });
-    if (data.update_channel) chips.push({ label: 'Channel', value: data.update_channel, link: 'settings-advanced' });
+    if (data.update_channel) chips.push({ label: 'Channel', value: data.update_channel });
     // Commit counts are history (the updater's own merges count too); whether the
     // checkout holds content of its own is the server's `local_changes` fact.
     const commits = [];
@@ -562,10 +563,10 @@ export function bindAppVersionRender({ getStatus, render }) {
     return watchAppVersion(() => { if (getStatus()) render(); });
 }
 
-export function initUpdates({ mount, state, ws, openSettingsTab }) {
+export function initUpdates({ mount, state, ws }) {
     // The tab's one root and scroller (style.css "The Dashboard tab body"): the state of the channel leads as the
     // tab's headline with its facts and one next action; the last attempt, the record's facts, the description and
-    // Recovery follow, each behind its own disclosure.
+    // Recovery follow, each behind its own disclosure. The channel itself is the settings card's row below.
     const page = document.createElement('div');
     page.id = 'page-updates';
     page.className = 'dashboard-body scroll-fade-y';
@@ -632,8 +633,12 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
                     <div id="updates-official-tags" class="updates-restore-list"></div>
                 </details>
             </section>
+            <section class="ui-card dashboard-settings" aria-label="Which updates" data-updates-settings></section>
     `;
     mount.appendChild(page);
+    // Drawn once, out of every repaint below; a saved channel reads the status again.
+    mountTabSettings(page.querySelector('[data-updates-settings]'), 'updates',
+        { state, title: 'Which updates', onSaved: () => loadStatus({ fetchRemote: false }) });
 
     const primaryBtn = page.querySelector('#btn-update-primary');
     let restartNeeded = false;  // panel-lifetime restart continuation (no durable marker exists for fence/rollback refusals)
@@ -689,11 +694,9 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     let restartReconcileQueued = false;
     let restartReconcileAfterBootNotice = false;
 
-    // The headline's facts are one flat line (the app, the official repository, the channel, a door to change it); the
-    // rest of the record is the card's Details. A group heading spans both columns of a facts list.
-    const factLine = (chip) => chip.link === 'settings-advanced'
-        ? `<button type="button" class="consciousness-inline-link ui-hit-area" data-open-settings-advanced title="Change in Settings › Advanced">${escapeHtml(chip.value)} channel</button>`
-        : escapeHtml(chip.label === 'App' ? `App ${chip.value}` : chip.value);
+    // The headline's facts are one flat line (the app, the official repository, the channel); the rest of the record is
+    // the card's Details. A group heading spans both columns of a facts list.
+    const factLine = (chip) => escapeHtml(chip.label === 'App' ? `App ${chip.value}` : chip.label === 'Channel' ? `${chip.value} channel` : chip.value);
     const factRowHtml = (row) => (row.head ? `<dt class="updates-facts-head">${escapeHtml(row.head)}</dt>`
         : `<dt>${escapeHtml(row.label)}</dt><dd>${escapeHtml(row.value)}</dd>`);
 
@@ -1227,11 +1230,6 @@ export function initUpdates({ mount, state, ws, openSettingsTab }) {
     attemptRestore.addEventListener('click', () => rollback({ target: attemptRestore.dataset.target, label: 'the version before this update' }));
     letterMore.addEventListener('click', () => {
         letterMore.textContent = letterBody.classList.toggle('is-open') ? 'Show less' : 'Read all';
-    });
-    meta.addEventListener('click', (event) => {
-        if (event.target.closest?.('[data-open-settings-advanced]')) {
-            openSettingsTab?.('advanced');
-        }
     });
     page.querySelector('#updates-promote').addEventListener('click', async () => {
         const confirmedPromote = await openConfirmDialog({
