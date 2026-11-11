@@ -19,7 +19,7 @@ const HOME_PAGES = HOME_ROWS.map((row) => row.to).filter((to) => !isDoorId(to));
 // Pages another lane registers and rows another lane describes: named here until that lane lands, then removed. A
 // name left here after its page is registered fails below, so both lists are empty on the integrated tree.
 const PENDING_PAGES = {
-    models: 'lane E2', agents: 'lane E1', rules: 'lane C2', permissions: 'lane C2', accounts: 'lane E3', tools: 'lane E2',
+    agents: 'lane E1', rules: 'lane C2', permissions: 'lane C2', accounts: 'lane E3',
     appearance: 'lane C2', notifications: 'lane C2', voice: 'lane C2', computer: 'lane C2',
 };
 const PENDING_ROWS = { OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS: 'lane C2' };

@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_WELCOME_TEXT, mountEmptyChatWelcome, welcomeText } from '../modules/welcome_preference.js';
-import { accountsPanel, advancedPanel, appearancePanel, behaviorPanel, modelsPanel, secretSettingsSection } from '../modules/settings_ui.js';
+import { accountsPanel, advancedPanel, appearancePanel, behaviorPanel, secretSettingsSection } from '../modules/settings_ui.js';
 import { HOME_ROWS } from '../modules/settings_rows.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 
 // The Settings sections settings_ui.js still holds (unmounted until their pages are rebuilt).
-const settingsSections = () => [accountsPanel(), secretSettingsSection(), modelsPanel(), behaviorPanel(), appearancePanel(),
+const settingsSections = () => [accountsPanel(), secretSettingsSection(), behaviorPanel(), appearancePanel(),
     advancedPanel()].join('');
 
 test('welcome mode resolves exactly without treating custom text as markup', () => {

@@ -9,10 +9,10 @@ import {
     reachesAnotherPair,
 } from '../modules/settings_connections.js';
 import { cyberReviewNote } from '../modules/settings_policy.js';
-import { accountsPanel, advancedPanel, appearancePanel, behaviorPanel, modelsPanel, secretSettingsSection } from '../modules/settings_ui.js';
+import { accountsPanel, advancedPanel, appearancePanel, behaviorPanel, secretSettingsSection } from '../modules/settings_ui.js';
 
 // The old tabs' sections, unmounted in settings_ui.js until their pages are rebuilt.
-const renderSettingsPage = () => [accountsPanel(), secretSettingsSection(), modelsPanel(), behaviorPanel(), appearancePanel(),
+const renderSettingsPage = () => [accountsPanel(), secretSettingsSection(), behaviorPanel(), appearancePanel(),
     advancedPanel()].join('');
 
 test('provider test status uses only the controlled compact vocabulary', () => {
@@ -112,9 +112,8 @@ test('each key row docks Test beside its other actions and reports in its own li
         }
         assert.match(row, /data-connection-test-status[^>]*role="status" aria-live="polite"/);
     }
-    // The catalog refresh is the shared action row: the button, then its result right after it (ui.css
-    // .ui-action-row). The Claude-runtime status/Repair panel is retired with its product surface.
-    assert.match(html, /<div class="ui-action-row">\s*<button type="button" class="btn btn-default" id="btn-refresh-model-catalog">[^<]*<\/button>\s*<span id="settings-model-catalog-status" class="ui-result"/);
+    // The Claude-runtime status/Repair panel is retired with its product surface. (The catalogue's Read again is a row
+    // of Settings › Models: settings_tools_models.test.js.)
     assert.doesNotMatch(html, /settings-action-row/);
     assert.doesNotMatch(html, /settings-claude-code/);
     assert.doesNotMatch(html, /settings-ghost-btn/);

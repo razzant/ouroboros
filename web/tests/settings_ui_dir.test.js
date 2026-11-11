@@ -4,11 +4,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-    accountsPanel, advancedPanel, appearancePanel, behaviorPanel, modelsPanel, secretSettingsSection, servedUiStatus,
+    accountsPanel, advancedPanel, appearancePanel, behaviorPanel, secretSettingsSection, servedUiStatus,
 } from '../modules/settings_ui.js';
 
 test('the choice is one Advanced field with its help and a live applied-state line', () => {
-    const others = [accountsPanel(), secretSettingsSection(), modelsPanel(), behaviorPanel(), appearancePanel()];
+    const others = [accountsPanel(), secretSettingsSection(), behaviorPanel(), appearancePanel()];
     const advanced = advancedPanel();
     assert.equal(advanced.match(/id="s-ui-dir"/g)?.length, 1);
     assert.match(advanced, /<input id="s-ui-dir"[^>]*aria-describedby="s-ui-dir-help s-ui-dir-applied"/);
