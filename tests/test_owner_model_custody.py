@@ -259,8 +259,14 @@ def test_the_next_call_uses_the_act_after_a_drain_or_from_a_stale_saved_queue(ho
 
 @pytest.mark.parametrize("checkpoint_after", [False, True])
 def test_resume_after_ack_uses_the_durable_primary_with_or_without_a_new_checkpoint(host, monkeypatch, checkpoint_after):
+    from ouroboros.owner_model import primary_action
+
     running(host)
     tools, ctx = turn(host, monkeypatch)
+    ctx.active_model = C
+    lead_fact.adopt_fallback(ctx, False, {}, "fallback:0")
+    primary_action(ctx, "return")
+    assert ctx._lead_return_from["model"] == C
     def save():
         return json.loads(json.dumps(owner_wait.continuation_state(ctx, [], {}, {}, 3, [], set())))
     old = save()
@@ -275,6 +281,8 @@ def test_resume_after_ack_uses_the_durable_primary_with_or_without_a_new_checkpo
     assert (model, local) == (B, False)
     assert fresh.primary_route["model"] == B and fresh.task_model_override == B
     assert fresh.route_choice == route_choice.explicit("owner")
+    assert fresh._lead_return_from is None
+    assert lead_fact.lead_fact(fresh) == {"model": B, "use_local": False, "basis": "owner"}
     assert not drain_and_apply(host, fresh_tools, fresh).get("owner_model")  # ACK already survived
 
 
@@ -332,26 +340,33 @@ def test_stale_worker_results_keep_the_host_primary_and_follow_choice(host):
 
 def test_keep_changes_the_primary_and_follow_rejoins_main(host, monkeypatch):
     from ouroboros.loop_model_call import _route_candidates
+    from ouroboros.owner_model import primary_action
     running(host)
     tools, ctx = turn(host, monkeypatch)
     ctx.active_model = C
     lead_fact.adopt_fallback(ctx, False, {"failure_code": "quota"}, "fallback:0")
     host[2].RUNNING["work"]["lead"] = lead_fact.lead_fact(ctx)
+    primary_action(ctx, "return")
+    assert ctx._lead_return_from["model"] == C
     ctx.model_wait_context = SimpleNamespace(overrides={"lead": {"model": "obsolete"}})
     assert act(host, "keep").status_code == 200
     drain_and_apply(host, tools, ctx)
     assert ctx.primary_route["model"] == ctx.active_model == C
     assert "lead" not in ctx.model_wait_context.overrides
     assert lead_fact.lead_fact(ctx) == {"model": C, "use_local": False, "basis": "owner"}
+    assert ctx._lead_return_from is None
     save_owner({"OUROBOROS_MODEL": B})
     ctx.active_model = A
     lead_fact.adopt_fallback(ctx, False, {}, "fallback:0")
+    primary_action(ctx, "wait")
+    assert ctx._lead_return_from["model"] == A
     candidates = _route_candidates(ctx, A, False, "fallback:0", None)
     assert any(row[0] == C and row[3] for row in candidates)
     assert all(row[0] != B for row in candidates)
     assert act(host, "follow", request_id="follow").status_code == 200
     drain_and_apply(host, tools, ctx)
     assert ctx.active_model == B and ctx.route_choice == route_choice.following("main")
+    assert ctx._lead_return_from is None and lead_fact.lead_fact(ctx)["basis"] == "main"
     save_owner({"OUROBOROS_MODEL": A})
     assert route_choice.round_route(ctx, None, (B, False)) == (A, False)
 
@@ -766,13 +781,17 @@ def test_model_control_is_absent_when_the_owner_act_cannot_hold(host, monkeypatc
 @pytest.mark.parametrize("source", ["owner_mailbox", "live_call"])
 def test_cited_work_switch_keeps_its_words_through_receipt_resume_fallback_and_continue(host, monkeypatch, live, long_span, source):
     from ouroboros.loop_routes import _apply_round_route_overrides
-    from ouroboros.owner_model import restore_current
+    from ouroboros.owner_model import primary_action, restore_current
     from ouroboros.tools.control_runtime import _switch_model
     from supervisor.events_mind_controls import handle_mind_task_control
     from tests.test_continue_work_identity import _successor
 
     task = running(host) if live else queued(host)
     tools, ctx = turn(host, monkeypatch)
+    ctx.active_model = C
+    lead_fact.adopt_fallback(ctx, False, {}, "fallback:0")
+    primary_action(ctx, "return")
+    assert ctx._lead_return_from["model"] == C
     old_checkpoint = json.loads(json.dumps(owner_wait.continuation_state(ctx, [], {}, {}, 3, [], set())))
     span = "Use the other route" if not long_span else ("Для этой работы выбери эту модель 🙂. " * 40).rstrip()
     ctx._owner_directives = [{"source": source, "content": f"Before. {span} After."}]
@@ -792,6 +811,7 @@ def test_cited_work_switch_keeps_its_words_through_receipt_resume_fallback_and_c
     assert primary == {"model": B, "use_local": False, "basis": "owner_words", "cited": {
         "text": span[:lead_fact.MAX_CITED_CHARS], "clipped": long_span}}
     assert ctx.primary_route == {"model": B, "use_local": False, "role": "lead"}
+    assert ctx._lead_return_from is None
     restored = turn(host, monkeypatch)[1]
     restore_current(restored)
     assert restored.primary_route == ctx.primary_route and restored.task_metadata["lead"] == carrier
@@ -801,6 +821,7 @@ def test_cited_work_switch_keeps_its_words_through_receipt_resume_fallback_and_c
         model, local, *_ = _apply_round_route_overrides(fresh, fresh_tools, [],
             (fresh.active_model, fresh.active_use_local, "medium"), None, "max", "max", [])
         assert (model, local) == (B, False) and fresh.task_metadata["lead"] == carrier
+        assert fresh._lead_return_from is None
     ctx.active_model, ctx.route_choice = C, route_choice.explicit("fallback")
     assert lead_fact.lead_fact(ctx, role="fallback:0")["primary"] == primary
     _switch_model(ctx, primary="return")

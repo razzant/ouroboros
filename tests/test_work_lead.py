@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from ouroboros import lead_fact as leads, route_choice
-from ouroboros.primary_route_observation import record_primary_return_request, record_round_route_result, route_facts_text
+from ouroboros.primary_route_observation import record_round_route_result, route_facts_text
 from tests._task_settings_helpers import isolated_runtime, save_owner  # noqa: F401
 
 A, B, C = "openai::a", "openai::b", "openai::c"
@@ -98,22 +98,47 @@ def test_wait_card_move_names_the_owner_and_unchanged_primary_without_pending(so
     assert (projected.get("pending") == {"model": C, "use_local": False}) is (source == "main")
 
 
-def test_return_request_keeps_fallback_until_its_own_accepted_reply():
+@pytest.mark.parametrize("action", ["return", "wait"])
+@pytest.mark.parametrize("explicit_switch", [False, True], ids=["primary", "explicit-light"])
+def test_return_request_keeps_fallback_until_its_own_accepted_reply(monkeypatch, action, explicit_switch):
+    from ouroboros import loop
+    from ouroboros.loop_routes import bind_round_route
+    from ouroboros.tools.control_runtime import _switch_model
+
+    save_owner({"OUROBOROS_MODEL": A, "OUROBOROS_MODEL_LIGHT": C})
+    monkeypatch.setattr(loop, "_rebind_context_fit_plan", lambda plan, *_a, **_kw: (plan, "max"))
     ctx = context("room", role="lead")
-    ctx.active_model = B
+    ctx.active_model, ctx.active_effort_override = B, None
     leads.adopt_fallback(ctx, False, {"failure_code": "transport_unavailable"}, "fallback:0")
     departed = ctx.event_queue.get()["lead"]
-    ctx.route_choice = route_choice.opening_choice(ctx)
-    record_primary_return_request(ctx, A, False, "lead")
-    ctx.active_model = A
+    assert _switch_model(ctx, primary=action).startswith("OK:")
+    assert leads.lead_fact(ctx) == departed  # requesting is not returning
+    assert "Unknown model" in _switch_model(ctx, model="openai::not-configured")
+    assert leads.lead_fact(ctx) == departed  # a refused switch changes nothing
+    if explicit_switch:
+        assert _switch_model(ctx, model=C).startswith("OK:")  # same tool batch, before the boundary
+    tools = SimpleNamespace(_ctx=ctx)
+    model, local, *_ = bind_round_route(tools, [], (B, False, "medium"), ctx.context_fit_plan, "max", "max", [])
+    assert (model, local, ctx.route_wait_on_primary) == (C if explicit_switch else A, False,
+                                                      action == "wait" and not explicit_switch)
     leads.publish_lead(ctx)
-    assert ctx.event_queue.empty() and leads.lead_fact(ctx) == departed
-    call = SimpleNamespace(tools=SimpleNamespace(_ctx=ctx), active_model=A, active_use_local=False, accumulated_usage={})
+    if explicit_switch:
+        current = ctx.event_queue.get_nowait()["lead"]
+        assert (current["model"], current["basis"], current["cause"]) == (C, "mind", "switch_model")
+        assert current["primary"] == {"model": A, "use_local": False, "basis": "room"}
+        assert current["since"] and "role" not in current
+    else:
+        current = departed
+    assert ctx.event_queue.empty() and leads.lead_fact(ctx) == current
+    call = SimpleNamespace(tools=tools, active_model=model, active_use_local=local, accumulated_usage={})
     record_round_route_result(call, "lead", accepted=False)
-    assert leads.lead_fact(ctx) == departed
+    assert leads.lead_fact(ctx) == current
     record_round_route_result(call, "lead", accepted=True)
-    returned = ctx.event_queue.get()["lead"]
-    assert returned == {"model": A, "use_local": False, "basis": "room"}
+    if explicit_switch:
+        assert leads.lead_fact(ctx) == current  # Light's reply cannot revive the cancelled return hold
+    else:
+        returned = ctx.event_queue.get()["lead"]
+        assert returned == {"model": A, "use_local": False, "basis": "room"}
     assert ctx.event_queue.empty()
 
 

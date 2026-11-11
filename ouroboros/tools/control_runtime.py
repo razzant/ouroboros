@@ -970,6 +970,7 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: 
         ctx.active_model_override = model
         ctx.active_use_local_override = use_local
         ctx.route_wait_on_primary, ctx.active_role_override = False, None  # an explicit route ends a declared wait
+        ctx._lead_return_from = None  # it also cancels the requested return's held fallback fact
         ctx.route_choice = route_choice.explicit("switch_model")  # the mind's own route: Settings no longer move it
         changes.append(f"model={model}{' (local)' if use_local else ''}")
 
