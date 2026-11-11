@@ -497,8 +497,10 @@ class _PlaceReads:
     each page twice the last (``memory_tail_cold``: the room key and the digest the set stored). Each read compares the
     set and the stored tail with the capture's in its own transaction; where either changed, the capture reads the whole
     tail again (``memory_tail_cold.Moved``, ``over_one_state``). Every row read is decided again by the pass's own rule
-    and facts and counted as read, as asked for and as kept by the place rule (``rows_kept``); the pass's sealed set
-    says which are sealed."""
+    and facts; the pass's sealed set says which are sealed. Each is counted once: as read and asked for, as no longer
+    left unread (``rows_cold``), and as read ahead (``rows_ahead``) until a walk gives it to its reader or a copy of an
+    asked word is in it, then as kept by the place rule (``rows_kept``): law L7d tells a walk that reads a page from one
+    that reads its chat."""
     _NEWEST = 8  # rows of each chat read first, and half a walk's next page: pages, never a bound on what a walk reads
 
     def __init__(self, store: ChronicleStore, facts: MembershipFacts, found: "_Pass", held: Optional[Dict[str, Any]]) -> None:
@@ -506,7 +508,10 @@ class _PlaceReads:
         self.unread: Dict[str, Dict[int, Entry]] = {}  # an asked room's rows read from the set, by position
         self.edge: Dict[str, int] = {}  # a room whose chat may hold unread rows below this position
         self.page: Dict[str, int] = {}  # the size of a room's next older page
-        self.words: Dict[str, Set[str]] = {}
+        self.words: Dict[str, Set[str]] = {}  # the words whose earlier copies a room's rows were read for
+        self.asking: Dict[str, Set[str]] = {}  # every word its reader asked of a room
+        self.read: Set[int] = set()  # the positions read by request
+        self.used: Set[int] = set()  # of them, those a reader was given
         self.known: Dict[str, Tuple[List[Entry], List[int]]] = {}  # a room's sealed rows so far, and their positions
         self.warm: Callable[[List[Entry]], None] = lambda _entries: None
 
@@ -514,6 +519,8 @@ class _PlaceReads:
               warm: Optional[Callable[[List[Entry]], None]]) -> Dict[str, "PlaceRoom"]:
         self.warm = warm or self.warm
         asked = [room for room in rooms if room in self.found.held]
+        for room in asked:
+            self.asking.setdefault(room, set()).update(str(word) for word in words.get(room, ()) if word)
         plain = [room for room in asked if self.held is not None and room not in self.projects]
         fresh = [room for room in plain if room not in self.unread]
         for room in fresh:
@@ -544,13 +551,24 @@ class _PlaceReads:
             while index > 0 and (edge is None or positions[index - 1] >= edge):
                 index -= 1
                 position = positions[index]
-                yield rows[index]
+                yield self._use(rows[index])
             if edge is None:
                 return
             self._older(room)
 
     def copies(self, room: str) -> List[Entry]:
-        return list(self._known(room)[0])
+        rows = self._known(room)[0]
+        for entry in rows:
+            if words_of(entry[1]) in self.asking.get(room, ()):
+                self._use(entry)
+        return list(rows)
+
+    def _use(self, entry: Entry) -> Entry:
+        if entry[2] in self.read and entry[2] not in self.used:
+            self.used.add(entry[2])
+            counted("rows_ahead", -1)
+            counted("rows_kept")
+        return entry
 
     def _known(self, room: str) -> Tuple[List[Entry], List[int]]:
         if room not in self.known:
@@ -572,8 +590,11 @@ class _PlaceReads:
         self.warm(self._known(room)[0])
 
     def _take(self, rooms: List[str], facts: List[list]) -> None:
-        for counter in ("rows_read", "rows_asked", "rows_kept"):
+        facts = [fact for fact in facts if fact[0] not in self.read]  # a row met again (a copy, then a page) is one read
+        self.read.update(fact[0] for fact in facts)
+        for counter in ("rows_read", "rows_asked", "rows_ahead"):
             counted(counter, len(facts))
+        counted("rows_cold", -len(facts))
         wanted, entries = set(rooms), [_entry(fact) for fact in facts]
         self.facts.rooms.warm(_task_ids(meta for _pos, _address, meta, _terminal in entries))  # one read a generation
         for pos, address, meta, _terminal in entries:

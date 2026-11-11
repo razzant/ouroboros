@@ -220,6 +220,12 @@ def _compose(root: pathlib.Path) -> None:
     assert _in_use(root), "a whole pass composed no set that stands"
 
 
+def _law_l7d(work: dict) -> bool:
+    """Law L7d: every row a standing capture reads is open, kept by a rule or given to a reader, stale, or read ahead."""
+    return work["rows_read"] == (work.get("rows_open", 0) + work.get("rows_kept", 0) + work.get("rows_stale", 0)
+                                 + work.get("rows_ahead", 0))
+
+
 def _texts(views: dict) -> str:
     return json.dumps(views, ensure_ascii=False)
 
@@ -558,7 +564,7 @@ def test_case3_a_room_that_becomes_a_place_reads_its_earlier_sealed_rows(monkeyp
     assert _in_use(tmp_path)
     work = _work(tmp_path, rooms)  # its earlier sealed rows are read by its chat when the block asks, not the whole tail
     assert work.get("tail_whole", 0) == 0 and work.get("rows_asked", 0) > 0, work
-    assert work["rows_read"] == work["rows_open"] + work["rows_kept"] + work.get("rows_stale", 0), work  # law L7d
+    assert _law_l7d(work), work
     views = _same(monkeypatch, tmp_path, rooms)
     assert "delivered again" in _texts(views), "the place's later delivery no longer names its earlier sealed copy"
 
@@ -941,7 +947,7 @@ def test_a_shown_places_walks_read_its_unread_rows_only_as_far_as_they_go(monkey
     rooms, sealed = _long_place(tmp_path, mine_at=30)
     work = _work(tmp_path, rooms)
     assert work.get("tail_whole", 0) == 0 and 0 < work.get("rows_asked", 0) < sealed, (work, sealed)
-    assert work["rows_read"] == work["rows_open"] + work["rows_kept"] + work.get("rows_stale", 0), work  # law L7d
+    assert _law_l7d(work), work
     views = _same(monkeypatch, tmp_path, rooms)
     assert "delivered again" in _texts(views), "the earlier copy below the first page was not found by its words"
 
@@ -1063,6 +1069,28 @@ def test_a_walk_reads_the_lineage_of_the_rows_it_reads_in_one_read_a_batch(monke
         assert work.get("tail_whole", 0) == 0 and work.get("rows_asked", 0) >= size, work
         reads.append(counted[0])
     assert reads[0] == reads[1], reads
+
+
+def test_a_walks_receipt_counts_each_row_once_and_names_what_it_read_ahead(monkeypatch, tmp_path):
+    """A row met twice (in the first page and as the earlier copy of an open word) is one read; the rows a capture
+    reads by request leave the set's unread count; and what a page read past where its walk stopped is named, so a walk
+    that reads a page and one that reads its whole chat differ in the receipt (law L7d)."""
+    rooms, sealed = _long_place(tmp_path, mine_at=None, size=8)  # the open word repeats one of the eight
+    with monkeypatch.context() as patch:
+        patch.setattr(cold, "gate", lambda _store: None)
+        whole = _work(tmp_path, rooms)
+    silent = _work(tmp_path, rooms)  # nobody of ours spoke: the walk gives its reader every row
+    assert silent.get("tail_whole", 0) == 0 and silent["rows_asked"] == sealed, (silent, sealed)
+    assert silent["rows_read"] + silent["rows_cold"] == whole["rows_read"] and _law_l7d(silent), (silent, whole)
+    assert not silent.get("rows_ahead"), silent
+    _forget_process_memos()
+    root = tmp_path / "early"
+    root.mkdir()
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
+    rooms, sealed = _long_place(root, mine_at=38)  # my word is its second newest: the walk stops in its first page
+    early = _work(root, rooms)
+    assert early.get("tail_whole", 0) == 0 and _law_l7d(early), early
+    assert 0 < early["rows_ahead"] < early["rows_asked"] < sealed, early
 
 
 def test_a_place_where_none_of_us_spoke_reads_every_sealed_row(monkeypatch, tmp_path):
@@ -1412,7 +1440,7 @@ def test_a_row_a_page_sealed_after_the_set_was_composed_is_read_and_counted_unti
     work = _work(tmp_path, rooms)
     assert work.get("tail_whole", 0) == 0 and "rows_cold" in work, work
     assert work.get("rows_stale") == 1, work  # read: the set named it read while it was open
-    assert work["rows_read"] == work["rows_open"] + work["rows_kept"] + work["rows_stale"], work  # law L7d
+    assert _law_l7d(work) and work["rows_stale"] == 1, work
 
 
 def test_a_build_receipt_says_whether_the_set_acted_and_what_it_left_unread(tmp_path):
@@ -1422,14 +1450,14 @@ def test_a_build_receipt_says_whether_the_set_acted_and_what_it_left_unread(tmp_
     acting = _work(tmp_path, rooms)
     assert whole.get("tail_whole") == 1 and "rows_cold" not in whole, whole
     assert acting.get("tail_whole", 0) == 0 and acting.get("rows_cold", 0) > 0, acting
-    assert acting["rows_read"] + acting["rows_cold"] == whole["rows_read"] + acting.get("rows_asked", 0)
-    assert acting["rows_read"] == acting["rows_open"] + acting["rows_kept"], acting  # law L7d: open, kept by a rule, new
+    assert acting["rows_read"] + acting["rows_cold"] == whole["rows_read"], (acting, whole)  # each row once
+    assert _law_l7d(acting), acting
     _append(tmp_path, shared.msg(_ts(5), "New and sealed.", client_message_id="new-sealed"))  # sealed before a read
     _append(tmp_path, shared.msg(_ts(6), "Newest and open.", client_message_id="new-open"))  # the room's newest
     _seal(tmp_path, _entry(tmp_path, "New and sealed."), 1)
     newer = _work(tmp_path, rooms)
     assert newer.get("rows_new") == 2 and "rows_cold" in newer, newer
-    assert newer["rows_read"] == newer["rows_open"] + newer["rows_kept"], newer  # the sealed one is read as new
+    assert _law_l7d(newer) and not newer.get("rows_stale"), newer  # the sealed one is read as new
     ds.revise_text(tmp_path, "chat", row[0]["hint"]["seq"], "Sealed row, revised.")  # the stored facts wait for the fill
     live = _work(tmp_path, rooms)
     assert live.get("tail_whole") == 1 and "rows_cold" not in live, live  # every row was read live: no set acted

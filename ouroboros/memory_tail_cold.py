@@ -243,10 +243,11 @@ def _read(store: Any, held: Mapping[str, Any], asks: Iterable[tuple]) -> list:
 
 
 def settle(store: Any, derived: Optional[Mapping[str, Any]], tail: Any, found: Any) -> None:
-    """Count what this capture's pass read: on the set, the rows it left unread (``rows_cold``) and the rows it read
-    that no room shows open, each kept by a rule or new since the stored facts (``rows_kept``), or read only because
-    the set, composed while they were still needed (open then), names them read until the next whole pass
-    (``rows_stale``: a page sealed them since); with the open rows, all it reads (law L7d). Else a pass over the whole
+    """Count what this capture's pass read: on the set, the rows it left unread (``rows_cold``, less those a reader asks
+    for later, ``memory_inventory.PlaceRows``) and the rows it read that no room shows open, each kept by a rule or new
+    since the stored facts (``rows_kept``), or read only because the set, composed while they were still needed (open
+    then), names them read until the next whole pass (``rows_stale``: a page sealed them since); with the open rows and
+    the rows a reader asked for and was not given (``rows_ahead``), all it reads (law L7d). Else a pass over the whole
     tail (``tail_whole``). After a whole pass of a capture that read the marks over a complete stored tail, store what
     no reader used as the set, with those marks, in one index transaction. A busy index or a stored tail replaced
     meanwhile stores nothing: the next whole pass does."""

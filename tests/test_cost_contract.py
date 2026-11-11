@@ -491,7 +491,8 @@ def test_b10_a_build_serializes_the_request_once_per_form_at_every_size(measured
 def test_b10_a_capture_reads_what_it_shows_and_what_is_new(measured, tag):
     """L7d. A capture standing on the cold set (``memory_tail_cold``) reads what it shows and what is new: every row of
     the tail it reads is open somewhere, or a rule keeps it read, or it arrived since the stored facts (``rows_kept``),
-    or the set named it read when it was composed and a page sealed it since (``rows_stale``, until the next whole pass).
+    or the set named it read when it was composed and a page sealed it since (``rows_stale``, until the next whole pass),
+    or a shown place's reader asked for it and its walk stopped before it (``rows_ahead``).
     A capture that read the whole tail (the first after its history, or one after a mark moved) names that pass in
     its receipt (``tail_whole``), once: a named fact, not a debt; the next capture stands on the set it composed, so
     the owner's next turn (``T:mainw``) stands: its own start writes no mark."""
@@ -499,7 +500,7 @@ def test_b10_a_capture_reads_what_it_shows_and_what_is_new(measured, tag):
     for k, work in _build_work(measured, tag).items():
         pairs.update({f"tail_whole(k={k})": (work["tail_whole"], 1)} if work.get("tail_whole") else
                      {f"rows_read(k={k})": (work.get("rows_read", 0), work.get("rows_open", 0) + work.get("rows_kept", 0)
-                                            + work.get("rows_stale", 0))})
+                                            + work.get("rows_stale", 0) + work.get("rows_ahead", 0))})
         if tag == "T:mainw":
             pairs[f"stands(k={k})"] = (int(not work.get("tail_whole") and work.get("rows_cold", 0) > 0), 1)
     hold_work_equal("L7d", tag, pairs)
