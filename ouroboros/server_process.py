@@ -6,6 +6,11 @@ them, and the two uvicorn shapes that decide who owns the process signals
 (``_SignalStopServer`` for the main server, ``_embedded_uvicorn_server`` for a server
 hosted inside its loop). These live below the composition root so a leaf can read
 them without importing ``server`` back.
+
+At server start, ``raise_open_file_limit`` raises POSIX ``RLIMIT_NOFILE`` soft
+toward hard (macOS: at most 10,240) for per-run transports. Infinite soft stays;
+failures and the resulting limit are logged without blocking startup. Windows
+is unchanged.
 """
 
 from __future__ import annotations

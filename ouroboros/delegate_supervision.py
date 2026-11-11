@@ -6,7 +6,30 @@ answering. A ``delegate_wait`` that nothing answers yet arms the nanny's ordinar
 (``model_sleep``) with a ``run_wait`` descriptor; the result is owed to the first model request
 after the wake (``native_task_wait.deliver_owed``), published there as one wake record
 (``pending_wake`` in ``delegate_supervision_state``) and acknowledged only after its exact text was
-delivered whole (``deliver_wake``)."""
+delivered whole (``deliver_wake``).
+
+Ready sources answer at once; unacknowledged wakes replay their facts
+(``replay_of``) before sleeping. Owed delivery follows mail drain; durable wakes
+coalesce. Retained output precedes a run-detail read. Without a continuation
+owner the same sources are waited on in-process. There is no wait window or
+run-count cap; legacy ``wait_sec`` is inert. Observation belongs to
+``delegate_collection.BodyRuntime`` and ``delegate_feed`` independently of the
+nanny's turn: no acting slot, nanny tick or LLM call is needed while it sleeps.
+
+``deliver_wake`` binds typed metadata/JSON to the saved whole view needed for
+loop/startup ACK: inline or complete exact-source reads
+(``delegate_output.credit_exact_source``). Warm/cold parks flush deferred ACKs
+and preserve source refs/read coverage. Unknown-outcome holds sleep host-armed
+and warm (``delegate_hold``), ACKing whole receipts synchronously before
+resuming; cut summaries never count. Wait saves name the failed stage; locks
+keep the known cause/errno without asserting run fate. Polls read task state;
+wakes keep full tools. ``leaf_live_input`` is capability, never liveness.
+
+The read-only ``coordination_context`` carries intent, time, settled spend and
+active descendants, with no thresholds (P5). ``nanny_pacing`` compares usage
+with round/cost anchors: coordination resets neither, ``owner_wait`` keeps both,
+and old checkpoints flag unknown anchors. Burn informs, never advises.
+"""
 
 from __future__ import annotations
 

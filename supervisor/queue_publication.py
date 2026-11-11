@@ -3,7 +3,9 @@
 Every queue transition marks the publication dirty under Q (``persist_queue_snapshot``: one
 revision bump, no bytes). ONE publisher, the supervisor tick (``publish_queue_changes``),
 captures the rows under Q when the revision moved and serializes and writes them outside
-Q. The capture copies containers only (``_frozen``): strings are shared, so the owner's
+Q. Publication follows revision or pool-census changes, one writer at a time,
+only from a process that initialized the queue; boot without a provider writes
+no snapshot, dispatch or alive document. The capture copies containers only (``_frozen``): strings are shared, so the owner's
 text is never copied under the lock. A large task value that appears in more than one place (the
 owner's message in twenty rows, the task contract twice per row) is published once, by
 content address (``$shared``, the reference ``ouroboros/shared_values.py`` owns), so the document carries the owner's

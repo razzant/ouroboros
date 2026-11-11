@@ -17,6 +17,11 @@ revalidating the stack, and MARKED on the queue (``persist_queue_snapshot``),
 never published under Q: the tick publishes the row. A crash between the store
 commit and that publication restores from the store (kill-after-each-step:
 ``tests/test_queue_publication_revision.py``).
+
+``grant_warm_returns`` persists on the admission lane under its claim, rolling
+back if the stack changed before put. Contention retries the same row under
+Stop/deadline/ceiling; pre-ACK sleep and the native-restart interval fold once.
+Resume keeps the attempt and never replays it.
 """
 
 from __future__ import annotations

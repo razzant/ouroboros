@@ -24,6 +24,7 @@ root's latch, the queue facts of its root and of the root's physical actor, that
 
 Nothing here authorizes a start: the launch (``worker_assignment._launch_attempt``) takes the owner's launch lock, the
 schedule's table hold and the restart boundary, reads again, and revalidates memory and C2 at the put.
+A launch refusal forgets the chooser's kept admission so the next pass can repair it.
 
 ``run_pass``: ``worker_pool_lifecycle.admissible_starts`` says how many new processes the pass may start; with no idle
 worker and no start it chooses nothing and reads nothing. Otherwise one walk in queue order (``queue._queue_sort_key``:
@@ -40,7 +41,7 @@ lane's carriers take with the same predicate (``conversation_lane.resumes_on_lan
 
 Disclosed residual (§10 invariant 24): with free capacity the memory gates still walk the held prefix, O(P) a pass,
 and a superseded selection beyond the rows a pass reaches waits for a pass that reaches it; the tick's cancel hygiene
-keeps one ``statuses`` SELECT, read before Q (``store_hot_facts.statuses_ahead``).
+keeps one ``statuses`` SELECT, read before Q (``store_hot_facts.statuses_ahead``), and its cancel-intent projection read.
 """
 
 from __future__ import annotations

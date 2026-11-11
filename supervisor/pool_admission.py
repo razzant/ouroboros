@@ -6,14 +6,16 @@ nothing). ``available`` is ``host_memory.physical_memory`` (within this process'
 reserve (``config.HOST_MEMORY_RESERVE_FRACTION`` of the total), ``T`` the typical size of one of our workers (the mean
 of the live workers' own heartbeat reports, both lanes; else this generation's last ``worker_ready`` size; else
 unknown) and ``B`` the processes of both lanes still starting. With no project process acting or starting one start is
-always admitted (the floor); readiness parks since the last successful ``worker_ready`` stop growth only when they
+admitted even under pressure (the floor), within the owner's cap and readiness fence;
+with measured memory but unknown ``T``, only that floor admits. Readiness parks since the last successful ``worker_ready`` stop growth only when they
 outnumber live ready project processes (finiteness); an unknown reading admits the owner's cap when set, else one
-starting process at a time, and says why
+starting process at a time (beyond the floor, both lanes' booting processes must finish), and says why
 (``memory_unmeasured: ...``); the owner's ``OUROBOROS_MAX_WORKERS``, when set, caps acting tasks and claims.
 
 Reuse of an idle process, a warm return and a crash replacement never ask; the conversation lane's starts stay
 outside (4A: spawn success). The machine is read at most once a pass, outside Q and the lifecycle serializer, only
-when chosen work needs a new process (``dispatch_choice.run_pass``), and never kept. Pressure stops or cools nobody;
+when chosen work needs a new process (``dispatch_choice.run_pass``), and never kept.
+Workers report RSS, never probe host memory. Pressure stops or cools nobody;
 it refuses a new process. Dated admission facts are published with the pool's counts (``facts``); the queue census
 hashes only whether starts are admitted and why. Disclosed residuals: growth after a start is not predicted; neighbours
 on the host share memory without a common ledger; Windows Job and commit limits are not read; running out of memory
