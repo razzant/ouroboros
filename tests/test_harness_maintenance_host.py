@@ -703,8 +703,8 @@ def connect_socket(monkeypatch):
                         "outcome": {"reason": "not_supported"}, "command": None}
             elif path == "/v2/maintenance/operations":
                 state["keys"].append(self.headers["Idempotency-Key"])
-                if state["mode"] == "lost_create":
-                    if len(state["keys"]) == 1:
+                if state["mode"] in {"lost_create", "failed_join"}:
+                    if state["mode"] == "lost_create" and len(state["keys"]) == 1:
                         self.close_connection = True
                         return  # Accepted, but the response never arrives.
                     status, body = 409, {"code": "maintenance_already_active", "message": "Already installing",
@@ -720,6 +720,8 @@ def connect_socket(monkeypatch):
                     self.close_connection = True
                     return
                 body = receipt if state["mode"] in {"slow_read", "slow_phases", "running"} else connected_program()
+                if state["mode"] in {"failed_install", "failed_join"}:
+                    body = connected_program(state="failed", after=None, problem=state.get("install_problem"))
                 if state["mode"] in {"refused", "not_found", "retryable_forever"} or (state["mode"] == "retryable" and state["calls"][path] == 1):
                     status = 403 if state["mode"] == "refused" else 404 if state["mode"] == "not_found" else 503
                     body = {"code": "fixture_refusal", "message": "The receipt cannot be read.",
@@ -887,9 +889,36 @@ def test_connect_join_keeps_only_accepted_receipts_and_request_identity(monkeypa
 
 @pytest.mark.parametrize("harness", ["agy", "future-program"])
 def test_connect_guidance_uses_the_named_card_not_a_raw_harness_id(owned, connect_clock, harness):
-    receipt = connected_program(harness=harness, state="failed", problem={"message": "Installer failed"})
+    receipt = connected_program(harness=harness, state="failed", problem=None)
     owned.gateway.maintenance_create = lambda *_: receipt
     with pytest.raises(ClaudexorUnavailable) as caught:
         service.install_for_connect(harness)
-    assert str(caught.value) == "Installer failed. See this program in Settings, Accounts"
+    assert str(caught.value) == "The selected program did not answer its version. See this program in Settings, Accounts"
     assert harness not in str(caught.value)
+
+
+@pytest.mark.parametrize("joined", [False, True])
+@pytest.mark.parametrize("retryable", [None, False, True])
+def test_failed_install_keeps_the_engine_problem_in_the_login_answer(connect_socket, joined, retryable):
+    state, login_http = connect_socket
+    state["mode"] = "failed_join" if joined else "failed_install"
+    problem = {"code": "installer_failed", "message": "The vendor installer could not write its program.",
+               "context": {"vendorFact": "permission refused"}, "retryable": retryable,
+               "requiredActions": ["Read the vendor log in Settings, Accounts"]} if retryable is not None else None
+    state["install_problem"] = problem
+    response = login_http.post("/api/claudexor/login", json={"harness": "future-program"})
+    assert response.status_code == 503
+    body = response.json()
+    assert body["context"]["operationId"] == "maintenance-one"
+    assert body["context"]["operation"]["state"] == "failed"
+    assert body["context"]["operation"]["problem"] == problem
+    if problem:
+        assert body["error"] == problem["message"] and body["code"] == problem["code"]
+        assert body["retryable"] is retryable and body["required_actions"] == problem["requiredActions"]
+        assert body["context"]["vendorFact"] == "permission refused"
+    else:
+        assert body["code"] == "harness_install_unverified" and "Settings, Accounts" in body["error"]
+        assert not {"retryable", "required_actions"} & body.keys()
+    assert state["calls"]["/v2/setup/jobs"] == 1, "failed installs never retry login"
+    assert state["calls"]["/v2/maintenance/operations/maintenance-one"] == 1
+    assert len(state["keys"]) == 1 and not any(path.endswith("/cancel") for path in state["calls"])

@@ -214,7 +214,7 @@ def install_for_connect(harness: str) -> dict:
                        for field in ("path", "version", "versionOutput"))):
         problem = operation.get("problem") or {}
         raise _connect_install_problem(operation, request_id, problem.get("code") or "harness_install_unverified",
-                                       problem.get("message") or "The selected program did not answer its version")
+                                       problem.get("message") or "The selected program did not answer its version", problem=problem)
     return operation
 
 
@@ -223,8 +223,10 @@ def _connect_context(identity, operation, request_id):
         "operationId": identity, "requestId": request_id, "operation": operation}.items() if value is not None}
 
 
-def _connect_install_problem(operation, request_id, code, message, *, identity=None):
-    error = ClaudexorUnavailable(code, f"{message}. See this program in Settings, Accounts", status_code=503)
-    error.problem = {"code": code, "message": str(error), "context":
-                     _connect_context(identity or operation["id"], operation, request_id)}
+def _connect_install_problem(operation, request_id, code, message, *, identity=None, problem=None):
+    problem = copy.deepcopy(problem or {})
+    error = ClaudexorUnavailable(code, message if problem else f"{message}. See this program in Settings, Accounts",
+                                status_code=503, required_actions=tuple(problem.get("requiredActions") or ()))
+    error.problem = {**problem, "code": code, "message": str(error), "context": {
+        **problem.get("context", {}), **_connect_context(identity or operation["id"], operation, request_id)}}
     return error
