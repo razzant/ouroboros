@@ -236,7 +236,7 @@ def vendor_scene(ui, count=1):
     actors += [{"subagent_id": "current", "recommended_use": "Other program", "route": {"kind": "agent_session", "target_id": "claude=choice-old"}},
                {"subagent_id": "api", "recommended_use": "Direct API", "route": {"kind": "api_model", "target_id": "openai::choice-api"}}]
     ui["settings"].update(OUROBOROS_SUBAGENTS={"enabled": True, "items": actors}, OUROBOROS_MODEL="claudexor::opaque-source=choice-old")
-    world = {"version": "2.0.0", "op": None, "new": False, "posts": [], "inventories": [], "catalogs": 0}
+    world = {"version": "2.0.0", "op": None, "new": False, "posts": [], "inventories": [], "catalogs": 0, "catalog_revision": "2.0.0"}
     row = _inventory_row("codex")
     row.update(updateAvailable="yes", newest={"status": "available", "version": "3.0.0", "observedAt": "2026-11-10T10:00:00Z"})
     other = _inventory_row("claude")
@@ -252,12 +252,12 @@ def vendor_scene(ui, count=1):
             common = {"credentialProfileId": pin, "provenance": "vendor", "observedAt": "2026-11-10T12:00:00Z", "sourceProgram": producer, "models": models}
             raw.append({"credentialProfileId": pin, "catalog": {**common, "source": "opaque-source"}, "availability": "available", "problem": None})
             native.append({"credentialProfileId": pin, "catalog": {**common, "harnessId": "codex", "source": "api"}, "availability": "available", "problem": None})
-            flat += [{**model, "value": f"claudexor::opaque-source={model['id']}", "source_id": "opaque-source", "source": "Claudexor", "credentialHarness": "codex", "credential_profile_id": pin, "sourceProgram": producer} for model in models]
+            flat += [{**model, "value": f"claudexor::opaque-source={model['id']}", "source_id": "opaque-source", "source": "Claudexor", "credential_profile_id": pin} for model in models]
         ui["fixture"]["catalog"] = {"items": flat + [{"id": "choice-api", "value": "openai::choice-api"}],
             "model_sources": [{"id": "opaque-source", "label": "Codex", "credentialHarness": "codex"}],
             "account_catalogs": [{"source": "opaque-source", "accounts": raw, "partial": False}], "errors": []}
         ui["fixture"]["status"]["harnesses"] = [
-            {"id": "codex", "display_name": "Codex", "enabled": True, "status": "ok", "models": models,
+            {"id": "codex", "display_name": "Codex", "enabled": True, "status": "ok", "models": [{**model, "credential_profile_id": account["credentialProfileId"]} for account in native for model in models],
              "model_catalog": {"harnessId": "codex", "accounts": native, "partial": False}},
             {"id": "claude", "display_name": "Claude Code", "enabled": True, "status": "ok", "models": [{"id": "choice-old"}],
              "model_catalog": {"harnessId": "claude", "sourceProgram": {"path": "/vendor/claude", "version": "2.0.0"}, "models": [{"id": "choice-old"}]}},
@@ -267,6 +267,9 @@ def vendor_scene(ui, count=1):
 
     def catalog_reply(route):
         world["catalogs"] += 1
+        if world["catalog_revision"] != world["version"]:
+            catalogs()
+            world["catalog_revision"] = world["version"]
         payload = copy.deepcopy(ui["fixture"]["catalog"])
         source = parse_qs(urlparse(route.request.url).query).get("source_id", [""])[0]
         if source:
@@ -276,6 +279,9 @@ def vendor_scene(ui, count=1):
     def maintenance(route):
         path = urlparse(route.request.url).path
         if path.endswith("/harnesses"):
+            if world["catalog_revision"] != world["version"]:
+                catalogs()
+                world["catalog_revision"] = world["version"]
             world["inventories"].append(route.request.url)
             row["selection"]["version"] = world["version"]
             row["updateAvailable"] = "no" if world["new"] else "yes"
@@ -468,6 +474,9 @@ def test_vendor_footer_in_wizard_models_reviewers_and_place_sheet(role_ui, width
     ui["fixture"]["catalog"]["items"] += [{"id": "choice-other", "value": "claudexor::other-source=choice-other",
         "source_id": "other-source", "source": "Claudexor", "credential_profile_id": f"other-{index}",
         "sourceProgram": {"path": "/vendor/claude", "version": "2.0.0"}} for index in range(account_count)]
+    ui["fixture"]["catalog"]["account_catalogs"].append({"source": "other-source", "accounts": [{"catalog": {
+        "source": "other-source", "credentialProfileId": f"other-{index}", "models": [{"id": "choice-other"}],
+        "sourceProgram": {"path": "/vendor/claude", "version": "2.0.0"}}} for index in range(account_count)]})
     world["other_inventory"].update(updateAvailable="yes", newest={"status": "available", "version": "3.0.0"})
     ui["errors"].watch(page)
     page.goto(ui["url"] + "/#settings")
@@ -528,3 +537,32 @@ def test_models_role_names_only_program_supplied_entries_in_a_mixed_source(role_
     expect(footer.get_by_role("button", name="Update", exact=True)).to_be_enabled()
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     roles.capture(page, f"program-models-mixed-{account_count}-{width}")
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+@pytest.mark.parametrize("consumer", ["Agent", "Models"])
+def test_outside_update_then_chooser_open_renews_list_once_at_44_accounts(role_ui, width, consumer):
+    from playwright.sync_api import expect
+    ui, page = role_ui, role_ui["page"]
+    world = vendor_scene(ui, 44)
+    page.set_viewport_size({"width": width, "height": 950})
+    roles.open_agents(ui)
+    field = vendor_consumer(ui, consumer)
+    field.fill("choice")
+    footer = page.locator("[data-model-footer]:visible")
+    expect(footer).to_contain_text("List from Codex 2.0.0")
+    before = world["catalogs"]
+    field.press("Escape"); field.press("ArrowDown")
+    expect(footer).to_contain_text("List from Codex 2.0.0")
+    assert world["catalogs"] == before
+    field.press("Escape")
+    world.update(version="3.0.0", new=True)  # Terminal/vendor updater, no receipt or button.
+    field.press("ArrowDown")
+    expect(footer).to_contain_text("List from Codex 3.0.0")
+    expect(page.locator('[role="listbox"]:visible [role="option"]').filter(has_text="choice-new")).to_be_visible()
+    assert field.input_value() == "choice"
+    after = world["catalogs"]
+    assert after > before and not world["posts"]
+    field.press("Escape"); field.press("ArrowDown")
+    expect(footer).to_contain_text("List from Codex 3.0.0")
+    assert world["catalogs"] == after

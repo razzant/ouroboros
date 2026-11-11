@@ -7,11 +7,11 @@ import { harnessPresentation } from './harness_presentation.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
 /** Account copies of the same list contribute one fact; distinct producer versions stay explicit. */
-export function catalogPrograms(catalog = {}, { harness = '', label = '', source = '', profile = '', sources = [] } = {}) {
+export function catalogPrograms(catalog = {}, { harness = '', label = '', source = '', profile = '', sources = catalog.model_sources || [] } = {}) {
     const groups = new Map(), supplied = new Map();
     const inScope = (row) => row && (!profile || (row.credentialProfileId || row.credential_profile_id) === profile)
         && (!source || (row.source_id || row.source) === source);
-    const modelKey = (row) => JSON.stringify([harness ? '' : row.source_id || row.source || '', row.id || row.value]);
+    const modelKey = (row) => JSON.stringify([harness ? '' : row.source_id || row.source || '', row.id || row.value, row.credentialProfileId || row.credential_profile_id || '']);
     function add(row, owner = harness, name = label) {
         if (!inScope(row)) return;
         const id = row.source_id || row.source;
@@ -23,7 +23,7 @@ export function catalogPrograms(catalog = {}, { harness = '', label = '', source
         const group = groups.get(owner);
         if (!group.programs.some((item) => item.path === program.path && item.version === program.version)) group.programs.push(program);
         for (const model of row.models || []) {
-            const key = modelKey({...model, source: id});
+            const key = modelKey({...model, source: id, credentialProfileId: row.credentialProfileId});
             if (!supplied.has(key)) supplied.set(key, new Set());
             supplied.get(key).add(owner);
         }
@@ -37,12 +37,13 @@ export function catalogPrograms(catalog = {}, { harness = '', label = '', source
         for (const account of list.accounts || []) add(account.catalog);
     }
     const choices = (catalog.items || catalog.models || []).filter(inScope).map((item) => {
-        const owner = add(item);
-        if (owner && catalog.items && item.source_id && item.source && item.source !== item.source_id) {
-            const names = groups.get(owner).entrySources;
+        const owner = !catalog.account_catalogs && add(item);
+        const owners = owner ? new Set([owner]) : supplied.get(modelKey(item)) || new Set();
+        for (const name of owners) if (catalog.items && item.source_id && item.source && item.source !== item.source_id) {
+            const names = groups.get(name).entrySources;
             if (!names.includes(item.source)) names.push(item.source);
         }
-        return owner ? new Set([owner]) : supplied.get(modelKey(item)) || new Set();
+        return owners;
     });
     return [...groups.values()].map((group) => ({...group,
         mixed: groups.size > 1 || choices.some((owners) => !owners.has(group.harness)),
@@ -78,18 +79,30 @@ export function modelProgramMarkup(program, view = {}) {
 let controller;
 let disposeStatus;
 const views = new Set();
+function syncStatus() {
+    const pending = [...views].some((view) => view.pending());
+    if (pending && !disposeStatus) {
+        disposeStatus = () => {}; // A subscription's first callback may render synchronously.
+        disposeStatus = claudexorStatus.subscribe((status) => {
+            if (!status.loading) controller.poll();
+        }, {visible: () => [...views].some((view) => view.pending())});
+    } else if (!pending && disposeStatus) { disposeStatus(); disposeStatus = null; }
+}
 function programsController() {
     if (!controller) controller = createHarnessMaintenanceController({
-        onChange: () => { for (const view of views) view.render(); },
+        onChange: () => { for (const view of views) view.render(); syncStatus(); },
         onSettled: refreshMaintenanceCatalogs,
     });
     return controller;
 }
 
-/** Only open choosers hold a status subscription; ticks read operations, never inventory/newest. */
+/** Open choosers subscribe only while work is pending; opening itself observes the producer. */
 export function bindModelProgramFooter(input, footer, changed) {
     let programs = [], opened = false, signature = '';
-    const view = { render() {
+    const view = { pending: () => programs.some((program) => {
+        const state = programsController().view(program.harness);
+        return state.request || maintenanceOperationPending(state.operation);
+    }), render() {
         const html = programs.map((program) => modelProgramMarkup(program, programsController().view(program.harness))).join('');
         footer.hidden = !programs.length;
         if (html === signature) return;
@@ -98,7 +111,17 @@ export function bindModelProgramFooter(input, footer, changed) {
         footer.innerHTML = html;
         changed(restoreFocus);
     } };
-    const read = () => { for (const program of programs) void programsController().refresh({harness: program.harness, fresh: true, checkLatest: true}); };
+    const read = async () => {
+        const answers = await Promise.all(programs.map((program) => programsController().refresh({harness: program.harness, fresh: true, checkLatest: true})));
+        for (const program of programs) {
+            const entry = answers.flatMap((answer) => answer?.harnesses || []).find((row) => row.harness === program.harness);
+            if (entry && !maintenanceOperationPending(entry.operation) && program.programs.some((source) =>
+                source.path !== entry.selection.path || source.version !== entry.selection.version)) {
+                void refreshMaintenanceCatalogs(program.harness, entry.selection);
+                break; // One catalog refresh covers every producer in this opened list.
+            }
+        }
+    };
     const click = (event) => {
         const button = event.target.closest('[data-program-action]');
         if (button) void programsController().act(button.closest('[data-program]').dataset.program, button.dataset.programAction);
@@ -106,7 +129,7 @@ export function bindModelProgramFooter(input, footer, changed) {
     footer.addEventListener('click', click);
     function close() {
         opened = false; views.delete(view);
-        if (!views.size) { disposeStatus?.(); disposeStatus = null; }
+        syncStatus();
     }
     return {
         update(next = []) {
@@ -119,9 +142,7 @@ export function bindModelProgramFooter(input, footer, changed) {
         open() {
             if (opened) return;
             opened = true; views.add(view); view.render(); read();
-            if (!disposeStatus) disposeStatus = claudexorStatus.subscribe((status) => {
-                if (!status.loading) programsController().poll();
-            }, {visible: () => views.size > 0});
+            syncStatus();
         },
         close,
         dispose() { close(); footer.removeEventListener('click', click); },

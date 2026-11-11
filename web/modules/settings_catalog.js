@@ -264,10 +264,13 @@ export async function refreshModelCatalog({ button } = {}) {
 }
 
 const settledPrograms = new Map();
-export function refreshMaintenanceCatalogs(harness, operation) {
-    const stamp = `${operation.id}:${operation.finishedAt || ''}`;
-    if (settledPrograms.get(harness) === stamp) return;
-    settledPrograms.set(harness, stamp);
+export function refreshMaintenanceCatalogs(harness, evidence) {
+    const previous = settledPrograms.get(harness) || {};
+    const operation = evidence.id && `${evidence.id}:${evidence.finishedAt || ''}`;
+    const program = evidence.id ? evidence.after : evidence;
+    const selection = program && JSON.stringify([program.path, program.version]);
+    if (operation ? previous.operation === operation : previous.selection === selection) return;
+    settledPrograms.set(harness, {operation, selection});
     document.dispatchEvent(new CustomEvent('harness-maintenance:settled', {detail: {harness}}));
     return Promise.allSettled([claudexorStatus.refresh({includeModels: true, afterCurrent: true}), refreshModelCatalog()]);
 }

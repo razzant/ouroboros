@@ -415,8 +415,9 @@ def test_catalog_producer_survives_flattening_without_borrowing_a_version(accoun
             account["catalog"]["sourceProgram"] = program
     payload = model_catalog_api._subscription_model_catalog("codex")
     assert payload["items"]
-    assert all(item["sourceProgram"] == program for item in payload["items"])
-    assert all(item["credentialHarness"] == "codex" for item in payload["items"])
+    assert all("sourceProgram" not in item for item in payload["items"])
+    assert all("credentialHarness" not in item for item in payload["items"])
+    assert payload["model_sources"][0]["credentialHarness"] == "codex"
     accounts[0]["catalog"]["models"] = []
     payload = model_catalog_api._subscription_model_catalog("codex", "a")
     assert payload["items"] == []

@@ -208,7 +208,8 @@ def test_status_native_models_reuse_negotiated_account_catalog(metadata_engine, 
         assert [(model["id"], model["credential_profile_id"], model["availability"]) for model in harness["models"]] == [
             ("model-a", "account-a", "available"), ("model-b", "account-b", "unavailable")]
         assert all(model["observed_at"] is None and model["catalog_source"] == "manifest" for model in harness["models"])
-        assert all(model["sourceProgram"] == {"path": "/vendor/program", "version": "2.0.0"} for model in harness["models"])
+        assert all("sourceProgram" not in model for model in harness["models"])
+        assert harness["model_catalog"]["accounts"][0]["catalog"]["sourceProgram"] == {"path": "/vendor/program", "version": "2.0.0"}
         assert harness["models"][1]["processing"]["modes"] == ["standard", "fast"]
     else:
         assert harness["models"] == [{"id": "legacy"}] and "model_catalog" not in harness
