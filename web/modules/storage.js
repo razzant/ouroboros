@@ -12,7 +12,6 @@
 // copies not verified saved are a separate, deliberate form: their own list read whole, each id chosen by the owner
 // (nothing chosen to begin with), the shared confirm dialog as the acknowledgement of the whole copy's loss.
 // The folders deleted projects left behind are one read-only fold under the groups (storage_deleted.js).
-// Cleanup ends with how long finished work is kept: a row that saves itself (dashboard.js mountTabSettings).
 
 import { apiClient, isStoreMigrating } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
@@ -441,9 +440,9 @@ export function initStorage({ state, mount } = {}) {
         </section>
         <section class="storage-panel storage-cleanup ui-card" aria-label="Cleanup">
             <h3 class="storage-card-title">Cleanup</h3>
+            <div class="storage-retention dashboard-settings" data-storage-settings></div>
             <div class="storage-tray" data-storage-tray></div>
             <div class="storage-actions storage-cleanup-door"><button type="button" class="btn btn-primary btn-sm" data-free-preview data-key="data-free-preview" data-storage-door hidden>Check for files to remove</button></div>
-            <div class="storage-retention" data-storage-settings></div>
         </section>
         <section class="storage-panel ui-card" aria-label="Folders" data-storage-panel hidden>
             <div class="storage-tray-head"><h3 class="storage-card-title">Folders</h3></div>
@@ -479,8 +478,7 @@ export function initStorage({ state, mount } = {}) {
     const measureButton = page.querySelector('[data-storage-action="measure"]');
     const stopButton = page.querySelector('[data-storage-action="stop"]');
     const door = page.querySelector('[data-storage-door]');
-    // How long finished work is kept is a row that saves itself (settings_rows.js); no repaint of the tab touches it,
-    // and a saved value reads the tab again, since the server's retention shapes the cleanup it plans.
+    // How long finished work is kept saves itself; a saved value reads the tab again, since it shapes the cleanup planned.
     const retention = mountTabSettings(page.querySelector('[data-storage-settings]'), 'storage', { state, onSaved: () => void refresh() });
     const scroller = page;
     const details = page.querySelector('[data-storage-details]');
@@ -968,8 +966,7 @@ export function initStorage({ state, mount } = {}) {
     function destroy() {
         if (disposed) return;
         disposed = true;
-        cancelRead();
-        retention.dispose();
+        cancelRead(), retention.dispose();
         measureButton.removeEventListener('click', onClick);
         stopButton.removeEventListener('click', onClick);
         door.removeEventListener('click', onTrayClick);
