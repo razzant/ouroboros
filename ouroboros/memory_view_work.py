@@ -5,11 +5,7 @@ stays whole after its intermediate replies have yielded to its recorded gist.
 """
 from __future__ import annotations
 
-import re
-
-
-def first_sentence(text):
-    return re.split(r'(?<=[.!?。！？])\s+', str(text).strip(), maxsplit=1)[0]
+from ouroboros.text_sentences import first_sentence as first_sentence
 
 
 def row_range(first, last):

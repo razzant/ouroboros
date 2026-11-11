@@ -542,9 +542,11 @@ class BackgroundConsciousness:
                     CONTINUITY_STATE_KEY: dict(self._continuity)}))
             except Exception:
                 log.debug("consciousness: wake completion not persisted", exc_info=True)
-        if (row or {}).get("wake_summary"):
+        if (row or {}).get("wake_summary") and not row.get("title"):
             from supervisor.worker_chat_lane import _broadcast_task_named
-            _broadcast_task_named({"type": "task_named", "task_id": task_id, "suggested_name": row["wake_summary"]})
+            from ouroboros.text_sentences import first_sentence
+            _broadcast_task_named({"type": "task_named", "task_id": task_id,
+                                   "suggested_name": first_sentence(row["wake_summary"])})
 
     def start(self) -> str:
         with self._lock:
