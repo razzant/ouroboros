@@ -343,6 +343,8 @@ export const ROWS = [
         name: 'Folder for new projects', meta: 'Blank: ~/Ouroboros/projects. Projects are kept.', more: '',
         control: { kind: 'text' },
         aliases: ['Subagent projects root (genesis)', 'projects root'],
+        writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
+
     // Settings › Tools (mcp_settings.js): the tool client's switch, where else outside abilities live, then the fold
     // (two waits and two actions). The servers are a list the page draws (HAND_WRITTEN).
     { id: 'MCP_ENABLED', keys: ['MCP_ENABLED'], page: 'tools', fold: false,
