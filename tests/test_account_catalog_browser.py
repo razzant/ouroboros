@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from tests import test_subscription_role_routes_browser as roles
+from tests.settings_browser_helpers import open_settings, press_editor_save
 
 pytestmark = [pytest.mark.ui_browser]
 subscription_ui = roles.subscription_ui
@@ -87,12 +88,15 @@ def account_catalog_ui(role_ui):
 def editor(ui, consumer):
     page = roles.open_agents(ui)
     if consumer == "Models":
-        page.locator('[data-settings-tab="models"]').click()
+        open_settings(page, "models/role/main")
         row = page.locator('[data-model-role="main"]')
         selectors = ('[data-model-role-source]', '[data-model-role-model]', '[data-model-role-account]')
     else:
-        row = page.locator('[data-subagent-row]').nth(0 if consumer == "API actor" else 2)
+        row = roles.open_agent(ui, "native" if consumer == "API actor" else "agent", fresh=False)
         selectors = tuple(f'[data-subagent-field="{field}"]' for field in ("route", "model", "account"))
+    from playwright.sync_api import expect
+    target = ui["settings"]["OUROBOROS_MODEL"] if consumer == "Models" else ui["settings"]["OUROBOROS_SUBAGENTS"]["items"][0 if consumer == "API actor" else 2]["route"]["target_id"]
+    expect(row.locator(selectors[1])).to_have_value(target.rsplit("=", 1)[-1])
     return page, row, *(row.locator(selector) for selector in selectors)
 
 
@@ -127,10 +131,8 @@ def refresh(ui):
 
 def assert_saved(ui, consumer, model, pin):
     page = ui["page"]
-    with page.expect_response("**/api/settings"):
-        page.locator("#btn-save-settings").click()
-    page.wait_for_function("() => !document.querySelector('#btn-save-settings').disabled")
-    saved = roles.settings_saves(ui)[-1]
+    assert press_editor_save(page).startswith("Saved")
+    saved = ui["settings"]
     target = f"claudexor::{SOURCE}={model}"
     if consumer == "Models":
         assert saved["OUROBOROS_MODEL"] == target
@@ -196,7 +198,8 @@ def test_partial_account_refresh_keeps_draft_and_only_failed_account_history(acc
     assert source.evaluate("e => e === window.accountSourceNode")
     assert account.evaluate("e => e === window.accountPinNode")
     assert account.input_value() == ""
-    assert problem["message"] in page.locator("#settings-model-catalog-status").text_content()
+    if consumer == "Models":
+        assert problem["message"] in row.inner_text()
     options = suggestions(page, field, {"catalog-shared", "catalog-only-b"})
     assert set(options) - {DRAFT_MODEL} == {"catalog-shared", "catalog-only-b"}
     shared = options["catalog-shared"]
@@ -208,9 +211,8 @@ def test_partial_account_refresh_keeps_draft_and_only_failed_account_history(acc
         account.select_option("work")
         assert "not checked" in suggestions(page, field)[DRAFT_MODEL]
         status = row.locator("[data-subagent-status]")
-        assert status.inner_text() == "Not checked"
-        # The unread account catalog is disclosed on the row's own status sentence.
-        assert "model list could not be read" in status.get_attribute("title")
+        # The agent page says the reason directly instead of hiding it in a hover title.
+        assert "model list could not be read" in status.inner_text()
         account.select_option("")
     roles.capture(page, "account-catalog-partial-" + consumer.lower().replace(" ", "-"))
     assert_saved(ui, consumer, DRAFT_MODEL, "")
