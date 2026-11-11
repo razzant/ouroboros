@@ -774,6 +774,21 @@ def test_a_tail_projected_anew_under_the_same_source_holds_no_set(monkeypatch, t
     assert _in_use(tmp_path)
 
 
+def test_an_index_an_older_body_built_reads_the_whole_tail_once_then_stands(monkeypatch, tmp_path):
+    """After an update the index has no set yet (an older body never made its table): the first capture reads the whole
+    tail and says so, its locked write makes the table and the set, and the next capture stands on it."""
+    rooms, _row = _sealed_main_row(tmp_path)
+    chronicle = ChronicleStore(tmp_path)
+    with sqlite3.connect(chronicle.index_path) as db:
+        db.execute("DELETE FROM state WHERE key='tail_cold'")
+        db.execute("DROP TABLE tail_cold")
+    assert not _in_use(tmp_path)  # the lock-free read asks no table it may not have
+    first = _work(tmp_path, rooms)
+    assert first.get("tail_whole") == 1 and "rows_cold" not in first, first
+    assert _in_use(tmp_path)
+    _same(monkeypatch, tmp_path, rooms)
+
+
 def test_a_tail_still_filling_composes_no_set(monkeypatch, tmp_path):
     rooms = shared.world(tmp_path)
     monkeypatch.setattr(mi, "_FILL_ROWS", 3)
@@ -834,6 +849,12 @@ def test_a_build_receipt_says_whether_the_set_acted_and_what_it_left_unread(tmp_
     assert whole.get("tail_whole") == 1 and "rows_cold" not in whole, whole
     assert acting.get("tail_whole", 0) == 0 and acting.get("rows_cold", 0) > 0, acting
     assert acting["rows_read"] + acting["rows_cold"] == whole["rows_read"]
+    assert acting["rows_read"] == acting["rows_open"] + acting["rows_kept"], acting  # law L7d: open, kept by a rule, new
+    _append(tmp_path, shared.msg(_ts(5), "New and sealed.", client_message_id="new-sealed"))  # sealed before a read
+    _seal(tmp_path, _entry(tmp_path, "New and sealed."), 1)
+    newer = _work(tmp_path, rooms)
+    assert newer.get("rows_new") == 1 and "rows_cold" in newer, newer
+    assert newer["rows_read"] == newer["rows_open"] + newer["rows_kept"], newer
     ds.revise_text(tmp_path, "chat", row[0]["hint"]["seq"], "Sealed row, revised.")  # the stored facts wait for the fill
     live = _work(tmp_path, rooms)
     assert live.get("tail_whole") == 1 and "rows_cold" not in live, live  # every row was read live: no set acted

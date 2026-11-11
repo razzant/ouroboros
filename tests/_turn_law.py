@@ -31,14 +31,6 @@ TURN_GAPS: Dict[Tuple[str, str], Tuple[str, Dict[str, int]]] = {
         "read again (knowledge._navigation_row). NEVER: both listings are what the turn shows (the shelf's "
         "index; the rescue scan, kept by decision); the row stays so that any other work per item fails.",
         {"dir_entries": 122, "scandir": 4, "listdir": 3}),
-    ("L7d", "T:main"): (
-        "A capture reads every tail row to find the open ones: 6,630 rows for 31 shown or new at k=30 (250 for 31 at "
-        "k=1; live 74,963 for 13,834). NEVER in this PR (owner's decision 1A): an exact skip of sealed rows needs its own "
-        "design (membership stored with its target facts, consensus T1). The row stays so the debt is visible and "
-        "anything beyond this read fails.", {"rows_read": 7000}),
-    ("L7d", "T:mainw"): (
-        "The same whole-tail read as T:main's L7d row (6,631 rows for 32 at k=30); the same owner decision.",
-        {"rows_read": 7000}),
     ("host", "census"): (
         "check_stray_server_processes spawns one ps per listed process: 2 children for one, 25 for 24 (26.10); a "
         "process's first owner turn on the owner's Mac paid 373 to 632. Remover: razzant/ouroboros#2025 (one ps "

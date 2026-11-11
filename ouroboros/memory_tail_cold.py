@@ -125,32 +125,46 @@ def short(derived: Optional[Mapping[str, Any]], tail: Any, places: Iterable[str]
 
 
 def settle(store: Any, derived: Optional[Mapping[str, Any]], tail: Any, found: Any) -> None:
-    """Count what this capture's pass read (``rows_cold``: the rows the set left unread; ``tail_whole``: a pass over
-    the whole tail) and, after a whole pass of a capture that read the marks over a complete stored tail, store what no
-    reader used as the set, with those marks, in one index transaction. A busy index or a stored tail replaced
-    meanwhile stores nothing: the next whole pass does."""
+    """Count what this capture's pass read: on the set, the rows it left unread (``rows_cold``) and the rows it read
+    that no room shows open, each kept by a rule or new since the stored facts (``rows_kept``: with the open rows, all
+    it reads, law L7d); else a pass over the whole tail (``tail_whole``). After a whole pass of a capture that read the
+    marks over a complete stored tail, store what no reader used as the set, with those marks, in one index
+    transaction. A busy index or a stored tail replaced meanwhile stores nothing: the next whole pass does."""
     from ouroboros.context_timing import counted
 
+    snapshot = store._pinned()
     if derived and derived.get(STANDS):
+        stored, writers = {row[0] for row in snapshot.tail_rows}, _writers(snapshot)
+        shown = {entry[2] for entries in found.rooms.values() for entry in entries}
         counted("rows_cold", int(derived[HELD].get("rows") or 0))
+        counted("rows_kept", sum(1 for pos, _address, meta, terminal in tail.rows if pos not in shown and (
+            pos not in stored or pos in found.kept or _kept(meta, terminal, writers))))
         return
     counted("tail_whole")
-    snapshot = store._pinned()
     if derived and derived.get(GATE) and tail.complete and snapshot is not None and not snapshot.proposed:
         _compose(store, snapshot, derived[GATE], tail, found)
+
+
+def _writers(snapshot: Any) -> set:
+    """Every task that wrote a page record, drafts and candidates too: a page links its writer's later terminal rows."""
+    from ouroboros.memory_sealing import _terminal_writer
+
+    return {_terminal_writer(snapshot.body(row)) for row in snapshot.records if row[2] == "page"} - {""}
+
+
+def _kept(meta: Mapping[str, Any], terminal: Any, writers: set) -> bool:
+    """A row the rules keep read whatever its rooms say: a quiet finish, an owner's Reply, a page writer's terminal row."""
+    return (meta.get("quiet_finish") is True or meta.get("direction") == "in" and isinstance(meta.get("reply_to"), dict)
+            or terminal is not None and str(meta.get("task_id") or "") in writers)
 
 
 def _compose(store: Any, snapshot: Any, gate_: Gate, tail: Any, found: Any) -> None:
     import sqlite3
 
-    from ouroboros.memory_sealing import _terminal_writer
-
-    writers = {_terminal_writer(snapshot.body(row)) for row in snapshot.records if row[2] == "page"} - {""}
+    writers = _writers(snapshot)
     # A terminal row's task is kept with it: a page its task writes later links it (``stands``).
     cold = [[pos, (meta.get("task_id") or None) if terminal is not None else None]
-            for pos, _address, meta, terminal in tail.rows if pos not in found.kept and not (
-                meta.get("quiet_finish") is True or meta.get("direction") == "in" and isinstance(meta.get("reply_to"), dict)
-                or terminal is not None and str(meta.get("task_id") or "") in writers)]
+            for pos, _address, meta, terminal in tail.rows if pos not in found.kept and not _kept(meta, terminal, writers)]
     source = (snapshot.state("tail") or {}).get("source")
     marks = {"marks": gate_.marks, "source": source, "sequence": snapshot.records[-1][0] if snapshot.records else 0,
              "places": sorted(found.places), "rows": len(cold)}

@@ -489,12 +489,15 @@ def test_b10_a_build_serializes_the_request_once_per_form_at_every_size(measured
 
 @pytest.mark.parametrize("tag", [pytest.param(tag, marks=turn_gap("L7d", tag)) for tag in WORK_TURNS])
 def test_b10_a_capture_reads_what_it_shows_and_what_is_new(measured, tag):
-    """L7d. The capture reads what it shows and what is new: every row of the tail read is open somewhere or arrived
-    since the stored facts. The one named debt of this class (``TURN_GAPS``): whole tail reads stay until the exact
-    skip of sealed rows is designed."""
-    works = _build_work(measured, tag)
-    hold_work_equal("L7d", tag, _pairs(works, "rows_read", lambda work: work.get("rows_open", 0) + work.get("rows_new", 0)),
-                    scale=(measured["large"] - K_SMALL) / 29)
+    """L7d. A capture standing on the cold set (``memory_tail_cold``) reads what it shows and what is new: every row of
+    the tail it reads is open somewhere, or a rule keeps it read, or it arrived since the stored facts (``rows_kept``).
+    A capture that read the whole tail (the first after its history, or one after a mark moved) names that pass in
+    its receipt (``tail_whole``), once: a named fact, not a debt; the next capture stands on the set it composed."""
+    pairs = {}
+    for k, work in _build_work(measured, tag).items():
+        pairs.update({f"tail_whole(k={k})": (work["tail_whole"], 1)} if work.get("tail_whole") else
+                     {f"rows_read(k={k})": (work.get("rows_read", 0), work.get("rows_open", 0) + work.get("rows_kept", 0))})
+    hold_work_equal("L7d", tag, pairs)
 
 
 @pytest.mark.parametrize("tag", [pytest.param(tag, marks=turn_gap("L7e", tag)) for tag in WORK_TURNS])

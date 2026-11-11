@@ -543,11 +543,15 @@ class TestHostWorkBeyondOnePass:
         env = _host_events(tmp_path, _host_receipt(view_renders=2, view_texts_kept=2, request_serializations=6, rows_read=31, rows_open=30, rows_new=1))
         assert _host_checks(env) == []
 
-    def test_rows_read_past_those_open_and_new_are_named_with_their_numbers(self, tmp_path):
-        env = _host_events(tmp_path, _host_receipt(rows_read=74963, rows_open=13834, rows_new=0))
+    def test_a_whole_tail_read_is_named_with_its_numbers_and_a_read_on_the_cold_set_is_not(self, tmp_path):
+        env = _host_events(tmp_path, _host_receipt(rows_read=74963, rows_open=13834, rows_new=0, tail_whole=1))
         [line] = _host_checks(env)
         assert line.startswith("INFO: HOST WORK BEYOND ONE PASS under the running code (runningcode1)")
-        assert "read 74,963 rows of the chat tail for 13,834 open and 0 new" in line and "should" not in line
+        assert "read the whole chat tail, 74,963 rows for 13,834 open and 0 new" in line and "should" not in line
+        root = tmp_path / "cold"
+        root.mkdir()
+        assert _host_checks(_host_events(root, _host_receipt(rows_read=31139, rows_open=13834, rows_kept=17305,
+                                                              rows_cold=43824))) == []
 
     def test_an_unfilled_tail_names_the_rows_it_read_past_the_open_ones(self, tmp_path):
         """Until the stored prefix stands every row of the tail is read live, and none is new after a stored end: a row
@@ -567,11 +571,11 @@ class TestHostWorkBeyondOnePass:
         with measured_sections():
             memory_inventory.open_rows_by_room(tmp_path)
             work = section_spans()["work"]
-        assert work["rows_read"] > work["rows_open"] and "rows_new" not in work, work
+        assert work["rows_read"] > work["rows_open"] and "rows_new" not in work and work["tail_whole"] == 1, work
         root = tmp_path / "health"
         root.mkdir()
         [line] = _host_checks(_host_events(root, _host_receipt(**work)))
-        assert f"read {work['rows_read']:,} rows of the chat tail for {work['rows_open']:,} open and 0 new" in line
+        assert f"read the whole chat tail, {work['rows_read']:,} rows for {work['rows_open']:,} open and 0 new" in line
 
     def test_work_done_again_is_named_with_its_verb_and_count(self, tmp_path):
         env = _host_events(tmp_path, _host_receipt(view_pieces=9, view_pieces_again=2, rows_read=5, rows_open=5),
