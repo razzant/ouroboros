@@ -14,6 +14,7 @@ const ALLOWED_WRITES = {
     'api_client.js': 'the HTTP client: it defines the calls, the helper makes them',
     'consciousness_api.js': 'the owner endpoints\' client, called by the helper',
     'composer_owner_controls.js': 'the composer\'s Context capsule writes Main\'s value through its own owner endpoint',
+    'subagents_settings.js': 'the roster\'s checker adapter, which the helper\'s writeEntry calls for every roster write',
 };
 // The same word for another fact: an update's progress, the wizard's completion answer, and the two reads of
 // GET /api/settings `_meta` (a restart that waits, the Access that runs).
