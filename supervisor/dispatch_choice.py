@@ -323,6 +323,8 @@ def _root_resume(queue: Any, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Under Q: the root resume the launch passes its fence check (``_launch_attempt``'s own rule)."""
     from supervisor.events_budget import budget_fence_selected
 
+    # A monetary latch hands over only an explicit selection against it (an
+    # owner-resumed cold sleeper must start), never sleep readiness.
     root = _root(row)
     latch, resume = queue.BUDGET_ROOT_FENCES.get(root) or {}, row.get("_budget_pause_resume")
     selected = bool(_tid(row) != root and isinstance(resume, dict)

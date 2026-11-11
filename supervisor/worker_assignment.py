@@ -504,7 +504,7 @@ def _launch_attempt(queue, candidate, worker, token: str, *, lane: bool, generat
     from supervisor.followup_policy import scheduled_start
     from supervisor.queue_schedules import automatic_acquisitions
     from supervisor.queue_timeouts import _pending_continuation, _deadline_launch_claim, pending_deadline_expirable
-    from supervisor.dispatch_choice import resume_admits, resume_read
+    from supervisor.dispatch_choice import _root_resume, resume_admits, resume_read
 
     witness = _unsent(candidate)
     with automatic_acquisitions():
@@ -516,20 +516,13 @@ def _launch_attempt(queue, candidate, worker, token: str, *, lane: bool, generat
         with queue._queue_lock:
             if lane and not _launch_claim_held(queue, candidate, worker, token):
                 return False
-            root_id = str(candidate.get("root_task_id") or candidate.get("id"))
-            latch = queue.BUDGET_ROOT_FENCES.get(root_id) or {}
-            resume = candidate.get("_budget_pause_resume")
-            # A monetary latch hands over only an explicit selection against it (an
-            # owner-resumed cold sleeper must start), never sleep readiness.
-            selected_child = bool(candidate.get("id") != root_id and isinstance(resume, dict)
-                                  and (latch.get("cause") == "owner_pause" or budget_fence_selected(candidate, latch))
-                                  and resume.get("root_fence_id") == latch.get("fence_id"))
+            resume = _root_resume(queue, candidate)
         # The root's launch lock and its control reads (owner Pause, sleep grants) wait for nothing
         # and run OUTSIDE Q; Q-holders take this lock non-blocking, so the order never blocks.
         with launch_admission(SimpleNamespace(
                 task_id=candidate.get("id"), root_task_id=candidate.get("root_task_id"),
                 budget_drive_root=candidate.get("budget_drive_root") or queue.DRIVE_ROOT),
-                root_resume=resume if not latch or selected_child else None, wait=False):
+                root_resume=resume, wait=False):
             unsubmitted = None if witness is None else witness["unsubmitted"]
             with queue._queue_lock:
                 if generation is not None and generation.launches_closed() and witness is None:
