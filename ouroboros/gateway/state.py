@@ -804,7 +804,6 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
 
             if phase == "unknown" and availability is not None:
                 availability["complete"] = False
-            view = view or {}
             if phase in {"budget_paused", "budget_pausing"}:
                 # A queue row's view comes with its control (``queue_control``); an answered root's is read here.
                 view = view or parked_stop_view(drive_root, row, task_id, {} if owner_resumed else fence_rows.get(
