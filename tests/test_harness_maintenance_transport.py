@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -201,7 +202,14 @@ def test_invalid_key_never_contacts_engine(client, key):
 
 
 @pytest.mark.parametrize("cancel", [False, True])
-def test_connect_receipt_reads_bound_catalog_and_operation_calls(client, cancel):
+def test_connect_receipt_reads_bound_catalog_and_operation_calls(client, cancel, monkeypatch):
+    from ouroboros.gateways import claudexor_maintenance
+
+    # The module's own clock, advancing on every read: a coarse system clock (Windows) can return
+    # the same instant twice, and then both phases honestly get the same remaining budget.
+    ticks = iter(range(10_000))
+    monkeypatch.setattr(claudexor_maintenance, "time",
+                        SimpleNamespace(monotonic=lambda: 100 + 0.05 * next(ticks)))
     gateway, seen = client(lambda _request: httpx.Response(200, json=OPERATION))
     call = gateway.maintenance_cancel if cancel else gateway.maintenance_operation
     assert call(OPERATION["id"], timeout_sec=0.75) == OPERATION
