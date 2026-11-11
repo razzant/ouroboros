@@ -40,21 +40,22 @@ export function modelSearchField(doc, listId) {
 
 /**
  * The list painted into `el` and driven by `input`. `main()`, `current()` and `recents()` are the caller's routes
- * (Main's now, the chosen one, the recent ones to offer); `mainRow` puts Main's model first, tagged; `rule` is the
+ * (Main's now, the chosen one, the recent ones to offer); `mainRow` puts Main's model first, tagged, and
+ * `mainFacts()` says in its facts what a press on it means where that is not Main's own route facts; `rule` is the
  * line under the rows. `onRoute(route)` takes a pick, `onSettings()` the way to Settings › Accounts where nothing but
  * Main can lead, `onLeave({focus})` an Escape with nothing typed (`focus`) or a Tab out; `onPaint()` follows every
  * repaint (the list may have changed size). Returns `{ paint, destroy }`.
  */
-export function createModelList({ el, input, id, store, main, current, recents, mainRow = true, rule = '',
-    onRoute, onSettings = () => {}, onLeave = () => {}, onPaint = () => {} }) {
+export function createModelList({ el, input, id, store, main, current, recents, mainRow = true, mainFacts = null,
+    rule = '', onRoute, onSettings = () => {}, onLeave = () => {}, onPaint = () => {} }) {
     const search = { query: '', only: '', active: -1, rows: [], picks: new Map() };
     const describe = (route) => describeRoute(store.index(), route);
 
-    const rowMarkup = (said, { tag = '', selected = false, extra = '' } = {}) => `<div class="chat-model-row" role="option"`
+    const rowMarkup = (said, { tag = '', selected = false, extra = '', facts = '' } = {}) => `<div class="chat-model-row" role="option"`
         + ` data-row="${esc(said.key)}" aria-selected="${selected}">${sourceMark(said)}`
         + `<span class="chat-model-row-id" data-i18n-skip>${esc(said.id)}</span>`
         + (tag ? `<span class="chat-model-row-tag">${esc(tag)}</span>` : '')
-        + `<span class="chat-model-row-facts" data-i18n-skip>${esc([said.window, said.sourceLabel, payWords(said)].filter(Boolean).join(' · '))}</span>${extra}</div>`;
+        + `<span class="chat-model-row-facts" data-i18n-skip>${esc(facts || [said.window, said.sourceLabel, payWords(said)].filter(Boolean).join(' · '))}</span>${extra}</div>`;
 
     function paint() {
         const index = store.index();
@@ -76,7 +77,7 @@ export function createModelList({ el, input, id, store, main, current, recents, 
         };
         const others = index.rows.filter((entry) => !sameRoute(entry.route, mainRoute));
         if (!search.query && !search.only) {
-            if (mainRow && mainRoute) add(mainRoute, { tag: 'Main' });
+            if (mainRow && mainRoute) add(mainRoute, { tag: 'Main', facts: mainFacts?.() || '' });
             const recent = recents();
             if (recent.length) { section('Recent'); recent.forEach((route) => add(route)); }
             if (status.reading && !status.read) note('Reading models…');

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { activeModelWaits, createModelWaitController, isModelWaitReference, MODEL_WAIT_REASONS, mergeModelWaits, modelWaitAction, modelWaitRoleLabel, unsavedPersistenceNotice } from '../modules/model_wait.js';
+import { activeModelWaits, createModelWaitController, isModelWaitReference, MODEL_WAIT_REASONS, mergeModelWaits, modelWaitAction, modelWaitReasonLabel, modelWaitRoleLabel, unsavedPersistenceNotice } from '../modules/model_wait.js';
 import { desiredLiveCardPhase } from '../modules/task_phase_chip.js';
 import { emptyWorkState, roomStatusView } from '../modules/work_status.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
@@ -223,4 +223,11 @@ test('a wait of a work on its own model says so and offers no save in Settings, 
     settingsRole.observe('task', { model_waits: { 'wait-light': row({ role: 'light' }) } });
     assert.equal(other.querySelector('[data-wait-persist-offer]').hidden, false);
     assert.equal(other.querySelector('[data-wait-persist]').disabled, false);
+});
+
+test('each wait reason has the one label its row shows, and a route whose access cannot be watched says so', () => {
+    assert.deepEqual(MODEL_WAIT_REASONS.map((reason) => modelWaitReasonLabel(reason)),
+        ['Waiting for quota', 'Sign-in required', 'Waiting for access', 'Waiting for an account', 'Key unavailable']);
+    assert.equal(modelWaitReasonLabel('quota', false), 'Waiting for provider access');
+    assert.equal(modelWaitReasonLabel('connection_unavailable', false), 'Key unavailable', 'a key that is off is off, watched or not');
 });

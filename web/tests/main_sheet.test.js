@@ -173,11 +173,12 @@ test('the sheet is given the page\'s census; each tick is its own act after the 
 
 test('a refused tick says the server\'s words and stops none of the others; without ticks nothing more is said', async () => {
     const c = mainChat({ moves: [{ kind: 'work', id: 't3', name: 'Compare prices' }, { kind: 'room', id: 'p7', name: 'Research' }],
-        moveWork: async () => { throw new Error('This work has already finished.'); } });
+        moveWork: async () => { throw Object.assign(new Error('task not live'), { status: 404, body: { reason_code: 'task_not_live' } }); } });
     await c.controls.model.pick(route(GLM));
     await flush();
     assert.deepEqual(c.said[0].map((result) => [result.id, result.ok, result.words]), [
-        ['t3', false, 'Not moved: This work has already finished.'], ['p7', true, 'New work here starts on Main.']]);
+        ['t3', false, 'Not moved: This work has already ended.'], ['p7', true, 'New work here starts on Main.']],
+    'a refusal in the card\'s own words for that code');
     c.controls.destroy();
 
     const quiet = mainChat({ moves: [] });

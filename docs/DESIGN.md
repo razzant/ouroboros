@@ -2392,16 +2392,21 @@ more there, and its popover's first line says `follows Main`. When the next step
 fact shows both, `gpt-6-astra → glm-5.3 at the next step` (`when it starts` for a queued work), so a change of
 Main never looks failed while a call in flight finishes. Where the server offers the work's `model` control the
 fact is a quiet capsule in the line's own ink (stronger for a model of the work's own) that opens a popover
-anchored to it, so nothing in the transcript moves: whose model this is, **Follow Main** when the work has a
-model of its own, then the Model capsule's own field and list — Main, the recent models, Search. A pick is one
-act, and its answer says when it applies: «Switches at the next step; the running call finishes.» or, for a
-queued work, «Applies when it starts.» Without the offered control the fact is plain text: a control is the
+anchored to it, so nothing in the transcript moves: whose model this is, then the Model capsule's own field and
+list — Main, the recent models, Search. The list's Main row is the one way to follow Main, as `Main` is in the
+capsule's strip, and its facts say so (`this work will follow Main`; `this work follows Main` on a follower).
+A pick is one act, and its answer says when it applies: «Switches at the next step; the running call
+finishes.» or, for a queued work, «Applies when it starts.» A refused act is said in the popover in the owner's
+words, by the server's reason; when the server saved the decision and only its delivery failed, `Retry` sends
+the same request again. Without the offered control the fact is plain text: a control is the
 server's decision and is never guessed. A card whose work publishes no such fact (an older record, a child, a
 portal) keeps the line below. On a narrow card the source gives way before the model's name.
 
 **A work on a fallback is amber until that is resolved** (owner 10.11, «4. A»; 11.11, «Все A», 2): its fact reads
 `fallback from Settings · claude-opus-5.5 · since 02:14`, then what it left (`left gpt-6-astra`), wrapping rather
-than cut, and its popover says when and why it left and offers the three exits: **Return** (back to the model it
+than cut, and its popover says when it left and why — in the wait card's own words where it has them for that
+condition (`Sign-in required`, `Waiting for quota`, `Key unavailable`), else the server's code as it is, never a
+sentence of the page's own — and offers the three exits: **Return** (back to the model it
 left, at the next step), **Wait** (wait for that model, no paid calls until it answers) and **Keep** (the
 fallback becomes the work's own choice). Amber ends when the server's fact says so, never on a timer here;
 nothing about it is written to the Main chat; the amber line carries no money figure (one money line per card;

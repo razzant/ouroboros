@@ -4,7 +4,7 @@
 // Fixtures are in the contract's shapes; geometry and the real page are the browser lane's.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { APPLIED_WORDS, basisWords, closeCardModel, leadView, openCardModel, paintCardModel } from '../modules/card_model.js';
+import { APPLIED_WORDS, basisWords, causeWords, closeCardModel, leadView, openCardModel, paintCardModel, refusalWords } from '../modules/card_model.js';
 import { createModelCatalogStore } from '../modules/model_catalog_store.js';
 import { applyCardWorkViews, emptyWorkState, reconcileWorkState } from '../modules/work_status.js';
 import { stubDocument } from './composer_controls_fixture.js';
@@ -36,6 +36,7 @@ function card({ recents = [route(GLM)], answer = null } = {}) {
     meta.append(tools);
     const record = { groupId: 't1', metaEl: meta };
     const calls = [];
+    const ids = [];  // each act's request id, in order
     const toasts = [];
     const rerenders = [];
     const reply = { value: answer };
@@ -47,6 +48,7 @@ function card({ recents = [route(GLM)], answer = null } = {}) {
         rerender: (seen) => rerenders.push(seen),
         act: async (taskId, requestId, act) => {
             calls.push([taskId, act]);
+            ids.push(requestId);
             assert.ok(requestId, 'every act carries a request id');
             const said = await reply.value;
             if (said instanceof Error) throw said;
@@ -75,7 +77,7 @@ function card({ recents = [route(GLM)], answer = null } = {}) {
         .map(([, key, selected, inner]) => ({ key, selected: selected === 'true',
             text: inner.replace(/<svg.*?<\/svg>/g, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() }));
     const take = (key) => fire(list(), 'click', { target: { closest: () => list().querySelectorAll('.chat-model-row').find((node) => node.dataset.row === key) } });
-    return { doc, meta, record, tools, calls, toasts, rerenders, reply, store, paint, part, fact, said, popup, acts, pressAct, list, rows, take, fire };
+    return { doc, meta, record, tools, calls, ids, toasts, rerenders, reply, store, paint, part, fact, said, popup, acts, pressAct, list, rows, take, fire };
 }
 
 test('the words of a fact follow its basis; a follower says nothing beside its model', () => {
@@ -93,12 +95,12 @@ test('the words of a fact follow its basis; a follower says nothing beside its m
 });
 
 test('a fallback names where it came from, since when and what it left', () => {
-    const fell = lead(OPUS, 'fallback', { role: 'fallback:1', primary: lead(ASTRA, 'owner'), since: 1, cause: 'gpt-6-astra did not answer' });
+    const fell = lead(OPUS, 'fallback', { role: 'fallback:1', primary: lead(ASTRA, 'owner'), since: '2026-11-11T02:14:00Z', cause: 'subscription_window_exhausted' });
     const said = leadView(fell, { since: '02:14' });
     assert.equal(said.name, 'fallback from Settings · claude-opus-5.5 · since 02:14');
     assert.equal(said.why, 'left gpt-6-astra');
     assert.equal(said.fallback, true);
-    assert.equal(said.cause, 'gpt-6-astra did not answer');
+    assert.equal(said.cause, 'Waiting for quota', 'the wait card\'s own words for that condition');
     assert.equal(leadView({ ...fell, primary: lead(ASTRA, 'main') }, { since: '02:14' }).why, 'left Main (gpt-6-astra)');
     assert.equal(leadView(fell).name, 'fallback from Settings · claude-opus-5.5', 'no time is said when the fact gives none');
     assert.equal(leadView({ ...fell, role: 'main' }).name, 'fallback to Main · claude-opus-5.5');
@@ -179,16 +181,18 @@ test('a work whose fact is gone gets back the line it had', () => {
     assert.equal(c.rerenders.length, 2);
 });
 
-test('the popover offers Main, the recent models and Follow Main only to a work with a model of its own', async () => {
+test('the popover is the capsule\'s list; its Main row is the one way to follow Main and says so', async () => {
     const c = card();
     c.paint({ lead: lead(GLM, 'owner') });
     c.fact().click();
     await flush();
     assert.equal(c.fact().getAttribute('aria-expanded'), 'true');
     assert.equal(c.popup().querySelector('.card-model-pop-title').textContent, 'Model for this work · you chose it');
-    assert.deepEqual(c.acts(), [['follow', 'Follow Main', 'Codex · gpt-6-astra']]);
+    assert.deepEqual(c.acts(), [], 'no separate action: the list\'s Main row is the way');
+    assert.equal(c.popup().querySelector('.card-model-acts').hidden, true);
     assert.deepEqual(c.rows().slice(0, 2).map((row) => [row.key, row.selected]), [[`route|${ASTRA}`, false], [`route|${GLM}`, true]]);
-    assert.match(c.rows()[0].text, /^gpt-6-astra Main/);
+    assert.equal(c.rows()[0].text, 'gpt-6-astra Main this work will follow Main');
+    assert.match(c.rows()[1].text, /OpenRouter · paid by key$/, 'any other row keeps its route\'s facts');
     assert.match(c.list().innerHTML, new RegExp(APPLIED_WORDS.next_step.replace(/[.;]/g, '\\$&')));
     assert.ok(c.doc.activeElement === c.popup().querySelector('.chat-model-query'), 'a keyboard types at once');
     c.fact().click();
@@ -198,10 +202,13 @@ test('the popover offers Main, the recent models and Follow Main only to a work 
     c.paint({ lead: lead(ASTRA, 'main'), queued: true });
     c.fact().click();
     await flush();
-    assert.deepEqual(c.acts(), [], 'a follower has nothing to return to');
+    assert.deepEqual(c.acts(), []);
     assert.equal(c.popup().querySelector('.card-model-pop-title').textContent, 'Model for this work · follows Main');
-    assert.equal(c.rows()[0].selected, true, 'Main\'s row is its own');
+    assert.deepEqual([c.rows()[0].selected, c.rows()[0].text], [true, 'gpt-6-astra Main this work follows Main'], 'Main\'s row is its own');
     assert.match(c.list().innerHTML, /Applies when it starts\./, 'a queued work says when its change lands');
+    // A follower whose next step is another route has not arrived yet: the row still says what a press does.
+    c.paint({ lead: lead(GLM, 'main', { pending: route(ASTRA) }) });
+    assert.equal(c.rows()[0].text, 'gpt-6-astra Main this work will follow Main');
     closeCardModel();
     assert.equal(c.popup(), null);
 });
@@ -227,36 +234,85 @@ test('a pick sets this work\'s model, Main\'s row follows Main, and the answer s
     assert.deepEqual(c.calls[1], ['t1', { action: 'follow' }], 'Main\'s model is Main: the work follows it');
     assert.deepEqual(c.toasts[1], [APPLIED_WORDS.at_start, 'ok']);
     assert.equal(c.said('pending'), '→ gpt-6-astra at the next step');
+    assert.equal(c.calls.length, 2, 'one write per press');
 
+    // A work that already follows Main: its own row is no act.
+    c.paint({ lead: lead(ASTRA, 'main') });
     c.fact().click();
     await flush();
-    await c.pressAct('follow');
+    await c.take(`route|${ASTRA}`);
     await flush();
-    assert.deepEqual(c.calls[2], ['t1', { action: 'follow' }]);
+    assert.deepEqual([c.calls.length, c.popup()], [2, null], 'nothing is sent; the popover closes');
 });
 
-test('a refusal says the server\'s words and leaves the popover and the fact as they were', async () => {
-    const c = card({ answer: new Error('This work has already finished.') });
+test('a refusal is said in the popover in the owner\'s words; the fact and the popover stay as they were', async () => {
+    const refused = (code, status, message = code.replaceAll('_', ' ')) => Object.assign(new Error(message), { status, body: { error: message, reason_code: code, task_id: 't1' } });
+    const c = card({ answer: refused('task_not_live', 404) });
+    const status = () => c.popup().querySelector('.card-model-refusal');
+    const words = () => (status().hidden ? '' : status().children[0].textContent);
     c.paint({ lead: lead(GLM, 'owner') });
     c.fact().click();
     await flush();
-    await c.pressAct('follow');
+    assert.equal(status().hidden, true, 'nothing is said before an act is refused');
+    await c.take(`route|${ASTRA}`);
     await flush();
-    assert.deepEqual(c.toasts, [['The model was not changed: This work has already finished.', 'error']]);
+    assert.deepEqual([words(), status().children[1].hidden], ['This work has already ended.', true], 'a decided refusal offers no retry');
+    assert.deepEqual(c.toasts, [], 'said on the card, not beside it');
     assert.ok(c.popup(), 'still open: another model can be picked');
     assert.equal(c.said('name'), 'OpenRouter · glm-5.3');
-    closeCardModel();
+
+    // A 503: the decision is saved; Retry sends the same request id again.
+    c.reply.value = refused('model_wake_failed', 503);
+    await c.take(`route|${ASTRA}`);
+    await flush();
+    assert.deepEqual([words(), status().children[1].hidden, status().children[1].textContent],
+        ['Your choice is saved, but the work could not be told yet.', false, 'Retry']);
+    c.reply.value = { ok: true, task_id: 't1', applied: 'next_step', lead: lead(GLM, 'main', { pending: route(ASTRA) }) };
+    await c.fire(status().children[1], 'click', {});
+    await flush();
+    assert.deepEqual(c.calls.slice(-2), [['t1', { action: 'follow' }], ['t1', { action: 'follow' }]]);
+    assert.equal(c.ids.length, 3);
+    assert.ok(c.ids[1] === c.ids[2] && c.ids[0] !== c.ids[1], 'the retry carries the refused request\'s id; another press has its own');
+    assert.equal(c.popup(), null, 'accepted: the popover closes');
+    assert.deepEqual(c.toasts.at(-1), [APPLIED_WORDS.next_step, 'ok']);
+});
+
+test('every refusal the endpoint names has words of its own; an unknown one keeps the server\'s', () => {
+    const refused = (code, status, message) => Object.assign(new Error(message || code), { status, body: { reason_code: code } });
+    const said = Object.fromEntries(['task_model_invalid', 'request_id_required', 'task_not_live', 'presence_model_unsupported',
+        'not_a_root_task', 'model_control_unavailable', 'cancel_pending', 'model_action_state', 'model_recents_pending',
+        'model_queue_publish_failed', 'model_wake_failed'].map((code) => [code, refusalWords(refused(code, code.startsWith('model_') && code !== 'model_action_state' && code !== 'model_control_unavailable' ? 503 : 409))]));
+    for (const [code, { words }] of Object.entries(said)) {
+        assert.ok(words && !words.includes('_') && words !== code.replaceAll('_', ' '), `${code} is said in words: ${words}`);
+    }
+    assert.equal(new Set(Object.values(said).map((entry) => entry.words)).size, 11, 'each its own');
+    assert.deepEqual(Object.entries(said).filter(([, entry]) => entry.retry).map(([code]) => code),
+        ['model_recents_pending', 'model_queue_publish_failed', 'model_wake_failed'], 'only a saved decision offers the retry');
+    assert.deepEqual(refusalWords(refused('migrating', 503, 'the task store is importing; retry shortly')),
+        { words: 'the task store is importing; retry shortly', retry: true });
+    assert.deepEqual(refusalWords(new Error('Network unreachable')), { words: 'Network unreachable', retry: false });
+});
+
+test('a cause is said in the wait card\'s words where it has them, as its code where it has none, and not twice', () => {
+    assert.equal(causeWords('subscription_window_exhausted'), 'Waiting for quota');
+    assert.equal(causeWords('quota_exhausted'), 'Waiting for quota');
+    assert.equal(causeWords('auth_error'), 'Sign-in required');
+    assert.equal(causeWords('connection_unavailable'), 'Key unavailable');
+    assert.equal(causeWords('provider_transient'), 'provider_transient', 'a code this page has no words for is shown as it is');
+    assert.equal(causeWords('configured fallback'), '', 'the amber line already says "fallback from Settings"');
+    assert.equal(causeWords('switch_model'), '', 'the card already says "Ouroboros switched to it"');
+    assert.equal(causeWords(undefined), '');
 });
 
 test('a fallback\'s popover offers Return, Wait and Keep, each its own act', async () => {
     const c = card();
-    const fell = lead(OPUS, 'fallback', { role: 'fallback:0', primary: lead(GLM, 'owner'), since: 5, cause: 'glm-5.3 did not answer after 3 tries' });
+    const fell = lead(OPUS, 'fallback', { role: 'fallback:0', primary: lead(GLM, 'owner'), since: '2026-11-11T02:14:00Z', cause: 'auth_error' });
     for (const [action, toast] of [['return', APPLIED_WORDS.next_step], ['wait', 'Waits for glm-5.3: no paid calls until it answers.'],
         ['keep', 'Stays on claude-opus-5.5: your choice from now on.']]) {
         c.paint({ lead: fell, since: '02:14' });
         c.fact().click();
         await flush();
-        assert.equal(c.popup().querySelector('.card-model-pop-title').textContent, 'Left glm-5.3 at 02:14 · glm-5.3 did not answer after 3 tries');
+        assert.equal(c.popup().querySelector('.card-model-pop-title').textContent, 'Left glm-5.3 at 02:14 · Sign-in required');
         assert.deepEqual(c.acts(), [['return', 'Return to glm-5.3', 'at the next step'],
             ['wait', 'Wait for glm-5.3', 'no paid calls until it answers'], ['keep', 'Keep on claude-opus-5.5', 'your choice from now on']]);
         await c.pressAct(action);

@@ -14,7 +14,7 @@
  */
 import { apiClient, taskModel } from './api_client.js';
 import { createCapsule } from './capsule.js';
-import { APPLIED_WORDS, basisWords, leadView } from './card_model.js';
+import { APPLIED_WORDS, basisWords, leadView, refusalWords } from './card_model.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { fmt, fmtInto, tr, translateString } from './i18n.js';
 import { createModelList, modelSearchField, routeFacts, SEARCH_ICON } from './model_list.js';
@@ -417,7 +417,7 @@ export function createModelControl({
                     results.push({ ...move, ok: true, words: tr('model.sheet.room_follows', 'New work here starts on Main.') });
                 }
             } catch (error) {
-                results.push({ ...move, ok: false, words: fmt('Not moved: {reason}', { reason: error?.message || String(error) }) });
+                results.push({ ...move, ok: false, words: fmt('Not moved: {reason}', { reason: refusalWords(error).words }) });
             }
         }
         if (state.destroyed) return;

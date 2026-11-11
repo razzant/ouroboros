@@ -5531,6 +5531,18 @@ button.card-model-fact:focus-visible { outline: 2px solid var(--focus-accent-bor
     font-size: var(--type-meta);
     overflow-wrap: anywhere;
 }
+.card-model-refusal {
+    display: flex;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1) var(--space-2);
+    margin: 0;
+    padding: var(--space-1) var(--space-3) var(--space-2);
+    color: var(--status-error-fg);
+    font-size: var(--type-meta);
+}
+.card-model-refusal-words { flex: 1 1 16ch; min-width: 0; overflow-wrap: anywhere; }
 .card-model-acts { display: flex; flex: 0 0 auto; flex-direction: column; }
 .card-model-act {
     display: flex;

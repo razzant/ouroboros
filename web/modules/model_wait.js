@@ -29,6 +29,14 @@ export function modelWaitRoleLabel(role = '') {
     return String(role || 'Model');
 }
 
+/** A wait's reason as its row names it; `observesAccess` false: the host cannot watch that route's access return.
+ *  A work's card says a fallback's cause in the same words (card_model.js). */
+export function modelWaitReasonLabel(reason, observesAccess = true) {
+    return reason === 'connection_unavailable' ? 'Key unavailable' : !observesAccess ? 'Waiting for provider access'
+        : reason === 'auth_quota' ? 'Waiting for access' : reason === 'unavailable' ? 'Waiting for an account'
+            : reason === 'auth' ? 'Sign-in required' : 'Waiting for quota';
+}
+
 /** Host wait reasons: `unavailable` is an engine-dated pool refusal, neither quota nor sign-in;
  *  `connection_unavailable`: the API key the route names is turned off or removed in Accounts. */
 export const MODEL_WAIT_REASONS = ['quota', 'auth', 'auth_quota', 'unavailable', 'connection_unavailable'];
@@ -160,8 +168,7 @@ export function createModelWaitController({ getRecord, onDomWrite = (fn) => fn()
         const observesAccess = row.availability_observation !== 'unavailable';
         const timed = (quota || pool) && observesAccess;
         node.querySelector('[data-wait-role]').textContent = modelWaitRoleLabel(row.role);
-        node.querySelector('[data-wait-reason]').textContent = keyOff ? 'Key unavailable' : !observesAccess ? 'Waiting for provider access'
-            : mixed ? 'Waiting for access' : pool ? 'Waiting for an account' : row.reason === 'auth' ? 'Sign-in required' : 'Waiting for quota';
+        node.querySelector('[data-wait-reason]').textContent = modelWaitReasonLabel(row.reason, observesAccess);
         // Amber only while the wait needs the owner (the host's revision-bound fact); a wait that goes on by itself is a
         // quiet tray with a neutral sentence (docs/DESIGN.md "Status marks").
         const owner = row.requires_owner_action === true;

@@ -7,19 +7,21 @@
  * record, a child, a portal) keeps the line it has today.
  *
  * Where the server offers the work's `model` control the fact is a button. It opens the list of models the
- * composer's Model capsule uses (model_list.js) with this work's own acts above it: Follow Main where the work has a
- * model of its own; Return, Wait and Keep while it runs on a fallback. Each press is one
- * `POST /api/tasks/{id}/model` (CONTRACT §6) whose answer says when it applies. Without the control the fact is
- * plain text: a control is the server's decision and is never guessed here.
+ * composer's Model capsule uses (model_list.js): its Main row is the one way to follow Main, as `Main` is in the
+ * capsule's strip, and its facts say so; while the work runs on a fallback its three exits stand above the list:
+ * Return, Wait and Keep. Each press is one `POST /api/tasks/{id}/model` (CONTRACT §6) whose answer says when it
+ * applies; a refusal is said in the popover in the owner's words, and one whose decision the server saved (a 503)
+ * offers the same request again. Without the control the fact is plain text: a control is the server's decision and
+ * is never guessed here.
  */
 import { taskModel } from './api_client.js';
 import { renderLiveCardMeta } from './chat_activity.js';
-import { fmt, tr } from './i18n.js';
+import { fmt, tr, translateString } from './i18n.js';
 import { isCoarsePointer } from './layout.js';
 import { modelCatalog } from './model_catalog_store.js';
 import { createModelList, modelSearchField } from './model_list.js';
 import { sourceMark } from './model_source_mark.js';
-import { modelWaitRoleLabel } from './model_wait.js';
+import { modelWaitReasonLabel, modelWaitRoleLabel } from './model_wait.js';
 import { controlIcon } from './page_icons.js';
 import { showToast } from './toast.js';
 import { bindPopoverPosition } from './ui_interactions.js';
@@ -40,12 +42,50 @@ const BASIS_WORDS = Object.freeze({
     place: ['model.basis.place', 'its place\'s model'],
     circle: ['model.basis.circle', 'its circle\'s model'],
 });
+// A fallback's cause is the failed call's code (lead_fact.adopt_fallback). The codes whose condition the wait card
+// already names are said in its words (model_wait.js); any other code is shown as the server gave it.
+const CAUSE_WAIT_REASONS = Object.freeze({ subscription_window_exhausted: 'quota', quota_exhausted: 'quota',
+    auth_error: 'auth', auth_required: 'auth', connection_unavailable: 'connection_unavailable' });
+// The two causes the fact's own words already say: a fallback with no failure code, and the mind's own switch.
+const CAUSES_SAID = new Set(['configured fallback', 'switch_model']);
+// A refused act by the server's `reason_code`. The last three are 503s: the decision is saved and only its delivery
+// failed, so the same request may be sent again.
+const REFUSAL_WORDS = Object.freeze({
+    task_model_invalid: 'This model was not accepted.',
+    request_id_required: 'The request was incomplete. Try again.',
+    task_not_live: 'This work has already ended.',
+    presence_model_unsupported: 'A place\'s model is set in its place sheet.',
+    not_a_root_task: 'A helper runs on the model its work gave it; change the model on the work\'s own card.',
+    model_control_unavailable: 'This work has no saved record yet, so its model cannot be changed.',
+    cancel_pending: 'This work is stopping; its model stays as it is.',
+    model_action_state: 'This work is not running on a fallback now.',
+    model_recents_pending: 'Your choice is saved, but the list of recent models could not be updated yet.',
+    model_queue_publish_failed: 'Your choice is saved, but the queue could not be updated yet.',
+    model_wake_failed: 'Your choice is saved, but the work could not be told yet.',
+});
 // How many recent models the popover offers under Main.
 const RECENT_ROWS = 3;
 let serial = 0;
 let openPopover = null;  // one popover in the window: opening another closes it
 
-const reasonWords = (cause) => String((cause && typeof cause === 'object' ? cause.text : cause) || '').trim();
+/** Why a work left its primary, for the popover's first line: '' when the fact's own words already say it. */
+export function causeWords(cause) {
+    const code = String(cause || '').trim();
+    if (!code || CAUSES_SAID.has(code)) return '';
+    const reason = CAUSE_WAIT_REASONS[code];
+    return reason ? translateString(modelWaitReasonLabel(reason)) : code;
+}
+
+/**
+ * A refused act in the owner's words: `{ words, retry }`. `retry` is true for a 503, whose decision the server saved:
+ * the same request id may be sent again. A code this page does not know keeps the server's own words.
+ */
+export function refusalWords(error) {
+    const code = String(error?.body?.reason_code || '');
+    const known = REFUSAL_WORDS[code];
+    return { words: known ? tr(`model.refused.${code}`, known) : String(error?.message || error || ''),
+        retry: Number(error?.status) === 503 };
+}
 const nodeOf = (doc, tag, className, text) => {
     const made = doc.createElement(tag);
     made.className = className;
@@ -92,7 +132,7 @@ export function leadView(lead, { index = null, since = '', queued = false } = {}
             : basis === 'main' ? '' : basisWords(basis),
         pending: pending && !sameRoute(pending, said.route)
             ? fmt(queued ? '→ {model} when it starts' : '→ {model} at the next step', { model: shortName(pending) }) : '',
-        cause: reasonWords(lead.cause),
+        cause: causeWords(lead.cause),
     };
 }
 
@@ -240,26 +280,38 @@ export function openCardModel(record) {
     const title = nodeOf(doc, 'p', 'card-model-pop-title');
     title.dataset.i18nSkip = '';
     const acts = nodeOf(doc, 'div', 'card-model-acts');
+    // A refused act, said where it was pressed; `Retry` stands beside it only when the server saved the decision.
+    const refusal = nodeOf(doc, 'p', 'card-model-refusal');
+    refusal.setAttribute('role', 'status');
+    refusal.dataset.i18nSkip = '';
+    refusal.hidden = true;
+    const refusalText = nodeOf(doc, 'span', 'card-model-refusal-words');
+    const retry = nodeOf(doc, 'button', 'btn btn-sm btn-default card-model-retry', 'Retry');
+    retry.setAttribute('type', 'button');
+    refusal.append(refusalText, retry);
     const { label, input } = modelSearchField(doc, `${id}-list`);
     const list = nodeOf(doc, 'div', 'card-model-list');
     list.id = `${id}-list`;
     list.setAttribute('role', 'listbox');
     list.setAttribute('aria-label', 'Models');
-    popup.append(title, acts, label, list);
+    popup.append(title, refusal, acts, label, list);
     let busy = false;
     let closed = false;
     let actsKey = null;
     let position = null;
+    let again = null;  // the refused request a 503 may send again, under its own id
     let unsubscribe = () => {};
     const view = () => state.view;
 
-    async function run(action, route = null) {
+    async function run(action, route = null, requestId = globalThis.crypto?.randomUUID?.() || `card-model-${Date.now()}-${++serial}`) {
         if (busy || closed) return;
         busy = true;
+        again = null;
+        refusal.hidden = true;
         popup.setAttribute('aria-busy', 'true');
         const before = view();
         try {
-            const reply = await deps.act(before.target, globalThis.crypto?.randomUUID?.() || `card-model-${Date.now()}-${serial}`,
+            const reply = await deps.act(before.target, requestId,
                 { action, ...(route ? { model: route.model, use_local: route.use_local } : {}) });
             const kept = before.said.said.short;
             deps.toast(action === 'wait' ? fmt('Waits for {model}: no paid calls until it answers.', { model: before.said.leftName || kept })
@@ -272,7 +324,15 @@ export function openCardModel(record) {
             void store.readRecents();  // the server wrote this act into the recent models
             close({ focus: true });
         } catch (error) {
-            deps.toast(fmt('The model was not changed: {reason}', { reason: error?.message || String(error) }), 'error');
+            const said = refusalWords(error);
+            if (closed) deps.toast(said.words, 'error');  // its popover went while the answer was on its way
+            else {
+                again = said.retry ? { action, route, requestId } : null;
+                write(refusalText, said.words);
+                retry.hidden = !again;
+                refusal.hidden = false;
+                position?.reposition();
+            }
         } finally {
             busy = false;
             if (!closed) popup.removeAttribute('aria-busy');
@@ -294,13 +354,12 @@ export function openCardModel(record) {
                 : said.name, said.cause].filter(Boolean).join(' · ')
             : [tr('model.popover.title', 'Model for this work'), basisWords(said.basis)].filter(Boolean).join(' · '));
         const mainName = now.main ? shortName(now.main) : '';
+        // A fallback's three exits; any other work is moved from the list alone (its Main row follows Main).
         const offered = said.fallback ? [
             ['return', fmt('Return to {model}', { model: said.leftName || mainName }),
                 said.leftMain && mainName ? fmt('{model} · at the next step', { model: mainName }) : tr('model.act.return.sub', 'at the next step')],
             ['wait', fmt('Wait for {model}', { model: said.leftName || mainName }), tr('model.act.wait.sub', 'no paid calls until it answers')],
             ['keep', fmt('Keep on {model}', { model: said.said.short }), tr('model.act.keep.sub', 'your choice from now on')],
-        ] : said.basis !== 'main' ? [
-            ['follow', tr('model.act.follow', 'Follow Main'), now.main ? `${describeRoute(store.index(), now.main).sourceLabel} · ${mainName}` : ''],
         ] : [];
         const key = JSON.stringify(offered);
         if (key === actsKey) return;
@@ -320,6 +379,9 @@ export function openCardModel(record) {
         // The row that is this work's now: Main's while it follows Main, else its own.
         current: () => (view().said.basis === 'main' ? view().main : view().said.said.route),
         recents: () => store.recents().filter((route) => !sameRoute(route, view().main)).slice(0, RECENT_ROWS),
+        // The Main row is the way to follow Main: its facts say what a press does, or that the work already does.
+        mainFacts: () => (view().said.basis === 'main' && !view().lead.pending
+            ? tr('model.row.follows_main', 'this work follows Main') : tr('model.row.will_follow_main', 'this work will follow Main')),
         rule: APPLIED_WORDS[view().queued ? 'at_start' : 'next_step'],
         onRoute: pick,
         onLeave: ({ focus }) => { if (focus) close({ focus: true }); },
@@ -330,6 +392,7 @@ export function openCardModel(record) {
         const made = event.target?.closest?.('.card-model-act');
         if (made) run(made.dataset.act);
     };
+    const onRetry = () => { if (again) run(again.action, again.route, again.requestId); };
     const onKey = (event) => {
         if (event.key !== 'Escape' || event.defaultPrevented) return;
         event.preventDefault?.();
@@ -355,6 +418,7 @@ export function openCardModel(record) {
         popup.removeEventListener('keydown', onKey);
         popup.removeEventListener('focusout', onFocusOut);
         acts.removeEventListener('click', onActs);
+        retry.removeEventListener('click', onRetry);
         unsubscribe();
         position?.destroy();
         rows.destroy();
@@ -385,6 +449,7 @@ export function openCardModel(record) {
     popup.addEventListener('keydown', onKey);
     popup.addEventListener('focusout', onFocusOut);
     acts.addEventListener('click', onActs);
+    retry.addEventListener('click', onRetry);
     state.fact.setAttribute('aria-expanded', 'true');
     openPopover = handle;
     // A finger's press shows the acts and the list; the keyboard waits for a press on the field itself.
