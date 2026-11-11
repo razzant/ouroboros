@@ -130,13 +130,21 @@ def vendor_programs_line(root=None):
     """Local file read only: no gateway imports, subprocess, network, clock or wake."""
     saved = _read(_root(root))
     if not saved:
-        return "Vendor programs: not observed."
-    parts = []
+        return "Harness programs: not observed."
+    parts, absent = [], []
     for name, row in sorted(saved["programs"].items()):
-        installed = (row.get("version") or "version unknown") if row.get("path") else "not installed"
-        newest = f"; newest {row['newestVersion']}" if row.get("newestVersion") else ""
-        parts.append(f"{name} {installed} ({row.get('updateAvailable', 'cannot_tell')}{newest})")
-    return f"Vendor programs (facts unchanged since {saved.get('factsSince', 'date unknown')}): " + ("; ".join(parts) or "none listed") + "."
+        if not row.get("path"):
+            absent.append(name)
+            continue
+        installed = row.get("version") or "version unknown"
+        newest, verdict = row.get("newestVersion"), row.get("updateAvailable")
+        fact = (f"{newest} available" if verdict == "yes" and newest else
+                "up to date" if verdict == "no" else
+                f"newest {newest}, order unknown" if newest else "newest not read")
+        parts.append(f"{name} {installed} ({fact})")
+    if absent:
+        parts.append("not installed: " + ", ".join(absent))
+    return f"Harness programs (facts unchanged since {saved.get('factsSince', 'date unknown')}): " + ("; ".join(parts) or "none listed") + "."
 
 
 def _fingerprint(value):

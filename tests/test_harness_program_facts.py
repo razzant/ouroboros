@@ -29,14 +29,14 @@ def test_nothing_read_or_unreadable_is_explicitly_unobserved(tmp_path, content):
         path = tmp_path / facts.OBSERVATION_FILE
         path.parent.mkdir()
         path.write_text(content, encoding="utf-8")
-    assert facts.vendor_programs_line(tmp_path) == "Vendor programs: not observed."
+    assert facts.vendor_programs_line(tmp_path) == "Harness programs: not observed."
 
 
 def test_unchanged_facts_keep_their_date_across_reads_and_only_current_facts_are_saved(tmp_path):
     first = inventory()
     facts.record_inventory(first, root=tmp_path)
     line = facts.vendor_programs_line(tmp_path)
-    assert line == "Vendor programs (facts unchanged since 2026-11-10): future-program 2.1.319 (yes; newest 2.1.321)."
+    assert line == "Harness programs (facts unchanged since 2026-11-10): future-program 2.1.319 (2.1.321 available)."
     later = inventory("2026-12-12")
     facts.record_inventory(later, root=tmp_path)
     assert facts.vendor_programs_line(tmp_path) == line
@@ -45,7 +45,7 @@ def test_unchanged_facts_keep_their_date_across_reads_and_only_current_facts_are
     assert state["programs"]["future-program"]["newestObservedAt"] == "2026-11-10T11:00:00Z"
     assert "private-receipt" not in json.dumps(state) and "before" not in json.dumps(state)
     facts.record_inventory(inventory("2026-12-13", version="2.1.321", verdict="no"), root=tmp_path)
-    assert facts.vendor_programs_line(tmp_path) == "Vendor programs (facts unchanged since 2026-12-13): future-program 2.1.321 (no; newest 2.1.321)."
+    assert facts.vendor_programs_line(tmp_path) == "Harness programs (facts unchanged since 2026-12-13): future-program 2.1.321 (up to date)."
 
 
 def test_absent_unknown_and_empty_inventories_are_distinct_and_sorted(tmp_path):
@@ -53,7 +53,7 @@ def test_absent_unknown_and_empty_inventories_are_distinct_and_sorted(tmp_path):
     data["harnesses"][0]["newest"] = {"status": "unavailable", "observedAt": data["observedAt"]}
     data["harnesses"].append({"harness": "absent", "selection": None, "updateAvailable": "cannot_tell"})
     facts.record_inventory(data, root=tmp_path)
-    assert facts.vendor_programs_line(tmp_path).endswith("absent not installed (cannot_tell); future-program version unknown (cannot_tell).")
+    assert facts.vendor_programs_line(tmp_path).endswith("future-program version unknown (newest not read); not installed: absent.")
     facts.record_inventory({"observedAt": "2026-11-11T00:00:00Z", "harnesses": []}, root=tmp_path)
     assert facts.vendor_programs_line(tmp_path).endswith("none listed.")
 
@@ -273,3 +273,24 @@ def test_failed_ready_observation_does_not_mark_generation_observed(monkeypatch,
         facts.engine_ready(SimpleNamespace(_endpoint="existing-endpoint"))
         assert facts._read(tmp_path) == {} and not facts._pending
     assert len(attempts) == 2, "another event can retry; failure is not an observation"
+
+
+@pytest.mark.parametrize(("verdict", "newest", "phrase"), [
+    ("yes", "2.1.321", "2.1.321 available"),
+    ("no", "2.1.321", "up to date"),
+    ("cannot_tell", "build-nightly", "newest build-nightly, order unknown"),
+    ("cannot_tell", None, "newest not read"),
+])
+def test_line_names_the_fact_and_groups_absent_programs_once(tmp_path, verdict, newest, phrase):
+    data = inventory(verdict=verdict, newest=newest)
+    data["harnesses"] += [{"harness": name, "selection": None, "updateAvailable": "cannot_tell",
+                          "newest": {"status": "available", "version": "123"}}
+                         for name in ("z-absent", "a-absent")]
+    facts.record_inventory(data, root=tmp_path)
+    line = facts.vendor_programs_line(tmp_path)
+    assert line == ("Harness programs (facts unchanged since 2026-11-10): "
+                    f"future-program 2.1.319 ({phrase}); not installed: a-absent, z-absent.")
+    assert "\n" not in line and "cannot_tell" not in line and "123" not in line
+    data["observedAt"] = "2026-12-12T00:00:00Z"
+    facts.record_inventory(data, root=tmp_path)
+    assert facts.vendor_programs_line(tmp_path) == line

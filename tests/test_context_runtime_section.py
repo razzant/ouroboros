@@ -896,7 +896,7 @@ class TestVitalsFact:
             line = data["vitals"]["vendor_programs"]
             assert line in vitals_line(data["vitals"])
             lines.append(line)
-        assert lines[0] == lines[1] == "Vendor programs (facts unchanged since 2026-11-10): future-program 2.1.319 (yes; newest 2.1.321)."
+        assert lines[0] == lines[1] == "Harness programs (facts unchanged since 2026-11-10): future-program 2.1.319 (2.1.321 available)."
         assert not called
 
     def test_absent_sources_omit_their_keys_and_a_pooled_worker_reads_the_journals_receipts(self, tmp_path, monkeypatch):
@@ -905,7 +905,7 @@ class TestVitalsFact:
         vitals = data["vitals"]
         assert set(vitals) <= {"owner_turns_note", "runtime", "wal_gate", "note", "engine_pool", "vendor_programs"}
         assert {"owner_turns_note", "runtime", "note", "engine_pool", "vendor_programs"} <= set(vitals)
-        assert vitals["vendor_programs"] == "Vendor programs: not observed."
+        assert vitals["vendor_programs"] == "Harness programs: not observed."
         assert "engine" in vitals["engine_pool"]  # the one key that stays: it names the sources it could not read
         assert vitals["owner_turns_note"] == "none since this process started"
         monkeypatch.setenv("OUROBOROS_IN_WORKER", "1")  # a deep self-review's pooled worker: no ring of its own
