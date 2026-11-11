@@ -662,7 +662,7 @@ def test_old_engine_cannot_receive_any_vendor_contract_request(client, monkeypat
     elif surface == "background":
         facts.engine_ready(gateway)
     else:
-        with pytest.raises(ClaudexorUnavailable, match="Program inspection unavailable"):
+        with pytest.raises(ClaudexorUnavailable, match="Update the app or connect an engine"):
             service.install_for_connect("agy") if surface == "connect" else service.inspect_harnesses()
     assert seen == []
 

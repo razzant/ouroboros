@@ -57,7 +57,7 @@ class ClaudexorMaintenanceGateway:
 
         if not supports_program_maintenance(self):
             raise ClaudexorUnavailable("maintenance_unavailable",
-                                      "Program inspection unavailable. Update the app or connect an engine "
+                                      "Update the app or connect an engine "
                                       "at version 6.0.0 or newer to install or update harness programs.", status_code=503)
         if not any(row.get("id") == operation for row in self.operations(**({"timeout_sec": timeout_sec} if timeout_sec is not None else {}))):
             raise ClaudexorUnavailable("maintenance_unavailable",

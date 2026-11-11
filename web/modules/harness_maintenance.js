@@ -312,7 +312,7 @@ export function createHarnessMaintenanceController({
                 // A transport failure is said in owner words (a TypeError with no response: errorWords); an engine's own
                 // sentence stays on the row (an unclassified failure keeps its exact sentence).
                 const reason = error instanceof TypeError && error.response === undefined ? errorWords(error).text : error.message || error;
-                state.inspectionError = String(reason).startsWith('Program inspection unavailable') ? String(reason) : `Program inspection unavailable: ${reason}`;
+                state.inspectionError = `Program inspection unavailable: ${reason}`;
                 state.inspectionNeedsFresh = current;
                 state.inspectionProblem = missing;
                 if (inspectionProblem() !== before) onInspectionProblem();

@@ -127,17 +127,22 @@ def test_maintenance_lost_reply_cancel_and_drafts(subscription_ui, width, accoun
     assert not any("/login" in path or path == "/api/settings" for path, _ in ui["posts"])
 
 
-def test_old_engine_explains_missing_capability(subscription_ui):
+@pytest.mark.parametrize("reason", [
+    "Update the app or connect an engine at version 6.0.0 or newer to install or update harness programs.",
+    "This engine does not support program maintenance.",
+])
+def test_old_engine_explains_missing_capability(subscription_ui, reason):
     from playwright.sync_api import expect
 
     ui, page = subscription_ui, subscription_ui["page"]
     page.route("**/api/claudexor/maintenance/**", lambda route: route.fulfill(status=503, json={
-        "error": {"code": "capability_unavailable", "message": "This engine does not support program maintenance."},
+        "error": {"code": "maintenance_unavailable", "message": reason},
     }))
     page.goto(ui["url"] + "/#settings")
     page.locator('[data-settings-tab="providers"]').click()
     family = page.locator('.agent-family-card[data-family="codex"]')
-    expect(family).to_contain_text("This engine does not support program maintenance")
+    expect(family).to_contain_text(f"Program inspection unavailable: {reason}")
+    assert family.inner_text().count("Program inspection unavailable") == 1
     family.get_by_role('button', name='Details', exact=True).click()
     expect(family.get_by_role('button', name='Check latest', exact=True)).to_be_enabled()
     assert family.locator('[data-maintenance-action="latest"]').count() == 0

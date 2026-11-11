@@ -126,6 +126,7 @@ def test_old_engine_refuses_all_contract_requests_even_when_routes_exist(client,
     assert caught.value.code == "maintenance_unavailable"
     assert caught.value.status_code == 503
     assert "Update the app" in str(caught.value)
+    assert "Program inspection unavailable" not in str(caught.value), "the row owns its inspection label"
     assert seen == []
 
 
