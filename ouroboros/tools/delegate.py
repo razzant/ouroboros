@@ -1320,7 +1320,7 @@ def get_tools() -> List[ToolEntry]:
                 "deadline or the one-shot checkpoint wakes you, and this wait's result is then owed to your next "
                 "model request: it arrives there as a host notice, with no further call. Each wake is delivered "
                 "once and counts as shown only when shown whole. There is no wait window: a wait_sec an old "
-                "transcript passes is accepted and sizes nothing. Without a continuation owner it waits in-process on the same sources. Context-only place arrivals stay unread until a genuine wake. "
+                "transcript passes is accepted and sizes nothing. Without a continuation owner it waits in-process on the same sources. To keep your process on a wait you expect to be short, call await_messages(mode=\"warm\", runs=[...]) first. Context-only place arrivals stay unread until a genuine wake. "
                 "A host-confirmed retry successor may retrieve a predecessor's proven terminal result; live control stays with its starter. "
                 "Usable terminal output returns before pending host capture/accounting; "
                 "rereading it is immediate, not a wait for that preparation. A wake's leaf_live_input is the "
