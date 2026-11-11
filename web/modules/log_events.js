@@ -1,6 +1,7 @@
 import { accountedUpperBound, accountedUpperBoundWithChildren, formatUsd4, isoMicros, plainCauseText, projectMarkdownLines, savedTerminalRowNote } from './utils.js';
 import { cancelCauseClauses, ownerStopEnding } from './cancel_presentation.js';
-import { TASK_CAUSE_PHRASES, UNSTARTED_REASONS, taskReasonPhrase, describedCause, reasonCodesNote, residualToolErrorsPhrase } from './task_reason_words.js';
+import { TASK_CAUSE_PHRASES, UNSTARTED_REASONS, taskReasonPhrase, describedCause, reasonCodesNote, residualToolErrorsPhrase,
+    failedStepHeadline, heldCallPhrase } from './task_reason_words.js';
 export { taskReasonPhrase, reasonCodesNote } from './task_reason_words.js';
 import { taskCheckpointLabel, taskCheckpointIdentity, checkpointHasProgressRow, waitEpisode } from './task_checkpoints.js';
 export { taskCheckpointLabel } from './task_checkpoints.js';
@@ -573,7 +574,8 @@ export function taskReasonDetail(evt, codes = []) {
     const warnings = [...(Array.isArray(objective?.warnings) ? objective.warnings : []), objective?.warning || ''];
     const named = residualToolErrorsPhrase(execution);  // the failure the record holds, in owner words
     const warningClauses = warnings.filter(w => !excluded.includes(w))
-        .map(w => (w === 'residual_tool_errors_without_review' && named) || taskReasonPhrase(w)).concat(residualToolErrorsPhrase(execution, true));
+        .map(w => (w === 'residual_tool_errors_without_review' && named) || taskReasonPhrase(w))
+        .concat(residualToolErrorsPhrase(execution, true));  // a call Safety held, named on Done (never a warning)
     const artifacts = record.artifact_bundle?.status || record.artifact_status || record.outcome_axes?.artifacts?.status;
     if (['failed', 'missing'].includes(artifacts)) warningClauses.push(taskReasonPhrase('artifacts_unavailable'));
     if (decision?.open_obligations?.length) warningClauses.push(taskReasonPhrase('open_obligations'));
@@ -865,11 +867,12 @@ export function summarizeLogEvent(evt) {
         // failure facts as the live tool_call_finished frame — is_error plus the
         // signal/exit facts — so a failed call reads the same after a reload.
         const signalDeath = Boolean(evt.signal) || (typeof evt.exit_code === 'number' && evt.exit_code < 0);
-        const failed = Boolean(evt.is_error) || signalDeath;
+        const held = heldCallPhrase(evt.tool, evt.status);  // returned by Safety, or unread by it: no failure
+        const failed = !held && (Boolean(evt.is_error) || signalDeath);
         const finished = t === 'tool_call_finished';
         const label = signalDeath ? `killed (${evt.signal || evt.exit_code})`
             : failed ? 'failed' : finished ? 'finished' : 'result';
-        return view(failed ? 'error' : finished ? 'done' : 'result', `${evt.tool || 'tool'} ${label}`, {
+        return view(held ? 'warn' : failed ? 'error' : finished ? 'done' : 'result', held || `${evt.tool || 'tool'} ${label}`, {
             body: shortText(evt.result_preview || (finished ? '' : compactJson(evt.args, 220)), 260),
             meta: taskMeta(formatLogDuration(evt.duration_sec)),
         });
@@ -1484,7 +1487,7 @@ function summarizeChatLiveEventView(evt) {
         });
     }
     if (['tool_call_finished', 'tool_call'].includes(t) && evt.is_error) {
-        const failed = toolObservation(evt, groupId, 'error');
+        const held = heldCallPhrase(evt.tool, evt.status);  // returned by Safety, or unread by it: no failure
         const commandText = describeText(extractCommandText(evt.args), 120);
         const errorResult = describeText(evt.result_preview || evt.error, 220);
         const bodyParts = [];
@@ -1493,18 +1496,14 @@ function summarizeChatLiveEventView(evt) {
         if (errorResult.preview) bodyParts.push(errorResult.preview);
         if (commandText.full) fullBodyParts.push(`Command: ${commandText.full}`);
         if (errorResult.full) fullBodyParts.push(errorResult.full);
-        const commandFailed = evt.status === 'non_zero_exit';
-        const exitCode = commandFailed ? Number(evt.exit_code) : NaN;
         return chatView({
-            phase: commandFailed ? 'warn' : 'error',
-            headline: commandFailed
-                ? `A command returned ${Number.isFinite(exitCode) ? `exit code ${exitCode}` : 'a non-zero exit code'}`
-                : `One of the steps failed${evt.tool ? ` · ${evt.tool}` : ''}`,
+            phase: held || evt.status === 'non_zero_exit' ? 'warn' : 'error',
+            headline: failedStepHeadline(evt),
             body: shortText(bodyParts.join(' '), 220),
             fullBody: fullBodyParts.join('\n\n'),
             visible: true,
             dedupeKey: toolCallKey(evt, groupId),
-            toolCall: failed,
+            toolCall: toolObservation(evt, groupId, held ? 'held' : 'error'),
         });
     }
 

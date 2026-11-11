@@ -192,7 +192,9 @@ test('summary is authored, note is whole and disclosed, only flagged checks get 
 test('a warning chip says what the Safety Supervisor did; a raw tool id waits in the row\'s Details', () => {
     assert.equal(wakeCheckChip({ chip: 'warned', tool: 'ext_8_r_github_github_place_message' }), 'Safety Supervisor warned about a step');
     assert.equal(wakeCheckChip({ chip: 'held', tool: 'run_command' }), 'Safety Supervisor held a step');
-    assert.equal(wakeCheckChip({ chip: 'sent_despite', tool: 'slack_send' }), 'A step was sent despite the check');
+    assert.equal(wakeCheckChip({ chip: 'sent_despite', tool: 'slack_send' }), 'A step was let through despite the check');
+    assert.equal(wakeCheckChip({ chip: 'sent_despite', tool: 'run_command' }), 'A step was let through despite the check');
+    assert.equal(wakeCheckChip({ chip: 'sent_despite', tool: 'place_reply' }), 'The reply sent despite the check');
     assert.equal(wakeCheckChip({ chip: 'warned', tool: 'place_reply' }), 'Safety Supervisor warned about the reply', 'a tool it names in words stays');
     const row = wakeRowHtml({ ...wake('w-summary'), checks: [{ chip: 'warned', tool: 'ext_8_r_github_github_place_message' }] });
     const [main, details] = [row.split('<details')[0], row.slice(row.indexOf('<details'))];
@@ -624,7 +626,8 @@ test('Safety chips name what they checked in sentence case, keeping raw tool ids
     assert.equal(wakeCheckText({ chip: 'warned', tool: 'place_reply' }), 'Safety Supervisor warned about the reply');
     assert.equal(wakeCheckText({ chip: 'sent_despite', tool: 'place_reply' }), 'The reply sent despite the check');
     assert.equal(wakeCheckText({ chip: 'held', tool: 'send_user_message' }), 'Safety Supervisor held the message');
-    assert.equal(wakeCheckText({ chip: 'sent_despite', tool: 'slack_send' }), 'slack_send sent despite the check');
+    assert.equal(wakeCheckText({ chip: 'sent_despite', tool: 'slack_send' }), 'slack_send let through despite the check');
+    assert.equal(wakeCheckText({ chip: 'sent_despite', tool: 'run_command' }), 'run_command let through despite the check');
     assert.equal(wakeCheckText({ chip: 'not_checked', tool: 'update_memory' }), 'Not checked (update_memory)');
     assert.equal(wakeCheckText({ chip: 'not_checked', tool: '' }), 'Not checked');
     assert.equal(wakeCheckText({ chip: 'unknown', tool: 'x' }), '');

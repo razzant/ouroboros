@@ -114,8 +114,9 @@ def test_only_a_loud_leftover_warns_without_review(call, loud, flag):
 ])
 def test_a_call_safety_held_is_no_failure_and_stays_named_on_done(call, clause):
     """A call Safety returned or could not read counts as no tool failure and alone never makes a task Done with
-    warnings; while nothing replaced it, the Done card names it as held. A later call through its tool replaces it,
-    and an old record's ``safety_violation`` stays a loud failure."""
+    warnings; while its identical call (same tool and target) has not got past Safety, the Done card names it as
+    held. That call replaces it whatever it then did, a failure being named as itself; another call through the tool
+    leaves it named, and an old record's ``safety_violation`` stays a loud failure."""
     from ouroboros.outcomes import build_verification_ledger
     from ouroboros.project_dialogue import _completion_verdict, outcome_phase
 
@@ -133,6 +134,20 @@ def test_a_call_safety_held_is_no_failure_and_stays_named_on_done(call, clause):
     assert card([held, {"tool": call["tool"], "status": "ok"}])[:3] == ("done", "", False)
     phase, line, failed, _ = card([{**held, "status": "safety_violation"}])
     assert phase == "warn" and "returned" not in line and failed
+    push = {"tool": "run_command", "args": {"cmd": ["git", "push", "origin", "main"]}}
+    command = {**push, "status": call["status"], "is_error": True}
+    named = card([command])[1]
+
+    def left(outcome):
+        execution = outcome["outcome_axes"]["execution"]
+        return [e["status"] for e in execution["unresolved_tool_errors"] + execution["cosmetic_tool_errors"]]
+    assert card([command, {**push, "status": "ok"}])[:2] == ("done", "")  # its identical call got past Safety
+    assert left(card([command, dict(command)])[3]) == [call["status"]] * 2  # held again: neither got past it
+    for failure, said in (("non_zero_exit", ""), ("error", "A command failed.")):  # and failed: it ran
+        phase, line, failed, outcome = card([command, {**push, "status": failure, "is_error": True}])
+        assert (line, failed, left(outcome)) == (said, True, [failure])
+    other = card([command, {"tool": "run_command", "status": "ok", "args": {"cmd": ["git", "status"]}}])
+    assert other[:3] == ("done", named, False) and "Safety Supervisor" in named  # a different command
 
 
 def test_a_record_written_before_the_flags_stays_loud():

@@ -634,6 +634,52 @@ def test_loop_reads_the_guard_code_not_its_denial_text(
         "tool_result_code": typed.code,
         "tool_result_meta": dict(typed.meta),
     }
+    # Every one took no effect (``is_error``); a call Safety returned or could not read is still no tool error in
+    # what the task counts and stores, where a guard's denial is one.
+    from ouroboros.outcomes import SAFETY_HELD_STATUSES
+    from ouroboros.post_task_synthesis import build_trace_summary, task_tool_metrics
+
+    held = legacy_status in SAFETY_HELD_STATUSES
+    trace = {"tool_calls": [{"tool": "fixture_guard", "args": {}, "is_error": row["is_error"], **row["result_meta"]}]}
+    assert task_tool_metrics(trace)["tool_errors"] == int(not held)
+    head = build_trace_summary(trace).splitlines()[0]
+    assert (head == "## Tool trace (1 calls, 0 errors, 1 held by Safety)") is held, head
+
+
+@pytest.mark.parametrize(("code", "words"), [
+    ("SAFETY_RETURNED", "A command was returned by the Safety Supervisor"),
+    ("SAFETY_UNAVAILABLE", "A command was not run: the Safety Supervisor could not read it"),
+    ("SAFETY_VIOLATION", ""),  # an old record's stop stays a failed step
+    ("TOOL_ERROR", ""),
+])
+def test_a_call_safety_held_is_never_shown_as_a_failed_step(code, words):
+    """The live and replayed step row of a call Safety returned or could not read says what happened to it, outside
+    the error phase, and settles as held, so the block counts no error; a real failure stays a failed step."""
+    import pathlib
+    import subprocess
+
+    from ouroboros.loop_tool_execution import _typed_execution_failure, _typed_result_metadata
+    from ouroboros.preflight_node import resolve_node
+
+    result = ToolResult(status=TOOL_CODE_SPECS[code].status, code=code, text="Call did not run")
+    error = _typed_execution_failure(True, result)
+    event = {"type": "tool_call_finished", "tool": "run_command", "is_error": error,
+             **_typed_result_metadata("run_command", result.text, error, result)}
+    node = resolve_node()
+    assert node, "the owner-facing step rows are the browser's: this proof needs Node"
+    module = (pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "log_events.js").as_uri()
+    script = ("import { summarizeLogEvent, summarizeChatLiveEvent } from " + json.dumps(module) + ";"
+              "const e = JSON.parse(process.argv[1]);"
+              "console.log(JSON.stringify([summarizeLogEvent(e), summarizeChatLiveEvent(e)]));")
+    views = json.loads(subprocess.run([node, "--input-type=module", "-e", script, json.dumps(event)],
+                                      check=True, capture_output=True, text=True, timeout=60).stdout)
+    assert error  # none of them took effect
+    if words:
+        assert [(view["phase"], view["headline"]) for view in views] == [("warn", words)] * 2
+        assert views[1]["toolCall"]["status"] == "held"
+    else:
+        assert [view["phase"] for view in views] == ["error", "error"]
+        assert all("failed" in view["headline"] for view in views) and views[1]["toolCall"]["status"] == "error"
 
 
 def test_loop_dispatches_typed_result_once_and_reads_the_published_code(

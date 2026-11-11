@@ -16,6 +16,7 @@ import json
 import pathlib
 from typing import Any, Dict, List
 
+SAFETY_HELD_STATUSES = frozenset({"safety_returned", "safety_unavailable"})  # a call Safety returned or could not read
 _BLOCKING_TOOL_STATUSES = frozenset({
     # T1: the statuses below the blank line were produced but partitioned nowhere,
     # so a call could be an honest error while every bucket of the honest breakdown
@@ -38,8 +39,6 @@ _BLOCKING_TOOL_STATUSES = frozenset({
     "resource_constraint_blocked",
     "resource_policy_blocked",
     "run_script_blocked",
-    "safety_returned",
-    "safety_unavailable",
     "safety_violation",
     "shell_error",
     "skill_payload_blocked",
@@ -79,7 +78,7 @@ _BLOCKING_TOOL_STATUSES = frozenset({
     "resource_blocked",
     "root_required",
     "safety_error",
-})
+}) | SAFETY_HELD_STATUSES
 # Buckets deliberately left OUT of every partition, each with its reason. The
 # totality assertion in tests/test_tool_classification_differential.py fails if a
 # new code acquires a bucket that appears in neither a partition nor this set, so
@@ -298,9 +297,9 @@ def _tool_error_record(item: Dict[str, Any], *, recovered_by: int | None = None)
 # stopped, a tool of unknown kind that ran and failed (MCP and extension tools included), a declared output that never
 # registered — and a command killed by a signal
 # (D7: a kernel, OOM or external kill is the install acting; the 43-SIGKILL incident once hid as "cosmetic"; only a
-# directly spawned POSIX process reports one). A call Safety returned or could not read that no later call through
-# its tool replaced is no error: the card names it on Done, never as a warning (``tool_error_words``).
-SAFETY_HELD_STATUSES = frozenset({"safety_returned", "safety_unavailable"})
+# directly spawned POSIX process reports one). A call Safety returned or could not read whose identical call (same
+# tool and target signature) never got past Safety is no error: the card names it on Done, never as a warning
+# (``tool_error_words``).
 _UNEXECUTED_STATUSES = frozenset({"argument_error", "unknown_tool"})
 _DETAILS_ONLY_COMMAND_STATUSES = frozenset({"non_zero_exit", "shell_error", "timeout"})
 
@@ -393,12 +392,12 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
         args = item.get("args") if isinstance(item.get("args"), dict) else {}
         target_key, target_paths = _call_target_signature(args)
         recovered_by: int | None = None
+        held = status in SAFETY_HELD_STATUSES  # its identical call got past Safety, whatever that call then did
         for later_idx, later in enumerate(calls[idx + 1:], start=idx + 2):
-            if later.get("is_error"):
-                continue
             later_tool = str(later.get("tool") or "")
             later_status = str(later.get("status") or "ok")
-            if later_status not in _OK_TOOL_STATUSES:
+            if (later_status in SAFETY_HELD_STATUSES if held
+                    else later.get("is_error") or later_status not in _OK_TOOL_STATUSES):
                 continue
             later_args = later.get("args") if isinstance(later.get("args"), dict) else {}
             later_key, later_paths = _call_target_signature(later_args)
@@ -411,8 +410,8 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
             artifact_registered = bool(later.get("artifact_registered"))
             if status in ("artifact_output_error", "artifact_output_undeclared"):
                 recovered = artifact_registered and (same_path or not target_paths)
-            elif status in ("safety_returned", "safety_unavailable"):  # changed or released: the tool's next call ran
-                recovered = later_tool == tool
+            elif held:
+                recovered = same_target
             else:
                 recovered = same_target or (artifact_registered and same_path)
             if recovered:

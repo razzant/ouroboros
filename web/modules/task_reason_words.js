@@ -151,6 +151,26 @@ const TOOL_NOUNS = {
     skill_exec: 'A skill run',
 };
 const LISTED = 20;  // outcomes keeps at most this many errors per list
+const HELD_STATUSES = ['safety_returned', 'safety_unavailable'];  // twin: _outcome_tool_errors.SAFETY_HELD_STATUSES
+const toolNoun = (tool) => tr(`task.tool_noun.${Object.hasOwn(TOOL_NOUNS, tool) ? tool : 'other'}`, TOOL_NOUNS[tool] || 'A tool step');
+
+/** What happened to a call Safety returned or could not read, in the words of its step row and its Done card alike,
+ *  or '' for any other status (twin: tool_error_words.residual_tool_errors_phrase). */
+export function heldCallPhrase(tool, status) {
+    if (!HELD_STATUSES.includes(status)) return '';
+    const noun = toolNoun(tool);
+    return status === 'safety_returned' ? fmt('{noun} was returned by the Safety Supervisor', { noun })
+        : fmt('{noun} was not run: the Safety Supervisor could not read it', { noun });
+}
+
+/** The headline of a finished step that did not succeed: held by Safety (never "failed"), a command's exit, or a
+ *  failed step. */
+export function failedStepHeadline(evt = {}) {
+    const exitCode = Number(evt.exit_code);
+    return heldCallPhrase(evt.tool, evt.status) || (evt.status === 'non_zero_exit'
+        ? `A command returned ${Number.isFinite(exitCode) ? `exit code ${exitCode}` : 'a non-zero exit code'}`
+        : `One of the steps failed${evt.tool ? ` · ${evt.tool}` : ''}`);
+}
 
 /** The residual-warning clause naming the first recorded LOUD tool error in plain words (never a tool name, its
  *  result text or a path), or '' when the record names none. A failed read (`read_only`, owner 06.11 A) and a
@@ -161,10 +181,10 @@ export function residualToolErrorsPhrase(execution = {}, held = false) {
     const list = (key) => (Array.isArray(execution?.[key]) ? execution[key].filter((item) => item && typeof item === 'object') : []);
     const listed = [list('unresolved_tool_errors'), list('cosmetic_tool_errors')];
     const [unresolved, cosmetic] = listed.map((errors) => errors.filter((item) => !(item.read_only || item.details_only)
-        && ['safety_returned', 'safety_unavailable'].includes(item.status) === held));
+        && HELD_STATUSES.includes(item.status) === held));
     const first = (unresolved.length ? unresolved : cosmetic)[0];
     if (!first) return '';
-    const noun = tr(`task.tool_noun.${Object.hasOwn(TOOL_NOUNS, first.tool) ? first.tool : 'other'}`, TOOL_NOUNS[first.tool] || 'A tool step');
+    const noun = toolNoun(first.tool);
     const status = String(first.status || ''), code = Number.isInteger(first.exit_code) ? first.exit_code : null;
     const signal = first.signal ?? '';
     const subject = status === 'unknown_tool' ? tr('task.tool_error.unknown_tool', 'A call named a tool that does not exist')
@@ -173,10 +193,7 @@ export function residualToolErrorsPhrase(execution = {}, held = false) {
                 : fmt('{noun} returned a non-zero exit code', { noun }))
                 : status.endsWith('timeout') ? fmt('{noun} timed out', { noun })
                     : status === 'argument_error' ? fmt('{noun} was called with invalid arguments', { noun })
-                        : status === 'safety_returned' ? fmt('{noun} was returned by the Safety Supervisor', { noun })
-                            : status === 'safety_unavailable'
-                                ? fmt('{noun} was not run: the Safety Supervisor could not read it', { noun })
-                                : fmt('{noun} failed', { noun });
+                        : heldCallPhrase(first.tool, status) || fmt('{noun} failed', { noun });
     const more = unresolved.length + cosmetic.length - 1;
     // "More" only when a capped list is loud through and through; otherwise the retained loud errors are counted exactly.
     const capped = (listed[0].length >= LISTED && unresolved.length === listed[0].length)
