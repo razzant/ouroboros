@@ -13,11 +13,11 @@ import {
 import { modelSourceGroups, sourceChoice, sourceFromChoice } from '../modules/model_roles.js';
 import { adoptConnectionLabels, connectionLabel, routeConnectionId } from '../modules/connection_labels.js';
 import { PROVIDER_CARDS, PROVIDER_SECRET_KEYS, connectionRowHtml } from '../modules/settings_provider_cards.js';
-import { accountsPanel, advancedPanel, appearancePanel, behaviorPanel, modelsPanel, secretSettingsSection } from '../modules/settings_ui.js';
+import { accountsPanel, advancedPanel, modelsPanel, secretSettingsSection } from '../modules/settings_ui.js';
+import { rowById } from '../modules/settings_rows.js';
 
 // The old tabs' sections, unmounted in settings_ui.js until their pages are rebuilt.
-const renderSettingsPage = () => [accountsPanel(), secretSettingsSection(), modelsPanel(), behaviorPanel(), appearancePanel(),
-    advancedPanel()].join('');
+const renderSettingsPage = () => [accountsPanel(), secretSettingsSection(), modelsPanel(), advancedPanel()].join('');
 import {
     cacheHintsNote, connectionNameFor, connectionReferencesText, connectionRowFacts, connectionRows, connectionUsage,
 } from '../modules/settings_connections.js';
@@ -189,9 +189,9 @@ test('Accounts renders one card per provider with its Default row, and an added 
     const secrets = secretSettingsSection();
     for (const key of PROVIDER_SECRET_KEYS) assert.doesNotMatch(secrets, new RegExp(`data-secret-setting="${key}"`), key);
     assert.match(secrets, /data-secret-setting="GITHUB_TOKEN"/);
-    // The network password has one field, beside the bind host it guards (Accounts › Network Gate), not a second one here.
-    assert.doesNotMatch(secrets, /OUROBOROS_NETWORK_PASSWORD/);
-    assert.equal(html.split('data-secret-setting="OUROBOROS_NETWORK_PASSWORD"').length - 1, 1);
+    // The network password has one control, a row beside the choice it guards (This computer), not a field here.
+    assert.doesNotMatch(secrets + html, /OUROBOROS_NETWORK_PASSWORD/);
+    assert.deepEqual([rowById('OUROBOROS_NETWORK_PASSWORD').page, rowById('OUROBOROS_SERVER_HOST').page], ['computer', 'computer']);
 
     const compatible = PROVIDER_CARDS.find((card) => card.kind === 'openai-compatible');
     const row = connectionRowHtml(compatible, { uid: 'compatible-7', name: 'gigaagent', label: 'GigaAgent', enabled: false,

@@ -16,20 +16,17 @@ const ALLOWED_WRITES = {
     'composer_owner_controls.js': 'the composer\'s Context capsule writes Main\'s value through its own owner endpoint',
     'subagents_settings.js': 'the roster\'s checker adapter, which the helper\'s writeEntry calls for every roster write',
 };
-// The same word for another fact: an update's progress, the wizard's completion answer, and the two reads of
+// The same word for another fact: an update's progress, the wizard's completion answer, and the home's read of
 // GET /api/settings `_meta` (a restart that waits, the Access that runs).
 const ALLOWED_READS = {
     'updates.js': 'an update that needs a restart', 'update_status.js': 'an update that needs a restart',
     'onboarding_wizard.js': 'the wizard\'s completion answer', 'onboarding_overlay.js': 'the wizard\'s completion message',
     'onboarding_agents_step.js': 'the wizard\'s preview answer',
     'settings_home.js': '`_meta.restart_state` and `_meta.policy_state` of the read, never a save answer',
-    'settings_policy.js': '`_meta.policy_state.access` of the read',
 };
 // Modules another lane is still converting to rows. Empty on the integrated tree: a name that no longer writes or
 // reads fails below until it is removed.
-const PENDING = {
-    'settings_safety.js': 'pending lane C2 (the page-draft save of the Safety levels, the rules and the checker)',
-};
+const PENDING = {};
 
 const WRITES = /apiClient\.saveSettings\(|\bowner(RuntimeMode|AutoGrant|ContextMode|SafetyMode)\(|\bsave(SafetyLevel|SafetyRules|CheckerSettings)\(|['"`]\/api\/owner\/(runtime-mode|auto-grant|context-mode|safety-mode|safety-rules|safety-model)\b|['"`]\/api\/settings['"`][^\n]*method:\s*['"]POST/;
 const READS = /\b(immediate_changed|next_task_changed|restart_required)\b/;

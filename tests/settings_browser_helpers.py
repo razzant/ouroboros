@@ -109,20 +109,40 @@ def setting_row(page, row_id: str):
     return settings_page(page, top_path(page)).locator(f'[data-setting-row="{row_id}"]')
 
 
+# Watches one row from before the owner's move: a write in flight marks its control busy, and a result line is rewritten
+# only when its words change, so "the line differs from the one before" cannot tell a second save that says the same
+# words from no save at all. Either sign counts: the row was busy, or its result line was touched (an edit clears it).
+_WATCH_ROW = """id => {
+    const row = (node) => (node.nodeType === 1 ? node : node.parentElement)?.closest?.('[data-setting-row]');
+    const line = (node) => (node.nodeType === 1 ? node : node.parentElement)?.closest?.('[data-setting-result]');
+    const seen = { moved: false };
+    const observer = new MutationObserver((records) => {
+        if (records.some((record) => row(record.target)?.dataset.settingRow === id
+            && (record.type === 'attributes' ? record.target.getAttribute('aria-busy') === 'true' : Boolean(line(record.target))))) seen.moved = true;
+    });
+    observer.observe(document.querySelector('#page-settings'),
+        { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['aria-busy'] });
+    window.__ouroRowWatch?.observer.disconnect();
+    window.__ouroRowWatch = { seen, observer };
+}"""
+
+
 def commit_row(page, row_id: str, value=None, *, timeout: float = 10_000) -> str:
     """Commit `value` to a row the way the owner does and return its result line once the write settled.
 
-    A switch is set to ``bool(value)`` (toggled when `value` is None); a select picks `value`; a strip presses its
-    option; a typed field is filled and left, which is its commit (settings_controls.js commits on ``change``)."""
+    A switch is set to ``bool(value)`` (toggled when `value` is None) by a press on its track, as a hand does it (its
+    input lies under the track); a select picks `value`; a strip presses its option; a typed field is filled and left,
+    which is its commit (settings_controls.js commits on ``change``). The write has settled when the row was seen busy
+    (or its line was rewritten) and is busy no more: two saves that say the same words each settle."""
     row = setting_row(page, row_id)
     row.wait_for(state="visible", timeout=timeout)
     result = row.locator("[data-setting-result]")
-    before = result.inner_text()
     kind = row.get_attribute("data-kind") or ""
     control = row.locator("[data-setting-control]").first
+    page.evaluate(_WATCH_ROW, row_id)
     if kind == "switch":
         if value is None or control.is_checked() != bool(value):
-            control.click()
+            control.locator("xpath=..").click()
     elif row.locator(f'[data-setting-value="{value}"]').count():
         row.locator(f'[data-setting-value="{value}"]').click()
     elif kind == "select":
@@ -130,13 +150,14 @@ def commit_row(page, row_id: str, value=None, *, timeout: float = 10_000) -> str
     else:
         control.fill(str(value))
         control.evaluate("element => element.blur()")
-    page.wait_for_function("""([id, before]) => {
+    page.wait_for_function("""id => {
         const rows = [...document.querySelectorAll(`#page-settings [data-setting-row="${CSS.escape(id)}"]`)];
         const row = rows.find((node) => node.getClientRects().length);
         const line = row?.querySelector('[data-setting-result]');
-        return Boolean(line && !row.querySelector('[aria-busy="true"]') && line.textContent.trim()
-            && line.textContent !== before);
-    }""", arg=[row_id, before], timeout=timeout)
+        if (!(line && window.__ouroRowWatch?.seen.moved && !row.querySelector('[aria-busy="true"]') && line.textContent.trim())) return false;
+        window.__ouroRowWatch.observer.disconnect();
+        return true;
+    }""", arg=row_id, timeout=timeout)
     return result.inner_text().strip()
 
 

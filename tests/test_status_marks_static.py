@@ -86,6 +86,7 @@ warning | web/settings.css | .local-toggle[data-warning="1"] | color
 warning | web/settings.css | .mcp-server-status-warn | background, color
 warning | web/settings.css | .resource-message[data-tone="warn"] | background, color
 warning | web/settings.css | .resource-window[data-spent="true"] .resource-fill | background
+warning | web/settings.css | .settings-choice[aria-checked="true"] .settings-choice-mark | background, color
 warning | web/settings.css | .settings-inline-note[data-tone="warn"] | color
 warning | web/onboarding.css | .agent-family-status[data-tone="warn"] | color
 warning | web/onboarding.css | .agent-service-note[data-tone="warn"] | color

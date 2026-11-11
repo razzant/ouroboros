@@ -550,61 +550,56 @@ def test_a_change_made_before_send_lands_before_the_message(direct_server_with_d
             browser.close()
 
 
-def test_behavior_has_no_effort_section_and_ends_with_one_plain_startup_note(direct_server_with_data, tmp_path):  # noqa: F811
+def test_settings_has_no_effort_row_and_this_computer_says_one_plain_startup_note(direct_server_with_data, tmp_path):  # noqa: F811
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import sync_playwright
+
+    from tests.settings_browser_helpers import open_settings
 
     url = direct_server_with_data["url"]
     with sync_playwright() as pw:
         browser, page = _launch(pw, "chromium", viewport={"width": 1440, "height": 900})
         try:
             _open_chat(page, url, width=1440)
-            page.locator('[data-nav-page="settings"]').click()
-            page.wait_for_selector(".settings-shell", timeout=20_000)
-            page.locator('[data-settings-tab="behavior"]').click()
-            panel = page.locator('[data-settings-panel="behavior"]')
-            # The range lives in the composer alone.
-            assert panel.locator("h3", has_text="Reasoning Effort").count() == 0
+            # The range lives in the composer alone: no row of Settings names it, and Permissions and checks draws none.
+            keys = page.evaluate("async () => (await import('/static/modules/settings_rows.js')).ROWS.flatMap((row) => row.keys)")
+            assert keys and not [key for key in keys if key.startswith("OUROBOROS_EFFORT_")], keys
+            level = open_settings(page, "permissions")
+            level.locator('[data-setting-row="OUROBOROS_RUNTIME_MODE"]').wait_for(state="visible")
+            assert level.locator(".settings-card-title", has_text="Reasoning Effort").count() == 0
             assert page.locator("[data-effort-range-summary]").count() == 0
-            assert page.locator('[data-effort-target^="s-effort-"]').count() == 0
-            # This test host is not the packaged desktop app: both switches are off and disabled,
-            # and the one reason is said once, as a note, at the label text's edge.
+            # This test host is not the packaged desktop app: both switches are off and disabled, and the one reason
+            # is said once, as a plain note under the two rows it speaks for.
+            open_settings(page, "computer")
             page.wait_for_selector("[data-autostart-settings]:not([hidden])", timeout=20_000)
             page.wait_for_selector("[data-autostart-shared-note]:not([hidden])", timeout=20_000)
             facts = page.evaluate("""() => {
-                const panel = document.querySelector('[data-settings-panel="behavior"]');
-                const sections = [...panel.querySelectorAll(':scope > .form-section')];
-                const card = panel.querySelector('[data-autostart-settings]');
+                const card = document.querySelector('#page-settings [data-autostart-settings]');
                 const note = card.querySelector('[data-autostart-shared-note]');
-                const label = card.querySelector('[data-autostart-toggle]').closest('label');
-                const text = [...label.childNodes].find((node) => node.nodeType === 3 && node.textContent.trim());
-                const range = document.createRange();
-                range.selectNodeContents(text);
-                const textLeft = range.getBoundingClientRect().left;
-                const noteStyle = getComputedStyle(note);
+                const boxes = [...card.querySelectorAll('input[role="switch"]')];
                 return {
-                    last: sections.at(-1) === card,
+                    first: card.parentElement.querySelector('.settings-card') === card,
+                    rows: [...card.querySelectorAll('[data-setting-row]')].map((row) => row.dataset.settingRow),
                     note: note.textContent,
                     noteTone: note.dataset.tone || '',
                     noteDot: getComputedStyle(note, '::before').content,
-                    noteColor: noteStyle.color,
-                    metaColor: getComputedStyle(card.querySelector('.settings-section-copy')).color,
-                    noteTextLeft: note.getBoundingClientRect().left + parseFloat(noteStyle.paddingLeft),
-                    textLeft,
+                    noteColor: getComputedStyle(note).color,
+                    metaColor: getComputedStyle(card.querySelector('[data-setting-meta]').parentElement).color,
                     rowsHidden: [...card.querySelectorAll('[data-autostart-status], [data-background-status]')].every((el) => el.hidden),
-                    describedBy: [...card.querySelectorAll('input[type="checkbox"]')].map((box) => box.getAttribute('aria-describedby')),
-                    disabled: [...card.querySelectorAll('input[type="checkbox"]')].map((box) => box.disabled),
+                    describedBy: boxes.map((box) => box.getAttribute('aria-describedby')),
+                    disabled: boxes.map((box) => box.disabled),
+                    checked: boxes.map((box) => box.checked),
                 };
             }""")
-            assert facts["last"], "Startup & background is the last card of Behavior"
+            assert facts["first"], "Start and background is the first card of This computer"
+            assert facts["rows"] == ["computer:autostart", "OUROBOROS_DESKTOP_KEEP_RUNNING"], facts
             assert facts["note"] == "Available only when the host runs the packaged desktop app.", facts
             assert facts["noteTone"] == "" and facts["noteDot"] in ("none", "normal", ""), facts
             assert facts["noteColor"] == facts["metaColor"], "a fact in meta ink, not a warning colour"
-            assert abs(facts["noteTextLeft"] - facts["textLeft"]) <= 1, facts
             assert facts["rowsHidden"] and facts["describedBy"] == ["settings-autostart-note"] * 2, facts
-            assert facts["disabled"] == [True, True], facts
+            assert facts["disabled"] == [True, True] and facts["checked"] == [False, False], facts
             page.locator("[data-autostart-settings]").scroll_into_view_if_needed()
-            _shot(page, tmp_path, "settings-behavior-startup-chromium")
+            _shot(page, tmp_path, "settings-computer-startup-chromium")
         finally:
             browser.close()
 
