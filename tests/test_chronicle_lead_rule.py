@@ -38,7 +38,7 @@ def test_only_final_tool_description_proves_delivery(tmp_path, candidate, expect
         candidate=candidate, candidate_facts={})
     ref = result["manifest_ref"]
     assert ref.get("chronicle_lead_rule") == expected
-    assert json.loads(Path(ref["path"]).read_text()).get("chronicle_lead_rule") == expected
+    assert json.loads(Path(ref["path"]).read_text(encoding="utf-8")).get("chronicle_lead_rule") == expected
 
 
 def test_rule_and_revision_change_together_at_the_schema_boundary(monkeypatch):
