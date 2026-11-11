@@ -676,7 +676,7 @@ def test_a_call_safety_held_is_never_shown_as_a_failed_step(code, words):
               "const e = JSON.parse(process.argv[1]);"
               "console.log(JSON.stringify([summarizeLogEvent(e), summarizeChatLiveEvent(e)]));")
     views = json.loads(subprocess.run([node, "--input-type=module", "-e", script, json.dumps(event)],
-                                      check=True, capture_output=True, text=True, timeout=60).stdout)
+                                      check=True, capture_output=True, text=True, encoding="utf-8", timeout=60).stdout)
     assert error  # none of them took effect
     if words:
         assert [(view["phase"], view["headline"]) for view in views] == [("warn", words)] * 2

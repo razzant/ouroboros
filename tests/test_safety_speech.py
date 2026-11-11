@@ -451,11 +451,14 @@ def test_writes_keep_binding_and_effective_mode(supervisor, monkeypatch):
 def test_terminal_clears_only_the_root_retry_authority(supervisor, monkeypatch):
     h = supervisor
     from ouroboros.task_results import write_task_result
-    h.replies.append({"status": "DANGEROUS", "reason": "flag"})
+    h.replies.extend([{"status": "DANGEROUS", "reason": "flag"}] * 2)
     assert not h.module.check_safety("place_reply", {"text": "hi"}, ctx=h.ctx)[0]
+    h.later()
+    h.ctx._owner_directives = [{"source": "owner_mailbox", "content": "Note.", "msg_id": "chat 1 / m-1"}]
+    assert not h.module.check_safety("place_reply", {"text": "hi"}, ctx=h.ctx)[0]  # read anew: the old row is judged
     write_task_result(h.ctx.drive_root, "child", status="completed", root_task_id="work", parent_task_id="work")
-    assert "work" in h.module._PRIOR_VERDICTS
+    assert "work" in h.module._PRIOR_VERDICTS and h.module._JUDGED.get("work")
     write_task_result(h.ctx.drive_root, "work", status="completed", root_task_id="work")
-    assert "work" not in h.module._PRIOR_VERDICTS
+    assert "work" not in h.module._PRIOR_VERDICTS and "work" not in h.module._JUDGED
     assert h.module.check_safety("place_reply", {"text": "hi"}, ctx=h.ctx)[0]
-    assert len(h.calls) == 2
+    assert len(h.calls) == 3

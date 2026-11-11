@@ -95,16 +95,20 @@ def test_the_supervisor_reads_only_the_pending_return_through_the_same_tool(supe
     assert "returned_and_pending" not in _bundle(h)["subject"], "the work's end ends it"
 
 
-def test_root_limit_evicts_retry_authority_without_holding_new_work(supervisor):
+def test_root_limit_evicts_retry_authority_without_holding_new_work(supervisor, monkeypatch):
     h = supervisor
     h.ctx.task_id = "old-flag"
-    h.replies.append({"status": "SUSPICIOUS", "reason": "Flagged"})
+    monkeypatch.setattr(h.module, "_SAFETY_PRIOR_BYTE_BUDGET", 10)  # each work keeps only its newest call
+    h.replies.extend([{"status": "SUSPICIOUS", "reason": "Flagged"}] * 2)
+    assert not h.module.check_safety("place_reply", {"text": "first"}, ctx=h.ctx)[0]
     assert not h.module.check_safety("place_reply", {"text": "same"}, ctx=h.ctx)[0]
+    assert h.module._JUDGED.get("old-flag"), "the first call is no longer kept: judged"
     for n in range(512):
         h.ctx.task_id = f"root-{n}"
         h.replies.append({"status": "SUSPICIOUS", "reason": "Flagged"})
         assert not h.module.check_safety("place_reply", {"text": f"step {n}"}, ctx=h.ctx)[0]
     assert len(h.module._PRIOR_VERDICTS) <= 512 and "old-flag" not in h.module._PRIOR_VERDICTS
+    assert "old-flag" not in h.module._JUDGED, "an evicted work's judged marks leave with it"
     h.ctx.task_id = "root-0"
     h.replies.append({"status": "SUSPICIOUS", "reason": "Flagged"})
     assert not h.module.check_safety("place_reply", {"text": "touch"}, ctx=h.ctx)[0]
