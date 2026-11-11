@@ -6236,8 +6236,9 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .storage-deleted .storage-place:focus { outline: none; }
 .storage-deleted .storage-place:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; border-radius: var(--radius-inner); }
 
-/* Free temporary space: the flow under the free-space reading in the first card. */
-.storage-auto { margin: var(--space-3) 0 0; color: var(--text-secondary); font-size: var(--type-meta); line-height: var(--line-meta); }
+/* Free temporary space: the flow under the free-space reading in the first card. How long finished work is kept ends
+   the card, a row that saves itself. */
+.storage-retention { margin-top: var(--space-3); }
 .storage-tray { display: grid; gap: var(--space-2); margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--divider); }
 .storage-tray:empty { display: none; }
 .storage-tray p { margin: 0; }
@@ -6342,7 +6343,7 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .storage-cleanup-figure.is-quiet .storage-cleanup-amount { font-size:var(--type-section); }
 .storage-cleanup-door { margin-top:var(--space-3); justify-content:flex-start; }
 .storage-cleanup.has-door { display:grid; grid-template-columns:minmax(0,1fr) auto; column-gap:var(--space-4); }
-.storage-cleanup.has-door > :is(.storage-card-title,.storage-auto) { grid-column:1 / -1; }
+.storage-cleanup.has-door > :is(.storage-card-title,.storage-retention) { grid-column:1 / -1; }
 .storage-cleanup.has-door > .storage-cleanup-door { align-self:center; }
 .storage-decisions { margin-top:var(--space-3); padding-top:var(--space-3); border-top:1px solid var(--divider); }
 .storage-decisions > .storage-free-sub { margin-top:0; }
@@ -6447,6 +6448,74 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 /* A Dashboard card's title (16/600) and its list of facts (label, value): the tabs' cards share these two parts of the
    tab body (Costs, Consciousness, Updates, Activity, Evolution). */
 .dashboard-card-title { margin: 0; color: var(--text-primary); font-size: var(--type-section); line-height: var(--line-title); font-weight: 600; }
+/* A tab's settings cards (dashboard.js mountTabSettings): rows that save themselves (settings.css "settings rows")
+   under the card's title and lead, the rarer ones in its fold. Their host adds no box: each card is a card of the tab
+   body. A number is a short field; a door says its value before its chevron; a row without a meta line keeps its
+   name centred, and one that says its value in its own words (its caption) starts at the row's edge. */
+.dashboard-settings-cards { display: contents; }
+.dashboard-settings > .dashboard-card-title { margin-bottom: var(--space-3); }
+.dashboard-settings-lead { margin: calc(-1 * var(--space-2)) 0 var(--space-3); color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); }
+.dashboard-settings-fold { margin-top: var(--space-3); }
+.dashboard-settings .settings-row-field > .ui-control { width: 4.5rem; }
+.costs-limits .settings-row-field > .ui-control { width: 5.25rem; }  /* money: room for a larger limit */
+.dashboard-settings .settings-row-value { color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); font-weight: 600; white-space: nowrap; }
+.dashboard-settings .settings-row-value[data-tone="warn"] { color: var(--status-warn-fg); }
+.dashboard-settings .settings-row-chevron { color: var(--text-disabled); }
+.dashboard-settings [data-setting-meta]:empty { display: none; }
+.dashboard-settings .settings-row:has(> .ui-row-meta > [data-setting-meta]:empty):not(:has(> .ui-row-meta > :not(:empty))) > .ui-row-meta { display: none; }
+.dashboard-settings .settings-row:has(> .ui-row-meta > [data-setting-meta]:empty):not(:has(> .ui-row-meta > :not(:empty))) > .ui-row-title { grid-row: 1 / span 2; }
+/* A row that leads with its glyph (Costs' kinds of account): the glyph stands beside both lines. */
+.dashboard-settings .settings-row[data-lead] { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "lead words actions" "lead meta actions"; }
+.dashboard-settings-glyph { grid-area: lead; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: var(--surface-object); color: var(--text-secondary); font-size: 16px; }
+/* In a narrow row a number and a door keep their place at the row's end (a strip, a range and a custom control go under
+   the words, as ui.css moves every row's actions); a row that leads with its glyph says its value as a third line
+   and keeps its chevron at the end. */
+@container (max-width: 28rem) {
+    .dashboard-settings .settings-row:is([data-kind="number"]:not(:has([data-setting-no-limit])), [data-kind="door"]) > :is(.ui-row-title, .ui-row-meta) { grid-column: 1; }
+    .dashboard-settings .settings-row:is([data-kind="number"]:not(:has([data-setting-no-limit])), [data-kind="door"]) > .ui-row-actions { grid-column: 2; grid-row: 1 / span 2; justify-content: flex-end; }
+    .dashboard-settings .settings-row[data-lead] > :is(.ui-row-title, .ui-row-meta) { grid-column: 2; }
+    .dashboard-settings .settings-row[data-lead] > .ui-row-actions { display: contents; }
+    .dashboard-settings .settings-row[data-lead] .settings-row-value { grid-column: 2; grid-row: 3; white-space: normal; }
+    .dashboard-settings .settings-row[data-lead] .settings-row-chevron { grid-column: 3; grid-row: 1 / span 3; align-self: center; }
+    .dashboard-settings-glyph { grid-row: 1 / span 3; align-self: start; }
+}
+/* A card that is one row (data-solo): the row's name is the card's title, its meta the lead, its control the body. */
+.dashboard-settings[data-solo] > .settings-row { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-1); padding: 0; border: 0; background: none; }
+.dashboard-settings[data-solo] .ui-row-title { font-size: var(--type-section); font-weight: 600; }
+.dashboard-settings[data-solo] .ui-row-meta { font-size: var(--type-body); line-height: var(--line-body); }
+.dashboard-settings[data-solo] .ui-row-actions { margin-top: var(--space-2); justify-content: flex-start; }
+.dashboard-settings[data-solo] .ui-row-actions > .ui-control { width: 100%; }
+/* A choice that carries a sentence is a card of its own (DESIGN principle 4): the chosen one is filled. */
+.dashboard-choices { display: flex; flex-direction: column; gap: var(--space-2); width: 100%; }
+.dashboard-choice {
+    display: grid;
+    gap: 2px;
+    padding: var(--space-3) var(--space-4);
+    border: 1px solid transparent;
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
+    color: var(--text-primary);
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+    transition: var(--motion-tone);
+}
+@media (hover: hover) { .dashboard-choice[aria-pressed="false"]:not(:disabled):hover { background: var(--tone-quiet-hover); } }
+.dashboard-choice:not(:disabled):active { filter: var(--press); }
+.dashboard-choice:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+.dashboard-choice[aria-pressed="true"] { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); box-shadow: var(--elev-rest); }
+.dashboard-choice-name { font-size: var(--type-body); font-weight: 600; line-height: var(--line-title); }
+.dashboard-choice-note { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.dashboard-choice[aria-pressed="true"] > .dashboard-choice-note { color: inherit; }
+/* A tab opened from Settings leads back there with its first row (dashboard.js settingsReturn), drawn as a Settings
+   page draws its Back (settings.css .settings-back-row). It stands above the tab's scroller, at the cards' edge, so it
+   stays in place while the tab scrolls. */
+.dashboard-back { position: static; flex: none; margin: var(--space-2) 0 0; padding-inline: 20px; background: none; }
+.dashboard-back + .dashboard-body { padding-top: var(--space-2); }
+html[data-layout="stack"] .dashboard-back { padding-inline: var(--space-3); }
+/* On a phone the tab body's own gutter is the page's: with the shell's added to it a card lost 40 px of a 320 px
+   screen, and a three-way choice wrapped two and one (ui.css "On a phone a card keeps 18 px at its sides"). */
+html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 .dashboard-facts {
     display: grid;
     grid-template-columns: fit-content(14rem) minmax(0, 1fr);
