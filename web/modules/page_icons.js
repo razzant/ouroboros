@@ -38,6 +38,7 @@ const CONTROL_BODIES = {
     // Consciousness, its own time: the header's chip and the Dashboard's wakes.
     brain: '<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/>',
     close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+    search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',  // the magnifier: Find a project, Search this chat
     chevron: '<path d="m6 9 6 6 6-6"/>',
     'message-circle': '<path d="M21 11.5a8.4 8.4 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7a8.4 8.4 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.4 8.4 0 0 1 3.8-.9h.5a8.5 8.5 0 0 1 8 8v.5z"/>',
     hash: '<path d="M4 9h16M3 15h16M10 3 8 21M16 3l-2 18"/>',
@@ -70,7 +71,7 @@ export function renderSkillIcon(spec, { size = 16, className = '' } = {}) {
 // chevron, the magnifier of Find a project and the move grip (⠿) of a Widgets card. Same stroke family as the page
 // icons; a control's accessible name says what the glyph does.
 export const SHELL_ICONS = {
-    search: strokeIcon('<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>', 18),
+    search: strokeIcon(CONTROL_BODIES.search, 18),
     menu: strokeIcon('<path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/>'),
     back: strokeIcon('<path d="m15 18-6-6 6-6"/>'),
     close: strokeIcon('<path d="M18 6 6 18"/><path d="m6 6 12 12"/>'),

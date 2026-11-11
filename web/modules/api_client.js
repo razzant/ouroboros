@@ -532,6 +532,14 @@ export const apiClient = {
         const query = params.toString();
         return fetchJson(`/api/chat/history${query ? `?${query}` : ''}`, { cache: 'no-store', signal });
     },
+    /** One bounded read of a room's saved messages containing `q`, newest first; `cursor` continues older.
+     * @returns {Promise<import('./client_contract_types.js').ChatSearchResponse>} */
+    chatSearch: ({ chatId = 1, q = '', cursor = null, limit = null, signal } = {}) => {
+        const params = new URLSearchParams({ chat_id: String(chatId), q: String(q) });
+        if (cursor) params.set('cursor', cursor);
+        if (limit) params.set('limit', String(limit));
+        return fetchJson(`/api/chat/search?${params}`, { cache: 'no-store', signal });
+    },
     /** @returns {Promise<import('./api_types.js').HealthResponse>} */
     health: () => fetchJson('/api/health', { cache: 'no-store' }),
     /** @returns {Promise<import('./api_types.js').StateResponse>} */

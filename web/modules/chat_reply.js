@@ -14,6 +14,7 @@ import { bindBubbleActions } from './message_actions.js';
 import { revealTimelineNode } from './chat_render_batch.js';
 import { afterMotion } from './motion.js';
 import { readBand } from './project_read_state.js';
+import { createChatSearch } from './chat_search.js';
 
 export const REPLY_ICON = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor"'
     + ' stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
@@ -66,12 +67,15 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
     let staged = null;
     let strip = null;
     let targetTimer = 0;
+    let search = null;  // the room's search (below), whose open surface the clearance counts
     const bubbleActions = bindBubbleActions({ feed, registry: actions, onDomWrite });
-    // How much of the feed's top the room's header covers: a placed row lands under it, not behind it.
+    // How much of the feed's top the room's header (and an open search, chat_search.js) covers: a placed row lands
+    // under them, not behind them.
     const headerClearance = () => {
         const header = feed.closest('.project-panel')?.querySelector('.project-panel-bar')
             || feed.closest('.page, .chat-instance-panel')?.querySelector('.chat-page-header, .chat-panel-statusbar');
-        return Math.max(HEADER_CLEARANCE, (header?.getBoundingClientRect().bottom || 0) - feed.getBoundingClientRect().top + 12);
+        const bottom = Math.max(header?.getBoundingClientRect().bottom || 0, search?.cover()?.getBoundingClientRect().bottom || 0);
+        return Math.max(HEADER_CLEARANCE, bottom - feed.getBoundingClientRect().top + 12);
     };
     /** One explicit placement of a row under the header, as a quote's landing is: it claims the reading intent, so the
      * reader's own later gesture supersedes it. `follow` instead returns a reader who was following the newest message
@@ -94,6 +98,9 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
     // What of the feed a reader sees below: the composer is drawn over the feed's foot.
     const band = () => readBand(feed, null, composerArea);
     const decks = createRelayDecks({ feed, chatId, onDomWrite, reading, clearance: headerClearance, band, place });
+    // The room's search lands through the same reveal, leaving the keyboard in its field (chat_search.js).
+    search = createChatSearch({ chatId, feed, present,
+        reveal: (address, isCurrent) => reveal(address, isCurrent, null, { focus: false }) });
     let destroyed = false;
     // `held`: the reader's own live-edge intent while a reveal is pending (a reveal sets stick false itself).
     let revealGeneration = 0, revealing = 0, held = null;
@@ -109,21 +116,23 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
     const rowOf = (address) => (address ? [...feed.querySelectorAll('[data-row-address]')]
         .find((node) => node.dataset.rowAddress === address) : null) || null;
 
-    function markTarget(target) {
+    function markTarget(target, focus = true) {
         clearTimeout(targetTimer);
         feed.querySelectorAll('.is-quote-target').forEach((old) => old.classList.remove('is-quote-target'));
         void target.offsetWidth;
         target.classList.add('is-quote-target');
         if (target.tabIndex < 0) target.tabIndex = -1;
-        target.focus({ preventScroll: true });
+        if (focus) target.focus({ preventScroll: true });
         targetTimer = setTimeout(() => target.classList.remove('is-quote-target'), TARGET_MS);
     }
 
     /** One claim covers the loaded fastpath, bounded read and app-owned room switch. Never sends a message.
      * A reveal that moved nothing (an answer, a failed read, a room it could not open) gives a reader who followed
      * the live edge that edge back, with what arrived meanwhile, while the claim is still theirs: a gesture, a
-     * newer reveal or leaving the room decided instead. A landing or a page drawn around it (`left`) keeps its view. */
-    async function reveal(address, isCurrent = () => true, prepared = null) {
+     * newer reveal or leaving the room decided instead. A landing or a page drawn around it (`left`) keeps its view.
+     * A landing answers `{state: 'found', target}`; `focus: false` (a search stepping through matches) leaves the
+     * keyboard where it is. */
+    async function reveal(address, isCurrent = () => true, prepared = null, { focus = true } = {}) {
         const position = reading();
         const following = held?.claimed() ? held.following : position.stick;
         const claimed = position.claim ? position.claim() : (position.cancel(), () => true);
@@ -131,7 +140,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         const generation = revealing = ++revealGeneration;
         const own = held = { following, claimed };
         position.stick = false;
-        const result = await seek(address, position, wanted, prepared)
+        const result = await seek(address, position, wanted, prepared, focus)
             .catch(error => (wanted() ? { state: 'unknown', error } : null));
         if (generation === revealing) revealing = 0;
         if (held === own) held = null;
@@ -150,7 +159,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         return Boolean(node) && node.dataset.portal !== '1';
     };
 
-    async function seek(address, position, wanted, prepared) {
+    async function seek(address, position, wanted, prepared, focus = true) {
         let target = !prepared && drawn(address);
         if (!target) {
             const result = await history()?.reference(address, wanted, prepared);
@@ -168,8 +177,8 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         // This explicit placement measured the current column. An ordinary scroll
         // keeps the old-width anchor until reflow; a newly opened room must replace it.
         position.remember(true);
-        markTarget(target);
-        return { state: 'found' };
+        markTarget(target, focus);
+        return { state: 'found', target };
     }
 
     async function jump(ref) {
@@ -410,6 +419,8 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         syncDerivedQuotes,
         reveal,
         draws,
+        /** The room's search of its saved messages (chat_search.js): Ctrl+F or Cmd+F, and "+" → Search this chat. */
+        search,
         get revealing() { return revealing !== 0; },
         /**
          * "Send as a new message" under a delivery doubt: the owner's words join this composer's draft (sent, they are
@@ -429,6 +440,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         destroy() {
             destroyed = true;
             clearTimeout(targetTimer);
+            search.destroy();
             bubbleActions.destroy();
             decks.destroy();
             keyHost?.removeEventListener('keydown', onKeydown);

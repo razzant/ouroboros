@@ -1,7 +1,8 @@
 """Descriptive Chat history response and its rows, re-exported by the gateway facade.
 
 ``GET /api/chat/history`` projects the dialogue store's stored chat and progress rows
-(``state/dialog.sqlite``) plus a few synthesized ones (``gateway/history.py``). The JSDoc twin is
+(``state/dialog.sqlite``) plus a few synthesized ones (``gateway/history.py``); ``GET /api/chat/search``
+finds a room's saved messages by their words (``gateway/chat_search.py``). The JSDoc twin is
 ``web/modules/client_contract_types.js``.
 """
 
@@ -281,8 +282,64 @@ class ChatHistoryResponse(TypedDict, total=False):
     reason_code: str
 
 
+class ChatSearchSnippetPart(TypedDict):
+    """One run of a match's snippet, the message's words with white space collapsed; ``match`` marks
+    an occurrence of the query. An ellipsis run says the words were cut there."""
+
+    text: str
+    match: bool
+
+
+class ChatSearchMatch(TypedDict, total=False):
+    """One saved message of the room whose words contain the query. ``history_id`` and ``row_address``
+    are that row's identity in ``GET /api/chat/history``, whose ``around=<row_address>`` reads the page
+    around it; ``role`` is its author as history names it."""
+
+    history_id: Required[str]
+    row_address: Required[str]
+    role: Required[Literal["user", "assistant", "system"]]
+    ts: Required[str]
+    snippet: Required[List[ChatSearchSnippetPart]]
+    sender_label: str
+    task_id: str
+
+
+class ChatSearchSpan(TypedDict):
+    """What one search read covered: ``rows`` stored chat rows of the room below the cut, back to the
+    time of the oldest (``reached_ts``, "" when none was read). ``beginning``: it reached the room's
+    first message. ``importing``: older history exists that the archive import has not made readable
+    yet, so it was not searched. ``gaps``: the read range holds lines that could not be read
+    (``malformed_jsonl``, ``invalid_jsonl_row``, ``segment_unimportable``) or a Project's rows written
+    elsewhere not yet known (``appearances_deriving``, ``reply_target_unreadable``)."""
+
+    rows: int
+    reached_ts: str
+    beginning: bool
+    importing: bool
+    gaps: List[str]
+
+
+class ChatSearchResponse(TypedDict, total=False):
+    """``GET /api/chat/search?chat_id=&q=``: the room's saved messages containing the query, newest
+    first, from one bounded read. ``query`` is the query as searched (white space collapsed).
+    ``has_more`` and ``next_cursor`` continue older; a page may hold no match and still continue.
+    The search covered the whole room only when a chain of pages reached ``beginning`` with no
+    ``gaps``. An error answer (400 search_query_invalid or search_cursor_invalid, 409
+    search_view_changed, 503 history_source_unavailable or migrating) keeps this shape with no
+    matches and the cursor that was sent as ``next_cursor``."""
+
+    query: Required[str]
+    matches: Required[List[ChatSearchMatch]]
+    has_more: Required[bool]
+    next_cursor: Required[Optional[str]]
+    searched: Required[ChatSearchSpan]
+    error: str
+    reason_code: str
+
+
 __all__ = [
     "ChatHistoryPosition", "PresenceContact", "PlaceHistoryAttention", "PlaceHistoryImport", "PlaceHistoryReaction", "PlaceHistoryFacts",
     "ChatHistoryQuiz", "ChatHistoryCard", "ChatHistoryMessage",
     "ChatHistoryCoverage", "ChatHistoryWindow", "ChatHistoryAnchor", "ChatHistoryResponse",
+    "ChatSearchSnippetPart", "ChatSearchMatch", "ChatSearchSpan", "ChatSearchResponse",
 ]

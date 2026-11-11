@@ -601,6 +601,51 @@
  * @property {string=} reason_code
  */
 
+/**
+ * One run of a search match's snippet; `match` marks an occurrence of the query.
+ * @typedef {Object} ChatSearchSnippetPart
+ * @property {string} text
+ * @property {boolean} match
+ */
+
+/**
+ * A saved message whose words contain the query: `history_id` and `row_address` are its identity in
+ * `GET /api/chat/history` (`around=<row_address>` reads the page around it).
+ * @typedef {Object} ChatSearchMatch
+ * @property {string} history_id
+ * @property {string} row_address
+ * @property {'user'|'assistant'|'system'} role
+ * @property {string} ts
+ * @property {ChatSearchSnippetPart[]} snippet
+ * @property {string=} sender_label
+ * @property {string=} task_id
+ */
+
+/**
+ * What one search read covered: `rows` of the room back to `reached_ts`; `beginning`: the room's first
+ * message was reached; `importing`: older history is not readable yet; `gaps`: lines it could not read.
+ * @typedef {Object} ChatSearchSpan
+ * @property {number} rows
+ * @property {string} reached_ts
+ * @property {boolean} beginning
+ * @property {boolean} importing
+ * @property {string[]} gaps
+ */
+
+/**
+ * `GET /api/chat/search`: matches newest first from one bounded read; a page may hold none and still
+ * continue (`next_cursor`). The whole room was searched only when a chain reached `beginning` with no
+ * `gaps`. An error answer keeps this shape with no matches and the cursor that was sent.
+ * @typedef {Object} ChatSearchResponse
+ * @property {string} query
+ * @property {ChatSearchMatch[]} matches
+ * @property {boolean} has_more
+ * @property {?string} next_cursor
+ * @property {ChatSearchSpan} searched
+ * @property {string=} error
+ * @property {string=} reason_code
+ */
+
 // --- Journey bodies of routes whose handlers check fields by hand (ProjectEntry: ./api_types.js) ---
 
 /**

@@ -2,6 +2,8 @@
 
 The fixture is also the reusable inspection stand's seed. Transport holds/failures
 delay real responses; no successful lookup or history response is fabricated.
+
+Search in a chat lands on its matches through the same quote landing (the scenes at the end).
 """
 from __future__ import annotations
 
@@ -15,10 +17,11 @@ from ouroboros.chat_chain import format_address, row_address
 from ouroboros.chat_references import reference_from_row
 from ouroboros.project_dialogue import build_owner_message_ref
 from ouroboros.projects_registry import bind_task_to_project, create_project
+from tests import _room_browser_shared as room_browser
 from tests._shared import producer_evidence_dir
 from tests.test_chat_history_paging_browser import _FRAMES, _idle, _open, _result, _step
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
-from tests.ui_chat_viewport_smoke import _emit_ws_frame
+from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _SETTLE_RESTORE_FRAMES, _emit_ws_frame
 
 pytestmark = [pytest.mark.ui_browser]
 
@@ -358,3 +361,389 @@ def test_cancelled_failed_and_overlapping_quotes_keep_newer_intent(direct_server
         finally:
             _evidence(page, tmp_path, f"races-{browser_engine}", fixture, facts)
             browser.close()
+
+
+# ---- Search in a chat (docs/DESIGN.md "Search in a chat"): a match lands through the same quote landing ----------
+# Main holds four hundred saved messages, so most matches lie far older than its newest page, and a Project holds its
+# own, with a question Main shows only as its copy. Ctrl+F opens the room in front's search with the keyboard in its
+# field and the owner's draft untouched; Enter and Shift+Enter land on the exact rows (reading the page around one that
+# is not loaded) below the open sheet; Esc closes it and gives the field back. On a phone, "+" → Search this chat
+# opens it for a finger. Screenshots of each scene, in both themes, go to the run's evidence.
+
+SEARCH_START = datetime(2026, 10, 1, 9, tzinfo=timezone.utc)
+SEARCH_LONG = ("We walked along the river for most of the afternoon and stopped by the weir where the water slows down. "
+        "Somewhere past the alders a Kingfisher flashed blue and orange, gone before the camera came up, and we "
+        "waited another hour at the bank hoping it would come back to the same branch above the pool.")
+# Owner messages are the odd ones: the matches alternate Ouroboros and the owner, newest first.
+SEARCH_MAIN_MATCHES = {31: "The kingfisher nested by the old mill.", 100: SEARCH_LONG,
+                201: "Saw a KINGFISHER again near the bridge", 390: "Remember the kingfisher photo?"}
+SEARCH_QUESTION = "Which kingfisher route should the survey take?"
+
+
+def _seed_search_rooms(root):
+    from ouroboros.owner_quiz import record_asked
+
+    for index in range(400):
+        text = SEARCH_MAIN_MATCHES.get(index, f"Routine note {index}: nothing to report about the garden today.")
+        ds.append(root, "chat", {"chat_id": 1, "ts": (SEARCH_START + timedelta(minutes=index)).isoformat(),
+                                 "direction": "in" if index % 2 else "out", "text": text}, feed=True)
+    room = create_project(root, "search-room", name="Bird notes", origin="owner_ui")
+    for index, text in enumerate(["Plan the kingfisher survey for the project.", "Weather looks fine on Saturday.",
+                                  "Kingfisher survey route is ready."]):
+        ds.append(root, "chat", {"chat_id": room["chat_id"], "ts": (SEARCH_START + timedelta(days=1, minutes=index)).isoformat(),
+                                 "direction": "out" if index % 2 else "in", "text": text}, feed=True)
+    # The Project's open question: Main draws it only as a copy of the Project's, so only the Project finds it.
+    record_asked(root, "survey-asker", quiz_id="route", question=SEARCH_QUESTION, options=["River", "Weir"],
+                 wait_for_answer=True)
+    ds.append(root, "chat", {"chat_id": room["chat_id"], "ts": (SEARCH_START + timedelta(days=1, minutes=5)).isoformat(),
+                             "direction": "out", "type": "quiz", "task_id": "survey-asker", "text": SEARCH_QUESTION,
+                             "quiz": {"quiz_id": "route", "question": SEARCH_QUESTION, "options": ["River", "Weir"],
+                                      "wait_for_answer": True}}, feed=True)
+    return room
+
+
+_SEARCH_STATE = """page => {
+    const root = document.querySelector(page);
+    const find = root?.querySelector('.chat-find');
+    const input = find?.querySelector('.chat-find-input');
+    const active = document.activeElement;
+    return {
+        open: Boolean(find && !find.hidden),
+        focused: active === input,
+        activeId: active?.id || '',
+        count: find?.querySelector('.chat-find-count')?.textContent || '',
+        note: find?.querySelector('.chat-find-note')?.textContent || '',
+        results: [...(find?.querySelectorAll('.chat-find-result') || [])].map(node => ({
+            selected: node.getAttribute('aria-selected') === 'true',
+            snippet: node.querySelector('.chat-find-snippet').textContent,
+            marks: [...node.querySelectorAll('mark')].map(mark => mark.textContent),
+            meta: node.querySelector('.chat-find-meta').textContent})),
+        authored: Boolean(find?.querySelector('.chat-find-results')?.closest('[data-i18n-authored]')),
+        bottom: find && !find.hidden ? find.getBoundingClientRect().bottom : 0,
+    };
+}"""
+
+# The innermost shown row holding ``words``: a message bubble, or the card it is drawn in (a question's).
+_SEARCH_ROW = """([page, words]) => {
+    const rows = [...document.querySelectorAll(`${page} [data-row-address], ${page} [data-history-id]`)]
+        .filter(row => row.textContent.includes(words) && row.getClientRects().length);
+    return rows.find(row => !rows.some(other => other !== row && row.contains(other))) || null;
+}"""
+_SEARCH_LANDED = """([page, words]) => {
+    const node = (""" + _SEARCH_ROW + """)([page, words]);
+    if (!node) return null;
+    const box = node.getBoundingClientRect(), feed = node.closest('.chat-messages, #chat-messages').getBoundingClientRect();
+    return {top: box.top, bottom: box.bottom, feedBottom: feed.bottom, target: node.classList.contains('is-quote-target'),
+            highlighted: CSS.highlights ? CSS.highlights.has('ouro-chat-find') : null};
+}"""
+
+
+def _search_evidence(tmp_path):
+    return producer_evidence_dir(tmp_path / "chat-search-evidence", "chat-search", env="CHAT_SEARCH_EVIDENCE_DIR")
+
+
+def _open_main_for_search(page, url):
+    """Main, as a client opening the app sees it: its socket open and its newest saved page drawn."""
+    page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
+    page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+    page.wait_for_function("() => window.__testSockets?.some(socket => socket.readyState === WebSocket.OPEN)")
+    page.locator("#chat-messages [data-history-id]").first.wait_for(state="attached", timeout=30_000)
+    page.evaluate(_SETTLE_RESTORE_FRAMES)
+
+
+def _search_state(page, scope):
+    return page.evaluate(_SEARCH_STATE, scope)
+
+
+def _wait_search_results(page, scope, count):
+    page.wait_for_function("""([scope, n]) => {
+        const find = document.querySelector(`${scope} .chat-find`);
+        return find && !find.hasAttribute('data-searching') && find.querySelectorAll('.chat-find-result').length === n
+            && (n !== 0 || find.querySelector('.chat-find-count').textContent === '0 found');
+    }""", arg=[scope, count], timeout=30_000)
+
+
+def _search_landed(page, scope, words):
+    """The row holding ``words`` is shown whole below the open sheet (as it stands after the landing)."""
+    page.wait_for_function(f"args => ({_SEARCH_ROW})(args)?.getBoundingClientRect().height > 0", arg=[scope, words],
+                           timeout=30_000)
+    page.evaluate(_SETTLE_RESTORE_FRAMES)
+    landed = page.evaluate(_SEARCH_LANDED, [scope, words])
+    below = _search_state(page, scope)["bottom"]
+    assert landed and landed["top"] >= below - 1 and landed["bottom"] <= landed["feedBottom"] + 1, (landed, below)
+    return landed
+
+
+def _search_both_themes(page, path):
+    """The scene in the dark theme it opened in, then in the light one a new client takes from the system."""
+    page.screenshot(path=str(path.with_name(f"{path.stem}-dark.png")))
+    page.emulate_media(color_scheme="light")
+    page.wait_for_function("() => document.documentElement.dataset.theme === 'light'")
+    page.evaluate(_SETTLE_RESTORE_FRAMES)
+    page.screenshot(path=str(path.with_name(f"{path.stem}-light.png")))
+    page.emulate_media(color_scheme="dark")
+    page.wait_for_function("() => document.documentElement.dataset.theme === 'dark'")
+    page.evaluate(_SETTLE_RESTORE_FRAMES)
+
+
+@pytest.mark.parametrize("browser_engine", ["webkit", "chromium"])
+def test_ctrl_f_finds_saved_messages_of_the_room_in_front_and_lands_on_them(direct_server_with_data, browser_engine, tmp_path):
+    from playwright.sync_api import sync_playwright
+
+    room = _seed_search_rooms(direct_server_with_data["data_dir"])
+    shots = _search_evidence(tmp_path)
+    errors = []
+    with sync_playwright() as pw:
+        try:
+            browser = getattr(pw, browser_engine).launch(headless=True)
+        except Exception as error:  # an engine this host has not installed is named, never passed silently
+            if "Executable doesn't exist" in str(error):
+                pytest.skip(f"{browser_engine} is not installed for this Playwright")
+            raise
+        page = browser.new_page(viewport={"width": 1512, "height": 949}, device_scale_factor=2, color_scheme="dark")
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        try:
+            _open_main_for_search(page, direct_server_with_data["url"])
+            page.fill("#chat-input", "my unsent draft")
+            # A pointer-opened '+' menu leaves focus in the composer, but still owns the key.
+            page.locator("#chat-plus").click()
+            menu = page.locator(".chat-plus-menu:not([data-leaving])")
+            menu.wait_for(state="visible")
+            assert page.evaluate("document.activeElement.id") == "chat-input"
+            page.keyboard.press("Control+f")
+            assert not page.locator(".chat-find:visible").count(), "an open menu keeps Find even without keyboard focus"
+            assert menu.is_visible()
+            page.keyboard.press("Escape")
+            menu.wait_for(state="hidden")
+            page.keyboard.press("Control+f")
+            page.wait_for_function("() => document.activeElement?.classList.contains('chat-find-input')")
+            state = _search_state(page, "#page-chat")
+            assert state["open"] and state["focused"] and not state["results"], state
+            page.keyboard.type("Kingfisher")
+            _wait_search_results(page, "#page-chat", 4)
+            state = _search_state(page, "#page-chat")
+            assert state["count"] == "4 found" and state["authored"], state  # never the Project's question
+            assert [result["marks"][0].casefold() for result in state["results"]] == ["kingfisher"] * 4, state
+            assert state["results"][0]["snippet"] == "Remember the kingfisher photo?", state
+            assert state["results"][2]["snippet"].startswith("…") and state["results"][2]["snippet"].endswith("…"), state
+            assert "Ouroboros" in state["results"][0]["meta"] and "You" in state["results"][1]["meta"], state
+            _search_both_themes(page, shots / f"{browser_engine}-main-results.png")
+
+            page.keyboard.press("Enter")  # the newest match, loaded already
+            landed = _search_landed(page, "#page-chat", "Remember the kingfisher photo?")
+            assert landed["target"], landed
+            state = _search_state(page, "#page-chat")
+            assert state["focused"] and state["count"] == "1 of 4" and state["results"][0]["selected"], state
+            page.keyboard.press("Enter")
+            page.keyboard.press("Enter")  # far older than the newest page: the page around it is read
+            _search_landed(page, "#page-chat", "flashed blue and orange")
+            state = _search_state(page, "#page-chat")
+            assert state["focused"] and state["count"] == "3 of 4" and state["results"][2]["selected"], state
+            _search_both_themes(page, shots / f"{browser_engine}-main-landed-older.png")
+            page.keyboard.press("Shift+Enter")
+            _search_landed(page, "#page-chat", "Saw a KINGFISHER again")
+            assert _search_state(page, "#page-chat")["count"] == "2 of 4"
+
+            page.keyboard.press("Escape")
+            state = _search_state(page, "#page-chat")
+            assert not state["open"] and state["activeId"] == "chat-input", state
+            assert page.input_value("#chat-input") == "my unsent draft"
+            assert page.evaluate("() => CSS.highlights ? !CSS.highlights.has('ouro-chat-find') : true")
+
+            # A Project in front: the key searches the Project's own messages, never Main behind it.
+            room_browser._open(page, room["id"])
+            panel, feed = f'[id="panel-pchat-{room["id"]}"]', f'[id="pchat-{room["id"]}-messages"]'
+            page.locator(feed).click(position={"x": 40, "y": 200})
+            page.keyboard.press("Meta+f" if browser_engine == "webkit" else "Control+f")
+            page.wait_for_function("() => document.activeElement?.classList.contains('chat-find-input')")
+            assert not _search_state(page, "#page-chat")["open"]
+            page.keyboard.type("kingfisher survey")
+            _wait_search_results(page, panel, 2)
+            state = _search_state(page, panel)
+            assert [result["snippet"] for result in state["results"]] == [
+                "Kingfisher survey route is ready.", "Plan the kingfisher survey for the project."], state
+            page.keyboard.press("Enter")
+            _search_landed(page, panel, "Kingfisher survey route is ready.")
+            _search_both_themes(page, shots / f"{browser_engine}-project-landed.png")
+            # Its question is the Project's: found and landed on here, where Main finds nothing of it.
+            page.fill(f"{panel} .chat-find-input", "kingfisher route")
+            _wait_search_results(page, panel, 1)
+            assert _search_state(page, panel)["results"][0]["snippet"] == SEARCH_QUESTION
+            page.keyboard.press("Enter")
+            assert _search_landed(page, panel, SEARCH_QUESTION)["target"]
+            page.keyboard.press("Escape")
+            assert not _search_state(page, panel)["open"]
+            assert page.locator(feed).is_visible(), "Esc closed the search, not the Project"
+        finally:
+            browser.close()
+    assert not errors, errors
+
+
+def test_search_lands_on_a_rendered_project_answer_and_other_pages_keep_find(direct_server_with_data, tmp_path):
+    from playwright.sync_api import sync_playwright
+
+    root = direct_server_with_data["data_dir"]
+    room = _seed_search_rooms(root)
+    answer = "The swallows returned to their nests."
+    ds.append(root, "chat", {"chat_id": 1, "ts": (SEARCH_START + timedelta(days=2)).isoformat(),
+                              "direction": "system", "type": "project_completion_summary", "project_id": room["id"],
+                              "text": "The project has finished.", "completion_answer": answer}, feed=True)
+    # Production start/handoff rows carry both IDs: they bind a work portal, not a navigable chat bubble.
+    for index, kind in enumerate(("project_started", "project_handoff")):
+        ds.append(root, "chat", {"chat_id": 1, "ts": (SEARCH_START + timedelta(days=2, minutes=index + 1)).isoformat(),
+                                  "direction": "system", "type": kind, "project_id": room["id"],
+                                  "task_id": f"portal-work-{index}", "text": "portal-only falcon",
+                                  "completion_answer": "portal-only falcon answer"}, feed=True)
+    ds.append(root, "chat", {"chat_id": 1, "ts": (SEARCH_START + timedelta(days=2, minutes=3)).isoformat(),
+                              "direction": "in", "source": "web", "text": "Here is the document.\n\n[Attached file: bird.txt]",
+                              "attachments": [{"name": "bird.txt", "unavailable": "missing"}]}, feed=True)
+    with sync_playwright() as pw:
+        browser = pw.webkit.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1512, "height": 949}, device_scale_factor=2)
+        try:
+            _open_main_for_search(page, direct_server_with_data["url"])
+            page.keyboard.press("Control+f")
+            page.wait_for_function("() => document.activeElement?.classList.contains('chat-find-input')")
+            page.keyboard.type("swallows")
+            _wait_search_results(page, "#page-chat", 1)
+            result = _search_state(page, "#page-chat")["results"][0]
+            assert result["snippet"] == answer and "Ouroboros" in result["meta"]
+            page.keyboard.press("Enter")
+            _search_landed(page, "#page-chat", answer)
+            page.screenshot(path=str(_search_evidence(tmp_path) / "webkit-project-answer-found.png"))
+            page.fill("#page-chat .chat-find-input", "portal-only falcon")
+            _wait_search_results(page, "#page-chat", 0)
+            assert _search_state(page, "#page-chat")["count"] == "0 found"
+            page.fill("#page-chat .chat-find-input", "kingfisher route")  # the Project's question Main copies
+            _wait_search_results(page, "#page-chat", 0)
+            page.fill("#page-chat .chat-find-input", "Attached file")
+            _wait_search_results(page, "#page-chat", 0)
+            page.fill("#page-chat .chat-find-input", "Here is the document")
+            _wait_search_results(page, "#page-chat", 1)
+            assert _search_state(page, "#page-chat")["results"][0]["snippet"] == "Here is the document."
+            page.keyboard.press("Enter")
+            _search_landed(page, "#page-chat", "Here is the document.")
+            page.keyboard.press("Escape")
+            room_browser._open(page, room["id"])
+            room_browser._nav(page, "settings")
+            page.keyboard.press("Control+f")
+            assert not page.locator(".chat-find:visible").count(), "a departed Project never steals Find on Settings"
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("browser_engine", ["webkit"])
+def test_a_finger_opens_search_from_plus_and_lands_on_a_tapped_match(direct_server_with_data, browser_engine, tmp_path):
+    from playwright.sync_api import sync_playwright
+
+    _seed_search_rooms(direct_server_with_data["data_dir"])
+    shots = _search_evidence(tmp_path)
+    errors = []
+    with sync_playwright() as pw:
+        browser = getattr(pw, browser_engine).launch(headless=True)
+        page = browser.new_page(viewport={"width": 390, "height": 844}, device_scale_factor=2, has_touch=True)
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        try:
+            _open_main_for_search(page, direct_server_with_data["url"])
+            page.locator("#page-chat #chat-plus").tap()
+            item = page.locator(".chat-plus-menu:not([data-leaving]) [data-plus-item='search']")
+            assert page.locator(".chat-plus-menu:not([data-leaving]) [role=menuitem]").all_inner_texts()[:2] == [
+                "Attach file", "Search this chat"]
+            item.tap()
+            page.wait_for_function("() => document.activeElement?.classList.contains('chat-find-input')")
+            page.keyboard.type("kingfisher")
+            _wait_search_results(page, "#page-chat", 4)
+            sheet = page.locator("#page-chat .chat-find").bounding_box()
+            assert sheet["x"] >= 0 and sheet["x"] + sheet["width"] <= 390.5, sheet
+            assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+            page.screenshot(path=str(shots / f"{browser_engine}-phone-results.png"))
+            page.locator("#page-chat .chat-find-result").nth(3).tap()
+            _search_landed(page, "#page-chat", "The kingfisher nested by the old mill.")
+            assert page.locator("#page-chat .chat-find-results").is_hidden(), "the list folds over a phone's landing"
+            page.screenshot(path=str(shots / f"{browser_engine}-phone-landed.png"))
+            page.locator("#page-chat .chat-find-input").tap()
+            assert page.locator("#page-chat .chat-find-results").is_visible(), "touching the field opens the list again"
+            page.locator("#page-chat .chat-find-close").tap()
+            assert not _search_state(page, "#page-chat")["open"]
+        finally:
+            browser.close()
+    assert not errors, errors
+
+
+# The sheet's frame: its corner, its padding and its field's corner as drawn (DESIGN "Search in a chat").
+_SEARCH_FRAME = """page => {
+    const find = document.querySelector(`${page} .chat-find`), bar = find.querySelector('.chat-find-bar');
+    const sheet = find.getBoundingClientRect(), field = bar.getBoundingClientRect(), style = getComputedStyle(find);
+    const note = find.querySelector('.chat-find-note');
+    return {height: sheet.height, barHeight: field.height, pad: parseFloat(style.paddingTop),
+            radius: parseFloat(style.borderTopLeftRadius),
+            barRadius: Math.min(parseFloat(getComputedStyle(bar).borderTopLeftRadius), field.height / 2),
+            note: note.getClientRects().length ? note.textContent : null, searching: find.hasAttribute('data-searching')};
+}"""
+
+
+def _search_frame(page, scope, *, alone):
+    """The field is concentric with the sheet; the sheet is a capsule while it holds the field alone, else a card with
+    the same corner (never an oval, never a box whose corner fights its field's)."""
+    frame = page.evaluate(_SEARCH_FRAME, scope)
+    assert abs(frame["radius"] - frame["pad"] - frame["barRadius"]) <= 0.5, frame
+    if alone:
+        assert frame["note"] is None, frame
+        assert abs(frame["height"] - frame["barHeight"] - 2 * frame["pad"]) <= 0.5, frame
+        assert abs(frame["radius"] - frame["height"] / 2) <= 0.5, frame
+    else:
+        assert frame["height"] > frame["barHeight"] + 2 * frame["pad"] + 1, frame
+    return frame
+
+
+@pytest.mark.parametrize("viewport", [(1512, 949), (1100, 750), (390, 844)], ids=["owner", "window", "phone"])
+def test_the_search_sheet_is_a_capsule_until_it_has_more_to_say(direct_server_with_data, viewport, tmp_path):
+    from playwright.sync_api import sync_playwright
+
+    _seed_search_rooms(direct_server_with_data["data_dir"])
+    shots, (width, height) = _search_evidence(tmp_path), viewport
+    name = f"webkit-{width}x{height}"
+    errors, held = [], []
+    with sync_playwright() as pw:
+        browser = pw.webkit.launch(headless=True)
+        page = browser.new_page(viewport={"width": width, "height": height}, device_scale_factor=2, color_scheme="dark")
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        try:
+            _open_main_for_search(page, direct_server_with_data["url"])
+            page.keyboard.press("Control+f")
+            page.wait_for_function("() => document.activeElement?.classList.contains('chat-find-input')")
+            empty = _search_frame(page, "#page-chat", alone=True)
+            _search_both_themes(page, shots / f"{name}-empty.png")
+
+            page.keyboard.type("Kingfisher")
+            _wait_search_results(page, "#page-chat", 4)
+            assert _search_frame(page, "#page-chat", alone=False)["radius"] == empty["radius"]
+            _search_both_themes(page, shots / f"{name}-results.png")
+
+            # A read held in transport: the sheet says it is searching (the real answer is released after).
+            page.route("**/api/chat/search?*", lambda route: held.append(route))
+            page.fill("#page-chat .chat-find-input", "routine note 3")
+            page.wait_for_function("() => document.querySelector('#page-chat .chat-find')?.hasAttribute('data-searching')")
+            page.wait_for_function("() => document.querySelector('#page-chat .chat-find-note')?.textContent.length > 0")
+            assert _search_frame(page, "#page-chat", alone=False)["searching"]
+            _search_both_themes(page, shots / f"{name}-loading.png")
+            for route in held:
+                route.abort()  # an offline read: the sheet says the history could not be searched, with Try again
+            page.unroute("**/api/chat/search?*")
+            page.wait_for_function("""() => document.querySelector('#page-chat .chat-find-more')?.textContent === 'Try again'""")
+            failed = _search_frame(page, "#page-chat", alone=False)
+            assert failed["note"].startswith("Saved history could not be searched."), failed
+            _search_both_themes(page, shots / f"{name}-error.png")
+            page.locator("#page-chat .chat-find-more").click()
+            page.wait_for_function("""() => {
+                const find = document.querySelector('#page-chat .chat-find');
+                return !find.hasAttribute('data-searching') && find.querySelectorAll('.chat-find-result').length > 0;
+            }""", timeout=30_000)
+            _search_frame(page, "#page-chat", alone=False)
+            page.fill("#page-chat .chat-find-input", "")
+            page.wait_for_function("() => document.querySelector('#page-chat .chat-find-results')?.hidden")
+            _search_frame(page, "#page-chat", alone=True)  # emptied words give the capsule back
+            assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        finally:
+            browser.close()
+    assert not errors, errors

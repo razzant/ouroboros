@@ -187,8 +187,10 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
     const attachments = createComposerAttachments({ preview: byId('attachment-preview'), attachBtn: plusBtn, fileInput,
         input, showToast, onLayout: () => requestAnimationFrame(() => onLayout()) });
 
+    // Search this chat is the pointer's way to the room's search (Ctrl+F or Cmd+F on a keyboard; chat_search.js).
     const plusMenu = createPlusMenu({ button: plusBtn, hostItems: [
         { key: 'attach', label: 'Attach file', icon: 'attach', onSelect: () => fileInput.click() },
+        ...(replies?.search ? [{ key: 'search', label: 'Search this chat', icon: 'search', onSelect: () => replies.search.open() }] : []),
     ] });
 
     // Local-only staging avoids orphan uploads and fast-send races.

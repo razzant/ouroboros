@@ -146,7 +146,7 @@ def _project_history_context(
     data_dir: pathlib.Path,
     thread_id: int,
     *, strict: bool = False,
-) -> tuple[set[int], list[dict], Dict[str, Any], Dict[str, int], Any, bool]:
+) -> tuple[set[int], list[dict], Dict[str, int], Any, bool]:
     """Read-only Project lenses and registry completeness, in the assembly worker.
 
     Preload bindings (the cursor fingerprint's explicit roots) and the room rule
@@ -175,13 +175,7 @@ def _project_history_context(
             if strict:
                 raise StoreError("Project origins unavailable") from None
             log.debug("Failed to load canonical Project source refs", exc_info=True)
-    try:
-        from ouroboros.project_dialogue import latest_chat_annotations
-
-        annotations = latest_chat_annotations(data_dir)
-    except Exception:
-        annotations = {}
-    return project_chat_ids, source_refs, annotations, all_task_bindings(data_dir), rooms, classified
+    return project_chat_ids, source_refs, all_task_bindings(data_dir), rooms, classified
 
 
 def _user_annotation(
@@ -1407,9 +1401,15 @@ def _assemble_history_response(
     if around is not None and cursor:
         raise HistoryCursorError("history_around_invalid", 400)
     notes = notes_stamp(data_dir)  # before the annotations are read: a later change refuses ``after``
-    project_chat_ids, project_source_refs, chat_annotations, bindings_by_task, rooms, classified = (
+    project_chat_ids, project_source_refs, bindings_by_task, rooms, classified = (
         _project_history_context(data_dir, thread_id, strict=exact)
     )
+    try:  # each owner message's latest routing annotation: a journal history's rows read, a word search never
+        from ouroboros.project_dialogue import latest_chat_annotations
+
+        chat_annotations = latest_chat_annotations(data_dir)
+    except Exception:
+        chat_annotations = {}
     row_target = None
     if exact:
         from ouroboros.chat_references import history_row_destination, resolve_history_row
