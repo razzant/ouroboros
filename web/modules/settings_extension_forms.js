@@ -1,7 +1,9 @@
 /** Skill forms and skill sources in Settings (docs/DESIGN.md "Settings").
  *
- * `skill/<id>` is the form a skill registered (its reviewed, host-rendered settings sections), opened from the
- * skill's card, a place's Connect, Voice and calls, and search. One host element, `#extension-settings-sections`,
+ * `skill` lists the skills that registered a settings form, one door each; search lands on it by the names this
+ * list had ("Extension Settings", under Advanced). `skill/<id>` is the form a skill registered (its reviewed,
+ * host-rendered settings sections), opened from that list, the skill's card, a place's Connect, Voice and calls,
+ * and search. One host element, `#extension-settings-sections`,
  * is re-filled for the opened skill: only that skill's routes are read, and `ouro:extension-settings-mounted` tells
  * a skill's own page module that its form stands (the bundled Calls skill enhances its form on it). The host draws
  * every field, reads the stored values from the route it posts to and owns the Save outcome.
@@ -243,15 +245,58 @@ export const skillForms = () => [...FORMS.values()];
 
 const skillOf = (path) => { try { return decodeURIComponent(String(path).split('/')[1] || ''); } catch { return ''; } };
 
-/** A skill page's title: its one section's own title, else the skill's name; the id until the skills are read. */
+/** A skill page's title: its one section's own title, else the skill's name; the id until the skills are read. The
+ *  page without a skill is the list of them. */
 export function skillFormTitle(path) {
     const form = FORMS.get(skillOf(path));
     const titled = form?.sections.length === 1 ? String(form.sections[0].title || '') : '';
     return titled || form?.name || skillOf(path) || 'Skill settings';
 }
 
-function mountSkillForm(container, { path }) {
+// `skill` alone: one door per skill that registered a form. A list that could not be read says so and claims nothing.
+function mountSkillList(container, { path, ctx }) {
+    let alive = true;
+    let rows = null;
+    let drawn = null;
+    let drawing = null;
+    // One read at a time: the page's first draw and the signal that it is shown ask together.
+    const draw = () => (drawing ||= read().finally(() => { drawing = null; }));
+    const read = async () => {
+        let failure = null;
+        try { await readSkills(); } catch (err) { failure = err; }
+        if (!alive) return;
+        const doors = failure ? [] : skillForms().map((form) => {
+            const name = skillFormTitle(`skill/${encodeURIComponent(form.skill)}`);
+            return { id: `skill:${form.skill}`, keys: [], page: path, name, meta: form.name === name ? '' : form.name, control: { kind: 'door' } };
+        });
+        // The same list is not drawn again: a door that holds focus keeps it.
+        const signature = failure ? `failed:${failure?.message}` : JSON.stringify(doors.map((row) => [row.id, row.name, row.meta]));
+        if (signature === drawn) return;
+        drawn = signature;
+        rows?.dispose();
+        container.innerHTML = `<section class="ui-card settings-card" data-skill-forms>${doors.length
+            ? `<div class="settings-rows">${doors.map((row) => settingsRow(row)).join('')}</div>`
+            : `<p class="${failure ? 'ui-result' : 'settings-card-lead'}">${failure ? '' : 'No installed skill has settings.'}</p>`}</section>`;
+        if (failure) setResult(container.querySelector('.ui-result'), errorWords(failure));
+        rows = bindSettingRows(container, { rows: doors,
+            openDoor: (row) => ctx.openSettings(`skill/${encodeURIComponent(row.id.slice('skill:'.length))}`) });
+    };
+    const onShown = (event) => { if (event.detail?.path === path) void draw(); };
+    window.addEventListener('ouro:settings-page-shown', onShown);
+    window.addEventListener('ouro:skill-lifecycle', draw);
+    return draw().then(() => ({
+        unmount() {
+            alive = false;
+            window.removeEventListener('ouro:settings-page-shown', onShown);
+            window.removeEventListener('ouro:skill-lifecycle', draw);
+            rows?.dispose();
+        },
+    }));
+}
+
+function mountSkillForm(container, { path, ctx }) {
     const skill = skillOf(path);
+    if (!skill) return mountSkillList(container, { path, ctx });
     formsHost ||= Object.assign(document.createElement('div'), { id: 'extension-settings-sections', className: 'settings-extension-sections' });
     const host = formsHost;
     host.innerHTML = '';
