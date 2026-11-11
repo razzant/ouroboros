@@ -20,11 +20,14 @@ Marks, all equal or the whole tail:
   go), no page by a writer whose terminal row the set left unread (``memory_sealing`` links it below the page).
 
 Never cold: a row open in some room; each room's newest row (it says whether the room is a place); every row of a
-place room (its earlier deliveries of the same words, who of ours spoke there); a quiet finish (it considers the words
-before it); an owner's Reply (its target may appear or move, ``room_membership.reply_target``); a terminal row of a
-task that wrote a page record; a row whose answer rested on a task the store did not hold or could not read
-(``RoomResolver.settled``). A row the set does not name, appended or inserted since, is read. A room that became a
-place since the set was composed makes the capture read the whole tail (``short``).
+Project whose newest row is a place's (its rows come from many chats); a quiet finish (it considers the words before
+it); an owner's Reply (its target may appear or move, ``room_membership.reply_target``); a terminal row of a task that
+wrote a page record; a row whose answer rested on a task the store did not hold or could not read
+(``RoomResolver.settled``). A row the set does not name, appended or inserted since, is read. The sealed rows of any
+other place room (its earlier deliveries of the same words, who of ours spoke there) are read for the rooms a reader
+shows, when it asks (``rows_of``): the set keeps each row's room key, the chat ``chat_chain._row_chat_id`` reads, as
+the room rule reads it, and no other room holds a row of that chat. A Project that became a place since the set was
+composed makes the capture read the whole tail (``short``).
 
 The set is a projection: a reset of the chronicle index takes it with its marks (``_RESET``), and the first whole pass
 after an update, a rebuild or any change composes it again; nothing to migrate or fill. A doubt is a whole pass: a
@@ -40,6 +43,11 @@ STANDS, GATE, HELD = "tail_cold", "tail_cold_gate", "tail_cold_held"  # a captur
 MEMO = (STANDS, GATE, HELD)
 MARKS = "tail_cold"  # the set's marks, in the index's ``state``
 _SINCE = "SELECT body FROM records WHERE sequence>? AND kind IN ('decision','page') ORDER BY sequence"
+# One page of the set's rows in some chats (``rows_of``), stored facts as ``chronicle_store._tail_rows`` reads them.
+_ROWS_OF = ("SELECT json_group_array(json_array(t.pos,t.seq,t.row_sha256,json(t.legacy),json(t.meta),t.terminal)), "
+            "max(c.pos) FROM (SELECT pos FROM tail_cold WHERE chat IN (SELECT value FROM json_each(?)) AND pos>? "
+            "ORDER BY pos LIMIT ?) c JOIN tail_rows t ON t.pos=c.pos")
+_PAGE = 2_000
 
 
 class Gate(NamedTuple):
@@ -115,13 +123,43 @@ class Watch:
 
 
 def short(derived: Optional[Mapping[str, Any]], tail: Any, places: Iterable[str]) -> bool:
-    """On a capture standing on the set: whether a room is a place now that was none when the set was composed (its
-    earlier sealed rows may be among those left unread); then it reads the whole tail again. A capture whose rows were
-    read live (the stored facts stand for another source) left none unread. Either stands no more."""
+    """On a capture standing on the set: whether a Project is a place now that was none when the set was composed (its
+    earlier rows may be among those left unread, and no room key finds them); then it reads the whole tail again. A
+    capture whose rows were read live (the stored facts stand for another source) left none unread. Either stands no
+    more."""
     if not (derived and derived.get(STANDS)) or tail.complete and set(places) <= set(derived[HELD].get("places") or ()):
         return False
     derived[STANDS] = False  # type: ignore[index]
     return tail.complete
+
+
+def standing(derived: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The marks a capture stands on, or ``None`` when it read the whole tail."""
+    return derived[HELD] if derived and derived.get(STANDS) else None
+
+
+def rows_of(store: Any, held: Mapping[str, Any], chats: Iterable[int]) -> Optional[list]:
+    """The stored facts of the rows the set leaves unread in these chats (the room key stored with each, ``_compose``),
+    by position, read in one transaction where the set and the stored tail are still the ones a capture stood on
+    (``held``, its marks); ``None`` where they are not or cannot be read: the reader takes those chats' rows from the
+    dialogue store instead (``memory_inventory._unread_place_rows``)."""
+    import sqlite3
+
+    from ouroboros.chronicle_store import ChronicleStore
+
+    keys, rows, after = json.dumps(sorted(set(chats))), [], -(1 << 63)
+    try:
+        with store._index() as db:
+            if ChronicleStore._state(db, MARKS) != held or (ChronicleStore._state(db, "tail") or {}).get("source") != held.get("source"):
+                return None
+            while True:
+                text, last = db.execute(_ROWS_OF, (keys, after, _PAGE)).fetchone()
+                if last is None:
+                    return rows
+                rows.extend(sorted(json.loads(text)))  # SQLite promises no aggregate order; the pages are in order
+                after = last
+    except (TimeoutError, sqlite3.Error):
+        return None
 
 
 def settle(store: Any, derived: Optional[Mapping[str, Any]], tail: Any, found: Any) -> None:
@@ -161,21 +199,24 @@ def _kept(meta: Mapping[str, Any], terminal: Any, writers: set) -> bool:
 def _compose(store: Any, snapshot: Any, gate_: Gate, tail: Any, found: Any) -> None:
     import sqlite3
 
+    from ouroboros.chat_chain import _row_chat_id
+
     writers = _writers(snapshot)
-    # A terminal row's task is kept with it: a page its task writes later links it (``stands``).
-    cold = [[pos, (meta.get("task_id") or None) if terminal is not None else None]
+    # A terminal row's task is kept with it: a page its task writes later links it (``stands``); every row its room key,
+    # the chat the room rule reads (``memory_inventory.rooms_of_row``), by the same function: ``rows_of`` reads by it.
+    cold = [[pos, (meta.get("task_id") or None) if terminal is not None else None, _row_chat_id(meta)]
             for pos, _address, meta, terminal in tail.rows if pos not in found.kept and not _kept(meta, terminal, writers)]
-    source = (snapshot.state("tail") or {}).get("source")
+    source, projects = (snapshot.state("tail") or {}).get("source"), {str(chat) for chat in gate_.facts.project_chat_ids}
     marks = {"marks": gate_.marks, "source": source, "sequence": snapshot.records[-1][0] if snapshot.records else 0,
-             "places": sorted(found.places), "rows": len(cold)}
+             "places": sorted(found.places & projects), "rows": len(cold)}
     try:
         with store._publishing(0) as db:
             held = store._state(db, "tail")
             if not isinstance(held, dict) or held.get("source") != source:
                 return
             db.execute("DELETE FROM tail_cold")
-            db.execute("INSERT INTO tail_cold SELECT json_extract(value,'$[0]'), json_extract(value,'$[1]') "
-                       "FROM json_each(?)", (json.dumps(cold),))
+            db.execute("INSERT INTO tail_cold SELECT json_extract(value,'$[0]'), json_extract(value,'$[1]'), "
+                       "json_extract(value,'$[2]') FROM json_each(?)", (json.dumps(cold),))
             store._set_state(db, MARKS, marks)
             db.commit()
     except (TimeoutError, sqlite3.Error):

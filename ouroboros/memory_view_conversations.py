@@ -99,9 +99,10 @@ def _task_line(root_id: str, group: List[Tuple[Entry, Dict[str, Any]]]) -> Dict[
 @timed_section("memory_view.conversations")
 def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room: Mapping[str, List[Entry]],
             notes: Mapping[str, List[Dict[str, Any]]], lineage: Mapping[str, Any], *, quiet: Mapping[str, List[Entry]],
-            sealed: Mapping[str, List[Entry]], gaps: Mapping[str, set], projects: Any) -> List[Dict[str, Any]]:
+            sealed: memory_inventory.PlaceRows, gaps: Mapping[str, set], projects: Any) -> List[Dict[str, Any]]:
     """The groups of my other conversations, by key: every room with open rows, a note or running work but the
-    focus's own (``spec.room_id``), from the rows ``memory_inventory.open_rows_by_room`` read for this capture."""
+    focus's own (``spec.room_id``), from the rows ``memory_inventory.open_rows_by_room`` read for this capture; the
+    sealed rows of the place rooms among them only (``sealed``), asked once."""
     from ouroboros import memory_view as mv
     from ouroboros.memory_room_activity import considered_through, running_by_room
     from ouroboros.memory_sealing import linked_rows
@@ -110,6 +111,7 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
     running = running_by_room(root, by_room, notes, membership.bindings, projects or [])
     rooms = sorted((set(by_room) | set(notes) | {room for room, kinds in gaps.items() if kinds}
                     | {room for room, tasks in running.items() if tasks}) - {str(spec.room_id)})
+    sealed = sealed.rows(rooms)  # a place none of these rooms is stays unread
     linked = linked_rows(root, store, by_room, projects or ())
     here = {entry[0]["row_sha256"] for entry in by_room.get(str(spec.room_id), ())} if spec.room_lanes else set()
     # Labels come from the rows in hand (open and sealed): a room's newest row that came over a transport, whose tail

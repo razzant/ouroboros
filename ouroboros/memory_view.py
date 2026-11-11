@@ -861,7 +861,7 @@ def _capture_live(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
     notes = _notes_by_room(store) if integrating or spec.room_id is not None or spec.other_conversations else {}
     gaps: Dict[str, set] = {}  # by room, what its open rows may lack (``room_appearances.GAP_DETAILS``)
     quiet: Dict[str, List[Entry]] = {}
-    sealed: Dict[str, List[Entry]] = {}
+    sealed = memory_inventory.PlaceRows()  # each shown place's sealed rows, read when the block asks for them
     if spec.other_conversations:
         by_room = memory_inventory.open_rows_by_room(root, gaps=gaps, quiet=quiet, sealed=sealed)
     elif spec.room_id is not None:  # the room's facts are counted from its open rows whatever the view prints of them

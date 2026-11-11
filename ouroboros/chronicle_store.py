@@ -101,11 +101,14 @@ _SCHEMA = """
     CREATE TABLE IF NOT EXISTS told (record TEXT NOT NULL, account TEXT NOT NULL, sequence INTEGER NOT NULL,
                                      PRIMARY KEY (record, account));
     CREATE INDEX IF NOT EXISTS told_account ON told(account);
-    CREATE TABLE IF NOT EXISTS tail_cold (pos INTEGER PRIMARY KEY, task TEXT);
+    CREATE TABLE IF NOT EXISTS tail_cold (pos INTEGER PRIMARY KEY, task TEXT, chat INTEGER NOT NULL);
     CREATE INDEX IF NOT EXISTS tail_cold_task ON tail_cold(task) WHERE task IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS tail_cold_chat ON tail_cold(chat, pos);
 """
 # ``tail_cold`` (``memory_tail_cold``) takes no SCHEMA_VERSION step: a lock-free reader reaches it only through its marks
-# in ``state``, which a locked open that created it wrote, and every reset takes the marks with it.
+# in ``state``, which a locked open that created it wrote, and every reset takes the marks with it. An index holding the
+# table without ``chat`` (only this change's own earlier commits wrote one) fails the script and is rebuilt, as any
+# unreadable index is.
 _RESET = ("DELETE FROM records; DELETE FROM state; DELETE FROM active_marks; DELETE FROM page_rows; "
           "DELETE FROM folded; DELETE FROM tail_rows; DELETE FROM told; DELETE FROM tail_cold; "
           f"DELETE FROM sqlite_sequence WHERE name='records'; PRAGMA user_version={SCHEMA_VERSION};")

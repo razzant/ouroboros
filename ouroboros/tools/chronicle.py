@@ -1072,7 +1072,7 @@ def _groups(root: Path, store: ChronicleStore) -> List[Dict[str, Any]]:
 
     spec = mv.ViewSpec("integrator", room_id=None)
     with capture(root):  # one state of the chronicle for every room's facts
-        gaps, quiet, sealed = {}, {}, {}
+        gaps, quiet, sealed = {}, {}, memory_inventory.PlaceRows()
         rows, lineage = memory_inventory.open_rows_by_room(root, gaps=gaps, quiet=quiet, sealed=sealed), row_lineage(root)
         return conversations.capture(store, root, spec, mv.room_labeler(root), rows, mv._notes_by_room(store), lineage,
                                      quiet=quiet, sealed=sealed, gaps=gaps, projects=list_projects(root))

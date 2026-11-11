@@ -5,7 +5,8 @@ import dataclasses
 
 import pytest
 
-from ouroboros import chat_chain, memory_floor, memory_view as mv, memory_view_conversations as conversations
+from ouroboros import (chat_chain, memory_floor, memory_inventory, memory_view as mv,
+                       memory_view_conversations as conversations)
 from ouroboros.chronicle_store import ChronicleStore
 from ouroboros.tools.chronicle import _memory_read, page_covers
 from ouroboros.tools.registry import ToolContext
@@ -284,7 +285,7 @@ def test_a_gap_holds_a_room_in_the_block_without_words_or_notes(tmp_path):
     _install(tmp_path)
     spec = mv.ViewSpec("integrator", room_id="1")
     label = lambda room, _sample=None: f"Room {room}"
-    store, kw = ChronicleStore(tmp_path), {"quiet": {}, "sealed": {}, "projects": []}
+    store, kw = ChronicleStore(tmp_path), {"quiet": {}, "sealed": memory_inventory.PlaceRows(), "projects": []}
     groups = conversations.capture(store, tmp_path, spec, label, {}, {}, {}, gaps={"555": {"reply_target_unreadable"}}, **kw)
     assert [room["room_id"] for group in groups for room in group["rooms"]] == ["555"]
     assert not conversations.capture(store, tmp_path, spec, label, {}, {}, {}, gaps={}, **kw)
