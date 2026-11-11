@@ -71,7 +71,7 @@ def lead_fact(ctx: Any, *, model: str | None = None, use_local: bool | None = No
     role = role or (getattr(ctx, "_lead_role", None) if source == "fallback" else None) or task_model_binding({"task_metadata": getattr(ctx, "task_metadata", {})},
                                      context_fit_plan=getattr(ctx, "context_fit_plan", None))[0]
     overrides = getattr(getattr(ctx, "model_wait_context", None), "overrides", None)
-    home = route_binding(primary["model"], bool(primary.get("use_local")), primary["role"], overrides=overrides)
+    home = route_binding(primary["model"], bool(primary.get("use_local")), primary["role"])
     acting = route_binding(model, local, role, overrides=overrides)
     basis = primary_basis(ctx)
     departed = acting != home
@@ -80,16 +80,18 @@ def lead_fact(ctx: Any, *, model: str | None = None, use_local: bool | None = No
         fact.update(basis="fallback", role=role)
     elif source == "switch_model":
         fact["basis"] = "mind"
+    elif source == "wait_card":
+        fact["basis"] = "owner"
     if departed:
         fact["primary"] = {"model": home[0], "use_local": home[1], "basis": basis}
     if basis == "owner_words" and (departed or fact["basis"] == basis):
         (fact["primary"] if departed else fact).update(cited_fields((getattr(ctx, "task_metadata", None) or {}).get("lead")))
-    if fact["basis"] in {"fallback", "mind"} and source in {"fallback", "switch_model"}:
+    if source in {"fallback", "switch_model", "wait_card"} and departed:
         identity = [model, local, fact["basis"], role, list(acting)]
         episode = getattr(ctx, "_lead_episode", None) or {}
         if episode.get("identity") != identity:
             episode = {"identity": identity, "since": utc_now_iso(),
-                       "cause": ("switch_model" if fact["basis"] == "mind" else str(
+                       "cause": (source if source in {"switch_model", "wait_card"} else str(
                            getattr(ctx, "_lead_cause", "") or "configured fallback"))}
             ctx._lead_episode = episode
         fact.update(since=episode["since"], cause=episode["cause"])

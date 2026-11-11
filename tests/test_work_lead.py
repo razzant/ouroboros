@@ -77,6 +77,27 @@ def test_same_model_on_another_chain_account_is_still_a_fallback():
     assert "primary" not in leads.lead_fact(ctx, role="main")
 
 
+@pytest.mark.parametrize("source,role", [("main", "main"), ("owner", "lead")])
+def test_wait_card_move_names_the_owner_and_unchanged_primary_without_pending(source, role):
+    save_owner({"OUROBOROS_MODEL": A})
+    ctx = context(source, role=role)
+    ctx.model_wait_context = SimpleNamespace(overrides={role: {"model": B, "use_local": False}})
+    ctx.active_model, ctx.route_choice = B, route_choice.explicit("wait_card")
+    fact = leads.lead_fact(ctx)
+    assert fact["model"] == B and fact["basis"] == "owner"
+    assert fact["primary"] == {"model": A, "use_local": False, "basis": source}
+    assert fact["since"] and fact["cause"] == "wait_card"
+    save_owner({"OUROBOROS_MODEL": C})
+    assert leads.project_lead(fact) == fact  # this explicit route has no next-call move
+    assert ctx.primary_route["model"] == A
+    ctx.model_wait_context.overrides.clear()
+    ctx.active_model, ctx.route_choice = A, route_choice.opening_choice(ctx)
+    returned = leads.lead_fact(ctx)
+    assert returned == {"model": A, "use_local": False, "basis": source}
+    projected = leads.project_lead(returned)
+    assert (projected.get("pending") == {"model": C, "use_local": False}) is (source == "main")
+
+
 def test_return_request_keeps_fallback_until_its_own_accepted_reply():
     ctx = context("room", role="lead")
     ctx.active_model = B

@@ -229,7 +229,9 @@ An `owner_words` primary carries `cited: {text, clipped}`: the verified span's f
 with `clipped: true` only if more remain. The durable lead keeps the whole span. The cite sits on `lead` on the
 primary and `lead.primary` while away, including an accepted primary awaiting application; it never governs the work.
 A fallback names its chain row in `role` (`fallback:<index>`); equal models on different accounts remain distinct.
-`primary` appears only away from the primary; `since` and `cause` date only fallback/mind departures.
+`primary` appears only away from the primary; `since` and `cause` date fallback, mind and wait-card departures.
+A wait-card switch has basis `owner` and cause `wait_card`: the owner moved the acting route without changing
+the work's primary. It carries no fallback amber and no `pending` route unless a later act will actually move it.
 A requested return stays fallback until the primary answers. Queued roots use their admitted carrier;
 a recorded follow reads Main now. `pending` names an accepted owner act awaiting application or a follower's next route after Settings moved it,
 without changing the acting model. Missing facts remain unknown; there is no cost field.
