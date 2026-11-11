@@ -328,9 +328,9 @@ def get_tools() -> List[ToolEntry]:
                     "restore_unit_refs may be used without a note. Core, assignment, owner words, typed owner-directed "
                     "dialogue and newer tail stay whole. Each older tool call and contiguous results is atomic; exact "
                     "bytes are checkpointed with CAS provenance before replacement, so raw evidence remains retrievable. "
-                    "Earlier notes stay unless replace_note_ids names them. Restored sources and host emergency "
-                    "records follow keep_unit_ids; keep_last_n keeps every unnamed capsule. Replacement occupies "
-                    "the first replaced unit. Batch usefully, shorter than sources: rewriting loses signed "
+                    "Notes stay unless replace_note_ids names them; restored sources and emergency records follow "
+                    "the keep selection; replacement occupies the first replaced unit. "
+                    "Batch usefully, shorter than sources: rewriting loses signed "
                     "reasoning from the earliest change and cache reuse from there (on Codex from the end of the leading "
                     "system items); round facts report the measured re-read. "
                     "Native review ignores schema_names, review_notes and review_transfers; its inspection reports "
@@ -340,12 +340,12 @@ def get_tools() -> List[ToolEntry]:
                     "type": "object",
                     "properties": {
                         "view_address": {"type": "array", "items": {"type": "string"}, "description": "Exact inspected memory forms; restore_view_address restores a note whole. Applied at the next tool boundary from the same snapshot, preserving other choices and arrivals; receipt measures the complete result and prefix re-reading."},
-                        "inspect": {"type": "boolean", "description": "Pin view_revision; return counts/tokens by kind, one transcript-ordered page of unit IDs/eligibility (capsules: authorship and first_line), restore_checkpoint and schema names; no mutation."},
+                        "inspect": {"type": "boolean", "description": "Pin view_revision; return counts/tokens by kind, one transcript-ordered page of unit IDs/eligibility, restore_checkpoint and schema names; no mutation."},
                         "offset": {"type": "integer", "minimum": 0, "description": "Inspection page's zero-based start; next_offset names remaining units."},
                         "expected_view_revision": {"type": "string", "description": "Exact inspected revision; omitted binds the model-send view producing this call, so inspection is optional."},
                         "working_note": {"type": "string", "description": "For a future reader without sources: keep situation/purpose, who decided what, their status within those sources, scope, changes, corrections and unresolved work; label inference and gaps, invent no detail. Later grants/cancellations supersede only their scope, not unaffected branches; proposals are not approvals, and superseded restrictions do not survive scoped approval. Concise, no fixed template; required for folds."},
-                        "keep_unit_ids": {"type": "array", "items": {"type": "string"}, "description": "Exact complete units to keep raw, overriding keep_last_n; [] folds eligible tools, prose, restored sources and host emergency records. Other capsules stay unless replace_note_ids names them; both keep selectors omitted keeps all."},
-                        "replace_note_ids": {"type": "array", "items": {"type": "string"}, "description": "Capsule IDs to merge into working_note, required for notes (actor, helper or unrecorded authorship), optional for host source views. The new note names their exact sources, the receipt their first lines. A capsule also in keep_unit_ids is refused."},
+                        "keep_unit_ids": {"type": "array", "items": {"type": "string"}, "description": "Exact complete units to keep raw, overriding keep_last_n; empty selects none, omitting both selectors selects all."},
+                        "replace_note_ids": {"type": "array", "items": {"type": "string"}, "description": "Capsule IDs this working_note replaces. The new note keeps their source addresses, the receipt names their first lines; an ID also in keep_unit_ids is refused."},
                         "restore_unit_refs": {"type": "array", "items": {"type": "object", "properties": {
                             "checkpoint_ref": {"type": "object"}, "unit_id": {"type": "string"}, "raw_sha256": {"type": "string"}},
                             "required": ["checkpoint_ref", "unit_id", "raw_sha256"]},
@@ -364,7 +364,7 @@ def get_tools() -> List[ToolEntry]:
                             "description": "With working_note, declare attachment decisions/reasons transferred to named current plan decisions using inspected source/spec identities; no completeness is inferred, and absent/stale transfer keeps the attachment whole."},
                         "keep_last_n": {
                             "type": "integer",
-                            "description": "With working_note and no keep_unit_ids: recent completed tool units to keep raw (2-20), everything from that tool unit onward, and every capsule unless replace_note_ids names it.",
+                            "description": "With working_note and no keep_unit_ids: recent completed tool units to keep raw (2-20); earlier notes stay.",
                         },
                     },
                     "required": [],
