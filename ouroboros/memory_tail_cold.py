@@ -128,17 +128,16 @@ def moved(store: Any, gate_: Gate) -> bool:
 
 
 def forgo(derived: Dict[str, Any]) -> None:
-    """A capture whose set moved under it stands on nothing from here: it composes nothing, and its rule answers each
-    task again from the lineage as it is now (this process's memory of it dropped where the counter moved)."""
-    from ouroboros.projects_registry import forget_lineage
-    from ouroboros.store_hot_facts import lineage_writes
+    """A capture whose set moved under it stands on nothing from here: it composes nothing, and its rule decides rooms
+    again over the facts as they are now: the registry read anew, each task's lineage asked again (this process's memory
+    of it dropped where the counter moved, ``memory_inventory._membership_facts``)."""
+    from ouroboros.memory_inventory import _membership_facts
 
     derived.update({STANDS: False, HELD: {}})
     derived.pop(GATE, None)
     facts = derived.get("membership")
     if facts is not None:
-        forget_lineage(facts.rooms.root, lineage_writes(facts.rooms.root), facts.rooms._projects)
-        facts.rooms.answers.clear()
+        derived["membership"] = _membership_facts(facts.rooms.root)
 
 
 def stands(db: Any, gate_: Gate) -> Optional[Dict[str, Any]]:

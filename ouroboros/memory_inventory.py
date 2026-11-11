@@ -454,6 +454,7 @@ def open_rows_by_room(root: Any, gaps: Optional[Dict[str, set]] = None,
         found = _open_pass(root, store, facts, tail, *wants)
         if memory_tail_cold.again(store, derived, tail, found.places & projects):  # rows it left unread may count now
             derived["tail"] = tail = _whole_again(root, frontier, tail)  # type: ignore[index]
+            facts = membership_facts(root)  # read anew where its lineage moved (``memory_tail_cold.forgo``)
             found = _open_pass(root, store, facts, tail, *wants)
         memory_tail_cold.settle(store, derived, tail, found)
         held = memory_tail_cold.standing(derived)
@@ -483,8 +484,7 @@ def over_one_state(root: Any, read: Callable[[], Any]) -> Any:
             return got
     except memory_tail_cold.Moved:
         pass
-    memory_tail_cold.forgo(derived)
-    derived["membership"] = _membership_facts(root)
+    memory_tail_cold.forgo(derived)  # the registry and the lineage read anew
     derived["tail"] = _whole_again(root, _active_frontier(store), derived.get("tail"))
     return read()
 

@@ -750,6 +750,39 @@ def test_a_lineage_written_inside_a_capture_with_no_reader_of_places_leaves_one_
     assert fired and got in (before, after), _first_difference({"open": got}, {"open": after})
 
 
+def test_a_lineage_and_a_binding_written_inside_a_capture_with_no_reader_of_places_leave_one_state(monkeypatch, tmp_path):
+    """Both after the marks: a task's admitted chat moves and the task is bound to a Project. The pass read again under
+    the new lineage decides by the registry's facts as they are then too, never the old ones beside the new lineage."""
+    rooms = _moving_task(tmp_path, 1)
+
+    def open_rows() -> dict:
+        return json.loads(json.dumps(mi.open_rows_by_room(tmp_path)))
+
+    def both() -> None:
+        store.update_task(tmp_path, "moving", lambda doc: {**doc, "chat_id": rooms["alpha"]})
+        bind_task_to_project(tmp_path, "moving", "beta", origin={"absent": "post_hoc_unresolved"})
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cold, "gate", lambda _store: None)
+        before = open_rows()
+    real, fired = cold.gate, []
+
+    def moved_after_the_marks(store_):
+        marks = real(store_)
+        if not fired:
+            fired.append(both())
+        return marks
+
+    _forget_process_memos()
+    with monkeypatch.context() as patch:
+        patch.setattr(cold, "gate", moved_after_the_marks)
+        got = open_rows()
+    with monkeypatch.context() as patch:
+        patch.setattr(cold, "gate", lambda _store: None)
+        after = open_rows()
+    assert fired and got in (before, after), _first_difference({"open": got}, {"open": after})
+
+
 def test_a_lineage_written_while_a_block_reads_a_place_leaves_one_state(monkeypatch, tmp_path):
     """The same, while the block reads a place's rows: a row of the place's chat that the task's new room takes away
     from it is decided under the lineage the capture read, or the capture reads the whole tail again."""
