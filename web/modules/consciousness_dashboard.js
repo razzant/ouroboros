@@ -32,10 +32,11 @@ export function liveWake(snapshot) {
     return (snapshot.recentWakes || []).find((wake) => wake.live) || null;
 }
 
-/** The alarm clock owns the headline, independently of the recent-wake list. */
+/** The alarm clock owns the headline, independently of the recent-wake list; `note` only when the host says what
+ *  follows from its state (a held wake's allowance). */
 export function headlineView(snapshot) {
     return { text: snapshot.detail ? tr(snapshot.detail, snapshot.detail) : tr('task.phase.unknown', 'State unknown'),
-        moving: snapshot.status === 'thinking' };
+        ...(snapshot.detailNote ? { note: tr(snapshot.detailNote, snapshot.detailNote) } : {}), moving: snapshot.status === 'thinking' };
 }
 
 const causeWord = (row) => (row.cause === 'own' ? tr('task.title.own_time', 'Own time') : row.cause === 'started' ? tr('consciousness.started_work', 'Started work') : row.label || row.cause.replace(/^place:/, ''));
@@ -66,7 +67,8 @@ export function countedRootsText(snapshot) {
 
 /** The tab's headline card on the Dashboard tab body: the state in the host's words with its one status mark, the money
  *  of the last 24 hours and the own-task count as its meta, Start/Stop (and Restart when it cannot wake) beside them;
- *  where the money went, the unpriced caveat and the own tasks' names are the card's Details. `toggling` is the
+ *  where the money went, the unpriced caveat and the own tasks' names are the card's Details. Its doors: Circles, Costs
+ *  (the allowance's one editor, where a hold's reason and when room returns are said) and Settings. `toggling` is the
  *  command just sent (its button says so until the next read). */
 export function summaryHtml(snapshot, { hasSocket = true, toggling = '', detailsOpen = false } = {}) {
     const headline = headlineView(snapshot);
@@ -89,13 +91,15 @@ export function summaryHtml(snapshot, { hasSocket = true, toggling = '', details
     return `<div class="dashboard-hero">
             <p class="dashboard-hero-kicker">${escapeHtml(kicker)}</p>
             <p class="dashboard-hero-figure consciousness-headline">${escapeHtml(headline.text)}${markHtml}</p>
+            ${headline.note ? `<p class="dashboard-hero-meta consciousness-headline-note">${escapeHtml(headline.note)}</p>` : ''}
             ${money ? `<p class="dashboard-hero-meta">${escapeHtml(money)}</p>` : ''}
             ${roots ? `<p class="dashboard-hero-meta">${escapeHtml(roots.head)}</p>` : ''}
             ${toggle || restart ? `<div class="dashboard-hero-actions">${restart}${toggle}</div>` : ''}
         </div>
         ${details ? `<details class="ui-disclosure consciousness-details"${detailsOpen ? ' open' : ''}><summary>Details</summary>${details}</details>` : ''}
         <p class="consciousness-foot consciousness-door-line">${escapeHtml(tr('consciousness.places.circles', 'The places it lives in, their words and their circles:'))} <button type="button" class="consciousness-inline-link ui-hit-area" data-cx-act="circles">${escapeHtml(tr('circles.link', 'Circles ›'))}</button></p>
-        <p class="consciousness-foot consciousness-door-line">Allowance, own tasks and concurrent conversations: <button type="button" class="consciousness-inline-link ui-hit-area" data-cx-act="settings">Settings ›</button></p>`;
+        <p class="consciousness-foot consciousness-door-line">Its spending limit over 24 hours and what it spent: <button type="button" class="consciousness-inline-link ui-hit-area" data-cx-act="costs">Costs ›</button></p>
+        <p class="consciousness-foot consciousness-door-line">Its own tasks and concurrent conversations: <button type="button" class="consciousness-inline-link ui-hit-area" data-cx-act="settings">Settings ›</button></p>`;
 }
 
 /** One view of the card: authored line, whole note on request, factual phase and cost. */
@@ -200,7 +204,7 @@ export function paintWakeRows(region, wakes, coverage, opened, put, release = de
 }
 
 /** Mount the tab into its Dashboard panel. */
-export function initConsciousnessDashboard({ mount, ws, state, openSettingsTab, read = readConsciousness,
+export function initConsciousnessDashboard({ mount, ws, state, openSettingsTab, openDashboardTab, read = readConsciousness,
     readFallback = readConsciousnessFromState, readPlacesFn = readPlaces, openSheet = openPlaceSheet,
     markdown = { mount: mountChatMarkdown, enhance: enhanceChatMarkdown, destroy: destroyChatMarkdown } } = {}) {
     if (!mount) return { refresh: () => {}, destroy() {} };
@@ -329,6 +333,7 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettingsTab, 
         if (!button || button.disabled) return;
         const act = button.dataset.cxAct;
         if (act === 'circles') { openCircles(); return; }
+        if (act === 'costs') { await openDashboardTab?.('costs'); return; }
         if (act === 'settings') {
             await openSettingsTab?.('behavior');
             document.getElementById('settings-consciousness')?.scrollIntoView({ block: 'start' });

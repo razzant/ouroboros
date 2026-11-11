@@ -256,6 +256,15 @@ def test_wake_task_metadata_carries_origin_level_and_tree_cap(monkeypatch):
     # the alarm never launches on an exhausted allowance anyway.
     assert "root_cost_ceiling_usd" not in wake.wake_task_metadata("act", "heartbeat", root_cost_ceiling_usd=0.0)
     assert wake.wake_task_metadata("bogus", "")["consciousness_autonomy"] == "act"  # falls back to the setting
+    # Which limit set the ceiling is observed beside it, only beside a stamped ceiling and only in its own words.
+    for source in ("allowance", "per_task_cap", "both"):
+        stamped = wake.wake_task_metadata("act", "heartbeat", root_cost_ceiling_usd=2.99, root_cost_ceiling_source=source)
+        assert stamped["root_cost_ceiling_source"] == source and stamped["root_cost_ceiling_usd"] == 2.99
+    assert "root_cost_ceiling_source" not in meta  # no source given: none is guessed
+    assert "root_cost_ceiling_source" not in wake.wake_task_metadata(
+        "act", "heartbeat", root_cost_ceiling_usd=0.0, root_cost_ceiling_source="allowance")
+    assert "root_cost_ceiling_source" not in wake.wake_task_metadata(
+        "act", "heartbeat", root_cost_ceiling_usd=1.0, root_cost_ceiling_source="guess")
 
 
 def _chat(root, *rows, archive: str = ""):

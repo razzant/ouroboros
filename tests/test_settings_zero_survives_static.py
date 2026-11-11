@@ -7,8 +7,9 @@ save of any tab wrote ``20`` back. Only a missing value may take the fallback.
 
 Source pin (the pattern of the other *_static tests) plus the typed server read
 the helper relies on. The helper itself runs in the node lane
-(``web/tests/settings_stored_zero.test.js``); the load/save/reload round trip
-runs against a real server in ``tests/test_ui_smoke_settings_drafts.py``.
+(``web/tests/settings_stored_zero.test.js``) for the INPUT_FIELDS rows that keep it; the
+allowance's own editor is Costs now, and its 0 save/reload and an unrelated Settings save
+run against a real server in ``tests/test_costs_allowance_browser.py``.
 """
 
 from __future__ import annotations

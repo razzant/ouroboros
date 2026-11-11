@@ -56,13 +56,20 @@ LEVEL_LINES = {
 _FALLBACK_TEMPLATE = "[Wake-up · {reason}] No request started this turn: it is yours. Previous wake: {previous_wake}. Wake context (last wake {last_wake_ago}): {events}"
 
 
-def wake_task_metadata(level: Any, reason: str, *, root_cost_ceiling_usd: Optional[float] = None) -> Dict[str, Any]:
+CEILING_SOURCES = frozenset({"allowance", "per_task_cap", "both"})
+
+
+def wake_task_metadata(level: Any, reason: str, *, root_cost_ceiling_usd: Optional[float] = None,
+                       root_cost_ceiling_source: str = "") -> Dict[str, Any]:
     """The wake's ``task_metadata``: origin label, ledger category, level and its consequences.
 
     ``root_cost_ceiling_usd`` is the wake tree's GRACEFUL ceiling (the allowance left, at most the per-task cap): the
     root's own by ``task_pacing.resolve_cost_ceiling``, inherited resolved by the members, the ledger fence staying at
     the owner's per-task cap. Only a strictly positive ceiling is stamped: a wake with nothing left is skipped by the
-    alarm, never started under a $0 ceiling."""
+    alarm, never started under a $0 ceiling. ``root_cost_ceiling_source`` (``CEILING_SOURCES``) is stamped beside it:
+    which limit set that number at launch (the allowance left, the per-task cap, or both at once). It is an
+    observation for the views that explain a pause (``consciousness_view.hold_cause``); no stop, fence or Resume
+    reads it, and a record without it says nothing about either limit."""
     normalized = normalize_level(level)
     metadata: Dict[str, Any] = {
         "initiator": CONSCIOUSNESS_INITIATOR, "usage_category": CONSCIOUSNESS_CATEGORY,
@@ -74,6 +81,8 @@ def wake_task_metadata(level: Any, reason: str, *, root_cost_ceiling_usd: Option
     }
     if root_cost_ceiling_usd is not None and float(root_cost_ceiling_usd) > 0:
         metadata["root_cost_ceiling_usd"] = float(root_cost_ceiling_usd)
+        if root_cost_ceiling_source in CEILING_SOURCES:
+            metadata["root_cost_ceiling_source"] = root_cost_ceiling_source
     return metadata
 
 

@@ -75,6 +75,15 @@ test('amber only for the owner\'s move; a failure is the outcome\'s red dot, an 
     }
     for (const status of ['wake_outcome_unknown', 'allowance_unknown']) assert.equal(shapeOf(chipView(answer({ status }))), 'ring/ink', status);
     assert.equal(shapeOf(chipView(answer({ status: 'wake_paused' }))), 'pause/ink');
+    // A wake held at the allowance it started with, proven by its records, is the owner's move; the chip keeps no time.
+    const held = { status: 'wake_paused', live_wake_task_id: 'w1', live_wake_held: true,
+        detail: 'Wake-up w1 stopped at the allowance it had left when it started ($2.99).' };
+    const allowance = chipView(answer({ ...held, live_wake_hold: { cause: 'allowance', ceiling_usd: 2.99 } }));
+    assert.deepEqual([allowance.word, shapeOf(allowance)], ['', 'dot/owner']);
+    assert.equal(allowance.said, `Consciousness: ${held.detail} · waits for you`);
+    for (const cause of ['per_task_cap', 'launch_ceiling', 'owner', '']) {
+        assert.equal(shapeOf(chipView(answer({ ...held, live_wake_hold: { cause, ceiling_usd: null } }))), 'pause/ink', cause);
+    }
     // An unknown control is never Off: a ring and no word.
     const unknown = chipView({ bg_consciousness_state: {}, bg_consciousness_enabled: null });
     assert.deepEqual([unknown.word, shapeOf(unknown), unknown.off], ['', 'ring/ink', false]);
@@ -149,7 +158,8 @@ test('the chip opens its Shade and switches nothing; the Shade reads the wakes o
         const toggle = shade.querySelector('.cx-toggle');
         assert.equal(toggle.textContent, 'Stop');
         const doors = shade.querySelectorAll('.cx-door');
-        assert.deepEqual(doors.map((door) => [door.textContent, door.hidden]), [['Dashboard ›', false], ['Evolution ›', true]]);
+        assert.deepEqual(doors.map((door) => [door.textContent, door.hidden]),
+            [['Dashboard ›', false], ['Costs ›', true], ['Evolution ›', true]], 'Costs › only while the allowance is the next step');
 
         toggle.click();
         assert.deepEqual(sent, [{ type: 'command', cmd: '/bg stop', ui_control: { name: 'consciousness_toggle' } }],
@@ -160,16 +170,55 @@ test('the chip opens its Shade and switches nothing; the Shade reads the wakes o
         status.update(answer({ status: 'disabled' }, { bg_consciousness_enabled: false, evolution_enabled: true }));
         assert.deepEqual([toggle.textContent, toggle.disabled], ['Start', false]);
         assert.equal(status.chip.querySelector('.cx-chip-word').textContent, 'Evolving');
-        assert.equal(doors[1].hidden, false, 'Evolution › while a campaign runs');
+        assert.equal(doors[2].hidden, false, 'Evolution › while a campaign runs');
 
         // A door closes the Shade and opens its Dashboard tab.
-        doors[1].parentElement.listeners.get('click')[0]({ target: { closest: () => doors[1] } });
+        doors[2].parentElement.listeners.get('click')[0]({ target: { closest: () => doors[2] } });
         assert.deepEqual(tabs, ['evolution']);
         assert.equal(status.isOpen(), false);
         assert.equal(bar.hasAttribute('data-cx-shade'), false);
 
         status.destroy();
         assert.equal(bar.children.includes(status.chip), false, 'its nodes go with it');
+    } finally {
+        restoreDom(env.prior);
+    }
+});
+
+test('while the allowance is the next step the Shade offers Costs, and its door opens Costs', async () => {
+    const env = installDom();
+    try {
+        const bar = document.createElement('div');
+        const tabs = [];
+        const status = createConsciousnessStatus({ bar, ws: { send() {}, isConnected: () => true },
+            openDashboardTab: (tab) => tabs.push(tab), read: async () => normalizeConsciousness({ recent_wakes: [] }) });
+        const held = { status: 'wake_paused', live_wake_task_id: 'w1', live_wake_held: true,
+            detail: 'Wake-up w1 stopped at the allowance it had left when it started ($2.99).',
+            live_wake_hold: { cause: 'allowance', ceiling_usd: 2.99 } };
+        status.update(answer(held));
+        status.chip.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const costs = status.shade.querySelectorAll('.cx-door').find((door) => door.textContent === 'Costs ›');
+        assert.equal(costs.hidden, false, 'a wake held at its allowance');
+        assert.equal(status.shade.querySelector('.cx-state').textContent, held.detail, 'the host\'s reason, no clock added');
+        const note = status.shade.querySelector('.cx-state-note');
+        assert.equal(note.hidden, true, 'no note without one');
+        status.update(answer({ ...held, detail_note: 'Resume keeps that limit.' }));
+        assert.deepEqual([note.textContent, note.hidden], ['Resume keeps that limit.', false]);
+        for (const [bg, shown] of [[{ status: 'allowance_exhausted', detail: 'Daily allowance spent.' }, true],
+            [{ ...held, live_wake_hold: { cause: 'per_task_cap', ceiling_usd: 10 } }, false],
+            [{ ...held, live_wake_hold: { cause: 'owner', ceiling_usd: null } }, false],
+            [{ status: 'sleeping' }, false]]) {
+            status.update(answer(bg));
+            assert.equal(costs.hidden, !shown, JSON.stringify(bg.live_wake_hold || bg.status));
+        }
+        status.update(answer({ status: 'allowance_exhausted', detail: 'Daily allowance spent.' }, { bg_consciousness_enabled: false }));
+        assert.equal(costs.hidden, true, 'Off is no allowance step');
+        status.update(answer(held));
+        costs.parentElement.listeners.get('click')[0]({ target: { closest: () => costs } });
+        assert.deepEqual(tabs, ['costs']);
+        assert.equal(status.isOpen(), false, 'the door closes the Shade');
+        status.destroy();
     } finally {
         restoreDom(env.prior);
     }

@@ -8,7 +8,6 @@ round's ``llm_round`` also carries what the host did to prepare it (``round_wind
 from __future__ import annotations
 
 import contextlib
-import contextvars
 import pathlib
 import logging
 import queue
@@ -16,7 +15,7 @@ import threading
 import time
 from typing import Any, Dict, Iterator, Optional, Tuple
 
-from ouroboros.context_timing import measured_sections, section_spans, timed
+from ouroboros.context_timing import STEPS as _STEPS, host_step, measured_sections, section_spans, timed
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.anthropic_native_custody import public_custody_projection
 from ouroboros.utils import emit_cognitive_operation_event, sanitize_tool_result_for_log
@@ -47,7 +46,6 @@ def emit_main_call_state(event_queue: Optional[queue.Queue], identity: Tuple[Any
         logging.getLogger(__name__).debug("Failed to emit main LLM call state event", exc_info=True)
 
 
-_STEPS: contextvars.ContextVar[Optional[Dict[str, Any]]] = contextvars.ContextVar("round_host_steps", default=None)
 _RUSAGE = ("ru_nvcsw", "ru_nivcsw", "ru_majflt", "ru_oublock")
 
 
@@ -87,21 +85,6 @@ def round_window(slot: Any = None) -> Iterator[None]:
             yield
         finally:
             _STEPS.reset(token)
-
-
-def host_step(name: str) -> None:
-    """The round's step ``name`` ends here: its wall and thread CPU time since the previous mark, or since the window
-    opened, add to its span (nothing outside a window). A step that ends on another thread than it began (the model
-    sender's, which runs in a copy of this context) has no one thread's CPU time: unknown (None)."""
-    state = _STEPS.get()
-    if state is None:
-        return
-    now = (time.perf_counter(), time.thread_time(), threading.get_ident())
-    wall, cpu, thread = state["mark"]
-    span = state["steps"].setdefault(name, [0.0, 0.0])
-    span[0] += now[0] - wall
-    span[1] = None if span[1] is None or now[2] != thread else span[1] + now[1] - cpu
-    state["mark"] = now
 
 
 def round_receipt() -> Dict[str, Any]:
