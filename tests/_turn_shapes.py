@@ -24,6 +24,7 @@ MORE_ROWS = 650  # open rows the rows step adds over the same rooms (B9's 650 ->
 ARCHIVED = 40  # archived knowledge notes and old rescue snapshots the archive step adds at k=1
 RESCUE_AGE_SEC = 3 * 86_400.0  # an old restart's rescue snapshot: older than the health block's two hours
 CATALOGUE_WINDOW = 118_000  # tokens: tight for both root sizes, so a turn's start walks Max -> Low as a live install's does.
+WIDE_WINDOW = 1_000_000  # tokens: more than any view measured here fills, so a fit keeps Max (the stand's horizon)
 #                             Picked by hand: the books, the tool schemas and this fixture's history set the band, and growth
 #                             past it fails the Max -> Low precondition in test_cost_contract._build_work. Deriving it would
 #                             take a calibration boot per root size; re-pick the number when that precondition fails.
@@ -177,12 +178,13 @@ def turn_history(root: pathlib.Path, k: int) -> Dict[str, Any]:
             "rotated_logs": _rotated_logs(root)}
 
 
-def steady_state(root: pathlib.Path, *, refused: Callable[[Any], List[str]]) -> Dict[str, Any]:
+def steady_state(root: pathlib.Path, *, refused: Callable[[Any], List[str]],
+                 window: int = CATALOGUE_WINDOW) -> Dict[str, Any]:
     """A long-lived install between the owner's turns: the maintenance child has run the jobs it owed since the
     chronicle became active (``memory_tail`` stores the facts of the rows after the frontier, so a capture reads
     them and only the rows appended since, not every row live), and the boot has observed the OpenRouter
-    catalogue (``boot_catalogue``) and listed ``archive/`` for the logs a first owner turn reads
-    (``boot_listings``). An install that does not reach it fails the driver: no law reads a fill.
+    catalogue (``boot_catalogue``, every model at ``window`` tokens) and listed ``archive/`` for the logs a first
+    owner turn reads (``boot_listings``). An install that does not reach it fails the driver: no law reads a fill.
     ``refused`` is the driver's judge of a maintenance pass's report (tests/_cost_driver.py ``refused``), handed
     in because that module runs as ``__main__`` in the driver's interpreter and a named import would load it twice."""
     from ouroboros import maintenance
@@ -200,7 +202,7 @@ def steady_state(root: pathlib.Path, *, refused: Callable[[Any], List[str]]) -> 
     if not tail.get("complete") or due or refusals:
         raise RuntimeError(f"the install did not reach its steady state: tail {tail}, still due {due}, "
                            f"refused {refusals}, ran {jobs}")
-    return {"child_jobs": jobs, "catalogue": boot_catalogue(), "listings": boot_listings(root)}
+    return {"child_jobs": jobs, "catalogue": boot_catalogue(window), "listings": boot_listings(root)}
 
 
 def boot_listings(root: pathlib.Path) -> Dict[str, Any]:
@@ -216,7 +218,7 @@ def boot_listings(root: pathlib.Path) -> Dict[str, Any]:
     return {"remembered": remembered}
 
 
-def boot_catalogue() -> Dict[str, Any]:
+def boot_catalogue(window: int = CATALOGUE_WINDOW) -> Dict[str, Any]:
     """The boot's catalogue observation on an install with network, through production
     (``LLMClient.prefetch_openrouter_catalog``): one clean ``/models`` answer, canned for the OpenRouter models
     this install's settings name, fills the process's catalogue and its response limits and is recorded for every
@@ -231,7 +233,7 @@ def boot_catalogue() -> Dict[str, Any]:
     named = [runtime_setting(key, "") for key in MODEL_ROLE_SETTINGS.values()]
     models = sorted({model for model in (*OPENROUTER_DEFAULTS.values(), *named)
                      if isinstance(model, str) and "/" in model})
-    answer = {"data": [{"id": model, "context_length": CATALOGUE_WINDOW,
+    answer = {"data": [{"id": model, "context_length": window,
                         "top_provider": {"max_completion_tokens": 32_000},
                         "supported_parameters": ["max_tokens", "reasoning", "temperature", "tool_choice", "tools"]}
                        for model in models]}

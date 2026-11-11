@@ -33,11 +33,11 @@ DEFAULT_UI_PREFERENCES: dict[str, Any] = {
     # checked against live widgets, so a temporarily disabled or removed skill keeps
     # the owner's choice instead of losing it with the next discovery.
     "widget_start_mode": {},
-    # Owner width of a Widgets card, keyed like widget_start_mode: {"w": masonry columns
-    # the card spans, 12 = full width; "h": 0}. ``h`` is reserved for a pinned card height
-    # and is stored as 0 until that exists. A POST merges by key and a null value deletes
-    # one (the card falls back to its author ``span``); keys are never checked
-    # against live widgets. Semantics: docs/DESIGN.md "Widgets board".
+    # Owner size of a Widgets card, keyed like widget_start_mode: {"w": masonry columns the
+    # card spans, 12 = full width, 0 = the author's span; "h": the content's height in px,
+    # 0 = as tall as its content}. The two are independent; a size with neither is no size.
+    # A POST merges by key and a null value deletes one (author width, natural height); keys
+    # are never checked against live widgets. Semantics: docs/DESIGN.md "Widgets board".
     "widget_size": {},
     "nested_subagents_expanded": False,
     # Resizable side sections (0 = use the CSS default). Clamped to sane ranges so
@@ -73,6 +73,7 @@ _MAX_WIDGET_START_MODE_ITEMS = 200
 _MAX_WIDGET_KEY_LENGTH = 200
 _MAX_WIDGET_SIZE_ITEMS = 200
 WIDGET_GRID_COLUMNS = 12  # the bound of w and its full-width value (web/modules/widget_size.js WIDGET_FULL_SPAN)
+WIDGET_HEIGHT_MIN, WIDGET_HEIGHT_MAX = 120, 8192  # bounds of a set h (widget_size.js WIDGET_HEIGHT_MIN / _MAX)
 _SIDEBAR_WIDTH_MIN, _SIDEBAR_WIDTH_MAX = 180, 560
 _PROJECT_PANEL_WIDTH_MIN, _PROJECT_PANEL_WIDTH_MAX = 320, 1100
 _MAX_PROJECT_CURSORS = 1000
@@ -132,7 +133,7 @@ def _normalize_width(value: Any, lo: int, hi: int) -> int:
 
 
 def _normalize_widget_size(value: Any) -> dict[str, dict[str, int] | None]:
-    """Owner card widths clamped to the board; ``None`` is a key a POST deletes."""
+    """Owner card sizes clamped to the board; ``None`` is a key a POST deletes, as is a size with neither axis set."""
     if not isinstance(value, dict):
         raise ValueError("widget_size must be an object of {widget_key: {w, h}}")
     sizes: dict[str, dict[str, int] | None] = {}
@@ -146,7 +147,9 @@ def _normalize_widget_size(value: Any) -> dict[str, dict[str, int] | None]:
         w, h = (size.get("w"), size.get("h", 0)) if isinstance(size, dict) else (None, None)
         if not all(isinstance(n, int) and not isinstance(n, bool) for n in (w, h)):
             raise ValueError("widget_size values must be null or objects of integer w and h")
-        sizes[key] = {"w": max(1, min(WIDGET_GRID_COLUMNS, w)), "h": 0}
+        w = max(0, min(WIDGET_GRID_COLUMNS, w))
+        h = 0 if h <= 0 else max(WIDGET_HEIGHT_MIN, min(WIDGET_HEIGHT_MAX, h))
+        sizes[key] = {"w": w, "h": h} if w or h else None
     return sizes
 
 

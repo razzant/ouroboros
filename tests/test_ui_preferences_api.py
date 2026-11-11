@@ -307,8 +307,9 @@ def test_ui_preferences_widget_start_mode_override(tmp_path):
 
 
 def test_ui_preferences_widget_size_merges_by_card_and_clamps(tmp_path):
-    """Owner Widgets card widths: a POST merges by card key and null deletes one,
-    widths clamp to the 12-column board, the reserved height stays 0, keys are
+    """Owner Widgets card sizes: a POST merges by card key and null deletes one,
+    widths clamp to the 12-column board (0: the author's span), heights to their
+    bounds (0: as tall as the content), a size with neither is none, keys are
     never checked against live widgets, the map is bounded, and there is no
     conditional write: the last write wins, like widget_order."""
     from starlette.testclient import TestClient
@@ -343,16 +344,29 @@ def test_ui_preferences_widget_size_merges_by_card_and_clamps(tmp_path):
         stored = json.loads((tmp_path / "state" / "ui_preferences.json").read_text(encoding="utf-8"))
         assert stored["widget_size"] == {"game:main": {"w": 8, "h": 0}, "gauge:live": {"w": 4, "h": 0}}
 
-        # Out-of-range widths clamp to 1..12; h is reserved and stored as 0; keys are
-        # trimmed; blank and oversized keys and extra fields are dropped.
+        # Out-of-range widths clamp to 0..12 and heights to 120..8192 (0 stays natural); a size
+        # with neither axis is none; keys are trimmed; blank and oversized keys and extra
+        # fields are dropped.
         clamped = client.post("/api/ui/preferences", json={"widget_size": {
-            " wide:card ": {"w": 99, "h": 640, "x": 3}, "tiny:card": {"w": -5}, "": {"w": 4}, "x" * 201: {"w": 4},
+            " wide:card ": {"w": 99, "h": 640, "x": 3}, "tiny:card": {"w": -5}, "short:card": {"w": 0, "h": 40},
+            "tall:card": {"w": 2, "h": 99999}, "": {"w": 4}, "x" * 201: {"w": 4},
         }})
         assert clamped.status_code == 200
-        assert {key: clamped.json()["widget_size"][key] for key in ("wide:card", "tiny:card")} == {
-            "wide:card": {"w": 12, "h": 0}, "tiny:card": {"w": 1, "h": 0},
+        stored_sizes = clamped.json()["widget_size"]
+        assert {key: stored_sizes[key] for key in ("wide:card", "short:card", "tall:card")} == {
+            "wide:card": {"w": 12, "h": 640}, "short:card": {"w": 0, "h": 120}, "tall:card": {"w": 2, "h": 8192},
         }
-        assert "" not in clamped.json()["widget_size"] and "x" * 201 not in clamped.json()["widget_size"]
+        assert "tiny:card" not in stored_sizes, "no width and no height is no size"
+        assert "" not in stored_sizes and "x" * 201 not in stored_sizes
+
+        # The axes are independent writes of one card: a height alone keeps the author's width,
+        # a later width keeps the height, and a size with neither deletes the card's entry.
+        assert client.post("/api/ui/preferences", json={"widget_size": {"axes:card": {"w": 0, "h": 432}}}).json()[
+            "widget_size"]["axes:card"] == {"w": 0, "h": 432}
+        assert client.post("/api/ui/preferences", json={"widget_size": {"axes:card": {"w": 3, "h": 432}}}).json()[
+            "widget_size"]["axes:card"] == {"w": 3, "h": 432}
+        assert "axes:card" not in client.post("/api/ui/preferences", json={"widget_size": {
+            "axes:card": {"w": 0, "h": 0}}}).json()["widget_size"]
 
         # Any other shape is a 400 and stores nothing; the PR-era condition key is unknown.
         before = sizes()
@@ -418,6 +432,8 @@ def test_widget_board_bounds_have_one_value_in_python_and_the_browser():
 
     assert js("WIDGET_FULL_SPAN") == prefs.WIDGET_GRID_COLUMNS
     assert js("WIDGET_SIZE_MAX_ITEMS") == prefs._MAX_WIDGET_SIZE_ITEMS
+    assert js("WIDGET_HEIGHT_MIN") == prefs.WIDGET_HEIGHT_MIN
+    assert js("WIDGET_HEIGHT_MAX") == prefs.WIDGET_HEIGHT_MAX
 
 
 def test_model_recents_are_bounded_deduplicated_and_server_written(tmp_path):

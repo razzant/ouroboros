@@ -171,7 +171,7 @@ class UiPreferencesResponse(TypedDict):
     contributions: dict[str, list[str]]
     widget_order: list[str]
     widget_start_mode: dict[str, Literal["auto", "manual", "retain"]]  # owner per-card launch-policy override
-    widget_size: dict[str, dict[str, int]]  # owner Widgets card width: {w: masonry columns the card spans, 12 = full width; h: 0}
+    widget_size: dict[str, dict[str, int]]  # owner Widgets card size: {w: columns spanned, 12 = full, 0 = author's; h: content px, 0 = natural}
     nested_subagents_expanded: bool
     sidebar_width: int  # px; 0 = CSS default (resizable side sections, v6.33.0)
     project_panel_width: int  # px; 0 = CSS default
