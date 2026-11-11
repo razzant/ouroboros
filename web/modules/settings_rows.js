@@ -506,7 +506,7 @@ export const HAND_WRITTEN = [
     { id: 'models:main', keys: ['OUROBOROS_MODEL', 'USE_LOCAL_MAIN'], page: 'models', name: 'Main model',
         meta: 'Leads your chats and tasks.', aliases: ['Main', 'Model Routing'], writer: 'checker' },
     { id: 'models:fallbacks', keys: ['OUROBOROS_MODEL_FALLBACKS', 'USE_LOCAL_FALLBACK'], page: 'models', name: 'Fallback models',
-        meta: 'Tried in this order when the acting model cannot answer. A wait starts only when none of them answers.',
+        meta: 'Ouroboros tries these in order. A wait starts only when none of them answers.',
         aliases: ['Fallback', 'Add fallback', 'If Main cannot answer'], writer: 'generic' },
     { id: 'models:light', keys: ['OUROBOROS_MODEL_LIGHT', 'USE_LOCAL_LIGHT'], page: 'models', name: 'Light',
         meta: 'Small jobs: titles, summaries, quick checks.', aliases: ['Light model'], writer: 'checker' },
