@@ -392,7 +392,7 @@ to recolour, so an outline outside it would be a second frame.
 ### Controls and editable choices
 
 Text, number, password, select and multiline fields use the same `.ui-control`
-family; `.ui-checkbox` keeps native checkbox behavior. `.ui-field` groups a
+family; `.ui-switch` acts at once, `.ui-checkbox` on its form's Save. `.ui-field` groups a
 label, control and optional `.ui-field-help`. A placeholder is an example,
 never the field's only name. Help and validation belong to that field without
 changing the alignment of neighboring controls and their actions.
@@ -409,19 +409,14 @@ page closes the reveal, and a late read cannot reopen it. Built-in, custom,
 skill-requested and MCP header fields use the same interaction; loading Settings
 keeps saved secrets masked. Pending reads and failures are shown at the field.
 
-A segmented choice row gives every choice the same width. Up to four fill their
-row; a longer scale wraps into equal columns of four and leaves its last row partly
-empty rather than stretching a lone choice; a narrow card stacks two; one-glyph
-values such as review cycles stay one row. An empty inherit choice is as real as
-any other, and the focused choice wears the one focus ring. A choice the running
-Access suspends — Blocking under Cyber Pro — stays selected; the note beside it
-names its effect for the current process and for the selected next start, from
-the draft before Save.
-
-Short fixed choices keep native selects, including the platform's own popup.
-A control never widens its column: a select shows its chosen label on one
-line, clipped at its own edge, and the full label stays in the platform's
-popup.
+A choice among a few short words is one strip: one track, each option as wide as its word and at
+least a touch target, only the chosen one filled; it wraps and never scrolls sideways. A choice
+that needs a line per option is a list of choices (Access), and one of many or long labels a
+native select, clipped at its own edge with the full label in the platform's popup: a control
+never widens its column. The composer's capsules are the same control with a sliding thumb. An
+empty inherit choice is as real as any other, and the focused choice wears the one focus ring. A
+choice the running Access suspends (Blocking under Cyber Pro) stays chosen; its row says what
+holds now and after restart.
 Model selection uses the shared editable chooser: suggestions assist typing
 without becoming an allowlist. A saved unknown model remains editable; a
 catalog refresh preserves the real input, selection and composition. Escape
@@ -638,15 +633,11 @@ meaning a reader has to obtain.
 ### A selected state is not exempt from contrast
 
 A **status hue** and a **status foreground** are different values, and the
-selected state of a control must use the foreground. Selected Advisory in the
-enforcement group once read `--amber` (`#f59e0b`) over a 12% amber wash: ~2:1 on the
-light surface, unreadable exactly when the owner had chosen it. The rule that
-closes this: a selected control takes a tone, a fill with its own ink that each theme
-defines (a chosen option the soft crimson, `--tone-crimson-soft` with its `-soft-ink`); a
-status colour reaches a control only through the `--status-*-fg` / `-bg` / `-border`
-triple, also defined per theme, and never through the raw hue token, which is not. A
-setting value carries no status tone at all: Advisory now takes the shared chosen-option
-tone (Status marks).
+selected state of a control must use the foreground: a selected control takes a tone, a fill
+with its own ink that each theme defines (a chosen option the soft crimson, `--tone-crimson-soft`
+with its `-soft-ink`); a status colour reaches a control only through the `--status-*-fg` / `-bg` /
+`-border` triple, also defined per theme, and never through the raw hue token, which is not. A
+setting value carries no status tone at all (Status marks).
 
 The same reasoning covers images. A colour baked into a `data:` URI cannot be
 themed, because a custom property cannot be interpolated into the URI string —
@@ -1559,31 +1550,22 @@ recipient, opens another pane or manufactures activity.
 
 ### List editors
 
-A list editor is any section where the owner adds and edits entries in place:
-the Available subagents roster, MCP servers, custom keys.
+A list editor is a section where the owner adds and edits entries in place: setup's roster and
+keys, a tool server's headers. Settings draws a list as heads (§7 “Settings”).
 
-- A section-level add action acts from its group's header (§6). A list editor's
-  new entry appears at the end of its own group, is scrolled into view (the
-  shortest distance, without animation) and takes the caret in its first field.
-  A button that stays in view while the entry it made is born off-screen has not
-  finished its job. Remove hands the caret the same way to the entry now in its
-  place (the next, else the previous), or to the add action once the group is
-  empty, never to the page.
-- A freshly added entry is an invitation, not an error. Where a list editor
-  validates in the browser (today the Available subagents roster), the entry
-  shows a neutral hint in its own meta line until the owner tries to save; the
-  error then names the entry and stands beside it (the entry tinted with the
-  status pair, never dimmed), with the section-level line as the summary. A save
-  attempt judges the entries that existed then; one added afterwards is an
-  invitation again.
-- A per-entry on/off switch is a native `.ui-checkbox` leading that entry's
-  head, before its title, with its own accessible name and pointer target. It
-  is a draft like every other field — the section's Save is the one writer, and
-  no entry saves on its own click. An entry switched off is not dimmed, locked
-  or removed: it keeps every control editable and its own status reading, and
-  the switch never merges into the availability axis beside it.
-- A multi-field card (an MCP server) follows the add-and-reveal rule without
-  adopting the §6 row anatomy.
+- A new entry, added from its group's header (§6), appears at the end of its own group, is
+  scrolled into view (the shortest distance, without animation) and takes the caret in its
+  first field; one saved from its own page is revealed in its list the same way. Remove hands
+  the caret to the entry now in its place (the next, else the previous), or to the add action
+  once the group is empty, never to the page.
+- A freshly added entry is an invitation, not an error: where a list validates in the browser
+  (setup's roster) it shows a neutral hint in its meta line until the owner tries to save; the
+  error then names the entry and stands beside it (tinted with the status pair, never dimmed),
+  the section-level line its summary, and an entry added later is an invitation again.
+- A per-entry on/off switch is a `.ui-switch` closing that entry's head and acts at once (a
+  `.ui-checkbox` in setup's form), with its own accessible name and target. An entry switched
+  off is not dimmed, locked or removed: it stays editable and keeps its own status, and the
+  switch never merges into the availability axis beside it.
 
 ### Reviews inside task cards
 
