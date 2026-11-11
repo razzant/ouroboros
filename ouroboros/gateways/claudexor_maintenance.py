@@ -25,6 +25,12 @@ def _object(value):
     return value
 
 
+def _selected_program(value):
+    fields = {"path", "realPath", "version", "versionOutput", "overrideEnv", "overrideValue"}
+    return (isinstance(value, dict) and fields <= value.keys()
+            and all(value[key] is None or isinstance(value[key], str) for key in fields))
+
+
 class ClaudexorMaintenanceGateway:
     """No daemon lifecycle, installer, cache or retry policy lives in transport."""
 
@@ -47,9 +53,37 @@ class ClaudexorMaintenanceGateway:
         query.extend((("fresh", str(fresh).lower()), ("checkLatest", str(check_latest).lower())))
         body = _object(self._maintenance_request("get:maintenance.harnesses", "GET",
                        "/v2/maintenance/harnesses?" + urlencode(query)))
-        if not isinstance(body.get("harnesses"), list):
+        if not isinstance(body.get("observedAt"), str) or not isinstance(body.get("harnesses"), list):
             raise ClaudexorUnavailable("malformed_response", "Claudexor maintenance inventory is missing")
+        for row in body["harnesses"]:
+            if not self._maintenance_entry(row):
+                raise ClaudexorUnavailable("maintenance_unavailable",
+                                          "This engine does not provide the vendor program maintenance contract",
+                                          status_code=503)
+            if row["operation"] is not None:
+                self._maintenance_operation(row["operation"])
         return body
+
+    @staticmethod
+    def _maintenance_entry(row) -> bool:
+        """Recognize the supported wire shape, never translate legacy ownership/targets."""
+        if not isinstance(row, dict) or not {
+                "harness", "selection", "newest", "actions", "updateAvailable",
+                "releaseNotesUrl", "operation", "observedAt"} <= row.keys():
+            return False
+        newest, actions = row["newest"], row["actions"]
+        if (not isinstance(row["harness"], str) or not _selected_program(row["selection"])
+                or row["updateAvailable"] not in ("yes", "no", "cannot_tell")
+                or not isinstance(newest, dict) or not isinstance(actions, dict)):
+            return False
+        fields = {"not_read": {"source"}, "available": {"source", "version", "observedAt"},
+                  "unavailable": {"source", "observedAt", "problem"}}.get(str(newest.get("status")))
+        return (fields is not None and fields <= newest.keys()
+                and all(isinstance(actions.get(name), dict)
+                        and type(actions[name].get("available")) is bool
+                        and "reason" in actions[name]
+                        and isinstance(actions[name].get("commands"), list)
+                        for name in ("install", "update", "exactVersion")))
 
     def maintenance_create(self, request: dict, request_id: str) -> dict:
         from ouroboros.gateways.claudexor import ClaudexorUnavailable
@@ -105,6 +139,14 @@ class ClaudexorMaintenanceGateway:
                 or not isinstance(body.get("state"), str)
                 or (operation_id is not None and body["id"] != operation_id)):
             raise ClaudexorUnavailable("malformed_response", "Claudexor maintenance operation identity is invalid")
+        if (not {"harness", "phase", "target", "requester", "installationHome", "commands",
+                 "before", "after", "elsewhere", "activeRunsAtStart", "exitCode", "outcome",
+                 "mutation", "termination", "limitations", "progress", "problem",
+                 "createdAt", "startedAt", "finishedAt"} <= body.keys()
+                or body["outcome"] not in ("changed", "not_changed", "changed_elsewhere", "unknown")
+                or not isinstance(body["commands"], list)
+                or any(body[key] is not None and not _selected_program(body[key]) for key in ("before", "after"))):
+            raise ClaudexorUnavailable("malformed_response", "Claudexor vendor program receipt is unavailable")
         return body
 
     def project_registrations(self) -> list:

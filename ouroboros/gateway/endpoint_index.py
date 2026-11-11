@@ -552,11 +552,8 @@ HTTP_SHAPES: dict[str, Shape] = {
         note=f"passive; an engine refusal keeps the engine's status; {_ENGINE}"),
     "POST /api/claudexor/maintenance/operations": Shape(
         f"202:ClaudexorMaintenanceOperation {_MAINTENANCE}", "ClaudexorMaintenanceRequest", headers="Idempotency-Key!",
-        note="can start the engine and prepare Node/npm; 409 maintenance_restart_required or 409/503 "
-             "maintenance_preparation_failed: acceptance=not_submitted, scope=this_attempt; "
-             "use Restart Claudexor in Accounts when required; external/attach-only Node/npm needs external repair; "
-             "optional inspection failure still submits; the same key and body join one operation; "
-             "keep both after 503 acceptance unknown, even after a later preparation-only reply"),
+        note="vendor latest/exact-version operation; can start the engine; the same key and body join one "
+             "operation; retain both after acceptance unknown; a pre-submit refusal covers this attempt only"),
     "GET /api/claudexor/maintenance/operations/{operation_id}": Shape(
         f"200:ClaudexorMaintenanceOperation {_MAINTENANCE}", note="passive; poll while queued or running"),
     "POST /api/claudexor/maintenance/operations/{operation_id}/cancel": Shape(

@@ -782,7 +782,7 @@ The retired hub catalog/preview/install/update/uninstall/publication-clear route
 
 ## 13. Agent accounts
 
-Connected coding subscriptions use Claudexor. Its API v2 objects (`job`, maintenance operation, reset receipt, quota snapshots) pass through; Node/npm preparation is host-owned. Pin: `ouroboros/claudexor_runtime_pin.json`; source: https://github.com/razzant/claudexor. Read published shape keys; treat the rest as data.
+Connected coding subscriptions use Claudexor. Its API v2 objects (`job`, maintenance operation, reset receipt, quota snapshots) pass through; the engine owns vendor maintenance. Pin: `ouroboros/claudexor_runtime_pin.json`; source: https://github.com/razzant/claudexor. Read published shape keys; treat the rest as data.
 
 **Status:**
 - `GET /api/claudexor/status` (`ClaudexorStatusResponse`) is passive: it never starts the engine. `reads.catalog`, `reads.accounts` and `reads.quota` are each `ok` (authoritative, even when empty), `not_read` (never asked) or `failed`. A facet that was not read freshly serves its last value with `facets.<name>.stale: true`. Never read an empty list without `ok` as "no accounts".
@@ -810,10 +810,10 @@ Connected coding subscriptions use Claudexor. Its API v2 objects (`job`, mainten
 - After a lost answer the outcome is unknown: send the same key and body again, or read the receipt by id.
 
 **Agent tool maintenance:**
-- `GET /api/claudexor/maintenance/harnesses` passively lists installed, tested and available tools and current operations (rejoin after reload).
-- `POST /api/claudexor/maintenance/operations` (`{harness, target}`, `Idempotency-Key` header) installs, updates or rolls back a tool: `202` returns its operation. It can start the engine and prepare Node/npm. `409 maintenance_restart_required` asks for Restart Claudexor (above), then repeat Update; `409/503 maintenance_preparation_failed` reports failure. Optional inspection failure still permits POST.
-- `409 maintenance_already_active`: follow `context.operationId`. Poll `GET .../operations/{id}` while `state` is `queued`/`running` or `termination` is `unconfirmed`. `POST .../operations/{id}/cancel` requests cancellation, without proving termination.
-- `ClaudexorMaintenanceProblem.error` holds engine or host `{code, message, context}`. Preparation's `context.acceptance=not_submitted, scope=this_attempt` cannot resolve an earlier `503 acceptance=unknown`: keep and resend that same key/body.
+- `GET /api/claudexor/maintenance/harnesses` passively returns selected program observations, `newest`, `actions`, engine `updateAvailable` (`yes`, `no`, `cannot_tell`) and full operation receipts. `checkLatest=true` requests vendor HTTPS discovery. No host version ordering or legacy-contract fallback.
+- `POST /api/claudexor/maintenance/operations` (`{harness, target}`, `Idempotency-Key`) can start the engine. `target` is `{kind:"latest"}` or `{kind:"version",version:"<exact>"}`; latest updates the selected program or installs when absent. `202` is a durable handle, not completion.
+- `409 maintenance_already_active`: follow `context.operationId`. Read `GET .../operations/{id}` while queued/running or termination is unconfirmed. `POST .../operations/{id}/cancel` requests cancellation, not proof of termination. Receipts retain commands, script provenance, selected-program before/after, outcome and partial effects.
+- `ClaudexorMaintenanceProblem.error` retains `{code, message, context}`. After `acceptance=unknown`, resend the same key/body; a later `not_submitted` covers only that attempt.
 
 **The review pool.** `GET /api/review-pool` lists the agent rows that may review work and what one review costs on each. A broken configuration answers a non-empty `config_error` with an empty pool. A readable catalog with no row marked Reviewer also answers an empty pool: the Main model then reviews alone.
 

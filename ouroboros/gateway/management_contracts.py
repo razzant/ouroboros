@@ -495,12 +495,9 @@ class ClaudexorProblem(TypedDict):
 
 
 class ClaudexorMaintenanceProblem(TypedDict):
-    """Engine or host preparation problem: ``{code, message, retryable?, requiredActions?, context?}``.
-    POST may prepare Node/npm: 409 ``maintenance_restart_required`` asks for Restart Claudexor in Accounts;
-    409/503 ``maintenance_preparation_failed`` reports failure. Both use
-    ``context.acceptance=not_submitted, scope=this_attempt``. Optional inspection failure still
-    permits POST. A 503 ``acceptance=unknown`` may have been accepted: retain its body and
-    Idempotency-Key even after a later preparation-only reply, then resend both."""
+    """Engine or host problem: ``{code, message, retryable?, requiredActions?, context?}``.
+    A pre-submit ``not_submitted`` covers this attempt only. After ``acceptance=unknown``,
+    retain the original body and Idempotency-Key until the engine resolves that request."""
 
     error: Dict[str, Any]
 
@@ -598,44 +595,162 @@ class ClaudexorAccountTarget(TypedDict):
     profile_id: str
 
 
+class ClaudexorSelectedProgram(TypedDict):
+    """The selected invocation and its own version answer; never package metadata."""
+
+    path: Optional[str]
+    realPath: Optional[str]
+    version: Optional[str]
+    versionOutput: Optional[str]
+    overrideEnv: Optional[str]
+    overrideValue: Optional[str]
+
+
+class ClaudexorProgramExecCommand(TypedDict):
+    kind: Literal["exec"]
+    command: str
+    args: List[str]
+    env: NotRequired[Dict[str, str]]
+
+
+class ClaudexorProgramScriptCommand(TypedDict):
+    kind: Literal["script"]
+    url: str
+    interpreter: str
+    interpreterArgs: List[str]
+    args: List[str]
+    env: NotRequired[Dict[str, str]]
+
+
+class ClaudexorProgramAction(TypedDict):
+    """Engine capability and display-only plans; unavailable actions carry a reason."""
+
+    available: bool
+    reason: Optional[str]
+    commands: List[ClaudexorProgramExecCommand | ClaudexorProgramScriptCommand]
+
+
+class ClaudexorProgramActions(TypedDict):
+    install: ClaudexorProgramAction
+    update: ClaudexorProgramAction
+    exactVersion: ClaudexorProgramAction
+
+
+class ClaudexorNewestNotRead(TypedDict):
+    status: Literal["not_read"]
+    source: Optional[str]
+
+
+class ClaudexorNewestAvailable(TypedDict):
+    status: Literal["available"]
+    source: str
+    version: str
+    observedAt: str
+
+
+class ClaudexorNewestUnavailable(TypedDict):
+    status: Literal["unavailable"]
+    source: Optional[str]
+    observedAt: str
+    problem: Dict[str, Any]  # Engine ControlProblem, passed through.
+
+
+class ClaudexorMaintenanceLatestTarget(TypedDict):
+    kind: Literal["latest"]
+
+
+class ClaudexorMaintenanceVersionTarget(TypedDict):
+    kind: Literal["version"]
+    version: str  # One exact vendor version; the engine validates its spelling.
+
+
+class ClaudexorMaintenanceLatestReceiptTarget(ClaudexorMaintenanceLatestTarget):
+    version: None
+
+
 class ClaudexorMaintenanceRequest(TypedDict):
-    """``POST /api/claudexor/maintenance/operations`` (engine ControlHarnessMaintenanceCreateRequest),
-    sent with a required ``Idempotency-Key`` header (1-256 printable ASCII characters): the same key
-    and body join the same operation."""
+    """Latest runs the selected updater or installs when missing; version uses the vendor's
+    exact-version command. The same Idempotency-Key (1–256 printable ASCII) and body rejoin."""
 
     harness: str
-    target: Dict[str, Any]  # {kind: latest} | {kind: version, version} | {kind: previous} | {kind: baseline}
+    target: ClaudexorMaintenanceLatestTarget | ClaudexorMaintenanceVersionTarget
 
 
-class ClaudexorMaintenanceOperation(TypedDict, total=False):
-    """Engine ControlHarnessMaintenanceOperation, passed through. ``state``: queued, running,
-    succeeded, failed, cancelled or interrupted; poll while queued or running, and while
-    ``termination`` is ``unconfirmed``."""
+class ClaudexorMaintenanceRequester(TypedDict):
+    source: str
+    requestId: Optional[str]
 
-    id: Required[str]
-    state: Required[str]
+
+class ClaudexorMaintenanceScript(TypedDict):
+    url: str
+    size: int
+    sha256: str
+
+
+class ClaudexorMaintenanceCommand(TypedDict):
+    binary: str
+    args: List[str]
+    env: Dict[str, str]
+    script: Optional[ClaudexorMaintenanceScript]
+
+
+class ClaudexorMaintenanceElsewhere(TypedDict):
+    before: ClaudexorSelectedProgram
+    after: ClaudexorSelectedProgram
+
+
+class ClaudexorMaintenanceProfileCleanup(TypedDict):
+    plannedPaths: List[str]
+    removedPaths: List[str]
+
+
+class ClaudexorMaintenanceOperation(TypedDict):
+    """Full engine receipt, passed through. Acceptance is not completion; unconfirmed
+    termination retains custody even when state is terminal. Outcome compares selected programs."""
+
+    id: str
     harness: str
-    phase: str
-    mechanism: str
-    target: Dict[str, Any]
-    before: Any
-    after: Any
-    mutation: str  # none | applied | unknown
-    termination: str  # not_applicable | confirmed | unconfirmed
-    limitations: Any
-    progress: Any
-    problem: Any
+    state: Literal["queued", "running", "succeeded", "failed", "cancelled", "interrupted"]
+    phase: Literal["accepted", "preparing", "installing", "settled"]
+    target: ClaudexorMaintenanceLatestReceiptTarget | ClaudexorMaintenanceVersionTarget
+    requester: ClaudexorMaintenanceRequester
+    installationHome: Optional[str]
+    commands: List[ClaudexorMaintenanceCommand]
+    profileCleanup: NotRequired[ClaudexorMaintenanceProfileCleanup]
+    before: Optional[ClaudexorSelectedProgram]
+    after: Optional[ClaudexorSelectedProgram]
+    elsewhere: Optional[ClaudexorMaintenanceElsewhere]
+    activeRunsAtStart: Optional[int]
+    exitCode: Optional[int]
+    outcome: Literal["changed", "not_changed", "changed_elsewhere", "unknown"]
+    mutation: Literal["none", "applied", "unknown"]
+    termination: Literal["not_applicable", "confirmed", "unconfirmed"]
+    limitations: List[str]
+    progress: List[str]
+    problem: Optional[Dict[str, Any]]
     createdAt: str
     startedAt: Optional[str]
     finishedAt: Optional[str]
 
 
+class ClaudexorMaintenanceEntry(TypedDict):
+    """No host version ordering or ownership inference: the engine supplies every action."""
+
+    harness: str
+    selection: ClaudexorSelectedProgram
+    newest: ClaudexorNewestNotRead | ClaudexorNewestAvailable | ClaudexorNewestUnavailable
+    actions: ClaudexorProgramActions
+    updateAvailable: Literal["yes", "no", "cannot_tell"]
+    releaseNotesUrl: Optional[str]
+    operation: Optional[ClaudexorMaintenanceOperation]
+    observedAt: str
+
+
 class ClaudexorMaintenanceInventory(TypedDict):
-    """Engine ControlHarnessMaintenanceInventory, passed through: per harness what is installed,
-    tested and available, and its current ``operation`` (rejoin it after a reload)."""
+    """Engine inventory, unchanged: selected program, newest observation, actions and receipt."""
 
     observedAt: str
-    harnesses: List[Dict[str, Any]]
+    harnesses: List[ClaudexorMaintenanceEntry]
 
 
 class ClaudexorQuotaRefreshRequest(TypedDict, total=False):
