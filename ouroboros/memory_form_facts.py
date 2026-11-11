@@ -150,7 +150,7 @@ def _group_counts(group, data, sources, state, aggregate_unread):
             unread = [w for w in unread if w["id"] in words]
         if aggregate_unread:
             global_unread += len(unread)
-        else:
+        elif not (form and remote.get("overheard")):
             add("host", "unread", int(bool(unread)), len(unread))
         if not count and (fold := remote.get("folded")):
             add("retold", "read and folded", 1, fold["count"])
@@ -162,6 +162,8 @@ def _group_counts(group, data, sources, state, aggregate_unread):
                 raw, bare = word["id"] in words, "bare:" + word["id"] in words
                 if (raw or bare) and data["kinds"][word["id"]] == "untold":
                     add("emergency", "other addresses" if bare else "other openings", 1, 1)
+    if form and not aggregate_unread:
+        add("host", "overheard unread", int(bool(data["overheard"][1])), len(data["overheard"][1]))
     return tuple(facts), lost, global_unread
 
 

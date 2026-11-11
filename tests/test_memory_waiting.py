@@ -339,3 +339,137 @@ def test_event_counts_use_the_full_catalogue_offset_and_remain_ordinary(tmp_path
     assert not mf.form_counts(isolated, fitted)["emergency"]
     from ouroboros.memory_view_conversations import folded_rooms
     assert not folded_rooms([group], dict(fitted.addressed))
+
+
+def _overheard_view(root, provider="harbor"):
+    from ouroboros import chat_chain, dialogue_store as ds
+    shared.world(root)
+    focus = _event_row("aaa", "focus", 0, "Ann")
+    ds.append(root, "chat", focus)
+    reply = _event_row(provider, "mine", 1, direction="out", type="presence_delivery", task_id="answer01")
+    ds.append(root, "chat", reply)
+    result = json.loads(_chronicle_write(_ctx(root, "root0001"), kind="page", room_id=str(reply["chat_id"]),
+        text="I answered here.", covers={"to": chat_chain.format_address(chat_chain.row_address(reply))}))
+    assert result["ok"], result
+    for i in range(6):
+        ds.append(root, "chat", _event_row(provider, f"topic{i // 2}", 10 + i, "Ann",
+            text=f"Topic {i} opening.\n" + f"The details of question {i} stay readable. " * 30))
+    ds.append(root, "chat", _event_row(provider, "mine", 16, "Ben", text="A new question for me.\n" + "Detail. " * 200))
+    task = {"id": "root0001", "chat_id": focus["chat_id"]}
+    return mv.capture_memory_view(root, task, dataclasses.replace(mv.ROLE_DEFAULTS["integrator"], room_id=str(focus["chat_id"])))
+
+
+@pytest.mark.parametrize("provider", ["harbor", "kiln", "fern", "kite"])
+def test_overheard_unread_is_per_conversation_only_in_line_forms(tmp_path, provider):
+    from ouroboros import memory_floor as mf, memory_view_conversation_forms as forms
+    snapshot = _overheard_view(tmp_path, provider)
+    group = _event_group(snapshot, provider)
+    snapshot = dataclasses.replace(snapshot, room=None, story=[], conversations=[group])
+    unread = [w for r in group["rooms"] for w in r["words"]]
+    latest = max((w for w in unread if "Topic" in w["text"]), key=lambda w: w["pos"])
+    def draw(gone):
+        return "\n".join(forms.pieces([group], gone, lambda _key, render: render()))
+    whole = draw({})
+    assert all(w["line"] in whole for w in unread) and "No recorded consideration:" not in whole
+    room_lines = draw({"F6w": {w["id"] for w in unread}})
+    assert room_lines.count("No recorded consideration:") == 4 and "overheard rooms" not in room_lines
+    for gone in ({"F6g": {prefix + group["key"]}} for prefix in ("", "all:", "last:")):
+        shown = draw(gone)
+        assert "No recorded consideration: 3 overheard rooms, 6 words;" in shown
+        assert "No recorded consideration: 1 words;" in shown and shown.count("No recorded consideration:") == 2
+        counter = next(line for line in shown.splitlines() if "overheard rooms" in line)
+        assert latest["address"] in counter and latest["author"] in counter and "Topic 5 opening." in counter
+        assert all(w["line"] not in shown for w in unread)
+    for gone in ({"F6g": {group["key"]}}, {"F6a": {group["key"]}}):
+        assert "3 overheard rooms, 6 words" in draw(gone)
+        level = mv.FloorLevel(tuple((step, tuple(ids)) for step, ids in gone.items()))
+        host = mf.form_counts(snapshot, level)["host"]
+        assert host["overheard unread"] == {"lines": 1, "sources": 6}
+        assert host["unread"] == {"lines": 1, "sources": 1}
+    aggregate = {"F6a": {group["key"], "unread"}}
+    assert "7 words without recorded consideration" in draw(aggregate) and "overheard rooms" not in draw(aggregate)
+    counts = mf.form_counts(snapshot, mv.FloorLevel((("F6a", tuple(aggregate["F6a"])),)))
+    assert counts["window"]["unread count"] == {"lines": 1, "sources": 7}
+    assert "overheard unread" not in counts["host"]
+
+
+@pytest.mark.parametrize("prior", ["owner", "forward", "reply", "stranger", "own_account"])
+@pytest.mark.parametrize("sealed", [False, True])
+def test_overheard_excludes_my_humans_or_my_participation_in_open_and_sealed_rows(tmp_path, prior, sealed):
+    from ouroboros import chat_chain, dialogue_store as ds, places
+    from ouroboros.memory_view_conversation_forms import render_group
+    shared.world(tmp_path)
+    place = places.connect_place(tmp_path, connector="bridge", provider="harbor", account_id="account", label="Garden")
+    places.edit_place(tmp_path, place.place_id, "confirm_owner_account", author="owner", platform_actor_id="anton",
+                      account_id="account")
+    author = "anton" if prior in ("owner", "forward") else "own" if prior == "own_account" else "Ann"
+    row = _event_row("harbor", "one", 1, author, presence_provenance={"place_id": place.place_id})
+    if prior == "forward":
+        row["transport"]["message"] = {"forward_origin": {"sender_user_name": "Other"}}
+    if prior == "reply":
+        row.update(direction="out", type="presence_delivery", task_id="answer01")
+    ds.append(tmp_path, "chat", row)
+    if sealed:
+        result = json.loads(_chronicle_write(_ctx(tmp_path, "root0001"), kind="page", room_id=str(row["chat_id"]),
+            text="The earlier exchange.", covers={"to": chat_chain.format_address(chat_chain.row_address(row))}))
+        assert result["ok"], result
+    ds.append(tmp_path, "chat", _event_row("harbor", "one", 2, "Ann", text="Still waiting for consideration."))
+    group = _event_group(view(tmp_path))
+    room = group["rooms"][0]
+    assert room["engaged"] and room["overheard"] == (prior in ("stranger", "own_account"))
+    if prior == "owner" and not sealed:
+        owner = next(w for w in room["words"] if w["owner_side"])
+        assert all(owner["line"] in render_group(group, set(), set(), form) for form in range(4))
+
+
+def test_overheard_reader_guard_and_local_prices_share_the_conversation_state(tmp_path):
+    from ouroboros import memory_floor as mf, memory_view_conversation_forms as forms
+    from ouroboros.memory_view_events import catalogue_lines
+    from ouroboros.tools.chronicle import _groups, _read_rooms
+    snapshot = _overheard_view(tmp_path)
+    group = _event_group(snapshot)
+    snapshot = dataclasses.replace(snapshot, room=None, story=[], conversations=[group])
+    ordinary = mf.ordinary_level(snapshot)
+    text = mv.render_room(snapshot, ordinary)
+    assert "3 overheard rooms, 6 words" in text
+    offset = int(re.search(r"memory_read\(room_id='\*', start=(\d+)\)", text)[1])
+    groups = _groups(tmp_path, ChronicleStore(tmp_path))
+    catalogue = "\n".join(line for g in groups for line in catalogue_lines(g))
+    identity = forms.identity_line(next(g for g in groups if g["key"] == group["key"]))
+    assert offset > 0 and catalogue[offset:].startswith(identity)
+    assert identity in _read_rooms(tmp_path, ChronicleStore(tmp_path), offset, 10_000)
+    frozen = mv.snapshot_json(snapshot)
+    index = forms.source_index(snapshot)[group["key"]]
+    selected = {"F6g": {group["key"]}}
+    assert forms.local_key(group, selected, index) == forms.local_key(group, {"F6g": {group["key"], "unrelated"}}, index)
+    assert forms.local_key(group, selected, index) != forms.local_key(group, {}, index)
+    for gone in ({}, selected, {"F6g": {"all:" + group["key"]}}, {"F6g": {"last:" + group["key"]}},
+                 {"F6w": {w["id"] for r in group["rooms"] for w in r["words"]}},
+                 {"F6a": {group["key"]}}, {"F6a": {group["key"], "unread"}}):
+        level = mv.FloorLevel(tuple((step, tuple(sorted(ids))) for step, ids in gone.items()))
+        assert mv.room_chars(snapshot, level) == mv.json_chars(mv.render_room(snapshot, level))
+        counts = mf.form_counts(snapshot, level)["host"]
+        assert counts.get("overheard unread", {}).get("lines", 0) == mv.render_room(snapshot, level).count("overheard rooms")
+    assert mv.snapshot_json(snapshot) == frozen
+    budget = mf.tokens_of(mv.room_chars(snapshot, ordinary)) + mf.tokens_of(mv.story_chars(snapshot, ordinary))
+    fitted = mf.fit_memory_view(snapshot, {"margin": budget, "physical": budget, "budget": None})
+    counts = mf.form_counts(snapshot, fitted)
+    assert not counts["emergency"] and not counts["window"]
+    assert counts["host"]["overheard unread"] == {"lines": 1, "sources": 6}
+    # This host count alone gives no reason to commission a retelling.
+    from ouroboros.memory_inventory import shortage_from_trace, VIEW_TRACE_KEY
+    overheard = {**group, "rooms": [r for r in group["rooms"] if r["overheard"]]}
+    alone = dataclasses.replace(snapshot, conversations=[overheard])
+    lined = mv.FloorLevel((("F6g", (group["key"],)),))
+    fact = mf.view_facts(alone, lined, window_tokens=budget, mode="max", allowances={"margin": budget})
+    assert not fact["floor"]["folded_rooms"] and shortage_from_trace({VIEW_TRACE_KEY: fact}) is None
+    assert len(forms.folded_rooms([overheard], {"F6w": {w["id"] for r in overheard["rooms"] for w in r["words"]}})) == 3
+    # Under pressure the new line arrives before this room's final reply yields to a work line.
+    from tests.test_memory_distance_forms import completed_room, size
+    completed, _gist = completed_room()
+    room = completed.room
+    with_work = dataclasses.replace(snapshot, room=room)
+    bound = size(with_work, lined)
+    fitted = mf.fit_memory_view(with_work, {"margin": bound, "physical": bound, "budget": None})
+    assert "3 overheard rooms, 6 words" in mv.render_room(with_work, fitted)
+    assert room["lane1"][-1]["line"] in mv.render_room(with_work, fitted)

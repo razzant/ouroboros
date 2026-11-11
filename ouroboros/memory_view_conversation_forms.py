@@ -42,14 +42,29 @@ def _gist_lines(group, excluded=(), *, gists=None):
             for key, gist in (_gist_records(group) if gists is None else gists) if key not in excluded]
 
 
-def _unread_line(words):
-    from ouroboros.memory_view_work import row_range
+def _latest_unread(words):
     latest = max(words, key=lambda word: word["pos"])
-    first = min(words, key=lambda word: word["pos"])
     opening = str(latest.get("text") or latest["line"].removeprefix(latest["head"])).strip().splitlines()[0:1]
     author = latest.get("author") or latest["head"].split(";", 2)[1].strip()
+    return latest, author, ' '.join(opening)[:160]
+
+
+def _unread_line(words):
+    from ouroboros.memory_view_work import row_range
+    latest, author, opening = _latest_unread(words)
+    first = min(words, key=lambda word: word["pos"])
     return (f"No recorded consideration: {len(words)} words; [{row_range(first['address'], latest['address'])}; "
-            f"latest by {author}] «{' '.join(opening)[:160]}»")
+            f"latest by {author}] «{opening}»")
+
+
+def _overheard_line(group, data):
+    rooms, words = data["overheard"]
+    if not words:
+        return ""
+    latest, author, opening = _latest_unread(words)
+    return (f"No recorded consideration: {rooms} overheard rooms, {len(words)} words; "
+            f"[{latest['address']}; latest by {author}] «{opening}»; "
+            f"memory_read(room_id='*', start={group['catalogue_start']})")
 
 
 def _fold_line(room):
@@ -103,6 +118,7 @@ def source_index(snapshot):
 def _sources(group):
     words, kinds, rooms, owners, ids = [], {}, {}, [], set()
     untold = 0
+    overheard_rooms, overheard_words = 0, []
     for room in group["rooms"]:
         parts = rooms[room["room_id"]] = {k: [] for k in ("owner", "unread", "told", "untold", "fixed")}
         for word in room["words"]:
@@ -122,7 +138,11 @@ def _sources(group):
             elif kind == "untold":
                 ids.add("bare:" + ident)
                 untold += 1
+        if room.get("overheard") and parts["unread"]:
+            overheard_rooms += 1
+            overheard_words.extend(parts["unread"])
     return {"words": words, "kinds": kinds, "rooms": rooms,
+            "overheard": (overheard_rooms, overheard_words),
             "owners": owners, "ids": ids, "gists": _gist_records(group), "untold": untold,
             "ordinary": not untold and all(
                 "lead_rule" in n and n.get("text", "").strip() for r in group["rooms"] for n in r["notes"])}
@@ -200,10 +220,12 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
                             if gists else "."))
         for room in group["rooms"]:
             lines += [_note_pointer(note) for note in room["notes"]] if as_line == 1 else []
-            if unread := data["rooms"][room["room_id"]]["unread"]:
+            if (unread := data["rooms"][room["room_id"]]["unread"]) and not room.get("overheard"):
                 lines.append(_unread_line(unread))
             if fold := _fold_line(room):
                 lines.append(fold)
+        if overheard := _overheard_line(group, data):
+            lines.append(overheard)
         no_gist = sum(not task.get("gist") for room in group["rooms"] for task in room["tasks"])
         if no_gist:
             lines.append(f"{no_gist} tasks without a gist; memory_read(room_id='{group['rooms'][-1]['room_id']}', rows=true)")
@@ -265,15 +287,18 @@ def _counted_text(groups, owners, aggregate_unread, *, index=None):
             f"{len({room['room_id'] for room, _word in unread})} rooms, {days[0]} → {days[-1]}; "
             f"latest by {latest.get('author') or latest['head']} at {latest['ts']}: «{opening}»; memory_read(room_id='*')")
     elif unread:
-        lines += [_unread_line(words) for room in rooms
-                  if (words := sources[room["room_id"]]["unread"])]
+        for group in groups:
+            lines += [_unread_line(words) for room in group["rooms"] if not room.get("overheard")
+                      and (words := sources[room["room_id"]]["unread"])]
+            if overheard := _overheard_line(group, index[group["key"]]):
+                lines.append(overheard)
     lines += [_row_pointer(word, "words") if word["id"] in owners else word["line"]
               for room in rooms for word in sources[room["room_id"]]["owner"]]
     return "\n".join(lines)
 
 
 def local_key(group, gone, data):
-    """The local choices read by both a conversation's price and its numeric receipt."""
+    """The local choices read by both price and receipt; captured overheard facts vary only with this group's form."""
     form = 4 if group["key"] in gone.get("F6a", ()) else group_form(group, gone)
     ids = data["ids"]
     return ("conversations", "group", group["key"], form,
@@ -333,9 +358,16 @@ def folded_rooms(groups: Iterable[Mapping[str, Any]], gone: Mapping[str, Iterabl
     oldest open row first: what a writer may seal where consciousness is off (``memory_inventory.shortage_from_trace``)."""
     words = {ident.removeprefix("bare:") for ident in gone.get("F6w", ())}
     lined = {g["key"] for g in groups if group_form(g, gone) or g["key"] in gone.get("F6a", ())}
+    def needs_telling(group, room):
+        # The new conversation count is a host fact, not a request to retell these unread words.
+        # The older per-room and final window forms keep their existing shortage facts.
+        counted_unread = room.get("overheard") and group["key"] in lined and not (
+            group["key"] in gone.get("F6a", ()) and "unread" in gone.get("F6a", ()))
+        return any(not (counted_unread and _unread(word)) and (
+            group["key"] in lined or word["id"] in words) for word in room["words"])
     return [room for _first, room in sorted(
         (item["first"], item["room_id"]) for group in groups for item in group["rooms"] if item["engaged"] and item["words"]
-        and (group["key"] in lined or any(word["id"] in words for word in item["words"])))]
+        and needs_telling(group, item))]
 
 
 def owner_items(groups: Iterable[Mapping[str, Any]]) -> Dict[str, Mapping[str, Any]]:

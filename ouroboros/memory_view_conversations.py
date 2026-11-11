@@ -9,7 +9,9 @@ running work, and each of its rooms that has open rows, a note of mine or runnin
 
 - a place room with a recorded living person's words or my outward reply (sealed rows too), or any non-place
   room, is **engaged**: its open words stay whole, notes stay whole, and tasks carry their host facts and first gist
-  sentence. A bot inside a conversation keeps its words too; children never travel as reports;
+  sentence. Without my human's confirmed words or forward or my outward reply it is **overheard**: line forms
+  count its unread words with the conversation's other overheard rooms. A bot inside a conversation keeps its
+  words too; children never travel as reports;
 - arrivals from bots or my own unconfirmed account alone are **events**: the host names their first text,
   last recorded author, counts and reader. A tighter ordinary form counts such rooms per conversation.
   Unknown authors use the single pending choice in ``memory_view_events.count_unattributed``. Notes remain mine
@@ -135,13 +137,17 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
         key, place = conversation_of(room, held or sealed.get(room, []), notes.get(room, []), membership.project_chat_ids)
         own = max((entry[2] for entry, cls in spoken if _outward(cls["author"])), default=-1)  # §3.4 (i)
         ours = any(_ours(entry[1], cls["author"]) for entry, cls in spoken)
+        participated = not place or own >= 0 or any(cls["author"].get("owner_confirmed") is True for _entry, cls in spoken)
         first = entries[0][2] if entries else -1
-        for _address, meta, pos in reversed(sealed.get(room, ())):  # newest first: who of ours spoke before the pages
-            if ours and pos < first or ours and first < 0:  # older than every open row: it considers none of them
+        for _address, meta, pos in reversed(sealed.get(room, ())):
+            if ours and participated and (pos < first or first < 0):  # older rows can add neither fact nor consideration
                 break
             author = row_class(meta, pos=pos, **lineage)
+            if author["lane"] == 1:
+                participated |= author["author"].get("owner_confirmed") is True
             if author["lane"] == 1 and _outward(author["author"]):
                 ours, own = True, max(own, pos) if pos > first else own
+                participated = True
             elif author["lane"] == 1 and _ours(meta, author["author"]):
                 ours = True
         engaged = not place or ours
@@ -161,6 +167,7 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
         group["running"] = sorted({*group["running"], *running.get(room, ())})
         newest = max(entries, key=lambda entry: entry[2]) if entries else None
         item: Dict[str, Any] = {"room_id": room, "label": label(room, sample), "engaged": engaged, "facts": facts,
+                                "overheard": bool(place) and engaged and not participated,
                                 "first": first, "notes": [], "words": [], "tasks": [], "silent": "", "folded": {},
                                 "newest": chat_chain.format_address(newest[0]) if newest else "",
                                 "last": newest[2] if newest else -1}
@@ -214,7 +221,7 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
                         f"memory_read(room_id='{where}', rows=true, from='{first}', to='{first}')")
         item["words"].append({**word, "id": f"{item['room_id']}:{word['address']}", "rank": author["rank"]})
     ordered = [groups[key] for key in sorted(groups)]
-    if event_rooms:
+    if event_rooms or any(room["overheard"] for group in ordered for room in group["rooms"]):
         events.locate_catalogue(ordered)
     for group in ordered:
         group["rooms"] = [room for room in group["rooms"] if room["room_id"] != str(spec.room_id)]
