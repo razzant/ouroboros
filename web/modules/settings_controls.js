@@ -1,6 +1,6 @@
 import { APP_SETTINGS_ORIGIN, apiClient, fetchJson } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
-import { saveCheckerSettings, saveSafetyLevel } from './consciousness_api.js';
+import { saveCheckerSettings, saveSafetyLevel, saveSafetyRules } from './consciousness_api.js';
 import { rowById } from './settings_rows.js';
 import { errorWords, escapeHtmlAttr, setResult } from './ui_primitives.js';
 
@@ -321,8 +321,7 @@ function failureOutcome(row, value, error) {
 const refusal = (row, message, code = 'invalid_value') => ({ state: 'refused', effect: effectOf(row), withheld: '', message, code });
 const unchanged = (row) => ({ state: 'unchanged', effect: effectOf(row), withheld: '', message: '', code: '' });
 
-/** One call as an Outcome: what a page's own writer (`WRITERS.<name>`, added by its module) wraps its request in. */
-export async function attempt(row, value, call) {
+async function attempt(row, value, call) {
     try { return savedOutcome(row, value, await call()); } catch (error) { return failureOutcome(row, value, error); }
 }
 
@@ -411,6 +410,8 @@ export const WRITERS = {
     contextMode: (row, value) => attempt(row, value, () => saveContextMode(value)),
     safetyMode: (row, value) => attempt(row, value, () => saveSafetyLevel(value,
         row.keys[0] === 'OUROBOROS_CONSCIOUSNESS_SAFETY_MODE' ? 'consciousness' : 'your_work', { headers: APP_SETTINGS_ORIGIN })),
+    // Your rules: the owner's text through its own audited endpoint (the page's Save, settings_safety.js).
+    safetyRules: (row, value) => attempt(row, value, () => saveSafetyRules(value, { headers: APP_SETTINGS_ORIGIN })),
     language: (row, value) => attempt(row, value, () => apiClient.saveUiLanguage(String(value ?? ''))),
     host: hostWrite,
     // A device-local store (theme, size, notifications): its codec's `write` applies at once on this device.

@@ -26,9 +26,7 @@ const ALLOWED_READS = {
 };
 // Modules another lane is still converting to rows. Empty on the integrated tree: a name that no longer writes or
 // reads fails below until it is removed.
-const PENDING = {
-    'settings_safety.js': 'pending lane C2 (the page-draft save of the Safety levels, the rules and the checker)',
-};
+const PENDING = {};
 
 const WRITES = /apiClient\.saveSettings\(|\bowner(RuntimeMode|AutoGrant|ContextMode|SafetyMode)\(|\bsave(SafetyLevel|SafetyRules|CheckerSettings)\(|['"`]\/api\/owner\/(runtime-mode|auto-grant|context-mode|safety-mode|safety-rules|safety-model)\b|['"`]\/api\/settings['"`][^\n]*method:\s*['"]POST/;
 const READS = /\b(immediate_changed|next_task_changed|restart_required)\b/;

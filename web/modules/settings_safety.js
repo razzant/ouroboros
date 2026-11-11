@@ -1,12 +1,13 @@
 // The Safety Supervisor in Settings. Permissions and checks, "Who watches its actions": the two levels are rows that
 // save themselves (settings_rows.js; settings_controls.js writes them through the owner endpoint and asks before a
 // level is lowered); this module says the facts beside them: which model checks, who re-checks, what a managed
-// deployment closes, and how many checks were let through. Your rules is its own page: one text with its own Save
-// through the owner endpoint, read again by Ouroboros and the Supervisor from the next task or turn.
-import { APP_SETTINGS_ORIGIN, apiClient } from './api_client.js';
-import { recheckFromSettings, saveSafetyRules } from './consciousness_api.js';
+// deployment closes, and how many checks were let through. Your rules is its own page: one text with its own Save,
+// written by the row helper through the owner endpoint (its writer `safetyRules`) and read again by Ouroboros and the
+// Supervisor from the next task or turn.
+import { apiClient } from './api_client.js';
+import { recheckFromSettings } from './consciousness_api.js';
 import { parseModelSource } from './route_editor_primitives.js';
-import { WRITERS, attempt, commitSetting, outcomeLine } from './settings_controls.js';
+import { commitSetting, outcomeLine } from './settings_controls.js';
 import { deploymentOf, safetyExitsNote } from './settings_policy.js';
 import { rowById } from './settings_rows.js';
 import { setResult } from './ui_primitives.js';
@@ -90,9 +91,6 @@ export async function refreshSafetySkipCounter(root, { logsTail = apiClient.logs
         el.textContent = '';
     }
 }
-
-// Your rules: the row's one writer. The text is the owner's; the endpoint audits it.
-WRITERS.safetyRules = (row, value) => attempt(row, value, () => saveSafetyRules(value, { headers: APP_SETTINGS_ORIGIN }));
 
 const RULES_SAVED = 'Saved · applies from the next task or turn';
 let unsavedRules = null;  // text typed and not saved survives leaving the page, in this window
