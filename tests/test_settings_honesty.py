@@ -356,5 +356,8 @@ def test_settings_ui_save_flow_pins():
     subagents_js = " ".join((root / "subagents_settings.js").read_text(encoding="utf-8").split())
     assert "a task that is already running keeps the reviewers it started with" in subagents_js
 
+    # A Costs limit is a setting row: a write in flight is its control, disabled and busy; no "Saving…" is drawn.
     costs_js = (root / "costs.js").read_text(encoding="utf-8")
-    assert "'Saving…'" in costs_js
+    controls_js = (root / "settings_controls.js").read_text(encoding="utf-8")
+    assert "Saving…" not in costs_js
+    assert "element.setAttribute('aria-busy', 'true')" in controls_js

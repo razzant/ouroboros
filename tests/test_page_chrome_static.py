@@ -120,10 +120,14 @@ def test_server_navigation_and_chat_static_contracts():
     assert "currentSettings?.[field.settingKey]" in settings
     assert "window.addEventListener('ouro:settings-updated'" in settings
     assert "source: 'settings'" in settings
-    assert "Budget values must be at least 0.01." in costs
-    assert "COST_BUDGET_INPUTS" in costs
-    assert "s?._meta?.setup_contract?.budgetFields" in costs
-    assert "const MIN_BUDGET_VALUE" not in costs
-    assert "new CustomEvent('ouro:settings-updated'" in costs
-    assert "source: 'costs'" in costs
-    assert "event.detail?.source === 'costs'" in costs
+    # Costs' limits are setting rows: their floor comes from the setup contract through the row helper (the one
+    # writer of a setting), which tells the other pages a row saved; Costs keeps no bound and no save of its own.
+    controls = _read("web/modules/settings_controls.js")
+    rows = _read("web/modules/settings_rows.js")
+    assert "from: 'setup:totalBudget'" in rows and "from: 'setup:perTaskCostUsd'" in rows
+    assert "lastSettings?._meta?.setup_contract" in controls
+    assert "settings?._meta?.setup_contract?.budgetFields" in costs  # the note of how the limits count
+    assert "const MIN_BUDGET_VALUE" not in costs and "Budget values must be at least 0.01." not in costs
+    assert "new CustomEvent('ouro:settings-updated'" in controls and "source: 'settings-row'" in controls
+    assert "new CustomEvent('ouro:settings-updated'" not in costs
+    assert "source !== 'settings-row' || home !== LIMITS_PAGE" in costs

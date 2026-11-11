@@ -6063,7 +6063,7 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .evo-empty-line { margin: 0; max-width: 62ch; color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
 
 /* Dashboard › Costs (costs.js) on the Dashboard tab body: the known spend of the limit leads with its share as a thin
-   bar under it (amber only when the limit is reached, the owner's move); the budget form is the tab's action row; the
+   bar under it (amber only when the limit is reached, the owner's move); the limits card's rows save themselves; the
    four breakdowns are cards of their own, two side by side where they fit, each a short list with "Show all (N)". */
 .costs-spend-bar { height: 4px; border-radius: var(--pill-radius); background: var(--status-neutral-bg); overflow: hidden; }
 .costs-spend-bar > i { display: block; width: var(--spend-share, 0%); height: 100%; border-radius: inherit; background: var(--text-meta); }
@@ -6071,7 +6071,6 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .costs-budget, .costs-table-card { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
 /* A table's one-line scope note under its title: what it groups by (costs.js TABLES). */
 .costs-table-note { margin: calc(-1 * var(--space-2)) 0 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
-.costs-budget-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: var(--space-3) var(--space-5); align-items: start; }
 .costs-copy { margin: 0; max-width: 72ch; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 /* The consciousness allowance under its field (costs.js allowancePresentation): the clock's own spend in its words, what
    that leaves out in the meta ink and the door to Consciousness; then at most two status sentences (.ui-status), each

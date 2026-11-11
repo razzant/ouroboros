@@ -1,25 +1,25 @@
 import { formatUsd, number } from './storage_format.js';
-import { APP_SETTINGS_ORIGIN, apiFetch, jsonPost } from './api_client.js';
-import { clearResultOnEdit, errorWords, escapeHtmlAttr, setResult } from './ui_primitives.js';
+import { apiFetch } from './api_client.js';
+import { escapeHtmlAttr } from './ui_primitives.js';
+import { bindSettingRows, readSettings, settingsRow } from './settings_controls.js';
+import { rowsOf } from './settings_rows.js';
 import { statusMarkHtml } from './status_mark.js';
 import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
 import { readConsciousness, readConsciousnessFromState } from './consciousness_api.js';
 import { allowanceHold, allowanceText } from './consciousness_words.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
 
-const COST_BUDGET_INPUTS = {
-    TOTAL_BUDGET: 's-budget',
-    OUROBOROS_PER_TASK_COST_USD: 's-per-task-cost',
-};
-// The three limits of Budget. The consciousness allowance has its one editor here (owner, 10 Nov 2026: moved from
-// Settings with the spend it counts); its 0 is a real choice (it may not spend), so it is no setup-contract budget
-// field, whose minimum is 0.01. Only an edited limit is posted: a Costs tab left open never writes back an old value.
+// The limits card is rows of settings_rows.js (their home is this tab), drawn and written by settings_controls.js: each
+// saves itself and says what happened. The consciousness allowance has its one editor here (owner, 10 Nov 2026: moved
+// from Settings with the spend it counts); its 0 is a real choice (it may not spend).
+const LIMITS_PAGE = 'dashboard:costs';
 const ALLOWANCE_KEY = 'OUROBOROS_CONSCIOUSNESS_DAILY_USD';
-export const BUDGET_LIMITS = [
-    { id: 's-budget', key: 'TOTAL_BUDGET', min: 0.01, invalid: 'Budget values must be at least 0.01.' },
-    { id: 's-per-task-cost', key: 'OUROBOROS_PER_TASK_COST_USD', min: 0.01, invalid: 'Budget values must be at least 0.01.' },
-    { id: 's-consciousness-allowance', key: ALLOWANCE_KEY, min: 0, invalid: 'The consciousness limit must be a number, 0 or more.' },
-];
+// What else describes a limit's field: the note of how its limit counts, and for the allowance its spend and state.
+const LIMIT_NOTES = Object.freeze({
+    TOTAL_BUDGET: 'costs-budget-help', OUROBOROS_PER_TASK_COST_USD: 'costs-budget-help',
+    [ALLOWANCE_KEY]: 'costs-allowance-spend costs-allowance-state costs-allowance-help',
+});
+const limitRows = (fold) => rowsOf(LIMITS_PAGE, { fold }).map((row) => settingsRow(row, { describedBy: ({ id }) => LIMIT_NOTES[id] || '' })).join('');
 // A breakdown table shows its largest rows; the rest wait behind its "Show all (N)" (the list's one length control).
 const TABLE_ROWS = 8;
 // Each table says what it groups by (owner, Track09 A, 9 Nov 2026). The ledger's `by_api_key` groups by provider; a
@@ -43,16 +43,6 @@ export const breakdownRowName = (tableId, key) => (NAME_WORDS[tableId] ? NAME_WO
 const BUDGET_NOTE_FALLBACK =
     'Budget limits use known spend: Total Budget applies globally, while Per-task Cost Cap applies to one root task tree. '
     + 'Unpriced calls remain unknown and are not counted as $0; reservations and unresolved charges are not counted as spending.';
-
-/** One limit's draft against the value it was loaded with (`data-loaded`): `{ value, edited, valid }`. An empty field
- *  is no number (never 0); an untouched one, or one typed back to its loaded number, is not edited. */
-export function limitDraft(raw, loaded, min) {
-    const text = String(raw ?? '').trim();
-    const base = String(loaded ?? '').trim();
-    const value = text === '' ? NaN : Number(text);
-    const edited = text === '' ? base !== '' : !(base !== '' && Number(base) === value);
-    return { value, edited, valid: Number.isFinite(value) && value >= min };
-}
 
 function optionalFiniteNumber(value) {
     if (value === null || value === undefined || value === '') return null;
@@ -80,38 +70,6 @@ export function costBucketPresentation(info) {
     const detail = [open && !word ? 'pending' : '', unknown > 0 ? `${number(unknown)} without a price` : '']
         .filter(Boolean).join(' · ');
     return { text, open, detail };
-}
-
-// The consciousness clock reads the allowance at its next check, never at a task's start; a wake already paused at the
-// allowance it started with keeps that number (consciousness_view.held_sentence).
-const ALLOWANCE_SAVED = 'The next consciousness check uses it; a paused wake keeps its launch limit.';
-const ALLOWANCE_SAVED_BESIDE = 'The next consciousness check uses the new consciousness limit; a paused wake keeps its launch limit.';
-
-/** What one budget save says and whether that saying may end by itself: `{ text, tone, transient }`. `sent` names the
- *  edited limits the save posted: the server files the allowance under the next task, which it is not, so its own
- *  sentence stands for it and the other limits keep their words. */
-export function budgetSavePresentation(data = {}, { sent = null } = {}) {
-    let text;
-    const keys = sent ? new Set(sent) : null;
-    const allowance = Boolean(keys?.has(ALLOWANCE_KEY));
-    const others = !keys || [...keys].some((key) => key !== ALLOWANCE_KEY);
-    // The per-task cap is the one other limit applying on the next task; Total budget takes effect at once.
-    const nextTask = data.next_task_changed && (!allowance || keys.has('OUROBOROS_PER_TASK_COST_USD'));
-    // `restart_required` is the server's whole restart state, so with nothing changed it is a setting saved earlier.
-    if (data.no_changes) text = data.restart_required ? 'No changes. Restart still required.' : 'No changes.';
-    else if (allowance && !others && !data.restart_required) text = `Saved. ${ALLOWANCE_SAVED}`;
-    else {
-        if (data.restart_required) text = 'Saved. Restart required.';
-        else if (data.immediate_changed && nextTask) {
-            text = 'Saved. Some changes took effect immediately; others apply on the next task.';
-        } else if (data.immediate_changed) text = 'Saved. Took effect immediately.';
-        else text = 'Saved. Applies on the next task.';
-        if (allowance) text += ` ${others ? ALLOWANCE_SAVED_BESIDE : ALLOWANCE_SAVED}`;
-    }
-    const warned = Boolean(data.warnings?.length);
-    if (warned) text += ' Warnings: ' + data.warnings.join(' | ');
-    const standing = warned || Boolean(data.restart_required);
-    return { text, tone: standing ? 'warn' : 'ok', transient: !standing };
 }
 
 /** Pure cost-dashboard projection: null/unavailable never renders as $0.
@@ -264,24 +222,9 @@ export function initCosts({ state, mount, openDashboardTab = null }) {
         </section>
         <section class="ui-card costs-budget" aria-labelledby="costs-budget-title">
             <h3 class="dashboard-card-title" id="costs-budget-title">Budget</h3>
-            <div class="costs-budget-fields">
-                <div class="form-field ui-field">
-                    <label for="s-budget">Total budget ($)</label>
-                    <input id="s-budget" class="ui-control" type="number" value="200" aria-describedby="costs-total-note costs-budget-help">
-                    <div class="ui-field-help" id="costs-total-note">Paid work stops when known spend reaches it.</div>
-                </div>
-                <div class="form-field ui-field">
-                    <label for="s-per-task-cost">Per-task cost cap ($)</label>
-                    <input id="s-per-task-cost" class="ui-control" type="number" value="50" aria-describedby="costs-per-task-note costs-budget-help">
-                    <div class="ui-field-help" id="costs-per-task-note">A task and its helpers stop when their known spend reaches it.</div>
-                </div>
-                <div class="form-field ui-field costs-allowance">
-                    <label for="s-consciousness-allowance">Consciousness per 24 hours ($)</label>
-                    <input id="s-consciousness-allowance" class="ui-control" type="number" min="0" step="any" inputmode="decimal"
-                        aria-describedby="costs-allowance-note costs-allowance-spend costs-allowance-state costs-allowance-help">
-                    <div class="ui-field-help" id="costs-allowance-note">Its wake-ups, replies in places and the work they start, over a rolling 24 hours.</div>
-                    <p class="ui-field-help costs-allowance-spend" id="costs-allowance-spend">Reading…</p>
-                </div>
+            <div class="costs-limits">${limitRows(false)}</div>
+            <div class="costs-allowance">
+                <p class="ui-field-help costs-allowance-spend" id="costs-allowance-spend">Reading…</p>
             </div>
             <div class="costs-allowance-state" id="costs-allowance-state" aria-live="polite"></div>
             <details class="ui-disclosure">
@@ -292,29 +235,22 @@ export function initCosts({ state, mount, openDashboardTab = null }) {
                 <summary>How the consciousness limit counts</summary>
                 <p class="costs-copy" id="costs-allowance-help" role="note">${ALLOWANCE_NOTE}</p>
             </details>
-            <div class="ui-action-row">
-                <button type="button" class="btn btn-save" id="btn-save-budget">Save</button>
-                <p class="ui-result" id="budget-save-status" role="status" aria-live="polite"></p>
-            </div>
+            <details class="ui-disclosure">
+                <summary>More limits</summary>
+                <div class="costs-limits">${limitRows(true)}</div>
+            </details>
         </section>
         <div class="costs-tables">${TABLES.map(tableCardHtml).join('')}</div>
     `;
     mount.appendChild(page);
     const budgetCard = page.querySelector('.costs-budget');
-    const statusEl = page.querySelector('#budget-save-status');
-    // An edit of either field starts a new subject: the last save's words go (DESIGN "Status and chips").
-    clearResultOnEdit(budgetCard, statusEl);
+    // The rows are drawn once and never redrawn: a refresh of the tab repaints the spend, the tables and the allowance's
+    // facts around them, and `limits.paint()` only writes a fresh value into a field the owner is not in.
+    const limits = bindSettingRows(budgetCard);
     const expanded = new Set();
     let lastBreakdown = null;
     let allowanceRead = 0;
     let allowanceExpiry = null;
-    let budgetRead = 0;
-    budgetCard.addEventListener('input', (event) => {
-        const limit = BUDGET_LIMITS.find(({ id }) => id === event.target.id);
-        // While a save of the field is on its way, an edit is measured against what that save sends.
-        if (limit) event.target.dataset.edited = String(limitDraft(event.target.value,
-            event.target.dataset.saving ?? event.target.dataset.loaded, limit.min).edited);
-    });
 
     function renderBreakdownTable(tableId, data, emptyLabel = 'No data') {
         const table = page.querySelector('#' + tableId);
@@ -420,38 +356,15 @@ export function initCosts({ state, mount, openDashboardTab = null }) {
         }
     }
 
-    async function loadBudget() {
-        const read = ++budgetRead;
+    async function loadLimits() {
         try {
-            const resp = await apiFetch('/api/settings', { cache: 'no-store' });
-            const s = await resp.json().catch(() => ({}));
-            if (!resp.ok || read !== budgetRead) return;
-            const fields = s?._meta?.setup_contract?.budgetFields || [];
+            const settings = await readSettings();
+            const fields = settings?._meta?.setup_contract?.budgetFields || [];
             const note = fields.map((field) => String(field.note || '').trim()).find(Boolean) || '';
-            const noteEl = document.getElementById('costs-budget-help');
-            if (noteEl && note) {
-                noteEl.textContent = note;
-                noteEl.hidden = false;
-            }
-            fields.forEach((field) => {
-                const input = document.getElementById(COST_BUDGET_INPUTS[field.settingKey]);
-                if (!input) return;
-                input.min = field.min || '0.01';
-                input.step = field.step || 'any';
-                if (field.default != null && input.dataset.edited !== 'true' && !String(input.value || '').trim()) {
-                    input.value = field.default;
-                }
-            });
-            BUDGET_LIMITS.forEach(({ id, key }) => {
-                const input = document.getElementById(id);
-                // A tab return or a Settings notification may finish reading while the owner is typing.
-                // Keep that draft; update only fields still showing their last loaded/saved value.
-                if (input.dataset.edited !== 'true' && input.dataset.saving === undefined && s[key] != null) {
-                    input.value = String(s[key]);
-                    input.dataset.loaded = String(input.value);
-                }
-            });
-        } catch {}
+            const noteEl = page.querySelector('#costs-budget-help');
+            if (noteEl && note) noteEl.textContent = note;
+        } catch { /* the rows keep the last values they read */ }
+        limits.paint();
     }
 
     page.querySelector('#btn-refresh-costs').addEventListener('click', () => { loadCosts(); loadAllowance(); });
@@ -469,62 +382,23 @@ export function initCosts({ state, mount, openDashboardTab = null }) {
         renderBreakdownTable(id, lastBreakdown?.[key] || {});
     });
 
-    // The result of a save sits right after Save and keeps its own lifetime (ui_primitives.js setResult): a plain
-    // acknowledgement ends by itself, a restart still required, a warning or a failure stays until the next save or
-    // an edit of the fields replaces it.
-    page.querySelector('#btn-save-budget').addEventListener('click', async (event) => {
-        const drafts = BUDGET_LIMITS.map((limit) => {
-            const input = document.getElementById(limit.id);
-            const draft = limitDraft(input.value, input.dataset.loaded, limit.min);
-            return { ...limit, ...draft, edited: draft.edited && input.dataset.edited === 'true' };
-        });
-        const invalid = drafts.find((draft) => draft.edited && !draft.valid);
-        if (invalid) {
-            setResult(statusEl, { text: invalid.invalid, tone: 'danger' });
-            return;
-        }
-        // Only what was edited travels; nothing edited still asks the server, which says so (and any restart owed).
-        const sending = drafts.filter((draft) => draft.edited);
-        const body = Object.fromEntries(sending.map((draft) => [draft.key, draft.value]));
-        sending.forEach((draft) => { document.getElementById(draft.id).dataset.saving = String(draft.value); });
-        const saveButton = event.currentTarget;
-        saveButton.disabled = true;
-        saveButton.setAttribute('aria-busy', 'true');
-        setResult(statusEl, { text: 'Saving…', tone: 'muted' });
-        try {
-            const data = await jsonPost('/api/settings', body, { headers: APP_SETTINGS_ORIGIN });
-            ++budgetRead;  // a read started before this save must not put the old value back
-            const saved = budgetSavePresentation(data || {}, { sent: Object.keys(body) });
-            setResult(statusEl, { text: saved.text, tone: saved.tone, ends: saved.transient });
-            sending.forEach((draft) => { document.getElementById(draft.id).dataset.loaded = String(draft.value); });
-            if (ALLOWANCE_KEY in body) loadAllowance();
-            window.dispatchEvent(new CustomEvent('ouro:settings-updated', { detail: { reason: 'budget saved', source: 'costs' } }));
-        } catch (error) {
-            const words = errorWords(error);
-            setResult(statusEl, { text: `Not saved. ${words.text}`, tone: words.tone, details: words.details });
-        } finally {
-            // What was typed while it travelled stays a draft against what is now saved (or, failed, still loaded).
-            sending.forEach((draft) => {
-                const input = document.getElementById(draft.id);
-                delete input.dataset.saving;
-                input.dataset.edited = String(limitDraft(input.value, input.dataset.loaded, draft.min).edited);
-            });
-            saveButton.disabled = false;
-            saveButton.removeAttribute('aria-busy');
-        }
-    });
-
     function refreshCostsPanel() {
         loadCosts();
-        loadBudget();
+        loadLimits();
         loadAllowance();
     }
 
+    // A result the owner saw ends when the tab or the Dashboard is left.
     window.addEventListener('ouro:dashboard-subtab-shown', (event) => {
-        if (event.detail?.tab === 'costs' && state.activePage === 'dashboard') refreshCostsPanel();
+        if (event.detail?.tab !== 'costs') limits.leave();
+        else if (state.activePage === 'dashboard') refreshCostsPanel();
     });
+    window.addEventListener('ouro:page-shown', (event) => { if (event.detail?.page !== 'dashboard') limits.leave(); });
     window.addEventListener('ouro:settings-updated', (event) => {
-        if (event.detail?.source === 'costs') return;
-        refreshCostsPanel();
+        const { source, page: home, row } = event.detail || {};
+        if (source !== 'settings-row' || home !== LIMITS_PAGE) { refreshCostsPanel(); return; }
+        // One of this card's own rows was saved: read again only what that limit moves.
+        if (row === 'TOTAL_BUDGET') loadCosts();
+        if (row === ALLOWANCE_KEY) loadAllowance();
     });
 }

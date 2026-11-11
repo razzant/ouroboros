@@ -185,10 +185,12 @@ def test_settings_cost_warnings_skip_review_and_authored_widget(direct_server_wi
         page.screenshot(path=str(evidence / 'settings-warning.png'))
         page.locator('[data-nav-page="dashboard"]').click()
         page.locator('[data-dashboard-tab="costs"]').click()
-        page.locator('#btn-save-budget').click()
-        status = page.locator('#budget-save-status')
-        page.wait_for_function("document.querySelector('#budget-save-status').textContent.includes('Warnings:')")
-        assert ' Warnings: First warning | Second warning' in status.inner_text()
+        # A Costs limit saves itself when its field is left; its row says the server's warnings in words.
+        page.locator('#setting-TOTAL_BUDGET').fill('321')
+        page.locator('#setting-TOTAL_BUDGET').press('Tab')
+        status = page.locator('#setting-TOTAL_BUDGET-result')
+        page.wait_for_function("document.querySelector('#setting-TOTAL_BUDGET-result').textContent.includes('First warning')")
+        assert status.inner_text().startswith('Saved') and 'First warning Second warning' in status.inner_text()
         assert status.get_attribute('data-tone') == 'warn'
         assert len(writes) == 2, writes
         page.screenshot(path=str(evidence / 'costs-warning.png'))
