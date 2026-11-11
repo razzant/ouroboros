@@ -101,8 +101,11 @@ def catalogue_lines(group):
     """The exact unwindowed room catalogue, shared with its character-offset reader."""
     from ouroboros import memory_view as mv
     from ouroboros.memory_view_conversation_forms import identity_line
+    def presence(room):
+        return ("a person spoke here; no word of my human or reply of mine" if room.get("overheard") else
+                "a person or I spoke here" if room["engaged"] else "no recorded conversation here")
     return [identity_line(group), *(
-        f"  - {room['label']}; {'a person or I spoke here' if room['engaged'] else 'no recorded conversation here'}; "
+        f"  - {room['label']}; {presence(room)}; "
         f"{mv._facts_text(room['facts'], 'that room')}; memory_read(room_id='{room['room_id']}', rows=true)"
         for room in group["rooms"])]
 

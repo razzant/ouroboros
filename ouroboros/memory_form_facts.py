@@ -163,7 +163,8 @@ def _group_counts(group, data, sources, state, aggregate_unread):
                 if (raw or bare) and data["kinds"][word["id"]] == "untold":
                     add("emergency", "other addresses" if bare else "other openings", 1, 1)
     if form and not aggregate_unread:
-        add("host", "overheard unread", int(bool(data["overheard"][1])), len(data["overheard"][1]))
+        add("host", "unread in rooms without my human's word or my reply",
+            int(bool(data["overheard"][1])), len(data["overheard"][1]))
     return tuple(facts), lost, global_unread
 
 

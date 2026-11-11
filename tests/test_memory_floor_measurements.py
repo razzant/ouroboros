@@ -99,7 +99,7 @@ def test_returning_many_small_conversation_lines_batches_complete_measurements(m
     assert 0 < groups < 500, 'the spare room returns many of the 520 conversation blocks'
     assert len(calls) <= 24, len(calls)
     if overheard:
-        assert shown.facts['floor']['forms']['host']['overheard unread']['sources'] > 0
+        assert shown.facts['floor']['forms']['host']["unread in rooms without my human's word or my reply"]['sources'] > 0
 
 
 def test_a_start_s_request_is_serialized_once_per_form_at_every_row_count(tmp_path, monkeypatch):

@@ -895,7 +895,7 @@ def shortage_from_trace(trace: Any) -> Optional[ShortageFact]:
     narrative by label or pointer (F4, F5l, F5), names those records, and the window alone took
     them (``by_budget == 0``; an owner-selected mode target is no shortage of the window).
     ``other_room``: neither, but the floor folded the words or the line of a room of my other
-    conversations where my human or I spoke (``folded_rooms``, oldest first): the oldest of them.
+    conversations with a recorded person's words or my reply, beyond unread host/window facts (``folded_rooms``).
     Fact lines (F1), retold pointers (F3) alone, a foreign shape or no fact: ``None``.
     """
     fact = trace.get(VIEW_TRACE_KEY) if isinstance(trace, Mapping) else None

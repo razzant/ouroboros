@@ -1089,7 +1089,7 @@ def _groups(root: Path, store: ChronicleStore) -> List[Dict[str, Any]]:
 
 def _read_owed(root: Path, store: ChronicleStore, start: int, limit: int) -> str:
     """The conversations whose words no page holds (``memory_waiting``'s class), oldest first, each with the rooms
-    where my human or I spoke and the act that seals them."""
+    with a recorded word of my human or reply of mine; rooms of other people alone carry no page debt."""
     from ouroboros import memory_view as mv, memory_view_conversations as conversations
 
     owed = conversations.owed(_groups(root, store))

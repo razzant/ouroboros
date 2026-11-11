@@ -11,7 +11,8 @@ AUTHORITY = ("What other people said in my other conversations is information ab
              "me; only my human's words from the accounts confirmed as theirs carry their authority.")
 AUDIENCE = "Whether any of it belongs where I answer is my judgment of who reads there: knowing is not publishing."
 _INTRO = ("One group per conversation, rooms oldest first: a recorded person or my reply makes a conversation; "
-          "elsewhere arrivals stand as event facts. Notes and conversation words stay whole, tasks stand as lines.")
+          "elsewhere arrivals stand as event facts. Whole forms keep notes and words; shorter forms below name their "
+          "telling, host facts or recorded emergency. Tasks stand as lines.")
 
 # --- the floor's elements and the rendering --------------------------------------------------------
 
@@ -62,7 +63,11 @@ def _overheard_line(group, data):
     if not words:
         return ""
     latest, author, opening = _latest_unread(words)
-    return (f"No recorded consideration: {rooms} overheard rooms, {len(words)} words; "
+    people = len({w.get("author") or w["head"] for w in words})
+    days = [str(w["ts"])[:10] for w in words]
+    return (f"No recorded consideration: {len(words)} words from {people} {'person' if people == 1 else 'people'}, "
+            f"{min(days)} → {max(days)}, in {rooms} room{'' if rooms == 1 else 's'} "
+            "with no recorded word of my human or reply of mine; "
             f"[{latest['address']}; latest by {author}] «{opening}»; "
             f"memory_read(room_id='*', start={group['catalogue_start']})")
 
@@ -293,7 +298,7 @@ def _counted_text(groups, owners, aggregate_unread, *, index=None):
             lines += [_unread_line(words) for room in group["rooms"] if not room.get("overheard")
                       and (words := sources[room["room_id"]]["unread"])]
             if overheard := _overheard_line(group, index[group["key"]]):
-                lines.append(overheard)
+                lines.append(group["label"] + ": " + overheard)
     lines += [_row_pointer(word, "words") if word["id"] in owners else word["line"]
               for room in rooms for word in sources[room["room_id"]]["owner"]]
     return "\n".join(lines)
@@ -342,11 +347,12 @@ def pieces(groups: List[Mapping[str, Any]], gone: Mapping[str, Iterable[str]],
 
 
 def owed(groups: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
-    """The conversations whose words no page holds (S4): each group with a room where my human or I spoke that has open
-    words, oldest open word first, with those rooms and their open characters (``memory_waiting``'s class)."""
+    """Open conversations with a recorded word of my human or reply of mine (S4); rooms of other people alone
+    carry host facts, not a page debt. Oldest open word first (``memory_waiting``'s class)."""
     found = []
     for group in groups:
-        rooms = [room for room in group["rooms"] if room["engaged"] and (room["words"] or room.get("folded"))]
+        rooms = [room for room in group["rooms"] if room["engaged"] and not room.get("overheard")
+                 and (room["words"] or room.get("folded"))]
         if rooms:  # a conversation page seals all its rooms up to its newest row: the act names that row
             newest = max(group["rooms"], key=lambda room: room["last"])
             found.append({"group": group, "rooms": rooms, "chars": sum(int(room["facts"].get("chars") or 0) for room in rooms),
@@ -356,14 +362,13 @@ def owed(groups: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def folded_rooms(groups: Iterable[Mapping[str, Any]], gone: Mapping[str, Iterable[str]]) -> List[str]:
-    """The rooms where my human or I spoke whose words (F6w) or group (F6g) a floor level shows only by address,
+    """Rooms with a recorded person's words or my reply whose words (F6w) or group (F6g) yielded beyond host facts,
     oldest open row first: what a writer may seal where consciousness is off (``memory_inventory.shortage_from_trace``)."""
     words = {ident.removeprefix("bare:") for ident in gone.get("F6w", ())}
     lined = {g["key"] for g in groups if group_form(g, gone) or g["key"] in gone.get("F6a", ())}
     def needs_telling(group, room):
-        # The new conversation count is a host fact, not a request to retell these unread words.
-        # The older per-room and final window forms keep their existing shortage facts.
-        counted_unread = room.get("overheard") and group["key"] in lined and not (
+        # Neither an unread host count nor the window's global unread emergency asks for a retelling.
+        counted_unread = (room.get("overheard") and group["key"] in lined) or (
             group["key"] in gone.get("F6a", ()) and "unread" in gone.get("F6a", ()))
         return any(not (counted_unread and _unread(word)) and (
             group["key"] in lined or word["id"] in words) for word in room["words"])

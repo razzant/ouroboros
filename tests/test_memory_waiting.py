@@ -372,25 +372,25 @@ def test_overheard_unread_is_per_conversation_only_in_line_forms(tmp_path, provi
     whole = draw({})
     assert all(w["line"] in whole for w in unread) and "No recorded consideration:" not in whole
     room_lines = draw({"F6w": {w["id"] for w in unread}})
-    assert room_lines.count("No recorded consideration:") == 4 and "overheard rooms" not in room_lines
+    assert room_lines.count("No recorded consideration:") == 4 and "with no recorded word of my human or reply of mine" not in room_lines
     for gone in ({"F6g": {prefix + group["key"]}} for prefix in ("", "all:", "last:")):
         shown = draw(gone)
-        assert "No recorded consideration: 3 overheard rooms, 6 words;" in shown
+        assert "No recorded consideration: 6 words from 3 people, 2026-09-09 → 2026-09-09, in 3 rooms with no recorded word of my human or reply of mine;" in shown
         assert "No recorded consideration: 1 words;" in shown and shown.count("No recorded consideration:") == 2
-        counter = next(line for line in shown.splitlines() if "overheard rooms" in line)
+        counter = next(line for line in shown.splitlines() if "with no recorded word of my human or reply of mine" in line)
         assert latest["address"] in counter and latest["author"] in counter and "Topic 5 opening." in counter
         assert all(w["line"] not in shown for w in unread)
     for gone in ({"F6g": {group["key"]}}, {"F6a": {group["key"]}}):
-        assert "3 overheard rooms, 6 words" in draw(gone)
+        assert "in 3 rooms with no recorded word of my human or reply of mine" in draw(gone)
         level = mv.FloorLevel(tuple((step, tuple(ids)) for step, ids in gone.items()))
         host = mf.form_counts(snapshot, level)["host"]
-        assert host["overheard unread"] == {"lines": 1, "sources": 6}
+        assert host["unread in rooms without my human's word or my reply"] == {"lines": 1, "sources": 6}
         assert host["unread"] == {"lines": 1, "sources": 1}
     aggregate = {"F6a": {group["key"], "unread"}}
-    assert "7 words without recorded consideration" in draw(aggregate) and "overheard rooms" not in draw(aggregate)
+    assert "7 words without recorded consideration" in draw(aggregate) and "with no recorded word of my human or reply of mine" not in draw(aggregate)
     counts = mf.form_counts(snapshot, mv.FloorLevel((("F6a", tuple(aggregate["F6a"])),)))
     assert counts["window"]["unread count"] == {"lines": 1, "sources": 7}
-    assert "overheard unread" not in counts["host"]
+    assert "unread in rooms without my human's word or my reply" not in counts["host"]
 
 
 @pytest.mark.parametrize("prior", ["owner", "forward", "reply", "stranger", "own_account"])
@@ -431,7 +431,7 @@ def test_overheard_reader_guard_and_local_prices_share_the_conversation_state(tm
     snapshot = dataclasses.replace(snapshot, room=None, story=[], conversations=[group])
     ordinary = mf.ordinary_level(snapshot)
     text = mv.render_room(snapshot, ordinary)
-    assert "3 overheard rooms, 6 words" in text
+    assert "in 3 rooms with no recorded word of my human or reply of mine" in text
     offset = int(re.search(r"memory_read\(room_id='\*', start=(\d+)\)", text)[1])
     groups = _groups(tmp_path, ChronicleStore(tmp_path))
     catalogue = "\n".join(line for g in groups for line in catalogue_lines(g))
@@ -449,13 +449,13 @@ def test_overheard_reader_guard_and_local_prices_share_the_conversation_state(tm
         level = mv.FloorLevel(tuple((step, tuple(sorted(ids))) for step, ids in gone.items()))
         assert mv.room_chars(snapshot, level) == mv.json_chars(mv.render_room(snapshot, level))
         counts = mf.form_counts(snapshot, level)["host"]
-        assert counts.get("overheard unread", {}).get("lines", 0) == mv.render_room(snapshot, level).count("overheard rooms")
+        assert counts.get("unread in rooms without my human's word or my reply", {}).get("lines", 0) == mv.render_room(snapshot, level).count("with no recorded word of my human or reply of mine")
     assert mv.snapshot_json(snapshot) == frozen
     budget = mf.tokens_of(mv.room_chars(snapshot, ordinary)) + mf.tokens_of(mv.story_chars(snapshot, ordinary))
     fitted = mf.fit_memory_view(snapshot, {"margin": budget, "physical": budget, "budget": None})
     counts = mf.form_counts(snapshot, fitted)
     assert not counts["emergency"] and not counts["window"]
-    assert counts["host"]["overheard unread"] == {"lines": 1, "sources": 6}
+    assert counts["host"]["unread in rooms without my human's word or my reply"] == {"lines": 1, "sources": 6}
     # This host count alone gives no reason to commission a retelling.
     from ouroboros.memory_inventory import shortage_from_trace, VIEW_TRACE_KEY
     overheard = {**group, "rooms": [r for r in group["rooms"] if r["overheard"]]}
@@ -471,5 +471,37 @@ def test_overheard_reader_guard_and_local_prices_share_the_conversation_state(tm
     with_work = dataclasses.replace(snapshot, room=room)
     bound = size(with_work, lined)
     fitted = mf.fit_memory_view(with_work, {"margin": bound, "physical": bound, "budget": None})
-    assert "3 overheard rooms, 6 words" in mv.render_room(with_work, fitted)
+    assert "in 3 rooms with no recorded word of my human or reply of mine" in mv.render_room(with_work, fitted)
     assert room["lane1"][-1]["line"] in mv.render_room(with_work, fitted)
+
+
+def test_unread_counter_names_the_predicate_people_days_and_its_conversation(tmp_path):
+    from ouroboros import memory_view_conversation_forms as forms
+    from ouroboros.memory_view_events import catalogue_lines
+    group = _event_group(_overheard_view(tmp_path))
+    expected = ("No recorded consideration: 6 words from 3 people, 2026-09-09 → 2026-09-09, "
+                "in 3 rooms with no recorded word of my human or reply of mine;")
+    assert expected in forms.render_group(group, set(), set(), 1)
+    counted = forms._counted_text([group], set(), False)
+    assert group["label"] + ": " + expected in counted
+    assert expected not in forms.render_group(group, set(), set(), 0)
+    catalogue = catalogue_lines(group)
+    for room, line in zip(group["rooms"], catalogue[1:]):
+        predicate = "a person spoke here; no word of my human or reply of mine"
+        assert (predicate in line) is room["overheard"]
+        assert ("a person or I spoke here" in line) is not room["overheard"]
+
+
+def test_unread_host_counts_do_not_create_page_debt_or_restore_it_at_the_window_floor(tmp_path):
+    from ouroboros import memory_view_conversation_forms as forms
+    group = _event_group(_overheard_view(tmp_path))
+    ours = next(r for r in group["rooms"] if not r["overheard"])
+    others = [r for r in group["rooms"] if r["overheard"]]
+    assert forms.owed([group])[0]["rooms"] == [ours]
+    assert not forms.owed([{**group, "rooms": others}])
+    for step, ids in (("F6g", [group["key"]]), ("F6a", [group["key"]]), ("F6a", [group["key"], "unread"])):
+        expected = [] if "unread" in ids else [ours["room_id"]]
+        assert forms.folded_rooms([group], {step: ids}) == expected
+    # A considered word is still an untold source, even beside unread host facts.
+    others[0]["words"][0]["rank"] = 1
+    assert forms.folded_rooms([group], {"F6a": [group["key"], "unread"]}) == [others[0]["room_id"]]
