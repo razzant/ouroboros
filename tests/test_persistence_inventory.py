@@ -945,9 +945,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # (``ouroboros/context_view_facts.py``); its own row.
 # Result-review retained material/restored source views and published kept-service declarations
 # share the existing inventory; the combined AST census below pins their union.
-# Function-local isolation: actual inherited465 minus five polluted spellings plus
-# three own-scope/coarser spellings is463; this is not retirement of their writers.
-EXPECTED_SCAN_PATHS = 463
+# Audited independent-tree census after function-local isolation. This is a
+# spelling correction, not retirement of writers; other proposals add their own paths.
+EXPECTED_SCAN_PATHS = 462
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
