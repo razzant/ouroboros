@@ -171,7 +171,8 @@ def project_lead(fact: Any = None, task: Mapping | None = None, *, queued: bool 
         carrier = (task.get("metadata") or {}).get("lead")
         if citation := cited_fields(carrier):
             result.pop("cited", None)
-            if (model, local) == (result["model"], result["use_local"]):
+            # A fallback may be the primary's own model on another account: only an accepted reply ends it.
+            if basis != "fallback" and (model, local) == (result["model"], result["use_local"]):
                 result.pop("primary", None)
                 result.update(basis="owner_words", **citation)
             else:

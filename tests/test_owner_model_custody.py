@@ -809,6 +809,37 @@ def test_cited_work_switch_keeps_its_words_through_receipt_resume_fallback_and_c
     assert _successor(host[0], "work")["metadata"]["lead"] == carrier
 
 
+@pytest.mark.parametrize("action", ["return", "wait"])
+def test_a_cited_primary_on_its_own_model_through_a_fallback_account_stays_fallback_until_it_answers(host, action):
+    """The ladder may answer on the primary's own model through another account. The owner's Return or Wait is a
+    request: the receipt and the card keep the departure, with the words that chose the primary, until the primary's
+    accepted reply. The same words choosing the model a work already acts on are an arrival, not a departure."""
+    from ouroboros import owner_model
+    from tests.test_work_lead import context
+
+    model, span = "claudexor::codex=example", "Use this model for the work."
+    save_owner({"OUROBOROS_MODEL": model, "OUROBOROS_MODEL_ACCOUNTS": json.dumps({"fallback": ["fallback-account"]})})
+    task = queued(host)
+    assert owner_model.request("work", {"action": "set", "request_id": "cited-primary", "model": model,
+                                        "use_local": False, "cited": span}, source="owner_words")["ok"]
+    cited = {"model": model, "use_local": False, "basis": "owner_words", "cited": {"text": span, "clipped": False}}
+    following = {"model": model, "use_local": False, "basis": "main"}
+    arrived = lead_fact.project_lead(following, {**task, "owner_model": {"request_id": "cited-primary"}})
+    assert arrived == cited  # already on that model, by its own account: no departure, nothing pending
+    host[2].PENDING.remove(task)
+    write_task_result(host[0], "work", "running")
+    ctx = context("owner_words", model=model, role="lead", metadata=task["metadata"])
+    lead_fact.adopt_fallback(ctx, False, {"failure_code": "quota"}, "fallback:0")
+    departed = lead_fact.lead_fact(ctx)
+    assert departed["basis"] == "fallback" and departed["role"] == "fallback:0" and departed["primary"] == cited
+    host[2].RUNNING["work"] = {"task": task, "attempt": 1, "lead": departed, "_lead_request_id": "cited-primary"}
+    response = act(host, action, request_id="before-the-primary-answers")
+    assert response.status_code == 200, response.text
+    for shown in (response.json()["lead"], lead_fact.project_lead(departed, task)):
+        assert (shown["basis"], shown["role"], shown["primary"]) == ("fallback", "fallback:0", cited)
+        assert "pending" not in shown and shown["cause"] == "quota"
+
+
 @pytest.mark.parametrize("scope", ["room", "main"])
 @pytest.mark.parametrize("source", ["initial_user", "live_call"])
 def test_cited_settings_scopes_use_owner_writers_and_uncited_attempts_refuse(host, monkeypatch, scope, source):
