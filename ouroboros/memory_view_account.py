@@ -89,6 +89,19 @@ def quote_line(quote: Mapping[str, Any]) -> str:
     return f"- quote ({quote.get('speaker')}, {quote.get('address')}): {quote.get('text')}"
 
 
+def page_quote_lines(entry, gone=(), *, short=False):
+    """Short story forms retain human quotes until owner; the quote model has no owner flag."""
+    return [quote_line(q) for n, q in enumerate(entry.get("quotes") or ())
+            if (not short or q.get("speaker") == "human") and f"quote:{entry['id']}:{n}" not in gone]
+
+
+def story_quote_rows(story):
+    """Already-carried human words, individually addressable on the owner's stage of the floor."""
+    return {f"quote:{entry['id']}:{n}": {**q, "line": quote_line(q), "carried": True}
+            for entry in story if entry.get("kind") not in ("legacy", "account") and not entry.get("told_by")
+            for n, q in enumerate(entry.get("quotes") or ()) if q.get("speaker") == "human"}
+
+
 def _told_fix_lines(entry: Mapping[str, Any]) -> List[str]:
     """My signed changes of the records the account tells whose version none of its sources cites."""
     fixes = entry.get("told_fixes") or ()

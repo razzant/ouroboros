@@ -53,8 +53,8 @@ from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
 from ouroboros.dialogue_provenance import (RoomLabelResolver, is_presence_task, render_memory_row, render_row_text, stamp_summary,
                                            row_class, warm_lineage)
 from ouroboros.mark_anchors import describe as describe_anchor
-from ouroboros.memory_view_account import (account_entries, account_lines, accounts_line, fix_map, quote_line,
-                                         told_here, told_map)
+from ouroboros.memory_view_account import (account_entries, account_lines, accounts_line, fix_map, quote_line as quote_line,
+                                         page_quote_lines, story_quote_rows as story_quote_rows, told_here, told_map)
 from ouroboros.memory_view_legacy import INDENT, indented as _indented, retold_lines
 from ouroboros.context_timing import counted, timed_section
 from ouroboros.utils import append_jsonl, sha256_text, utc_now_iso
@@ -1046,6 +1046,10 @@ def _page_label(entry: Mapping[str, Any]) -> str:
     return _page_pointer(entry) + attribution + missing + "\n" + _indented(sentence)
 
 
+def _page_short(entry, gone=(), *, lead=False):
+    return "\n".join([_page_label(entry) if lead else _page_pointer(entry), *page_quote_lines(entry, gone, short=True)])
+
+
 def _told_lines(account_id: str, children: Mapping[str, List[Dict[str, Any]]]) -> List[str]:
     """One count and period over the selected records, nested selections included; exact IDs stay in the reader.
 
@@ -1065,11 +1069,11 @@ def _told_lines(account_id: str, children: Mapping[str, List[Dict[str, Any]]]) -
             f"{_period(span)}{basis}; exact records and selections in the composition reader"]
 
 
-def _page_lines(entry: Mapping[str, Any]) -> List[str]:
+def _page_lines(entry: Mapping[str, Any], gone=()) -> List[str]:
     head = f"### {entry['label']} · {entry['period']} · {entry['kind']} {entry['id']}"
     if entry.get("kind") == "account":  # its words, compact composition, and new source changes still in full
         return ["", head, *account_lines(entry)]
-    lines = ["", head, _indented(entry["text"]), *map(quote_line, entry.get("quotes") or ())]
+    lines = ["", head, _indented(entry["text"]), *page_quote_lines(entry, gone)]
     if entry.get("status") == "draft":
         lines.append(f"(draft by a helper ({entry.get('signer') or 'Light'}), not yet accepted or rejected by me)")
     elif entry.get("status") == "accepted":
@@ -1199,7 +1203,7 @@ def _status_lines(status: Mapping[str, Any], refusals: Tuple[Dict[str, Any], ...
     return lines
 
 
-STORY_STEPS = ("F3", "F5l", "F5", "F5a")  # the only steps ``render_story``'s text reads
+STORY_STEPS = ("F3", "F5l", "F5", "F5a", "F7")  # F7 affects only the story's human quotes
 
 
 def render_story(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW) -> str:
@@ -1211,7 +1215,7 @@ def render_story(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW) ->
     chronicle, the room labels, the helper route and ``level`` (the physical floor's; the
     empty level renders the full view): F3 turns a room's retold records into one line; F5l keeps
     page first sentences, then F5 addresses pages and parts by covered-period age, independently
-    of display order. Selected accounts stay whole. Only those steps (``STORY_STEPS``) reach the text.
+    of display order. Their human quotes stay until F7. Selected accounts stay whole.
     """
     key = _story_key(level)
     counted("view_renders", key=("story", id(snapshot), key))
@@ -1219,7 +1223,8 @@ def render_story(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW) ->
 
 
 def _story_key(level: FloorLevel) -> Tuple[Any, ...]:
-    return tuple(item for item in level.addressed if item[0] in STORY_STEPS)
+    return tuple((step, shown) for step, ids in level.addressed if step in STORY_STEPS
+                 if (shown := tuple(i for i in ids if i.startswith("quote:")) if step == "F7" else ids))
 
 
 def story_chars(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW) -> int:
@@ -1262,14 +1267,18 @@ def _story_text(snapshot: MemoryViewSnapshot, gone: Mapping[str, Tuple[str, ...]
         lines += ["", "### Old memory retold by a helper before the update (not lived; exact sources readable by id)"]
         lines += retold_lines(pointers, taken)
     shown = set(gone.get("F5", ()))
+    quotes_gone = set(gone.get("F7", ()))
     aggregate = [entry for entry in pages if entry['id'] in shown] if gone.get('F5a') else []
     # A selected form changes this entry alone, without regrouping unrelated entries or changing their headers.
     for entry in pages:
         if aggregate and entry is aggregate[0]:
             lines += ['', '### My older pages and parts, by address', _story_line(aggregate)]
         if not aggregate or entry['id'] not in shown:
-            lines += (["", _page_pointer(entry)] if entry["id"] in shown else
-                      ["", _page_label(entry)] if entry["id"] in gone.get('F5l', ()) else _page_lines(entry))
+            lines += (["", _page_short(entry, quotes_gone)] if entry["id"] in shown else
+                      ["", _page_short(entry, quotes_gone, lead=True)] if entry["id"] in gone.get('F5l', ())
+                      else _page_lines(entry, quotes_gone))
+        else:
+            lines += page_quote_lines(entry, quotes_gone, short=True)
         told_lines = _told_lines(entry["id"], told)
         if aggregate and entry['id'] in shown and told_lines:
             lines += [f"Account {entry['id']}; memory_read(node_id='{entry['id']}')"]

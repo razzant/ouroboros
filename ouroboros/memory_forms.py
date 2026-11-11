@@ -366,10 +366,11 @@ def list_elements(snapshot):
                  if r["kind"] != "ouroboros" and not r.get("owner_side", r["kind"] == "human")],
         "F7": [(r["address"], r["line"], r["short"]) for r in room.get("project_words") or () if r.get("address")]
               + block["F7"] + [(r["address"], r["line"], mv._row_pointer(r, "words")) for r in lane1
-                              if r.get("owner_side", r["kind"] == "human") and not r.get("immune")],
-        "F5l": [(r["id"], "\n".join(mv._page_lines(r)), mv._page_label(r)) for r in story
+                              if r.get("owner_side", r["kind"] == "human") and not r.get("immune")]
+              + [(ident, row["line"], "") for ident, row in mv.story_quote_rows(story).items()],
+        "F5l": [(r["id"], "\n".join(mv._page_lines(r)), mv._page_short(r, lead=True)) for r in story
                  if r.get("kind") in ("page", "part") and r.get("text", "").strip() and not r.get("told_by")],
-        "F5": [(r["id"], "\n".join(mv._page_lines(r)), mv._page_pointer(r)) for r in story
+        "F5": [(r["id"], "\n".join(mv._page_lines(r)), mv._page_short(r)) for r in story
                 if r.get("kind") not in ("legacy", "account") and not r.get("told_by")],
         "F7a": [(str(room['room_id']), '', '')] if lane1 else [],
         "F5a": [('story', '', '')] if snapshot.story else [],

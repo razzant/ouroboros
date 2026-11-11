@@ -35,6 +35,7 @@ def _count_forms(snapshot, level):
             entry = counts[kind].setdefault(form, {"lines": 0, "sources": 0})
             entry["lines"] += lines
             entry["sources"] += sources
+    add("emergency", "story quotes", 0, len(set(gone.get("F7", ())) & mv.story_quote_rows(snapshot.story).keys()))
     room = snapshot.room or {}
     hidden, work_lines = folded_work_rows(room, gone)
     addressed = hidden | gone.get("F2", set()) | gone.get("F7", set()) | gone.get("F7p", set())
@@ -191,13 +192,16 @@ def _holding_room(snapshot, level):
     aggregated = [e for e in pages if e["id"] in gone.get("F5", ())] if gone.get("F5a") else []
     grouped_ids = {e["id"] for e in aggregated}
     if aggregated:
-        hold("story lists", mv._story_line(aggregated), unmarked=any("lead_rule" not in e for e in aggregated))
+        hold("story lists", "\n".join([mv._story_line(aggregated),
+             *(line for e in aggregated for line in mv.page_quote_lines(e, gone.get("F7", ()), short=True))]),
+             unmarked=any("lead_rule" not in e for e in aggregated))
     for entry in pages:
         ident, kind = entry["id"], entry.get("kind")
         if entry["id"] in grouped_ids:
             continue
-        text = (mv._page_pointer(entry) if ident in gone.get("F5", ()) else mv._page_label(entry)
-                if ident in gone.get("F5l", ()) else "\n".join(mv._page_lines(entry)))
+        text = (mv._page_short(entry, gone.get("F7", ())) if ident in gone.get("F5", ()) else
+                mv._page_short(entry, gone.get("F7", ()), lead=True) if ident in gone.get("F5l", ()) else
+                "\n".join(mv._page_lines(entry, gone.get("F7", ()))))
         hold({"account": "accounts", "part": "parts"}.get(kind, "pages without part"), text,
              f"memory_read(node_id='{ident}')", unmarked=kind != "account" and "lead_rule" not in entry)
     for key, records in legacy.pointer_rooms(snapshot.story).items():

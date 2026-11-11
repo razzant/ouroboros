@@ -8,6 +8,35 @@ from ouroboros import memory_view_work as work
 from tests import _memory_view_synthetic as syn
 
 
+@pytest.mark.parametrize("short", ["F5l", "F5", "F5a"])
+def test_short_story_forms_keep_human_quotes_until_the_owner_stage(short):
+    page = syn.pages(1, 3000)[0]
+    human = dict(speaker="human", address=syn.spoken(1, "human", 40)["address"], text="Keep the original promise.")
+    mine = dict(speaker="ouroboros", address=syn.spoken(2, "ouroboros", 40)["address"], text="I will finish this.")
+    page.update(quotes=[human, mine], lead_rule=True)
+    snap = syn.snapshot(story=[page])
+    captured = mv.snapshot_json(snap)
+    whole = mv.render_story(snap)
+    assert mv.quote_line(human) in whole and mv.quote_line(mine) in whole
+    steps = (("F5", (page["id"],)), ("F5a", ("story",))) if short == "F5a" else ((short, (page["id"],)),)
+    level = mv.FloorLevel(steps)
+    text = mv.render_story(snap, level)
+    assert text.count(mv.quote_line(human)) == 1
+    assert mv.quote_line(mine) not in text and page["text"] not in text
+    assert mv.story_chars(snap, level) == mv.json_chars(text)
+    quotes = [(ident, full) for step, ident, full, reduced in mf.floor_elements(snap)
+              if step == "F7" and full == mv.quote_line(human) and not reduced]
+    assert len(quotes) == 1
+    ident = quotes[0][0]
+    assert forms.stage_of(snap, "F7", ident) == "owner"
+    final = mf.level_with(snap, level, ["F7:" + ident])
+    text = mv.render_story(snap, final)
+    assert mv.quote_line(human) not in text
+    assert mv.story_chars(snap, final) == mv.json_chars(text)
+    assert forms.form_counts(snap, final)["emergency"]["story quotes"] == {"lines": 0, "sources": 1}
+    assert mv.snapshot_json(snap) == captured
+
+
 @pytest.mark.parametrize("hidden", ["none", "notes", "words", "older gist"])
 def test_emergency_conversation_forms_require_hidden_sources(hidden):
     from ouroboros import memory_view_conversations as conv

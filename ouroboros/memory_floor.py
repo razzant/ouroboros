@@ -444,9 +444,10 @@ def ordinary_level(snapshot):
 
 def owner_rows(snapshot: mv.MemoryViewSnapshot) -> Dict[str, Mapping[str, Any]]:
     """My human's rows by their F7 id: this room's by address (a project root's sealed rows, ``sealed_owner_rows``,
-    among them), my other conversations' by ``room:address``."""
+    among them), my other conversations' by ``room:address``, and carried human quotes by page and index."""
     room = snapshot.room or {}
     return {**conversations.owner_items(snapshot.conversations),
+            **mv.story_quote_rows(snapshot.story),
             **{i["address"]: i for i in [*sealed_owner_rows(room), *room.get("lane1", ())]}}
 
 
