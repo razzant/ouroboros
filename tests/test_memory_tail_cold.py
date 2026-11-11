@@ -1143,6 +1143,39 @@ def test_a_walk_reads_the_lineage_of_the_rows_it_reads_in_one_read_a_batch(monke
     assert reads[0] == reads[1], reads
 
 
+def test_a_walk_reads_the_tasks_of_rows_from_before_the_lineage_epoch_in_one_read_a_batch(monkeypatch, tmp_path):
+    """A row written before the lineage epoch carries no lineage fields: who wrote it comes from its task's result
+    (``dialogue_provenance._pre_epoch_author``). The block warms those results a batch at a time as its walk reads a
+    place's rows (``warm_lineage``), as the base warmed every place's sealed rows at once: never one read a row."""
+    from ouroboros import task_results
+
+    rooms = _settled(tmp_path)
+    place = {"source": "presence:slack", "transport": _TRANSPORT, "presence_provenance": _PROVENANCE}
+    for n in range(12):
+        write_task_result(tmp_path, f"pre{n}", "completed", result="done", chat_id=LONG)
+        _append(tmp_path, shared.msg(_ts(n + 1), f"Old words {n}.", chat_id=LONG, direction="out", task_id=f"pre{n}",
+                                     type="presence_delivery", **place))
+    _append(tmp_path, shared.msg(_ts(20), "A place word.", chat_id=LONG, client_message_id="word", **place))
+    _fill(tmp_path)
+    sealed = [_entry(tmp_path, f"Old words {n}.") for n in range(12)]
+    assert ChronicleStore(tmp_path).publish_page(room_id=str(LONG), text="A page.", author=shared.MIND, covers={
+        "rows": [entry[0]["row_sha256"] for entry in sealed], "stream_span": [sealed[0][2], sealed[-1][2]]}).ok
+    _compose(tmp_path)
+    real, load, alone = ChronicleStore.activation, task_results.load_task_result, []
+
+    def activation(self):  # every row so far was written before the epoch
+        receipt = real(self)
+        metadata = receipt["metadata"]
+        return {**receipt, "metadata": {**metadata, "lineage_epoch": {**metadata["lineage_epoch"], "pos": 1 << 40}}}
+
+    monkeypatch.setattr(ChronicleStore, "activation", activation)
+    monkeypatch.setattr(task_results, "load_task_result", lambda root, task_id, *args, **kwargs: (
+        alone.append(str(task_id)), load(root, task_id, *args, **kwargs))[1])
+    work = _work(tmp_path, rooms)
+    assert work.get("tail_whole", 0) == 0 and work.get("rows_asked", 0) >= 1, work
+    assert not [task for task in alone if task.startswith("pre")], alone
+
+
 def test_a_walks_receipt_counts_each_row_once_and_names_what_it_read_ahead(monkeypatch, tmp_path):
     """A row met twice (in the first page and as the earlier copy of an open word) is one read; the rows a capture
     reads by request leave the set's unread count; and what a page read past where its walk stopped is named, so a walk
