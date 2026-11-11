@@ -869,3 +869,36 @@ def test_holding_formats_only_the_three_units_it_shows(monkeypatch):
     assert len(set(formatted)) == 3
     assert all(reader in description for reader, (_tokens, description) in zip(formatted, held["largest"]))
     assert list(held["tokens"].values()) == sorted(held["tokens"].values(), reverse=True)
+
+
+@pytest.mark.parametrize("source", ["capture", "shared"])
+@pytest.mark.parametrize("shortest", [False, True])
+def test_repeated_fits_and_renders_keep_the_captured_payload_and_borrowed_rows(tmp_path, source, shortest):
+    import dataclasses
+    import json
+    from tests import _memory_inventory_shared as shared
+
+    if source == "capture":
+        shared.world(tmp_path)
+        snapshot = mv.capture_memory_view(tmp_path, {"id": "turn0001", "chat_id": 1}, mv.ROLE_DEFAULTS["integrator"])
+    else:
+        snapshot = syn.live_scale()
+        snapshot.story[0]["quotes"] = [dict(speaker="human", text="Keep this exact promise.",
+                                          address=syn.spoken(1, "human", 40)["address"])]
+    aliases = {field.name: getattr(snapshot, field.name) for field in dataclasses.fields(snapshot)}
+    before = deepcopy(aliases)
+    canonical = mv.snapshot_json(snapshot)
+    views = []
+    for _ in range(2):
+        shown = mf.render_view_for_mode(snapshot, mode="low", owner_mode="max", window_tokens=200000,
+            known_window=True, output_reserve=10000, ratio=1, non_memory_tokens=180000, shortest=shortest)
+        # Each fit is printed independently; prior prices and receipt caches are already populated on the second.
+        views.append((shown.story, shown.room, shown.note, json.dumps(shown.facts, sort_keys=True, ensure_ascii=False)))
+        assert mv.snapshot_json(snapshot) == canonical
+        assert aliases == before
+        assert all(getattr(snapshot, name) is value for name, value in aliases.items())
+    assert views[0] == views[1]
+    assert "_holding_conversations" in snapshot.__dict__
+    if source == "shared":
+        assert snapshot.__dict__["_story_quotes"]
+        assert "carried" not in snapshot.story[0]["quotes"][0]
