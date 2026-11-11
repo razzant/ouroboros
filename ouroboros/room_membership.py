@@ -27,7 +27,7 @@ _CONTACT_ROLES = frozenset({"assistant", "system"})
 # stays Main's; the Projects it could join find ``GAP_KEY`` keys and disclose the gap. One proven
 # absent (both streams readable, no row at its address) is no room's. Either is a fact of the store
 # it was read under: the rooms the saved reference names stay candidates, decided again on a read
-# once a stream's end moved (an import or a repair may bring the target).
+# once a stream's end moved (an import or a repair may bring the target) or a text was revised.
 TARGET_UNKNOWN, TARGET_ABSENT, GAP_KEY = "unknown", "absent", "gap:"
 # The same fact as this rule decides it, beside ``GAP_KEY`` (which an older body reads and, by its own rule, may
 # erase): outside that key's range, so only this rule's catch-up closes it, both keys together.
@@ -53,18 +53,29 @@ def reply_target_home(target: Mapping[str, Any]) -> str:
     return TARGET_WORK if target.get("direction") != "in" and target.get("task_id") else TARGET_ROOM
 
 
-# (root, address) -> ((home, task, chat), ends): a found target row is immutable, read once (ends None);
-# a target not found holds while the dialogue streams' ends it was read under stand.
+# (root, address) -> ((home, task, chat, private), (text revision, ends)): a decision this process read, kept
+# while the store it was read under stands, so a process started later decides the same. A target found
+# holds under its chat text revision (ends None: no append changes a stored row); one not found, under the
+# streams' ends too.
 _SAVED_TARGETS: dict = {}
 _SAVED_TARGETS_MAX = 4096
+
+
+def _text_revision(root: Any) -> int:
+    """The chat text revision ``dialogue_store.revise_text`` counts: a revised row keeps its coordinate and
+    answers another address, so under unchanged stream ends a target found may answer no more and one not
+    found may answer now. A progress row's revision is not counted; no caller revises one."""
+    from ouroboros import dialogue_store as ds
+
+    return int(ds.meta(root, "chat_text_revision") or 0)
 
 
 def _stream_ends(root: Any) -> tuple:
     """The dialogue streams' ends (``dialogue_store.stream_end``, the readers' change counter): an append and
     a newly planned segment move them. The archive import stores rows under unchanged ends, but only into
     intervals planned before it, and while one is pending ``resolve_row`` answers importing, so no not-found
-    decision is kept. No code rewrites the rows or skipped lines of an imported interval in place; were it
-    done by hand, this process would see it after the next append or a restart."""
+    decision is kept. Nothing else rewrites the rows or skipped lines of an imported interval in place; were it
+    done by hand, this process would see it after the next append, text revision or restart."""
     from ouroboros import dialogue_store as ds
 
     return tuple(ds.stream_end(root, stream) for stream in ds.STREAMS)
@@ -72,7 +83,9 @@ def _stream_ends(root: Any) -> tuple:
 
 def _saved_target(rooms: Any, ref: Mapping[str, Any]) -> tuple:
     """``(home, task, chat)`` of a Reply target saved before ``target_home``, read from the target row
-    itself at its exact address (chat, then progress, as ``chat_references.resolve_reply`` does).
+    itself at its exact address (chat, then progress, as ``chat_references.resolve_reply`` does), as
+    that address answers now: no link is kept apart from it, so a target whose text was revised is
+    absent until its text is back (owner decision 2026-11-11: such a Reply stays Main's alone).
     One proven absent is ``TARGET_ABSENT``; one whose bytes cannot be read (a recorded unreadable
     interval, an ambiguous address, another row of its chat and time beside unreadable lines, as
     ``chat_references.resolve_history_row`` holds) is ``TARGET_UNKNOWN``: both with the saved
@@ -91,10 +104,11 @@ def _target_facts(rooms: Any, ref: Mapping[str, Any]) -> tuple:
         return TARGET_NONE, "", 0, False
     key = (str(root), address)
     held = _SAVED_TARGETS.get(key)
-    if held is not None and held[1] is None:
+    revision = _text_revision(root)  # the marks are read first: a change during the read below moves them past it
+    if held is not None and held[1] == (revision, None):
         return held[0]
-    ends = _stream_ends(root)  # read first: a row stored during the read below moves them past it
-    if held is not None and held[1] == ends:
+    ends = _stream_ends(root)
+    if held is not None and held[1] == (revision, ends):
         return held[0]
     from ouroboros import dialogue_positions as dp
     from ouroboros.chat_chain import _row_chat_id, resolve_row
@@ -114,7 +128,7 @@ def _target_facts(rooms: Any, ref: Mapping[str, Any]) -> tuple:
         decision = (TARGET_UNKNOWN if statuses & {"row_unreadable", "row_ambiguous"} else TARGET_ABSENT,
                     str(ref.get("task_id") or ""), _ref_chat(ref), False)
     _SAVED_TARGETS.pop(key, None)
-    _SAVED_TARGETS[key] = (decision, ends)
+    _SAVED_TARGETS[key] = (decision, (revision, ends))
     while len(_SAVED_TARGETS) > _SAVED_TARGETS_MAX:
         _SAVED_TARGETS.pop(next(iter(_SAVED_TARGETS)))
     return decision
