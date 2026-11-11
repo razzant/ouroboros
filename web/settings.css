@@ -1307,3 +1307,68 @@ html[data-layout="stack"] :is(.settings-home, .settings-page) { padding-inline: 
 .settings-row-copy { margin: 0; max-width: 72ch; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .settings-row [aria-busy="true"] { cursor: progress; }
 button.settings-row { width: 100%; color: inherit; font: inherit; text-align: start; cursor: pointer; }
+
+/* Settings › Agents (subagents_settings.js): the list of heads, and an agent's page in cards. A card stacks its
+   title, one lead and its rows; rows inside it lie 8 px apart, as trays of one object. */
+.agents-lead,
+.agents-card-lead { margin: 0; color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); }
+.agents-lead { margin-top: calc(var(--space-1) - var(--space-4)); }
+.agents-root,
+.agent-page { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
+.agents-root:empty { display: none; }
+.agents-card { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+.agents-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); min-height: var(--control-h-sm); }
+.agents-card-title { min-width: 0; margin: 0; color: var(--text-primary); font-size: var(--type-section); font-weight: 600; line-height: var(--line-title); }
+.agents-card-head > .agents-card-title { flex: 1 1 10rem; }
+.agents-card-title + .agents-card-lead { margin-top: calc(-1 * var(--space-2)); }
+.agents-card-head > .ui-result { flex: 0 1 auto; min-height: 0; }
+.agents-card-head > .ui-result:empty { display: none; }
+.agents-rows { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.agents-rows > .ui-row + .ui-row { margin-top: 0; }
+.agents-card > details > .agents-rows { margin-top: var(--space-3); }
+.agents-filters { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-inline: calc(-1 * var(--space-1)); }
+.agents-filters > .filter-chip { --control-h: var(--control-h-sm); }
+/* A head: the mark of the agent's source, its name with what it is for (the press that opens its page), then its
+   switch, which keeps the row's end at every width. */
+.agent-head { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "mark words actions"; min-height: 52px; cursor: pointer; }
+.agent-head-glyph {
+    grid-area: mark;
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: var(--surface-tray);
+    color: var(--text-secondary);
+    font-size: 16px;
+}
+.agent-head-glyph .harness-identity-label { display: none; }
+.agent-head-open {
+    grid-area: words;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-inner);
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+}
+.agent-head-open:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+.agent-head-open > .ui-row-title { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; overflow: visible; }
+.agent-head-open > .ui-row-meta { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+.agent-head > .ui-row-actions,
+:is(.agent-use, .agents-card > .settings-row[data-kind="switch"]) > .ui-row-actions { grid-area: actions; flex-wrap: nowrap; justify-content: flex-end; }
+:is(.agent-use, .agents-card > .settings-row[data-kind="switch"]) > :is(.ui-row-title, .ui-row-meta) { grid-column: 1; }
+.agent-head-end { display: flex; color: var(--text-disabled); }
+.agent-chip { padding: 1px 8px; font-size: var(--type-meta); font-weight: 600; line-height: var(--line-meta); }
+/* An agent's page: the form's parts keep the card recipe of setup (.available-subagent-*), each in its own card, and
+   the page is the container their columns read, as a card is in setup. */
+.agent-page { container: subagentcard / inline-size; }
+.agent-page .available-subagent-purpose textarea { min-height: 84px; max-height: none; }
+.agent-status { margin: 0; }
+.agents-foot { padding: 0 var(--space-1); }

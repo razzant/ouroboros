@@ -14,8 +14,6 @@ import {
 import {
     MAX_AVAILABLE_SUBAGENTS,
     REVIEWER_TICK_CAPTIONS,
-    applySubagentsSettings,
-    availableSubagentsHasExplicitDraft,
     availableSubagentRowMarkup,
     availableSubagentsLoadValue,
     availableSubagentsRenderSignature,
@@ -24,8 +22,6 @@ import {
     createAvailableSubagentsEditor,
     generatedPreviewCanReplace,
     parseAvailableSubagentsSetting,
-    destroySubagentsSection,
-    renderSubagentsSection,
     reviewerTickCaption,
     subagentSettingsFingerprint,
     validateAvailableSubagentsSetting,
@@ -127,34 +123,17 @@ test('an unloaded or malformed view cannot replace the owner setting', () => {
     });
 });
 
-test('only an omitted or untouched generated draft stays out of an unrelated Settings save', () => {
-    const editor = createAvailableSubagentsEditor({
-        doc: null,
-        win: null,
-        allowUnloadedOmission: true,
-    });
-    editor.load(undefined, { source: 'undecided', allowOmission: true });
-    assert.deepEqual(editor.validate(), []);
-    assert.deepEqual(editor.collect(), {});
+test('a list that could not be loaded says so and is never read as an empty one', () => {
+    const editor = createAvailableSubagentsEditor({ doc: null, win: null });
+    editor.load(undefined, { source: 'undecided' });
+    assert.match(editor.validate()[0], /was not loaded/);
+    assert.equal(editor.loaded, false);
 
-    editor.load({ enabled: true, items: [{ ...apiRow(), recommended_use: 7 }] }, {
-        source: 'configured',
-        allowOmission: false,
-    });
+    editor.load({ enabled: true, items: [{ ...apiRow(), recommended_use: 7 }] }, { source: 'configured' });
     assert.match(editor.validate()[0], /recommended use must be a string/);
-    assert.deepEqual(editor.collect(), {});
-
-    assert.equal(availableSubagentsHasExplicitDraft({}), false);
-    assert.equal(availableSubagentsHasExplicitDraft({
-        OUROBOROS_SUBAGENTS: '',
-        _meta: { available_subagents: { candidate: null } },
-    }), false);
-    assert.equal(availableSubagentsHasExplicitDraft({
-        _meta: { available_subagents: { candidate: { enabled: true, items: [] } } },
-    }), true);
-    assert.equal(availableSubagentsHasExplicitDraft({
-        OUROBOROS_SUBAGENTS: '{malformed owner bytes',
-    }), true);
+    assert.equal(editor.loaded, false);
+    editor.load(setting([apiRow()]), { source: 'configured' });
+    assert.deepEqual(editor.validate(), []);
 });
 
 test('object and serialized settings compare as the same new-child-task intent', () => {
@@ -174,9 +153,7 @@ test('loaded saved rows remain collectible when live status is unavailable', () 
     };
     const editor = createAvailableSubagentsEditor({ store, doc: null, win: null });
     editor.load(setting([sessionRow()]), { source: 'configured' });
-    assert.deepEqual(editor.collect(), {
-        OUROBOROS_SUBAGENTS: setting([sessionRow()]),
-    });
+    assert.deepEqual(editor.setting, setting([sessionRow()]));
 });
 
 test('validation protects stable unique IDs, route shape, effort and the row limit', () => {
@@ -282,13 +259,10 @@ test('a clean undecided Settings draft is enriched from connected status through
     assert.deepEqual(requests, [{ subscriptionsConnected: true }]);
     assert.equal(editor.setting.items[0].subagent_id, 'codex_builder');
     assert.equal(editor.dirty, false);
-    assert.deepEqual(editor.collect(), {}, 'an untouched preview is no owner choice: Save leaves it unsaved');
 });
 
-test('Settings status reload does not await preview and late preview obeys the whole-draft gate', async () => {
+test('a status reload does not await the preview, and only the newest preview lands', async () => {
     const releases = [];
-    let outerDraftClean = true;
-    let applied = 0;
     const store = {
         error: '',
         snapshot: { profiles: { harnessAccounts: [], profiles: [] }, harnesses: [] },
@@ -300,8 +274,6 @@ test('Settings status reload does not await preview and late preview obeys the w
         store,
         doc: null,
         win: null,
-        isOuterDraftClean: () => outerDraftClean,
-        onGeneratedApply: () => { applied += 1; },
         previewGenerated: () => new Promise((resolve) => { releases.push(resolve); }),
     });
     editor.load(setting([apiRow()]), { source: 'undecided' });
@@ -310,19 +282,12 @@ test('Settings status reload does not await preview and late preview obeys the w
     assert.equal(releases.length, 1, 'preview starts in the background');
     assert.equal(editor.setting.items[0].subagent_id, 'api_scout');
 
-    outerDraftClean = false;
-    releases.shift()({
-        available_subagents: setting([sessionRow()]),
-        source: 'onboarding_default',
-        diagnostics: [],
-    });
+    // A second preview is asked for while the first is in flight: the older answer is dropped.
+    const refresh = editor.refreshGeneratedPreview({ force: true });
+    assert.equal(releases.length, 2);
+    releases.shift()({ available_subagents: setting([apiRow({ subagent_id: 'stale' })]), source: 'onboarding_default', diagnostics: [] });
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(editor.setting.items[0].subagent_id, 'api_scout');
-    assert.equal(applied, 0);
-
-    outerDraftClean = true;
-    const refresh = editor.refreshGeneratedPreview({ force: true });
-    assert.equal(releases.length, 1);
     releases.shift()({
         available_subagents: setting([sessionRow()]),
         source: 'onboarding_default',
@@ -330,7 +295,6 @@ test('Settings status reload does not await preview and late preview obeys the w
     });
     assert.equal(await refresh, true);
     assert.equal(editor.setting.items[0].subagent_id, 'codex_builder');
-    assert.equal(applied, 1);
 });
 
 test('a late generated preview cannot replace a newly loaded configured document', async () => {
@@ -609,9 +573,6 @@ test('last actual execution uses the one typed receipt and only its exact actor 
 test('preview replaces only a clean generated baseline', () => {
     assert.equal(generatedPreviewCanReplace({ dirty: false, parsedSetting: setting() }), true);
     assert.equal(generatedPreviewCanReplace({ dirty: true, parsedSetting: setting() }), false);
-    assert.equal(generatedPreviewCanReplace({
-        dirty: false, outerDraftClean: false, parsedSetting: setting(),
-    }), false);
     assert.equal(generatedPreviewCanReplace({ dirty: false, parsedSetting: null }), false);
 
     const editor = createAvailableSubagentsEditor({ doc: null, win: null });
@@ -626,16 +587,14 @@ test('preview replaces only a clean generated baseline', () => {
 });
 
 test('explicit owner preview becomes an unsaved draft and survives later generated previews', () => {
-    const changes = [], dirty = [];
-    const editor = createAvailableSubagentsEditor({ doc: null, win: null,
-        onChange: (value) => changes.push(value), onDirtyChange: (value) => dirty.push(value) });
+    const changes = [];
+    const editor = createAvailableSubagentsEditor({ doc: null, win: null, onChange: (value) => changes.push(value) });
     const original = setting([apiRow()]);
     editor.load(original, { source: 'onboarding_default' });
     const recovered = setting([apiRow(), apiRow({ subagent_id: 'main-reviewer',
         route: { kind: 'api_model', target_id: 'claudexor::codex=main' } })]);
     assert.equal(editor.applyOwnerPreview({ available_subagents: recovered }).applied, true);
     assert.equal(editor.dirty, true);
-    assert.equal(dirty.at(-1), true);
     assert.deepEqual(changes.at(-1), recovered);
     assert.equal(editor.applyGeneratedPreview({ available_subagents: original }).applied, false);
     assert.deepEqual(editor.setting, recovered);
@@ -679,7 +638,7 @@ test('a typed preview refusal stays typed and cannot become an empty fictional d
     assert.equal(editor.loaded, false);
     assert.match(editor.parseError, /subagent_preview_unavailable: preview refused/);
     assert.match(editor.parseError, /catalog_unread: Model catalog was not read/);
-    assert.deepEqual(editor.collect(), {});
+    assert.match(editor.validate()[0], /subagent_preview_unavailable/);
 });
 
 test('shared route primitive preserves each semantic owner account spelling', () => {
@@ -700,20 +659,6 @@ test('shared route primitive preserves each semantic owner account spelling', ()
     }), sessionRow().route);
 });
 
-test('Settings section keeps global task-authority controls beside the actor list', () => {
-    const html = renderSubagentsSection();
-    assert.match(html, /<h3>Available subagents<\/h3>/);
-    assert.match(html, /id="available-subagents-editor"/);
-    assert.match(html, /id="s-allow-mutative-subagents"/);
-    assert.match(html, /id="s-active-subagents"/);
-    assert.match(html, /id="s-subagent-depth"/);
-    assert.match(html, /id="s-subagent-worktree-root"/);
-    assert.match(html, /id="s-subagent-projects-root"/);
-    assert.doesNotMatch(html, /chooses one by its stable ID/);
-    assert.match(html, /Rows marked Reviewer form the review pool/);
-    assert.doesNotMatch(html, /review lane|triad|scope review/i);
-});
-
 // IMPL_SPEC §5, verbatim: the Reviewer tick means whose agreement counts, said per saved strictness.
 const TICK = {
     blocking: 'Counts toward review: every ticked reviewer checks each change Ouroboros makes to itself, each skill and each required result; a critical finding stops it.',
@@ -731,25 +676,6 @@ test('the Reviewer tick caption is one line per strictness; Cyber Pro Access out
     // The shipped defaults (advisory, advanced) when the document names neither.
     assert.equal(reviewerTickCaption(undefined, undefined), TICK.advisory);
     for (const caption of Object.values(TICK)) assert.doesNotMatch(caption, /\n/);
-});
-
-test('Settings paints the caption from the saved document it loads, and the every-change sentence is gone', () => {
-    destroySubagentsSection();
-    const html = renderSubagentsSection();
-    // Unknown until a document is loaded: an empty, hidden line claims no strictness.
-    assert.match(html, /<div class="settings-inline-note" data-reviewer-tick-caption hidden><\/div>/);
-    assert.doesNotMatch(html, /each of them reviews every change|composes the panel from the pool/);
-    assert.match(html, /an unmarked row Ouroboros asks is an adviser, heard but never counted/);
-    const caption = { textContent: '', hidden: true };
-    const doc = { querySelector: (selector) => (selector === '#subagents-section [data-reviewer-tick-caption]' ? caption : null) };
-    applySubagentsSettings({ OUROBOROS_REVIEW_ENFORCEMENT: 'blocking', OUROBOROS_RUNTIME_MODE: 'pro' }, doc);
-    assert.deepEqual(caption, { textContent: TICK.blocking, hidden: false });
-    applySubagentsSettings({ OUROBOROS_REVIEW_ENFORCEMENT: 'blocking', OUROBOROS_RUNTIME_MODE: 'cyber_pro' }, doc);
-    assert.equal(caption.textContent, TICK.cyber_pro);
-    applySubagentsSettings({ OUROBOROS_REVIEW_ENFORCEMENT: 'advisory', OUROBOROS_RUNTIME_MODE: 'advanced' }, doc);
-    assert.equal(caption.textContent, TICK.advisory);
-    // A page without the section (the wizard mounts the editor alone) is left untouched.
-    assert.doesNotThrow(() => applySubagentsSettings({ OUROBOROS_REVIEW_ENFORCEMENT: 'blocking' }, { querySelector: () => null }));
 });
 
 test('revealNewRow scrolls the shortest distance and focuses the named field without a second scroll', () => {
@@ -823,7 +749,7 @@ test('validate() stays pure and names rows the way the cards do', () => {
     // and a host-less editor (node tests, detached panel) tolerates the note.
     assert.doesNotThrow(() => editor.noteSaveAttempt());
     assert.deepEqual(editor.validate(), []);
-    assert.deepEqual(editor.collect(), { OUROBOROS_SUBAGENTS: setting([apiRow()]) });
+    assert.deepEqual(editor.setting, setting([apiRow()]));
 
     const unrouted = validateAvailableSubagentsSetting(setting([
         apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: '' } }),
@@ -1034,7 +960,7 @@ test('access edit saves and clones the lower choice, resets for API and restores
     const control = (name, index = 0) => dom.row(index).querySelector(`[data-subagent-field="${name}"]`);
     control('access').emit('change', 'workspace_write');
     assert.equal(editor.dirty, true);
-    assert.equal(editor.collect().OUROBOROS_SUBAGENTS.items[0].access, 'workspace_write');
+    assert.equal(editor.setting.items[0].access, 'workspace_write');
     assert.equal(changes.at(-1).items[0].route.access, undefined);
     assert.match(control('access').attributes['aria-describedby'], /-access-help/);
     dom.row().querySelector('[data-subagent-duplicate]').emit('click');
@@ -1047,12 +973,12 @@ test('access edit saves and clones the lower choice, resets for API and restores
     control('model', 1).emit('input', 'openai/gpt-5.6-luna');
     assert.deepEqual(editor.validate(), []);
     control('access').emit('change', 'readonly');
-    const saved = editor.collect().OUROBOROS_SUBAGENTS;
+    const saved = editor.setting;
     assert.equal(saved.items[0].access, 'readonly');
     editor.load(JSON.stringify(saved));
-    assert.equal(editor.collect().OUROBOROS_SUBAGENTS.items[0].access, 'readonly');
+    assert.equal(editor.setting.items[0].access, 'readonly');
     control('access').emit('change', 'full');
-    assert.equal(editor.collect().OUROBOROS_SUBAGENTS.items[0].access, 'full');
+    assert.equal(editor.setting.items[0].access, 'full');
     editor.destroy();
 });
 
@@ -1226,38 +1152,37 @@ test('the card head leads with a native enable checkbox that never dims the row'
         rowStatus(sessionRow(), QUIET_STATE).text);
 });
 
-test('the row switch is a draft the common Save writes, never an instant save', () => {
+test('in setup the row switch is a draft its Finish writes, never an instant save', () => {
     const dom = accessEditorDom();
     const changes = [];
     const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null, onChange: (value) => changes.push(value) });
     editor.load(setting([apiRow(), sessionRow()]), { source: 'undecided' });
     const control = (name, index = 0) => dom.row(index).querySelector(`[data-subagent-field="${name}"]`);
     assert.equal(editor.dirty, false);
-    assert.deepEqual(editor.collect(), {}, 'a generated draft becomes the owner\'s only by an edit here');
     control('enabled').toggle(false);
     assert.equal(editor.dirty, true);
-    // Held in the draft only: `collect()` is the one writer, and the payload
+    // Held in the draft only: setup's Finish is the one writer, and the payload
     // carries `false` explicitly while the untouched sibling stays omitted.
-    const payload = editor.collect().OUROBOROS_SUBAGENTS;
+    const payload = editor.setting;
     assert.equal(payload.items[0].enabled, false);
     assert.equal('enabled' in payload.items[1], false);
     assert.equal(changes.at(-1).items[0].enabled, false);
 
     // A pending unrelated edit survives the same draft; both ride ONE save.
     control('recommended_use', 1).emit('input', 'Pending prose the owner is still writing.');
-    assert.deepEqual(editor.collect().OUROBOROS_SUBAGENTS.items.map((row) => row.enabled),
+    assert.deepEqual(editor.setting.items.map((row) => row.enabled),
         [false, undefined]);
-    assert.equal(editor.collect().OUROBOROS_SUBAGENTS.items[1].recommended_use,
+    assert.equal(editor.setting.items[1].recommended_use,
         'Pending prose the owner is still writing.');
 
     // off -> save -> reload -> on: the saved bytes round-trip, and switching the
     // row back on returns the roster to its original canonical form.
-    const saved = editor.collect().OUROBOROS_SUBAGENTS;
+    const saved = editor.setting;
     editor.load(saved);
     assert.equal(editor.dirty, false);
     assert.equal(editor.setting.items[0].enabled, false);
     dom.row(0).querySelector('[data-subagent-field="enabled"]').toggle(true);
-    assert.equal('enabled' in editor.collect().OUROBOROS_SUBAGENTS.items[0], false);
+    assert.equal('enabled' in editor.setting.items[0], false);
     editor.destroy();
 });
 
@@ -1278,12 +1203,12 @@ test('duplicate carries the row switch and the two enabled axes stay independent
 
     // The list-level switch writes only itself, leaving every row switch alone.
     dom.toolbar.listEnabled.toggle(false);
-    const payload = editor.collect().OUROBOROS_SUBAGENTS;
+    const payload = editor.setting;
     assert.equal(payload.enabled, false);
     assert.deepEqual(payload.items.map((row) => row.enabled), [false, false, undefined]);
     dom.toolbar.listEnabled.toggle(true);
-    assert.equal(editor.collect().OUROBOROS_SUBAGENTS.enabled, true);
-    assert.equal(editor.collect().OUROBOROS_SUBAGENTS.items[0].enabled, false);
+    assert.equal(editor.setting.enabled, true);
+    assert.equal(editor.setting.items[0].enabled, false);
     editor.destroy();
 });
 
