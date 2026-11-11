@@ -195,7 +195,6 @@ class Feed:
         self.windows: Dict[str, _Cursor] = {}
         self.outage: Optional[tuple] = None  # the open episode: (its UTC start, its millisecond stamp)
         self.told: set = set()  # tasks told of the open episode
-        self.owed: set = set()  # projection of durable pending frames; ``owe`` is only a latency hint
         self.placing: Dict[str, Any] = {}  # run id -> its send in flight
         self.record_lock = threading.Lock()  # one record write at a time (``record``)
         self.recorded: Dict[str, Dict[str, Any]] = {}  # run id -> the record this body wrote or read
@@ -213,7 +212,6 @@ class Feed:
             self.live = {task_id: target for task_id, target in targets.items() if target["chat_id"] is not None}
             for run_id in set(self.windows) - set(held):
                 del self.windows[run_id]
-            self.owed &= set(held)  # a run no longer held is owed nothing here; its next continuation carries the words
             self.placing = {run_id: job for run_id, job in self.placing.items() if run_id in held}
         with self.record_lock:  # the parent lists open runs only: a settled or released run's record goes
             known = set(self.recorded)
@@ -265,27 +263,18 @@ class Feed:
                 return
             self.recorded[entry.run_id] = new
 
-    def owe(self, run_id: str) -> None:
-        with self.lock:
-            self.owed.add(str(run_id))
-
     def place(self, runtime: Any, held: Dict[str, Any]) -> None:
         """Derive demand from durable frames on every pass, including after restart or a receipt in another
         process. Send once the engine answers: one job per run, idempotent with the starter's round top."""
         from ouroboros.delegate_message_store import pending_runs, replay_frames
 
         pending = pending_runs(self.root, held)
-        def send(entry: Any) -> None:
-            if replay_frames(self.root, entry):
-                with self.lock:
-                    self.owed.discard(entry.run_id)
         with self.lock:
-            self.owed = pending
             due = [run_id for run_id in pending if run_id not in self.placing or self.placing[run_id].done()]
         for run_id in due:
             if runtime.observation(run_id).get("answered"):
                 with self.lock:
-                    self.placing[run_id] = runtime.observers.submit(send, held[run_id].entry)
+                    self.placing[run_id] = runtime.observers.submit(replay_frames, self.root, held[run_id].entry)
 
     def follow(self, runtime: Any, run_id: str) -> None:
         """Read one run's journal beat after beat while the body holds it, observes it and its task is live;
@@ -457,13 +446,12 @@ def announce_working(entry: Any) -> None:
         log.debug("Working-again announce unavailable for %s", entry.run_id, exc_info=True)
 
 
-def owe_placement(root: Any, run_id: str) -> None:
+def owe_placement(root: Any) -> None:
     """Wake this process's body sooner; any body's next pass discovers the durable pending frames itself."""
     from ouroboros.delegate_collection import body_runtime
 
     runtime = body_runtime(root)
     if runtime is not None:
-        runtime.feed.owe(run_id)
         runtime.changed.set()
 
 

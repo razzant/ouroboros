@@ -198,7 +198,7 @@ def test_fresh_body_reconstructs_pending_owner_frame_retry(world, monkeypatch, o
     stub = _install(monkeypatch, _Stub(result={"outcome": "delivered", "reason": ""}))
     details = {entry.run_id: [{"summary": {"runId": entry.run_id, "state": "running"}, "lastSeq": 1}]}
     with _body(world, _engine(details=details, routes=())) as (runtime, tick):
-        assert not runtime.feed.owed
+        assert frames.pending_frames(ctx, entry.run_id)
         tick()
         assert _until(lambda: runtime.observation(entry.run_id).get("answered"))
         tick()
@@ -206,7 +206,7 @@ def test_fresh_body_reconstructs_pending_owner_frame_retry(world, monkeypatch, o
         runtime.feed.placing[entry.run_id].result(timeout=10)
         tick()
         assert [(post["key"], post["text"]) for post in stub.posts] == [(message_id, wire)]
-        assert frames.pending_frames(ctx, entry.run_id) == [] and not runtime.feed.owed
+        assert frames.pending_frames(ctx, entry.run_id) == []
 
 
 def test_an_answered_run_without_pending_frames_costs_only_one_followed_set_read(world, monkeypatch):
@@ -239,8 +239,9 @@ def test_an_answered_run_without_pending_frames_costs_only_one_followed_set_read
     held = {entry.run_id: SimpleNamespace(entry=entry) for entry in entries[:2]}
     for _ in range(2):
         feed.place(runtime, held)
-    assert opened == [False, False] and not feed.owed
+    assert opened == [False, False]
     assert len([query for query in queries if "FROM obligations" in query]) == 2
+    assert not frames.pending_runs(world.root, held)
 
 
 def test_the_feed_reaches_the_owner_once_per_new_journal_span_with_the_nanny_asleep(world):

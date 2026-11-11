@@ -371,9 +371,10 @@ def test_frames_the_receipt_could_not_send_wait_for_the_body_which_sends_them_on
             _receive(tmp_path)
         assert written("run-live") == written("run-root") == [("prepared", True)], "written ahead, nothing sent"
         assert written("run-review") == written("run-foreign") == []
-        assert until(lambda: runtime.observation("run-live").get("answered")) and {"run-live", "run-root"} <= runtime.feed.owed
+        assert until(lambda: runtime.observation("run-live").get("answered"))
+        assert frames.pending_runs(tmp_path, ("run-live", "run-root")) == {"run-live", "run-root"}
         stub = _install(monkeypatch, _Stub(result={"outcome": "delivered", "reason": ""}))
-        assert until(lambda: not {"run-live", "run-root"} & runtime.feed.owed), "the body sends what receipt could not"
+        assert until(lambda: not frames.pending_runs(tmp_path, ("run-live", "run-root"))), "the body sends what receipt could not"
     finally:
         delegate_collection.stop_body_runtime(tmp_path, wait=True)
     posted = {(run, addr, line) for run, _key, addr, line in _posts(stub)}

@@ -94,6 +94,11 @@ def acting(slot: Any, meta: Any, now: Optional[float] = None) -> bool:
     return bool(getattr(slot, "active_capacity", True) and not waits_on_its_process(meta, now))
 
 
+def cold_sleeping(task: Any) -> bool:
+    """A pending row paused for sleep holds no place at the scheduling soft cap."""
+    return isinstance(task, dict) and isinstance(pause := task.get("_budget_pause"), dict) and pause.get("reason") == "sleep"
+
+
 def acting_children(root_task_id: str, running: Iterable[Any]) -> int:
     """The acting subagents of one root (``OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT`` counts these): a child that
     waits on its process or sleeps without one does not act; a row chosen in this pass does."""
@@ -133,6 +138,8 @@ def admit(reading: Optional[Reading], counts: Dict[str, Any], slots: Iterable[An
         _FACTS.clear()
         _FACTS.update(read_at=utc_now_iso(), status="not_read", starts_admitted=0, reason="worker_readiness_finiteness")
         return 0
+    if _FACTS.get("reason") == "worker_readiness_finiteness":
+        _FACTS.clear()
     if room is not None and room <= 0 or reading is None:
         return 0  # the owner's cap or a pass that has not read the machine
     if reading is PROBE:

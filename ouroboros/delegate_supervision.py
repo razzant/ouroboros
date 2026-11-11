@@ -809,10 +809,10 @@ def stage_pending_wake_exposure(ctx: Any, delivered: Any) -> None:
 
 
 def _record_exposure(ctx: Any, payload: Any, pending: dict[str, Any], run_id: str) -> None:
-    from ouroboros.model_sleep import acknowledge_question_delivery
+    from ouroboros.sleep_custody import record_question_notice
 
     wake = payload.get("wake", payload) if isinstance(payload, dict) else {}
-    acknowledge_question_delivery(ctx, json.dumps(wake))
+    record_question_notice(ctx, (wake.get("questions") or []) if isinstance(wake, dict) else [])
     if isinstance(wake, dict) and isinstance(wake.get("wake_events"), list):
         seen_mail = getattr(ctx, "_loop_mailbox_seen_ids", None)
         if seen_mail is None:

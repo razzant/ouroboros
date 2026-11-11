@@ -385,7 +385,7 @@ def tree_ledger_rows(
 ) -> List[Dict[str, Any]]:
     """Read-only rows cached by (path, st_size, st_mtime_ns): an unchanged file costs one stat.
 
-    Physical cache bounds: 32 ledgers, 8192 retained rows and 8 MiB of source bytes in total.
+    Physical cache bounds: 32 ledgers and 8 MiB of source bytes in total.
     Larger ledgers are still read whole, but not retained. An append invalidates the cached generation.
     """
     try:
@@ -401,10 +401,9 @@ def tree_ledger_rows(
             return cached[1]
         rows = [r for r in iter_jsonl_objects(path) if isinstance(r, dict)]
         _ROWS_CACHE.pop(path, None)
-        if len(rows) <= 8192 and stat.st_size <= 8 * 1024 * 1024:
+        if stat.st_size <= 8 * 1024 * 1024:
             _ROWS_CACHE[path] = (identity, rows)
-            while (len(_ROWS_CACHE) > 32 or sum(len(value[1]) for value in _ROWS_CACHE.values()) > 8192
-                   or sum(value[0][0] for value in _ROWS_CACHE.values()) > 8 * 1024 * 1024):
+            while len(_ROWS_CACHE) > 32 or sum(value[0][0] for value in _ROWS_CACHE.values()) > 8 * 1024 * 1024:
                 _ROWS_CACHE.popitem(last=False)
         return rows
 

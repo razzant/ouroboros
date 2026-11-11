@@ -2406,6 +2406,9 @@ def test_handle_schedule_task_rejects_legacy_subagent_event_schema(tmp_path, mon
     (6, "slot_flag", 0, False, False),
     (6, "expired", 0, True, False),
     (6, "warm", 6, True, False),
+    (0, "cold", 6, False, False),
+    (0, "cold", 499, False, False),
+    (0, "cold", 500, True, True),
     (499, "warm", 0, False, False),
     (500, "warm", 0, True, True),
 ])
@@ -2414,7 +2417,7 @@ def test_scheduling_soft_cap_counts_acting_children_but_hard_cap_counts_all(
     from supervisor import events, workers
 
     monkeypatch.setenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", "6")
-    running, slots, enqueued, sent = {}, {}, [], []
+    running, slots, enqueued, sent = {}, {-1: SimpleNamespace(busy_task_id=None)}, [], []
     for wid in range(count):
         tid = f"running-{wid}"
         running[tid] = {"task": {"id": tid, "root_task_id": "root", "delegation_role": "subagent"}, "worker_id": wid}
@@ -2434,6 +2437,9 @@ def test_scheduling_soft_cap_counts_acting_children_but_hard_cap_counts_all(
         enqueue_task=lambda task: enqueued.append(dict(task)) or task,
         persist_queue_snapshot=lambda reason="": None,
     )
+    if wait == "cold":
+        for task in ctx.PENDING:
+            task["_budget_pause"] = {"reason": "sleep", "sleep": {}}
     drive = str(tmp_path / "state" / "headless_tasks" / "next" / "data")
     events._handle_schedule_task({
         "type": "schedule_subagent", "task_id": "next", "objective": "Inspect", "expected_output": "Findings",

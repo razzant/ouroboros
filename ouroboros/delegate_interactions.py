@@ -1311,7 +1311,7 @@ def place_at_receipt(root: Any, work_id: str, rows: List[Tuple[Any, ...]]) -> Op
 def _place_runs_at_receipt(root: Any, runs: List[Any], rows: List[Tuple[Any, ...]]) -> None:
     from ouroboros.delegate_continuation import line_start_bodies
     from ouroboros.delegate_feed import owe_placement
-    from ouroboros.delegate_message_store import PLACEMENT_ENDED, pending_frames, placed_words, starter
+    from ouroboros.delegate_message_store import PLACEMENT_ENDED, placed_words, starter
     from ouroboros.owner_relay import stamped_refs
 
     for run in runs:
@@ -1324,7 +1324,6 @@ def _place_runs_at_receipt(root: Any, runs: List[Any], rows: List[Tuple[Any, ...
             if owed := [(address, quote, went) for identities, address, quote, went, _before in rows
                         if not identities & seen and address not in ended]:
                 _place_into_run(ctx, run, owed, host=True)
-            if pending_frames(ctx, run.run_id):  # the body sends them once the engine answers the run again
-                owe_placement(root, run.run_id)
+            owe_placement(root)
         except Exception:  # noqa: BLE001 — a host thread: what it could not place waits for the next pass
             log.warning("owner words placement into run %s failed at receipt", run.run_id, exc_info=True)

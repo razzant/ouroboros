@@ -45,7 +45,7 @@ def test_unchanged_rows_cost_one_stat_and_an_append_is_seen(tmp_path, monkeypatc
     assert ledger.tree_ledger_rows("root", data_root=tmp_path) == []
 
 
-def test_the_row_cache_is_bounded_by_entries_and_total_retained_rows(tmp_path, monkeypatch):
+def test_the_row_cache_keeps_32_entries_and_several_large_hot_trees(tmp_path, monkeypatch):
     from collections import OrderedDict
     from ouroboros import task_tree_ledger as ledger
 
@@ -56,14 +56,20 @@ def test_the_row_cache_is_bounded_by_entries_and_total_retained_rows(tmp_path, m
         path.write_text(json.dumps({"text": str(index)}) + "\n", encoding="utf-8")
         assert ledger.tree_ledger_rows(f"root-{index}", data_root=tmp_path) == [{"text": str(index)}]
     assert len(ledger._ROWS_CACHE) == 32
-    for index, count in enumerate((3000, 3000, 3000, 8193)):
+    assert ledger.tree_ledger_path("root-0", data_root=tmp_path) not in ledger._ROWS_CACHE
+    parsed, real_read = [], ledger.iter_jsonl_objects
+    monkeypatch.setattr(ledger, "iter_jsonl_objects", lambda p: parsed.append(p) or real_read(p))
+    hot = {}
+    for index, count in enumerate((5000, 5000, 9000)):
         path = ledger.tree_ledger_path(f"large-{index}", data_root=tmp_path)
         path.parent.mkdir(parents=True)
-        path.write_text('{"kind":"note"}\n' * count, encoding="utf-8")
-        assert len(ledger.tree_ledger_rows(f"large-{index}", data_root=tmp_path)) == count
-        assert sum(len(value[1]) for value in ledger._ROWS_CACHE.values()) <= 8192
-        assert len(ledger._ROWS_CACHE) <= 32
-        assert (path in ledger._ROWS_CACHE) is (count <= 8192)
+        path.write_text((json.dumps({"text": "x" * 128}) + "\n") * count, encoding="utf-8")
+        hot[f"large-{index}"] = (path, count)
+    for _ in range(3):
+        for root_id, (path, count) in hot.items():
+            assert len(ledger.tree_ledger_rows(root_id, data_root=tmp_path)) == count
+            assert path in ledger._ROWS_CACHE and len(ledger._ROWS_CACHE) <= 32
+    assert parsed == [path for path, _count in hot.values()], "interleaved hot trees parse only once each"
 
 
 def test_the_row_cache_bounds_source_bytes_without_cutting_the_read(tmp_path, monkeypatch):
@@ -71,11 +77,15 @@ def test_the_row_cache_bounds_source_bytes_without_cutting_the_read(tmp_path, mo
     from ouroboros import task_tree_ledger as ledger
 
     monkeypatch.setattr(ledger, "_ROWS_CACHE", OrderedDict())
+    parsed, real_read = [], ledger.iter_jsonl_objects
+    monkeypatch.setattr(ledger, "iter_jsonl_objects", lambda p: parsed.append(p) or real_read(p))
     line = json.dumps({"text": "x" * 4000}) + "\n"
     for index, count in enumerate((1000, 1000, 1000, 2500)):
         path = ledger.tree_ledger_path(f"root-{index}", data_root=tmp_path)
         path.parent.mkdir(parents=True)
         path.write_text(line * count, encoding="utf-8")
-        assert len(ledger.tree_ledger_rows(f"root-{index}", data_root=tmp_path)) == count
+        for _ in range(2):
+            assert len(ledger.tree_ledger_rows(f"root-{index}", data_root=tmp_path)) == count
         assert sum(value[0][0] for value in ledger._ROWS_CACHE.values()) <= 8 * 1024 * 1024
         assert (path in ledger._ROWS_CACHE) is (path.stat().st_size <= 8 * 1024 * 1024)
+        assert parsed.count(path) == (1 if path.stat().st_size <= 8 * 1024 * 1024 else 2)

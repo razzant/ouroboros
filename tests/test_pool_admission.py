@@ -69,12 +69,19 @@ def readiness_park(wid):
     return slot
 
 
-def test_one_readiness_park_leaves_a_waiting_parent_its_floor_and_two_stop_growth(assigning, monkeypatch):
+@pytest.mark.parametrize("reading, admitted", [(None, 0), (pool_admission.PROBE, 1)])
+def test_one_readiness_park_leaves_a_waiting_parent_its_floor_and_two_stop_growth(
+        assigning, monkeypatch, reading, admitted):
     from ouroboros.context_runtime_facts import _queue_context_fact
     from ouroboros.engine_facts import engine_pool_line
 
     park(assigning)
     machine(monkeypatch, 0.1, pressure=True)
+    assert starts() == 1
+    memory_fact = pool_admission.facts()
+    with queue._queue_lock:
+        assert lifecycle.admissible_starts(reading) == admitted
+    assert pool_admission.facts() == memory_fact, "passes without a reading retain ordinary memory facts"
     readiness_park(1)
     workers.PENDING.append(child("child"))
     workers.assign_tasks()
@@ -95,6 +102,11 @@ def test_one_readiness_park_leaves_a_waiting_parent_its_floor_and_two_stop_growt
     fresh = booting_slot(3)
     assert lifecycle._open_ready_slot(3, fresh, {"pid": fresh.proc.pid}, "", 0, 0.0, 1)
     assert pool_admission.parked(lifecycle.project_slots()) == 0
+    with queue._queue_lock:
+        assert lifecycle.admissible_starts(reading) == admitted
+    assert pool_admission.facts() == {}, "a ready retracts the finiteness refusal even without a memory reading"
+    queue.persist_queue_snapshot("readiness_recovered")
+    assert "worker_readiness_finiteness" not in engine_pool_line(assigning.root)
     workers.assign_tasks()
     assert workers.RUNNING["child"]["worker_id"] == 3
 

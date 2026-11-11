@@ -740,7 +740,7 @@ def finish_unready_teardown(job: dict) -> None:
 
 
 def _replace_or_park_unready_slot(wid: int, slot: Any, owner_chat_id: int, started: float, attempt: int) -> None:
-    """After a confirmed stop: the next bounded attempt, or the parked slot and its report."""
+    """After a confirmed stop: retry or park; only the first park since a ready notifies the owner."""
     if attempt < WORKER_READY_MAX_ATTEMPTS:
         try:
             respawn_worker(wid, ready_attempt=attempt + 1)
@@ -755,11 +755,11 @@ def _replace_or_park_unready_slot(wid: int, slot: Any, owner_chat_id: int, start
     with _queue_lock:
         if _pool().WORKERS.get(wid) is not slot:
             return
-        slot.readiness_exhausted = True
+        slot.readiness_exhausted = slot.reaping = True
         slot.booting = False
-        slot.reaping = True
         pool_admission.note_park(slot)  # count this park until the next successful worker_ready
-    if owner_chat_id:
+        first_park = pool_admission.parked(_pool().WORKERS.values()) == 1
+    if owner_chat_id and first_park:
         _pool().send_with_budget(
             owner_chat_id,
             f"⚠️ Worker slot {wid} never confirmed ready in {attempt} attempts "
