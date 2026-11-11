@@ -186,6 +186,10 @@ def test_partial_account_refresh_keeps_draft_and_only_failed_account_history(acc
     raw.update(items=[], partial=True, errors=[{"credential_profile_id": "work", "error": problem["message"]}])
     native["models"] = []
     refresh(ui)
+    # Circles also listens to this failed catalogue broadcast; attribute only its known rejection.
+    refused = "The model catalog could not be read."
+    assert not [error for error in ui['errors'].unexpected() if refused not in error], ui['errors'].report()
+    ui['errors'].clear()
     if consumer == "Models":
         page.wait_for_function("""message => document.querySelector(
             '[data-model-role=main] [data-model-role-status]').textContent.includes(message)""", arg=problem["message"])
@@ -195,7 +199,7 @@ def test_partial_account_refresh_keeps_draft_and_only_failed_account_history(acc
     assert source.evaluate("e => e === window.accountSourceNode")
     assert account.evaluate("e => e === window.accountPinNode")
     assert account.input_value() == ""
-    problem_line = page.locator("[data-model-role-status]" if consumer == "Models" else "[data-subagents-read-problem]")
+    problem_line = page.locator("[data-model-role-status]" if consumer == "Models" else "[data-subagents-read-problem]:visible")
     assert problem["message"] in problem_line.text_content()
     options = suggestions(page, field, {"catalog-shared", "catalog-only-b"})
     assert set(options) - {DRAFT_MODEL} == {"catalog-shared", "catalog-only-b"}
