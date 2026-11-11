@@ -21,7 +21,7 @@ import urllib.request
 
 import pytest
 
-from tests.settings_browser_helpers import open_settings, setting_row
+from tests.settings_browser_helpers import commit_row, open_settings, setting_row
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 from tests.ui_console_errors import PageErrors
 
@@ -81,13 +81,11 @@ def test_interface_choice_applies_at_restart_and_the_core_page_follows_it(direct
                 return setting_row(page, "OUROBOROS_UI_DIR").locator("[data-served-ui]")
 
             def save(row_id, value):
-                """Type a row's value and leave the field, which is its save; an edit clears the row's last result."""
-                result = setting_row(page, row_id).locator("[data-setting-result]")
-                field(row_id).fill("\u2026" if value == "" else "")  # the edit, whatever the field held
-                expect(result).to_have_text("")
-                field(row_id).fill(value)
-                field(row_id).evaluate("node => node.blur()")
-                expect(result).to_contain_text("Saved", timeout=30_000)
+                """Type a row's value and leave the field, which is its save; the row's result line is the answer."""
+                return commit_row(page, row_id, value, timeout=30_000)
+
+            def meta(row_id):
+                return setting_row(page, row_id).locator("[data-setting-meta]")
 
             def restart():
                 core["restart_server"]()
@@ -101,13 +99,17 @@ def test_interface_choice_applies_at_restart_and_the_core_page_follows_it(direct
             expect(served()).to_have_text("Serving now: the built-in interface.")
 
             # Another row's save never authors the choice: a row writes its own key and nothing else.
-            save("OUROBOROS_EXTRA_CA_BUNDLE", "/nonexistent/extra-ca.pem")
+            # The server's receipt and timing, word for word: what the value replaced (an empty one in the row's own word).
+            assert save("OUROBOROS_EXTRA_CA_BUNDLE", "/nonexistent/extra-ca.pem") == "Saved · applies to new tasks · was none · Undo"
             assert saves[-1] == {"OUROBOROS_EXTRA_CA_BUNDLE": "/nonexistent/extra-ca.pem"}
-            save("OUROBOROS_EXTRA_CA_BUNDLE", "")
+            assert save("OUROBOROS_EXTRA_CA_BUNDLE", "") == "Saved · applies to new tasks · was /nonexistent/extra-ca.pem · Undo"
             assert "OUROBOROS_UI_DIR" not in saves[-1]
 
             # An unusable directory: saved, applied at restart as built-in with its reason; no reload.
-            save("OUROBOROS_UI_DIR", "/nonexistent/ouroboros-interface")
+            assert save("OUROBOROS_UI_DIR", "/nonexistent/ouroboros-interface") == "Saved · applies after restart · Undo"
+            # What still runs beside what was saved, from the server's `restart_state.running`.
+            expect(meta("OUROBOROS_UI_DIR")).to_have_text(
+                "Running: the built-in interface · after restart: /nonexistent/ouroboros-interface", timeout=30_000)
             assert saves[-1] == {"OUROBOROS_UI_DIR": "/nonexistent/ouroboros-interface"}
             seen = len(loads())
             restart()
@@ -121,7 +123,7 @@ def test_interface_choice_applies_at_restart_and_the_core_page_follows_it(direct
             page.screenshot(path=str(evidence / f"{browser_name}-ui-dir-refused.png"))
 
             # A directory: the marked page reloads ONCE into the directory's own page.
-            save("OUROBOROS_UI_DIR", str(custom))
+            assert save("OUROBOROS_UI_DIR", str(custom)) == "Saved · applies after restart · Undo"
             restart_started = len(loads())
             core["restart_server"]()
             page.wait_for_function(f"() => document.title === {json.dumps(CUSTOM_TITLE)}", timeout=60_000)
@@ -136,7 +138,8 @@ def test_interface_choice_applies_at_restart_and_the_core_page_follows_it(direct
 
             # Cleared from the directory's page: saved blank, applied at restart; this page
             # owns its refresh and stays until the core's address is reopened.
-            save("OUROBOROS_UI_DIR", "")
+            assert save("OUROBOROS_UI_DIR", "") == "Saved · applies after restart · Undo"
+            expect(meta("OUROBOROS_UI_DIR")).to_have_text(f"Running: {custom} · after restart: the built-in interface", timeout=30_000)
             assert saves[-1] == {"OUROBOROS_UI_DIR": ""}
             seen = len(loads())
             restart()
@@ -150,7 +153,7 @@ def test_interface_choice_applies_at_restart_and_the_core_page_follows_it(direct
 
             # none: the marked page reloads once into the core's own answer.
             open_advanced()
-            save("OUROBOROS_UI_DIR", "none")
+            assert save("OUROBOROS_UI_DIR", "none") == "Saved · applies after restart · Undo"
             restart_started = len(loads())
             core["restart_server"]()
             page.get_by_text("No main interface is served here").wait_for(timeout=60_000)

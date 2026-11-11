@@ -9,7 +9,7 @@ import pathlib
 
 import pytest
 
-from tests.settings_browser_helpers import open_settings, setting_row
+from tests.settings_browser_helpers import commit_row, open_settings, setting_row
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 
 META = "() => document.querySelector('#page-settings [data-setting-row=\"{row}\"] [data-setting-meta]').textContent"
@@ -18,15 +18,6 @@ META = "() => document.querySelector('#page-settings [data-setting-row=\"{row}\"
 def _meta_says(page, row, words):
     page.wait_for_function(f"words => ({META.format(row=row)})().includes(words)", arg=words)
     return setting_row(page, row).locator("[data-setting-meta]").inner_text()
-
-
-def _choose(page, row, value):
-    """Press a strip's option and wait until the row holds it (a second save may say the same words as the first)."""
-    setting_row(page, row).locator(f'[data-setting-value="{value}"]').click()
-    page.wait_for_function("""([row, value]) => {
-        const option = document.querySelector(`#page-settings [data-setting-row="${row}"] [data-setting-value="${value}"]`);
-        return option.getAttribute('aria-pressed') === 'true' && !option.hasAttribute('aria-busy');
-    }""", arg=[row, value])
 
 
 def _open_permissions(page, url):
@@ -54,9 +45,13 @@ def test_access_and_review_round_trip_without_losing_restart_truth(direct_server
             access.locator('[data-setting-value="cyber_pro"]').click()
             page.locator('[data-confirm-ok]').click()
             said = _meta_says(page, "OUROBOROS_RUNTIME_MODE", "after restart: Cyber Pro")
-            assert said == "Running: Light · after restart: Cyber Pro", said
-            assert access.locator("[data-setting-result]").inner_text().startswith("Saved")
-            _choose(page, "OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+            assert said == "Running: Light · after restart: Cyber Pro", said  # the level in force is the server's own answer
+            running = page.evaluate("async () => (await (await fetch('/api/settings')).json())._meta.restart_state.running")
+            assert running["OUROBOROS_RUNTIME_MODE"] == "light", running
+            # The server's receipt and timing, word for word: a restart row says no "was" (its meta says both values)
+            # and Access offers no Undo (choosing again may ask); a delayed strip says what it replaced, with Undo.
+            assert access.locator("[data-setting-result]").inner_text() == "Saved · applies after restart"
+            assert commit_row(page, "OUROBOROS_REVIEW_ENFORCEMENT", "blocking") == "Saved · applies to new tasks · was Advisory · Undo"
             stored = json.loads((fixture["data_dir"] / "settings.json").read_text(encoding="utf-8"))
             assert stored["OUROBOROS_RUNTIME_MODE"] == "cyber_pro"
             assert stored["OUROBOROS_REVIEW_ENFORCEMENT"] == "blocking"
@@ -152,6 +147,7 @@ def test_cyber_pro_names_a_kept_blocking_choice_beside_its_control(direct_server
                 pro.focus()
                 page.keyboard.press("Enter")
                 assert _meta_says(page, "OUROBOROS_RUNTIME_MODE", "after restart") == "Running: Cyber Pro · after restart: Pro"
+                assert access.locator("[data-setting-result]").inner_text() == "Saved · applies after restart"
                 assert not page.locator('[data-confirm-ok]').is_visible()  # lowering Access is never asked about
                 assert _meta_says(page, "OUROBOROS_REVIEW_ENFORCEMENT", "Enforced after") == \
                     "Not enforced now, under Cyber Pro. Enforced after the restart that applies Pro."
@@ -161,10 +157,12 @@ def test_cyber_pro_names_a_kept_blocking_choice_beside_its_control(direct_server
                 enforcement.scroll_into_view_if_needed()
                 page.screenshot(path=str(evidence / f"settings-cyber-blocking-saved-pro-{theme}-{width}.png"))
                 # Advisory has nothing to qualify.
-                _choose(page, "OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+                assert commit_row(page, "OUROBOROS_REVIEW_ENFORCEMENT", "advisory") == \
+                    "Saved · applies to new tasks · was Blocking · Undo"
                 assert _meta_says(page, "OUROBOROS_REVIEW_ENFORCEMENT", "decides") == "It reads the finding and decides."
                 # Back to the state this loop starts from: raising Access asks first.
-                _choose(page, "OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+                assert commit_row(page, "OUROBOROS_REVIEW_ENFORCEMENT", "blocking") == \
+                    "Saved · applies to new tasks · was Advisory · Undo"
                 access.locator('[data-setting-value="cyber_pro"]').click()
                 page.locator('[data-confirm-ok]').click()
                 _meta_says(page, "OUROBOROS_RUNTIME_MODE", "How far it reaches")  # nothing waits for a restart any more

@@ -17,7 +17,7 @@ import pathlib
 
 import pytest
 
-from tests.settings_browser_helpers import open_settings, setting_row
+from tests.settings_browser_helpers import commit_row, open_settings, setting_row
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 
 POLICY = {"version": 1, "access": {"max": "pro"},
@@ -133,9 +133,8 @@ def test_managed_permissions_say_what_the_organization_fixes(direct_server_with_
                     page.keyboard.press("End")
                     assert page.evaluate("document.activeElement.dataset.settingValue") == "pro"
                     # A change the policy allows still saves at once; the raw shadowed Access stays the employee's.
-                    setting_row(page, "OUROBOROS_REVIEW_ENFORCEMENT").locator('[data-setting-value="blocking"]').click()
-                    page.wait_for_function("() => document.querySelector('#page-settings [data-setting-row=\"OUROBOROS_REVIEW_ENFORCEMENT\"] "
-                                           "[data-setting-result]').textContent.startsWith('Saved')")
+                    assert commit_row(page, "OUROBOROS_REVIEW_ENFORCEMENT", "blocking") == \
+                        "Saved · applies to new tasks · was Advisory · Undo"
                     saved = json.loads(settings_path.read_text(encoding="utf-8"))
                     assert saved["OUROBOROS_REVIEW_ENFORCEMENT"] == "blocking"
                     assert saved["OUROBOROS_RUNTIME_MODE"] == "light"
