@@ -9,6 +9,7 @@ import { forgetSettingRows, readSettings } from '../modules/settings_controls.js
 import { settingsPageFor } from '../modules/settings_pages.js';
 import { HAND_WRITTEN, ROWS, rowsOf } from '../modules/settings_rows.js';
 import { agentName, rosterResult } from '../modules/subagents_settings.js';
+import { recheckDraft, recheckSaved } from '../modules/safety_recheck.js';
 import { SAFETY_MODEL_KEYS } from '../modules/consciousness_api.js';
 import { NodeStub, setup } from './dashboard_dom_fixture.js';
 
@@ -200,6 +201,25 @@ test('a row with the re-check mark and the roster\'s own switch take the same ow
     assert.equal(page.container.querySelector(`[data-setting-row="${KEY}"]`).querySelector('[data-setting-result]').textContent,
         'Saved · applies to new tasks');
     assert.equal(page.container.querySelector('[data-review-pool-stays]').textContent, 'Helpers are off; agents marked Reviewer still review.');
+});
+
+test('the agent page owns the second-check binding and releases it when left', async (t) => {
+    const page = await open(t, 'agents/recheck');
+    const mark = page.container.querySelector('[data-recheck-mark="recheck"]');
+    assert.ok(mark, 'the saved second-check switch participates in the shared binding');
+    assert.equal(recheckSaved(), 'recheck');
+    mark.checked = false;
+    // The fixture dispatches capture and target separately, as the browser does in that order.
+    await page.container.fire('change', { target: mark });
+    assert.equal(recheckDraft(), '', 'the page itself binds the shared one-mark rule');
+    await page.press(mark, false);
+    assert.equal(page.server.agent('recheck').rechecks_flags, false);
+    assert.equal(recheckSaved(), '', 'the completed read resets the mark from the stored roster');
+    assert.equal(recheckDraft(), null);
+    page.handle.unmount();
+    mark.checked = true;
+    await page.container.fire('change', { target: mark });
+    assert.equal(recheckDraft(), null, 'a detached page cannot change the shared mark');
 });
 
 test('a toggle on a roster that already holds a twin pair is sent, and the server\'s answer is shown as it is', async (t) => {

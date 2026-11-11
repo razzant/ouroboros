@@ -7,7 +7,7 @@ import {
     FACET_ACCOUNTS, FACET_CATALOG, FACET_QUOTA, READ_OK, accountRows,
     bindStatusSurface, boundedStatusRefresh, claudexorStatus,
 } from './claudexor_status_store.js';
-import { markRecheckRow, saveCheckerSettings } from './consciousness_api.js';
+import { markRecheckRow, recheckFromSettings, saveCheckerSettings } from './consciousness_api.js';
 import { harnessIdentityMarkup } from './harness_presentation.js';
 import { strokeIcon } from './page_icons.js';
 import {
@@ -25,7 +25,7 @@ import {
     harnessMap, lastReviewRunText, reviewCostText, reviewTwinAllowed, rowIdentity, rowMeta, rowStatus, rowStatusReason, rowTaskRun,
     sessionRouteVerdict,
 } from './subagent_status_primitives.js';
-import { recheckMarkHtml } from './safety_recheck.js';
+import { bindRecheckMarks, recheckMarkHtml, syncRecheckState } from './safety_recheck.js';
 import { CODECS, CONFIRMS, bindSettingRows, outcomeLine, setButtonBusy, settingsRow, writeEntry } from './settings_controls.js';
 import { registerSettingsPage } from './settings_pages.js';
 import { rowById, rowsOf } from './settings_rows.js';
@@ -483,8 +483,8 @@ function rowDetailsHtml(row, state, rowKey) {
 const CHEVRON = strokeIcon('<path d="m9 18 6-6-6-6"/>', 14);
 const chip = (text, tone = 'neutral') => `<span class="ui-chip agent-chip" data-tone="${tone}">${escapeHtml(text)}</span>`;
 // An on/off that writes at once is the shared switch; one that is a field of a form with its own Save is a checkbox.
-function toggleHtml(field, label, checked, live) {
-    const attrs = `type="checkbox" data-subagent-field="${field}" aria-label="${escapeHtml(label)}"${checked ? ' checked' : ''}`;
+function toggleHtml(field, label, checked, live, recheckId = '') {
+    const attrs = `type="checkbox" data-subagent-field="${field}"${recheckId ? ` data-recheck-mark="${escapeHtml(recheckId)}"` : ''} aria-label="${escapeHtml(label)}"${checked ? ' checked' : ''}`;
     return live ? `<label class="ui-switch"><input ${attrs} role="switch" aria-checked="${checked}"${field === 'enabled' ? ' data-entry-switch' : ''}><span class="ui-switch-track" aria-hidden="true"><span class="ui-switch-thumb"></span></span></label>`
         : `<input class="ui-checkbox" ${attrs}>`;
 }
@@ -612,7 +612,7 @@ function agentPageHtml(row, state, index, live) {
     const recheck = saved?.rechecks_flags === true
         || (saved?.route.kind === ROUTE_KIND_API_MODEL && saved.delivery === 'packet' && saved.enabled !== false);
     const use = (field, title, meta, checked) => `<div class="ui-row agent-use"><p class="ui-row-title">${title}</p>
-        <p class="ui-row-meta">${escapeHtml(meta)}</p><div class="ui-row-actions">${toggleHtml(field, title, checked, live)}</div></div>`;
+        <p class="ui-row-meta">${escapeHtml(meta)}</p><div class="ui-row-actions">${toggleHtml(field, title, checked, live, field === 'rechecks_flags' ? row.subagent_id : '')}</div></div>`;
     const card = (title, body, lead = '') => `<section class="ui-card agents-card"><h3 class="agents-card-title">${title}</h3>
         ${lead ? `<p class="agents-card-lead">${lead}</p>` : ''}${body}</section>`;
     return `<p class="agents-lead">${escapeHtml(rowIdentity(row, state).label)}</p>
@@ -1430,6 +1430,7 @@ function mountAgents(container, { path, ctx }) {
             <summary>More: limits for helpers and their folders</summary>
             <div class="agents-rows" data-agents-fold></div>
         </details></section>`;
+    const unbindRechecks = bindRecheckMarks(container);
     const foldRows = container.querySelector('[data-agents-fold]');
     let fold = null;
     const roster = container.querySelector(`[data-setting-row="${KEY}"]`);
@@ -1439,6 +1440,7 @@ function mountAgents(container, { path, ctx }) {
         let settings;
         // A failed read keeps what the page showed (the next showing reads again); with nothing shown yet it says so.
         try { settings = await ctx.readSettings(); } catch { if (!editor.loaded) editor.load(undefined); return; }
+        syncRecheckState(recheckFromSettings(settings), container);
         editor.adopt(settings);
         // The fold's rows are drawn once their values are read: a row the page was opened for takes the focus filled.
         if (foldRows && !fold) foldRows.innerHTML = rowsOf('agents', { fold: true }).map((row) => settingsRow(row)).join('');
@@ -1466,7 +1468,7 @@ function mountAgents(container, { path, ctx }) {
     if (entry) void refreshModelCatalog();  // the model chooser of this agent's form
     return { unmount() {
         globalThis.window?.removeEventListener('ouro:settings-page-shown', onShown);
-        fold?.dispose(); editor.destroy();
+        unbindRechecks(); fold?.dispose(); editor.destroy();
     } };
 }
 
