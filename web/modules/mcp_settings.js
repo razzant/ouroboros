@@ -954,7 +954,7 @@ export function applyMcpSettings(settings) {
             allowed_tools: Array.isArray(s.allowed_tools) ? s.allowed_tools.map(String) : [], schemas_at_start: isPinned(s),
         };
         // `key` is how the list's own write finds this entry (settings_controls.js writeEntry).
-        if (!kept) savedMcpSecrets.set(server, { identity: serverIdentity(s), url: server.url, key: String(s.id ?? s.slug ?? s.name ?? ''), read: asRead(entry) });
+        if (!kept) savedMcpSecrets.set(server, { identity: serverIdentity(s), url: server.url, key: String(s.id || s.slug || s.name || ''), read: asRead(entry) });
         if (pageId(server)) NAMES.set(pageId(server), serverName(server));
         return server;
     });

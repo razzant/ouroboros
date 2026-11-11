@@ -162,6 +162,19 @@ test('a server\'s switch writes one entry from a fresh read with its token, and 
     assert.equal(inside(head(page.container, 'slack'), '[data-entry-switch]').hasAttribute('checked'), false, 'the list is drawn from the fresh read');
 });
 
+test('a server with an empty id writes by its slug or name without touching the other entry', async (t) => {
+    const servers = [{ id: '', name: 'first', enabled: true, transport: 'stdio', command: 'python' },
+        { id: '', slug: 'second', name: 'alias', enabled: true, transport: 'stdio', command: 'python' }];
+    const page = await open(t, 'tools', { values: { MCP_SERVERS: servers } });
+    for (const [id, index] of [['second', 1], ['first', 0]]) {
+        const input = inside(head(page.container, id), '[data-entry-switch]');
+        input.checked = false;
+        await page.change(input);
+        servers[index].enabled = false;
+        assert.deepEqual(page.server.posts.at(-1).settings.MCP_SERVERS, servers);
+    }
+});
+
 test('a server\'s page saves its one entry and keeps the switch out of the form; Remove asks first', async (t) => {
     const page = await open(t, 'tools/files');
     const card = page.container.querySelector('[data-mcp-card]');

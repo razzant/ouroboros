@@ -111,9 +111,7 @@ test('each key row docks Test beside its other actions and reports in its own li
         }
         assert.match(row, /data-connection-test-status[^>]*role="status" aria-live="polite"/);
     }
-    // The catalog refresh is the shared action row: the button, then its result right after it (ui.css
-    // .ui-action-row). The Claude-runtime status/Repair panel is retired with its product surface.
-    assert.match(html, /<div class="ui-action-row">\s*<button type="button" class="btn btn-default" id="btn-refresh-model-catalog">[^<]*<\/button>\s*<span id="settings-model-catalog-status" class="ui-result"/);
+    // Catalogue refresh is on Models (settings_tools_models.test.js); Accounts keeps each key's own result.
     assert.doesNotMatch(html, /settings-action-row/);
     assert.doesNotMatch(html, /settings-claude-code/);
     assert.doesNotMatch(html, /settings-ghost-btn/);
@@ -141,4 +139,3 @@ test('the Cyber Pro note says what a saved Blocking means now and after the rest
     assert.equal(cyberReviewNote(policy({ now: 'cyber_pro', saved: 'pro', review: 'blocking' })),
         'Not enforced now, under Cyber Pro. Enforced after the restart that applies Pro.');
 });
-
