@@ -200,8 +200,10 @@ def _holding_room(snapshot, level):
             totals[kind] = totals.get(kind, 0) + tokens
             if unmarked:
                 without_lead[kind] = without_lead.get(kind, 0) + int(unmarked)
-            description = f"{kind}, {label}: {reader}"
-            ready[description] = ready.get(description, 0) + tokens
+            unit = ready.setdefault(reader, [0, {}, {}])
+            unit[0] += tokens
+            unit[1][kind] = unit[1].get(kind, 0) + tokens
+            unit[2][label] = None
     pages = [e for e in snapshot.story if not e.get("told_by") and e.get("kind") != "legacy"]
     aggregated = [e for e in pages if e["id"] in gone.get("F5", ())] if gone.get("F5a") else []
     grouped_ids = {e["id"] for e in aggregated}
@@ -279,9 +281,13 @@ def _holding_room(snapshot, level):
         hold("untold in this room", item.get("short") if item.get("address") in gone.get("F7", ()) else item.get("line", ""),
              _rows_reader(room.get("room_id"), [item]), label=own_label)
     _hold_conversations(snapshot, gone, hold, price, counts)
+    units = []
+    for reader, (tokens, kinds, labels) in sorted(ready.items(), key=lambda pair: (-pair[1][0], pair[0]))[:3]:
+        names = "; ".join(sorted(kinds, key=lambda kind: (-kinds[kind], kind)))
+        units.append([tokens, f"{names}, {' / '.join(labels)}: {reader}"])
     return {"tokens": dict(sorted(totals.items(), key=lambda pair: (-pair[1], pair[0]))),
             "without_lead": without_lead, "counts": counts,
-            "largest": [[tokens, description] for description, tokens in sorted(ready.items(), key=lambda p: (-p[1], p[0]))[:3]]}
+            "largest": units}
 
 
 def _rows_reader(room_id, rows):

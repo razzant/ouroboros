@@ -535,6 +535,25 @@ def test_holding_records_have_one_kind_and_one_reader_even_when_present_in_both_
     assert "memory_read(node_id='page-000')" in held["largest"][0][1]
 
 
+def test_holding_largest_units_merge_kinds_with_the_same_reader():
+    from dataclasses import replace
+    snap, _gist = completed_room()
+    room = snap.room
+    room["lane1"].append(syn.spoken(5, "human", 4000))
+    room["lane2"] = []
+    snap = replace(snap, conversations=[], story=syn.pages(2, 1500))
+    held = forms.holding_room(snap, mv.FULL_VIEW)
+    units = held["largest"]
+    readers = [description.split(": memory_read(", 1)[1] for _n, description in units]
+    assert len(readers) == len(set(readers)) == 3
+    own = next((tokens, description) for tokens, description in units if "rows=true" in description)
+    assert "replies of completed works" in own[1] and "untold in this room" in own[1]
+    assert own[0] == held["tokens"]["replies of completed works"] + held["tokens"]["untold in this room"]
+    assert all(any(f"memory_read(node_id='page-{i:03d}')" in description for _n, description in units[1:]) for i in range(2))
+    # Different readers remain separate even if their source kind is identical.
+    assert units[1][1] != units[2][1] and all("pages without part" in unit[1] for unit in units[1:])
+
+
 def test_holding_includes_whole_remote_replies_until_their_gist_replaces_them():
     snap, _gist = completed_room()
     snap.room["lane1"] = []
@@ -826,3 +845,27 @@ def test_task_gist_reader_uses_the_source_room_when_its_terminal_is_elsewhere(tm
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id='reader', current_chat_id=1)
     read = _memory_read(ctx, room_id='777', rows=True, **{'from': address, 'to': address})
     assert terminal['text'] in read and 'complete: no further rows' in read
+
+
+def test_holding_formats_only_the_three_units_it_shows(monkeypatch):
+    from ouroboros import memory_form_facts as facts
+
+    formatted = []
+    class Reader(str):
+        def __format__(self, spec):
+            formatted.append(str(self))
+            return super().__format__(spec)
+
+    original = facts._hold_conversations
+    def observe(snapshot, gone, hold, price, counts):
+        def tracked(kind, text, reader, **kwargs):
+            return hold(kind, text, Reader(reader), **kwargs)
+        return original(snapshot, gone, tracked, price, counts)
+    monkeypatch.setattr(facts, "_hold_conversations", observe)
+    snapshot = syn.snapshot(room_facts=syn.room(), conversations=[
+        syn.conversation(i, words=1, word_chars=500+i) for i in range(30)])
+    held = facts.holding_room(snapshot, mv.FULL_VIEW)
+    assert len(held["largest"]) == len(formatted) == 3
+    assert len(set(formatted)) == 3
+    assert all(reader in description for reader, (_tokens, description) in zip(formatted, held["largest"]))
+    assert list(held["tokens"].values()) == sorted(held["tokens"].values(), reverse=True)
