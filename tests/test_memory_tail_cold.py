@@ -863,6 +863,34 @@ def test_a_shown_places_first_page_costs_the_same_whatever_its_history(monkeypat
     assert first[0] == first[1], first
 
 
+def test_a_row_the_stored_tail_does_not_hold_yet_is_never_left_unread(monkeypatch, tmp_path):
+    """A place row sealed before any reader stored it (the store attempt is one zero-wait try, and the lock can be busy
+    twice): the set names only rows the stored tail holds as the pass read them, so a first page that comes back full
+    is never one row short and the walk goes on to the rest of the place."""
+    rooms = _settled(tmp_path)
+    place = {"source": "presence:slack", "transport": _TRANSPORT, "presence_provenance": _PROVENANCE}
+    for n in range(12):
+        if n == 1:
+            _append(tmp_path, shared.msg(_ts(n + 1), "My word there.", chat_id=LONG, direction="out", task_id="free1",
+                                         type="presence_delivery", **place))
+        else:
+            _append(tmp_path, shared.msg(_ts(n + 1), f"Words {n}.", chat_id=LONG, client_message_id=f"w{n}", **place))
+    with monkeypatch.context() as patch:  # a reader stores the rows appended since the stored tail's end
+        patch.setattr(cold, "gate", lambda _store: None)
+        mi.open_rows_by_room(tmp_path)
+    sealed = [_entry(tmp_path, "My word there." if n == 1 else f"Words {n}.") for n in range(12)]
+    assert ChronicleStore(tmp_path).publish_page(room_id=str(LONG), text="A page.", author=shared.MIND, covers={
+        "rows": [entry[0]["row_sha256"] for entry in sealed], "stream_span": [sealed[0][2], sealed[-1][2]]}).ok
+    monkeypatch.setattr(ChronicleStore, "extend_tail", lambda *_args, **_kwargs: False)  # the lock is busy each time
+    _append(tmp_path, shared.msg(_ts(20), "Late and sealed.", chat_id=LONG, client_message_id="late", **place))
+    _seal(tmp_path, _entry(tmp_path, "Late and sealed."), LONG)  # sealed before any reader stored it
+    _append(tmp_path, shared.msg(_ts(21), "Words 0.", chat_id=LONG, client_message_id="again", **place))
+    _compose(tmp_path)
+    assert _entry(tmp_path, "Late and sealed.")[2] not in _cold_positions(tmp_path)
+    views = _same(monkeypatch, tmp_path, rooms)
+    assert "delivered again" in _texts(views)
+
+
 def test_a_place_where_none_of_us_spoke_reads_every_sealed_row(monkeypatch, tmp_path):
     """Only reading all of them shows that none of its sealed rows is ours: its room stays silent."""
     rooms, sealed = _long_place(tmp_path, mine_at=None)

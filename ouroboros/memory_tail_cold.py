@@ -229,21 +229,26 @@ def _compose(store: Any, snapshot: Any, gate_: Gate, tail: Any, found: Any) -> N
     writers = _writers(snapshot)
     # A terminal row's task is kept with it: a page its task writes later links it (``stands``); every row its room key,
     # the chat the room rule reads (``memory_inventory.rooms_of_row``), by the same function: ``older_of`` reads by it;
-    # a row with words their digest as ``memory_view_conversations._repeats`` compares them (``copies_of``).
+    # a row with words their digest as ``memory_view_conversations._repeats`` compares them (``copies_of``). Only a
+    # row the stored tail holds as this pass read it (its position and identity) is named: a reader's page of the set
+    # is then whole, and a row not stored yet, or projected anew since, stays read until the next whole pass.
     cold = [[pos, (meta.get("task_id") or None) if terminal is not None else None, _row_chat_id(meta),
-             words_of(meta) or None]
-            for pos, _address, meta, terminal in tail.rows if pos not in found.kept and not _kept(meta, terminal, writers)]
+             words_of(meta) or None, address["row_sha256"]]
+            for pos, address, meta, terminal in tail.rows if pos not in found.kept and not _kept(meta, terminal, writers)]
     source, projects = (snapshot.state("tail") or {}).get("source"), {str(chat) for chat in gate_.facts.project_chat_ids}
     marks = {"marks": gate_.marks, "source": source, "sequence": snapshot.records[-1][0] if snapshot.records else 0,
-             "places": sorted(found.places & projects), "rows": len(cold)}
+             "places": sorted(found.places & projects)}
     try:
         with store._publishing(0) as db:
             held = store._state(db, "tail")
             if not isinstance(held, dict) or held.get("source") != source:
                 return
             db.execute("DELETE FROM tail_cold")
-            db.execute("INSERT INTO tail_cold SELECT json_extract(value,'$[0]'), json_extract(value,'$[1]'), "
-                       "json_extract(value,'$[2]'), json_extract(value,'$[3]') FROM json_each(?)", (json.dumps(cold),))
+            marks["rows"] = db.execute(
+                "INSERT INTO tail_cold SELECT c.pos, c.task, c.chat, c.digest FROM (SELECT json_extract(value,'$[0]') AS "
+                "pos, json_extract(value,'$[1]') AS task, json_extract(value,'$[2]') AS chat, json_extract(value,'$[3]') "
+                "AS digest, json_extract(value,'$[4]') AS sha FROM json_each(?)) c JOIN tail_rows t ON t.pos=c.pos "
+                "AND t.row_sha256=c.sha", (json.dumps(cold),)).rowcount
             store._set_state(db, MARKS, marks)
             db.commit()
     except (TimeoutError, sqlite3.Error):
