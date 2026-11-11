@@ -278,7 +278,8 @@ def _tail(root: Any, frontier: Mapping[str, Any]) -> Tail:
 @timed_section("memory_view.tail")
 def _read_tail(root: Any, frontier: Mapping[str, Any], *, terminal_only: bool = False, whole: bool = False) -> Tail:
     """``_tail``'s read; ``terminal_only`` keeps the rows with a terminal status (the stored ones read alone);
-    ``whole`` reads the index again for every stored row a capture standing on the cold set left unread."""
+    ``whole`` reads the index again for every stored row a capture standing on the cold set left unread, and counts
+    nothing: its capture counts what the first read left out (``_whole_again``)."""
     from ouroboros import dialogue_store as ds
 
     store, source = ChronicleStore(root), _tail_source(root, frontier)
@@ -294,13 +295,13 @@ def _read_tail(root: Any, frontier: Mapping[str, Any], *, terminal_only: bool = 
             if state.get("complete") and end > state["upper"]:  # one zero-wait attempt; a busy lock leaves it
                 store.extend_tail(state, gap, {**state, "upper": end, "anchor": gap[-1][1:3] if gap else anchor})
             rows = [_entry(fact) for fact in stored + gap if not terminal_only or fact[5] is not None]
-            counted("rows_read", 0 if terminal_only else len(rows))
-            counted("rows_new", 0 if terminal_only else len(gap))
+            counted("rows_read", 0 if terminal_only or whole else len(rows))
+            counted("rows_new", 0 if terminal_only or whole else len(gap))
             return Tail(rows, bool(state.get("complete")))
     lower = chat_chain.position_boundary(root, source["frontier"])
     rows = [_entry(fact) for fact in _projected(chat_chain.iter_stream(root, lower=lower, upper=end))
             if not terminal_only or fact[5] is not None]
-    counted("rows_read", 0 if terminal_only else len(rows))  # nothing stored: every row is read live, and none is new
+    counted("rows_read", 0 if terminal_only or whole else len(rows))  # nothing stored: every row is read live, none new
     return Tail(rows, False)
 
 
@@ -450,7 +451,7 @@ def open_rows_by_room(root: Any, gaps: Optional[Dict[str, set]] = None,
         wants, projects = (gaps is not None, quiet is not None, sealed is not None), _project_rooms(facts)
         found = _open_pass(root, store, facts, tail, *wants)
         if memory_tail_cold.again(store, derived, tail, found.places & projects):  # rows it left unread may count now
-            derived["tail"] = tail = _read_tail(root, frontier, whole=True)  # type: ignore[index]
+            derived["tail"] = tail = _whole_again(root, frontier, tail)  # type: ignore[index]
             found = _open_pass(root, store, facts, tail, *wants)
         memory_tail_cold.settle(store, derived, tail, found)
         held = memory_tail_cold.standing(derived)
@@ -481,8 +482,15 @@ def over_one_state(root: Any, read: Callable[[], Any]) -> Any:
         pass
     memory_tail_cold.forgo(derived)
     derived["membership"] = _membership_facts(root)
-    derived["tail"] = _read_tail(root, _active_frontier(store), whole=True)
+    derived["tail"] = _whole_again(root, _active_frontier(store), derived.get("tail"))
     return read()
+
+
+def _whole_again(root: Any, frontier: Mapping[str, Any], tail: Optional[Tail]) -> Tail:
+    """The whole tail read again for a capture that first read ``tail``: only the rows that read left out count."""
+    whole = _read_tail(root, frontier, whole=True)
+    counted("rows_read", len(whole.rows) - len(tail.rows if tail is not None else ()))
+    return whole
 
 
 def _project_rooms(facts: MembershipFacts) -> Set[str]:

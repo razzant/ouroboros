@@ -1139,7 +1139,10 @@ def test_a_project_that_becomes_a_place_reads_the_whole_tail(monkeypatch, tmp_pa
     assert _entry(tmp_path, "Alpha twice.")[2] in _cold_positions(tmp_path)
     _done_in_place(tmp_path, 4)
     work = _work(tmp_path, rooms)
-    assert work.get("tail_whole") == 1, work
+    with monkeypatch.context() as patch:
+        patch.setattr(cold, "gate", lambda _store: None)
+        whole = _work(tmp_path, rooms)
+    assert work.get("tail_whole") == 1 and work["rows_read"] == whole["rows_read"], (work, whole)  # each row once
     views = _same(monkeypatch, tmp_path, rooms)
     assert "delivered again" in _texts(views)
 
