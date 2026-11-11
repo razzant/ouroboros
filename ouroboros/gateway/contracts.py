@@ -535,6 +535,14 @@ class ProjectsChangedOutbound(TypedDict):
     chat_id: NotRequired[int]
 
 
+class UiPreferencesChangedOutbound(TypedDict):
+    """Outbound notice that ``POST /api/ui/preferences`` committed a change of the named groups
+    (``contributions``); every window reads the named state again."""
+
+    type: Literal["ui_preferences_changed"]
+    keys: List[str]
+
+
 class MessageAnnotationOutbound(TypedDict):
     """Bubble-free presentation update for one owner message; ``cause``: the host's sentence for a refused act."""
 
@@ -1494,6 +1502,7 @@ WS_MESSAGE_TYPES: tuple[str, ...] = (
     "extension_lifecycle",
     "message_annotation",
     "projects_changed",
+    "ui_preferences_changed",
     "task_named",
     "update_status_ready",
     "update_progress_changed",
@@ -1514,7 +1523,7 @@ __all__ = [
     "SecretConsumer", "SecretDecisionRequest", "SecretDecisionResponse", "SecretEvent", "SecretKeyState",
     "SecretOutcome", "SecretRequestField", "SecretRequestMeta",
     "TypingOutbound", "LogOutbound", "HeartbeatOutbound", "ExtensionLifecycleOutbound",
-    "ProjectsChangedOutbound", "MessageAnnotationOutbound",
+    "ProjectsChangedOutbound", "UiPreferencesChangedOutbound", "MessageAnnotationOutbound",
     "UpdateMergePlan", "UpdatePreflightRequest", "UpdatePreflightResponse", "UpdateApplyRequest",
     "UpdateApplySuccessResponse", "UpdateApplyErrorResponse",
     "UpdateDescriptionRequest", "UpdateDescriptionResponse", "UpdateDescriptionErrorResponse",

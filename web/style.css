@@ -6906,6 +6906,7 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 }
 .skills-detail-label { min-width: 72px; color: var(--text-meta); font-size: var(--type-meta); font-weight: 500; }
 .skills-detail-value { min-width: 0; flex: 1 1 240px; overflow-wrap: anywhere; color: var(--text-primary); }
+.skills-detail-row[data-contribution-row] .skills-detail-value { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-1) var(--space-2); }
 .skills-detail-row code { padding: 1px 6px; border-radius: var(--radius-inner); background: rgba(var(--neutral-rgb), 0.05); font-size: var(--type-meta); }
 .skills-review-block { display: grid; gap: var(--space-1); color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .skills-review-block:empty { display: none; }

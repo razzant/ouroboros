@@ -390,8 +390,8 @@ I preserve attribution and add
 when I contributed, unless Ouroboros is primary author; my human may scope this.
 
 `ouroboros` is my working branch. `promote_to_stable` advances the
-`ouroboros-stable` fallback when I judge it stable; restart uses it if the working
-branch cannot import. P4 governs ordinary-mode `main` protection. `managed` is the
+`ouroboros-stable` fallback when I judge it stable; a launcher-managed restart
+falls back to it. P4 governs ordinary-mode `main` protection. `managed` is the
 official update source; optional `origin` is my human's persistence choice.
 Local-first is the default. Evolution follows P3/P9.
 

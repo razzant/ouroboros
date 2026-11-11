@@ -1188,8 +1188,12 @@ def _stage_checked_completion(ctx: ToolContext, checked: dict, *, source: str, r
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
             text="ERROR: COMPLETION_CONFLICT: contradictory completion requests in one response; select again after seeing all results."))
     ctx._completion_request = staged
+    # A stop waits for nothing: an accepted pending_review is named as its own key, never in ``ignored``,
+    # whose emptiness keeps a root's summary and fold (``completion_request``).
+    inert = ({"pending_review": f"{staged['pending_review']}: no effect on a stop, which waits for nothing"}
+             if staged["action"] == "stop" and staged.get("pending_review") else {})
     return json.dumps({"status": "completion_requested", "completion_control": True, "action": staged["action"],
-                       **({"ignored": staged["ignored"]} if staged.get("ignored") else {})}, ensure_ascii=False)
+                       **({"ignored": staged["ignored"]} if staged.get("ignored") else {}), **inert}, ensure_ascii=False)
 
 
 _FINISH_TASK_ARGUMENTS = frozenset(inspect.signature(_finish_task).parameters) - {"ctx"}

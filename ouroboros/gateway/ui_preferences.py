@@ -80,6 +80,29 @@ _MAX_PROJECT_ID_LENGTH = 64
 _MAX_WELCOME_CHARS = 500
 _MAX_SHARED_READS = 64  # addresses one POST may name; recorded facts are never capped
 _MAX_MODEL_RECENTS = 4
+_MAX_CONTRIBUTION_KEYS = 64  # the bound _normalize_preferences enforces on contributions lists
+
+
+def _contribution_visibility_ops(body: dict[str, Any]) -> dict[str, list[str]]:
+    """Pop the atomic ``contributions.hide`` / ``contributions.show`` key lists from a POST body.
+
+    They change single keys of ``contributions.hidden`` under the preferences lock, so two windows that hide
+    different controls never overwrite each other's choice; the full-list ``hidden`` form stays as it was."""
+    group = body.get("contributions")
+    if not isinstance(group, dict):
+        return {}
+    ops: dict[str, list[str]] = {}
+    for op in ("hide", "show"):
+        if op not in group:
+            continue
+        values = group.pop(op)
+        if (not isinstance(values, list) or len(values) > _MAX_CONTRIBUTION_KEYS
+                or any(not isinstance(v, str) or not v.strip() or len(v) > 120 for v in values)):
+            raise ValueError(f"contributions.{op} must be a list of at most {_MAX_CONTRIBUTION_KEYS} keys of at most 120 characters")
+        ops[op] = list(dict.fromkeys(v.strip() for v in values))
+    if ops and not group:
+        body.pop("contributions")
+    return ops
 
 
 @contextmanager
@@ -395,13 +418,21 @@ async def api_ui_preferences_post(request: Request) -> JSONResponse:
         return json_error(f"shared_read must be a list of at most {_MAX_SHARED_READS} row addresses", 400)
     drive_root = request_drive_root(request)
     path = pathlib.Path(drive_root) / "state" / "ui_preferences.json"
+    contributions_changed = "contributions" in body
     try:
+        visibility = _contribution_visibility_ops(body)
         with _preferences_lock(path):
             prefs = _stored_preferences(path)
             incoming = _normalize_preferences(body, fill_defaults=False)
             for group in ("voice", "contributions"):
                 if group in incoming:
                     prefs[group] = {**prefs[group], **incoming.pop(group)}
+            if visibility:
+                hidden = [key for key in prefs["contributions"].get("hidden", []) if key not in visibility.get("show", [])]
+                hidden += [key for key in visibility.get("hide", []) if key not in hidden]
+                if len(hidden) > _MAX_CONTRIBUTION_KEYS:
+                    raise ValueError(f"contributions.hidden holds at most {_MAX_CONTRIBUTION_KEYS} keys")
+                prefs["contributions"] = {**prefs["contributions"], "hidden": hidden}
             if "project_seen_revision" in incoming:
                 from ouroboros.projects_registry import get_project
 
@@ -452,6 +483,14 @@ async def api_ui_preferences_post(request: Request) -> JSONResponse:
         return json_error(str(exc), 503)
     except StoreError as exc:
         return json_error(f"dialogue history unavailable: {exc}", 503)
+    if contributions_changed:
+        # Other windows re-read their contributions projection (one coalesced read each).
+        try:
+            from ouroboros.gateway.ws import broadcast_ws_sync
+
+            broadcast_ws_sync({"type": "ui_preferences_changed", "keys": ["contributions"]})
+        except Exception:  # a missing socket loop must not fail a committed write
+            pass
     return JSONResponse({"ok": True, **prefs})
 
 

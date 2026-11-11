@@ -2072,6 +2072,7 @@ leads), each chip is listed in "+" under its skill's name. A skill's trusted pag
 only through its small context (its provider, a notice, words into the draft)
 and never draws into the composer or the feed. A module that fails is off for
 this page with one notice naming it; the rest of the page keeps working.
+The owner hides or shows each placed control (chip, "+" item, reply action) without turning its skill off, in the skill's Details and its widget card's ⋮ menu, one saved choice every window follows.
 
 **A start the page did not outlive is not repeated by itself.** A page
 module, a skill's module or route frame and an app card are code the core did
@@ -2600,7 +2601,8 @@ fade dims a card where the list cuts it.
   not the viewport.
 - **The card menu works on every surface.** Every card's ⋮ menu carries Size
   (1, 2, 3 columns, Full width and Reset size) beside a framed card's launch
-  policy, so a touch screen, a keyboard or the mini app — no hover there, and
+  policy and, for a skill that places controls in the chat, Shown in chat (one
+  checked item per control), so a touch screen, a keyboard or the mini app — no hover there, and
   a vertical drag collapses it — can size any card; on a narrow list the menu
   says that widths apply when the list is wide. Wherever a step would change a
   card's width, its right edge can also be dragged between the widths the

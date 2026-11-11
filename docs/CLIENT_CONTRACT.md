@@ -285,7 +285,7 @@ answer through §7.
   - `log` carries one runtime event row in `data` (`data.type` names the event) for live activity displays; the task's durable facts come from §6.
   - `message_annotation`, the routing outcome shown on an owner message, is that row's `chat_annotation` in history.
   - `task_named` gives a card its title; history rows carry `suggested_name`.
-  - `projects_changed`, `extension_lifecycle`, `update_status_ready`, `update_progress_changed`, `ui_language_changed` and `ui_i18n_updated` mean "read the named state again".
+  - `projects_changed`, `extension_lifecycle`, `ui_preferences_changed` (its keys name the changed groups), `update_status_ready`, `update_progress_changed`, `ui_language_changed` and `ui_i18n_updated` mean "read the named state again".
   - `typing` (transient) and `heartbeat`.
 
 Some `chat` frames are transient notices history never shows, for example `system_type: "initialization_notice"` (a message could not be accepted yet) and a repair/admission receipt with `task_id_pending: true` (no proof a durable task is readable yet).
@@ -742,7 +742,10 @@ on a room save or Main write; POST naming `model_recents` returns 400 without wr
 `read_ahead_revisions`. Recents are suggestions, never an allowlist.
 POST merges named nested keys, replaces each supplied list, and rejects unknown
 nested keys, non-string keys, strings over 120 characters and lists over 64 items
-with 400. A missing provider never clears or substitutes a saved key.
+with 400. `contributions.hide` / `contributions.show` (lists of keys) add or remove
+single keys of `hidden` under the file's lock, so concurrent windows keep each
+other's choices; a resulting `hidden` over 64 keys answers 400. A committed
+`contributions` change broadcasts `ui_preferences_changed`. A missing provider never clears or substitutes a saved key.
 The contribution response includes these preferences and `voice[kind]` as
 `{key, available, reason}`: reason is empty when available, `not_selected` for an
 empty choice or `provider_unavailable` for a missing chosen engine. Client API

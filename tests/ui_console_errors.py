@@ -91,21 +91,25 @@ class _PageError(str):
 
 
 class PageErrors(list):
-    """Every uncaught page error as text, recorded from each page it watches (``page``, once
-    constructed, then any passed to ``watch``): one list however many pages a test opens.
+    """Every page error as text, recorded from each page it watches (``page``, once constructed,
+    then any passed to ``watch``): one list however many pages a test opens.
 
     ``unexpected()`` sets aside one engine artifact (#1468), and only on a page watched as one
-    the test navigates (as ``page`` is). WebKit reports a fetch of the page's
-    OWN origin that it could not complete (cancelled or never sent because a navigation unloaded
-    the document, or refused while a test restarts the server) as "<url> due to access control
-    checks.", even when the page caught it. Only that text for the receiving page's current
-    committed HTTP(S) origin (scheme, host and port) is set aside, at the time the error arrives.
-    Before a navigation commits, this is still the document being left; earlier visited
-    origins and other pages' origins are not exemptions. A delayed cancellation from a
-    different origin after commit still counts. The text cannot prove cancellation, so another
-    same-origin error with exactly this engine wording is indistinguishable; pageerror supplies no
-    initiating-frame/request identity. If Playwright split
-    the URL, its error name must supply the scheme; an ambiguous bare URL counts."""
+    the test navigates (as ``page`` is). WebKit reports a fetch of the page's OWN origin that a
+    navigation cut off as "<url> due to access control checks.", even when the page caught it.
+    Only that text for the receiving page's current committed HTTP(S) origin (scheme, host and
+    port) is set aside, at the time the error arrives. Before a navigation commits, this is
+    still the document being left; earlier visited origins and other pages' origins are not
+    exemptions. A delayed cancellation from a different origin after commit still counts. If
+    Playwright split the URL, its error name must supply the scheme; an ambiguous bare URL counts.
+
+    A consumer starts strict, with ``PageErrors(None, engine)`` and ``watch(page, navigates=False)``,
+    and calls ``watch(page)`` immediately before the transition: the declaration holds for the
+    rest of the page's life, not for that navigation alone. The text cannot prove cancellation
+    and pageerror supplies no initiating-frame or request identity, so another own-origin error
+    in exactly this wording is set aside too, such as a read the page caught (Chromium reports
+    none of those). A read the page left uncaught still counts through its own rejection entry,
+    never set aside; from ``pagehide``, neither engine reports one."""
 
     def __init__(self, page, engine: str) -> None:
         super().__init__()

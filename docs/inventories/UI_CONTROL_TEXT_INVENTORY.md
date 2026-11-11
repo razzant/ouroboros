@@ -5,7 +5,7 @@ it: `docs/DESIGN.md` "References and actions". Rows are sorted by text so that t
 the same thing sit together: when your diff adds a row, read its neighbours.
 
 311 controls with fixed text in 282 rows, 198 distinct texts;
-183 more controls build their text at run time and are not listed.
+184 more controls build their text at run time and are not listed.
 
 ## Fixed control text
 

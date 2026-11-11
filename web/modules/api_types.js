@@ -717,6 +717,11 @@
  * @property {number=} chat_id  // new project thread; client learns it before /api/state (v6.32.0)
  */
 
+/** @typedef {Object} UiPreferencesChangedOutbound A committed POST /api/ui/preferences change: read it again.
+ * @property {"ui_preferences_changed"} type
+ * @property {string[]} keys  // the changed groups, e.g. ["contributions"]
+ */
+
 /** @typedef {Object} MessageAnnotationOutbound Bubble-free update for an existing owner message.
  * @property {"message_annotation"} type
  * @property {"routing_ack"} annotation_type

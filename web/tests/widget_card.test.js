@@ -150,6 +150,19 @@ test('framed cards carry Start/Stop and the launch policy; every card carries th
     }
 });
 
+test('a skill\'s placed controls get one checked item each on its widget card, named by state, not action', () => {
+    const menu = renderWidgetCardParts(tab({ kind: 'declarative', schema_version: 1, components: [] }), {
+        contributionVisibility: [{ key: 'claudexor_quotas:quota', label: 'Quotas', place: 'Chip above the composer', hidden: false },
+            { key: 'claudexor_quotas:save', label: 'Save', place: 'On replies', hidden: true }],
+    }).menu;
+    assert.match(menu, /role="group" aria-label="Shown in chat" data-widget-contributions/);
+    assert.match(menu, /role="menuitemcheckbox"[^>]*data-widget-contribution-key="claudexor_quotas:quota" data-widget-contribution-hidden="false" aria-checked="true" aria-label="Quotas, chip above the composer"/);
+    assert.match(menu, /data-widget-contribution-key="claudexor_quotas:save" data-widget-contribution-hidden="true" aria-checked="false"/);
+    assert.doesNotMatch(menu, /Hide |Show /, 'the check carries the state; the words name the control');
+    assert.ok(menu.indexOf('Shown in chat') < menu.indexOf('aria-label="Size"'), 'the group stands before Size');
+    assert.doesNotMatch(renderWidgetCardParts(tab({ kind: 'declarative', schema_version: 1, components: [] })).menu, /Shown in chat/);
+});
+
 test('a card menu is the same markup however many widgets the page shows', () => {
     // The scale invariant (docs/DESIGN.md "Widgets board"): nothing in a card's
     // label or menu depends on its neighbours, so 1 card and 18 cards read alike.
