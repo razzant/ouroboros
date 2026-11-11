@@ -14,6 +14,7 @@ import { createTaskEpisodes } from './task_episodes.js';
 import { markSwarmLabel, syncSwarmReceipt } from './swarm_presentation.js';
 import { syncCostBreakdown } from './cost_breakdown_presentation.js';
 import { createChatMedia, decorateContactSource, showTaskIncidentToast } from './chat_media.js';
+import { recordAnswerWords } from './message_actions.js';
 import { createCatchUp } from './room_retire.js';
 import { createChatPreview } from './chat_preview.js';
 import { attachmentCaption, attachmentViews, createUnconfirmedSends } from './chat_attachments.js';
@@ -2191,7 +2192,13 @@ export function createChatInstance({
         `;
         decorateContactSource(bubble, opts.presenceContact);
         if (attachments.length) chatMedia.mountAttachments(bubble, attachments, shown);
-        if (!isProgress && shown) chatMedia.attachCopyControl(bubble, String(shown));
+        if (!isProgress && shown) {
+            chatMedia.attachCopyControl(bubble, String(shown));
+            // What Share passes on: Ouroboros's own message, Copy's exact words (a note between works is not one).
+            if (role === 'assistant' && systemType !== 'relay_entry' && opts.textPlaceholder !== true) {
+                recordAnswerWords(bubble, String(shown), (close) => chatMedia.holdTransient(bubble, close));
+            }
+        }
         if (!isProgress) { replies.decorate(bubble, opts.reply); markSwarmLabel(messagesDiv, opts.reply, bubble); }
         // Legacy start/transfer rows without task or Project stay plain text with Copy; an answer tied to
         // another room's work ends with that Project reference, unfolded.
