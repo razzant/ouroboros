@@ -174,8 +174,9 @@ def cited_switch(ctx, *, model: str, owner_words: str, scope: str, project_id: s
                  model_as_typed: bool = False) -> str:
     """Only an integrating focus can carry the owner's room or Main choice.
 
-    Presence is an integrating focus too: its confirmed place-owner cite may choose
-    either scope. Delegated actors keep their own acting model and effort controls.
+    Presence is an integrating focus too: at Full autonomy its confirmed place-owner
+    cite may choose either scope. Dispatch enforces the level before this handler.
+    Delegated actors keep their own acting model and effort controls.
     """
     from ouroboros.lead_fact import is_integrating_focus
     from ouroboros.owner_words import cited_owner_basis

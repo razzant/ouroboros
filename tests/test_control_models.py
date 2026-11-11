@@ -3,6 +3,8 @@ import json
 
 import pytest
 
+from tests.test_place_focus import focus as focus
+
 
 @pytest.mark.parametrize("failure", ["policy", "storage", None])
 def test_cited_main_write_distinguishes_refusal_uncertainty_and_success(model_start, monkeypatch, failure):
@@ -167,7 +169,7 @@ def local_model_choices(model_start, monkeypatch, request):
 
 @pytest.mark.parametrize("scope", ["room", "main"])
 @pytest.mark.parametrize("actor", ["root", "presence", "child", "nanny", "reviewer"])
-def test_only_integrating_foci_may_carry_owner_choices_to_room_or_main(configured_model_start, monkeypatch, scope, actor):
+def test_only_integrating_foci_may_carry_owner_choices_to_room_or_main(configured_model_start, focus, monkeypatch, scope, actor):
     from ouroboros.owner_words import PLACE_CONFIRMED
     from ouroboros.tools.control_runtime import _switch_model
     from ouroboros.tools.tool_result import _published_tool_result
@@ -179,7 +181,14 @@ def test_only_integrating_foci_may_carry_owner_choices_to_room_or_main(configure
     if actor == "reviewer":
         ctx.task_metadata["review_role"] = "result"
     if actor == "presence":
-        ctx.task_metadata["_presence_turn"] = True
+        from ouroboros.presence_context import focus_metadata
+
+        monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_AUTONOMY", "full")
+        root, _place, admission, event = focus
+        ctx.task_metadata = focus_metadata(admission, event, ctx.task_id, 7, root)
+        ctx.current_task_type = "presence"
+        assert ctx.task_metadata["initiator"] == "consciousness"
+        assert ctx.task_metadata["consciousness_autonomy"] == "full"
         ctx._owner_directives[0]["source"] = PLACE_CONFIRMED
     writes, recents = [], []
     monkeypatch.setattr("ouroboros.composer_cognition.update_project_model_choice",

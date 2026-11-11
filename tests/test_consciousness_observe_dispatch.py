@@ -11,12 +11,16 @@ including what a read-only descendant of such a wake may ask for in turn.
 from __future__ import annotations
 
 import json
+import queue
+from dataclasses import replace
 
+import pytest
 
 from ouroboros import consciousness_authority as ca
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests.test_consciousness_authority import _registry, _wake_task
 from tests._cases import case_folders
+from tests.test_place_focus import focus as focus
 
 
 _MUTATING_SHAPES = [
@@ -30,6 +34,8 @@ _MUTATING_SHAPES = [
     ("edit_text", {"root": "active_workspace", "path": "x.py", "old": "a", "new": "b"}),
     ("manage_schedules", {"action": "update", "schedule_id": "s1", "reason": "change time", "cron": "0 9 * * *"}),
     ("configure_presence", {"action": "set_state", "place_id": "p1", "state": "paused"}),
+    ("switch_model", {"scope": "room", "project_id": "alpha", "model": "vendor/chosen"}),
+    ("switch_model", {"scope": "main", "model": "vendor/chosen"}),
 ]
 
 
@@ -87,6 +93,146 @@ def test_every_level_below_full_reads_places_and_changes_none(tmp_path, monkeypa
     assert ca.observe_argument_refusal(_wake_task("full")["metadata"], "configure_presence", edit) == ""
     assert ca.observe_argument_refusal({"work_kind": "owner"}, "configure_presence", edit) == ""
     assert "configure_presence" not in ca.disabled_tools_for("act") + ca.disabled_tools_for("observe")
+
+
+@pytest.fixture
+def model_effects(monkeypatch):
+    from tests._safety_fixtures import disable_safety
+
+    disable_safety(monkeypatch)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
+    monkeypatch.setattr("ouroboros.tools.control_models.known_models",
+                        lambda: [{"model": "vendor/chosen", "use_local": False}])
+    monkeypatch.setattr("ouroboros.llm.LLMClient.available_models", lambda _self: ["vendor/chosen"])
+    writes, recents = [], []
+    monkeypatch.setattr("ouroboros.gateway.owner_effort._write_main_route",
+                        lambda _request, choice, **kw: writes.append(("main", choice)) or {"ok": True})
+    monkeypatch.setattr("ouroboros.composer_cognition.update_project_model_choice",
+                        lambda root, pid, choice: writes.append((pid, choice)) or ({"kind": "main"}, choice))
+    monkeypatch.setattr("ouroboros.gateway.ui_preferences.record_model_recent", lambda *a: recents.append(a))
+    return writes, recents
+
+
+def _place_model_registry(focus, monkeypatch, level):
+    """Build the real place carrier, including focus_metadata's origin and autonomy."""
+    from ouroboros import places
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_words import PLACE_CONFIRMED
+    from ouroboros.presence_runner import _build_task
+
+    monkeypatch.setenv("OUROBOROS_CONSCIOUSNESS_AUTONOMY", level)
+    root, place, admission, event = focus
+    place = places.edit_place(root, place.place_id, "confirm_owner_account", author="owner", platform_actor_id="person")
+    event = replace(event, text="Please use the other model.")
+    task = _build_task(replace(admission, place=place), event, drive_root=root, staged_files=())
+    metadata = task["metadata"]
+    assert metadata["initiator"] == "consciousness" and metadata["consciousness_autonomy"] == level
+    assert metadata["focus"]["actor"]["owner_confirmed"] is True
+    reg = ToolRegistry(repo_dir=root, drive_root=root)
+    ctx = ToolContext(repo_dir=root, drive_root=root, task_id=task["id"], current_task_type="presence",
+                      is_direct_chat=True, current_chat_id=task["chat_id"], task_metadata=metadata,
+                      task_contract=task["task_contract"], event_queue=queue.Queue())
+    reg.set_context(ctx)
+    _initialize_owner_directives(ctx, [{"role": "user", "content": "[FOCUS] the captured event"}])
+    assert ctx._owner_directives[0]["source"] == PLACE_CONFIRMED
+    return reg, task
+
+
+@pytest.mark.parametrize("scope", ["room", "main"])
+@pytest.mark.parametrize("level", ["observe", "act", "full"])
+def test_place_cited_settings_choices_require_full_at_dispatch(focus, monkeypatch, model_effects, level, scope):
+    reg, _task = _place_model_registry(focus, monkeypatch, level)
+    writes, recents = model_effects
+    assert reg.get_schema_by_name("switch_model") is not None
+    args = {"scope": scope, "model": "vendor/chosen", "owner_words": "use the other model"}
+    if scope == "room":
+        args["project_id"] = "alpha"
+    result = reg.execute_result("switch_model", args)
+    if level == "full":
+        assert result.status == "ok", result.text
+        assert json.loads(result.text.splitlines()[0])["ok"] is True
+        assert writes == [("alpha" if scope == "room" else "main",
+                           {"kind": "model", "model": "vendor/chosen", "use_local": False})]
+        assert len(recents) == 1
+    else:
+        assert result.status == "blocked" and result.code == "RESOURCE_CONSTRAINT_BLOCKED", result.text
+        assert "below Full autonomy" in result.text and "Model capsule or by a word in Main" in result.text
+        assert "a Full wake may carry the cite" in result.text
+        assert not writes and not recents  # neither settings writer (and its act receipt) is reached
+    assert reg._ctx.event_queue.empty()  # no supervisor model act was emitted
+
+
+@pytest.mark.parametrize("scope", [None, "work"])
+@pytest.mark.parametrize("level", ["observe", "act"])
+def test_below_full_place_keeps_its_own_route_and_effort_switch(focus, monkeypatch, model_effects, level, scope):
+    from ouroboros.owner_model import eligibility
+    from ouroboros.task_results import write_task_result
+
+    reg, task = _place_model_registry(focus, monkeypatch, level)
+    args = {"model": "vendor/chosen", "effort": "high", **({"scope": scope} if scope else {})}
+    result = reg.execute_result("switch_model", args)
+    assert result.status == "ok", result.text
+    assert reg._ctx.active_model_override == "vendor/chosen"
+    assert reg._ctx.active_effort_override == "high"
+    # A cited primary change still meets the separate durable-Presence refusal.
+    assert eligibility(task) == "presence_model_unsupported"
+    stored = write_task_result(reg._ctx.drive_root, task["id"], "running",
+                               _presence_turn=task["_presence_turn"], metadata=task["metadata"])
+    assert eligibility(stored) == "presence_model_unsupported"
+    result = reg.execute_result("switch_model", {**args, "owner_words": "use the other model"})
+    assert result.status == "error" and result.code == "TOOL_ARG_ERROR", result.text
+    assert "no eligible durable root" in result.text
+    assert model_effects == ([], []) and reg._ctx.event_queue.empty()
+
+
+@pytest.mark.parametrize("level", ["observe", "act"])
+def test_place_model_start_keeps_the_existing_level_boundary(focus, monkeypatch, model_effects, level):
+    from ouroboros.tools import control_routing
+
+    reg, _task = _place_model_registry(focus, monkeypatch, level)
+    starts = []
+    monkeypatch.setattr(control_routing, "_promotion_pool_disabled_from_snapshot", lambda _ctx: "")
+    monkeypatch.setattr(control_routing, "_emit_and_wait_for_routing",
+                        lambda _ctx, event: (starts.append(event) or "live", {"status": "scheduled"}))
+    args = {"objective": "Write the report", "title": "Report", "destination": "place",
+            "model": "vendor/chosen", "owner_words": "use the other model"}
+    assert ca.observe_argument_refusal(reg._ctx.task_metadata, "start_task", args) == ""
+    result = reg.execute_result("start_task", args)
+    if level == "act":
+        assert result.status == "ok", result.text
+        assert starts[0]["metadata"]["lead"] == {
+            "source": "owner_words", "model": "vendor/chosen", "use_local": False, "cited": "use the other model"}
+    else:
+        assert result.status == "blocked" and result.code == "RESOURCE_CONSTRAINT_BLOCKED"
+        assert "disabled_tools" in result.text and "start_task" in result.text and not starts
+    assert model_effects == ([], [])
+
+
+@pytest.mark.parametrize("actor", ["main_chat", "project_chat", "owner_root"])
+@pytest.mark.parametrize("source", ["initial_user", "live_call"])
+@pytest.mark.parametrize("scope", ["work", "room", "main"])
+def test_owner_foci_keep_cited_model_choices_at_dispatch(tmp_path, monkeypatch, model_effects, actor, source, scope):
+    reg = _registry(tmp_path, {"work_kind": "owner", "client_message_id": "owner-message"})
+    ctx = reg._ctx
+    ctx.is_direct_chat = actor != "owner_root"
+    ctx.project_id = "alpha" if actor == "project_chat" else ""
+    ctx._owner_directives = [{"source": source, "content": "Please use the other model.", "utterance_id": "u1"}]
+    requests = []
+    monkeypatch.setattr("ouroboros.tools.control_models.request_work_model",
+                        lambda _ctx, choice: (requests.append(choice) or '{"ok": true}', True))
+    args = {"scope": scope, "model": "vendor/chosen", "owner_words": "use the other model"}
+    if scope == "room":
+        args["project_id"] = "alpha"
+    result = reg.execute_result("switch_model", args)
+    assert result.status == "ok" and json.loads(result.text.splitlines()[0])["ok"], result.text
+    writes, recents = model_effects
+    if scope == "work":
+        assert requests == [{"kind": "model", "model": "vendor/chosen", "use_local": False, "cited": "use the other model"}]
+        assert not writes and not recents
+    else:
+        assert not requests and len(recents) == 1
+        assert writes == [("alpha" if scope == "room" else "main",
+                           {"kind": "model", "model": "vendor/chosen", "use_local": False})]
 
 
 def test_observe_keeps_its_own_research_and_notes(tmp_path, monkeypatch):
