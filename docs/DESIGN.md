@@ -2851,9 +2851,29 @@ stops clear of them.
 - Field labels are sentence case at meta ink: a step shows a dozen at once to
   get one value typed, not to present a grid of headings.
 
-### Advanced settings
+### Settings
 
-The panels a new owner opens first (Models, Providers, Agents, Behavior) show only what an owner touches in the first week. Anything a typical owner never needs or must look up to use safely lives under Advanced: deployment plumbing (bind hosts, process pools, runtime limits), transport and trust knobs such as the extra CA bundle, MCP servers, and the rarely used provider cards, which stay on the Providers page but fold under "More providers". A control needing a paragraph of explanation to be safe is Advanced by definition. Seams: the `advanced` settings panel and the `advanced: true` flag in `web/modules/settings_provider_cards.js` (DEVELOPMENT "Onboarding and Settings surfaces").
+**A row is a question with its current answer, and a setting has one row** (§6); the result of a change shares
+its one line of meaning, and a paragraph waits behind `More`. The home is Ouroboros's card, search and six groups
+of rows; a wide window keeps it beside the open page, whose first row is Back. A row opens its page or is a door:
+what lives elsewhere (a Dashboard tab beside its live state, Main's composer) shows its value here and leads
+there, and a tab opened from here leads back. A list of entries (agents, tool servers, keys, fallbacks) is heads:
+a press opens the entry's page, Add an unsaved one. The card speaks in Ouroboros's voice: what it has read that
+waits for the owner here, each with its one action, and a neutral line with Check for what it has not read; it
+never says that nothing waits.
+
+**No page-wide Save, no page draft.** A switch (an entry's too), a strip and a choice act when pressed; a typed
+value is written when its field is left, and its line says `Saved`, the value it replaced and `Undo`. A change
+that waits says when in that line, as the server answers for its key: from the next model call or wake, to new
+tasks, after restart, when the local model is restarted; while a restart waits the row shows both values. A
+refusal keeps the typed text and says why. Raising Access, lowering a Safety level, opening to the network,
+turning automatic grants on and a removal ask first. An editor of several fields and the owner's rules keep
+their own Save.
+
+**More and Advanced.** A page's rare rows fold under one `More` that names what it holds; what an install rarely
+changes is This computer › Advanced. One word names one thing on a page. Search is literal over names,
+old names and keys and ends by handing the words to Ouroboros as a draft in Main; an address no page registers
+opens the home with its word searched.
 
 ## 8. Author freedom
 
