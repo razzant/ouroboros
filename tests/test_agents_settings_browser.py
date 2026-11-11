@@ -223,6 +223,28 @@ def test_a_switch_writes_its_own_entry_and_never_an_open_form(subscription_ui, w
     assert not ui["errors"].unexpected(), ui["errors"].report()
 
 
+def test_a_row_the_page_is_opened_for_takes_the_focus_with_its_value(subscription_ui):
+    """Search and other pages open Agents on a row: a row of the fold is revealed (the fold opens) holding its
+    stored value, though the page reads after it is opened and a focused field is never rewritten; the roster's own
+    row takes the focus on its switch."""
+    ui = subscription_ui
+    page = ui["new_page"](viewport={"width": 1087, "height": 740})
+    RosterServer(ui, SCENE).serve(page)
+    page.goto(ui["url"] + "/#settings")
+    depth = "OUROBOROS_MAX_SUBAGENT_DEPTH"
+    level = open_settings(page, "agents", depth)
+    page.wait_for_function("""row => { const at = document.activeElement;
+        return at?.closest('[data-setting-row]')?.dataset.settingRow === row && at.value === '3'; }""", arg=depth)
+    assert level.locator("details[data-settings-fold]").evaluate("el => el.open")
+    open_settings(page, "")
+    level = open_settings(page, "agents", KEY)
+    page.wait_for_function("""row => { const at = document.activeElement;
+        return at?.closest('[data-setting-row]')?.dataset.settingRow === row && at.getAttribute('role') === 'switch'
+            && at.checked; }""", arg=KEY)
+    assert not level.locator("details[data-settings-fold]").evaluate("el => el.open")
+    assert not ui["errors"].unexpected(), ui["errors"].report()
+
+
 @pytest.mark.parametrize("theme", ["dark", "light"])
 @pytest.mark.parametrize("width,height", [(1087, 740), (320, 640)])
 def test_the_list_and_an_agents_page_keep_their_shape(subscription_ui, width, height, theme):

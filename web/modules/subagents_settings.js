@@ -1399,9 +1399,7 @@ export async function readReviewPool() {
         const payload = await resp.json().catch(() => ({}));
         if (!resp.ok) throw new Error(payload.error || `HTTP ${resp.status}`);
         return payload;
-    } catch (error) {
-        return { load_error: `Review pool facts could not be read: ${error.message || error}` };
-    }
+    } catch (error) { return { load_error: `Review pool facts could not be read: ${error.message || error}` }; }
 }
 
 // The last-reviewer question of every roster write, in the owner's words (the server's sentence names a request flag).
@@ -1426,9 +1424,10 @@ function mountAgents(container, { path, ctx }) {
         ${root}
         <section class="ui-card agents-card"><details class="ui-disclosure" data-settings-fold>
             <summary>More: limits for helpers and their folders</summary>
-            <div class="agents-rows">${rowsOf('agents', { fold: true }).map((row) => settingsRow(row)).join('')}</div>
+            <div class="agents-rows" data-agents-fold></div>
         </details></section>`;
-    const fold = entry ? null : bindSettingRows(container.querySelector('[data-settings-fold]'));
+    const foldRows = container.querySelector('[data-agents-fold]');
+    let fold = null;
     const roster = container.querySelector(`[data-setting-row="${KEY}"]`);
     const delegation = roster?.querySelector('[data-setting-control]');
     let reading = null;
@@ -1437,9 +1436,11 @@ function mountAgents(container, { path, ctx }) {
         // A failed read keeps what the page showed (the next showing reads again); with nothing shown yet it says so.
         try { settings = await ctx.readSettings(); } catch { if (!editor.loaded) editor.load(undefined); return; }
         editor.adopt(settings);
+        // The fold's rows are drawn once their values are read: a row the page was opened for takes the focus filled.
+        if (foldRows && !fold) foldRows.innerHTML = rowsOf('agents', { fold: true }).map((row) => settingsRow(row)).join('');
+        fold = fold || (foldRows ? bindSettingRows(foldRows) : null);
         fold?.paint();
-        if (delegation) Object.assign(delegation, { checked: editor.setting.enabled, disabled: !editor.loaded })
-            .setAttribute('aria-checked', String(editor.setting.enabled));
+        if (delegation) Object.assign(delegation, { checked: editor.setting.enabled, disabled: !editor.loaded }).setAttribute('aria-checked', String(editor.setting.enabled));
         void readReviewPool().then((payload) => editor.setReviewPool(payload));
         void editor.reloadStatus();
     };

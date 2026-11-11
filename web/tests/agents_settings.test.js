@@ -358,7 +358,7 @@ test('a new agent is an unsaved form whose on/off is a field of it; its Save add
 
 test('Helpers may change files is a strip over the stored spelling: Auto is the unset value, and a receipt reads back in its words', async (t) => {
     const page = await open(t);
-    const fold = page.container.querySelector('[data-settings-fold]');
+    const fold = page.container.querySelector('[data-agents-fold]');
     const row = fold.querySelector('[data-setting-row="OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS"]');
     const option = (label) => row.querySelectorAll('[data-setting-value]').find((button) => button.textContent === label);
     const pressed = () => row.querySelectorAll('[data-setting-value]').filter((button) => button.getAttribute('aria-pressed') === 'true')
