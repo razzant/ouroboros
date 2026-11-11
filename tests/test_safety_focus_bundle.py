@@ -195,7 +195,8 @@ def test_one_source_carried_twice_is_sent_once_whole_with_its_time_beside_one_no
     assert [row["source"] for row in shown] == ["origin_message", "owner_mailbox", "initial_text", "initial_text"]
     assert shown[0]["content"] == long_words and json.dumps(bundle, ensure_ascii=False).count(long_words) == 1
     assert shown[1]["ts"] == "2026-11-09T12:49:09+00:00" and not any("now" in row for row in shown)
-    assert datetime.fromisoformat(bundle["work"]["now"]).tzinfo is not None
+    now = bundle["work"]["now"]  # the rows' form: whole seconds and a +00:00 offset
+    assert datetime.fromisoformat(now).microsecond == 0 and len(now) == len(shown[1]["ts"]) and now.endswith("+00:00")
 
 
 def test_a_helper_reads_the_words_carried_to_its_work_and_never_a_siblings(checker, tmp_path):

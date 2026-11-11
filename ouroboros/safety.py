@@ -679,7 +679,7 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
     bundle = {
         "work": {"kind": kind, "label": "your work" if kind == "owner" else "consciousness",
                  "root_task_id": _root_id(ctx), "task_id": getattr(ctx, "task_id", ""), "runtime_mode": _runtime_mode(ctx),
-                 "consciousness_autonomy": metadata.get("consciousness_autonomy"), "now": utc_now_iso()},
+                 "consciousness_autonomy": metadata.get("consciousness_autonomy"), "now": utc_now_iso("seconds")},
         "occasion": {"cause": occasion, "consciousness_cause": metadata.get("consciousness_cause"),
                      "origin_wake_task_id": metadata.get("origin_wake_task_id"), "focus": focus,
                      "sources": sources, "retained_host_sources": isinstance(directives, list)},
