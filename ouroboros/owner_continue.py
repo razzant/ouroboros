@@ -840,7 +840,7 @@ def recorded_system_checkout(result: Dict[str, Any]) -> Dict[str, str]:
 def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any], *,
                     deadline_at: str = "", authority_source: Optional[Dict[str, Any]] = None,
                     checkout: Optional[Dict[str, str]] = None, successor_task_id: str = "",
-                    drive_mode: str = "", stop_note: str = "", tree_note: str = "") -> str:
+                    drive_mode: str = "", stop_note: str = "", tree_note: str = "", work_name_open: bool = False) -> str:
     """The successor's first message: host-authored FACTS, the owner's words verbatim.
 
     It frames nothing as a decision: the model judges whether and how to go on and asks the owner in this
@@ -968,11 +968,15 @@ def work_order_text(predecessor_task_id: str, cause: str, sources: Dict[str, Any
                        f"message{'s' if len(peers) != 1 else ''}, {chars} characters, from {', '.join(senders)}. "
                        "They are not repeated here; query_data(op='json', kind='task_result', "
                        f"ids=[{own!r}], select='metadata.continuation.peer_context') returns them exactly, in order.")]
+    if work_name_open:
+        lines += ["", "This work has no subject name of its own yet. With your first update_focus, also pass work_name: "
+                      "a short name for what the work is about that stays as it continues, not its status; the "
+                      "tool's answer says whether it was taken."]
     return "\n".join(lines)
 
 
-def claim_on_predecessor(drive_root: Any, predecessor_task_id: str, nonce: str,
-                         binding: Dict[str, Any]) -> Tuple[Dict[str, Any], bool]:
+def claim_on_predecessor(drive_root: Any, predecessor_task_id: str, nonce: str, binding: Dict[str, Any],
+                         *, declared_by: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], bool]:
     """Bind this action on the predecessor BEFORE any effect; ``(claim, created)``.
 
     Same nonce: the recorded claim (replay). Another nonce while a claim
@@ -995,7 +999,8 @@ def claim_on_predecessor(drive_root: Any, predecessor_task_id: str, nonce: str,
         if (execution_carry(current) or {}) != {key: binding[key] for key in EXECUTION_CARRY_KEYS if key in binding}:
             raise ValueError("execution_budget_changed")  # a later close: the same nonce rebinds
         from ouroboros.control_actor import control_actor
-        claim = {"by": control_actor(), "successor_task_id": binding["successor_task_id"], "action_nonce": nonce,
+        claim = {"by": control_actor() or dict(declared_by or {}), "successor_task_id": binding["successor_task_id"],
+                 "action_nonce": nonce,
                  "binding": dict(binding), "binding_sha256": binding_sha(binding),
                  "bound_at": utc_now_iso(), "state": "bound"}
         outcome.update(claim=claim, created=True)

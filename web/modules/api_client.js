@@ -391,7 +391,7 @@ export function continueTask(taskId, actionNonce) {
     return jsonPost(
         `/api/tasks/${encodeURIComponent(taskId)}/continue`,
         { action_nonce: String(actionNonce || '') },
-        { rejectOkFalse: true },
+        { rejectOkFalse: true, headers: APP_SETTINGS_ORIGIN },
     );
 }
 

@@ -2000,10 +2000,14 @@ def _drop_cancelled_pending() -> bool:
     if not PENDING:
         return True
     try:
-        from supervisor.restart_retention import conserve_unreadable_pending
         from ouroboros.task_results import (
-            STATUS_CANCEL_REQUESTED, STATUS_CANCELLED, _TRULY_TERMINAL_STATUSES, write_task_result,
+            _TRULY_TERMINAL_STATUSES,
+            STATUS_CANCEL_REQUESTED,
+            STATUS_CANCELLED,
+            write_task_result,
         )
+        from supervisor.ended_work_helpers import closes_only_parked_row
+        from supervisor.restart_retention import conserve_unreadable_pending
     except Exception:
         log.error(
             "Pending task-result authority imports are unavailable; assignment is blocked",
@@ -2119,6 +2123,9 @@ def _drop_cancelled_pending() -> bool:
             or (current_intents is not None and tid in current_intents)
         ):
             survivors.append(t)
+            continue
+        if closes_only_parked_row(current_intents.get(tid)):
+            survivors.append(t)  # its settlement rechecks the row and captures off Q (``ended_work_helpers``)
             continue
         if tid and (
             status == STATUS_CANCEL_REQUESTED or tid in current_intents

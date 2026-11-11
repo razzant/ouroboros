@@ -41,6 +41,7 @@ pool's own growth.
 from __future__ import annotations
 
 import logging
+import pathlib
 import time
 import uuid
 from typing import Any, Dict, List
@@ -724,12 +725,15 @@ def handle_task_named(evt: Dict[str, Any], ctx: Any) -> None:
 
     A queue row admitted with a name (a late input's head, ``worker_chat_lane._late_input_naming``) follows the
     task's chosen name by value, running or already parked, so its receipts, works row, park, detach and restore never
-    fall back to the admission name: the name its result holds, the frame's only where it holds none. The namer writes
+    fall back to the admission name: the name its result holds, the frame's only where it holds none. That result is the
+    record owning the name, as the replica reducer reads it (``canonical_name_fields``): a titled canonical record's own,
+    else the copy its carrier writes on a split drive. The namer writes
     that result before its frame, while a frame can be older than it: a resumed attempt's first step re-announces the
     name the Resume dispatched, and two carriers' frames can cross. The result is read off Q (ARCHITECTURE §5) and
     never waits on a busy store; re-taken Q finds the row by its task id again. A result that cannot be read (busy,
     unreadable or refused) leaves the row's own name standing, logged, never the frame's. The bridge broadcasts the
     name the row then carries. A row without one keeps reading its durable result."""
+    from ouroboros.post_task_checkpoint import canonical_name_fields
     from ouroboros.store import acquisition_budget
     from ouroboros.task_results import load_task_result
     from supervisor.queue_snapshot import persist_queue_snapshot
@@ -740,11 +744,16 @@ def handle_task_named(evt: Dict[str, Any], ctx: Any) -> None:
     with _queue_lock:
         row = _queue_row(ctx, task_id)
         named = isinstance(row, dict) and bool(row.get("suggested_name"))
-        root = (row.get("drive_root") or _pool().DRIVE_ROOT) if named else None  # where its carrier writes the result
+        if named:
+            canonical = pathlib.Path(row.get("budget_drive_root") or _pool().DRIVE_ROOT)
+            execution = pathlib.Path(row.get("drive_root") or _pool().DRIVE_ROOT)  # where its carrier writes the result
     if named:
         try:
             with acquisition_budget(0):
-                chosen = str((load_task_result(root, task_id, strict=True) or {}).get("suggested_name") or "") or name
+                record = load_task_result(canonical, task_id, strict=True) or {}
+                if execution != canonical and "suggested_name" not in canonical_name_fields(record):
+                    record = load_task_result(execution, task_id, strict=True) or {}
+                chosen = str(record.get("suggested_name") or "") or name
         except Exception as exc:
             chosen = ""
             log.warning("task_named %r for %s not applied: its result could not be read (%r); "

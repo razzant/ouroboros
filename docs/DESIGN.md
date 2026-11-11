@@ -1471,12 +1471,13 @@ Building context`, and nothing reads `Thinking` before a model call is sent),
 then one mark, as on the sidebar's rows; no frame at rest, a neutral
 tint on hover and while open, a caret when it opens. A working work the host dated as silent
 says so first in its quiet line (a recorded Stop still leads), `No recorded progress since 14:02`, in status ink (no amber, no
-new mark), until its own progress. A work is one request with
-its Continue episodes and whatever of them still lives (helpers, delegated
-runs still working, post-answer upkeep); the server gives each work and each room
-one status, and every surface (bar, work list, sidebar, cards, tray) words that
-one status without deciding its own; Activity's rows keep their queue words, said
-as the chip says them (never a raw phase code), and take the work's controls. A
+new mark), until its own progress. A work comprises one request, its Continue
+episodes and live helpers, delegated runs or post-answer upkeep. The server's
+single work/room status is worded by the bar, work list, sidebar, cards and tray;
+none decides its own.
+Activity uses the chip's queue words, never raw phase codes, and the work's controls.
+Parked helpers close when their ended root's tree is quiet; a live member keeps
+that tree's paused helpers resumable and may keep amber visible. A
 card without a projected work (a child, Main's owner-action message, a replayed
 card) takes its shape from its census phase through one table pinned to the
 server's `mark_of`, and the owner's move only from proved facts (`can_resume`,
@@ -1843,7 +1844,7 @@ Unavailable canonical refresh retains text, references and drafts but disables a
 **One message in two rooms.** Main is the owner's own conversation, where a work's expected results, decisions and substantial changes arrive promptly, even with no action needed; the rest stays in its room, routine progress on its card and focus line, in Main too. A Project room is its work's whole conversation. What its work says in Main, or answers in the room a note came from, also stands there at its time: the same words, address, Reply and Copy, never a copy or a link, and one notification (owner 28.10, A). Presence's private contact stands there too, never in its place; work a place started answers in its Project too, with its Done row, while the place hears only its own reply (owner 31.10). Host refusals and move receipts stay where issued.
 
 **Work portal.** Work keeps its Main card at the request’s place after a Project move
-(Turn into project, the mind's move, a binding); start/transfer rows name the destination without a second entry. Its portal: status chip and quiet fact, title,
+(Turn into project, the mind's move, a binding); start/transfer rows name the destination, no second entry. Its portal: status chip and quiet fact, title,
 latest line (two lines, cut on a word), the meta line (tool calls · money ·
 updated), one action row: the Project reference, then `[Reply] [Resume] [Stop…]`
 with one primary (owner 26.10, B). Timeline, Reviews and children live
@@ -1854,10 +1855,10 @@ wins, else nothing. The chip reads typed final outcome
 or durable detail. An undurable Main receipt keeps
 a dashed border and plain warning; its binding holds. The owner's routing line under his message hides while its portal is in the
 feed; later words passed to the work keep theirs. A Continue is the same card: the
-admitted successor takes the work's place and first name. Each episode has its
-own name, time and past outcome; only the current one owns the chip and controls.
-Expanded ordinary cards disclose earlier Files, timeline, Reviews and children
-in collapsible sections using their original content, never duplicate cards.
+admitted successor takes the work's place and first name (its subject, if unnamed).
+Each episode keeps its name, time, outcome and sentence; only the current one owns chip and controls.
+Expanded ordinary cards disclose earlier Files, timeline, Reviews, children
+in collapsible original-content sections, never duplicate cards.
 
 **Project completion mirror.** Eligible managed/transferred model-authored finals reach Main as host-stamped Markdown in Ouroboros's voice; ordinary Project-native replies stay local. Long answers keep a seven-line footprint; only painted fading text extends two lines into footer whitespace, without moving Project/time/actions. Short answers have no fade; limitations/details keep the tail above their words. Complete text stays selectable; folded text has no keyboard stops. Project opens the complete answer and delivered documents; Main has no expansion or Files inventory. A nonclean final has one compact, wrapping limitation from the recorded outcome/review; a clean final has no status caption. Copy and Reply quote the answer alone. Ordinary document readers, quiz materials and task-card Files stay on their existing surfaces; retained availability is not delivery or owner receipt. Full reviews, logs and progress stay in their sources. Durable rows/wire frames keep System metadata and text; Reply uses the persisted visible answer without changing its address. Telegram status replies reference the work instead. Endings without an authored answer keep System voice: Main shows the work's name and true outcome, its cause, accessible recorded details and any labelled preserved output. The Project is named once by its reference; Copy, canonical history and Telegram retain full context. Older rows without these typed facts keep their stored text. A quiet scheduled run (it finished without a message) keeps its internal result and its ordinary `Done · no message` card in its own room, titled by its schedule's name with the run's own sentence as the line under it; it creates no Main completion summary and sends no finish notification, while a host notice it carries stays visible. One logical identity joins retries/history and keeps one-ending-one-notification; external transport stays at-least-once.
 
@@ -2560,11 +2561,11 @@ process to keep running.
 
 A self-started run (a wake, a schedule-born root) keeps the ordinary task card (owner 28.10, 1A 2A): its accepted summary is the whole head (owner 01.11 10:52, A) when the run has no authored name (a wake), else the line under the schedule's name; either way it leads Details as “In its words”, and the answer remains the run's own note when it finishes silently.
 While running, the server supplies Own time, the focus's cause label or the
-schedule's name in that title slot; no summary leaves the title in place, with
-no invented sentence. Model waits, controls and temporary model changes last
+schedule's name in that slot; no summary leaves the title in place, with no
+invented sentence. Model waits, controls and temporary model changes last
 until the turn ends; the persistence checkbox still saves the consciousness
 role. `Started by: Schedule · <name>` keeps the origin in Details;
-`Started by: Consciousness` keeps it in Details and on its delivered answers.
+`Started by: Consciousness` there and on delivered answers; `Continued by` names its asker.
 The summary is authored text, not another message or card.
 
 An already-delivered answer does not close a still-open post-task synthesis.
