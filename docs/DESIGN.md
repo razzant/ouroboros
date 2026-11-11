@@ -479,7 +479,7 @@ above the row like the hint and never move the composer** (owner 10.11, «9. A»
 that can lead a work (those Settings offers the Main role, never agent sessions; with one source, its models at
 once). A row is one model through one source, however many accounts list it, never an account: the source, whether
 it is a subscription or paid by key, its window when known (an unknown window is omitted), `Unavailable` when no
-account can serve it now. Search spans the sources, a model once per provider; a key that cannot send keeps
+account can serve it now; where a line cannot hold both, the facts go under the model's name, which keeps its line. Search spans the sources, a model once per provider; a key that cannot send keeps
 Settings' "(no key)", "(off)", "(removed)"; where only Main can lead, the list says so and leads to Settings ›
 Accounts. The catalog suggests and never admits: any id can be used as typed. It is read when the capsule opens,
 never polled. Under a finger opening raises no keyboard: the field takes focus on its own press. Escape clears the

@@ -16,6 +16,7 @@ import { apiClient } from './api_client.js';
 import { createCapsule } from './capsule.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { fmt, tr, translateString } from './i18n.js';
+import { createModelList, modelSearchField, routeFacts, SEARCH_ICON } from './model_list.js';
 import { haptic } from './haptics.js';
 import { isCoarsePointer, isStackLayout, onLayoutChange } from './layout.js';
 import { modelCatalog } from './model_catalog_store.js';
@@ -24,30 +25,14 @@ import { sourceMark } from './model_source_mark.js';
 import { bindPopoverPosition } from './ui_interactions.js';
 import { escapeHtmlAttr as esc } from './ui_primitives.js';
 import {
-    MAIN_CHOICE, describeRoute, normalizeChoice, normalizeRoute, routeKey, sameRoute, searchModels, shortName,
-    sourceUnlisted, typedRoute,
+    MAIN_CHOICE, describeRoute, normalizeChoice, normalizeRoute, routeKey, sameRoute, shortName, sourceUnlisted,
 } from './chat_model_routes.js';
 
 // When a pick takes effect, the hint's rule line: for a room, and for Main itself.
 export const MODEL_RULE = 'Applies to new work here; running work keeps its model.';
 export const MAIN_RULE = 'New work starts on it everywhere, unless a room has its own model.';
 const MAIN_KEY = 'main';
-// How many suggestions one list shows; the rest wait for another letter.
-const LIST_ROWS = 60;
 let serial = 0;
-
-const SEARCH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"'
-    + ' stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>';
-
-// Words this module composes into lines the translation overlay leaves alone (they name models and sources): each
-// is asked for by its own code, the composed ones by their template. Words standing alone in the page are the overlay's.
-const payWords = (said) => tr(`model.pay.${said.lane}`, said.pay);
-
-/** A route's facts in the owner's words: its source, how that source is paid, its window when one is known. */
-export function routeFacts(said) {
-    return [said.sourceLabel, payWords(said), said.window ? fmt('{window} window', { window: said.window }) : '']
-        .filter(Boolean).join(' · ');
-}
 
 /**
  * The models of this room's live works that differ from what the capsule shows, by their short names: the hint's one
@@ -137,7 +122,7 @@ export function createModelControl({
     // `main` is what Main is now (`/api/state.main_route`), `choice` the room's own (`projects[].model_choice`); the
     // Main chat's capsule is Main, so it has no choice of its own.
     const state = { main: null, choice: { ...MAIN_CHOICE }, works: null, saving: null, lastOk: true, destroyed: false };
-    const search = { on: false, query: '', only: '', active: -1, rows: [], list: null, input: null, position: null };
+    const search = { on: false, rows: null, list: null, position: null };  // rows: the list of models while Search is on
     const segs = [];          // the strip's values as the machine's fit measures them: Main, the recents, Search
     const routes = new Map(); // a segment's key → its route
     let segsKey = null, markKey = null, nameWords = null, control = null;
@@ -227,7 +212,7 @@ export function createModelControl({
         // A saved API source this catalog read did not list: the settings document says why it cannot send.
         if (said && store.status().read && !store.status().failed && sourceUnlisted(store.index(), shown())) void store.readConnections();
         control?.sayHint();
-        if (search.on) paintList();
+        if (search.on) search.rows.paint();
     }
 
     // The chosen route, or the one a mouse rests on; under it, the models this room's works run on when they differ.
@@ -309,32 +294,32 @@ export function createModelControl({
         return saveRoom(route ? { kind: 'model', model: route.model, use_local: route.use_local } : { kind: 'main' });
     }
 
-    /* --- Search: the strip becomes a field in the row; its suggestions float above the row --- */
+    /* --- Search: the strip becomes a field in the row; its suggestions float above the row (model_list.js) --- */
     function startSearch({ focus = !isCoarse() } = {}) {
         if (search.on || state.destroyed) return;
-        Object.assign(search, { on: true, query: '', only: '', active: -1 });
+        search.on = true;
         el.dataset.search = 'true';
         row.dataset.ownerSearch = 'true';
-        const label = node('label', 'chat-model-search');
-        label.innerHTML = SEARCH_ICON;
-        const input = node('input', 'chat-model-query', { type: 'text', role: 'combobox', autocomplete: 'off',
-            autocorrect: 'off', autocapitalize: 'off', spellcheck: 'false', 'aria-autocomplete': 'list', 'aria-expanded': 'true',
-            'aria-controls': `${id}-list`, 'aria-label': 'Search models' });
-        input.dataset.i18nSkip = '';  // its placeholder may name a source: written through the catalog below
-        label.append(input);
+        const { label, input } = modelSearchField(doc, `${id}-list`);
         strip.replaceChildren(label);
         segs.length = 0;
         const list = node('div', 'ui-popup chat-model-list', { role: 'listbox', 'aria-label': 'Models' });
         list.id = `${id}-list`;
         doc.body.append(list);
-        Object.assign(search, { input, list });
-        input.addEventListener('input', onQuery);
-        input.addEventListener('keydown', onSearchKey);
-        list.addEventListener('mousedown', keepFocus);
-        list.addEventListener('click', onListClick);
+        search.list = list;
+        search.rows = createModelList({
+            el: list, input, id, store, main: () => state.main, current: shown, rule: isMain ? MAIN_RULE : MODEL_RULE,
+            recents: () => (isMain ? store.recents().filter((route) => !sameRoute(route, state.main)) : quick()),
+            // Main's own row follows Main; every other row is that route. A room's closed capsule then says what was set.
+            onRoute: (route) => { if (!isMain) control.setOpen(false); pick(sameRoute(route, state.main) ? null : route); },
+            onSettings: () => { control.setOpen(false); openSettings(); },
+            // Escape with nothing typed leaves the search for the strip; the capsule's own Escape closes it.
+            onLeave: endSearch,
+            onPaint: () => search.position?.reposition(),
+        });
         void store.read();
         void store.readRecents();
-        paintList();
+        search.rows.paint();
         search.position = placeList(list);
         control.relayout();
         // A finger's press on Search shows the field and the list; the keyboard waits for a press on the field itself.
@@ -344,8 +329,9 @@ export function createModelControl({
     function endSearch({ focus = false } = {}) {
         if (!search.on) return;
         search.position?.destroy();
+        search.rows?.destroy();
         search.list?.remove();
-        Object.assign(search, { on: false, query: '', only: '', active: -1, rows: [], list: null, input: null, position: null });
+        Object.assign(search, { on: false, rows: null, list: null, position: null });
         delete el.dataset.search;
         delete row.dataset.ownerSearch;
         segsKey = null;
@@ -354,148 +340,6 @@ export function createModelControl({
         if (control.isOpen()) control.relayout();
         if (focus) segs.at(-1)?.focus({ preventScroll: true });
     }
-    const keepFocus = (event) => event.preventDefault();  // a press on a suggestion leaves the caret in the field
-
-    const rowMarkup = (said, { tag = '', selected = false, extra = '' } = {}) => `<div class="chat-model-row" role="option"`
-        + ` data-row="${esc(said.key)}" aria-selected="${selected}">${sourceMark(said)}`
-        + `<span class="chat-model-row-id" data-i18n-skip>${esc(said.id)}</span>`
-        + (tag ? `<span class="chat-model-row-tag">${esc(tag)}</span>` : '')
-        + `<span class="chat-model-row-facts" data-i18n-skip>${esc([said.window, said.sourceLabel, payWords(said)].filter(Boolean).join(' · '))}</span>${extra}</div>`;
-
-    function paintList() {
-        const { list, input } = search;
-        if (!list) return;
-        const index = store.index();
-        const status = store.status();
-        const current = shown();
-        const picks = new Map();  // a row's key → what a press on it does
-        const parts = [];
-        const add = (route, options = {}) => {
-            const said = describe(route);
-            picks.set(said.key, { route });
-            const unavailable = said.available === false ? '<span class="chat-model-row-tag">Unavailable</span>' : '';
-            parts.push(rowMarkup(said, { selected: sameRoute(route, current), ...options, extra: unavailable }));
-        };
-        const note = (words) => parts.push(`<p class="chat-model-note" role="presentation">${esc(words)}</p>`);
-        const section = (words) => parts.push(`<p class="chat-model-section" role="presentation">${esc(words)}</p>`);
-        const others = index.rows.filter((entry) => !sameRoute(entry.route, state.main));
-        if (!search.query && !search.only) {
-            if (state.main) add(state.main, { tag: 'Main' });
-            const recent = isMain ? store.recents().filter((route) => !sameRoute(route, state.main)) : quick();
-            if (recent.length) { section('Recent'); recent.forEach((route) => add(route)); }
-            if (status.reading && !status.read) note('Reading models…');
-            else if (!others.length && !index.sources.some((entry) => entry.problems.length)) {
-                // Nothing but Main can lead: say so and offer the way to where a source is added.
-                note(status.failed ? 'The model catalog could not be read.' : 'Only Main\'s model can lead work here.');
-                picks.set('accounts', { settings: true });
-                parts.push(`<div class="chat-model-row chat-model-door" role="option" data-row="accounts" aria-selected="false">`
-                    + '<span class="chat-model-row-id">Add a subscription or a key in Settings › Accounts</span></div>');
-            } else if (index.sources.length === 1) {
-                // One source: its models at once, no source step.
-                listRows(searchModels(index, '', index.sources[0].id), add, section);
-            } else {
-                section('Sources');
-                for (const entry of index.sources) {
-                    picks.set(`source:${entry.id}`, { only: entry.id });
-                    const facts = [entry.count === 1 ? fmt('{n} model', { n: 1 }) : entry.count ? fmt('{n} models', { n: entry.count }) : '', payWords(entry),
-                        entry.problems.length ? tr('model.list_not_read', 'list not read') : ''].filter(Boolean).join(' · ');
-                    parts.push(`<div class="chat-model-row chat-model-source" role="option" data-row="${esc(`source:${entry.id}`)}" aria-selected="false">`
-                        + `${sourceMark(entry)}<span class="chat-model-row-id" data-i18n-skip>${esc(entry.label)}</span>`
-                        + `<span class="chat-model-row-facts" data-i18n-skip>${esc(facts)}</span></div>`);
-                }
-            }
-        } else {
-            if (search.only && index.sources.length > 1) {
-                picks.set('source:', { only: '' });
-                parts.push(`<div class="chat-model-row chat-model-source" role="option" data-row="source:" aria-selected="false">`
-                    + `${SEARCH_ICON}<span class="chat-model-row-id">All sources</span>`
-                    + `<span class="chat-model-row-facts" data-i18n-skip>${esc(index.source(search.only)?.label || '')}</span></div>`);
-            }
-            const found = searchModels(index, search.query, search.only);
-            listRows(found, add, section);
-            // Suggestions assist typing and are not an allowlist: what was typed can be used as it is.
-            const typed = search.query ? typedRoute(index, search.query, search.only) : null;
-            if (typed && !found.some((entry) => sameRoute(entry.route, typed))) {
-                const said = describe(typed);
-                picks.set(`typed:${said.key}`, { route: typed });
-                parts.push(`<div class="chat-model-row chat-model-typed" role="option" data-row="${esc(`typed:${said.key}`)}" aria-selected="false">`
-                    + `${sourceMark(said)}<span class="chat-model-row-id" data-i18n-skip>${esc(fmt('Use “{model}” as typed', { model: search.query }))}</span>`
-                    + `<span class="chat-model-row-facts" data-i18n-skip>${esc(said.sourceLabel)}</span></div>`);
-            } else if (search.query && !typed && !found.length) {
-                note('No model matches. Choose a source to use a model as typed.');
-            }
-            const gaps = (search.only ? [index.source(search.only)] : index.sources).filter((entry) => entry?.problems.length);
-            if (status.failed) note('The model catalog could not be read; earlier suggestions are kept.');
-            else if (gaps.length) note(fmt('Could not read every list: {sources}.', { sources: gaps.map((entry) => entry.label).join(', ') }));
-        }
-        list.innerHTML = `<div class="chat-model-rows">${parts.join('')}</div>`
-            + `<p class="chat-model-rule" role="presentation">${esc(isMain ? MAIN_RULE : MODEL_RULE)}</p>`;
-        search.rows = [...list.querySelectorAll('.chat-model-row')];
-        search.rows.forEach((made, at) => { made.id = `${id}-o${at}`; });
-        search.picks = picks;
-        setActive(Math.min(search.active, search.rows.length - 1));
-        if (input) {
-            input.placeholder = search.only ? fmt('{source}: type a model', { source: index.source(search.only)?.label || '' })
-                : tr('model.search.placeholder', 'Model or source');
-        }
-        search.position?.reposition();
-    }
-    function listRows(found, add, section) {
-        found.slice(0, LIST_ROWS).forEach((entry) => add(entry.route, { tag: sameRoute(entry.route, state.main) ? 'Main' : '' }));
-        if (found.length > LIST_ROWS) section(fmt('{n} more · keep typing', { n: found.length - LIST_ROWS }));
-    }
-    function setActive(at) {
-        search.active = at;
-        search.rows.forEach((made, order) => { made.dataset.active = String(order === at); });
-        const active = search.rows[at];
-        if (active) search.input?.setAttribute('aria-activedescendant', active.id);
-        else search.input?.removeAttribute('aria-activedescendant');
-        active?.scrollIntoView?.({ block: 'nearest' });
-    }
-    function take(made) {
-        const act = search.picks?.get(made?.dataset?.row);
-        if (!act) return;
-        if (act.settings) { control.setOpen(false); openSettings(); return; }
-        if (act.only !== undefined) {
-            Object.assign(search, { only: act.only, query: '', active: -1 });
-            if (search.input) { search.input.value = ''; search.input.focus({ preventScroll: true }); }
-            paintList();
-            return;
-        }
-        if (!isMain) control.setOpen(false);  // the closed capsule says what was set
-        // Main's own row follows Main; every other row is that route.
-        pick(sameRoute(act.route, state.main) ? null : act.route);
-    }
-    const onQuery = () => {
-        search.query = search.input.value.trim();
-        search.active = search.query ? 0 : -1;
-        paintList();
-    };
-    const onListClick = (event) => take(event.target?.closest?.('.chat-model-row'));
-    const onSearchKey = (event) => {
-        if (event.isComposing) return;
-        const count = search.rows.length;
-        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-            if (count) setActive(event.key === 'ArrowDown' ? (search.active + 1) % count : search.active <= 0 ? count - 1 : search.active - 1);
-        } else if (event.key === 'Enter') {
-            // The active row, else the first model when something was typed or a source chosen.
-            const first = search.query || search.only ? search.rows.find((made) => !made.classList.contains('chat-model-source')) : null;
-            const target = search.rows[search.active] || first;
-            if (target) take(target);
-        } else if (event.key === 'Escape') {
-            // Escape clears what was typed, then leaves the search for the strip; the capsule's own Escape closes it.
-            if (search.query || search.only) {
-                Object.assign(search, { query: '', only: '', active: -1 });
-                search.input.value = '';
-                paintList();
-            } else endSearch({ focus: true });
-        } else if (event.key === 'Tab') {
-            endSearch();
-            return;
-        } else return;
-        event.preventDefault();
-        event.stopPropagation?.();
-    };
 
     /* --- the strip's presses and keys --- */
     const onStripClick = (event) => {

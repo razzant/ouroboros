@@ -5362,7 +5362,8 @@ html[data-layout="stack"] .chat-model-mode[data-search="true"] .chat-capsule-hea
 .chat-model-query::placeholder { color: var(--text-disabled); }
 /* The suggestions: the popups' floating material above the row (as wide as the row in the stack layout), scrolling
    inside itself under the rule line. A row is one model through one source: the source's mark, the model, then its
-   window when known, the source and how the source is paid. */
+   window when known, the source and how the source is paid. Where a row cannot hold both on one line (a narrow pane,
+   a long model name) the facts go under the name, at the line's end, and the name keeps its line. */
 .ui-popup.chat-model-list {
     display: flex;
     flex-direction: column;
@@ -5381,8 +5382,9 @@ html[data-layout="stack"] .ui-popup.chat-model-list { width: var(--ui-popup-anch
 }
 .chat-model-row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: var(--space-2);
+    gap: 0 var(--space-2);
     min-height: 34px;
     padding: 5px var(--space-3);
     border-radius: var(--radius-inner);
@@ -5401,8 +5403,10 @@ html[data-layout="stack"] .ui-popup.chat-model-list { width: var(--ui-popup-anch
 .chat-model-row[aria-selected="true"] { background: var(--accent-12); color: var(--accent-light); }
 .chat-model-row :is(svg, .model-source-mark) { flex: 0 0 auto; width: 14px; height: 14px; color: var(--text-meta); }
 .chat-model-row[aria-selected="true"] :is(svg, .model-source-mark) { color: inherit; }
-.chat-model-row-id { flex: 1 1 auto; min-width: 0; overflow: hidden; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+/* The name never leaves its mark's line: it is at most the line less the mark, so only the facts ever wrap. */
+.chat-model-row-id { flex: 1 1 auto; min-width: 0; max-width: calc(100% - 14px - var(--space-2)); overflow: hidden; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .chat-model-row-facts, .chat-model-row-tag { flex: 0 0 auto; color: var(--text-meta); font-size: var(--type-meta); white-space: nowrap; }
+.chat-model-row-facts { margin-inline-start: auto; }
 :is(.chat-model-typed, .chat-model-door) .chat-model-row-id { color: var(--text-secondary); }
 .chat-model-section, .chat-model-note, .chat-model-rule {
     margin: 0;
