@@ -520,7 +520,7 @@ def test_the_acting_work_order_offers_the_review_its_tools_admit():
                                                      'write_root': '/assigned'})
     readonly = _compose_subagent_text('obj', role='researcher', expected_output='out', constraints='', context='')
     assert 'review_change' in ACTING_SUBAGENT_TOOL_NAMES
-    assert 'Do NOT commit, run review gates / runtime / skills lifecycle' in acting
+    assert 'Committing, review gates, runtime and skills lifecycle, granting yourself tools' in acting
     assert 'run review / ' not in acting
     assert ('optionally ask independent reviewers about work in your write root with review_change; '
             'it never approves, commits or integrates that work.') in acting

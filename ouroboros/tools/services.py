@@ -41,6 +41,7 @@ from ouroboros.config import load_settings, selection_settings
 from ouroboros.tools.tool_result import (
     ToolResult,
     _publish_tool_result,
+    safety_refusal,
 )
 from ouroboros.tool_access import (
     ResolvedResourceBinding,
@@ -570,8 +571,7 @@ def _start_service(
         }, messages=getattr(ctx, "messages", None), ctx=ctx, resolved_binding=binding)
         if not allowed:
             return _publish_tool_result(ctx, ToolResult(
-                status="blocked", code="SAFETY_VIOLATION", text=advice,
-                meta={"operation_outcome": "completed_no_effect"},
+                *safety_refusal(advice), text=advice, meta={"operation_outcome": "completed_no_effect"},
             ))
         if advice:
             ctx.emit_progress_fn(advice)
