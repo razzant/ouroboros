@@ -94,12 +94,17 @@ def _views(root: pathlib.Path, rooms: dict) -> dict:
     for name, (role, room) in _specs(rooms).items():
         view = mv.capture_memory_view(root, TASK, dataclasses.replace(mv.ROLE_DEFAULTS[role], room_id=room))
         out[name] = [mv.snapshot_json(view), mv.render_story(view), mv.render_room(view)]
-    gaps, quiet = {}, {}
-    sealed = mi.PlaceRows() if hasattr(mi, "PlaceRows") else {}
-    opened = mi.open_rows_by_room(root, gaps=gaps, quiet=quiet, sealed=sealed)
-    if not isinstance(sealed, dict):  # step 3a: a place's sealed rows are read for the rooms a reader asks
-        sealed = _every_sealed(sealed, {*opened, str(PLACE), str(PLACE2), *(str(chat) for chat in rooms.values())})
-    out["open"] = json.loads(json.dumps([opened, {room: sorted(kinds) for room, kinds in gaps.items()}, quiet, sealed]))
+
+    def read() -> list:
+        gaps, quiet = {}, {}
+        sealed = mi.PlaceRows() if hasattr(mi, "PlaceRows") else {}
+        opened = mi.open_rows_by_room(root, gaps=gaps, quiet=quiet, sealed=sealed)
+        if not isinstance(sealed, dict):  # step 3a: a place's sealed rows are read for the rooms a reader asks
+            sealed = _every_sealed(sealed, {*opened, str(PLACE), str(PLACE2), *(str(chat) for chat in rooms.values())})
+        return [opened, {room: sorted(kinds) for room, kinds in gaps.items()}, quiet, sealed]
+
+    with cs.capture(root, tail="all"):  # the readers of a place's rows inside the capture, as the block reads them
+        out["open"] = json.loads(json.dumps(mi.over_one_state(root, read) if hasattr(mi, "over_one_state") else read()))
     return out
 
 
@@ -588,6 +593,133 @@ def test_case4_a_rejection_after_the_marks_are_read_reopens_the_row_in_that_same
         assert entered == [1] and compared == [1]  # one read transaction: the marks, the seals and the rows
 
 
+# --- one capture, one state: a write landing inside a capture -------------------------------------------------
+
+def _main_view(root: pathlib.Path) -> list:
+    view = mv.capture_memory_view(root, TASK, dataclasses.replace(mv.ROLE_DEFAULTS["integrator"], room_id="1"))
+    return [mv.snapshot_json(view), mv.render_story(view), mv.render_room(view)]
+
+
+def _whole_main(monkeypatch, root: pathlib.Path) -> list:
+    with monkeypatch.context() as patch:
+        patch.setattr(cold, "gate", lambda _store: None)
+        return _main_view(root)
+
+
+def _inside(monkeypatch, root: pathlib.Path, write, at: str) -> list:
+    """Main's view (the normal path) with ``write`` run once, by another thread, inside its capture: after the marks are
+    read (``gate``), when the capture first asks a task's lineage (``pass``), or when its block first asks for a place's
+    rows (``lazy``)."""
+    import threading
+
+    fired, failed = [], []
+
+    def run() -> None:
+        if fired:
+            return
+        fired.append(at)
+
+        def target() -> None:
+            try:
+                write()
+            except BaseException as exc:  # the test fails on it below, not in a thread's log
+                failed.append(exc)
+        thread = threading.Thread(target=target)
+        thread.start()
+        thread.join()
+
+    with monkeypatch.context() as patch:
+        if at == "gate":
+            real_gate = cold.gate
+            patch.setattr(cold, "gate", lambda store_: (real_gate(store_), run())[0])
+        elif at == "pass":
+            real_warm = pr.RoomResolver.warm
+            patch.setattr(pr.RoomResolver, "warm", lambda self, ids: (run(), real_warm(self, ids))[1])
+        else:
+            real_rooms = mi.PlaceRows.rooms
+            patch.setattr(mi.PlaceRows, "rooms", lambda self, *args, **kwargs: (run(), real_rooms(self, *args, **kwargs))[1])
+        view = _main_view(root)
+    assert fired and not failed, (at, failed)
+    return view
+
+
+def _one_state(monkeypatch, root: pathlib.Path, write, at: str) -> None:
+    """A write inside a capture of a fresh process leaves a view a whole pass shows of one state: the one before it or
+    the one after."""
+    before = _whole_main(monkeypatch, root)
+    _forget_process_memos()  # what the reference read, the process under test has not
+    got = _inside(monkeypatch, root, write, at)
+    after = _whole_main(monkeypatch, root)
+    assert got in (before, after), (at, "before: " + _first_difference({"main": got}, {"main": before}),
+                                    "after: " + _first_difference({"main": got}, {"main": after}))
+
+
+def test_a_sealed_place_row_revised_and_refilled_inside_a_capture_leaves_one_state(monkeypatch, tmp_path):
+    """The earlier copy of a place's open words is revised and the stored tail filled anew after the capture's snapshot,
+    before its block reads the place: the rows the capture left unread are no longer in any store as it read them, so
+    it reads the whole tail again; it never shows a picture without both the earlier copy and the new words."""
+    _rooms, _sealed = _long_place(tmp_path, mine_at=30)
+
+    def revise_and_fill() -> None:
+        ds.revise_text(tmp_path, "chat", _entry(tmp_path, "Words 0.")[0]["hint"]["seq"], "Words 0, edited.")
+        _fill(tmp_path)
+
+    _one_state(monkeypatch, tmp_path, revise_and_fill, "lazy")
+
+
+def _moving_task(tmp_path: pathlib.Path, chat, newest: bool = True) -> dict:
+    """A task admitted in ``chat`` with a row sealed in its rooms and (``newest``) a later open one: its lineage moves
+    both."""
+    rooms = _settled(tmp_path)
+    write_task_result(tmp_path, "moving", "completed", result="done", chat_id=chat)
+    place = {"source": "presence:slack", "transport": _TRANSPORT, "presence_provenance": _PROVENANCE}
+    if chat != 1:  # a place's own arrival, so the room shows and its block reads its sealed rows
+        _append(tmp_path, shared.msg(_ts(1), "A place arrival.", chat_id=chat, client_message_id="arrival", **place))
+    _append(tmp_path, shared.msg(_ts(2), "Moving words.", chat_id=chat, direction="out", task_id="moving"))
+    if newest:
+        _append(tmp_path, shared.msg(_ts(3), "Newest moving words.", chat_id=chat, direction="out", task_id="moving"))
+    if chat != 1:
+        _append(tmp_path, shared.msg(_ts(4), "A place word.", chat_id=chat, client_message_id="word", **place))
+    _append(tmp_path, shared.msg(_ts(5), "Later word.", client_message_id="later"))
+    _fill(tmp_path)
+    for room in {chat, 1}:  # wherever the rule puts it now: left unread only where no room holds it open
+        _seal(tmp_path, _entry(tmp_path, "Moving words."), room)
+    _compose(tmp_path)
+    assert _entry(tmp_path, "Moving words.")[2] in _cold_positions(tmp_path)
+    return rooms
+
+
+@pytest.mark.parametrize("at", ["gate", "pass"])
+def test_a_lineage_written_inside_a_capture_leaves_one_state(monkeypatch, tmp_path, at):
+    """A task's admitted chat moves to a Project after the capture read its marks: its rooms in that capture rest on the
+    lineage as it is then, so the capture reads the whole tail under it, never a cold row left in a room it left."""
+    rooms = _moving_task(tmp_path, 1)
+    _one_state(monkeypatch, tmp_path, lambda: store.update_task(tmp_path, "moving", lambda doc: {**doc, "chat_id": rooms["alpha"]}), at)
+
+
+def test_a_lineage_written_while_a_block_reads_a_place_leaves_one_state(monkeypatch, tmp_path):
+    """The same, while the block reads a place's rows: a row of the place's chat that the task's new room takes away
+    from it is decided under the lineage the capture read, or the capture reads the whole tail again."""
+    rooms = _moving_task(tmp_path, LONG, newest=False)  # none of its rows is read before the block asks the place
+    _one_state(monkeypatch, tmp_path, lambda: store.update_task(tmp_path, "moving", lambda doc: {**doc, "chat_id": rooms["alpha"]}), "lazy")
+
+
+def test_a_project_made_inside_a_capture_leaves_one_state(monkeypatch, tmp_path):
+    """A Project made for a chat where a task was admitted, after the capture read its marks: the registry's facts moved
+    under the capture (its waiting facts read the Projects later), so it reads the whole tail under the new ones."""
+    from ouroboros.contracts.chat_id_policy import project_chat_id
+
+    _settled(tmp_path)
+    chat = project_chat_id("gamma")
+    write_task_result(tmp_path, "early", "completed", result="done", chat_id=chat)
+    _append(tmp_path, shared.msg(_ts(1), "Early row.", direction="out", task_id="early"))
+    _append(tmp_path, shared.msg(_ts(2), "Later word.", client_message_id="later"))
+    _fill(tmp_path)
+    _seal(tmp_path, _entry(tmp_path, "Early row."), 1)
+    _compose(tmp_path)
+    _one_state(monkeypatch, tmp_path, lambda: create_project(tmp_path, "gamma", name="Gamma"), "gate")
+
+
 # --- each hot rule ------------------------------------------------------------------------------------------
 
 def _scribe(tmp_path: pathlib.Path) -> tuple:
@@ -720,7 +852,10 @@ def test_a_place_row_whose_chat_id_sqlite_would_read_otherwise_is_read_by_its_ro
     assert "delivered again" in _texts(views), "the earlier copy under the odd key was not read with its room"
 
 
-def test_a_set_composed_anew_after_a_capture_read_it_answers_that_capture_from_the_dialogue_store(monkeypatch, tmp_path):
+def test_a_set_composed_anew_under_a_captures_reads_makes_it_read_the_whole_tail_again(monkeypatch, tmp_path):
+    """Another process composes the set anew between a capture's pass and the reads of its places' rows: those rows
+    are no longer the capture's to read from the index, and no other store holds them as the capture read them, so
+    that capture reads the whole tail again over one state (``memory_inventory.over_one_state``)."""
     _settled(tmp_path)
     _quiet_place(tmp_path, PLACE, ("Early place.", "Middle place.", "Open place."))
     _append(tmp_path, shared.msg(_ts(20), "Latest main.", client_message_id="latest"))
@@ -734,16 +869,23 @@ def test_a_set_composed_anew_after_a_capture_read_it_answers_that_capture_from_t
         mi.open_rows_by_room(tmp_path, sealed=reference)
         want = _every_sealed(reference, [PLACE])
     assert [entry[2] for entry in want[str(PLACE)]] == [_entry(tmp_path, w)[2] for w in ("Early place.", "Middle place.")]
-    with cs.capture(tmp_path, tail="all") as derived:
-        assert derived.get("tail_cold")
+    composed = []
+
+    def read() -> dict:
         sealed = mi.PlaceRows()
         mi.open_rows_by_room(tmp_path, sealed=sealed)
-        with sqlite3.connect(str(ChronicleStore(tmp_path).index_path)) as db:  # another process composed it anew
-            marks = json.loads(db.execute("SELECT value FROM state WHERE key='tail_cold'").fetchone()[0])
-            db.execute("UPDATE state SET value=? WHERE key='tail_cold'", (json.dumps({**marks, "sequence": -1}),))
-            db.execute("DELETE FROM tail_cold WHERE chat=?", (PLACE,))  # under its marks the place's rows stay read
-        got = _every_sealed(sealed, [PLACE])
-    assert json.loads(json.dumps(got)) == json.loads(json.dumps(want))
+        if not composed:  # another process composes it anew before the first read of a place's rows
+            composed.append(1)
+            with sqlite3.connect(str(ChronicleStore(tmp_path).index_path)) as db:
+                marks = json.loads(db.execute("SELECT value FROM state WHERE key='tail_cold'").fetchone()[0])
+                db.execute("UPDATE state SET value=? WHERE key='tail_cold'", (json.dumps({**marks, "sequence": -1}),))
+                db.execute("DELETE FROM tail_cold WHERE chat=?", (PLACE,))
+        return _every_sealed(sealed, [PLACE])
+
+    with measured_sections(), cs.capture(tmp_path, tail="all") as derived:
+        assert derived.get("tail_cold")
+        got, work = mi.over_one_state(tmp_path, read), section_spans()["work"]
+    assert json.loads(json.dumps(got)) == json.loads(json.dumps(want)) and work.get("tail_whole") == 1, work
 
 
 def test_a_row_of_a_places_chat_whose_work_joined_a_project_is_not_read_as_the_places(monkeypatch, tmp_path):

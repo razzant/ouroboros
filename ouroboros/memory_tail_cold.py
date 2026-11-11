@@ -27,7 +27,13 @@ wrote a page record; a row whose answer rested on a task the store did not hold 
 other place room (its earlier deliveries of the same words, who of ours spoke there) are read for the rooms a reader
 shows, when it asks (``older_of``): the set keeps each row's room key, the chat ``chat_chain._row_chat_id`` reads, as
 the room rule reads it, and no other room holds a row of that chat. A Project that became a place since the set was
-composed makes the capture read the whole tail (``short``).
+composed makes the capture read the whole tail (``again``).
+
+One capture, one state: the marks and the facts the rule decides rooms by are read together (the gate's one object),
+and a task's lineage, read later as the rule asks, is checked against its mark after the pass and after the readers
+are done (``again``, ``moved``); every later read of the set's rows checks the set and the stored tail in its own
+transaction (``_read``). Where any moved, the capture reads the whole tail again over the facts as they are then
+(``Moved``, ``memory_inventory.over_one_state``), as when no gate was read.
 
 The set is a projection: a reset of the chronicle index takes it with its marks (``_RESET``), and the first whole pass
 after an update, a rebuild or any change composes it again; nothing to migrate or fill. A doubt is a whole pass: a
@@ -57,9 +63,15 @@ _PAGE = 2_000
 
 class Gate(NamedTuple):
     """What a capture of the whole tail reads before its index transaction: the membership facts its rule decides rooms
-    by (one object) and the marks a stored set must name to stand."""
+    by (one object), the marks a stored set must name to stand, and the registry files' identities as the facts were
+    read (``moved``)."""
     facts: Any
     marks: Dict[str, Any]
+    files: tuple = ()
+
+
+class Moved(Exception):
+    """What a capture's set stood on moved before its readers were done: the capture reads the whole tail again."""
 
 
 def gate(store: Any) -> Optional[Gate]:
@@ -69,6 +81,7 @@ def gate(store: Any) -> Optional[Gate]:
     from ouroboros.transcript_prefix import _running_code
 
     try:
+        files = _registry_files(store.data_root)
         facts = _membership_facts(store.data_root)
         if facts.lineage is None:
             return None
@@ -76,9 +89,49 @@ def gate(store: Any) -> Optional[Gate]:
         registry = [sorted(facts.project_chat_ids), facts.bindings, rooms.bindings, sorted(rooms._projects),
                     sorted([list(key), sorted(chats)] for key, chats in facts.projects_by_source_key.items())]
         digest = hashlib.sha256(json.dumps(registry, sort_keys=True, default=str).encode("utf-8")).hexdigest()
-        return Gate(facts, {"registry": digest, "lineage": facts.lineage, "code": _running_code()})
+        return Gate(facts, {"registry": digest, "lineage": facts.lineage, "code": _running_code()}, files)
     except Exception:  # a mark not read decides nothing: the whole tail
         return None
+
+
+def _registry_files(root: Any) -> tuple:
+    from ouroboros import utils
+    from ouroboros.projects_registry import _bindings_path, _registry_path, _registry_witness_path
+
+    stamps = []
+    for path in (_registry_path(root), _registry_witness_path(root), _bindings_path(root)):
+        try:
+            stamps.append(utils.file_identity(path.stat()))
+        except OSError:
+            stamps.append(None)
+    return tuple(stamps)
+
+
+def moved(store: Any, gate_: Gate) -> bool:
+    """Whether what ``gate_`` read for a capture changed since: a task's lineage written (one counter read), or the
+    registry's facts (read again only when one of its files was written since)."""
+    from ouroboros.store_hot_facts import lineage_writes
+
+    if lineage_writes(store.data_root) != gate_.marks["lineage"]:
+        return True
+    if _registry_files(store.data_root) == gate_.files:
+        return False
+    now = gate(store)
+    return now is None or now.marks["registry"] != gate_.marks["registry"]
+
+
+def forgo(derived: Dict[str, Any]) -> None:
+    """A capture whose set moved under it stands on nothing from here: it composes nothing, and its rule answers each
+    task again from the lineage as it is now (this process's memory of it dropped where the counter moved)."""
+    from ouroboros.projects_registry import forget_lineage
+    from ouroboros.store_hot_facts import lineage_writes
+
+    derived.update({STANDS: False, HELD: {}})
+    derived.pop(GATE, None)
+    facts = derived.get("membership")
+    if facts is not None:
+        forget_lineage(facts.rooms.root, lineage_writes(facts.rooms.root), facts.rooms._projects)
+        facts.rooms.answers.clear()
 
 
 def stands(db: Any, gate_: Gate) -> Optional[Dict[str, Any]]:
@@ -127,14 +180,22 @@ class Watch:
         return unsure
 
 
-def short(derived: Optional[Mapping[str, Any]], tail: Any, places: Iterable[str]) -> bool:
-    """On a capture standing on the set: whether a Project is a place now that was none when the set was composed (its
-    earlier rows may be among those left unread, and no room key finds them); then it reads the whole tail again. A
-    capture whose rows were read live (the stored facts stand for another source) left none unread. Either stands no
-    more."""
-    if not (derived and derived.get(STANDS)) or tail.complete and set(places) <= set(derived[HELD].get("places") or ()):
+def again(store: Any, derived: Optional[Dict[str, Any]], tail: Any, places: Iterable[str]) -> bool:
+    """After the pass of a capture standing on the set: whether it reads the whole tail instead. A Project that is a
+    place now and was none when the set was composed may hold earlier rows among those left unread (no room key finds
+    them); a task's lineage written since the marks were read leaves the pass's rooms on lineage the set was not composed
+    under (``forgo``). A capture whose rows were read live (the stored facts stand for another source) left none unread.
+    Either stands no more."""
+    from ouroboros.store_hot_facts import lineage_writes
+
+    if not (derived and derived.get(STANDS)):
         return False
-    derived[STANDS] = False  # type: ignore[index]
+    if lineage_writes(store.data_root) != derived[HELD]["marks"]["lineage"]:
+        forgo(derived)
+        return tail.complete
+    if tail.complete and set(places) <= set(derived[HELD].get("places") or ()):
+        return False
+    derived[STANDS] = False
     return tail.complete
 
 
@@ -143,22 +204,22 @@ def standing(derived: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
     return derived[HELD] if derived and derived.get(STANDS) else None
 
 
-def older_of(store: Any, held: Mapping[str, Any], pages: Iterable[tuple]) -> Optional[list]:
+def older_of(store: Any, held: Mapping[str, Any], pages: Iterable[tuple]) -> list:
     """The stored facts of the set's rows of each ``(chat, before, count)``: the ``count`` newest of that chat's rows
     before a position (``None``: its newest), the room key stored with each (``_compose``); a chat's in position order."""
     return _read(store, held, [(_OLDER, (chat, _END if before is None else before, count)) for chat, before, count in pages])
 
 
-def copies_of(store: Any, held: Mapping[str, Any], words: Iterable[tuple]) -> Optional[list]:
+def copies_of(store: Any, held: Mapping[str, Any], words: Iterable[tuple]) -> list:
     """The stored facts of the set's rows with given words in given chats (``(chat, text_sha256)`` pairs, the digest
     stored with each row that has words), by position."""
     return _read(store, held, [(_COPIES, (json.dumps(sorted(set(words))),))])
 
 
-def _read(store: Any, held: Mapping[str, Any], asks: Iterable[tuple]) -> Optional[list]:
+def _read(store: Any, held: Mapping[str, Any], asks: Iterable[tuple]) -> list:
     """The stored facts of the set's rows each ``(selection, parameters)`` names, all in one transaction where the set
-    and the stored tail are still the ones a capture stood on (``held``, its marks); ``None`` where they are not or
-    cannot be read: the reader then takes those chats' rows from the dialogue store (``memory_inventory.PlaceRows``)."""
+    and the stored tail are still the ones a capture stood on (``held``, its marks); ``Moved`` where they are not or
+    cannot be read: that capture reads the whole tail again (``memory_inventory.over_one_state``)."""
     import sqlite3
 
     from ouroboros.chronicle_store import ChronicleStore
@@ -167,7 +228,7 @@ def _read(store: Any, held: Mapping[str, Any], asks: Iterable[tuple]) -> Optiona
     try:
         with store._index() as db:
             if ChronicleStore._state(db, MARKS) != held or (ChronicleStore._state(db, "tail") or {}).get("source") != held.get("source"):
-                return None
+                raise Moved
             for positions, parameters in asks:
                 sql, after = _FACTS.format(positions), -(1 << 63)
                 while True:
@@ -176,8 +237,8 @@ def _read(store: Any, held: Mapping[str, Any], asks: Iterable[tuple]) -> Optiona
                         break
                     rows.extend(sorted(json.loads(text)))  # SQLite promises no aggregate order; the pages are in order
                     after = last
-    except (TimeoutError, sqlite3.Error):
-        return None
+    except (TimeoutError, sqlite3.Error) as error:
+        raise Moved from error
     return rows
 
 

@@ -1073,11 +1073,14 @@ def _groups(root: Path, store: ChronicleStore) -> List[Dict[str, Any]]:
     from ouroboros.projects_registry import list_projects
 
     spec = mv.ViewSpec("integrator", room_id=None)
-    with capture(root):  # one state of the chronicle for every room's facts
+    def read() -> List[Dict[str, Any]]:
         gaps, quiet, sealed = {}, {}, memory_inventory.PlaceRows()
         rows, lineage = memory_inventory.open_rows_by_room(root, gaps=gaps, quiet=quiet, sealed=sealed), row_lineage(root)
         return conversations.capture(store, root, spec, mv.room_labeler(root), rows, mv._notes_by_room(store), lineage,
                                      quiet=quiet, sealed=sealed, gaps=gaps, projects=list_projects(root))
+
+    with capture(root):  # one state of the chronicle for every room's facts (``memory_inventory.over_one_state``)
+        return memory_inventory.over_one_state(root, read)
 
 
 def _read_owed(root: Path, store: ChronicleStore, start: int, limit: int) -> str:

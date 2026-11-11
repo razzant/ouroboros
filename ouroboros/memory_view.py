@@ -965,8 +965,14 @@ def capture_memory_view(drive_root: Any, task: Mapping[str, Any], spec: ViewSpec
                 "terminal" if spec.story or spec.room_id is not None and spec.room_page else "none")
         with capture(root, tail=tail) as derived:
             frontier, sequence = legacy_frontier(store), store.newest_sequence()  # the marks below read this state
-            story, story_status, refusals = capture_story(store, root, label) if spec.story else ([], {}, [])
-            room, groups, marks, waiting, acting = _capture_live(store, root, spec, label, story)
+
+            def read() -> tuple:  # the story and the live rooms, their labels too, over one state of the registry
+                labels = room_labeler(root)
+                told = capture_story(store, root, labels) if spec.story else ([], {}, [])
+                return told, _capture_live(store, root, spec, labels, told[0])
+
+            (story, story_status, refusals), (room, groups, marks, waiting, acting) = memory_inventory.over_one_state(
+                root, read)
         owner_words = words(acting)
         if room:
             from ouroboros.owner_words import task_governing_words
