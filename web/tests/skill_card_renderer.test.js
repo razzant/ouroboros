@@ -423,15 +423,15 @@ test('a stopped Skills-page reviewer of these bytes is continued by its own acti
     }
 });
 
-test('a declared secret that is not set is a neutral tray with Open Secrets and puts the card in Needs you; unknown is said, never a value', () => {
+test('a declared secret that is not set is a neutral tray with Open Accounts and keys and puts the card in Needs you; unknown is said, never a value', () => {
     const fields = (state) => ({ secret_config: { fields: [{ id: 'botToken', key: 'TELEGRAM_BOT_TOKEN', state }] } });
     const missing = renderInstalledSkillCard(skill({ enabled: true, ...fields('missing') }));
-    assert.match(traysOf(missing), /TELEGRAM_BOT_TOKEN is not set\.<div class="skills-tray-note">Save it in Settings → Secrets\.<\/div>/);
+    assert.match(traysOf(missing), /TELEGRAM_BOT_TOKEN is not set\.<div class="skills-tray-note">Save it in Settings › Accounts and keys\.<\/div>/);
     assert.doesNotMatch(traysOf(missing), /next read|some skills|Disable and Enable/, 'when it applies is the skill’s own status');
-    assert.match(traysOf(missing), /data-skill-action="open_secrets"[^>]*>Open Secrets</);
+    assert.match(traysOf(missing), /data-skill-action="open_secrets"[^>]*>Open Accounts and keys</);
     const two = renderInstalledSkillCard(skill({ enabled: true, secret_config: { fields: [
         { id: 'botToken', key: 'TELEGRAM_BOT_TOKEN', state: 'missing' }, { id: 'proxy', key: 'TELEGRAM_PROXY', state: 'missing' }] } }));
-    assert.match(traysOf(two), /TELEGRAM_BOT_TOKEN, TELEGRAM_PROXY are not set\.<div class="skills-tray-note">Save them in Settings → Secrets\.<\/div>/);
+    assert.match(traysOf(two), /TELEGRAM_BOT_TOKEN, TELEGRAM_PROXY are not set\.<div class="skills-tray-note">Save them in Settings › Accounts and keys\.<\/div>/);
     assert.doesNotMatch(traysOf(missing), /data-tone="(warn|danger)"/, 'a fact, not the owner’s amber move');
     assert.equal(chipOf(missing), null);
     // Saving it is the owner's move, so the card is under Needs you; the tray stays neutral and adds no chip.

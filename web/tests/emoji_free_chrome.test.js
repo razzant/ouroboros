@@ -34,14 +34,6 @@ test('fixed warning decoration is gone while the tone and words stay', () => {
     assert.match(skills, /<span class="skills-skip-glyph" aria-hidden="true">\$\{WARNING_GLYPH\}<\/span>\$\{escapeHtml\(label\)\}<\/button>/);
     assert.match(skills, /export const WARNING_GLYPH = strokeIcon\(WARNING_PATH, 14\);/);
     assert.doesNotMatch(skills, /\u26a0/);
-    const warningState = /statusMsg \+= '\. Warnings: ' \+ data\.warnings\.join\(' \| '\);\r?\n\s*statusType = 'warn';/;
-    for (const eol of ['\n', '\r\n']) {
-        const source = read('modules/settings.js').replace(/\r?\n/g, eol);
-        assert.match(source, warningState, `warning words and tone survive ${JSON.stringify(eol)} checkout`);
-        const opening = source.match(warningState)[0];
-        assert.doesNotMatch(opening.replace("statusType = 'warn'", "statusType = 'ok'"), warningState);
-        assert.doesNotMatch(opening.replace('Warnings: ', ''), warningState);
-    }
     // A setting row's save result says the server's warnings in words, in the warning tone, and no decoration is
     // prefixed to either.
     const warned = outcomeLine(rowById('TOTAL_BUDGET'),

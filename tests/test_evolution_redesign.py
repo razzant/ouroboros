@@ -676,7 +676,6 @@ def test_frontend_evolution_and_consciousness_controls_are_present():
     assert consciousness["settingKey"] == "OUROBOROS_MODEL_CONSCIOUSNESS"
     assert consciousness["settingsToggleId"] == "s-local-consciousness"
     assert "modelRolesHost('settings-model-roles')" in settings_ui
-    assert "modelRoles.load(s," in settings
     # The role effort keys are retired: evolution and wakes start at the top of the owner's
     # effort range, which only the composer's Effort control shows and edits.
     assert "OUROBOROS_EFFORT_CONSCIOUSNESS" not in settings and "OUROBOROS_EFFORT_EVOLUTION" not in settings

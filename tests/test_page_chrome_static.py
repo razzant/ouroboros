@@ -61,7 +61,6 @@ def test_server_navigation_and_chat_static_contracts():
     chat_source = _read("web/modules/chat.js")
     css = _read("web/style.css")
     ui = _read("web/modules/settings_ui.js")
-    settings = _read("web/modules/settings.js")
     costs = _read("web/modules/costs.js")
 
     assert "def _describe_bg_consciousness_state(requested_enabled: bool | None) -> dict:" in server_source
@@ -108,18 +107,10 @@ def test_server_navigation_and_chat_static_contracts():
     assert ".chat-attachment-preview" in css and "flex-wrap" in css
     assert 'id="s-total-budget"' in ui
     assert 'id="s-settings-per-task-cost"' in ui
-    assert "setupContract.budgetFields" in settings
-    # Model defaults come from the shared setup contract, not duplicate model
-    # literals in Settings. Source qualification belongs to the shared editor.
-    assert "setupContract.modelSlots" in settings
-    assert "modelRoles.load(s" in settings
-    assert "inputId: slot.settingsInputId" in settings
+    # Source qualification belongs to the shared model editor, not duplicate model literals in Settings.
     model_roles = _read("web/modules/model_roles.js")
     assert "composeModelSource" in model_roles
     assert "route_editor_primitives.js" in model_roles
-    assert "currentSettings?.[field.settingKey]" in settings
-    assert "window.addEventListener('ouro:settings-updated'" in settings
-    assert "source: 'settings'" in settings
     # Costs' limits are setting rows: their floor comes from the setup contract through the row helper (the one
     # writer of a setting), which tells the other pages a row saved; Costs keeps no bound and no save of its own.
     controls = _read("web/modules/settings_controls.js")

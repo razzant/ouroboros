@@ -1142,9 +1142,9 @@ export function createClaudexorStatusStore({
 // The app-wide instance every UI surface shares.
 export const claudexorStatus = createClaudexorStatusStore();
 
-// The settings shell announces a page and a sub-tab becoming active; reaching a
-// panel is not a visibility CHANGE the store can observe on its own.
-export const SURFACE_ACTIVATION_EVENTS = ['ouro:page-shown', 'ouro:settings-subtab-shown'];
+// The app announces a page, and the Settings shell a Settings page, becoming visible;
+// reaching a page is not a visibility CHANGE the store can observe on its own.
+export const SURFACE_ACTIVATION_EVENTS = ['ouro:page-shown', 'ouro:settings-page-shown'];
 
 /**
  * Bind ONE surface to the shared store: a subscription that can actually keep
@@ -1154,8 +1154,8 @@ export const SURFACE_ACTIVATION_EVENTS = ['ouro:page-shown', 'ouro:settings-subt
  * lived on — and two of them supplied neither a visibility predicate nor an
  * activation hook, so their comments promised "the daemon recovering is picked
  * up without a reload" while the store never polled for them at all. The rule
- * here is structural: an element that is on screen (an inactive `.page` /
- * `.settings-panel` is display:none, which is exactly what `offsetParent`
+ * here is structural: an element that is on screen (an inactive `.page` or a
+ * hidden Settings page is display:none, which is exactly what `offsetParent`
  * reports) is a visible surface, wherever the sprint later moves the section.
  *
  * @param {object} store the shared status store

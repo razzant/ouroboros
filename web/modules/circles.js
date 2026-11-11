@@ -216,7 +216,7 @@ async function readCatalog() {
 }
 
 /** Mount the page: its shell now, its data when it is shown. */
-export function initCircles({ state, showPage, openSettingsTab, read = readPlaces, readStatus = readPlaceConnector,
+export function initCircles({ state, showPage, openSettings, read = readPlaces, readStatus = readPlaceConnector,
     openSheet = openPlaceSheet, openConnect = openConnectPlace, askConfirm = openConfirmDialog, readModels = readCatalog,
     writes = { createCircle, updateCircle, deleteCircle }, contributions = getContributions() } = {}) {
     const page = document.createElement('div');
@@ -342,7 +342,7 @@ export function initCircles({ state, showPage, openSettingsTab, read = readPlace
 
     function addPlace(circle) {
         openConnect({ returnFocus: current(`[data-circles-act="add-place"][data-circle="${CSS.escape(circle?.id || UNASSIGNED)}"]`),
-            openSettingsTab, circle: circle ? { id: circle.id, name: circle.name } : null });
+            openSettings, circle: circle ? { id: circle.id, name: circle.name } : null });
     }
 
     // The fields stay open while a write is out: `onConflict` hears the circle as it stands now, the facts a resave uses.
