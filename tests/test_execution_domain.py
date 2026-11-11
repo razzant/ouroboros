@@ -793,17 +793,29 @@ def test_a_taken_decision_reaches_the_engine_that_holds_the_result(env, tmp_path
 
 def test_supervision_uses_the_runs_recorded_engine(env, tmp_path, monkeypatch):
     from ouroboros import delegate_supervision as supervision
+    from tests._run_wait_shared import publish, scripted_reads
 
     started(tmp_path, "run-w", engine_ref=work_ref(env), store=STORE)
+    started(tmp_path, "run-u", engine_ref=work_ref(env), store=STORE)
     started(tmp_path, "run-s", store="store-s")
     work, owned = object(), object()
     monkeypatch.setattr(domain, "work_gateway", lambda r, **_kw: work)
     monkeypatch.setattr(wire, "ClaudexorGateway", lambda: owned)
     assert supervision._loop_gateway(current.run(tmp_path, "run-w")) is work
     assert supervision._loop_gateway(current.run(tmp_path, "run-s")) is owned
+    # A wake's one read goes through the engine its own run's custody names (``_publish``).
+    ctx, reads = _delegate_ctx(tmp_path, monkeypatch), []
+    scripted_reads(monkeypatch, lambda _ctx, rid, *_a, gateway=None: reads.append((rid, gateway)) or json.dumps(
+        {"status": "no_progress", "run_id": rid}))
+    publish(ctx, "run-w")
+    publish(ctx, "run-s")
     monkeypatch.setattr(domain, "work_gateway", lambda *_a, **_kw: (_ for _ in ()).throw(
         ClaudexorUnavailable("daemon_unreachable", "down")))
     assert supervision._loop_gateway(current.run(tmp_path, "run-w")) is None
+    monkeypatch.setattr(custody, "lookup", lambda *_a: (_ for _ in ()).throw(OSError("custody temporarily unreadable")))
+    monkeypatch.setattr(supervision, "_loop_gateway", lambda *_a: pytest.fail("unreadable custody chose an engine"))
+    publish(ctx, "run-u")  # the per-call reader recovers custody itself; no guessed engine
+    assert reads == [("run-w", work), ("run-s", owned), ("run-u", None)]
 
 
 # --- attached launches: stdio MCP servers, skill scripts and dependency builds run in the pinned executor ----------
