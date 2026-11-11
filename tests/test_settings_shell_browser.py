@@ -151,16 +151,43 @@ def test_a_wide_page_box_shows_the_home_beside_the_page_with_no_layer(subscripti
     page = ui["new_page"](viewport={"width": 1440, "height": 900})
     page.goto(ui["url"] + "/#settings")
     page.locator(HOME).wait_for(state="visible")
+    page.evaluate(TEST_PAGE)
     level, _kept = _open_from_home(page, "rules")
     setup_browser.capture(page, "settings-beside-1440x900")
     assert page.locator(HOME).is_visible(), "wide: the home stays beside the page"
     assert page.locator(f'{HOME} [data-settings-open="rules"]').get_attribute("aria-current") == "page"
     assert page.evaluate(SETTINGS_LAYERS) == [], "beside the home a level is no layer"
-    # Another home row replaces the page; Back returns to the home alone.
+    # The home is a rail: its page needs no Back to it, and the card keeps its list behind its count.
+    assert not level.locator("[data-settings-back]").is_visible(), "the home is beside the page: no Back to it"
+    assert level.locator(".settings-page-title").inner_text().strip() == "Your rules"
+    assert not page.locator(f"{HOME} [data-being-needs]").is_visible()
+    # Another home row replaces the page.
     page.locator(f'{HOME} [data-settings-open="appearance"]').click()
     settings_page(page, "appearance").wait_for(state="visible")
     assert level.count() == 0
     assert page.locator(f'{HOME} [data-settings-open="rules"]').get_attribute("aria-current") is None
+    # A page opened from a page lies over it and names it: that Back is shown and closes one level.
+    first = open_settings(page, "test-shell")
+    assert not first.locator("[data-settings-back]").is_visible()
+    first.locator("[data-test-deeper]").click()
+    second = settings_page(page, "test-shell/deeper")
+    second.wait_for(state="visible")
+    back = second.locator("[data-settings-back]")
+    assert back.is_visible() and back.inner_text().strip() == "Shell test"
+    assert go_back(page) == "test-shell"
+    # A page opened from outside Settings names where it came from, in the wide layout too.
+    page.evaluate("() => window.__ouroSettings.open('test-shell', { back: { label: 'Skills', go() { window.testWentBack = true; } } })")
+    outside = settings_page(page, "test-shell")
+    assert outside.locator("[data-settings-back]").inner_text().strip() == "Skills"
+    outside.locator("[data-settings-back]").click()
+    page.wait_for_function("() => window.testWentBack === true")
+    # Narrowed, the same page is alone with its Back to the home; widened again the rail returns.
+    open_settings(page, "rules")
+    page.set_viewport_size({"width": 1087, "height": 740})
+    narrow = settings_page(page, "rules").locator("[data-settings-back]")
+    narrow.wait_for(state="visible")
+    assert narrow.inner_text().strip() == "Settings" and not page.locator(HOME).is_visible()
+    assert len(page.evaluate(SETTINGS_LAYERS)) == 1
     assert go_back(page) == ""
     assert page.locator(f'{HOME} [aria-current="page"]').count() == 0
     page.close()

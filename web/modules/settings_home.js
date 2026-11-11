@@ -130,7 +130,8 @@ function agentsWords(settings) {
 }
 
 function accountsWords(accounts, settings) {
-    const keys = settings ? (settings._meta?.connections || []).filter((row) => row?.configured).length : null;
+    // A document that does not list the connections says nothing about keys: no count is printed for it.
+    const keys = Array.isArray(settings?._meta?.connections) ? settings._meta.connections.filter((row) => row?.configured).length : null;
     const keyWords = keys === null ? '' : count(keys, '{n} API key', '{n} API keys');
     if (!accounts && keys === null) return undefined;
     const known = accounts?.read === READ_OK ? count(accounts.rows.length, '{n} account', '{n} accounts') : fmt('Accounts not checked');
@@ -322,11 +323,12 @@ export function resultsHtml(query, found) {
 }
 
 function needRowHtml(row) {
+    const words = `settings-need-${row.kind}-${row.id}`.replace(/[^\w-]/g, '-');
     return `<div class="ui-row settings-need" data-needs="${escapeHtml(row.kind)}" data-need-id="${escapeHtml(row.id)}">`
         + `<span class="settings-need-lead">${statusMarkHtml('', row.owner ? { shape: 'dot', hue: 'owner' } : { shape: 'ring', hue: 'ink' })}</span>`
-        + `<p class="ui-row-title" data-i18n-fmt="settings.need">${escapeHtml(row.text)}</p>`
+        + `<p class="ui-row-title" id="${words}" data-i18n-fmt="settings.need">${escapeHtml(row.text)}</p>`
         + `${row.note ? `<p class="ui-row-meta" data-i18n-fmt="settings.need">${escapeHtml(row.note)}</p>` : ''}`
-        + `<div class="ui-row-actions"><button type="button" class="btn btn-default btn-sm" data-need-action>${escapeHtml(row.action)}</button></div></div>`;
+        + `<div class="ui-row-actions"><button type="button" class="btn btn-default btn-sm" data-need-action aria-describedby="${words}">${escapeHtml(row.action)}</button></div></div>`;
 }
 
 /**
@@ -484,7 +486,8 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
         const found = row.dataset.settingsResult ? searchSettings(shownQuery).find((entry) => entry.id === row.dataset.settingsResult) : null;
         open(row.dataset.settingsOpen, { row: found?.row || '', opener: row });
     };
-    const onSaved = () => { void refresh(); };
+    // A setting saved while the home is on screen may start or end a wait for a restart: the document is read again.
+    const onSaved = () => { if (root.getClientRects?.().length) void read('settings', serial); };
     const offStore = store.subscribe((view) => { readAccounts(view); paintCard(); paintRows(); }, { visible: () => false });
     root.addEventListener('click', onClick);
     searchEl.addEventListener('input', paintList);

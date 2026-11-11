@@ -1,4 +1,4 @@
-"""P11 integration gate: new shell geometry, all pages/tabs, and real touch scrolling.
+"""P11 integration gate: new shell geometry, all pages/tabs, Settings' home and pages, and real touch scrolling.
 
 No xfails: the L3 branch intentionally exposes L1 shell failures until integration.
 Uses the existing static-server/API fixture; never starts the runtime or reads live data.
@@ -15,12 +15,13 @@ import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
 from tests._shared import answer_projects
+from tests.settings_browser_helpers import HOME, open_settings, top_path
 
 subscription_ui = setup_browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / 'web'
 VIEWPORTS = [
-    (360, 844, False), (390, 844, False), (390, 780, True),
+    (320, 640, False), (360, 844, False), (390, 844, False), (390, 780, True),
     (719, 844, False), (720, 844, False), (721, 844, False),
     (1280, 860, False), (1280, 600, False), (844, 320, False),
 ]
@@ -143,7 +144,13 @@ def seed_page(ui, width, height, telegram=False, touch=None):
             'ui_tabs': [dict(skill='gate_skill', tab_id='gate-widget', title='Gate widget', render={
                 'kind':'declarative', 'schema_version':1, 'components':[
                     {'type':'metric','label':'Processed','value':'42'},
-                    {'type':'callout','text':'A widget uses the same contained card on every screen.'}]} )], 'live': {}},
+                    {'type':'callout','text':'A widget uses the same contained card on every screen.'}]} )],
+            'live': {'settings_sections': [dict(skill='gate_skill', section_id='config', key='gate_skill:config',
+                title='Gate skill settings', render={'components': [{'type': 'form', 'id': 'form', 'route': 'settings',
+                    'submit_label': 'Save', 'fields': [
+                        {'name': 'address', 'label': 'A service address with a long descriptive label', 'type': 'text'},
+                        {'name': 'mode', 'label': 'Mode', 'type': 'select', 'default': 'safe',
+                         'options': [{'label': 'Safe', 'value': 'safe'}, {'label': 'Fast', 'value': 'fast'}]}]}]})]}},
         '/api/tasks?queue_only=1': {'tasks': []}, '/api/schedules': {'schedules': []},
         '/api/cost-breakdown': {'total_calls': 4, 'accounting': {
             'settled_usd':25, 'confirmed_usd':25, 'estimated_usd':0, 'reserved_usd':0,
@@ -173,6 +180,44 @@ AT_REST = """() => !document.querySelector('[data-leaving]') && document.getAnim
 def rest(page, timeout=5000):
     page.wait_for_function(AT_REST, timeout=timeout)
     settle(page)
+
+
+# Settings has no tab strip (settings.js): what it shows is its home, the pages a home row opens or a module
+# registered, and, where a page lists entries, the editor of one. A skill's page takes the fixture skill.
+SETTINGS_PATHS = """async () => {
+    const { settingsPagePrefixes } = await import('/static/modules/settings_pages.js');
+    const { HOME_ROWS } = await import('/static/modules/settings_rows.js');
+    const home = HOME_ROWS.map((row) => row.to).filter((to) => !/^(dashboard|page|main):/.test(to));
+    return [...new Set([...home, ...settingsPagePrefixes()])].map((path) => (path === 'skill' ? 'skill/gate_skill' : path));
+}"""
+
+
+def walk_settings(page, measure):
+    """Show every Settings view in turn and call ``measure(name)`` at each: the home, every page, one editor per
+    family that lists entries. Ends at the home, where it started."""
+    open_settings(page, '')
+    page.locator(f'{HOME} [data-settings-card]').wait_for(state='visible')
+    rest(page)
+    measure('home')
+    paths = page.evaluate(SETTINGS_PATHS)
+    assert 'skill-sources' in paths and 'skill/gate_skill' in paths and len(paths) >= 12, paths
+    for path in paths:
+        level = open_settings(page, path)
+        if path == 'skill/gate_skill':
+            level.locator('[data-extension-settings-form]').wait_for(state='visible')
+        rest(page)
+        measure(path)
+        head = level.locator('[data-entry-id]').first
+        if head.count():
+            head.click()
+            page.wait_for_function("before => { const levels = [...document.querySelectorAll('#page-settings "
+                                   "[data-settings-page]')].filter((e) => !e.hidden); return levels.length && "
+                                   "levels.at(-1).dataset.settingsPage !== before; }", arg=path)
+            rest(page)
+            measure(top_path(page))
+    open_settings(page, '')
+    rest(page)
+    return paths
 
 
 def nav_pages(page):
@@ -243,12 +288,21 @@ def test_every_page_and_settings_tab_meets_shell_contract(gate_ui, tmp_path, wid
             open_nav(page, name)
             root = f'#page-{name}'
             if name == 'settings':
-                page.wait_for_selector('#available-subagents-editor .available-subagent-row', state='attached')
+                def measure_settings(view, root=root):
+                    key = f'settings/{view}'
+                    facts[key] = page.evaluate(MEASURE, root)
+                    if any(facts[key].values()):
+                        failures[key] = facts[key]
+                    # The way to the other places stays on every Settings view: ☰ in the header on a phone.
+                    if width < 720 and not page.locator(root + ' .app-page-header [data-mobile-nav-toggle]').is_visible():
+                        failures[key + '/menu'] = 'the menu button left the header'
+                facts['settings-views'] = walk_settings(page, measure_settings)
+                continue
             if name == 'skills':
                 page.wait_for_selector('.skills-card')
             if name == 'widgets':
                 page.wait_for_selector('.widgets-card')
-            # Settings is mandatory; Dashboard and Skills subviews use the same control.
+            # Dashboard and Skills subviews use the shared tab strip.
             tabs = page.locator(root + ' .app-tab-strip [role="tab"]').all()
             for index in range(max(1, len(tabs))):
                 tab_name = 'page'
@@ -387,12 +441,9 @@ def test_content_regions_fit_with_touch_controls_and_local_table_scroll(gate_ui)
                 assert cell.evaluate('e => e.scrollWidth > e.clientWidth'), 'the fixture name is longer than its cell'
                 assert cell.evaluate('e => getComputedStyle(e).textOverflow') == 'ellipsis'
             if name == 'settings':
-                page.wait_for_selector('#available-subagents-editor .available-subagent-row', state='attached')
-                for tab in page.locator('[data-settings-tab]').all():
-                    tab.click()
-                    settle(page)
-                    results['settings/' + tab.inner_text().strip()] = page.evaluate(MEASURE, scope)
-                    assert tab.bounding_box()['height'] >= 44
+                walk_settings(page, lambda view: results.__setitem__('settings/' + view, page.evaluate(MEASURE, scope)))
+                for row in page.locator(f'{HOME} [data-settings-open]').all():
+                    assert row.bounding_box()['height'] >= 44, row.get_attribute('data-settings-open')
             else:
                 settle(page)
                 results[name] = page.evaluate(MEASURE, scope)
@@ -406,5 +457,12 @@ def test_content_regions_fit_with_touch_controls_and_local_table_scroll(gate_ui)
         settle(page)
         broken = page.evaluate(MEASURE, '.dashboard-shell')
         assert any(row['node'].startswith('div#page-costs') for row in broken['overflow']), broken
+
+        # The same sensitivity for Settings: a home row wider than its card must make the home's own probe fail.
+        open_nav(page, 'settings')
+        page.add_style_tag(content='#page-settings .settings-door { min-width: 140%; }')
+        settle(page)
+        broken = page.evaluate(MEASURE, '.settings-shell')
+        assert any('settings-home' in row['node'] for row in broken['overflow']), broken
     finally:
         page.close()

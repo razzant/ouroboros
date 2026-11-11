@@ -4,7 +4,9 @@ wait for its result line, open an entry's editor and press its Save.
 Settings has no URL: a path is opened through the shell's opener (the loopback debug hook ``window.__ouroSettings``,
 the same function app.js's ``openSettings`` calls), so a test reaches a page the way any caller does. The hooks are
 the shell's (settings.js: ``[data-settings-home]``, ``[data-settings-page]``, ``[data-settings-back]``), the home's
-(settings_home.js: ``[data-settings-open]``, ``[data-settings-answer]``) and the row helper's (settings_controls.js:
+(settings_home.js: ``[data-settings-open]``, ``[data-settings-answer]``, the card ``[data-settings-card]`` with its
+rows ``[data-needs]``, the search field ``#settings-search`` and a result ``[data-settings-result]``) and the row
+helper's (settings_controls.js:
 ``[data-setting-row]``, ``[data-setting-control]``, ``[data-setting-result]``; an editor's ``[data-entry-id]``,
 ``[data-editor-save]``, ``[data-editor-result]``)."""
 from __future__ import annotations
@@ -37,9 +39,14 @@ def top_path(page) -> str:
 
 
 def go_back(page):
-    """Press the open level's first row, Back, and return the path shown after it."""
+    """Press the open level's first row, Back, and return the path shown after it. In the wide layout a page opened
+    from the home has no Back (the home stands beside it): there the home is opened, as its row in the rail would."""
     before = top_path(page)
-    settings_page(page, before).locator("[data-settings-back]").click()
+    back = settings_page(page, before).locator("[data-settings-back]")
+    if back.is_visible():
+        back.click()
+    else:
+        page.evaluate("() => window.__ouroSettings.open('')")
     page.wait_for_function("before => { const levels = [...document.querySelectorAll('#page-settings "
                            "[data-settings-page]')]; return !levels.some((e) => e.dataset.settingsPage === before); }",
                            arg=before)
@@ -51,6 +58,20 @@ def home_answer(page, target: str) -> str:
     row = page.locator(f'{HOME} [data-settings-open="{target}"]')
     row.wait_for(state="attached")
     return row.locator("[data-settings-answer]").inner_text().strip()
+
+
+def needs(page) -> list[str]:
+    """What Ouroboros's card lists now, as ``kind:id`` of each row it shows or keeps behind "Show all"."""
+    return page.locator(f"{HOME} [data-settings-card] [data-needs]").evaluate_all(
+        "rows => rows.map((row) => `${row.dataset.needs}:${row.dataset.needId}`)")
+
+
+def search_settings(page, words: str) -> list[str]:
+    """Type `words` into the home's search and return the ids of the results it shows, in order."""
+    page.locator("#settings-search").fill(words)
+    page.wait_for_function("words => (document.querySelector('#page-settings [data-settings-ask]') !== null) === Boolean(words.trim())",
+                           arg=words)
+    return page.locator(f"{HOME} [data-settings-result]").evaluate_all("rows => rows.map((row) => row.dataset.settingsResult)")
 
 
 def setting_row(page, row_id: str):
