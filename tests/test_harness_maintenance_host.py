@@ -648,7 +648,7 @@ def test_mind_targets_preserve_the_requested_selector_and_pause(tmp_path, monkey
 
 
 @pytest.mark.parametrize("surface", ["connect", "tool", "row", "background"])
-def test_old_engine_cannot_receive_any_vendor_contract_request(client, monkeypatch, tmp_path, surface):
+def test_old_engine_cannot_receive_any_vendor_contract_request(client, monkeypatch, tmp_path, surface):  # noqa: F811 (wire fixture)
     from ouroboros import harness_program_facts as facts
     gateway, seen = client(lambda _: pytest.fail("No contract request to an old engine"), version="5.1.0")
     monkeypatch.setattr(service, "ensure_owned_gateway", lambda: gateway)
@@ -712,6 +712,8 @@ def connect_socket(monkeypatch):
             elif path == "/v2/maintenance/operations/" + receipt["id"]:
                 if state["mode"] == "slow_read":
                     time.sleep(4)
+                if state["mode"] == "retry_slow_read" and state["calls"][path] == 1:
+                    time.sleep(5.2)
                 if state["mode"] == "lost_read" and state["calls"][path] == 1:
                     self.close_connection = True
                     return
@@ -745,30 +747,30 @@ def connect_socket(monkeypatch):
     monkeypatch.setattr(service, "ensure_owned_gateway", acquire)
     monkeypatch.setattr(service, "read_owned_gateway", acquire)
     monkeypatch.setattr(claudexor_daemon, "ensure_owned_gateway", acquire)
-    monkeypatch.setattr(config, "get_claudexor_harness_install_timeout_sec", lambda: 3)
+    monkeypatch.setattr(config, "get_claudexor_harness_install_timeout_sec", lambda: 8 if state["mode"] == "retry_slow_read" else 3)
     monkeypatch.setattr(harness_program_facts, "_request", lambda *_: None)
     try:
-        with TestClient(Starlette(routes=[Route("/api/claudexor/login", claudexor_accounts.api_claudexor_login, methods=["POST"])])) as client:
-            yield state, client
+        with TestClient(Starlette(routes=[Route("/api/claudexor/login", claudexor_accounts.api_claudexor_login, methods=["POST"])])) as login_http:
+            yield state, login_http
     finally:
         server.shutdown(); server.server_close(); thread.join(timeout=5)
         assert not thread.is_alive()
 
 
-@pytest.mark.parametrize("mode", ["slow_read", "slow_phases", "running", "success", "lost_read"])
+@pytest.mark.parametrize("mode", ["slow_read", "slow_phases", "running", "success", "lost_read", "retry_slow_read"])
 def test_connect_real_socket_deadline_and_read_recovery(connect_socket, mode):
     import time
-    state, client = connect_socket
+    state, login_http = connect_socket
     state["mode"] = mode
     started = time.monotonic()
-    response = client.post("/api/claudexor/login", json={"harness": "future-program"})
+    response = login_http.post("/api/claudexor/login", json={"harness": "future-program"})
     elapsed = time.monotonic() - started
     assert not any(path.endswith("/cancel") for path in state["calls"])
     assert len(state["keys"]) == 1
-    if mode in {"success", "lost_read"}:
+    if mode in {"success", "lost_read", "retry_slow_read"}:
         assert response.status_code == 200, response.json()
         assert state["calls"]["/v2/setup/jobs"] == 2
-        assert state["calls"]["/v2/maintenance/operations/maintenance-one"] == (2 if mode == "lost_read" else 1)
+        assert state["calls"]["/v2/maintenance/operations/maintenance-one"] == (1 if mode == "success" else 2)
     else:
         assert response.status_code == 503, response.json()
         assert response.json()["code"] == "harness_install_timeout"
@@ -779,13 +781,13 @@ def test_connect_real_socket_deadline_and_read_recovery(connect_socket, mode):
 
 
 def test_login_keeps_lost_acceptance_then_joins_the_active_operation_on_next_connect(connect_socket):
-    state, client = connect_socket
+    state, login_http = connect_socket
     state["mode"] = "lost_create"
-    first = client.post("/api/claudexor/login", json={"harness": "future-program"})
+    first = login_http.post("/api/claudexor/login", json={"harness": "future-program"})
     assert first.status_code == 503
     assert first.json()["context"]["acceptance"] == "unknown"
     assert first.json()["context"]["requestId"] == state["keys"][0]
-    second = client.post("/api/claudexor/login", json={"harness": "future-program"})
+    second = login_http.post("/api/claudexor/login", json={"harness": "future-program"})
     assert second.status_code == 200, second.json()
     assert len(set(state["keys"])) == 2
     assert state["calls"]["/v2/maintenance/operations/maintenance-one"] == 1
@@ -793,9 +795,9 @@ def test_login_keeps_lost_acceptance_then_joins_the_active_operation_on_next_con
 
 
 def test_real_login_on_old_engine_sends_no_vendor_maintenance_requests(connect_socket):
-    state, client = connect_socket
+    state, login_http = connect_socket
     state["version"] = "5.1.0"
-    response = client.post("/api/claudexor/login", json={"harness": "future-program"})
+    response = login_http.post("/api/claudexor/login", json={"harness": "future-program"})
     assert response.status_code == 503 and response.json()["code"] == "maintenance_unavailable"
     assert "Update the app" in response.json()["error"]
     assert not any(path.startswith("/v2/maintenance") for path in state["calls"])
