@@ -134,7 +134,9 @@ def test_the_next_real_input_names_both_bindings_the_failure_and_the_answering_c
     for absent in ("$12.5", "included", "$0.00", "subscription", "metered", "free", "No catalog check"):
         assert absent not in facts, absent
     assert "No timer returns this task" in facts
-    assert "switch_model(" not in facts  # the switch reports facts, without telling the mind what to do
+    assert ('Facts, not an instruction: stay on this route, return with switch_model(primary="return") '
+            '(the next real request tests the primary; a refusal there moves on to configured routes again), '
+            'or return and wait for it with switch_model(primary="wait").') in facts
     assert quiet_primary == []  # no catalog fetch for the facts, and no estimate was needed
 
 

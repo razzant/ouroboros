@@ -125,12 +125,13 @@ def test_queue_fact_reads_the_carrier_and_only_a_follow_reads_main(carrier):
     assert leads.project_lead(task={"metadata": {"model": C}}, queued=True) == {}
 
 
-def test_owner_lead_facts_name_the_chooser_without_advice_or_a_new_follower_label():
+def test_owner_lead_facts_name_the_chooser_and_keep_the_primary_return_affordances():
     ctx = context("owner_words", role="lead")
     assert leads.model_fact_words(ctx, A) == f"model {A} — set by my human's words"
     text = route_facts_text(ctx, model=B, use_local=False, role="fallback:0", failed_model=A,
                             failure={"failure_code": "quota"}, waiter=None)
-    assert "set by my human's words" in text and "switch_model(" not in text
+    assert "set by my human's words" in text
+    assert 'switch_model(primary="return")' in text and 'switch_model(primary="wait")' in text
     assert leads.model_fact_words(context(), A) == f"model {A}"
     child = context(metadata={"delegation_role": "subagent"})
     leads.publish_lead(child)

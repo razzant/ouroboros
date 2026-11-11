@@ -196,6 +196,9 @@ def route_facts_text(tool_ctx, *, model: str, use_local: bool, role: str, failed
             f"{'answered this round' if answered else 'is now acting without a usable answer this round'} after "
             f"{failure.get('model') or failed_model} failed with {code}{f' ({detail})' if detail else ''} at {failure.get('ts') or 'an unrecorded time'}"
             f"{f' (its engine dated a reset at {reset})' if reset else ''}.{meaning}{error} {answer} {before} "
+            'Facts, not an instruction: stay on this route, return with switch_model(primary="return") '
+            '(the next real request tests the primary; a refusal there moves on to configured routes again), '
+            'or return and wait for it with switch_model(primary="wait"). '
             "No timer returns this task; a primary-route observation, when shown, "
             "is non-generating metadata and never proves that the primary generates.")
 

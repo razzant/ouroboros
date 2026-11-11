@@ -303,6 +303,7 @@ def test_an_adopted_fallback_that_fails_retains_the_primary_as_a_route(data_root
     assert text == f"answer from {PRIMARY}"
     facts = [row["content"] for row in llm.sent[2][1] if "[ROUTE FACTS]" in str(row.get("content"))]
     assert len(facts) == 1 and PRIMARY in facts[0] and 'No timer returns this task' in facts[0]
+    assert 'switch_model(primary="return")' in facts[0] and 'switch_model(primary="wait")' in facts[0]
     assert registry._ctx.primary_route == {"model": PRIMARY, "use_local": False, "role": "main"}
 
 
@@ -388,7 +389,7 @@ def test_initial_route_records_a_role_slot_primary(tmp_path):
     assert ctx.primary_route == {"model": "consc/model", "use_local": False, "role": "consciousness"}
 
 
-def test_route_facts_name_both_bindings_and_the_dated_failure_without_advice():
+def test_route_facts_name_both_bindings_and_the_dated_failure_with_return_affordances():
     ctx = SimpleNamespace(primary_route={"model": "claudexor::codex=gpt-test", "use_local": False, "role": "main"})
     text = route_facts_text(ctx, model="fb/one", use_local=False, role="fallback:0",
                             failed_model="claudexor::codex=gpt-test",
@@ -397,7 +398,8 @@ def test_route_facts_name_both_bindings_and_the_dated_failure_without_advice():
     assert text.startswith("[ROUTE FACTS]") and "(role main; account Auto)" in text and "(role fallback:0)" in text
     assert "subscription_window_exhausted at 2026-09-30T12:00:00Z" in text and "2026-09-30T18:00:00Z" in text
     # A primary observation may have just reported catalog or quota metadata: the facts no longer deny one.
-    assert 'switch_model(' not in text and "No catalog check" not in text
+    assert 'switch_model(primary="return")' in text and 'switch_model(primary="wait")' in text
+    assert "Facts, not an instruction:" in text and "No catalog check" not in text
     assert "No timer returns this task" in text and "never proves that the primary generates" in text
     assert route_facts_text(SimpleNamespace(), model="m", use_local=False, role="r", failed_model="p",
                             failure={}, waiter=None) == ""
