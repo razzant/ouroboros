@@ -184,6 +184,7 @@ def cited_switch(ctx, *, model: str, owner_words: str, scope: str, project_id: s
     from ouroboros.gateway.owner_settings import settings_document_mutation
     from ouroboros.composer_cognition import update_project_model_choice
     from ouroboros.tools.control_routing import _inherited_project_scope
+    from ouroboros.deployment_policy import DeploymentPolicyRefusal
 
     if scope in {"room", "main"} and not is_integrating_focus(ctx):
         return refuse(ctx, "Only an integrating work can set a room's model or Main. Ask the work that delegated you to carry your human's choice.")
@@ -225,6 +226,9 @@ def cited_switch(ctx, *, model: str, owner_words: str, scope: str, project_id: s
                 result = _write_main_route(None, choice, origin={"surface": "tool", "actor": "ouroboros", "actor_task_id": ctx.task_id})
             if choice["kind"] == "model":
                 record_model_recent(root, choice["model"], choice["use_local"])
+    except DeploymentPolicyRefusal:
+        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_REPORTED_FAILURE",
+            text="Model write refused by deployment policy; nothing was saved."))
     except Exception as exc:
         # Suggestion failure cannot turn a completed write into a no-effect refusal.
         detail = ("Model choice saved; recent suggestion could not be recorded. " + json.dumps(result)

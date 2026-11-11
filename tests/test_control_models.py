@@ -4,6 +4,30 @@ import json
 import pytest
 
 
+@pytest.mark.parametrize("failure", ["policy", "storage", None])
+def test_cited_main_write_distinguishes_refusal_uncertainty_and_success(model_start, monkeypatch, failure):
+    from ouroboros.deployment_policy import DeploymentPolicyRefusal
+    from ouroboros.tools.control_models import cited_switch
+
+    ctx, _events = model_start
+    writes = []
+    def write(*args, **kwargs):
+        writes.append(True)
+        if failure == "policy":
+            raise DeploymentPolicyRefusal("managed route")
+        if failure == "storage":
+            raise OSError("storage unavailable")
+        return {"ok": True}
+    monkeypatch.setattr("ouroboros.gateway.owner_effort._write_main_route", write)
+    monkeypatch.setattr("ouroboros.gateway.ui_preferences.record_model_recent", lambda *_: None)
+    result = cited_switch(ctx, model="vendor/chosen", owner_words="Please use the other one",
+                          scope="main", project_id="", model_as_typed=True)
+    assert writes == [True]
+    assert ("refused by deployment policy" in result) is (failure == "policy")
+    assert ("not confirmed" in result) is (failure == "storage")
+    assert ('"ok": true' in result) is (failure is None)
+
+
 @pytest.fixture
 def model_start(tmp_path, monkeypatch):
     from ouroboros.tools.registry import ToolContext
