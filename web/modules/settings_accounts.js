@@ -376,7 +376,10 @@ function mount(container, { path, row, ctx = {} }) {
     if (path === 'accounts') return mountList(container, { ctx, row });
     if (path === CUSTOM_KEY_PATH) return mountCustomKeyPage(container, { ctx, left: backToList(ctx, true) });
     if (path.startsWith('accounts/key/') || path === 'accounts/key') {
-        if (parseKeyPath(path)) return mountKeyPage(container, { path, ctx, left: backToList(ctx) });
+        if (parseKeyPath(path)) {
+            const handle = mountKeyPage(container, { path, ctx, left: backToList(ctx) });
+            return handle.ready.then(() => handle);  // the shell titles the page once the read names its key
+        }
         container.innerHTML = '<p class="settings-page-lead">No provider has this name.</p>';
         return null;
     }
