@@ -263,14 +263,24 @@ export async function refreshModelCatalog({ button } = {}) {
     }
 }
 
-const settledPrograms = new Map();
+const settledPrograms = new Map(), programReads = new Map();
 export function refreshMaintenanceCatalogs(harness, evidence) {
-    const previous = settledPrograms.get(harness) || {};
     const operation = evidence.id && `${evidence.id}:${evidence.finishedAt || ''}`;
-    const program = evidence.id ? evidence.after : evidence;
-    const selection = program && JSON.stringify([program.path, program.version]);
-    if (operation ? previous.operation === operation : previous.selection === selection) return;
-    settledPrograms.set(harness, {operation, selection});
-    document.dispatchEvent(new CustomEvent('harness-maintenance:settled', {detail: {harness}}));
-    return Promise.allSettled([claudexorStatus.refresh({includeModels: true, afterCurrent: true}), refreshModelCatalog()]);
+    if (operation && settledPrograms.get(harness) === operation) return;
+    let read = programReads.get(harness);
+    if (!read) {
+        document.dispatchEvent(new CustomEvent('harness-maintenance:settled', {detail: {harness}}));
+        read = Promise.allSettled([claudexorStatus.refresh({includeModels: true, afterCurrent: true}), refreshModelCatalog()])
+            .then(([native, raw]) => {
+                const row = native.value?.harnesses?.find((item) => item.id === harness);
+                return native.status === 'fulfilled' && !claudexorStatus.error && row?.model_catalog
+                    && !row.models_error && !row.model_catalog.partial
+                    && raw.status === 'fulfilled' && catalogReadState(raw.value) === 'ok';
+            }).finally(() => programReads.delete(harness));
+        programReads.set(harness, read);
+    }
+    return read.then((succeeded) => {
+        if (succeeded && operation) settledPrograms.set(harness, operation);
+        return succeeded;
+    });
 }

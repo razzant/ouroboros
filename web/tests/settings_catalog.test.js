@@ -9,22 +9,26 @@ const first = {
     observed_at: 'earlier', errors: [],
 };
 
-test('one settlement refreshes native and raw catalogs and notifies scoped consumers even if the general read fails', async (t) => {
+test('failed settlement reads stay retryable; successful receipts refresh once', async (t) => {
     const previousDocument = globalThis.document, previousFetch = globalThis.fetch;
     t.after(() => { globalThis.document = previousDocument; globalThis.fetch = previousFetch; });
     const doc = new EventTarget(); doc.getElementById = () => null; globalThis.document = doc;
     const events = [], native = []; let raw = 0;
     doc.addEventListener('harness-maintenance:settled', event => events.push(event.detail));
-    t.mock.method(claudexorStatus, 'refresh', async options => { native.push(options); });
+    t.mock.method(claudexorStatus, 'refresh', async options => { native.push(options); return {harnesses: [{id: 'future', model_catalog: {partial: false}}]}; });
     globalThis.fetch = async () => { raw++; throw new Error('general catalog unavailable'); };
     const receipt = {id: 'one', finishedAt: '2026-11-10'};
     await refreshMaintenanceCatalogs('future', receipt);
     await refreshMaintenanceCatalogs('future', {...receipt});
-    assert.deepEqual(events, [{harness: 'future'}]);
-    assert.deepEqual(native, [{includeModels: true, afterCurrent: true}]);
-    assert.equal(raw, 1);
+    assert.deepEqual(events, [{harness: 'future'}, {harness: 'future'}]);
+    assert.ok(native.every(options => options.includeModels && options.afterCurrent));
+    assert.equal(raw, 2);
+    globalThis.fetch = async () => { raw++; return {ok: true, json: async () => ({items: []})}; };
+    await refreshMaintenanceCatalogs('future', receipt);
+    await refreshMaintenanceCatalogs('future', receipt);
+    assert.equal(events.length, 3); assert.equal(raw, 3);
     await refreshMaintenanceCatalogs('future', {...receipt, id: 'two'});
-    assert.equal(events.length, 2); assert.equal(raw, 2);
+    assert.equal(events.length, 4); assert.equal(raw, 4);
 });
 
 test('connection discovery replaces only the exact source and preserves general refresh provenance', () => {

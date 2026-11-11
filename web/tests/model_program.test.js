@@ -93,7 +93,7 @@ test('opening renews a changed producer once; status subscription exists only fo
     const oldDoc = globalThis.document; globalThis.document = doc;
     t.after(() => { globalThis.document = oldDoc; });
     let path = producer.path, version = '2.0.0', raw = 0, native = 0, subscriptions = 0, releases = 0, poll, receipt = null;
-    t.mock.method(claudexorStatus, 'refresh', async () => { native++; });
+    t.mock.method(claudexorStatus, 'refresh', async () => { native++; return {harnesses: [{id: 'test-open', model_catalog: {partial: false}}]}; });
     t.mock.method(claudexorStatus, 'subscribe', (callback) => { subscriptions++; poll = callback; return () => { releases++; }; });
     const input = {dataset: {}, ownerDocument: {activeElement: null}};
     let click;
@@ -117,6 +117,50 @@ test('opening renews a changed producer once; status subscription exists only fo
     poll({loading: false}); await flush();
     assert.equal(releases, 1); assert.equal(raw, 3);
     binding.dispose();
+});
+
+for (const failure of ['raw', 'native']) test(`failed ${failure} refresh retries at the next opening; concurrent choosers share it`, async (t) => {
+    const {bindModelProgramFooter} = await import('../modules/model_program.js');
+    const {claudexorStatus} = await import('../modules/claudexor_status_store.js');
+    const {refreshMaintenanceCatalogs} = await import('../modules/settings_catalog.js');
+    const harness = `retry-${failure}`, current = {...producer, version: '3.0.0'};
+    const doc = new EventTarget(); doc.getElementById = () => null;
+    const oldDoc = globalThis.document; globalThis.document = doc;
+    t.after(() => { globalThis.document = oldDoc; });
+    let fail = true, raw = 0, native = 0;
+    t.mock.method(globalThis, 'fetch', async (url) => {
+        if (String(url).includes('/maintenance/harnesses')) return {ok: true, json: async () => ({harnesses: [{harness, selection: current, updateAvailable: 'no'}]})};
+        raw++;
+        if (fail && failure === 'raw') throw new Error('Catalog offline');
+        return {ok: true, json: async () => ({items: []})};
+    });
+    t.mock.method(claudexorStatus, 'refresh', async () => {
+        native++;
+        return {harnesses: [{id: harness, model_catalog: {partial: fail && failure === 'native'}}]};
+    });
+    const make = () => bindModelProgramFooter({dataset: {}, ownerDocument: {activeElement: null}},
+        {contains: () => false, addEventListener() {}, removeEventListener() {}}, () => {});
+    const bindings = [make(), make()], group = {harness, label: 'Future', programs: [producer]};
+    const flush = async () => { for (let n = 0; n < 100; n++) await Promise.resolve(); };
+    t.after(() => bindings.forEach((binding) => binding.dispose()));
+    bindings.forEach((binding) => { binding.update([group]); binding.open(); }); await flush();
+    assert.equal(raw, 1); assert.equal(native, 1, 'two open choosers share the read');
+    await flush(); assert.equal(raw, 1, 'failure causes no retry loop while open');
+    bindings.forEach((binding) => binding.close()); fail = false;
+    bindings.forEach((binding) => binding.open()); await flush();
+    assert.equal(raw, 2); assert.equal(native, 2);
+    bindings.forEach((binding) => binding.update([{...group, programs: [current]}])); await flush();
+    bindings.forEach((binding) => { binding.close(); binding.open(); }); await flush();
+    assert.equal(raw, 2, 'successful lists carry the current producer, needing no memory');
+    const receipt = {id: `receipt-${failure}`, after: current, finishedAt: 'today'};
+    fail = true;
+    assert.ok(!await refreshMaintenanceCatalogs(harness, receipt));
+    fail = false;
+    assert.ok(await refreshMaintenanceCatalogs(harness, current), 'a failed settlement cannot silence chooser recovery');
+    await refreshMaintenanceCatalogs(harness, receipt);
+    const successful = raw;
+    await refreshMaintenanceCatalogs(harness, receipt);
+    assert.equal(raw, successful, 'only successful settlement reads are remembered');
 });
 
 test('an already-open footer sees Accounts observations immediately, before its own read answers', async (t) => {

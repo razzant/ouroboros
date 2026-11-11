@@ -566,3 +566,38 @@ def test_outside_update_then_chooser_open_renews_list_once_at_44_accounts(role_u
     field.press("Escape"); field.press("ArrowDown")
     expect(footer).to_contain_text("List from Codex 3.0.0")
     assert world["catalogs"] == after
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+def test_failed_catalog_refresh_recovers_on_next_open_at_44_accounts(role_ui, width):
+    from playwright.sync_api import expect
+    ui, page = role_ui, role_ui["page"]
+    world = vendor_scene(ui, 44)
+    page.set_viewport_size({"width": width, "height": 950})
+    roles.open_agents(ui)
+    field = vendor_consumer(ui, "Models")
+    field.fill("choice")
+    footer = page.locator("[data-model-footer]:visible")
+    expect(footer).to_contain_text("List from Codex 2.0.0")
+    field.press("Escape")
+    failures = []
+    def refuse(route):
+        failures.append(route.request.url)
+        route.fulfill(status=503, json={"error": "Catalog temporarily unavailable"})
+    page.route("**/api/model-catalog?*", refuse)
+    world.update(version="3.0.0", new=True)
+    field.press("ArrowDown")
+    expect(page.locator('[data-model-role="main"] [data-model-role-status]')).to_contain_text("temporarily unavailable")
+    expect(footer).to_contain_text("List from Codex 2.0.0")
+    count = len(failures)
+    page.wait_for_timeout(250)
+    assert len(failures) == count and count > 0, "No retry loop while opened"
+    page.unroute("**/api/model-catalog?*", refuse)
+    field.press("Escape"); field.press("ArrowDown")
+    expect(footer).to_contain_text("List from Codex 3.0.0")
+    expect(page.locator('[role="listbox"]:visible [role="option"]').filter(has_text="choice-new")).to_be_visible()
+    after = world["catalogs"]
+    field.press("Escape"); field.press("ArrowDown")
+    expect(footer).to_contain_text("List from Codex 3.0.0")
+    assert world["catalogs"] == after and not world["posts"]
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
