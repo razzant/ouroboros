@@ -19,6 +19,7 @@ import {
     isFramedWidget,
     isRetainedWidget,
     renderWidgetCardParts,
+    renderWidgetContributionGroup,
     renderWidgetFacade,
     setWidgetCardNote,
     syncWidgetCardControls,
@@ -34,6 +35,7 @@ import {
 } from './api_client.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { collectSafeFieldValues, downloadViaHostBridge } from './ui_helpers.js';
+import { getContributions } from './contributions.js';
 import { mountPinnedCard, setCardPinned } from './card_components.js';
 import { getHolds, HELD_LINES, settleAfterFrameLoad } from './holds.js';
 import {
@@ -61,13 +63,13 @@ function pageTemplate() {
     `;
 }
 
-function renderCardHtml(tab) {
+function renderCardHtml(tab, contributionVisibility = null) {
     // The card's own title names it; the skill's id is no owner word, so only a card kept from the chat says where from.
     const title = tab.title || tab.tab_id || tab.skill;
     const subtitle = tab.pinned_card ? '<span class="widgets-card-source">kept from the chat</span>' : '';
     const span = Number(tab.span || tab.grid_span || 1);
     const spanClass = span >= 2 ? ' widgets-card-span-2' : '';
-    const { run, menu } = renderWidgetCardParts(tab);
+    const { run, menu } = renderWidgetCardParts(tab, { contributionVisibility: contributionVisibility?.(tab.skill) || [] });
     return `
         <article class="ui-card widgets-card${spanClass}" data-widget-key="${escapeHtml(widgetKey(tab))}">
             <div class="widgets-card-head">
@@ -90,17 +92,17 @@ function renderCardHtml(tab) {
 }
 
 // Full paint — only for a list that has no cards yet.
-function renderShell(host, tabs) {
+function renderShell(host, tabs, contributionVisibility = null) {
     if (!tabs.length) {
         host.innerHTML = '<div class="muted">No live widgets yet. Review and enable an extension that registers a UI tab.</div>';
         return;
     }
-    host.innerHTML = tabs.map(renderCardHtml).join('');
+    host.innerHTML = tabs.map((tab) => renderCardHtml(tab, contributionVisibility)).join('');
 }
 
-function createCardElement(tab) {
+function createCardElement(tab, contributionVisibility = null) {
     const template = document.createElement('template');
-    template.innerHTML = renderCardHtml(tab).trim();
+    template.innerHTML = renderCardHtml(tab, contributionVisibility).trim();
     return template.content.firstElementChild;
 }
 
@@ -765,7 +767,7 @@ function retireCard(card, settling) {
 // on the same settle promise) — new cards are appended, every other card keeps
 // its DOM node. No node ever moves: the visible order is the masonry key order,
 // and a moved <iframe> would reload. The list's masonry relayouts on the mutation.
-function patchWidgetCards(list, previousTabs, nextTabs) {
+function patchWidgetCards(list, previousTabs, nextTabs, contributionVisibility = null) {
     const plan = planWidgetListPatch(previousTabs, nextTabs);
     for (const key of plan.removed) {
         const card = liveCardFor(list, key);
@@ -780,7 +782,7 @@ function patchWidgetCards(list, previousTabs, nextTabs) {
         const card = liveCardFor(list, key);
         if (card && !plan.changed.includes(key)) continue;
         const settling = disposeWidgetByKey(key);
-        const fresh = createCardElement(tab);
+        const fresh = createCardElement(tab, contributionVisibility);
         if (!card) list.append(fresh);
         else if (!settling) card.replaceWith(fresh);
         else {
@@ -849,6 +851,8 @@ export function initWidgets(ctx = {}) {
     const listError = document.getElementById('widgets-list-error');
     const retryButton = listError.querySelector('[data-widget-list-retry]');
     const listRequests = widgetListRequests();
+    const contributions = getContributions();
+    const contributionVisibility = (skill) => contributions?.visibilityForSkill?.(skill) || [];
     let renderGeneration = 0;
     let widgetsVisible = false;
     let widgetsMounted = false;
@@ -890,7 +894,7 @@ export function initWidgets(ctx = {}) {
     const relayout = widths.relayout;
 
     function paintShell(tabs) {
-        renderShell(list, tabs);
+        renderShell(list, tabs, contributionVisibility);
         bindWidgetCardReorder(list, currentWidgetOrder, persistWidgetOrder);
         relayout();
     }
@@ -979,7 +983,7 @@ export function initWidgets(ctx = {}) {
                     // moved (the sync still reconciles controls and layout below).
                     if (signature !== lastSignature) {
                         cardMenus.close();
-                        patchWidgetCards(list, lastTabs, tabs);
+                        patchWidgetCards(list, lastTabs, tabs, contributionVisibility);
                     }
                 } else {
                     cardMenus.close();
@@ -999,7 +1003,7 @@ export function initWidgets(ctx = {}) {
                     for (const key of (lastTabs || []).map(widgetKey)) {
                         if (!live.has(key)) widgetSessionState.delete(key);
                     }
-                    renderShell(list, tabs);
+                    renderShell(list, tabs, contributionVisibility);
                 }
                 lastTabs = tabs;
                 lastSignature = signature;
@@ -1149,10 +1153,42 @@ export function initWidgets(ctx = {}) {
     }
 
     const stopFromMenu = (key) => { const tab = tabByKey(key), card = liveCardFor(list, key); if (tab && card) stopWidgetByOwner(card, tab); };
-    const cardMenus = bindWidgetCardMenus(list, setWidgetStartMode, widths, removeKeptCard, stopFromMenu);
+    // Only each card's "Shown in chat" group follows the contributions store; the trigger, the
+    // lifecycle items, the launch-policy check and focus stay as they are.
+    function refreshContributionMenus() {
+        for (const tab of lastTabs || []) {
+            // An open menu lives on body (widget_card.js moves it past clipped cards) beside its expanded trigger.
+            const card = liveCardFor(list, widgetKey(tab));
+            const dialog = card?.querySelector('.skills-card-menu-dialog') || (card?.querySelector('[data-widget-menu-trigger][aria-expanded="true"]')
+                ? document.querySelector('body > .skills-card-menu-dialog[open]') : null);
+            if (!dialog) continue;
+            const current = dialog.querySelector(':scope > [data-widget-contributions]');
+            const html = renderWidgetContributionGroup(contributionVisibility(tab.skill));
+            if ((current?.outerHTML || '') === html) continue;
+            const focusedKey = current?.contains(document.activeElement) ? document.activeElement.dataset.widgetContributionKey : '';
+            const fresh = html ? Object.assign(document.createElement('template'), { innerHTML: html }).content.firstElementChild : null;
+            if (current && fresh) current.replaceWith(fresh);
+            else if (current) current.remove();
+            else if (fresh) dialog.querySelector(':scope > [role="group"][aria-label="Size"]')?.before(fresh);
+            if (focusedKey) fresh?.querySelector(`[data-widget-contribution-key="${CSS.escape(focusedKey)}"]`)?.focus();
+        }
+    }
+    // The store's own refresh repaints the menus (onChange); a refused write keeps the last confirmed state.
+    async function toggleContribution(key, hidden) {
+        try {
+            await contributions.setHidden(key, hidden);
+        } catch (err) {
+            const status = list.parentElement?.querySelector('[data-widget-arrange-status]');
+            const message = `Chat visibility was not saved: ${err?.message || err}`;
+            if (status) Object.assign(status, { textContent: message }).dataset.tone = 'error';
+            else console.warn(message);
+        }
+    }
+    const cardMenus = bindWidgetCardMenus(list, setWidgetStartMode, widths, removeKeptCard, stopFromMenu, toggleContribution);
+    const stopContributionFacts = contributions?.onChange?.(refreshContributionMenus);
     window.addEventListener('pagehide', (event) => {
         listRequests.abortAll();
-        if (!event.persisted) { cardMenus.destroy(); widths.dispose(); }
+        if (!event.persisted) { cardMenus.destroy(); widths.dispose(); stopContributionFacts?.(); }
     });
     // The head's power starts a stopped card and stops a running one, as the card menu's Stop does (widget_card.js).
     list.addEventListener('click', (event) => {

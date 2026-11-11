@@ -399,8 +399,10 @@ def _run_round_compaction(
     """The round's transcript maintenance before the send: the mind's pending authored
     view (Main fit owns every automatic decision), then -- on the transcript that will
     actually go out -- the host roster of independent roots as a TAIL row when it changed
-    (owner 6C). The note follows any view so it is never folded into a rewrite, and precedes
-    the acceptance observation and the seal."""
+    (owner 6C), and the mark changes no row or memory_mark result in view states yet
+    (``mark_anchors.append_mark_changes``). These rows follow any view so they are never
+    folded into a rewrite, and precede the acceptance observation and the seal."""
+    from ouroboros.mark_anchors import append_mark_changes
     from ouroboros.peer_roster import maybe_append_roster_note
     from ouroboros.tools.owner_delivery import publish_pending_owner_dialogue
 
@@ -427,6 +429,7 @@ def _run_round_compaction(
     maybe_append_roster_note(ctx.tools._ctx, messages, ctx.drive_root)
     from ouroboros.skill_context_snapshot import maybe_append_skill_snapshots
     maybe_append_skill_snapshots(ctx.tools._ctx, messages, ctx.drive_root)
+    append_mark_changes(ctx.tools._ctx, messages)
     return messages
 
 
@@ -452,7 +455,7 @@ def _retire_superseded_host_state(messages, ctx):
 
 def _run_authored_context_view(messages, ctx, pending, selected_names):
     """Apply one source/schema view together at the existing completed boundary."""
-    from ouroboros.context_budget import ContextReclaimRequest
+    from ouroboros.context_budget import ContextReclaimRequest, authored_view_fields
     from ouroboros.context_compaction import compact_tool_history_llm, context_reclaim_transcript_sha256
     from ouroboros.tool_policy import request_tool_schema_selection, select_tool_schemas
 
@@ -524,7 +527,7 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
             route_fp="actor", round_id=str(ctx.round_idx),
             transcript_sha256=context_reclaim_transcript_sha256(messages),
             measurement_basis="cold_estimate", measurement_density=1.0, reclaim_goal_tokens=0,
-            **{key: proposal[key] for key in ("working_note", "expected_view_revision", "keep_unit_ids", "restore_unit_refs", "schema_names")},
+            **authored_view_fields(proposal),
         )
         candidate, result = compact_tool_history_llm(
             messages, request=request, observed_messages=observed["messages"],
@@ -602,7 +605,8 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
             from ouroboros.tools.compact_context import residue_by_kind
             notice.update(reclaimed_tokens=receipt.get("reclaimed_tokens"), residue=residue_by_kind(candidate),
                           resulting_input_tokens=(receipt.get("fit") or {}).get("estimated_input_tokens"),
-                          basis="host estimates")
+                          basis="host estimates", **({"replaced_notes": receipt["replaced_notes"]}
+                                                     if receipt.get("replaced_notes") else {}))
         exceptions = receipt.get("request_exceptions") or []
         if receipt.get("inherited_selections_unapplied"):
             notice["inherited_selections_unapplied"] = receipt["inherited_selections_unapplied"]

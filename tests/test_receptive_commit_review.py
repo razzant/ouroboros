@@ -461,6 +461,10 @@ def test_enforcement_keeps_its_authority_while_the_author_hears_mail(author, mon
     _join(thread)
     result = outcome["result"]
     assert _commit_count(a) == 1 and not a.pushes, result
+    # Both commit returns (the blocking late wait, the Cyber Pro handback): the notice only while this task runs, the
+    # record always, collection by this task or its recorded Continue successor (``review_collection.resolve_reference``).
+    for fact in ("while this task runs", "stays in its record", "recorded Continue successor"):
+        assert fact in result, (fact, result)
     if mode == "pro":  # ordinary Blocking: the pending wave blocks; its collected PASS commits in one call
         assert "REVIEW_PENDING" in result and "An addressed message ended your wait" in result
         a.reviewer.release()
@@ -659,6 +663,10 @@ def test_review_change_hears_mail_and_the_same_unchanged_call_collects_its_wave(
     _join(thread)
     result = outcome["result"]
     assert result.startswith("An addressed message reached you while the reviewers ran"), result
+    # The notice reaches a running task only; after its end the record keeps the outcome, a room shows it only where
+    # its ownership is proven, and its author alone collects it by reference.
+    for fact in ("while this task runs", "stays in its record", "when the room is known", "this task's alone"):
+        assert fact in result, (fact, result)
     first = _payload(result)
     assert first["state"] != "settled", first
     wait = a.ctx._left_review_wait

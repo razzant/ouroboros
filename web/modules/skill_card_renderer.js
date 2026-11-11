@@ -733,6 +733,46 @@ function menuHtml(skill, { reviewing, repairing, submit }) {
     return `<div class="skills-card-menu"><button type="button" class="btn btn-ghost btn-sm skills-card-menu-trigger" aria-label="More actions for ${name}" aria-haspopup="menu" aria-expanded="false" data-skill-menu-trigger>⋮</button><dialog class="skills-card-menu-dialog" role="menu">${items.join('')}</dialog></div>`;
 }
 
+function contributionVisibilityHtml(skill, options = {}) {
+    const source = typeof options.contributionVisibility === 'function'
+        ? options.contributionVisibility(skill.name) : options.contributionVisibility;
+    const rows = Array.isArray(source) ? source : [];
+    if (!rows.length) return '';
+    // The Details rows' own layout (label, then value): one row per placed control, its place and Hide/Show.
+    const items = rows.map((row) => {
+        const key = escapeHtml(row.key || '');
+        const label = row.label || row.skill_label || row.id || 'Skill control';
+        const place = row.place || 'In the chat';
+        const hidden = row.hidden === true;
+        return `<div class="skills-detail-row" data-contribution-row="${key}"><span class="skills-detail-label">${escapeHtml(label)}</span><span class="skills-detail-value">${escapeHtml(place)}${hidden ? ' · hidden' : ''} <button type="button" class="btn btn-ghost btn-sm" ${actionAttrs(skill.name, 'toggle_contribution',
+            `data-contribution-key="${key}" data-contribution-hidden="${hidden ? 'true' : 'false'}" aria-label="${hidden ? 'Show' : 'Hide'} ${escapeHtml(label)}, ${escapeHtml(place.toLowerCase())}"`)}>${hidden ? 'Show' : 'Hide'}</button></span></div>`;
+    }).join('');
+    return `<div class="skills-details-facts" data-skill-detail-contributions>${detailRow('Shown in chat', 'Each control can be hidden without turning the skill off.')}${items}</div>`;
+}
+
+/** Patch the visibility rows in place, keyed by contribution, so a focused Hide/Show keeps its focus. */
+function patchContributionRows(target, source) {
+    const rowsOf = (node) => [...node.querySelectorAll(':scope > [data-contribution-row]')].map((row) => row.dataset.contributionRow);
+    if (rowsOf(target).join('\n') !== rowsOf(source).join('\n')) {
+        const focusedKey = target.contains(document.activeElement) ? document.activeElement.dataset?.contributionKey || '' : '';
+        target.innerHTML = source.innerHTML;
+        if (focusedKey) [...target.querySelectorAll('[data-contribution-key]')].find((node) => node.dataset.contributionKey === focusedKey)?.focus();
+        return;
+    }
+    const fresh = new Map([...source.querySelectorAll(':scope > [data-contribution-row]')].map((row) => [row.dataset.contributionRow, row]));
+    for (const row of target.querySelectorAll(':scope > [data-contribution-row]')) {
+        const next = fresh.get(row.dataset.contributionRow);
+        if (!next || row.innerHTML === next.innerHTML) continue;
+        const button = row.querySelector('[data-contribution-key]'), nextButton = next.querySelector('[data-contribution-key]');
+        if (!button || !nextButton) { row.innerHTML = next.innerHTML; continue; }
+        // The value's words before the button, then the button's own state: the same node keeps focus.
+        const value = row.querySelector('.skills-detail-value'), nextValue = next.querySelector('.skills-detail-value');
+        if (value?.firstChild?.nodeType === 3 && nextValue?.firstChild?.nodeType === 3) value.firstChild.textContent = nextValue.firstChild.textContent;
+        for (const name of ['data-contribution-hidden', 'aria-label']) button.setAttribute(name, nextButton.getAttribute(name) || '');
+        button.textContent = nextButton.textContent;
+    }
+}
+
 /** One installed card. `options.githubTokenConfigured` gates Publish; `live` names loaded UI tabs. */
 export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), repairingSkills = new Set(), live = {}, options = {}) {
     const safeName = escapeHtml(skill.name);
@@ -773,6 +813,7 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
             <div class="skills-details-facts" data-skill-detail-review>${detailRow('Review', `${escapeHtml(reviewSentence(skill))} ${statusBadge(skill.review_status, skill.review_gate, skill.review_profile)}`)}</div>
             <div class="skills-review-block" data-review-key="${escapeHtml(reviewBlockKey(skill))}">${reviewHistory(skill)}${reviewFindings(skill)}</div>
             <div class="skills-details-overflow" data-skill-detail-overflow>${(model.overflow || []).join('')}</div>
+            ${contributionVisibilityHtml(skill, options)}
             <div class="skills-details-facts" data-skill-detail-facts>
                 ${detailRow('Can use', escapeHtml(permissionWords(skill.permissions).join(' · ') || 'Nothing beyond its own folder'))}
                 ${accessRows(skill)}
@@ -821,11 +862,13 @@ export function patchInstalledSkillEnrichment(card, skill, reviewing, repairing,
         else card.removeAttribute(name);
     }
     for (const selector of ['.skills-card-status', '[data-skill-trays]', '[data-skill-errors]', '.skills-card-who', '.skills-card-marks', '.skills-card-purpose',
-        '[data-skill-detail-review]', '[data-skill-detail-overflow]', '[data-skill-detail-facts]']) {
+        '[data-skill-detail-review]', '[data-skill-detail-overflow]', '[data-skill-detail-contributions]', '[data-skill-detail-facts]']) {
         const target = card.querySelector(selector), source = next.querySelector(selector);
         if (!target && source) {
             if (selector === '.skills-card-purpose') card.querySelector('.skills-head-title')?.after(source);
+            else if (selector === '[data-skill-detail-contributions]') card.querySelector('[data-skill-detail-overflow]')?.after(source);
         } else if (target && !source) target.remove();
+        else if (target && source && selector === '[data-skill-detail-contributions]') patchContributionRows(target, source);
         else if (target && source && target.innerHTML !== source.innerHTML) target.innerHTML = source.innerHTML;
     }
     const block = card.querySelector('.skills-review-block'), nextBlock = next.querySelector('.skills-review-block');

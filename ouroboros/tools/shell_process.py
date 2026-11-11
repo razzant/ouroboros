@@ -185,6 +185,12 @@ def tracked_start():
         return proc
 
     try:
+        # Direct git/skill callers share this boundary; interruption must still
+        # settle admission. The census starts no process and holds no start lock.
+        try:
+            maintain_tracked_children()
+        except Exception:
+            log.debug("Tracked-child maintenance failed before spawn", exc_info=True)
         yield publish
     finally:
         try:
@@ -411,7 +417,7 @@ def _kill_process_group(proc):
     kill_process_tree(proc)
 
 
-def _tree_remains(proc) -> Optional[bool]:
+def _tree_remains(proc, *, live_groups: Optional[dict[int, bool]] = None) -> Optional[bool]:
     """After its root's exit: whether what its containment holds still runs (its recorded group, or its Job's
     members). None when nothing measured holds it, so an exited root never stands for its tree."""
     held = _held(proc)
@@ -421,21 +427,30 @@ def _tree_remains(proc) -> Optional[bool]:
         if "_ouroboros_group_held" not in held or not retained_child_group(proc):
             return None  # an unknown/reaped/recycled leader cannot vouch for this number
         from ouroboros.process_containment import process_group_has_live_members
+        if live_groups is not None:
+            return live_groups.get(held["_ouroboros_pgid"])
         return process_group_has_live_members(held["_ouroboros_pgid"])
     if held.get("_ouroboros_job") is None:
         return None
     return job_has_running_member(held["_ouroboros_job"])
 
 
-def retire_tracked(proc) -> bool:
+def retire_tracked(proc, *, live_groups: Optional[dict[int, bool]] = None) -> bool:
     """Release only an exited root AND a measured empty tree; otherwise retain it.
 
     A task-group record is discovery, not transfer of this live OS witness.
     Foreground/external receipts describe the root separately. Idle workers
-    keep this registry alive; stop/idle probes retire naturally ended trees.
+    keep this registry alive; stop/idle probes and Linux spawn retries retire
+    naturally ended trees. Spawn retries wait for the owner's first attempt,
+    so publication bookkeeping can still read the retained leader's identity.
     """
     held = _held(proc)
-    if proc.poll() is None or _tree_remains(proc) is not False:
+    if live_groups is None:
+        held["_ouroboros_retirement_pending"] = True
+    if proc.poll() is None:
+        return False
+    remains = _tree_remains(proc) if live_groups is None else _tree_remains(proc, live_groups=live_groups)
+    if remains is not False:
         return False
     held["_ouroboros_tree_settled"] = True
     if held.get("_ouroboros_group_held") and not retained_child_group(proc, release=True):
@@ -513,6 +528,29 @@ def unsettled_tracked_children() -> Optional[dict]:
     with _start_settled:
         unpublished = _spawning_subprocesses
     return {"state": "unconfirmed", "pids": alive, "unpublished": unpublished} if alive or unpublished else None
+
+
+def maintain_tracked_children() -> None:
+    """Retry exited trees at spawn boundaries; Linux batches a non-spawning census.
+
+    The snapshot belongs to this call, never to the shared process handles. An
+    unreadable census retains POSIX groups without falling back to per-group ps.
+    Jobs keep owner/idle/stop retirement. No global waitpid consumes others' status.
+    """
+    from ouroboros.process_containment import process_groups_have_live_members
+
+    candidates = [proc for proc in _active_subprocesses.copy()
+                  if _held(proc).get("_ouroboros_retirement_pending")
+                  and _held(proc).get("_ouroboros_pgid") and proc.poll() is not None]
+    if not candidates:
+        return
+    pgids = {int(_held(proc).get("_ouroboros_pgid", 0) or 0) for proc in candidates}
+    census = process_groups_have_live_members(pgids) or {}
+    for proc in candidates:
+        pgid = int(_held(proc).get("_ouroboros_pgid", 0) or 0)
+        if census.get(pgid) is not False:
+            continue  # no identity lock/probe for a live or unknown POSIX group
+        retire_tracked(proc, live_groups=census)
 
 
 def _shell_env_for_cwd(ctx: ToolContext, work_dir: pathlib.Path) -> dict:

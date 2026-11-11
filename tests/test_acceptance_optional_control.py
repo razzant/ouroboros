@@ -100,6 +100,16 @@ def test_explicit_selection_after_a_malformed_old_control(tmp_path, monkeypatch)
     assert registry._ctx._acceptance_pending_review_choice == "wait"
 
 
+def test_the_wait_default_lives_in_finish_delivery_not_in_the_schema(tmp_path):
+    """The schema names no JSON default, so a stop reads no wait into it; a finish that omits the choice still
+    waits for its running result review (``consume_completion_request``)."""
+    registry, ctx, trace, candidate = _held(tmp_path)
+    choice = registry.get_schema_by_name("finish_task")["function"]["parameters"]["properties"]["pending_review"]
+    assert "default" not in choice and "wait (the default)" in choice["description"]
+    assert _select(registry, ctx, trace, answer_sha256=candidate.content_sha256)
+    assert registry._ctx._acceptance_pending_review_choice == "wait"
+
+
 @pytest.mark.parametrize("arguments", [
     {"action": "unknown", "answer": ANSWER},
     {"action": "finish", "answer_sha256": ""},

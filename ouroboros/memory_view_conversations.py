@@ -10,8 +10,8 @@ running work, and each of its rooms that has open rows, a note of mine or runnin
 - a room where my human or I spoke since the legacy frontier (sealed rows too), or with a note of mine or running
   work, or any room that is not a place's, is **engaged**: my notes there whole, the open words of people and mine
   whole (``row_class`` lane 1; my rows name the work that sent them), and one line per task of its lane 2 -- the
-  host's status, the root's closing sentence and its reader; a child's report never travels as text, as in its
-  own room;
+  card's stored word (its status where none was stored), the root's closing sentence and its reader; a child's
+  report never travels as text, as in its own room;
 - any other room is **silent**: one named line with its latest closing sentence, when a finish there wrote one,
   how many words nobody considered since, and its reader.
 
@@ -74,8 +74,8 @@ def conversation_of(room: str, entries: List[Entry], notes: List[Dict[str, Any]]
 
 
 def _task_line(root_id: str, group: List[Tuple[Entry, Dict[str, Any]]]) -> Dict[str, Any]:
-    """One line for a task's lane-2 rows in another conversation: the host's status from its stored facts, the
-    root's closing sentence and its reader; children by count, never their words."""
+    """One line for a task's lane-2 rows in another conversation: the host's word for its ending from its stored
+    facts, the root's closing sentence and its reader; children by count, never their words."""
     from ouroboros.memory_view import _HOST_FACTS, _KINDLESS, _TERMINAL, _minute
 
     def chosen(kinds: frozenset, kind: str = "task_summary") -> Optional[Entry]:  # ``memory_view._task_line``'s order
@@ -83,7 +83,8 @@ def _task_line(root_id: str, group: List[Tuple[Entry, Dict[str, Any]]]) -> Dict[
                      and entry[1].get("summary_kind") in kinds and str(entry[1].get("task_id") or "") == root_id), None)
 
     terminal = chosen(_TERMINAL) or chosen(_KINDLESS, "project_completion_summary") or chosen(_HOST_FACTS)
-    status = (str(terminal[1].get("status") or "status not recorded") if terminal is not None
+    # The card's stored word ("Stopped", "Done"), as this task's own room reads it; a row without one keeps its status.
+    status = (str(terminal[1].get("outcome") or terminal[1].get("status") or "status not recorded") if terminal is not None
               else "running or unreported")
     sentence = next((str(entry[1]["wake_summary"]) for entry, _cls in reversed(group) if entry[1].get("wake_summary")), "")
     children = {str(entry[1].get("task_id")) for entry, _cls in group

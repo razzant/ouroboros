@@ -786,32 +786,30 @@ def safe_restart(
     reason: str,
     unsynced_policy: str = "rescue_and_reset",
 ) -> Tuple[bool, str]:
-    """Checkout dev, sync deps, import-test, then fall back to stable if needed.
-
-    ``OUROBOROS_DISABLE_MANAGED_UPDATES=1`` is the stand lever: it keeps the deps sync and the import test but
-    skips the checkout, so a stand pinned to one sha stays on it. A deployment policy keeps only the import test:
-    its program and interpreter are the administrator's, so a failure is told, never repaired with another tree.
-    This is the choke point EVERY unrequested tree move goes through (bootstrap, owner restart, agent restart); an
-    explicit owner version change (Update / Rollback) calls ``checkout_and_reset``, which refuses one managed.
-    """
+    """Checkout dev, sync deps, import-test, else fall back to stable. ``git_ops._restart_keeps_checkout`` instead
+    keeps the tree (deployment policy, ``OUROBOROS_DISABLE_MANAGED_UPDATES=1``, a checkout boot sees unmanaged):
+    deps sync (none under a policy), import test, a stale managed stamp cleared; a failure is told, never repaired
+    with another tree. EVERY unrequested tree move comes here; Update / Rollback call ``checkout_and_reset``."""
     managed = body_replacement_refusal()
-    if managed or str(os.environ.get("OUROBOROS_DISABLE_MANAGED_UPDATES", "") or "").strip() == "1":
+    kept = _go()._restart_keeps_checkout(bool(managed))
+    if kept:
         _go().append_jsonl(
             _go().current_drive_root() / "logs" / "supervisor.jsonl",
-            {"ts": _go().utc_now_iso(), "type": "managed_by_deployment" if managed else "managed_checkout_disabled",
-             "reason": reason, "target_branch": _go().BRANCH_DEV},
+            {"ts": _go().utc_now_iso(), "type": kept["event"],
+             "reason": reason, "target_branch": _go().BRANCH_DEV, **kept["receipt"]},
         )
+        if "facts" in kept:  # the tree did not move: its observed-SHA stamp still describes it
+            _record_checkout_facts(kept["facts"], invalidate_bootstrap=False, stamp_observed=False)
         deps_ok, deps_msg = _go().sync_runtime_dependencies(reason=reason)  # managed: installs nothing
         if not deps_ok:
-            return False, f"Failed deps with managed checkout disabled: {deps_msg}"
+            return False, f"Failed deps {kept['where']}: {deps_msg}; the checkout was left untouched."
         t = _go().import_test()
         if t["ok"]:
-            return True, ("OK: the deployed program, unchanged" if managed
-                          else "OK: managed checkout disabled — staying on the current checkout")
+            return True, kept["ok"]
         if managed:  # an older recovery point is not the program this policy was deployed with
             return False, (f"Import test failed (rc={t.get('returncode', -1)}); no other version or package was "
                            f"tried. {BODY_STATUS}")
-        return False, f"Import test failed with managed checkout disabled (rc={t.get('returncode', -1)})"
+        return False, f"Import test failed {kept['where']}{_go()._import_failure(t)}; the checkout was left untouched."
 
     ok, err = _checkout_outcome(_go().BRANCH_DEV, reason, unsynced_policy)
     if not ok:
@@ -854,7 +852,7 @@ def safe_restart(
     return False, "Both branches failed import (dev and stable)"
 
 
-def _record_checkout_facts(facts: dict, *, invalidate_bootstrap: bool = True) -> None:
+def _record_checkout_facts(facts: dict, *, invalidate_bootstrap: bool = True, stamp_observed: bool = True) -> None:
     """Field-update the checkout projection (#1307): never a stale whole-state write."""
     from supervisor.state import StateUnavailable
 
@@ -866,6 +864,8 @@ def _record_checkout_facts(facts: dict, *, invalidate_bootstrap: bool = True) ->
         _go().update_state(lambda live: live.update(facts))
     except StateUnavailable:
         log.warning("Checkout facts not recorded in state: runtime state unavailable", exc_info=True)
+        return
+    if not stamp_observed:
         return
     try:
         from ouroboros.startup_migrations import stamp

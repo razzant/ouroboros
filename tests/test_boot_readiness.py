@@ -103,6 +103,69 @@ def test_the_coordinator_records_every_step_and_stops_between_steps_only():
 
 # --- the lifespan ---------------------------------------------------------------------------
 
+
+def test_real_ui_assets_survive_same_process_child_pressure(boot_app, monkeypatch):
+    """Actual routes and StaticFiles worker-thread path, not a replacement HTML app."""
+    import os
+    import pathlib
+    import subprocess
+    import sys
+    import time
+    from starlette.testclient import TestClient
+    from ouroboros import platform_layer
+    from ouroboros.tools import shell_process as sp
+    from tests._shared import wait_test_child_stop
+
+    if os.name == "nt":
+        pytest.skip("real POSIX retained leaders; Windows Job tests cover that platform")
+    srv, _root = boot_app
+    owned = []
+    stylesheet = pathlib.Path(__file__).resolve().parents[1] / "web" / "style.css"
+
+    def check(client):
+        page = client.get("/")
+        assert page.status_code == 200 and "style.css" in page.text
+        css = client.get("/static/style.css")
+        assert css.status_code == 200 and css.content == stylesheet.read_bytes() and css.content
+
+    with TestClient(srv.app) as client:
+        check(client)
+        try:
+            for _ in range(32):
+                with sp.tracked_start() as publish:
+                    proc = publish(sp.contained_popen(subprocess.Popen,
+                        ["sh", "-c", "sleep 60 >/dev/null 2>&1 & echo $!; exit 7"],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True))
+                child = int(proc.stdout.readline())
+                owned.append((proc, child))
+                assert proc.wait(timeout=5) == 7
+                assert not sp.retire_tracked(proc)  # each root leaves a live descendant
+            check(client)
+            for proc, child in owned:
+                platform_layer.request_process_tree_kill(proc)
+                assert wait_test_child_stop(child, timeout_sec=5)["child_stopped"]
+            # The new launch is in this application process, not a remote test controller.
+            deadline = time.monotonic() + 5
+            while True:
+                assert sp._tracked_subprocess_run([sys.executable, "-c", "pass"], timeout=5).returncode == 0
+                if not sys.platform.startswith("linux") or all(proc not in sp._active_subprocesses for proc, _ in owned):
+                    break
+                assert time.monotonic() < deadline, "spawn retries did not retire quiet trees"
+            if sys.platform.startswith("linux"):
+                for proc, _ in owned:
+                    assert proc not in sp._active_subprocesses and proc.wait() == 7
+                    with pytest.raises(ChildProcessError):
+                        platform_layer.observe_child_exit(proc.pid)
+            check(client)
+        finally:
+            for proc, child in owned:
+                platform_layer.request_process_tree_kill(proc)
+                assert wait_test_child_stop(child, timeout_sec=5)["child_stopped"]
+                assert sp.retire_tracked(proc)
+                proc.stdout.close()
+                proc.stderr.close()
+
+
 @pytest.fixture
 def boot_app(tmp_path, monkeypatch, request):
     """The real ASGI app on a temp root, the lifespan's patch helper of the extension tests."""
