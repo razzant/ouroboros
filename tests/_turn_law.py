@@ -31,6 +31,14 @@ TURN_GAPS: Dict[Tuple[str, str], Tuple[str, Dict[str, int]]] = {
         "read again (knowledge._navigation_row). NEVER: both listings are what the turn shows (the shelf's "
         "index; the rescue scan, kept by decision); the row stays so that any other work per item fails.",
         {"dir_entries": 122, "scandir": 4, "listdir": 3}),
+    ("L3", "T:main:broad"): (
+        "40 more live rooms with story and 10 running roots in a 118,000-token window whose tool schemas take "
+        "72,260: the start keeps Low and its reply reserve of 32,000 by moving four host sections behind their "
+        "readers (runtime, review pool, drive state, world: section_floor), and each is a new request part written "
+        "once (observability._write_parts: 10 new parts for the 7 of the turn before, open +3). NEVER: the count "
+        "is the host sections the start could not hold whole, not rooms, roots or rows; the row stays so that "
+        "any other work per item fails.",
+        {"open": 3}),
     ("L7d", "T:main"): (
         "A capture reads every tail row to find the open ones: 6,630 rows for 31 shown or new at k=30 (250 for 31 at "
         "k=1; live 74,963 for 13,834). NEVER in this PR (owner's decision 1A): an exact skip of sealed rows needs its own "
