@@ -174,7 +174,7 @@ const SUBAGENT_LIFECYCLE_EVENTS = new Set(['scheduled', 'running', 'completed', 
 const CHEVRON = renderSkillIcon('chevron', { size: 14, className: 'chat-live-chevron' });
 
 export function initChat(ctx) {
-    // Back-compat main-chat entry: one full-page instance bound to chat 1.
+    // Legacy entry: full-page Main (chat 1).
     return createChatInstance(ctx);
 }
 
@@ -247,7 +247,7 @@ export function createChatInstance({
     const scrollActivityDot = scrollBottomBtn?.querySelector('.chat-scroll-activity-dot');
     let nestedSubagentsExpanded = false;
     let _remoteActivityDepth = 0;
-    // The composer (composer.js), wired once the room's feed owners exist; Main's bar (chat_header.js), once its status.
+    // Wire composer.js after the feed owners; Main's chat_header.js after its status.
     let composer = null, header = null;
 
     // Destroyed instances ignore late async work and animation frames.
@@ -2769,8 +2769,8 @@ export function createChatInstance({
         historyControls.showNotice();
     }
     scrollBottomBtn?.addEventListener('click', showLatest);
-    // A return: from the newest message to the present; from an older passage back there, ↓ marked, the rest unread
-    // (owner 2026-11-03). Leaving the screen keeps the place and stops a pending move.
+    // Return from the newest message to the present; from an older passage back there, ↓ marked, the rest unread.
+    // Leaving the screen keeps the place and stops a pending move.
     const resume = (arrive = false) => ((reading.target || reading).stick === false
         ? (_hasNewActivity ||= arrive, reading.position(), updateScrollButton()) : showLatest({ arrive }));
     const keepPlace = () => { if (isInstanceVisible()) { reading.cancel(); reading.request(); } };
@@ -2831,8 +2831,7 @@ export function createChatInstance({
         return changed;
     }
 
-    // Kept on the instance so destroy() can disconnect it (the observer was
-    // previously an unreachable closure — the P3 lifecycle leak).
+    // Instance-owned so destroy() can disconnect it (P3).
     let chatResizeObserver = null;
 
     function installChatResizeObservers() {
@@ -2870,8 +2869,7 @@ export function createChatInstance({
     focusPanel?.addEventListener('keydown', showFocus);
 
     if (asPanel) {
-        // Late panels missed socket open; seed from the socket and latest snapshot, its works included: a working
-        // Project opened from its row said Online until its own first read (owner 20.10).
+        // Late panels missed socket open: seed from the socket and latest snapshot, including its work.
         const latest = stateSnapshots.latest?.();
         hostStart.read(latest);
         workState = reconcileWorkState(workState, latest, chatId, ws.isConnected?.() !== false);
@@ -3070,7 +3068,7 @@ export function createChatInstance({
         if (snapshot.error) return historyPager.retry();
         return loadHistoryAtEdge('older');
     }
-    // `Load more history` reads older messages, ↓ the present (owner, 2026-09-14 and 2026-10-05). Empty pages cross the
+    // `Load more history` reads older messages, ↓ the present. Empty pages cross the
     // server read ceiling: reading goes on until rows land or the chat ends. A grown room re-anchors unless its reader
     // still walks its older chain; `current` guards each request.
     async function loadHistoryAtEdge(direction, current = () => true) {
