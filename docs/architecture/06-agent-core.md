@@ -418,7 +418,9 @@ Disclosed isolation residuals: a non-owner orphan's verdict stays with its dispo
 
 ### Vendor program maintenance
 
-`harness_maintenance.py` serves Accounts, Connect and native tools; `gateways/claudexor_maintenance.py` passes engine inventory and receipts through. The engine owns vendor selection, newest-version reads, actions and installation. Inspection is passive; explicit Update submits directly. Connect waits within its ceiling, requires a selected version answer and retries login once. No runtime preparation, host version ordering, auth changes, automatic replay or host job ledger. Authority/Pause apply. A pre-submit refusal covers this attempt only; earlier unknown POSTs retain their key/body. Runtime delivery still selects immutable exact Node generations for the engine and its CLI; it never replaces a live tree.
+`harness_maintenance.py` serves Accounts, Connect and tools; `gateways/claudexor_maintenance.py` passes engine selection/actions/receipts. Authority/Pause apply; no automatic update, version ordering or job ledger. Connect needs selected-version evidence before one login retry. Unknown POST keeps key/body; later refusal covers only that attempt.
+
+`harness_program_facts.py` atomically replaces `state/harness_programs.json` on inventory reads, engine-ready generations and settled operations. Ready/settled reads are passive; none uses a timer. Runtime facts read only that file, no process/network: “not observed” until read, then installed/newest facts dated “facts unchanged since”. Unchanged facts keep that date on restart; PERSISTENCE owns lifetime.
 
 ### Own-body candidates
 

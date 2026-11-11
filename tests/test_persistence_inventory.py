@@ -937,7 +937,8 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # (``ouroboros/context_view_facts.py``); its own row.
 # Result-review retained material/restored source views and published kept-service declarations
 # share the existing inventory; the combined AST census below pins their union.
-EXPECTED_SCAN_PATHS = 464
+# The current vendor program observation adds one named singleton.
+EXPECTED_SCAN_PATHS = 465
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
@@ -961,6 +962,7 @@ SENTINELS = frozenset({
     "uploads",
     # stage-2: names that live in constants, helper returns or f-strings
     "state/claudexor_rotation_provisioning.json",
+    "state/harness_programs.json",
     "state/extension_generation.json",
     "state/post_task_evolution_counter.json",
     "state/post_task_evolution_request.json",
@@ -1237,6 +1239,7 @@ def test_constant_named_durable_files_are_visible_to_the_scan():
     paths = scan_data_paths()
     hidden = sorted(p for p in (
         "state/claudexor_rotation_provisioning.json",
+        "state/harness_programs.json",
         "state/extension_generation.json",
         "state/post_task_evolution_counter.json",
         "state/post_task_evolution_request.json",

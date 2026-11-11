@@ -87,8 +87,8 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/claudexor/wake` | |
 | GET | `/api/claudexor/restart` | passive preview of what ends (§3) |
 | POST | `/api/claudexor/restart` | preview `{token}`: stop, then the ordinary start |
-| GET | `/api/claudexor/maintenance/harnesses` | passive inspection |
-| POST | `/api/claudexor/maintenance/operations` | 202 vendor latest/exact-version handle; same key/body rejoin; pre-submit refusal covers this attempt only (§6) |
+| GET | `/api/claudexor/maintenance/harnesses` | selection/newest/actions/receipt; `checkLatest` reads vendor HTTPS |
+| POST | `/api/claudexor/maintenance/operations` | 202 latest/exact handle; same-key rejoin; refusal covers this attempt (§6) |
 | GET | `/api/claudexor/maintenance/operations/{operation_id}` | retained engine facts |
 | POST | `/api/claudexor/maintenance/operations/{operation_id}/cancel` | acknowledgement does not prove termination |
 | POST | `/api/claudexor/login` | |
