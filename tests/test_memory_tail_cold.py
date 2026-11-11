@@ -541,6 +541,7 @@ def test_case3_a_room_that_becomes_a_place_reads_its_earlier_sealed_rows(monkeyp
     assert _in_use(tmp_path)
     work = _work(tmp_path, rooms)  # its earlier sealed rows are read by its chat when the block asks, not the whole tail
     assert work.get("tail_whole", 0) == 0 and work.get("rows_asked", 0) > 0, work
+    assert work["rows_read"] == work["rows_open"] + work["rows_kept"] + work.get("rows_stale", 0), work  # law L7d
     views = _same(monkeypatch, tmp_path, rooms)
     assert "delivered again" in _texts(views), "the place's later delivery no longer names its earlier sealed copy"
 
@@ -727,6 +728,7 @@ def test_a_set_composed_anew_after_a_capture_read_it_answers_that_capture_from_t
         with sqlite3.connect(str(ChronicleStore(tmp_path).index_path)) as db:  # another process composed it anew
             marks = json.loads(db.execute("SELECT value FROM state WHERE key='tail_cold'").fetchone()[0])
             db.execute("UPDATE state SET value=? WHERE key='tail_cold'", (json.dumps({**marks, "sequence": -1}),))
+            db.execute("DELETE FROM tail_cold WHERE chat=?", (PLACE,))  # under its marks the place's rows stay read
         got = sealed.rows([PLACE])
     assert json.loads(json.dumps(got)) == json.loads(json.dumps(want))
 
