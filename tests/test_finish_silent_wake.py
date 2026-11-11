@@ -395,6 +395,30 @@ def test_new_owner_words_after_the_reply_refuse_silence_again(wake):
     assert "wake_silent" not in usage and text == "Tests pass."
 
 
+def test_presence_bound_project_work_is_answered_by_its_live_project_send(wake):
+    """#3098: a run keeping its place binding while it lives in a Project room answers my human there."""
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    project = create_project(wake.root, "launch", name="Launch")
+    bind_task_to_project(wake.root, TASK_ID, project["id"], project["chat_id"], origin={"absent": "system"})
+    wake.ctx.is_direct_chat, wake.ctx.current_chat_id = False, int(project["chat_id"])
+    metadata = {"presence": {"binding_id": "b1", "place_id": "place-1", "event": {"conversation_key": "slack:c1"}}}
+    text, usage, trace, bus = wake.run([
+        wake.owner_writes("Report here when it is done.", call("chat_history", {}), "m1"),
+        finish(silent=True),
+        call("send_user_message", {"text": "Done: the report is in this room."}),
+        wake.owner_writes("And the appendix?", call("chat_history", {}), "m2"),
+        finish(silent=True),
+        call("send_user_message", {"text": "The appendix is attached too."}),
+        finish(silent=True),
+        finish("Unused unless a live Project send failed to answer."),
+    ], metadata=metadata)
+    reasons = [row["reason"] for row in trace.get("completion_refusals") or []]
+    assert len(reasons) == 2 and all(reason.startswith("owner_reply_owed") for reason in reasons), reasons
+    assert usage.get("wake_silent") is True and len(wake.calls) == 7
+    assert {frame["chat_id"] for frame in sends(drained(bus))} == {int(project["chat_id"])}
+
+
 def test_reply_already_sent_needs_no_ceremonial_second_final(wake):
     text, usage, trace, _ = wake.run([
         wake.owner_writes("Status?", call("chat_history", {}), "m1"),

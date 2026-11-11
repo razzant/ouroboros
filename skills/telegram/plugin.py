@@ -39,6 +39,7 @@ from .lib.telegram_state import (
 from .lib import telegram_i18n, telegram_inbound, telegram_quiz
 from .lib.telegram_health import _collect_health, _build_menu_tasks
 from .lib.telegram_notifier import _make_notifier, _notify_enabled, _completion_text, _relay_text, _routing_notice_text
+from .lib.telegram_share import make_prepare_share
 from .lib.telegram_typing import TypingCue, host_reply_preparation
 from .lib.telegram_poll_binding import (
     PollCursor, bot_id, park_until_settings_change, saved_server as _saved_server, server_fingerprint, update_key,
@@ -1436,6 +1437,8 @@ def register(api):
     # GET hydrates the declarative form with what is stored; POST saves it.
     api.register_route("settings/save", handler=_make_settings_save(api), methods=("GET", "POST"))
     api.register_route("miniapp/status", handler=_make_status(api), methods=("POST",))
+    # Share… in the Mini App: the bridge's own client prepares the owner's message for Telegram's chat picker.
+    api.register_route("miniapp/prepare-share", handler=make_prepare_share(api, _bridge_client), methods=("POST",))
     api.register_route("connection", handler=_make_connection(api), methods=("GET", "POST"))
     api.register_settings_section(
         "telegram",
