@@ -355,57 +355,53 @@ def executor_observation(
     return executor_observation_meta(observation, task_id=task_id, task_attempt=attempt)
 
 
+def _hand_over(ctx: Any, frames: Any, what: str, meta: Any = dict) -> None:
+    """Hand each frame of ``frames`` (a ``delegate_activity`` reader, not started yet) to the task's progress
+    channel with ``meta()``, committing it only once handed over. Without a channel nothing is read, so retained
+    frames stay pending for a delivery that has one (the body's feed always binds it). A broken channel never
+    aborts the caller or advances the cursor."""
+    from ouroboros import delegate_activity
+
+    fn = getattr(ctx, "emit_progress_fn", None)
+    if not callable(fn):
+        return
+    try:
+        metadata = meta()
+        for activity, commit in frames:
+            fn(delegate_activity.progress_text(activity), **metadata, delegated_activity=activity)
+            commit()
+    except Exception:
+        log.debug("delegated %s emit failed", what, exc_info=True)
+
+
 def emit(ctx: Any, run_id: str, advance: _Advance, *,
          detail: Dict[str, Any], entry: Any, after_seq: int) -> None:
     """Publish the body's window advance as typed activity and its latest executor fact.
 
     ``Feed.window`` already selected the fallback for an engine without a readable journal.
-    The activity owner replays unhanded frames before the window and commits each only after
-    this channel accepts it. A broken channel never aborts the body or advances its cursor.
+    The activity owner replays unhanded frames before the window.
     """
     from ouroboros import delegate_activity
 
-    fn = getattr(ctx, "emit_progress_fn", None)
-    if not callable(fn):
-        return
-    try:
+    def observed() -> Dict[str, Any]:
         observation = executor_observation(ctx, run_id, advance, detail, entry)
-        metadata: Dict[str, Any] = {"executor_observation": observation} if observation else {}
-        for activity, commit in delegate_activity.window_observations(ctx, run_id, advance, after_seq=after_seq):
-            fn(delegate_activity.progress_text(activity), **metadata, delegated_activity=activity)
-            commit()
-    except Exception:
-        log.debug("delegated progress emit failed", exc_info=True)
+        return {"executor_observation": observation} if observation else {}
+    _hand_over(ctx, delegate_activity.window_observations(ctx, run_id, advance, after_seq=after_seq), "window",
+               observed)
 
 
 def emit_stream(ctx: Any, run_id: str, read: Any, *, after_seq: int) -> None:
-    """Push the events of one journal read the body made (``delegate_feed``) to the live
-    progress surface, each frame committed once handed over; a broken channel never aborts
-    the read."""
-    fn = getattr(ctx, "emit_progress_fn", None)
+    """Push the events of one journal read the body made (``delegate_feed``) to the live progress surface."""
     from ouroboros import delegate_activity
-    try:
-        for activity, commit in delegate_activity.stream_observations(ctx, run_id, read, after=after_seq):
-            if not callable(fn):
-                return  # retained, not delivered; the detail/terminal path can retry the pending frame
-            fn(delegate_activity.progress_text(activity), delegated_activity=activity)
-            commit()
-    except Exception:
-        log.debug("delegated stream emit failed", exc_info=True)
+
+    _hand_over(ctx, delegate_activity.stream_observations(ctx, run_id, read, after=after_seq), "stream")
 
 
 def emit_retained(ctx: Any, run_id: str) -> None:
     """Retry local activity delivery without delaying a ready result on transport."""
-    fn = getattr(ctx, "emit_progress_fn", None)
-    if not callable(fn):
-        return
     from ouroboros import delegate_activity
-    try:
-        for activity, commit in delegate_activity.retained_observations(ctx, run_id):
-            fn(delegate_activity.progress_text(activity), delegated_activity=activity)
-            commit()
-    except Exception:
-        log.debug("retained delegated progress emit failed", exc_info=True)
+
+    _hand_over(ctx, delegate_activity.retained_observations(ctx, run_id), "retained")
 
 
 def paused_note(pending_interactions: Optional[List[Dict[str, Any]]], async_only: bool = False) -> str:
