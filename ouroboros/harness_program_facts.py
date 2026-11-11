@@ -70,11 +70,13 @@ def _record_inventory(inventory, complete, root):
     saved = _read(root)
     observed = inventory.get("observedAt") or ""
     boundary = saved.get("completeObservedAt")
+    newest_complete = complete and _stamp(observed) >= _stamp(boundary)
     programs = dict(saved.get("programs", {}))
     for row in inventory["harnesses"]:
         at = row.get("observedAt") or observed
         previous = programs.get(row["harness"])
-        if _stamp(previous.get("observedAt") if previous else boundary) > _stamp(at):
+        prior = previous.get("observedAt") if previous else None if newest_complete else boundary
+        if _stamp(prior) > _stamp(at):
             continue
         selected, newest = row.get("selection") or {}, row.get("newest") or {}
         programs[row["harness"]] = {"path": selected.get("path"), "version": selected.get("version"),
@@ -82,12 +84,11 @@ def _record_inventory(inventory, complete, root):
             "newestStatus": newest.get("status", "not_read"),
             "newestVersion": newest.get("version") if newest.get("status") == "available" else None,
             "newestObservedAt": newest.get("observedAt"), "observedAt": at}
-    if complete:
+    if newest_complete:
         named = {row["harness"] for row in inventory["harnesses"]}
         programs = {name: row for name, row in programs.items()
                     if name in named or _stamp(row.get("observedAt")) >= _stamp(observed)}
-        if _stamp(observed) >= _stamp(boundary):
-            boundary = observed
+        boundary = observed
     saved = {"programs": programs, "completeObservedAt": boundary, "events": saved.get("events", {})}
     events = saved.get("events", {})
     if events:

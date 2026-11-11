@@ -329,6 +329,30 @@ def _process_observation(root, data, complete, wait, notify):
         notify.set()
 
 
+@pytest.mark.parametrize("newest_first", [False, True])
+@pytest.mark.parametrize("newest_adds", [False, True])
+def test_latest_complete_answer_owns_membership_in_either_publication_order(tmp_path, newest_first, newest_adds):
+    names = [f"program-{n}" for n in range(7)]
+    older_names, newer_names = (names[:1], names) if newest_adds else (names, names[:1])
+    older = crossing_inventory("2026-11-19", "2026-11-17", older_names, "older")
+    newer = crossing_inventory("2026-11-20", "2026-11-18", newer_names, "newer")
+    for answer in ([newer, older] if newest_first else [older, newer]):
+        facts.record_inventory(answer, root=tmp_path)
+    rows = saved(tmp_path)["programs"]
+    assert set(rows) == set(newer_names)
+    assert all(row["version"] == "newer" for row in rows.values())
+    assert saved(tmp_path)["completeObservedAt"] == newer["observedAt"]
+    # A later complete answer admits named cached rows behind the boundary,
+    # but never replaces a saved row whose own observation is newer.
+    recovery = crossing_inventory("2026-11-21", "2026-11-16", names, "cached")
+    facts.record_inventory(recovery, root=tmp_path)
+    rows = saved(tmp_path)["programs"]
+    assert set(rows) == set(names)
+    assert all(rows[name]["version"] == ("newer" if name in newer_names else "cached") for name in names)
+    facts.record_inventory(older, root=tmp_path)
+    assert set(saved(tmp_path)["programs"]) == set(names), "an older complete answer cannot prune recovery"
+
+
 def test_two_process_writers_keep_all_programs_and_newer_selection(tmp_path):
     import multiprocessing
     ctx = multiprocessing.get_context("spawn")

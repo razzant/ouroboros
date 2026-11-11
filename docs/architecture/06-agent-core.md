@@ -422,7 +422,7 @@ Disclosed isolation residuals: a non-owner orphan's verdict stays with its dispo
 
 `harness_maintenance.py` serves Accounts/Connect; `ouroboros/gateways/claudexor_maintenance.py` owns the 6.0.0 floor; `ouroboros/tools/control_maintenance.py` owns mind tools. Authority/Pause apply; no automatic update, version ordering or job ledger. Connect joins active installs under one deadline, returns definite refusals, cancels nothing and retries login once after selected-version evidence. Unknown POSTs keep key/body/context.
 
-`harness_program_facts.py` saves `state/harness_programs.json`. Claims spend each generation/settlement once, even on failure; locks cover only file work. Newer program observations win; full reads remove older absent rows. Context reads only the file: dated installed/newest facts, unavailable checks and incomplete coverage, or “not observed”. No timer; lifetime: PERSISTENCE.
+`harness_program_facts.py` saves `state/harness_programs.json`. Claims spend each generation/settlement once, even on failure; locks cover only file work. Newer rows win; the latest full answer governs membership. Context reads only the file: dated installed/newest facts, unavailable checks and incomplete coverage, or “not observed”. No timer; lifetime: PERSISTENCE.
 
 ### Own-body candidates
 
