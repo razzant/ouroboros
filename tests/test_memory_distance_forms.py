@@ -8,6 +8,45 @@ from ouroboros import memory_view_work as work
 from tests import _memory_view_synthetic as syn
 
 
+def test_remote_work_ranges_stay_in_their_source_rooms_and_read_those_replies(tmp_path):
+    from ouroboros import chat_chain, dialogue_store as ds
+    from ouroboros import memory_view_conversation_forms as conv
+    from tests import _memory_inventory_shared as shared
+    from tests.test_memory_waiting import _event_row, _event_group, view, _ctx, _memory_read
+
+    shared.world(tmp_path)
+    rows = []
+    for i, thread in enumerate(("first", "second", "first"), 1):
+        row = _event_row("harbor", thread, i, direction="out", type="presence_delivery",
+                         task_id="range001", text=f"Outward answer number {i}.")
+        ds.append(tmp_path, "chat", row)
+        rows.append(row)
+    ds.append(tmp_path, "chat", _event_row("harbor", "second", 4, direction="system", type="task_summary",
+              task_id="range001", wake_summary="The shared finding. Extra detail.", status="completed"))
+    group = _event_group(view(tmp_path))
+    address = lambda row: chat_chain.format_address(chat_chain.row_address(row))
+    expected = [work.row_range(address(rows[0]), address(rows[2])), address(rows[1])]
+    # Membership in another room must not change the address's room or add another range.
+    original = next(w for r in group["rooms"] for w in r["words"] if w["address"] == address(rows[0]))
+    other = next(r for r in group["rooms"] if r["room_id"] != str(rows[0]["chat_id"]))
+    other["words"].append(dict(original, id="membership-copy", again=original["address"]))
+    data = conv._sources(group)
+    assert data["replies"]["range001"] == ", ".join(expected)
+    for form in (1, 2, 3):
+        assert f"[{', '.join(expected)}] «The shared finding.»" in conv.render_group(group, set(), set(), form)
+    for span in expected:
+        endpoints = span.split(" → ")
+        first, last = endpoints[0], endpoints[-1]
+        room = chat_chain.parse_address(first)["chat_id"]
+        assert chat_chain.parse_address(last)["chat_id"] == room
+        text = _memory_read(_ctx(tmp_path, "root0001"), room_id=str(room), rows=True, **{"from": first, "to": last})
+        for row in rows:
+            assert (row["text"] in text) is (row["chat_id"] == room)
+    whole = conv.render_group(group, set(), set(), 0)
+    assert "get_task_result(task_id='range001')" in whole
+    assert all(row["text"] in whole for row in rows)
+
+
 @pytest.mark.parametrize("short", ["F5l", "F5", "F5a"])
 def test_short_story_forms_keep_human_quotes_until_the_owner_stage(short):
     page = syn.pages(1, 3000)[0]

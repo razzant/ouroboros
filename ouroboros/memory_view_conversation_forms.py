@@ -148,6 +148,7 @@ def _sources(group):
             ids.add(ident)
             key = word.get("work_id") or word.get("task_id")
             if word.get("kind") == "ouroboros" and key and word.get("gist"):
+                key = (key, word["address"].partition("@")[0])  # the address's room, not its memberships
                 first, last = replies.get(key, (word, word))
                 replies[key] = (word if word["pos"] < first["pos"] else first,
                                 word if word["pos"] > last["pos"] else last)
@@ -159,8 +160,11 @@ def _sources(group):
         if room.get("overheard") and parts["unread"]:
             overheard_rooms += 1
             overheard_words.extend(parts["unread"])
+    ranges = {}
+    for (key, _room), (first, last) in sorted(replies.items(), key=lambda item: item[1][0]["pos"]):
+        ranges.setdefault(key, []).append(row_range(first["address"], last["address"]))
     return {"words": words, "kinds": kinds, "rooms": rooms,
-            "replies": {key: row_range(first["address"], last["address"]) for key, (first, last) in replies.items()},
+            "replies": {key: ", ".join(spans) for key, spans in ranges.items()},
             "overheard": (overheard_rooms, overheard_words),
             "owners": owners, "ids": ids, "gists": _gist_records(group), "untold": untold,
             "ordinary": not untold and all(
