@@ -1695,6 +1695,30 @@ def test_a_start_stands_on_the_set_unless_its_own_records_write_its_lineage_late
     _same(monkeypatch, tmp_path, rooms)
 
 
+def test_a_place_turn_its_runner_starts_stands_on_the_set(monkeypatch, tmp_path):
+    """A place turn as its runner starts it: ``presence_runner._run_current`` writes its first record, the turn's start
+    its running record as the agent writes it (``agent.py``, the task's four lineage fields). Neither moves a mark, so
+    the turn's capture stands on the set, and so does the next one."""
+    from ouroboros.presence_runner import PresenceTurnGate, run_presence_turn
+    from ouroboros.store_hot_facts import LINEAGE_COLUMNS
+    from tests.test_presence_runner import _admission, _event, _terminal
+
+    _sealed_main_row(tmp_path)
+    stood = []
+
+    class Agent:
+        def handle_task(self, task):
+            write_task_result(tmp_path, task["id"], "running", **{key: task.get(key) for key in LINEAGE_COLUMNS})
+            stood.append(_in_use(tmp_path))  # where the turn's build captures
+            _terminal(tmp_path, task, "Hi")
+            return [{"type": "presence_result", "outcome": "message", "text": "Hi", "work_ref": ""}]
+
+    (tmp_path / "repo").mkdir()
+    result = run_presence_turn(admission=_admission(), event=_event(), repo_dir=tmp_path / "repo",
+                               drive_root=tmp_path, agent_factory=lambda **_kwargs: Agent(), gate=PresenceTurnGate(2))
+    assert result.outcome == "message" and stood == [True] and _in_use(tmp_path), (result, stood)
+
+
 def test_a_write_that_keeps_every_tasks_lineage_keeps_the_set(monkeypatch, tmp_path):
     rooms, _row = _sealed_main_row(tmp_path)
     write_task_result(tmp_path, "late", "failed", result="again")  # the same parent, root, role and chat
