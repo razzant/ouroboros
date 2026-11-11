@@ -2,7 +2,7 @@
 
 The one reader the test runner's worker budget (``test_parallelism``) and the overload stop of an
 owned test tree (``process_overload``) share. Each caller keeps its reserve
-(``config.HOST_MEMORY_RESERVE_FRACTION``) and its decision; this module only measures, afresh on every call.
+(``config.HOST_MEMORY_RESERVE_FRACTION``) and its decision; only macOS's fixed physical total is cached per process.
 
 macOS: ``hw.memsize``, free + inactive + speculative pages from ``vm_stat``, and the kernel's
 pressure level, of which only critical counts. Linux: ``/proc/meminfo`` within every memory limit
@@ -13,6 +13,7 @@ unknown: an unsupported platform, a failed probe, or a limit that exists but can
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
@@ -51,6 +52,12 @@ def _darwin_pressure() -> bool:
         return int(_native_output(["/usr/sbin/sysctl", "-n", "kern.memorystatus_vm_pressure_level"]).strip()) >= 4
     except (OSError, ValueError, subprocess.SubprocessError):
         return False
+
+
+@lru_cache(maxsize=1)
+def _darwin_total() -> int:
+    """Physical RAM is fixed for this process; a failed probe remains retryable."""
+    return int(_native_output(["/usr/sbin/sysctl", "-n", "hw.memsize"]).strip())
 
 
 def _cgroup_mounts(root: Path) -> dict:
@@ -128,7 +135,7 @@ def physical_memory() -> Optional[MemorySnapshot]:
             memory = psutil.virtual_memory()
             total, available = memory.total, memory.available
         elif sys.platform == "darwin":
-            total = int(_native_output(["/usr/sbin/sysctl", "-n", "hw.memsize"]).strip())
+            total = _darwin_total()
             vm = _native_output(["/usr/bin/vm_stat"])
             page_size = int(re.search(r"page size of (\d+) bytes", vm).group(1))
             pages = {name.strip(): int(value.strip().rstrip("."))

@@ -452,7 +452,7 @@ def _pool_counts(*, census: bool = False) -> Dict[str, Any]:
     ``pool_admission.facts``, dated by its own ``read_at``). A slot mid-reap is not
     assignable, so no reader is told of a free slot that is not. A failed measurement publishes
     ``pool_observation_status: "unknown"`` with null counts: never zeros, which would read as an empty pool. The
-    census hashes these facts with the reading's verdict in place of its bytes (``pool_admission.verdict``), so a
+    census hashes only whether starts are admitted and their reason in place of the reading's bytes, so a
     change of verdict or reason publishes and byte noise does not."""
     try:
         from supervisor import pool_admission, workers as _workers_mod
@@ -463,7 +463,8 @@ def _pool_counts(*, census: bool = False) -> Dict[str, Any]:
         # Absence is counted above, not an explicit disablement.
         counts["worker_pool_disabled_reason"] = "" if disabled == "no_workers" else disabled
         counts["pool_observation_status"] = "observed"
-        counts["memory_admission"] = pool_admission.verdict() if census else pool_admission.facts()
+        memory = pool_admission.facts()
+        counts["memory_admission"] = (bool(memory.get("starts_admitted")), memory.get("reason", "")) if census else memory
         return counts
     except Exception:
         log.debug("Worker pool facts unavailable; published as unknown", exc_info=True)  # every tick: no warning flood

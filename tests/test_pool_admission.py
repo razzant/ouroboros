@@ -27,6 +27,8 @@ def assigning(pool, monkeypatch):  # noqa: F811 -- the imported fixture is this 
     monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 100)
     monkeypatch.setattr(evolution_lifecycle, "evolution_block_reason", lambda: "")
     monkeypatch.setenv("OUROBOROS_MAX_WORKERS", "")  # no number: the machine is the limit
+    monkeypatch.setattr(pool_admission, "_READY", {"seq": 0, "generation": None, "rss_bytes": None})
+    monkeypatch.setattr(pool_admission, "_FACTS", {})
     return pool
 
 
@@ -57,6 +59,104 @@ def booting_slot(wid, lane="project"):
     slot = workers.Worker(wid, Process(500 + wid), InputQueue(), reaping=True, booting=True, lane=lane)
     workers.WORKERS[wid] = slot
     return slot
+
+
+def readiness_park(wid):
+    slot = booting_slot(wid)
+    slot.proc.alive = False
+    lifecycle._replace_or_park_unready_slot(wid, slot, 0, 0.0, lifecycle.WORKER_READY_MAX_ATTEMPTS)
+    assert slot.readiness_exhausted
+    return slot
+
+
+def test_one_readiness_park_leaves_a_waiting_parent_its_floor_and_two_stop_growth(assigning, monkeypatch):
+    from ouroboros.context_runtime_facts import _queue_context_fact
+    from ouroboros.engine_facts import engine_pool_line
+
+    park(assigning)
+    machine(monkeypatch, 0.1, pressure=True)
+    readiness_park(1)
+    workers.PENDING.append(child("child"))
+    workers.assign_tasks()
+    assert len(assigning.created) == 1, "one park cannot deadlock a healthy parent waiting for its queued child"
+    failed = workers.WORKERS[2]
+    failed.proc.alive = False
+    lifecycle._replace_or_park_unready_slot(2, failed, 0, 0.0, lifecycle.WORKER_READY_MAX_ATTEMPTS)
+    assert pool_admission.parked(lifecycle.project_slots()) == 2
+    for _ in range(2):
+        workers.assign_tasks()
+    assert len(assigning.created) == 1 and workers.worker_pool_admission_state()["available"]
+    queue.persist_queue_snapshot("readiness_finiteness")
+    fact = _queue_context_fact({"budget_drive_root": str(assigning.root)})["memory_admission"]
+    assert fact["read_at"] and fact["starts_admitted"] == 0
+    assert fact["reason"] == "worker_readiness_finiteness", "publish the refusal, not the older memory reason"
+    assert "worker_readiness_finiteness" in engine_pool_line(assigning.root)
+    # An already-booting worker's success resets the count, even though both exhausted slots remain.
+    fresh = booting_slot(3)
+    assert lifecycle._open_ready_slot(3, fresh, {"pid": fresh.proc.pid}, "", 0, 0.0, 1)
+    assert pool_admission.parked(lifecycle.project_slots()) == 0
+    workers.assign_tasks()
+    assert workers.RUNNING["child"]["worker_id"] == 3
+
+
+@pytest.mark.parametrize("state", ["acting", "waiting", "idle"])
+def test_thirty_ready_processes_keep_growing_through_a_readiness_blip(assigning, monkeypatch, state):
+    machine(monkeypatch, 90, total_gib=100)
+    for wid in range(30):
+        tid = f"live-{wid}"
+        slot = affirm_ready(workers.Worker(wid, Process(500 + wid), InputQueue(), busy_task_id=tid))
+        slot.rss = {"rss_bytes": GIB}
+        workers.WORKERS[wid] = slot
+        workers.RUNNING[tid] = {"task": task(tid), "worker_id": wid}
+        if state == "waiting":
+            slot.active_capacity = False
+            workers.RUNNING[tid]["owner_wait"] = {"state": "waiting"}
+        elif state == "idle":
+            slot.busy_task_id = None
+            del workers.RUNNING[tid]
+    workers.RUNNING.pop("owner")
+    readiness_park(30)
+    assert starts() > 0, "acting, waiting and idle ready processes all sustain growth through a blip"
+    workers.PENDING.extend(task(f"new-{i}") for i in range(31 if state == "idle" else 1))
+    workers.assign_tasks()
+    workers.assign_tasks()
+    assert len(assigning.created) == 1
+
+
+@pytest.mark.parametrize("state", ["dead", "unready", "reaping", "conversation", "inline"])
+def test_only_live_ready_project_processes_allow_growth_past_a_park(assigning, state):
+    slot = assigning.original
+    readiness_park(1)
+    if state == "dead":
+        slot.proc.alive = False
+    elif state == "unready":
+        slot.ready_identity = None
+    elif state == "reaping":
+        slot.reaping = True
+    elif state == "conversation":
+        slot.lane = "conversation"
+    else:
+        slot.executor = "inline_degraded"
+    assert starts(pool_admission.PROBE) == 0
+    assert pool_admission.facts()["reason"] == "worker_readiness_finiteness"
+    slot.proc.alive, slot.reaping, slot.lane, slot.executor = True, False, "project", "worker"
+    affirm_ready(slot)
+    assert starts() > 0
+
+
+def test_a_broken_checkout_stops_after_one_park_and_is_exhausted(assigning):
+    workers.WORKERS.clear()
+    # The dead parent's unsettled row keeps teardown pending while admission already sees exhaustion.
+    readiness_park(1)
+    workers.PENDING.append(task("unstarted"))
+    for _ in range(2):
+        assert starts(pool_admission.PROBE) == 0
+        workers.assign_tasks()
+    assert not assigning.created
+    assert workers._worker_pool_execution_state()["disabled_reason"] == "worker_readiness_exhausted"
+    workers.RUNNING.clear()
+    assert lifecycle.disable_exhausted_worker_pool()
+    assert not workers._worker_pool_execution_state()["available"]
 
 
 # ---- D-a/D-b: available - R >= T * (B + 1) per start; the floor; pressure; an unknown reading --------------------
@@ -323,6 +423,25 @@ def test_the_root_child_limit_counts_acting_children(assigning, monkeypatch):
     assert len(assigning.created) == 1
 
 
+def test_a_slots_wait_flag_counts_the_same_for_the_owner_and_child_caps(assigning, monkeypatch):
+    from ouroboros import config
+
+    monkeypatch.setattr(config, "get_max_active_subagents_per_root", lambda: 1)
+    slot = assigning.original
+    workers.RUNNING["owner"]["task"] = child("owner")
+    workers.PENDING.append(child("next"))
+    assert lifecycle.pool_slot_counts()["acting_worker_count"] == 1
+    assert pool_admission.acting_children("owner", workers.RUNNING.values()) == 1
+    workers.assign_tasks()
+    assert not assigning.created
+    slot.active_capacity = False  # Stop custody can hold the row after the wait metadata has left it.
+    assert lifecycle.pool_slot_counts()["acting_worker_count"] == 0
+    assert pool_admission.acting_children("owner", workers.RUNNING.values()) == 0
+    assert pool_admission.acting_children("owner", [{"task": child("selected")}]) == 1, "a projected launch acts"
+    workers.assign_tasks()
+    assert len(assigning.created) == 1
+
+
 # ---- the owner's number: optional, read live, migration A ----------------------------------------------------------
 
 @pytest.mark.parametrize(("saved", "marked", "read"), [
@@ -356,3 +475,50 @@ def test_a_saved_worker_number_reads_as_migration_a_says_and_never_repeats(tmp_p
     stored = json.loads(path.read_text(encoding="utf-8"))
     assert stored[OWNER_CAP_FORMAT_KEY] == 1 and config.load_settings()["OUROBOROS_MAX_WORKERS"] == (
         "" if read is None else read)
+
+
+@pytest.mark.parametrize("provenance", [False, True])
+def test_legacy_worker_cap_projection_does_not_undo_migration(tmp_path, monkeypatch, provenance):
+    from ouroboros import config
+    from ouroboros.runtime_limits import get_max_workers
+    from ouroboros.settings_integrity import PROJECTED_SETTINGS_ENV
+    from ouroboros.settings_scales import OWNER_CAP_FORMAT_KEY
+
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"OUROBOROS_MAX_WORKERS": 10}), encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_PATH", path)
+    inherited = {}
+    config.apply_settings_to_env({**config.SETTINGS_DEFAULTS, "OUROBOROS_MAX_WORKERS": 10}, environ=inherited)
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", inherited["OUROBOROS_MAX_WORKERS"])
+    monkeypatch.delenv(PROJECTED_SETTINGS_ENV, raising=False)
+    if provenance:
+        monkeypatch.setenv(PROJECTED_SETTINGS_ENV, inherited[PROJECTED_SETTINGS_ENV])
+    loaded = config.load_settings()
+    assert loaded[OWNER_CAP_FORMAT_KEY] == 1 and loaded["OUROBOROS_MAX_WORKERS"] == ""
+    config.apply_settings_to_env(loaded, environ=inherited)
+    assert "OUROBOROS_MAX_WORKERS" not in inherited
+    monkeypatch.delenv("OUROBOROS_MAX_WORKERS")
+    config.save_settings(loaded)
+    assert get_max_workers() is None
+    assert json.loads(path.read_text(encoding="utf-8"))["OUROBOROS_MAX_WORKERS"] == ""
+    config.save_settings({**loaded, "OUROBOROS_MAX_WORKERS": 10})
+    assert config.load_settings()["OUROBOROS_MAX_WORKERS"] == 10, "after migration, a chosen 10 stays chosen"
+
+
+def test_the_environment_configures_only_an_unauthored_worker_cap(tmp_path, monkeypatch):
+    from ouroboros import config
+    from ouroboros.gateway.owner_settings import _owner_update_settings, fields_on_saved_document
+
+    path = tmp_path / "settings.json"
+    path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_PATH", path)
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", "40")
+    loaded = config.load_settings()
+    assert loaded["OUROBOROS_MAX_WORKERS"] == 40
+    config.save_settings(loaded)
+    assert "OUROBOROS_MAX_WORKERS" not in json.loads(path.read_text(encoding="utf-8"))
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", "20")
+    assert config.load_settings()["OUROBOROS_MAX_WORKERS"] == 20
+    _owner_update_settings(fields_on_saved_document({"OUROBOROS_MAX_WORKERS": ""}),
+                           authored_keys=["OUROBOROS_MAX_WORKERS"])
+    assert config.load_settings()["OUROBOROS_MAX_WORKERS"] == "", "a saved blank wins over the environment too"

@@ -554,7 +554,7 @@ SETTINGS_KEYS_NOT_EXPORTED_TO_ENV = frozenset({
 # ABSENT key leaves the choice to the environment (a deployment's OUROBOROS_UI_DIR=none). A merged write
 # carries every key the read produced, so it must not author an absent key with the value the environment
 # or the default gave it: one unrelated Settings save would otherwise freeze the operator's choice on disk.
-SAVED_CHOICE_SETTINGS = frozenset({"OUROBOROS_UI_DIR"})
+SAVED_CHOICE_SETTINGS = frozenset({"OUROBOROS_UI_DIR", "OUROBOROS_MAX_WORKERS"})
 
 
 def unauthored_saved_choices(prepared, stored, authored=()) -> frozenset:

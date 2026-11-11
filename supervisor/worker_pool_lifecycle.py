@@ -86,8 +86,7 @@ def pool_slot_counts(pool: Any = None, running: Any = None) -> Dict[str, Any]:
     slots, running = _pool().WORKERS if pool is None else pool, _pool().RUNNING if running is None else running
     projects, carriers, now = project_slots(slots), lane_slots(slots), time.time()
     busy = [slot for slot in projects if getattr(slot, "busy_task_id", None) is not None]
-    waiting = sum(1 for slot in busy if not getattr(slot, "active_capacity", True)
-                  or pool_admission.waits_on_its_process(running.get(slot.busy_task_id), now))
+    waiting = sum(not pool_admission.acting(slot, running.get(slot.busy_task_id), now) for slot in busy)
 
     def idle(slot: Any) -> bool:
         return (getattr(slot, "busy_task_id", None) is None and worker_ready(slot)
@@ -759,7 +758,7 @@ def _replace_or_park_unready_slot(wid: int, slot: Any, owner_chat_id: int, start
         slot.readiness_exhausted = True
         slot.booting = False
         slot.reaping = True
-        pool_admission.note_park(slot)  # nothing starts until the next successful worker_ready
+        pool_admission.note_park(slot)  # count this park until the next successful worker_ready
     if owner_chat_id:
         _pool().send_with_budget(
             owner_chat_id,
@@ -1153,8 +1152,8 @@ def _worker_pool_execution_state(pool: Any = None) -> Dict[str, Any]:
     Project slots alone count: the conversation lane's carriers are outside the owner's cap
     and the exhaustion fence. A table that holds only the lane's spare is a STARTED pool with
     zero project members (growth buys them on demand). Exhaustion is counted on healthy slots:
-    a readiness park that no successful ``worker_ready`` has lifted since stops growth
-    (``pool_admission.parked``), so with no healthy project slot left nothing can run.
+    readiness parks since the last successful ``worker_ready`` stop growth when they outnumber
+    live ready project processes (``pool_admission``); with no healthy slot left nothing can run.
     """
     table = _pool().WORKERS if pool is None else pool
     projects = project_slots(table)

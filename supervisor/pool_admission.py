@@ -6,15 +6,16 @@ nothing). ``available`` is ``host_memory.physical_memory`` (within this process'
 reserve (``config.HOST_MEMORY_RESERVE_FRACTION`` of the total), ``T`` the typical size of one of our workers (the mean
 of the live workers' own heartbeat reports, both lanes; else this generation's last ``worker_ready`` size; else
 unknown) and ``B`` the processes of both lanes still starting. With no project process acting or starting one start is
-always admitted (the floor); a slot parked for readiness stops every start until the next successful ``worker_ready``
-(finiteness); an unknown reading admits the owner's cap when set, else one starting process at a time, and says why
+always admitted (the floor); readiness parks since the last successful ``worker_ready`` stop growth only when they
+outnumber live ready project processes (finiteness); an unknown reading admits the owner's cap when set, else one
+starting process at a time, and says why
 (``memory_unmeasured: ...``); the owner's ``OUROBOROS_MAX_WORKERS``, when set, caps acting tasks and claims.
 
 Reuse of an idle process, a warm return and a crash replacement never ask; the conversation lane's starts stay
 outside (4A: spawn success). The machine is read at most once a pass, outside Q and the lifecycle serializer, only
 when chosen work needs a new process (``dispatch_choice.run_pass``), and never kept. Pressure stops or cools nobody;
-it refuses a new process. The last reading's dated facts are published with the pool's counts (``facts``); the queue
-census hashes only its verdict (``verdict``). Disclosed residuals: growth after a start is not predicted; neighbours
+it refuses a new process. Dated admission facts are published with the pool's counts (``facts``); the queue census
+hashes only whether starts are admitted and why. Disclosed residuals: growth after a start is not predicted; neighbours
 on the host share memory without a common ledger; Windows Job and commit limits are not read; running out of memory
 is not prevented, only starting a process into a measured shortage.
 """
@@ -67,9 +68,9 @@ def note_park(slot: Any) -> None:
     slot.parked_after_ready = _READY["seq"]
 
 
-def parked(slots: Iterable[Any]) -> bool:
-    """Finiteness: a slot parked for readiness with no successful ``worker_ready`` since (one marked by hand counts)."""
-    return any(getattr(slot, "readiness_exhausted", False)
+def parked(slots: Iterable[Any]) -> int:
+    """Slots parked for readiness since the last successful ``worker_ready`` (one marked by hand counts)."""
+    return sum(getattr(slot, "readiness_exhausted", False)
                and getattr(slot, "parked_after_ready", _READY["seq"]) == _READY["seq"] for slot in slots)
 
 
@@ -88,13 +89,20 @@ def waits_on_its_process(meta: Any, now: Optional[float] = None) -> bool:
         for row in leases.values())
 
 
+def acting(slot: Any, meta: Any, now: Optional[float] = None) -> bool:
+    """A busy slot or projected launch acts unless its slot or running row says it waits on its process."""
+    return bool(getattr(slot, "active_capacity", True) and not waits_on_its_process(meta, now))
+
+
 def acting_children(root_task_id: str, running: Iterable[Any]) -> int:
     """The acting subagents of one root (``OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT`` counts these): a child that
     waits on its process or sleeps without one does not act; a row chosen in this pass does."""
+    from supervisor import workers
+
     now = time.time()
     return sum(1 for meta in running if isinstance(meta, dict) and isinstance(task := meta.get("task"), dict)
                and task.get("delegation_role") == "subagent" and str(task.get("root_task_id") or "") == root_task_id
-               and root_task_id and not waits_on_its_process(meta, now))
+               and root_task_id and acting(workers.WORKERS.get(meta.get("worker_id")), meta, now))
 
 
 def typical_size(slots: Iterable[Any]) -> Tuple[Optional[int], str]:
@@ -112,15 +120,21 @@ def typical_size(slots: Iterable[Any]) -> Tuple[Optional[int], str]:
     return None, "unknown"
 
 
-def admit(reading: Optional[Reading], counts: Dict[str, Any], slots: Iterable[Any], *, parked_now: bool) -> int:
+def admit(reading: Optional[Reading], counts: Dict[str, Any], slots: Iterable[Any], *, parked_now: int) -> int:
     """Under Q: how many new project processes may start, from ``counts`` (``pool_slot_counts``) and the pass's
     ``reading`` (None: not read, nothing starts; ``PROBE``: 1 when a reading could admit one). A real reading
-    records its dated facts for publication."""
+    records its dated facts for publication; finiteness publishes its refusal even without a memory read."""
+    from supervisor.worker_pool_lifecycle import is_project_slot, is_worker_slot, worker_ready
+
     slots = list(slots)
     cap, acting, booting = counts["max_workers"], counts["acting_worker_count"], counts["booting_count"]
     room = None if cap is None else cap - acting - counts["assignable_idle_workers"] - booting
-    if parked_now or room is not None and room <= 0 or reading is None:
-        return 0  # finiteness, the owner's cap, or a pass that has not read the machine
+    if parked_now and parked_now > sum(is_project_slot(slot) and is_worker_slot(slot) and worker_ready(slot) for slot in slots):
+        _FACTS.clear()
+        _FACTS.update(read_at=utc_now_iso(), status="not_read", starts_admitted=0, reason="worker_readiness_finiteness")
+        return 0
+    if room is not None and room <= 0 or reading is None:
+        return 0  # the owner's cap or a pass that has not read the machine
     if reading is PROBE:
         return 1
     from ouroboros.config import HOST_MEMORY_RESERVE_FRACTION
@@ -151,13 +165,8 @@ def admit(reading: Optional[Reading], counts: Dict[str, Any], slots: Iterable[An
 
 
 def facts() -> Dict[str, Any]:
-    """Under Q: the last reading's dated facts (``{}`` before the first): what the mind reads beside the counts."""
+    """Under Q: dated admission facts, including finiteness without a memory read (``{}`` before the first)."""
     return dict(_FACTS)
-
-
-def verdict() -> Dict[str, Any]:
-    """Under Q: what the queue census hashes of the reading: whether starts were admitted and why, never bytes."""
-    return {"admits": bool(_FACTS.get("starts_admitted")), "reason": _FACTS.get("reason", "")}
 
 
 def _number(value: Any) -> float:

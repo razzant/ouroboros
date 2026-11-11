@@ -126,9 +126,9 @@ def test_parked_authors_lend_capacity_but_buy_no_replacement_without_demand(assi
     assert workers.RUNNING["owner"] is assigning.meta
 
 
-def test_a_readiness_park_stops_growth_until_the_next_ready_and_no_healthy_slot_is_exhaustion(assigning, monkeypatch):
-    """Finiteness (R4 D-a(2)): a slot parked for readiness stops every start, room or not, until the next successful
-    ``worker_ready``; exhaustion is counted on healthy slots, not on a number: with none left, nothing can run."""
+def test_a_readiness_park_allows_growth_beside_a_healthy_slot_and_no_healthy_slot_is_exhaustion(assigning, monkeypatch):
+    """One park beside a healthy process permits growth; a successful worker_ready clears the park count.
+    With no healthy slot and a new readiness park, the pool is exhausted."""
     from supervisor import pool_admission
 
     monkeypatch.setenv("OUROBOROS_MAX_WORKERS", "")  # no number: memory, the floor and finiteness decide
@@ -138,18 +138,18 @@ def test_a_readiness_park_stops_growth_until_the_next_ready_and_no_healthy_slot_
     lifecycle._replace_or_park_unready_slot(1, broken, 0, 0.0, lifecycle.WORKER_READY_MAX_ATTEMPTS)
     assert broken.readiness_exhausted and workers.worker_pool_admission_state()["available"]  # the parent is healthy
     workers.PENDING.extend([task("a"), task("b")])
-    workers.assign_tasks()
     with queue._queue_lock:
-        assert lifecycle.admissible_starts(pool_admission.read()) == 0, "a park plus room starts nothing"
-    assert not assigning.created and "a" not in workers.RUNNING
-    fresh = workers.Worker(2, Process(44), InputQueue(), reaping=True, booting=True)
-    workers.WORKERS[2] = fresh
-    assert lifecycle._open_ready_slot(2, fresh, {"pid": 44}, "", 0, 0.0, 1)  # the next successful worker_ready
+        assert lifecycle.admissible_starts(pool_admission.read()) > 0, "a blip does not freeze healthy capacity"
+    workers.assign_tasks()
+    assert len(assigning.created) == 2 and "a" not in workers.RUNNING
+    fresh = workers.WORKERS[2]
+    assert lifecycle._open_ready_slot(2, fresh, {"pid": fresh.proc.pid}, "", 0, 0.0, 1)
+    assert pool_admission.parked(lifecycle.project_slots()) == 0
     with queue._queue_lock:
         assert lifecycle.admissible_starts(pool_admission.read()) > 0, "growth resumes after a ready"
     workers.assign_tasks()  # the opened slot takes one row (an idle process: the machine is not read)
-    workers.assign_tasks()  # none is idle now: the machine admits a process for the other
-    assert workers.RUNNING["a"]["worker_id"] == 2 and len(assigning.created) == 1
+    workers.assign_tasks()  # the other row already has its booting reservation
+    assert workers.RUNNING["a"]["worker_id"] == 2 and len(assigning.created) == 2
     for wid in (0, 2, 3):  # only the parked slot is left
         workers.WORKERS.pop(wid, None)
     assert workers._worker_pool_execution_state()["disabled_reason"] == "", "a ready since the park lifts it"
