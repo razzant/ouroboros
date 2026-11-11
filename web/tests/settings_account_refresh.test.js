@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { accountCatalogRefreshKey } from '../modules/settings.js';
+import { accountCatalogRefreshKey } from '../modules/settings_catalog.js';
 
 function statusView({ profileId = 'work', verification = 'passed' } = {}) {
     return {

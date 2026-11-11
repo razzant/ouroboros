@@ -74,7 +74,7 @@ test('Agents activation wakes only an already-provisioned idle daemon', async ()
     try {
         await initHarnessAccounts({ store });
         requests.length = 0;
-        await win.fire('ouro:settings-subtab-shown');
+        await win.fire('ouro:settings-page-shown');
         assert.ok(requests.includes('POST /api/claudexor/wake'));
 
         // A failed refresh keeps the last snapshot for display. It must not
@@ -83,13 +83,13 @@ test('Agents activation wakes only an already-provisioned idle daemon', async ()
         await store.refresh();
         requests.length = 0;
         failNextRead = true;
-        await win.fire('ouro:settings-subtab-shown');
+        await win.fire('ouro:settings-page-shown');
         assert.deepEqual(requests, ['GET /api/claudexor/status']);
 
         body = payload('not_provisioned');
         await store.refresh();
         requests.length = 0;
-        await win.fire('ouro:settings-subtab-shown');
+        await win.fire('ouro:settings-page-shown');
         assert.ok(!requests.includes('POST /api/claudexor/wake'));
         assert.match(elements['agents-service-banner'].textContent, /No accounts connected yet/i);
 
@@ -101,7 +101,7 @@ test('Agents activation wakes only an already-provisioned idle daemon', async ()
             body = { ...payload('stale'), daemon };
             await store.refresh();
             requests.length = 0;
-            await win.fire('ouro:settings-subtab-shown');
+            await win.fire('ouro:settings-page-shown');
             assert.ok(!requests.includes('POST /api/claudexor/wake'));
         }
     } finally {

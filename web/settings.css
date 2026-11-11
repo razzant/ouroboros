@@ -1,36 +1,141 @@
+/* Settings (settings.js): the home and the pages opened from it. The page box is the container both layouts read:
+   narrower than 56rem one column shows the home or the open page; from 56rem the home stands beside the page. Each
+   column scrolls by itself and keeps its place; a page's first row is its Back, which stays at the top. */
+#page-settings { container: settingspage / inline-size; }
 .settings-shell {
     flex: 1;
     min-width: 0;
     min-height: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
     overflow: hidden;
-    padding: 0 20px 16px;
 }
-
-.settings-scroll {
-    flex: 1;
+.settings-home,
+.settings-page {
     min-width: 0;
     min-height: 0;
     overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: var(--space-2) var(--page-header-padding-x) 56px;
+}
+html[data-layout="docked"] .app-page-header[data-empty] ~ .settings-shell :is(.settings-home, .settings-page) { padding-top: 20px; }
+:root[data-window-chrome="integrated"][data-layout="docked"] .app-page-header[data-empty] ~ .settings-shell :is(.settings-home, .settings-page) {
+    padding-top: calc(var(--space-4) + var(--window-chrome-top));
+}
+html[data-layout="stack"] :is(.settings-home, .settings-page) { padding-inline: 12px; }
+.settings-levels { display: grid; min-width: 0; min-height: 0; }
+.settings-levels > .settings-page { grid-area: 1 / 1; }
+.settings-shell[data-settings-view="page"] > .settings-home,
+.settings-shell[data-settings-view="home"] > .settings-levels,
+.settings-page[hidden] { display: none; }
+.settings-column {
     display: flex;
     flex-direction: column;
     gap: var(--space-4);
-    padding: 4px 2px 88px;
-}
-
-.settings-panel {
-    display: none;
+    width: 100%;
+    max-width: 720px;
+    margin-inline: 0 auto;
     min-width: 0;
     overflow-wrap: anywhere;
-    flex-direction: column;
-    gap: var(--space-4);
+}
+@container settingspage (min-width: 56rem) {
+    .settings-shell[data-settings-view="page"] { grid-template-columns: 348px minmax(0, 1fr); }
+    .settings-shell[data-settings-view="page"] > .settings-home { display: block; padding-inline-end: var(--space-3); }
+    .settings-shell[data-settings-view="page"] .settings-page { padding-inline-start: var(--space-4); }
+    .settings-shell[data-settings-view="page"] .settings-door-answer { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 }
 
-.settings-panel.active {
+/* A page's chrome: Back naming where it leads, then the title. The page module draws only what is under them. */
+.settings-back-row {
+    position: sticky;
+    top: 0;
+    z-index: 1;
     display: flex;
+    align-items: center;
+    min-height: var(--control-h-sm);
+    margin-bottom: var(--space-2);
+    background: var(--bg-primary);
 }
+:root[data-window-chrome="integrated"][data-layout="docked"] .settings-back-row { top: var(--window-chrome-top); }
+.settings-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    margin-inline-start: -6px;
+    padding: 0 var(--space-1) 0 0;
+    border: 0;
+    border-radius: 999px;
+    background: none;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: var(--type-body);
+    font-weight: 500;
+    line-height: var(--line-title);
+    cursor: pointer;
+    white-space: nowrap;
+}
+.settings-back > svg { flex: none; width: var(--control-h-sm); height: var(--control-h-sm); padding: 4px; }
+@media (hover: hover) { .settings-back:hover { color: var(--text-primary); } }
+.settings-back:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+.settings-page-title {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: var(--type-page);
+    font-weight: 600;
+    line-height: var(--line-title);
+    overflow-wrap: anywhere;
+}
+.settings-page-body { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
+
+/* The home (settings_home.js): groups of quiet doors, each saying its one answer; the open page's door is marked. */
+.settings-group { display: flex; flex-direction: column; gap: var(--space-2); }
+.settings-group-title {
+    margin: 0;
+    padding: 0 var(--space-1);
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    font-weight: 600;
+    line-height: var(--line-meta);
+}
+.settings-door-list { --card-pad: var(--space-2); display: flex; flex-direction: column; gap: 2px; }
+.settings-door {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: var(--space-3);
+    width: 100%;
+    min-height: 56px;
+    padding: var(--space-2) var(--space-3);
+    border: 0;
+    border-radius: var(--radius-inner);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+    transition: var(--motion-tone);
+}
+@media (hover: hover) { .settings-door:hover { background: var(--tone-quiet-hover); } }
+.settings-door:active { filter: var(--press); }
+.settings-door:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+.settings-door[aria-current="page"] { background: var(--tone-crimson-soft); }
+.settings-door[aria-current="page"] :is(.settings-door-title, .settings-door-answer, .settings-door-end) { color: var(--tone-crimson-soft-ink); }
+.settings-door[aria-current="page"] .settings-door-glyph { background: transparent; color: var(--tone-crimson-soft-ink); }
+.settings-door-glyph {
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: var(--surface-tray);
+    color: var(--text-secondary);
+}
+.settings-door-glyph > svg { width: 18px; height: 18px; }
+.settings-door-words { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.settings-door-title { color: var(--text-primary); font-size: var(--type-body); font-weight: 600; line-height: var(--line-title); }
+.settings-door-answer { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); overflow-wrap: anywhere; }
+.settings-door-answer:empty { display: none; }
+.settings-door-end { display: flex; color: var(--text-disabled); }
 
 /* The section (settings_controls.js settingsSection; DESIGN.md principle 7): a .ui-card holding the title row, one
    lead in owner words, the controls, and the former copy behind one Details disclosure. The section is the size
@@ -397,11 +502,11 @@
     align-items: center;
     gap: 10px;
 }
-/* Rows that wrap on a phone (a toolbar, a secret's buttons, an account's actions and its resources, a segmented scale):
+/* Rows that wrap on a phone (a toolbar, a secret's buttons, an account's actions and its resources):
    under a finger their controls take the touch minimum as their own height through the control tokens (the lock
    writes the box), so no reach covers a neighbour (DESIGN "Touch and containment"). */
 @media (pointer: coarse) {
-    :is(.settings-toolbar, .secret-input-row, .harness-account-actions, .account-resource-panel, .settings-effort-group,
+    :is(.settings-toolbar, .secret-input-row, .harness-account-actions, .account-resource-panel,
         .settings-extension-actions, .harness-maintenance-actions) {
         --control-h: var(--touch-target-min);
         --control-h-sm: var(--touch-target-min);
@@ -430,17 +535,6 @@
     white-space: normal;
 }
 .settings-action-row > :empty { display: none; }
-
-/* The Save bar is one shared action row (ui.css .ui-action-row): Reload, Save, then the one result right after
-   them; About hides it. */
-.settings-footer {
-    flex-shrink: 0;
-    padding: var(--space-3) 2px 0;
-    border-top: 1px solid var(--divider);
-    background: var(--surface-object);
-}
-.settings-footer[hidden] { display: none; }
-.settings-footer > #settings-restart-status[hidden] { display: none; }
 
 /* A secret's field row: the input, then its buttons at the field's middle, however many the row has. */
 .secret-input-row {
@@ -794,39 +888,6 @@
     letter-spacing: normal;
 }
 
-/* One equal-width grid for every segmented control. The renderer writes how many
-   choices it drew (`--segment-count`, page_header.js renderSegmentedField): up to
-   four share one row and fill it; a longer scale keeps four equal columns and
-   leaves its last row partly empty rather than stretching a lone choice. Each
-   track is that exact fraction of the row, so no math function sits in the
-   repeat count. */
-.settings-effort-group {
-    --segment-gap: 8px;
-    --segment-columns: min(var(--segment-count, 4), 4);
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(calc((100% - (var(--segment-columns) - 1) * var(--segment-gap)) / var(--segment-columns)), 1fr));
-    gap: var(--segment-gap);
-}
-
-/* A card of 20rem or less stacks two equal columns. Above it today's longest
-   labels ("Development" in three columns, "Advanced" in four) still sit inside
-   their buttons, and the default desktop window keeps its four-column effort
-   scales. */
-@container settingsbox (max-width: 20rem) {
-    .settings-effort-group {
-        --segment-columns: min(var(--segment-count, 4), 2);
-    }
-}
-
-/* Max review cycles: five one-glyph values (1 / 2 / 3 / 5 / ∞) keep one compact
-   row at every width. */
-[data-review-cycles-group].settings-effort-group {
-    --segment-columns: var(--segment-count, 5);
-}
-
-/* The segment itself (.ui-segment, its states) is ui.css's; the group's layout stays here. */
-
-
 /* The local toggle's checkbox and gap: one pair of dimensions for the toggles and for the
    notes that line up with their label text (Startup & background). */
 :root {
@@ -950,10 +1011,6 @@
 }
 
 @media (max-width: 980px) {
-    .settings-shell {
-        padding: 0 14px 14px;
-    }
-
     .harness-account-row.connection-row {
         grid-template-areas: "main" "meta" "fields" "actions";
     }
@@ -994,10 +1051,6 @@
 }
 
 @media (max-width: 640px) {
-    .settings-shell {
-        padding: 0 10px 10px;
-    }
-
     .settings-provider-head {
         padding: 14px 14px;
     }

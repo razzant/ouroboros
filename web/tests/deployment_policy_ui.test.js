@@ -104,12 +104,13 @@ test('a bounded segmented choice is drawn again by the one renderer; one left is
     const root = { querySelector: () => holder.child };
     const renders = [];
     const binds = [];
-    const render = ({ options, title }) => { renders.push({ options, title }); return JSON.stringify(options); };
+    const render = (args) => { renders.push(args); return JSON.stringify(args.options); };
     const fixed = offerAllowedChoices(root, { target: 's-safety-mode', options: LEVELS, axis: 'coverage' }, DEPLOYMENT,
         { render, bind: (node) => binds.push(node) });
     assert.equal(fixed, true);
     assert.deepEqual(renders.map(({ options }) => options.map(({ value }) => value)), [['full']]);
-    assert.equal(renders[0].title, 'Lowering asks first', 'the drawn group keeps its own title');
+    assert.deepEqual(Object.keys(renders[0]).sort(), ['modifier', 'options', 'target'],
+        'drawn again from its choices alone: an old hover title is not carried over');
     assert.deepEqual(binds, [holder], 'bound like the original, on its own holder');
     assert.equal(holder.child.hidden, true, 'a fixed level is said by its policy line, not offered');
     assert.equal(offerAllowedChoices(root, { target: 's-safety-mode', options: LEVELS, axis: 'coverage' }, DEPLOYMENT,

@@ -248,7 +248,7 @@ test('each rejected update states its cause and keeps the reviewed retry; only f
 test('conflicts lock an off switch with a visible reason but never trap an enabled skill', () => {
     const conflict = { code: 'skill_conflict', skills: ['beta'], omitted: 0 };
     const off = renderInstalledSkillCard(skill({ conflict }));
-    assert.match(off, /class="skills-switch is-locked"/);
+    assert.match(off, /class="ui-switch is-locked"/);
     assert.match(off, /input type="checkbox" class="skills-toggle"[^>]*disabled/);
     assert.match(traysOf(off), /Uses the same tool names as beta\. Turn one of them off to use the other\./);
     assert.match(off, /aria-describedby="skill-trays-demo"/, 'the locked switch points at the visible explanation');
@@ -423,15 +423,15 @@ test('a stopped Skills-page reviewer of these bytes is continued by its own acti
     }
 });
 
-test('a declared secret that is not set is a neutral tray with Open Secrets and puts the card in Needs you; unknown is said, never a value', () => {
+test('a declared secret that is not set is a neutral tray with Open Accounts and keys and puts the card in Needs you; unknown is said, never a value', () => {
     const fields = (state) => ({ secret_config: { fields: [{ id: 'botToken', key: 'TELEGRAM_BOT_TOKEN', state }] } });
     const missing = renderInstalledSkillCard(skill({ enabled: true, ...fields('missing') }));
-    assert.match(traysOf(missing), /TELEGRAM_BOT_TOKEN is not set\.<div class="skills-tray-note">Save it in Settings → Secrets\.<\/div>/);
+    assert.match(traysOf(missing), /TELEGRAM_BOT_TOKEN is not set\.<div class="skills-tray-note">Save it in Settings › Accounts and keys\.<\/div>/);
     assert.doesNotMatch(traysOf(missing), /next read|some skills|Disable and Enable/, 'when it applies is the skill’s own status');
-    assert.match(traysOf(missing), /data-skill-action="open_secrets"[^>]*>Open Secrets</);
+    assert.match(traysOf(missing), /data-skill-action="open_secrets"[^>]*>Open Accounts and keys</);
     const two = renderInstalledSkillCard(skill({ enabled: true, secret_config: { fields: [
         { id: 'botToken', key: 'TELEGRAM_BOT_TOKEN', state: 'missing' }, { id: 'proxy', key: 'TELEGRAM_PROXY', state: 'missing' }] } }));
-    assert.match(traysOf(two), /TELEGRAM_BOT_TOKEN, TELEGRAM_PROXY are not set\.<div class="skills-tray-note">Save them in Settings → Secrets\.<\/div>/);
+    assert.match(traysOf(two), /TELEGRAM_BOT_TOKEN, TELEGRAM_PROXY are not set\.<div class="skills-tray-note">Save them in Settings › Accounts and keys\.<\/div>/);
     assert.doesNotMatch(traysOf(missing), /data-tone="(warn|danger)"/, 'a fact, not the owner’s amber move');
     assert.equal(chipOf(missing), null);
     // Saving it is the owner's move, so the card is under Needs you; the tray stays neutral and adds no chip.

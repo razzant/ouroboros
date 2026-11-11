@@ -336,21 +336,16 @@ def test_handle_task_wires_the_disclosing_reload():
 
 
 def test_settings_ui_save_flow_pins():
-    """Static pins for the #285 UI surfaces (busy save, Restart now, the standing
+    """Static pins for the #285 UI surfaces (no page-wide Save, the one Restart, the standing
     reviewer hint): the strings the flow depends on must survive edits."""
     import pathlib
 
     root = pathlib.Path(__file__).resolve().parents[1] / "web" / "modules"
-    settings_js = (root / "settings.js").read_text(encoding="utf-8")
-    assert "setStatus('Saving…', 'muted')" in settings_js
-    assert "setButtonBusy(saveButton, true)" in settings_js
-    assert "setButtonBusy(saveButton, false)" in settings_js
-    assert "confirmAndSendRestart" in settings_js
+    # Settings saves row by row through the one writer; the shell keeps no Save, Reload or Restart bar.
+    shell = (root / "settings.js").read_text(encoding="utf-8") + (root / "settings_ui.js").read_text(encoding="utf-8")
+    for retired in ("btn-save-settings", "btn-reload-settings", "btn-restart-now", "settings-footer"):
+        assert retired not in shell, retired
     assert "cmd: '/restart'" in (root / "chat_activity.js").read_text(encoding="utf-8")
-    assert "btn-restart-now" in settings_js
-
-    settings_ui_js = (root / "settings_ui.js").read_text(encoding="utf-8")
-    assert 'id="btn-restart-now" hidden' in settings_ui_js
 
     # Reviewers are catalog rows marked Reviewer; their editor carries the standing hint.
     subagents_js = " ".join((root / "subagents_settings.js").read_text(encoding="utf-8").split())

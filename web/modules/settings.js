@@ -1,276 +1,291 @@
-import { PROVIDER_SECRET_KEYS } from './settings_provider_cards.js';
-import { bindSecretInputs } from './settings_secrets.js';
-import { refreshModelCatalog, watchAccountModelCatalog } from './settings_catalog.js';
-export { accountCatalogRefreshKey } from './settings_catalog.js';
-import { getNotifier } from './notifications.js';
-import { mountDesktopShell } from './desktop_shell.js';
-import { bindEffortSegments, syncEffortSegments, readCustomSecretDraft, collectCustomSecretDraft, paintSettingsFieldErrors, setButtonBusy, settingsWriteFailure,
-    webSearchPreviewWords } from './settings_controls.js';
-import { applyLocalModelPolicy, bindLocalModelControls } from './settings_local_model.js';
-import { bindAutostartControl } from './settings_autostart.js';
-import { applyMcpSettings, collectMcpSettings, initMcpSettings, mcpDraftSnapshot, validateMcpSettings } from './mcp_settings.js';
-import {
-    applySubagentsSettings,
-    availableSubagentsPreviewPayload,
-    collectSubagentsSettings,
-    initSubagentsSection,
-    noteSubagentsSaveAttempt,
-    reloadReviewPool,
-    reloadSubagentsSection,
-    subagentSettingsFingerprint,
-    validateSubagentsDraft,
-    setSubagentsProcessingPreference,
-    setSubagentsSourceContext,
-} from './subagents_settings.js';
-import { initHarnessAccounts } from './harness_accounts.js';
-import { openConfirmDialog } from './confirm_dialog.js';
-import { confirmAndSendRestart } from './chat_activity.js';
-import { RUNTIME_MODE_OPTIONS, SECRET_KEYS, bindSettingsTabs, renderSettingsPage } from './settings_ui.js';
-import { renderSegmentedField } from './page_header.js';
-import { connectionReferencesText, createConnectionsEditor } from './settings_connections.js';
-import { showToast } from './toast.js';
+/** Settings: the shell (docs/DESIGN.md "Settings"). The home (settings_home.js) holds Ouroboros's card, search and six
+ * groups of rows; a row opens a page, which its module draws into the body the shell gives it (settings_pages.js), or
+ * leaves Settings by its door. Every row saves itself (settings_controls.js): nothing here keeps a draft or a Save.
+ *
+ * What Settings shows is `state.settingsPath` ('' is the home), in memory only: no URL is written and a reload starts
+ * at the home. Pages open in levels. One opened from the home, a search result or outside Settings is the first level;
+ * one opened from a page lies over that page. The first row of every level is Back and names where it leads: the
+ * level under it, the home ("Settings"), or the place outside Settings that opened it (`back: { label, go }`).
+ *
+ * The page box's width decides the layout (settings.css `@container settingspage`). Narrow: one level alone, each one
+ * `page: true` layer of the shell's stack (layers.js), so Escape, the browser's or Android's Back and Telegram's Back
+ * close exactly one level, as Back does; a field that holds focus is left first, so its row commits. Wide: the home
+ * beside the level, and no layer. A level under another keeps its place, the home its scroll.
+ *
+ * `ouro:settings-page-shown` (`detail.path`) says which page is visible: when one opens or is returned to, when
+ * Settings is shown, after a reconnect and when the window is seen again. A page reads and repaints on it for its own
+ * path; the row helper never rewrites a field that holds focus or typed text. */
+
+import { renderPageHeader } from './page_header.js';
+import { SHELL_ICONS } from './page_icons.js';
+import { bindScrollFade } from './scroll_fade.js';
+import { readSettings } from './settings_controls.js';
+import { isDoorId, mountSettingsHome } from './settings_home.js';
+import { settingsPageFor } from './settings_pages.js';
+import { HOME_ROWS } from './settings_rows.js';
+import { resetSecretReveals } from './settings_secrets.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
-import { skillTitle } from './skill_presentation.js';
-import { APP_SETTINGS_ORIGIN, apiClient, apiFetch, cleanExtensionRoute, extensionRoutePath } from './api_client.js';
-import { claudexorStatus } from './claudexor_status_store.js';
-import { createModelRolesEditor } from './model_roles.js';
-import { PROCESSING_PREFERENCE_KEY } from './route_editor_primitives.js';
-import { collectSafeFieldValues, normalizeTone, renderSafeField, setInlineStatus, revealNewRow, copyTextWithToast } from './ui_helpers.js';
+import { apiFetch, cleanExtensionRoute, extensionRoutePath } from './api_client.js';
+import { collectSafeFieldValues, normalizeTone, renderSafeField, setInlineStatus } from './ui_helpers.js';
 import { clearResultOnEdit, errorWords, setResult } from './ui_primitives.js';
 import { extensionActionStatus } from './extension_status_text.js';
-import { bindLanguageSettings } from './settings_language.js';
-import { mountInterfaceSize } from './interface_size.js';
-import { resetSecretReveals } from './settings_secrets.js';
-import { checkerUses, deploymentOf, fixCheckerField, fixOrganizationSecret, offerAllowedChoices, syncPolicyState } from './settings_policy.js';
-import { applySafetySettings, bindSafetySettings, checkerSaveEffect, checkerTabsText, safetyOwnerDraft, saveSafetyChecker, saveSafetyOwnerChanges } from './settings_safety.js';
-import { applyConsciousnessSettings, bindConsciousnessSettings } from './settings_consciousness.js';
+// The page modules: each registers its family when it is imported (settings_pages.js).
+import './settings_ui.js';
+import './subagents_settings.js';
+import './mcp_settings.js';
+import './model_roles.js';
+import './settings_local_model.js';
 
-let markSettingsDirty = () => {};
-// Keys that already have their input (Secrets, Accounts): a skill's request never draws a second one.
-const BASE_SECRET_KEYS = new Set([...SECRET_KEYS.map(([key]) => key), ...PROVIDER_SECRET_KEYS]);
 const pendingExtensionSettings = new Set();
-let setupContract = {};
 
-const INPUT_FIELDS = [
-    ['s-openai-base-url', 'OPENAI_BASE_URL'], ['s-openai-compatible-base-url', 'OPENAI_COMPATIBLE_BASE_URL'], ['s-cloudru-base-url', 'CLOUDRU_FOUNDATION_MODELS_BASE_URL'],
-    ['s-gigachat-scope', 'GIGACHAT_SCOPE'], ['s-gigachat-user', 'GIGACHAT_USER'], ['s-gigachat-base-url', 'GIGACHAT_BASE_URL'], ['s-gigachat-verify-ssl', 'GIGACHAT_VERIFY_SSL_CERTS'],
-    ['s-minimax-region', 'MINIMAX_REGION'],
-    ['s-zai-plan', 'ZAI_PLAN'],
-    ['s-server-host', 'OUROBOROS_SERVER_HOST', '127.0.0.1'],
-    // No review route is authored here: the review pool is the Reviewer mark
-    // on the Available subagents rows.
-    ['s-skills-repo-path', 'OUROBOROS_SKILLS_REPO_PATH'],
-    ['s-extra-ca-bundle', 'OUROBOROS_EXTRA_CA_BUNDLE'],
-    ['s-clawhub-registry-url', 'OUROBOROS_CLAWHUB_REGISTRY_URL'], ['s-websearch-source', 'OUROBOROS_WEBSEARCH_BACKEND', 'auto'], ['s-websearch-model', 'OUROBOROS_WEBSEARCH_MODEL'], ['s-gh-repo', 'GITHUB_REPO'],
-    ['s-local-source', 'LOCAL_MODEL_SOURCE'], ['s-local-filename', 'LOCAL_MODEL_FILENAME'], ['s-local-chat-format', 'LOCAL_MODEL_CHAT_FORMAT'],
-    ['s-subagent-worktree-root', 'OUROBOROS_SUBAGENT_WORKTREE_ROOT'], ['s-subagent-projects-root', 'OUROBOROS_SUBAGENT_PROJECTS_ROOT'],
-    ['s-evo-budget', 'OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD', '0'],
-    // The consciousness allowance has no row: Costs is its one editor (costs.js), so no Settings save posts it.
-    ['s-evo-objective', 'OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE', ''],
-    // Optional task bounds: a positive integer or "unlimited" (SSOT: ouroboros/settings_scales.py); a blank is refused by the server.
-    ['s-max-rounds', 'OUROBOROS_MAX_ROUNDS', 'unlimited'], ['s-task-lifetime', 'OUROBOROS_TASK_ABS_CEILING_SEC', 'unlimited'],
-];
-const VALUE_FIELDS = [
-    // Effort is not a Settings draft: the range is edited in the chat composer alone, and Settings has no effort section.
-    ['s-consciousness-autonomy', 'OUROBOROS_CONSCIOUSNESS_AUTONOMY', 'act'],
-    ['s-review-enforcement', 'OUROBOROS_REVIEW_ENFORCEMENT', 'advisory'], ['s-task-review-mode', 'OUROBOROS_TASK_REVIEW_MODE', 'auto'], ['s-runtime-mode', 'OUROBOROS_RUNTIME_MODE', 'advanced'],
-    // Shared paid-review-cycle cap (result review / commit gate / skill review; plan asks stand outside it);
-    // the ∞ segment saves the string "unlimited" (SSOT: ouroboros/review_cycles.py).
-    ['s-review-max-cycles', 'OUROBOROS_REVIEW_MAX_CYCLES', '2'],
-    ['s-update-channel', 'OUROBOROS_UPDATE_CHANNEL', 'stable'],
-    ['s-context-mode', 'OUROBOROS_CONTEXT_MODE', 'max'], ['s-image-input-mode', 'OUROBOROS_IMAGE_INPUT_MODE', 'auto'],
-    ['s-prompt-cache-ttl', 'OUROBOROS_PROMPT_CACHE_TTL', '1h'],
-];
-const NUMBER_FIELDS = [
-    ['s-workers', 'OUROBOROS_MAX_WORKERS', 10], ['s-presence-max-active', 'OUROBOROS_PRESENCE_MAX_ACTIVE', 2], ['s-active-subagents', 'OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT', 6], ['s-subagent-depth', 'OUROBOROS_MAX_SUBAGENT_DEPTH', 3, true],
-    ['s-tool-timeout', 'OUROBOROS_TOOL_TIMEOUT_SEC', 600], ['s-local-port', 'LOCAL_MODEL_PORT', 8766], ['s-local-gpu-layers', 'LOCAL_MODEL_N_GPU_LAYERS', -1, true],
-    ['s-model-max-concurrency', 'OUROBOROS_MODEL_MAX_CONCURRENCY', 3, true],  // 0 = no limit: a choice, not unset
-    ['s-local-ctx', 'LOCAL_MODEL_CONTEXT_LENGTH', 16384], ['s-gc-retention-days', 'OUROBOROS_GC_RETENTION_DAYS', 7],
-    ['s-bg-wakeup-min', 'OUROBOROS_BG_WAKEUP_MIN', 900], ['s-bg-wakeup-max', 'OUROBOROS_BG_WAKEUP_MAX', 14400],
-    ['s-consciousness-max-tasks', 'OUROBOROS_CONSCIOUSNESS_MAX_TASKS', 2, true],  // 0 = never starts tasks: a choice, not unset
-];
-
-function setupModelSlots() {
-    return Array.isArray(setupContract.modelSlots) ? setupContract.modelSlots : [];
+/** A page's title for `path`: its module's words, else the home row that opens it, else the path. */
+export function settingsTitle(path) {
+    const page = settingsPageFor(path);
+    const named = typeof page?.title === 'function' ? page.title(path) : page?.title;
+    return String(named || HOME_ROWS.find((row) => row.to === path)?.name || path);
 }
 
-function byId(id) {
-    return document.getElementById(id);
-}
+const quoted = (value) => String(value).replace(/["\\]/g, '\\$&');
+const visible = (el) => Boolean(el?.isConnected && el.getClientRects?.().length);
 
-// A stored 0 is a value, not an absence: `fallback && !value` rendered a saved
-// 0 (once the consciousness allowance's, edited here then) as its fallback, and the next
-// save of ANY tab wrote the fallback back. Only a missing value takes the fallback.
-export function storedOrFallback(value, fallback) {
-    return fallback && (value === undefined || value === null || value === '') ? fallback : value;
-}
+export function initSettings(ctx = {}) {
+    const { state, ws, layers = null, setBeforePageLeave, showPage, openDashboardTab } = ctx;
+    state.settingsPath = '';
+    const page = document.createElement('div');
+    page.id = 'page-settings';
+    page.className = 'page app-page-glass';
+    page.innerHTML = `${renderPageHeader({ page: 'settings' })}
+        <div class="settings-shell" data-settings-view="home">
+            <div class="settings-home scroll-fade-y" data-settings-home></div>
+            <div class="settings-levels"></div>
+        </div>`;
+    document.getElementById('content').appendChild(page);
+    const shell = page.querySelector('.settings-shell');
+    const homeEl = page.querySelector('[data-settings-home]');
+    const levelsEl = page.querySelector('.settings-levels');
+    const levels = [];
+    const layered = new Set();
+    const places = new WeakMap();  // a column → where it was scrolled while visible
+    let opening = false;
+    let besideBefore = false;
+    let serial = 0;
+    const shown = () => state.activePage === 'settings';
+    const top = () => levels[levels.length - 1] || null;
+    const beside = () => levels.length > 0 && visible(homeEl);
+    const pageCtx = { openSettings: (path, options) => go(path, options), openDashboardTab, showPage, layers, ws, state, readSettings };
+    const home = mountSettingsHome(homeEl, { open: (path, options = {}) => go(path, { ...options, fresh: true }) });
 
-// The slot wait the concurrency help names: a finite value, below 0 shown as 0 because
-// `model_concurrency._max_slot_wait_sec` counts it so, else the 180 s default. Only the
-// sentence follows it; the saved value stays.
-export function slotWaitSeconds(saved) {
-    const wait = Number.parseFloat(saved);
-    return Number.isFinite(wait) ? Math.max(0, wait) : 180;
-}
+    // A door out of Settings: a Dashboard tab gets a Back to the page it was opened from; Circles, Skills and Main are
+    // pages of their own (`main:context` shows Main and does nothing else: the Context capsule is the room's).
+    function leave(door, { row = '' } = {}) {
+        const [kind, name] = door.split(':');
+        if (kind === 'dashboard') return openDashboardTab?.(name, { row, back: state.settingsPath });
+        return showPage?.(kind === 'main' ? 'chat' : name);
+    }
 
-// What the core serves at its own address right now (`served_ui` on /api/state),
-// beside the saved choice that applies at the next restart; a refused choice
-// carries the core's own sentence naming it and why. A core older than the choice
-// reports nothing, and nothing is shown.
-export function servedUiStatus(servedUi) {
-    const label = { builtin: 'the built-in interface', directory: 'the interface directory', none: 'no main page' }[servedUi?.source];
-    if (!label) return null;
-    return servedUi.error
-        ? { text: `Serving now: ${label}. ${servedUi.error}`, tone: 'warn' }
-        : { text: `Serving now: ${label}.`, tone: 'muted' };
-}
+    function go(path = '', { row = '', back = null, fresh = false, opener = null } = {}) {
+        const target = String(path || '');
+        if (isDoorId(target)) return leave(target, { row });
+        const at = back || fresh ? -1 : levels.findIndex((level) => level.path === target);
+        if (!target) closeLevels(0);
+        else if (at >= 0) closeLevels(at + 1, { row });
+        else open(target, { row, back, under: back || fresh ? 0 : levels.length, opener });
+        return true;
+    }
 
-// The interface choice travels only when edited: an untouched field must not turn
-// an environment choice or the default into a saved one, and a cleared field saves
-// the blank that selects built-in over the environment.
-export function uiDirChange(edited, loaded) {
-    const value = String(edited ?? '').trim();
-    return value === String(loaded ?? '').trim() ? {} : { OUROBOROS_UI_DIR: value };
-}
+    // `opener` is the control that opened the level, where focus returns: WebKit does not focus a pressed button.
+    function open(path, { row, back, under, opener }) {
+        while (levels.length > under) close(levels.pop());
+        const focused = document.activeElement === document.body ? null : document.activeElement;
+        const level = { path, back, id: `settings-level-${++serial}`, opener: opener || focused };
+        level.el = document.createElement('section');
+        level.el.className = 'settings-page';
+        level.el.dataset.settingsPage = path;
+        level.el.setAttribute('aria-labelledby', `${level.id}-title`);
+        const leadsTo = back?.label || (levels.length ? settingsTitle(top().path) : 'Settings');
+        level.el.innerHTML = `<div class="settings-back-row"><button type="button" class="settings-back ui-hit-area" data-settings-back
+            aria-label="Back to ${escapeHtml(leadsTo)}">${SHELL_ICONS.back}<span>${escapeHtml(leadsTo)}</span></button></div>
+            <div class="settings-column"><h2 class="settings-page-title" id="${level.id}-title">${escapeHtml(settingsTitle(path))}</h2>
+            <div class="settings-page-body"></div></div>`;
+        level.el.querySelector('[data-settings-back]').addEventListener('click', () => backFrom(level));
+        levelsEl.append(level.el);
+        levels.push(level);
+        mount(level, row);
+        paint({ row, opened: level });
+    }
 
-function applyInputValue(id, value) {
-    const el = byId(id);
-    el.value = value === undefined || value === null ? '' : value;
-    // Server-applied snapshot (secrets arrive MASKED): lets the provider-test
-    // handler tell an owner edit apart from the mask, which must never be sent
-    // back as a credential.
-    el.dataset.appliedValue = el.value;
-}
+    function mount(level, row) {
+        const found = settingsPageFor(level.path);
+        if (!found) return;  // no page serves this path yet: the chrome with nothing inside
+        const body = level.el.querySelector('.settings-page-body');
+        const failed = (err) => {
+            console.error('settings: a page failed to draw', level.path, err);
+            const line = document.createElement('p');
+            line.className = 'ui-result';
+            body.replaceChildren(line);
+            setResult(line, { text: `This page could not be shown: ${err?.message || err}`, tone: 'danger' });
+        };
+        try {
+            Promise.resolve(found.mount(body, { path: level.path, row, ctx: pageCtx })).then((handle) => {
+                if (level.closed) handle?.unmount?.();
+                else level.handle = handle;
+            }, failed);
+        } catch (err) { failed(err); }
+    }
 
-function applyCheckboxValue(id, value) {
-    byId(id).checked = isTruthySetting(value);
-}
+    // A level closes: the field it holds is left first (its row commits on that change), then its page is let go.
+    function close(level) {
+        const at = document.activeElement;
+        if (at && level.el.contains(at)) at.blur?.();
+        level.closed = true;
+        level.watch?.disconnect();
+        try { level.handle?.unmount?.(); } catch (err) { console.error('settings: a page failed to let go', level.path, err); }
+        level.el.remove();
+        if (layered.delete(level.id)) layers?.remove(level.id);
+    }
 
-function isTruthySetting(value) {
-    const normalized = String(value ?? '').trim().toLowerCase();
-    return value === true || ['true', '1', 'yes', 'on'].includes(normalized);
-}
+    function closeLevels(keep, { row = '', quiet = false } = {}) {
+        const left = levels.length > keep ? levels[keep] : null;
+        while (levels.length > keep) close(levels.pop());
+        paint({ row, returned: left, quiet });
+    }
 
-// A loading, validation or editor owner may update its own status. A later
-// message from anyone else drops that ownership, protecting the newer result.
-// The footer's one result line (ui.css .ui-result): an acknowledgement ends by itself, a warning stays.
-// The footer's one line. The save result is a retained record (DESIGN "Status and chips"): no timer, it stays until
-// the next result, or the draft word of the next edit, replaces it; only a load's plain acknowledgement ends by itself
-// (U105: at rest the line says nothing). `owner` names what holds the line: 'save' gives way to the draft word, a
-// load, a validation or the draft itself keep it.
-function setStatus(text, tone = 'ok', owner = '', subject = '', details = '', { ends = false } = {}) {
-    const status = byId('settings-status');
-    setResult(status, { text, tone, details, ends });
-    if (owner) status.dataset.owner = owner;
-    else delete status.dataset.owner;
-    if (subject) status.dataset.subject = subject;
-    else delete status.dataset.subject;
-}
+    function backFrom(level) {
+        if (level !== top()) return;
+        if (levels.length === 1 && level.back) {
+            closeLevels(0, { quiet: true });
+            level.back.go?.();
+            return;
+        }
+        closeLevels(levels.length - 1);
+    }
 
-function readInt(id, fallback) {
-    const value = parseInt(byId(id).value, 10);
-    return Number.isNaN(value) ? fallback : value;
-}
-
-function resetSecretClearFlags(root) {
-    resetSecretReveals(root);
-    root.querySelectorAll('.secret-input').forEach((input) => {
-        delete input.dataset.forceClear;
-        input.type = 'password';
-    });
-    root.querySelectorAll('.secret-toggle').forEach((button) => {
-        button.textContent = 'Show';
-    });
-}
-
-function applySecretInputs(root, settings) {
-    root.querySelectorAll('[data-secret-setting]').forEach((input) => {
-        applyInputValue(input.id, settings[input.dataset.secretSetting]);
-    });
-}
-
-
-function customSecretRow(key = '', value = '') {
-    const id = `custom-secret-${Math.random().toString(36).slice(2)}`;
-    const row = document.createElement('div');
-    row.className = 'settings-custom-secret-row';
-    row.dataset.customSecretRow = '1';
-    row.dataset.originalKey = key;
-    // One row is the key and its value; the field words are the inputs' names, the buttons share the field row.
-    row.innerHTML = `
-        <div class="form-field ui-field settings-custom-secret-key"><input id="${id}-key" name="custom-key" type="text" class="ui-control" data-custom-secret-key value="${escapeHtml(key)}" placeholder="SLACK_WEBHOOK_URL" aria-label="Key name" spellcheck="false"></div>
-        <div class="form-field ui-field settings-custom-secret-value"><div class="secret-input-row">
-            <input id="${id}" name="custom-value" data-custom-secret-value class="secret-input ui-control" type="password" value="${escapeHtml(value || '')}" placeholder="Secret value" aria-label="Key value">
-            <button type="button" class="btn btn-default secret-toggle" data-target="${id}" data-row-secret-toggle>Show</button>
-            <button type="button" class="btn btn-default secret-clear" data-target="${id}" data-row-secret-clear>Clear</button>
-            <button type="button" class="btn btn-default" data-custom-secret-remove>Remove</button>
-        </div></div>`;
-    bindSecretInputs(row);
-    row.querySelector('[data-custom-secret-value]').dataset.appliedValue = value;
-    row.querySelector('[data-custom-secret-remove]')?.addEventListener('click', () => {
-        // The caret moves to the key now in this place, else to Add (DESIGN "List editors").
-        const shown = [...row.parentElement.querySelectorAll('[data-custom-secret-row]:not([hidden])')];
-        const next = shown[shown.indexOf(row) + 1] || shown[shown.indexOf(row) - 1];
-        resetSecretReveals(row);
-        if (row.dataset.originalKey) { row.dataset.removeCustomSecret = '1'; row.hidden = true; }
-        else row.remove();
-        if (next) revealNewRow(next, next.querySelector('[data-custom-secret-key]'));
-        else document.getElementById('btn-add-custom-secret')?.focus();
-        markSettingsDirty();
-    });
-    return row;
-}
-
-function renderCustomSecrets(root, settings) {
-    const host = root.querySelector('#custom-secrets-list');
-    if (!host) return;
-    resetSecretReveals(host);
-    host.innerHTML = '';
-    // A key a skill asked for is shown once, under its asker (renderRequestedSkillSecrets): a render after that list
-    // (a Discard) leaves its custom row out, as that list's own render removes it.
-    const requested = new Set([...root.querySelectorAll('#skill-requested-secrets [data-secret-setting]')]
-        .map((input) => input.dataset.secretSetting));
-    const keys = (Array.isArray(settings?._meta?.custom_secret_keys) ? settings._meta.custom_secret_keys : [])
-        .filter((key) => !requested.has(key));
-    keys.forEach((key) => {
-        const row = host.appendChild(customSecretRow(key, settings[key] || ''));
-        fixOrganizationSecret(row, deploymentOf(settings?._meta), key);
-    });
-    if (!keys.length) host.innerHTML = '<div class="muted">No custom keys yet.</div>';
-}
-
-function renderRequestedSkillSecrets(root, skills, settings) {
-    const host = root.querySelector('#skill-requested-secrets');
-    if (!host) return;
-    resetSecretReveals(host);
-    const askers = new Map();
-    (Array.isArray(skills) ? skills : []).forEach((skill) => {
-        (skill?.grants?.requested_keys || []).forEach((key) => {
-            const normalized = String(key || '').trim();
-            if (normalized && !BASE_SECRET_KEYS.has(normalized)) askers.set(normalized, [...(askers.get(normalized) || []), String(skill ? skillTitle(skill) : '')]);
+    // The row a page was opened for: its fold opens, it scrolls into view, its control takes focus. A page drawn after
+    // a read gets it when the row appears.
+    function revealRow(level, id) {
+        const find = () => level.el.querySelector(`[data-setting-row="${quoted(id)}"]`);
+        const reveal = (node) => {
+            for (let fold = node.closest('details'); fold; fold = fold.parentElement?.closest('details')) fold.open = true;
+            node.scrollIntoView?.({ block: 'center' });
+            const control = node.querySelector('[data-setting-control], [data-setting-value], button, input, select, textarea');
+            (control || node).focus?.({ preventScroll: true });
+        };
+        const node = find();
+        if (node || typeof MutationObserver !== 'function') { if (node) reveal(node); return; }
+        level.watch = new MutationObserver(() => {
+            const hit = find();
+            if (!hit) return;
+            level.watch.disconnect();
+            reveal(hit);
         });
+        level.watch.observe(level.el, { childList: true, subtree: true });
+    }
+
+    function paint({ row = '', opened = null, returned = null, quiet = false } = {}) {
+        const level = top();
+        state.settingsPath = level?.path || '';
+        shell.dataset.settingsView = level ? 'page' : 'home';
+        for (const each of levels) each.el.hidden = each !== level;
+        const column = level ? level.el : homeEl;
+        column.scrollTop = places.get(column) || 0;
+        if (beside() || !level) homeEl.scrollTop = places.get(homeEl) || 0;
+        besideBefore = beside();
+        home.mark(levels[0]?.path || '');
+        syncLayers();
+        if (!quiet) {
+            if (row && level) revealRow(level, row);
+            else if (opened && (!besideBefore || !visible(document.activeElement))) {
+                opened.el.querySelector('[data-settings-back]')?.focus({ preventScroll: true });
+            } else if (returned) {
+                const to = visible(returned.opener) ? returned.opener
+                    : level ? level.el.querySelector('[data-settings-back]')
+                        : homeEl.querySelector(`[data-settings-open="${quoted(returned.path.split('/')[0])}"]`);
+                to?.focus?.({ preventScroll: true });
+            }
+            announce();
+        }
+    }
+
+    // Narrow: every level is a layer, so Escape and the system's Back close the top one. Wide, or Settings put away: none.
+    function syncLayers() {
+        if (!layers) return;
+        const wanted = shown() && !beside() ? levels : [];
+        layers.batch(() => {
+            for (const id of [...layered]) {
+                if (wanted.some((level) => level.id === id)) continue;
+                layers.remove(id);
+                layered.delete(id);
+            }
+            for (const level of wanted) {
+                layers.push({ id: level.id, el: level.el, page: true, modal: false, focus: false, opener: null,
+                    onClose: () => backFrom(level) });
+                layered.add(level.id);
+            }
+        });
+    }
+
+    function announce() {
+        if (!shown()) return;
+        window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: state.settingsPath } }));
+    }
+
+    // From outside Settings (app.js `openSettings`): Settings is shown first, and refused when the page left vetoes.
+    // A path already open keeps its level and its place (a Dashboard tab's Back returns there); any other starts anew.
+    async function openFromOutside(path = '', { row = '', back = null } = {}) {
+        const target = String(path || '');
+        if (isDoorId(target)) return leave(target, { row });
+        opening = true;
+        try {
+            if (!await showPage('settings')) return false;
+        } finally { opening = false; }
+        const at = levels.findIndex((level) => level.path === target);
+        if (!target || (at >= 0 && !back)) closeLevels(target ? at + 1 : 0, { row });
+        else go(target, { row, back, fresh: true });
+        return true;
+    }
+
+    const onScroll = (event) => {
+        const box = event.target;
+        if (box === homeEl || levels.some((level) => level.el === box)) places.set(box, box.scrollTop);
+    };
+    const onPageShown = (event) => {
+        syncLayers();
+        if (event.detail?.page === 'settings' && !opening) announce();
+    };
+    const onVisible = () => { if (!document.hidden) announce(); };
+    const offReconnect = ws?.on?.('open', () => announce());
+    // A width that puts the home beside the page, or takes it away: the layers follow, and the home comes back
+    // where it was left.
+    const resize = typeof ResizeObserver === 'function' ? new ResizeObserver(() => {
+        if (beside() === besideBefore) return;
+        besideBefore = beside();
+        if (besideBefore) homeEl.scrollTop = places.get(homeEl) || 0;
+        syncLayers();
+    }) : null;
+    resize?.observe(shell);
+    const disposeFade = bindScrollFade(homeEl);
+    shell.addEventListener('scroll', onScroll, { capture: true, passive: true });
+    window.addEventListener('ouro:page-shown', onPageShown);
+    document.addEventListener('visibilitychange', onVisible);
+    // Leaving Settings puts every revealed secret away again.
+    setBeforePageLeave?.(({ from }) => {
+        if (from === 'settings') resetSecretReveals(page);
+        return true;
     });
-    const unique = [...askers.keys()].sort((a, b) => a.localeCompare(b));
-    // A key a skill asked for is shown once, here, under its asker; its custom row (if it was saved as one) steps aside.
-    root.querySelectorAll('#custom-secrets-list [data-custom-secret-row]').forEach((row) => {
-        if (askers.has(row.dataset.originalKey)) row.remove();
+    window.addEventListener('pagehide', (event) => {
+        resetSecretReveals(page);
+        if (event.persisted) return;
+        resize?.disconnect();
+        disposeFade();
+        offReconnect?.();
+        window.removeEventListener('ouro:page-shown', onPageShown);
+        document.removeEventListener('visibilitychange', onVisible);
+        home.dispose();
     });
-    if (!unique.length) { host.innerHTML = '<div class="muted">No skill-requested secrets.</div>'; return; }
-    host.innerHTML = '';
-    unique.forEach((key, idx) => {
-        const id = `requested-secret-${idx}`;
-        const el = document.createElement('div');
-        el.className = 'settings-requested-secret-row';
-        const by = askers.get(key).filter(Boolean);
-        el.innerHTML = `<div class="form-field ui-field"><label for="${id}">${escapeHtml(key)}</label><div class="secret-input-row">
-            <input id="${id}" name="${escapeHtml(key)}" data-secret-setting="${escapeHtml(key)}" class="secret-input ui-control" type="password" value="${escapeHtml(settings[key] || '')}" placeholder="Secret value">
-            <button type="button" class="btn btn-default secret-toggle" data-target="${id}" data-row-secret-toggle>Show</button>
-            <button type="button" class="btn btn-default secret-clear" data-target="${id}" data-row-secret-clear>Clear</button>
-        </div>${by.length ? `<div class="settings-inline-note">Asked for by ${escapeHtml(by.join(', '))}</div>` : ''}</div>`;
-        el.querySelector('.secret-input').dataset.appliedValue = settings[key] || '';
-        bindSecretInputs(el); host.appendChild(el);
-        fixOrganizationSecret(el, deploymentOf(settings?._meta), key);
-    });
+
+    // Loopback-only debug hook, like app.js's __ouroWs: Settings has no URL, so browser tests open a path through it.
+    window.__ouroSettings = { open: openFromOutside };
+    return { page, open: openFromOutside };
 }
 
 // A declarative extension form must show what is STORED (posting the bare schema once unbound the
@@ -467,1057 +482,4 @@ export async function renderExtensionSettingsSections(root, sections, { isCurren
     // Already-granted page modules may enhance their own declared forms. The
     // schema, hydration, write route and Save outcome remain host-owned.
     globalThis.window?.dispatchEvent(new CustomEvent('ouro:extension-settings-mounted'));
-}
-
-function collectSecretValue(id, body) {
-    const input = byId(id);
-    if (!input) return;
-    const settingKey = input.dataset.secretSetting;
-    if (!settingKey) return;
-    if (input.dataset.forceClear === '1') {
-        body[settingKey] = '';
-        return;
-    }
-    const value = input.value;
-    if (value && value !== input.dataset.appliedValue) body[settingKey] = value;
-}
-
-
-// The save's effect, from the gateway's honest buckets (#285). A running task keeps
-// its start snapshot, while a skill reads the keys it is granted on its next read
-// (#1122): the next-task bucket states both once, whichever keys the save carried.
-const SKILL_KEYS_READ = 'skills pick up granted keys on their next read';
-
-const DRAFT_KEPT = 'Settings were not reloaded because your draft changed while loading. Your edits are kept.';
-
-export function settingsSaveEffectText(data = {}) {
-    if (data.no_changes) return 'No changes detected';
-    if (data.restart_required) return 'Settings saved. Some changes require a restart to take effect';
-    if (data.restart_state?.summary || data.restart_state?.local_model?.summary) return 'Settings saved';
-    if (data.immediate_changed && data.next_task_changed) {
-        return `Settings saved. Some changes took effect immediately, others apply on the next task; ${SKILL_KEYS_READ}`;
-    }
-    if (data.immediate_changed) return 'Settings saved. Changes took effect immediately';
-    if (data.next_task_changed) return `Settings saved. Changes take effect on the next task; ${SKILL_KEYS_READ}`;
-    // Reachable when the only changed keys are retired no-ops:
-    // the warning below carries the honest story.
-    return 'Settings saved';
-}
-
-// Decision 16=A (#285): the settings "Restart now" action reuses the existing
-// owner command contract — the same WS `/restart` the chat header sends, through
-// the ONE shared confirmation both Restart buttons use (owner quiz 285597). The
-// whole confirm-and-send flow lives in chat_activity.js (node-tested, beside the
-// Panic flow); this page re-exports it and its click handler only injects deps.
-export { confirmAndSendRestart };
-
-export function initSettings({ state, setBeforePageLeave, ws, openDashboardTab = null } = {}) {
-    const page = document.createElement('div');
-    page.id = 'page-settings';
-    page.className = 'page app-page-glass';
-    page.innerHTML = renderSettingsPage();
-    document.getElementById('content').appendChild(page);
-
-    const activateSettingsTab = (tabName) => {
-        if (typeof page.activateSettingsTab === 'function') {
-            page.activateSettingsTab(tabName);
-        }
-    };
-    const disposeSettingsTabs = bindSettingsTabs(page, { state, onActivate: () => resetSecretReveals(page) });
-    bindSecretInputs(page);
-    bindEffortSegments(page);
-    // Appearance is client-local and injected after boot; never a server setting.
-    globalThis.ouroTheme?.mount();
-    // Notification preferences are client-local for the same reason; the module
-    // owns delegated handlers, so mounting only paints current state.
-    getNotifier().mountSettings(page);
-    // The interface size is per device too (interface_size.js): the slider sets this window's size, never a draft.
-    const disposeInterfaceSize = mountInterfaceSize(page);
-    // The desktop app's own facts (storage, system notifications): the app is not updated with the core.
-    const disposeShell = mountDesktopShell(page, (shell) => getNotifier().configure({ shell }));
-    // The interface language is an install-wide setting with its own endpoint; the block
-    // saves on change and never marks the Settings draft dirty.
-    const disposeLanguage = bindLanguageSettings(page);
-    bindAutostartControl(page); // host OS entry applied on click, never in the draft; self-disposing
-    const disposeLocalModel = bindLocalModelControls({ state,
-        onApplication: (local) => syncRestartState({ ...restartState, local_model: local }) });
-    let currentSettings = {};
-    // A change signalled while a draft is open (its reason): said, never applied over the draft; a new baseline ends it.
-    let draftOutdatedBy = '';
-    let searchSelectionEdited = false;
-    let extensionRefreshPending = false;
-    let settingsLoaded = false;
-    let settingsBaseline = '';
-    let settingsDirty = false;
-    let draftRevision = 0;
-    let loadSequence = 0;
-    let restartReadSequence = 0;
-    let servedUiReadSequence = 0;
-    let restartState = { restart_required: false };
-    let settingsSaving = false;
-    let saveOutcomeUnknown = false;
-    let validationAttempted = false;
-    const modelRoles = createModelRolesEditor({ hostId: 'settings-model-roles', mainNote: true,
-        onChange: (settings) => { syncProcessingPreference(settings); onSettingsEdited(); } });
-    // Accounts → API keys: the key rows, their Test and the "More providers" fold (settings_connections.js).
-    const connections = createConnectionsEditor({ root: page, onChange: () => onSettingsEdited(),
-        pageDraft: () => ({ OPENAI_BASE_URL: byId('s-openai-base-url')?.value ?? '' }) });
-    modelRoles.mount();
-    initMcpSettings({ onChange: onSettingsEdited });
-    initSubagentsSection({
-        hasPageDirtyIndicator: true,
-        onChange: () => onSettingsEdited(),
-        // A judged roster may clear only the validation footer it authored.
-        // A cadence or other field error keeps its typed subject and survives.
-        onJudged: (clean) => {
-            const status = byId('settings-status');
-            if (clean && status.dataset.owner === 'validation'
-                    && status.dataset.subject === 'subagents') { setStatus('', 'ok'); paintDirtyWord(); }
-        },
-        isOuterDraftClean: () => !settingsDirty,
-        onGeneratedApply: () => {
-            if (settingsLoaded && !settingsDirty) setSettingsCleanBaseline();
-        },
-        previewGenerated: ({ subscriptionsConnected }) => apiClient.previewOnboardingSubagents(
-            availableSubagentsPreviewPayload(collectBody(), subscriptionsConnected),
-        ),
-    });
-    initHarnessAccounts();
-    const disposeOwnerSections = [bindSafetySettings(page), bindConsciousnessSettings(page, { openDashboardTab })];
-
-    function syncProcessingPreference(settings) {
-        setSubagentsProcessingPreference(settings[PROCESSING_PREFERENCE_KEY]);
-    }
-
-    function syncRestartState(value) {
-        if (!value || typeof value.restart_required !== 'boolean') return;
-        restartState = value;
-        const restartAvailable = value.restart_required || value.restart_source_unknown_keys?.length > 0;
-        byId('btn-restart-now').hidden = !restartAvailable;
-        const text = [value.summary, value.local_model?.summary].filter(Boolean).join(' ');
-        const target = byId('settings-restart-status');
-        target.hidden = !text;
-        setInlineStatus(target, text, restartAvailable || value.local_model?.pending_keys?.length ? 'warn' : 'muted');
-    }
-
-    async function refreshServedUi() {
-        const sequence = ++servedUiReadSequence;
-        let shown;
-        try {
-            shown = servedUiStatus((await apiClient.state())?.served_ui);
-        } catch { return; /* An unavailable read keeps the last known fact. */ }
-        const target = byId('s-ui-dir-applied');
-        if (sequence !== servedUiReadSequence || !target) return;
-        target.hidden = !shown;
-        setInlineStatus(target, shown?.text || '', shown?.tone || 'muted');
-    }
-
-    async function refreshRestartState() {
-        const sequence = ++restartReadSequence;
-        try {
-            const data = await apiClient.settings();
-            if (sequence === restartReadSequence) syncRestartState(data?._meta?.restart_state);
-        } catch { /* An unavailable read cannot clear a known pending change. */ }
-    }
-
-    function syncSettingsLoadState() {
-        const saveBtn = byId('btn-save-settings');
-        if (saveBtn) {
-            saveBtn.disabled = !settingsLoaded || settingsSaving || saveOutcomeUnknown;
-            saveBtn.title = settingsLoaded
-                ? (saveOutcomeUnknown ? 'Reload settings to check the previous save before saving again.' : '')
-                : 'Reload current settings successfully before saving.';
-        }
-    }
-
-    function syncRuntimeModeBridgeState() {
-        const hasBridge = Boolean(window.pywebview?.api?.confirm_runtime_mode_change);
-        const group = document.querySelector('[data-runtime-mode-group]');
-        if (group) {
-            group.title = hasBridge
-                ? 'Runtime mode changes require native launcher confirmation and restart.'
-                : 'Runtime mode changes are saved through the owner endpoint and take effect after restart.';
-        }
-        document.querySelectorAll('[data-runtime-mode-group] [data-effort-value]').forEach((button) => {
-            button.disabled = false;
-        });
-    }
-
-    function syncPostTaskEvolutionUi() {
-        const mode = byId('s-post-task-evolution-mode')?.value || 'off';
-        page.querySelectorAll('[data-evo-every-n-row]').forEach((row) => {
-            row.hidden = mode !== 'every_n';
-        });
-    }
-
-    // Top-level keys in sorted order: the dirty check compares these strings,
-    // and the status-settle baseline fold below inserts keys AFTER the fact —
-    // equality must not depend on object insertion order. Nested values keep
-    // native stringify (both sides build them through the same code path).
-    function stableSerializeDraft(draft) {
-        return JSON.stringify(Object.fromEntries(
-            Object.entries(draft).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
-        ));
-    }
-
-    function snapshotSettingsDraft() {
-        return stableSerializeDraft({
-            ...collectBody(),
-            // Raw controls retain invalid/empty values and owner-only settings
-            // that the transport payload intentionally normalizes or omits.
-            controls: Array.from(page.querySelectorAll('input[id^="s-"], select[id^="s-"], textarea[id^="s-"], [data-secret-setting], [data-model-role-context]'),
-                (input) => [input.id, input.value, input.checked, input.validity?.badInput || false, input.dataset.forceClear || '']),
-            customSecrets: readCustomSecretDraft(page),
-            // MCP header rows, including exact duplicates the saved map would collapse.
-            mcpHeaderRows: mcpDraftSnapshot(),
-        });
-    }
-
-    function setSettingsCleanBaseline() {
-        settingsBaseline = snapshotSettingsDraft();
-        settingsDirty = false;
-        draftOutdatedBy = '';
-        paintDirtyWord();
-    }
-
-    function updateSettingsDirtyState() {
-        const nextDirty = settingsLoaded && settingsBaseline
-            ? snapshotSettingsDraft() !== settingsBaseline : draftRevision > 0;
-        if (nextDirty === settingsDirty) return;
-        settingsDirty = nextDirty;
-        paintDirtyWord();
-    }
-
-    // The unsaved draft is the footer's one word beside Save: it replaces an acknowledgement it would
-    // contradict and leaves a warning, a validation or a load in place; a clean draft takes it away.
-    function paintDirtyWord() {
-        page.querySelector('.settings-footer')?.setAttribute('data-draft', settingsDirty ? 'dirty' : 'clean');  // whatever the line says
-        const status = byId('settings-status');
-        if (!status) return;
-        const owner = status.dataset.owner || '';
-        if (settingsDirty) {
-            // The last save's result gives way to the draft word; a load, a validation, an unknown outcome keep the line.
-            if ((owner && owner !== 'save') || (!owner && ['warn', 'danger'].includes(status.dataset.tone || ''))) return;
-            setStatus('Unsaved changes', 'warn', 'draft');
-        } else if (owner === 'draft') setStatus('', 'ok');
-    }
-
-    function onSettingsEdited() {
-        draftRevision += 1;
-        if (validationAttempted) renderValidation();
-        updateSettingsDirtyState();
-    }
-
-    let baselineSettleDisposer = null;
-    function armCleanBaselineOnStatusSettle(revision) {
-        // The Claudexor status probe is fire-and-forget, so the baseline can be taken before the
-        // store-gated collectors have their facts, and their output changes when a snapshot lands.
-        // Absent owner edits no store arrival may read as an unsaved change; every owner edit flips
-        // settingsDirty before any store notify, so re-baselining a CLEAN draft can never mask one,
-        // and a DIRTY draft is never re-baselined. Not a one-shot: a later include-models upgrade
-        // settles the store again. A bare subscription: it never arms the polling chain itself.
-        baselineSettleDisposer?.();
-        baselineSettleDisposer = claudexorStatus.subscribe(() => {
-            if (revision === draftRevision && !settingsDirty && settingsLoaded) setSettingsCleanBaseline();
-        });
-    }
-
-    function syncAutoGrantBridgeState() {
-        const hasBridge = Boolean(window.pywebview?.api?.request_auto_grant_reviewed_skills_change);
-        const checkbox = byId('s-auto-grant-reviewed-skills');
-        const label = checkbox?.closest('.local-toggle');
-        if (checkbox) checkbox.disabled = false;
-        if (label) {
-            label.title = hasBridge
-                ? 'Requires native confirmation. Applies only after a fresh executable skill review and only to manifest-declared grants for that exact content hash.'
-                : 'Uses the owner endpoint. Applies only after a fresh executable skill review and only to manifest-declared grants for that exact content hash.';
-        }
-    }
-
-    function applySettings(s) {
-        setupContract = s?._meta?.setup_contract || setupContract || {};
-        applySecretInputs(page, s);
-        INPUT_FIELDS.forEach(([id, key, fallback = '']) => applyInputValue(id, storedOrFallback(s[key], fallback)));
-        applyInputValue('s-ui-dir', s.OUROBOROS_UI_DIR);
-        searchSelectionEdited = false;
-        VALUE_FIELDS.forEach(([id, key, fallback]) => { byId(id).value = s[key] || fallback; });
-        modelRoles.load(s, { ...setupContract, modelSlots: setupModelSlots().map((slot) => ({
-            ...slot, inputId: slot.settingsInputId,
-        })) });
-        applyCheckboxValue('s-auto-grant-reviewed-skills', s.OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS);
-        // The mutative-subagents control shows the EFFECTIVE state where it is binary: an explicit
-        // value, or unset in advanced/pro ("On"). Unset in LIGHT mode is surface-aware (see
-        // config.get_allow_mutative_subagents), so it displays as "Auto"; picking Auto saves the
-        // empty value (collectBody maps any non-on/off segment to ''), so the mode default decides.
-        const rawMutative = String(s.OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS ?? '').trim().toLowerCase();
-        const runtimeMode = String(s.OUROBOROS_RUNTIME_MODE || 'advanced').trim().toLowerCase();
-        const mutativeInput = byId('s-allow-mutative-subagents');
-        mutativeInput.dataset.rawValue = rawMutative;
-        delete mutativeInput.dataset.effortTouched;
-        mutativeInput.value =
-            ({ true: 'on', false: 'off' }[rawMutative] || (runtimeMode === 'light' ? 'auto' : 'on'));
-        // The actor list lives next to it in Agents → Available subagents.
-        applySubagentsSettings(s);
-        syncProcessingPreference(s);
-        // The editor offers the API providers THIS document has a credential
-        // for, named by the setup contract. Derived from the loaded settings,
-        // so a key added under Accounts shows up on the next load rather than
-        // being typed as a prefix (docs/DESIGN.md §7).
-        setSubagentsSourceContext(s, setupContract.providerProfiles);
-        // Post-task evolution: one owner-facing selector maps to enable + cadence.
-        const evoEnabled =
-            ({ true: 'on', '1': 'on', on: 'on', false: 'off', '0': 'off', off: 'off' }[
-                String(s.OUROBOROS_POST_TASK_EVOLUTION ?? '').trim().toLowerCase()] || 'off') === 'on';
-        const evoCadence = String(s.OUROBOROS_POST_TASK_EVOLUTION_CADENCE || 'llm').trim().toLowerCase();
-        // Use the SAME strict shape as the backend (^every_n:[1-9]\d*$) so a stale/
-        // malformed value (e.g. every_nonsense, every_n:0) displays as llm — never as
-        // Every-N:3, which a later Save would silently persist as periodic evolution.
-        const everyNMatch = evoCadence.match(/^every_n:([1-9]\d*)$/);
-        if (!evoEnabled) {
-            byId('s-post-task-evolution-mode').value = 'off';
-        } else if (everyNMatch) {
-            byId('s-post-task-evolution-mode').value = 'every_n';
-            byId('s-evo-cadence-n').value = everyNMatch[1];
-        } else {
-            byId('s-post-task-evolution-mode').value = 'llm';
-        }
-        NUMBER_FIELDS.forEach(([id, key, fallback, allowFalsy]) => {
-            const value = s[key];
-            if (allowFalsy ? value !== null && value !== undefined : value) byId(id).value = value;
-            else byId(id).value = fallback;
-        });
-        // The wait the concurrency field's help names is the install's own, not a copy of its default.
-        byId('s-model-slot-wait').textContent = String(slotWaitSeconds(s.OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC));
-        (Array.isArray(setupContract.budgetFields) ? setupContract.budgetFields : []).forEach((field) => {
-            const id = field.settingsInputId;
-            const input = byId(id);
-            if (!input) return;
-            input.min = field.min || '0.01';
-            input.step = field.step || 'any';
-            input.value = s[field.settingKey] ?? field.default ?? '';
-        });
-        const budgetHelp = byId('s-budget-help');
-        if (budgetHelp) {
-            const note = (Array.isArray(setupContract.budgetFields) ? setupContract.budgetFields : [])
-                .map((field) => String(field.note || '').trim()).find(Boolean) || '';
-            if (note) {
-                budgetHelp.textContent = note;
-                budgetHelp.hidden = false;
-            }
-        }
-        applyMcpSettings(s);
-        resetSecretClearFlags(page);
-        // After the flat inputs and transient flags: snapshot only the applied document.
-        connections.load(s, { modelSlots: setupModelSlots() });
-        offerAllowedChoices(page, { target: 's-runtime-mode', options: RUNTIME_MODE_OPTIONS, axis: 'access',  // a deployment's ceiling
-            modifier: 'data-runtime-mode-group' }, deploymentOf(s?._meta), { render: renderSegmentedField, bind: bindEffortSegments });
-        applyLocalModelPolicy(page, checkerUses(deploymentOf(s?._meta), 'local'));
-        fixCheckerField(byId('s-openai-base-url'), page.querySelector('[data-legacy-base-url-fixed]'), deploymentOf(s?._meta),
-            'OPENAI_BASE_URL', 'Legacy OpenAI Base URL');  // the legacy compatible pair a built-in checker reads
-        // A managed deployment's program, and so its update feed, is its administrator's (deployment_policy).
-        page.querySelector('[data-effort-target="s-update-channel"]').hidden = Boolean(deploymentOf(s?._meta));
-        page.querySelector('[data-update-channel-fixed]').hidden = !deploymentOf(s?._meta);
-        syncEffortSegments(page);
-        syncRuntimeModeBridgeState();
-        syncPolicyState(page, s?._meta);
-        syncPostTaskEvolutionUi();
-        applySafetySettings(page, s);  // owner-only safety values, facts and lines (settings_safety.js)
-        applyConsciousnessSettings(page, s);
-        void refreshSearchPreview();  // fire-and-forget; describes the applied search Source/Model
-    }
-
-    function _renderNetworkHint(meta) {
-        const hint = document.getElementById('settings-lan-hint');
-        if (!hint || !meta) return;
-        if (meta.reachability === 'loopback_only') {
-            hint.innerHTML = 'Bound to localhost: only this machine can reach Ouroboros. Set Server Bind Host to <code>0.0.0.0</code>, save, and restart for LAN access.';
-            hint.dataset.tone = 'info';
-            hint.hidden = false;
-        } else if (meta.reachability === 'lan_reachable') {
-            const url = escapeHtml(meta.recommended_url || '');
-            const warning = escapeHtml(meta.warning || '');
-            // Status first, action right (ui.css .ui-action-row). The link keeps its own words; the button
-            // carries the address this read drew, so a click after any later read copies that read's address.
-            const copy = url ? `<button type="button" class="btn btn-default btn-sm ui-hit-area" data-copy-lan-url="${url}">Copy link</button>` : '';
-            hint.innerHTML = `<div class="ui-action-row"><span>LAN URL: <a href="${url}" target="_blank" rel="noopener">${url}</a>${warning ? ' — <strong>' + warning + '</strong>' : ''}</span>${copy}</div>`;
-            hint.dataset.tone = meta.warning ? 'warn' : 'ok';
-            hint.hidden = false;
-        } else if (meta.reachability === 'host_ip_unknown') {
-            const url = escapeHtml(meta.recommended_url || '');
-            const warning = escapeHtml(meta.warning || '');
-            hint.innerHTML = `Server is listening on non-localhost but LAN IP could not be detected automatically. Try <code>${url}</code>.${warning ? ' <strong>' + warning + '</strong>' : ''}`;
-            hint.dataset.tone = 'warn';
-            hint.hidden = false;
-        } else {
-            hint.hidden = true;
-        }
-    }
-
-    // Every Settings read rebuilds the hint, so one listener lives as long as the page and reads the address
-    // off the button that was clicked; the shared copy owns the fallback and reports through the toast host.
-    const lanHint = byId('settings-lan-hint');
-    const onLanHintClick = (event) => {
-        const url = event.target?.closest?.('[data-copy-lan-url]')?.dataset.copyLanUrl;
-        if (url) void copyTextWithToast(url, { okMessage: 'LAN URL copied.' });
-    };
-    lanHint?.addEventListener('click', onLanHintClick);
-
-    // Skill-requested keys and extension settings sections come from the
-    // installed-skill list, a read the settings document never waits for; a
-    // hidden page skips it altogether, since every page show reloads.
-    const settingsPageActive = () => state?.activePage === 'settings';
-
-    async function loadSettings({ awaitEnrichment = true } = {}) {
-        resetSecretReveals(page);
-        const sequence = ++loadSequence;
-        const restartSequence = ++restartReadSequence;
-        const revision = draftRevision;
-        const extensionsRead = settingsPageActive() ? apiClient.extensions().catch(() => ({})) : null;
-        const data = await apiClient.settings();
-        if (!data || typeof data !== 'object' || Array.isArray(data) || data.error) {
-            throw new Error(data?.error || 'The server did not return a settings document.');
-        }
-        if (restartSequence === restartReadSequence) syncRestartState(data._meta?.restart_state);
-        // A newer load took over (null: it reports for both); an owner edit kept the draft (false).
-        if (sequence !== loadSequence) return null;
-        if (revision !== draftRevision) return false;
-        currentSettings = data;
-        applySettings(data);
-        renderCustomSecrets(page, data);
-        // This confirmed document can already be edited and saved. Optional
-        // reviewer/status/skill reads must not hold its baseline or Save capability.
-        settingsLoaded = true;
-        saveOutcomeUnknown = false;
-        validationAttempted = false;
-        paintSettingsFieldErrors(page, []);
-        setSettingsCleanBaseline();
-        armCleanBaselineOnStatusSettle(revision);
-        _renderNetworkHint(data._meta);
-        void refreshServedUi();
-        syncSettingsLoadState();
-        // The skill-requested rows and the extension settings forms (which read
-        // their stored values before rendering) are optional enrichment: it must
-        // not delay the clean baseline above or absorb an owner edit made while
-        // it was pending, so it lands only on an unchanged draft.
-        const isCurrent = () => sequence === loadSequence && revision === draftRevision;
-        const enriched = (async () => {
-            const enrichment = [reloadReviewPool({ isCurrent }), reloadSubagentsSection()];
-            const extData = await extensionsRead;
-            if (extData && isCurrent()) {
-                renderRequestedSkillSecrets(page, extData.skills || [], data);
-                const sections = Array.isArray(extData.live?.settings_sections) ? extData.live.settings_sections : [];
-                enrichment.push(renderExtensionSettingsSections(page, sections, { isCurrent }));
-            }
-            await Promise.all(enrichment);
-            if (!isCurrent()) {
-                updateSettingsDirtyState();
-                // The same answer as the document stage: a newer load took over (null, it reports), or an owner edit
-                // kept the draft (false). A page-show refresh says "Your edits are kept" only for the second.
-                return sequence !== loadSequence ? null : false;
-            }
-            // Optional enrichment belongs in a still-clean baseline, never in an
-            // owner edit made while one of those reads was pending.
-            setSettingsCleanBaseline();
-            return true;
-        })();
-        // A confirmed Save waits for the document only; its enrichment lands behind the same guards.
-        if (!awaitEnrichment) {
-            enriched.catch(() => {});
-            return true;
-        }
-        return enriched;
-    }
-
-    async function reloadSettingsWithFeedback() {
-        if (settingsSaving) return;
-        if (settingsDirty && !(await confirmDiscardSettings('reload Settings'))) return;
-        const reloadSequence = loadSequence + 1;
-        setStatus('Loading settings...', 'muted', 'load');
-        try {
-            const applied = await loadSettings();
-            if (applied === false && byId('settings-status').dataset.owner === 'load') {
-                setStatus(DRAFT_KEPT, 'warn', 'load');
-            }
-            try {
-                await refreshModelCatalog({ button: byId('btn-refresh-model-catalog') });
-                if (applied && byId('settings-status').dataset.owner === 'load' && !settingsDirty && !settingsSaving && !saveOutcomeUnknown) setStatus('Settings loaded', 'ok', '', '', '', { ends: true });
-            } catch (error) {
-                if (applied && byId('settings-status').dataset.owner === 'load' && !settingsDirty && !settingsSaving && !saveOutcomeUnknown) {
-                    const words = errorWords(error);
-                    setStatus(`Settings loaded. The model catalog did not refresh. ${words.text}`, 'warn', '', '', words.details);
-                }
-            }
-            // Catalog readiness is independent of Settings GET completion:
-            // a superseding page-show load may still be waiting for its document.
-            // Arm after discovery so its settled Accounts snapshot stays quiet.
-            accountModelCatalog.arm();
-        } catch (error) {
-            if (reloadSequence !== loadSequence) return;
-            settingsLoaded = false;
-            syncSettingsLoadState();
-            const words = errorWords(error);
-            setStatus(`Failed to load current settings. ${words.text} Save is disabled until reload succeeds.`, 'warn', '', '', words.details);
-        }
-    }
-
-    async function refreshSettingsAfterExtensionChange(reason = 'skills changed') {
-        if (extensionRefreshPending || settingsSaving || saveOutcomeUnknown) return;
-        if (settingsDirty) {
-            draftOutdatedBy = reason;
-            await refreshRestartState();
-            setStatus(`Settings changed externally (${reason}). Reload after saving or discarding your draft.`, 'warn');
-            return;
-        }
-        extensionRefreshPending = true;
-        try {
-            const applied = await loadSettings();
-            // A load this one superseded left its line to it; an owner edit made meanwhile kept the draft.
-            if (applied === false && byId('settings-status').dataset.owner === 'load') setStatus(DRAFT_KEPT, 'warn', 'load');
-            if (!applied) return;
-            setStatus('Settings refreshed', 'ok', '', '', '', { ends: true });
-        } catch (error) {
-            const words = errorWords(error);
-            setStatus(`Settings did not refresh. ${words.text}`, 'warn', '', '', words.details);
-        } finally {
-            extensionRefreshPending = false;
-        }
-    }
-
-    function collectSearchSelection() {
-        const backend = byId('s-websearch-source').value;
-        let model = byId('s-websearch-model').value.trim();
-        // Preserve untouched legacy settings. An edited native Anthropic id uses
-        // the existing routed spelling so dispatch can recognize the new intent.
-        if (searchSelectionEdited && backend === 'anthropic' && model
-                && !model.includes('::') && !model.startsWith('anthropic/')) model = `anthropic::${model}`;
-        return { backend, model };
-    }
-
-    function collectBody() {
-        const fieldValue = (id) => byId(id)?.value || '';
-        const mutativeInput = byId('s-allow-mutative-subagents');
-        const rawMutative = String(mutativeInput?.dataset?.rawValue ?? '').trim().toLowerCase();
-        const mutativeTouched = mutativeInput?.dataset?.effortTouched === '1';
-        const body = {
-            OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS: byId('s-auto-grant-reviewed-skills')?.checked ? 'true' : 'false',
-            OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS: mutativeTouched
-                ? ({ on: 'true', off: 'false' }[mutativeInput?.value] ?? '')
-                : (rawMutative ? ({ true: 'true', false: 'false' }[rawMutative] ?? rawMutative) : ''),
-            ...collectMcpSettings(),
-            // Saved config and live availability are independent: a loaded
-            // actor list is collected even when status is down; an unloaded,
-            // unparseable or untouched generated draft omits the key.
-            ...collectSubagentsSettings(),
-        };
-        Object.assign(body, modelRoles.collect());
-        INPUT_FIELDS.forEach(([id, key, fallback = '']) => {
-            const value = fieldValue(id).trim();
-            body[key] = key === 'OUROBOROS_SERVER_HOST' ? value || fallback : value || '';
-        });
-        Object.assign(body, uiDirChange(fieldValue('s-ui-dir'), currentSettings?.OUROBOROS_UI_DIR));
-        body.OUROBOROS_WEBSEARCH_MODEL = collectSearchSelection().model;
-        VALUE_FIELDS
-            // Owner-only keys travel through their audited owner endpoints, never the generic
-            // settings POST (the safety levels, rules and checker: settings_safety.js).
-            .filter(([, key]) => key !== 'OUROBOROS_RUNTIME_MODE' && key !== 'OUROBOROS_CONTEXT_MODE')
-            .forEach(([id, key]) => { body[key] = fieldValue(id); });
-        NUMBER_FIELDS.forEach(([id, key, fallback]) => { body[key] = readInt(id, fallback); });
-        (Array.isArray(setupContract.budgetFields) ? setupContract.budgetFields : []).forEach((field) => {
-            const id = field.settingsInputId;
-            const input = byId(id);
-            if (!input) return;
-            const raw = String(input.value || '').trim();
-            const parsed = Number(raw);
-            const value = Number.isFinite(parsed) && parsed > 0 ? parsed : raw;
-            if (String(value) !== String(currentSettings?.[field.settingKey] ?? field.default)) {
-                body[field.settingKey] = value;
-            }
-        });
-        // Post-task evolution: compose the legacy enable + cadence settings from
-        // the single owner-facing selector.
-        const evoCadMode = byId('s-post-task-evolution-mode').value;
-        body.OUROBOROS_POST_TASK_EVOLUTION = evoCadMode === 'off' ? 'false' : 'true';
-        body.OUROBOROS_POST_TASK_EVOLUTION_CADENCE = evoCadMode === 'every_n'
-            ? `every_n:${Math.max(1, parseInt(byId('s-evo-cadence-n').value, 10) || 3)}`
-            : 'llm';
-
-        page.querySelectorAll('[data-secret-setting]').forEach((input) => {
-            collectSecretValue(input.id, body);
-        });
-        Object.assign(body, collectCustomSecrets().values, connections.collect());
-        return body;
-    }
-
-    // Main, Light and Fallbacks as loaded are no choice (server_runtime.unedited_unauthored_slots): Save sends neither
-    // write an echo, so a lane the document does not author keeps following the access, also past a Main the owner
-    // transaction saves first (#2969). A changed, saved or blank lane is posted or kept as it is.
-    function omitUnchangedModelLanes(body) {
-        const lane = (value) => String(value ?? '').split(',').map((entry) => entry.trim()).filter(Boolean).join(',');
-        for (const key of ['OUROBOROS_MODEL', 'OUROBOROS_MODEL_LIGHT', 'OUROBOROS_MODEL_FALLBACKS']) {
-            if (key in body && lane(body[key]) === lane(currentSettings?.[key])) delete body[key];
-        }
-        return body;
-    }
-
-    function collectCustomSecrets() {
-        const customKeys = new Set(currentSettings?._meta?.custom_secret_keys || []);
-        return collectCustomSecretDraft(readCustomSecretDraft(page),
-            Object.keys(currentSettings).filter((key) => !customKeys.has(key)));
-    }
-
-    function validationSummary(errors) {
-        return errors.length > 1 ? `${errors[0]} (${errors.length} fields need attention.)` : errors[0] || '';
-    }
-
-    function collectValidation() {
-        const fields = [...validateMcpSettings(), ...connections.validate()];
-        const cadence = byId('s-evo-cadence-n');
-        if (byId('s-post-task-evolution-mode')?.value === 'every_n' && !/^[1-9]\d*$/.test(cadence.value.trim())) {
-            fields.push({ input: cadence, message: 'Every-N cadence needs a whole number ≥ 1.' });
-        }
-        page.querySelectorAll('input[id^="s-"], select[id^="s-"], textarea[id^="s-"]').forEach((input) => {
-            if (input === cadence || fields.some((error) => error.input === input)
-                    || input.hasAttribute('data-model-role-context') || !input.willValidate || input.validity.valid) return;
-            const label = input.labels?.[0]?.textContent || input.name || input.id;
-            fields.push({ input, message: `${label.trim()}: ${input.validationMessage}` });
-        });
-        const rows = [...page.querySelectorAll('[data-custom-secret-row]')];
-        collectCustomSecrets().errors.forEach(({ index, field, message }) => {
-            if (rows[index]?.dataset.judged === '1') fields.push({ input: rows[index].querySelector(`[data-custom-secret-${field}]`), message });
-        });
-        const groups = [
-            ['fields', fields.map(({ message }) => message)],
-            ['models', modelRoles.validateAll()],
-            ['subagents', validateSubagentsDraft().map((error) => `Available subagents: ${error}`)],
-        ];
-        const messages = groups.flatMap(([, rows]) => rows).filter(Boolean);
-        const subject = groups.find(([, rows]) => rows.some(Boolean))?.[0] || '';
-        return { fields, messages, subject };
-    }
-
-    function renderValidation() {
-        const { fields, messages, subject } = collectValidation();
-        paintSettingsFieldErrors(page, fields);
-        if (byId('settings-status').dataset.owner === 'validation') {
-            if (messages.length) setStatus(validationSummary(messages), 'warn', 'validation', subject);
-            else { setStatus('', 'ok'); paintDirtyWord(); }
-        }
-        return { fields, messages, subject };
-    }
-
-    async function confirmDiscardSettings(action) {
-        return openConfirmDialog({
-            title: 'Unsaved settings',
-            body: `You have unsaved settings changes. Discard them and ${action}?`,
-            confirmLabel: 'Discard and continue', cancelLabel: 'Stay',
-        });
-    }
-
-    async function saveRuntimeModeViaNativeBridgeIfNeeded(nextMode) {
-        const currentMode = currentSettings?.OUROBOROS_RUNTIME_MODE || 'advanced';
-        if (nextMode === currentMode) return null;
-        // The native bridge is confirmation-only.  Older shells do not expose
-        // that method; fall back to the same in-app dialog so they never receive
-        // the legacy mutating request_runtime_mode_change call (which cannot
-        // represent Cyber Pro). Every surface writes through one owner endpoint.
-        const nativeConfirm = window.pywebview?.api?.confirm_runtime_mode_change;
-        const confirmed = nativeConfirm
-            ? (await nativeConfirm(nextMode))?.confirmed === true
-            : await openConfirmDialog({
-                title: 'Change runtime mode',
-                body: `Change Ouroboros runtime mode from ${currentMode} to ${nextMode}? The change takes effect after restart.`,
-                confirmLabel: 'Change mode',
-            });
-        if (!confirmed) {
-            const result = { ok: false, saved: false, error: 'Runtime mode change cancelled.' };
-            throw Object.assign(new Error(result.error), { body: result });
-        }
-        const result = await apiClient.ownerRuntimeMode(nextMode);
-        if (!result || result.ok !== true) {
-            throw Object.assign(new Error(result?.error || 'Runtime mode change failed.'), { body: result });
-        }
-        return result;
-    }
-
-    async function saveAutoGrantViaNativeBridgeIfNeeded(nextEnabled) {
-        const currentEnabled = isTruthySetting(currentSettings?.OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS);
-        if (nextEnabled === currentEnabled) return null;
-        const bridge = window.pywebview?.api?.request_auto_grant_reviewed_skills_change;
-        // Browser-side confirm only; the pywebview bridge path stays untouched.
-        const result = bridge
-            ? await bridge(nextEnabled)
-            : ((await openConfirmDialog({
-                title: 'Reviewed-skill auto-grant',
-                body: `${nextEnabled ? 'Enable' : 'Disable'} reviewed-skill auto-grant? It only applies after a fresh executable review for the current content hash.`,
-                confirmLabel: nextEnabled ? 'Enable' : 'Disable',
-            }))
-                ? await apiClient.ownerAutoGrant(nextEnabled)
-                : { ok: false, saved: false, error: 'Reviewed-skill auto-grant change cancelled.' });
-        if (!result || result.ok !== true) {
-            throw Object.assign(new Error(result?.error || 'Reviewed-skill auto-grant change was cancelled.'), { body: result });
-        }
-        return result;
-    }
-
-    async function saveContextModeViaOwnerEndpointIfNeeded(next) {
-        const current = currentSettings?.OUROBOROS_CONTEXT_MODE || 'max';
-        if (next === current) return null;
-        const result = await apiClient.ownerContextMode(next);
-        if (!result || result.ok !== true) {
-            throw Object.assign(new Error(result?.error || 'Context mode change failed.'), { body: result });
-        }
-        return result;
-    }
-
-    markSettingsDirty = onSettingsEdited;
-    syncSettingsLoadState();
-    syncRuntimeModeBridgeState();
-    syncAutoGrantBridgeState();
-    reloadSettingsWithFeedback();
-
-    if (typeof setBeforePageLeave === 'function') {
-        // Leaving Settings keeps the draft for the return, unsaved and marked so
-        // (owner 2026-11-03: a page left keeps its unsaved input); a revealed
-        // secret is masked again. A Save in flight holds the page until it
-        // answers. Reload, which replaces the draft, still asks first.
-        setBeforePageLeave(async ({ from }) => {
-            if (from !== 'settings') return true;
-            if (settingsSaving) return false;
-            resetSecretReveals(page);
-            return true;
-        });
-    }
-
-    // Blocks outside the server draft (theme, notifications and the interface size on Appearance; host
-    // sign-in startup on Behavior) never enter the /api/settings payload, so their
-    // controls must not make the server draft dirty — otherwise toggling one would
-    // ask the owner to discard "unsaved settings" that do not exist.
-    const onServerSettingEdited = (event) => {
-        if (event?.target?.closest?.('[data-notify-settings], [data-autostart-settings], [data-interface-size]')) return;
-        if (event?.target?.closest?.('[data-response-limit]')) return;   // a maximum is an evidence acknowledgement, not a setting
-        if (event?.target?.closest?.('[data-i18n-settings]')) return;   // the interface language saves through its own endpoint
-        onSettingsEdited();
-    };
-    let searchPreviewSequence = 0;
-    async function refreshSearchPreview() {
-        const sequence = ++searchPreviewSequence;
-        const target = byId('s-websearch-preview');
-        if (!target?.isConnected) return;
-        try {
-            const data = await apiClient.webSearchPreview(searchSelectionEdited ? collectSearchSelection() : {});
-            if (sequence !== searchPreviewSequence || !target.isConnected) return;
-            // The help text already says skills, MCP and browser tools stay independent; a source is named by its option.
-            const names = new Map(Array.from(byId('s-websearch-source')?.options || [], (option) => [option.value, option.textContent]));
-            const { main, details } = webSearchPreviewWords(data, (id) => names.get(id) || id);
-            target.innerHTML = `${escapeHtml(main)}${details ? ` <details class="ui-disclosure"><summary>Details</summary>${escapeHtml(details)}</details>` : ''}`;
-        } catch (_) { if (sequence === searchPreviewSequence && target.isConnected) target.textContent = 'Search routes could not be checked. Your choices are kept.'; }
-    }
-    const onSearchSelectionEdited = () => { searchSelectionEdited = true; void refreshSearchPreview(); };
-    byId('s-websearch-source')?.addEventListener('change', onSearchSelectionEdited);
-    byId('s-websearch-model')?.addEventListener('input', onSearchSelectionEdited);
-    page.addEventListener('input', onServerSettingEdited);
-    page.addEventListener('change', onServerSettingEdited);
-    page.addEventListener('click', (event) => {
-        if (event.target.closest('[data-effort-value], .secret-clear, [data-row-secret-clear], [data-custom-secret-remove]')) {
-            queueMicrotask(() => {
-                syncPostTaskEvolutionUi();
-                syncPolicyState(page, currentSettings?._meta);
-                onSettingsEdited();
-            });
-        }
-    });
-    byId('btn-add-custom-secret')?.addEventListener('click', () => {
-        const host = byId('custom-secrets-list');
-        if (!host) return;
-        if (host.querySelector('.muted')) host.innerHTML = '';
-        const row = customSecretRow();
-        host.appendChild(row);
-        revealNewRow(row, row.querySelector('[data-custom-secret-key]'));
-        markSettingsDirty();
-    });
-
-    // Skill lifecycle events reload only a visible page; the page-show
-    // handler below reloads on entry, so a hidden page reads nothing.
-    window.addEventListener('ouro:skill-lifecycle', (event) => {
-        extensionChanged(String(event.detail?.action || 'skills changed'));
-    });
-    window.addEventListener('ouro:settings-updated', (event) => {
-        if (event.detail?.source === 'settings') return;
-        const action = String(event.detail?.reason || 'settings changed');
-        refreshSettingsAfterExtensionChange(action);
-    });
-    if (ws && typeof ws.on === 'function') {
-        ws.on('extension_lifecycle', (event) => {
-            extensionChanged(String(event?.action || 'extension lifecycle'));
-        });
-    }
-    // A hidden page's kept draft only notes the change, said on its return.
-    function extensionChanged(reason) {
-        if (settingsPageActive()) refreshSettingsAfterExtensionChange(reason);
-        else if (settingsDirty) draftOutdatedBy = reason;
-    }
-    // A confirmed Accounts facet is the existing status-store seam for login
-    // completion. It refreshes the catalog only on a changed/rehydrated account
-    // answer, while modelRoles.adoptCatalog keeps unsaved assignments intact.
-    const accountModelCatalog = watchAccountModelCatalog();
-    const disposeRestartReconnect = ws?.on?.('open', () => {
-        refreshRestartState();
-        void refreshServedUi();
-        if (settingsLoaded) void refreshModelCatalog();
-    });
-
-    // The saved values a draft began from, without the read's own metadata (`_meta`: restart state, catalogs).
-    const savedValues = (doc) => JSON.stringify(Object.keys(doc).filter((key) => key !== '_meta').sort().map((key) => [key, doc[key]]));
-    // A kept draft began from `currentSettings`; another client, Telegram or the agent may have saved since without a
-    // signal this page hears. Its return reads the document again and says so when it differs, applying nothing.
-    async function noticeSavedElsewhere() {
-        const base = currentSettings;
-        const data = await apiClient.settings().catch(() => null);
-        if (!data || typeof data !== 'object' || Array.isArray(data) || data.error || base !== currentSettings) return;
-        if (settingsDirty && !draftOutdatedBy && savedValues(data) !== savedValues(base)) {
-            void refreshSettingsAfterExtensionChange('saved elsewhere');
-        }
-    }
-
-    window.addEventListener('ouro:page-shown', (event) => {
-        if (event.detail?.page === 'settings') {
-            // A draft kept from the last visit is said as kept, not as changed elsewhere: only a change signalled
-            // meanwhile (`draftOutdatedBy`) or found by reading again says so; a clean page reloads.
-            if (settingsDirty && !draftOutdatedBy && !settingsSaving && !saveOutcomeUnknown) {
-                void refreshRestartState();
-                setStatus('Your unsaved draft is kept.', 'muted', 'draft');  // the draft's word: a clean draft takes it away
-                void noticeSavedElsewhere();
-            } else refreshSettingsAfterExtensionChange(draftOutdatedBy || 'settings page shown');
-            if (settingsLoaded) void refreshModelCatalog();
-        }
-    });
-
-    const onModelCatalog = (event) => modelRoles.adoptCatalog(event.detail);
-    const beforeUnload = (event) => {
-        if (settingsDirty || settingsSaving) { event.preventDefault(); event.returnValue = ''; }
-    };
-    window.addEventListener('beforeunload', beforeUnload);
-    document.addEventListener('settings-model-catalog:updated', onModelCatalog);
-    window.addEventListener('pagehide', (event) => {
-        resetSecretReveals(page);
-        if (event.persisted) return;
-        disposeSettingsTabs();
-        window.removeEventListener('beforeunload', beforeUnload);
-        lanHint?.removeEventListener('click', onLanHintClick);
-        disposeLocalModel();
-        disposeOwnerSections.forEach((dispose) => dispose());
-        disposeLanguage();
-        disposeInterfaceSize();
-        disposeShell();
-        disposeRestartReconnect?.();
-        accountModelCatalog.dispose();
-        restartReadSequence += 1;
-        baselineSettleDisposer?.();
-        modelRoles.destroy();
-        connections.destroy();
-        document.removeEventListener('settings-model-catalog:updated', onModelCatalog);
-    });
-
-    byId('btn-refresh-model-catalog').addEventListener('click', async (event) => {
-        await refreshModelCatalog({ button: event.currentTarget });
-    });
-
-    byId('btn-reload-settings')?.addEventListener('click', async () => {
-        await reloadSettingsWithFeedback();
-    });
-
-    byId('btn-save-settings').addEventListener('click', async () => {
-        if (settingsSaving || saveOutcomeUnknown) return;
-        if (!settingsLoaded) {
-            setStatus('Reload current settings successfully before saving.', 'warn');
-            return;
-        }
-        // The owner just tried to commit the draft — every Save click is one,
-        // whichever validation aborts it below — so from here the roster shows
-        // its own errors beside the rows they name, not only in this status.
-        noteSubagentsSaveAttempt();
-        modelRoles.noteSaveAttempt();
-        page.querySelectorAll('[data-custom-secret-row]').forEach((row) => { row.dataset.judged = '1'; });
-        validationAttempted = true;
-        const { fields: invalid, messages: errors, subject } = renderValidation();
-        if (errors.length) {
-            // The first refused field is shown where it is: a closed disclosure holding it (a saved MCP server's Edit)
-            // opens, so its message and the fix beside it are in view.
-            for (let fold = invalid[0]?.input?.closest('details'); fold; fold = fold.parentElement?.closest('details')) fold.open = true;
-            setStatus(validationSummary(errors), 'warn', 'validation', subject);
-            return;
-        }
-        const body = omitUnchangedModelLanes(collectBody());
-        loadSequence += 1;
-        const sentRevision = draftRevision;
-        const subagentsChanged = subagentSettingsFingerprint(body.OUROBOROS_SUBAGENTS)
-            !== subagentSettingsFingerprint(currentSettings?.OUROBOROS_SUBAGENTS);
-        const ownerDraft = {
-            runtime: byId('s-runtime-mode').value || 'advanced',
-            autoGrant: Boolean(byId('s-auto-grant-reviewed-skills').checked),
-            context: byId('s-context-mode').value || 'max',
-            // Takes the checker's changed keys (Models, Agents) out of `body`; they are written first, below.
-            safety: safetyOwnerDraft(page, body, currentSettings),
-        };
-
-        // Phase 1 of the save: the button goes busy and the status says so.
-        // Capability probes on review-route changes make a save take seconds;
-        // an idle "Save Settings" over that window reads as a dead click.
-        const saveButton = byId('btn-save-settings');
-        settingsSaving = true;
-        setButtonBusy(saveButton, true);
-        setStatus('Saving…', 'muted');
-        let saved = false;
-        let checkerSaved = false;
-        try {
-            checkerSaved = await saveSafetyChecker(ownerDraft.safety);
-            const data = await apiClient.saveSettings(body, { headers: APP_SETTINGS_ORIGIN });
-            if (data?.status !== 'saved') {
-                const error = new Error(data?.error || 'The server did not confirm the settings save.');
-                error.body = data;
-                throw error;
-            }
-            saved = true;
-            let runtimeModeResult = null;
-            let runtimeModeError = '';
-            let autoGrantResult = null;
-            let autoGrantError = '';
-            let contextModeResult = null;
-            let contextModeError = '';
-            try {
-                runtimeModeResult = await saveRuntimeModeViaNativeBridgeIfNeeded(ownerDraft.runtime);
-            } catch (error) {
-                const failure = settingsWriteFailure(error, "Runtime mode");
-                runtimeModeError = failure.text;
-                saveOutcomeUnknown ||= failure.unknown;
-            }
-            try {
-                autoGrantResult = await saveAutoGrantViaNativeBridgeIfNeeded(ownerDraft.autoGrant);
-            } catch (error) {
-                const failure = settingsWriteFailure(error, "Reviewed-skill auto-grant");
-                autoGrantError = failure.text;
-                saveOutcomeUnknown ||= failure.unknown;
-            }
-            try {
-                contextModeResult = await saveContextModeViaOwnerEndpointIfNeeded(ownerDraft.context);
-            } catch (error) {
-                const failure = settingsWriteFailure(error, "Context mode");
-                contextModeError = failure.text;
-                saveOutcomeUnknown ||= failure.unknown;
-            }
-            const safety = await saveSafetyOwnerChanges(ownerDraft.safety, currentSettings);
-            saveOutcomeUnknown ||= safety.unknown;
-            const ownerError = runtimeModeError || autoGrantError || contextModeError || safety.error;
-            const draftKept = ownerError || sentRevision !== draftRevision || !(await loadSettings({ awaitEnrichment: false }));
-            syncAutoGrantBridgeState();
-            const effect = checkerSaveEffect(data, ownerDraft.safety);
-            let statusMsg = settingsSaveEffectText(effect);
-            let statusType = effect.restart_required && !effect.no_changes ? 'warn' : 'ok';
-            if (subagentsChanged && data.agent_task_running) {
-                statusMsg += '. Available subagents take effect for new child tasks; '
-                    + 'the current task keeps its existing routes';
-            }
-            if (data.warnings && data.warnings.length) {
-                statusMsg += '. Warnings: ' + data.warnings.join(' | ');
-                statusType = 'warn';
-            }
-            const references = connectionReferencesText(data.connection_references, connections.connections());
-            if (references) {
-                statusMsg += `. ${references}`;
-                statusType = 'warn';
-            }
-            if (runtimeModeResult?.restart_required) {
-                statusMsg = `${statusMsg} Runtime mode saved as ${runtimeModeResult.runtime_mode}; restart required.`;
-                statusType = 'warn';
-            }
-            if (runtimeModeError) {
-                statusMsg = `${statusMsg} ${runtimeModeError}`;
-                statusType = 'warn';
-            }
-            if (autoGrantResult) {
-                statusMsg = `${statusMsg} Reviewed-skill auto-grant ${autoGrantResult.enabled ? 'enabled' : 'disabled'}.`;
-            }
-            if (contextModeResult?.context_mode) {
-                statusMsg = `${statusMsg} Context mode saved as ${contextModeResult.context_mode}.`;
-            }
-            if (contextModeError) {
-                statusMsg = `${statusMsg} ${contextModeError}`;
-                statusType = 'warn';
-            }
-            if (safety.saved) statusMsg = `${statusMsg} ${safety.saved}`;
-            if (safety.error) { statusMsg = `${statusMsg} ${safety.error}`; statusType = 'warn'; }
-            if (autoGrantError) {
-                statusMsg = `${statusMsg} ${autoGrantError}`;
-                statusType = 'warn';
-            }
-            if (draftKept) {
-                statusMsg += saveOutcomeUnknown ? '. Your draft is kept. Reload settings to check before saving again.' : '. Your current draft is kept.';
-                statusType = 'warn';
-            }
-            setStatus(statusMsg, statusType, 'save');
-            syncRestartState(data.restart_state);
-            await refreshRestartState();
-            window.dispatchEvent(new CustomEvent('ouro:settings-updated', { detail: { reason: 'settings saved', source: 'settings' } }));
-        } catch (e) {
-            const receipt = e?.body || e?.payload;
-            const confirmedSaved = saved || receipt?.saved === true;
-            saveOutcomeUnknown = !confirmedSaved && receipt?.saved !== false;
-            // The checker's keys are saved already: the next Save compares against them, never re-sends them.
-            if (checkerSaved && !confirmedSaved) Object.assign(currentSettings, ownerDraft.safety.checker.settings);
-            // The line says what happened and what to do: a refusal says the server's own reason (errorWords), the
-            // error's raw text is the result's Details.
-            const words = errorWords(e);
-            setStatus(confirmedSaved ? 'Settings were saved, but a later step failed. Your draft is kept.'
-                : saveOutcomeUnknown ? 'Save outcome unknown. Your draft is kept; reload settings to check before saving again.'
-                    : `${checkerSaved ? `Changes in ${checkerTabsText(ownerDraft.safety)} were saved; the other settings were not` : 'Settings were not saved'}. ${words.text} Your draft is kept.`,
-            'warn', saveOutcomeUnknown ? '' : 'save', '', words.details);
-        } finally {
-            settingsSaving = false;
-            setButtonBusy(saveButton, false);
-            syncSettingsLoadState();
-        }
-    });
-
-    byId('btn-restart-now')?.addEventListener('click', async () => {
-        const outcome = await confirmAndSendRestart({ openConfirmDialog, ws });
-        if (outcome === 'sent') {
-            setStatus('Restart requested. If the agent refuses, the reason appears in the main chat.', 'muted');
-        } else if (outcome === 'not_connected') {
-            setStatus('Not connected — the restart command was not sent.', 'warn');
-        }
-    });
-
-    byId('btn-reset').addEventListener('click', async () => {
-        const confirmedReset = await openConfirmDialog({
-            title: 'Reset runtime data',
-            body: 'This will delete all runtime data (state, memory, logs, settings) and restart.\nThe repo (agent code) will be preserved.\nYou will need to re-enter your provider settings.\n\nContinue?',
-            confirmLabel: 'Delete and restart',
-            danger: true,
-        });
-        if (!confirmedReset) return;
-        try {
-            const res = await apiFetch('/api/reset', { method: 'POST' });
-            const data = await res.json();
-            if (data.status === 'ok') {
-                await openConfirmDialog({
-                    title: 'Reset complete',
-                    body: 'Deleted: ' + (data.deleted.join(', ') || 'nothing') + '\nRestarting...',
-                    alert: true,
-                });
-            } else {
-                await openConfirmDialog({
-                    title: 'Reset failed',
-                    body: 'Error: ' + (data.error || 'unknown'),
-                    alert: true,
-                });
-            }
-        } catch (e) {
-            showToast('Reset failed: ' + e.message, 'error');
-        }
-    });
-
-    return {
-        activateTab: activateSettingsTab,
-        page,
-    };
 }

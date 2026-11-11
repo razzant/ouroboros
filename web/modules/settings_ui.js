@@ -1,28 +1,18 @@
-import { bindPageHeader, renderPageHeader, renderSegmentedField, renderTabStrip, bindTabStrip } from './page_header.js';
+/** The section builders of the old Settings tabs, kept unmounted while the lanes of the rework recompose them into
+ * pages (settings_pages.js): the shell in settings.js no longer draws any of them. */
+import { renderSegmentedField } from './page_header.js';
 import { renderAgentAccountsSection } from './harness_accounts.js';
-import { renderSubagentsSection } from './subagents_settings.js';
 import { languageBlockHtml } from './settings_language.js';
 import { modelRolesHost } from './model_roles.js';
 import { safetySectionHtml } from './settings_safety.js';
 import { consciousnessSectionHtml } from './settings_consciousness.js';
 import { PROVIDER_CARDS, providerSettingsCard } from './settings_provider_cards.js';
 import { settingsSection } from './settings_controls.js';
-
-// Reads as a sequence: keys → secrets → which API models → who among the agents
-// does what → behavior → technical. "Agents", not "Coding agents" (D-10): the
-// same subscriptions build presentations and run arbitrary tasks, so the
-// narrower word named only one of their uses.
-const SETTINGS_TABS = [
-    { value: 'providers', label: 'Accounts' },
-    { value: 'secrets', label: 'Secrets' },
-    { value: 'models', label: 'Models' },
-    { value: 'agents', label: 'Agents' },
-    { value: 'behavior', label: 'Behavior' },
-    { value: 'appearance', label: 'Appearance' },
-    { value: 'advanced', label: 'Advanced' },
-    { value: 'about', label: 'About' },
-];
-// Guard markers: renderTabStrip emits behavior/advanced tabs at runtime.
+import { apiFetch } from './api_client.js';
+import { openConfirmDialog } from './confirm_dialog.js';
+import { showToast } from './toast.js';
+import { copyTextWithToast } from './ui_helpers.js';
+import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
 // The setup contract replaces this after the settings read. Keep the accessible
 // description useful while that read is pending or unavailable.
@@ -58,13 +48,13 @@ export const SECRET_KEYS = [
 ];
 
 /** A section's one choice: the hidden value and its segmented row, named by the section title (no tray, no second label). */
-function choice({ id, value, options, modifier = '', title = '' }) {
-    return `<input id="${id}" type="hidden" value="${value}">${renderSegmentedField({ target: id, modifier, title, options })}`;
+function choice({ id, value, options, modifier = '' }) {
+    return `<input id="${id}" type="hidden" value="${value}">${renderSegmentedField({ target: id, modifier, options })}`;
 }
 
 const policyLine = (key) => `<div class="settings-inline-note" data-policy-state="${key}" role="status" aria-live="polite"></div>`;
 
-function secretSettingsSection() {
+export function secretSettingsSection() {
     return `
         ${settingsSection({
             title: 'Stored Secrets',
@@ -97,7 +87,7 @@ function secretSettingsSection() {
     `;
 }
 
-function accountsPanel() {
+export function accountsPanel() {
     const moreHint = PROVIDER_CARDS.filter((card) => card.advanced).map((card) => card.title).join(', ');
     return `
         ${renderAgentAccountsSection()}
@@ -148,7 +138,7 @@ function accountsPanel() {
     `;
 }
 
-function modelsPanel() {
+export function modelsPanel() {
     return `
         ${settingsSection({
             title: 'Model Routing',
@@ -185,7 +175,7 @@ function modelsPanel() {
     `;
 }
 
-function behaviorPanel() {
+export function behaviorPanel() {
     return `
         ${settingsSection({
             title: 'Review Enforcement',
@@ -233,7 +223,7 @@ function behaviorPanel() {
                 <br><strong>Human controlled:</strong> desktop builds ask the launcher for native confirmation before saving a mode change.
                 Web/Docker sessions save mode changes through the owner endpoint; the new mode takes effect after restart.`,
             body: `${choice({ id: 's-runtime-mode', value: 'advanced', modifier: 'data-runtime-mode-group',
-                title: 'Access changes take effect after restart.', options: RUNTIME_MODE_OPTIONS })}
+                options: RUNTIME_MODE_OPTIONS })}
             ${policyLine('access')}`,
         })}
 
@@ -282,12 +272,11 @@ function behaviorPanel() {
                 <strong>Max</strong>, for ~1M-context models, inlines ARCHITECTURE in full and DEVELOPMENT in full unless the work is known to be about something else: a folder proven not to be Ouroboros, a helper task, or work started through the API, CLI or a schedule gets its chapter map, and work of unknown subject keeps the whole book.
                 <strong>Nano</strong> is the compact owner window. <strong>Low</strong> aims for about 250K tokens; what actually fits depends on the model's window and what this installation holds. Both books become chapter maps (read full sections on demand), and memory compacts sooner. In every mode, a task that itself requires the whole DEVELOPMENT handbook gets it. It governs Ouroboros's own working window: it never changes the model or reasoning effort, and the review panel runs in every mode.
                 <br><strong>Human controlled:</strong> saved via the owner endpoint; saves immediately (no restart), and lowering requires Ouroboros to be idle.`,
-            body: choice({ id: 's-context-mode', value: 'max',
-                title: 'Saves immediately; no restart required. Lowering requires Ouroboros to be idle.', options: [
-                    { value: 'nano', label: 'Nano' },
-                    { value: 'low', label: 'Low' },
-                    { value: 'max', label: 'Max' },
-                ] }),
+            body: choice({ id: 's-context-mode', value: 'max', options: [
+                { value: 'nano', label: 'Nano' },
+                { value: 'low', label: 'Low' },
+                { value: 'max', label: 'Max' },
+            ] }),
         })}
 
         ${settingsSection({
@@ -356,7 +345,7 @@ function behaviorPanel() {
             title: 'Update Channel',
             lead: 'Which released branch Update follows.',
             details: 'Chooses which official branch Update checks. Your local work branch stays <code>ouroboros</code>. <strong>Stable</strong> follows released code on <code>main</code> (default), <strong>QA</strong> follows <code>ouroboros-stable</code>, and <strong>Development</strong> follows <code>ouroboros</code>.',
-            body: choice({ id: 's-update-channel', value: 'stable', title: 'Applies immediately; no restart required.', options: [
+            body: choice({ id: 's-update-channel', value: 'stable', options: [
                 { value: 'stable', label: 'Stable' },
                 { value: 'qa', label: 'QA' },
                 { value: 'development', label: 'Development' },
@@ -389,7 +378,7 @@ function behaviorPanel() {
     `;
 }
 
-function appearancePanel() {
+export function appearancePanel() {
     return `
         ${languageBlockHtml()}
 
@@ -494,7 +483,7 @@ function appearancePanel() {
     `;
 }
 
-function advancedPanel() {
+export function advancedPanel() {
     return `
         ${settingsSection({
             title: 'Runtime Limits',
@@ -680,126 +669,115 @@ function advancedPanel() {
     `;
 }
 
-export function renderSettingsPage() {
+// The static About content; utils.js fills `#about-version` wherever it stands.
+export function aboutPanel() {
     return `
-        ${renderPageHeader({
-            page: 'settings',
-            tabsHtml: renderTabStrip({
-                items: SETTINGS_TABS.map((item) => ({ ...item,
-                    tabId: `settings-tab-${item.value}`, panelId: `settings-panel-${item.value}` })),
-                active: 'providers',
-                dataAttr: 'data-settings-tab',
-                ariaLabel: 'Settings sections',
-                stripClass: 'settings-tabs',
-            }),
-        })}
-        <div class="settings-shell">
-            <div class="settings-scroll scroll-fade-y">
-                <section class="settings-panel active" data-settings-panel="providers">
-                    ${accountsPanel()}
-                </section>
-
-                <section class="settings-panel" data-settings-panel="secrets">
-                    ${secretSettingsSection()}
-                </section>
-
-                <section class="settings-panel" data-settings-panel="models">
-                    ${modelsPanel()}
-                </section>
-
-                <section class="settings-panel" data-settings-panel="agents">
-                    <!-- ONE service banner for the whole tab (inside the Accounts section): the single place a
-                         daemon or runtime problem is explained, instead of the scattering of
-                         "(not in discovery)" the owner reported. -->
-                    ${renderSubagentsSection()}
-                </section>
-
-                <section class="settings-panel" data-settings-panel="behavior">
-                    ${behaviorPanel()}
-                </section>
-
-                <section class="settings-panel" data-settings-panel="appearance">
-                    ${appearancePanel()}
-                </section>
-
-                <section class="settings-panel" data-settings-panel="advanced">
-                    ${advancedPanel()}
-                </section>
-
-                <section class="settings-panel" data-settings-panel="about">
-                    <div class="about-body">
-                        <img src="/static/logo.jpg" class="about-logo" alt="Ouroboros">
-                        <div>
-                            <h1 class="about-title">Ouroboros</h1>
-                            <p id="about-version" class="about-version"></p>
-                        </div>
-                        <p class="about-desc">
-                            A self-creating AI agent. Not a tool, but a becoming digital personality
-                            with its own constitution, persistent identity, and background consciousness.
-                            Born February 16, 2026.
-                        </p>
-                        <div class="about-credits">
-                            <span>Created by <strong>Anton Razzhigaev</strong> &amp; <strong>Andrew Kaznacheev</strong></span>
-                            <div class="about-links">
-                                <a href="https://t.me/abstractDL" target="_blank" rel="noopener noreferrer">@abstractDL</a>
-                                <a href="https://github.com/razzant/ouroboros" target="_blank" rel="noopener noreferrer">GitHub</a>
-                            </div>
-                        </div>
-                    </div>
-                </section>
+        <div class="about-body">
+            <img src="/static/logo.jpg" class="about-logo" alt="Ouroboros">
+            <div>
+                <h1 class="about-title">Ouroboros</h1>
+                <p id="about-version" class="about-version"></p>
             </div>
-
-            <!-- The footer is one action row: the two actions, then the one result right after them (ui.css
-                 .ui-action-row). A pending restart is its own action with its own result in the same row. -->
-            <div class="settings-footer ui-action-row" data-draft="clean">
-                <button type="button" class="btn btn-default" id="btn-reload-settings">Reload</button>
-                <button class="btn btn-save" id="btn-save-settings">Save</button>
-                <span id="settings-status" class="ui-result" role="status" aria-live="polite" aria-atomic="true"></span>
-                <button type="button" class="btn btn-default" id="btn-restart-now" hidden
-                    title="Restart the agent process">Restart now</button>
-                <span id="settings-restart-status" class="ui-result" role="status" aria-live="polite" hidden></span>
+            <p class="about-desc">
+                A self-creating AI agent. Not a tool, but a becoming digital personality
+                with its own constitution, persistent identity, and background consciousness.
+                Born February 16, 2026.
+            </p>
+            <div class="about-credits">
+                <span>Created by <strong>Anton Razzhigaev</strong> &amp; <strong>Andrew Kaznacheev</strong></span>
+                <div class="about-links">
+                    <a href="https://t.me/abstractDL" target="_blank" rel="noopener noreferrer">@abstractDL</a>
+                    <a href="https://github.com/razzant/ouroboros" target="_blank" rel="noopener noreferrer">GitHub</a>
+                </div>
             </div>
         </div>
     `;
 }
 
-export function bindSettingsTabs(root, options = {}) {
-    const panels = Array.from(root.querySelectorAll('.settings-panel'));
-    const scrollRoot = root.querySelector('.settings-scroll');
-    const footer = root.querySelector('.settings-footer');
-    const state = options.state || null;
-    const onActivate = typeof options.onActivate === 'function' ? options.onActivate : null;
+// The slot wait the concurrency help names: a finite value, below 0 shown as 0 because
+// `model_concurrency._max_slot_wait_sec` counts it so, else the 180 s default. Only the
+// sentence follows it; the saved value stays.
+export function slotWaitSeconds(saved) {
+    const wait = Number.parseFloat(saved);
+    return Number.isFinite(wait) ? Math.max(0, wait) : 180;
+}
 
-    const tabs = bindTabStrip(root.querySelector('.settings-tabs'), {
-        dataAttr: 'data-settings-tab', onChange: (value) => activate(value),
-    });
-    panels.forEach((panel) => {
-        panel.id = `settings-panel-${panel.dataset.settingsPanel}`;
-        panel.setAttribute('role', 'tabpanel');
-        panel.setAttribute('aria-labelledby', `settings-tab-${panel.dataset.settingsPanel}`);
-    });
+// What the core serves at its own address right now (`served_ui` on /api/state),
+// beside the saved choice that applies at the next restart; a refused choice
+// carries the core's own sentence naming it and why. A core older than the choice
+// reports nothing, and nothing is shown.
+export function servedUiStatus(servedUi) {
+    const label = { builtin: 'the built-in interface', directory: 'the interface directory', none: 'no main page' }[servedUi?.source];
+    if (!label) return null;
+    return servedUi.error
+        ? { text: `Serving now: ${label}. ${servedUi.error}`, tone: 'warn' }
+        : { text: `Serving now: ${label}.`, tone: 'muted' };
+}
 
-    function activate(tabName, notify = true) {
-        if (!tabs.select(tabName)) return;
-        const changed = root.dataset.activeSettingsTab !== tabName;
-        root.dataset.activeSettingsTab = tabName;
-        panels.forEach((panel) => {
-            panel.classList.toggle('active', panel.dataset.settingsPanel === tabName);
-            panel.hidden = panel.dataset.settingsPanel !== tabName;
-        });
-        // About holds nothing to save: no Save bar under it.
-        if (footer) footer.hidden = tabName === 'about';
-        if (scrollRoot && changed && notify) scrollRoot.scrollTop = 0;
-        if (state) state.settingsActiveSubtab = tabName;
-        if (notify && changed) {
-            if (onActivate) onActivate(tabName);
-            window.dispatchEvent(new CustomEvent('ouro:settings-subtab-shown', { detail: { tab: tabName } }));
-        }
+// The hint under the bind host (`#settings-lan-hint`), from a settings read's `_meta`.
+export function paintNetworkHint(hint, meta) {
+    if (!hint || !meta) return;
+    if (meta.reachability === 'loopback_only') {
+        hint.innerHTML = 'Bound to localhost: only this machine can reach Ouroboros. Set Server Bind Host to <code>0.0.0.0</code>, save, and restart for LAN access.';
+        hint.dataset.tone = 'info';
+        hint.hidden = false;
+    } else if (meta.reachability === 'lan_reachable') {
+        const url = escapeHtml(meta.recommended_url || '');
+        const warning = escapeHtml(meta.warning || '');
+        // Status first, action right (ui.css .ui-action-row). The link keeps its own words; the button
+        // carries the address this read drew, so a click after any later read copies that read's address.
+        const copy = url ? `<button type="button" class="btn btn-default btn-sm ui-hit-area" data-copy-lan-url="${url}">Copy link</button>` : '';
+        hint.innerHTML = `<div class="ui-action-row"><span>LAN URL: <a href="${url}" target="_blank" rel="noopener">${url}</a>${warning ? ' — <strong>' + warning + '</strong>' : ''}</span>${copy}</div>`;
+        hint.dataset.tone = meta.warning ? 'warn' : 'ok';
+        hint.hidden = false;
+    } else if (meta.reachability === 'host_ip_unknown') {
+        const url = escapeHtml(meta.recommended_url || '');
+        const warning = escapeHtml(meta.warning || '');
+        hint.innerHTML = `Server is listening on non-localhost but LAN IP could not be detected automatically. Try <code>${url}</code>.${warning ? ' <strong>' + warning + '</strong>' : ''}`;
+        hint.dataset.tone = 'warn';
+        hint.hidden = false;
+    } else {
+        hint.hidden = true;
     }
+}
 
-    root.activateSettingsTab = activate;
-    activate(state?.settingsActiveSubtab || 'providers', false);
-    // On a desk the eight tabs are the bar's start, scrolling inside it (docs/DESIGN.md "Page header").
-    const disposeBar = bindPageHeader(root.querySelector('.app-page-header'));
-    return () => { tabs.destroy(); disposeBar(); delete root.activateSettingsTab; };
+// Every read rebuilds the hint, so one listener lives as long as the hint and reads the address off the
+// button that was clicked; the shared copy owns the fallback and reports through the toast host.
+export function bindNetworkHintCopy(hint, { copy = copyTextWithToast } = {}) {
+    const onClick = (event) => {
+        const url = event.target?.closest?.('[data-copy-lan-url]')?.dataset.copyLanUrl;
+        if (url) void copy(url, { okMessage: 'LAN URL copied.' });
+    };
+    hint?.addEventListener('click', onClick);
+    return () => hint?.removeEventListener('click', onClick);
+}
+
+// Reset All Data (the Danger Zone's button): asks first, then deletes the runtime data and restarts.
+export async function resetAllData() {
+    const confirmedReset = await openConfirmDialog({
+        title: 'Reset runtime data',
+        body: 'This will delete all runtime data (state, memory, logs, settings) and restart.\nThe repo (agent code) will be preserved.\nYou will need to re-enter your provider settings.\n\nContinue?',
+        confirmLabel: 'Delete and restart',
+        danger: true,
+    });
+    if (!confirmedReset) return;
+    try {
+        const res = await apiFetch('/api/reset', { method: 'POST' });
+        const data = await res.json();
+        if (data.status === 'ok') {
+            await openConfirmDialog({
+                title: 'Reset complete',
+                body: 'Deleted: ' + (data.deleted.join(', ') || 'nothing') + '\nRestarting...',
+                alert: true,
+            });
+        } else {
+            await openConfirmDialog({
+                title: 'Reset failed',
+                body: 'Error: ' + (data.error || 'unknown'),
+                alert: true,
+            });
+        }
+    } catch (e) {
+        showToast('Reset failed: ' + e.message, 'error');
+    }
 }

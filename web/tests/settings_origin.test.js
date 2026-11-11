@@ -57,9 +57,11 @@ test('a model-wait card declares the app on its decision, which may save the cho
     assert.deepEqual(seen, [['/api/decisions', { 'Content-Type': 'application/json', ...APP_SETTINGS_ORIGIN }]]);
 });
 
-test('the Settings page passes the declaration to its generic save', () => {
-    // The page's Save runs inside its whole form (browser lanes drive it); the Safety writes are checked by
-    // behavior in consciousness_settings.test.js.
-    const source = readFileSync(new URL('../modules/settings.js', import.meta.url), 'utf8');
-    assert.match(source, /apiClient\.saveSettings\(body, \{ headers: APP_SETTINGS_ORIGIN \}\)/);
+test('the one Settings writer passes the declaration to its generic save', () => {
+    // Every Settings row writes through settings_controls.js (the Costs row above drives it by behavior); the shell
+    // in settings.js keeps no Save of its own.
+    const writer = readFileSync(new URL('../modules/settings_controls.js', import.meta.url), 'utf8');
+    assert.match(writer, /apiClient\.saveSettings\(body, \{ headers: APP_SETTINGS_ORIGIN \}\)/);
+    const shell = readFileSync(new URL('../modules/settings.js', import.meta.url), 'utf8');
+    assert.doesNotMatch(shell, /saveSettings|\/api\/settings/);
 });

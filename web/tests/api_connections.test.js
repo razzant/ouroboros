@@ -13,7 +13,11 @@ import {
 import { modelSourceGroups, sourceChoice, sourceFromChoice } from '../modules/model_roles.js';
 import { adoptConnectionLabels, connectionLabel, routeConnectionId } from '../modules/connection_labels.js';
 import { PROVIDER_CARDS, PROVIDER_SECRET_KEYS, connectionRowHtml } from '../modules/settings_provider_cards.js';
-import { renderSettingsPage } from '../modules/settings_ui.js';
+import { accountsPanel, advancedPanel, appearancePanel, behaviorPanel, modelsPanel, secretSettingsSection } from '../modules/settings_ui.js';
+
+// The old tabs' sections, unmounted in settings_ui.js until their pages are rebuilt.
+const renderSettingsPage = () => [accountsPanel(), secretSettingsSection(), modelsPanel(), behaviorPanel(), appearancePanel(),
+    advancedPanel()].join('');
 import {
     cacheHintsNote, connectionNameFor, connectionReferencesText, connectionRowFacts, connectionRows, connectionUsage,
 } from '../modules/settings_connections.js';
@@ -182,7 +186,7 @@ test('Accounts renders one card per provider with its Default row, and an added 
     }
     assert.match(html, /id="s-openrouter" name="OPENROUTER_API_KEY" data-secret-setting="OPENROUTER_API_KEY"/);
     // Provider keys have one input each, in Accounts: the Secrets tab keeps the other secrets only.
-    const secrets = html.slice(html.indexOf('data-settings-panel="secrets"'), html.indexOf('data-settings-panel="models"'));
+    const secrets = secretSettingsSection();
     for (const key of PROVIDER_SECRET_KEYS) assert.doesNotMatch(secrets, new RegExp(`data-secret-setting="${key}"`), key);
     assert.match(secrets, /data-secret-setting="GITHUB_TOKEN"/);
     // The network password has one field, beside the bind host it guards (Accounts › Network Gate), not a second one here.
