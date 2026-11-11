@@ -281,6 +281,9 @@ class MemoryViewSnapshot:
     fallback_refusals: Tuple[Dict[str, Any], ...] = ()
     owner_words: str = ""  # the rendered block of the owner's words that caused a helper's work
     waiting: Dict[str, Any] = dataclasses.field(default_factory=dict)
+    # The newest chronicle record this capture read (its marks among them); later mark changes reach a running
+    # focus's tail (``mark_anchors.append_mark_changes``). None: the view read no chronicle.
+    chronicle_sequence: Optional[int] = None
 
     @property
     def active(self) -> bool:
@@ -847,8 +850,30 @@ def _late_review_entry(mark: Mapping[str, Any], label: Callable[..., str]) -> Di
                             "sha256": str(target.get("sha256") or "")}}
 
 
+def mark_in_view(mark: Mapping[str, Any], spec: ViewSpec, *, running: bool = False) -> bool:
+    """Whether a role keeps a mark in view by its scope: none, every room's, or this room's and the global ones.
+    A focus already running meets later changes of this room's and the global ones only, whatever its start view
+    holds (``mark_anchors.append_mark_changes``)."""
+    if spec.marks == "none":
+        return False
+    return (spec.marks == "all" and not running) or mark.get("scope") == "global" or str(mark.get("room_id")) == spec.room_id
+
+
+def mark_entry(mark: Mapping[str, Any], label: Callable[..., str]) -> Dict[str, Any]:
+    """A mark as every view names it: its words, who marked it and when, its target, its quote while visibility
+    is full, and the action it is tied to."""
+    author = _mapping(mark.get("author"))
+    by = _mapping(author.get("focus")).get("role") or (
+        "the old dialogue writer" if author.get("kind") == "legacy_helper" else author.get("kind") or "not recorded")
+    return {"id": mark["id"], "scope": str(mark.get("scope") or "room"),
+            "room": label(mark.get("room_id")), "text": str(mark.get("text") or ""), "by": str(by),
+            "date": _minute(mark.get("ts")).split(" ")[0], "target": _mark_target(mark.get("target_ref")),
+            "quote": str(mark.get("quote") or "") if mark.get("visibility", "full") == "full" else "",
+            "anchor": describe_anchor(mark["anchor"]) if isinstance(mark.get("anchor"), dict) else ""}
+
+
 def _capture_marks(store: ChronicleStore, spec: ViewSpec, label: Callable[..., str], marks=None) -> List[Dict[str, Any]]:
-    """The acting marks a role keeps in view: every room's, or this room's and the global ones.
+    """The acting marks a role keeps in view (``mark_in_view``).
 
     Late review feedback the host keeps in view belongs to the room of its work whatever the role's
     mark scope: that room holds its words, every role alike. Other rooms' late reviews are counted in the
@@ -859,22 +884,13 @@ def _capture_marks(store: ChronicleStore, spec: ViewSpec, label: Callable[..., s
     if spec.marks == "none":
         return []
     marks = store.active_marks(None) if marks is None else marks
-    if spec.marks == "room_and_global":
-        marks = [mark for mark in marks if mark.get("scope") == "global" or str(mark.get("room_id")) == spec.room_id]
     entries = []
-    for mark in marks:
+    for mark in (mark for mark in marks if mark_in_view(mark, spec)):
         if is_late_review_mark(mark):
             if str(mark.get("room_id")) == spec.room_id:
                 entries.append(_late_review_entry(mark, label))
             continue
-        author = _mapping(mark.get("author"))
-        by = _mapping(author.get("focus")).get("role") or (
-            "the old dialogue writer" if author.get("kind") == "legacy_helper" else author.get("kind") or "not recorded")
-        entries.append({"id": mark["id"], "scope": str(mark.get("scope") or "room"),
-                        "room": label(mark.get("room_id")), "text": str(mark.get("text") or ""), "by": str(by),
-                        "date": _minute(mark.get("ts")).split(" ")[0], "target": _mark_target(mark.get("target_ref")),
-                        "quote": str(mark.get("quote") or "") if mark.get("visibility", "full") == "full" else "",
-                        "anchor": describe_anchor(mark["anchor"]) if isinstance(mark.get("anchor"), dict) else ""})
+        entries.append(mark_entry(mark, label))
     return sorted(entries, key=lambda entry: (entry["scope"] == "global", "" if entry["scope"] == "global" else entry["room"]))
 
 
@@ -951,7 +967,7 @@ def capture_memory_view(drive_root: Any, task: Mapping[str, Any], spec: ViewSpec
         tail = ("all" if spec.other_conversations else
                 "terminal" if spec.story or spec.room_id is not None and spec.room_page else "none")
         with capture(root, tail=tail) as derived:
-            frontier = legacy_frontier(store)
+            frontier, sequence = legacy_frontier(store), store.newest_sequence()  # the marks below read this state
             story, story_status, refusals = capture_story(store, root, label) if spec.story else ([], {}, [])
             room, groups, marks, waiting, acting = _capture_live(store, root, spec, label, story)
         owner_words = words(acting)
@@ -977,7 +993,8 @@ def capture_memory_view(drive_root: Any, task: Mapping[str, Any], spec: ViewSpec
     return MemoryViewSnapshot(spec=spec, store_status=status,
                               frontier={"status": frontier.get("status"), "pos": frontier.get("pos")},
                               story=tuple(story), room=room, conversations=tuple(groups), marks=tuple(marks), waiting=waiting,
-                              legacy_blocks=story_status, fallback_refusals=tuple(refusals), owner_words=owner_words)
+                              legacy_blocks=story_status, fallback_refusals=tuple(refusals), owner_words=owner_words,
+                              chronicle_sequence=sequence)
 
 
 # --- rendering ------------------------------------------------------------------------------------

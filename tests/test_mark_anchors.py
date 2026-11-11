@@ -288,3 +288,60 @@ def test_a_mark_on_an_mcp_tool_meets_its_gateway_call(tmp_path):
     process_tool_results(rows, messages, trace, lambda *_a: None, SimpleNamespace(_ctx=ctx),
                          fit_candidate=measured_fit(window=200_000, reserve=1_000), tool_schemas=[])
     assert "GMAIL_LESSON" not in messages[0]["content"] and "GMAIL_LESSON" in messages[1]["content"]
+
+
+def _running(root: pathlib.Path, task_id: str, chat_id: int = 1) -> ToolContext:
+    """A task already running: its memory view captured at its start, as its context plan holds it."""
+    from types import SimpleNamespace
+
+    from ouroboros import memory_view as mv
+
+    ctx, task = ctx_for(root, task_id, chat_id), {"id": task_id, "chat_id": chat_id}
+    view = mv.capture_memory_view(root, task, mv.view_spec_for_task(task, root, ctx=ctx))
+    ctx.context_fit_plan = SimpleNamespace(core=SimpleNamespace(memory_view_json=mv.snapshot_json(view)))
+    return ctx
+
+
+def test_a_mark_another_work_makes_or_releases_while_i_run_acts_from_my_next_call(tmp_path):
+    """The changes reach my tail at my next round and my anchored-marks cache is read again: a mark tied to an action
+    meets that action's first call, a released one stops, another room's mark stays silent."""
+    from ouroboros.mark_anchors import MARK_CHANGES_KIND, append_mark_changes
+
+    other = ctx_for(tmp_path, task_id="other001")
+    early = mark(other, "EARLY_LESSON: read the diff before editing.", {"tool": "edit_text"}, scope="global")
+    me = _running(tmp_path, "root0001")
+    assert anchored_note(me, "read_file", {"path": "notes.md"}) == ""  # my cache holds the early mark, not yet met
+    late = mark(other, "LATE_LESSON: run the tests after a write.", {"tool": "write_file"}, scope="global")
+    foreign = mark(ctx_for(tmp_path, task_id="other002", chat_id=2), "ROOM_TWO_LESSON: only for room two.",
+                   {"tool": "write_file"})
+    assert late["ok"] and foreign["ok"]
+    assert json.loads(_memory_mark(other, release_ids=[early["mark_id"]], reason="The diff is shown now."))["ok"]
+    messages = []
+    assert append_mark_changes(me, messages) and messages[-1]["_host_context_kind"] == MARK_CHANGES_KIND
+    row = messages[-1]["content"]
+    assert f"mark {early['mark_id']}: released by root, task other001" in row and "reason: The diff is shown now." in row
+    assert f"mark {late['mark_id']}: marked by root, task other001" in row and "ROOM_TWO_LESSON" not in row
+    assert "also shown after a task's first call matching write_file" in row
+    assert anchored_note(me, "edit_text", {"path": "a.py"}) == ""  # released: its anchor no longer fires
+    note = anchored_note(me, "write_file", {"path": "b.py"})  # delivered: fires at its first matching call
+    assert "LATE_LESSON: run the tests after a write." in note and "ROOM_TWO_LESSON" not in note
+    assert anchored_note(me, "write_file", {"path": "c.py"}) == ""  # once per task, as before
+    assert not append_mark_changes(me, messages)  # nothing new: no second row
+
+
+def test_a_running_task_reads_the_journal_only_when_it_grew_and_only_past_its_last_read(tmp_path, monkeypatch):
+    """The round's cost: an unchanged journal is not read; a grown one is read from where the last read ended."""
+    from ouroboros.mark_anchors import append_mark_changes
+
+    other = ctx_for(tmp_path, task_id="other001")
+    assert mark(other, "FIRST_LESSON: read the diff.", {"tool": "edit_text"}, scope="global")["ok"]
+    me = _running(tmp_path, "root0001")
+    reads, original = [], ChronicleStore.mark_changes
+    monkeypatch.setattr(ChronicleStore, "mark_changes", lambda store, after: reads.append(after) or original(store, after))
+    assert json.loads(_chronicle_write(other, kind="note", text="a record that is no mark"))["ok"]
+    assert not append_mark_changes(me, [])  # read once: from the capture, past the note
+    assert not append_mark_changes(me, [])  # nothing grew: not read
+    later = mark(other, "LATER_LESSON: run the tests.", {"tool": "write_file"}, scope="global")
+    messages = []
+    assert append_mark_changes(me, messages) and f"mark {later['mark_id']}: marked" in messages[-1]["content"]
+    assert len(reads) == 2 and reads[1] > reads[0]

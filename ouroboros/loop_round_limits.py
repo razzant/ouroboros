@@ -399,8 +399,10 @@ def _run_round_compaction(
     """The round's transcript maintenance before the send: the mind's pending authored
     view (Main fit owns every automatic decision), then -- on the transcript that will
     actually go out -- the host roster of independent roots as a TAIL row when it changed
-    (owner 6C). The note follows any view so it is never folded into a rewrite, and precedes
-    the acceptance observation and the seal."""
+    (owner 6C), and the mark changes other works made that no row states yet
+    (``mark_anchors.append_mark_changes``). These rows follow any view so they are never
+    folded into a rewrite, and precede the acceptance observation and the seal."""
+    from ouroboros.mark_anchors import append_mark_changes
     from ouroboros.peer_roster import maybe_append_roster_note
     from ouroboros.tools.owner_delivery import publish_pending_owner_dialogue
 
@@ -427,6 +429,7 @@ def _run_round_compaction(
     maybe_append_roster_note(ctx.tools._ctx, messages, ctx.drive_root)
     from ouroboros.skill_context_snapshot import maybe_append_skill_snapshots
     maybe_append_skill_snapshots(ctx.tools._ctx, messages, ctx.drive_root)
+    append_mark_changes(ctx.tools._ctx, messages)
     return messages
 
 
