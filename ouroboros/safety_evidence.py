@@ -5,7 +5,7 @@ does not assess becomes facts (digest, media type, size, caption), a connector e
 and second copies of its text, and a thread or history becomes one who/when/what line per message. A place event's
 frame is replaced by its typed records only when they re-render it byte for byte (``focus_frame_sources``), the
 producer's attachment manifest and image captions included. Owner words, rules and notes are never shortened; the
-per-place work lines (``work_here``, the previous turn) stay whole.
+per-place work lines (``work_here``, the previous turn) stay whole. Every row names who wrote it (``with_author``).
 """
 from __future__ import annotations
 
@@ -16,6 +16,30 @@ import json
 from typing import Any, Mapping
 
 _ATTACHMENTS = ("[ATTACHMENTS]\n", "\n[END_ATTACHMENTS]")  # the presence producer's manifest block
+# Who wrote a source row, by the label the host recorded it under: the one table every row's ``author`` comes from.
+SOURCE_AUTHORS = {
+    "initial_user": "the owner: the message that opened this task",
+    "origin_message": "the owner: the message that opened the work this task belongs to or continues (it may be "
+                      "about an earlier stage)",
+    "owner_mailbox": "the owner: a later message to this work",
+    "direct_incoming": "the owner: a later message to this work",
+    "owner_quiz_answer": "the owner: his answer to the card quoted in reply_to (the card's text was written by "
+                         "Ouroboros)",
+    "place_confirmed": "the owner: his own message in this chat, from an account he confirmed",
+    "place_owner": "the owner: his own message in this chat, from an account he confirmed",
+    "owner_corpus": "the owner",
+    "principal_task_message": "the parent task (Ouroboros), not the owner",
+    "relayed_peer_message": "a sibling task (Ouroboros), not the owner",
+    "schedule_text": "text of a schedule; its supplier is named in the row",
+    "live_call": "speech in a live call",
+}
+_OPENING_AUTHORS = {  # ``initial_text``: the run's first turn, by what the host knows of it
+    "event": "a chat event that woke this turn: event.actor wrote message_text; the other keys are host facts",
+    "brief": "this task's brief: written by its parent task (Ouroboros) with blocks added by the host; not the "
+             "owner's words",
+    "other": "host or Ouroboros text that opened this run; not the owner's words",
+}
+UNATTRIBUTED = "unattributed; not attested owner words"
 
 
 def _image(part: Any) -> bool:
@@ -135,3 +159,15 @@ def focus_event_source(row: Any, metadata: Mapping[str, Any], notes: list) -> An
             "host_frame": "prompts/FOCUS.md showed the mind these records and its allowance", **typed,
             **({"attachments": manifest} if manifest else {}),
             **({"images": [image_facts(part) for part in images]} if images else {})}
+
+
+def with_author(row: Any, metadata: Mapping[str, Any]) -> dict[str, Any]:
+    """A source row with its ``author`` (``SOURCE_AUTHORS``). The run's opening text is a place event when its typed
+    records ride with it (``focus_event_source``), a helper's brief when this task is a delegated child, else the
+    host's or Ouroboros's text; a row under any other label, or none, is unattributed."""
+    row = dict(row) if isinstance(row, Mapping) else {"content": row}
+    source = row.get("source")
+    if source == "initial_text":
+        kind = "event" if "event" in row else "brief" if metadata.get("delegation_role") == "subagent" else "other"
+        return {**row, "author": _OPENING_AUTHORS[kind]}
+    return {**row, "author": SOURCE_AUTHORS.get(source, UNATTRIBUTED) if isinstance(source, str) else UNATTRIBUTED}

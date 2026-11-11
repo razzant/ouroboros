@@ -23,6 +23,7 @@ def supervisor(monkeypatch, tmp_path):
         rounds[0] += 1
         ctx._current_llm_call_meta = {"llm_call_id": f"llm-round-{rounds[0]}"}
     safety._PRIOR_VERDICTS.clear()
+    monkeypatch.setattr(safety, "_RETURNED", type(safety._RETURNED)())
     monkeypatch.setattr(safety, "_SAFETY_STORM_UNTIL", 0)
     monkeypatch.setattr(safety, "_CHAIN_STORMS", {})
     monkeypatch.setattr(safety, "runtime_setting", lambda key, default=None: values.get(key, default))

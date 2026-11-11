@@ -280,11 +280,12 @@ def test_a_refusal_kept_under_an_open_repeat_is_answered_by_its_verdict_once_the
     assert (second.status, "refused before" in second.text, len(h.calls), sent) == ("blocked", True, 1, [])
 
 
-def test_a_verdict_the_history_cannot_keep_is_said_audited_and_ends_the_hold_it_answered(
+def test_a_verdict_larger_than_the_bound_is_kept_and_ends_the_hold_it_answered(
         supervisor, exits, monkeypatch, tmp_path):
-    """Held while the checker was down, then judged DANGEROUS with a verdict the work's history cannot keep: the call
-    is refused with that verdict said and audited, never as unjudged, and my human's later matching answer to the old
-    hold releases nothing; the next issue is judged again."""
+    """Held while the checker was down, then judged DANGEROUS with a verdict larger than the work's record bound: the
+    newest call is kept whatever its size, so it returns with that verdict said and audited, never as unjudged or too
+    large, and my human's later matching answer to the old hold releases nothing; the kept verdict answers its next
+    issue without a new model call."""
     h = supervisor
     exits("release")  # the unjudged release open, the repeat closed
     registry, context, sent = _registry(tmp_path, monkeypatch)
@@ -294,19 +295,20 @@ def test_a_verdict_the_history_cannot_keep_is_said_audited_and_ends_the_hold_it_
     context._current_llm_call_meta = {"llm_call_id": "llm-round-2"}
     h.replies.append({"status": "DANGEROUS", "reason": "Not delegated. " * 300})
     judged = registry.execute_result("fixture_send", {"text": "hello"}).text
-    assert "TOO_LARGE" in judged and "judged" in judged and "first: DANGEROUS — Not delegated." in judged
-    assert not any(phrase in judged for phrase in ("not checked", "no verdict", "wait until a check", SAID[RELEASE]))
+    assert "first: DANGEROUS — Not delegated." in judged
+    assert not any(phrase in judged for phrase in ("TOO_LARGE", "not checked", "no verdict", "wait until a check", SAID[RELEASE]))
     assert [event["verdicts"][0]["status"] for event in h.events if event["type"] == "safety_verdict"] == ["DANGEROUS"]
     _answered(h, "q-late", "fixture_send", {"text": "hello"}, context)
     context._current_llm_call_meta = {"llm_call_id": "llm-round-3"}
-    h.replies.append({"status": "DANGEROUS", "reason": "Still not delegated."})
     third = registry.execute_result("fixture_send", {"text": "hello"})
-    assert (third.status, sent, len(h.calls)) == ("blocked", [], 3), "judged again, never released unjudged"
+    assert (third.status, sent, len(h.calls)) == ("blocked", [], 2), "answered by its kept verdict, never unjudged"
     assert not [event for event in h.events if event["type"] == "safety_sent_without_assessment"]
 
 
 @pytest.mark.parametrize("rootless", [False, True])
-def test_a_first_unretained_verdict_does_not_become_unchecked_when_a_card_arrives(supervisor, exits, monkeypatch, rootless):
+def test_a_judged_call_does_not_become_unchecked_when_a_card_arrives(supervisor, exits, monkeypatch, rootless):
+    """Judged DANGEROUS with only the unjudged release open: kept whatever its verdict's size, its refusal answers the
+    identical call; rootless, nothing is kept and the call is judged again. My human's card releases nothing."""
     h = supervisor
     exits("release")  # only unchecked release, not a known-DANGEROUS override
     ctx = (SimpleNamespace(task_metadata={"work_kind": "owner"}, drive_root=h.ctx.drive_root,
@@ -321,7 +323,8 @@ def test_a_first_unretained_verdict_does_not_become_unchecked_when_a_card_arrive
     ctx._current_llm_call_meta = {"llm_call_id": "second"}
     h.replies.append({"status": "DANGEROUS", "reason": "Still not permitted."})
     assert not h.module.check_safety("place_reply", args, ctx=ctx)[0]
-    assert len(h.calls) == 3 and not [e for e in h.events if e["type"] == "safety_sent_without_assessment"]
+    assert len(h.calls) == (3 if rootless else 2)
+    assert not [e for e in h.events if e["type"] == "safety_sent_without_assessment"]
 
 
 @pytest.mark.parametrize("declared", [True, False])
@@ -341,26 +344,10 @@ def test_a_preanswered_card_after_a_required_check_uses_only_the_dangerous_relea
     assert not [e for e in h.events if e["type"] == "safety_sent_without_assessment"]
 
 
-def test_an_unkept_verdict_on_an_action_cyber_pro_runs_is_said_without_claiming_its_outcome(
-        supervisor, exits, monkeypatch, tmp_path):
-    """A non-speech action judged DANGEROUS in Cyber Pro still runs on advice; when the history cannot keep that
-    verdict, the assessment it carries says the verdict and audits it, never that the action did not run."""
-    h = supervisor
-    exits("none")
-    monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
-    monkeypatch.setattr(h.module, "_SAFETY_PRIOR_BYTE_BUDGET", 2000)
-    registry, _context, sent = _registry(tmp_path, monkeypatch, declared=False)
-    h.replies.append({"status": "DANGEROUS", "reason": "An action. " * 300, "speech": False})
-    outcome = registry.execute_result("fixture_send", {"text": "run"})
-    assert (outcome.status, sent) == ("ok", ["run"]) and "Cyber Pro leaves the decision" in outcome.text
-    assert "judged" in outcome.text and not any(claim in outcome.text for claim in ("does not run", "no verdict"))
-    assert [event["type"] for event in h.events].count("safety_verdict") == 1
-
-
 @pytest.mark.parametrize("case", ["unmanaged", "none", "both"])
 def test_no_exit_is_offered_where_nothing_was_kept(supervisor, exits, monkeypatch, case):
-    """A rootless call keeps no refusal or hold, and decisive history that does not fit keeps neither: their refusal
-    and hold name no repeat, no closed repeat and no card, and their next issue is checked again."""
+    """A rootless call keeps no refusal or hold: their refusal and hold name no repeat, no closed repeat and no card,
+    and their next issue is checked again. A rooted refusal is kept whatever its verdict's size, never held for it."""
     from ouroboros import place_guard
 
     h = supervisor
@@ -377,13 +364,12 @@ def test_no_exit_is_offered_where_nothing_was_kept(supervisor, exits, monkeypatc
     rootless._current_llm_call_meta = {"llm_call_id": "llm-round-2"}
     assert h.module.check_safety("place_reply", {"place_id": "p", "text": "refused"}, ctx=rootless) == (True, "")
     assert len(h.calls) == 3, "nothing kept: the same call is checked again"
-    # A refusal whose verdict cannot be kept holds, but a judged call is no unjudged hold: no card, though a hold
-    # row (no verdict in it) would fit this budget.
     monkeypatch.setattr(h.module, "_SAFETY_PRIOR_BYTE_BUDGET", 1000)
     h.replies.append({"status": "DANGEROUS", "reason": "not delegated " * 100})
     ok, message = h.module.check_safety("place_reply", {"place_id": "p", "text": "too much"}, ctx=h.ctx)
-    assert not ok and "TOO_LARGE" in message and not any(phrase in message for phrase in named), message
-    assert h.module._PRIOR_VERDICTS["work"][h.module._subject_digest("place_reply", {"place_id": "p", "text": "too much"})] == {"judged": True}
+    digest = h.module._subject_digest("place_reply", {"place_id": "p", "text": "too much"})
+    assert not ok and "TOO_LARGE" not in message and list(h.module._PRIOR_VERDICTS["work"]) == [digest]
+    assert h.module._PRIOR_VERDICTS["work"][digest]["flagged"] == "DANGEROUS"
 
 
 def test_a_kept_refusal_is_read_as_its_exit_stands_now(supervisor, exits, monkeypatch):

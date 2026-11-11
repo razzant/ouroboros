@@ -20,6 +20,19 @@ from tests.test_place_focus import focus as _focus
 
 focus = _focus
 RULES = "Rule one: keep private work private.\nRule two: hold a disputed send and ask me in Main."
+OPENING = "host or Ouroboros text that opened this run; not the owner's words"
+
+
+def _whole(rows):
+    """Recorded opening rows as the Supervisor reads them: whole, each naming who wrote it."""
+    return [{**row, "author": OPENING} for row in rows]
+
+
+def _sources(ctx, messages=None):
+    from ouroboros import safety
+    prompt = safety._build_check_prompt("run_command", {"cmd": ["echo", "hello"]}, messages, ctx=ctx)
+    return json.loads(prompt.split("Host evidence (provenance is not consent):\n", 1)[1]
+                      .split("\nProposed tool call:", 1)[0])
 
 
 @pytest.fixture
@@ -29,6 +42,7 @@ def checker(monkeypatch):
 
     prompts = []
     safety._PRIOR_VERDICTS.clear()
+    monkeypatch.setattr(safety, "_RETURNED", type(safety._RETURNED)())
     monkeypatch.setattr(safety, "_SAFETY_STORM_UNTIL", 0)
     monkeypatch.setattr(safety, "_resolve_safety_routing", lambda: (False, False, None))
     monkeypatch.setattr(safety, "_emit_durable_safety_event", lambda ctx, event: None)
@@ -130,10 +144,55 @@ def test_an_owner_answer_reaches_the_supervisor_with_the_card_it_answers(focus, 
                                                                      "answer_snapshot": card})
     drained = SimpleNamespace(_owner_directives=[])
     _drain_incoming_messages([], queue.Queue(), tmp_path, "root", None, set(), owner_ctx=drained)
+    [answer] = drained._owner_directives
     root, _place, _admission, _event = focus
     _ctx, bundle, _prompt = _reply_bundle(root, monkeypatch, checker, extra_rows=tuple(drained._owner_directives))
     [shown] = [source for source in bundle["occasion"]["sources"] if source.get("quiz_id") == "q7"]
-    assert shown["content"] == "1. Publish it" and "> Thanks, taking it up." in shown["reply_to"]["text"]
+    assert shown == {**answer, "author": "the owner: his answer to the card quoted in reply_to (the card's text was "
+                                         "written by Ouroboros)"}  # the answer and its card, whole
+    assert shown["content"] == "1. Publish it" and shown["reply_to"]["text"].startswith(card["question"])
+
+
+def test_every_source_names_its_author_from_the_one_table(checker, tmp_path):
+    """Each row the Supervisor reads carries ``author`` from the host's one table, by the label it was recorded under.
+    The run's opening text is the host's or Ouroboros's (a helper's brief: its parent's), never the owner's; a row
+    under no known label, and a caller's raw messages, are unattributed."""
+    from ouroboros.safety_evidence import SOURCE_AUTHORS, UNATTRIBUTED
+
+    rows = [*({"source": label, "content": f"words {n}", "msg_id": f"m{n}"} for n, label in enumerate(SOURCE_AUTHORS)),
+            {"source": "initial_text", "content": "Opening frame"}, {"source": "made_up", "content": "x", "msg_id": "q"},
+            {"content": "no label", "msg_id": "r"}]
+    ctx = SimpleNamespace(task_id="t", task_metadata={}, drive_root=tmp_path, _owner_directives=rows)
+    shown = _sources(ctx)["occasion"]["sources"]
+    assert [row["author"] for row in shown] == [*SOURCE_AUTHORS.values(), OPENING, UNATTRIBUTED, UNATTRIBUTED]
+    helper = SimpleNamespace(task_id="t", drive_root=tmp_path, _owner_directives=[{"source": "initial_text", "content": "Do X"}],
+                             task_metadata={"delegation_role": "subagent", "root_task_id": "root", "parent_task_id": "root"})
+    assert _sources(helper)["occasion"]["sources"][0]["author"] == (
+        "this task's brief: written by its parent task (Ouroboros) with blocks added by the host; not the owner's words")
+    raw = SimpleNamespace(task_id="t", task_metadata={}, drive_root=tmp_path)
+    assert _sources(raw, [{"role": "user", "content": "raw words"}, {"role": "assistant", "content": "mine"}])[
+        "occasion"]["sources"] == [{"role": "user", "content": "raw words", "author": UNATTRIBUTED}]
+
+
+def test_one_source_carried_twice_is_sent_once_whole_with_its_time_beside_one_now(checker, tmp_path):
+    """One message the corpus carries under two reference formats (its room and client id; the ``chat N / id`` a carrier
+    printed as its msg_id) is sent once, its words never clipped; rows that name no message stay apart even in the
+    same words. Owner rows carry the time recorded for them, and the bundle one ``now``."""
+    from datetime import datetime
+
+    long_words = "".join(f"Item {n}: split it into projects. " for n in range(900))
+    rows = [{"source": "origin_message", "content": long_words, "chat_id": "207", "client_message_id": "msg-1",
+             "carried": True},
+            {"source": "initial_user", "content": long_words, "msg_id": "chat 207 / msg-1", "carried": True},
+            {"source": "owner_mailbox", "content": "yes", "msg_id": "row:1@a", "ts": "2026-11-09T12:49:09+00:00"},
+            {"source": "initial_text", "content": "yes"}, {"source": "initial_text", "content": "yes"}]
+    ctx = SimpleNamespace(task_id="t", task_metadata={}, drive_root=tmp_path, _owner_directives=rows)
+    bundle = _sources(ctx)
+    shown = bundle["occasion"]["sources"]
+    assert [row["source"] for row in shown] == ["origin_message", "owner_mailbox", "initial_text", "initial_text"]
+    assert shown[0]["content"] == long_words and json.dumps(bundle, ensure_ascii=False).count(long_words) == 1
+    assert shown[1]["ts"] == "2026-11-09T12:49:09+00:00" and not any("now" in row for row in shown)
+    assert datetime.fromisoformat(bundle["work"]["now"]).tzinfo is not None
 
 
 def test_a_helper_reads_the_words_carried_to_its_work_and_never_a_siblings(checker, tmp_path):
@@ -179,7 +238,9 @@ def test_a_helper_reads_the_words_carried_to_its_work_and_never_a_siblings(check
     prompt, sources = sources_of(helper)
     card_reply = {"address": "quiz q7 of task asker", "author": "Ouroboros, task asker",
                   "text": "Publish exactly this reply?\n1. Publish it\n2. Not now\n(host record: my human pressed option 1)"}
-    assert sources == [{"source": "owner_mailbox", "content": "1. Publish it", "msg_id": addresses[""], "reply_to": card_reply}]
+    later_words = {"author": "the owner: a later message to this work", "ts": "2026-10-04T06:00:00+00:00"}
+    assert sources == [{"source": "owner_mailbox", "content": "1. Publish it", "msg_id": addresses[""],
+                        "reply_to": card_reply, **later_words}]
     assert addresses["sibling"] not in prompt and "March figures" not in prompt
     # The helper schedules a helper of its own: the answer rides in that helper's field, and its Supervisor reads it.
     later = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, current_task_type="task")
@@ -188,8 +249,10 @@ def test_a_helper_reads_the_words_carried_to_its_work_and_never_a_siblings(check
                            **governing_words_for_schedule(helper)}
     assert [row["ref"] for row in later.task_metadata[FIELD]] == ["chat 1 / owner-answer", "quiz q7 of task asker"]
     prompt, sources = sources_of(later)
-    assert sources == [{"source": "initial_text", "content": "Ship the release notes."}, {
-        "source": "owner_mailbox", "content": "1. Publish it", "msg_id": "chat 1 / owner-answer", "reply_to": card_reply}]
+    assert sources == [{"source": "initial_text", "content": "Ship the release notes.", "author": (
+        "this task's brief: written by its parent task (Ouroboros) with blocks added by the host; not the owner's words")},
+        {"source": "owner_mailbox", "content": "1. Publish it", "msg_id": "chat 1 / owner-answer", "reply_to": card_reply,
+         **later_words}]
     assert addresses["sibling"] not in prompt and "March figures" not in prompt
     later._owner_directives.append({"source": "owner_mailbox", "content": "1. Publish it", "msg_id": addresses[""],
                                     "chat_id": "1", "client_message_id": "owner-answer", "carried": True})
@@ -206,6 +269,7 @@ def test_each_source_projection_appears_once_and_the_event_is_typed(focus, monke
     assert retained["source"] == "initial_text" and "counted_roots" in retained["content"]
     source = bundle["occasion"]["sources"][0]
     assert source["message_text"] == "hello there" and source["event"]["conversation_key"] == "chat:a:r:0"
+    assert source["author"] == "a chat event that woke this turn: event.actor wrote message_text; the other keys are host facts"
     assert source["work_here"] == "Already started: task1" and "content" not in source
     assert "notes_at_event" not in source  # the same note versions are read now
     for text in ("OWNER NOTE", "MIND NOTE", RULES.splitlines()[0], "hello there"):
@@ -238,7 +302,7 @@ def test_a_retained_task_without_typed_sources_keeps_its_whole_row(focus, monkey
     root, place, _admission, _event = focus
     p.edit_place(root, place.place_id, "add_note", author="owner", text="OWNER NOTE")
     ctx, bundle, _prompt = _reply_bundle(root, monkeypatch, checker, typed=False)
-    assert bundle["occasion"]["sources"] == ctx._owner_directives
+    assert bundle["occasion"]["sources"] == _whole(ctx._owner_directives)
     assert "Place facts (context only)" in bundle["occasion"]["sources"][0]["content"]
 
 
@@ -276,7 +340,7 @@ def test_a_frame_with_attachments_rerenders_from_its_records(focus, monkeypatch,
     assert "[ATTACHMENTS]" in frame and source.name in frame
     shown = bundle["occasion"]["sources"][0]
     if kind == "unreadable_image":
-        assert bundle["occasion"]["sources"] == ctx._owner_directives  # the recorded row, whole
+        assert bundle["occasion"]["sources"] == _whole(ctx._owner_directives)  # the recorded row, whole
         assert "Pixels unavailable" in frame and "Pixels unavailable" in prompt
         return
     assert "content" not in shown and shown["message_text"] == "hello there"
@@ -329,7 +393,7 @@ def test_each_retained_row_is_matched_to_its_own_event(focus, monkeypatch, check
     _ctx, bundle, prompt = _reply_bundle(root, monkeypatch, checker, extra_rows=[other, order])
     first, second, third = bundle["occasion"]["sources"]
     assert first["message_text"] == "hello there" and "content" not in first
-    assert second == other and third == order
+    assert [second, third] == _whole([other, order])
     assert prompt.count("an earlier, different message") == 1
 
 
@@ -338,7 +402,7 @@ def test_an_empty_event_placeholder_keeps_the_row_whole(focus, monkeypatch, chec
     root, _place, _admission, _event = focus
     ctx, bundle, _prompt = _reply_bundle(root, monkeypatch, checker, text="")
     assert "(empty presence event)" in ctx._owner_directives[0]["content"]
-    assert bundle["occasion"]["sources"] == ctx._owner_directives
+    assert bundle["occasion"]["sources"] == _whole(ctx._owner_directives)
 
 
 def test_source_place_and_wake_authorship_survive_a_nonplace_call(focus, monkeypatch, checker):

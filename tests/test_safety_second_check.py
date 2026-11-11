@@ -47,7 +47,9 @@ def test_second_verdict_final_for_write(supervisor, second, allowed):
     assert "first reason" in call["user_prompt"]
     assert "tools" not in call
     h.module.check_safety("write_remote", {"x": 2}, ctx=h.ctx)
-    assert "second reason" in h.calls[-1]["user_prompt"]
+    # A returned call's final reading rides beside its tool; a call let through leaves none.
+    assert ('"reason": "second reason"' in h.calls[-1]["user_prompt"]) is not allowed
+    assert "first reason" not in h.calls[-1]["user_prompt"]
     assert len(h.calls) == 3  # SAFE first verdict never triggers the second stage.
 
 
