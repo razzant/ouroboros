@@ -70,17 +70,18 @@ def test_notes_and_skill_notices_reach_the_pinned_chat(tmp_path, monkeypatch, mo
     note = {"chat_id": 1, "role": "system", "system_type": "reminder", "markdown": False, "transport": web,
             "text": "Reminder · Ouroboros · written Oct 3 14:05 · for Oct 3 15:00 (UTC+3)\nCall mother"}
     notice = {**note, "system_type": "skill_notice", "text": "Notice · calendar\nMeeting in 15 min"}
+    safety = {**note, "system_type": "safety_notice", "text": "Safety Supervisor · not Ouroboros's words\nCall: x"}
     other = {**note, "system_type": "command_reply", "text": "Restarting."}
     reply = {"chat_id": 1, "role": "assistant", "markdown": False, "transport": web, "text": "Hello"}
-    for event in (note, notice, other, reply):
+    for event in (note, notice, safety, other, reply):
         asyncio.run(handle(event))
     forwarded = [text for _chat, text, _mode in _Client.sent]
-    assert forwarded[:2] == [note["text"], notice["text"]]
+    assert forwarded[:3] == [note["text"], notice["text"], safety["text"]]
     assert all(chat == 42 and parse_mode == "" for chat, _text, parse_mode in _Client.sent), "plain, to the pinned chat"
     if mode == "telegram_only":
-        assert forwarded == [note["text"], notice["text"]], "the mode's filter still holds for everything else"
+        assert forwarded == [note["text"], notice["text"], safety["text"]], "the mode's filter still holds for the rest"
     else:
-        assert forwarded == [note["text"], notice["text"], "Restarting.", "Hello"]
+        assert forwarded == [note["text"], notice["text"], safety["text"], "Restarting.", "Hello"]
 
 
 def test_the_settings_say_telegram_only_also_carries_reminders_and_skill_notices(tmp_path, monkeypatch):
@@ -105,3 +106,4 @@ def test_the_settings_say_telegram_only_also_carries_reminders_and_skill_notices
     told = explanation[explanation.index("*Telegram only*"):].split("\n", 1)[0]
     for words in (told, option):
         assert "Telegram" in words and "reminders" in words and "skill notices" in words, words
+        assert "Safety notices" in words, words

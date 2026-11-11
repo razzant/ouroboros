@@ -21,9 +21,11 @@ _CHIP_LOCK = threading.RLock()
 
 
 def parse_safety_response(text: str) -> Optional[Dict[str, Any]]:
-    """Parse the ``{"status", "reason", "quote"}`` verdict from a Safety model response.
+    """Parse the ``{"status", "reason", "quote", "owner"}`` verdict from a Safety model response.
 
-    ``quote`` is kept only as non-empty text, the checker's claim. Words are a host fact, so any other key is dropped.
+    ``quote`` is kept only as non-empty text, the checker's claim. ``owner`` is kept only as ``true`` on a flag: the
+    checker's claim that my human would want to stop the act if Ouroboros went ahead (``tell_owner_over_flag``);
+    absent or anything else is false. Words are a host fact, so any other key is dropped.
     Models occasionally wrap the JSON in prose or code fences despite the prompt.
     The whole reply and every outermost ``{...}`` in it are candidates; the
     strictest recognized status wins (DANGEROUS > SUSPICIOUS > SAFE, first of
@@ -68,7 +70,8 @@ def parse_safety_response(text: str) -> Optional[Dict[str, Any]]:
             return None
         quote = obj.get("quote")
         return {"status": status, "reason": str(obj.get("reason") or ""),
-                **({"quote": quote} if isinstance(quote, str) and quote.strip() else {})}
+                **({"quote": quote} if isinstance(quote, str) and quote.strip() else {}),
+                **({"owner": True} if obj.get("owner") is True and status != "SAFE" else {})}
 
     for candidate in candidates:
         try:
@@ -168,6 +171,56 @@ def _track_returned(ctx, tool_name, result):
                 _RETURNED[key] = tools
             while len(_RETURNED) > 512:
                 _RETURNED.popitem(last=False)
+
+
+def tell_owner_over_flag(ctx, tool_name, arguments, effect, subject, verdicts, level) -> None:
+    """The Supervisor's own row to my human when Ouroboros's identical re-issue is let through over a flag whose final
+    reading marked the act as one my human would want to stop (``"owner": true``). Host-composed from typed facts
+    through the terminal outbox, signed as the Supervisor's, one per work and destination: the declared words' places
+    and recipients, else the tool and its declared targets (``delivery_id``, so a reworded repeat, a restart or a later
+    finding there adds none). ``subject`` resolves what the call says and where (``safety._exit_subject``), read only
+    for a marked flag. Never in the tool's result, never changing what the call does; claims no delivery."""
+    final = verdicts[-1] if verdicts else {}
+    if final.get("owner") is not True:
+        return
+    try:
+        import hashlib
+        from ouroboros.tool_access_paths import canonical_data_root
+        from ouroboros.tool_effects import target_values
+        from supervisor.schedule_notes import owner_chat_id
+        from supervisor.terminal_delivery import enqueue_terminal_delivery_outcome
+
+        work, root = _root_id(ctx), canonical_data_root(ctx)
+        if not work:
+            return
+        _words, destinations, exact, labels = subject()
+        words_to = not exact
+        where = sorted(labels or destinations) if words_to else sorted(
+            {value for values in target_values(effect, arguments or {}).values() for value in values})
+        identity = json.dumps(["words" if words_to else tool_name, where], ensure_ascii=False)
+        try:
+            from ouroboros.projects_registry import task_presentation_snapshot
+            label = task_presentation_snapshot(root, work, fallback="").get("target_label") or ""
+        except Exception:
+            label = ""  # the row outranks its label
+        quote = " ".join(str(final.get("quote") or "").split())
+        text = "\n".join([
+            "Safety Supervisor · not Ouroboros's words",
+            "Ouroboros re-issued this after the flag and the host admitted the attempt; "
+            "delivery is not confirmed here.",
+            f"Call: {tool_name}" + (f" → {', '.join(where)}" if where else ""),
+            f"Flag ({level}): {final.get('reason') or ''}",
+            *([f"Quoted: «{quote[:300]}{'…' if len(quote) > 300 else ''}»"] if quote else []),
+            f"Work: {label} ({work})" if label else f"Work: {work}",
+            "Your brakes: /bg stop or /panic in Telegram; "
+            "in the app, Stop or Pause the work and set its place Paused."])
+        enqueue_terminal_delivery_outcome(root, {
+            "type": "send_message", "chat_id": owner_chat_id(root), "task_id": "", "text": text, "role": "system",
+            "system_type": "safety_notice",
+            "delivery_id": "safety_notice:" + hashlib.sha256(f"{work}\0{identity}".encode()).hexdigest()[:24],
+        }, event_queue=getattr(ctx, "event_queue", None))
+    except Exception:
+        log.warning("The Safety Supervisor's row to the owner was not queued", exc_info=True)
 
 
 def _record_task_checks(ctx: Optional[Any], event: Dict[str, Any]) -> None:

@@ -81,6 +81,53 @@ def test_flag_retry_and_changed_subject(supervisor, monkeypatch, mode, status, n
     assert len(h.calls) == 4
 
 
+@pytest.mark.parametrize("owner", [True, False])
+def test_a_reissue_over_an_owner_marked_flag_tells_my_human_once_per_destination(supervisor, monkeypatch, owner):
+    """When the mind lets a flagged call through by re-issuing it, a final reading that marked the act as one my human
+    would stop ("owner": true) also queues the Supervisor's own signed row, never in the tool's result; one per work
+    and destination, so reworded words to the same place carry the same delivery id. An unmarked flag, a return and
+    another work's call queue nothing new, and the call's result is the same either way."""
+    h = supervisor
+    from ouroboros import tool_effects
+    from supervisor import schedule_notes, terminal_delivery
+    rows = []
+    monkeypatch.setattr(terminal_delivery, "enqueue_terminal_delivery_outcome",
+                        lambda root, event, **kw: rows.append(event) or "queued")
+    monkeypatch.setattr(schedule_notes, "owner_chat_id", lambda root: 7)
+    words = tool_effects.ToolEffect("message", targets=("to",), declared=True)
+    monkeypatch.setattr(tool_effects, "effect_of", lambda *a, **kw: words)
+    mark = {"owner": True} if owner else {}
+    h.replies.append({"status": "SUSPICIOUS", "reason": "private plan to another circle", "quote": "the plan", **mark})
+    args = {"text": "the plan", "to": "room-a"}
+    assert h.module.check_safety("connector_send", args, ctx=h.ctx)[0] is False and rows == []
+    h.later()
+    ok, message = h.module.check_safety("connector_send", args, ctx=h.ctx)
+    assert ok and message.startswith("⚠️ SAFETY_NOTE: let through on your later identical call")
+    assert "Safety Supervisor" not in message, "the row is never the tool's result"
+    if not owner:
+        assert rows == []
+        return
+    [row] = rows
+    assert (row["system_type"], row["role"], row["chat_id"], row["task_id"]) == ("safety_notice", "system", 7, "")
+    lines = row["text"].split("\n")
+    assert lines[:2] == ["Safety Supervisor · not Ouroboros's words", "Ouroboros re-issued this after the flag and the "
+                         "host admitted the attempt; delivery is not confirmed here."]
+    assert "Call: connector_send → room-a" in lines and "Flag (SUSPICIOUS): private plan to another circle" in lines
+    assert "Quoted: «the plan»" in lines and "Work: work" in lines and lines[-1].startswith("Your brakes: ")
+    h.replies.append({"status": "SUSPICIOUS", "reason": "still the plan", **mark})
+    reworded = {"text": "the plan, reworded", "to": "room-a"}
+    assert h.module.check_safety("connector_send", reworded, ctx=h.ctx)[0] is False
+    h.later()
+    assert h.module.check_safety("connector_send", reworded, ctx=h.ctx)[0] is True
+    assert len(rows) == 2 and rows[1]["delivery_id"] == rows[0]["delivery_id"], "the outbox sends one per destination"
+    h.ctx.task_id = "another-work"
+    h.replies.append({"status": "SUSPICIOUS", "reason": "private plan to another circle", **mark})
+    assert h.module.check_safety("connector_send", args, ctx=h.ctx)[0] is False
+    h.later()
+    assert h.module.check_safety("connector_send", args, ctx=h.ctx)[0] is True
+    assert rows[2]["delivery_id"] != rows[0]["delivery_id"], "another work is told of its own"
+
+
 @pytest.mark.parametrize(("status", "mode"), [("SUSPICIOUS", "advanced"), ("DANGEROUS", "cyber_pro"),
                                               ("DANGEROUS", "advanced")])
 def test_a_step_the_host_cannot_name_is_a_later_step(supervisor, monkeypatch, status, mode):
