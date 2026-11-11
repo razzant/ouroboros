@@ -235,6 +235,7 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
             "active_model_override", "active_effort_override", "active_use_local_override",
             "active_role_override", "route_wait_on_primary", "primary_route", "_route_facts_pending",
             "route_choice",  # following its role, or the task's own (route_choice)
+            "_lead_episode", "_lead_cause", "_lead_return_from", "_lead_role",  # one departure fact, including an unaccepted return
         )},
         "delivery_candidate": asdict(candidate) if candidate is not None else None,
         "delivery": {key: getattr(ctx, key, None) for key in (

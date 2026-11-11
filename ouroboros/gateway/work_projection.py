@@ -572,6 +572,8 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
                             and member.get("stop", {}).get("scope") != "tree")
         work.update(kind="direct" if str(room_row.get("kind") or "") == "direct_chat" else "task",
                     project_id=str(room_row.get("project_id") or ""), since=_since(room_row), controls=controls)
+        if current_row is not None and current_row.get("lead"):
+            work["lead"] = current_row["lead"]
         cmid = str(room_row.get("client_message_id") or "")
         if cmid:
             work["client_message_id"] = cmid

@@ -333,6 +333,13 @@ Logical global quarantine changes generation visibility while retaining the inde
 
 Downgrade: old builds keep holds but lose `_resume_selection`; with a released latch children can dispatch without root-generation checks: **not Q9-equivalent**, no reverse export. Old bodies miss the Restart door and restore as after Quit. Old launchers can block auto-start after failed Panic unlink; explicit Start works. Gateway `stop`, `refusal`, `members.states` and model/external tails are optional observations, not authority.
 
+The continuation `route` block also retains one lead departure observation (`_lead_episode`, `_lead_cause`,
+`_lead_role`, `_lead_return_from`): a fixed number of route ids, chooser/cause strings and one timestamp, normally
+under 1 KB, never an event history. `owner_wait.continuation_state` writes it; the next accepted primary reply or
+new departure replaces it, and the enclosing continuation's existing retirement removes it. The live `work_lead`
+frame folds onto one RUNNING/direct activity record and disappears with that record; readers add `pending`
+without persistence.
+
 ## Reset ladder (summary)
 
 Recreated caches: `state/pycache.noindex`, `state/code_intel`,

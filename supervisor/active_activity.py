@@ -224,6 +224,7 @@ class DirectActivityEntry:
     # derived from the private newest-first attempts below (``physical_attempt_context.fold_attempt``), unpublished.
     context_attempt: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
     context_attempts: Optional[List[Dict[str, Any]]] = field(default=None, repr=False, compare=False)
+    lead: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
     parked_wait: Optional[Dict[str, Any]] = field(default=None, repr=False, compare=False)
     parked_root: Any = field(default=None, repr=False, compare=False)
 
@@ -301,6 +302,9 @@ class DirectActivityEntry:
             row["model_activity"] = dict(active["model_activity"])
         if self.context_attempt and self.context_attempt.get("task_attempt") == row.get("task_attempt"):
             row["context_attempt"] = dict(self.context_attempt)
+        from ouroboros.lead_fact import lead_fields
+
+        row.update(lead_fields(self.lead))
         if wait_availability.get("complete") is False:
             row["phase"] = "unknown"
             if availability is not None:

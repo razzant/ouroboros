@@ -113,7 +113,7 @@ def _queue_revision() -> Tuple[Any, ...]:
         active = (meta.get("active_llm_call") or {}) if isinstance(meta, dict) else {}
         running.append((str(task_id), meta.get("attempt") if isinstance(meta, dict) else None,
                         json.dumps([active.get("model_activity"), meta.get("context_attempt") if isinstance(
-                            meta, dict) else None], sort_keys=True, default=str),
+                            meta, dict) else None, meta.get("lead") if isinstance(meta, dict) else None], sort_keys=True, default=str),
                         str(meta.get("turn_phase") or "") if isinstance(meta, dict) else ""))
     return (queue_revision(), tuple(pending), tuple(running))
 

@@ -20,6 +20,24 @@ class ChatModelRoute(TypedDict):
     use_local: bool
 
 
+class WorkPrimaryRoute(ChatModelRoute):
+    basis: str
+
+
+class WorkLead(WorkPrimaryRoute):
+    """Acting route and chooser; a departure names the primary it left."""
+
+    role: NotRequired[str]
+    primary: NotRequired[WorkPrimaryRoute]
+    since: NotRequired[str]
+    cause: NotRequired[str]
+    pending: NotRequired[ChatModelRoute]
+
+
+class WorkLeadFields(TypedDict):
+    lead: NotRequired[WorkLead]
+
+
 class WorkReason(TypedDict):
     """One typed reason: ``code`` is closed per release, ``text`` its English sentence (unknown codes stay raw)."""
 
@@ -114,7 +132,7 @@ class WorkFocus(TypedDict):
     at: Any
 
 
-class Work(TypedDict):
+class Work(WorkLeadFields):
     """One request with its Continue episodes and live members."""
 
     work_id: str

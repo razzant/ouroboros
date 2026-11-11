@@ -133,6 +133,33 @@ def _fold_context_attempt(direct: Any, meta: Any, fact: Dict[str, Any], active: 
         meta["context_attempts"], meta["context_attempt"] = folded, attempt_view(folded)
 
 
+def _handle_work_lead(evt: Dict[str, Any], ctx: Any) -> None:
+    """Fold this attempt's acting route beside its call facts, never onto an ended work."""
+    task_id, fact = str(evt.get("task_id") or ""), evt.get("lead")
+    if not task_id or not isinstance(fact, dict) or not fact.get("model"):
+        return
+    meta = (getattr(ctx, "RUNNING", None) or {}).get(task_id)
+    direct = None
+    if isinstance(meta, dict):
+        task = meta.get("task") or {}
+        attempt = meta.get("attempt") or task.get("_attempt") or 1
+    else:
+        from supervisor.active_activity import get_direct_activity_registry
+
+        direct = get_direct_activity_registry().get(task_id)
+        owner = getattr(getattr(getattr(direct, "actor", None), "tools", None), "_ctx", None)
+        waiter = getattr(owner, "model_wait_context", None)
+        if waiter is None or waiter.closed or waiter.task_id != task_id:
+            return
+        attempt = waiter.attempt
+    if evt.get("task_attempt") != attempt:
+        return
+    if direct is not None:
+        direct.lead = dict(fact)
+    else:
+        meta["lead"] = dict(fact)
+
+
 def _handle_main_llm_call_state(evt: Dict[str, Any], ctx: Any) -> None:
     task_id = str(evt.get("task_id") or "")
     phase = str(evt.get("phase") or "").strip().lower()
@@ -365,6 +392,7 @@ EVENT_HANDLERS = {
     **_MWH,
     **_CDE,
     "main_llm_call_state": _handle_main_llm_call_state,
+    "work_lead": _handle_work_lead,
     "budget_pause": _handle_budget_pause,
     "budget_root_fence": _handle_budget_root_fence,
     "budget_resume_child": _handle_budget_resume_child,

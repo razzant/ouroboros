@@ -344,8 +344,8 @@ def _run_cross_model_fallback_chain(
                 tools._ctx, model=active_model, use_local=active_use_local, role=fallback_role,
                 failed_model=entry_model, failure=entry_failure, waiter=waiter, usage=accumulated_usage,
                 round_idx=round_idx, answered=msg is not None, own_call=own_call)
-            from ouroboros.route_choice import after_fallback
-            tools._ctx.route_choice = after_fallback(tools._ctx, is_primary)  # a chain entry is the task's own route
+            from ouroboros.lead_fact import adopt_fallback
+            adopt_fallback(tools._ctx, is_primary, entry_failure, fallback_role)
             if not is_primary:
                 tools._ctx.route_wait_on_primary = False  # a declared wait belonged to the primary route
             adopted = True

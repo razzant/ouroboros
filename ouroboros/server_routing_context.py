@@ -78,6 +78,7 @@ def _late_input_author(task: Dict[str, Any]) -> Dict[str, str]:
 
 def _active_direct_roots(ctx: Any) -> list:
     """All addressable native actors, without constructing agents or queue state."""
+    from ouroboros.lead_fact import lead_fields
     from supervisor.active_activity import get_direct_activity_registry
     from supervisor.workers import direct_chat_turn
 
@@ -97,7 +98,7 @@ def _active_direct_roots(ctx: Any) -> list:
                     "objective": _clip_marked(turn.get("text"), 600),
                     "project_id": turn["project_id"], "chat_id": turn["chat_id"],
                     "started_at": turn["_started_at"], "steerable": True, "direct_chat": True, "room_reader": reader,
-                    **_late_input_author(turn),
+                    **_late_input_author(turn), **lead_fields(entry.lead, turn),
                 })
     return roots
 
@@ -109,6 +110,7 @@ def _moved_presence_readers(ctx: Any) -> list:
     re-checks under the mail lock. An unmoved author reads no room, and a closed intake or another author's
     unreadable facts never hide a reader; a reader's own unreadable facts are the snapshot's gap."""
     from ouroboros.conversation_lease import author_intake_accepting, author_intake_open, resolved_presence_turns
+    from ouroboros.lead_fact import lead_fields
     from ouroboros.projects_registry import project_id_for_task
     from ouroboros.room_reader import is_reading
 
@@ -127,6 +129,7 @@ def _moved_presence_readers(ctx: Any) -> list:
                           "title": _clip_marked(row.get("suggested_name") or row.get("title"), 120),
                           "objective": "", "chat_id": row.get("chat_id"), "started_at": row.get("started_at"),
                           "steerable": True, "inline_presence": True,
+                          **lead_fields(row.get("lead"), row),
                           "room_reader": is_reading(ctx.DRIVE_ROOT, task_id, row, running=True)})
     return roots
 
@@ -144,13 +147,15 @@ def addressable_roots(ctx: Any) -> RootSnapshot:
     says (``steer_task`` still offers another process's author nothing: ``presence_author_elsewhere``).
     """
     try:
+        from ouroboros.lead_fact import lead_fields
         from ouroboros.room_reader import is_reading
         from ouroboros.store_hot_facts import snapshot as hot_facts
         from ouroboros.task_carrier import execution_kind
         from ouroboros.task_status import SETTLED_STATUSES
         from ouroboros.task_store import task_drive_status
 
-        queued = [*((tid, row.get("task") if isinstance(row.get("task"), dict) else row, "running",
+        queued = [*((tid, {**(row.get("task") if isinstance(row.get("task"), dict) else row),
+                          "lead": row.get("lead")}, "running",
                      row.get("started_at")) for tid, row in list(getattr(ctx, "RUNNING", {}).items())
                     if isinstance(row, dict)),
                   *((row.get("id"), row, "pending", row.get("queued_at"))
@@ -183,6 +188,7 @@ def addressable_roots(ctx: Any) -> RootSnapshot:
                     "project_id": str(task.get("project_id") or ""),
                     "started_at": started_at,
                     "steerable": True, "room_reader": reader, **_late_input_author(task),
+                    **lead_fields(task.get("lead"), task, queued=status == "pending"),
                 }, _task_chats(ctx, tid, task)))
         pairs += [(row, _task_chats(ctx, row["task_id"], row))
                   for row in [*_active_direct_roots(ctx), *_moved_presence_readers(ctx)]]

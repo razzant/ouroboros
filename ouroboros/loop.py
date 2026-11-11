@@ -440,35 +440,11 @@ def _reset_turn_state(ctx: Any) -> None:
     ctx.route_wait_on_primary, ctx.active_role_override, ctx._route_facts_pending = False, None, ""
     ctx._round_prep_since = None  # an earlier turn's batch end starts no round of this one (``round_window``)
     ctx._primary_route_observation, ctx._accepted_route_binding, ctx._primary_return_requested = None, None, None
+    ctx._lead_last_sent = ctx._lead_episode = ctx._lead_return_from = None
+    ctx._lead_cause, ctx._lead_role = "", None
     ctx._primary_view = None  # a return resumes only the view this turn left (primary_route_observation.held_primary_view)
     ctx._accepted_model_route = ctx._left_review_wait = None  # a new turn waits on no left review
     ctx._pending_task_wait = None  # nor owes an earlier turn's native task wait (``native_task_wait``)
-
-
-def _initial_round_route(ctx: Any, llm: LLMClient, initial_effort: str) -> tuple:
-    """The route this turn opens on: model, effort, local flag and context modes.
-
-    Unknown routes get one honest call; no synthetic short-window capacity, so a
-    fit plan is adopted only while it still answers the preferred mode. The same
-    binding is recorded as the turn's primary (task override or role slot, role,
-    locality) for configured-route recovery and ``switch_model(primary=...)``, and
-    the turn's route choice says whether that binding follows its role live or is
-    the task's own (``route_choice``).
-    """
-    from ouroboros.model_slots import task_model_binding
-    from ouroboros.route_choice import open_route
-
-    preferred_mode = get_context_mode()
-    context_fit_plan = getattr(ctx, "context_fit_plan", None)
-    if (context_fit_plan is not None
-            and str(getattr(context_fit_plan, "preferred_mode", "")) == preferred_mode):
-        active_context_mode = str(getattr(context_fit_plan, "initial_mode", "") or preferred_mode)
-    else:
-        active_context_mode = preferred_mode
-    model, use_local, ctx.route_choice = open_route(ctx, llm)
-    ctx.primary_route = {"model": model, "use_local": use_local, "role": task_model_binding(
-        {"task_metadata": getattr(ctx, "task_metadata", {})}, context_fit_plan=context_fit_plan)[0]}
-    return model, initial_effort, use_local, preferred_mode, active_context_mode, context_fit_plan
 
 
 def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dict, usage: dict, seen: set,
@@ -620,6 +596,8 @@ def run_llm_loop(
                     active_context_mode, _preferred_context_mode, tool_schemas, llm=llm)
             ctx.active_context_mode = active_context_mode
             ctx.active_model, ctx.active_effort, ctx.active_use_local = active_model, active_effort, active_use_local
+            if not pending_tool_budget:
+                publish_lead(ctx)
 
             # One context per round, shared by budget, round-limit and finalize_now rails.
             limit_ctx = _RoundLimitContext(
@@ -1002,3 +980,6 @@ from ouroboros.loop_forced_finalization import (  # noqa: E402, F401 -- intentio
     _FORCED_BEST_EFFORT_TAIL,
     _prepare_forced_prompt,
 )
+
+from ouroboros.lead_fact import publish_lead
+from ouroboros.route_choice import initial_round_route as _initial_round_route

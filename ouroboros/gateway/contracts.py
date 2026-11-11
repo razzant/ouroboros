@@ -28,7 +28,7 @@ from ouroboros.gateway.claudexor_contracts import (  # noqa: F401 -- public re-e
     ClaudexorReadState, ClaudexorStatusReads, ClaudexorPassiveReadError, ClaudexorQuotaResponse,
     ClaudexorStatusResponse,
 )
-from ouroboros.gateway.work_contracts import WorkStateFields
+from ouroboros.gateway.work_contracts import WorkLeadFields, WorkStateFields
 from ouroboros.gateway.history_contracts import ChatHistoryResponse, PresenceContact  # noqa: F401 -- public re-exports
 from ouroboros.gateway.health_contracts import BootDocument, BootJob, BootStep, HealthResponse  # noqa: F401 -- public re-exports
 from ouroboros.gateway.attachment_contracts import (  # noqa: F401 -- public re-exports
@@ -692,7 +692,7 @@ class EvolutionStateSnapshot(TypedDict):
     campaign: NotRequired[Dict[str, Any]]
 
 
-class ActiveDirectTurn(TypedDict):
+class ActiveDirectTurn(WorkLeadFields):
     """An active owner turn: a conversation-lane row or an inline executor's actor.
 
     Rows of ``StateResponse.active_direct_turns`` (``conversation_lane.lane_turn_rows`` and

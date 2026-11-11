@@ -125,6 +125,7 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
         "supervisor.events_worker_reports", "ouroboros/utils.py", lane=TELEMETRY_LANE,
         note="the envelope every worker log line rides; the payload types that "
              "need their own answer are the nested_log_event rows below"),
+    "work_lead": _handled("supervisor.events", "ouroboros/lead_fact.py"),
     "main_llm_call_state": _handled(
         "supervisor.events", "ouroboros/llm_observability.py",
         note="the last handler still resolving on the facade itself", idle_input=True),

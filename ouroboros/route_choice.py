@@ -470,3 +470,29 @@ def classify_legacy(ctx: Any, state: Mapping) -> dict:
     if primary.get("model") and acting != (str(primary["model"]), bool(primary.get("use_local"))):
         return explicit("switch_model")
     return following(opening_role(ctx))
+
+
+def initial_round_route(ctx: Any, llm: Any, initial_effort: str) -> tuple:
+    """The route this turn opens on: model, effort, local flag and context modes.
+
+    Unknown routes get one honest call; no synthetic short-window capacity, so a
+    fit plan is adopted only while it still answers the preferred mode. The same
+    binding is recorded as the turn's primary (task override or role slot, role,
+    locality) for configured-route recovery and ``switch_model(primary=...)``, and
+    the turn's route choice says whether that binding follows its role live or is
+    the task's own (``route_choice``).
+    """
+    from ouroboros.model_slots import task_model_binding
+    from ouroboros.config import get_context_mode
+
+    preferred_mode = get_context_mode()
+    context_fit_plan = getattr(ctx, "context_fit_plan", None)
+    if (context_fit_plan is not None
+            and str(getattr(context_fit_plan, "preferred_mode", "")) == preferred_mode):
+        active_context_mode = str(getattr(context_fit_plan, "initial_mode", "") or preferred_mode)
+    else:
+        active_context_mode = preferred_mode
+    model, use_local, ctx.route_choice = open_route(ctx, llm)
+    ctx.primary_route = {"model": model, "use_local": use_local, "role": task_model_binding(
+        {"task_metadata": getattr(ctx, "task_metadata", {})}, context_fit_plan=context_fit_plan)[0]}
+    return model, initial_effort, use_local, preferred_mode, active_context_mode, context_fit_plan
