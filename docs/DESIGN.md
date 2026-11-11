@@ -1631,6 +1631,17 @@ reviews create child tasks or prove execution.
   codes stay in the receipt, the PR body and the merging agent's result.
   A later FAIL of that record appears below with one retained report link when
   available; it creates no Main row.
+- A work the review gate let continue where Blocking enforcement would have
+  stopped it carries one quiet phrase on its card's line, `Review: N× continued
+  where Blocking would have stopped · latest: <reason>`, live as each decision
+  lands and on a page load before Details open, a running work's too (a Project
+  work's portal in Main shows it live and once its Details open), and one
+  Details row, `Review gate did not prohibit
+  continuation`, holding the stored head of the latest reason (300 characters,
+  an ellipsis when cut; `review_gate_card.js`): a count, never a row per
+  decision; no Main row and no Telegram message of its own, its Telegram
+  completion carrying the same phrase. It never says committed, merged or
+  running; a child's decision counts on its root's card, naming the child.
 - Read opens the selected saved answer in the document reader (Markdown, Source
   exact; a failure note as plain text) and never regenerates a review or
   switches sources after an update; limits, Download, timeout and focus follow

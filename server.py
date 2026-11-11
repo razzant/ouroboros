@@ -54,7 +54,7 @@ from ouroboros.server_process import (  # noqa: F401
     _request_restart_exit, _restart_requested,
     _supervisor_stop, _exit_signalled,
     _SignalStopServer, _embedded_uvicorn_server,
-    capture_server_source_baseline, server_stop_cause, log,
+    capture_server_source_baseline, server_stop_cause, log, restart_gate_line,
     FAULT_BUS_LOST, FAULT_LOOP_FAILED, bind_fault_exit, end_generation_on_fault, fault_cancel_reason,
     fault_exit, held_saved_work_count, previous_fault_sentence, end_fault_held_runs,
 )
@@ -427,7 +427,7 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
                 continue
 
         if lowered.startswith("/restart"):
-            reply("♻️ Restarting.", "")
+            reply("♻️ Restarting." + restart_gate_line(REPO_DIR, DATA_DIR), "")
             ok, restart_msg = _perform_owner_restart(ctx, reply)
             if not ok:
                 reply(f"⚠️ Restart cancelled: {restart_msg}", "failed")
@@ -460,11 +460,11 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
             parts = lowered.split()
             action = parts[1] if len(parts) > 1 else "status"
             if action in ("start", "on", "1", "stop", "off", "0"):
-                from supervisor.events_runtime_controls import persist_consciousness_choice
+                from ouroboros.consciousness import OWNER_STOP
 
-                on = action in ("start", "on", "1")
-                result = ctx.consciousness.start() if on else ctx.consciousness.stop()
-                reply(f"🧠 {result}{persist_consciousness_choice(on)}")
+                on = action in ("start", "on", "1")  # the owner's door: app, Telegram and onboarding all send /bg
+                result = ctx.consciousness.start() if on else ctx.consciousness.stop(source=OWNER_STOP)
+                reply(f"🧠 {result}")
             else:
                 from supervisor.state import control_value
 
@@ -1039,7 +1039,7 @@ def _startup_owner_command(command: str, *, send_kwargs=None, source="web", user
         context = SimpleNamespace(safe_restart=git_ops.safe_restart,
                                   RUNNING=workers.RUNNING, kill_workers=workers.kill_workers)
         if reply is not None:
-            reply("♻️ Restarting.", "")
+            reply("♻️ Restarting." + restart_gate_line(REPO_DIR, DATA_DIR), "")
         ok, message = _perform_owner_restart(context, reply)
         if not ok:
             log.error("Startup owner restart cancelled: %s", message)
