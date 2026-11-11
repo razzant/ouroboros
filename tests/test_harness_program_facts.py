@@ -99,7 +99,7 @@ def test_passive_ready_event_is_once_per_generation_and_never_during_recovery(me
 
     state, calls, _clients, provision, config_dir = metadata_engine
     launched = []
-    monkeypatch.setattr(facts, "_ready", {})
+    monkeypatch.setattr(facts, "_pending", set())
     monkeypatch.setattr(facts, "_launch", lambda *args: launched.append(args))
     provision()
     for _ in range(2):
@@ -125,7 +125,7 @@ def test_passive_ready_event_is_once_per_generation_and_never_during_recovery(me
 @pytest.mark.parametrize("state", ["succeeded", "failed", "cancelled", "interrupted"])
 def test_settlement_event_waits_for_custody_and_deduplicates_the_receipt(monkeypatch, tmp_path, state):
     launched = []
-    monkeypatch.setattr(facts, "_settled", {})
+    monkeypatch.setattr(facts, "_pending", set())
     monkeypatch.setattr(facts, "_root", lambda *_: tmp_path)
     monkeypatch.setattr(facts, "_launch", lambda *args: launched.append(args))
     gateway = SimpleNamespace(_endpoint=object())
@@ -137,7 +137,7 @@ def test_settlement_event_waits_for_custody_and_deduplicates_the_receipt(monkeyp
     operation["termination"] = "confirmed"
     facts.operation_observed(gateway, operation)
     facts.operation_observed(gateway, deepcopy(operation))
-    assert launched == [(gateway._endpoint, tmp_path)]
+    assert launched == [(gateway._endpoint, tmp_path, ("settled:future-program", facts._fingerprint(("one", operation["finishedAt"]))))]
     operation["id"] = "two"
     facts.operation_observed(gateway, operation)
     assert len(launched) == 2
@@ -162,7 +162,7 @@ def test_event_acquisition_is_passive_fresh_and_does_not_check_latest(monkeypatc
     def forbidden(*_a, **_k):
         pytest.fail("an observation must not wake the engine")
     monkeypatch.setattr("ouroboros.claudexor_daemon.ensure_owned_gateway", forbidden)
-    facts._refresh("existing-endpoint", tmp_path)
+    facts._refresh("existing-endpoint", tmp_path, ("settled:future-program", "event"))
     assert calls == ["handshake", {"fresh": True, "check_latest": False}, "closed"]
     assert "2.1.319" in facts.vendor_programs_line(tmp_path)
 
@@ -171,13 +171,105 @@ def test_settlement_notification_does_not_wait_for_a_snapshot_write(monkeypatch,
     import threading
 
     done = threading.Event()
-    monkeypatch.setattr(facts, "_settled", {})
+    monkeypatch.setattr(facts, "_pending", set())
     monkeypatch.setattr(facts, "_root", lambda *_: tmp_path)
     monkeypatch.setattr(facts, "_launch", lambda *_: done.set())
     receipt = {"id": "one", "harness": "future-program", "state": "succeeded", "termination": "confirmed"}
     worker = threading.Thread(target=facts.operation_observed, args=(SimpleNamespace(_endpoint=object()), receipt))
-    with facts._lock:  # A separate process can keep the writer's file lock busy.
+    with facts._observation_lock(tmp_path) as acquired:
+        assert acquired
         worker.start()
         notified = done.wait(timeout=1)
     worker.join(timeout=1)
     assert notified and not worker.is_alive()
+
+
+def test_eighteen_independent_hosts_share_generation_and_settlement_observations(monkeypatch, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from importlib.util import module_from_spec, spec_from_file_location
+    from threading import Barrier, Event
+    from ouroboros.gateways import claudexor, claudexor_metadata
+
+    generation = ["engine-one"]
+    calls, workers = [], []
+    entered, release = Event(), Event()
+    class Gateway:
+        def __init__(self, endpoint):
+            assert endpoint == "existing-endpoint"
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            pass
+        def handshake(self):
+            pass
+        def maintenance_harnesses(self, **kwargs):
+            assert kwargs == {"fresh": True, "check_latest": False}
+            calls.append(generation[0])
+            entered.set()
+            assert release.wait(timeout=2)
+            return inventory()
+    monkeypatch.setattr(claudexor, "ClaudexorGateway", Gateway)
+    monkeypatch.setattr(claudexor_metadata, "endpoint_generation", lambda _: generation[0])
+    for index in range(18):
+        spec = spec_from_file_location(f"independent_facts_{index}", facts.__file__)
+        module = module_from_spec(spec)
+        spec.loader.exec_module(module)
+        monkeypatch.setattr(module, "_root", lambda *_: tmp_path)
+        # Each worker has independent globals; its dispatch runs on our controlled thread.
+        monkeypatch.setattr(module, "_launch", module._refresh)
+        workers.append(module)
+    gateway = SimpleNamespace(_endpoint="existing-endpoint")
+    def meet(event):
+        barrier = Barrier(len(workers))
+        def run(module):
+            barrier.wait(timeout=3)
+            event(module)
+        with ThreadPoolExecutor(max_workers=len(workers)) as pool:
+            futures = [pool.submit(run, module) for module in workers]
+            assert entered.wait(timeout=2)
+            release.set()
+            for future in futures:
+                future.result(timeout=4)
+    ready = lambda module: module.engine_ready(gateway)
+    meet(ready)
+    assert calls == ["engine-one"]
+    first_line = facts.vendor_programs_line(tmp_path)
+    first_generation = saved(tmp_path)["events"]["engineGeneration"]
+    for worker in workers:
+        worker.engine_ready(gateway)
+    assert calls == ["engine-one"], "later processes find the generation recorded"
+    generation[0] = "engine-two"
+    meet(ready)
+    assert calls == ["engine-one", "engine-two"]
+    assert saved(tmp_path)["events"]["engineGeneration"] != first_generation
+    receipt = {"id": "private-settlement", "harness": "future-program", "state": "succeeded", "termination": "confirmed"}
+    meet(lambda module: module.operation_observed(gateway, receipt))
+    meet(lambda module: module.operation_observed(gateway, deepcopy(receipt)))
+    meet(ready)
+    assert calls == ["engine-one", "engine-two", "engine-two"]
+    facts.record_inventory(inventory("2026-12-12"), root=tmp_path)
+    meet(ready)
+    assert len(calls) == 3, "ordinary inventory publication preserves the event markers"
+    assert facts.vendor_programs_line(tmp_path) == first_line
+    assert set(saved(tmp_path)["events"]) == {"engineGeneration", "settled:future-program"}
+    assert "private-settlement" not in json.dumps(saved(tmp_path))
+    facts.record_inventory({"observedAt": "2026-12-13T00:00:00Z", "harnesses": []}, root=tmp_path)
+    assert set(saved(tmp_path)["events"]) == {"engineGeneration"}, "removed programs leave no event history"
+
+
+def test_failed_ready_observation_does_not_mark_generation_observed(monkeypatch, tmp_path):
+    from ouroboros.gateways import claudexor, claudexor_metadata
+
+    attempts = []
+    def unavailable(_):
+        attempts.append("attempt")
+        raise OSError("engine unavailable")
+    monkeypatch.setattr(claudexor, "ClaudexorGateway", unavailable)
+    monkeypatch.setattr(claudexor_metadata, "endpoint_generation", lambda _: "generation")
+    monkeypatch.setattr(facts, "_root", lambda *_: tmp_path)
+    monkeypatch.setattr(facts, "_launch", facts._refresh)
+    monkeypatch.setattr(facts, "_pending", set())
+    for _ in range(2):
+        facts.engine_ready(SimpleNamespace(_endpoint="existing-endpoint"))
+        assert facts._read(tmp_path) == {} and not facts._pending
+    assert len(attempts) == 2, "another event can retry; failure is not an observation"
