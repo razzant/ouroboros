@@ -7,7 +7,7 @@ their place without changing a silent room into an event.
 from collections import defaultdict
 
 from ouroboros import memory_view as mv, memory_view_conversations as conversations, memory_view_legacy as legacy
-from ouroboros.memory_view_work import works, work_line, task_gist_line
+from ouroboros.memory_view_work import works, work_line, task_gist_line, task_line
 from ouroboros.memory_form_facts import form_counts as form_counts, holding_room as holding_room
 
 LADDER = ("F1", "F6w", "F6g", "F3", "F2", "F4", "F7p", "F5l", "F5", "F5a", "F7", "F7a", "F8", "F8a", "F6a")
@@ -101,12 +101,42 @@ def supersedes(step, ident):
     return ()
 
 
-def normalized(selected):
+def normalized(selected, replacements=None):
     """Superseded forms do not acquire a second receipt or a different price key."""
     chosen = set(selected)
-    for pair in selected:
-        chosen.difference_update(supersedes(*pair))
+    relations = replacements.items() if replacements is not None else ((p, supersedes(*p)) for p in selected)
+    for pair, lower in relations:
+        if pair in selected:
+            chosen.difference_update(lower)
     return chosen
+
+
+class WorkPrices:
+    """Marginal savings from a work's own pieces, including the telling it replaces.
+
+    A final line replaces the remaining replies plus the intermediate line, when
+    selected. The task's gist moves to the work line only once, on its first fold.
+    """
+    def __init__(self, room, elements, price):
+        self.replies = {ident: (whole, short) for step, ident, whole, short in elements
+                        if step == "F2" and ident.startswith("work:")}
+        self.tellings = defaultdict(list)
+        for task in room.get("lane2", ()):
+            if task.get("gist"):
+                self.tellings[task["task"]].append((task["first"], price(task_gist_line(task)),
+                                                  price(task_line(task)) - price(task_line(task, folded=True))))
+
+    def saving(self, ident, selected):
+        whole, short = self.replies[ident]
+        progress = ident.removesuffix(":final") + ":progress"
+        if ident.endswith(":final") and ("F2", progress) in selected:
+            previous_whole, previous_short = self.replies[progress]
+            whole -= previous_whole - previous_short
+        else:
+            key = ident.removeprefix("work:").rsplit(":", 1)[0]
+            whole += sum(gist if ("F1", first) in selected else inline
+                         for first, gist, inline in self.tellings.get(key, ()))
+        return max(0, whole - short)
 
 
 class Selection:
@@ -148,8 +178,14 @@ class Selection:
         self.pairs.add(pair)
         for lower in self.upper.get(pair, ()):
             self._visible(lower, False)
-        if not any(p in self.pairs for p in self.lower.get(pair, ())):
-            self._visible(pair, True)
+        uppers = self.lower.get(pair)
+        if not uppers or not any(p in self.pairs for p in uppers):
+            # A newly selected pair cannot already be visible. Only predecessors
+            # need the conditional update above (some are absent or hidden).
+            step, ident = pair
+            self.by_step[step].add(ident)
+            self.new_count += pair not in self.old
+            self.ordered.pop(step, None)
 
     def discard(self, pair):
         self.pairs.discard(pair)
@@ -176,6 +212,9 @@ class Selection:
 
 def swallowed(snapshot, step, ident, selected):
     """A grouped conversation owns its inner forms until it is returned to full text."""
+    uppers = selected.lower.get((step, ident))
+    if uppers and any(upper in selected for upper in uppers):
+        return True
     if step not in ("F6w", "F6g"):
         return False
     if not (selected.by_step.get("F6g") or selected.by_step.get("F6a")):

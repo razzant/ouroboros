@@ -78,17 +78,30 @@ def source_index(snapshot):
 
 
 def _sources(group):
-    words = [w for r in group["rooms"] for w in r["words"]]
-    kinds = {w["id"]: "fixed" if w.get("again") or w.get("kind") == "place_fact" else
-             "owner" if _whole_owner(w) else "unread" if _unread(w) else
-             "told" if _told(w) else "untold" for w in words}
-    rooms = {r["room_id"]: {kind: [w for w in r["words"] if kinds[w["id"]] == kind]
-                            for kind in ("owner", "unread", "told", "untold", "fixed")} for r in group["rooms"]}
+    words, kinds, rooms, owners, ids = [], {}, {}, [], set()
+    untold = 0
+    for room in group["rooms"]:
+        parts = rooms[room["room_id"]] = {k: [] for k in ("owner", "unread", "told", "untold", "fixed")}
+        for word in room["words"]:
+            # These cases are disjoint: repeats and place facts have no word form,
+            # then owner authority, consideration, and a work's recorded telling.
+            kind = ("fixed" if word.get("again") or word.get("kind") == "place_fact" else
+                    "owner" if word["owner_side"] else
+                    "unread" if word.get("rank") == 2 and word.get("kind") == "human" else
+                    "told" if word.get("gist") else "untold")
+            ident = word["id"]
+            kinds[ident] = kind
+            parts[kind].append(word)
+            words.append(word)
+            ids.add(ident)
+            if kind == "owner":
+                owners.append(word)
+            elif kind == "untold":
+                ids.add("bare:" + ident)
+                untold += 1
     return {"words": words, "kinds": kinds, "rooms": rooms,
-            "owners": [w for w in words if kinds[w["id"]] == "owner"],
-            "ids": {i for w in words for i in ((w["id"], "bare:" + w["id"]) if kinds[w["id"]] == "untold" else (w["id"],))},
-            "gists": _gist_records(group), "untold": sum(k == "untold" for k in kinds.values()),
-            "ordinary": all(k != "untold" for k in kinds.values()) and all(
+            "owners": owners, "ids": ids, "gists": _gist_records(group), "untold": untold,
+            "ordinary": not untold and all(
                 "lead_rule" in n and n.get("text", "").strip() for r in group["rooms"] for n in r["notes"])}
 
 

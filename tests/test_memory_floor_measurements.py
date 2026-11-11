@@ -36,6 +36,43 @@ def test_no_note_measurement_without_a_physical_bound():
     assert len(set(calls)) == 1, f'unpressured view: one form measured, got {set(calls)}'
 
 
+def test_complete_measurements_do_not_grow_with_finished_works(monkeypatch):
+    """The same crowded frame at 50/300 works: probe bounds, never each work's replies."""
+    from ouroboros import memory_view_work as work
+
+    counts = {}
+    original = mf.fit_memory_view
+    def counted(snapshot, allowances, **kwargs):
+        measure = kwargs['measure']
+        def price(level):
+            counts[n] += 1
+            return measure(level)
+        return original(snapshot, allowances, **{**kwargs, 'measure': price})
+    monkeypatch.setattr(mf, 'fit_memory_view', counted)
+    for n in (50, 300):
+        rows, tasks, summaries = [], [], {}
+        for w in range(n):
+            rows.extend(dict(syn.spoken(i, 'ouroboros', 1500), task_id=f'w{w}') for i in (2*w, 2*w+1))
+            gist = {'summary': f'Work {w} settled its thing.', 'ts': rows[-1]['ts'],
+                    'address': rows[-1]['address'], 'room_id': '1'}
+            task = syn.task_line(w)
+            task.update(task=f'w{w}', line=task['line'] + ' — summary: «' + gist['summary'] + '»')
+            tasks.append(task)
+            summaries[f'w{w}'] = gist
+        room = {**syn.room(lane1=rows), 'lane2': tasks}
+        groups = [syn.conversation(g+1, words=6, word_chars=800) for g in range(60)]
+        work.bind(room, groups, summaries)
+        snap = syn.snapshot(room_facts=room, conversations=groups, story=syn.pages(10, 3000))
+        full = mf.tokens_of(mv.story_chars(snap)) + mf.tokens_of(mv.room_chars(snap))
+        counts[n] = 0
+        shown = mf.render_view_for_mode(snap, mode='low', owner_mode='max', window_tokens=1_000_000,
+            known_window=True, output_reserve=65536, ratio=1,
+            non_memory_tokens=1_000_000 - 65536 - int(full * .4) - 120_000)
+        assert dict(shown.level.steps).get('F2'), 'the crowded view actually folds finished works'
+    print('WORK_MEASUREMENTS', counts)
+    assert counts[300] <= counts[50] + 8, counts
+
+
 def test_a_start_s_request_is_serialized_once_per_form_at_every_row_count(tmp_path, monkeypatch):
     """Serializations equal the request's forms and do not follow the rows: a form is a frame's shape, never a probe."""
     seen = {}

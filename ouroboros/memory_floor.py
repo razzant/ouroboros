@@ -20,7 +20,7 @@ from ouroboros import memory_view as mv
 from ouroboros import memory_view_conversations as conversations
 from ouroboros import memory_view_legacy as legacy
 from ouroboros.memory_forms import (LADDER, list_elements as _list_elements, ordinary_pairs, normalized, swallowed,
-                                    form_counts, holding_room, Selection, supersedes)
+                                    form_counts, holding_room, Selection, supersedes, WorkPrices)
 from ouroboros.chat_chain import parse_address
 from ouroboros.context_layout import WHOLE_OR_OUTLINE_STEPS
 from ouroboros.section_floor import PROTECTED, relocated_text, retain_section, section_views
@@ -350,8 +350,8 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
     from the snapshot's pieces (``render_view_for_mode``'s ``measure``, by default its story and room characters)."""
     table = _elements(snapshot)
     elements = table.priced
-    labels = {ident: short for step, ident, _whole, short in elements if step == 'F5l'}
-    group_prices = {ident: short for step, ident, _whole, short in elements if step == 'F6g'}
+    work_prices = WorkPrices(snapshot.room or {}, elements, view_tokens)
+    previous = {(step, ident): short for step, ident, _whole, short in elements if step in ('F5l', 'F6g')}
     old = {(step, ident) for step, ids in kept.addressed for ident in ids}
     taken = Selection(table, old, old=old, aggregates=_LIST_FORMS)
     measure = measure or (lambda level: tokens_of(mv.story_chars(snapshot, level)) + tokens_of(mv.room_chars(snapshot, level)))
@@ -366,7 +366,8 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
 
     ordinary = ordinary_pairs(snapshot, table.listed)
     # The same minimum ordinary view prices the clean-start guard and both Max decisions.
-    clean = target is None or measure(level(Selection(table, old | ordinary, old=old, aggregates=_LIST_FORMS))) <= target
+    clean = target is None or measure(level(Selection(table, old | ordinary, old=old, aggregates=_LIST_FORMS))
+                                      if old or budget or kept.by_budget else ordinary_level(snapshot)) <= target
     uncovered = uncovered_owner_rows(snapshot, elements)
     last = {(step, ident) for step, ident, *_ in uncovered}
     added = []
@@ -379,8 +380,7 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
         pair = step, ident
         if pair in taken or pair in last or (clean and pair not in ordinary) or swallowed(snapshot, step, ident, taken):
             continue
-        if (step in (*_LIST_FORMS, "F8") or step == "F2" and ident.startswith("work:")
-                or step == "F6a" and (ident == "unread" or not counted_groups)):
+        if step in (*_LIST_FORMS, "F8") or step == "F6a" and (ident == "unread" or not counted_groups):
             extra = [pair] + ([("F8", i) for i in table.ids.get("F8", ()) if ("F8", i) not in taken] if step == "F8a" else [])
             before = measure(level(taken))
             for added_pair in extra:
@@ -395,13 +395,13 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
         else:
             if step == "F6g" or step == "F6a":
                 key = ident.split(":", 1)[1] if ident.startswith(("all:", "last:")) else ident
-                whole = next((group_prices[name] for name in ("last:" + key, "all:" + key, key)
+                whole = next((previous["F6g", name] for name in ("last:" + key, "all:" + key, key)
                               if ("F6g", name) in taken), whole)
             if step == "F5l" and ("F5", ident) in taken:
                 continue
             if step == "F5" and ("F5l", ident) in taken:
-                whole = labels[ident]
-            delta = max(0, whole - short)
+                whole = previous['F5l', ident]
+            delta = work_prices.saving(ident, taken) if step == "F2" and ident.startswith("work:") else max(0, whole - short)
             current -= delta
             taken.add(pair)
         added.append((pair, delta))
@@ -447,7 +447,11 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
 def ordinary_level(snapshot):
     """All ordinary replacements, retaining every source that has no in-view telling."""
     table = _elements(snapshot)
-    return table.level(normalized(ordinary_pairs(snapshot, table.listed)))
+    previous, level = snapshot.__dict__.get("_ordinary_level", (None, None))
+    if previous is not table:
+        level = table.level(normalized(ordinary_pairs(snapshot, table.listed), table.replacements[0]))
+        object.__setattr__(snapshot, "_ordinary_level", (table, level))
+    return level
 
 
 def owner_rows(snapshot: mv.MemoryViewSnapshot) -> Dict[str, Mapping[str, Any]]:

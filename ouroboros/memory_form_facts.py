@@ -41,18 +41,20 @@ def _count_forms(snapshot, level):
     addressed |= {i[5:] for i in addressed if i.startswith("bare:")}
     aggregate = [r for r in room.get("lane1", ()) if r["address"] in addressed and not r.get("immune")] if gone.get("F7a") else []
     grouped = {r["address"] for r in aggregate}
+    folded_rows, separate = hidden - grouped, addressed - hidden - grouped
+    bare = gone.get("F2", set()) | gone.get("F7p", set())
     add("emergency", "room ranges", bool(aggregate), len(aggregate))
     for key, rows in works(room):
-        folded = [r for r in rows if r["address"] in hidden - grouped]
+        folded = [r for r in rows if r["address"] in folded_rows]
         add("retold", "works", int(bool(folded)), len(folded))
     for row in room.get("lane1", ()):
-        if row["address"] in addressed - hidden - grouped:
-            add("emergency", "room addresses" if ("bare:" + row["address"] in gone.get("F2", set()) | gone.get("F7p", set()) or row["address"] in gone.get("F7", ())) else "room openings", 1, 1)
+        if row["address"] in separate:
+            add("emergency", "room addresses" if ("bare:" + row["address"] in bare or row["address"] in gone.get("F7", ())) else "room openings", 1, 1)
     tasks = [t for t in room.get("lane2", ()) if t["first"] in gone.get("F1", ())]
     sole = sum(stage_of(snapshot, "F1", t["first"]) == "task_only" for t in tasks)
     add("emergency", "sole task gists", int(bool(sole)), sole)
     add("host", "task facts", int(bool(tasks) and not sole), len(tasks) - sole)
-    task_gists = ([t for t in room.get("lane2", ()) if t.get("gist") and t not in tasks] if aggregate
+    task_gists = ([t for t in room.get("lane2", ()) if t.get("gist") and t["first"] not in gone.get("F1", ())] if aggregate
                   else task_gists_before_work_lines(room, gone))
     add("retold", "task gists", len(task_gists), len(task_gists))
     for row in room.get("project_words") or ():
@@ -65,9 +67,10 @@ def _count_forms(snapshot, level):
             ("F5", [e for e in snapshot.story if not e.get("told_by")], "F5a", "story"),
             ("F8", room.get("notes", ()), "F8a", "notes")):
         aggregated = [e for e in entries if e["id"] in gone.get(step, ())] if gone.get(aggregate_step) else []
+        grouped_ids = {e["id"] for e in aggregated}
         add("emergency", label + " lists", int(bool(aggregated)), len(aggregated))
         for entry in entries:
-            if entry in aggregated:
+            if entry["id"] in grouped_ids:
                 continue
             if step == "F5" and entry["id"] in gone.get(step, ()):
                 add("emergency", label + " pointers", 1, 1)
@@ -180,11 +183,12 @@ def _holding_room(snapshot, level):
                 ready.append([tokens, reader])
     pages = [e for e in snapshot.story if not e.get("told_by") and e.get("kind") != "legacy"]
     aggregated = [e for e in pages if e["id"] in gone.get("F5", ())] if gone.get("F5a") else []
+    grouped_ids = {e["id"] for e in aggregated}
     if aggregated:
         hold("story lists", mv._story_line(aggregated), unmarked=any("lead_rule" not in e for e in aggregated))
     for entry in pages:
         ident, kind = entry["id"], entry.get("kind")
-        if entry in aggregated:
+        if entry["id"] in grouped_ids:
             continue
         text = (mv._page_pointer(entry) if ident in gone.get("F5", ()) else mv._page_label(entry)
                 if ident in gone.get("F5l", ()) else "\n".join(mv._page_lines(entry)))
@@ -199,10 +203,11 @@ def _holding_room(snapshot, level):
              f"memory_read(node_id='{entry['id']}')", unmarked=not entry.get("standing") and "lead_rule" not in entry)
     notes = room.get("notes", ())
     aggregate_notes = [e for e in notes if e["id"] in gone.get("F8", ())] if gone.get("F8a") else []
+    grouped_notes = {e["id"] for e in aggregate_notes}
     if aggregate_notes:
         hold("notes", mv._notes_line(aggregate_notes), unmarked=any("lead_rule" not in e for e in aggregate_notes))
     for note in notes:
-        if note not in aggregate_notes:
+        if note["id"] not in grouped_notes:
             text = mv._note_pointer(note) if note["id"] in gone.get("F8", ()) else "\n".join(mv._note_lines([note]))
             hold("notes", text, f"memory_read(node_id='{note['id']}')", unmarked="lead_rule" not in note)
     hidden, work_lines = folded_work_rows(room, gone)
@@ -215,14 +220,15 @@ def _holding_room(snapshot, level):
             hold("work gists", line)
     folded = {key for key, _rows in works(room) if any("work:" + key + suffix in gone.get("F2", ())
                                                      for suffix in (":progress", ":final"))} if not aggregate else set()
-    only_gists = task_gists_before_work_lines(room, gone)
+    only_gists = {t["first"] for t in task_gists_before_work_lines(room, gone)}
     for task in room.get("lane2", ()):
-        if task.get("gist") and (task["first"] not in gone.get("F1", ()) or task in only_gists) and task.get("task") not in folded:
+        if task.get("gist") and (task["first"] not in gone.get("F1", ()) or task["first"] in only_gists) and task.get("task") not in folded:
             gist = task["gist"]
-            hold("task gists", task_gist_line(task) if task in only_gists else task_line(task), f"memory_read(room_id='{gist['room_id']}', rows=true, "
+            hold("task gists", task_gist_line(task) if task["first"] in only_gists else task_line(task), f"memory_read(room_id='{gist['room_id']}', rows=true, "
                  f"from='{gist['address']}', to='{gist['address']}')")
+    grouped_rows = {r["address"] for r in aggregate}
     for row in room.get("lane1", ()):
-        if row in aggregate or row.get("gist") or row["address"] in hidden:
+        if row["address"] in grouped_rows or row.get("gist") or row["address"] in hidden:
             continue
         step = "F2" if row["kind"] == "ouroboros" else "F7" if row.get("owner_side", row["kind"] == "human") else "F7p"
         label = "my reply" if step == "F2" else "words"

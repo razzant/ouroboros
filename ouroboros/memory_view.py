@@ -304,7 +304,7 @@ _TUPLES = ("story", "conversations", "marks", "fallback_refusals")
 
 def json_chars(text: str) -> int:
     """What a text adds to a request's JSON: its escaped characters, quotes excluded."""
-    return len(json.dumps(text, ensure_ascii=False)) - 2
+    return len(json.encoder.encode_basestring(text)) - 2
 
 
 def snapshot_json(snapshot: MemoryViewSnapshot) -> str:
@@ -1342,12 +1342,13 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]]) -> str:
         aggregate = [item for item in room['lane1'] if item['address'] in addressed
                      and not item.get('immune')] if gone.get('F7a') else []
         grouped = {item['address'] for item in aggregate}
+        omitted = grouped | work_rows
         for item in room['lane1']:
             if aggregate and item is aggregate[0]:
                 lines.append(_rows_line(room, aggregate))
             if item['address'] in work_lines and not aggregate:
                 lines.append(work_lines[item['address']])
-            if item['address'] not in grouped | work_rows:
+            if item['address'] not in omitted:
                 render = _row_pointer if item['address'] in bare or item['address'] in gone.get('F7', ()) else _row_opening
                 lines.append(item['line'] if item.get('immune') else render(item, 'my reply')
                              if item['address'] in mine else render(item, 'words') if item['address'] in people else item['line'])
