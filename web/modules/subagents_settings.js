@@ -905,7 +905,7 @@ export function createAvailableSubagentsEditor({
     }
 
     // An agent page's Save: the form goes into its own entry of the list read afresh. A saved agent keeps the on/off
-    // and marks the server holds; a new one brings its own. The re-check mark belongs to one agent at a time.
+    // and the marks the server holds (its switches write those); a new one brings its own.
     async function saveEntry(button) {
         const row = current();
         state.saveAttempted = row._uiAttempted = true;
@@ -1407,13 +1407,12 @@ export async function readReviewPool() {
 // The last-reviewer question of every roster write, in the owner's words (the server's sentence names a request flag).
 CONFIRMS.emptyReviewPool = (row, refused, current, ask) => ask({ title: 'Save without reviewers?', confirmLabel: 'Save without reviewers',
     danger: true, body: 'No agent marked Reviewer would be on, so the main model reviews alone: one model, no second opinion.' });
-// Helpers may change files: Off, Auto or On, where Auto is the unset value that follows Access (config.py
-// get_allow_mutative_subagents). A receipt's stored spelling reads back as the same three words.
-const MUTATIVE = { true: 'on', false: 'off', on: 'on', off: 'off' };
-CODECS.helperMutation = {
-    read: (settings, row) => (settings ? MUTATIVE[String(settings[row.keys[0]] ?? '').trim().toLowerCase()] || 'auto' : undefined),
-    body: (value, row) => ({ [row.keys[0]]: { on: 'true', off: 'false' }[MUTATIVE[String(value ?? '').trim().toLowerCase()]] ?? '' }),
-};
+// Helpers may change files: stored as 'true', 'false' or nothing (Auto follows Access: config.py
+// get_allow_mutative_subagents). An older spelling of yes or no reads as the same choice.
+CODECS.helperMutation = { read(settings, row) {
+    const text = String(settings?.[row.keys[0]] ?? '').trim().toLowerCase();
+    return !settings ? undefined : /^(1|true|yes|on)$/.test(text) ? 'true' : /^(0|false|no|off)$/.test(text) ? 'false' : '';
+} };
 
 let roots = 0;
 /** Settings › Agents (settings_pages.js): the list (`agents`), or one agent's page (`agents/<id>`, `agents/new`). It

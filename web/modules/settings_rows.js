@@ -42,7 +42,7 @@ export const ROWS = [
     { id: 'OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS', keys: ['OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS'], page: 'agents', fold: true,
         name: 'Helpers may change files', meta: 'Auto follows Access.',
         more: 'Whether a helper may write in its own copy of the work, an outside folder or a new project. Helpers that only read stay available.',
-        control: { kind: 'strip', options: [{ value: 'off', label: 'Off' }, { value: 'auto', label: 'Auto' }, { value: 'on', label: 'On' }] },
+        control: { kind: 'strip', options: [{ value: 'false', label: 'Off' }, { value: '', label: 'Auto' }, { value: 'true', label: 'On' }] },
         aliases: ['Allow mutative subagents', 'write access'],
         writer: 'generic', codec: 'helperMutation', confirm: '', hiddenWhen: '' },
     { id: 'OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT', keys: ['OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT'], page: 'agents', fold: true,

@@ -39,13 +39,13 @@ const ROSTER = () => [
 
 // The settings server's roster half: the stored list, its token, and one queue of scripted answers.
 function fakeServer(env, { items = ROSTER(), saved = true } = {}) {
-    const server = { roster: { enabled: true, items }, saved, version: 0, posts: [], generic: [], answers: [], reads: 0 };
+    const server = { roster: { enabled: true, items }, saved, version: 0, posts: [], generic: [], answers: [], reads: 0,
+        plain: { OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS: '', OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT: 6, OUROBOROS_MAX_SUBAGENT_DEPTH: 3,
+            OUROBOROS_SUBAGENT_WORKTREE_ROOT: '', OUROBOROS_SUBAGENT_PROJECTS_ROOT: '' } };
     server.token = () => `roster@${server.version}`;
     server.agent = (id) => server.roster.items.find((item) => item.subagent_id === id);
     server.document = () => ({
-        [KEY]: server.saved ? JSON.stringify(server.roster) : '',
-        OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS: '', OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT: 6, OUROBOROS_MAX_SUBAGENT_DEPTH: 3,
-        OUROBOROS_SUBAGENT_WORKTREE_ROOT: '', OUROBOROS_SUBAGENT_PROJECTS_ROOT: '',
+        [KEY]: server.saved ? JSON.stringify(server.roster) : '', ...server.plain,
         OUROBOROS_REVIEW_ENFORCEMENT: 'blocking', OUROBOROS_RUNTIME_MODE: 'pro',
         _meta: { tokens: { [KEY]: server.token() }, effects: { [KEY]: 'next_task', OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS: 'next_task' },
             available_subagents: { source: server.saved ? 'configured' : 'undecided', candidate: server.saved ? null : server.roster } },
@@ -61,8 +61,12 @@ function fakeServer(env, { items = ROSTER(), saved = true } = {}) {
     };
     env.routes.set('/api/settings', async (_url, init = {}) => {
         if (init.method !== 'POST') { server.reads += 1; return response(server.document()); }
-        server.generic.push(JSON.parse(init.body));
-        return response({ status: 'saved' });
+        const body = JSON.parse(init.body);
+        server.generic.push(body);
+        const changes = Object.fromEntries(Object.keys(body).filter((key) => key in server.plain)
+            .map((key) => [key, { old: server.plain[key], new: body[key], token: `${key}@${server.generic.length}` }]));
+        Object.assign(server.plain, Object.fromEntries(Object.entries(changes).map(([key, change]) => [key, change.new])));
+        return response({ status: 'saved', changes });
     });
     env.routes.set(CHECKER, async (_url, init) => {
         const body = JSON.parse(init.body);
@@ -350,6 +354,31 @@ test('a new agent is an unsaved form whose on/off is a field of it; its Save add
     assert.deepEqual({ ...added, subagent_id: '' }, { subagent_id: '', recommended_use: '', route: { kind: 'api_model', target_id: 'qwen/qwen3.8-max' }, enabled: false });
     assert.equal(page.server.roster.items.length, 4);
     assert.deepEqual(page.opened, ['agents']);
+});
+
+test('Helpers may change files is a strip over the stored spelling: Auto is the unset value, and a receipt reads back in its words', async (t) => {
+    const page = await open(t);
+    const fold = page.container.querySelector('[data-settings-fold]');
+    const row = fold.querySelector('[data-setting-row="OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS"]');
+    const option = (label) => row.querySelectorAll('[data-setting-value]').find((button) => button.textContent === label);
+    const pressed = () => row.querySelectorAll('[data-setting-value]').filter((button) => button.getAttribute('aria-pressed') === 'true')
+        .map((button) => button.textContent);
+    assert.deepEqual(row.querySelectorAll('[data-setting-value]').map((button) => button.textContent), ['Off', 'Auto', 'On']);
+    assert.deepEqual(pressed(), ['Auto']);
+    await fold.fire('click', { target: option('On') });
+    await settle();
+    assert.deepEqual(page.server.generic, [{ OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS: 'true' }], 'its one key, by the generic save');
+    assert.deepEqual(pressed(), ['On']);
+    assert.equal(row.querySelector('[data-setting-result]').textContent, 'Saved · applies to new tasks · was Auto · Undo');
+    await fold.fire('click', { target: option('Auto') });
+    await settle();
+    assert.deepEqual(page.server.generic[1], { OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS: '' }, 'Auto is stored as nothing');
+    assert.equal(row.querySelector('[data-setting-result]').textContent, 'Saved · applies to new tasks · was On · Undo');
+    // A value written long ago in another spelling reads as the same choice.
+    page.server.plain.OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS = 'off';
+    await page.shown();
+    assert.deepEqual(pressed(), ['Off']);
+    assert.equal(page.server.posts.length, 0, 'the roster is no part of these rows');
 });
 
 test('a roster write says Saved with when it applies, a refusal with the server\'s sentence, and nothing for no change', () => {
