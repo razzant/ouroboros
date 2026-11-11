@@ -66,6 +66,7 @@ warning | web/style.css | .harness-account-meta .meta-fact[data-tone="warn"] | c
 warning | web/style.css | :root[data-theme="light"] .harness-account-row.harness-exhausted | background
 warning | web/style.css | .harness-maintenance-notice[data-tone="warn"] | color
 warning | web/style.css | .log-entry .log-phase:is(.warn, .empty):not([data-chip-tone]) | background, border-color, color
+warning | web/style.css | .message-share-status[data-tone="warn"] | color
 warning | web/style.css | .msg-attachment-outcome | color
 warning | web/style.css | .new-project-trust-note | background, color
 warning | web/style.css | .settings-lan-hint[data-tone="warn"] | color

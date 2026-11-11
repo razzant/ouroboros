@@ -332,7 +332,12 @@ function costsPanel(t, answers) {
         return [details ? all.slice(0, all.indexOf('Details')) : all, status.dataset.tone ?? ''];
     };
     const raw = () => status.querySelector('.ui-result-details')?.textContent ?? '';
-    return { ...env, status, save, posts, press, words, raw, tick: (ms) => t.mock.timers.tick(ms) };
+    const edit = async (id, value) => {
+        const field = env.mount.querySelector(`#${id}`);
+        field.value = value;
+        await save.closest('.costs-budget').fire('input', { target: field });
+    };
+    return { ...env, status, save, posts, press, edit, words, raw, tick: (ms) => t.mock.timers.tick(ms) };
 }
 
 test('the budget form is the reference action row: Save, then its result as the next sibling in one row', (t) => {
@@ -418,10 +423,47 @@ test('one timer owner: an older acknowledgement never erases what a newer save s
 test('a validation message after an acknowledgement is not erased by the acknowledgement\'s timer either', async (t) => {
     const panel = costsPanel(t, [reply({ immediate_changed: true })]);
     await panel.press();
-    panel.mount.querySelector('#s-budget').value = '0';
+    await panel.edit('s-budget', '0');
     panel.tick(ACK - 1);
     await panel.press();
     panel.tick(ACK);
     assert.deepEqual(panel.words(), ['Budget values must be at least 0.01.', 'danger'], 'never in the acknowledgement\'s tone');
     assert.equal(panel.posts.length, 1, 'an invalid value is never sent');
+});
+
+// The consciousness allowance moved here from Settings (owner, 10 Nov 2026): only what was edited is posted, so a
+// Costs tab left open never writes back an old limit; its save says the clock's next check reads it.
+test('Costs posts only edited limits, the allowance\'s 0 and decimals included, and says when the clock reads it', async (t) => {
+    const panel = costsPanel(t, [reply({ next_task_changed: true }), reply({ immediate_changed: true }),
+        reply({ no_changes: true })]);
+    let reads = 0;
+    panel.routes.set('/api/consciousness', async () => { reads += 1; return reply({ enabled: true, status: 'sleeping',
+        spent_24h_usd: 1.5, daily_usd: 0, allowance_status: 'exhausted' }); });
+    const field = (id) => panel.mount.querySelector(`#${id}`);
+    for (const [id, value] of [['s-budget', '200'], ['s-per-task-cost', '50'], ['s-consciousness-allowance', '300']]) {
+        field(id).value = value;
+        field(id).dataset.loaded = value;  // as loadBudget leaves them
+    }
+    await panel.edit('s-consciousness-allowance', '0');
+    await panel.press();
+    assert.deepEqual(panel.posts, [{ OUROBOROS_CONSCIOUSNESS_DAILY_USD: 0 }], 'the one edited limit, its 0 a number');
+    assert.deepEqual(panel.words(), ['Saved. The next consciousness check uses it; a paused wake keeps its launch limit.', 'ok']);
+    assert.equal(reads, 1, 'its spend and state are read again under the new limit');
+    assert.match(field('costs-allowance-state').textContent, /At \$0 consciousness may not spend/);
+    await panel.edit('s-budget', '250');
+    await panel.press();
+    assert.deepEqual(panel.posts[1], { TOTAL_BUDGET: 250 }, 'the saved allowance is the new baseline, never sent again');
+    assert.equal(reads, 1, 'a budget save does not re-read consciousness');
+    await panel.press();
+    assert.deepEqual(panel.posts[2], {}, 'nothing edited still asks the server, which answers no change');
+    assert.deepEqual(panel.words(), ['No changes.', 'ok']);
+    await panel.edit('s-consciousness-allowance', '12.75');
+    await panel.edit('s-per-task-cost', '');
+    await panel.press();
+    assert.deepEqual(panel.words(), ['Budget values must be at least 0.01.', 'danger'], 'an emptied cap is no number, nothing sent');
+    await panel.edit('s-per-task-cost', '50');
+    await panel.edit('s-consciousness-allowance', '-2');
+    await panel.press();
+    assert.deepEqual(panel.words(), ['The consciousness limit must be a number, 0 or more.', 'danger']);
+    assert.equal(panel.posts.length, 3);
 });

@@ -588,8 +588,8 @@ def _delivery_control_prompt(candidate: DeliveryCandidate, *, pending_review_cho
     """Selection is an author act, never a classifier over prose or its length."""
     return ("[DELIVERY_FINALIZATION_CONTROL]\n[SYSTEM NOTICE] The complete answer is retained as "
             + candidate.content_sha256 + ". Continue useful work or use the available completion tool "
-            "to select complete answer bytes or this answer_sha256. action=finish requests the normal "
-            "completion checks; action=stop with a rationale records unfinished work without cancelling children. "
+            "to select complete answer bytes or this answer_sha256. action=finish delivers the selection unless "
+            "the host holds it; action=stop with a rationale records unfinished work without cancelling children. "
             "Interim prose is activity, not a new completion selection."
             + (" Pending critics: choose pending_review=wait (default) or finish where permitted."
                if pending_review_choice else ""))
