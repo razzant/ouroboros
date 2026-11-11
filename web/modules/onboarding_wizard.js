@@ -1228,8 +1228,8 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
                     if (resp.status === 412 && data.error === 'runtime_missing') {
                         setLocalTestResult(
                             'Local runtime (llama-cpp-python) is not installed.\n' +
-                            'Go to Settings → Advanced → Local Model Runtime\n' +
-                            'and click "Install Local Runtime".\n\n' +
+                            'Go to Settings › Models › Local model\n' +
+                            'and press "Install the local runtime".\n\n' +
                             'Manual: ' + (data.hint || 'pip install llama-cpp-python[server]'),
                             'error'
                         );
