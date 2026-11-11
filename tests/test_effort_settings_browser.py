@@ -27,11 +27,11 @@ def test_reviewer_effort_auto_caption_and_saved_preference(role_ui, tmp_path, wi
     facts = unset.locator(f'[data-subagent-field="effort"] {default}')
     assert facts.inner_text() == "Auto (reviews at the top of the chat range)"
     with page.expect_response("**/api/owner/safety-model"):
-        unset.locator('[data-subagent-field="review_eligible"]').uncheck()
+        unset.locator('.agent-use:has([data-subagent-field="review_eligible"]) .ui-switch').click()
     page.wait_for_function("() => document.querySelector('[data-subagent-field=effort]')?.options[0].textContent === 'Auto (chat range)'")
     assert facts.inner_text() == "Auto (chat range)", "an unmarked row runs inside the chat range"
     with page.expect_response("**/api/owner/safety-model"):
-        unset.locator('[data-subagent-field="review_eligible"]').check()
+        unset.locator('.agent-use:has([data-subagent-field="review_eligible"]) .ui-switch').click()
     page.wait_for_function("() => document.querySelector('[data-subagent-field=effort]')?.options[0].textContent.includes('reviews at the top')")
     unset.locator('[data-subagent-field="effort"]').select_option('medium')
     unset.scroll_into_view_if_needed()
