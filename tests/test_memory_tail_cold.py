@@ -974,6 +974,36 @@ def test_every_write_of_a_tasks_lineage_moves_the_mark_again_whatever_statement_
     _same(monkeypatch, tmp_path, rooms)
 
 
+def _older_body_write(root: pathlib.Path, task: str, chat) -> None:
+    """What a body before the chat column writes (``Txn.store_task`` then): its document, and a REPLACE of the typed
+    row without that column, so the row stays underived and the room rule reads the chat from the body."""
+    with store.open_store(root, write=True) as txn:
+        document = {**txn.load(task), "chat_id": chat}
+        txn.conn.execute("UPDATE task_bodies SET body=? WHERE task_id=?", (store.encode_document(document), task))
+        txn.conn.execute("INSERT OR REPLACE INTO tasks (task_id, status, root_task_id) VALUES (?, ?, ?)",
+                         (task, document["status"], task))
+
+
+def test_an_underived_tasks_rewrite_moves_the_mark_whatever_its_body_says(monkeypatch, tmp_path):
+    """A task an older body wrote keeps no typed chat: its room follows the chat its body names
+    (``projects_registry._BODY_CHAT``), which no trigger can read. Every rewrite of such a row counts as a lineage
+    write, or a second write that moves only the body's chat would leave its sealed row out of its new room."""
+    rooms = _settled(tmp_path)
+    write_task_result(tmp_path, "older", "running", chat_id=1)
+    _older_body_write(tmp_path, "older", 1)  # its typed chat is underived from here on
+    _append(tmp_path, shared.msg(_ts(1), "Older body words.", direction="out", task_id="older"))
+    _append(tmp_path, shared.msg(_ts(2), "Later word.", client_message_id="later"))
+    _fill(tmp_path)
+    row = _entry(tmp_path, "Older body words.")
+    _seal(tmp_path, row, 1)
+    _compose(tmp_path)
+    assert row[2] in _cold_positions(tmp_path)
+    _older_body_write(tmp_path, "older", rooms["alpha"])  # the same older body moves its work to alpha
+    assert not _in_use(tmp_path)
+    assert row[2] in _open_in(tmp_path, rooms["alpha"])
+    _same(monkeypatch, tmp_path, rooms)
+
+
 def test_a_write_that_keeps_every_tasks_lineage_keeps_the_set(monkeypatch, tmp_path):
     rooms, _row = _sealed_main_row(tmp_path)
     write_task_result(tmp_path, "late", "failed", result="again")  # the same parent, root, role and chat

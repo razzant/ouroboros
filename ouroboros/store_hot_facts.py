@@ -91,9 +91,10 @@ BEGIN UPDATE obligations SET request_root_task_id=NULL WHERE set_name=NEW.set_na
 # A task's lineage as the room rule reads it (``projects_registry._read_lineage``: parent, root, role, admitted chat)
 # changes on an existing task only through a statement one of these triggers watches: a REPLACE (``Txn.store_task``, an
 # older body's), an UPDATE (the derivation job, any direct writer) or a DELETE. Each moves one counter in that writer's
-# own transaction; a new task moves nothing. The cold tail set's mark (``memory_tail_cold``, ``lineage_writes``). Its
-# statements name no conflict policy: a trigger's take the firing statement's, and an ``INSERT OR IGNORE`` fired by a
-# REPLACE replaced the count with its seed.
+# own transaction; a new task moves nothing. A REPLACE of a row whose chat is underived counts whatever it writes: the
+# rule reads that chat from the body (``projects_registry._BODY_CHAT``), which no trigger reads. The cold tail set's
+# mark (``memory_tail_cold``, ``lineage_writes``). Its statements name no conflict policy: a trigger's take the firing
+# statement's, and an ``INSERT OR IGNORE`` fired by a REPLACE replaced the count with its seed.
 LINEAGE_WRITES = "task_lineage_writes"
 LINEAGE_COLUMNS = ("parent_task_id", "root_task_id", "delegation_role", "chat_id")  # a task record's own fields too
 _MOVE = (f"INSERT INTO meta (key, value) SELECT '{LINEAGE_WRITES}', '0' WHERE NOT EXISTS "
@@ -101,7 +102,8 @@ _MOVE = (f"INSERT INTO meta (key, value) SELECT '{LINEAGE_WRITES}', '0' WHERE NO
          f"UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = '{LINEAGE_WRITES}';")
 LINEAGE_TRIGGERS = (
     "CREATE TRIGGER IF NOT EXISTS tasks_lineage_replaced BEFORE INSERT ON tasks WHEN EXISTS (SELECT 1 FROM tasks t WHERE "
-    f"t.task_id = NEW.task_id AND ({' OR '.join(f't.{name} IS NOT NEW.{name}' for name in LINEAGE_COLUMNS)})) BEGIN {_MOVE} END",
+    f"t.task_id = NEW.task_id AND (t.chat_id IS NULL OR {' OR '.join(f't.{name} IS NOT NEW.{name}' for name in LINEAGE_COLUMNS)})) "
+    f"BEGIN {_MOVE} END",
     f"CREATE TRIGGER IF NOT EXISTS tasks_lineage_updated AFTER UPDATE OF {', '.join(LINEAGE_COLUMNS)} ON tasks WHEN "
     f"{' OR '.join(f'OLD.{name} IS NOT NEW.{name}' for name in LINEAGE_COLUMNS)} BEGIN {_MOVE} END",
     f"CREATE TRIGGER IF NOT EXISTS tasks_lineage_removed AFTER DELETE ON tasks BEGIN {_MOVE} END",
