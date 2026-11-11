@@ -121,6 +121,13 @@ def _page(ui, width, height, theme="dark", **values):
     page.route("**/api/desktop/autostart", lambda route: route.fulfill(content_type="application/json", body='{"state": "on"}'))
     page.route("**/api/desktop/background", lambda route: route.fulfill(content_type="application/json", body='{"state": "off"}'))
     page.route("**/api/logs/events**", lambda route: route.fulfill(content_type="application/json", body='{"entries": []}'))
+    page.route("**/api/ui/i18n", lambda route: route.fulfill(content_type="application/json", body=json.dumps(
+        {"language": "en", "english": True, "chosen": False, "languages": [], "revision": 1, "entries": {}})))
+    # A skill that registered a live conversation, as the contributions projection lists it (no page module to load).
+    page.route("**/api/ui/contributions", lambda route: route.fulfill(content_type="application/json", body=json.dumps(
+        {"contributions": [{"key": "talk_skill:call", "id": "call", "skill": "talk_skill", "skill_label": "Calls (beta)",
+                            "provides": "conversation", "runtime": "client", "label": "Live Conversation", "revision": "1"}],
+         "offers": {}, "preferences": {}, "voice": {}, "icons": [], "problems": {}})))
     page.goto(ui["url"] + "/#settings")
     page.wait_for_function("() => Boolean(window.__ouroSettings && window.ouroTheme)")
     page.evaluate("theme => window.ouroTheme.set(theme)", theme)
@@ -257,3 +264,27 @@ def test_opening_to_the_network_asks_and_carries_the_typed_password(subscription
         "the host and the typed password travel in one body"
     assert server.values["OUROBOROS_NETWORK_PASSWORD"] == "correct horse battery"
     setup_browser.capture(page, "c2-computer-restart-waits-1087x740-dark")
+
+
+def test_voice_and_calls_says_the_saved_choices_and_opens_the_form_of_the_skill_that_registered_a_call(subscription_ui):
+    """No setting lives on this page. On this branch the skill's own form page (`skill/<id>`, the shell lane's) is not
+    registered yet: the door opens its level, which shows the page chrome alone; the form inside it is asserted on the
+    integrated tree."""
+    page, server = _page(subscription_ui, 1087, 740)
+    level = open_settings(page, "voice")
+    _settled(page, "voice")
+    assert level.locator("[data-setting-row]").evaluate_all("rows => rows.map((row) => row.dataset.settingRow)") == \
+        ["voice:dictation", "voice:read-aloud", "voice:skill:talk_skill"]
+    assert level.locator("input, select, textarea, [role='switch']").count() == 0
+    dictation = setting_row(page, "voice:dictation")
+    assert dictation.locator("[data-setting-meta]").inner_text() == "Chosen at the message field: +, then Add dictation."
+    assert dictation.locator('[data-fact="voice:dictation"]').inner_text() == "Not chosen"
+    assert setting_row(page, "voice:read-aloud").locator("[data-setting-meta]").inner_text().startswith("Chosen in a reply")
+    door = setting_row(page, "voice:skill:talk_skill")
+    assert door.locator(".ui-row-title").inner_text() == "Calls (beta)"
+    setup_browser.capture(page, "c2-voice-with-calls-1087x740-dark")
+    door.click()
+    opened = settings_page(page, "skill/talk_skill")
+    opened.wait_for(state="visible")
+    assert opened.locator("[data-settings-back]").inner_text().strip() == "Voice and calls"
+    assert server.posts == []
