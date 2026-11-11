@@ -6082,9 +6082,11 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .costs-allowance-state:empty { display: none; }
 .costs-allowance-line { margin: 0; max-width: 72ch; }
 .costs-allowance-note { color: var(--text-meta); }
-/* Reserve the sentence link's touch overshoot inside its field, before the next status or disclosure (ui.css "Touch reach"). */
+/* Reserve each sentence link's touch overshoot before the next status or disclosure (ui.css "Touch reach"). */
 @media (pointer: coarse) {
-    .costs-allowance { padding-block-end: max(0px, calc((var(--touch-target-min) - var(--type-meta) * var(--line-meta)) / 2)); }
+    .costs-allowance, .costs-allowance-line:has([data-open-task]) {
+        padding-block-end: max(0px, calc((var(--touch-target-min) - var(--type-meta) * var(--line-meta)) / 2));
+    }
 }
 .costs-tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: var(--space-4); align-items: start; }
 .cost-cell-name { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
