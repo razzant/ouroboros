@@ -1972,6 +1972,74 @@ def test_a_lineage_read_begun_before_this_process_forgot_its_lineage_reaches_no_
         assert _entry(tmp_path, "Moving words.")[2] in _open_in(tmp_path, rooms["alpha"])
 
 
+def test_a_capture_shares_no_room_answer_read_under_other_project_rooms_than_its_own(monkeypatch, tmp_path):
+    """One process, two captures around a new Project. The first read its marks before the Project was made and forgets
+    the process's lineage after the second, which read them after, has forgotten it: its rule answers a task admitted in
+    the new Project's chat as outside every Project. The second capture's rule is given the Project rooms of its own
+    marks and shares no answer read under others: its view, and the set it composes under its marks, hold the task's row
+    in the Project, as a fresh process does. Under the same Project rooms the answers are shared as before."""
+    import threading
+
+    from ouroboros.contracts.chat_id_policy import project_chat_id
+
+    rooms = _settled(tmp_path)
+    chat = project_chat_id("gamma")
+    write_task_result(tmp_path, "early", "completed", result="done", chat_id=chat)
+    _append(tmp_path, shared.msg(_ts(1), "Early row.", direction="out", task_id="early"))
+    _append(tmp_path, shared.msg(_ts(2), "Later word.", client_message_id="later"))
+    _fill(tmp_path)
+    row = _entry(tmp_path, "Early row.")
+    _seal(tmp_path, row, 1)
+    _compose(tmp_path)
+    _forget_process_memos()
+    forget, moved, main = pr.forget_lineage, cold.moved, threading.get_ident()
+    at_forget, go, at_end, done = (threading.Event() for _ in range(4))
+    earlier, later = [], []
+
+    def forgetting(root, writes, projects=None):
+        if threading.get_ident() != main and not earlier:  # the earlier capture: its marks are read, it has not forgotten
+            earlier.append(projects)
+            at_forget.set()
+            assert go.wait(600)
+            return forget(root, writes, projects)
+        forget(root, writes, projects)
+        if threading.get_ident() == main and earlier and not later:  # the later capture has forgotten: the earlier one
+            later.append(projects)  # forgets now, reads its pass and stops before its end check
+            go.set()
+            assert at_end.wait(600)
+
+    def end_check(store_, gate_):
+        if threading.get_ident() != main:
+            at_end.set()
+            assert done.wait(600)
+        return moved(store_, gate_)
+
+    other = threading.Thread(target=lambda: mi.open_rows_by_room(tmp_path))
+    with monkeypatch.context() as patch:
+        patch.setattr(pr, "forget_lineage", forgetting)
+        patch.setattr(cold, "moved", end_check)
+        other.start()
+        assert at_forget.wait(600)
+        create_project(tmp_path, "gamma", name="Gamma")
+        try:
+            got = _main_view(tmp_path)
+        finally:
+            go.set(), done.set()
+            other.join(600)
+    assert not other.is_alive() and chat not in earlier[0] and chat in later[0], (earlier, later)
+    assert _child(tmp_path, rooms, whole=False) == _child(tmp_path, rooms, whole=True)
+    shared_answers = pr._ROOM_ANSWERS[str(pr._bindings_path(tmp_path))]
+    again = _main_view(tmp_path)
+    assert pr._ROOM_ANSWERS[str(pr._bindings_path(tmp_path))] is shared_answers and shared_answers[1]  # the same rooms
+    _forget_process_memos()
+    want = _whole_main(monkeypatch, tmp_path)
+    assert got == want, _first_difference({"main": got}, {"main": want})
+    assert again == want, _first_difference({"main": again}, {"main": want})
+    with monkeypatch.context() as patch:  # and that is the state with the Project: the sealed row is open in its room
+        patch.setattr(cold, "gate", lambda _store: None)
+        assert row[2] in _open_in(tmp_path, chat)
+
+
 def test_a_task_store_before_the_lineage_count_decides_nothing(monkeypatch, tmp_path):
     """A store an older body left before the count (no triggers, schema 11) answers no lineage mark: no set stands on
     it and none is composed over it, so a lineage write nothing counts reaches every start."""

@@ -599,7 +599,7 @@ def _emit_origin_ambiguous(drive_root: Any, key: tuple, candidates: list, chosen
 # reader looks in.
 _TASK_LINEAGE: Dict[str, Dict[str, Dict[str, Any]]] = {}
 _TASK_LINEAGE_LIMIT = 50_000  # a memory bound, not a policy: the facts are re-read on the next sight
-_ROOM_ANSWERS: Dict[str, tuple] = {}
+_ROOM_ANSWERS: Dict[str, tuple] = {}  # each root's (bindings, answers, the Project rooms a capture gave their rule)
 _LINEAGE_SEEN: Dict[str, Any] = {}  # each root's lineage writes and Project rooms its remembered answers were read under
 # One capture (``store_capture``). ``chat_id`` is the column its writer derived (``store_hot_facts.admitted_chat``);
 # only a row an older writer left underived, and every row of a store before that column, reads its body for it:
@@ -670,10 +670,11 @@ class RoomResolver:
     """One rule for live/history/cognition: nearest explicit binding on task→parent→…,
     then root; else own admitted registered Project chat (never project_id), else 0
     preserves the caller's address. Caller/store lineage is shared. Answers cache per
-    bindings snapshot by the rule's whole input (a row's own parent and root): conversion
-    invalidates, commit does not; an answer resting on a task not held or not read now is
-    never kept (``settled``), absent ids read once per resolver. Strict publication uses
-    fresh bindings and propagates unreadable authority instead of pinning a guessed room."""
+    bindings snapshot by the rule's whole input (a row's own parent and root), a capture's only
+    with resolvers given its own Project rooms: conversion invalidates, commit does not; an
+    answer resting on a task not held or not read now is never kept (``settled``), absent ids
+    read once per resolver. Strict publication uses fresh bindings and propagates unreadable
+    authority instead of pinning a guessed room."""
 
     __slots__ = ("root", "bindings", "answers", "misses", "_projects", "strict")
 
@@ -682,8 +683,8 @@ class RoomResolver:
         self.bindings = _load_bindings(drive_root, strict=strict)["bindings"]  # one ``stat`` per resolver
         key = str(_bindings_path(drive_root))
         cached = None if strict else _ROOM_ANSWERS.get(key)
-        if cached is None or cached[0] is not self.bindings:
-            cached = (self.bindings, {})
+        if cached is None or cached[0] is not self.bindings or projects is not None and cached[2] != projects:
+            cached = (self.bindings, {}, projects)  # a capture shares no answer read under other Project rooms than its own
             if not strict:
                 _ROOM_ANSWERS[key] = cached
         self.answers: Dict[tuple, int] = cached[1]
