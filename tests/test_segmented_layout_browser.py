@@ -1,15 +1,7 @@
-"""Every strip on the real page: one track whose options are as wide as their words.
+"""Current segmented choices: fit, chosen paint and keyboard persistence on their owning pages.
 
-The one renderer (`page_header.renderSegmentedField`) draws 13 groups in Settings and a place's state on its sheet;
-two strips are built by hand (the Evolution measures, the Skills first-start trust choice). On a real server in
-Chromium and WebKit, at the desk width and at 320 x 640 under a finger, dark and light: every option is at least the
-touch minimum wide, no label leaves its option, no strip leaves its row or scrolls sideways, no group carries a hover
-title or an inline style, and the chosen option is told from the rest by its fill. On the desk every drawn strip keeps
-one line, each option its own word's width; at 320 px a strip does wrap inside its own track (so the wrap is measured,
-not assumed), a long translated label breaks inside its option, and the design gate's own measure (no sideways page,
-every target within a finger's reach) holds around every strip. One screenshot per strip, width and theme goes to
-OUROBOROS_UI_EVIDENCE_DIR. Then the keyboard: Enter and Space choose, focus wears the one DESIGN ring (not the hover
-paint), the draft turns dirty, and the chosen value survives Save and reload where the old one stood before.
+Settings rows save themselves. Controls now drawn as selects or choice cards are covered by their page tests;
+this file measures every surviving strip, including the Agents fold, in both themes and engines.
 """
 
 from __future__ import annotations
@@ -20,6 +12,7 @@ import pathlib
 
 import pytest
 
+from tests.settings_browser_helpers import open_settings, setting_row
 from tests.test_design_system_gate_browser import MEASURE as GATE_MEASURE
 from tests.test_evolution_browser import history as evolution_history
 
@@ -28,19 +21,20 @@ pytest_plugins = ("tests.test_ui_smoke_playwright",)
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 # Every group the renderer draws in Settings, with its number of choices.
 GROUPS = {
-    "s-allow-mutative-subagents": 3, "s-review-enforcement": 2,
-    "s-task-review-mode": 3, "s-review-max-cycles": 5, "s-image-input-mode": 4, "s-context-mode": 3,
-    "s-prompt-cache-ttl": 3, "s-safety-mode": 3, "s-update-channel": 3, "s-runtime-mode": 4,
-    "s-post-task-evolution-mode": 3, "s-consciousness-autonomy": 3, "s-consciousness-safety-mode": 3,
+    'OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS': 3, 'OUROBOROS_REVIEW_ENFORCEMENT': 2,
+    'OUROBOROS_TASK_REVIEW_MODE': 3, 'OUROBOROS_REVIEW_MAX_CYCLES': 5,
+    'OUROBOROS_PROMPT_CACHE_TTL': 3, 'OUROBOROS_SAFETY_MODE': 3,
+    'OUROBOROS_CONSCIOUSNESS_SAFETY_MODE': 3, 'OUROBOROS_SERVER_HOST': 2,
+    'OUROBOROS_CONSCIOUSNESS_AUTONOMY': 3,
 }
 # The renderer's strip on a place sheet, then the two built by hand: (selector, choices).
 OTHERS = {"place-state": ("[data-place-state]", 3), "evolution-measures": (".evo-measures", 5),
           "skills-trust": (".skills-trust-segments", 2)}
-STRIPS = {**{target: (f'[data-effort-target="{target}"]', count) for target, count in GROUPS.items()}, **OTHERS}
+STRIPS = {**{target: (f'[data-setting-row="{target}"] .ui-segment-group', count) for target, count in GROUPS.items()}, **OTHERS}
 DRAWN = set(GROUPS) | {"place-state"}
 DESK, PHONE = {"width": 1280, "height": 860}, {"width": 320, "height": 640}
 THEMES = ("dark", "light")
-LONG = ("s-post-task-evolution-mode", "Nach jeder Aufgabe, wann immer das Sprachmodell es für richtig hält")
+LONG = ("OUROBOROS_TASK_REVIEW_MODE", "Nach jeder Aufgabe, wann immer das Sprachmodell es für richtig hält")
 
 _MEASURE = """([name, selector]) => {
   const group = [...document.querySelectorAll(selector)].find((node) => node.getClientRects().length);
@@ -205,8 +199,10 @@ def test_every_strip_fits_its_row_and_shows_its_choice(direct_server_with_data, 
 
                 _open(page, fixture["url"])
                 page.add_style_tag(content=_STILL)
-                for tab in ("agents", "behavior"):
-                    page.locator(f'[data-settings-tab="{tab}"]').click()
+                for path, fold in [('agents', 'OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS'),
+                                   ('permissions', 'OUROBOROS_REVIEW_MAX_CYCLES'),
+                                   ('models', 'OUROBOROS_PROMPT_CACHE_TTL'), ('computer', '')]:
+                    open_settings(page, path, fold)
                     for name in GROUPS:
                         measure(name)
                     target, label = LONG
@@ -234,6 +230,9 @@ def test_every_strip_fits_its_row_and_shows_its_choice(direct_server_with_data, 
                 page.locator(".skills-dialog [data-dialog-cancel]").first.click()
 
                 _go(page, "dashboard")
+                page.locator('[data-dashboard-tab="consciousness"]').click()
+                page.locator(STRIPS['OUROBOROS_CONSCIOUSNESS_AUTONOMY'][0]).wait_for(state='visible')
+                measure('OUROBOROS_CONSCIOUSNESS_AUTONOMY')
                 page.locator('[data-dashboard-tab="evolution"]').click()
                 page.locator(".evo-measures").wait_for(state="visible", timeout=30_000)
                 measure("evolution-measures")
@@ -259,7 +258,7 @@ def test_keyboard_choice_focus_ring_and_the_chosen_value_survive_save(direct_ser
 
     fixture = direct_server_with_data
     settings_path = fixture["data_dir"] / "settings.json"
-    group = '[data-effort-target="s-task-review-mode"]'
+    group = '[data-setting-row="OUROBOROS_TASK_REVIEW_MODE"] .ui-segment-group'
     with sync_playwright() as pw:
         browser = getattr(pw, engine).launch(headless=True)
         try:
@@ -267,26 +266,21 @@ def test_keyboard_choice_focus_ring_and_the_chosen_value_survive_save(direct_ser
 
             def open_behavior():
                 _open(page, fixture["url"])
-                page.locator('[data-settings-tab="behavior"]').click()
-                expect(page.locator("#btn-save-settings")).to_be_enabled(timeout=30_000)
+                open_settings(page, "permissions")
 
             def press(value: str, key: str) -> None:
                 page.keyboard.press("Shift")  # keyboard modality: script focus then counts as keyboard focus
-                page.locator(f'{group} [data-effort-value="{value}"]').focus()
-                page.keyboard.press(key)
+                page.locator(f'{group} [data-setting-value="{value}"]').focus()
+                with page.expect_response('**/api/settings'):
+                    page.keyboard.press(key)
+                expect(setting_row(page, 'OUROBOROS_TASK_REVIEW_MODE').locator('[data-setting-result]')).to_contain_text('Saved')
 
             def save() -> dict:
-                page.locator("#btn-save-settings").click()
-                expect(page.locator("#settings-status")).to_contain_text("Settings saved", timeout=30_000)
                 return json.loads(settings_path.read_text(encoding="utf-8"))
 
             open_behavior()
-            # The draft's state is the Save bar's; its one word gives way to a load still in that line (#2886, e83cd2103).
-            footer = page.locator(".settings-footer")
-            expect(footer).to_have_attribute("data-draft", "clean")
             press("required", "Enter")
-            assert page.locator("#s-task-review-mode").input_value() == "required"
-            expect(footer).to_have_attribute("data-draft", "dirty")
+            assert page.locator(f'{group} [data-setting-value="required"]').get_attribute("aria-pressed") == "true"
             ring = page.evaluate("""(selector) => {
                 const focused = document.activeElement;
                 const probe = document.createElement('span');
@@ -295,26 +289,26 @@ def test_keyboard_choice_focus_ring_and_the_chosen_value_survive_save(direct_ser
                 const token = getComputedStyle(probe).color;
                 probe.remove();
                 const style = getComputedStyle(focused);
-                return {visible: focused.matches(':focus-visible'), value: focused.dataset.effortValue, token,
+                return {visible: focused.matches(':focus-visible'), value: focused.dataset.settingValue, token,
                         outline: [style.outlineStyle, style.outlineWidth, style.outlineOffset, style.outlineColor]};
             }""", group)
             assert ring["visible"] and ring["value"] == "required", ring
             assert ring["outline"] == ["solid", "2px", "2px", ring["token"]], ring
             # Hover paints the button; it never draws the focus ring.
-            hovered = page.locator(f'{group} [data-effort-value="off"]')
+            hovered = page.locator(f'{group} [data-setting-value="off"]')
             hovered.hover()
             assert hovered.evaluate("(node) => getComputedStyle(node).outlineStyle") == "none"
             assert save()["OUROBOROS_TASK_REVIEW_MODE"] == "required"
 
             open_behavior()
-            assert page.locator(f'{group} [data-effort-value="required"]').get_attribute("aria-pressed") == "true"
+            assert page.locator(f'{group} [data-setting-value="required"]').get_attribute("aria-pressed") == "true"
             press("off", " ")  # Space chooses too
-            assert page.locator("#s-task-review-mode").input_value() == "off"
+            assert page.locator(f'{group} [data-setting-value="off"]').get_attribute("aria-pressed") == "true"
             assert save()["OUROBOROS_TASK_REVIEW_MODE"] == "off"
 
             open_behavior()
-            chosen = page.locator(f'{group} [data-effort-value="off"]')
+            chosen = page.locator(f'{group} [data-setting-value="off"]')
             assert chosen.get_attribute("aria-pressed") == "true" and "Off" in chosen.inner_text()
-            assert page.locator(f'{group} [data-effort-value="required"]').get_attribute("aria-pressed") == "false"
+            assert page.locator(f'{group} [data-setting-value="required"]').get_attribute("aria-pressed") == "false"
         finally:
             browser.close()
