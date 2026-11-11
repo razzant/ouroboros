@@ -143,11 +143,15 @@ def clear_safety_work(root_task_id: str) -> None:
             store.pop(str(root_task_id), None)
 
 
-def _drop(key, rows, digest):
-    """A kept call leaves its work's record; a flagged one stays judged (``_JUDGED``)."""
+def _drop(key, rows, digest, judged=True):
+    """A kept call leaves its work's record; a flagged one stays judged (``_JUDGED``). A fresh SAFE reading drops it
+    unjudged (``judged=False``): its marks and its gate's leave too, and the call is as one never flagged."""
     row = rows.pop(digest, None) or {}
-    if row.get("flagged"):
-        _JUDGED.setdefault(key, set()).update(filter(None, (digest, row.get("gate"))))
+    marks = set(filter(None, (digest, row.get("gate"))))
+    if not judged:
+        _JUDGED.get(key, set()).difference_update(marks)
+    elif row.get("flagged"):
+        _JUDGED.setdefault(key, set()).update(marks)
 
 
 def _track_returned(ctx, tool_name, result):

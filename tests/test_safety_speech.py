@@ -227,13 +227,23 @@ def test_later_dangerous_words_hold_older_suspicious_retry(supervisor, monkeypat
     assert ("(q-later)" if release == "owner_card" else "let through on your later identical call") in message
 
 
+UNMADE = "A new reading after your human's later message or card answer could not be made ("
+OUTAGES = (  # a new reading that cannot be made: its routing, the checker's failure, the cause it is named by
+    ((False, False, "no Safety model is set"), "", "no Safety model is set"),
+    ((True, True, None), "connection refused", "the local Safety runtime is unreachable: RuntimeError"),
+    ((False, False, None), "provider_failed: down", "its check failed: RuntimeError: provider_failed: down"))
+
+
 @pytest.mark.parametrize("second", ["SAFE", "DANGEROUS"])
 @pytest.mark.parametrize("gate", [False, True])
 def test_a_later_word_of_my_human_earns_a_waiting_call_one_new_reading(supervisor, monkeypatch, gate, second):
     """A DANGEROUS call that waits for my human is answered by its kept verdict however often it is issued, until my
-    human writes in this work: then one new reading; their speech in a call is no message and earns none, as the
-    returned text says. SAFE lets it through and the old verdict answers it no more; DANGEROUS waits again, unread,
-    until their next message. The same words under a new request_id meet the same gate."""
+    human writes in this work: then one new reading in a later step; their speech in a call is no message and earns
+    none, as the returned text says. SAFE lets it through and leaves the call as one never flagged: unread while the
+    checker is down, it names the card that lets it through, never the verdict SAFE replaced. DANGEROUS waits
+    again, unread, until their next message, which buys the step that got that verdict nothing; a new reading that
+    cannot be made (no route, the fail-open local fallback down, an outage) lets nothing through and says why, and
+    the next issue tries again. The same words under a new request_id meet the same gate."""
     from ouroboros import place_guard
     h = supervisor
     monkeypatch.setattr(place_guard, "call_place_facts", lambda *a, **kw: {
@@ -249,7 +259,7 @@ def test_a_later_word_of_my_human_earns_a_waiting_call_one_new_reading(superviso
     assert not h.module.check_safety("place_reply", reply, ctx=h.ctx)[0]
     for n in (2, 3):
         ok, message = check(n)
-        assert not ok and LATER in message
+        assert not ok and LATER in message and UNMADE not in message
     assert len(h.calls) == 1, "no new word of my human: the kept verdict answers"
     h.ctx._owner_directives = [{"source": "live_call", "content": "Yes, send it.", "msg_id": "item-1"}]
     ok, message = check(4)
@@ -257,12 +267,37 @@ def test_a_later_word_of_my_human_earns_a_waiting_call_one_new_reading(superviso
     h.ctx._owner_directives.append(word(1))
     h.replies.append({"status": second, "reason": "they asked for it" if second == "SAFE" else "still apart"})
     assert check(5)[0] is (second == "SAFE") and len(h.calls) == 2, "exactly one new reading"
-    h.replies.append({"status": "DANGEROUS", "reason": "read afresh"})
-    assert not check(6)[0] and len(h.calls) == 2 + (second == "SAFE"), "SAFE: the old verdict answers no more"
-    if second == "DANGEROUS":
-        assert not check(7)[0] and len(h.calls) == 2, "waits again until another word"
-        h.ctx._owner_directives.append(word(2))
-        assert not check(8)[0] and len(h.calls) == 3
+    if second == "SAFE":  # issued again while the checker is down: unread, and my human's card lets it through
+        h.replies.append(RuntimeError("provider_failed: down"))
+        ok, message = check(6)
+        assert not ok and message.startswith("⚠️ SAFETY_UNAVAILABLE") and "ask your human privately" in message
+        assert "keeps this circle apart" not in message and len(h.calls) == 3
+        card = f"Send this to Telegram · Team?\n{reply['text']}\n1. Send it"
+        h.ctx._owner_directives.append({"source": "owner_quiz_answer", "content": "1. Send it", "quiz_id": "q-1",
+                                        "reply_to": {"address": "quiz q-1 of task work", "text": card}})
+        ok, message = check(7)
+        assert ok and "(q-1), without a reading" in message and len(h.calls) == 3
+        return
+    h.ctx._owner_directives.append(word(2))  # lands in the step that got the verdict
+    ok, message = h.module.check_safety("place_reply", issue(6), ctx=h.ctx)
+    assert not ok and len(h.calls) == 2, "the step that got the verdict buys no reading"
+    for n, (routing, failure, cause) in enumerate(OUTAGES, start=7):
+        monkeypatch.setattr(h.module, "_resolve_safety_routing", lambda routing=routing: routing)
+        h.replies.extend([RuntimeError(failure)] if failure else [])
+        ok, message = check(n)
+        assert not ok and LATER in message and f"{UNMADE}{cause}" in message, message
+    monkeypatch.setattr(h.module, "_resolve_safety_routing", lambda: (False, False, None))
+    h.replies.append({"status": "DANGEROUS", "reason": "still apart"})
+    assert not check(10)[0] and len(h.calls) == 5, "the next issue tries again"
+    ok, message = check(11)
+    assert not ok and UNMADE not in message and len(h.calls) == 5, "waits again until another word"
+    released = {"safety_sent_without_assessment", "safety_sent_despite_check", "safety_advisory"}
+    assert not [event for event in h.events if event["type"] in released]
+    h.ctx._owner_directives.append(word(3))
+    h.replies.extend([{"status": "SAFE", "reason": "they asked for it"}, RuntimeError("provider_failed: down")])
+    assert check(12)[0] and len(h.calls) == 6
+    ok, message = check(13)
+    assert not ok and "ask your human privately" in message, "flagged twice, then cleared: as one never flagged"
 
 
 def _at(n):

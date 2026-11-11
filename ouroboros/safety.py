@@ -958,8 +958,8 @@ def _rate_limited_outcome(
             "type": "safety_check_rate_limited", "tool": tool_name,
             "action": "fail_open_local_fallback", "error": error,
         })
-        return _Assessment(True, _let_through(f"the local fallback Safety Supervisor was rate-limited: {error}"),
-                           status="UNAVAILABLE")
+        cause = f"the local fallback Safety Supervisor was rate-limited: {error}"
+        return _Assessment(True, _let_through(cause), status="UNAVAILABLE", cause=cause)
     return _safety_unavailable_blocked(ctx, tool_name, error, attempts=attempts)
 
 
@@ -1117,8 +1117,8 @@ def _unanswered(ctx: Optional[Any], tool_name: str, error: Exception, *, fail_op
     safe_error = sanitize_tool_result_for_log(f"{type(error).__name__}: {error}")
     if fail_open:  # a fallback local outage warns instead of blocking all unknown tools
         log.warning("Safety local-fallback LLM call failed for %s (%s); proceeding with warning", tool_name, safe_error)
-        return _Assessment(True, _let_through(f"the local Safety runtime is unreachable: {safe_error}"),
-                           status="UNAVAILABLE")
+        cause = f"the local Safety runtime is unreachable: {safe_error}"
+        return _Assessment(True, _let_through(cause), status="UNAVAILABLE", cause=cause)
     log.error("Safety check LLM call failed for %s: %s", tool_name, safe_error)
     return _hold(ctx, tool_name, f"its check failed: {safe_error}")
 
@@ -1146,7 +1146,7 @@ def _run_llm_check(
     if _skip_reason is not None:
         if _needs_checker(ctx):
             return _hold(ctx, tool_name, _skip_reason)
-        return _Assessment(True, _let_through(_skip_reason), status="UNAVAILABLE")
+        return _Assessment(True, _let_through(_skip_reason), status="UNAVAILABLE", cause=_skip_reason)
     client = LLMClient()
     system_prompt = _get_safety_prompt()
     light_model = get_safety_model().removesuffix(" (local)")
@@ -1386,6 +1386,7 @@ def _assess_call(tool_name, arguments, messages, ctx, python_resolution, resolve
     that issue; elsewhere DANGEROUS waits for my human, declared words keyed on words and destination so a new
     request_id or another tool buys no fresh reading; a later message of my human in this work earns one: a row of
     theirs no reading of the call or gate saw, issued where no fewer of their rows are listed (``_owner_seen``).
+    A SAFE one leaves the call as one never flagged; one not made says why, and the next issue tries again.
     My human's answer whose card holds the exact words as whole lines and the destination (any other call: the exact
     call) lets it through, one given before the issue included (``_owner_yes``): the host checks that the card was
     answered, never what the answer says. The step that received a return never releases it; an unknown step is a
@@ -1483,9 +1484,9 @@ def _assess_call(tool_name, arguments, messages, ctx, python_resolution, resolve
     waits = level == "DANGEROUS" and not (cyber and repeat)
     same_step = bool(call) and call in {row.get("llm_call_id") for row in (prior, gated) if row}
 
-    def waiting():  # the kept reading answers; for other words' gate, as theirs
+    def waiting(unmade=""):  # the kept reading answers; for other words' gate, as theirs
         head = _returned_head(level, basis, words=bool(gated) and gated["digest"] != digest)
-        return _Assessment(False, f"{head} {close(waits)}", status=level, verdicts=basis)
+        return _Assessment(False, f"{head} {close(waits)}{unmade}", status=level, verdicts=basis)
     if flag and same_step:  # the returned decision re-presented, not a later one
         return _Assessment(False, "⚠️ SAFETY_RETURNED: not run. This exact call was returned earlier in this same "
                            f"step; decide in a later step. {close(waits)}", status=level, verdicts=basis)
@@ -1513,13 +1514,14 @@ def _assess_call(tool_name, arguments, messages, ctx, python_resolution, resolve
         (propagate_model_control if cyber else propagate_model_error)(exc)
         assessment = _hold(ctx, tool_name, sanitize_tool_result_for_log(f"{type(exc).__name__}: {exc}"))
     verdicts, status = getattr(assessment, "verdicts", ()), getattr(assessment, "status", "")
-    if reread and not verdicts:  # no new reading was reached: the kept one still answers
-        return waiting()
+    if reread and not verdicts:  # no new reading was reached: the kept one still answers, and says why
+        return waiting(f" A new reading after your human's later message or card answer could not be made "
+                       f"({getattr(assessment, 'cause', '')}); the next issue tries again.")
     if reread:  # the new reading replaces what answered: this call's row and these words' gate
         with _PRIOR_LOCK:
             rows = _PRIOR_VERDICTS.get(key, {})
             for stale in [d for d, row in rows.items() if d == digest or (gated and row.get("gate") == gated["gate"])]:
-                _drop(key, rows, stale)
+                _drop(key, rows, stale, judged=status != "SAFE")  # SAFE: as a call never flagged
     if verdicts:
         _emit_durable_safety_event(ctx, {"type": "safety_verdict", "tool": tool_name,
                                        "subject_digest": digest, "verdicts": verdicts})
