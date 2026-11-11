@@ -67,8 +67,8 @@ export function renderSkillIcon(spec, { size = 16, className = '' } = {}) {
 }
 
 // The shell's control glyphs, each once: the menu (☰), back (‹), the one close (×), the one more (⋯), the
-// chevron and the magnifier of Find a project. Same stroke family as the page icons; a control's accessible name
-// says what the glyph does.
+// chevron, the magnifier of Find a project and the move grip (⠿) of a Widgets card. Same stroke family as the page
+// icons; a control's accessible name says what the glyph does.
 export const SHELL_ICONS = {
     search: strokeIcon('<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>', 18),
     menu: strokeIcon('<path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/>'),
@@ -77,4 +77,5 @@ export const SHELL_ICONS = {
     more: strokeIcon('<circle cx="5" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.6" fill="currentColor" stroke="none"/>'),
     chevron: strokeIcon('<path d="m9 18 6-6-6-6"/>', 16),
     plus: strokeIcon('<path d="M12 5v14M5 12h14"/>', 16),
+    grip: strokeIcon('<circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/>', 16),
 };

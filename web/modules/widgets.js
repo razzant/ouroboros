@@ -8,7 +8,8 @@ import {
 } from './widget_job.js';
 import { getPath } from './widget_chart.js';
 import { applyChartTheme, onThemeChange } from './theme_palette.js';
-import { mountModuleWidget, mountRouteIframeWidget } from './widget_module.js';
+import { boardFrameGeometry, mountModuleWidget, mountRouteIframeWidget, setFrameHeight } from './widget_module.js';
+import { SHELL_ICONS } from './page_icons.js';
 import {
     planWidgetListPatch, requestWidgetCards, requestWidgetListPayload, widgetKey,
     widgetListRequests, widgetTabsSignature,
@@ -16,6 +17,7 @@ import {
 import {
     bindWidgetCardMenus,
     effectiveStartMode,
+    fitWidgetCardBody,
     isFramedWidget,
     isRetainedWidget,
     renderWidgetCardParts,
@@ -23,10 +25,14 @@ import {
     renderWidgetFacade,
     setWidgetCardNote,
     syncWidgetCardControls,
+    syncWidgetCardMore,
     WIDGET_START_MODES,
     withWidgetStartMode,
 } from './widget_card.js';
-import { bindWidgetCardReorder, createWidgetWidths, mergeWidgetOrder, normalizeWidgetOrder, sortTabsByWidgetOrder } from './widget_reorder.js';
+import {
+    bindWidgetCardReorder, cancelWidgetCardCarry, createWidgetWidths, mergeWidgetOrder, moveWidgetKey, normalizeWidgetOrder,
+    sortTabsByWidgetOrder, widgetMoveIndex, widgetPlaceWords,
+} from './widget_reorder.js';
 import {
     apiClient,
     apiFetch,
@@ -43,6 +49,7 @@ import {
 } from './widget_render.js';
 
 export {
+    WIDGET_BOARD_FRAME_BORDER_RESERVE,
     WIDGET_FRAME_BORDER_RESERVE,
     WIDGET_FRAME_DEFAULT_HEIGHT,
     WIDGET_FRAME_MAX_HEIGHT,
@@ -63,15 +70,19 @@ function pageTemplate() {
     `;
 }
 
+// One card: its head (title; a framed card's status and Start; the menu and the move grip), its body (the frame or
+// the host-drawn components), the line that shows what an owner height keeps out of view (Show all / Back), and its
+// right edge (width), bottom edge (height) and corner (both).
 function renderCardHtml(tab, contributionVisibility = null) {
     // The card's own title names it; the skill's id is no owner word, so only a card kept from the chat says where from.
     const title = tab.title || tab.tab_id || tab.skill;
     const subtitle = tab.pinned_card ? '<span class="widgets-card-source">kept from the chat</span>' : '';
     const span = Number(tab.span || tab.grid_span || 1);
     const spanClass = span >= 2 ? ' widgets-card-span-2' : '';
+    const framed = isFramedWidget(tab) && !tab.pinned_card ? ' data-widget-framed' : '';
     const { run, menu } = renderWidgetCardParts(tab, { contributionVisibility: contributionVisibility?.(tab.skill) || [] });
     return `
-        <article class="ui-card widgets-card${spanClass}" data-widget-key="${escapeHtml(widgetKey(tab))}">
+        <article class="ui-card widgets-card${spanClass}" data-widget-key="${escapeHtml(widgetKey(tab))}"${framed}>
             <div class="widgets-card-head">
                 <div class="widgets-card-title">
                     <strong>${escapeHtml(title)}</strong>
@@ -81,12 +92,15 @@ function renderCardHtml(tab, contributionVisibility = null) {
                     ${run ? `<div class="widgets-card-run">${run}</div>` : ''}
                     <div class="widgets-card-tools">
                         ${menu}
-                        <button class="btn btn-ghost btn-sm widgets-card-drag" type="button" data-widget-reorder-handle title="Move widget: drag or use arrow keys" aria-label="Move widget: drag or use arrow keys">↕</button>
+                        <button class="btn btn-ghost btn-sm widgets-card-drag" type="button" data-widget-reorder-handle title="Move widget: drag or use arrow keys" aria-label="Move widget: drag or use arrow keys">${SHELL_ICONS.grip}</button>
                     </div>
                 </div>
             </div>
             <div class="widgets-card-body" data-widget-mount></div>
+            <div class="widgets-card-more" data-widget-more hidden><button type="button" class="btn btn-default btn-sm" data-widget-expand aria-expanded="false"></button></div>
             <button class="widgets-card-resize" type="button" data-widget-resize-handle title="Resize width: drag or use arrow keys" aria-label="Resize width: drag or use arrow keys"></button>
+            <button class="widgets-card-edge" type="button" data-widget-height-handle title="Resize widget: drag; arrow keys change height" aria-label="Resize widget: drag; arrow keys change height"></button>
+            <span class="widgets-card-corner" data-widget-corner-handle aria-hidden="true" title="Resize width and height: drag"></span>
         </article>
         `;
 }
@@ -125,6 +139,18 @@ const holds = getHolds();
 const stopHoldKey = (tab) => `board:${widgetKey(tab)}`;
 const codeHoldKey = (tab) => `widget:${tab.skill}:${tab.tab_id}`;
 let widgetsWsBridgeBound = false;
+// What the page knows of each framed card's geometry in this page session: the content height its frame last
+// reported (`natural`, at the card's revision; forgotten when the card leaves the list), so a remount — returning to
+// Widgets, Start again — stands at it at once, with `held` (the extra its reporter found it keeps asking for there:
+// widget_frame.js) so its next document stops at the same place instead of growing again, and `at`, the frame's height
+// when that report came (see `heightInfo`); and the refit of the frame mounted now, which re-applies the card's
+// geometry when the owner changes its height or Show all. The frame's own memory is not kept: a remount is a new
+// document.
+const frameNatural = new Map();
+const frameRefits = new Map();
+// The frame policy of one framed card for its mount (`board` of widget_module.js), set by initWidgets; `starting`
+// is the ledger write the mount calls as its frame gets its document.
+let boardFrameOf = () => null;
 
 async function callWidgetRoute(tab, spec, values, signal) {
     const method = String(spec.method || 'GET').toUpperCase();
@@ -682,12 +708,12 @@ export async function mountDeclarativeWidget(mount, tab, render, { input = null 
     return dispose;
 }
 
-async function mountTab(card, tab, mountSignal = null) {
+async function mountTab(card, tab, mountSignal = null, board = null) {
     const mount = card.querySelector('[data-widget-mount]');
     const render = tab.render || {};
     if (!mount) return;
     if (render.kind === 'iframe' && render.route) {
-        return mountRouteIframeWidget(mount, tab, render, mountSignal, null, widgetMessageHandlers);
+        return mountRouteIframeWidget(mount, tab, render, mountSignal, null, widgetMessageHandlers, board);
     }
     // A kept living card is Ouroboros's, not a skill's: no route, its presses go to the card's decisions.
     if (tab.pinned_card) return mountPinnedCard(mount, tab);
@@ -695,7 +721,7 @@ async function mountTab(card, tab, mountSignal = null) {
         return mountDeclarativeWidget(mount, tab, render);
     }
     if (render.kind === 'module' && render.entry) {
-        return mountModuleWidget(mount, tab, render, mountSignal, widgetMessageHandlers);
+        return mountModuleWidget(mount, tab, render, mountSignal, widgetMessageHandlers, null, board);
     }
     mount.innerHTML = `<div class="muted">Widget render kind <code>${escapeHtml(render.kind || 'unknown')}</code> is not supported yet.</div>`;
     return null;
@@ -773,6 +799,7 @@ function patchWidgetCards(list, previousTabs, nextTabs, contributionVisibility =
         const card = liveCardFor(list, key);
         const settling = disposeWidgetByKey(key);
         widgetSessionState.delete(key);
+        frameNatural.delete(key);
         if (!card) continue;
         if (settling) retireCard(card, settling);
         else card.remove();
@@ -820,10 +847,16 @@ async function mountTabOnce(card, tab, key, isCurrent) {
     if (!isCurrent() || !card.isConnected) return;
     const mountController = new AbortController();
     widgetMountControllers.add(mountController);
-    // A frame's start goes into the ledger before its first byte runs; its load and one host second clear it.
-    const settle = isFramedWidget(tab) && !tab.pinned_card ? holds.starting(codeHoldKey(tab), tab.revision) : () => {};
+    // A frame's start goes into the ledger before its first byte runs — as the frame gets its document, never
+    // during the downloads before it, which run no code (a neighbour's crash meanwhile is not this card's); its
+    // load and one host second clear it.
+    let settle = () => {};
+    const framed = isFramedWidget(tab) && !tab.pinned_card;
+    const starting = () => { settle = holds.starting(codeHoldKey(tab), tab.revision); };
+    const board = framed ? boardFrameOf(tab, starting) : null;
+    if (framed && !board) starting();
     try {
-        const mounted = await mountTab(card, tab, mountController.signal);
+        const mounted = await mountTab(card, tab, mountController.signal, board);
         if (typeof mounted !== 'function') { settle(); return; }
         const cancelSettle = settleAfterFrameLoad(card.querySelector('[data-widget-mount]'), settle);
         const dispose = () => { cancelSettle(); settle(); return mounted(); };
@@ -890,13 +923,115 @@ export function initWidgets(ctx = {}) {
     const widths = createWidgetWidths(list, {
         tabs: () => lastTabs || [], prefs: () => uiPreferences, save: (payload) => apiClient.saveUiPreferences(payload),
         adopt(widgetSize) { uiPreferences = { ...uiPreferences, widget_size: widgetSize }; },
+        resized: (key, picked) => fitCard(key, picked),
+        heightInfo: (key) => heightInfo(key),
     });
     const relayout = widths.relayout;
 
+    // A framed card's geometry now (boardFrameGeometry): the owner's height, Show all, and the content height its
+    // frame last reported at this revision.
+    const isBoardFrame = (tab) => isFramedWidget(tab) && !tab.pinned_card;
+    const fitOf = (tab) => {
+        const known = frameNatural.get(widgetKey(tab));
+        return known && known.revision === String(tab.revision ?? '') ? known : null;
+    };
+    const naturalOf = (tab) => fitOf(tab)?.natural || 0;
+    const geometryOf = (tab, natural = naturalOf(tab)) => {
+        const key = widgetKey(tab);
+        return boardFrameGeometry(tab.render, { h: widths.heightOf(key), expanded: widths.isExpanded(key), natural });
+    };
+    // A stopped card's facade is as tall as its frame will be: a card that starts again when Widgets is shown
+    // keeps its last height, so the board does not move while it comes back; one waiting for Start stands at the
+    // loading height (an owner height is both).
+    const facadeHeight = (tab) => geometryOf(tab, startsOnShow(tab) ? naturalOf(tab) : 0).height;
+    // The bottom edge's starting point and catch: the content height on screen and the height its content takes, when
+    // that is known apart from the height it is shown at (0 otherwise: no catch rather than a guess). A fixed frame has
+    // none (a taller one is a bigger working area); nor has a bounded body taller than what it holds (its scroll height
+    // is then its own height). A frame's report is the content's own only once it has outlived a change of that frame:
+    // a document that follows its window (one that fills it, or asks for margins beyond it) reports anew at every
+    // height, and one report at one height, or the height it stopped at, says nothing about any other.
+    function heightInfo(key) {
+        const tab = tabByKey(key);
+        const card = liveCardFor(list, key);
+        if (!tab || !card) return null;
+        if (isBoardFrame(tab)) {
+            // A stopped card stands at its facade: an edge starts there, with no catch (no frame measures it now).
+            if (!frameRefits.has(key)) return { content: facadeHeight(tab), natural: 0 };
+            const geometry = geometryOf(tab);
+            const fit = fitOf(tab);
+            const own = fit && !fit.held && Math.abs(geometry.height - fit.at) > 1;
+            const whole = own ? boardFrameGeometry(tab.render, { natural: fit.natural }).height : 0;
+            return { content: geometry.height, natural: geometry.auto ? whole : 0 };
+        }
+        const body = card.querySelector('[data-widget-mount]');
+        if (!body) return null;
+        const echo = body.hasAttribute('data-widget-bounded') && body.scrollHeight <= body.clientHeight + 1;
+        return { content: body.clientHeight, natural: echo ? 0 : body.scrollHeight };
+    }
+    // Fit one card to its size now: a running frame takes its geometry (its refit), a stopped one's facade
+    // its height, a host-drawn body its bound. The line under a frame shows while it runs, and while it waits to
+    // start again on show, so the card keeps its whole height until its frame is back. Natural height or Reset size
+    // (`picked`) on a card that had an owner height, or whose reporter stopped, starts its fit over from the loading
+    // height: a document that fills or follows its window has no height of its own to return to.
+    function fitCard(key, picked = null) {
+        const card = liveCardFor(list, key);
+        const tab = tabByKey(key);
+        if (!card || !tab) return;
+        if (!isBoardFrame(tab)) {
+            fitWidgetCardBody(card, widths.heightOf(key), widths.isExpanded(key));
+            return;
+        }
+        const fresh = Boolean(picked && (picked.hadHeight || fitOf(tab)?.held));
+        if (fresh) frameNatural.delete(key);
+        const refit = frameRefits.get(key);
+        if (refit) refit({ fresh });
+        const facade = card.querySelector('[data-widget-mount] > [data-widget-facade]');
+        if (facade) setFrameHeight(facade, facadeHeight(tab));
+        const h = widths.heightOf(key);
+        syncWidgetCardMore(card, refit || startsOnShow(tab)
+            ? { ...geometryOf(tab), expanded: widths.isExpanded(key) && h > 0, h } : { h: 0 });
+    }
+    // A host-drawn body's content changes under its bound (a poll, a stream, an image or video that learns its size
+    // after it is drawn, or fails, a disclosure such as a JSON value opened): its line is counted again, once a frame.
+    // Media loading and a disclosure's toggle change no node or text, so they are heard on the list in the capture phase.
+    let bodiesFrame = 0;
+    const fitBodies = () => {
+        bodiesFrame = 0;
+        for (const tab of lastTabs || []) {
+            const key = widgetKey(tab);
+            if (!isBoardFrame(tab) && widths.heightOf(key)) fitCard(key);
+        }
+    };
+    const refitBodies = () => {
+        if (!bodiesFrame) bodiesFrame = requestAnimationFrame(fitBodies);
+    };
+    const bodiesObserver = new MutationObserver(refitBodies);
+    bodiesObserver.observe(list, { childList: true, subtree: true, characterData: true });
+    const BODY_SIZED = ['load', 'loadedmetadata', 'error', 'toggle'];
+    BODY_SIZED.forEach((type) => list.addEventListener(type, refitBodies, true));
+    boardFrameOf = (tab, starting) => {
+        const key = widgetKey(tab);
+        return {
+            starting,
+            geometry: () => geometryOf(tab),
+            held: () => fitOf(tab)?.held || 0,
+            measured(natural, held = 0, at = 0) {
+                frameNatural.set(key, { natural, held, at, revision: String(tab.revision ?? '') });
+                const card = liveCardFor(list, key);
+                if (card) syncWidgetCardMore(card, { ...geometryOf(tab), expanded: widths.isExpanded(key) && widths.heightOf(key) > 0, h: widths.heightOf(key) });
+            },
+            attach(refit) {
+                frameRefits.set(key, refit);
+                return () => { if (frameRefits.get(key) === refit) frameRefits.delete(key); };
+            },
+        };
+    };
+
     function paintShell(tabs) {
         renderShell(list, tabs, contributionVisibility);
-        bindWidgetCardReorder(list, currentWidgetOrder, persistWidgetOrder);
+        bindWidgetCardReorder(list, currentWidgetOrder, persistWidgetOrder, widths);
         relayout();
+        tabs.forEach((tab) => fitCard(widgetKey(tab)));
     }
 
     // Page entry: the shell is on screen before the first await. Leaving
@@ -1007,21 +1142,27 @@ export function initWidgets(ctx = {}) {
                 }
                 lastTabs = tabs;
                 lastSignature = signature;
-                bindWidgetCardReorder(list, currentWidgetOrder, persistWidgetOrder);
+                bindWidgetCardReorder(list, currentWidgetOrder, persistWidgetOrder, widths);
                 relayout();
                 widgetsMounted = true;
+                // Every card starts on its own and says it is ready (or failed) as its own mount ends: a slow
+                // source or lease holds back only its card. The sync — and a reconcile that marked the list dirty
+                // meanwhile — waits for all of them before it reads the list again.
+                const mounting = [];
                 for (const tab of tabs) {
-                    if (!isCurrent()) return;
+                    if (!isCurrent()) break;
                     const key = widgetKey(tab);
                     const card = liveCardFor(list, key);
                     if (!card) continue;
+                    fitCard(key);
                     if (widgetDisposers.has(key)) {
                         if (isFramedWidget(tab)) syncWidgetCardControls(card, 'running', effectiveStartMode(tab, uiPreferences));
                         continue;
                     }
-                    if (isFramedWidget(tab) && !startsOnShow(tab)) await settleStopped(card, tab);
-                    else await startWidget(card, tab, isCurrent);
+                    mounting.push(isFramedWidget(tab) && !startsOnShow(tab) ? settleStopped(card, tab) : startWidget(card, tab, isCurrent));
                 }
+                await Promise.allSettled(mounting);
+                if (!isCurrent()) return;
             } while (listDirty && isCurrent());
         } catch (err) {
             if (!isCurrent()) return;
@@ -1067,7 +1208,7 @@ export function initWidgets(ctx = {}) {
     // the owner left meanwhile ends stopped with its facade, never a stale Stop.
     async function startWidget(card, tab, isCurrent) {
         const mount = card.querySelector('[data-widget-mount]');
-        if (isFramedWidget(tab)) renderWidgetFacade(mount, tab);
+        if (isFramedWidget(tab)) renderWidgetFacade(mount, tab, isBoardFrame(tab) ? geometryOf(tab).height : 0);
         syncWidgetCardControls(card, 'starting', effectiveStartMode(tab, uiPreferences));
         try {
             await mountTrackedTab(card, tab, isCurrent);
@@ -1076,6 +1217,7 @@ export function initWidgets(ctx = {}) {
         }
         if (isCurrent()) syncWidgetCardControls(card, widgetDisposers.has(widgetKey(tab)) ? 'running' : 'stopped', effectiveStartMode(tab, uiPreferences));
         else if (isFramedWidget(tab)) await settleStopped(card, tab);
+        fitCard(widgetKey(tab));
     }
 
     // A framed card that is not to run now: let an ordered stop still in flight
@@ -1092,7 +1234,8 @@ export function initWidgets(ctx = {}) {
         }
         if (widgetMounting.has(key)) await widgetMounting.get(key).promise.catch(() => {});
         if (widgetDisposers.has(key) || !card.isConnected) return;
-        renderWidgetFacade(card.querySelector('[data-widget-mount]'), tab);
+        renderWidgetFacade(card.querySelector('[data-widget-mount]'), tab, isBoardFrame(tab) ? facadeHeight(tab) : 0);
+        fitCard(key);
         syncWidgetCardControls(card, 'stopped', mode);
         setWidgetCardNote(card, HELD_LINES[holds.reason(codeHoldKey(tab), tab.revision)] || '');
     }
@@ -1184,11 +1327,47 @@ export function initWidgets(ctx = {}) {
             else console.warn(message);
         }
     }
-    const cardMenus = bindWidgetCardMenus(list, setWidgetStartMode, widths, removeKeptCard, stopFromMenu, toggleContribution);
+    // The menu's moves step the card in the shown order, as the move handle's keys do.
+    const placeOf = (key) => {
+        const order = currentWidgetOrder();
+        return order.includes(key) ? { index: order.indexOf(key), count: order.length } : null;
+    };
+    const moveFromMenu = (key, where) => {
+        const order = currentWidgetOrder();
+        const index = widgetMoveIndex(order, key, where);
+        if (index < 0) return;
+        const next = moveWidgetKey(order, key, index);
+        persistWidgetOrder(next);
+        widths.announce(widgetPlaceWords(key, liveCardFor(list, key), next));
+    };
+    const cardMenus = bindWidgetCardMenus(list, setWidgetStartMode, widths, removeKeptCard, stopFromMenu, toggleContribution,
+        { placeOf, onMove: moveFromMenu });
     const stopContributionFacts = contributions?.onChange?.(refreshContributionMenus);
+    // Show all lifts a card's owner height in this window; Back returns to it and keeps the card's top in view.
+    list.addEventListener('click', (event) => {
+        const card = event.target.closest('[data-widget-expand]')?.closest('[data-widget-key]');
+        const key = card?.dataset.widgetKey || '';
+        if (!key) return;
+        const opening = !widths.isExpanded(key);
+        widths.setExpanded(key, opening);
+        if (opening) return;
+        requestAnimationFrame(() => {
+            const scroller = list.closest('.widgets-scroll');
+            if (scroller && card.getBoundingClientRect().top < scroller.getBoundingClientRect().top) {
+                card.scrollIntoView({ block: 'start' });
+            }
+        });
+    });
     window.addEventListener('pagehide', (event) => {
         listRequests.abortAll();
-        if (!event.persisted) { cardMenus.destroy(); widths.dispose(); stopContributionFacts?.(); }
+        if (event.persisted) return;
+        cardMenus.destroy();
+        widths.dispose();
+        stopContributionFacts?.();
+        bodiesObserver.disconnect();
+        BODY_SIZED.forEach((type) => list.removeEventListener(type, refitBodies, true));
+        if (bodiesFrame) cancelAnimationFrame(bodiesFrame);
+        bodiesFrame = 0;
     });
     // The head's power starts a stopped card and stops a running one, as the card menu's Stop does (widget_card.js).
     list.addEventListener('click', (event) => {
@@ -1206,7 +1385,10 @@ export function initWidgets(ctx = {}) {
         if (event.detail?.page === 'widgets') {
             render();
         } else {
+            // A card carried or an edge dragged when the owner left goes back: the release saves nothing.
             cardMenus.close();
+            cancelWidgetCardCarry(list);
+            widths.cancel();
             // Leaving Widgets cancels ITS sync; once hidden, an unrelated page change
             // must not cancel a skill-disable retention check (its kept frame would run on).
             if (widgetsVisible) listRequests.abortAll();
