@@ -135,7 +135,7 @@ ouroboros/ — agent core and shared runtime (§6)
   transcript_prefix.py — shared prefix digests/comparison, change counts by origin and signed-reasoning retirement; reporting/round facts cross the loop boundary only at call time (§6 Task lifecycle)
   loop_transport.py — transport-outage waits and provider-failure text (§6 Context fitting)
   loop_output_exhaustion.py — typed reply recovery (§6)
-  loop_delivery.py, loop_budget.py, loop_forced_finalization.py, loop_messages.py, loop_model_call.py, primary_route_observation.py, loop_nudges.py, loop_round_limits.py — delivery candidates and the delivery-control protocol; leaves of `loop.py`, one rail each as named; `loop_forced_finalization` is the one forced model call (§6 Task lifecycle)
+  loop_delivery.py, loop_budget.py, loop_forced_finalization.py, loop_messages.py, loop_model_call.py, primary_route_observation.py, loop_nudges.py, loop_round_limits.py, loop_routes.py — delivery candidates and the delivery-control protocol; leaves of `loop.py`, one rail each as named; `loop_forced_finalization` is the one forced model call (§6 Task lifecycle)
   task_pacing.py — threshold facts, shared round-money reading, finalization reserve, `CostCeiling` and main-loop wire options (§6 Budget tracking)
   vision_routing.py, vision_image_limits.py, image_preparation.py — owner-mode image routing for Main, explicit VLM/caption sends, route limits and byte preparation (§6 Vision and local image evidence)
   fallback_cooldown.py — per-process 429-aware cooldown for the `OUROBOROS_MODEL_FALLBACKS` chain; advisory
@@ -193,6 +193,7 @@ ouroboros/ — agent core and shared runtime (§6)
   send_clock.py — Main preparation clocks and physical-candidate binding
   net_transport.py — shared httpx transport: TCP keepalive and the owner's extra-CA bundle every first-party client trusts (§7 `OUROBOROS_EXTRA_CA_BUNDLE`)
   model_wait.py — quota/auth waits bound to the task or phase owner (§6 Quota and auth waits)
+  owner_model.py, lead_fact.py — the owner's durable work-local primary and its wake; a work's published lead (§6)
   transport_custody.py — typed transport facts for the physical-attempt custody seam
   openrouter_attribution.py — canonical OpenRouter application attribution, centralized so forks do not compete under one identity (§7)
   openai_chat_custom.py, openai_chat_dispatch.py — direct-OpenAI Chat function→custom codec and its dispatch policy: custom first, exact-dialect fallback, task-local `none` last
