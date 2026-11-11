@@ -233,8 +233,8 @@ def test_read_aloud_reads_one_reply_shows_stop_and_offers_honest_voices(subscrip
     read = answer.locator("[data-message-action='read-aloud']")
     read.wait_for()
     controls = answer.locator(".chat-message-actions > *").evaluate_all(
-        "nodes => nodes.map(node => node.className.split(' ')[0])")
-    assert controls == ["chat-message-reply", "chat-message-action", "chat-message-copy"], "beside Copy, one control"
+        "nodes => nodes.map(node => node.dataset.messageAction || node.className.split(' ')[0])")
+    assert controls == ["chat-message-reply", "read-aloud", "share", "chat-message-copy"], "beside Copy, Read aloud first"
     assert page.locator(".chat-bubble.user [data-message-action]").count() == 0
     assert read.get_attribute("aria-label") == "Read aloud"
     read.click()
@@ -252,7 +252,7 @@ def test_read_aloud_reads_one_reply_shows_stop_and_offers_honest_voices(subscrip
     rows = page.locator(".chat-row-menu:not([data-leaving])")
     rows.wait_for()
     labels = rows.locator("[role=menuitem]").all_inner_texts()
-    assert labels[-2:] == ["Read aloud", "Read aloud voice…"], labels
+    assert labels[-3:] == ["Read aloud", "Read aloud voice…", "Share"], labels
     rows.get_by_role("menuitem", name="Read aloud voice…").click()
     voices = page.locator(".voice-menu:not([data-leaving])")
     voices.wait_for()
