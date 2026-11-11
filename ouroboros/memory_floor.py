@@ -10,7 +10,7 @@ import hashlib
 import json
 import logging
 import math
-from functools import cached_property
+from functools import cache, cached_property
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple
 
@@ -356,6 +356,7 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
     old = {(step, ident) for step, ids in kept.addressed for ident in ids}
     taken = Selection(table, old, old=old, aggregates=_LIST_FORMS)
     measure = measure or (lambda level: tokens_of(mv.story_chars(snapshot, level)) + tokens_of(mv.room_chars(snapshot, level)))
+    measure = cache(measure)  # One immutable frame; later frames have their own prices.
     current = measure(kept)
     bounds = [b for b in (allowances.get("margin"), allowances.get("budget"), allowances.get("physical")) if b is not None]
     bound = min(bounds) if bounds else None
@@ -448,7 +449,7 @@ def owner_rows(snapshot: mv.MemoryViewSnapshot) -> Dict[str, Mapping[str, Any]]:
     among them), my other conversations' by ``room:address``, and carried human quotes by page and index."""
     room = snapshot.room or {}
     return {**conversations.owner_items(snapshot.conversations),
-            **mv.story_quote_rows(snapshot.story),
+            **mv.story_quote_rows(snapshot),
             **{i["address"]: i for i in [*sealed_owner_rows(room), *room.get("lane1", ())]}}
 
 
@@ -644,7 +645,7 @@ def floor_note(level: mv.FloorLevel, *, window_tokens: Optional[int], mode: str,
         if forms.get("window"):
             lines.append(f"Window emergency over unread words: {describe('window')}; not a failure of my telling.")
     if holding:
-        lines.extend(holding_lines(holding_room(snapshot, level), short=physical_floor(level, mode)))
+        lines.extend(holding_lines(holding_room(snapshot, level), short=physical_floor(snapshot, level, mode)))
     if lowered_from:
         lines.append(lowered_line(mode, lowered_from, max_room))
     path = memory_read_path(names) if mode == "nano" else ""

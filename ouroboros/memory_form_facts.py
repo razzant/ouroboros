@@ -35,7 +35,7 @@ def _count_forms(snapshot, level):
             entry = counts[kind].setdefault(form, {"lines": 0, "sources": 0})
             entry["lines"] += lines
             entry["sources"] += sources
-    add("emergency", "story quotes", 0, len(set(gone.get("F7", ())) & mv.story_quote_rows(snapshot.story).keys()))
+    add("emergency", "story quotes", 0, len(set(gone.get("F7", ())) & mv.story_quote_rows(snapshot).keys()))
     room = snapshot.room or {}
     hidden, work_lines = folded_work_rows(room, gone)
     addressed = hidden | gone.get("F2", set()) | gone.get("F7", set()) | gone.get("F7p", set())
@@ -361,10 +361,21 @@ def telling_emergency(snapshot, level):
     return snapshot.__dict__["_telling_emergency"][level.addressed]
 
 
-def physical_floor(level, mode):
+def physical_floor(snapshot, level, mode):
     """Nano, or a level retaining a stage from remote_count through owner."""
-    return mode == "nano" or any(step in ("F6a", "F5a", "F8a", "F7", "F7a") or any(i.startswith("bare:") for i in ids)
-                                 for step, ids in level.addressed)
+    if mode == "nano" or any(s in ("F6a", "F5a", "F8a", "F7", "F7a") for s, _ids in level.addressed):
+        return True
+    cache = snapshot.__dict__.setdefault("_physical_rungs", {})
+    for step, ids in level.addressed:
+        if step not in ("F2", "F6w", "F7p"):
+            continue
+        # Equal rungs from later frames reuse one numeric fact as well.
+        physical = cache.get(ids)
+        if physical is None:
+            physical = cache[ids] = any(i.startswith("bare:") for i in ids)
+        if physical:
+            return True
+    return False
 
 
 def holding_lines(held, *, short=False):

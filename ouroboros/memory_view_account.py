@@ -95,11 +95,15 @@ def page_quote_lines(entry, gone=(), *, short=False):
             if (not short or q.get("speaker") == "human") and f"quote:{entry['id']}:{n}" not in gone]
 
 
-def story_quote_rows(story):
+def story_quote_rows(snapshot):
     """Already-carried human words, individually addressable on the owner's stage of the floor."""
-    return {f"quote:{entry['id']}:{n}": {**q, "line": quote_line(q), "carried": True}
+    if "_story_quotes" not in snapshot.__dict__:
+        story = sorted(snapshot.story, key=lambda r: tuple(r.get("floor_order", (0, 0))))
+        snapshot.__dict__["_story_quotes"] = {
+            f"quote:{entry['id']}:{n}": {**q, "line": quote_line(q), "carried": True}
             for entry in story if entry.get("kind") not in ("legacy", "account") and not entry.get("told_by")
             for n, q in enumerate(entry.get("quotes") or ()) if q.get("speaker") == "human"}
+    return snapshot.__dict__["_story_quotes"]
 
 
 def _told_fix_lines(entry: Mapping[str, Any]) -> List[str]:

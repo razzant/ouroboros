@@ -670,3 +670,66 @@ def test_a_start_builds_a_story_or_room_text_only_as_a_counted_piece_or_render(t
         assert section_spans()["work"]["view_renders"] == 2 and len(built) == counted() > 2
         mv._story_text(snapshot, {})  # a text built outside a piece and a render
         assert len(built) == counted() + 1
+
+
+def test_a_walk_measures_each_level_once_but_a_new_frame_prices_it_again():
+    from collections import Counter
+
+    snapshot = syn.snapshot(story=syn.pages(3, 1200))
+    readings = []
+    for frame_tokens in (0, 1000):
+        calls = Counter()
+        def price(level):
+            calls[level] += 1
+            return frame_tokens + mf.tokens_of(mv.story_chars(snapshot, level)) + mf.tokens_of(mv.room_chars(snapshot, level))
+        result = mf.fit_memory_view(snapshot, {"margin": 700 + frame_tokens}, measure=price)
+        assert max(calls.values()) == 1
+        assert len(calls) > 1 and calls[mv.FULL_VIEW] == 1
+        readings.append((result, price(mv.FULL_VIEW)))
+    assert readings[0][0] == readings[1][0]
+    assert readings[1][1] - readings[0][1] == 1000
+
+
+def test_receipts_reuse_the_story_quote_index():
+    from ouroboros import memory_form_facts as facts
+    from tests import _memory_view_synthetic as syn
+
+    reads = []
+    class Quote(dict):
+        def get(self, key, default=None):
+            reads.append(key)
+            return super().get(key, default)
+    page = syn.pages(1, 100)[0]
+    page["quotes"] = [Quote(speaker="human", address=syn.spoken(0, "human", 50)["address"], text="The source stays.")]
+    snapshot = syn.snapshot(story=[page])
+    before = mv.snapshot_json(snapshot)
+    mf.floor_elements(snapshot)  # build the owner-stage source index once
+    reads.clear()
+    for level in (mv.FULL_VIEW, mv.FloorLevel((("F7", ("quote:page-000:0",)),))):
+        mf.owner_rows(snapshot)
+        count = facts.form_counts(snapshot, level)["emergency"].get("story quotes", {}).get("sources", 0)
+        assert count == bool(level.addressed)
+    assert reads == []
+    assert mv.snapshot_json(snapshot) == before
+
+
+def test_physical_floor_reuses_equal_rungs_without_retaining_copies():
+    from ouroboros import memory_form_facts as facts
+
+    scans = []
+
+    class SourceId(str):
+        def startswith(self, *args):
+            scans.append(str(self))
+            return super().startswith(*args)
+
+    snapshot = syn.snapshot()
+    for _ in range(100):
+        level = mv.FloorLevel((("F6w", tuple(SourceId(i) for i in ("word-1", "word-2"))),))
+        assert not facts.physical_floor(snapshot, level, "low")
+    assert scans == ["word-1", "word-2"]
+    assert len(snapshot.__dict__["_physical_rungs"]) == 1
+    physical = mv.FloorLevel((("F6w", tuple(SourceId(i) for i in ("word-1", "bare:word-2"))),))
+    assert facts.physical_floor(snapshot, physical, "low")
+    assert not facts.physical_floor(snapshot, level, "low")
+    assert len(snapshot.__dict__["_physical_rungs"]) == 2
