@@ -37,9 +37,11 @@ them a second time:
 Rows are addressed in ``state/dialog.sqlite`` by the legacy frontier's durable
 stream position. A room query selects only that room's indexed candidates and
 then applies current membership, so a later binding still moves earlier rows.
-Whole-mind inventory reads the facts of every row after the frontier stored
-beside the chronicle (``_tail``) plus the rows appended since; membership and
-seals are applied at read. No reader walks JSONL or keeps a process-local copy.
+Whole-mind inventory reads the facts of the rows after the frontier stored
+beside the chronicle (``_tail``) plus the rows appended since, leaving out those
+no reader of the capture uses while the cold set stands (``memory_tail_cold``);
+membership and seals are applied at read. No reader walks JSONL or keeps a
+process-local copy.
 
 Nothing here publishes a record or calls a model.
 """

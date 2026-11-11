@@ -14,7 +14,8 @@ Marks, all equal or the whole tail:
   version), as the index's own ``state.tail`` names it, complete;
 - the registry by value: the very projects, bindings, origin messages and Project rooms the capture's rule reads;
 - the task store's lineage writes (``store_hot_facts.lineage_writes``: its triggers count every change or removal of a
-  task's parent, root, role or admitted chat in that writer's own transaction, whichever body wrote it);
+  task's parent, root, role or admitted chat, and every rewrite of a row whose chat is underived, in that writer's own
+  transaction, whichever body wrote it);
 - the code this process loaded (``CODE``: an update composes anew);
 - nothing journaled after the set's sequence returns a row to reading: no decision that rejected a page (its seals
   go), no page by a writer whose terminal row the set left unread (``memory_sealing`` links it below the page).
