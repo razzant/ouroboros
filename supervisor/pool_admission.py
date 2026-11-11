@@ -146,13 +146,10 @@ def admit(reading: Optional[Reading], counts: Dict[str, Any], slots: Iterable[An
         return 0  # the owner's cap or a pass that has not read the machine
     if reading is PROBE:
         return 1
-    from ouroboros.config import HOST_MEMORY_RESERVE_FRACTION
-
     floor = int(acting == 0 and booting == 0)
     starting = sum(1 for slot in slots if getattr(slot, "booting", False))
     typical, basis = typical_size(slots)
     memory = reading.memory
-    reserve = None if memory is None else int(memory.total_bytes * HOST_MEMORY_RESERVE_FRACTION)
     if memory is None:
         starts, why = max(floor, room if room is not None else int(starting == 0)), reading.unmeasured
     elif memory.pressure:
@@ -160,14 +157,15 @@ def admit(reading: Optional[Reading], counts: Dict[str, Any], slots: Iterable[An
     elif not typical:
         starts, why = floor, "worker_size_unknown"
     else:
-        fits = (memory.available_bytes - reserve) // typical - starting
+        fits = memory.room_bytes // typical - starting
         starts, why = max(floor, fits), "memory_room" if fits > 0 else "memory_full"
     starts = starts if room is None else min(starts, room)
     _FACTS.clear()
     _FACTS.update({
         "read_at": reading.at, "status": "unknown" if memory is None else "measured",
         "total_bytes": memory and memory.total_bytes, "available_bytes": memory and memory.available_bytes,
-        "reserve_bytes": reserve, "pressure": memory and ("critical" if memory.pressure else "not_critical"),
+        "reserve_bytes": memory and memory.reserve_bytes,
+        "pressure": memory and ("critical" if memory.pressure else "not_critical"),
         "typical_worker_bytes": typical, "typical_basis": basis, "starting_processes": starting,
         "starts_admitted": starts, "reason": why})
     return starts

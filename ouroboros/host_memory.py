@@ -1,8 +1,9 @@
 """This host's physical memory: total and reclaimable bytes, and the kernel's own critical verdict.
 
-The one reader the test runner's worker budget (``test_parallelism``) and the overload stop of an
-owned test tree (``process_overload``) share. Each caller keeps its reserve
-(``config.HOST_MEMORY_RESERVE_FRACTION``) and its decision; only macOS's fixed physical total is cached per process.
+The one reader the pool's admission of new processes (``supervisor.pool_admission``), the test runner's
+worker budget (``test_parallelism``) and the overload stop of an owned test tree (``process_overload``)
+share. A reading carries the host reserve (``config.HOST_MEMORY_RESERVE_FRACTION`` of the total) and the
+room above it; each caller keeps its decision. Only macOS's fixed physical total is cached per process.
 
 macOS: ``hw.memsize``, free + inactive + speculative pages from ``vm_stat``, and the kernel's
 pressure level, of which only critical counts. Linux: ``/proc/meminfo`` within every memory limit
@@ -34,6 +35,18 @@ class MemorySnapshot:
     total_bytes: int
     available_bytes: int
     pressure: bool = False  # the kernel itself reports memory pressure (macOS)
+
+    @property
+    def reserve_bytes(self) -> int:
+        """What every admission leaves to the OS and other work: ``HOST_MEMORY_RESERVE_FRACTION`` of the total."""
+        from ouroboros.config import HOST_MEMORY_RESERVE_FRACTION
+
+        return int(self.total_bytes * HOST_MEMORY_RESERVE_FRACTION)
+
+    @property
+    def room_bytes(self) -> int:
+        """Available memory above the reserve; 0 at or under it."""
+        return max(0, self.available_bytes - self.reserve_bytes)
 
 
 def _native_output(argv: Sequence[str]) -> str:

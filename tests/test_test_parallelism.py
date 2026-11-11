@@ -42,7 +42,7 @@ def test_native_probe_failure_admits_one_worker(monkeypatch):
 def test_physical_headroom_parent_slots_and_other_runs_cap_the_same_budget(monkeypatch, requested, inherited,
                                                                            host, expected):
     peak = config.TEST_WORKER_PEAK_RSS_BYTES
-    monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(10 * peak, 4 * peak))
+    monkeypatch.setattr(budget, "physical_memory", lambda: host_memory.MemorySnapshot(10 * peak, 4 * peak))
 
     def census():
         assert host is not None, "a child with a parent allocation reads no ledger and runs no census"
@@ -170,7 +170,7 @@ def test_a_lease_narrows_to_what_a_pass_uses_and_never_widens(tmp_path, monkeypa
     ledger, me = tmp_path / "slots", os.getpid()
     monkeypatch.setattr(budget, "_ledger_dir", lambda: ledger)
     monkeypatch.delenv(budget.NESTED_WORKERS_ENV, raising=False)
-    monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(2 ** 40, 2 ** 40))
+    monkeypatch.setattr(budget, "physical_memory", lambda: host_memory.MemorySnapshot(2 ** 40, 2 ** 40))
     monkeypatch.setattr(budget, "_process_table", lambda: ([], ""))
     admitted, lease = budget.reserve("hermetic gate", 4, slots=lambda admission: admission.workers + 5)
     row = lambda: json.loads((ledger / f"{me}.json").read_text(encoding="utf-8"))  # noqa: E731
@@ -202,11 +202,11 @@ def test_two_runs_started_at_once_admit_under_one_ledger_lock(tmp_path, monkeypa
         import json, os, sys
         from pathlib import Path
         sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})
-        from ouroboros import test_parallelism as budget
+        from ouroboros import host_memory, test_parallelism as budget
         os.environ.pop(budget.NESTED_WORKERS_ENV, None)  # the test seam gives every child one slot; this one is a run of its own
         ledger = Path({str(ledger)!r})
         budget._ledger_dir = lambda: ledger
-        budget.physical_memory = lambda: budget.MemorySnapshot(2 ** 40, 2 ** 40)
+        budget.physical_memory = lambda: host_memory.MemorySnapshot(2 ** 40, 2 ** 40)
         budget._process_table = lambda: ([], "")
         print("reserving", flush=True)
         admitted, lease = budget.reserve("child", 8)
@@ -233,8 +233,8 @@ def test_two_runs_started_at_once_admit_under_one_ledger_lock(tmp_path, monkeypa
 def test_the_gate_pins_the_worker_count_it_verified(tmp_path, monkeypatch, capacity):
     """The requested three slots still obey measured memory, not a hostile pytest override."""
     total = 20 * config.TEST_WORKER_PEAK_RSS_BYTES
-    memory = budget.MemorySnapshot(total, int(total * config.HOST_MEMORY_RESERVE_FRACTION)
-                                   + capacity * config.TEST_WORKER_PEAK_RSS_BYTES)
+    memory = host_memory.MemorySnapshot(total, int(total * config.HOST_MEMORY_RESERVE_FRACTION)
+                                        + capacity * config.TEST_WORKER_PEAK_RSS_BYTES)
     monkeypatch.setattr(budget, "physical_memory", lambda: memory)
     monkeypatch.setenv(budget.WORKERS_ENV, "3")
     monkeypatch.setenv(budget.NESTED_WORKERS_ENV, "3")
@@ -267,7 +267,7 @@ def test_local_node_lane_uses_the_same_cpu_and_memory_budget(tmp_path, monkeypat
     runner = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runner)
     peak = config.TEST_WORKER_PEAK_RSS_BYTES
-    monkeypatch.setattr(budget, "physical_memory", lambda: budget.MemorySnapshot(10 * peak, 4 * peak))
+    monkeypatch.setattr(budget, "physical_memory", lambda: host_memory.MemorySnapshot(10 * peak, 4 * peak))
     monkeypatch.setattr(budget, "other_runs", lambda: budget.HostRuns())  # a quiet host; the ledger has its own test
     monkeypatch.setenv(budget.WORKERS_ENV, "16")
     monkeypatch.delenv(budget.NESTED_WORKERS_ENV)

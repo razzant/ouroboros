@@ -1,8 +1,8 @@
 """Physical admission budget shared by the test entrypoints and nested runners.
 
 This bounds initial fan-out, not later allocation: the process owner separately
-watches its tree for overload. Memory comes from ``host_memory.physical_memory``;
-a failed probe admits one worker.
+watches its tree for overload. The tree is admitted within the room above the host
+reserve (``host_memory.physical_memory``); a failed probe admits one worker.
 
 Honest workers (owner 10.10, 2026-11-05): a run admits the CPU default (or the
 documented request) within measured memory, minus what the OTHER live test runs
@@ -27,20 +27,13 @@ import stat
 import subprocess
 from typing import Mapping, Optional
 
-from ouroboros.host_memory import MemorySnapshot, physical_memory
+from ouroboros.host_memory import physical_memory
 
 # Transport state must survive the OUROBOROS_ runtime-settings scrub, just like
 # ProcessContainer's membership token. A test explicitly allocates extra slots
 # to a child by supplying this key in that child's environment.
 NESTED_WORKERS_ENV = "OURO_TEST_WORKER_BUDGET"
 WORKERS_ENV = "OUROBOROS_PREFLIGHT_TEST_WORKERS"
-
-
-def memory_budget(memory: MemorySnapshot) -> int:
-    """Leave the host's physical reserve outside the admitted test tree."""
-    from ouroboros.config import HOST_MEMORY_RESERVE_FRACTION
-
-    return max(0, memory.available_bytes - int(memory.total_bytes * HOST_MEMORY_RESERVE_FRACTION))
 
 
 def _positive(value: object, default: int) -> int:
@@ -106,7 +99,7 @@ def admission(cpu_workers: Optional[int] = None, *, env: Optional[Mapping[str, s
 
     env = os.environ if env is None else env
     memory = physical_memory()
-    capacity = max(1, memory_budget(memory) // TEST_WORKER_PEAK_RSS_BYTES) if memory else 1
+    capacity = max(1, memory.room_bytes // TEST_WORKER_PEAK_RSS_BYTES) if memory else 1
     own = min(requested_workers(cpu_workers, env=env), capacity)
     host = HostRuns() if NESTED_WORKERS_ENV in env else other_runs()
     return Admission(max(1, own - host.held), host)

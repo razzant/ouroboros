@@ -408,11 +408,10 @@ def test_overload_stops_growth_only_under_machine_pressure(monkeypatch, slots, t
     monkeypatch.setattr(config, "TEST_WORKER_PEAK_RSS_BYTES", gib)
     watch = process_overload.OverloadWatch(object(), slots=slots)
     assert watch.floor_bytes == (slots + 1) * gib
-    reserve = int(machine * gib * config.HOST_MEMORY_RESERVE_FRACTION)
     memory = host_memory.MemorySnapshot(machine * gib, int(now * gib), pressure)
-    reason = process_overload.stop_reason(int(tree * gib), memory, floor=watch.floor_bytes, reserve=reserve)
+    reason = process_overload.stop_reason(int(tree * gib), memory, floor=watch.floor_bytes)
     assert bool(reason) is stops, reason
-    assert not process_overload.stop_reason(int(tree * gib), None, floor=watch.floor_bytes, reserve=reserve)
+    assert not process_overload.stop_reason(int(tree * gib), None, floor=watch.floor_bytes)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows attribution is the held Job, not a POSIX token")
