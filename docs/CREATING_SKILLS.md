@@ -2059,12 +2059,20 @@ same promises through the host-side protocol in
 [`WIDGET_HOST_PROTOCOL.md`](WIDGET_HOST_PROTOCOL.md).
 
 Framed render declarations may add a bounded `height` (320–8,192 pixels).
-When a module omits `height`, the host starts at 320px and measures its
-existing `#root` through a resize message on the bridge's channel. The host
-integer-deduplicates and clamps that value to 8,192px by default; an optional
-module-only `max_height` lowers the ceiling. A fixed `height` disables
+When a module omits `height`, the host starts at 320px and, once your entry has
+run (an `entry_type: "module"` entry's top-level `await` included) or its page
+has loaded, measures `#root` through a resize message on the bridge's channel;
+on the Widgets board the frame is then exactly as tall as the content, however
+short, and measured again whenever anything in the document changes, and when the pointer or the focus moves
+(a menu that `:hover` shows counts).
+The host integer-deduplicates and clamps that value to 8,192px by default; an
+optional module-only `max_height` lowers the ceiling. A fixed `height` disables
 auto-growth. Legacy route iframes accept explicit `height` only because the
-host cannot inspect their opaque document. The parent owns iframe removal and
+host cannot inspect their opaque document. The owner may give any card a
+height of their own, taller or shorter than its content: the frame is then
+exactly that tall and your document scrolls inside it when it needs to (the host
+releases its vertical overflow there), so keep useful controls reachable in a
+shorter or taller viewport. The parent owns iframe removal and
 the module bootstrap rejects pending fetch promises and errors open body streams
 on disposal, so module
 code must not invent a second resize, vertical-scrolling, or teardown protocol:
@@ -2077,25 +2085,31 @@ declarative renders remain content-driven and reject them.
 Any render kind may add `span`: `1` (the default) or `2`, the card's default
 column span on the Widgets masonry (`grid_span` is read as an alias; a larger
 number counts as `2`, anything else as `1`). The board fits it to the columns
-it has (a narrow list is one column), and the owner's width from the card
-menu or the card's edge (1, 2, 3 columns or full width) wins for that card
-until the owner resets it; the card's height always follows its content (the
-board: `docs/DESIGN.md` "Widgets board").
+it has (a narrow list is one column), and the owner's width and height from
+the card menu or the card's edges win for that card until the owner resets
+them (the board: `docs/DESIGN.md` "Widgets board"). Design for a narrow card:
+a one-column card can be 240–360px wide, a phone card about 360px, so let text
+wrap and avoid fixed widths and side-by-side layouts that cannot fold. A body
+may be 100vh or 100% tall: the frame counts what it holds, where drawn, and
+keeps its loading height until something is drawn. A box taller than the
+viewport (110vh), or one its size or at its bottom with margins or padding
+outside it, asks for more than any height the frame can give: the frame stops
+growing a step or two later and your document scrolls to that control there. A
+box sized as a share of the viewport (60vh, `max-height: 70vh`) shrinks with the
+frame until its content stops it. A layout that should fill an area, or a share
+of one, can declare `height`.
 
 For auto-height module CSS, prefer one owner of padding and box geometry between
 `body` and `#root`, and choose `border-box` deliberately. Nested percentage
 `min-height`/padding owners, especially with `overflow-x: hidden`, can compute
-`overflow-y: auto` and feed scrollbar width back into wrapping. This is author
-guidance, not a restriction: legal width-sensitive CSS remains supported by the
-host-owned resize contract. For auto-height modules, the host bootstrap
-suppresses only document-viewport `overflow-y` below the ceiling and releases
-it at the ceiling; horizontal document overflow remains author-controlled and
-reachable. After a `ResizeObserver` notice the bootstrap re-measures and
-toggles in the next animation frame, never inside observer delivery: a layout
-write there can leave a size change undelivered, and the browser's loop error
-would reach the fault channel as a widget script error (WebKit reports
-`Script error.`). An author observer that writes layout in its own callback
-can raise the same error.
+`overflow-y: auto` and feed scrollbar width back into wrapping; such CSS stays
+supported. For auto-height modules, the host bootstrap suppresses only
+document-viewport `overflow-y` below the ceiling and releases it at the ceiling;
+horizontal overflow stays the author's. The bootstrap re-measures in the next
+animation frame after a `ResizeObserver` notice, never inside its delivery,
+where a layout write can leave a change undelivered and the loop error would
+reach the fault channel as a widget script error (WebKit: `Script error.`); an
+author observer that writes layout in its own callback can raise the same error.
 
 #### The in-frame bridge (`window.OuroborosWidget`)
 
@@ -2166,6 +2180,11 @@ below). The bridge exposes:
   the declaration does not gate legacy modules or prove that the source repaints.
   `appearance` is valid only inside a `kind: module` render; adding it to an
   iframe or declarative render is a registration error rather than a theme claim.
+  The frame inherits the page's colour scheme; a document whose own scheme
+  differs gets the browser's opaque canvas of that scheme (white around narrow
+  content on the dark theme, which keeps an unstyled page readable). A module that
+  paints its own dark palette on a transparent page declares `color-scheme: dark`
+  on its root while it is dark; the host changes neither.
 
 - **`OuroborosWidget.download(name, source)`** saves an existing `Blob`, a
   `data:` URL, a URL under this skill's extension route prefix or an ESM
@@ -2251,7 +2270,7 @@ closed. The classic capabilities below are verified on Chromium and WebKit throu
   rules (a user gesture for audible playback) still apply.
 
 A `kind: iframe` route frame is your own page under the same sandbox and
-permissions set, with no bridge and no host CSP, loaded from the mount's route
+permissions set, with no host CSP and no bridge unless it loads one, loaded from the mount's route
 lease (`/api/widget-resources/<lease>/<route>`): your page keeps its own HTTP
 `Content-Security-Policy`, and its own URL is its base, so **relative** URLs
 (images, styles, scripts, `<audio>`/`<video>`, fonts, a relative HLS playlist
@@ -2295,7 +2314,7 @@ declaration, so every framed or declarative widget tab carries an explicit value
 | `start` | Behaviour | Default for |
 |---|---|---|
 | `auto` | Starts when the Widgets page is shown; leaving the page stops it. For cheap instruments (a quota gauge, a status board). | `declarative` — the only value it accepts: the host draws it, there is nothing to start |
-| `manual` | The card shows the title, icon, and a Start button; the program runs only after the owner presses Start. Leaving the page is an ordered Stop: for `kind: module` the host sends the dispose message and gives the widget up to one second to save before the frame is removed; a `kind: iframe` route frame has no bridge and is removed at once. | `module`, `iframe` |
+| `manual` | The card shows the title, icon, and a Start button; the program runs only after the owner presses Start. Leaving the page is an ordered Stop: for `kind: module` (and a route page that loaded `/api/widget-bridge.js`) the host sends the dispose message and gives the widget up to one second to save before the frame is removed; a route page without the bridge is removed at once. | `module`, `iframe` |
 | `retain` | "Keep running": starts on the first Widgets visit like `auto` and keeps running while the owner is on other pages; the card's status reads "Keeps running". It stops on the owner's Stop, on skill disable / unload / delete (also while Widgets is hidden), when the window reloads, and when Ouroboros closes. A server reconnect with the same served code keeps the frame when the skill is live again with the same revision; a changed revision stops it in order and starts it again. An `entry_type: "module"` widget also restarts on a new publication of the same bytes, because its file lease ends with the old one. | — |
 
 Rules every module author follows:
@@ -2364,8 +2383,8 @@ acknowledgement handshake is live for `kind: module`: your
 `__ouroWidgetOnDispose` hooks may be async and may use the fetch bridge, and
 the parent gives them up to one second before it removes the frame — on Stop,
 on leaving the page, and when your skill's revision changes while the card
-runs (the old frame flushes first, then the fresh card mounts). A `kind: iframe`
-route frame has no bridge and is removed at once. Autosave while running plus the one-second flush
+runs (the old frame flushes first, then the fresh card mounts). A route page
+gets the same handshake once it loads the bridge; without it, it is removed at once. Autosave while running plus the one-second flush
 is still the whole durable path — nothing survives a reload or Ouroboros
 closing, kept-running cards included. When the owner disables your skill while
 its widget runs, the dispose hook still runs, but the server unregisters the

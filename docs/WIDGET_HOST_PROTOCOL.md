@@ -49,7 +49,7 @@ Set the frame's `srcdoc` property (not an attribute string) to this document, in
 
 - **`BRIDGE`** is your bootstrap (§3). It must run before the module.
 - **`RESIZE`** is your size reporter (§5), or empty when the card has a fixed `height`.
-- **`ENTRY`** for classic mode is `<script>MODULE</script>`, with the script text with every `</script` written as `<\/script` and every `<!--` as `<\!--`. It runs as a classic script, even when the file is named `.mjs`.
+- **`ENTRY`** for classic mode is `<script>MODULE</script><script>MARK</script>`, with the script text with every `</script` written as `<\/script` and every `<!--` as `<\!--`. It runs as a classic script, even when the file is named `.mjs`. `MARK` (builtin: `window.__ouroWidgetEntryRan?.();`) tells the size reporter (§5) the entry has run.
 
 ### Route leases (classic entries and route frames)
 
@@ -96,8 +96,9 @@ invalid fields/body answer 400/413; foreign or opaque origins answer 403.
 
 Set `BASE` to `<meta name="referrer" content="no-referrer"><base href="ASSET_BASE">`
 and the iframe's `referrerPolicy` to `no-referrer`. Set `ENTRY` to
-`<script type="module" crossorigin="anonymous" src="ENTRY_URL"></script>`,
-where `ENTRY_URL` resolves `render.entry` from `ASSET_BASE`; escape attributes.
+`<script type="module" crossorigin="anonymous">import "ENTRY_URL"; MARK</script>`,
+where `ENTRY_URL` resolves `render.entry` from `ASSET_BASE`, as a JSON string with
+`</script` escaped; `MARK` then runs after the entry's top-level `await`.
 Use this policy (the bootstrap still runs first):
 
 ```
@@ -168,7 +169,7 @@ A route page's bootstrap is the same script served at `GET /api/widget-bridge.js
 | `ouro-widget-theme` | `op: "subscribe" \| "unsubscribe"` | Start or stop sending the theme. |
 | `ouro-widget-download` | `id`, `name`, `source` | Save a `Blob`, a `data:` URL or a URL under the skill's prefix. |
 | `ouro-widget-open-external` | `id`, `url` | Open an external link. |
-| `ouro-widget-resize` | `height` | The measured content height in pixels (§5). |
+| `ouro-widget-resize` | `height`, optional `held`, `fit` | The measured content height in pixels. On a board frame the builtin reporter adds `held` when it stops growing it and `fit` after a fresh fit (§5). |
 | `ouro-widget-error` | `kind: "error" \| "rejection" \| "csp"`, `message`, `source`, `line` | A fault inside the frame. Show it on the card; builtin logging is described in §5. |
 | `ouro-widget-disposed` | | The frame finished its dispose hooks (§6). |
 
@@ -182,6 +183,7 @@ A route page's bootstrap is the same script served at `GET /api/widget-bridge.js
 | `ouro-widget-fetch-chunk` | `id`, `phase`, and per phase: `headers`: `status`, `statusText`, `headers` (`[name, value]` pairs); `data`: `chunk` (an `ArrayBuffer`, transferred); `end`; `error`: `error` (text) | One step of a bridged response. |
 | `ouro-widget-event` | `event`, `data` | One of the skill's WebSocket events. |
 | `ouro-widget-theme` | `theme: "light" \| "dark"` | The page's current theme. |
+| `ouro-widget-viewport` | `floor`, `ceiling`, optional `frame`, `fit` | A self-sizing frame's new bounds, in pixels; when the fit starts over (Natural height, Reset), the height it is being set to and that fresh fit's number (§5). Optional: the builtin widgets view sends it, a frame in a message never gets it. |
 | `ouro-widget-download-result` | `id`, `result` | The outcome of a download. |
 | `ouro-widget-open-external-result` | `id`, `result` | The outcome of opening a link. |
 | `ouro-widget-dispose` | | Stop now (§6). |
@@ -201,7 +203,7 @@ There is no default timeout. A positive `init.timeoutMs` aborts the request afte
 
 **Theme.** On `subscribe`, post the current theme at once and again whenever it changes. `unsubscribe` stops that.
 
-**Size.** Only a card without a fixed `height` sizes itself. The frame starts at 320 pixels. On `ouro-widget-resize`, set the frame's height to `min(ceiling, max(320, height + 2))`, where `ceiling` is `max_height` (default 8192) and the 2 pixels are the frame border. Ignore a height that is not a positive number. With a fixed `height`, ignore these messages. The builtin size reporter measures `#root` with a `ResizeObserver`, reports in the next animation frame, posts only a changed integer height, and hides the document's vertical scrollbar below the ceiling.
+**Size.** Only a card without a fixed `height` sizes itself. The frame starts at 320 pixels. On `ouro-widget-resize`, set the frame's height to `min(ceiling, max(floor, height + 2))`: `ceiling` is `max_height` (default 8192), `floor` 320, the 2 pixels the frame border. Ignore a height that is not a positive number. With a fixed `height`, ignore these messages and keep the declared height. The builtin size reporter measures `#root` with a `ResizeObserver`, reports in the next animation frame, posts only a changed integer height, and hides the document's vertical scrollbar below the ceiling, releasing it there. The builtin widgets view lets the owner set a card's content height `h`, the frame's height exactly (ceiling `h`, floor 0); without one, or shown all, its borderless self-sizing frame adds 0, has floor 0 and ceiling `max_height`, and stands at 320 until its first report, which waits for `MARK` or the document's `load`, whichever is first, and for something drawn (an empty document scrolls). Both are baked into its document; a change is posted as `ouro-widget-viewport`, with the hello if made before it. After `frame` the reporter measures anew once its window has that height and adds `fit` to each report; the page ignores a report with an older `fit`. Its reporter measures the laid-out document with the scrollbar hidden, again on each resize, change in the document, ended transition or animation, loaded image or video and move of the pointer or the focus: what the body holds where drawn, body margins in, the body's own height out. A box the viewport's size or larger, or one at its bottom, with space outside asks for more at every height: seen asking at two heights the frame answered exactly, no less the second time, each unchanged one animation frame later, the reporter stops asking and sends `held`, baked into the next mount so the frame does not grow again (a stop made while a finite transition or animation runs is looked at once more when nothing moves: one more height, then for good); a different extra at that height or new bounds resume it, and the document scrolls meanwhile. A fixed module or route frame takes `h` as its height.
 
 **Downloads.** A `Blob` or a `data:` URL is saved as it is. A URL must have the page's origin and lie under the skill's prefix or this mount's asset prefix; anything else fails. The builtin host streams a skill-route URL and reads an asset URL with `credentials: "omit"`, saving its finite captured bytes like a `Blob`. Answer with `result: {ok: true, ...}` or `{ok: false, error}`.
 

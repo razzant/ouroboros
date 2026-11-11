@@ -555,6 +555,12 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
         ended = [] if current_state is not None else [current_id]
         controls = ws.controls_for(current_state, current_row, earlier_live=earlier, live_roots=ended + logical + earlier,
                                    presence_turn=bool((raw.get(current_id) or {}).get("_presence_turn")))
+        from ouroboros.owner_model import eligibility
+
+        durable = obs.result(current_id) if current_row is not None else None
+        if (durable and current_state["activity"] in {"working", "queued", "waiting"}
+                and not eligibility(durable) and durable.get("status") not in _TRULY_TERMINAL_STATUSES):
+            controls.append({"action": "model", "target": current_id})
         if (raw.get(current_id) or {}).get("nothing_to_stop"):
             controls = [control for control in controls if control["action"] != "stop"]  # its door has nothing to reach
         # An ended author's tree takes the owner's Pause while a helper lives, or an ordinary run its members left
@@ -572,6 +578,8 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
                             and member.get("stop", {}).get("scope") != "tree")
         work.update(kind="direct" if str(room_row.get("kind") or "") == "direct_chat" else "task",
                     project_id=str(room_row.get("project_id") or ""), since=_since(room_row), controls=controls)
+        if current_row is not None and current_row.get("lead"):
+            work["lead"] = current_row["lead"]
         cmid = str(room_row.get("client_message_id") or "")
         if cmid:
             work["client_message_id"] = cmid

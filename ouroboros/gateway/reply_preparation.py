@@ -9,10 +9,9 @@ or finalizing, and its own answer having entered the delivery path
 (``reply_handed_off``, a stored answer or result). Otherwise it is active when
 its own model rounds and tools run, or, while it waits (an owner question, model
 access, a sleep, a slot held on mail, task terminals, a delegated run or a
-review panel), when what the wait names works: a held run the host currently
-observes running (``delegate_supervision.observed_run_activity``), a run a warm
-or cold sleep selected that the body observer currently sees running
-(``delegate_collection.current_activity``), a panel seat not waiting for model
+review panel), when what the wait names works: a run its in-slot wait or its
+warm or cold sleep selected that the body observer currently sees running
+(``delegate_feed.current_activity``), a panel seat not waiting for model
 access (``review_pause.panel_activity``), or a live descendant active by the
 same rules. Children contribute only through their
 root and never name a chat. Unknown facts make no positive and never cancel
@@ -163,8 +162,7 @@ def reply_preparation(drive_root: Any) -> Dict[str, Any]:
     known positives either way. Without any awaited reply alive the census is not read.
     """
     from ouroboros.budget_pause import budget_pause_row
-    from ouroboros.delegate_collection import current_activity
-    from ouroboros.delegate_supervision import observed_run_activity
+    from ouroboros.delegate_feed import current_activity
     from ouroboros.sleep_custody import accepted_receipt
     from ouroboros.gateway.state import _answer_stored, _chat_activities_snapshot_safe, _direct_turns_snapshot_safe
     from ouroboros.gateway.state import _task_activity_facts
@@ -260,8 +258,8 @@ def reply_preparation(drive_root: Any) -> Dict[str, Any]:
         results: List[Optional[bool]] = []
         for key in fact.get("waits") or ():
             kind, _, target = str(key).partition(":")
-            if kind == "delegate":
-                results.append(observed_run_activity(drive_root, task_id, target, fact.get("attempt")))
+            if kind == "delegate":  # a turn that cannot sleep waits on its runs in the slot (``delegate_wait``)
+                results.extend(current_activity(drive_root, task_id, run_id) for run_id in target.split(",") if run_id)
             elif kind == "review":
                 results.append(panel_activity(*seats(task_id, row, fact), owner_id=target.split(":", 1)[0]))
         if fact.get("park") == "review":

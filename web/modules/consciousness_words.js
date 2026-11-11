@@ -1,4 +1,5 @@
 import { tr, fmt } from './i18n.js';
+import { shortName } from './chat_model_routes.js';
 import { taskPresentation } from './log_events.js';
 import { taskCostMeta } from './chat_activity.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
@@ -117,6 +118,24 @@ const TITLE_SEP = ' · ';
 export const sameWords = (a, b) => String(a || '').toLowerCase().replace(/\s+/g, '') === String(b || '').toLowerCase().replace(/\s+/g, '');
 /** The service a place is on, as its row and its sheet name it quietly. */
 export const placeService = (place) => String(place.serviceLabel || place.provider || '');
+
+// A model a place or a circle is given, as a row says it: the two aliases by their role's name, a route by the
+// model's own short name (`z-ai/glm-5.3` reads `glm-5.3`).
+const MODEL_ALIASES = Object.freeze({ main: ['places.model.main', 'Main'], light: ['places.model.light', 'Light'] });
+export const isModelAlias = (value) => Object.hasOwn(MODEL_ALIASES, String(value || ''));
+export const placeModelWord = (value) => (isModelAlias(value) ? tr(...MODEL_ALIASES[value]) : shortName({ model: String(value || '') }));
+/** What an empty Model field of a place uses, from its `model_route` and its circle as last read (a circle's model
+ *  edit does not revise its places' rows): `{circle, model}`, `circle` empty for the consciousness model and `model`
+ *  empty when this read does not say which one that is. */
+export function inheritedModel(place, circle = null) {
+    const route = place.modelRoute;
+    if (circle?.model) {
+        // An alias is named by what it resolves to now, which only a place that inherits it carries.
+        const resolved = isModelAlias(circle.model) && route?.layer === 'circle' && route.value ? route.value : circle.model;
+        return { circle: circle.name, model: placeModelWord(resolved) };
+    }
+    return { circle: '', model: route?.layer === 'consciousness' && route.value ? placeModelWord(route.value) : '' };
+}
 /** One title for a place's row and its sheet: its label without the service it is on and without its circle's own
  *  name; a whole-account place with nothing left takes the account's name from its connector's status; the service
  *  itself is the last resort. */

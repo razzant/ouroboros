@@ -506,7 +506,7 @@ def test_settlement_follows_the_ledger_and_the_registration_debt_survives(tmp_pa
     assert dc.record_started(tmp_path, entry) is True, "the authoritative row must land"
     ctx = _nanny_ctx(tmp_path)
 
-    first = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
+    first = json.loads(delegate._read_run(ctx, "run-1"))
     assert first["settlement"]["settled"] is True, "settles on the ledger row"
     assert first["settlement"]["project_retired"] is False, "the debt is disclosed"
     entry = dc.replay(tmp_path)["run-1"]  # the durable collector fact, not a pre-collection object
@@ -515,7 +515,7 @@ def test_settlement_follows_the_ledger_and_the_registration_debt_survives(tmp_pa
     assert [c.run_id for c in dc.owned_project_registrations(tmp_path)] == ["run-1"]
 
     failing["now"] = False
-    second = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
+    second = json.loads(delegate._read_run(ctx, "run-1"))
     delegate._CUSTODY.clear()
     assert second["settlement"]["settled"] is True
     rows = ledger_rows(tmp_path)
@@ -541,15 +541,12 @@ def test_settlement_follows_the_ledger_and_the_registration_debt_survives(tmp_pa
 
 
 def test_the_public_wait_is_event_only_and_its_outer_bound_matches_task_lifetime():
-    """The model cannot request a fake return window; the host renews quiet windows."""
+    """The model cannot request a fake return window: delegate_wait is a sleep on runs, its retired window
+    settings bind nothing any more, and the windowed read's own bounds and idle-rail lease are gone with it."""
     import os
 
-    from ouroboros.config import (
-        DELEGATE_WAIT_CEILING_SEC,
-        DELEGATE_WAIT_WINDOW_MAX_SEC,
-        get_delegate_wait_max_sec,
-    )
-    from ouroboros.delegate_progress import EXTERNAL_WAIT_LEASE_CEILING_SEC
+    from ouroboros import config, delegate_progress
+    from ouroboros.config import RETIRED_SETTING_KEYS, SETTINGS_DEFAULTS
     from ouroboros.loop_tool_execution import _DEADLINE_CLAMPED_TOOLS, _PER_CALL_TIMEOUT_TOOLS
     from ouroboros.tools.delegate import get_tools
 
@@ -568,28 +565,19 @@ def test_the_public_wait_is_event_only_and_its_outer_bound_matches_task_lifetime
         os.environ.pop("OUROBOROS_TASK_ABS_CEILING_SEC", None)
         if previous_lifetime is not None:
             os.environ["OUROBOROS_TASK_ABS_CEILING_SEC"] = previous_lifetime
-    assert DELEGATE_WAIT_WINDOW_MAX_SEC < DELEGATE_WAIT_CEILING_SEC < EXTERNAL_WAIT_LEASE_CEILING_SEC
-    assert (DELEGATE_WAIT_WINDOW_MAX_SEC, DELEGATE_WAIT_CEILING_SEC,
-            EXTERNAL_WAIT_LEASE_CEILING_SEC) == (1800, 2100, 2400)
+    for retired in ("DELEGATE_WAIT_WINDOW_MAX_SEC", "DELEGATE_WAIT_CEILING_SEC"):
+        assert not hasattr(config, retired), retired
+    assert not hasattr(delegate_progress, "EXTERNAL_WAIT_LEASE_CEILING_SEC")
     # ...and neither escape hatch applies to this tool, which is why the ToolEntry
     # value really is the bound. The task deadline is a separate concern and is
-    # honoured INSIDE the tool (see the wait-window test below), which is why the
+    # honoured INSIDE the tool (its sleep wakes on the deadline), which is why the
     # outer clamp still must not apply: it would thread-kill the graceful return.
     assert "delegate_wait" not in _PER_CALL_TIMEOUT_TOOLS
     assert "delegate_wait" not in _DEADLINE_CLAMPED_TOOLS
 
-    previous = os.environ.get("OUROBOROS_DELEGATE_WAIT_MAX_SEC")
-    os.environ["OUROBOROS_DELEGATE_WAIT_MAX_SEC"] = "7200"
-    try:
-        # The configurable max clamps to the hard window max — NOT to the
-        # ToolEntry timeout: raising the executor timeout must never silently
-        # widen the askable window.
-        assert get_delegate_wait_max_sec() == DELEGATE_WAIT_WINDOW_MAX_SEC
-    finally:
-        if previous is None:
-            os.environ.pop("OUROBOROS_DELEGATE_WAIT_MAX_SEC", None)
-        else:
-            os.environ["OUROBOROS_DELEGATE_WAIT_MAX_SEC"] = previous
+    for key in ("OUROBOROS_DELEGATE_WAIT_SEC", "OUROBOROS_DELEGATE_WAIT_MAX_SEC"):
+        # No window to configure: the two keys are retired, never read and never offered.
+        assert key in RETIRED_SETTING_KEYS and key not in SETTINGS_DEFAULTS
 
 
 # ---------------------------------------------------------------------------

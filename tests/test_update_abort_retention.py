@@ -49,7 +49,9 @@ def _system(tmp_path, monkeypatch):
     from supervisor import git_ops, worker_pool_lifecycle, worker_process
     from ouroboros.utils import append_jsonl
 
+    admission = worker_pool_lifecycle.admissible_starts  # this system grows its project slot on demand
     queue, state, workers = _install_queue(tmp_path, monkeypatch)
+    monkeypatch.setattr(worker_pool_lifecycle, "admissible_starts", admission)
     _pool_events(workers, monkeypatch)
     repo = tmp_path / "repo"
     (repo / ".git").mkdir(parents=True)
@@ -59,7 +61,7 @@ def _system(tmp_path, monkeypatch):
     monkeypatch.setattr(workers, "REPO_DIR", repo)
     monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "")
     monkeypatch.setattr(workers, "_repo_writer_gate_reason", "")
-    monkeypatch.setattr(workers, "MAX_WORKERS", 1)
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", str(1))
     monkeypatch.setattr(workers, "mp", SimpleNamespace(get_context=lambda _method: SimpleNamespace(Queue=stdqueue.Queue)))
     # The real spawn_workers caches that fake context in the global ``workers._CTX``, which the
     # ``mp`` patch does not restore: the next test in this process that starts the real event bus

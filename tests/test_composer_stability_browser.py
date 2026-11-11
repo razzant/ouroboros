@@ -25,7 +25,7 @@ OPENERS = "#page-chat .chat-input-wrap [aria-expanded]:not([data-mobile-nav-togg
 WHERE = """(selector) => {
     const wrap = document.querySelector('#page-chat .chat-input-wrap');
     const top = (node) => (node && node.getClientRects().length ? Math.round(node.getBoundingClientRect().top * 10) / 10 : null);
-    const name = (node) => node.id || ['subagents', 'context', 'effort'].find((k) => node.closest(`.chat-${k}-mode, .chat-${k}-range`))
+    const name = (node) => node.id || ['model', 'subagents', 'context', 'effort'].find((k) => node.closest(`.chat-${k}-mode, .chat-${k}-range`))
         || node.getAttribute('aria-label') || node.className;
     return { field: top(wrap.querySelector('.chat-field')), row: top(wrap.querySelector('.chat-toolbar-row')),
         openers: [...document.querySelectorAll(selector)].map((node) => [name(node), top(node), node.getAttribute('aria-expanded')]) };
@@ -73,7 +73,7 @@ def test_nothing_the_composer_opens_moves_the_composer(direct_server_with_data, 
                 _settle(page)
                 rest = page.evaluate(WHERE, OPENERS)
                 names = [name for name, _, _ in rest["openers"]]
-                assert {"subagents", "context", "effort", "chat-plus"} <= set(names), rest
+                assert {"model", "subagents", "context", "effort", "chat-plus"} <= set(names), rest
                 for i, name in enumerate(names):
                     opener = page.locator(OPENERS).nth(i)
                     if not opener.is_visible():
@@ -89,6 +89,21 @@ def test_nothing_the_composer_opens_moves_the_composer(direct_server_with_data, 
                         _settle(page)
                         steps["choose"] = page.evaluate(WHERE, OPENERS)
                         _still(rest, steps["choose"], i, f"{availability}, choosing in {name}")
+                    if name == "model":
+                        # Main's choice closes the strip and asks in its sheet before writing Main itself.
+                        press(page.locator("#chat-model-mode .chat-model-find"))
+                        chosen = f"mock-stability-{availability}"
+                        page.fill("#chat-model-mode .chat-model-query", f"openai-compatible::{chosen}")
+                        press(page.locator(".chat-model-list .chat-model-typed"))
+                        page.wait_for_selector(".confirm-dialog [data-confirm-ok]")
+                        steps["sheet"] = page.evaluate(WHERE, OPENERS)
+                        _still(rest, steps["sheet"], i, f"{availability}, Main's sheet")
+                        with page.expect_response(lambda r: r.url.endswith("/api/owner/chat-model") and r.status == 200, timeout=30_000):
+                            press(page.locator(".confirm-dialog [data-confirm-ok]"))
+                        page.wait_for_function("word => document.querySelector('#chat-model-mode .chat-capsule-value').textContent === word", arg=chosen)
+                        _settle(page)
+                        steps["choose"] = page.evaluate(WHERE, OPENERS)
+                        _still(rest, steps["choose"], i, f"{availability}, choosing Main")
                     page.keyboard.press("Escape")
                     expanded(i, "false")
                     steps["closed"] = page.evaluate(WHERE, OPENERS)

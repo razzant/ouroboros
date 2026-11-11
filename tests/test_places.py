@@ -445,3 +445,66 @@ def test_malformed_circle_metadata_is_a_repair_error_never_an_empty_store(tmp_pa
     with pytest.raises(p.PlaceError, match="need repair") as unreadable:
         p.place_records(tmp_path)
     assert unreadable.value.code == "places_unreadable"
+
+
+def test_circle_model_is_revisioned_without_changing_words_or_place_rows(tmp_path):
+    place = connect(tmp_path)
+    circle = p.create_circle(tmp_path, name="Team", text="Shared words", model="  future/route  ", author="owner")
+    place = p.edit_place(tmp_path, place.place_id, "set_circle", author="owner", circle_id=circle["circle_id"])
+    before = document(tmp_path)
+    assert before["circles"][0]["model"] == "future/route"
+    assert p.place_records(tmp_path).circle_context(place.place_id)["model"] == "future/route"
+    changed = p.edit_circle(tmp_path, circle["circle_id"], author="ouroboros", model=" another/route ",
+                            expected_revision=circle["revision"])
+    assert changed["model"] == "another/route" and changed["revision"] > circle["revision"]
+    assert {key: changed[key] for key in ("text", "text_author", "text_at")} == {
+        key: circle[key] for key in ("text", "text_author", "text_at")}
+    assert set(changed) == {"circle_id", "name", "text", "text_author", "text_at", "revision", "model"}
+    assert document(tmp_path)["places"] == before["places"]  # frozen Place rows and their revisions stay intact
+    saved = p.places_path(tmp_path).read_bytes()
+    with pytest.raises(p.PlaceError, match="Current revision") as stale:
+        p.edit_circle(tmp_path, circle["circle_id"], author="owner", model="stale", expected_revision=circle["revision"])
+    assert stale.value.code == "circle_revision_conflict" and p.places_path(tmp_path).read_bytes() == saved
+    assert p.edit_circle(tmp_path, circle["circle_id"], author="owner", model="another/route",
+                          expected_revision=changed["revision"]) == changed
+    assert p.places_path(tmp_path).read_bytes() == saved
+    cleared = p.edit_circle(tmp_path, circle["circle_id"], author="owner", model="  ", expected_revision=changed["revision"])
+    assert cleared["model"] == "" and cleared["revision"] > changed["revision"]
+    assert p.place_records(tmp_path).circle_context(place.place_id)["model"] == ""
+
+
+def test_old_circle_without_model_inherits_without_rewriting_the_store(tmp_path):
+    from ouroboros.place_projection import circle_summary
+    place = connect(tmp_path)
+    circle = p.create_circle(tmp_path, name="Old circle", author="owner")
+    p.edit_place(tmp_path, place.place_id, "set_circle", author="owner", circle_id=circle["circle_id"])
+    value = document(tmp_path)
+    del value["circles"][0]["model"]
+    path = p.places_path(tmp_path)
+    path.write_text(json.dumps(value), encoding="utf-8")
+    before = path.read_bytes()
+    records = p.place_records(tmp_path)
+    assert circle_summary(records.circle(circle["circle_id"]))["model"] == ""
+    assert records.circle_context(place.place_id)["model"] == ""
+    assert path.read_bytes() == before
+    assert base_reader(value)[place.place_id] == records.places[place.place_id]
+
+
+@pytest.mark.parametrize("model", [7, False, [], {}])
+def test_circle_model_requires_a_string_in_writers_and_stored_rows(tmp_path, model):
+    circle = p.create_circle(tmp_path, name="Team", model="unlisted/model", author="owner")
+    path = p.places_path(tmp_path)
+    before = path.read_bytes()
+    for write in (lambda: p.create_circle(tmp_path, name="Other", model=model, author="owner"),
+                  lambda: p.edit_circle(tmp_path, circle["circle_id"], model=model, author="owner")):
+        with pytest.raises(p.PlaceError) as error:
+            write()
+        assert error.value.code == "place_invalid_string" and error.value.field == "model"
+        assert path.read_bytes() == before
+    value = document(tmp_path)
+    value["circles"][0]["model"] = model
+    path.write_text(json.dumps(value), encoding="utf-8")
+    malformed = path.read_bytes()
+    with pytest.raises(p.PlaceError, match="need repair"):
+        p.place_records(tmp_path)
+    assert path.read_bytes() == malformed

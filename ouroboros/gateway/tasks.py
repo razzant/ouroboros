@@ -90,7 +90,7 @@ log = logging.getLogger(__name__)
 
 _RESERVED_METADATA_KEYS = frozenset({
     "work_kind", "schedule_writer_kind", "wake_cause", "focus", "consciousness_cause", "origin_wake_task_id",
-    "task_id",
+    "task_id", "lead",
     "parent_task_id",
     "root_task_id",
     "session_id",

@@ -32,8 +32,11 @@ from tests.test_pause_model_receiver import _call, _until, scope as scope
 @pytest.fixture
 def registries(monkeypatch):
     """This process's producer registries, isolated from rows other tests left pinned."""
+    from ouroboros.tools import shell_process
+
     monkeypatch.setattr(budget_pause, "_TOOL_FUTURES", {})
     monkeypatch.setattr(_usage_wait, "_ABANDONED_SENDS", set())
+    monkeypatch.setattr(shell_process, "_active_subprocesses", set())
 
 
 def test_forgotten_attempt_rows_stay_owned_through_the_late_callback_tail(registries):

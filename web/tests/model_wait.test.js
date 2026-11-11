@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { activeModelWaits, createModelWaitController, isModelWaitReference, MODEL_WAIT_REASONS, mergeModelWaits, modelWaitAction, modelWaitRoleLabel, unsavedPersistenceNotice } from '../modules/model_wait.js';
+import { activeModelWaits, createModelWaitController, isModelWaitReference, MODEL_WAIT_REASONS, mergeModelWaits, modelWaitAction, modelWaitReasonLabel, modelWaitRoleLabel, unsavedPersistenceNotice } from '../modules/model_wait.js';
 import { desiredLiveCardPhase } from '../modules/task_phase_chip.js';
 import { emptyWorkState, roomStatusView } from '../modules/work_status.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
@@ -192,4 +192,42 @@ test('a requested Settings save that did not land is told only once its wait res
     assert.equal(unsavedPersistenceNotice({ ...resolved, applied_request_id: undefined }, { request_id: 'mine', saved: null }),
         'Reviewer · one: model wait ended; whether it was saved in Settings is unconfirmed.', 'missing receipt proves no application outcome');
     assert.equal(unsavedPersistenceNotice(resolved, null), '', 'no Settings save was requested');
+});
+
+test('a wait of a work on its own model says so and offers no save in Settings, while its task can still switch', (t) => {
+    const env = installDom();
+    t.after(() => restoreDom(env.prior));
+    const root = document.createElement('div');
+    const timelineEl = document.createElement('div');
+    root.append(timelineEl);
+    const controller = createModelWaitController({ getRecord: () => ({ root, timelineEl, finished: false }) });
+    t.after(() => controller.destroy());
+    assert.equal(modelWaitRoleLabel('lead'), 'This work\'s model');
+    controller.observe('task', { model_waits: { 'wait-light': row({ role: 'lead' }) } });
+    assert.equal(root.querySelector('[data-wait-role]').textContent, 'This work\'s model');
+    const persist = root.querySelector('[data-wait-persist]');
+    assert.equal(root.querySelector('[data-wait-persist-offer]').hidden, true, '"Also save this role in Settings" is not offered');
+    assert.equal(persist.disabled, true);
+    assert.equal(persist.checked, false);
+    assert.match(root.querySelector('[data-wait-scope]').textContent, /this work's model only/);
+    persist.checked = true;
+    controller.observe('task', { model_waits: { 'wait-light': row({ role: 'lead', revision: 2 }) } });
+    assert.equal(persist.checked, false);
+    assert.equal(modelWaitAction('task', row({ role: 'lead' }), 'switch', { model: 'openai::replacement' }, 'r').persist_role, false);
+    // A role of Settings keeps the offer.
+    const other = document.createElement('div');
+    const otherTimeline = document.createElement('div');
+    other.append(otherTimeline);
+    const settingsRole = createModelWaitController({ getRecord: () => ({ root: other, timelineEl: otherTimeline, finished: false }) });
+    t.after(() => settingsRole.destroy());
+    settingsRole.observe('task', { model_waits: { 'wait-light': row({ role: 'light' }) } });
+    assert.equal(other.querySelector('[data-wait-persist-offer]').hidden, false);
+    assert.equal(other.querySelector('[data-wait-persist]').disabled, false);
+});
+
+test('each wait reason has the one label its row shows, and a route whose access cannot be watched says so', () => {
+    assert.deepEqual(MODEL_WAIT_REASONS.map((reason) => modelWaitReasonLabel(reason)),
+        ['Waiting for quota', 'Sign-in required', 'Waiting for access', 'Waiting for an account', 'Key unavailable']);
+    assert.equal(modelWaitReasonLabel('quota', false), 'Waiting for provider access');
+    assert.equal(modelWaitReasonLabel('connection_unavailable', false), 'Key unavailable', 'a key that is off is off, watched or not');
 });

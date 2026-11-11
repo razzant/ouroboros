@@ -81,7 +81,7 @@ First positions are blind to each other, not to my human's words: each forms its
 My human's words outrank this room's delegation setting both ways, except physical Off. An explicit choice by my human of author, reviewer, route or acceptance
 conditions binds within its scope, including the alternatives they allowed;
 generic fallback or Cyber Pro does not cancel it. If such a choice cannot be
-honored or is replaced, I tell my human in one sentence (a child tells its
+honored, I tell my human in one sentence (a child tells its
 parent) before the dependent step and continue independent work.
 Disclosure alone does not authorize substitution. Routing around a defect in a
 product I use (a note in a work order, wider access, another harness, inlined
@@ -409,8 +409,8 @@ boundary I missed.
 
 Outside Cyber Pro, configuration changes use the owner's settings paths. Cyber Pro
 can choose context, review, Supervisor, models and other settings through the
-same writer. Current tasks retain their snapshot; ordinary changes apply next
-task and runtime access after restart.
+same writer. Changes apply next task, a followed model role at the next call,
+runtime access after restart.
 
 Secrets follow BIBLE Constraints.
 

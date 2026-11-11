@@ -127,8 +127,8 @@ def _drain_incoming_messages(
     returned result's final save, or the published exact pause), so a crash in
     between delivers it again instead of losing it. Non-content controls are
     acknowledged at once. ``place_live_runs`` (the round top alone, never a delivery
-    close, a forced finalization or a live call): my human's rows this run carries
-    are placed into the sessions it holds open (``place_rows_into_runs``), each once.
+    close, a forced finalization or a live call): my human's rows the host's placement at receipt
+    left are placed into the sessions it holds open (``place_rows_into_runs``), each once.
     """
     controls: Dict[str, Any] = {}
 
@@ -221,6 +221,13 @@ def _drain_incoming_messages(
 
                 apply_latch(owner_ctx, entry, event_queue=event_queue)
                 controls["hurry"] = str(entry.get("msg_id") or "hurry")
+                continue
+            from ouroboros.owner_mailbox import KIND_OWNER_MODEL
+            if kind == KIND_OWNER_MODEL:
+                from ouroboros.owner_model import apply_current
+
+                controls["owner_model"] = apply_current(owner_ctx) or controls.get("owner_model", False)
+                acknowledge_transcript_entry(drive_root, task_id, entry, wake_id="owner_model_wake")
                 continue
             dmsg = entry.get("text") or ""
             if kind == KIND_TASK_MESSAGE:
@@ -364,11 +371,11 @@ def _drain_incoming_messages(
                     })
                 except Exception:
                     pass
-    if owner_ctx is not None:  # my human's rows reach every live member below this run, by identity, each once
+    if owner_ctx is not None:  # the catch-up of the host's carriage at receipt: every live member below, each row once
         from ouroboros.owner_relay import carry_to_members
         grown = len(getattr(owner_ctx, "_owner_directives", None) or []) > before_rows
         carry_to_members(owner_ctx, delivered=delivered or grown)
-        if place_live_runs:  # and the sessions this run holds open, each row once per run
+        if place_live_runs:  # and the sessions this run holds open, each row once per run (and the host's facts)
             from ouroboros.delegate_interactions import place_rows_into_runs
             for line in place_rows_into_runs(owner_ctx):
                 _loop()._append_or_merge_user_message(messages, line, slot=owner_ctx)
@@ -907,6 +914,8 @@ def _handle_model_wait_control(
     # catches a hold's interruption raised outside the model call, must not
     # hand the same error back here.
     error.control_rails_seen = True
+    if reason == "owner_model":
+        return None  # a refused call's wait yielded; the next drain applies the durable primary
     if reason == "owner_launch_authority_unavailable":
         # Only the positively unsent handoff waits, and only on positive lock contention;
         # sent effects never retry. Reuse this task's live stack and control/deadline

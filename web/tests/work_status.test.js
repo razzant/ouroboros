@@ -232,7 +232,7 @@ test('a sleep whose chosen helper still awaits its own Resume says so beside Wai
         secondary: 'Sleeping until the task it chose finishes or a message arrives · 1 helper it waits for is paused until Ouroboros resumes it' });
     // The sleeping root keeps exactly its own controls; the helper's Resume stays Ouroboros's selection.
     const grouped = workControls(state.works[0]);
-    assert.deepEqual(grouped, { stop: ['sw'], stopEarlier: [], pause: 'sw', resume: '', hurry: 'sw', wrapUp: 'sw' });
+    assert.deepEqual(grouped, { stop: ['sw'], stopEarlier: [], pause: 'sw', resume: '', hurry: 'sw', wrapUp: 'sw', model: '' });
     assert.deepEqual([roomStatusView(state).owner, roomStatusView(state).amber], [false, '']);
     // A translation keeps the count; the helper's own Activity sentence is unchanged.
     assert.equal(reasonText({ code: 'awaited_helpers_mind', count: 3, text: 'x' }),
@@ -243,7 +243,7 @@ test('a sleep whose chosen helper still awaits its own Resume says so beside Wai
 test('a reusable slot gets no control by its id; a real target keeps its own', () => {
     const slot = { controls: [{ action: 'stop', target: 'active' }, { action: 'pause', target: 'active' },
         { action: 'stop', target: 't-1' }] };
-    assert.deepEqual(workControls(slot), { stop: ['t-1'], stopEarlier: [], pause: '', resume: '', hurry: '', wrapUp: '' });
+    assert.deepEqual(workControls(slot), { stop: ['t-1'], stopEarlier: [], pause: '', resume: '', hurry: '', wrapUp: '', model: '' });
 });
 
 test('a held Continue with three helpers of its failed earlier attempt: one working row with the reason, Stop and Stop earlier attempt, no Resume', () => {
@@ -253,7 +253,7 @@ test('a held Continue with three helpers of its failed earlier attempt: one work
     assert.deepEqual(row, { word: 'Working', secondary: 'Continue starts when 3 helpers of the earlier attempt finish',
         tone: 'live', mark: 'moving', owner: false, outcome: '', focus: '' });
     const grouped = workControls(state.works[0]);
-    assert.deepEqual(grouped, { stop: ['c', 'p'], stopEarlier: ['p'], pause: '', resume: '', hurry: '', wrapUp: '' });
+    assert.deepEqual(grouped, { stop: ['c', 'p'], stopEarlier: ['p'], pause: '', resume: '', hurry: '', wrapUp: '', model: '' });
     assert.deepEqual(workMenuActions(grouped), [ACTION_STOP_EARLIER, ACTION_STOP_NOW]);
     assert.equal(TASK_CONTROL_LABELS[ACTION_STOP_EARLIER], 'Stop earlier attempt');
     // The held Continue's own card says the work's word and reason, and offers no Resume.
@@ -452,7 +452,9 @@ test('controls group by action with exact targets; Resume is a button, a pending
     assert.deepEqual(workMenuActions(workControls(work('direct_question'))), [ACTION_PAUSE, ACTION_STOP_NOW],
         'a direct turn waiting for its answer can be paused and stopped, as its doors take it');
     assert.deepEqual(workControls({ controls: [{ action: 'teleport', target: 'x' }, { action: 'stop', target: '' }] }),
-        { stop: [], stopEarlier: [], pause: '', resume: '', hurry: '', wrapUp: '' }, 'unknown or targetless actions are not offered');
+        { stop: [], stopEarlier: [], pause: '', resume: '', hurry: '', wrapUp: '', model: '' }, 'unknown or targetless actions are not offered');
+    assert.equal(workControls({ controls: [{ action: 'model', target: 't1' }] }).model, 't1', 'the model control names its task');
+    assert.equal(running.model, '', 'a work the server offers no model control for has none');
     assert.deepEqual([...resumeTargets(body('paused_by_owner'))], ['o']);
     assert.deepEqual([...resumeTargets(body('held_continue'))], [], 'a held Continue is never resumed by the owner');
 });

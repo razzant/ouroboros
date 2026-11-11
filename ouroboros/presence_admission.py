@@ -35,7 +35,7 @@ class PresenceAdmission:
     workspace_root: str = ""
     place: Place | None = None
     allowance: Mapping[str, Any] | None = None
-    circle: Mapping[str, Any] | None = None  # the circle words the place inherited at admission, with both origins
+    circle: Mapping[str, Any] | None = None  # circle words with both origins, and model, at admission
 
 
 def admit_presence_turn(*, drive_root: Path, authenticated_transport_skill: str, binding_id: str = "",

@@ -41,6 +41,7 @@
  * @property {"available"|"disabled"|"unsaved"} subagents_availability
  * @property {boolean} context_mode_auto_low  // frozen compatibility field; always false
  * @property {EffortRange} effort_range  // the owner's effort range (POST /api/owner/effort-range), the tolerant read
+ * @property {ChatModelRoute} main_route  // Main itself, written by POST /api/owner/chat-model without project_id
  * @property {string} safety_mode
  * @property {boolean} skills_repo_configured
  * @property {boolean} github_token_configured
@@ -479,6 +480,7 @@
  *   16 and `commit_landings_omitted` counts the older ones its record (`source_ref`) keeps. Absent means no
  *   landing was recorded, never that nothing landed or nobody reviewed.
  * @property {Object[]=} body_adoptions The task's settled adoptions (TaskDetailResponse), on its summary rows.
+ * @property {Object=} review_overrides The work's review-gate field (TaskDetailResponse), on its summary rows.
  * @property {boolean=} worker_saturation_warning
  * @property {string=} source
  * @property {string=} sender_label
@@ -751,7 +753,6 @@
  */
 
 /** @typedef {import('./client_contract_types.js').ProjectMirrorHistoryFields} ProjectMirrorHistoryFields */
-/** @typedef {import('./management_contract_types.js').SkillReviewHistoryDetailResponse} SkillReviewHistoryDetailResponse */
 
 /** Additive /api/chat/history terminality projection.
  * @typedef {Object} TaskOutcomeHistoryFields
@@ -807,6 +808,7 @@
  * @property {string=} last_task_result_id
  * @property {boolean=} created
  * @property {ProjectCognition} cognition
+ * @property {ChatModelChoice=} model_choice  // the room's own model for new owner work; never copied from Main
  */
 
 /** @typedef {Object} ProjectDeleteResponse
@@ -943,17 +945,14 @@
  * @property {EffortRange} effort_range
  */
 
+/** @typedef {import('./client_contract_types.js').ChatModelChoice} ChatModelChoice */
+/** @typedef {import('./client_contract_types.js').ChatModelRoute} ChatModelRoute */
+
 /**
  * @typedef {Object} OwnerSafetyModeResponse
  * @property {boolean} ok
  * @property {string} safety_mode  // full | light | off (v6.54.3)
  */
-
-/** @typedef {import('./management_contract_types.js').InstalledSkill} InstalledSkill */
-
-/** @typedef {import('./management_contract_types.js').SkillToggleResponse} SkillToggleResponse */
-
-/** @typedef {import('./management_contract_types.js').SkillReconcileResponse} SkillReconcileResponse */
 
 /**
  * One Widgets card from `GET /api/widgets` (`gateway/widgets.py::WidgetTab`).
@@ -1039,8 +1038,6 @@
  * @property {string} summary
  * @property {string} repair_hint
  */
-
-/** @typedef {import('./management_contract_types.js').SkillReviewResponse} SkillReviewResponse */
 
 /**
  * `POST /api/skills/{skill}/grants`; refusals use `SkillActionRefusal`, slow setup {ok, pending: true, job_id, message}.
@@ -1228,6 +1225,7 @@
  * @property {Array<{adoption_id:string, outcome:'adopted'|'not_applied'|'superseded'|'unconfirmed', commit_sha:string, previous_sha:string, branch:string, note:string, settled_at:string, revision:number, commits?:string[], commits_complete?:boolean, commits_omitted?:number}>=} body_adoptions
  *   Every adoption this task authorized, as boot settled them; `commits` (previous..candidate, newest first, bounded;
  *   a cut range counts the rest in `commits_omitted`) only when adopted.
+ * @property {{count:number, latest:{at:string, reason:string, task_id:string, text:string}}=} review_overrides  // a root's decisions Blocking would have stopped (review_overrides.py)
  * @property {string=} error
  * @property {ContinuationOffer=} continuation_offer
  */
@@ -1508,7 +1506,7 @@
  * @property {{hidden:string[],order:string[]}} contributions
  * @property {string[]} widget_order
  * @property {Object.<string,'auto'|'manual'|'retain'>} widget_start_mode  // owner per-card launch-policy override, keyed "<skill>:<tab_id>"
- * @property {Object.<string,{w:number,h:number}>} widget_size  // owner Widgets card width: w masonry columns the card spans (12 = full width), h 0 (reserved)
+ * @property {Object.<string,{w:number,h:number}>} widget_size  // owner Widgets card size: w columns spanned (12 = full, 0 = author's), h content px (0 = natural)
  * @property {boolean} nested_subagents_expanded
  * @property {number} sidebar_width  // px; 0 = CSS default (v6.33.0)
  * @property {number} project_panel_width  // px; 0 = CSS default
@@ -1516,6 +1514,7 @@
  * @property {?number} main_seen_revision  // Main's monotonic paint ACK; null until a client first reads Main
  * @property {Object.<string,number[][]>} read_ahead_revisions  // per chat id: revisions read in full in another room (host-owned)
  * @property {{mode:'default'|'hidden'|'custom',text:string}} welcome  // install-wide empty-Main UI copy, not chat history
+ * @property {ChatModelRoute[]} model_recents  // server-written on each owner model act: newest first, at most four distinct routes; a POST may not carry it
  * @property {boolean=} ok
  */
 /**

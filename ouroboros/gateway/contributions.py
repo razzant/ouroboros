@@ -10,6 +10,8 @@ import asyncio
 import copy
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, TypedDict
 
+from ouroboros.gateway.work_contracts import ChatModelRoute
+
 if TYPE_CHECKING:
     from starlette.requests import Request
     from starlette.responses import Response
@@ -169,7 +171,7 @@ class UiPreferencesResponse(TypedDict):
     contributions: dict[str, list[str]]
     widget_order: list[str]
     widget_start_mode: dict[str, Literal["auto", "manual", "retain"]]  # owner per-card launch-policy override
-    widget_size: dict[str, dict[str, int]]  # owner Widgets card width: {w: masonry columns the card spans, 12 = full width; h: 0}
+    widget_size: dict[str, dict[str, int]]  # owner Widgets card size: {w: columns spanned, 12 = full, 0 = author's; h: content px, 0 = natural}
     nested_subagents_expanded: bool
     sidebar_width: int  # px; 0 = CSS default (resizable side sections, v6.33.0)
     project_panel_width: int  # px; 0 = CSS default
@@ -177,4 +179,5 @@ class UiPreferencesResponse(TypedDict):
     main_seen_revision: Optional[int]  # Main's monotonic paint ACK; null until a client first sets it
     read_ahead_revisions: dict[str, list[list[int]]]  # per chat id: revisions read in full in another room (host-owned)
     welcome: dict[str, str]  # install-wide empty-Main UI copy: mode default|hidden|custom and plain text
+    model_recents: list[ChatModelRoute]  # server-written, newest first, at most four distinct routes
 

@@ -5,12 +5,59 @@ Descriptive, not runtime validation. The browser twin is ``web/modules/work_type
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal
 
 try:  # Python 3.11+
     from typing import NotRequired, TypedDict  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover - CI supports Python 3.10.
     from typing_extensions import NotRequired, TypedDict  # type: ignore[assignment]
+
+
+class ChatModelRoute(TypedDict):
+    """A model route shared by room choices, Main and owner recents."""
+
+    model: str
+    use_local: bool
+
+
+class CitedModelWords(TypedDict):
+    """Up to 1024 Unicode characters of the verified span; clipped says whether more was retained."""
+
+    text: str
+    clipped: bool
+
+
+class WorkPrimaryRoute(ChatModelRoute):
+    basis: str
+    cited: NotRequired[CitedModelWords]
+
+
+class WorkLead(WorkPrimaryRoute):
+    """Acting route and chooser; a departure names the primary it left."""
+
+    role: NotRequired[str]
+    primary: NotRequired[WorkPrimaryRoute]
+    since: NotRequired[str]
+    cause: NotRequired[str]
+    pending: NotRequired[ChatModelRoute]
+
+
+class WorkLeadFields(TypedDict):
+    lead: NotRequired[WorkLead]
+
+
+class TaskModelRequest(TypedDict):
+    request_id: str
+    action: Literal["set", "follow", "return", "wait", "keep"]
+    model: NotRequired[str]
+    use_local: NotRequired[bool]
+
+
+class TaskModelResponse(TypedDict):
+    ok: Literal[True]
+    task_id: str
+    applied: Literal["next_step", "at_start"]
+    lead: WorkLead
 
 
 class WorkReason(TypedDict):
@@ -107,7 +154,7 @@ class WorkFocus(TypedDict):
     at: Any
 
 
-class Work(TypedDict):
+class Work(WorkLeadFields):
     """One request with its Continue episodes and live members."""
 
     work_id: str

@@ -145,3 +145,44 @@ def test_new_admission_uses_scope_without_binding_id(tmp_path):
     with pytest.raises(PresenceAdmissionError):
         admit_presence_turn(drive_root=tmp_path, authenticated_transport_skill="bridge",
                             provider="chat", account_id="other", conversation_id="r")
+
+
+def test_admission_carries_circle_model_from_the_same_snapshot(tmp_path, monkeypatch):
+    from ouroboros import places, presence_admission
+    place = places.connect_place(tmp_path, connector="bridge", provider="chat", account_id="account")
+    circle = places.create_circle(tmp_path, name="Team", model="circle/first", author="owner")
+    places.edit_place(tmp_path, place.place_id, "set_circle", author="owner", circle_id=circle["circle_id"])
+    reads = []
+    read_records = presence_admission.place_records
+    def read(root):
+        reads.append(root)
+        return read_records(root)
+    monkeypatch.setattr(presence_admission, "place_records", read)
+    admitted = admit_presence_turn(drive_root=tmp_path, authenticated_transport_skill="bridge",
+                                   provider="chat", account_id="account")
+    assert reads == [tmp_path] and admitted.circle["model"] == "circle/first"
+    assert admitted.place.model == admitted.model_slot == ""
+    places.edit_circle(tmp_path, circle["circle_id"], author="owner", model="circle/next")
+    assert admitted.circle["model"] == "circle/first"
+    fresh = admit_presence_turn(drive_root=tmp_path, authenticated_transport_skill="bridge",
+                                   provider="chat", account_id="account")
+    assert fresh.circle["model"] == "circle/next" and reads == [tmp_path, tmp_path]
+
+
+def test_migrated_main_is_a_place_override_until_cleared(tmp_path, monkeypatch):
+    from ouroboros import places
+    from ouroboros.place_projection import place_view
+    skill = _install_behavior(tmp_path)
+    manifest = skill / "SKILL.md"
+    manifest.write_text(manifest.read_text(encoding="utf-8").replace("    model_slot: light\n", ""), encoding="utf-8")
+    binding = _binding(tmp_path)
+    admitted = _admit(tmp_path, binding)
+    assert admitted.place.model == "main"
+    circle = places.create_circle(tmp_path, name="Team", model="circle/model", author="owner")
+    places.edit_place(tmp_path, admitted.place.place_id, "set_circle", author="owner", circle_id=circle["circle_id"])
+    monkeypatch.setattr("ouroboros.model_slots._main_model", lambda: "main/model")
+    inherited = _admit(tmp_path, binding)
+    assert place_view(tmp_path, inherited.place, brief=True)["model_route"] == {"value": "main/model", "layer": "place"}
+    places.edit_place(tmp_path, admitted.place.place_id, "set_model", author="owner", model="")
+    cleared = _admit(tmp_path, binding)
+    assert place_view(tmp_path, cleared.place, brief=True)["model_route"] == {"value": "circle/model", "layer": "circle"}
