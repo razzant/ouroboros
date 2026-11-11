@@ -601,3 +601,45 @@ def test_failed_catalog_refresh_recovers_on_next_open_at_44_accounts(role_ui, wi
     expect(footer).to_contain_text("List from Codex 3.0.0")
     assert world["catalogs"] == after and not world["posts"]
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+def test_two_chooser_openings_share_producer_refresh_at_44_accounts(role_ui, width):
+    from playwright.sync_api import expect
+    from urllib.parse import parse_qs, urlparse
+    ui, page = role_ui, role_ui["page"]
+    world = vendor_scene(ui, 44)
+    page.set_viewport_size({"width": width, "height": 950})
+    roles.open_agents(ui)
+    first = vendor_consumer(ui, "Agent")
+    second = page.locator('[data-subagent-row]').nth(2).locator('[data-subagent-field="model"]')
+    first.fill("choice")
+    footer = page.locator("[data-model-footer]:visible")
+    expect(footer).to_contain_text("List from Codex 2.0.0")
+    first.press("Escape")
+    pending, requests = [], []
+    def hold(route):
+        if parse_qs(urlparse(route.request.url).query).get("harness") == ["codex"]:
+            pending.append(route)
+        else:
+            route.fallback()
+    pattern = "**/api/claudexor/maintenance/harnesses?*"
+    page.route(pattern, hold)
+    page.on("request", lambda request: requests.append(request.url))
+    world.update(version="3.0.0", new=True)
+    first.press("ArrowDown")
+    expect(footer).to_contain_text("List from Codex 2.0.0")
+    second.fill("choice")  # The first opening still awaits the same program read.
+    expect(footer).to_contain_text("List from Codex 2.0.0")
+    page.wait_for_timeout(100)
+    assert len(pending) == 1
+    page.unroute(pattern, hold)
+    pending[0].fallback()
+    expect(footer).to_contain_text("List from Codex 3.0.0")
+    expect(page.locator('[role="listbox"]:visible [role="option"]').filter(has_text="choice-new")).to_be_visible()
+    full_catalogs = [url for url in requests if urlparse(url).path == "/api/model-catalog"
+                     and "source_id" not in parse_qs(urlparse(url).query)]
+    native_catalogs = [url for url in requests if urlparse(url).path == "/api/claudexor/status"
+                       and parse_qs(urlparse(url).query).get("include") == ["models"]]
+    assert len(full_catalogs) == len(native_catalogs) == 1
+    assert not world["posts"] and page.evaluate("document.documentElement.scrollWidth <= innerWidth")
