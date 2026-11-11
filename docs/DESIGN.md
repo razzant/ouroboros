@@ -2649,8 +2649,8 @@ A nonzero installer exit can still mean Updated: retain the limitation sentence.
 A package-manager updater's advice remains advice, never an automatic command.
 
 Only an opened model list shows a non-option closing row per producer: “List from”
-when it supplies every suggestion, otherwise “Models supplied by” naming its subset,
-followed by the newest fact and Update when needed.
+when it supplies every suggestion, otherwise the supplied subset with its source label
+(e.g. “Claudexor entries supplied by Codex”), then the newest fact and Update when needed.
 Models roles/fallbacks, subagents/reviewers, onboarding and Places share it. Closed
 editors stay quiet; API-only lists have no such row. Mouse, touch and keyboard Update
 keep the list open through progress and result, then refresh its suggestions. Typed

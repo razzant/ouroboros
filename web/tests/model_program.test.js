@@ -38,7 +38,7 @@ test('newest verdict, refusal and operation outcome are engine facts, and text i
 
 for (const count of [1, 18]) test(`mixed catalogs name the supplied subset; ${count} accounts do not multiply it`, () => {
     const items = Array.from({length: count}, (_, index) => ({id: 'vendor-model', value: 'claudexor::transport=vendor-model',
-        source_id: 'transport', credential_profile_id: String(index), sourceProgram: producer}));
+        source_id: 'transport', source: 'Claudexor', credential_profile_id: String(index), sourceProgram: producer}));
     const sources = [{id: 'transport', credentialHarness: 'codex'}];
     const api = {id: 'api-model', value: 'openai::api-model'};
     const pure = catalogPrograms({items, model_sources: sources}, {sources});
@@ -47,7 +47,7 @@ for (const count of [1, 18]) test(`mixed catalogs name the supplied subset; ${co
     for (const extra of [api, {...api, source_id: 'transport', sourceProgram: null}]) {
         const mixed = catalogPrograms({items: [...items, extra]}, {sources});
         assert.equal(mixed.length, 1);
-        assert.match(modelProgramMarkup(mixed[0]), /Models supplied by Codex 2.0.0/);
+        assert.match(modelProgramMarkup(mixed[0]), /Claudexor entries supplied by Codex 2.0.0/);
         assert.doesNotMatch(modelProgramMarkup(mixed[0]), /List from/);
     }
     const scoped = catalogPrograms({items: [...items, api]}, {source: 'transport', profile: '0', sources});
@@ -64,4 +64,13 @@ test('native flat suggestions inherit only the models their supplying catalogs a
     assert.match(modelProgramMarkup(catalogPrograms(catalog, options)[0]), /Models supplied by Future/);
     catalog.model_catalog.models.push({id: 'hint'});
     assert.match(modelProgramMarkup(catalogPrograms(catalog, options)[0]), /List from Future/);
+});
+
+test('mixed provenance uses the actual entry source label and escapes it', () => {
+    const [group] = catalogPrograms({items: [
+        {id: 'vendor', source_id: 'transport', source: 'Reader <source>', credentialHarness: 'future', sourceProgram: producer},
+        {id: 'api', source: 'Another source'},
+    ]});
+    assert.match(modelProgramMarkup(group), /Reader &lt;source&gt; entries supplied by/);
+    assert.doesNotMatch(modelProgramMarkup(group), /Claudexor|List from|Reader <source>/);
 });

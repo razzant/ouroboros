@@ -252,7 +252,7 @@ def vendor_scene(ui, count=1):
             common = {"credentialProfileId": pin, "provenance": "vendor", "observedAt": "2026-11-10T12:00:00Z", "sourceProgram": producer, "models": models}
             raw.append({"credentialProfileId": pin, "catalog": {**common, "source": "opaque-source"}, "availability": "available", "problem": None})
             native.append({"credentialProfileId": pin, "catalog": {**common, "harnessId": "codex", "source": "api"}, "availability": "available", "problem": None})
-            flat += [{**model, "value": f"claudexor::opaque-source={model['id']}", "source_id": "opaque-source", "credentialHarness": "codex", "credential_profile_id": pin, "sourceProgram": producer} for model in models]
+            flat += [{**model, "value": f"claudexor::opaque-source={model['id']}", "source_id": "opaque-source", "source": "Claudexor", "credentialHarness": "codex", "credential_profile_id": pin, "sourceProgram": producer} for model in models]
         ui["fixture"]["catalog"] = {"items": flat + [{"id": "choice-api", "value": "openai::choice-api"}],
             "model_sources": [{"id": "opaque-source", "label": "Codex", "credentialHarness": "codex"}],
             "account_catalogs": [{"source": "opaque-source", "accounts": raw, "partial": False}], "errors": []}
@@ -466,7 +466,7 @@ def test_vendor_footer_in_wizard_models_reviewers_and_place_sheet(role_ui, width
     # row regardless of account count, and every action must be keyboard reachable.
     ui["fixture"]["catalog"]["model_sources"].append({"id": "other-source", "label": "Claude Code", "credentialHarness": "claude"})
     ui["fixture"]["catalog"]["items"] += [{"id": "choice-other", "value": "claudexor::other-source=choice-other",
-        "source_id": "other-source", "credential_profile_id": f"other-{index}",
+        "source_id": "other-source", "source": "Claudexor", "credential_profile_id": f"other-{index}",
         "sourceProgram": {"path": "/vendor/claude", "version": "2.0.0"}} for index in range(account_count)]
     world["other_inventory"].update(updateAvailable="yes", newest={"status": "available", "version": "3.0.0"})
     ui["errors"].watch(page)
@@ -481,9 +481,9 @@ def test_vendor_footer_in_wizard_models_reviewers_and_place_sheet(role_ui, width
     field = page.locator('[data-place-draft="model"]')
     field.fill("choice")
     expect(footer).to_have_count(1)
-    expect(footer).to_contain_text("Models supplied by Codex 2.0.0")
+    expect(footer).to_contain_text("Claudexor entries supplied by Codex 2.0.0")
     expect(footer.locator("[data-program]")).to_have_count(2)
-    expect(footer).to_contain_text("Models supplied by Claude Code 2.0.0")
+    expect(footer).to_contain_text("Claudexor entries supplied by Claude Code 2.0.0")
     expect(footer).not_to_contain_text("List from")
     expect(page.locator('[role="listbox"]:visible [data-model-value="openai::choice-api"]')).to_be_visible()
     action = footer.locator('[data-program="codex"]').get_by_role("button", name="Update", exact=True)
@@ -522,7 +522,7 @@ def test_models_role_names_only_program_supplied_entries_in_a_mixed_source(role_
     footer = page.locator("[data-model-footer]:visible")
     expect(footer).to_have_count(1)
     expect(footer.locator("[data-program]")).to_have_count(1)
-    expect(footer).to_contain_text("Models supplied by Codex 2.0.0")
+    expect(footer).to_contain_text("Claudexor entries supplied by Codex 2.0.0")
     expect(footer).not_to_contain_text("List from")
     expect(page.locator('[role="listbox"]:visible [role="option"]')).to_have_count(2)
     expect(footer.get_by_role("button", name="Update", exact=True)).to_be_enabled()

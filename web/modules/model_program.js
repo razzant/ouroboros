@@ -19,7 +19,7 @@ export function catalogPrograms(catalog = {}, { harness = '', label = '', source
         owner = owner || row.credentialHarness || descriptor?.credentialHarness;
         const program = row.sourceProgram;
         if (!owner || !program?.path) return;
-        if (!groups.has(owner)) groups.set(owner, { harness: owner, label: name || harnessPresentation(owner).label, programs: [] });
+        if (!groups.has(owner)) groups.set(owner, { harness: owner, label: name || harnessPresentation(owner).label, programs: [], entrySources: [] });
         const group = groups.get(owner);
         if (!group.programs.some((item) => item.path === program.path && item.version === program.version)) group.programs.push(program);
         for (const model of row.models || []) {
@@ -38,6 +38,10 @@ export function catalogPrograms(catalog = {}, { harness = '', label = '', source
     }
     const choices = (catalog.items || catalog.models || []).filter(inScope).map((item) => {
         const owner = add(item);
+        if (owner && catalog.items && item.source_id && item.source && item.source !== item.source_id) {
+            const names = groups.get(owner).entrySources;
+            if (!names.includes(item.source)) names.push(item.source);
+        }
         return owner ? new Set([owner]) : supplied.get(modelKey(item)) || new Set();
     });
     return [...groups.values()].map((group) => ({...group,
@@ -55,12 +59,13 @@ export function modelProgramMarkup(program, view = {}) {
     const verb = entry?.selection?.path ? 'Update' : 'Install';
     const error = view.operationError || view.inspectionError || view.inventoryError;
     const versions = [...new Set(program.programs.map((item) => item.version || 'version unknown'))].join(', ');
+    const subset = program.entrySources?.length ? `${program.entrySources.join(', ')} entries` : 'Models';
     let button = '';
     if (view.request && !operation) button = `<button type="button" class="btn btn-default" data-program-action="rejoin"${view.busy ? ' disabled' : ''}>${view.busy ? 'Sending…' : 'Retry same request'}</button>`;
     else if (pending && (view.operationError || operation?.termination === 'unconfirmed')) button = '<button type="button" class="btn btn-default" data-program-action="rejoin">Check operation</button>';
     else if ((needsUpdate && action?.available && !error) || pending) button = `<button type="button" class="btn btn-default" data-program-action="latest"${disabled ? ' disabled' : ''}>${verb}</button>`;
     return `<div class="harness-model-program ui-field-help" data-program="${escapeHtml(program.harness)}">
-        <span>${program.mixed ? 'Models supplied by' : 'List from'} ${escapeHtml(program.label)} ${escapeHtml(versions)}</span>
+        <span>${program.mixed ? `${escapeHtml(subset)} supplied by` : 'List from'} ${escapeHtml(program.label)} ${escapeHtml(versions)}</span>
         ${needsUpdate ? `<span>${escapeHtml(maintenanceLatestLine(entry))}</span>` : ''}${button}
         ${needsUpdate && action && !action.available ? `<span>${escapeHtml(action.reason)}</span>` : ''}
         ${operation ? `<span role="status">${escapeHtml(maintenanceOperationLine(operation, {missing: !entry?.selection?.path && !operation.before?.path}))}</span>` : ''}
