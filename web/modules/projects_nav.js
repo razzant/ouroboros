@@ -29,7 +29,7 @@
 import { fmt, fmtInto, tr } from './i18n.js';
 import { SHELL_ICONS, controlIcon } from './page_icons.js';
 import { IDLE_SUMMARY, markWords } from './project_activity.js';
-import { repositionProjectRowMenu } from './project_create.js';
+import { pinWords, repositionProjectRowMenu } from './project_create.js';
 import { createStatusMark, markView, paintStatusMark } from './status_mark.js';
 
 const PAGE = 50;  // Show more adds a page; Show all projects (after a find with no match) opens the rest
@@ -68,7 +68,7 @@ export const listOrder = (a, b) => ((a.pinned === true) !== (b.pinned === true) 
 const placeKey = (row) => `${row?.pinned === true}|${row ? recency(row) : ''}`;
 
 export function createProjectsNav({ section, header, list, toggle, feed, feedOrder, nextOrder, reserved, listableCount, activeId,
-    expanded, isUnread, readList, onListRead, onShown, open, openMenu, messagesRevision = () => null }) {
+    expanded, isUnread, readList, onListRead, onShown, open, openMenu, pin, messagesRevision = () => null }) {
     // `browse`: the ids a browse shows (sorted with the list) and the rows Show more still owes; `found`: the ids a
     // find shows (null: the owner's new words, laid out anew) and how many rows besides the pins it may show.
     const state = { query: '', browse: null, found: null, budget: PAGE, resume: null, collapsed: null, handoff: null };
@@ -78,6 +78,7 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
     let failure = '';      // why the last read failed; '' once one answered
     let listed = new Set();  // the rooms an open find or browse showed at the last paint; none at rest
     let activity = { byChat: new Map() };  // the census index the last patch painted from
+    let pressedPin = null;  // the drawn Pin a pointer's last press in the list began on; null after any other press
     let destroyed = false;
     const folded = new Map();  // name → its folded form
 
@@ -318,8 +319,22 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
                 item.appendChild(deletingStatus);
             } else {
                 // Pressing a row opens its Project; pressing the open one again keeps it open (like every reference).
-                btn.addEventListener('click', (event) => open(pressed(item.project), { pointer: event.detail > 0 }));
-                // The action control is a sibling button, never nested interactive UI.
+                const openRow = (pointer) => open(pressed(item.project), { pointer });
+                btn.addEventListener('click', (event) => openRow(event.detail > 0));
+                // Sibling actions, never nested buttons: Pin over the row's icon column, ⋯ after its name.
+                // Semantic activation of the focused glyph or a single press begun on it asks for its painted state.
+                // On a hybrid screen a finger can begin on the row, then hover draws the glyph under its click:
+                // that click opens the row. A double click's second press may hit a moved neighbour; it pins nothing.
+                const pinControl = document.createElement('button');
+                pinControl.type = 'button';
+                pinControl.className = 'nav-project-pin';
+                pinControl.addEventListener('click', (event) => {
+                    if (event.detail === 0 || (event.detail === 1
+                        && (pressedPin === pinControl || pinControl.matches(':focus-visible')))) {
+                        pin(item.project, pinControl.dataset.action === 'pin');
+                    } else if (pressedPin !== pinControl) openRow(true);
+                });
+                item.prepend(pinControl);
                 const kebab = document.createElement('button');
                 kebab.type = 'button';
                 kebab.className = 'nav-project-kebab';
@@ -343,6 +358,17 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         btn.classList.toggle('active', active);
         if (active) btn.setAttribute('aria-current', 'page');
         else btn.removeAttribute('aria-current');
+        const pinControl = item.querySelector('.nav-project-pin');
+        if (pinControl) {
+            const action = project.pinned === true ? 'unpin' : 'pin';
+            if (pinControl.dataset.action !== action) {
+                pinControl.dataset.action = action;
+                pinControl.innerHTML = SHELL_ICONS[action];  // the pin, or the slashed pin of Unpin (page_icons.js)
+            }
+            const words = pinWords(action === 'unpin');
+            pinControl.title = fmt(words);
+            pinControl.setAttribute('aria-label', fmt(`${words} {name}`, { name: project.name || project.id }));
+        }
         const kebab = item.querySelector('.nav-project-kebab');
         if (kebab) kebab.setAttribute('aria-label', fmt('Actions for {name}', { name: project.name || project.id }));
         else item.querySelector('.nav-project-deleting-status').title = project.delete_error || 'Cancellation and cleanup are in progress';
@@ -458,7 +484,7 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
             // A deleting row draws only `Deleting…`; its census fact stays in its name.
             paintStatusMark(button.querySelector('.nav-mark'),
                 deleting ? markView() : markView({ mark: summary.mark, owner: summary.owner, unread: unreadRow }));
-            // The pin is said in the row's full name (its tooltip and accessible name), never drawn in the row.
+            // The pin is said in the row's full name (its tooltip and accessible name); at rest nothing draws it.
             const name = `${row.name || row.id}${row.pinned === true ? ' · Pinned' : ''}`;
             setActivityOwnerName(button, deleting ? `${name} — Deleting…${row.delete_error ? ` ${row.delete_error}` : ''}` : name,
                 markWords(summary, unreadRow));
@@ -636,9 +662,10 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
         load();
         render();
     };
+    const onListPress = (event) => { pressedPin = event.target.closest?.('.nav-project-pin') || null; };
     const bindings = [[input, 'input', onInput], [input, 'keydown', onFieldKey], [clear, 'click', onClearCommand],
-        [list, 'keydown', onListKey], [more, 'click', onMore], [clearCommand, 'click', onClearCommand],
-        [showAll, 'click', onShowAll], [retry, 'click', onRetry]];
+        [list, 'keydown', onListKey], [list, 'pointerdown', onListPress], [more, 'click', onMore],
+        [clearCommand, 'click', onClearCommand], [showAll, 'click', onShowAll], [retry, 'click', onRetry]];
     for (const [node, type, handler] of bindings) node.addEventListener(type, handler);
 
     return {

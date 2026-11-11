@@ -153,7 +153,8 @@ const projectsNav = createProjectsNav({ section: navProjects, header: navProject
     isUnread: (row) => unreadCount(row.visible_revision, state.projectSeenRevision?.[row.id], readAheadFor(row.chat_id)) > 0,
     onListRead: () => { mergeProjectSeenRevisions(); if (projectsNav.unreadRows().length) refreshSharedProjectSeen(); },
     onShown: () => { paintProjectsCount(); patchProjectActivityMarkers(); },
-    open: (project, { pointer }) => openProjectPanel(project, { openOnly: true, pointer }), openMenu: openProjectMenu });
+    open: (project, { pointer }) => openProjectPanel(project, { openOnly: true, pointer }), openMenu: openProjectMenu,
+    pin: setProjectPin });
 const projectInstances = new Map();
 const projectPaintRequests = new Map();
 // The question reveal the current showing is still making (revealProjectQuestion):
@@ -1178,8 +1179,8 @@ const disposeProjectRowGesture = navProjectsList ? bindRowMenuGesture({
     open: openProjectMenu,
 }) : () => {};
 
-// The ⋯ menu's Pin or Unpin asks for the state its label named, so a menu opened before
-// another window changed the pin never flips it back. The row moves only once saved.
+// Pin or Unpin, in the row's menu or its own glyph, asks for the state its label named, so
+// one shown before another window changed the pin never flips it back. The row moves only once saved.
 async function setProjectPin(project, pinned) {
     if (pendingProjectPins.has(project.id)) return;
     pendingProjectPins.add(project.id);
