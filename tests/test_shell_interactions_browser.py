@@ -589,7 +589,7 @@ def test_the_desktop_title_band_over_a_page_moves_the_window(shell_ui, tmp_path,
         facts['band'] = page.evaluate(TITLE_BAND, {'band': 52, 'allowed': allowed})
         band = facts['band']
         assert band['height'] == 52 and band['drags'] > 0 and not band['unexpected'], facts
-        if page_name == 'widgets':
+        if page_name in ('widgets', 'settings'):  # Settings has no tab strip: Back is the first row of a page
             assert band['controls'] == [] and band['firstTabTop'] is None, facts
         else:
             assert band['controls'], facts
@@ -607,7 +607,7 @@ def test_the_desktop_title_band_over_a_page_moves_the_window(shell_ui, tmp_path,
         if page_name == 'files':
             page.locator('#files-new-file').click()
             page.locator('#page-files .files-editor').wait_for()
-        elif page_name != 'widgets':
+        elif page_name not in ('widgets', 'settings'):
             tab = page.locator(f'#page-{page_name} .app-page-lead .app-tab').nth(1)
             tab.click()
             assert tab.get_attribute('aria-selected') == 'true'
