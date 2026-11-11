@@ -216,7 +216,8 @@ class Shape(NamedTuple):
     """Published shapes of one ``HTTP_ENDPOINTS`` token.
 
     ``responses`` reads ``"200:TaskCreateResponse 400,409,503:ErrorResponse"``: statuses, then
-    a body that is a contract TypedDict name (JSON), a media kind (``json`` = JSON whose shape is
+    a body; ``4xx``/``5xx`` cover otherwise unlisted error statuses. The body is
+    a contract TypedDict name (JSON), a media kind (``json`` = JSON whose shape is
     not published, ``html``, ``text``, ``sse``, ``file``, ``zip``, ``js``, ``empty``, ``any``), a kind with
     the TypedDict its items follow (``sse/TaskEvent``), or alternatives joined by ``|``.
     ``request`` uses the same body words (plus ``multipart``); ``query`` names the parameters
@@ -586,7 +587,8 @@ HTTP_SHAPES: dict[str, Shape] = {
              "409 restart_preview_stale carries the fresh preview and stopped nothing; 200 restart.serving false "
              "is a stopped engine that did not start"),
     "POST /api/claudexor/login": Shape(
-        "200:ClaudexorLoginJobResponse 400,409:ErrorResponse|ClaudexorLoginJobProblem 503:ClaudexorLoginJobProblem|ErrorResponse",
+        "200:ClaudexorLoginJobResponse 400,409:ErrorResponse|ClaudexorLoginJobProblem "
+        "503:ClaudexorLoginJobProblem|ErrorResponse 4xx,5xx:ClaudexorLoginJobProblem|ErrorResponse",
         "ClaudexorLoginRequest", note="not idempotent: every call may start a job; can start the engine; "
              "Connect maintenance refusals preserve engine status, code, context, retryability and required_actions"),
     "GET /api/claudexor/login/{job_id}": Shape(_LOGIN_JOB, note="a snapshot {job, cursor, sequence, deviceCode?}; poll it"),

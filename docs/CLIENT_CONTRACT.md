@@ -2,7 +2,7 @@
 
 A complete client needs this contract, [`WIDGET_HOST_PROTOCOL.md`](WIDGET_HOST_PROTOCOL.md) for widgets, and the core's HTTP/WebSocket endpoints; no source imports are needed.
 
-`GET /api/contract` publishes routes, parameters, headers, statuses, WebSocket types and named JSON Schemas from the running core. The live API is authoritative about shapes; this document is authoritative about meaning: ordering, outcomes, identities and safe retries. Fetch that core's contract; versions differ. Report disagreements as defects. Tests cover structural completeness and selected producer/consumer behavior; §17 lists gaps.
+`GET /api/contract` publishes routes, parameters, headers, statuses (exact codes, then `4xx`/`5xx` fallbacks), WebSocket types and named JSON Schemas from the running core. The live API is authoritative about shapes; this document is authoritative about meaning: ordering, outcomes, identities and safe retries. Fetch that core's contract; versions differ. Report disagreements as defects. Tests cover structural completeness and selected producer/consumer behavior; §17 lists gaps.
 
 ## 1. Compatibility rules
 
