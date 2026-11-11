@@ -70,6 +70,26 @@ def test_queued_follow_keeps_a_reference_and_an_unlisted_model_is_accepted(host)
     assert project_lead(task=task, queued=True) == {"model": C, "use_local": False, "basis": "main"}
 
 
+def test_model_endpoint_admits_off_the_server_loop_and_validates_before_storage(host, monkeypatch):
+    import asyncio
+    from ouroboros.gateway import task_model
+
+    queued(host)
+    request, threads = task_model.request_model, []
+    def admission(*args, **kwargs):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            threads.append("worker")
+        else:
+            threads.append("server loop")
+        return request(*args, **kwargs)
+    monkeypatch.setattr(task_model, "request_model", admission)
+    assert act(host, model="").status_code == 400 and not threads
+    assert act(host, model=B).status_code == 200
+    assert threads == ["worker"]
+
+
 def test_an_older_retry_cannot_undo_a_later_press(host):
     task = queued(host)
     first = act(host, model=B, request_id="first")

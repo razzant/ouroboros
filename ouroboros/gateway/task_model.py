@@ -1,6 +1,8 @@
 """POST /api/tasks/{task_id}/model: one owner act on a durable root's primary."""
 from __future__ import annotations
 
+import asyncio
+
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -36,7 +38,7 @@ async def api_task_model(request: Request) -> JSONResponse:
     except ValueError as exc:
         return json_error(str(exc), 400, task_id=task_id, reason_code="task_model_invalid")
     try:
-        result = request_model(task_id, body)
+        result = await asyncio.to_thread(request_model, task_id, body)
     except ModelActRefused as exc:
         return json_error(str(exc), exc.status, task_id=task_id, reason_code=exc.code)
     except Exception as exc:
