@@ -242,6 +242,26 @@ def test_my_humans_card_must_name_every_recipient(supervisor, monkeypatch, cc, n
     assert sent or "the destination Internal team, outsider@example.test on the card" in message
 
 
+def test_a_prompt_that_cannot_be_loaded_is_a_missing_reading(supervisor, monkeypatch):
+    """No stand-in prompt judges a call: an unreadable ``prompts/SAFETY.md`` is a missing reading whose cause names
+    the file, with no model call; a readable one is what the Supervisor is sent."""
+    import pathlib
+    h = supervisor
+    prompt = pathlib.Path(h.module.__file__).parent.parent / "prompts" / "SAFETY.md"
+    real = pathlib.Path.read_text
+
+    def unreadable(self, *args, **kwargs):
+        if self == prompt:
+            raise OSError("permission denied")
+        return real(self, *args, **kwargs)
+    monkeypatch.setattr(pathlib.Path, "read_text", unreadable)
+    ok, message = h.module.check_safety("write_remote", {}, ctx=h.ctx)
+    assert not ok and message.startswith("⚠️ SAFETY_UNAVAILABLE") and "prompts/SAFETY.md" in message and not h.calls
+    monkeypatch.setattr(pathlib.Path, "read_text", real)
+    assert h.module.check_safety("write_remote", {}, ctx=h.ctx) == (True, "")
+    assert h.calls[-1]["system_prompt"] == real(prompt, encoding="utf-8")
+
+
 def test_legacy_owner_backend_absence_still_warns(supervisor, monkeypatch):
     h = supervisor
     monkeypatch.setattr(h.module, "_resolve_safety_routing", lambda: (False, False, "no backend"))

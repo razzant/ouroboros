@@ -302,17 +302,11 @@ def _normalize_resolved_python_subject(raw_cmd: Any, python_resolution: Any) -> 
 # LLM check plumbing.
 
 def _get_safety_prompt() -> str:
-    """Load the safety system prompt from prompts/SAFETY.md."""
-    prompt_path = pathlib.Path(__file__).parent.parent / "prompts" / "SAFETY.md"
+    """The Supervisor's prompt, ``prompts/SAFETY.md``; one that cannot be loaded is a missing reading, never a stand-in."""
     try:
-        return prompt_path.read_text(encoding="utf-8")
-    except Exception as e:
-        log.error(f"Failed to read SAFETY.md: {e}")
-        return (
-            "You are a security supervisor. Block only clearly destructive commands. "
-            "Default to SAFE. Respond with JSON: "
-            '{\"status\": \"SAFE\"|\"SUSPICIOUS\"|\"DANGEROUS\", \"reason\": \"...\"}'
-        )
+        return (pathlib.Path(__file__).parent.parent / "prompts" / "SAFETY.md").read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"its prompt prompts/SAFETY.md could not be loaded: {exc}") from exc
 
 
 # Safety-supervisor prompt-cache TTL. The SAFETY.md system prefix is byte-stable and

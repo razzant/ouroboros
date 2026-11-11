@@ -265,11 +265,11 @@ def test_safety_prompt_protected_path_list_mirrors_runtime_policy():
     )
 
     safety_md = (REPO / "prompts" / "SAFETY.md").read_text(encoding="utf-8")
-    marker = "Protected paths (exact mirror of `PROTECTED_RUNTIME_PATHS` plus the protected prefix in `ouroboros/runtime_mode_policy.py`):"
+    marker = "(exact mirror of `PROTECTED_RUNTIME_PATHS` plus the protected prefix in `ouroboros/runtime_mode_policy.py`):"
     start = safety_md.find(marker)
     assert start != -1, "SAFETY.md lost its protected-path mirror sentence"
-    line_end = safety_md.find("\n", start)
-    listed = set(re.findall(r"`([^`]+)`", safety_md[start + len(marker):line_end]))
+    sentence = safety_md[start + len(marker):].split("\n", 1)[0].split("`. ", 1)[0]  # the list ends its sentence
+    listed = set(re.findall(r"`([^`]+)`", sentence + "`"))
     expected = set(PROTECTED_RUNTIME_PATHS) | set(PROTECTED_RUNTIME_PATH_PREFIXES)
     assert listed == expected, listed ^ expected
 
