@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { slotWaitSeconds } from '../modules/settings_ui.js';
+import { slotWaitSeconds } from '../modules/model_roles.js';
 
 // The help names the wait `model_concurrency._max_slot_wait_sec` applies, which counts a finite
 // negative as 0. Settings GET types this key by its integer default (`config._coerce_setting_value`).

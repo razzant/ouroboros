@@ -13,11 +13,11 @@ import {
 import { modelSourceGroups, sourceChoice, sourceFromChoice } from '../modules/model_roles.js';
 import { adoptConnectionLabels, connectionLabel, routeConnectionId } from '../modules/connection_labels.js';
 import { PROVIDER_CARDS, PROVIDER_SECRET_KEYS, connectionRowHtml } from '../modules/settings_provider_cards.js';
-import { accountsPanel, advancedPanel, modelsPanel, secretSettingsSection } from '../modules/settings_ui.js';
+import { accountsPanel, advancedPanel, secretSettingsSection } from '../modules/settings_ui.js';
 import { rowById } from '../modules/settings_rows.js';
 
 // The old tabs' sections, unmounted in settings_ui.js until their pages are rebuilt.
-const renderSettingsPage = () => [accountsPanel(), secretSettingsSection(), modelsPanel(), advancedPanel()].join('');
+const renderSettingsPage = () => [accountsPanel(), secretSettingsSection(), advancedPanel()].join('');
 import {
     cacheHintsNote, connectionNameFor, connectionReferencesText, connectionRowFacts, connectionRows, connectionUsage,
 } from '../modules/settings_connections.js';
