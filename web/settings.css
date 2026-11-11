@@ -1510,6 +1510,8 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
 .models-main-name { color: var(--text-primary); font-size: var(--type-page); font-weight: 600; line-height: var(--line-title); overflow-wrap: anywhere; }
 .models-main-meta { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); overflow-wrap: anywhere; }
 .models-main-meta:empty { display: none; }
+/* A role that follows another says so more quietly than a role with a model of its own. */
+.settings-row-value[data-follows] { color: var(--text-secondary); font-weight: 500; }
 /* A role's page: the shared role editor as a form of labelled fields in its card, Save under them, then its fold. */
 .models-role .model-role-editor { gap: var(--space-3); }
 .model-role-row[data-solo] { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }

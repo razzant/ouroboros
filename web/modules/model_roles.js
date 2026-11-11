@@ -627,7 +627,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
 const MAP_KEYS = [MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_KEY, MODEL_PROCESSING_PREFERENCES_KEY];
 const MAP_FIELDS = { [MODEL_ACCOUNTS_KEY]: ['account', ''], [MODEL_CONTEXT_KEY]: ['context', 0], [MODEL_PROCESSING_PREFERENCES_KEY]: ['processing', ''] };
 const FALLBACKS_KEY = 'OUROBOROS_MODEL_FALLBACKS';
-const ROLE_ORDER = ['light', 'safety', 'vision', 'consciousness'];
+const ROLE_ORDER = ['light', 'vision', 'consciousness', 'safety'];
 const truthy = (value) => value === true || /^(true|1|yes|on)$/i.test(String(value ?? '').trim());
 // A key's value as one text: what is sent, and what a read is compared with when an answer never came.
 const canon = (key, value) => JSON.stringify(key.startsWith('USE_LOCAL_') ? truthy(value) : MAP_KEYS.includes(key) ? modelRoleMap(value) : String(value ?? ''));
@@ -765,7 +765,7 @@ function mountModels(container, { path, ctx }) {
     let fold = null;
     let shown = '';   // the fallbacks as drawn: a press acts on these, never on a list that changed meanwhile
     // A row's value at its end, before its chevron: made once, then only its words change.
-    const say = (id, text) => {
+    const say = (id, text, follows = false) => {
         const node = container.querySelector(`[data-setting-row="${id}"]`);
         let span = node?.querySelector('[data-row-value]');
         if (node && !span) {
@@ -775,6 +775,7 @@ function mountModels(container, { path, ctx }) {
             box.insertBefore(span, box.firstChild);
         }
         if (span && span.textContent !== text) span.textContent = text;
+        if (span && follows) span.setAttribute('data-follows', ''); else span?.removeAttribute('data-follows');
     };
     const paint = (settings) => {
         const slots = Object.fromEntries(slotsOf(settings).map((slot) => [slot.slot, slot]));
@@ -800,7 +801,7 @@ function mountModels(container, { path, ctx }) {
         }).join('') || '<p class="settings-card-lead">No fallback yet.</p>';
         for (const slot of ROLE_ORDER) {
             const words = route(slot, slot === 'safety' ? 'Light' : 'Main');
-            say(`models:${slot}`, words.name);
+            say(`models:${slot}`, words.name, words.follows);
         }
         say('models:websearch', Object.fromEntries(SEARCH_SOURCES)[settings.OUROBOROS_WEBSEARCH_BACKEND || 'auto'] || String(settings.OUROBOROS_WEBSEARCH_BACKEND));
         say('models:context', CONTEXT_WORDS[String(settings.OUROBOROS_CONTEXT_MODE || '').toLowerCase()] || String(settings.OUROBOROS_CONTEXT_MODE || ''));
