@@ -3,10 +3,9 @@
 An employee sees what the organization fixes, still changes what it allows, finds no editor for what it fixes and
 no door to replace the serving program, and keeps Panic. Frames go to ``OUROBOROS_UI_EVIDENCE_DIR`` for a look.
 
-Settings is pages now. ``test_managed_permissions_say_what_the_organization_fixes`` is the Permissions and checks and
-Your rules part of this walk, on the pages as they are. The older walk below it still opens the Behavior, Models and
-Accounts tabs and the page-wide Save: its Models, Accounts and Updates parts wait for those pages (lanes E2, E3, D)
-and are rewritten with them on the integrated tree.
+Settings is pages. ``test_managed_permissions_say_what_the_organization_fixes`` walks Permissions and checks and Your
+rules; ``test_managed_settings_and_updates_say_what_the_organization_fixes`` walks the Safety role's page in Models, the
+pages of single API keys in Accounts and keys, Dashboard › Updates and the first-run wizard.
 """
 
 from __future__ import annotations
@@ -26,25 +25,9 @@ POLICY = {"version": 1, "access": {"max": "pro"},
 CHECKER_ROW = {"kind": "anthropic", "name": "safety", "label": "Organization checker", "api_key": "sk-ant-fixture-organization"}
 
 
-def _open(page, url, theme, tab):
-    page.add_init_script(f"localStorage.setItem('ouroboros.theme', {json.dumps(theme)})")
-    page.goto(url + "/#settings", wait_until="domcontentloaded")
-    page.wait_for_function("() => document.querySelector('#btn-save-settings')?.disabled === false")
-    page.locator(f'[data-settings-tab="{tab}"]').click()
-
-
 def _shot(page, evidence, name, locator=None):
     target = locator or page
     target.screenshot(path=str(evidence / f"{name}.png"))
-
-
-def _builtin_row(page, card_id):
-    """Open one API key card as the owner would; its built-in ("Default") row."""
-    card = page.locator(f'[data-provider-card="{card_id}"]')
-    toggle = card.locator('[data-provider-toggle]')
-    if toggle.get_attribute("aria-expanded") != "true":
-        toggle.click()
-    return card.locator('[data-connection-row][data-builtin="1"]')
 
 
 def _open_page(page, url, theme, path):
@@ -56,6 +39,31 @@ def _open_page(page, url, theme, path):
         page.wait_for_function("() => document.querySelector('#page-settings [data-setting-row=\"permissions:supervisor\"] "
                                "[data-setting-meta]').textContent.trim() !== ''")
     return level
+
+
+def _key_page(page, path):
+    """One API key's page in Accounts and keys (``accounts/key/<provider>[/<name>]``), once its read drew the key."""
+    level = open_settings(page, path)
+    level.locator("[data-connection-row]").wait_for(state="visible")
+    return level
+
+
+def _legacy_address(level):
+    """The OpenAI key's fold: its legacy base address row, opened as the owner opens it."""
+    fold = level.locator("details[data-settings-fold]")
+    if not fold.evaluate("node => node.open"):
+        fold.locator("summary").click()
+    return level.locator('[data-setting-row="OPENAI_BASE_URL"]')
+
+
+def _updates(page):
+    """Dashboard › Updates, once its status read answered."""
+    page.locator('[data-nav-page="dashboard"]').click()
+    page.locator('[data-dashboard-tab="updates"]').click()
+    page.wait_for_function("() => !(document.querySelector('#updates-summary')?.textContent || '').startsWith('Loading')")
+
+
+READ_ONLY = "node => node.readOnly || node.disabled"
 
 
 def _values(row):
@@ -181,102 +189,65 @@ def test_managed_settings_and_updates_say_what_the_organization_fixes(direct_ser
             # --- unmanaged: the positive control, today's behaviour, in both themes ---
             for theme, width in (("light", 1400), ("dark", 1400), ("dark", 390)):
                 page = browser.new_page(viewport={"width": width, "height": 1000 if width > 500 else 844})
-                _open(page, fixture["url"], theme, "behavior")
+                _open_page(page, fixture["url"], theme, "models/role/safety")
                 assert page.evaluate("document.documentElement.dataset.theme") == theme
-                assert page.locator('[data-runtime-mode-group] [data-effort-value]').evaluate_all(
-                    "nodes => nodes.map(n => n.dataset.effortValue)") == ["light", "advanced", "pro", "cyber_pro"]
-                assert page.locator('[data-effort-target="s-safety-mode"]').is_visible()
-                assert page.locator('[data-effort-target="s-update-channel"]').is_visible()
-                assert not page.locator('[data-update-channel-fixed]').is_visible()
-                assert "Change in Models" in page.locator('[data-safety-checker]').inner_text()
-                assert not page.locator('[data-safety-exits]').is_visible(), "personal OSS keeps both exits, unsaid"
-                page.locator('[data-safety-checker]').scroll_into_view_if_needed()
-                _shot(page, evidence, f"unmanaged-behavior-{theme}-{width}")
-                page.locator('[data-settings-tab="models"]').click()
-                assert page.locator('#s-model-safety').count() == 1
-                page.locator('[data-settings-tab="providers"]').click()
-                openai = _builtin_row(page, "openai")
-                assert not page.locator('#s-openai').evaluate("node => node.readOnly")
-                assert openai.locator('[data-connection-toggle]').is_visible()
-                assert not openai.locator('[data-connection-fixed-fields]').is_visible()
-                assert not page.locator('#s-openai-base-url').evaluate("node => node.readOnly")
-                assert not page.locator('[data-legacy-base-url-fixed]').is_visible()
+                # The role's editor is drawn once its read answers: the Safety role is the owner's to change.
+                page.locator("#page-settings [data-model-role-model]").first.wait_for(state="attached")
+                assert page.locator("#page-settings [data-model-role-model]").count() == 1
+                assert page.locator("#page-settings [data-model-role-fixed]").count() == 0
+                level = _key_page(page, "accounts/key/openai")
+                openai = level.locator('[data-connection-row][data-builtin="1"]')
+                assert not level.locator("#s-openai").evaluate(READ_ONLY)
+                assert level.locator("[data-key-toggle]").is_visible()
+                assert not level.locator("[data-key-fixed]").is_visible()
+                assert not level.locator("[data-connection-fixed-fields]").is_visible()
+                assert not _legacy_address(level).locator("[data-setting-control]").evaluate(READ_ONLY)
                 openai.scroll_into_view_if_needed()
                 _shot(page, evidence, f"unmanaged-accounts-{theme}-{width}")
+                _updates(page)
+                assert page.locator('#page-dashboard [data-setting-row="OUROBOROS_UPDATE_CHANNEL"]').is_visible()
+                assert page.locator(".updates-recovery").is_visible()
                 page.close()
 
             # --- the same server, started under the administrator's policy file ---
             fixture["stop_server"]()
-            stored = json.loads(settings_path.read_text())
+            stored = json.loads(settings_path.read_text(encoding="utf-8"))
             stored["OUROBOROS_CONNECTIONS"] = [CHECKER_ROW]
-            settings_path.write_text(json.dumps(stored))
+            settings_path.write_text(json.dumps(stored), encoding="utf-8")
             policy_path = tmp_path / "admin" / "deployment-policy.json"
             policy_path.parent.mkdir(exist_ok=True)
-            policy_path.write_text(json.dumps(POLICY))
+            policy_path.write_text(json.dumps(POLICY), encoding="utf-8")
             fixture["env"]["OUROBOROS_DEPLOYMENT_POLICY"] = str(policy_path)
             fixture["start_server"]()
 
             for theme, width in (("light", 1400), ("dark", 1400), ("dark", 390)):
                 page = browser.new_page(viewport={"width": width, "height": 1000 if width > 500 else 844})
-                _open(page, fixture["url"], theme, "behavior")
+                level = _open_page(page, fixture["url"], theme, "models/role/safety")
                 assert page.evaluate("document.documentElement.dataset.theme") == theme
-                access = page.locator('[data-runtime-mode-group] [data-effort-value]')
-                assert access.evaluate_all("nodes => nodes.map(n => n.dataset.effortValue)") == ["light", "advanced", "pro"]
-                assert "Your organization allows up to Pro" in page.locator('[data-policy-state="access"]').inner_text()
-                assert not page.locator('[data-effort-target="s-safety-mode"]').is_visible()
-                assert not page.locator('[data-effort-target="s-consciousness-safety-mode"]').is_visible()
-                assert page.locator('[data-policy-state="supervisor"]').inner_text() == "Set by your organization: Full"
-                checker = page.locator('[data-safety-checker]').inner_text()
-                assert "Set by your organization" in checker and "Change in Models" not in checker
-                assert "decides alone" in page.locator('[data-safety-second-check]').inner_text()
-                assert page.locator('[data-safety-exits]').inner_text() == (  # unnamed under the organization's checker
-                    "Set by your organization: your approval cannot send a message the Supervisor has not checked.")
-                assert page.locator('[data-safety-organization-rules]').is_visible()
-                assert page.locator('#s-safety-rules').is_enabled(), "the employee's own rules stay editable"
-                assert page.locator('[data-update-channel-fixed]').is_visible()
-                assert not page.locator('[data-effort-target="s-update-channel"]').is_visible()
+                # The Safety role is said with its model and no control to change it.
+                fixed = level.locator('[data-model-role-group="safety"][data-model-role-fixed]')
+                fixed.wait_for(state="visible")
+                assert "Set by your organization" in fixed.inner_text()
+                assert level.locator("[data-model-role-model]").count() == 0
+                _shot(page, evidence, f"managed-models-{theme}-{width}")
+                # The organization's key: said, read-only, with no Save, Turn off or Remove.
+                level = _key_page(page, "accounts/key/anthropic/safety")
+                row = level.locator('[data-connection-row][data-kind="anthropic"][data-name="safety"]')
+                assert level.locator("[data-key-fixed]").is_visible()
+                for control in ("[data-editor-save]", "[data-key-toggle]", "[data-editor-remove]"):
+                    assert level.locator(control).count() == 0, control
+                assert row.locator("[data-connection-label]").evaluate(READ_ONLY)
                 assert page.locator('[data-chat-command="panic"]').count() >= 1 or width < 500
-                assert page.evaluate("document.querySelector('[data-settings-panel=\"behavior\"]').scrollWidth <= innerWidth + 1")
-                page.locator('[data-runtime-mode-group]').scroll_into_view_if_needed()
-                _shot(page, evidence, f"managed-access-{theme}-{width}")
-                page.locator('[data-safety-checker]').scroll_into_view_if_needed()
-                _shot(page, evidence, f"managed-safety-{theme}-{width}")
-                if width == 1400 and theme == "light":
-                    # Keyboard: the capped row is the only stop set; no hidden Cyber Pro takes focus.
-                    access.first.focus()
-                    stops = [page.evaluate("document.activeElement.dataset.effortValue || ''")]
-                    for _ in range(3):
-                        page.keyboard.press("Tab")
-                        stops.append(page.evaluate("document.activeElement.dataset.effortValue || ''"))
-                    assert stops[:3] == ["light", "advanced", "pro"] and stops[3] != "cyber_pro", stops
-                    # A change the policy allows still saves; the raw shadowed Access stays the employee's.
-                    page.locator('[data-enforcement-group] [data-effort-value="blocking"]').click()
-                    page.locator('#btn-save-settings').click()
-                    page.wait_for_function("() => (document.querySelector('#settings-status')?.textContent || '').match(/[Ss]aved/)")
-                    saved = json.loads(settings_path.read_text())
-                    assert saved["OUROBOROS_REVIEW_ENFORCEMENT"] == "blocking"
-                    assert saved["OUROBOROS_RUNTIME_MODE"] == "light"
-                    assert "OUROBOROS_SAFETY_MODE" not in saved and "OUROBOROS_MODEL_SAFETY" not in saved
-                    page.locator('[data-settings-tab="models"]').click()
-                    fixed = page.locator('[data-model-role-group="safety"][data-model-role-fixed]')
-                    assert fixed.is_visible() and "Set by your organization" in fixed.inner_text()
-                    assert page.locator('#s-model-safety').count() == 0
-                    fixed.scroll_into_view_if_needed()
-                    _shot(page, evidence, "managed-models-light-1400")
-                    page.locator('[data-settings-tab="providers"]').click()
-                    row = page.locator('[data-connection-row][data-kind="anthropic"][data-name="safety"]')
-                    row.scroll_into_view_if_needed()
-                    assert row.locator('[data-connection-fixed]').is_visible()
-                    assert not row.locator('[data-connection-toggle]').is_visible()
-                    assert not row.locator('[data-connection-remove]').is_visible()
-                    assert row.locator('[data-connection-label]').evaluate("node => node.readOnly")
-                    _shot(page, evidence, "managed-accounts-light-1400", row)
-                    page.locator('[data-nav-page="dashboard"]').click()
-                    page.locator('[data-dashboard-tab="updates"]').click()
-                    page.wait_for_function("() => (document.querySelector('#updates-summary')?.textContent || '') === 'Managed by your organization'")
-                    assert not page.locator('.updates-recovery').is_visible()
-                    assert not page.locator('#btn-update-replace').is_visible()
-                    _shot(page, evidence, "managed-updates-light-1400")
+                assert level.evaluate("level => level.scrollWidth <= level.clientWidth + 1") and \
+                    page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+                _shot(page, evidence, f"managed-accounts-{theme}-{width}", row)
+                # Updates: the administrator replaces the serving program; no channel, replace or recovery is offered.
+                _updates(page)
+                assert page.locator("#updates-summary").inner_text() == "Managed by your organization"
+                assert not page.locator('#page-dashboard [data-setting-row="OUROBOROS_UPDATE_CHANNEL"]').is_visible()
+                assert not page.locator(".updates-recovery").is_visible()
+                assert not page.locator("#btn-update-replace").is_visible()
+                _shot(page, evidence, f"managed-updates-{theme}-{width}")
                 page.close()
             # The wizard draws the same contract: the Supervisor fixed in Models, Access capped with its bound.
             page = browser.new_page(viewport={"width": 390, "height": 844})
@@ -300,62 +271,60 @@ def test_managed_settings_and_updates_say_what_the_organization_fixes(direct_ser
             _shot(page, evidence, "managed-wizard-access-dark-390")
             page.close()
             # Nothing the browser did wrote a fixed value or touched the organization's connection.
-            final = json.loads(settings_path.read_text())
+            final = json.loads(settings_path.read_text(encoding="utf-8"))
             assert final["OUROBOROS_CONNECTIONS"][0]["api_key"] == CHECKER_ROW["api_key"]
 
             # --- the legacy source branch: a built-in compatible checker reaching OPENAI_BASE_URL + OPENAI_API_KEY ---
             fixture["stop_server"]()
-            stored = json.loads(settings_path.read_text())
+            stored = json.loads(settings_path.read_text(encoding="utf-8"))
             stored["OPENAI_BASE_URL"] = stored.pop("OPENAI_COMPATIBLE_BASE_URL")
             stored["OPENAI_API_KEY"] = stored.pop("OPENAI_COMPATIBLE_API_KEY")
-            settings_path.write_text(json.dumps(stored))
+            settings_path.write_text(json.dumps(stored), encoding="utf-8")
             legacy = {key: stored[key] for key in ("OPENAI_BASE_URL", "OPENAI_API_KEY")}
             policy_path.write_text(json.dumps({"version": 1, "safety": {"checker": {"model": "openai-compatible::mock-model"},
                                                                         "allowed_exits": []}}))
             fixture["start_server"]()
             for theme in ("light", "dark"):
                 page = browser.new_page(viewport={"width": 1400, "height": 1000})
-                _open(page, fixture["url"], theme, "behavior")  # the strict file closes all three Safety exits
-                exits = page.locator('[data-safety-exits]')
+                level = _open_page(page, fixture["url"], theme, "permissions")  # the strict file closes all three exits
+                exits = level.locator('[data-safety-exits]')
                 assert exits.inner_text() == (
                     "Set by your organization: Ouroboros cannot override a DANGEROUS refusal on its own; "
                     "your approval cannot override a DANGEROUS refusal; "
                     "your approval cannot send a message the Supervisor has not checked.")
                 exits.scroll_into_view_if_needed()
                 _shot(page, evidence, f"managed-strict-safety-{theme}-1400")
-                page.locator('[data-settings-tab="providers"]').click()
-                openai = _builtin_row(page, "openai")
-                assert page.locator('#s-openai').evaluate("node => node.readOnly")
-                assert openai.locator('[data-connection-fixed-fields]').inner_text() == (
+                level = _key_page(page, "accounts/key/openai")
+                openai = level.locator('[data-connection-row][data-builtin="1"]')
+                assert level.locator("#s-openai").evaluate(READ_ONLY)
+                assert level.locator("[data-connection-fixed-fields]").inner_text() == (
                     "API key: set by your organization, its Safety Supervisor uses it.")
-                assert not openai.locator('[data-connection-fixed]').is_visible(), "the OpenAI key itself is not the checker's"
-                assert openai.locator('[data-connection-toggle]').is_visible(), "its Disable stays the employee's"
-                assert not openai.locator('[data-connection-remove]').is_visible()
-                assert not openai.locator('.secret-clear').is_visible()
-                openai.scroll_into_view_if_needed()
+                assert not level.locator("[data-key-fixed]").is_visible(), "the OpenAI key itself is not the checker's"
+                assert level.locator("[data-key-toggle]").is_visible(), "its Turn off stays the employee's"
+                assert not level.locator("[data-editor-remove]").is_visible()
+                assert not openai.locator(".secret-clear").is_visible()
                 _shot(page, evidence, f"managed-legacy-openai-{theme}-1400", openai)
-                compatible = _builtin_row(page, "compatible")
-                assert compatible.locator('[data-connection-fixed]').is_visible()
-                assert not compatible.locator('[data-connection-toggle]').is_visible()
-                assert "change the address" not in compatible.locator('[data-connection-meta]').inner_text()
-                compatible.scroll_into_view_if_needed()
-                _shot(page, evidence, f"managed-legacy-compatible-{theme}-1400", compatible)
-                address = page.locator('#s-openai-base-url')
-                assert address.evaluate("node => node.readOnly") and address.input_value() == legacy["OPENAI_BASE_URL"]
-                note = page.locator('[data-legacy-base-url-fixed]')
-                assert note.is_visible() and note.inner_text().startswith("Legacy OpenAI Base URL: set by your organization")
+                address = _legacy_address(level)
+                control = address.locator("[data-setting-control]")
+                assert control.input_value() == legacy["OPENAI_BASE_URL"]
+                assert control.evaluate(READ_ONLY), "the checker reads the legacy address: shown, never edited"
                 address.scroll_into_view_if_needed()
                 _shot(page, evidence, f"managed-legacy-address-{theme}-1400")
                 if theme == "light":
-                    # A permitted save: the employee turns their own OpenAI key off; the checker's pair stays as deployed.
-                    openai.locator('[data-connection-toggle]').click()
-                    page.locator('#btn-save-settings').click()
-                    page.wait_for_function("() => (document.querySelector('#settings-status')?.textContent || '').match(/[Ss]aved/)")
-                    saved = json.loads(settings_path.read_text())
+                    # A permitted change: the employee turns their own OpenAI key off; the checker's pair stays.
+                    with page.expect_response(lambda r: r.url.endswith("/api/settings") and r.request.method == "POST"):
+                        level.locator("[data-key-toggle]").click()
+                    page.wait_for_function("() => document.querySelector('#page-settings [data-key-toggle]')?.textContent === 'Turn on'")
+                    saved = json.loads(settings_path.read_text(encoding="utf-8"))
                     assert {key: saved.get(key) for key in legacy} == legacy
                     assert not saved.get("OPENAI_COMPATIBLE_BASE_URL"), "the legacy pair is still the one dispatch reads"
                     assert {"kind": "openai", "name": "default", "enabled": False} in saved["OUROBOROS_CONNECTIONS"]
                     _shot(page, evidence, "managed-legacy-saved-light-1400", openai)
+                level = _key_page(page, "accounts/key/openai-compatible")
+                assert level.locator("[data-key-fixed]").is_visible()
+                assert level.locator("[data-key-toggle]").count() == 0
+                assert "change the address" not in level.locator(".settings-page-lead").inner_text()
+                _shot(page, evidence, f"managed-legacy-compatible-{theme}-1400")
                 page.close()
             page = browser.new_page(viewport={"width": 390, "height": 844})
             page.add_init_script("localStorage.setItem('ouroboros.theme', 'dark')")
