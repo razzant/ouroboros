@@ -4,9 +4,11 @@
  *
  * What Settings shows is `state.settingsPath` ('' is the home), in memory only: no URL is written and a reload starts
  * at the home. An address no page registers (a skill written for the tabs Settings had) never shows an empty page:
- * the home opens with the address's last word searched, and search says where the thing lives now. Pages open in levels. One opened from the home, a search result or outside Settings is the first level;
- * one opened from a page lies over that page. The first row of every level is Back and names where it leads: the
- * level under it, the home ("Settings"), or the place outside Settings that opened it (`back: { label, go }`).
+ * the home opens with the address's last part searched, its hyphens and underscores read as spaces (`local-model`
+ * searches "local model"), and search says where the thing lives now. Pages open in levels. One opened from the
+ * home, a search result or outside Settings is the first level; one opened from a page lies over that page. The
+ * first row of every level is Back and names where it leads: the level under it, the home ("Settings"), or the
+ * place outside Settings that opened it (`back: { label, go }`).
  *
  * The page box's width decides the layout (settings.css `@container settingspage`). Narrow: one level alone, each one
  * `page: true` layer of the shell's stack (layers.js), so Escape, the browser's or Android's Back and Telegram's Back
@@ -79,7 +81,7 @@ export function initSettings(ctx = {}) {
         if (isDoorId(target)) return leave(target, { row });
         if (target && !settingsPageFor(target)) {
             closeLevels(0);
-            home.search(target.split(/[^\p{L}\p{N}]+/u).filter(Boolean).pop() || '');
+            home.search((target.split('/').filter(Boolean).pop() || '').replace(/[-_]+/g, ' ').trim());
             return true;
         }
         const at = back || fresh ? -1 : levels.findIndex((level) => level.path === target);

@@ -106,7 +106,7 @@ test('every page the home opens is served, or is named as pending with its lane;
     for (const door of SEARCH_DOORS) assert.equal(deadPath(door.to), '', `search offers a door to "${door.to}"`);
 });
 
-test('an address no page registers lands on the home with its last word searched; a registered one opens its page', async (t) => {
+test('an address no page registers lands on the home with its last part searched; a registered one opens its page', async (t) => {
     const { content, state, showPage } = world(t);
     registerSettingsPage('test-known', { title: 'Known', mount(body) { body.innerHTML = '<p data-known>here</p>'; } });
     const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
@@ -120,21 +120,25 @@ test('an address no page registers lands on the home with its last word searched
     assert.deepEqual([pages(), state.settingsPath, search()], [['test-known'], 'test-known', '']);
     assert.ok(content.querySelector('[data-known]'));
 
-    // A tab Settings had, as a skill written before the rework names it: the home, the word searched, the page it
-    // became among the results, and no level with nothing inside. The page that was open is closed.
+    // A tab Settings had, as a skill written before the rework names it: the home, the address's last part searched
+    // whole with its hyphens and underscores read as spaces (never its last word alone: `local-model` is the Local
+    // model, not every model), the page it became among the results, and no level with nothing inside. The page
+    // that was open is closed.
     for (const [address, word, found] of [['secrets', 'secrets', 'home:accounts'], ['behavior', 'behavior', 'home:permissions'],
-        ['old-tabs/advanced', 'advanced', 'door:skill'], ['Providers', 'Providers', 'home:accounts']]) {
+        ['old-tabs/advanced', 'advanced', 'door:skill'], ['Providers', 'Providers', 'home:accounts'],
+        ['old-tabs/local-model', 'local model', 'models:local'], ['local_model', 'local model', 'models:local']]) {
         assert.equal(await controls.open(address), true, address);
         await settle();
         assert.deepEqual([pages(), state.settingsPath, search()], [[], '', word], address);
         assert.ok(results().includes(found), `${address}: ${results()}`);
         assert.ok(content.querySelector('[data-settings-ask]'), 'the Ask line stands under the results');
     }
-    assert.ok(results().includes('home:accounts'));
-    // A word no setting has still shows the home, never an empty page: the list says so and offers the Ask line.
+    // The whole part is searched, so `local-model` does not list what only `model` would find.
+    assert.ok(!results().includes('models:main'), `local model: ${results()}`);
+    // Words no setting has still show the home, never an empty page: the list says so and offers the Ask line.
     await controls.open('zzz-nowhere');
     await settle();
-    assert.deepEqual([pages(), search(), results()], [[], 'nowhere', []]);
+    assert.deepEqual([pages(), search(), results()], [[], 'zzz nowhere', []]);
     // From a page inside Settings the same holds, and a known path still opens over it.
     await controls.open('test-known');
     await settle();
