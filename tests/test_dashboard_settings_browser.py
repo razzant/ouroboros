@@ -111,6 +111,15 @@ def _scale_word(page, value):
         return words.SAFETY_LEVELS.find((level) => level.value === value).label; }""", value)
 
 
+def _serve(page, prefix):
+    """Settings opens a level only for a path some page registered; any other lands on its home with a search
+    (settings.js `go`). Where the lane that owns `prefix` has not registered its page yet, a stand-in does, so a door
+    and its way back are checked here without waiting for that lane."""
+    page.evaluate("""async (prefix) => { const app = [...document.scripts].find((script) => /app\\.js/.test(script.src)).src;
+        const pages = await import(new URL('modules/settings_pages.js', app).href);
+        if (!pages.settingsPageFor(prefix)) pages.registerSettingsPage(prefix, { title: prefix, mount() {} }); }""", prefix)
+
+
 def _reads(path, method="GET"):
     return lambda request: urlparse(request.url).path == path and request.method == method
 
@@ -223,6 +232,8 @@ def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(
     assert page.locator(row("OUROBOROS_BG_WAKEUP")).evaluate(
         "(el) => [...el.querySelectorAll('.settings-row-field > *')].map((n) => n.tagName === 'INPUT' ? n.value : n.textContent)") == ["300", "to", "7200", "s"]
     # The model door opens its role in Models, whose Back names this tab and returns to it.
+    _serve(page, "models")
+    _serve(page, "permissions")
     page.click(row("consciousness-model"))
     back = page.locator('#page-settings [data-settings-page="models/role/consciousness"] [data-settings-back]')
     back.wait_for()
@@ -263,6 +274,7 @@ def test_costs_shows_subscriptions_from_the_passive_view_alone_and_its_doors_ope
     assert page.quota_reads and all(urlparse(url).query == "view=quota" for url in page.quota_reads)
     assert not [url for url in ui["reads"] if "/api/claudexor/" in url and "view=quota" not in url], "no other account read from this tab"
     assert not [path for path, _ in ui["posts"] if "/api/claudexor/" in path], "nothing is woken or refreshed"
+    _serve(page, "accounts")
     door.click()
     back = page.locator('#page-settings [data-settings-page="accounts/codex"] [data-settings-back]')
     back.wait_for()
