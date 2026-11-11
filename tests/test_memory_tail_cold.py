@@ -481,7 +481,7 @@ class Chain:
 # Together the seeds take every change in STEPS, a place page's acceptance (24) and rejection (29); a place's walks read
 # its first page of unread rows two at a time there (``memory_inventory._PlaceReads._NEWEST``), so every read past it,
 # every earlier copy below it and every return to the dialogue store happens on these short chains too.
-@pytest.mark.parametrize("seed,page", [(1, 2), (5, 2), (24, 2), (29, 2), (1, None)])
+@pytest.mark.parametrize("seed,page", [(1, 2), (2, 2), (5, 2), (24, 2), (29, 2), (1, None), (2, None)])
 def test_after_every_change_the_normal_path_equals_the_whole_tail_warm_and_fresh(monkeypatch, tmp_path, seed, page):
     if page is not None and hasattr(mi, "_PlaceReads"):
         monkeypatch.setattr(mi._PlaceReads, "_NEWEST", page)
@@ -942,19 +942,35 @@ def test_a_new_project_returns_the_whole_tail_to_reading(monkeypatch, tmp_path):
     _same(monkeypatch, tmp_path, rooms)
 
 
-@pytest.mark.parametrize("change", ["direct_update", "older_replace", "removed"])
-def test_any_write_of_a_tasks_lineage_moves_the_mark_in_the_stores_own_transaction(monkeypatch, tmp_path, change):
-    rooms, row = _sealed_main_row(tmp_path)
-    if change == "direct_update":  # the derivation job, or any writer past ``Txn.store_task``
+def test_every_write_of_a_tasks_lineage_moves_the_mark_again_whatever_statement_writes_it(monkeypatch, tmp_path):
+    """Each change of a task's parent, root, role or admitted chat, or its removal, moves the mark in the store's own
+    transaction to a value it never held, again and again, whichever statement writes it: ``Txn.store_task``'s REPLACE,
+    an older body's REPLACE, a direct UPDATE (the derivation job), a DELETE. SQLite runs a trigger's statements under
+    the conflict policy the firing statement names, so a counter seeded by ``INSERT OR IGNORE`` was replaced by its
+    first value under every REPLACE: the mark stood still after the first change of a store's life."""
+    from ouroboros.store_hot_facts import lineage_writes
+
+    rooms, _row = _sealed_main_row(tmp_path)
+    write_task_result(tmp_path, "late2", "completed", result="done", chat_id=1)  # a new task: nothing to move
+
+    def raw(sql: str, *values) -> None:
         with store.open_store(tmp_path, write=True) as txn:
-            txn.conn.execute("UPDATE tasks SET chat_id=? WHERE task_id='late'", (str(rooms["alpha"]),))
-    elif change == "older_replace":  # an older body's REPLACE that does not know the chat column
-        with store.open_store(tmp_path, write=True) as txn:
-            txn.conn.execute("INSERT OR REPLACE INTO tasks (task_id, status, parent_task_id, root_task_id) "
-                             "VALUES ('late', 'completed', NULL, 'late')")
-    else:
-        task_store.delete_document(tmp_path, "late")
-    assert not _in_use(tmp_path)
+            txn.conn.execute(sql, values)
+
+    writes = (lambda: store.update_task(tmp_path, "late", lambda doc: {**doc, "chat_id": rooms["alpha"]}),
+              lambda: store.update_task(tmp_path, "late2", lambda doc: {**doc, "parent_task_id": "free1"}),
+              lambda: raw("INSERT OR REPLACE INTO tasks (task_id, status, parent_task_id, root_task_id) "
+                          "VALUES ('late', 'completed', 'free1', 'late')"),  # an older body's, without the chat column
+              lambda: raw("UPDATE tasks SET chat_id=? WHERE task_id='late2'", str(rooms["beta"])),
+              lambda: raw("UPDATE tasks SET chat_id='1' WHERE task_id='late2'"),
+              lambda: store.update_task(tmp_path, "late2", lambda doc: {**doc, "delegation_role": "subagent"}),
+              lambda: task_store.delete_document(tmp_path, "late"))
+    marks = [lineage_writes(tmp_path)]
+    for n, write in enumerate(writes):
+        _compose(tmp_path)  # a set that stands on the mark as it is
+        write()
+        marks.append(lineage_writes(tmp_path))
+        assert marks[-1] not in marks[:-1] and not _in_use(tmp_path), (n, marks)
     _same(monkeypatch, tmp_path, rooms)
 
 
