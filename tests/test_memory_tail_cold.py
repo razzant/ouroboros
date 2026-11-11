@@ -1667,6 +1667,25 @@ def test_a_row_a_page_sealed_after_the_set_was_composed_is_read_and_counted_unti
     assert _law_l7d(work) and work["rows_stale"] == 1, work
 
 
+def test_an_accepted_candidate_keeps_the_set_and_its_rows_are_read_until_a_whole_pass(monkeypatch, tmp_path):
+    """Accepting a helper's candidate page moves no mark: the set stands, and the row the page sealed (open when the set
+    was composed) is read and counted as the set's age until the next whole pass."""
+    rooms = _settled(tmp_path)
+    _append(tmp_path, shared.msg(_ts(1), "Open then.", client_message_id="then"))
+    _append(tmp_path, shared.msg(_ts(2), "Later word.", client_message_id="later"))
+    _fill(tmp_path)
+    _compose(tmp_path)
+    item = _entry(tmp_path, "Open then.")
+    candidate = ChronicleStore(tmp_path).publish_page(room_id="1", text="A candidate.", author=LIGHT, metadata={
+        "candidate": True}, covers={"rows": [item[0]["row_sha256"]], "stream_span": [item[2], item[2]]})
+    assert candidate.ok, candidate.reason
+    assert ChronicleStore(tmp_path).decide(candidate.record["id"], True, shared.MIND, "adopted").ok
+    assert _in_use(tmp_path)
+    work = _work(tmp_path, rooms)
+    assert work.get("tail_whole", 0) == 0 and work.get("rows_stale") == 1 and _law_l7d(work), work
+    _same(monkeypatch, tmp_path, rooms)
+
+
 def test_a_build_receipt_says_whether_the_set_acted_and_what_it_left_unread(tmp_path):
     rooms, row = _sealed_main_row(tmp_path)
     create_project(tmp_path, "gamma", name="Gamma")
