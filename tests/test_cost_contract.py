@@ -43,7 +43,8 @@ starts, counted up to the turn's first model request, where the driver refuses t
 history it must not reread (tests/_turn_shapes.py) is the old memory folded by parts, the archived dialogue sealed
 by pages and rooms sealed after the frontier, met in the steady state a long-lived install keeps (the tail facts
 stored, the OpenRouter catalogue recorded). L1: a project room's turn does the same work at k=1 and k=30; L2:
-Main's turns make the same round trips and decode the same rows (their payload is delivered once: Main shows its story);
+integrating turns make the same round trips apart from the stored tail's exact page reads, and decode the same rows
+(their payload is delivered once: Main shows its story);
 L3/L4 (k=1): after 40 live rooms and 10 running roots, 650 open rows, or 40 archived knowledge notes and old
 rescue snapshots, only the dialogue's page reads may grow, by B9's allowance per page (their statements by the
 lease's per transaction); L5: each turn reaches its request and nothing it does reaches the network; L6: the
@@ -380,6 +381,19 @@ def _growth(before: Dict[str, Any], after: Dict[str, Any], keys: Iterable[str]) 
     return {key: after["counts"].get(key, 0) - before["counts"].get(key, 0) for key in keys}
 
 
+def _round_trips(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Separate the stored tail's page reads (the whole-tail debt named by L7d) from the flat round trips.
+    Check their exact count (including the empty end page) before separating them from other statements."""
+    from ouroboros.chronicle_store import _TAIL_PAGE
+
+    work = entry["view"]["work"]
+    stored = work["rows_read"] - work["rows_new"]
+    pages = sum(amount for source, amount in entry["callers"].items()
+                if source.startswith("statements <- ") and "ouroboros.chronicle_store._tail_rows" in source.split(" <- "))
+    assert pages == -(-stored // _TAIL_PAGE) + 1, ("stored tail pages", pages, stored, _TAIL_PAGE)
+    return {**entry, "counts": {**entry["counts"], "statements": entry["counts"]["statements"] - pages}}
+
+
 @pytest.mark.parametrize("tag", [pytest.param(tag, marks=turn_gap("L2", tag))
                                  for tag in (*MAIN_TURNS, "T:room")])
 def test_b10_an_integrating_turn_makes_the_same_round_trips_at_every_size(measured, tag):
@@ -387,10 +401,11 @@ def test_b10_an_integrating_turn_makes_the_same_round_trips_at_every_size(measur
     Main's (the process's first, the next one, one after activity elsewhere) and a project room's direct turn,
     which integrates as a root task does (BIBLE P1: the whole horizon stays resident there, so its view holds
     every room's story and a line per live room). Its payload is delivered once: an integrating view shows its story. The
-    transactions ``COUNT_JITTER`` lets come and go (which thread first remembers a turn's own lineage is timing)
-    bring their statements, as in L3; a read per unit of history still adds 29 transactions."""
+    stored tail costs exactly one statement per page plus its end read, checked separately. The transactions
+    ``COUNT_JITTER`` lets come and go (which thread first remembers a turn's own lineage is timing) bring their
+    statements, as in L3; a read per unit of history still adds 29 transactions."""
     large = measured["large"]
-    little, big = at_request(measured, tag, K_SMALL), at_request(measured, tag, large)
+    little, big = (_round_trips(at_request(measured, tag, k)) for k in (K_SMALL, large))
     keys = (*ROUND, "rows_decoded")
     per_begin = little["counts"].get("statements", 0) / max(1, little["counts"].get("begins", 0))
     allowed = {**dict.fromkeys(keys, COUNT_JITTER), "statements": math.ceil(per_begin * COUNT_JITTER)}

@@ -332,11 +332,33 @@ def _mark(result: Dict[str, Any], name: str) -> None:
 def _install_checkpoints(meter: CostMeter, srv: Any, result: Dict[str, Any], root: pathlib.Path) -> Dict[str, threading.Event]:
     import functools
 
-    from ouroboros import server_liveness, store_journal, store_switch
+    from ouroboros import owned_shutdown, server_liveness, store_journal, store_switch, usage_store
     from supervisor import message_bus
     from tests._cost_meter import tagged
 
     events = {"ready": threading.Event(), "release": threading.Event()}
+    # B1c's usage import enumerates state/ for unfinished usage.sqlite imports. Hold the two background
+    # writers until it finishes: otherwise that census may meet current.sqlite-wal/-shm and
+    # owned_processes.json (or the writers' temporary files). They still run and count under their own tags.
+    usage_imported = threading.Event()
+
+    def after_usage_import(call):
+        def run(*args, **kwargs):
+            usage_imported.wait()
+            return call(*args, **kwargs)
+        return run
+
+    store_switch._run = after_usage_import(store_switch._run)
+    owned_shutdown.import_inherited_records = after_usage_import(owned_shutdown.import_inherited_records)
+    migrate_usage = usage_store.migrate_from_journal
+
+    def usage_first(*args, **kwargs):
+        try:
+            return migrate_usage(*args, **kwargs)
+        finally:
+            usage_imported.set()
+
+    usage_store.migrate_from_journal = usage_first
     when_ready = store_switch.when_ready
     prepare_children = store_journal.prepare_children
 
