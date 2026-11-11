@@ -105,8 +105,8 @@ def test_server_navigation_and_chat_static_contracts():
     assert "send(msg, options = {})" in _read("web/modules/ws.js")
     assert "options.queue === false" in _read("web/modules/ws.js")
     assert ".chat-attachment-preview" in css and "flex-wrap" in css
-    assert 'id="s-total-budget"' in ui
-    assert 'id="s-settings-per-task-cost"' in ui
+    # The two budgets have one editor, the Costs rows: Settings draws no second field for them.
+    assert "s-total-budget" not in ui and "s-settings-per-task-cost" not in ui
     # Source qualification belongs to the shared model editor, not duplicate model literals in Settings.
     model_roles = _read("web/modules/model_roles.js")
     assert "composeModelSource" in model_roles

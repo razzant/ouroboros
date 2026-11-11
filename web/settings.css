@@ -1033,88 +1033,6 @@ html[data-layout="stack"] .settings-needs:not([data-all]) > .settings-needs-more
     cursor: pointer;
 }
 
-/* The notification choices sit under their master switch; while it is off they are disabled (the words say so
-   in the disabled ink). */
-.notify-choices { display: flex; flex-direction: column; gap: 10px; padding-left: calc(var(--local-toggle-box) + var(--local-toggle-gap)); }
-.notify-choices :is(.local-toggle:has(> input:disabled), .notify-tone-volume > label:has(+ input:disabled)) {
-    color: var(--text-disabled);
-    cursor: default;
-}
-
-/* A slider row (Notifications: the soft app tone's level, under Sound; Appearance: the interface size). The label on
-   its own line, the slider and its value on one, then its action and the note across the row. */
-.notify-tone-volume,
-.interface-size-range {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
-    gap: var(--space-3);
-    padding-block: var(--space-2);
-}
-.interface-size-range[hidden] { display: none; }
-.notify-tone-volume > label,
-.notify-tone-volume > .settings-toolbar,
-.notify-tone-volume > .settings-inline-note,
-.interface-size-range > label,
-.interface-size-range > .settings-toolbar {
-    grid-column: 1 / -1;
-}
-.notify-tone-volume > .settings-toolbar,
-.interface-size-range > .settings-toolbar {
-    margin: 0;
-}
-.notify-tone-volume input[type="range"],
-.interface-size-range input[type="range"] {
-    min-width: 0;
-    width: 100%;
-    accent-color: var(--accent-light);
-}
-.notify-tone-volume input[type="range"]:disabled,
-.interface-size-range input[type="range"]:disabled {
-    opacity: var(--control-disabled-opacity);
-    cursor: not-allowed;
-}
-.notify-tone-volume input[type="range"]:focus-visible,
-.interface-size-range input[type="range"]:focus-visible {
-    outline: 2px solid var(--focus-accent-border);
-    outline-offset: 2px;
-}
-.notify-tone-volume output,
-.interface-size-range output {
-    min-width: 4ch;
-    text-align: right;
-    font-size: var(--type-meta);
-    line-height: var(--line-meta);
-    font-variant-numeric: tabular-nums;
-    color: var(--text-meta);
-}
-
-/* Startup & background: a row's note starts where its checkbox label's text starts, and a
-   status dot hangs under the checkbox, so wrapped lines and both rows share one text edge. */
-[data-autostart-settings] {
-    --autostart-dot: var(--mark-fact);   /* the status sentence's dot, ui.css */
-}
-[data-autostart-settings] .settings-inline-status,
-[data-autostart-settings] .settings-inline-note {
-    padding-left: calc(var(--local-toggle-box) + var(--local-toggle-gap));
-}
-/* Both rows sit in the card's one column, so a note is as far from its own checkbox in either
-   row, and an empty note takes no room. */
-[data-autostart-settings] [data-background-row]:not([hidden]) {
-    display: contents;
-}
-[data-autostart-settings] .settings-inline-status:empty {
-    display: none;
-}
-/* A row's plain note (no tone, no dot) reads in meta ink, like the shared note. */
-[data-autostart-settings] .settings-inline-status:not([data-tone]) {
-    color: var(--text-meta);
-}
-[data-autostart-settings] .settings-inline-status[data-tone]:not(:empty)::before {
-    margin-left: calc(var(--autostart-dot) / 2 - var(--local-toggle-box) / 2 - var(--local-toggle-gap) - var(--autostart-dot));
-    margin-right: calc(var(--local-toggle-box) / 2 + var(--local-toggle-gap) - var(--autostart-dot) / 2);
-}
-
 .local-toggle[data-warning="1"] {
     color: var(--status-warn-fg);
 }
@@ -1383,26 +1301,12 @@ html[data-layout="stack"] .settings-needs:not([data-all]) > .settings-needs-more
     .mcp-header-row { grid-template-columns: minmax(0, 1fr); }
 }
 
-/* About: a centred page block, its title at the page size and the versions as one meta line. */
-.about-body {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    flex: 1;
-    gap: var(--space-5);
-    padding: 40px 20px;
-    text-align: center;
-}
-.about-logo {
-    width: 96px;
-    height: 96px;
-    border-radius: var(--radius-object);
-    object-fit: cover;
-}
-.about-title { font-size: var(--type-page); line-height: var(--line-title); font-weight: 600; margin: 0; }
-.about-version { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); margin: var(--space-1) 0 0; }
-.about-desc { max-width: 480px; color: var(--text-secondary); font-size: var(--type-body); line-height: var(--line-body); }
+/* About (This computer › About): a centred block in its card, its name at the page size and the versions as one meta line. */
+.about-body { display: flex; flex-direction: column; align-items: center; gap: var(--space-4); padding-block: var(--space-4); text-align: center; }
+.about-logo { width: 96px; height: 96px; border-radius: var(--radius-object); object-fit: cover; }
+.about-title { margin: 0; color: var(--text-primary); font-size: var(--type-page); line-height: var(--line-title); font-weight: 600; }
+.about-version { margin: var(--space-1) 0 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.about-desc { max-width: 480px; margin: 0; color: var(--text-secondary); font-size: var(--type-body); line-height: var(--line-body); }
 .about-credits { display: flex; flex-direction: column; gap: var(--space-2); font-size: var(--type-body); }
 .about-links { display: flex; gap: var(--space-4); justify-content: center; margin-top: var(--space-1); }
 .about-links a { color: var(--accent); text-decoration: none; }
@@ -1424,3 +1328,120 @@ html[data-layout="stack"] .settings-needs:not([data-all]) > .settings-needs-more
 .settings-row-copy { margin: 0; max-width: 72ch; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .settings-row [aria-busy="true"] { cursor: progress; }
 button.settings-row { width: 100%; color: inherit; font: inherit; text-align: start; cursor: pointer; }
+
+/* ---- The plain pages (settings_ui.js): a page is cards of rows --------------------------------------------------
+   The page's lead, a card, its title, its lead, its rows and the fold are the shell's recipe above ("An object of a
+   page"). What these pages add to it: a card's head with a word at its end, a note under a card's rows, a stack of
+   cards one module binds as a whole, and the rows' own details. Width is read from the row's own box (ui.css
+   .ui-row), never from the window. */
+.settings-stack { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
+.settings-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); }
+.settings-card-head > .settings-card-title { flex: 1 1 10rem; min-width: 0; }
+.settings-card-head + .settings-card-lead { margin-top: calc(-1 * var(--space-2)); }
+.settings-card-note { margin: 0; padding-inline: var(--space-1); color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.settings-card-note:empty { display: none; }
+/* Choices kept while their master switch is off say so once, in the card's head (the page shows and hides it). */
+.settings-card-held[hidden] { display: none; }
+.settings-rows > .settings-row { box-sizing: border-box; min-height: 52px; }
+/* A row with no line under its name stands on one line: its name is centred against the control, and takes the
+   first row alone once the line under it says something. */
+.settings-row > .ui-row-meta:not(:has(> :not(:empty))) { display: none; }
+.settings-rows > .settings-row > .ui-row-title { grid-row: 1 / span 2; }
+.settings-rows > .settings-row > .ui-row-title:has(+ .ui-row-meta > :not(:empty)) { grid-row: 1; }
+.settings-row-fact:empty { display: none; }
+/* A door row: the whole tray is the press. */
+@media (hover: hover) { button.settings-row:hover { background: var(--tone-quiet-hover); } }
+button.settings-row { transition: var(--motion-tone); }
+button.settings-row:active { filter: var(--press); }
+button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+.settings-row-chevron { color: var(--text-disabled); font-size: var(--type-section); line-height: 1; }
+/* What a row shows at its end when it is a fact, not a control: a saved choice, an address. */
+.settings-row-end { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); min-width: 0; }
+.settings-row-value { min-width: 0; color: var(--text-meta); font-size: var(--type-body); font-weight: 600; line-height: var(--line-body); overflow-wrap: anywhere; }
+a.settings-row-value { color: var(--accent); text-decoration: none; }
+/* A slider with its value and its one action (the interface size, the app tone's level). */
+.settings-slider { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); min-width: 0; }
+.settings-slider[hidden] { display: none; }
+.settings-slider input[type="range"] { width: 140px; min-width: 0; max-width: 100%; accent-color: var(--accent-light); }
+.settings-slider input[type="range"]:disabled { opacity: var(--control-disabled-opacity); cursor: not-allowed; }
+.settings-slider input[type="range"]:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+.settings-slider output { min-width: 4ch; text-align: end; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); font-variant-numeric: tabular-nums; }
+/* Your rules: one field as wide as its card, at the reading size. */
+textarea.ui-control.settings-rules-text {
+    width: 100%;
+    min-height: 12rem;
+    font-size: var(--type-body);
+    line-height: var(--line-body);
+    resize: vertical;
+}
+
+/* A choice whose every option needs a line of meaning (settings_controls.js kind `choices`): the row is its name and
+   its one line, then the options one under another, each a tray; the chosen one is filled and stands. While a restart
+   waits, the option in force and the chosen one carry a word. */
+.settings-row[data-kind="choices"] {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "words" "meta" "actions";
+    padding: 0;
+    background: none;
+}
+.settings-row[data-kind="choices"] > .ui-row-actions { display: block; margin-top: var(--space-2); }
+.settings-choices { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.settings-choice {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 2px;
+    width: 100%;
+    padding: var(--space-3) var(--space-4);
+    border: 1px solid transparent;
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
+    color: var(--text-primary);
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+    transition: var(--motion-tone);
+}
+@media (hover: hover) { .settings-choice:not(:disabled):not([aria-checked="true"]):hover { background: var(--tone-quiet-hover); } }
+.settings-choice:not(:disabled):active { filter: var(--press); }
+.settings-choice:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+.settings-choice[aria-checked="true"] { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); box-shadow: var(--elev-rest); }
+.settings-choice[aria-busy="true"] { cursor: progress; }
+.settings-choice-name { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: var(--type-body); font-weight: 600; line-height: var(--line-title); }
+.settings-choice-note { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.settings-choice[aria-checked="true"] .settings-choice-note { color: inherit; }
+.settings-choice-mark {
+    padding: 1px var(--space-2);
+    border-radius: 999px;
+    background: var(--status-neutral-bg);
+    color: var(--status-neutral-fg);
+    font-size: var(--type-meta);
+    font-weight: 600;
+    line-height: var(--line-meta);
+}
+.settings-choice-mark:empty { display: none; }
+.settings-choice[aria-checked="true"] .settings-choice-mark { background: var(--status-warn-bg); color: var(--status-warn-fg); }
+/* Access is a ladder: each level's mark shows how far up it stands (four bars, as many lit as the level). */
+[data-setting-row="OUROBOROS_RUNTIME_MODE"] .settings-choice {
+    --bar-lit: currentColor;
+    --bar-dim: color-mix(in srgb, currentColor 28%, transparent);
+    grid-template-columns: auto minmax(0, 1fr);
+    column-gap: var(--space-3);
+    align-items: center;
+}
+[data-setting-row="OUROBOROS_RUNTIME_MODE"] .settings-choice::before {
+    content: "";
+    grid-row: 1 / span 2;
+    width: 18px;
+    height: 16px;
+    color: var(--text-secondary);
+    background:
+        linear-gradient(var(--b1, var(--bar-dim)) 0 0) 0 100% / 3px 5px no-repeat,
+        linear-gradient(var(--b2, var(--bar-dim)) 0 0) 5px 100% / 3px 9px no-repeat,
+        linear-gradient(var(--b3, var(--bar-dim)) 0 0) 10px 100% / 3px 13px no-repeat,
+        linear-gradient(var(--b4, var(--bar-dim)) 0 0) 15px 100% / 3px 16px no-repeat;
+}
+[data-setting-row="OUROBOROS_RUNTIME_MODE"] .settings-choice[aria-checked="true"]::before { color: inherit; }
+[data-setting-row="OUROBOROS_RUNTIME_MODE"] .settings-choice:nth-child(n+1) { --b1: var(--bar-lit); }
+[data-setting-row="OUROBOROS_RUNTIME_MODE"] .settings-choice:nth-child(n+2) { --b2: var(--bar-lit); }
+[data-setting-row="OUROBOROS_RUNTIME_MODE"] .settings-choice:nth-child(n+3) { --b3: var(--bar-lit); }
+[data-setting-row="OUROBOROS_RUNTIME_MODE"] .settings-choice:nth-child(n+4) { --b4: var(--bar-lit); }

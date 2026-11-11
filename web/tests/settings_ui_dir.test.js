@@ -1,34 +1,31 @@
-// The main-interface choice in Settings: one restart-applied field beside what the core actually serves right now.
-// Its section is unmounted in settings_ui.js until the page that holds it is rebuilt.
+// The main-interface choice in Settings (This computer › Advanced): one row, applied at the next restart, beside
+// what the core actually serves right now.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import {
-    accountsPanel, advancedPanel, appearancePanel, behaviorPanel, modelsPanel, secretSettingsSection, servedUiStatus,
-} from '../modules/settings_ui.js';
+import { ROWS, rowById } from '../modules/settings_rows.js';
+import { accountsPanel, advancedPanel, modelsPanel, secretSettingsSection, servedUiStatus } from '../modules/settings_ui.js';
 
-test('the choice is one Advanced field with its help and a live applied-state line', () => {
-    const others = [accountsPanel(), secretSettingsSection(), modelsPanel(), behaviorPanel(), appearancePanel()];
-    const advanced = advancedPanel();
-    assert.equal(advanced.match(/id="s-ui-dir"/g)?.length, 1);
-    assert.match(advanced, /<input id="s-ui-dir"[^>]*aria-describedby="s-ui-dir-help s-ui-dir-applied"/);
-    assert.match(advanced, /id="s-ui-dir-applied" role="status" aria-live="polite" hidden/);
-    // Deployment plumbing set once: after the trust knobs, before Cleanup and the Danger Zone.
-    assert.ok(advanced.indexOf('Extra CA Certificates') < advanced.indexOf('Main Interface'));
-    assert.ok(advanced.indexOf('Main Interface') < advanced.indexOf('<h3>Cleanup</h3>'));
-    for (const other of others) assert.doesNotMatch(other, /s-ui-dir/);
+test('the choice is one row of This computer › Advanced, a plain field that travels only when edited', () => {
+    const row = rowById('OUROBOROS_UI_DIR');
+    assert.deepEqual([row.page, row.fold, row.control.kind, row.writer], ['computer/advanced', false, 'text', 'generic']);
+    assert.equal(ROWS.filter((each) => each.keys.includes('OUROBOROS_UI_DIR')).length, 1);
+    // The sections the editor lanes still hold draw no second field for it.
+    for (const other of [accountsPanel(), secretSettingsSection(), modelsPanel(), advancedPanel()]) assert.doesNotMatch(other, /s-ui-dir|OUROBOROS_UI_DIR/);
+    assert.ok(row.aliases.includes('Interface directory'), 'the old label finds it');
 });
 
-test('the help is truthful about restart, refresh ownership and the way back', () => {
-    const help = advancedPanel().match(/id="s-ui-dir-help">([\s\S]*?)<\/div>/)[1];
-    assert.match(help, /Empty: the built-in interface/);
-    assert.match(help, /<code>none<\/code>: no main page/);
-    assert.match(help, /absolute or <code>~<\/code>-prefixed path/);
-    assert.match(help, /keeps the built-in interface and says why below/);
-    assert.match(help, /the built-in page reloads into the new choice; a page from a directory or another host refreshes itself and only reconnects/);
-    assert.match(help, /To return to the built-in interface, clear this field .* restart, and reopen the Ouroboros address/);
-    assert.match(help, /a saved choice, empty included, wins/);
-    assert.match(advancedPanel(), /Applies at the next restart\./);
+test('the row is truthful about what is served, refresh ownership and the way back', () => {
+    const { meta, more } = rowById('OUROBOROS_UI_DIR');
+    assert.equal(meta, 'Empty serves the built-in interface.');
+    assert.match(more, /^none: no main page/);
+    assert.match(more, /an absolute or ~ path/);
+    assert.match(more, /keeps the built-in interface and says why/);
+    assert.match(more, /the built-in page reloads into the new choice; a page from a folder or another host refreshes itself and only reconnects/);
+    assert.match(more, /To return to the built-in interface, clear this field .* restart, and open the Ouroboros address again/);
+    assert.match(more, /a saved choice, empty included, wins/);
+    // When it applies is the server's fact (`_meta.effects`), said by the row's result line: no sentence here restates it.
+    assert.doesNotMatch(meta + more, /Applies at the next restart/);
 });
 
 test('the applied-state line names what is served now, and a refused choice with its reason', () => {

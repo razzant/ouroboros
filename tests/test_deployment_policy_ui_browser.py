@@ -2,6 +2,11 @@
 
 An employee sees what the organization fixes, still changes what it allows, finds no editor for what it fixes and
 no door to replace the serving program, and keeps Panic. Frames go to ``OUROBOROS_UI_EVIDENCE_DIR`` for a look.
+
+Settings is pages now. ``test_managed_permissions_say_what_the_organization_fixes`` is the Permissions and checks and
+Your rules part of this walk, on the pages as they are. The older walk below it still opens the Behavior, Models and
+Accounts tabs and the page-wide Save: its Models, Accounts and Updates parts wait for those pages (lanes E2, E3, D)
+and are rewritten with them on the integrated tree.
 """
 
 from __future__ import annotations
@@ -12,6 +17,7 @@ import pathlib
 
 import pytest
 
+from tests.settings_browser_helpers import commit_row, open_settings, setting_row
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 
 POLICY = {"version": 1, "access": {"max": "pro"},
@@ -39,6 +45,126 @@ def _builtin_row(page, card_id):
     if toggle.get_attribute("aria-expanded") != "true":
         toggle.click()
     return card.locator('[data-connection-row][data-builtin="1"]')
+
+
+def _open_page(page, url, theme, path):
+    page.add_init_script(f"localStorage.setItem('ouroboros.theme', {json.dumps(theme)})")
+    page.goto(url + "/#settings", wait_until="domcontentloaded")
+    level = open_settings(page, path)
+    if path == "permissions":  # drawn from the read the page makes when it is shown
+        level.locator('[data-setting-row="OUROBOROS_RUNTIME_MODE"] [role="radio"][aria-checked="true"]').wait_for(state="visible")
+        page.wait_for_function("() => document.querySelector('#page-settings [data-setting-row=\"permissions:supervisor\"] "
+                               "[data-setting-meta]').textContent.trim() !== ''")
+    return level
+
+
+def _values(row):
+    return row.locator("[data-setting-value]").evaluate_all("nodes => nodes.map((node) => node.dataset.settingValue)")
+
+
+@pytest.mark.ui_browser
+def test_managed_permissions_say_what_the_organization_fixes(direct_server_with_data, tmp_path):  # noqa: F811
+    """Permissions and checks and Your rules under the administrator's policy file: a bounded choice offers only what
+    is allowed and its row says whose limit it is, a fixed one stays on the page with its one value, the Supervisor is
+    said and not offered for change, and what the policy allows still saves. Unmanaged, nothing of it is said."""
+    from playwright.sync_api import sync_playwright
+
+    fixture = direct_server_with_data
+    evidence = pathlib.Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", str(tmp_path / "frames")))
+    evidence.mkdir(parents=True, exist_ok=True)
+    settings_path = fixture["data_dir"] / "settings.json"
+    meta = "[data-setting-meta]"
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            # --- unmanaged: the positive control ---
+            page = browser.new_page(viewport={"width": 1400, "height": 1000})
+            level = _open_page(page, fixture["url"], "dark", "permissions")
+            assert _values(setting_row(page, "OUROBOROS_RUNTIME_MODE")) == ["light", "advanced", "pro", "cyber_pro"]
+            assert _values(setting_row(page, "OUROBOROS_SAFETY_MODE")) == ["off", "light", "full"]
+            assert "organization" not in level.inner_text().lower()
+            supervisor = setting_row(page, "permissions:supervisor")
+            assert supervisor.evaluate("row => row.tagName") == "BUTTON", "the Supervisor's model is a door to Models"
+            assert not level.locator("[data-safety-exits]").is_visible(), "personal OSS keeps both exits, unsaid"
+            assert not level.locator("[data-safety-organization-rules]").is_visible()
+            _shot(page, evidence, "unmanaged-permissions-dark-1400")
+            page.close()
+
+            # --- the same server, started under the administrator's policy file ---
+            fixture["stop_server"]()
+            stored = json.loads(settings_path.read_text(encoding="utf-8"))
+            stored["OUROBOROS_CONNECTIONS"] = [CHECKER_ROW]
+            settings_path.write_text(json.dumps(stored), encoding="utf-8")
+            policy_path = tmp_path / "admin" / "deployment-policy.json"
+            policy_path.parent.mkdir(exist_ok=True)
+            policy_path.write_text(json.dumps(POLICY), encoding="utf-8")
+            fixture["env"]["OUROBOROS_DEPLOYMENT_POLICY"] = str(policy_path)
+            fixture["start_server"]()
+
+            for theme, width in (("light", 1400), ("dark", 1400), ("dark", 320)):
+                page = browser.new_page(viewport={"width": width, "height": 1000 if width > 500 else 640})
+                level = _open_page(page, fixture["url"], theme, "permissions")
+                assert page.evaluate("document.documentElement.dataset.theme") == theme
+                access = setting_row(page, "OUROBOROS_RUNTIME_MODE")
+                assert _values(access) == ["light", "advanced", "pro"], "the ceiling leaves only what it allows"
+                assert access.locator(meta).inner_text() == "Your organization allows up to Pro"
+                for key in ("OUROBOROS_SAFETY_MODE", "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE"):
+                    row = setting_row(page, key)
+                    assert row.is_visible() and _values(row) == ["full"], "a fixed level stays on the page as its one value"
+                    assert row.locator(meta).inner_text().endswith("Set by your organization: + Commands.")
+                supervisor = setting_row(page, "permissions:supervisor")
+                assert supervisor.evaluate("row => row.tagName") == "DIV", "said, never offered for change"
+                assert supervisor.locator(meta).inner_text() == "claude-opus-5-5 · Set by your organization"
+                assert "decides alone" in setting_row(page, "permissions:second-check").locator(meta).inner_text()
+                assert level.locator("[data-safety-exits]").inner_text() == (  # unnamed under the organization's checker
+                    "Set by your organization: your approval cannot send a message the Supervisor has not checked.")
+                assert level.locator("[data-safety-organization-rules]").is_visible()
+                assert level.evaluate("level => level.scrollWidth <= level.clientWidth") and \
+                    page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                access.scroll_into_view_if_needed()
+                _shot(page, evidence, f"managed-access-{theme}-{width}")
+                supervisor.scroll_into_view_if_needed()
+                _shot(page, evidence, f"managed-safety-{theme}-{width}")
+                if width == 1400 and theme == "light":
+                    # Keyboard: the capped list is the whole radio group; no hidden Cyber Pro takes the focus.
+                    access.locator('[data-setting-value="pro"]').focus()
+                    page.keyboard.press("ArrowDown")
+                    assert page.evaluate("document.activeElement.dataset.settingValue") == "light"
+                    page.keyboard.press("End")
+                    assert page.evaluate("document.activeElement.dataset.settingValue") == "pro"
+                    # A change the policy allows still saves at once; the raw shadowed Access stays the employee's.
+                    assert commit_row(page, "OUROBOROS_REVIEW_ENFORCEMENT", "blocking") == \
+                        "Saved · applies to new tasks · was Advisory · Undo"
+                    saved = json.loads(settings_path.read_text(encoding="utf-8"))
+                    assert saved["OUROBOROS_REVIEW_ENFORCEMENT"] == "blocking"
+                    assert saved["OUROBOROS_RUNTIME_MODE"] == "light"
+                    assert "OUROBOROS_SAFETY_MODE" not in saved and "OUROBOROS_MODEL_SAFETY" not in saved
+                    # The employee's own rules stay editable, beside the sentence that the organization's apply too.
+                    rules = _open_page(page, fixture["url"], theme, "rules")
+                    assert rules.locator("#settings-rules").is_enabled()
+                    rules.locator("[data-rules-organization]").wait_for(state="visible")
+                    _shot(page, evidence, "managed-rules-light-1400")
+                page.close()
+
+            # --- a strict file: every Safety exit closed, said in one sentence ---
+            fixture["stop_server"]()
+            policy_path.write_text(json.dumps({"version": 1, "safety": {"checker": {"model": "anthropic@safety::claude-opus-5-5"},
+                                                                        "allowed_exits": []}}), encoding="utf-8")
+            fixture["start_server"]()
+            page = browser.new_page(viewport={"width": 1400, "height": 1000})
+            level = _open_page(page, fixture["url"], "dark", "permissions")
+            exits = level.locator("[data-safety-exits]")
+            assert exits.inner_text() == (
+                "Set by your organization: Ouroboros cannot override a DANGEROUS refusal on its own; "
+                "your approval cannot override a DANGEROUS refusal; "
+                "your approval cannot send a message the Supervisor has not checked.")
+            exits.scroll_into_view_if_needed()
+            _shot(page, evidence, "managed-strict-safety-dark-1400")
+            page.close()
+            final = json.loads(settings_path.read_text(encoding="utf-8"))
+            assert final["OUROBOROS_CONNECTIONS"][0]["api_key"] == CHECKER_ROW["api_key"]
+        finally:
+            browser.close()
 
 
 @pytest.mark.ui_browser

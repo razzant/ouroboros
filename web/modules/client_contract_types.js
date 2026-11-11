@@ -110,7 +110,6 @@
  * @property {string} stateKey
  * @property {string} settingKey
  * @property {string} inputId
- * @property {string} settingsInputId
  * @property {string} title
  * @property {string} label
  * @property {string} note
