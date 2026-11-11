@@ -2498,6 +2498,10 @@ changing Local for one waiting fallback makes the replacement task-only, its
 persistence checkbox cleared and disabled with an explanation while Apply
 remains available. Model and account changes can still be saved when the shared
 Local value is unchanged; permanent group-wide Local changes remain in Models.
+A work on a model of its own (its room's, or one the owner gave it) waits on no
+role of Settings: its row is named `This work's model` and offers no "Also save
+this role in Settings" (owner 10.11, «1. A»: a room's model is the room's, set in
+its composer).
 
 A pool confirmed to contain both accounts requiring sign-in and accounts waiting
 for quota says "Waiting for access" and names both causes. It keeps automatic

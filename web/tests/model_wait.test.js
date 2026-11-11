@@ -194,7 +194,7 @@ test('a requested Settings save that did not land is told only once its wait res
     assert.equal(unsavedPersistenceNotice(resolved, null), '', 'no Settings save was requested');
 });
 
-test('a room-model wait clears and disables global-role persistence while keeping task switching', (t) => {
+test('a wait of a work on its own model says so and offers no save in Settings, while its task can still switch', (t) => {
     const env = installDom();
     t.after(() => restoreDom(env.prior));
     const root = document.createElement('div');
@@ -202,13 +202,25 @@ test('a room-model wait clears and disables global-role persistence while keepin
     root.append(timelineEl);
     const controller = createModelWaitController({ getRecord: () => ({ root, timelineEl, finished: false }) });
     t.after(() => controller.destroy());
-    controller.observe('task', { model_waits: { 'wait-light': row({ role: 'room' }) } });
+    assert.equal(modelWaitRoleLabel('lead'), 'This work\'s model');
+    controller.observe('task', { model_waits: { 'wait-light': row({ role: 'lead' }) } });
+    assert.equal(root.querySelector('[data-wait-role]').textContent, 'This work\'s model');
     const persist = root.querySelector('[data-wait-persist]');
+    assert.equal(root.querySelector('[data-wait-persist-offer]').hidden, true, '"Also save this role in Settings" is not offered');
     assert.equal(persist.disabled, true);
     assert.equal(persist.checked, false);
-    assert.match(root.querySelector('[data-wait-scope]').textContent, /composer/);
+    assert.match(root.querySelector('[data-wait-scope]').textContent, /this work's model only/);
     persist.checked = true;
-    controller.observe('task', { model_waits: { 'wait-light': row({ role: 'room', revision: 2 }) } });
+    controller.observe('task', { model_waits: { 'wait-light': row({ role: 'lead', revision: 2 }) } });
     assert.equal(persist.checked, false);
-    assert.equal(modelWaitAction('task', row({ role: 'room' }), 'switch', { model: 'openai::replacement' }, 'r').persist_role, false);
+    assert.equal(modelWaitAction('task', row({ role: 'lead' }), 'switch', { model: 'openai::replacement' }, 'r').persist_role, false);
+    // A role of Settings keeps the offer.
+    const other = document.createElement('div');
+    const otherTimeline = document.createElement('div');
+    other.append(otherTimeline);
+    const settingsRole = createModelWaitController({ getRecord: () => ({ root: other, timelineEl: otherTimeline, finished: false }) });
+    t.after(() => settingsRole.destroy());
+    settingsRole.observe('task', { model_waits: { 'wait-light': row({ role: 'light' }) } });
+    assert.equal(other.querySelector('[data-wait-persist-offer]').hidden, false);
+    assert.equal(other.querySelector('[data-wait-persist]').disabled, false);
 });
