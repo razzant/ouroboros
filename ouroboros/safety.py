@@ -1414,7 +1414,9 @@ def _assess_call(tool_name, arguments, messages, ctx, python_resolution, resolve
     if policy == POLICY_CHECK_CONDITIONAL:
         raw_cmd = arguments.get("cmd", arguments.get("command", ""))
         if tool_name == "run_script":
-            raw_cmd = arguments.get("script", raw_cmd)
+            # A script runs whole under its interpreter, so its first word proves nothing about
+            # the rest (`ls` then `curl … | sh`): no safe-subject bypass, like a string check below.
+            raw_cmd = None
         elif tool_name == "verify_and_record":
             # A LIST `check` is argv (no shell), so it is safe-subject eligible like
             # run_command. A STRING `check` runs through `sh -c` (shell interpretation),
