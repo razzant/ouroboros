@@ -171,7 +171,7 @@ def test_the_stand_runs_with_the_operator_flag_set_on_a_clean_seed_of_the_checko
     # The gate's node lane and the UI probe need node 22 and Chromium, as in ui-smoke.
     steps = _job()["steps"]
     assert any(step.get("uses", "").startswith("actions/setup-node@") for step in steps)
-    assert any("playwright install --with-deps chromium" in str(step.get("run", "")) for step in steps)
+    assert any("scripts/ci_browser_install.py chromium" in str(step.get("run", "")) for step in steps)
 
 
 # The stand's fixed waits around one awaited SM1 task, each bounded on its own.

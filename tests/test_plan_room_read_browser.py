@@ -33,6 +33,7 @@ import pytest
 from ouroboros import dialogue_store
 from ouroboros.configured_subagents import SUBAGENTS_SETTING
 from tests.test_batch4_owner_controls_browser import _reply, _user_text, _wait
+from tests.ui_console_errors import PageErrors
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
 pytestmark = [pytest.mark.ui_browser]
@@ -332,7 +333,8 @@ def check_screen(view, chain):
     assert view["head"] == "no open objection" and view["head_tone"] != "warn", view["head"]
     assert view["seat_states"] == ["answered, no objection"] * len(SEATS), view["seat_states"]
     assert f"{len(SEATS)} of {len(SEATS)} counted answered" in view["group_heads"][1], view["group_heads"]
-    assert not view["errors"] and not view["overflow"], view
+    assert not view["errors"].unexpected(), view["errors"].report()
+    assert not view["overflow"], view
     shown = view["room_rows"]
     assert set(shown) == {f"Participant {seat} room" for seat in SEATS} and "%" not in json.dumps(shown)
     for seat, row in seats.items():
@@ -345,9 +347,10 @@ def check_screen(view, chain):
 
 
 def watch_page(page):
-    """What a window reports beside its pixels, kept as evidence: page errors, console errors, every failed response."""
-    seen = {"errors": [], "console_errors": [], "failed_responses": []}
-    page.on("pageerror", lambda error: seen["errors"].append(str(error)))
+    """What a window reports beside its pixels, kept as evidence: page errors (strict until the caller declares a
+    reload), console errors, every failed response."""
+    seen = {"errors": PageErrors(None, page.context.browser.browser_type.name), "console_errors": [], "failed_responses": []}
+    seen["errors"].watch(page, navigates=False)
     page.on("console", lambda message: seen["console_errors"].append(message.text) if message.type == "error" else None)
     page.on("response", lambda response: seen["failed_responses"].append([response.status, response.url]) if response.status >= 400 else None)
     return seen
@@ -401,6 +404,7 @@ def look(page, url, task_id, theme, tag, evidence, chain):
     page.wait_for_timeout(200)
     page.screenshot(path=str(evidence / f"record-{tag}.png"))
     view["record_text"] = record.inner_text()
+    seen["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload(wait_until="domcontentloaded")
     _card, again = open_plan(page, task_id, theme)
     body, reloaded = record_facts(again)
@@ -453,6 +457,7 @@ def look_saved(page, url, task_id, theme, tag, evidence):
             "saved_colors": sorted({color for label, _value, color in rows if label.startswith(("Participant unknown", "Participant inflight"))}),
             "overflow": card.evaluate("el => el.scrollWidth > el.clientWidth + 1") or page.evaluate(
                 "document.documentElement.scrollWidth > window.innerWidth + 1") or body.evaluate("el => el.scrollWidth > el.clientWidth + 1")}
+    seen["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload(wait_until="domcontentloaded")
     _card, again = open_plan(page, task_id, theme)
     body, reloaded = record_facts(again, ready=SAVED)
@@ -473,7 +478,8 @@ def check_saved(view, ask, real_rooms):
     status = {label: value for label, value, _color in view["facts"] if label in {f"Participant {seat}" for seat in SAVED}}
     assert status == {f"Participant {seat}": f"status={facts['status']} · model=synthetic/{seat}" for seat, facts in SAVED.items()}, status
     assert view["seat_lines"]["nosend (synthetic/nosend)"] == f"not sent — {SAVED['nosend']['not_dispatched_reason']}", view["seat_lines"]
-    assert not view["errors"] and not view["overflow"] and view["facts_same_after_reload"], view
+    assert not view["errors"].unexpected(), view["errors"].report()
+    assert not view["overflow"] and view["facts_same_after_reload"], view
 
 
 def test_room_read(direct_server_with_data, monkeypatch, tmp_path):

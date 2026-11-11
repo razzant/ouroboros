@@ -65,6 +65,7 @@ def test_reclaim_request_and_receipt_are_exact_frozen_records():
         "reclaim_goal_tokens",
         "allow_partial_shrink",
         "working_note", "expected_view_revision", "keep_unit_ids", "restore_unit_refs", "schema_names",
+        "replace_note_ids",
     ]
     assert [field.name for field in dataclasses.fields(cb.ContextReclaimReceipt)] == [
         "status",
@@ -77,7 +78,7 @@ def test_reclaim_request_and_receipt_are_exact_frozen_records():
         "checkpoint_ref",
         "capsule_refs",
         "observed_view_revision", "view_revision", "retained_unit_ids", "restored_unit_refs",
-        "source_refs", "schema_names", "fit",
+        "source_refs", "schema_names", "fit", "replaced_notes",
     ]
     request = cb.ContextReclaimRequest("route", "round", "a" * 64, "cold_estimate", 1.0, 1)
     with pytest.raises(dataclasses.FrozenInstanceError):

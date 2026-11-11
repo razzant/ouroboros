@@ -13,10 +13,11 @@ tree-origin channel (``origin_metadata``) into every descendant's ``task.metadat
 marker (``initiator=consciousness``) or ``not_recorded``: no vocabulary of reasons of its own.
 
 ``work_words`` is the set a handoff renders (a helper's birth, a reviewer's ask, a direct
-start): the tree's rows first, then the rows the run holds as context, the bound Project
-room's rows read once at that render, the Project's retained origin rows and the rows that
-marks in force target. One message is one row whichever carrier holds it — its room and
-client id; a row with no id at all by its words and its time — and the first carrier keeps
+start) and the mind reads itself (``memory_read(owner_words=true)``): the tree's rows first,
+then the rows the run holds as context, the bound Project room's rows read once at that
+render, the Project's retained origin rows and the rows that marks in force target. One
+message is one row whichever carrier holds it — its room and client id; a row with no id
+at all by its words and its time — and the first carrier keeps
 the row. Every row carries the time the room accepted it, or ``received``, when the host
 got it, or none: never an invented date. An answer travels with the card it answers, under
 the asking task's name. A room or a mark store that cannot be read is one gap line beside
@@ -1163,12 +1164,17 @@ def words_stamp(row: Mapping[str, Any]) -> str:
     return "[" + " · ".join(part for part in stamp if part) + "]"
 
 
-def owner_words_text(ctx: Any, *, audience: str = "reviewer") -> str:
-    """``render_owner_words`` over this run's set at this handoff (``work_words``), then the schedule text the run
-    holds (``render_schedule_text``)."""
+def work_words_text(ctx: Any, *, audience: str = "reviewer") -> str:
+    """``render_owner_words`` over this run's set at this handoff (``work_words``): my human's words alone. Reviewers
+    and the plan council read it with the schedule text appended; ``memory_read(owner_words=true)`` returns it whole."""
     rows, absent, gaps = work_words(ctx)
     root = str(_ctx_metadata(ctx).get("root_task_id") or getattr(ctx, "task_id", "") or "")
-    words = render_owner_words(rows, absent, audience=audience, root_task_id=root, gaps=gaps)
+    return render_owner_words(rows, absent, audience=audience, root_task_id=root, gaps=gaps)
+
+
+def owner_words_text(ctx: Any, *, audience: str = "reviewer") -> str:
+    """``work_words_text``, then the schedule text the run holds (``render_schedule_text``)."""
+    words = work_words_text(ctx, audience=audience)
     schedule = render_schedule_text(schedule_items(ctx), audience=audience)
     return "\n\n".join(part for part in (words, schedule) if part)
 

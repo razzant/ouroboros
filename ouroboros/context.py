@@ -1040,7 +1040,7 @@ def _capture_context_core(
         reference_book_errors=tuple(book_errors),
         compact_reference_docs=is_child,
         dynamic_head_text="\n\n".join(head_parts),
-        memory_view_json=view_json,
+        memory_view_json=view_json, memory_view_sequence=view.chronicle_sequence,
         supplementary_messages_json=json.dumps(supplementary_messages, ensure_ascii=False, sort_keys=True),
         connections=connections,
     )

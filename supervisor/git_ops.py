@@ -225,6 +225,36 @@ def _is_launcher_managed_repo() -> bool:
     return launcher_managed_repo_matches()
 
 
+def _restart_keeps_checkout(deployment_managed: bool) -> Dict[str, Any]:
+    """How a Restart stays on what is on disk; ``{}`` when ``checkout_and_reset`` owns it.
+
+    The boot predicate decides: a checkout it does not call launcher-managed keeps its branch, HEAD and files
+    unless Update armed an intent (gated as ``checkout_and_reset`` gates it, so a stray marker moves nothing).
+    """
+    disabled = "with managed checkout disabled"
+    live = {"current_branch": None, "current_sha": None}  # a managed past's stamp must not outrank the live read
+    if deployment_managed:
+        return {"event": "managed_by_deployment", "where": disabled, "receipt": {},
+                "ok": "OK: the deployed program, unchanged"}
+    if str(os.environ.get("OUROBOROS_DISABLE_MANAGED_UPDATES", "") or "").strip() == "1":
+        return {"event": "managed_checkout_disabled", "where": disabled, "receipt": {}, "facts": live,
+                "ok": "OK: managed checkout disabled — staying on the current checkout"}
+    if _is_launcher_managed_repo():
+        return {}
+    intent = _read_update_intent()
+    if intent and _read_managed_repo_meta() and str(intent.get("branch") or BRANCH_DEV) == BRANCH_DEV:
+        return {}
+    head = git_capture(["git", "rev-parse", "HEAD"])[1].strip()
+    return {"event": "unmanaged_checkout_kept", "where": "on this unmanaged checkout", "receipt": {"head": head},
+            "facts": live, "ok": f"OK: unmanaged checkout kept at {head[:12] or 'unknown HEAD'}"}
+
+
+def _import_failure(result: Dict[str, Any]) -> str:
+    """The exit code and stderr's last line, the part of a failed import an owner can act on."""
+    last = str(result.get("stderr") or "").strip().splitlines()[-1:]
+    return f" (rc={result.get('returncode', -1)})" + "".join(f": {line}" for line in last)
+
+
 def _list_remotes(*, capture=None, warnings: Optional[List[str]] = None) -> List[str]:
     capture_fn = capture or git_capture
     rc, remotes, error = capture_fn(["git", "remote"])

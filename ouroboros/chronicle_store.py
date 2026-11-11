@@ -1523,6 +1523,29 @@ class ChronicleStore:
         with self._reading() as look:
             return [json.loads(body) for body in look.marks(room_id, include_global)]
 
+    def newest_sequence(self) -> int:
+        """The newest record's sequence the reads reflect: a pinned capture's own, else the index's."""
+        snapshot = self._pinned()
+        if snapshot is not None:
+            return snapshot.records[-1][0] if snapshot.records else 0
+        with self._index() as db:
+            return db.execute("SELECT COALESCE(MAX(sequence),0) FROM records").fetchone()[0]
+
+    def mark_changes(self, after: int) -> Tuple[List[Dict[str, Any]], int]:
+        """``(changes, newest)`` from one read of the index: the marks, view changes and releases after sequence
+        ``after``, oldest first, each with ``mark``, the marked record as it stood then (its visibility as of that
+        change), and the newest sequence, where the next read starts (``mark_anchors.append_mark_changes``)."""
+        with self._index() as db:
+            look = _IndexLookups(db)
+            newest = db.execute("SELECT COALESCE(MAX(sequence),0) FROM records").fetchone()[0]
+            changes = []
+            for seq, body in look.rows(None, ("mark", "mark_view", "mark_release"), after):
+                change = {**json.loads(body), "sequence": seq}
+                mark = change if change["kind"] == "mark" else look.get(change.get("target_id")) or {}
+                views = [view for at, view in look.targeting(mark.get("id", ""), ("mark_view",)) if at <= seq]
+                changes.append({**change, "mark": {**mark, **({"visibility": views[-1]["visibility"]} if views else {})}})
+            return changes, newest
+
     def observation_snapshot(self, boundary: Optional[Dict[str, Any]] = None, *, limit: Optional[int] = None):
         """New immutable records (the first ``limit`` of them) plus the newest position, under one read lock.
 

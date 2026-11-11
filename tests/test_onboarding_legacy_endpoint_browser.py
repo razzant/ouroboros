@@ -16,7 +16,7 @@ import pytest
 from ouroboros.test_evidence import diagnostic_directory
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
-from tests.ui_console_errors import record_console_errors, record_failed_loads, unexpected_console_errors
+from tests.ui_console_errors import PageErrors, record_console_errors, record_failed_loads, unexpected_console_errors
 
 pytestmark = [pytest.mark.ui_browser]
 
@@ -137,8 +137,8 @@ def test_reopened_setup_reaches_and_keeps_a_legacy_compatible_pair(direct_server
         context = browser.new_context(viewport={"width": 980, "height": 780}, device_scale_factor=2)
         page = context.new_page()
         errors, failed = record_console_errors(page), record_failed_loads(page)
-        uncaught = []
-        page.on("pageerror", lambda error: uncaught.append(str(error)))
+        uncaught = PageErrors(None, engine)
+        uncaught.watch(page, navigates=False)
         page.goto(ui["url"] + "/onboarding?builtin=1", wait_until="networkidle")
 
         # Accounts: the saved pair is the built-in server's, shown read-only; no field is prefilled from it.
@@ -234,6 +234,7 @@ def test_reopened_setup_reaches_and_keeps_a_legacy_compatible_pair(direct_server
             route.continue_()
 
         page.route('**/api/onboarding/complete', keep_body)
+        uncaught.watch(page)  # Finish hands off to the app: leaving may cut off the page's own reads (tests/ui_console_errors.py)
         with page.expect_response('**/api/onboarding/complete') as completion:
             page.click('#next-btn')
         assert completion.value.status == 200, completion.value.text()
@@ -344,7 +345,7 @@ def test_reopened_setup_reaches_and_keeps_a_legacy_compatible_pair(direct_server
                       unexpected_console_errors=unexpected_console_errors(errors, failed))
         (evidence / "legacy-endpoint-proof.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
         assert all(not frame["overflow"] and frame["body"][1] <= frame["viewport"][0] + 1 for frame in report["frames"].values())
-        assert not uncaught
+        assert not uncaught.unexpected(), uncaught.report()
         browser.close()
 
 

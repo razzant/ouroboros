@@ -9,7 +9,8 @@ words ride the dynamic half, so the cache-marked prefixes of the triad and the s
 brief do not move. A plan's participants read them right after the task objective,
 inside the delivery's cache-stable prefix; each ask carries the words it was sent, so an
 owner letter reaches the next ask while an earlier ask's retained delivery keeps what it
-carried. Reviewers still get no memory and no story: they stay independent.
+carried. Reviewers still get no memory and no story: they stay independent. The mind
+reads the same section itself (``memory_read(owner_words=true)``), with nothing beside it.
 Every rule is checked in both directions.
 """
 from __future__ import annotations
@@ -399,3 +400,42 @@ def test_the_result_review_reads_the_marks_in_force_with_author_and_date_and_nam
     broken = _ask(ctx)
     assert "Readings: the marks in force could not be read here (OSError: disk)" in broken
     assert "objective: Deliver the thing" in broken and OWNER in broken
+
+
+# --- the mind's own reader of the same section ----------------------------------------------------------------
+
+def test_the_mind_reads_the_section_its_reviewers_get_whole_and_nothing_beside_it(harness):
+    """``memory_read(owner_words=true)``: this work's set (``owner_words.work_words``) exactly as the result review's
+    ask carries it, the row a mark in force targets among its rows, and no objective, plan, claim, mark or schedule
+    text; a work without words reads the host's recorded absence marker, never an invented row."""
+    from ouroboros import dialogue_store as ds
+    from ouroboros.chat_chain import row_address
+    from ouroboros.chronicle_store import ChronicleStore
+    from ouroboros.tools.chronicle import _memory_read
+    from ouroboros.tools.review_result import _ask
+
+    conscious = _plan_ctx(harness, "conscious", task_id="task-4")
+    assert _memory_read(conscious, owner_words=True).split("\n")[2:] == [ABSENT_CONSCIOUS]
+    assert ABSENT_CONSCIOUS in _ask(conscious)  # the same marker its reviewer reads
+    ctx = _plan_ctx(harness, "root", task_id="task-3")
+    _write(ctx)  # a plan revision: its goal, plan and claim are accounts beside the words
+    ctx._owner_directives.append({"source": ow.SCHEDULE_TEXT, "content": "SCHEDULE TEXT", "schedule_id": "s1",
+                                  "field": "objective"})  # the assignment's text, never my human's words
+    ds.append(harness.drive, "chat", {"ts": "2026-11-10T09:30:00+00:00", "direction": "in", "chat_id": 1,
+                                      "text": "MARKED WORDS", "client_message_id": "cm-marked", "task_id": ""})
+    store = ChronicleStore(harness.drive)
+    assert store.ensure_activated()["kind"] == "activation"
+    mind = {"kind": "mind", "task_id": "task-3", "focus": {"role": "root", "task_id": "task-3"}}
+    target = row_address(dict(ds.accepted_row(harness.drive, 1, "cm-marked").row))
+    assert store.mark(target, "Their standing ask", mind, room_id="1").ok
+    head, progress, body = _memory_read(ctx, owner_words=True).split("\n", 2)
+    asked = _ask(ctx)
+    assert head == "my human's words for task task-3" and progress.endswith("; complete")
+    assert body == ow.work_words_text(ctx) and body in asked  # the reviewer's section, byte for byte
+    assert OWNER in body and "MARKED WORDS" in body and "not the owner's" not in body
+    for account in ("Deliver the thing", "Ship the deck", "Outline first", "exactly 5 slides", "Their standing ask",
+                    "SCHEDULE TEXT"):
+        assert account not in body, account
+    assert all(account in asked for account in ("Deliver the thing", "exactly 5 slides", "Their standing ask",
+                                                "SCHEDULE TEXT"))
+    assert "TOOL_ARG_ERROR" in _memory_read(ctx, owner_words=True, room_id="1")  # one mode, this work's set
