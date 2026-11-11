@@ -12,7 +12,7 @@ import { isFileDrag } from './chat_activity.js';
 import { buildAttachmentBlock } from './chat_attachments.js';
 import { createDocumentReader, documentReaderKind } from './document_reader.js';
 import { createChatCards } from './chat_cards.js';
-import { recordCardSource } from './message_actions.js';
+import { recordAnswerWords, recordCardSource } from './message_actions.js';
 
 // Player controls draw the house stroke vectors; each button's aria-label names its
 // current action and is rewritten with the icon whenever the state flips.
@@ -916,7 +916,7 @@ export function createChatMedia({
         + '<rect x="5.5" y="5.5" width="8" height="8" rx="1.5"></rect>'
         + '<path d="M10.5 2.5h-6a2 2 0 0 0-2 2v6"></path></svg>';
 
-    function attachCopyControl(bubble, rawText) {
+    function attachCopyControl(bubble, rawText, { role, systemType, textPlaceholder } = {}) {
         const words = () => String((typeof rawText === 'function' ? rawText() : rawText) || '');
         if (!bubble || !words()) return null;
         const button = document.createElement('button');
@@ -945,6 +945,10 @@ export function createChatMedia({
         // The bubble class reserves a timestamp gutter under the icon (style.css).
         bubble.classList.add('has-copy');
         bubble.appendChild(button);
+        // What Share passes on: Ouroboros's own message, Copy's exact words (a note between works is not one).
+        if (role === 'assistant' && systemType !== 'relay_entry' && textPlaceholder !== true) {
+            recordAnswerWords(bubble, words(), (close) => holdTransient(bubble, close));
+        }
         return button;
     }
 

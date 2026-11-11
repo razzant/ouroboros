@@ -737,7 +737,7 @@ test('render arm order and enhancement guard are pinned in source', () => {
     assert.match(chatSource, /: renderChatMarkdown\(painted\);/);
     // `painted` is render-only (host_notice_text.js); Copy keeps the pre-cleanup `shown`.
     assert.match(chatSource, /const painted = hostRowDisplayText\(\{ text: stored, role, system_type: systemType, narration: opts\.narration \}, text\);/);
-    assert.match(chatSource, /chatMedia\.attachCopyControl\(bubble, String\(shown\)\)/);
+    assert.match(chatSource, /chatMedia\.attachCopyControl\(bubble, shown,/);
     // The enhancement pass skips exactly the plain-system case.
     assert.match(
         chatSource,

@@ -275,14 +275,15 @@ def test_first_request_content_contract(world, case, role, full, story):
     assert "Yesterday I asked about the copper bridge." in _read(ctx, "memory_read", room_id="1", rows=True)
 
 
-def test_physical_window_replaces_words_with_resolvable_addresses(world):
+@pytest.mark.parametrize("reply_task", ["earlier-beta", "untold-beta"])
+def test_physical_window_replaces_words_with_resolvable_addresses(world, reply_task):
     """A real route window forces the same captured world to give up words, never their source."""
     chat = world.beta["chat_id"]
     rows = [
         {"chat_id": chat, "ts": "2026-11-10T09:11:00+00:00", "direction": "in",
          "client_message_id": "long-owner", "text": "LONG OWNER SURVEY: " + "violet orchard bearing; " * 15_000},
         {"chat_id": chat, "ts": "2026-11-10T09:12:00+00:00", "direction": "out",
-         "task_id": "earlier-beta", "root_task_id": "earlier-beta", "delegation_role": "root",
+         "task_id": reply_task, "root_task_id": reply_task, "delegation_role": "root",
          "text": "LONG OUROBOROS SURVEY: " + "orchard measurements checked; " * 15_000},
     ]
     for row in rows:
@@ -301,12 +302,19 @@ def test_physical_window_replaces_words_with_resolvable_addresses(world):
     for row in rows:
         assert row["text"] in whole
         assert row["text"] not in text
-        assert format_address(row_address(row)) in text
+        if row["direction"] == "in" or reply_task == "untold-beta":
+            assert format_address(row_address(row)) in text
     assert "read by address" in text
     # The room still accounts for the two original and two long rows.
     other = section(text, "## Other conversations")
     room_line = next(line for line in other.splitlines() if f"memory_read(room_id='{chat}', rows=true)" in line)
     assert "people 2, mine 2" in room_line
+    if reply_task == "earlier-beta":
+        # Plan v7, law 1 and commit 2: this work's telling stands for its replies.
+        # Its task and the room reader still identify the author and every source row.
+        task_line = next(line for line in other.splitlines() if "host; task earlier-beta]" in line)
+        assert "«The orchard measurements are complete.»" in task_line
+        assert "get_task_result(task_id='earlier-beta')" in task_line
     # Use the advertised room reader and its continuations through real dispatch.
     # Every byte remains readable even though neither body fits the request.
     for row in rows:

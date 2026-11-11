@@ -311,8 +311,9 @@ def test_a_finish_that_folds_what_it_read_stands_for_it_elsewhere_and_leaves_it_
     assert ("beta reply" in beta_section) is not fold  # my reply there: folded into the sentence, or whole
     if fold:
         assert item["folded"]["count"] == 1 and _addr(rows[14]) in item["folded"]["to"]
-        assert ("«Read Beta's thread; nothing owed.» (2026-09-05): 1 words up to it read and folded into that "
-                f"sentence; memory_read(room_id='{beta}', rows=true, from='") in beta_section
+        assert f"[{_addr(rows[14])}] «Read Beta's thread; nothing owed.»: 1 words read and folded" in beta_section
+        assert ("Read row addresses with memory_read(room_id=<room from address>, rows=true, "
+                "from=<first>, to=<last>)") in text  # one reader for this block, the source coordinates in the row
     else:
         assert not item["folded"] and "read and folded" not in text
     assert ChronicleStore(tmp_path).sealed_row_refs(beta) == set()  # a fold seals nothing
@@ -446,7 +447,8 @@ def test_one_row_several_rooms_hold_is_whole_once_and_my_humans_copy_keeps_its_f
     (``memory_inventory.rooms_of_row``): whole once, in the room it was written in; the Project keeps its entry as one
     line naming that room and the row's reader, its text never read. The whole copy survives its group's line (F6g)
     and the count (F6a); only F7 addresses it, and it is the copy F7 and an owner-note capsule
-    (``memory_floor.owner_rows``) see; the line folds as a word (F6w). Equal words of another row stay whole."""
+    (``memory_floor.owner_rows``) see; the repeated-delivery fact is not a word to fold (R12).
+    Equal words of another row stay whole."""
     from ouroboros import memory_inventory
     from ouroboros.project_dialogue import build_owner_message_ref
     from ouroboros.projects_registry import bind_task_to_project, list_projects
@@ -482,7 +484,8 @@ def test_one_row_several_rooms_hold_is_whole_once_and_my_humans_copy_keeps_its_f
     steps = {step: [ident for ident, *_ in elements] for step, elements in conversations.floor_steps(
         snapshot.conversations).items()}
     assert f"1:{address}" in steps["F7"] and f"{alpha}:{address}" not in steps["F7"]
-    assert f"{alpha}:{address}" in steps["F6w"] and f"1:{address}" not in steps["F6w"]
+    assert f"{alpha}:{address}" not in steps["F6w"] and f"1:{address}" not in steps["F6w"]
+    assert copies[alpha]["line"] in conversations_text(snapshot.conversations, {"F6w": list(steps["F6w"])})
     assert set(memory_floor.owner_rows(snapshot)) & {f"1:{address}", f"{alpha}:{address}"} == {f"1:{address}"}
     keys = [group["key"] for group in snapshot.conversations]
     for gone in ({"F6g": ["main"]}, {"F6g": keys}, {"F6g": keys, "F6a": ["conversations"]},
