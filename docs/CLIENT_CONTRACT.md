@@ -31,7 +31,7 @@ A client and the core must share one browser origin, served from the root path. 
 | `/` and `/static` | the interface | the main page and its assets |
 
 The contract publishes these as `core_paths` and `interface_paths`. A reverse proxy that puts a separately hosted interface in front of a core sends the core prefixes to the core and everything else to the interface host. It must:
-- pass WebSocket upgrades on `/ws`;
+- pass WebSocket upgrades on `/ws` with the browser's own `Host` (port included) and, where the proxy ends TLS, the scheme (§3): a Chromium handshake carries `Origin` alone, which must name the scheme and host the core sees;
 - keep request bodies and server-sent event streams unbuffered;
 - never answer a core path with the interface's index page.
 
@@ -123,7 +123,7 @@ Nobody tells an unmarked page to reload. A new choice reaches it when someone ne
 - **Requests:** they start answering 401. Run the same login steps.
 - **Failed changes:** never resend a change that failed before or during sign-in. Read the current state again and let the person decide.
 
-**The WebSocket.** An unauthenticated `/ws` is refused at the handshake (HTTP 403). Browsers report it as close code 1006: recognise sign-in problems through an HTTP probe, never close codes.
+**The WebSocket.** An unauthenticated `/ws` is refused at the handshake (HTTP 403), and so is a handshake without Fetch Metadata whose `Origin` differs from the scheme and host the core sees (§2). Browsers report both as close code 1006: recognise sign-in problems through an HTTP probe, never close codes. A probe that succeeds while the socket keeps failing proves only that, not why.
 
 **Signing out.** `GET` or `POST /auth/logout` revokes that authentication context's widget file leases, deletes the cookie and answers `303` to `next`. Login/logout answer 404 when the gate is inactive; those names never serve selected files. Other `/auth/` paths serve the optional public bundle even without the gate: missing files answer 404, unsupported methods 405. With no bundle those paths answer 404.
 

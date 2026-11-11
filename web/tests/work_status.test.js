@@ -89,6 +89,12 @@ test('only the client facts overlay the room, each with its mark: socket closed,
         { kind: 'offline', text: 'Reconnecting…', tone: 'offline', mark: 'ring', owner: false, amber: '' });
     assert.equal(roomStatusView(stateOf('spending_limit'), { connected: false }).owner, false,
         'a closed socket proves nothing current, the owner\'s move included');
+    // The socket's own observation is said beside its word (the step a short bar drops first), never a cause.
+    assert.deepEqual(roomStatusView(working, { connected: false, serverAnswers: true }),
+        { kind: 'offline', text: 'Reconnecting…', tone: 'offline', mark: 'ring', owner: false, amber: '',
+            step: 'server answers', title: 'The server answers, but live updates cannot connect.' });
+    assert.deepEqual(roomStatusView(working, { serverAnswers: true }), roomStatusView(working),
+        'a connected room says its work, whatever the socket observed before');
     // Shown again or reconnected, a room still reading what it missed says so over its last known state.
     assert.deepEqual(roomStatusView(working, { catchingUp: true }),
         { kind: 'starting', text: 'Updating…', tone: 'updating', mark: 'ring', owner: false, amber: '' });
