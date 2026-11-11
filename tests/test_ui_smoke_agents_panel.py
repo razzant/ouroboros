@@ -398,7 +398,8 @@ def test_ui_smoke_agents_remove_asks_first_and_hands_the_caret_on(direct_server_
 
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
-def test_ui_smoke_list_editor_remove_hands_the_caret_on(direct_server_with_data, engine):
+@pytest.mark.parametrize("surface", ["fallbacks", "tools", "keys"])
+def test_ui_smoke_list_editor_remove_hands_the_caret_on(direct_server_with_data, engine, surface):
     """A keyboard Remove in the other Settings list editors (fallbacks, tool servers and their headers, custom keys)
     hands the caret to the entry now in that place (the next, else the previous) and, once the list is empty, to
     the group's Add: never to the page (docs/DESIGN.md "List editors").
@@ -430,36 +431,45 @@ def test_ui_smoke_list_editor_remove_hands_the_caret_on(direct_server_with_data,
                 if value is not None:
                     expect(page.locator(":focus")).to_have_value(value)
 
-            open_settings(page, 'models')
-            fallbacks = page.locator('[data-fallback-remove]')
-            remove(fallbacks, 0, '[data-entry-open]')
-            remove(fallbacks, 1, '[data-entry-open]')
-            remove(fallbacks, 0, '[data-fallback-add]')
+            if surface == 'fallbacks':
+                open_settings(page, 'models')
+                fallbacks = page.locator('[data-fallback-remove]')
+                remove(fallbacks, 0, '[data-entry-open]')
+                remove(fallbacks, 1, '[data-entry-open]')
+                remove(fallbacks, 0, '[data-fallback-add]')
 
-            open_settings(page, 'tools')
-            open_entry(page, 'alpha')
-            headers = page.locator('[data-mcp-header-remove]')
-            remove(headers, 0, '[data-mcp-header-field="name"]', 'X-B')
-            remove(headers, 0, '[data-mcp-header-add]')
-            # Removing a saved server asks first and returns to its list.
-            for identity, next_id in [('gamma', 'beta'), ('alpha', 'beta'), ('beta', '')]:
+            elif surface == 'tools':
                 open_settings(page, 'tools')
-                open_entry(page, identity)
-                page.locator('[data-editor-remove]').focus()
-                page.keyboard.press('Enter')
-                page.locator('[data-confirm-ok]').click()
-                level = settings_page(page, 'tools')
-                level.wait_for(state='visible')
-                expect(level.locator(f'[data-entry-id="{identity}"]')).to_have_count(0)
-                if next_id:
-                    expect(level.locator(f'[data-entry-id="{next_id}"] [data-entry-open]')).to_be_focused()
-                else:
-                    expect(level.locator('[data-tools-add]')).to_be_focused()
+                open_entry(page, 'alpha')
+                headers = page.locator('[data-mcp-header-remove]')
+                remove(headers, 0, '[data-mcp-header-field="name"]', 'X-B')
+                remove(headers, 0, '[data-mcp-header-add]')
+                # Removing a saved server asks first and returns to its list.
+                for identity, next_id in [('gamma', 'beta'), ('alpha', 'beta'), ('beta', '')]:
+                    open_settings(page, 'tools')
+                    open_entry(page, identity)
+                    page.locator('[data-editor-remove]').focus()
+                    page.keyboard.press('Enter')
+                    page.locator('[data-confirm-ok]').click()
+                    level = settings_page(page, 'tools')
+                    level.wait_for(state='visible')
+                    expect(level.locator(f'[data-entry-id="{identity}"]')).to_have_count(0)
+                    if next_id:
+                        expect(level.locator(f'[data-entry-id="{next_id}"] [data-entry-open]')).to_be_focused()
+                    else:
+                        expect(level.locator('[data-tools-add]')).to_be_focused()
 
-            open_settings(page, 'accounts')
-            keys = page.locator("[data-custom-secret-row]:not([hidden]) [data-custom-secret-remove]")
-            remove(keys, 0, "[data-custom-secret-key]", "REMOVE_FOCUS_TWO")
-            remove(keys, 0, "#btn-add-custom-secret")
-            capture(page, f"list-editor-remove-focus-{engine}")
+            else:
+                level = open_settings(page, 'accounts')
+                for key in ('REMOVE_FOCUS_ONE', 'REMOVE_FOCUS_TWO'):
+                    row = level.locator(f'[data-setting-row="{key}"]')
+                    row.locator('[data-secret-open]').click()
+                    row.locator('[data-secret-remove]').focus()
+                    page.keyboard.press('Enter')
+                    page.locator('[data-confirm-ok]').click()
+                    # Clearing a saved key keeps its named row; Add is that row's next action.
+                    expect(row.locator('[data-secret-open]')).to_have_text('Add')
+                    expect(row.locator('[data-secret-open]')).to_be_focused()
+            capture(page, f"list-editor-remove-focus-{surface}-{engine}")
         finally:
             browser.close()
