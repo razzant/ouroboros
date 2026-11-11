@@ -82,7 +82,7 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
    sapphire lift and an explicit `Your choice` label; other options lie flat. No outlines. Shape follows content: a
    one-line control is a capsule; a choice that carries a paragraph (an offered answer)
    is a card with the object radius, standing like every other. A label that acts takes the
-   primary ink; a setting's name or an unchosen option the secondary ink; a setting's
+   primary ink; a capsule's name or an unchosen option the secondary ink; a setting's
    value the meta ink, never the darkest; a chosen state its tone's ink, on the fill or, for a
    control that stays bodiless when chosen (Read aloud while it speaks, a mark), as a word on
    its own (`--tone-crimson-word`); a chosen choice in a menu (a model, a voice) keeps a faint
@@ -327,7 +327,7 @@ The criterion is the same one that governs the whole table: **if the owner has
 to read it to act, it is `--text-meta` or brighter.** A load-bearing caveat, a
 one-off note, a hint that explains a control: those stay at meta. A control's own
 label is not content: it follows bible principle 4 (an action's label is primary, a
-setting's name or an unchosen option secondary). A tone or an
+capsule's name or an unchosen option secondary). A tone or an
 unclassifiable ink is what produced the original "too much small
 high-contrast white text" report from the opposite direction, so a rule that
 declares a size and no colour is still the worst of the options.
@@ -2187,8 +2187,8 @@ where it was confirmed.
 
 Empty notes ask: “Who am I here? What may I do? What calls me at once? What matters
 here? What must I never do? What do you want to see afterwards?” Hints are never saved.
-Below notes, Full adds “Ouroboros reads your words every time; the Safety Supervisor reads them before
-actions.” Light: “before some actions”; Off: “the Safety Supervisor is off.”
+Below notes, + Commands adds “Ouroboros reads your words every time; the Safety Supervisor reads them before
+actions.” Outgoing: “before some actions”; Off: “the Safety Supervisor is off.”
 All add “Silent and Paused are locks; words are not.” Absent Safety keeps the old
 explanation. Notes retain authorship.
 
@@ -2690,7 +2690,7 @@ a server entry):
    an instant is humanized. A row never leads with a raw ISO timestamp.
 6. **Actions** — docked right in a slot of their own, legible at rest. An action
    rendered at secondary ink reads as disabled: its label is `--text-primary` (a
-   setting's name and an unchosen option take the secondary ink, bible principle 4).
+   capsule's name and an unchosen option take the secondary ink, bible principle 4).
 
 **A row's words follow bible principle 7.** Its primary choices and owner actions stay
 visible and a value keeps its honest form (`up to`, `Tracked:`, unknown). Accounts keeps
