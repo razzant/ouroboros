@@ -31,6 +31,8 @@ from typing import Any, Callable, Dict, Optional, Sequence
 
 log = logging.getLogger("ouroboros.project_naming")
 
+CONTINUE_TITLE_PREFIX = "Continue: "
+
 
 def _light_use_local(explicit: Optional[bool]) -> bool:
     """Resolve the light-lane local route for naming. Honor an explicit caller value;
@@ -404,12 +406,19 @@ def spawn_turn_namer(
             # the status advanced past our read — acceptable for a best-effort title).
             current = load_task_result(drive_root, task_id) or {}
             status = str(current.get("status") or "") or STATUS_RUNNING
-            write_task_result(drive_root, task_id, status, suggested_name=name)
+            written = {"kept": False}
+
+            def _unless_adopted(existing: Dict[str, Any], fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+                """In the write itself: a Continue's adopted subject outranks this late cosmetic name."""
+                written["kept"] = not work_name_adopted(existing)
+                return fields if written["kept"] else None
+
+            write_task_result(drive_root, task_id, status, suggested_name=name, _field_projector=_unless_adopted)
             # A cosmetic namer may settle concurrently with or after the ordinary
             # post-task worker.  The shared refresh/checkpoint critical section
             # linearizes both cases without marking an unfinished phase complete.
             _refresh_root_cost_after_naming(drive_root, task_id)
-            if broadcast is not None:
+            if broadcast is not None and written["kept"]:
                 try:
                     broadcast({"type": "task_named", "task_id": task_id, "suggested_name": name})
                 except Exception:
@@ -473,6 +482,91 @@ def derived_run_name(task: Dict[str, Any]) -> str:
         return stored
     request = task.get("description") or task.get("objective") or task.get("text") or ""
     return admission_names(task, str(request))[1]
+
+
+def without_continue(name: Any) -> str:
+    """``name`` without the host's own ``Continue: `` prefixes, however many; every reader of a work's name strips them
+    here (the card's JavaScript pins the same prefix)."""
+    name = str(name or "").lstrip()
+    while name.startswith(CONTINUE_TITLE_PREFIX):
+        name = name[len(CONTINUE_TITLE_PREFIX):].lstrip()
+    return name.strip()
+
+
+def summary_stands_as_name(record: Dict[str, Any]) -> bool:
+    """A run's display name is its own closing sentence and no author titled it: the exact equality the closing
+    write leaves. Every root once took its sentence as its name, so the current producer's narrower rule proves less."""
+    name = str(record.get("suggested_name") or "").strip()
+    return bool(name) and name == str(record.get("wake_summary") or "").strip() and not str(record.get("title") or "").strip()
+
+
+def _host_subject(record: Dict[str, Any]) -> str:
+    """What the host itself calls an unnamed run: its wake's cause, its schedule, else its request's first line."""
+    from ouroboros.task_finalization import wake_cause_title
+
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    return (wake_cause_title(metadata) or str(record.get("schedule_name") or metadata.get("schedule_name") or "").strip()
+            or derived_run_name({**record, "suggested_name": ""}))
+
+
+def work_shown_name(record: Optional[Dict[str, Any]]) -> str:
+    """A work's name as its card shows it (coined, else authored); a sentence standing in for one gives way to its subject."""
+    record = record if isinstance(record, dict) else {}
+    if summary_stands_as_name(record):
+        return without_continue(_host_subject(record))
+    return without_continue(record.get("suggested_name")) or without_continue(record.get("title"))
+
+
+def work_name_open(record: Dict[str, Any]) -> bool:
+    """No author titled this work and its display name is empty or provably the host's own stand-in. A name the
+    record cannot prove host-derived may be someone's choice, and stays."""
+    if str(record.get("title") or "").strip():
+        return False
+    shown = str(record.get("suggested_name") or "").strip()
+    return not shown or summary_stands_as_name(record) or shown == _host_subject(record)
+
+
+def work_name_adopted(record: Dict[str, Any]) -> bool:
+    """A Continue's author gave this work its subject: ``adopt_continued_work_name`` writes both slots with one name."""
+    title = str(record.get("title") or "").strip()
+    return bool(title) and title == str(record.get("suggested_name") or "").strip()
+
+
+def continued_work_name(proposed: Any) -> str:
+    """The name a Continue's author proposed as it would stand; "" when nothing is left of it."""
+    from ouroboros.projects_registry import PROJECT_NAME_MAX
+    from ouroboros.utils import strip_markdown
+
+    return without_continue(clean_model_title(strip_markdown(str(proposed or "")), max_len=PROJECT_NAME_MAX))
+
+
+def adopt_continued_work_name(txn: Any, work_id: str, name: str) -> tuple:
+    """``(name, "")`` when the work's first record carries this name after this transaction, else ``("", why)``.
+
+    The caller's own write commits or rolls back with it. Enriches that terminal record, both slots at once: ``title``
+    is the first-writer mark, so a later Continue cannot rename it. Its status, outcome, sentence, attempt and clock
+    are not written. Reads and writes that one address only."""
+    from ouroboros.obligations import pending_drive_rule
+    from ouroboros.task_results import require_writable_task_result_schema, stamp_task_result_schema
+    from ouroboros.utils import utc_now_iso
+
+    try:
+        current = txn.load(work_id)
+        if not current:
+            return "", "the work's first record is missing"
+        if not str(current.get("status") or "").strip() or str(current.get("task_id") or "") != work_id:
+            raise ValueError("unbindable first record")
+        require_writable_task_result_schema(current)
+    except ValueError:
+        log.debug("Naming work %s failed", work_id, exc_info=True)
+        return "", "the work's first record could not be read or written"
+    if str(current.get("title") or "") == name:  # the same name again (a retried call) is that name standing
+        return name, ""
+    if not work_name_open(current):
+        return "", f"the work is already named {work_shown_name(current)!r}"
+    updated = stamp_task_result_schema({**current, "title": name, "suggested_name": name, "updated_at": utc_now_iso()})
+    txn.store_task(updated, pending_drive=pending_drive_rule(txn, current, updated), current=current)
+    return name, ""
 
 
 def late_input_names(metadata: Dict[str, Any], answered: str, owner_words: str) -> tuple:

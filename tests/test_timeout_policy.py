@@ -809,20 +809,13 @@ def test_strict_review_poll_does_not_raise_the_remaining_window_to_five_seconds(
     assert 0 < gateway.timeout <= 0.001
 
 
-def test_expiring_strict_review_poll_keeps_the_subsecond_bound():
-    from ouroboros.delegate_progress import expiring_poll
+def test_a_spent_strict_review_poll_keeps_the_subsecond_bound():
+    """A review slot whose clock is spent still takes its one read (``review_execution._observe_session`` reads
+    through ``bounded_poll``), bounded at the strict floor of 1 ms, never the ordinary five-second floor."""
+    from ouroboros.delegate_progress import poll_bound
 
-    class Gateway:
-        def __init__(self):
-            self.timeout = None
-
-        def get_run(self, _run_id, *, timeout_sec=None):
-            self.timeout = timeout_sec
-            return {"summary": {"state": "succeeded"}}
-
-    gateway = Gateway()
-    expiring_poll(gateway, "run-1", strict=True)
-    assert 0 < gateway.timeout <= 0.001
+    assert poll_bound(0.0, strict=True) == poll_bound(-3.0, strict=True) == 0.001
+    assert poll_bound(0.0) == 5.0, "the ordinary floor a strict read must not take"
 
 
 def test_strict_poll_splits_http_phase_budget_and_recomputes_retry(monkeypatch):

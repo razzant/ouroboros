@@ -371,19 +371,35 @@ def _read_rows(txn, ids) -> dict:
 
 
 _SNAPSHOT = contextvars.ContextVar("task_hot_facts_snapshot", default=None)
+_STATUSES = contextvars.ContextVar("task_statuses_read_ahead", default=None)
+#: Task writes in THIS process whose document carries control facts (a budget pause row, an owner fence or a retry
+#: lineage), counted in the writer's transaction (``obligations.task_written``). A reader that keeps a decision it
+#: derived from those facts keeps it only while this count stands (``supervisor/dispatch_choice``): a pre-commit
+#: re-read can keep a stale answer until the next such write, so the keeper still decides again at its own handoff.
+CONTROL_WRITES = [0]
+_CONTROL_COLUMNS = ("owner_pause_facts", "budget_pause_facts", "superseded_by", "retry_task_id")
+
+
+def note_written(columns) -> None:
+    if columns and any(columns.get(name) not in (None, "", "{}") for name in _CONTROL_COLUMNS):
+        CONTROL_WRITES[0] += 1
+
+
+class NotRead(LookupError):
+    """A strict read-ahead (``serving(..., strict=True)``) was asked a row it did not read: unknown, never SQLite."""
+
+
+class _Strict(dict):
+    pass
 
 
 def _root_key(root):
     return os.path.abspath(root)
 
 
-@contextlib.contextmanager
-def snapshot(requests):
-    """One short transaction per addressed store, before queue/consumer locks.
-
-    A failed store stays unknown for this request; no per-member retries. This
-    snapshot serves display only and must never span an authority mutation.
-    """
+def read_ahead(requests) -> dict:
+    """The rows of ``(root, task_id)`` requests, one short transaction per addressed store, before any lock.
+    A failed store keeps its rows' exception (unknown); nothing is retried per member."""
     from ouroboros import store
 
     grouped, facts = {}, {}
@@ -397,11 +413,30 @@ def snapshot(requests):
             facts.update({(root, tid): row for tid, row in rows.items()})
         except Exception as exc:
             facts.update({(root, tid): exc for tid in ids})
-    token = _SNAPSHOT.set(facts)
+    return facts
+
+
+@contextlib.contextmanager
+def serving(facts, *, strict: bool = False):
+    """``read``/``controls`` answer from ``facts`` (``read_ahead``); a strict serving answers a row it lacks with
+    ``NotRead`` instead of SQLite, so a reader under the queue lock never opens the store. Facts serve a choice,
+    never an authority mutation: leave the context before a write that must read its own row again."""
+    token = _SNAPSHOT.set(_Strict(facts) if strict else facts)
     try:
         yield
     finally:
         _SNAPSHOT.reset(token)
+
+
+@contextlib.contextmanager
+def snapshot(requests):
+    """One short transaction per addressed store, before queue/consumer locks.
+
+    A failed store stays unknown for this request; no per-member retries. This
+    snapshot serves display only and must never span an authority mutation.
+    """
+    with serving(read_ahead(requests)):
+        yield
 
 
 def read(root, task_id: str) -> dict | None:
@@ -412,6 +447,8 @@ def read(root, task_id: str) -> dict | None:
     key, held = (_root_key(root), task_id), _SNAPSHOT.get()
     if held is not None and key in held:
         row = held[key]
+    elif isinstance(held, _Strict):
+        raise NotRead(f"task:{task_id} was not read ahead")
     else:
         with store.open_store(root, write=False) as txn:
             row = _read_rows(txn, [task_id])[task_id]
@@ -431,6 +468,17 @@ def controls(root, task_id: str) -> dict:
             "budget_pause": json.loads(row["budget_pause_facts"])}
 
 
+@contextlib.contextmanager
+def statuses_ahead(root, task_ids):
+    """Read ``statuses`` of these ids now, before the caller takes its lock: a ``statuses`` call of the same root
+    inside answers them from this read and reads only ids added since (the assignment tick's one SELECT, outside Q)."""
+    token = _STATUSES.set((_root_key(root), statuses(root, task_ids)))
+    try:
+        yield
+    finally:
+        _STATUSES.reset(token)
+
+
 def statuses(root, task_ids) -> dict:
     """Each id's stored status in ONE short read, for a pass over many queue rows: the status, ``None``
     for no row, or the exception a single read of that id raises. No body is decoded for a derived row;
@@ -446,6 +494,10 @@ def statuses(root, task_ids) -> dict:
             ids.append(validate_task_id(task_id))
         except ValueError as exc:
             answers[str(task_id)] = exc
+    ahead = _STATUSES.get()
+    if ahead is not None and ahead[0] == _root_key(root):
+        answers.update({tid: ahead[1][tid] for tid in ids if tid in ahead[1]})
+        ids = [tid for tid in ids if tid not in ahead[1]]
     if not ids:
         return answers
     ids = sorted(set(ids))

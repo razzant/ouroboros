@@ -53,7 +53,7 @@ def test_one_process_effect_under_selected_supervisor(tmp_path, monkeypatch, mod
     else:
         assert result.status == "blocked"
     if mode == "cyber_pro" and coverage == "full":
-        assert "SAFETY_ADVICE" in result.text
+        assert "⚠️ SAFETY_NOTE: let through without a Safety reading (" in result.text
         events = [json.loads(line) for line in (ctx.drive_logs() / "events.jsonl").read_text().splitlines()]
         advice = next(row for row in events if row["type"] == "safety_advisory")
         assert advice["assessment_allowed"] is False
@@ -100,9 +100,9 @@ def test_supervisor_backend_failure_keeps_original_evidence(tmp_path, monkeypatc
     monkeypatch.setattr(safety, "_run_llm_check", failed)
     allowed, message = safety.check_safety("fixture_remote_write", {}, ctx=ctx)
     assert allowed == (mode == "cyber_pro")
-    assert "SAFETY_UNAVAILABLE" in message and "backend unavailable" in message
-    if mode == "cyber_pro":
-        assert "SAFETY_ADVICE" in message
+    assert "backend unavailable" in message
+    assert message.startswith("⚠️ SAFETY_NOTE: let through without a Safety reading (" if mode == "cyber_pro"
+                              else "⚠️ SAFETY_UNAVAILABLE: not run.")
     # An MCP call that is no declared read waits like words to people when no verdict exists, in every mode.
     allowed, message = safety.check_safety("mcp_fixture__run", {}, ctx=ctx)
     assert not allowed and "SAFETY_UNAVAILABLE" in message and "backend unavailable" in message

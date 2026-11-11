@@ -169,7 +169,7 @@ def test_cancelling_a_run_this_module_already_settled_is_not_an_incident(tmp_pat
                                  ledger_root=str(tmp_path))
     dc.record_started(tmp_path, entry)
     ctx = _nanny_ctx(tmp_path)
-    assert json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))["settlement"]["settled"] is True
+    assert json.loads(delegate._read_run(ctx, "run-1"))["settlement"]["settled"] is True
 
     # The daemon then goes away entirely — the common shape, since a finished run is often
     # the last thing it did. Nothing can be read back, so only the durable settlement this

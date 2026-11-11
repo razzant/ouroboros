@@ -138,12 +138,13 @@ def wait_running(gateway, row, seconds):
 
 def settle(ctx, gateway, row, seconds, expected):
     from ouroboros import delegate_custody as custody
-    from ouroboros.tools.delegate import _delegate_wait
+    from ouroboros.tools.delegate import _read_run
 
     detail = poll_to_terminal(gateway, row.run_id, seconds)
     state = (detail.get('summary') or {}).get('state')
     require(state == expected, 'unexpected_terminal', state=state, expected=expected)
-    answer = json.loads(_delegate_wait(ctx, row.run_id, wait_sec=1, gateway=gateway))
+    # The read a delegate_wait wake makes of its run: a terminal run is collected and settled here.
+    answer = json.loads(_read_run(ctx, row.run_id, gateway=gateway))
     require((answer.get('settlement') or {}).get('settled'), 'production_settlement_failed', answer=answer)
     recorded = custody.replay(ctx.drive_root)[row.run_id]
     require(recorded.settled and recorded.ledger_recorded, 'durable_settlement_missing')

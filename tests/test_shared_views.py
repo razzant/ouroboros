@@ -514,3 +514,52 @@ def test_a_part_with_keys_of_mixed_types_is_redacted_as_the_whole_walk(tmp_path,
     assert obs.redact_projection(payload, facts=facts).manifest() == obs.redact_projection(payload).manifest()
     assert obs.redact_projection(payload, facts=facts).value == obs.redact_projection(payload).value
     assert obs.persist_call(tmp_path, task_id="odd", call_id="c", call_type="llm_request", payload=payload)
+
+
+@pytest.mark.parametrize("count", [2, 80])
+def test_shared_publication_prepares_directories_once_per_operation(tmp_path, monkeypatch, count):
+    """Actual mkdir/chmod traffic stays constant; existing files are still checked and moded."""
+    mkdir, chmod = pathlib.Path.mkdir, obs.os.chmod
+    directories, modes = [], []
+
+    def make_directory(path, *args, **kwargs):
+        directories.append(path)
+        return mkdir(path, *args, **kwargs)
+
+    def private_mode(path, mode, *args, **kwargs):
+        modes.append((pathlib.Path(path), mode))
+        return chmod(path, mode, *args, **kwargs)
+
+    # Precreate the test root so recursive mkdir setup does not enter the comparison.
+    (tmp_path / "observability" / "blobs").mkdir(parents=True)
+    monkeypatch.setattr(pathlib.Path, "mkdir", make_directory)
+    monkeypatch.setattr(obs.os, "chmod", private_mode)
+    payload = {"messages": [{"role": "user", "content": f"message {i} Ω"} for i in range(count)]}
+    for _ in range(2):
+        directories.clear()
+        modes.clear()
+        parts = {}
+        ref = obs.write_shared_blob(tmp_path, payload, parts)
+        assert len(directories) == 2, directories
+        assert sum(mode == obs._PRIVATE_DIR_MODE for _path, mode in modes) == 2
+        assert len(parts) == count
+        assert all(any(path.name == f"{digest}.json.gz" and mode == obs._PRIVATE_FILE_MODE
+                       for path, mode in modes) for digest in parts)
+        assert packs.blob_bytes(tmp_path, ref) == obs._json_bytes(payload)
+
+
+def test_part_batches_prepare_each_root_and_count_only_new_bytes(tmp_path):
+    from ouroboros.context_timing import measured_sections, section_spans
+
+    raw = obs._json_bytes({"content": "same bytes Ω"})
+    digest = hashlib.sha256(raw).hexdigest()
+    for root in (tmp_path / "one", tmp_path / "two"):
+        with measured_sections():
+            ref = obs.write_parts(root, {digest: raw})[digest]
+            assert section_spans()["work"]["new_parts"] == len(raw)
+        assert packs.blob_bytes(root, ref) == raw
+        with measured_sections():
+            assert obs.write_parts(root, {digest: raw})[digest] == ref
+            assert section_spans()["work"].get("new_parts", 0) == 0
+    assert obs.write_parts(tmp_path / "unused", {}) == {}
+    assert not (tmp_path / "unused").exists()

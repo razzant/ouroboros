@@ -1384,7 +1384,7 @@ export function costMetaKeys(src) {
 
 const CARD_META_KEYS = [
     ...COST_META_KEYS, 'executor_route', 'execution_evidence', 'actual_substrate',
-    'executor_observation', 'model_execution', 'tool_calls', 'model', 'ts', 'initiator', 'cancel_origin',
+    'executor_observation', 'model_execution', 'tool_calls', 'model', 'ts', 'initiator', 'continue_requester', 'cancel_origin',
     'delegated_activity', 'outcome_axes', 'task_completion', 'effort_level', 'effort_requested', 'effort_source', 'reasoning',
 ];
 export function cardMetaKeys(src) {
@@ -1523,6 +1523,7 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
         // An unobserved execution of a card without an executor is its compact model fact already.
         [execution?.label || 'Model execution', execution && (chip || execution.observed) ? escapeHtml(execution.value) : ''],
         ['Started by', record.scheduleName ? `${tr('task.fact.started_by.schedule', 'Schedule')} · <span data-i18n-authored>${escapeHtml(record.scheduleName)}</span>` : record.initiator === 'consciousness' ? 'Consciousness' : ''],
+        ['Continued by', { owner: 'You', ouroboros: 'Ouroboros', unknown: 'Not recorded' }[record.continueRequester] || ''],
         ['Tool calls', !supervision && record.toolCalls === 0 ? '0' : ''],
         ['Rounds', !supervision && rounds ? `${record.rounds} · usable solve response${record.rounds === 1 ? '' : 's'}` : ''],
         ['Supervision', supervision && (rounds || toolCalls)

@@ -1261,7 +1261,10 @@ def read_owned_gateway(*, timeout_sec: Optional[float] = None) -> Any:
     endpoint = attached_endpoint(home) if home is not None else discover_daemon_at(owned_config_dir())
     gateway = ClaudexorGateway(endpoint)
     try:
-        gateway.handshake(**({"timeout_sec": timeout_sec} if timeout_sec is not None else {}))
+        body = gateway.handshake(**({"timeout_sec": timeout_sec} if timeout_sec is not None else {}))
+        if _handshake_serving_mode(body) != "recovery_only":
+            from ouroboros.harness_program_facts import engine_ready
+            engine_ready(gateway)
         if home is None:
             get_owned_daemon()._remember_stop_targets(endpoint)
     except Exception:
@@ -1395,6 +1398,8 @@ def ensure_owned_gateway(*, admission_wait_sec: Optional[float] = None,
     except Exception:
         gateway.close()
         raise
+    from ouroboros.harness_program_facts import engine_ready
+    engine_ready(gateway)
     if home is not None:  # the proven version feeds request-shape floors; host engine settings stay untouched
         daemon._proven_engine_version = str(gateway.engine_version or "")
         return gateway

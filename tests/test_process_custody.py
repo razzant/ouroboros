@@ -70,11 +70,6 @@ _SPAWN_ALLOWLIST = {
     "ouroboros/tools/skill_exec.py",      # bounded skill run (waited + tracked)
     "ouroboros/tools/skill_preflight.py", # waited preflight child
     "ouroboros/marketplace/isolated_deps.py",  # waited installer child
-    # Connect's vendor-CLI install (domain op, extracted from the owned-daemon
-    # module): ONE waited child published through shell_process.tracked_start, so
-    # /panic's lock-free sweep or a begun stop that misses it is met by its own
-    # publication (isolated_deps._run template).
-    "ouroboros/claudexor_harness_install.py",
     "ouroboros/extension_process_runner.py",  # waited calls and session-owned response streams
     "ouroboros/workspace_executor.py",    # custody write-through added at spawn
     # One work-domain effect's docker CLI: published through shell_process.tracked_start, its container group

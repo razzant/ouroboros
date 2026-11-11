@@ -1353,7 +1353,7 @@ def test_a_returned_owner_turn_takes_the_lanes_carrier_beside_a_full_project_poo
     meta = _on_lane(system, tmp_path, turn.id, 2)
     assert meta["worker_id"] == wid and meta["client_message_id"] == "cm-keep-working"
     assert [row["id"] for row in _launched(system)] == ["bg"], "the project slot took only the background work"
-    assert sum(1 for w in system.workers.WORKERS.values() if w.lane != "conversation") <= system.workers.MAX_WORKERS
+    assert sum(1 for w in system.workers.WORKERS.values() if w.lane != "conversation") == 1, "the one project slot"
     system.workers.assign_tasks()
     assert not _carried(system) and not _launched(system) and not system.workers.PENDING
 
@@ -1891,7 +1891,7 @@ def test_a_returned_turn_continues_beside_a_cold_room_writer_and_pooled_work_wai
     outside the project lease): my human's turn held by a quit, moved into that room (readmission: the room's basis
     and folder) or already in it, continues on its lane after Resume while the writer stays parked with its receipt.
     The turn the mind sent to the pool, moved there the same way, waits for the lane, as pooled work does."""
-    from ouroboros.project_lease import cold_project_holders
+    from ouroboros.project_lease import lane_holders
     from ouroboros.projects_registry import create_project, get_project
     from ouroboros.sleep_custody import carrier_receipt
 
@@ -1913,7 +1913,8 @@ def test_a_returned_turn_continues_beside_a_cold_room_writer_and_pooled_work_wai
     [writer] = [row for row in system.workers.PENDING if row["id"] == "bg"]
     assert carrier_receipt(writer)["retains_project_lane"]
     assert not [row for row in _launched(system) if "id" in row], "no work on a project slot (a probe is no launch)"
-    assert cold_project_holders(system.workers.PENDING) == {"cold-room": {"bg"}}, "the writer keeps its room's lane"
+    assert lane_holders(system.workers.RUNNING.values(), system.workers.PENDING) == {"cold-room": {"bg"}}, (
+        "the writer keeps its room's lane")
     if work == "detached":
         assert not _carried(system) and sorted(row["id"] for row in system.workers.PENDING) == sorted(["bg", turn.id])
         return

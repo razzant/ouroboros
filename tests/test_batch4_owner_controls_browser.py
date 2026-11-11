@@ -478,8 +478,11 @@ def test_pause_restart_retention_and_resume(direct_server_with_data, monkeypatch
                 expect(dialog).to_be_hidden()
                 record["header_body"] = body
                 page.locator('[data-nav-page="settings"]').click()
-                page.locator("#s-workers").evaluate(
-                    "(node) => {node.value='2'; node.dispatchEvent(new Event('input',{bubbles:true}));}")
+                skills = data_dir.parent / "skills-restart-fixture"  # a restart-required field (the cap is live)
+                skills.mkdir(exist_ok=True)
+                page.locator("#s-skills-repo-path").evaluate(
+                    "(node, value) => {node.value=value; node.dispatchEvent(new Event('input',{bubbles:true}));}",
+                    str(skills))
                 page.locator("#btn-save-settings").click()
                 expect(page.locator("#btn-restart-now")).to_be_visible(timeout=30_000)
                 dialog, s_title, s_body = _restart_dialog(page, page.locator("#btn-restart-now"))

@@ -75,6 +75,7 @@ from ouroboros.tools.tool_result import (
     _published_tool_result,
     _restore_tool_result_sidecar,
     _replace_tool_result,
+    safety_refusal,
 )
 from ouroboros.tools.registry_guards import (
     _builtin_tool_availability,
@@ -1433,7 +1434,7 @@ class ToolRegistry:
             declared_policy=entry.safety_policy,
         )
         if not is_safe:
-            return ToolResult(status="blocked", code="SAFETY_VIOLATION", text=safety_msg)
+            return ToolResult(*safety_refusal(safety_msg), text=safety_msg)
         light_repo_before = (
             registry_guard_process._light_repo_snapshot(system_repo_dir_for(self._ctx))
             if name in _PROCESS_COMMAND_TOOLS and _runtime_mode == "light" and targets_system_repo

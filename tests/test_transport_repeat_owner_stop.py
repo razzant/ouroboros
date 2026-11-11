@@ -198,12 +198,12 @@ def test_wrapup_reason_survives_the_live_delegate_hold(tmp_path, monkeypatch, wi
             request_wrapup()
         return httpx.ReadError("controlled post-dispatch failure")
 
-    def hold(*args):
+    def hold(*args, **_kwargs):
         request_wrapup()
         return delegate_result({"status": "progress", "wake_events": [{"kind": "finalize_now"}]})
 
     if during_hold:
-        monkeypatch.setattr(delegate_hold, "supervised_wait", hold)
+        monkeypatch.setattr(delegate_hold, "hold_wake", hold)
 
     llm = _LedgerLLM(tmp_path, death)
     kwargs = hold_kwargs(tmp_path, registry, [])

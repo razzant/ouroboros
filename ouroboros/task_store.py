@@ -104,8 +104,9 @@ def delete_document(root: Any, task_id: str) -> bool:
         return present
 
 
-def patch_document(root: Any, task_id: str, mutator: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]) -> Dict[str, Any]:
-    """Mutate CURRENT in one write; None writes nothing. Return the current document."""
+def patch_document(root: Any, task_id: str, mutator: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]], *,
+                   last_word: Any = None) -> Dict[str, Any]:
+    """Mutate CURRENT in one write; None writes nothing. Return the current document. ``last_word``: ``store.update_task``."""
     from ouroboros.obligations import pending_drive_rule
 
     task_id = str(task_id)
@@ -115,7 +116,7 @@ def patch_document(root: Any, task_id: str, mutator: Callable[[Dict[str, Any]], 
         seen["current"] = current
         return mutator(current)
 
-    updated = store.update_task(root, task_id, _mutate, pending_drive=pending_drive_rule)
+    updated = store.update_task(root, task_id, _mutate, pending_drive=pending_drive_rule, last_word=last_word)
     return seen.get("current", {}) if updated is None else {**updated, "task_id": task_id}
 
 
@@ -475,13 +476,16 @@ DISPLAY_DROPPED: Tuple[str, ...] = (
     "task_acceptance_review_accounting", "review_thread_releases", "delegated_result_taken",
     *(f"metadata.{key}" for key in (
         "task_contract", "main_routing_manifest", "governing_owner_words", "routing_contract",
-        "configured_subagent", "continuation", "project_routing_manifest", "subagent_envelope", "owner_corpus",
+        "configured_subagent", "project_routing_manifest", "subagent_envelope", "owner_corpus",
         "origin_message_text", "wake_observation", "project_last_task_result", "current_chat",
         "workspace_preflight", "workspace_copy", "late_answer")),
 )
 DISPLAY_KEPT: Dict[str, Tuple[str, ...]] = {
     "artifact_bundle": ("status",), "task_contract": ("deadline_at",),
     "loop_outcome": ("usage",), "loop_outcome.usage": ("total_rounds",),  # history's accepted solve responses
+    # Who asked for a Continue (``initiator_meta``), without the continuation's evidence.
+    "metadata.continuation": ("admission",), "metadata.continuation.admission": ("by",),
+    "metadata.continuation.admission.by": ("actor",),
 }
 _KEEP = "__keep__"  # a path no kept object holds: the no-op target of a conditional edit
 

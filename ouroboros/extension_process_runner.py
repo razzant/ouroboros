@@ -207,11 +207,9 @@ def _ensure_private_dir(path: pathlib.Path) -> None:
         pass
 
 
-def _write_private_json(path: pathlib.Path, payload: Dict[str, Any], *, cap_bytes: int | None = None, overflow_error: str | None = None) -> None:
+def _write_private_json(path: pathlib.Path, payload: Dict[str, Any], *, cap_bytes: int | None = None) -> None:
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     if cap_bytes is not None and len(data) > cap_bytes:
-        if overflow_error:
-            raise ExtensionProcessError(overflow_error)
         data = json.dumps(
             {"ok": False, "error": "extension child protocol result exceeded safety cap"},
             ensure_ascii=False,
@@ -461,19 +459,24 @@ def _child_process(
     repo_dir: pathlib.Path, env: Dict[str, str],
     on_spawn: Callable[[], None] | None = None, stream: bool = False,
 ):
-    """One staging, spawn, registration and cleanup owner for every child mode."""
+    """Own staging, spawn, registration and cleanup for every child mode.
+
+    The input limit bounds the call envelope, not the host-carried tool context:
+    both context dictionaries must reach handlers whole, whatever their size.
+    Only a tool's top-level ``ctx`` is excluded; ``args.ctx`` and other modes
+    remain bounded. One private file carries both, with O(ctx) serialization,
+    disk and child memory costs, not a second transport or an authority source.
+    """
     calls_dir = skill_state_dir(drive_root, str(payload.get("skill_name") or "")) / "extension_calls"
     _ensure_private_dir(calls_dir)
     input_path = calls_dir / f"{uuid.uuid4().hex}.json"
     result_path = calls_dir / f"{uuid.uuid4().hex}.result.json"
     payload = dict(payload)
     payload["result_path"] = str(result_path)
-    _write_private_json(
-        input_path,
-        payload,
-        cap_bytes=_INPUT_CAP,
-        overflow_error="extension child protocol input exceeded safety cap",
-    )
+    call_input = ({key: value for key, value in payload.items() if key != "ctx"}
+                  if payload.get("mode") == "tool" else payload)
+    if len(json.dumps(call_input, ensure_ascii=False).encode("utf-8")) > _INPUT_CAP:
+        raise ExtensionProcessError("extension child protocol input exceeded safety cap; nothing was launched")
     from ouroboros.process_custody import lifeline_parent_env
     env = {**env, **lifeline_parent_env()}
     cmd = [_child_python(), "-m", "ouroboros.extension_process_runner", str(input_path)]
@@ -490,6 +493,9 @@ def _child_process(
     confirmed = lambda: None
     proc = after_spawn = None
     try:
+        # Staging can fail after writing private bytes (for example, a full disk).
+        # The existing pre-spawn cleanup owns that partial file too.
+        _write_private_json(input_path, payload)
         from ouroboros.owner_pause import operation_start
         confirmed = external_handoff("extension_process")
         with tracked_start() as publish, operation_start():

@@ -313,11 +313,14 @@ def json_chars(text: str) -> int:
 
 
 def snapshot_json(snapshot: MemoryViewSnapshot) -> str:
-    """The canonical JSON of a snapshot (sorted keys): the context core keeps it and hashes it. The capture's journal
-    boundary is not in it (``chronicle_sequence``)."""
-    data = dataclasses.asdict(snapshot)
-    data.pop("chronicle_sequence")
-    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    """Canonical JSON of captured plain data, excluding render caches and the capture's journal boundary."""
+    def fields(value: Any) -> Dict[str, Any]:
+        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            return {field.name: getattr(value, field.name) for field in dataclasses.fields(value)
+                    if not (isinstance(value, MemoryViewSnapshot) and field.name == "chronicle_sequence")}
+        raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+    return json.dumps(snapshot, default=fields, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def snapshot_from_json(text: str) -> MemoryViewSnapshot:

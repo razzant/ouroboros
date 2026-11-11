@@ -1578,16 +1578,18 @@ class Txn:
 
 
 def update_task(root: Any, task_id: str, mutator: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]], *,
-                pending_drive: Any = None) -> Optional[Dict[str, Any]]:
+                pending_drive: Any = None, last_word: Any = None) -> Optional[Dict[str, Any]]:
     """Merge CURRENT under the published write gate; ``None`` commits without writing. Schema preparation
     precedes callbacks, including for old child stores. ``pending_drive`` is a value or (txn, current, updated)
-    -> Optional[bool]; pristine current and the mutator's copy are decoded separately from the same bytes."""
+    -> Optional[bool]; pristine current and the mutator's copy are decoded separately from the same bytes.
+    ``last_word`` (txn, current, updated) -> document decides inside this transaction after the mutator accepted, on
+    other addressed tasks of ``txn`` too; ``None``, returned before any such write, writes nothing."""
     while True:
         with open_store(root, write=True) as txn:
             if int(txn.meta("schema_version") or 1) >= SCHEMA_VERSION:
                 raw = txn.raw(task_id)
                 current, updated = materialize(task_id, *raw) or {}, mutator(materialize(task_id, *raw) or {})
-                if updated is None:
+                if updated is None or (last_word is not None and (updated := last_word(txn, current, updated)) is None):
                     return None
                 flag = pending_drive(txn, current, updated) if callable(pending_drive) else pending_drive
                 updated = {**updated, "task_id": task_id}

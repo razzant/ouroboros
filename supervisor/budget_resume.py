@@ -573,10 +573,9 @@ def _grant_exact_resume(task: Dict[str, Any], pause: Dict[str, Any], *, selected
         refusal = _root_money_refusal(result_root, task, root_task_id)
         if refusal:
             return refusal
-    # Owner Q9: a descendant cannot be resumed under a root that is itself still paused.
-    if not actor and any(
-            str(item.get("id") or "") == root_task_id and isinstance(item.get("_budget_pause"), dict)
-            for item in q.PENDING):
+    # Owner Q9: a descendant cannot be resumed under a root that is itself still paused (a sleep is a wait).
+    if not actor and any(str(item.get("id") or "") == root_task_id and isinstance(item.get("_budget_pause"), dict)
+                         and item["_budget_pause"].get("reason") != "sleep" for item in q.PENDING):
         return {"ok": False, "error": "root_still_paused", "root_task_id": root_task_id,
                 "action": "resume_root_first"}
     # A later Resume raises the generation; older grants cannot become live again.

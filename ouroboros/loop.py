@@ -63,8 +63,8 @@ from ouroboros.transcript_prefix import count_history_change, observe_send as _o
 from ouroboros.transcript_prefix import retire_main_reasoning as _retire_main_reasoning  # noqa: F401 -- shared send boundary
 from ouroboros.delegate_hold import (
     close_hold as _delegate_hold_close,
-    hold_step as _delegate_hold_step,
     latch_after_unknown as _delegate_hold_latch,
+    round_top as _delegate_hold_round_top,
 )
 from ouroboros.loop_transport import (
     continue_unknown_transport as _continue_unknown_transport,
@@ -627,16 +627,13 @@ def run_llm_loop(
                 _owner_msg_seen, owner_ctx=ctx, defer_content_ack=True, place_live_runs=True)
             active_model, active_use_local, active_effort, context_fit_plan, active_context_mode = after_mail(
                 limit_ctx, context_fit_plan, active_context_mode, _preferred_context_mode, _controls)
-            if _delegate_hold_step(
-                    tools, controls=_controls, messages=messages, drive_logs=drive_logs,
-                    task_id=task_id, emit_progress=emit_progress,
-                    new_input=transcript_growth_signature(messages) != _pre_drain_sig) == "terminal":
-                # The no-call decision reads the usage record, not the error_kind argument — stamp first.
-                accumulated_usage["_last_llm_error_kind"] = "provider_outcome_unknown"
-                text, accumulated_usage, forced_trace = _handle_provider_unavailable(
-                    limit_ctx, error_kind="provider_outcome_unknown")
-                _merge_finalization_trace(llm_trace, forced_trace)
-                return text, accumulated_usage, llm_trace
+            _held = _delegate_hold_round_top(tools, limit_ctx, _controls, emit_progress,
+                                             new_input=transcript_growth_signature(messages) != _pre_drain_sig)
+            if _held == "park":  # the hold's host-armed sleep was parked, no model call: its wake is the next top's
+                free_redial = True
+                continue
+            if isinstance(_held, tuple):  # the unknown no-resend terminal: zero provider calls
+                return _held
             # The ordered pre-round exit owns supervisor grace, deadline and cost.
             _early_final = _maybe_early_finalize(
                 limit_ctx, tools, _controls, transport_episode=transport_wait, cost_ceiling=cost_ceiling)
@@ -718,7 +715,7 @@ def run_llm_loop(
                 limit_ctx.active_model, limit_ctx.active_use_local = active_model, active_use_local
                 if msg is None and TIMEOUT_REPEAT_KEY in accumulated_usage:  # before any route, wait or renewal
                     return _timeout_repeat_handover(limit_ctx, transport_wait, llm_trace)
-                # Configured routes before any wait; an active episode owns its own outcome.
+                # Configured routes before any wait but a primary's first lost answer; an active episode owns its outcome.
                 # Fallbacks and an owner-wait resend are author calls too, receipted in their own window.
                 # Their physical sender retains any late answer after this wait leaves.
                 with round_window(), receiver_abandonable(), working_checkpoint.model_call_scope(limit_ctx):
