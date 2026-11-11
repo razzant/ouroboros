@@ -186,7 +186,7 @@ def test_bound_running_work_holds_an_empty_room_without_reading_history_or_finis
     assert _room(_view(tmp_path, MAIN_TASK)[0], beta) is None
 
 
-def test_a_room_where_neither_my_human_nor_i_spoke_is_one_line_and_a_room_where_i_spoke_once_keeps_its_words(tmp_path):
+def test_a_bot_event_is_one_line_and_a_room_where_i_spoke_once_keeps_its_words(tmp_path):
     from ouroboros.presence_bindings import conversation_key
     from ouroboros.presence_runner import presence_chat_id
 
@@ -200,21 +200,24 @@ def test_a_room_where_neither_my_human_nor_i_spoke_is_one_line_and_a_room_where_
 
     answer = shared.msg(_ts(42), "Looking.", chat_id=rooms["i2"], direction="out", type="presence_delivery", task_id="p2",
                         source="presence:github", transport={**base, "thread_id": "i2", "delivery": {"state": "delivered"}})
-    shared.append(tmp_path / "logs" / "chat.jsonl", said("i1", 40, "a dependabot bump"),
+    bot = said("i1", 40, "a dependabot bump\nDETAIL NOT IN THE EVENT LINE")
+    bot["transport"]["actor"]["is_bot"] = True
+    shared.append(tmp_path / "logs" / "chat.jsonl", bot,
                   said("i2", 41, "can you look?"), answer, said("i2", 43, "thanks"))
     seal(tmp_path, str(rooms["i2"]), answer)
     snapshot, text = _view(tmp_path, MAIN_TASK)
     group = next(g for g in snapshot.conversations if g["key"] == "github:me:repo.1")
     silent, spoke = (_room(snapshot, str(rooms[t])) for t in ("i1", "i2"))
-    assert not silent["engaged"] and not silent["words"] and "a dependabot bump" not in text
-    assert silent["silent"].endswith(f"1 words nobody considered; memory_read(room_id='{rooms['i1']}', rows=true)")
+    assert not silent["engaged"] and not silent["words"] and "a dependabot bump" in text
+    assert "DETAIL NOT IN THE EVENT LINE" not in text
+    assert silent["events"]["count"] == 1 and f"memory_read(room_id='{rooms['i1']}', rows=true)" in text
     assert spoke["engaged"] and "thanks" in text  # my sealed answer there still makes it a room where I spoke
     assert [room["room_id"] for room in group["rooms"]] == [str(rooms["i1"]), str(rooms["i2"])]
 
 
 def test_a_forward_from_my_humans_account_engages_the_room_and_still_waits_as_anothers_words(tmp_path):
     """A forward keeps its sender: a room where my human forwarded is one where they acted, so it keeps its words (a
-    stranger's forward does not engage one); the forwarded words are not my human's, so they rank as unconsidered."""
+    stranger's forward also records a person); the forwarded words are not my human's, so they rank as unconsidered."""
     from ouroboros import places
     from ouroboros.presence_bindings import conversation_key
     from ouroboros.presence_runner import presence_chat_id
@@ -239,7 +242,8 @@ def test_a_forward_from_my_humans_account_engages_the_room_and_still_waits_as_an
     assert engaged["engaged"] and "words anton forwarded" in text, "my human acted in this room"
     assert [word["owner_side"] for word in engaged["words"]] == [False], "the words are another author's"
     assert _rank(snapshot, str(rooms["f1"]), mine) == 2, "they wait unconsidered, as a person's words do"
-    assert not stranger["engaged"] and "1 words nobody considered" in stranger["silent"]
+    assert stranger["engaged"] and "words u7 forwarded" in text
+    assert _rank(snapshot, str(rooms["f2"]), theirs) == 2 and not stranger["words"][0]["owner_side"]
 
 
 @pytest.mark.parametrize("owner", [False, True])
@@ -438,7 +442,8 @@ def test_a_row_with_no_recorded_speaker_is_nobody_and_only_a_persons_word_waits_
     assert "The description, revised." in text  # its text stays whole where it is shown
     assert (spoke["facts"]["people"], spoke["facts"]["unattributed"], spoke["facts"]["reactions"]) == (1, 1, 1)
     assert "people 1, mine 2, reactions 1, author not recorded 1, " in text
-    assert not silent["engaged"] and "; 1 words nobody considered; " in silent["silent"]  # the person alone
+    assert silent["engaged"] and "Another revision." in text and "a question" in text
+    assert [word["rank"] for word in silent["words"]] == [1, 2]  # only the person's words are unread
 
 
 

@@ -1109,13 +1109,10 @@ def _read_owed(root: Path, store: ChronicleStore, start: int, limit: int) -> str
 
 def _read_rooms(root: Path, store: ChronicleStore, start: int, limit: int) -> str:
     """Every open room, by conversation: the block's own capture (``memory_view_conversations``), one line a room."""
-    from ouroboros import memory_view as mv, memory_view_conversations as conversations
+    from ouroboros.memory_view_events import catalogue_lines
 
     groups = _groups(root, store)
-    lines = [line for group in groups for line in (conversations.identity_line(group), *(
-        f"  - {room['label']}; {'my human or I spoke here' if room['engaged'] else 'neither my human nor I spoke here'}; "
-        f"{mv._facts_text(room['facts'], 'that room')}; memory_read(room_id='{room['room_id']}', rows=true)"
-        for room in group["rooms"]))]
+    lines = [line for group in groups for line in catalogue_lines(group)]
     count = sum(len(group["rooms"]) for group in groups)
     return _window(f"Open rooms: {count} in {len(groups)} conversations", "\n".join(lines), start, limit,
                    lambda n: f"memory_read(room_id='*', start={n})")

@@ -10,7 +10,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 |---|---|---:|---:|
 | D01 | Agent core & main loop | 67 | 0 |
 | D02 | LLM client, routing & providers | 48 | 0 |
-| D03 | Context assembly, fit & compaction | 39 | 0 |
+| D03 | Context assembly, fit & compaction | 40 | 0 |
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
 | D05 | Tool surfaces: files, code, shell, media, external | 55 | 0 |
 | D06 | Review stack | 100 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 41 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 26 | 0 |
-| **total** | | **1029** | **0** |
+| **total** | | **1030** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -358,6 +358,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/memory_view_account.py`
 - `ouroboros/memory_view_conversation_forms.py`
 - `ouroboros/memory_view_conversations.py`
+- `ouroboros/memory_view_events.py`
 - `ouroboros/memory_view_legacy.py`
 - `ouroboros/memory_view_work.py`
 - `ouroboros/memory_waiting.py`

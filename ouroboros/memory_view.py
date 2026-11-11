@@ -33,13 +33,14 @@ Nothing here publishes a record or calls a model.
 """
 from __future__ import annotations
 
+from ouroboros.text_sentences import first_sentence
+
 import dataclasses
 import datetime
 import functools
 import json
 import logging
 import pathlib
-import re
 from collections import Counter, OrderedDict
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
@@ -1038,7 +1039,7 @@ def _page_pointer(entry: Mapping[str, Any]) -> str:
 
 def _page_label(entry: Mapping[str, Any]) -> str:
     """The page's first sentence, without a length cut or an invented summary, and its reader."""
-    sentence = re.split(r'(?<=[.!?。！？])\s+', entry['text'].strip(), maxsplit=1)[0]
+    sentence = first_sentence(entry['text'])
     attribution = (f" (draft by {entry.get('signer') or 'Light'}, not yet accepted)"
                    if entry.get('status') == 'draft' else '')
     missing = " (record opening, no lead)" if "lead_rule" not in entry else ""
@@ -1287,7 +1288,7 @@ def _note_lines(notes: List[Dict[str, Any]]) -> List[str]:
 
 def _note_pointer(note: Mapping[str, Any]) -> str:
     """A source-derived label, never a summary or a function of the start allowance."""
-    sentence = re.split(r'(?<=[.!?。！？])\s+', ' '.join(note['text'].split()), maxsplit=1)[0]
+    sentence = first_sentence(' '.join(note['text'].split()))
     label = sentence + (" (record opening, no lead)" if "lead_rule" not in note else "")
     return (f"note {note['id']} by {note['role']} on {note['date']}: {label}; "
             f"memory_read(node_id='{note['id']}')")

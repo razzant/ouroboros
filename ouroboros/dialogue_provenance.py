@@ -817,9 +817,10 @@ def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch:
     if direction == "in":
         from ouroboros.places import forwarded_message  # D15->D20 is lazy-only
 
+        bot = {"is_bot": True} if _mapping(_mapping(row.get("transport")).get("actor")).get("is_bot") is True else {}
         if wordless_reaction(row):  # the actor's act, in the host's words: never quotable as theirs
             return {"kind": "place_fact", "label": dialogue_author(row),
-                    "actor_kind": _text(_mapping(_mapping(row.get("transport")).get("actor")).get("kind"))}
+                    "actor_kind": _text(_mapping(_mapping(row.get("transport")).get("actor")).get("kind")), **bot}
         place = row_provenance(row) == "place"
         # A forward keeps who sent it (my human's account stays confirmed); its words are another author's.
         forward = {"forwarded": True} if place and forwarded_message(_mapping(row.get("transport")).get("message")) else {}
@@ -827,11 +828,11 @@ def row_author(row: Mapping[str, Any], *, pos: int | None = None, lineage_epoch:
         fact = _place_speaker(row, owner_accounts) if place else ""
         if fact == "the account I send as" and owner_accounts is not None:  # my own account's event, no recorded
             return {"kind": "ouroboros", "label": f"{lead}{fact}: {dialogue_author(row)}", "via": "own_account",
-                    **forward}  # sender work
+                    **forward, **bot}  # sender work
         label = dialogue_author(row)
         return {"kind": "human", "label": lead + (f"{fact}: {label}" if fact else label),
                 **({"owner_confirmed": True} if fact == "my human" else {}),  # no speaker recorded: no person either
-                **({"unattributed": True} if place and not recorded_speaker(row) else {}), **forward}
+                **({"unattributed": True} if place and not recorded_speaker(row) else {}), **forward, **bot}
     if direction == "system":
         if row.get("summary_kind") == LEGACY_RETELLING_SUMMARY_KIND:
             return {"kind": "helper", "label": "Light (legacy retelling)"}

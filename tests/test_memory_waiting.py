@@ -150,8 +150,7 @@ def _github_row(conversation, thread, minute, text, **extra):
 
 
 def test_a_conversation_waits_while_words_where_i_spoke_are_open_and_never_for_ambient_rooms(tmp_path):
-    """S4: the fourth class counts a conversation whose room where my human or I spoke holds words no page holds; a
-    conversation where neither spoke does not; a page to the room's head takes it out; the listing names the act."""
+    """S4: a real conversation waits for its page; a connector-marked bot's event does not."""
     from ouroboros import chat_chain, dialogue_store as ds
     from ouroboros.memory_view_conversations import owed
 
@@ -160,7 +159,9 @@ def test_a_conversation_waits_while_words_where_i_spoke_are_open_and_never_for_a
     asked = _github_row("repo.1", "i1", 1, "can you look?")
     answer = {**_github_row("repo.1", "i1", 2, "Looking."), "direction": "out", "type": "presence_delivery",
               "task_id": "p1", "client_message_id": "", "transport": {**asked["transport"], "delivery": {"state": "delivered"}}}
-    for row in (asked, answer, _github_row("repo.2", "i9", 3, "a dependabot bump")):
+    ambient = _github_row("repo.2", "i9", 3, "a dependabot bump")
+    ambient["transport"]["actor"]["is_bot"] = True
+    for row in (asked, answer, ambient):
         ds.append(tmp_path, "chat", row)
 
     def owing():
@@ -178,3 +179,163 @@ def test_a_conversation_waits_while_words_where_i_spoke_are_open_and_never_for_a
     assert json.loads(_chronicle_write(ctx, kind="page", room_id=str(asked["chat_id"]), text="Answered; closed.",
                                        covers={"to": newest}))["ok"]
     assert "github:me:repo.1" not in owing()
+
+
+def _event_row(provider, thread, minute, author="own", text=None, **extra):
+    """The same connector contract under unrelated provider names."""
+    from ouroboros.presence_bindings import conversation_key
+    from ouroboros.presence_runner import presence_chat_id
+    key = conversation_key(provider, "account", "garden", thread)
+    actor = {} if author == "unknown" else {"platform_actor_id": "self" if author == "own" else author}
+    if author == "bot":
+        actor["is_bot"] = True
+    return {"chat_id": presence_chat_id(key), "direction": "in", "source": "presence:" + provider,
+            "ts": f"2026-09-09T00:{minute:02d}:00+00:00", "text": text or f"{thread} title\n{author} body {minute}",
+            "client_message_id": f"{provider}-{thread}-{minute}",
+            "transport": {"provider": provider, "account_id": "account", "conversation_id": "garden",
+                          "thread_id": thread, "actor": actor, "identity": {"sends_as": {"id": "self"}}}, **extra}
+
+
+def _event_group(snapshot, provider="harbor"):
+    return next(g for g in snapshot.conversations if g["key"] == f"{provider}:account:garden")
+
+
+@pytest.mark.parametrize("provider", ["harbor", "kiln", "fern", "kite"])
+@pytest.mark.parametrize("with_bot", [False, True])
+def test_account_arrivals_are_ordinary_events_independent_of_provider(tmp_path, provider, with_bot):
+    from ouroboros import dialogue_store as ds, memory_floor as mf
+    from ouroboros.memory_view_conversations import owed
+    shared.world(tmp_path)
+    ds.append(tmp_path, "chat", _event_row(provider, "one", 1))
+    if with_bot:
+        ds.append(tmp_path, "chat", _event_row(provider, "one", 2, "bot"))
+    snapshot = view(tmp_path)
+    group = _event_group(snapshot, provider)
+    assert not group["rooms"][0]["engaged"] and not owed([group])
+    isolated = dataclasses.replace(snapshot, room=None, story=[], conversations=[group])
+    counts = mf.form_counts(isolated, mv.FULL_VIEW)
+    assert not counts["emergency"] and counts["host"]["events"] == {"lines": 1, "sources": 1 + with_bot}
+    shown = mv.render_room(isolated)
+    assert "account not confirmed as my human's" in shown and "one title" in shown
+    assert "Event:" in shown and "own body" not in shown
+
+
+@pytest.mark.parametrize("prior", ["human", "reply"])
+@pytest.mark.parametrize("sealed", [False, True])
+def test_a_recorded_person_or_reply_engages_a_room_even_when_sealed(tmp_path, prior, sealed):
+    from ouroboros import chat_chain, dialogue_store as ds
+    shared.world(tmp_path)
+    row = _event_row("harbor", "one", 1, "Ann", text="A person's real question.")
+    if prior == "reply":
+        row.update(direction="out", type="presence_delivery", task_id="answer01", text="My outward reply.")
+    ds.append(tmp_path, "chat", row)
+    if sealed:
+        reply = json.loads(_chronicle_write(_ctx(tmp_path, "root0001"), kind="page", room_id=str(row["chat_id"]),
+                          text="I kept that exchange.", covers={"to": chat_chain.format_address(chat_chain.row_address(row))}))
+        assert reply["ok"], reply
+    ds.append(tmp_path, "chat", _event_row("harbor", "one", 2, "bot", text="Bot words stay whole here.\nSECOND_LINE"))
+    snapshot = view(tmp_path)
+    group = _event_group(snapshot)
+    assert group["rooms"][0]["engaged"] and not group["rooms"][0].get("events")
+    bot = group["rooms"][0]["words"][-1]
+    assert bot["text"] == "Bot words stay whole here.\nSECOND_LINE"
+    assert bot["line"] in mv.render_room(snapshot)
+
+
+def test_unauthenticated_same_id_is_a_person_and_a_marked_mail_bot_is_an_event(tmp_path):
+    from ouroboros import dialogue_store as ds
+    shared.world(tmp_path)
+    row = _event_row("harbor", "one", 1)
+    row["transport"]["actor"]["authenticated"] = False
+    ds.append(tmp_path, "chat", row)
+    ds.append(tmp_path, "chat", _event_row("mailbox", "inbox", 2, "bot"))
+    snapshot = view(tmp_path)
+    assert _event_group(snapshot)["rooms"][0]["engaged"]
+    assert not _event_group(snapshot, "mailbox")["rooms"][0]["engaged"]
+
+
+@pytest.mark.parametrize("provider", ["harbor", "mailbox"])
+@pytest.mark.parametrize("count_unknown", [True, False])
+def test_unattributed_arrivals_have_one_owner_choice_and_keep_their_reader(tmp_path, monkeypatch, provider, count_unknown):
+    from ouroboros import dialogue_store as ds, memory_view_events as events
+    from ouroboros import memory_view_conversations as conv
+    shared.world(tmp_path)
+    monkeypatch.setattr(events, "count_unattributed", lambda: count_unknown)
+    text = "Unknown opening. " + "unconfirmed words " * 30
+    ds.append(tmp_path, "chat", _event_row(provider, "one", 1, "unknown", text=text))
+    snapshot = view(tmp_path)
+    group = _event_group(snapshot, provider)
+    room = group["rooms"][0]
+    shown = conv.render_group(group, set(), set(), 0)
+    assert not room["engaged"] and not conv.owed([group])
+    assert f"author not recorded: 1 arrivals, {len(text)} chars" in shown
+    assert "last 2026-09-09T00:01:00+00:00" in shown
+    assert (text in shown) is not count_unknown
+    assert text in _memory_read(_ctx(tmp_path, "root0001"), room_id=room["room_id"], rows=True)
+    if not count_unknown:
+        word = room["words"][0]
+        opened = conv.render_group(group, {word["id"]}, set(), 0)
+        assert text not in opened and "Unknown opening." in opened and "opening, no retelling" in opened
+    ds.append(tmp_path, "chat", _event_row(provider, "one", 2, "Ann"))
+    live = _event_group(view(tmp_path), provider)["rooms"][0]
+    assert live["engaged"] and live["words"][0]["text"] == text
+
+
+def test_event_counts_use_the_full_catalogue_offset_and_remain_ordinary(tmp_path):
+    from ouroboros import dialogue_store as ds, memory_floor as mf
+    from ouroboros.memory_view_conversations import pieces
+    from ouroboros.tools.chronicle import _groups, _read_rooms
+    shared.world(tmp_path)
+    # The focus's own group sorts before the tested conversation, so omitting it gives a wrong offset.
+    rows = [_event_row("aaa", "focus", 0, "Ann"),
+            *[_event_row("harbor", f"topic{i}", i + 1) for i in range(3)],
+            _event_row("harbor", "topic0", 4, "bot", text="Latest recorded title\nBOT_BODY"),
+            _event_row("harbor", "topic2", 5, "unknown", text="Unknown tail\nUNATTRIBUTED_BODY")]
+    for row in rows:
+        ds.append(tmp_path, "chat", row)
+    task = {"id": "root0001", "chat_id": rows[0]["chat_id"]}
+    snapshot = mv.capture_memory_view(tmp_path, task, dataclasses.replace(mv.ROLE_DEFAULTS["integrator"], room_id=str(task["chat_id"])))
+    group = _event_group(snapshot)
+    selected = {"F6g": {"events:" + group["key"]}}
+    def draw(gone):
+        return "\n".join(pieces([group], gone, lambda _key, render: render()))
+    whole, counted = draw({}), draw(selected)
+    assert all(f"topic{i} title" in whole and f"topic{i} title" not in counted for i in range(3))
+    assert "Events: 3 rooms, 5 arrivals" in counted and "Latest recorded title" in counted
+    assert "author not recorded: 1 arrivals" in counted and "Unknown tail" in counted
+    assert "a bot" in counted and "00:04" in counted
+    offset = int(re.search(r"memory_read\(room_id='\*', start=(\d+)\)", counted)[1])
+    assert offset > 0
+    store = ChronicleStore(tmp_path)
+    from ouroboros.memory_view_events import catalogue_lines
+    groups = _groups(tmp_path, store)
+    catalogue = "\n".join(line for g in groups for line in catalogue_lines(g))
+    from ouroboros.memory_view_conversations import identity_line
+    expected = identity_line(next(g for g in groups if g["key"] == group["key"]))
+    assert catalogue[offset:].startswith(expected)
+    assert expected in _read_rooms(tmp_path, store, offset, 10_000)
+    for prefix in ("all:", "last:"):
+        assert "Events: 3 rooms, 5 arrivals" in draw({"F6g": {prefix + group["key"]}})
+    physical = draw({"F6a": {group["key"]}})
+    assert "3 event rooms, 5 arrivals" in physical and "Latest recorded title" not in physical
+    isolated = dataclasses.replace(snapshot, room=None, story=[], conversations=[group])
+    level = mv.FloorLevel((("F6g", tuple(selected["F6g"])),))
+    from ouroboros.memory_forms import stage_of
+    first = mf.floor_elements(isolated)[0]
+    assert stage_of(isolated, *first[:2]) == "remote_events"
+    frozen = mv.snapshot_json(isolated)
+    for gone in ({}, selected, {"F6g": {"all:" + group["key"]}},
+                 {"F6g": {"last:" + group["key"]}}, {"F6a": {group["key"]}}):
+        state = mv.FloorLevel(tuple((step, tuple(ids)) for step, ids in gone.items()))
+        assert mv.room_chars(isolated, state) == mv.json_chars(mv.render_room(isolated, state))
+    assert mv.snapshot_json(isolated) == frozen and '"_samples"' not in frozen
+    counted_level = mv.FloorLevel((("F6a", (group["key"],)),))
+    assert "conversation count" in mf.form_counts(isolated, counted_level)["emergency"]  # R2
+    assert mf.form_counts(isolated, counted_level)["host"]["event counts"]["sources"] == 5
+    ordinary = mf.ordinary_level(isolated)
+    assert not mf.form_counts(isolated, level)["emergency"]
+    budget = mf.tokens_of(mv.room_chars(isolated, ordinary)) + mf.tokens_of(mv.story_chars(isolated, ordinary)) + 30
+    fitted = mf.fit_memory_view(isolated, {"margin": budget, "physical": 10**9, "budget": None})
+    assert not mf.form_counts(isolated, fitted)["emergency"]
+    from ouroboros.memory_view_conversations import folded_rooms
+    assert not folded_rooms([group], dict(fitted.addressed))

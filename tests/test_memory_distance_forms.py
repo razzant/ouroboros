@@ -8,6 +8,41 @@ from ouroboros import memory_view_work as work
 from tests import _memory_view_synthetic as syn
 
 
+def test_three_sentence_completion_is_whole_here_and_one_sentence_in_another_conversation(tmp_path):
+    from ouroboros import dialogue_store as ds, memory_view_conversations as conv
+    from tests import _memory_inventory_shared as shared
+    rooms = shared.world(tmp_path)
+    gist = "The API now preserves its callers. The migration has passed. I left one measured follow-up."
+    for row in [shared.msg("2026-09-09T01:01:00Z", "I delivered the change.", direction="out",
+                           task_id="done001", root_task_id="done001", delegation_role="root"),
+                shared.msg("2026-09-09T01:02:00Z", "Done", direction="system", type="task_summary",
+                           task_id="done001", root_task_id="done001", summary_kind="terminal_root_projection",
+                           status="completed", wake_summary=gist)]:
+        ds.append(tmp_path, "chat", row)
+    def capture(chat):
+        task = {"id": "reader001", "chat_id": chat}
+        return mv.capture_memory_view(tmp_path, task, mv.view_spec_for_task(task, tmp_path))
+    own = capture(1)
+    task = next(t for t in own.room["lane2"] if t["task"] == "done001")
+    assert gist in task["line"]
+    short = mv.render_room(own, mv.FloorLevel((("F2", ("work:done001:final",)),)))
+    assert gist in short and "; work done001]" in short
+    remote = next(g for g in capture(rooms["alpha"]).conversations if g["key"] == "main")
+    line = next(t["line"] for r in remote["rooms"] for t in r["tasks"] if t["task"] == "done001")
+    assert work.first_sentence(gist) in line and "The migration has passed." not in line
+    assert "The migration has passed." not in conv.render_group(remote, set(), set(), 0)
+
+
+def test_page_and_note_leads_share_the_sentence_boundary_without_rewriting_the_words():
+    from ouroboros.text_sentences import first_sentence
+    text = "A thought on\ntwo lines. Another sentence! A third?"
+    page = dict(syn.pages(1, 500)[0], text=text, lead_rule=True)
+    note = {"id": "note1", "role": "root", "date": "2026-11-11", "text": text, "lead_rule": True}
+    assert mv._indented(first_sentence(text)) in mv._page_label(page)
+    assert ' '.join(first_sentence(text).split()) in mv._note_pointer(note)
+    assert "Another sentence!" not in mv._page_label(page) + mv._note_pointer(note)
+
+
 def size(snap, level=mv.FULL_VIEW):
     return mf.tokens_of(mv.story_chars(snap, level)) + mf.tokens_of(mv.room_chars(snap, level))
 

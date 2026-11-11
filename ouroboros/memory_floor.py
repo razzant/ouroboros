@@ -394,8 +394,8 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
             delta, current = before - actual, actual
         else:
             if step == "F6g" or step == "F6a":
-                key = ident.split(":", 1)[1] if ident.startswith(("all:", "last:")) else ident
-                whole = next((previous["F6g", name] for name in ("last:" + key, "all:" + key, key)
+                key = ident.split(":", 1)[1] if ident.startswith(("all:", "last:", "events:")) else ident
+                whole = next((previous["F6g", name] for name in ("last:" + key, "all:" + key, key, "events:" + key)
                               if ("F6g", name) in taken), whole)
             if step == "F5l" and ("F5", ident) in taken:
                 continue

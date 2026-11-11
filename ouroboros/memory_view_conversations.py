@@ -7,13 +7,13 @@ conversation -- a place conversation without its thread, a Project, Main -- in a
 focus's own room is ``## This room``. A group names where it is and who reads it (``RoomLabelResolver``), its
 running work, and each of its rooms that has open rows, a note of mine or running work:
 
-- a room where my human or I spoke since the legacy frontier (sealed rows too), or with a note of mine or running
-  work, or any room that is not a place's, is **engaged**: my notes there whole, the open words of people and mine
-  whole (``row_class`` lane 1; my rows name the work that sent them), and one line per task of its lane 2 -- the
-  card's stored word (its status where none was stored), the root's closing sentence and its reader; a child's
-  report never travels as text, as in its own room;
-- any other room is **silent**: one named line with its latest closing sentence, when a finish there wrote one,
-  how many words nobody considered since, and its reader.
+- a place room with a recorded living person's words or my outward reply (sealed rows too), or any non-place
+  room, is **engaged**: its open words stay whole, notes stay whole, and tasks carry their host facts and first gist
+  sentence. A bot inside a conversation keeps its words too; children never travel as reports;
+- arrivals from bots or my own unconfirmed account alone are **events**: the host names their first text,
+  last recorded author, counts and reader. A tighter ordinary form counts such rooms per conversation.
+  Unknown authors use the single pending choice in ``memory_view_events.count_unattributed``. Notes remain mine
+  and stay whole even beside events; running work remains named in the group. These host forms owe no telling.
 
 A writer's terminal rows its page links below it (``memory_sealing.linked_rows``) are that page's, never open
 here. A room's later delivery of words it already holds (the same ``text_sha256``, not my human's; by the same
@@ -31,7 +31,7 @@ from __future__ import annotations
 import datetime
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
-from ouroboros import chat_chain, memory_inventory
+from ouroboros import chat_chain, memory_inventory, memory_view_events as events
 from ouroboros.context_timing import timed_section
 from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
 from ouroboros.dialogue_provenance import (owner_speech, place_row_facts, recorded_person, recorded_speaker, row_class,
@@ -98,8 +98,8 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
             notes: Mapping[str, List[Dict[str, Any]]], lineage: Mapping[str, Any], *, quiet: Mapping[str, List[Entry]],
             sealed: Mapping[str, List[Entry]], gaps: Mapping[str, set], projects: Any,
             summaries: Optional[Mapping[str, Any]] = None) -> List[Dict[str, Any]]:
-    """The groups of my other conversations, by key: every room with open rows, a note or running work but the
-    focus's own (``spec.room_id``), from the rows ``memory_inventory.open_rows_by_room`` read for this capture."""
+    """The other conversations, by key. The full catalogue includes the focus room when calculating event readers;
+    the visible groups then exclude it (``spec.room_id``). From the rows ``memory_inventory.open_rows_by_room`` read for this capture."""
     from ouroboros import memory_view as mv
     from ouroboros.memory_room_activity import considered_through, running_by_room
     from ouroboros.memory_sealing import linked_rows
@@ -108,8 +108,8 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
     summaries = gists(by_room, chat_chain.format_address, quiet, sealed) if summaries is None else summaries
     membership = memory_inventory.membership_facts(root)
     running = running_by_room(root, by_room, notes, membership.bindings, projects or [])
-    rooms = sorted((set(by_room) | set(notes) | {room for room, kinds in gaps.items() if kinds}
-                    | {room for room, tasks in running.items() if tasks}) - {str(spec.room_id)})
+    rooms = sorted(set(by_room) | set(notes) | {room for room, kinds in gaps.items() if kinds}
+                   | {room for room, tasks in running.items() if tasks})
     linked = linked_rows(root, store, by_room, projects or ())
     here = {entry[0]["row_sha256"] for entry in by_room.get(str(spec.room_id), ())} if spec.room_lanes else set()
     # Labels come from the rows in hand (open and sealed): a room's newest row that came over a transport, whose tail
@@ -140,18 +140,16 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
             if ours and pos < first or ours and first < 0:  # older than every open row: it considers none of them
                 break
             author = row_class(meta, pos=pos, **lineage)
-            if author["lane"] == 1 and author["author"]["kind"] == "ouroboros":
-                ours, own = True, max(own, pos) if pos > first and _outward(author["author"]) else own
+            if author["lane"] == 1 and _outward(author["author"]):
+                ours, own = True, max(own, pos) if pos > first else own
             elif author["lane"] == 1 and _ours(meta, author["author"]):
                 ours = True
-        engaged = not place or ours or bool(notes.get(room)) or bool(running.get(room))
+        engaged = not place or ours
         fold = max(((pos, meta) for _a, meta, pos in held if meta.get("fold_read") is True and meta.get("wake_summary")),
                    key=lambda pair: pair[0], default=None)  # S5: a finish that read here folded it into its sentence
         considered = max(own, considered_through(quiet.get(room, ()), lineage), fold[0] if fold else -1)
         noted = max((_instant(note.get("ts")) for note in notes.get(room, ()) if _instant(note.get("ts"))), default=None)
         retold = max((pos for _a, meta, pos in held if meta.get("wake_summary")), default=-1)
-        sentence = next(((meta["wake_summary"], meta.get("ts")) for _a, meta, _p in reversed(held) if meta.get("wake_summary")),
-                        None)
         sample = samples[room]
         group = groups.setdefault(key, {"key": key, "rooms": [], "running": [], "latest": "", "place": bool(place)})
         if place and "label" not in group:  # a conversation; its rooms carry their own ids
@@ -168,17 +166,17 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
                                 "last": newest[2] if newest else -1}
         group.setdefault("label", item["label"])
         group["rooms"].append(item)
-        unconsidered = nobody_considered(spoken, considered)
         if not engaged:
-            said = f"«{sentence[0]}» ({mv._minute(sentence[1]).split(' ')[0]})" if sentence else ""
-            item["silent"] = "; ".join(part for part in (
-                f"last {mv._minute(latest)}" if latest else "", said,
-                f"{unconsidered} words nobody considered" if unconsidered else "",
-                f"memory_read(room_id='{room}', rows=true)") if part)
-            continue
+            previous = [(e, row_class(e[1], pos=e[2], **lineage)) for e in sealed.get(room, ())]
+            item["events"] = events.capture([*previous, *spoken])
         item["notes"] = list(notes.get(room, ()))
         again = _repeats(sorted((*sealed.get(room, ()), *held), key=lambda entry: entry[2]))
         for entry, cls in (pair for pair in spoken if pair[0][0]["row_sha256"] not in here):  # once, in this room
+            if room == str(spec.room_id) or not engaged and not (
+                cls["author"].get("unattributed") and not events.count_unattributed() or
+                cls["author"]["kind"] == "place_fact" and entry[1].get("direction") == "out"
+            ):
+                continue
             if fold and entry[2] <= fold[0] and not owner_speech(entry[1], cls["author"]):  # my human's stay whole
                 folded = item["folded"] or {"sentence": str(fold[1]["wake_summary"]), "ts": str(fold[1].get("ts") or ""),
                                             "task": str(fold[1].get("task_id") or ""),
@@ -202,7 +200,11 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
                             for task in group["running"]]
         group["rooms"].sort(key=lambda room: (room["first"] if room["first"] >= 0 else 1 << 62, room["room_id"]))
     shown = _once(shown, [room for key in sorted(groups) for room in groups[key]["rooms"]])
-    texts = mv._row_texts(root, [entry for _item, entry, _author, earlier in shown if earlier is None])
+    event_rooms = [room for group in groups.values() for room in group["rooms"] if room.get("events")]
+    texts = mv._row_texts(root, [entry for _item, entry, _author, earlier in shown if earlier is None]
+                         + [entry for room in event_rooms for entry in events.text_entries(room["events"])])
+    for room in event_rooms:
+        events.finish_capture(room["events"], texts)
     for item, entry, author, earlier in shown:
         word = mv._spoken(entry, author, texts)
         if earlier is not None:  # the earlier copy's words: one line naming it, this row's text never read
@@ -211,7 +213,16 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
             word.update(again=first, line=f"{word['head']} delivered again: {same} {first}; "
                         f"memory_read(room_id='{where}', rows=true, from='{first}', to='{first}')")
         item["words"].append({**word, "id": f"{item['room_id']}:{word['address']}", "rank": author["rank"]})
-    return [groups[key] for key in sorted(groups)]
+    ordered = [groups[key] for key in sorted(groups)]
+    if event_rooms:
+        events.locate_catalogue(ordered)
+    for group in ordered:
+        group["rooms"] = [room for room in group["rooms"] if room["room_id"] != str(spec.room_id)]
+        group["latest"] = max((str(room["facts"].get("latest") or "") for room in group["rooms"]), default="")
+        visible = sorted({task for room in group["rooms"] for task in running.get(room["room_id"], ())})
+        group["running"] = [f"get_task_result(task_id='{task}')" + (f": {focus[task]}" if task in focus else "")
+                            for task in visible]
+    return [group for group in ordered if group["rooms"]]
 
 
 def _once(shown: List[Tuple[Dict[str, Any], Entry, Dict[str, Any], Any]],
@@ -285,9 +296,8 @@ def _repeats(rows: List[Entry]) -> Dict[str, Dict[str, Any]]:
 
 
 def _ours(row: Mapping[str, Any], author: Mapping[str, Any]) -> bool:
-    """An act of mine or my human's in a room: my words, theirs (``owner_speech``) or a forward from their confirmed
-    account, which engages the room as theirs though its words stay another author's."""
-    return author.get("kind") == "ouroboros" or owner_speech(row, author) or author.get("owner_confirmed") is True
+    """A recorded living person or my outward reply, including before the open frontier."""
+    return events.starts_conversation(author)
 
 
 def _outward(author: Mapping[str, Any]) -> bool:

@@ -142,8 +142,8 @@ def world(tmp_path, monkeypatch):
         task.update(type="task", text="Inspect the assigned fixture.")
         write_task_result(root, task["id"], "running", **{key: value for key, value in task.items() if key != "id"})
 
-    # Projects are always engaged. A place where only a guest has spoken exercises
-    # the real quiet-room branch without changing any memory-view flags.
+    # Projects are always engaged. A recorded guest also makes a place a conversation
+    # (commit 4, provider-independent rule), even before I answer there.
     for conversation, text in (("quiet", "QUIET GUEST WORDS: the indigo ferry arrived."),
                                ("presence", "Please inspect the white lantern.")):
         places.connect_place(root, connector="contract-bridge", provider="chat", account_id="fixture",
@@ -224,12 +224,12 @@ def test_first_request_content_contract(world, case, role, full, story):
         "Compare compass bearings before drawing a route.",
         "## Other conversations", "## Shared understanding", "## Knowledge base",
         "The orchard measurements are complete.", "get_task_result(task_id='earlier-beta')",
+        "QUIET GUEST WORDS: the indigo ferry arrived.",
     ):
         assert (words in text) is full, (case, words)
     for words in ("## My story", "I checked the copper bridge yesterday; its eastern support is sound."):
         assert (words in text) is story, (case, words)
     for words in (
-        "QUIET GUEST WORDS: the indigo ferry arrived.",
         "PRIVATE CHILD REPORT: soil samples are attached.",
         "EARLIER REPORT BODY: all orchard measurements.",
         "NOTE BODY: the east bearing is engraved underneath.",
@@ -249,9 +249,12 @@ def test_first_request_content_contract(world, case, role, full, story):
         other = section(text, "## Other conversations")
         assert "Keep the violet orchard open until I return." in other
         assert f"memory_read(room_id='{world.beta['chat_id']}', rows=true)" in other
-        quiet_line = next(line for line in other.splitlines() if line.startswith("- ") and f"chat_id={world.quiet}]" in line)
-        assert "words nobody considered" in quiet_line
-        assert f"memory_read(room_id='{world.quiet}', rows=true)" in quiet_line
+        captured = memory_view.snapshot_from_json(ctx.context_fit_plan.core.memory_view_json)
+        guest = next(r for g in captured.conversations for r in g["rooms"] if r["room_id"] == str(world.quiet))
+        assert guest["engaged"] and len(guest["words"]) == 1
+        word = guest["words"][0]
+        assert word["line"] in other and word["address"] in other and "Guest" in word["author"]
+        assert not word["owner_side"] and f"memory_read(room_id='{world.quiet}', rows=true)" in other
         assert "QUIET GUEST WORDS: the indigo ferry arrived." in _read(ctx, "memory_read", room_id=str(world.quiet), rows=True)
         assert "EARLIER REPORT BODY: all orchard measurements." in _read(ctx, "get_task_result", task_id="earlier-beta")
     else:

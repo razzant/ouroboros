@@ -48,10 +48,10 @@ def test_a_legacy_conversation_without_gist_facts_has_only_host_counts():
     sentences = [task["line"].split("«")[1].split("»")[0] for room in both["rooms"] for task in room["tasks"]]
     whole, line = (conversations.render_group(both, set(), set(), as_line) for as_line in (False, True))
     assert len(sentences) == 2 and all(sentence in whole for sentence in sentences)
-    assert not any(sentence in line for sentence in sentences) and "2 rooms where my human or I spoke" in line
+    assert not any(sentence in line for sentence in sentences) and "2 rooms where a person or I spoke" in line
 
 
-def test_own_accounts_and_bots_still_stand_as_conversation_and_unread_arrivals_yield_first():
+def test_saved_conversations_keep_their_captured_words_and_unread_arrivals_yield_first():
     snapshot = syn.snapshot(conversations=syn.place_threads())
     words = {word["id"]: word for group in snapshot.conversations for room in group["rooms"] for word in room["words"]}
     order = list(shorter(snapshot, "F6w"))
@@ -64,4 +64,4 @@ def test_own_accounts_and_bots_still_stand_as_conversation_and_unread_arrivals_y
     text = mv.render_room(snapshot)  # whole: my account's publications, a bot's labels, a stranger's question
     assert all(word["line"] in text for word in words.values()) and "1 words nobody considered" in text
     lines = [conversations.identity_line(group) for group in snapshot.conversations[1:4]]
-    assert all("1 room where my human or I spoke" in line for line in lines)
+    assert all("1 room where a person or I spoke" in line for line in lines)

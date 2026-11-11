@@ -87,9 +87,10 @@ def _count_forms(snapshot, level):
 
 def _remote_counts(snapshot, gone, add):
     from ouroboros.memory_view_conversation_forms import local_key
+    from ouroboros.memory_view_events import totals
     sources, index = _conversation_sources(snapshot), conversations.source_index(snapshot)
     cache = snapshot.__dict__.setdefault("_conversation_form_counts", {})
-    lost = groups_counted = global_unread = 0
+    lost = groups_counted = global_unread = event_arrivals = 0
     for group in snapshot.conversations:
         data = index[group["key"]]
         state = local_key(group, gone, data)
@@ -102,21 +103,28 @@ def _remote_counts(snapshot, gone, add):
         for kind, name, lines, n in facts:
             add(kind, name, lines, n)
         lost += missing
+        if count:
+            event_arrivals += totals(group["rooms"])[1]
         groups_counted += count
         global_unread += unread
     add("emergency", "conversation count", int(bool(groups_counted)), lost or groups_counted)
+    add("host", "event counts", int(bool(event_arrivals) and not groups_counted), event_arrivals)
     add("window", "unread count", int(bool(global_unread)), global_unread)
 
 
 def _group_counts(group, data, sources, state, aggregate_unread):
     """Only numbers for one local form; grouping another conversation cannot change them."""
     from ouroboros.memory_view_conversation_forms import _visible_gists
-    form, words, owners = state[3:]
+    from ouroboros.memory_view_events import totals
+    form, words, owners, event_count = state[3:]
     count = form == 4
     facts, lost, global_unread = [], 0, 0
     def add(kind, name, lines, n):
         if n:
             facts.append((kind, name, lines, n))
+    event_rooms, arrivals = totals(group["rooms"])
+    if not count:
+        add("host", "event counts" if event_count else "events", int(bool(event_rooms)) if event_count else event_rooms, arrivals)
     if form and not count:
         add("host", "conversation facts", 1, 1)
         gists = data["gists"]
@@ -134,7 +142,7 @@ def _group_counts(group, data, sources, state, aggregate_unread):
         unread, owner, rest = sources[remote["room_id"]]
         if count:
             lost += len(rest) + len(remote["notes"]) + len(remote["tasks"]) + int((remote.get("folded") or {}).get("count", 0))
-            lost += int(not remote["engaged"])
+            lost += int(not remote["engaged"] and not remote.get("events"))
         elif form:
             if form == 1:
                 add("retold", "note leads", len(remote["notes"]), len(remote["notes"]))

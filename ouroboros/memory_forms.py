@@ -1,8 +1,7 @@
 """Memory forms and their distance order, independent of a request's budget and fit.
 
 Each element keeps an existing rung and source identity. Stages order those
-elements; the clean-start guard walks only ordinary forms. Event counts reserve
-their place without changing a silent room into an event.
+elements; the clean-start guard walks only ordinary forms, event counts first.
 """
 from collections import defaultdict, deque
 from itertools import groupby
@@ -58,7 +57,8 @@ def stage_of(snapshot, step, ident):
         return ("remote_told" if kind == "told" else "remote_unread" if kind == "unread"
                 else "remote_mine" if cached["words"][ident]["kind"] == "ouroboros" else "remote_people")
     if step == "F6g":
-        return "remote_all" if ident.startswith("all:") else "remote_last" if ident.startswith("last:") else "remote_gists"
+        return ("remote_events" if ident.startswith("events:") else "remote_all" if ident.startswith("all:")
+                else "remote_last" if ident.startswith("last:") else "remote_gists")
     if step == "F6a":
         return "unread_count" if ident == "unread" else "remote_count"
     if step in ("F5l", "F8"):
@@ -98,7 +98,10 @@ def supersedes(step, ident):
         return ((step, ident.removesuffix(":final") + ":progress"),)
     if step == "F6g" and ident.startswith(("all:", "last:")):
         key = ident.split(":", 1)[1]
-        return ((step, key), (step, "all:" + key)) if ident.startswith("last:") else ((step, key),)
+        return ((step, "events:" + key), (step, key), (step, "all:" + key)) if ident.startswith("last:") else (
+            (step, "events:" + key), (step, key))
+    if step == "F6g" and not ident.startswith("events:"):
+        return ((step, "events:" + ident),)
     return ()
 
 
@@ -221,9 +224,10 @@ def swallowed(snapshot, step, ident, selected):
     if not (selected.by_step.get("F6g") or selected.by_step.get("F6a")):
         return False
     key = (snapshot.__dict__["_form_catalogue"]["parents"].get(ident.removeprefix("bare:")) if step == "F6w" else
-           ident.split(":", 1)[1] if ident.startswith(("all:", "last:")) else ident)
+           ident.split(":", 1)[1] if ident.startswith(("all:", "last:", "events:")) else ident)
     return (("F6a", key) in selected or step == "F6w" and any(
         ("F6g", name) in selected for name in (key, "all:" + key, "last:" + key))
+        or step == "F6g" and ident.startswith("events:") and ("F6g", key) in selected
         or step == "F6g" and ident == key and ("F6g", "all:" + key) in selected
         or step == "F6g" and ident != "last:" + key and ("F6g", "last:" + key) in selected)
 
@@ -253,6 +257,18 @@ def restore(snapshot, table, taken, added, target, current, level, measure):
                 batch.append((pair, delta))
                 cost += delta
             if not batch:
+                if not pending:
+                    break
+                # A local saving can exceed the actual restore price by rounding
+                # or shared headers. Probe before giving up on this stage;
+                # a failed probe still ends that stage's older prefix.
+                pair, _delta = pending.popleft()
+                taken.discard(pair)
+                actual = measure(level(taken))
+                if actual <= target:
+                    current = actual
+                    continue
+                taken.add(pair)
                 break
             actual = measure(level(taken))
             if actual <= target:

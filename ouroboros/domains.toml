@@ -261,6 +261,7 @@ D20 = "Presence"
 "ouroboros/memory_form_facts.py" = "D03"  # captured memory forms and their provenance
 "ouroboros/memory_view_work.py" = "D03"  # captured memory forms and their provenance
 "ouroboros/memory_view_conversation_forms.py" = "D03"  # captured memory forms and their provenance
+"ouroboros/memory_view_events.py" = "D03"  # ordinary place event facts and their catalogue readers
 "ouroboros/memory_view_legacy.py" = "D03"  # how my story names a retold old record: what its address holds
 "ouroboros/memory_view_account.py" = "D03"  # common-view account rendering and retained source addresses
 "ouroboros/memory_view_conversations.py" = "D03"  # my other conversations: their groups, words whole, task lines
