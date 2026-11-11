@@ -807,6 +807,7 @@ def _consciousness_status_facts(ctx: ToolContext) -> str:
         LAST_SKIP_STATE_KEY,
         LAST_WAKE_STATE_KEY,
         NEXT_WAKE_STATE_KEY,
+        STOP_SOURCE_KEY,
         _iso,
         panic_blocks_wake,
     )
@@ -832,9 +833,9 @@ def _consciousness_status_facts(ctx: ToolContext) -> str:
             stored = loaded if isinstance(loaded, dict) else None
             gap = "" if stored is not None else "corrupt: the file is not a JSON object"
     facts = {"source": str(path), "observed_at": utc_now_iso()}
-    fields = (("enabled", "bg_consciousness_enabled"), ("stored_next_wake_at", NEXT_WAKE_STATE_KEY),
-              ("last_wake_ended_at", LAST_WAKE_STATE_KEY), ("chosen_interval_sec", INTERVAL_STATE_KEY),
-              ("last_skip", LAST_SKIP_STATE_KEY))
+    fields = (("enabled", "bg_consciousness_enabled"), ("stopped_by", STOP_SOURCE_KEY),  # owner, panic or agent_tool
+              ("stored_next_wake_at", NEXT_WAKE_STATE_KEY), ("last_wake_ended_at", LAST_WAKE_STATE_KEY),
+              ("chosen_interval_sec", INTERVAL_STATE_KEY), ("last_skip", LAST_SKIP_STATE_KEY))
     if stored is None:
         facts.update(read_gap=gap, not_read=[name for name, _key in fields])
     else:
@@ -849,10 +850,11 @@ def _consciousness_status_facts(ctx: ToolContext) -> str:
                     facts[name] = _iso(value)
                 except (OverflowError, OSError, ValueError):
                     pass
-        unproven = authority_reason(path.parent.parent, str(stored.get("initialization_id") or "")) or (
-            "" if control_value(stored, "bg_consciousness_enabled")[0] else "unconfirmed after a state recovery")
-        if "enabled" in facts and unproven:
-            facts["enabled"] = {"status": "unknown", "reason": unproven}
+        authority = authority_reason(path.parent.parent, str(stored.get("initialization_id") or ""))
+        for name, key in fields[:2]:  # the two controls: shown only as a copy that proves them
+            unproven = authority or ("" if control_value(stored, key)[0] else "unconfirmed after a state recovery")
+            if name in facts and unproven:
+                facts[name] = {"status": "unknown", "reason": unproven}
     if panic_blocks_wake(path.parent.parent):
         facts["panic_flag_kept"] = "state/panic_stop.flag is unreceived or unreadable: no wake starts until it is received"
     facts["configured_bounds_sec"] = {"min": get_bg_wakeup_min_sec(), "max": get_bg_wakeup_max_sec(),

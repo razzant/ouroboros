@@ -42,7 +42,7 @@ def runtime(tmp_path, monkeypatch):
     ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, budget_drive_root=tmp_path,
                           task_id="requester", task_attempt=1, current_task_type="task",
                           task_metadata={}, pending_events=[], event_queue=events)
-    host = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING=workers.RUNNING, PENDING=workers.PENDING,
+    host = SimpleNamespace(DRIVE_ROOT=tmp_path, REPO_DIR=tmp_path, RUNNING=workers.RUNNING, PENDING=workers.PENDING,
                            load_state=lambda: {}, persist_queue_snapshot=queue.persist_queue_snapshot)
     return SimpleNamespace(server=server, restart=server_restart, queue=queue, workers=workers,
                            state=state, ctx=ctx, host=host, events=events, root=tmp_path)
@@ -992,7 +992,7 @@ def test_evolution_completion_retries_unknown_decision_on_existing_restart_tick(
     assert runtime.restart.agent_restart_holds(queued) and queued in runtime.queue.PENDING
 
 
-def test_restart_drain_tells_the_owner_how_many_tasks_it_waits_for_and_logs_their_ids(monkeypatch, caplog):
+def test_restart_drain_tells_the_owner_how_many_tasks_it_waits_for_and_logs_their_ids(monkeypatch, caplog, tmp_path):
     """Audit 05.11 item 8: the drain row in Main says how many tasks it waits for; their ids go to one log line."""
     import logging
     import uuid
@@ -1007,7 +1007,7 @@ def test_restart_drain_tells_the_owner_how_many_tasks_it_waits_for_and_logs_thei
         server = SimpleNamespace(uuid=uuid, time=time, log=server_restart.log, _pending_restart={},
                                  _live_running_task_ids=lambda ctx, live=live: list(live),
                                  _perform_supervisor_restart=lambda *a, **k: pytest.fail("the drain comes first"))
-        ctx = SimpleNamespace(load_state=lambda: {"owner_chat_id": 1},
+        ctx = SimpleNamespace(load_state=lambda: {"owner_chat_id": 1}, REPO_DIR=tmp_path, DRIVE_ROOT=tmp_path,
                               send_with_budget=lambda chat, text, **kwargs: sent.append(text))
         caplog.clear()
         with caplog.at_level(logging.INFO, logger=server_restart.log.name):
