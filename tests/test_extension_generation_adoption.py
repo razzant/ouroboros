@@ -327,6 +327,7 @@ def test_safety_assesses_the_timeout_bound_handler_under_its_own_reviewed_declar
     """A real loader swap after timeout selection: the handler that runs is the bound one, judged by its own publication."""
     from ouroboros import safety
     from ouroboros.tools.registry import ToolRegistry
+    from tests._safety_fixtures import reset_safety_stores
 
     _as_server()
     loaded, repo_root, drive_root = _prepare_extension(
@@ -340,7 +341,7 @@ def test_safety_assesses_the_timeout_bound_handler_under_its_own_reviewed_declar
     monkeypatch.setattr(safety, "get_safety_mode", lambda *a: "full")
     monkeypatch.setattr(safety, "_run_llm_check", lambda *a, **kw: (assessments.append(a[0]), (False, "inert refusal"))[1])
     monkeypatch.setattr(safety, "_emit_durable_safety_event", lambda *a, **kw: None)
-    monkeypatch.setattr(safety, "_PRIOR_VERDICTS", {})
+    reset_safety_stores()
     real_timeout = registry.get_timeout
 
     def select_then_reload(name):
@@ -372,13 +373,13 @@ _SPEAKS = "tools:\n  - name: say\n    effect: message\n    target: channel\n    
 
 def _supervisor(monkeypatch, verdict="SAFE", runtime="advanced"):
     """The real Safety path; only the physical model call is recorded and answers ``verdict`` (an exception: no answer)."""
-    import collections
     import json
 
     from ouroboros import safety
+    from tests._safety_fixtures import reset_safety_stores
 
     prompts: list[str] = []
-    monkeypatch.setattr(safety, "_PRIOR_VERDICTS", collections.OrderedDict())
+    reset_safety_stores()
     monkeypatch.setattr(safety, "_SAFETY_STORM_UNTIL", 0)
     monkeypatch.setattr(safety, "_CHAIN_STORMS", {})
     monkeypatch.setattr(safety, "_resolve_safety_routing", lambda: (False, False, None))
@@ -445,10 +446,10 @@ def _speaker_call(tmp_path, monkeypatch, *, replacement="message", then=None, ou
 
 
 @pytest.mark.parametrize("runtime,verdict,refusal", [  # a flag at either level returns words unsent (the final assessment)
-    ("advanced", "SUSPICIOUS", "Message not sent"),
-    ("advanced", "DANGEROUS", "Message not sent"),
-    ("cyber_pro", "DANGEROUS", "Message not sent"),
-    ("cyber_pro", RuntimeError("checker route down"), "SAFETY_UNAVAILABLE"),
+    ("advanced", "SUSPICIOUS", "⚠️ SAFETY_RETURNED: not run;"),
+    ("advanced", "DANGEROUS", "⚠️ SAFETY_RETURNED: not run;"),
+    ("cyber_pro", "DANGEROUS", "⚠️ SAFETY_RETURNED: not run;"),
+    ("cyber_pro", RuntimeError("checker route down"), "⚠️ SAFETY_UNAVAILABLE: not run."),
 ])
 @pytest.mark.parametrize("replacement", ["message", "read", None])
 def test_a_bound_message_handler_keeps_its_speech_refusal_across_a_replacement(
@@ -460,7 +461,7 @@ def test_a_bound_message_handler_keeps_its_speech_refusal_across_a_replacement(
     result, place = _speaker_call(tmp_path, monkeypatch, replacement=replacement)
 
     assert result["is_error"] is True and refusal in result["result"], result
-    assert "said" not in result["result"], "the bound message handler ran past a speech refusal"
+    assert "said hi in C2" not in result["result"], "the bound message handler ran past a speech refusal"
     facts = _brief_place(prompts[0])
     assert (facts["effect"], facts["declared"], facts["targets"]) == ("message", True, {"channel": ["C2"]}), facts
     assert [row["place_id"] for row in facts["places"]] == [place.place_id]

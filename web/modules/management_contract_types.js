@@ -404,12 +404,8 @@
  */
 
 /**
- * Engine or host preparation problem. POST may prepare Node/npm:
- * 409 maintenance_restart_required asks for Restart Claudexor in Accounts;
- * 409/503 maintenance_preparation_failed reports failure. Both carry
- * context.acceptance=not_submitted, scope=this_attempt. Optional inspection failure still
- * permits POST. After 503 acceptance=unknown, keep the same body and Idempotency-Key,
- * even after a later preparation-only reply, then resend both.
+ * Engine or host problem. A pre-submit not_submitted covers this attempt only.
+ * After acceptance=unknown, retain the original body and Idempotency-Key until resolved.
  * @typedef {Object} ClaudexorMaintenanceProblem
  * @property {Object} error  // {code, message, retryable?, requiredActions?, context?}
  */
@@ -420,39 +416,170 @@
  * @property {string} profile_id
  */
 
+// Engine program observations and receipts pass through unchanged. Plans are display-only.
 /**
- * Sent with a required Idempotency-Key header.
+ * @typedef {Object} ClaudexorSelectedProgram
+ * @property {?string} path
+ * @property {?string} realPath
+ * @property {?string} version
+ * @property {?string} versionOutput
+ * @property {?string} overrideEnv
+ * @property {?string} overrideValue
+ */
+
+/**
+ * @typedef {Object} ClaudexorProgramExecCommand
+ * @property {'exec'} kind
+ * @property {string} command
+ * @property {string[]} args
+ * @property {Object<string, string>=} env
+ */
+
+/**
+ * @typedef {Object} ClaudexorProgramScriptCommand
+ * @property {'script'} kind
+ * @property {string} url
+ * @property {string} interpreter
+ * @property {string[]} interpreterArgs
+ * @property {string[]} args
+ * @property {Object<string, string>=} env
+ */
+
+/**
+ * @typedef {Object} ClaudexorProgramAction
+ * @property {boolean} available
+ * @property {?string} reason
+ * @property {Array<ClaudexorProgramExecCommand|ClaudexorProgramScriptCommand>} commands
+ */
+
+/**
+ * @typedef {Object} ClaudexorProgramActions
+ * @property {ClaudexorProgramAction} install
+ * @property {ClaudexorProgramAction} update
+ * @property {ClaudexorProgramAction} exactVersion
+ */
+
+/**
+ * @typedef {Object} ClaudexorNewestNotRead
+ * @property {'not_read'} status
+ * @property {?string} source
+ */
+
+/**
+ * @typedef {Object} ClaudexorNewestAvailable
+ * @property {'available'} status
+ * @property {string} source
+ * @property {string} version
+ * @property {string} observedAt
+ */
+
+/**
+ * @typedef {Object} ClaudexorNewestUnavailable
+ * @property {'unavailable'} status
+ * @property {?string} source
+ * @property {string} observedAt
+ * @property {Object} problem
+ */
+
+/**
+ * @typedef {Object} ClaudexorMaintenanceLatestTarget
+ * @property {'latest'} kind
+ */
+
+/**
+ * @typedef {Object} ClaudexorMaintenanceVersionTarget
+ * @property {'version'} kind
+ * @property {string} version
+ */
+
+/**
+ * @typedef {Object} ClaudexorMaintenanceLatestReceiptTarget
+ * @property {'latest'} kind
+ * @property {null} version
+ */
+
+/**
  * @typedef {Object} ClaudexorMaintenanceRequest
  * @property {string} harness
- * @property {Object} target
+ * @property {(ClaudexorMaintenanceLatestTarget|ClaudexorMaintenanceVersionTarget)} target
  */
 
 /**
- * Engine ControlHarnessMaintenanceOperation, passed through.
+ * @typedef {Object} ClaudexorMaintenanceRequester
+ * @property {string} source
+ * @property {?string} requestId
+ */
+
+/**
+ * @typedef {Object} ClaudexorMaintenanceScript
+ * @property {string} url
+ * @property {number} size
+ * @property {string} sha256
+ */
+
+/**
+ * @typedef {Object} ClaudexorMaintenanceCommand
+ * @property {string} binary
+ * @property {string[]} args
+ * @property {Object<string, string>} env
+ * @property {?ClaudexorMaintenanceScript} script
+ */
+
+/**
+ * @typedef {Object} ClaudexorMaintenanceElsewhere
+ * @property {ClaudexorSelectedProgram} before
+ * @property {ClaudexorSelectedProgram} after
+ */
+
+/**
+ * @typedef {Object} ClaudexorMaintenanceProfileCleanup
+ * @property {string[]} plannedPaths
+ * @property {string[]} removedPaths
+ */
+
+/**
  * @typedef {Object} ClaudexorMaintenanceOperation
  * @property {string} id
- * @property {string} state
- * @property {string=} harness
- * @property {string=} phase
- * @property {string=} mechanism
- * @property {Object=} target
- * @property {*=} before
- * @property {*=} after
- * @property {string=} mutation
- * @property {string=} termination
- * @property {*=} limitations
- * @property {*=} progress
- * @property {*=} problem
- * @property {string=} createdAt
- * @property {?string=} startedAt
- * @property {?string=} finishedAt
+ * @property {string} harness
+ * @property {('queued'|'running'|'succeeded'|'failed'|'cancelled'|'interrupted')} state
+ * @property {('accepted'|'preparing'|'installing'|'settled')} phase
+ * @property {(ClaudexorMaintenanceLatestReceiptTarget|ClaudexorMaintenanceVersionTarget)} target
+ * @property {ClaudexorMaintenanceRequester} requester
+ * @property {?string} installationHome
+ * @property {ClaudexorMaintenanceCommand[]} commands
+ * @property {ClaudexorMaintenanceProfileCleanup=} profileCleanup
+ * @property {?ClaudexorSelectedProgram} before
+ * @property {?ClaudexorSelectedProgram} after
+ * @property {?ClaudexorMaintenanceElsewhere} elsewhere
+ * @property {?number} activeRunsAtStart
+ * @property {?number} exitCode
+ * @property {('changed'|'not_changed'|'changed_elsewhere'|'unknown')} outcome
+ * @property {('none'|'applied'|'unknown')} mutation
+ * @property {('not_applicable'|'confirmed'|'unconfirmed')} termination
+ * @property {string[]} limitations
+ * @property {string[]} progress
+ * @property {?Object} problem
+ * @property {string} createdAt
+ * @property {?string} startedAt
+ * @property {?string} finishedAt
  */
 
 /**
- * Engine ControlHarnessMaintenanceInventory, passed through.
+ * @typedef {Object} ClaudexorMaintenanceEntry
+ * @property {string} harness
+ * @property {ClaudexorSelectedProgram} selection
+ * @property {(ClaudexorNewestNotRead|ClaudexorNewestAvailable|ClaudexorNewestUnavailable)} newest
+ * @property {ClaudexorProgramActions} actions
+ * @property {('yes'|'no'|'cannot_tell')} updateAvailable
+ * @property {?string} releaseNotesUrl
+ * @property {?ClaudexorMaintenanceOperation} operation
+ * @property {string} observedAt
+ */
+
+/**
  * @typedef {Object} ClaudexorMaintenanceInventory
  * @property {string} observedAt
- * @property {Object[]} harnesses
+ * @property {ClaudexorMaintenanceEntry[]} harnesses
  */
 
 /**

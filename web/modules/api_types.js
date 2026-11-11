@@ -162,11 +162,13 @@
  * @property {boolean=} automatic The read's own unsaved catalog, following Main and access.
  */
 /** @typedef {Object} SettingsMeta
+ * @property {Object<string, 'now'|'next_call'|'next_wake'|'next_task'|'restart'|'local_model'>} effects
+ * @property {Object<string, string>} tokens
  * @property {string[]=} custom_secret_keys
  * @property {Object=} setup_contract
  * @property {AvailableSubagentsSettingsMeta=} available_subagents
  * @property {import('./client_contract_types.js').SettingsPolicyState=} policy_state
- * @property {{restart_required:boolean,restart_keys:string[],restart_source_unknown_keys:string[],unknown_keys:string[],local_model:Object,summary:string}=} restart_state Component application and source uncertainty.
+ * @property {import('./client_contract_types.js').SettingsRestartState=} restart_state Component application and source uncertainty.
  * @property {{kind:string,name:string,label:string,builtin:boolean,enabled:boolean,configured:boolean,source:string,id:string,display:string}[]=} connections Every API connection as the picker shows it.
  * @property {string[]=} main_connection_choice The connections an unauthored Main waits to be chosen among.
  */
@@ -211,14 +213,7 @@
  * @property {OnboardingPresetProjection} preset
  */
 /** @typedef {import('./client_contract_types.js').OnboardingAttemptResponse} OnboardingAttemptResponse */
-/**
- * 500 AFTER settings landed: retry the named later step, never re-save (settings/onboarding writes).
- * @typedef {Object} SettingsPostCommitFailureResponse
- * @property {string} error
- * @property {string} status  // saved_with_post_commit_error
- * @property {boolean} saved  // always true
- * @property {string} post_commit_failed
- */
+/** @typedef {import('./client_contract_types.js').SettingsPostCommitFailureResponse} SettingsPostCommitFailureResponse */
 /**
  * 503 settings_save_timeout: the server writer still runs; saved=null is unknown. Reload to check status before retrying.
  * @typedef {Object} SettingsSaveTimeoutResponse
@@ -887,11 +882,13 @@
 /**
  * `POST /api/settings` success; `restart_keys` apply only after a restart.
  * @typedef {Object} SettingsSaveResponse
+ * @property {Object<string, import('./client_contract_types.js').SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
  * @property {string=} status
  * @property {boolean=} no_changes
  * @property {boolean=} restart_required
  * @property {string[]=} restart_keys
- * @property {Object=} restart_state
+ * @property {import('./client_contract_types.js').SettingsRestartState=} restart_state
  * @property {boolean=} immediate_changed
  * @property {boolean=} next_task_changed
  * @property {string[]=} warnings
@@ -900,16 +897,22 @@
  * @property {Object[]=} connection_references Rows naming a connection that cannot serve them: {setting, entry?, route, connection, reason}.
  */
 /** @typedef {Object} OwnerRuntimeModeResponse
+ * @property {Object<string, import('./client_contract_types.js').SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
  * @property {boolean} ok
  * @property {string} runtime_mode
  * @property {boolean} restart_required
  */
 /** @typedef {Object} OwnerAutoGrantResponse
+ * @property {Object<string, import('./client_contract_types.js').SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
  * @property {boolean} ok
  * @property {boolean} enabled
  */
 
 /** @typedef {Object} OwnerContextModeResponse
+ * @property {Object<string, import('./client_contract_types.js').SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
  * @property {boolean} ok
  * @property {string} context_mode
  * @property {string} project_id
@@ -950,6 +953,8 @@
 
 /**
  * @typedef {Object} OwnerSafetyModeResponse
+ * @property {Object<string, import('./client_contract_types.js').SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
  * @property {boolean} ok
  * @property {string} safety_mode  // full | light | off (v6.54.3)
  */
@@ -1339,6 +1344,8 @@
  * @property {string} error
  * @property {string=} code
  * @property {Array<string>=} required_actions
+ * @property {Object<string, *>=} context
+ * @property {boolean=} retryable
  */
 /**
  * @typedef {Object} ClaudexorVendorCredentialDisposition

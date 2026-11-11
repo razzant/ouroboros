@@ -1032,7 +1032,7 @@ def _observe_session(gateway: Any, run_id: str, remaining: float, streak: Any) -
     or ``({}, failure)`` when the run could not be observed (transport, timeout, 5xx,
     unreadable body) — it is still live, so polling continues (#1547). A received 4xx
     about the run propagates while the window is open; a spent window takes the 1 ms
-    read whose silence means only "still unobserved", as ``expiring_poll`` does."""
+    read whose silence means only "still unobserved"."""
     from ouroboros.delegate_progress import bounded_poll
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
     try:

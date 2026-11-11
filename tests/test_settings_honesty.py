@@ -335,6 +335,156 @@ def test_handle_task_wires_the_disclosing_reload():
     assert reset_at < disclose_at
 
 
+from tests.test_consciousness import clock as clock_fixture
+
+clock = clock_fixture
+
+
+def test_every_default_has_one_effect_without_changing_actor_snapshot_policy():
+    from ouroboros.config import SETTINGS_DEFAULTS
+    from ouroboros.gateway.settings import _effect_buckets
+    from ouroboros.settings_integrity import _next_task_setting
+    from ouroboros.settings_scales import setting_effect
+
+    # Frozen pre-change snapshot exclusions, independent of the new presentation function.
+    original_live = {"TOTAL_BUDGET", "OUROBOROS_SUBAGENTS_MODE", "OUROBOROS_UI_LANGUAGE",
+                     "OUROBOROS_TOOL_TIMEOUT_SEC", "OUROBOROS_MODEL_MAX_CONCURRENCY", "GITHUB_TOKEN", "GITHUB_REPO",
+                     "OUROBOROS_UPDATE_CHANNEL", "MCP_ENABLED", "MCP_SERVERS", "MCP_TOOL_TIMEOUT_SEC"}
+    original_restart = {"OUROBOROS_MAX_WORKERS", "OUROBOROS_SERVER_HOST", "OUROBOROS_HOST_SERVICE_PORT",
+                        "OUROBOROS_UI_DIR", "OUROBOROS_SKILLS_REPO_PATH", "LOCAL_MODEL_SOURCE", "LOCAL_MODEL_FILENAME",
+                        "LOCAL_MODEL_PORT", "LOCAL_MODEL_N_GPU_LAYERS", "LOCAL_MODEL_CONTEXT_LENGTH", "LOCAL_MODEL_CHAT_FORMAT"}
+    classes = {"now", "next_call", "next_wake", "next_task", "restart", "local_model"}
+    for key in SETTINGS_DEFAULTS:
+        effect = setting_effect(key)
+        assert effect in classes, key
+        live, later = _effect_buckets([key])
+        assert bool(live) == (effect in {"now", "next_call"}), key
+        assert bool(later) == (effect in {"next_wake", "next_task"}), key
+        assert _next_task_setting(key) == (key not in original_live | original_restart | {"OUROBOROS_RUNTIME_MODE"}), key
+    assert setting_effect("UNRECOGNIZED_KEY") == "next_task"
+    assert setting_effect("OUROBOROS_SAFETY_OWNER_RULES") == "next_task"
+    assert setting_effect("OUROBOROS_NETWORK_PASSWORD") == "now"
+    assert setting_effect("OUROBOROS_FINALIZATION_GRACE_SEC") == "now"
+    assert setting_effect("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS") == "now"
+
+
+@pytest.mark.parametrize("case", ["scheduled_wake", "launched_wake", "following_model", "explicit_model", "restart", "local_model"])
+def test_effects_at_the_reader_boundary_keep_running_actor_facts(clock, isolated_settings, monkeypatch, case):
+    import os
+    from types import SimpleNamespace
+    from ouroboros import config, consciousness, route_choice, local_model
+    from ouroboros.gateway import settings
+    from ouroboros.settings_integrity import task_settings_scope, task_settings_snapshot, runtime_setting
+    from ouroboros.settings_scales import setting_effect
+
+    initial = {"OPENROUTER_API_KEY": "fixture", "OUROBOROS_MODEL": "openai/old", "OUROBOROS_MODEL_SAFETY": "openai/checker",
+               "OUROBOROS_CONSCIOUSNESS_DAILY_USD": 20, "OUROBOROS_CONSCIOUSNESS_AUTONOMY": "act",
+               "OUROBOROS_CONSCIOUSNESS_MAX_TASKS": 2, "OUROBOROS_BG_WAKEUP_MIN": 900, "OUROBOROS_BG_WAKEUP_MAX": 14400,
+               "LOCAL_MODEL_CONTEXT_LENGTH": 16384, "OUROBOROS_MAX_WORKERS": 10}
+    isolated_settings.write_text(json.dumps(initial), encoding="utf-8")
+    for key in config.SETTINGS_DEFAULTS:
+        monkeypatch.setenv(key, os.environ.get(key, ""))  # restore environment projection at fixture teardown
+    config.apply_settings_to_env(config.load_settings())
+    snapshot = task_settings_snapshot(config.load_settings(), dict(os.environ))
+    client = TestClient(_settings_app(monkeypatch, isolated_settings))
+    monkeypatch.setattr(settings, "_apply_settings_to_env", config.apply_settings_to_env)
+    if case.endswith("wake"):
+        monkeypatch.setattr(consciousness, "allowance_window", lambda *a, **kw: {
+            "status": "available", "limit_usd": config.get_consciousness_daily_usd(),
+            "remaining_usd": config.get_consciousness_daily_usd(), "settled_usd": 0, "accounted_usd": 0})
+        alarm, due = clock.clock, clock.clock.next_wake_at
+        if case == "launched_wake":
+            assert alarm.tick(now=due + 1) == "launched"
+            admitted = dict(clock.launches[0]["prepare"])
+        patch = {"OUROBOROS_CONSCIOUSNESS_DAILY_USD": 40, "OUROBOROS_CONSCIOUSNESS_AUTONOMY": "observe",
+                 "OUROBOROS_CONSCIOUSNESS_MAX_TASKS": 3, "OUROBOROS_BG_WAKEUP_MIN": 1200, "OUROBOROS_BG_WAKEUP_MAX": 7200}
+        response = client.post("/api/settings", json=patch)
+        assert response.status_code == 200 and response.json()["next_task_changed"], response.text
+        assert all(setting_effect(key) == "next_wake" for key in patch)
+        with task_settings_scope(snapshot):
+            assert all(runtime_setting(key) == snapshot.environ[key] for key in patch)
+        assert alarm.next_wake_at == due  # bounds never silently move an existing appointment
+        if case == "scheduled_wake":
+            assert alarm.tick(now=due - 1) == "not_due"
+            assert alarm.tick(now=due + 1) == "launched"
+            preparation = clock.launches[-1]["prepare"]
+            assert preparation["level"] == "observe" and preparation["max_tasks"] == 3
+            assert clock.launches[-1]["metadata"]["root_cost_ceiling_usd"] == 40
+            assert alarm.floor == 1200 and alarm.ceiling == 7200
+        else:
+            assert alarm.tick(now=due + 2) == "wake_live"
+            assert clock.launches[0]["prepare"] == admitted
+            assert admitted["level"] == "act" and admitted["max_tasks"] == 2
+            assert clock.launches[0]["metadata"]["root_cost_ceiling_usd"] == 20
+    elif case.endswith("model") and case != "local_model":
+        follows = case == "following_model"
+        ctx = SimpleNamespace(route_choice=route_choice.following("main") if follows else route_choice.explicit("task_argument"))
+        with task_settings_scope(snapshot):
+            assert route_choice.round_route(ctx, None, ("openai/old", False)) is None
+            response = client.post("/api/settings", json={"OUROBOROS_MODEL": "openai/new"})
+            assert response.status_code == 200 and response.json()["immediate_changed"], response.text
+            assert setting_effect("OUROBOROS_MODEL") == "next_call"
+            assert route_choice.round_route(ctx, None, ("openai/old", False)) == (("openai/new", False) if follows else None)
+            assert snapshot.settings["OUROBOROS_MODEL"] == "openai/old"
+    else:
+        manager = local_model.LocalModelManager()
+        monkeypatch.setattr(local_model, "get_manager", lambda: manager)
+        monkeypatch.setattr(manager, "get_status", lambda: "ready")
+        manager._applied_settings = local_model.local_model_settings(initial)
+        key, value = ("OUROBOROS_MAX_WORKERS", 12) if case == "restart" else ("LOCAL_MODEL_CONTEXT_LENGTH", 32768)
+        assert setting_effect(key) == case
+        response = client.post("/api/settings", json={key: value})
+        assert response.status_code == 200, response.text
+        pending = response.json()["restart_state"]
+        if case == "restart":
+            assert pending["running"][key] == 10 and key in pending["restart_keys"]
+        else:
+            assert key in pending["local_model"]["pending_keys"] and key not in pending["restart_keys"]
+            assert manager._applied_settings[key] == 16384
+        # Saving the applied value clears the pending fact, without changing the actor snapshot.
+        back = client.post("/api/settings", json={key: initial[key]}).json()["restart_state"]
+        assert back["running"] == {} and not back["local_model"]["pending_keys"]
+        assert snapshot.settings[key] == initial[key]
+
+
+@pytest.mark.parametrize("key,old,new", [
+    ("OUROBOROS_NETWORK_PASSWORD", "old-pass", "new-pass"),
+    ("OUROBOROS_FINALIZATION_GRACE_SEC", 120, 180),
+    ("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "true", "false"),
+])
+def test_now_labels_read_the_new_value_even_with_an_old_actor_snapshot(isolated_settings, monkeypatch, key, old, new):
+    import os
+    from ouroboros import config, server_auth
+    from ouroboros.gateway import owner_settings
+    from ouroboros.settings_integrity import task_settings_scope, task_settings_snapshot, runtime_setting
+    from ouroboros.settings_scales import setting_effect
+    from supervisor import queue
+
+    isolated_settings.write_text(json.dumps({key: old}), encoding="utf-8")
+    monkeypatch.setenv(key, str(old))
+    snapshot = task_settings_snapshot(config.load_settings(), dict(os.environ))
+    assert setting_effect(key) == "now"
+    owner_settings._owner_update_settings(owner_settings.fields_on_saved_document({key: new}))
+    monkeypatch.setenv(key, str(new))
+    # The clock/queue runs outside an actor's scope. Its hot refresh changes the consumer's shared value.
+    monkeypatch.setattr(queue, "FINALIZATION_GRACE_SEC", 120)
+    queue.refresh_timeouts_from_settings({key: new})
+    with task_settings_scope(snapshot):
+        assert str(runtime_setting(key)) == str(old)  # presentation did not loosen snapshot semantics
+        if key == "OUROBOROS_NETWORK_PASSWORD":
+            assert server_auth.get_configured_network_password() == new
+        elif key == "OUROBOROS_FINALIZATION_GRACE_SEC":
+            assert queue.FINALIZATION_GRACE_SEC == new
+        else:
+            assert config.get_auto_grant_enabled() is False
+    owner_settings._owner_update_settings(owner_settings.fields_on_saved_document({key: old}))
+    monkeypatch.setenv(key, str(old))
+    queue.refresh_timeouts_from_settings({key: old})
+    assert (server_auth.get_configured_network_password() == old if key == "OUROBOROS_NETWORK_PASSWORD" else
+            queue.FINALIZATION_GRACE_SEC == old if key == "OUROBOROS_FINALIZATION_GRACE_SEC" else config.get_auto_grant_enabled())
+
+
+
 def test_settings_ui_save_flow_pins():
     """Static pins for the #285 UI surfaces (no page-wide Save, the one Restart, the standing
     reviewer hint): the strings the flow depends on must survive edits."""

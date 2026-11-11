@@ -216,7 +216,8 @@ class Shape(NamedTuple):
     """Published shapes of one ``HTTP_ENDPOINTS`` token.
 
     ``responses`` reads ``"200:TaskCreateResponse 400,409,503:ErrorResponse"``: statuses, then
-    a body that is a contract TypedDict name (JSON), a media kind (``json`` = JSON whose shape is
+    a body; ``4xx``/``5xx`` cover otherwise unlisted error statuses. The body is
+    a contract TypedDict name (JSON), a media kind (``json`` = JSON whose shape is
     not published, ``html``, ``text``, ``sse``, ``file``, ``zip``, ``js``, ``empty``, ``any``), a kind with
     the TypedDict its items follow (``sse/TaskEvent``), or alternatives joined by ``|``.
     ``request`` uses the same body words (plus ``multipart``); ``query`` names the parameters
@@ -268,8 +269,8 @@ HTTP_SHAPES: dict[str, Shape] = {
         "200:SettingsReadResponse", query="websearch_preview response_limit_preview model account local backend",
         note="masked secrets read back as placeholders; sending a placeholder keeps the stored value"),
     "POST /api/settings": Shape(
-        f"200:SettingsSaveResponse {_SETTINGS_REFUSAL} 500:SettingsPostCommitFailureResponse", "json",
-        note="partial document of setting keys; restart_state names keys that apply only after a restart"),
+        f"200:SettingsSaveResponse {_SETTINGS_REFUSAL} 500:SettingsPostCommitFailureResponse", "SettingsSaveRequest",
+        note="partial setting keys; if_unchanged checks per-key tokens; unset restores omission; restart_state includes running values"),
     "POST /api/settings/secret": Shape("200:SettingsSecretResponse 400,404,409:ErrorResponse", "SettingsSecretRequest",
                                        note="reveals one stored secret, no-store; writes nothing"),
     "GET /api/ui/preferences": Shape("200:UiPreferencesResponse"),
@@ -303,9 +304,9 @@ HTTP_SHAPES: dict[str, Shape] = {
                                           note="helper min <= max; primary independent; optional project_id, otherwise Main"),
     "POST /api/owner/chat-model": Shape(f"200:OwnerChatModelResponse {_SETTINGS_REFUSAL} 404:SettingsWriteRefusal", "OwnerChatModelRequest",
                                         note="the room's model for new owner work; optional project_id, otherwise Main"),
-    "POST /api/owner/safety-rules": Shape(f"200:OwnerSafetyRulesResponse {_SETTINGS_REFUSAL}", "OwnerSafetyRulesRequest"),
-    "POST /api/owner/safety-model": Shape(f"200:OwnerSafetyModelResponse {_SETTINGS_REFUSAL}", "OwnerSafetyModelRequest"),
-    "POST /api/owner/safety-mode": Shape(f"200:OwnerSafetyModeResponse {_SETTINGS_REFUSAL}", "OwnerSafetyModeRequest"),
+    "POST /api/owner/safety-rules": Shape(f"200:OwnerSafetyRulesResponse {_SETTINGS_REFUSAL} 500:SettingsPostCommitFailureResponse", "OwnerSafetyRulesRequest"),
+    "POST /api/owner/safety-model": Shape(f"200:OwnerSafetyModelResponse {_SETTINGS_REFUSAL} 500:SettingsPostCommitFailureResponse", "OwnerSafetyModelRequest"),
+    "POST /api/owner/safety-mode": Shape(f"200:OwnerSafetyModeResponse {_SETTINGS_REFUSAL} 500:SettingsPostCommitFailureResponse", "OwnerSafetyModeRequest"),
     "POST /api/owner/capability-ack": Shape(
         "200:ResponseLimitAckResponse|ContextWindowAckResponse 400:ErrorResponse", "CapabilityAckRequest",
         note="writes acknowledgement evidence for one exact route, never settings; a repeat overwrites it"),
@@ -557,11 +558,8 @@ HTTP_SHAPES: dict[str, Shape] = {
         note=f"passive; an engine refusal keeps the engine's status; {_ENGINE}"),
     "POST /api/claudexor/maintenance/operations": Shape(
         f"202:ClaudexorMaintenanceOperation {_MAINTENANCE}", "ClaudexorMaintenanceRequest", headers="Idempotency-Key!",
-        note="can start the engine and prepare Node/npm; 409 maintenance_restart_required or 409/503 "
-             "maintenance_preparation_failed: acceptance=not_submitted, scope=this_attempt; "
-             "use Restart Claudexor in Accounts when required; external/attach-only Node/npm needs external repair; "
-             "optional inspection failure still submits; the same key and body join one operation; "
-             "keep both after 503 acceptance unknown, even after a later preparation-only reply"),
+        note="vendor latest/exact-version operation; can start the engine; the same key and body join one "
+             "operation; retain both after acceptance unknown; a pre-submit refusal covers this attempt only"),
     "GET /api/claudexor/maintenance/operations/{operation_id}": Shape(
         f"200:ClaudexorMaintenanceOperation {_MAINTENANCE}", note="passive; poll while queued or running"),
     "POST /api/claudexor/maintenance/operations/{operation_id}/cancel": Shape(
@@ -589,8 +587,10 @@ HTTP_SHAPES: dict[str, Shape] = {
              "409 restart_preview_stale carries the fresh preview and stopped nothing; 200 restart.serving false "
              "is a stopped engine that did not start"),
     "POST /api/claudexor/login": Shape(
-        "200:ClaudexorLoginJobResponse 400,409:ErrorResponse|ClaudexorLoginJobProblem 503:ClaudexorLoginJobProblem|ErrorResponse",
-        "ClaudexorLoginRequest", note="not idempotent: every call may start a job; can start the engine"),
+        "200:ClaudexorLoginJobResponse 400,409:ErrorResponse|ClaudexorLoginJobProblem "
+        "503:ClaudexorLoginJobProblem|ErrorResponse 4xx,5xx:ClaudexorLoginJobProblem|ErrorResponse",
+        "ClaudexorLoginRequest", note="not idempotent: every call may start a job; can start the engine; "
+             "Connect maintenance refusals preserve engine status, code, context, retryability and required_actions"),
     "GET /api/claudexor/login/{job_id}": Shape(_LOGIN_JOB, note="a snapshot {job, cursor, sequence, deviceCode?}; poll it"),
     "DELETE /api/claudexor/login/{job_id}": Shape(_LOGIN_JOB, note="cancel; a repeat is harmless"),
     "POST /api/claudexor/login/{job_id}/input": Shape(

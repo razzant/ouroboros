@@ -76,8 +76,8 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/onboarding/complete` | |
 | GET | `/api/onboarding/complete` | |
 | POST | `/api/onboarding/subagents/preview` | |
-| GET | `/api/settings` | |
-| POST | `/api/settings` | origin, change record (§7) |
+| GET | `/api/settings` | masked values, effects and per-key tokens (§7) |
+| POST | `/api/settings` | partial write, conditional Undo, sanitized receipt (§7) |
 | POST | `/api/settings/secret` | |
 | GET | `/api/review-pool` | |
 | GET | `/api/claudexor/status` | `last_exit`/`memory` (§9), resource-catalog evidence (§3); never wakes |
@@ -87,8 +87,8 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/claudexor/wake` | |
 | GET | `/api/claudexor/restart` | passive preview of what ends (§3) |
 | POST | `/api/claudexor/restart` | preview `{token}`: stop, then the ordinary start |
-| GET | `/api/claudexor/maintenance/harnesses` | passive inspection |
-| POST | `/api/claudexor/maintenance/operations` | 202 handle; Node/npm preparation: 409 `maintenance_restart_required`, 409/503 `maintenance_preparation_failed`; `not_submitted` covers this attempt only (§6) |
+| GET | `/api/claudexor/maintenance/harnesses` | selection/newest/actions/receipt; `checkLatest` reads vendor HTTPS |
+| POST | `/api/claudexor/maintenance/operations` | 202 latest/exact handle; same-key rejoin; refusal covers this attempt (§6) |
 | GET | `/api/claudexor/maintenance/operations/{operation_id}` | retained engine facts |
 | POST | `/api/claudexor/maintenance/operations/{operation_id}/cancel` | acknowledgement does not prove termination |
 | POST | `/api/claudexor/login` | |
@@ -261,6 +261,6 @@ Each socket has one writer and outbox (`ws._Connection`), so a slow or half-open
 
 #### Reconnect and recovery
 
-The browser reconnects with bounded exponential delay; a watchdog closes a silent seemingly-open connection. One served-page decision (`ws.js decideServedPage`) governs the post-open state read and the socket-down probe, so a transient drop cannot destroy in-page state. The core attests only pages it serves: without `served_ui` (an older core), or for its marked page while it serves builtin, `decide()` reloads on a changed or unprovable SHA (a restarted server must not keep old JS/CSS alive in PyWebView), and an unchanged one keeps the page and its queued frames (an unversioned `/api/state` with no remembered SHA keeps it too, accepting possibly stale assets); the marked page reloads once after a restart applied a directory or `none`, and an unmarked page owns its refresh and only reconnects. A failed/non-OK state read never reloads (a seconds-old server can answer 500); `ws.js` forces at most one reload per disconnect episode.
+The browser reconnects with bounded exponential delay; a watchdog closes a silent seemingly-open socket. One served-page decision (`ws.js decideServedPage`) governs the post-open read and the socket-down probe, so a transient drop keeps in-page state. The core attests only pages it serves: without `served_ui` (an older core), or for its marked page while it serves builtin, `decide()` reloads on a changed or unprovable SHA and keeps the page and its queued frames on an unchanged one or an unversioned `/api/state` with no remembered SHA (possibly stale assets); the marked page reloads once after a restart applied a directory or `none`; an unmarked page owns its refresh and only reconnects. A failed/non-OK read never reloads (a seconds-old server can answer 500). Four healthy probes reload only a page that connected, once per disconnect episode; an attempt failing after one is `serverAnswersWhileDown`: an observation, not a cause.
 
 Each Chat instance handles `open` by resynchronizing durable history (a reconnect adds no feed row) and `close` by withdrawing online and accounting presentation; deduplication covers the overlap between live frames and REST replay, and large history parsing runs off the server event loop. Not every transient frame is persisted: durable chat rows, task results, queue snapshots, Project revisions, review/cost ledgers and lifecycle state remain the recovery authorities.

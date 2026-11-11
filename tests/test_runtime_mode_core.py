@@ -349,11 +349,12 @@ def test_api_settings_post_clamps_unknown_runtime_mode(tmp_path, monkeypatch):
         return out
 
     def fake_save_settings(payload, *, allow_elevation: bool = False, allow_context_lowering: bool = False,
-                           authored_keys=(), boundary=None):
+                           authored_keys=(), boundary=None, expected_digest="", if_unchanged=None, unset=()):
         # Stands in for both save_settings (allow_elevation) and _owner_write_settings
         # (allow_context_lowering, added in v6.33.0 P4; authored_keys in v6.80.0 — the caller
         # names the disk-authored keys it really authors, see prepare_settings_for_persist;
-        # boundary marks the commit point, so the stub marks it as the real writer would).
+        # boundary marks the commit point, so the stub marks it as the real writer would;
+        # expected_digest, if_unchanged and unset bind the save to its own read and a row's token).
         saved.clear()
         saved.update(payload)
         if boundary is not None:
@@ -398,11 +399,12 @@ def test_api_settings_post_silently_drops_runtime_mode_changes(monkeypatch):
         return out
 
     def fake_save_settings(payload, *, allow_elevation: bool = False, allow_context_lowering: bool = False,
-                           authored_keys=(), boundary=None):
+                           authored_keys=(), boundary=None, expected_digest="", if_unchanged=None, unset=()):
         # Stands in for both save_settings (allow_elevation) and _owner_write_settings
         # (allow_context_lowering, added in v6.33.0 P4; authored_keys in v6.80.0 — the caller
         # names the disk-authored keys it really authors, see prepare_settings_for_persist;
-        # boundary marks the commit point, so the stub marks it as the real writer would).
+        # boundary marks the commit point, so the stub marks it as the real writer would;
+        # expected_digest, if_unchanged and unset bind the save to its own read and a row's token).
         saved.clear()
         saved.update(payload)
         if boundary is not None:

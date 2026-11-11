@@ -29,8 +29,10 @@ from ouroboros.gateway.owner_settings import (
     MANAGED_BY_DEPLOYMENT,
     CommitBoundary,
     SettingsDocumentBusy,
-    SettingsDocumentUnreadable,
-    SettingsLockUnavailable,
+    SettingsPreconditionFailed, settings_write_refusal,
+    OWNER_SETTING_WRITERS, fields_on_saved_document,
+    settings_receipt, merged_changes, settings_read_view, settings_in_place_of, setting_tokens, settings_unset_keys,
+    settings_roster_error,
     _CONTEXT_MODE_KEYS,
     _owner_audit,
     _owner_read_settings_raw,
@@ -239,37 +241,20 @@ def _build_restart_state(settings: Dict[str, Any]) -> dict:
     summary += host_summary
     return {"restart_required": bool(pending), "restart_keys": sorted(pending),
             "restart_source_unknown_keys": source_unknown, "unknown_keys": unknown,
-            "local_model": local, "summary": summary.strip()}
+            "local_model": local, "summary": summary.strip(),
+            "running": {key: applied[key] for key in pending}}
 
 
 from ouroboros.settings_scales import (
     IMMEDIATE_SETTINGS as _IMMEDIATE_KEYS,
-    RESTART_REQUIRED_SETTINGS as _RESTART_REQUIRED_KEYS,
+    RESTART_REQUIRED_SETTINGS as _RESTART_REQUIRED_KEYS, setting_effect,
 )
 
 
 def _effect_buckets(all_changed: list) -> tuple:
-    """Split changed keys into the honest effect buckets for the save response.
-
-    Every key that reaches here applies at SOME point, so both buckets are
-    truthful claims (#285). Models, accounts and keys are read live
-    (``route_choice``): work that follows them uses them at its next call, so they
-    count as immediate; a context window waits for a task's next context plan. A key a release retired cannot reach here at all:
-    the merge only walks SETTINGS_DEFAULTS, and load_settings strips retired
-    keys off disk — the RC auditor is what tells an upgrading install its
-    stored value is gone (scripts/rc_audit.py "retired-setting").
-    """
-    from ouroboros.model_slots import MODEL_CONTEXT_WINDOWS_KEY
-    from ouroboros.route_choice import ROUTE_SETTING_KEYS
-
-    # A window is read when a task's context plan is built: at its start or when its route moves.
-    live = _IMMEDIATE_KEYS | (ROUTE_SETTING_KEYS - {MODEL_CONTEXT_WINDOWS_KEY})
-    immediate_changed = [k for k in all_changed if k in live]
-    next_task_changed = [
-        k for k in all_changed
-        if k not in live and k not in _RESTART_REQUIRED_KEYS and k != "OUROBOROS_RUNTIME_MODE"
-    ]
-    return immediate_changed, next_task_changed
+    """Keep the legacy live/later flags; per-row timing comes from the same label function."""
+    return ([key for key in all_changed if setting_effect(key) in {"now", "next_call"}],
+            [key for key in all_changed if setting_effect(key) in {"next_task", "next_wake"}])
 
 
 def _merge_settings_payload(current: Dict[str, Any], body: Dict[str, Any]) -> Dict[str, Any]:
@@ -279,8 +264,7 @@ def _merge_settings_payload(current: Dict[str, Any], body: Dict[str, Any]) -> Di
 
     skipped = {"OUROBOROS_CONTEXT_MODE_AUTO_LOW"} | _ENDPOINT_AUTHORED_SETTINGS | _ENDPOINT_WRITTEN_SETTINGS
     if not runtime_mode_at_least(get_runtime_mode(), "cyber_pro"):
-        skipped |= {"OUROBOROS_CONTEXT_MODE", "OUROBOROS_RUNTIME_MODE", "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "OUROBOROS_SAFETY_MODE",
-                    "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "OUROBOROS_MODEL_SAFETY", "OUROBOROS_SAFETY_OWNER_RULES"}
+        skipped |= OWNER_SETTING_WRITERS.keys()
     # Cyber authors controls through the same writer. Install receipts remain facts;
     # the retired auto-Low marker is derived from an explicit context choice below.
     for key in _SETTINGS_DEFAULTS:
@@ -435,6 +419,7 @@ def _api_owner_runtime_mode_sync(request: Request, body: Any) -> JSONResponse:
     active_mode = _config.get_runtime_mode()
     next_mode = _config.normalize_runtime_mode(raw_mode)
     restart_required = active_mode != next_mode
+    changes = {}
     if next_mode != previous_mode:
         # A no-change POST must not rewrite settings.json: the rewrite raced a
         # concurrent generic save (last-writer-wins over a stale read) for zero
@@ -449,7 +434,7 @@ def _api_owner_runtime_mode_sync(request: Request, body: Any) -> JSONResponse:
         # refresh here; the digest keeps this request's PRE-lock decision bound to
         # the document that decision was taken from.
         with settings_document_mutation():
-            _owner_update_settings(_set_runtime_mode, digest)
+            changes = _owner_update_settings(_set_runtime_mode, digest)
     _owner_audit(
         request,
         "runtime_mode",
@@ -464,6 +449,7 @@ def _api_owner_runtime_mode_sync(request: Request, body: Any) -> JSONResponse:
         "ok": True,
         "runtime_mode": next_mode,
         "restart_required": restart_required,
+        **settings_receipt(changes),
     })
 
 
@@ -491,13 +477,13 @@ def _api_owner_auto_grant_sync(request: Request, body: Any) -> JSONResponse:
         return current
 
     with settings_document_mutation():
-        _owner_update_settings(_set_auto_grant)
+        changes = _owner_update_settings(_set_auto_grant)
         # Projected under the SAME lock as the commit: released first, two
         # writers can commit A->B and project B->A, stranding the live
         # environment on the loser's value.
         os.environ["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"] = value
     _owner_audit(request, "auto_grant", {"enabled": enabled})
-    return JSONResponse({"ok": True, "enabled": enabled})
+    return JSONResponse({"ok": True, "enabled": enabled, **settings_receipt(changes)})
 
 
 def _active_main_route(
@@ -746,11 +732,13 @@ def _api_owner_context_mode_sync(request: Request, body: Any) -> JSONResponse:
             except ValueError as exc:
                 return unsaved_error(str(exc), 404, code="project_unavailable")
             previous_mode = old["context_mode"]
+            receipt = {"changes": {"OUROBOROS_CONTEXT_MODE": {"old": previous_mode, "new": cognition["context_mode"]}}}
         else:
             previous_mode = main_cognition()["context_mode"]
             digest = settings_document_digest()
-            _owner_update_settings(_set_context_mode, digest,
+            changes = _owner_update_settings(_set_context_mode, digest,
                                    authored_keys=_CONTEXT_MODE_KEYS, allow_context_lowering=True)
+            receipt = settings_receipt(changes)
             os.environ["OUROBOROS_CONTEXT_MODE"] = next_mode
             os.environ["OUROBOROS_CONTEXT_MODE_AUTO_LOW"] = "false"
             cognition = main_cognition()
@@ -759,7 +747,7 @@ def _api_owner_context_mode_sync(request: Request, body: Any) -> JSONResponse:
         "context_mode",
         {"project_id": project_id, "context_mode": next_mode, "previous_context_mode": previous_mode},
     )
-    return JSONResponse({"ok": True, "project_id": project_id, "context_mode": next_mode, "cognition": cognition})
+    return JSONResponse({"ok": True, "project_id": project_id, "context_mode": next_mode, "cognition": cognition, **receipt})
 
 
 async def api_acknowledge_capability(request: Request) -> JSONResponse:
@@ -833,7 +821,8 @@ async def api_review_pool(request: Request) -> JSONResponse:
 
 
 async def api_settings_get(request: Request) -> JSONResponse:
-    settings, _, _ = apply_runtime_provider_defaults(load_settings())
+    settings, document = settings_read_view()
+    settings, _, _ = apply_runtime_provider_defaults(settings)
     if request.query_params.get("websearch_preview") == "1":
         from ouroboros.search_routes import resolve_web_search_route
         return JSONResponse(resolve_web_search_route(settings=settings,
@@ -897,6 +886,8 @@ async def api_settings_get(request: Request) -> JSONResponse:
         and is_custom_secret_setting_key(key, known_setting_keys=_SETTINGS_DEFAULTS)
         and settings.get(key)
     )
+    meta["effects"] = {key: setting_effect(key) for key in settings}
+    meta["tokens"] = setting_tokens(document, tuple(settings))
     meta["setup_contract"] = build_setup_contract("web")
     from ouroboros.configured_subagents import (
         configured_subagents_dict,
@@ -912,7 +903,7 @@ async def api_settings_get(request: Request) -> JSONResponse:
         "candidate": (
             configured_subagents_dict(subagents.config) if subagents.config is not None else None
         ),
-        "automatic": automatic_catalog(document := _owner_settings_document()),
+        "automatic": automatic_catalog(document),
     }
     meta["connections"] = connections_meta(settings, document)
     meta["main_connection_choice"] = main_connection_choice(settings, document)  # Main waits for the owner's pick
@@ -1010,13 +1001,6 @@ def _apply_settings_save_side_effects(
     try:
         from supervisor.queue import refresh_timeouts_from_settings
         refresh_timeouts_from_settings(current)
-    except Exception:
-        pass
-    try:
-        from supervisor.message_bus import refresh_budget_limit
-        raw_budget = current.get("TOTAL_BUDGET")
-        new_budget = float(raw_budget) if raw_budget is not None else 0.0
-        refresh_budget_limit(new_budget)
     except Exception:
         pass
     return side_effect_warnings
@@ -1135,14 +1119,15 @@ def _network_exposure_warning(current: Dict[str, Any]) -> str:
     return ""
 
 
-def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
-    # Everything below the write is a POST-commit step. The broad handler at the
-    # bottom used to answer a failure there with "400, nothing saved" while the
-    # bytes were already on disk; `boundary` is what lets it tell the two apart.
+def _api_settings_post_locked(request: Request, body: Any, *, retry: bool = True) -> JSONResponse:
+    """Merge a patch; the boundary separates its durable commit from subsequent projection."""
     boundary = CommitBoundary()
+    original_body = body
     try:
         if not isinstance(body, dict):
             return unsaved_error("JSON body must be an object.", 400)
+        digest = settings_document_digest()  # binds every validation/read below to the write
+        unset = settings_unset_keys(body)
         body = dict(body)  # normalized in place below; the empty-pool confirmation is a request flag, never a setting
         allow_empty_pool = body.pop(ALLOW_EMPTY_REVIEW_POOL, None) is True
         channel_key = "OUROBOROS_UPDATE_CHANNEL"
@@ -1196,7 +1181,7 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
         catalog_saved = subagents_key in body and body.get(subagents_key) not in (None, "")
         if catalog_saved:
             from ouroboros.configured_subagents import (
-                normalize_configured_subagents, roster_save_error,
+                normalize_configured_subagents,
             )
             try:
                 _subagents, canonical_subagents = normalize_configured_subagents(
@@ -1206,7 +1191,7 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
                 return unsaved_error(str(exc), 400)
             stored_for_rules = load_settings()
             # Twins are refused only when THIS save changes the roster.
-            twin_error = roster_save_error(canonical_subagents, stored_for_rules, body)
+            twin_error = settings_roster_error(canonical_subagents, stored_for_rules, body)
             if twin_error:
                 return unsaved_error(twin_error, 400)
             pool_error = review_pool_save_judgement(canonical_subagents, stored_for_rules, allow_empty=allow_empty_pool)
@@ -1255,6 +1240,9 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
             except ConnectionSecretIdentityAmbiguous as exc:
                 return unsaved_error(str(exc), 409, code=exc.code)
         current = _merge_settings_payload(old_effective_settings, body)
+        if unset:
+            without = settings_in_place_of({k: v for k, v in _owner_settings_document().items() if k not in unset})
+            current.update({key: without[key] for key in unset})
         from ouroboros.runtime_mode_policy import runtime_mode_at_least
 
         requested_runtime_mode = _norm_runtime_mode(current.get("OUROBOROS_RUNTIME_MODE"))
@@ -1317,8 +1305,9 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
         authored_keys += tuple(key for key in body if key in SAVED_CHOICE_SETTINGS)
         if runtime_mode_at_least(current_runtime_mode, "cyber_pro") and "OUROBOROS_CONTEXT_MODE" in body:
             authored_keys += tuple(_CONTEXT_MODE_KEYS)
-        record_settings_change(request, _owner_write_settings(
-            settings_to_save, authored_keys=authored_keys, boundary=boundary))
+        changes = _owner_write_settings(settings_to_save, authored_keys=authored_keys, boundary=boundary,
+                                        expected_digest=digest, if_unchanged=body.get("if_unchanged"), unset=unset)
+        record_settings_change(request, changes)
         from ouroboros.gateway.safety_settings import audit_safety_change
         audit_safety_change(request, old_effective_settings, current)
         boundary.at("environment projection")
@@ -1363,8 +1352,10 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
                 warnings.append(f"Remote config failed: {remote_msg}")
             elif resolved_slug and resolved_slug != _repo_slug:
                 current["GITHUB_REPO"] = resolved_slug
-                settings_to_save["GITHUB_REPO"] = resolved_slug
-                _owner_write_settings(settings_to_save)
+                followup = _owner_update_settings(fields_on_saved_document({"GITHUB_REPO": resolved_slug}))
+                record_settings_change(request, followup)
+                changes = merged_changes(changes, followup)
+                boundary.receipt = settings_receipt(changes)
                 os.environ["GITHUB_REPO"] = resolved_slug
         immediate_changed, next_task_changed = _effect_buckets(all_changed)
         # Owner decision (2026-08-05): the task-start snapshot boundary STAYS for reviewers, subagents, context and
@@ -1376,14 +1367,16 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
                 "An agent task is running right now: it keeps the reviewers, subagents, context and "
                 "effort it started with; those apply from the next task."
             )
-        if started_before_save and set(immediate_changed) - _IMMEDIATE_KEYS:  # a model, account or key moved
+        if started_before_save and any(setting_effect(key) == "next_call" for key in all_changed):  # a model, account or key moved
             warnings.append("Running work that follows a model setting moves at its next call; "
                             "a task that chose its own model keeps it.")
-        resp: Dict[str, Any] = {"status": "saved"}
+        resp: Dict[str, Any] = {"status": "saved", **settings_receipt(changes)}
         # A key with its own writer is skipped here, and the save says so instead of reading as applied.
         ignored = sorted(k for k in body if k in _ENDPOINT_WRITTEN_SETTINGS)
+        if not runtime_mode_at_least(current_runtime_mode, "cyber_pro"):  # Cyber Pro saves the owner controls here
+            ignored = sorted({*ignored, *(k for k in body if k in OWNER_SETTING_WRITERS)})
         if ignored:
-            resp["ignored_keys"] = {k: _ENDPOINT_WRITERS.get(k, "its own endpoint") for k in ignored}
+            resp["ignored_keys"] = {k: _ENDPOINT_WRITERS.get(k, OWNER_SETTING_WRITERS.get(k, "its own endpoint")) for k in ignored}
         if agent_task_running:
             resp["agent_task_running"] = True
         if not all_changed:
@@ -1419,12 +1412,6 @@ def _api_settings_post_locked(request: Request, body: Any) -> JSONResponse:
             # the owner looking for changes that landed (BIBLE P1). This branch
             # comes FIRST so a post-commit lock refusal is not misread as one.
             return post_commit_failure_response(e, boundary)
-        if isinstance(e, SettingsLockUnavailable):
-            return unsaved_error(str(e), 503, code="settings_locked")
-        if isinstance(e, SettingsDocumentBusy):
-            return unsaved_error(str(e), 503, code="settings_busy")
-        if isinstance(e, SettingsDocumentUnreadable):
-            return unsaved_error(str(e), 409, code="settings_unreadable")
-        if isinstance(e, DeploymentPolicyRefusal):
-            return unsaved_error(str(e), 403, code=MANAGED_BY_DEPLOYMENT)
-        return unsaved_error(str(e), 400)
+        if type(e) is SettingsPreconditionFailed and retry:
+            return _api_settings_post_locked(request, original_body, retry=False)
+        return settings_write_refusal(e) or unsaved_error(str(e), 400)

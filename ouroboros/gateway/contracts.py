@@ -51,6 +51,7 @@ from ouroboros.gateway.update_contracts import (  # noqa: F401 -- public re-expo
     UpdatePreflightRequest, UpdatePreflightResponse, UpdateProgressChangedOutbound, UpdateStatusReadyOutbound,
 )
 from ouroboros.gateway.management_contracts import (  # noqa: F401 -- public re-exports
+    ClaudexorLoginJobProblem,
     ExtensionsIndexResponse, LocalModelStatusResponse, MarketplaceInstalledResponse, MarketplaceSearchResponse,
     McpStatusResponse, ModelCatalogResponse, SkillLifecycleQueueResponse,
 )
@@ -838,9 +839,10 @@ class StateResponse(WorkStateFields):
     served_ui: NotRequired[ServedUiState]  # this generation's main interface; absent on older cores
 
 
-class SettingsNetworkMeta(TypedDict):
-    """Network fields inside the ``GET /api/settings`` ``_meta`` block."""
+from ouroboros.gateway.client_contracts import SettingsReceipt, SettingsTiming, SettingsRestartState
 
+
+class SettingsNetworkMeta(TypedDict):
     bind_host: str
     bind_port: int
     lan_ip: str
@@ -874,24 +876,22 @@ class SettingsPolicyAxis(TypedDict, total=False):
     applies: Literal["restart", "next_task"]
 
 
-class SettingsMeta(SettingsNetworkMeta, total=False):
-    """Complete ``GET /api/settings`` ``_meta`` block."""
-
+class SettingsMeta(SettingsNetworkMeta, SettingsTiming, total=False):
     custom_secret_keys: list[str]
     setup_contract: Dict[str, Any]
     available_subagents: AvailableSubagentsSettingsMeta
     policy_state: SettingsPolicyState
-    restart_state: Dict[str, Any]
+    restart_state: SettingsRestartState
     connections: list[Dict[str, Any]]  # every API connection as the picker shows it (provider_connections.connections_meta)
     main_connection_choice: list[str]  # the connections an unauthored Main waits to be chosen among (server_runtime)
 
 
-class SettingsSaveResponse(TypedDict, total=False):
+class SettingsSaveResponse(SettingsReceipt, total=False):
     status: str
     no_changes: bool
     restart_required: bool
     restart_keys: list[str]
-    restart_state: Dict[str, Any]
+    restart_state: SettingsRestartState
     immediate_changed: bool
     next_task_changed: bool
     warnings: list[str]
@@ -902,25 +902,25 @@ class SettingsSaveResponse(TypedDict, total=False):
     connection_references: list[Dict[str, str]]  # rows naming a connection that cannot serve them (they refuse)
 
 
-class OwnerRuntimeModeResponse(TypedDict):
+class OwnerRuntimeModeResponse(SettingsReceipt):
     ok: bool
     runtime_mode: str
     restart_required: bool
 
 
-class OwnerAutoGrantResponse(TypedDict):
+class OwnerAutoGrantResponse(SettingsReceipt):
     ok: bool
     enabled: bool
 
 
-class OwnerContextModeResponse(TypedDict):
+class OwnerContextModeResponse(SettingsReceipt):
     ok: bool
     context_mode: str
     project_id: str
     cognition: ProjectCognition
 
 
-class OwnerSafetyModeResponse(TypedDict):
+class OwnerSafetyModeResponse(SettingsReceipt):
     ok: bool
     safety_mode: str  # full | light | off (v6.54.3)
 
@@ -1237,17 +1237,6 @@ class ClaudexorCredentialProfileDeleteResponse(TypedDict):
     vendorCredentialDisposition: NotRequired[ClaudexorVendorCredentialDisposition]
 
 
-class ClaudexorLoginJobProblem(TypedDict, total=False):
-    """Typed job errors preserve engine prose/status/code and bounded actions
-    (16 strings, 512 chars each). Covers absent jobs, input/reconcile conflicts,
-    setup 400/409 and marked retryable terminal-probe 503. Other daemon 5xx and
-    unmarked transport/discovery failures use the generic proxy 503."""
-
-    error: Required[str]
-    code: str
-    required_actions: List[str]
-
-
 class TaskEventCursor(TypedDict):
     v: Literal[2]
     seq: int
@@ -1464,7 +1453,7 @@ class OnboardingAttemptResponse(TypedDict):
     post_commit_failed: NotRequired[str]
 
 
-class SettingsPostCommitFailureResponse(TypedDict):
+class SettingsPostCommitFailureResponse(SettingsReceipt):
     """500 after settings bytes landed; post_commit_failed names the later step.
     Retry that step, never re-save. Shared by settings and onboarding writes."""
 

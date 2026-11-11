@@ -396,7 +396,8 @@ html[data-layout="stack"] .resize-handle { display: none; }
 
 @media (hover: hover) {
     .nav-row:hover,
-    .nav-section-toggle:hover {
+    .nav-section-toggle:hover,
+    .nav-project-pin:hover + .nav-project-row:not(.active) {  /* a row's Pin lies over it */
         background: var(--tone-quiet-hover);
         border-color: transparent;
         color: var(--text-primary);
@@ -6236,8 +6237,9 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .storage-deleted .storage-place:focus { outline: none; }
 .storage-deleted .storage-place:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; border-radius: var(--radius-inner); }
 
-/* Free temporary space: the flow under the free-space reading in the first card. */
-.storage-auto { margin: var(--space-3) 0 0; color: var(--text-secondary); font-size: var(--type-meta); line-height: var(--line-meta); }
+/* Free temporary space: the flow under the free-space reading in the first card. How long finished work is kept ends
+   the card, a row that saves itself. */
+.storage-retention { margin-top: var(--space-3); }
 .storage-tray { display: grid; gap: var(--space-2); margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--divider); }
 .storage-tray:empty { display: none; }
 .storage-tray p { margin: 0; }
@@ -6342,7 +6344,7 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .storage-cleanup-figure.is-quiet .storage-cleanup-amount { font-size:var(--type-section); }
 .storage-cleanup-door { margin-top:var(--space-3); justify-content:flex-start; }
 .storage-cleanup.has-door { display:grid; grid-template-columns:minmax(0,1fr) auto; column-gap:var(--space-4); }
-.storage-cleanup.has-door > :is(.storage-card-title,.storage-auto) { grid-column:1 / -1; }
+.storage-cleanup.has-door > :is(.storage-card-title,.storage-retention) { grid-column:1 / -1; }
 .storage-cleanup.has-door > .storage-cleanup-door { align-self:center; }
 .storage-decisions { margin-top:var(--space-3); padding-top:var(--space-3); border-top:1px solid var(--divider); }
 .storage-decisions > .storage-free-sub { margin-top:0; }
@@ -6447,6 +6449,74 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 /* A Dashboard card's title (16/600) and its list of facts (label, value): the tabs' cards share these two parts of the
    tab body (Costs, Consciousness, Updates, Activity, Evolution). */
 .dashboard-card-title { margin: 0; color: var(--text-primary); font-size: var(--type-section); line-height: var(--line-title); font-weight: 600; }
+/* A tab's settings cards (dashboard.js mountTabSettings): rows that save themselves (settings.css "settings rows")
+   under the card's title and lead, the rarer ones in its fold. Their host adds no box: each card is a card of the tab
+   body. A number is a short field; a door says its value before its chevron; a row without a meta line keeps its
+   name centred, and one that says its value in its own words (its caption) starts at the row's edge. */
+.dashboard-settings-cards { display: contents; }
+.dashboard-settings > .dashboard-card-title { margin-bottom: var(--space-3); }
+.dashboard-settings-lead { margin: calc(-1 * var(--space-2)) 0 var(--space-3); color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); }
+.dashboard-settings-fold { margin-top: var(--space-3); }
+.dashboard-settings .settings-row-field > .ui-control { width: 4.5rem; }
+.costs-limits .settings-row-field > .ui-control { width: 5.25rem; }  /* money: room for a larger limit */
+.dashboard-settings .settings-row-value { color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); font-weight: 600; white-space: nowrap; }
+.dashboard-settings .settings-row-value[data-tone="warn"] { color: var(--status-warn-fg); }
+.dashboard-settings .settings-row-chevron { color: var(--text-disabled); }
+.dashboard-settings [data-setting-meta]:empty { display: none; }
+.dashboard-settings .settings-row:has(> .ui-row-meta > [data-setting-meta]:empty):not(:has(> .ui-row-meta > :not(:empty))) > .ui-row-meta { display: none; }
+.dashboard-settings .settings-row:has(> .ui-row-meta > [data-setting-meta]:empty):not(:has(> .ui-row-meta > :not(:empty))) > .ui-row-title { grid-row: 1 / span 2; }
+/* A row that leads with its glyph (Costs' kinds of account): the glyph stands beside both lines. */
+.dashboard-settings .settings-row[data-lead] { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "lead words actions" "lead meta actions"; }
+.dashboard-settings-glyph { grid-area: lead; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; background: var(--surface-object); color: var(--text-secondary); font-size: 16px; }
+/* In a narrow row a number and a door keep their place at the row's end (a strip, a range and a custom control go under
+   the words, as ui.css moves every row's actions); a row that leads with its glyph says its value as a third line
+   and keeps its chevron at the end. */
+@container (max-width: 28rem) {
+    .dashboard-settings .settings-row:is([data-kind="number"]:not(:has([data-setting-no-limit])), [data-kind="door"]) > :is(.ui-row-title, .ui-row-meta) { grid-column: 1; }
+    .dashboard-settings .settings-row:is([data-kind="number"]:not(:has([data-setting-no-limit])), [data-kind="door"]) > .ui-row-actions { grid-column: 2; grid-row: 1 / span 2; justify-content: flex-end; }
+    .dashboard-settings .settings-row[data-lead] > :is(.ui-row-title, .ui-row-meta) { grid-column: 2; }
+    .dashboard-settings .settings-row[data-lead] > .ui-row-actions { display: contents; }
+    .dashboard-settings .settings-row[data-lead] .settings-row-value { grid-column: 2; grid-row: 3; white-space: normal; }
+    .dashboard-settings .settings-row[data-lead] .settings-row-chevron { grid-column: 3; grid-row: 1 / span 3; align-self: center; }
+    .dashboard-settings-glyph { grid-row: 1 / span 3; align-self: start; }
+}
+/* A card that is one row (data-solo): the row's name is the card's title, its meta the lead, its control the body. */
+.dashboard-settings[data-solo] > .settings-row { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-1); padding: 0; border: 0; background: none; }
+.dashboard-settings[data-solo] .ui-row-title { font-size: var(--type-section); font-weight: 600; }
+.dashboard-settings[data-solo] .ui-row-meta { font-size: var(--type-body); line-height: var(--line-body); }
+.dashboard-settings[data-solo] .ui-row-actions { margin-top: var(--space-2); justify-content: flex-start; }
+.dashboard-settings[data-solo] .ui-row-actions > .ui-control { width: 100%; }
+/* A choice that carries a sentence is a card of its own (DESIGN principle 4): the chosen one is filled. */
+.dashboard-choices { display: flex; flex-direction: column; gap: var(--space-2); width: 100%; }
+.dashboard-choice {
+    display: grid;
+    gap: 2px;
+    padding: var(--space-3) var(--space-4);
+    border: 1px solid transparent;
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
+    color: var(--text-primary);
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+    transition: var(--motion-tone);
+}
+@media (hover: hover) { .dashboard-choice[aria-pressed="false"]:not(:disabled):hover { background: var(--tone-quiet-hover); } }
+.dashboard-choice:not(:disabled):active { filter: var(--press); }
+.dashboard-choice:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+.dashboard-choice[aria-pressed="true"] { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); box-shadow: var(--elev-rest); }
+.dashboard-choice-name { font-size: var(--type-body); font-weight: 600; line-height: var(--line-title); }
+.dashboard-choice-note { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.dashboard-choice[aria-pressed="true"] > .dashboard-choice-note { color: inherit; }
+/* A tab opened from Settings leads back there with its first row (dashboard.js settingsReturn), drawn as a Settings
+   page draws its Back (settings.css .settings-back-row). It stands above the tab's scroller, at the cards' edge, so it
+   stays in place while the tab scrolls. */
+.dashboard-back { position: static; flex: none; margin: var(--space-2) 0 0; padding-inline: 20px; background: none; }
+.dashboard-back + .dashboard-body { padding-top: var(--space-2); }
+html[data-layout="stack"] .dashboard-back { padding-inline: var(--space-3); }
+/* On a phone the tab body's own gutter is the page's: with the shell's added to it a card lost 40 px of a 320 px
+   screen, and a three-way choice wrapped two and one (ui.css "On a phone a card keeps 18 px at its sides"). */
+html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 .dashboard-facts {
     display: grid;
     grid-template-columns: fit-content(14rem) minmax(0, 1fr);
@@ -8531,10 +8601,13 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
     align-items: center;
     width: 100%;
     border-radius: var(--radius-inner);
+    position: relative;  /* its Pin's place; its own stack keeps that Pin under the sidebar's sticky bars */
+    isolation: isolate;
 }
 
 /* Pinned Projects lead the same list: the first row shown after them keeps one step of air, the way the sidebar's
-   zones part. No caption, glyph, tint, rule or column, so nothing reads as one more Project (DESIGN "Shell"). */
+   zones part. No caption, tint, rule or column and no glyph at rest, so nothing reads as one more Project (DESIGN
+   "Shell"). */
 .nav-project-item[data-after-pins] {
     margin-top: var(--space-2);
 }
@@ -8702,7 +8775,8 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
 /* A row's ⋯: under a mouse it appears with the row's hover or focus. On touch the row's menu opens by a long press
    (owner 19.10, 5A; row_menu_gesture.js), so the ⋯ leaves the row's look and its column there, and stays the keyboard's
    and assistive technology's door: it comes back with its column whenever the keyboard reaches it. */
-.nav-project-kebab {
+.nav-project-kebab,
+.nav-project-pin {
     width: var(--nav-control-h);
     height: var(--nav-control-h);
     display: inline-flex;
@@ -8740,9 +8814,39 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
 
 /* Hover paint is not a focus ring: the kebab had only the paint, so a keyboard
    user could not tell it was focused (docs/DESIGN.md "Focus"). */
-.nav-project-kebab:focus-visible {
+.nav-project-kebab:focus-visible,
+.nav-project-pin:focus-visible {
     outline: 2px solid var(--focus-accent-border);
     outline-offset: -2px;
+}
+
+/* A row's Pin or Unpin: the ⋯'s quiet control over the row's icon column, left of the name, in no column of its own.
+   It is drawn while a pointer hovers the row or the keyboard is on it, and is a target only while drawn, so a finger
+   (no hover) presses the row there and keeps the long press's menu. Over the chosen row it takes the row's ink, and
+   the row keeps its hover under it (the rows' hover rule). */
+.nav-project-pin {
+    --pin-w: min(var(--nav-control-h), calc(var(--nav-label-x) - var(--space-1)));  /* a finger's 44px would reach the name */
+    position: absolute;
+    z-index: 1;  /* over the row, which follows it */
+    inset-block: 0;
+    left: calc(1px + (var(--nav-label-x) - var(--pin-w)) / 2);  /* centred on the column, past the row's border */
+    width: var(--pin-w);
+    margin-block: auto;
+    opacity: 0;
+    pointer-events: none;
+}
+.nav-project-pin:focus-visible {
+    opacity: 1;
+    pointer-events: auto;
+    color: var(--text-primary);
+}
+.nav-project-pin:has(+ .nav-project-row.active) { color: var(--tone-crimson-ink); }
+@media (hover: hover) {
+    .nav-project-item:hover > .nav-project-pin {
+        opacity: 1;
+        pointer-events: auto;
+    }
+    .nav-project-pin:hover { color: var(--text-primary); }
 }
 
 /* Touch: a long press opens the row's menu, so the ⋯ takes no room and no finger, and the row's words are not a
@@ -9280,6 +9384,9 @@ html[data-layout="stack"] .project-panel {
     gap: var(--space-1) var(--space-2);
     min-width: 0;
 }
+.harness-maintenance-facts { display: flex; flex-direction: column; min-width: 0; }
+.harness-maintenance-row > .harness-maintenance-actions { min-height: var(--control-h); }
+.harness-maintenance-state > [data-maintenance-details] { margin-left: auto; }
 .harness-maintenance-line {
     flex: 1 1 auto;
     font-size: var(--type-meta);
@@ -9314,8 +9421,13 @@ html[data-layout="stack"] .project-panel {
 .harness-maintenance-exact code { white-space: pre-wrap; overflow-wrap: anywhere; }
 .harness-maintenance-details dl { margin: var(--space-2) 0; }
 .harness-maintenance-details dt { color: var(--text-meta); }
-.harness-maintenance-details dd { margin: 0 0 var(--space-1); color: var(--text-primary); }
+.harness-maintenance-details dd { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 var(--space-1); color: var(--text-primary); }
 .harness-maintenance-details pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.harness-model-program { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); }
+.ui-model-options[data-model-popup] { display: flex; flex-direction: column; overflow: hidden; }
+.ui-model-options[data-model-popup] > [role="listbox"] { min-height: 0; overflow-y: auto; }
+.ui-model-footer { flex: 0 0 auto; padding: var(--space-2) var(--space-3); overflow-wrap: anywhere; }
+
 /* Account rows are purpose-built (identity left, actions right), not the
    settings key/value grid — .settings-custom-secret-row's 0.65fr/1.35fr
    columns inverted the proportions and its align-items:end sank the text.

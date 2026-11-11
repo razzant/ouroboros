@@ -526,18 +526,6 @@ class ClaudexorRuntimeManager:
                 self._last_error = f"{exc.code}: {exc}"
                 raise
 
-    def prepare_node_toolchain(self) -> str:
-        """Explicit maintenance preparation, without replacing an engine tree or process."""
-        with self._lock:
-            if self._pin_error or self._pin is None:
-                raise ClaudexorRuntimeError("runtime_cli_unavailable", self._pin_error or "no reviewed runtime pin")
-            self._cli_node_artifact(self._pin)
-            self._install(self._pin, require_npm=True, node_only=True)
-            node = self._resolve_node_toolchain(self._pin)
-            if not node:
-                raise ClaudexorRuntimeError("runtime_node_install_failed", "prepared Node/npm is not selectable")
-            return node
-
     def ensure(self) -> list[str]:
         """Foreground install/repair/update intent, returning the next command."""
         with self._lock:
@@ -1303,7 +1291,7 @@ class ClaudexorRuntimeManager:
             return []
 
     def _install(
-        self, pin: ClaudexorRuntimePin, *, require_npm: bool = False, node_only: bool = False
+        self, pin: ClaudexorRuntimePin, *, require_npm: bool = False
     ) -> None:
         from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 
@@ -1316,8 +1304,7 @@ class ClaudexorRuntimeManager:
             metadata=f"pid={os.getpid()} version={pin.version} build_sha={pin.build_sha}\n",
         )
         if lock_fd is None:
-            command = (self._resolve_node_toolchain(pin) if node_only else
-                       self._managed_cli_command() if require_npm else self._managed_command())
+            command = self._managed_cli_command() if require_npm else self._managed_command()
             if command:
                 return
             raise ClaudexorRuntimeError(
@@ -1329,8 +1316,6 @@ class ClaudexorRuntimeManager:
                 self._ensure_node_toolchain(pin)
             else:
                 self._ensure_node(pin)
-            if node_only:
-                return
             try:
                 command = (
                     self._managed_cli_command()

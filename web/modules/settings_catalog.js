@@ -262,3 +262,27 @@ export async function refreshModelCatalog({ button } = {}) {
         }
     }
 }
+
+const settledPrograms = new Map(), programReads = new Map();
+export function refreshMaintenanceCatalogs(harness, evidence) {
+    const operation = evidence.id && `${evidence.id}:${evidence.finishedAt || ''}`;
+    if (operation && settledPrograms.get(harness) === operation) return;
+    let read = programReads.get(harness);
+    if (!read) {
+        document.dispatchEvent(new CustomEvent('harness-maintenance:settled', {detail: {harness}}));
+        let timeout;
+        const expired = new Promise(resolve => { timeout = setTimeout(() => resolve(false), MODEL_CATALOG_TIMEOUT_MS); });
+        read = Promise.race([expired, Promise.allSettled([claudexorStatus.refresh({includeModels: true, afterCurrent: true}), refreshModelCatalog()])
+            .then(([native, raw]) => {
+                const row = native.value?.harnesses?.find((item) => item.id === harness);
+                return native.status === 'fulfilled' && !claudexorStatus.error && row?.model_catalog
+                    && !row.models_error && !row.model_catalog.partial
+                    && raw.status === 'fulfilled' && catalogReadState(raw.value) === 'ok';
+            })]).finally(() => { clearTimeout(timeout); programReads.delete(harness); });
+        programReads.set(harness, read);
+    }
+    return read.then((succeeded) => {
+        if (succeeded && operation) settledPrograms.set(harness, operation);
+        return succeeded;
+    });
+}

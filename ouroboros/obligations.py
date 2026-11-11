@@ -38,7 +38,9 @@ def task_written(txn, task_id, columns=None):
     """Publish duty inputs in the task writer's transaction. The terminal-write counter moves on
     closing/closed writes, never on a live task's writes, and stamps the row's ``terminal_seq`` with
     its new value, so a pass keyed on the counter reads only the rows written since (``task_store``)."""
+    from ouroboros.store_hot_facts import note_written
     from ouroboros.task_status import SETTLED_STATUSES
+    note_written(columns)  # a control fact's writer moves the dispatcher's kept C2 admissions (dispatch_choice)
     if columns is None:
         row = txn.conn.execute("SELECT status, write_seq, updated_at, plan_collection_pending, drive_retention_at "
                                "FROM tasks WHERE task_id=?", (task_id,)).fetchone()

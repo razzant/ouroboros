@@ -1,6 +1,6 @@
 /* Settings (settings.js): the home and the pages opened from it. The page box is the container both layouts read:
-   narrower than 56rem one column shows the home or the open page; from 56rem the home stands beside the page. Each
-   column scrolls by itself and keeps its place; a page's first row is its Back, which stays at the top. */
+   narrower than 56rem one column shows the home or the open page; from 56rem the home stands beside the page as a
+   rail. Each column scrolls by itself and keeps its place; a page's first row is its Back, which stays at the top. */
 #page-settings { container: settingspage / inline-size; }
 .settings-shell {
     flex: 1;
@@ -38,14 +38,18 @@ html[data-layout="stack"] :is(.settings-home, .settings-page) { padding-inline: 
     min-width: 0;
     overflow-wrap: anywhere;
 }
+/* Wide: the home is a rail beside the page. Its card says only who and how many; the count opens the list. */
 @container settingspage (min-width: 56rem) {
     .settings-shell[data-settings-view="page"] { grid-template-columns: 348px minmax(0, 1fr); }
     .settings-shell[data-settings-view="page"] > .settings-home { display: block; padding-inline-end: var(--space-3); }
     .settings-shell[data-settings-view="page"] .settings-page { padding-inline-start: var(--space-4); }
     .settings-shell[data-settings-view="page"] .settings-door-answer { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .settings-shell[data-settings-view="page"] .settings-needs:not([data-all]) { display: none; }
+    .settings-shell[data-settings-view="page"] .settings-being-count { color: var(--text-primary); font-weight: 600; }
 }
 
-/* A page's chrome: Back naming where it leads, then the title. The page module draws only what is under them. */
+/* A page's chrome: Back naming where it leads, then the title. The page module draws only what is under them: one
+   lead sentence if it has one (.settings-page-lead, first in its body), then objects of rows. */
 .settings-back-row {
     position: sticky;
     top: 0;
@@ -53,7 +57,7 @@ html[data-layout="stack"] :is(.settings-home, .settings-page) { padding-inline: 
     display: flex;
     align-items: center;
     min-height: var(--control-h-sm);
-    margin-bottom: var(--space-2);
+    margin-bottom: var(--space-1);
     background: var(--bg-primary);
 }
 :root[data-window-chrome="integrated"][data-layout="docked"] .settings-back-row { top: var(--window-chrome-top); }
@@ -61,7 +65,7 @@ html[data-layout="stack"] :is(.settings-home, .settings-page) { padding-inline: 
     display: inline-flex;
     align-items: center;
     gap: 2px;
-    margin-inline-start: -6px;
+    margin-inline-start: -4px;
     padding: 0 var(--space-1) 0 0;
     border: 0;
     border-radius: 999px;
@@ -74,7 +78,7 @@ html[data-layout="stack"] :is(.settings-home, .settings-page) { padding-inline: 
     cursor: pointer;
     white-space: nowrap;
 }
-.settings-back > svg { flex: none; width: var(--control-h-sm); height: var(--control-h-sm); padding: 4px; }
+.settings-back > svg { flex: none; width: 14px; height: 14px; }
 @media (hover: hover) { .settings-back:hover { color: var(--text-primary); } }
 .settings-back:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 .settings-page-title {
@@ -86,8 +90,26 @@ html[data-layout="stack"] :is(.settings-home, .settings-page) { padding-inline: 
     overflow-wrap: anywhere;
 }
 .settings-page-body { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
+.settings-page-lead {
+    margin: 0;
+    color: var(--text-meta);
+    font-size: var(--type-body);
+    line-height: var(--line-body);
+}
+.settings-page-body > .settings-page-lead:first-child { margin-top: calc(var(--space-1) - var(--space-4)); }
+/* An object of a page: its title if it has one, one lead, then its rows; what an install rarely changes folds at
+   its end (details[data-settings-fold], named More with what it holds). */
+.settings-card { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+.settings-card-title { margin: 0; color: var(--text-primary); font-size: var(--type-section); font-weight: 600; line-height: var(--line-title); }
+.settings-card-lead { margin: 0; color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); }
+.settings-card-title + .settings-card-lead { margin-top: calc(-1 * var(--space-2)); }
+.settings-rows { display: flex; flex-direction: column; gap: var(--space-2); min-width: 0; }
+.settings-rows > .ui-row + .ui-row { margin-top: 0; }
+details[data-settings-fold] > .settings-rows { margin-top: var(--space-3); }
 
-/* The home (settings_home.js): groups of quiet doors, each saying its one answer; the open page's door is marked. */
+/* The home (settings_home.js): Ouroboros's card, search, then groups of quiet doors, each saying its one answer;
+   the open page's door is marked. */
+.settings-home-list { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
 .settings-group { display: flex; flex-direction: column; gap: var(--space-2); }
 .settings-group-title {
     margin: 0;
@@ -130,12 +152,97 @@ html[data-layout="stack"] :is(.settings-home, .settings-page) { padding-inline: 
     background: var(--surface-tray);
     color: var(--text-secondary);
 }
-.settings-door-glyph > svg { width: 18px; height: 18px; }
+.settings-door-glyph > svg:not(.settings-gauge) { width: 18px; height: 18px; }
+/* A glyph that says a fact: the Access level as ascending bars, the share of the budget spent as an arc. What is
+   reached is drawn in the glyph's ink, the rest of the scale faint. */
+.settings-gauge-rail { opacity: 0.22; }
 .settings-door-words { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .settings-door-title { color: var(--text-primary); font-size: var(--type-body); font-weight: 600; line-height: var(--line-title); }
 .settings-door-answer { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); overflow-wrap: anywhere; }
 .settings-door-answer:empty { display: none; }
-.settings-door-end { display: flex; color: var(--text-disabled); }
+.settings-door-end { display: flex; align-items: center; gap: var(--space-2); color: var(--text-disabled); }
+.settings-search-empty { margin: 0; padding: 0 var(--space-1); color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); }
+
+/* Ouroboros's own card, in its voice (ui.css gives .settings-voice the voice's materials on a dark document): who it
+   is, its state, and what waits for the owner here as lines of the card, each with its one action. */
+.settings-voice { background: var(--voice-ouroboros-card); color: var(--text-primary); }
+.settings-being {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: var(--space-3) var(--space-4);
+}
+.settings-being-avatar {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    background: var(--surface-tray) url("/static/logo.jpg") center / cover no-repeat;
+}
+.settings-being-words { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.settings-being-name { color: var(--text-primary); font-size: var(--type-section); font-weight: 600; line-height: var(--line-title); }
+.settings-being-state {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0 6px;
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+}
+.settings-being-sep { color: var(--text-disabled); }
+.settings-being-count { padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: start; cursor: pointer; }
+.settings-being-count:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; border-radius: 6px; }
+.settings-needs { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.settings-needs[hidden] { display: none; }
+.settings-needs > .settings-need {
+    grid-template-columns: 22px minmax(0, 1fr) auto;
+    grid-template-areas: "lead words actions" "lead meta actions";
+    min-height: 40px;
+    margin: 0;
+    padding: var(--space-1) 0;
+    background: transparent;
+}
+.settings-need-lead { grid-area: lead; display: grid; place-items: center; }
+.settings-need > .ui-row-title { grid-area: words; display: block; overflow: visible; }
+.settings-need > .ui-row-meta { grid-area: meta; }
+.settings-need > .ui-row-actions { grid-area: actions; grid-column: auto; grid-row: auto; flex-wrap: nowrap; justify-content: flex-end; }
+/* A long list shows its first lines (two on a phone, three on a desk) and one quiet line that opens the rest. */
+.settings-needs-more { align-self: flex-start; display: none; }
+.settings-needs:not([data-all]) > .settings-need:nth-child(n + 4) { display: none; }
+html[data-layout="stack"] .settings-needs:not([data-all]) > .settings-need:nth-child(n + 3) { display: none; }
+.settings-needs:not([data-all], [data-count="3"]) > .settings-needs-more,
+html[data-layout="stack"] .settings-needs:not([data-all]) > .settings-needs-more { display: inline-flex; }
+
+/* Search: one capsule field over the list. */
+.settings-search {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    height: 40px;
+    padding: 0 var(--space-4);
+    border-radius: 999px;
+    background: var(--surface-capsule);
+    box-shadow: var(--elev-rest);
+    color: var(--text-secondary);
+    cursor: text;
+}
+.settings-search > svg { flex: none; width: 16px; height: 16px; }
+.settings-search > input {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    font-size: var(--type-body);
+    -webkit-appearance: none;
+    appearance: none;
+}
+.settings-search > input::placeholder { color: var(--text-disabled); }
+.settings-search > input::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; }
+.settings-search:focus-within { box-shadow: var(--elev-rest), 0 0 0 3px var(--focus-accent-ring); }
 
 /* The section (settings_controls.js settingsSection; DESIGN.md principle 7): a .ui-card holding the title row, one
    lead in owner words, the controls, and the former copy behind one Details disclosure. The section is the size
@@ -302,6 +409,16 @@ html[data-layout="stack"] :is(.settings-home, .settings-page) { padding-inline: 
 .settings-extension-section {
     padding: 12px 14px;
 }
+/* On a skill's own page (settings_extension_forms.js) each registered section is an object of the page; the page's
+   title already names a lone section, so its own head is not repeated. */
+.settings-page-body .settings-extension-section {
+    padding: var(--card-pad);
+    border-radius: var(--radius-object);
+    background: var(--surface-object);
+    box-shadow: var(--elev-rest);
+}
+.settings-page-body .settings-extension-section:only-child > .settings-extension-section-head { display: none; }
+.settings-page-body .settings-extension-section-head > strong { font-size: var(--type-section); line-height: var(--line-title); font-weight: 600; }
 
 .settings-extension-section-head {
     display: flex;

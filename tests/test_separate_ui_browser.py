@@ -322,6 +322,83 @@ def test_an_empty_browser_signs_in_on_the_shared_origin_and_returns_with_http_an
     assert not [p for p in stack.interface_paths() if p.startswith(("/api", "/auth", "/ws", "/onboarding"))]
 
 
+def test_a_rewritten_host_reports_the_failed_live_channel_and_recovers_in_place(stack):
+    """Real TLS/Caddy/core: HTTP works, Chromium's Origin-only socket is refused, then repaired."""
+    pytest.importorskip("playwright.sync_api")
+    from playwright.sync_api import sync_playwright
+
+    site = stack.proxy.site
+    good = site.read_text(encoding="utf-8")
+    line = f"header_up X-Forwarded-For {SYNTHETIC_PEER}"
+    assert good.count(line) == 1
+    stack.proxy.stop()
+    site.write_text(good.replace(line, line + "\n\t\t\theader_up Host {upstream_hostport}"), encoding="utf-8")
+    stack.proxy.start()
+    with sync_playwright() as playwright:
+        session = _session(playwright, stack, "chromium")
+        page = session.page
+        try:
+            page.goto(stack.url + "/")
+            page.wait_for_url(stack.url + "/auth/login?next=%2F", timeout=30_000)
+            session.sign_in()
+            page.wait_for_url(stack.url + "/", timeout=30_000)
+            page.locator("#chat-input").fill("Keep this draft while the connection is repaired")
+            page.wait_for_function("() => window.__ouroWs?.serverAnswersWhileDown() === true", timeout=60_000)
+            assert session.api("GET", "/api/state")["status"] == 200
+            assert not page.evaluate(CONNECTED)
+            trigger = page.locator("#page-chat .rw-trigger")
+            trigger.click()
+            note = page.locator("#page-chat .rw-note")
+            note.filter(has_text="check WebSocket forwarding and the server log").wait_for(state="visible")
+            assert page.locator("#chat-status").get_attribute("data-step") == "server answers"
+            assert "server answers" in trigger.get_attribute("title")
+            before = session.loads()
+            # Past the old four-probe fuse, this never-connected page and its draft stay in place.
+            page.wait_for_function("() => window.__ouroWs._recoveryHealthyProbes >= 5", timeout=160_000)
+            assert session.loads() == before
+            assert page.locator("#chat-input").input_value() == "Keep this draft while the connection is repaired"
+            for theme in ("dark", "light"):
+                page.evaluate("theme => document.documentElement.dataset.theme = theme", theme)
+                page.set_viewport_size({"width": 1100, "height": 800})
+                session.shot(f"host-refused-{theme}-desktop")
+                page.set_viewport_size({"width": 390, "height": 844})
+                note.wait_for(state="visible")
+                session.shot(f"host-refused-{theme}-phone")
+            expected = f"expected=https://127.0.0.1:{stack.core.port}"
+            assert f"origin={stack.url} {expected}" in stack.core.process.log_text()
+            assert any(r["uri"] == "/ws" and r["status"] == 403 for r in stack.routed())
+
+            # Repair only this test proxy. The same page reconnects; no manual reload, no lost draft.
+            stack.proxy.stop()
+            site.write_text(good, encoding="utf-8")
+            stack.proxy.start()
+            page.wait_for_function(CONNECTED, timeout=60_000)
+            page.wait_for_function("() => window.__ouroWs.serverAnswersWhileDown() === false")
+            assert session.loads() == before
+            assert page.locator("#chat-input").input_value() == "Keep this draft while the connection is repaired"
+            assert "live updates cannot connect" not in page.locator("#page-chat .rw-note").inner_text()
+            session.shot("host-repaired-phone")
+
+            # A foreign page still cannot open the repaired core's socket, and raw XFH grants nothing.
+            foreign = session.context.new_page()
+            foreign.goto(f"http://127.0.0.1:{stack.interface.port}/static/style.css")
+            code = foreign.evaluate("""url => new Promise(resolve => {
+                const socket = new WebSocket(url);
+                socket.onopen = () => { socket.close(); resolve('opened'); };
+                socket.onclose = event => resolve(event.code);
+            })""", stack.url.replace("https:", "wss:") + "/ws")
+            assert code == 1006
+            foreign.close()
+            status, _, body, _ = _Client(stack).request("POST", "/api/settings", body={}, headers={
+                "Origin": "https://other.example", "X-Forwarded-Host": "other.example"})
+            assert status == 403 and json.loads(body)["code"] == "cross_origin_request"
+            stack.extra["host_repair"] = {"loads": before, "foreign_close": code, "xfh_status": status,
+                                          "proxy_expected_origin": expected, "page_errors": session.unexpected_errors()}
+            assert session.unexpected_errors() == [], session.errors
+        finally:
+            session.close()
+
+
 def _signed_session(data_dir: Path, age_sec: int) -> str:
     """A session value the core's own signer would issue ``age_sec`` ago, with the core's own key."""
     from ouroboros import server_auth
@@ -620,6 +697,9 @@ def test_settings_save_reports_the_restart_the_core_requires(stack):
 
     core = stack.core
     settings_path = core.data_dir / "settings.json"
+    # A restart-required setting with its own field: the skills repository path (the worker cap is read live).
+    skills = core.data_dir.parent / "skills-restart-fixture"
+    skills.mkdir(exist_ok=True)
     with sync_playwright() as playwright:
         session = _session(playwright, stack, "chromium")
         page = session.page
@@ -631,10 +711,11 @@ def test_settings_save_reports_the_restart_the_core_requires(stack):
                 expect(page.locator("#btn-save-settings")).to_be_enabled(timeout=30_000)
 
             open_settings()
-            wait_until(lambda: "OUROBOROS_MAX_WORKERS" not in session.api("GET", "/api/settings", None)["json"]
-                       ["_meta"]["restart_state"]["unknown_keys"], 30, "worker count never applied")
-            page.locator("#s-workers").evaluate(
-                "(node) => {node.value='2'; node.dispatchEvent(new Event('input', {bubbles: true}));}")
+            wait_until(lambda: "OUROBOROS_SKILLS_REPO_PATH" not in session.api("GET", "/api/settings", None)["json"]
+                       ["_meta"]["restart_state"]["unknown_keys"], 30, "skills path never applied")
+            page.locator("#s-skills-repo-path").evaluate(
+                "(node, value) => {node.value=value; node.dispatchEvent(new Event('input', {bubbles: true}));}",
+                str(skills))
             with page.expect_response(lambda r: r.url.endswith("/api/settings") and r.request.method == "POST") as saved:
                 page.locator("#btn-save-settings").click()
                 if page.locator("[data-confirm-ok]").is_visible():
@@ -666,11 +747,11 @@ def test_settings_save_reports_the_restart_the_core_requires(stack):
             session.close()
     stack.extra["settings"] = {"save_request": save_request, "restart_state": state,
                                "refused": refused, "file_unchanged": unchanged, "after_restart": after}
-    assert written["OUROBOROS_MAX_WORKERS"] in (2, "2")
+    assert written["OUROBOROS_SKILLS_REPO_PATH"] == str(skills)
     assert "OUROBOROS_UI_DIR" not in written, "a save never authors the operator's interface choice"
-    assert "OUROBOROS_MAX_WORKERS" in state["restart_keys"] and state["restart_required"] is True
+    assert "OUROBOROS_SKILLS_REPO_PATH" in state["restart_keys"] and state["restart_required"] is True
     assert refused["status"] == 400 and unchanged, refused
-    assert after["restart_required"] is False and "OUROBOROS_MAX_WORKERS" not in after["restart_keys"]
+    assert after["restart_required"] is False and "OUROBOROS_SKILLS_REPO_PATH" not in after["restart_keys"]
 
 
 @pytest.mark.parametrize("browser_name", BROWSERS)

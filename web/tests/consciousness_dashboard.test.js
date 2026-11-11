@@ -112,13 +112,11 @@ test('the headline card says the money of the last 24 hours alone; where it went
     assert.equal(spendDetails(snapshot).unpriced, true);
     assert.deepEqual(spendDetails({ ...snapshot, spendByCause: [{ cause: 'own', label: '', usd: 0, unmeteredCalls: 0 }] }),
         { rows: [], unpriced: false }, 'a zero is not listed');
-    // Where the places live, where the allowance is set (Costs, its one editor) and where the rest is: pointers, no list.
-    assert.match(strip(html), /The places it lives in, their words and their circles: Circles ›/);
-    assert.match(html, /data-cx-act="circles"/);
-    assert.match(strip(html), /Its spending limit over 24 hours and what it spent: Costs ›/);
-    assert.match(html, /data-cx-act="costs">Costs ›</);
-    assert.match(strip(html), /Its own tasks and concurrent conversations: Settings ›/);
-    assert.doesNotMatch(strip(html), /Allowance, own tasks/, 'Settings no longer holds the allowance');
+    // The allowance, its own tasks, its conversations, its model and its places are rows of the settings cards
+    // (dashboard_settings.test.js), so no line here leads to Costs, Settings or Circles.
+    assert.doesNotMatch(html, /data-cx-act="(costs|settings|circles)"|Costs ›|Settings ›|Circles ›/);
+    assert.match(strip(main), /Stop also ends a wake that is running now\./, 'stopping is said to end a running wake');
+    assert.doesNotMatch(summaryHtml({ ...snapshot, enabled: false }), /Stop also ends/, 'said only while there is a Stop');
     assert.match(details, /^<details class="ui-disclosure consciousness-details"><summary>Details<\/summary>/);
     assert.match(strip(details), /Own time\s*\$0\.62.*Some calls have no price\..*Release notes draft \(Slack · Acme\)/);
     assert.equal(countedRootsText(snapshot), 'Its own tasks: 1 of 2 · Release notes draft (Slack · Acme)');
@@ -214,7 +212,9 @@ test('summary is authored, note is whole and disclosed, only flagged checks get 
 test('a warning chip says what the Safety Supervisor did; a raw tool id waits in the row\'s Details', () => {
     assert.equal(wakeCheckChip({ chip: 'warned', tool: 'ext_8_r_github_github_place_message' }), 'Safety Supervisor warned about a step');
     assert.equal(wakeCheckChip({ chip: 'held', tool: 'run_command' }), 'Safety Supervisor held a step');
-    assert.equal(wakeCheckChip({ chip: 'sent_despite', tool: 'slack_send' }), 'A step was sent despite the check');
+    assert.equal(wakeCheckChip({ chip: 'sent_despite', tool: 'slack_send' }), 'A step was let through despite the check');
+    assert.equal(wakeCheckChip({ chip: 'sent_despite', tool: 'run_command' }), 'A step was let through despite the check');
+    assert.equal(wakeCheckChip({ chip: 'sent_despite', tool: 'place_reply' }), 'The reply sent despite the check');
     assert.equal(wakeCheckChip({ chip: 'warned', tool: 'place_reply' }), 'Safety Supervisor warned about the reply', 'a tool it names in words stays');
     const row = wakeRowHtml({ ...wake('w-summary'), checks: [{ chip: 'warned', tool: 'ext_8_r_github_github_place_message' }] });
     const [main, details] = [row.split('<details')[0], row.slice(row.indexOf('<details'))];
@@ -266,7 +266,7 @@ test('the Dashboard lists no places: no card and no place read at mount, show, p
     window.dispatchEvent(new Event('ouro:skill-lifecycle')); await settled();
     assert.equal(reads, 0, 'the places are listed on Circles; a wake\'s door reads them when pressed');
     assert.equal(mount.regions.has('[data-cx-places]'), false, 'no Places card region');
-    assert.match(mount.regions.get('[data-cx-summary]').innerHTML, /data-cx-act="circles"/);
+    assert.match(mount.regions.get('[data-cx-summary]').innerHTML, /class="dashboard-hero"/);
     controller.destroy();
 });
 
@@ -276,7 +276,8 @@ function fakeMount() {
         innerHTML: '',
         regions,
         querySelector(selector) {
-            if (!regions.has(selector)) regions.set(selector, { innerHTML: '', textContent: '', dataset: {}, querySelector: () => null, querySelectorAll: () => [], closest: () => null });
+            if (!regions.has(selector)) regions.set(selector, { innerHTML: '', textContent: '', dataset: {}, querySelector: () => null, querySelectorAll: () => [], closest: () => null,
+                children: [], addEventListener() {}, removeEventListener() {} });
             return regions.get(selector);
         },
         addEventListener() {}, removeEventListener() {},
@@ -646,7 +647,8 @@ test('Safety chips name what they checked in sentence case, keeping raw tool ids
     assert.equal(wakeCheckText({ chip: 'warned', tool: 'place_reply' }), 'Safety Supervisor warned about the reply');
     assert.equal(wakeCheckText({ chip: 'sent_despite', tool: 'place_reply' }), 'The reply sent despite the check');
     assert.equal(wakeCheckText({ chip: 'held', tool: 'send_user_message' }), 'Safety Supervisor held the message');
-    assert.equal(wakeCheckText({ chip: 'sent_despite', tool: 'slack_send' }), 'slack_send sent despite the check');
+    assert.equal(wakeCheckText({ chip: 'sent_despite', tool: 'slack_send' }), 'slack_send let through despite the check');
+    assert.equal(wakeCheckText({ chip: 'sent_despite', tool: 'run_command' }), 'run_command let through despite the check');
     assert.equal(wakeCheckText({ chip: 'not_checked', tool: 'update_memory' }), 'Not checked (update_memory)');
     assert.equal(wakeCheckText({ chip: 'not_checked', tool: '' }), 'Not checked');
     assert.equal(wakeCheckText({ chip: 'unknown', tool: 'x' }), '');

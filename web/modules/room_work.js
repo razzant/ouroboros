@@ -114,6 +114,7 @@ export function createRoomWork({
     const frame = globalThis.requestAnimationFrame || ((fn) => setTimeout(fn, 16));
     // The one freshness predicate: the socket today; a shared connection epoch replaces it here.
     const connected = () => ws?.isConnected?.() !== false;
+    const serverAnswers = () => !connected() && ws?.serverAnswersWhileDown?.() === true;  // ws.js: an observation
     const refresh = () => refreshHeaderControlState(true);
     const element = (tag, className = '', text = '') => {
         const node = doc.createElement(tag);
@@ -751,9 +752,9 @@ export function createRoomWork({
     function paintTrigger() {
         const text = [clean(statusBadge.textContent), clean(statusBadge.dataset.step)].filter(Boolean).join(' · ');
         // A Project's list always has its head, the room's whole name, so its title opens it even with no work; a failed
-        // start always has its line and Restart.
+        // start always has its line and Restart, and a socket the server answers around always has its sentence.
         const failed = startFailureCause({ badge: statusBadge, ready: hostReady(), latest: stateSnapshots?.latest?.() }) !== null;
-        const listed = Boolean(head) || failed || rows.length > 0 || extras.children.length > 0;
+        const listed = Boolean(head) || failed || serverAnswers() || rows.length > 0 || extras.children.length > 0;
         // Word, tone, mark and what waits for the owner come together from the chat's producer
         // (work_status.roomStatusView via setStatus); the control paints them and never ranks row tones or reads a
         // class name for a second opinion. Before the producer's first answer the room is not online yet: an unknown
@@ -786,7 +787,9 @@ export function createRoomWork({
         // The failed start the bar says, or the producer says under work words, so the list never says "starting" (U003).
         const cause = startFailureCause({ badge: statusBadge, ready: hostReady(), latest });
         failure.paint(cause);
-        const message = !connected() ? tr('room_work.note.reconnecting', 'Reconnecting — showing the last known state.')
+        const message = !connected() ? (serverAnswers()
+            ? tr('room_work.note.server_answers', 'The server answers, but live updates cannot connect. Retrying automatically. If you use a proxy, check WebSocket forwarding and the server log.')
+            : tr('room_work.note.reconnecting', 'Reconnecting — showing the last known state.'))
             : cause !== null ? '' : !hostReady() ? tr('room_work.note.starting', 'Ouroboros is starting…')
                 : Array.isArray(latest?.works) && latest.works_complete === false
                     ? tr('room_work.note.partial', 'Not all current work could be confirmed; this list may be incomplete.')

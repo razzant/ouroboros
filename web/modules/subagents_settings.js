@@ -18,6 +18,7 @@ import {
     routeChoiceGroups, sameEngineAs, selectHtml, serializeRouteSpec, sessionModelOptions, subagentHandle, updateRouteControlOptions,
     PROCESSING_CHOICES, PROCESSING_PREFERENCE_KEY, processingDetailsHtml, processingIntentLabel, accountScopedModelCatalog,
 } from './route_editor_primitives.js';
+import { catalogPrograms } from './model_program.js';
 import { modelChooserHtml, bindModelChoosers } from './model_chooser.js';
 import { mergeModelCatalog, catalogReadNote, mergeHarnessModelCatalog, refreshModelCatalog } from './settings_catalog.js';
 import {
@@ -569,8 +570,8 @@ function subagentFormParts(row, state, index) {
         route: `<div class="available-subagent-route">
                 ${field('Source', selectHtml(`data-subagent-field="route" aria-label="Source for Subagent ${ordinal}"`, routeGroups, encodeRouteChoice(row)))}
                 <div class="ui-field available-subagent-field available-subagent-field-model">Model ${session
-                    ? modelChooserHtml(`data-subagent-field="model" aria-label="Agent session model for Subagent ${ordinal}"`, split.model, `actor-${rowKey}-models`, modelOptions, { placeholder: 'Engine default model' })
-                    : routeModelInputHtml(`data-subagent-field="model" aria-label="${split.subscription ? 'Subscription' : 'API'} model for Subagent ${ordinal}"`, row.route, state.apiModels, `actor-${rowKey}-models`)}</div>
+                    ? modelChooserHtml(`data-subagent-field="model" aria-label="Agent session model for Subagent ${ordinal}"`, split.model, `actor-${rowKey}-models`, modelOptions, { placeholder: 'Engine default model', programs: catalogPrograms(harnesses[split.harness], {harness: split.harness, profile: row.route.credential_profile_id}) })
+                    : routeModelInputHtml(`data-subagent-field="model" aria-label="${split.subscription ? 'Subscription' : 'API'} model for Subagent ${ordinal}"`, row.route, state.apiModels, `actor-${rowKey}-models`, {programs: split.subscription ? catalogPrograms(state.modelCatalog, {source: split.source, profile: row.route.credential_profile_id, sources: state.modelSources}) : []})}</div>
                 ${routeSupportsAccount(row.route)
                     ? field('Account', selectHtml(`data-subagent-field="account" aria-label="Account for Subagent ${ordinal}"`, [{ label: '', options: profileOptions }], row.route.credential_profile_id || ''))
                     : ''}
@@ -642,7 +643,7 @@ export function availableSubagentsRenderSignature(state, nowMs = Date.now()) {
         state.snapshot?.subagent_last_delegation || null,
         (state.setting?.items || []).map((row) => row?.route?.kind === ROUTE_KIND_AGENT_SESSION
             ? sessionRouteVerdict(row, state, nowMs).text : ''),
-        state.apiModels, state.modelSources, state.modelCatalogNote, state.processingPreference,
+        state.apiModels, state.modelSources, state.modelCatalog, state.modelCatalogNote, state.processingPreference,
         state.providers, state.connections, state.providerProfiles, state.reviewPool, state.allowEmptyReviewPool,
         state.filter, state.tickCaption, state.unsavedId,
     ]);
@@ -1283,6 +1284,16 @@ export function createAvailableSubagentsEditor({
         }
     }
 
+    function adoptCatalog(data) {
+        const catalog = mergeModelCatalog(state.modelCatalog || {items: state.apiModels, model_sources: state.modelSources}, data);
+        state.modelCatalog = catalog;
+        state.modelSources = catalog.model_sources;
+        state.apiModels = catalog.items;
+        state.modelCatalogNote = catalogReadNote(catalog);
+        state.signature = '';
+        paint({discoveryOnly: true});
+    }
+
     function mount({ bindStatus = true } = {}) {
         adoptStatus();
         if (bindStatus && !state.statusDisposer) {
@@ -1295,14 +1306,7 @@ export function createAvailableSubagentsEditor({
         }
         if (!state.catalogDisposer) {
             const target = getDoc();
-            const onCatalog = (event) => {
-                const catalog = mergeModelCatalog({ items: state.apiModels, model_sources: state.modelSources }, event?.detail);
-                state.modelSources = catalog.model_sources;
-                state.apiModels = catalog.items;
-                state.modelCatalogNote = catalogReadNote(catalog);
-                state.signature = '';
-                paint({ discoveryOnly: true });
-            };
+            const onCatalog = (event) => adoptCatalog(event?.detail);
             target?.addEventListener?.('settings-model-catalog:updated', onCatalog);
             state.catalogDisposer = () => target?.removeEventListener?.('settings-model-catalog:updated', onCatalog);
         }
@@ -1350,7 +1354,7 @@ export function createAvailableSubagentsEditor({
             return load(availableSubagentsLoadValue(settings), {
                 source: String(meta.source || 'configured'), diagnostics: meta.diagnostics || meta.diagnostic || [], automatic: meta.automatic === true });
         },
-        setPreviewFailure,
+        setPreviewFailure, adoptCatalog,
         validate: validationErrors,
         noteSaveAttempt,
         /** Adopt GET /api/review-pool for the catalog loaded last. */

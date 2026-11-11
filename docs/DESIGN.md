@@ -1487,7 +1487,8 @@ something that ends by itself, two bars while paused, a faint ring when
 unconfirmed. While something waits for the owner the amber dot replaces that shape
 beside the room's word; a Pause is not the owner's turn. At rest `Online` keeps its
 green dot, a status sentence's own. Only what the client alone knows lies over the
-server's mark: `Reconnecting…` (a ring), `Updating…` (a ring) while a room shown again or
+server's mark: `Reconnecting…` (a ring; `· server answers` once the core answered and a later
+attempt still failed: an observation, never a cause), `Updating…` (a ring) while a room shown again or
 reconnected still reads what it missed after 300 ms, the owner's own unconfirmed send and the
 owner's own Stop press (moving), and `Starting…` with the boot phases that refine it
 (no mark). The transcript's typing bubble shows only while the room's work moves and
@@ -2747,6 +2748,27 @@ from Main remains visibly inherited while its account can be pinned
 independently. Fallbacks use the same row in their saved order, with adjacent
 move/remove controls and the group's Add action.
 
+Accounts has one program row per family, regardless of account count. Installed and
+newest versions keep one place; operation state and Details keep another. The engine's
+verdict reads “X available”, “Up to date” or “Latest unknown”. Update is present for
+newer/unknown versions only; Install for absence, exactly when the engine allows it.
+Nothing updates itself. An unavailable action names the engine's reason. Details holds
+Check latest, paths, override, command/script evidence, vendor lines, limitations and
+release notes through the host opener, keeping the app open. “Ran” appears only if
+different from “Command”; show time, never an
+operation id. A changed receipt can offer Return to its prior version when supported.
+A nonzero installer exit can still mean Updated: retain the limitation sentence.
+A package-manager updater's advice remains advice, never an automatic command.
+
+Only an opened model list shows a non-option closing row per producer: “List from”
+when it supplies every suggestion, otherwise the supplied subset with its source label
+(e.g. “Claudexor entries supplied by Codex”), then the newest fact and Update when needed.
+Every editor built on the shared chooser follows this rule. Closed
+editors stay quiet; API-only lists have no such row. Mouse, touch and keyboard Update
+keep the list open through progress and result, then refresh its suggestions. Typed
+values/carets survive; “Custom ID · Not in this list” stays under an unlisted input.
+Full evidence stays in Accounts. Flex gaps wrap facts without an orphan separator.
+
 Restart Claudexor (Accounts toolbar, after Refresh) asks first in the shared confirm
 dialog: its body is one sentence of fact, `Restarting Claudexor ends N runs: X of
 Ouroboros, Y of other programs.`, plus any pin warning; the serving and pinned engines,
@@ -3136,10 +3158,11 @@ the safe area (owner 22.10). Free room lies between the tools and the foot,
 never between the list and the tools (owner 18.10); a wrapping update grows the
 foot upward. Main's row carries its room's status mark at the Project rows' x. A Project's
 menu opens from its ⋯ (a fine pointer), a right-click, Shift+F10 or a long press; it
-first says the row's state as its mark and words, then offers Pin or Unpin; pinning
-neither opens nor reads it. Pins lead the one list, one `--space-2` of air before the next shown row their only
-boundary: no caption, glyph, tint, rule or column, so nothing reads as one more Project; their tooltip and
-accessible name say Pinned. Within each group the newest message leads: what Unread (§4) counts,
+first says the row's state as its mark and words, then offers Pin or Unpin, as the row's glyph left of its name
+does for a hovering pointer or the keyboard; pinning neither opens nor reads it. Pins lead the one list, one
+`--space-2` of air before the next shown row their only boundary: no caption, tint, rule or column, and no glyph at
+rest, so nothing reads as one more Project; their tooltip and accessible name say Pinned. Within each group the
+newest message leads: what Unread (§4) counts,
 the owner's own, of System rows only a work's end or a reminder; unread only marks. The column's places follow
 §5. The list rests on the pins and the fifty newest others, the rest a step away (owner's choice A1):
 Find a project under the header, Show more at its end. The field, a capsule a row high in the header
@@ -3187,7 +3210,7 @@ scrolls sideways keep their own finger. Dragging it back closes it
 veil follow the same finger. A menu or dialog that opens under the finger, a long
 press's row menu included, ends the drag before it starts. Every gesture has a
 visible control, except a Project row's menu on touch: phone rows have no room
-for ⋯, so there a long press opens it, and the ⋯ stays in the row for the keyboard
+for ⋯, so there a long press opens it, and the ⋯ and Pin stay in the row for the keyboard
 and screen readers, appearing when focused (`web/modules/row_menu_gesture.js`;
 a feed row keeps its own press, which sinks and lifts it).
 
