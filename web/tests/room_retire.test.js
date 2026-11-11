@@ -261,11 +261,15 @@ test('a room away hears only its own sends\' custody; back, it hears everything 
     assert.equal(heard.at(-1)[0], 'log');
     assert.equal(socket.send({ type: 'chat' }).status, 'sent');
     assert.equal(socket.ws.readyState, 1);
-    // Away while the socket is down: back, it waits for the real open instead of claiming one.
+    // Away while the socket is down: back, it waits for the real open instead of claiming one. The socket's own
+    // observation reaches the room only while it is back, as its other live facts do.
     socket.pause();
     connected = false;
+    ws.serverAnswersWhileDown = () => true;
+    assert.equal(socket.serverAnswersWhileDown(), false, 'away, the room claims nothing about the socket');
     heard.length = 0;
     socket.resume();
+    assert.equal(socket.serverAnswersWhileDown(), true);
     assert.deepEqual(heard, []);
     ws.emit('open', { previouslyConnected: true });
     assert.deepEqual(heard.map(([event]) => event), ['open']);

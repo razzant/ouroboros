@@ -216,7 +216,8 @@ class Shape(NamedTuple):
     """Published shapes of one ``HTTP_ENDPOINTS`` token.
 
     ``responses`` reads ``"200:TaskCreateResponse 400,409,503:ErrorResponse"``: statuses, then
-    a body that is a contract TypedDict name (JSON), a media kind (``json`` = JSON whose shape is
+    a body; ``4xx``/``5xx`` cover otherwise unlisted error statuses. The body is
+    a contract TypedDict name (JSON), a media kind (``json`` = JSON whose shape is
     not published, ``html``, ``text``, ``sse``, ``file``, ``zip``, ``js``, ``empty``, ``any``), a kind with
     the TypedDict its items follow (``sse/TaskEvent``), or alternatives joined by ``|``.
     ``request`` uses the same body words (plus ``multipart``); ``query`` names the parameters
@@ -557,11 +558,8 @@ HTTP_SHAPES: dict[str, Shape] = {
         note=f"passive; an engine refusal keeps the engine's status; {_ENGINE}"),
     "POST /api/claudexor/maintenance/operations": Shape(
         f"202:ClaudexorMaintenanceOperation {_MAINTENANCE}", "ClaudexorMaintenanceRequest", headers="Idempotency-Key!",
-        note="can start the engine and prepare Node/npm; 409 maintenance_restart_required or 409/503 "
-             "maintenance_preparation_failed: acceptance=not_submitted, scope=this_attempt; "
-             "use Restart Claudexor in Accounts when required; external/attach-only Node/npm needs external repair; "
-             "optional inspection failure still submits; the same key and body join one operation; "
-             "keep both after 503 acceptance unknown, even after a later preparation-only reply"),
+        note="vendor latest/exact-version operation; can start the engine; the same key and body join one "
+             "operation; retain both after acceptance unknown; a pre-submit refusal covers this attempt only"),
     "GET /api/claudexor/maintenance/operations/{operation_id}": Shape(
         f"200:ClaudexorMaintenanceOperation {_MAINTENANCE}", note="passive; poll while queued or running"),
     "POST /api/claudexor/maintenance/operations/{operation_id}/cancel": Shape(
@@ -589,8 +587,10 @@ HTTP_SHAPES: dict[str, Shape] = {
              "409 restart_preview_stale carries the fresh preview and stopped nothing; 200 restart.serving false "
              "is a stopped engine that did not start"),
     "POST /api/claudexor/login": Shape(
-        "200:ClaudexorLoginJobResponse 400,409:ErrorResponse|ClaudexorLoginJobProblem 503:ClaudexorLoginJobProblem|ErrorResponse",
-        "ClaudexorLoginRequest", note="not idempotent: every call may start a job; can start the engine"),
+        "200:ClaudexorLoginJobResponse 400,409:ErrorResponse|ClaudexorLoginJobProblem "
+        "503:ClaudexorLoginJobProblem|ErrorResponse 4xx,5xx:ClaudexorLoginJobProblem|ErrorResponse",
+        "ClaudexorLoginRequest", note="not idempotent: every call may start a job; can start the engine; "
+             "Connect maintenance refusals preserve engine status, code, context, retryability and required_actions"),
     "GET /api/claudexor/login/{job_id}": Shape(_LOGIN_JOB, note="a snapshot {job, cursor, sequence, deviceCode?}; poll it"),
     "DELETE /api/claudexor/login/{job_id}": Shape(_LOGIN_JOB, note="cancel; a repeat is harmless"),
     "POST /api/claudexor/login/{job_id}/input": Shape(

@@ -196,7 +196,7 @@ def _run_cross_model_fallback_chain(
     accumulated_usage, task_type, emit_progress, context_fit_plan,
     active_context_mode,
 ) -> tuple:
-    """Try the configured routes other than the acting binding before any wait begins. An eligible unknown
+    """Try the configured routes other than the acting binding ahead of any further wait. An eligible unknown
     outcome moves on with facts-only recovery input (a real, possibly charged generation); an ineligible
     one (an accepted operation still readable) or a spent deadline stops the walk. A round whose own
     failure is an outage or an unknown outcome keeps that failure as its wait when none answers."""
@@ -441,25 +441,29 @@ def _recover_failed_round(limit_ctx: Any, tools: ToolRegistry, msg: Any, episode
 
     Each observed failure can use configured alternatives, including during an existing
     outage. That episode keeps its elapsed clock, backoff and prior custody; a failed
-    alternative never resets those bounds. Returns ``(msg, model, use_local, plan, mode, episode)``.
+    alternative never resets those bounds. An acting primary's first lost answer opens its
+    wait instead, so its own continuation precedes the walk (``fallback_chain_allowed``).
+    Returns ``(msg, model, use_local, plan, mode, episode)``.
     """
     from ouroboros.model_wait import current_model_wait
 
     usage, ctx = limit_ctx.accumulated_usage, tools._ctx
     model, use_local = limit_ctx.active_model, limit_ctx.active_use_local
 
-    def reconcile(current: Any) -> Any:
+    def reconcile(current: Any, after_walk: bool = False) -> Any:  # past the walk, only a configured route answers
         return _loop()._reconcile_transport_wait(
             current, ctx, msg_present=msg is not None, error_kind=str(usage.get("_last_llm_error_kind") or ""),
-            drive_logs=limit_ctx.drive_logs, task_id=limit_ctx.task_id, model=model, emit_progress=emit_progress)
+            drive_logs=limit_ctx.drive_logs, task_id=limit_ctx.task_id, model=model, emit_progress=emit_progress,
+            by_configured_route=after_walk and msg is not None)
 
     if episode is not None:
         episode = reconcile(episode)
         if msg is not None:
             return msg, model, use_local, context_fit_plan, active_context_mode, episode
     kind, pending = str(usage.get("_last_llm_error_kind") or ""), usage.get("_pending_transport_outcome")
-    if (msg is None and _loop()._fallback_chain_allowed(ctx, kind, None, usage) and _route_candidates(
-            ctx, model, use_local, str(getattr(context_fit_plan, "model_role", "") or ""), current_model_wait())):
+    if (msg is None and (rows := _route_candidates(
+            ctx, model, use_local, str(getattr(context_fit_plan, "model_role", "") or ""), current_model_wait()))
+            and _loop()._fallback_chain_allowed(ctx, kind, episode, usage, primary_acting=not rows[0][3])):
         msg, model, use_local, context_fit_plan, active_context_mode = _loop()._run_cross_model_fallback_chain(
             llm=limit_ctx.llm, ctx=ctx, tools=tools, messages=limit_ctx.messages, active_model=model,
             active_use_local=use_local, tool_schemas=limit_ctx.tool_schemas, active_effort=limit_ctx.active_effort,
@@ -481,7 +485,7 @@ def _recover_failed_round(limit_ctx: Any, tools: ToolRegistry, msg: Any, episode
             usage["_last_llm_error_kind"] = "provider_outcome_unknown" if outstanding else kind
             if outstanding:
                 usage["_pending_transport_outcome"] = outstanding
-    return msg, model, use_local, context_fit_plan, active_context_mode, reconcile(episode)
+    return msg, model, use_local, context_fit_plan, active_context_mode, reconcile(episode, after_walk=True)
 
 
 def _walk_fenced(tool_ctx: Any, usage: Dict[str, Any]) -> bool:

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.worker_pool_support import fixed_pool
 
 
 def _install_queue(tmp_path, monkeypatch):
@@ -24,7 +25,7 @@ def _install_queue(tmp_path, monkeypatch):
     monkeypatch.setattr(workers, "PENDING", [])
     monkeypatch.setattr(workers, "RUNNING", {})
     monkeypatch.setattr(workers, "WORKERS", {})
-    monkeypatch.setattr(workers, "MAX_WORKERS", 1)
+    fixed_pool(monkeypatch)  # the slots a test installs, never a new process
     monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "")
     monkeypatch.setattr(queue, "PENDING", workers.PENDING)
     monkeypatch.setattr(queue, "RUNNING", workers.RUNNING)

@@ -1,24 +1,25 @@
-import { escapeHtmlAttr, escapeHtmlText as escapeHtml, isoMicros } from './utils.js';
-import { bindMarkdownTables, destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown, renderChatMarkdown, linkify } from './chat_markdown.js';
+import { escapeHtmlAttr, isoMicros } from './utils.js';
+import { bindMarkdownTables, destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
 import { renderPageHeader } from './page_header.js';
 import { renderSkillIcon, strokeIcon } from './page_icons.js';
 import { bindScrollFade } from './scroll_fade.js';
 import { createRoomHeader, mainHeaderActionsHtml } from './chat_header.js';
 import { pageLabel } from './pages.js';
 import { showToast } from './toast.js';
-import { hostRowDisplayText, hostSentenceText } from './host_notice_text.js';
 import { ORIGIN_ADDRESSED_NOTICE_TYPES, childRowPlacement, replayConcludesTask } from './chat_row_placement.js';
-import { appendProjectRow, decorateProjectRow, PROJECT_ROW_TYPES, refreshProjectAnswerFold, syncSavedProjectContext } from './project_answer.js';
+import { appendProjectRow, PROJECT_ROW_TYPES, refreshProjectAnswerFold, syncSavedProjectContext } from './project_answer.js';
 import { createWorkPortals, isPortal, reconcilePortalNotes } from './work_portal.js';
 import { createTaskEpisodes } from './task_episodes.js';
 import { markSwarmLabel, syncSwarmReceipt } from './swarm_presentation.js';
 import { syncCostBreakdown } from './cost_breakdown_presentation.js';
-import { createChatMedia, decorateContactSource, showTaskIncidentToast } from './chat_media.js';
+import { createChatMedia, showTaskIncidentToast } from './chat_media.js';
+import { createTextBubbles } from './chat_text_bubble.js';
 import { createCatchUp } from './room_retire.js';
 import { createChatPreview } from './chat_preview.js';
-import { attachmentCaption, attachmentViews, createUnconfirmedSends } from './chat_attachments.js';
+import { createUnconfirmedSends } from './chat_attachments.js';
 import { createChatDecision } from './chat_decision.js';
 import { createRoomWork } from './room_work.js';
+import { SERVER_ANSWERS_EVENT } from './ws.js';
 import { applyCardWorkViews, cardControls, cardMenuActions, changedOffers, emptyWorkState, openCardControls, ownStopPress, reconcileWorkState, roomStatusView } from './work_status.js';
 import { statusMarkHtml } from './status_mark.js';
 import { createMainWaiting } from './main_waiting.js';
@@ -81,10 +82,6 @@ import {
     setHistoricalUnconfirmed,
     syncParkedPhase,
 } from './task_phase_chip.js';
-import {
-    renderSkillReviewDisclosure,
-    wireSkillReviewDisclosure,
-} from './skill_review_card.js';
 import {
     classifyReviewLifecycle,
     classifyReviewLifecyclePointer,
@@ -160,7 +157,6 @@ import {
     dockChildReviewDoor,
     cardRowEvidenceRef,
     cardRowSummary,
-    evidenceLinkHtml,
     refitCollapsedActivity,
 } from './chat_activity.js';
 
@@ -266,6 +262,9 @@ export function createChatInstance({
         onDomWrite: withStableViewport,
         replies, composer: () => composer,
     });
+    // A text row as its bubble and doors (chat_text_bubble.js); addMessage keeps its identity and its place.
+    const drawTextBubble = createTextBubbles({ chatMedia, replies, feed: messagesDiv, isMain, ownProjectId: projectId,
+        onDomWrite: withStableViewport });
     const mainWaiting = isMain ? createMainWaiting({ page, messagesDiv, insertMessageNode, stampNodeTimestamp,
         openSettings: openSettingsTab, refresh: refreshHeaderControlState, mutate: withStableViewport,
         decision: () => chatDecision, revealQuestion: (...a) => revealQuestion(...a), reading: () => reading }) : null;
@@ -303,7 +302,6 @@ export function createChatInstance({
     const unconfirmed = createUnconfirmedSends({ send: (frame, options) => ws.send(frame, options),
         root: () => messagesDiv, onDomWrite: withStableViewport, showToast, compose: replies.compose,
         storage: sessionStorage, storageKey: storeKey('ouro_chat_unconfirmed') });
-    const ownProjectId = projectId;
 
     let _syncPass1Active = false;
     let _historyReplayActive = false;
@@ -505,7 +503,7 @@ export function createChatInstance({
         if (!statusBadge) return;
         statusBadge.className = `status-badge ${kind}`;
         statusBadge.textContent = text;
-        statusBadge.title = title; // a failed boot step's cause; empty otherwise
+        statusBadge.title = title; // a failed boot step's cause, or the server-answers sentence; empty otherwise
         Object.assign(statusBadge.dataset, { tone, mark, owner: owner ? '1' : '', amber, step });
         roomWork?.update();
     }
@@ -1676,6 +1674,7 @@ export function createChatInstance({
         if (summary.model) record.agentModel = summary.model;
         // Keep the observed initiator.
         if (summary.initiator) record.initiator = summary.initiator;
+        if (summary.continueRequester) record.continueRequester = summary.continueRequester;
 
         // Only task facts own the outcome chip under a hold; failed tools are diagnostics.
         if (summary.observedOutcome && !record.finished) record.observedOutcome = summary.observedOutcome;
@@ -2051,8 +2050,8 @@ export function createChatInstance({
     function updateLiveCardFromLogEvent(evt) {
         if (!evt) return false;
         const eventType = evt.type || evt.event || '';
-        if (eventType === 'history_retention') {
-            return withStableViewport(() => noteTaskDetails(liveCardRecords.get(taskKey(evt.task_id)), evt));
+        if (eventType === 'history_retention' || evt.review_overrides) {
+            return withStableViewport(() => noteTaskDetails(liveCardRecords.get(taskKey(evt.work_task_id || evt.task_id)), evt));
         }
         const reference = admitCardMetadata(evt);
         if (reference !== undefined) return reference;
@@ -2098,16 +2097,13 @@ export function createChatInstance({
     }
 
     function addMessage(text, role, markdown = false, timestamp = null, isProgress = false, opts = {}) {
-        const pending = !!opts.pending;
-        const ephemeral = !!opts.ephemeral;
         // Normalize the persisted identity once; the same fields label and deduplicate a row.
         const meta = Object.fromEntries([
             'clientMessageId', 'senderLabel', 'senderSessionId', 'source', 'initiator',
             'systemType', 'taskId', 'projectId', 'projectName', 'taskName', 'handoffId',
             'originId', 'completionLimitation', 'deliveryId',
         ].map(key => [key, opts[key] || '']));
-        const { clientMessageId, source, systemType, taskId, projectId, projectName } = meta;
-        const attachments = role === 'user' ? attachmentViews(opts.attachments) : [];
+        const { clientMessageId } = meta;
         const ts = timestamp || new Date().toISOString();
         const legacyKey = buildMessageKey(role, text, ts, { ...meta, isProgress });
         const bubbles = () => [...messagesDiv.querySelectorAll('.chat-bubble')];
@@ -2151,68 +2147,14 @@ export function createChatInstance({
             }
         }
 
-        const bubble = document.createElement('div');
-        bubble.className = `chat-bubble ${role}` + (isProgress ? ' progress' : '');
-        if (pending) bubble.classList.add('pending');
-        if (ephemeral) bubble.dataset.ephemeral = '1';
-        for (const key of ['clientMessageId', 'systemType', 'senderSessionId', 'taskId', 'deliveryId', 'projectId']) {
-            if (meta[key]) bubble.dataset[key] = meta[key];
-        }
-        if (legacyKey) bubble.dataset.messageKey = legacyKey;
-        stampHistoryNode(bubble, opts.historyId, opts.historyPosition);
-
-        const stored = text;
-        if (role === 'system' && ['task_pause_notice', 'legacy_memory_notice'].includes(systemType)) text = hostSentenceText(text);
-        // Render-only: Copy below keeps `shown`, the pre-cleanup sentence.
-        const painted = hostRowDisplayText({ text: stored, role, system_type: systemType, narration: opts.narration }, text);
-        const skillReview = role === 'system' && systemType === 'skill_review' && opts.narration !== true;
-        if (skillReview) bubble.classList.add('chat-skill-review');
-        const richMarkdown = role !== 'user' && !skillReview && (role !== 'system' || markdown === true);
-        // Only the web composer writes the file-name tail; a Telegram/skill caption is kept word for word.
-        const shown = attachments.length ? attachmentCaption(text, attachments,
-            { placeholder: opts.textPlaceholder === true, composed: source === 'web' }) : text;
-        const rendered = role === 'user'
-            ? linkify(shown)
-            : skillReview
-                ? renderSkillReviewDisclosure(text, opts.skillReview || null)
-                : role === 'system' && markdown !== true
-                    ? escapeHtml(painted)
-                    : renderChatMarkdown(painted);
-        const timeFmt = formatMsgTime(ts);
-        const timeHtml = timeFmt ? `<div class="msg-time" title="${escapeHtmlAttr(timeFmt.full)}">${escapeHtml(timeFmt.short)}</div>` : '';
-        const pendingHtml = pending ? `<div class="msg-pending">Queued until reconnect</div>` : '';
-        // Preserve the card's source link in a standalone row.
-        bubble.innerHTML = `
-            <div class="sender">${escapeHtml(senderLabel(role, isProgress, systemType, meta))}</div>
-            <div class="message${richMarkdown ? ' ui-rich-content' : ''}">${rendered}</div>
-            ${evidenceLinkHtml(opts.evidenceRef)}
-            ${pendingHtml}
-            ${timeHtml}
-        `;
-        decorateContactSource(bubble, opts.presenceContact);
-        if (attachments.length) chatMedia.mountAttachments(bubble, attachments, shown);
-        if (!isProgress && shown) {
-            chatMedia.attachCopyControl(bubble, shown, {
-                role, systemType, textPlaceholder: opts.textPlaceholder,
-            });
-        }
-        if (!isProgress) { replies.decorate(bubble, opts.reply); markSwarmLabel(messagesDiv, opts.reply, bubble); }
-        // Legacy start/transfer rows without task or Project stay plain text with Copy; an answer tied to
-        // another room's work ends with that Project reference, unfolded.
-        const projectRow = PROJECT_ROW_TYPES.has(systemType);
-        if (projectRow ? !(isMain && ['project_handoff', 'project_started'].includes(systemType))
-            : role === 'assistant' && projectId !== ownProjectId) decorateProjectRow(bubble, { ...meta, ...opts, role,
-            fold: projectRow && role === 'assistant', addedAt: ts });
-        syncSavedProjectContext(bubble, opts.originProjected, opts.originId);
-        wireSkillReviewDisclosure(bubble, { onDomWrite: withStableViewport });
-        stampNodeTimestamp(bubble, ts);
+        const { bubble, rich } = drawTextBubble(text, role, { markdown, ts, isProgress, meta, legacyKey, opts });
         insertMessageNode(bubble, { forceStick: !!opts.forceStick });
-        if (richMarkdown) enhanceMountedMarkdown(bubble);
+        if (rich) enhanceMountedMarkdown(bubble);
         chatDecision.renderRoutingDecision(bubble, opts.chatAnnotation);
         if (isMain) reconcilePortalNotes(messagesDiv, bubble);
         rememberMessageKey(messageKey);
         if (deliveryKey) rememberMessageKey(deliveryKey);
-        if (pending && clientMessageId) pendingUserBubbles.set(clientMessageId, bubble);
+        if (opts.pending && clientMessageId) pendingUserBubbles.set(clientMessageId, bubble);
         return bubble;
     }
 
@@ -2364,7 +2306,7 @@ export function createChatInstance({
                         cardRowsAttached.add(msg);
                         continue;
                     }
-                    // Placement precedes progress; later real rows may create the card.
+                    // Placement precedes progress; later rows may create the card.
                     if (isPlacedCardRow(msg)) continue;
                     const taskId = msg.task_id || '';
                     if (!taskId) continue;
@@ -2372,6 +2314,7 @@ export function createChatInstance({
                         if (msg.suggested_name) applySuggestedName(taskId, msg.suggested_name);
                         updateLiveCardFromProgressMessage(msg, { grantCancelAuthority: msg.project_mirror !== true });
                         const historyCard = liveCardRecords.get(taskId);
+                        if (msg.review_overrides) noteTaskDetails(historyCard, msg);
                         if (historyCard && !historyCard.isSubagent && !activeDirectActivities.has(taskId)
                                 && !msg.task_terminal_status && msg.task_phase !== 'finalizing'
                                 && setHistoricalUnconfirmed(historyCard)) {
@@ -3125,7 +3068,8 @@ export function createChatInstance({
 
     // The server's room under this client's own facts.
     function deriveChatStatus() {
-        return roomStatusView(workState, { connected: ws.isConnected ? ws.isConnected() : true, catchingUp: catchUp.active,
+        return roomStatusView(workState, { connected: ws.isConnected ? ws.isConnected() : true,
+            serverAnswers: ws.serverAnswersWhileDown?.() === true, catchingUp: catchUp.active,
             ready: hostStart.ready(),
             boot: hostStart.status().bootPhase,
             sending: pendingSubmissions.size > 0, stopping: ownStopPress(workState, liveCardRecords) });
@@ -3501,6 +3445,7 @@ export function createChatInstance({
         if (leaving) { outageAway = [...outageAway || [], ...unconfirmed.written()]; return; }
         showOutage();
     });
+    onWs(SERVER_ANSWERS_EVENT, () => syncChatStatus());
     function showOutage(doubted) {
         unconfirmed.unsettle(doubted);
         mainWaiting?.setConnected(false);

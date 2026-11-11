@@ -4,7 +4,6 @@ import test from 'node:test';
 
 import { bindComposerFileTargets, decorateContactSource, safeHttpUrl } from '../modules/chat_media.js';
 import { createComposerAttachments } from '../modules/chat_attachments.js';
-import { messageRow } from '../modules/message_actions.js';
 import { uploadView } from './helpers/attachment_views.js';
 import { NodeStub, fixture } from './helpers/media_dom.js';
 
@@ -340,41 +339,6 @@ test('video download filename follows the validated MIME subtype', async () => {
         fx.controller.destroy();
         fx.restore();
     }
-});
-
-test('Copy and the saved answer source keep the same words and room lifetime, only for eligible answers', async () => {
-    const fx = fixture();
-    try {
-        const copied = [];
-        Object.defineProperty(globalThis, 'navigator', {
-            configurable: true,
-            value: { clipboard: { writeText: async (text) => { copied.push(text); } } },
-        });
-        for (const [metadata, eligible] of [
-            [{ role: 'assistant' }, true],
-            [{ role: 'user' }, false],
-            [{ role: 'assistant', systemType: 'relay_entry' }, false],
-            [{ role: 'assistant', textPlaceholder: true }, false],
-            [{}, false],  // other Copy callers register their own source, such as a living card
-        ]) {
-            const bubble = new NodeStub('div', fx.tracker);
-            bubble.className = `chat-bubble ${metadata.role || 'assistant'}`;
-            bubble.dataset.rowAddress = 'row:1@t#a';
-            const words = '  **Exact** words\n  code  ';
-            const button = fx.controller.attachCopyControl(bubble, words, metadata);
-            await button.click();
-            assert.equal(copied.at(-1), words);
-            const row = messageRow(bubble);
-            assert.equal(row.answerWords, eligible ? words : '');
-            assert.equal(typeof row.holdTransient === 'function', eligible);
-            if (eligible) {
-                let closed = 0;
-                row.holdTransient(() => { closed += 1; });
-                fx.controller.closeTransient();
-                assert.equal(closed, 1, 'the same room owns Share as Copy');
-            }
-        }
-    } finally { fx.controller.destroy(); fx.restore(); }
 });
 
 test('rejected clipboard writeText falls back to textarea copy', async () => {

@@ -102,7 +102,7 @@ class Engine:
 def runtime(root, factory):
     stop = threading.Event()
     stop.set()
-    result = body.BodyRuntime(root, stop_event=stop, gateway_factory=factory, max_workers=2)
+    result = body.BodyRuntime(root, stop_event=stop, gateway_factory=factory)
     result.thread.join(10)
     assert not result.thread.is_alive()
     return result
@@ -169,7 +169,8 @@ def test_a_stale_handshake_cannot_prove_absence_for_another_store(tmp_path):
 def test_successful_read_binds_store_and_same_store_restart_can_close(tmp_path):
     entry = started(tmp_path)
     gateway = SimpleNamespace(store_identity="store-a", close=lambda: None,
-        get_run=lambda *_a, **_kw: {"summary": {"runId": entry.run_id, "state": "running"},
+        get_run=lambda *_a, **_kw: {"summary": {"runId": entry.run_id, "state": "running",
+                                                "effectiveAccess": "readonly"},
                                   "lastSeq": 1, "pendingInteractions": []})
     observer = runtime(tmp_path, lambda: gateway)
     observer._observe(entry)
@@ -195,7 +196,8 @@ def test_successful_read_resolves_only_its_own_absence_gap(tmp_path, newer_fault
     if newer_fault:
         c.record_containment_fault(tmp_path, entry, "cancel_unverified")
     gateway = SimpleNamespace(store_identity="store-a", close=lambda: None,
-        get_run=lambda *_a, **_kw: {"summary": {"runId": entry.run_id, "state": "running"},
+        get_run=lambda *_a, **_kw: {"summary": {"runId": entry.run_id, "state": "running",
+                                                "effectiveAccess": "readonly"},
                                   "lastSeq": 1, "pendingInteractions": []})
     observer = runtime(tmp_path, lambda: gateway)
     observer._observe(observed)

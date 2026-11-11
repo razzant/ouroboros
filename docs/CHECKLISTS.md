@@ -267,8 +267,9 @@ Ouroboros binds Ouroboros as the author, never the subject repository.
   answers are not one) or an internal-only refactor stays advisory. Disclosure
   alone (commit message, changelog) is not acceptance.
 - The `Ouroboros Body Layer` sets the severity of its own items and names the
-  body's addresses for items 5-9. Its editorial calibration of item 5
-  applies only to the body; other core severities remain unchanged.
+  body's addresses for items 4-9. Its replay note for item 4 and its editorial
+  calibration of item 5 apply only to the body; other core severities remain
+  unchanged.
 
 ### Retry convergence for tests_affected
 
@@ -383,6 +384,13 @@ Ownership` section is delivered beside them.
 
 ### Body addresses for core items
 
+- Item 4 (`tests_affected`): a change to what the Safety Supervisor flags (its
+  prompt `prompts/SAFETY.md`, the evidence its check reads, or which calls reach
+  it) is not "only docs changed". Its evidence is a replay of recorded checks
+  through the configured checker in both directions, with the counts in the
+  commit message or the pull request: the wrong flags that clear and the right
+  flags that stay. Its absence is advisory; where no checks are recorded, the
+  change says so.
 - Item 5 (`architecture_doc`): the documents are `docs/ARCHITECTURE.md` /
   `docs/DEVELOPMENT.md` and their owning physical chapters; the rule is P6
   (present-tense map) and P7 (one home per fact) — see DEVELOPMENT.md
@@ -1079,8 +1087,16 @@ content hash and exact retained copy, with text excerpts inline) and the host-at
   fix a method for this work: following it is then part of the ask. A fixed method skipped without
   saying so is a silent narrowing; one the subject cannot show is a gap to name, not by itself a
   failure. A method that only an account names (the objective, the plan) is not fixed by the owner.
-- A partial result that says plainly what it did not do is honest, not a defect. A result that silently
-  narrows what was asked, claims what it did not do, or contradicts its own material is a defect.
+- Saying plainly what was not done is honest, and it does not make the ask met. Name the part of the owner's
+  ask that remains unmet, in their words. A helper's result answers only for the part its assignment gives
+  it; where the subject carries no words of the owner, the ask is the task's own request. Then tell two
+  things apart: a stage handed over with the rest left open (the reply says what remains and does not present
+  the whole work as finished), and a result presented as the finished work. A useful stage may be delivered;
+  calling it a stage or a first version neither cancels the original ask nor excuses a false claim or a broken
+  part in what it does deliver. A result that presents the ask as done while part of it is unmet, that narrows
+  the ask without the owner's word, claims what it did not do, or contradicts its own material is a defect.
+  Where the subject does not show whether stopping here was the owner's wish, name that uncertainty: do not
+  invent a permission to stop, nor a ban on showing an intermediate result.
 - Read the exact copies of the produced files that the subject names; a claim about a file must match its content.
   A file you could not read is a gap you name with what it leaves unverified; a gap alone is not a failure.
 - When what was produced is something a person will look at, look at it (the frames the subject carries,
@@ -1093,9 +1109,10 @@ content hash and exact retained copy, with text excerpts inline) and the host-at
 
 ### Severity rules
 
-- **critical** — the result fails what was asked or misstates what it delivers, so it should not be
-  delivered as it is.
-- **advisory** — a real improvement that does not block delivery.
+- **critical** — the result is presented as doing what was asked while a part of the ask is unmet without
+  the owner's word, or it misstates what it delivers, so it should not be delivered as it is.
+- **advisory** — a real improvement that does not block delivery; the unmet remainder that an honest stage
+  handover names and leaves open belongs here, stated as unmet.
 
 ---
 

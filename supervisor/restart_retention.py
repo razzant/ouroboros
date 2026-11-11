@@ -191,11 +191,11 @@ def retain_owner_pause_park(root: pathlib.Path, task_id: str, attempt: int) -> D
 
 
 def _cancel_intent_active(result_root: Any, task_id: str) -> bool:
-    """An explicit Stop outranks a saved pause; an unreadable authority is NOT a Stop."""
+    """Only explicit cancellation owns a saved row; parked-helper closure and unreadable authority are not Stop."""
     try:
-        from ouroboros.cancel_intents import has_active_intent
+        from supervisor.ended_work_helpers import restore_custody_owns
 
-        return bool(has_active_intent(pathlib.Path(result_root), str(task_id), strict=True))
+        return restore_custody_owns(pathlib.Path(result_root), str(task_id))
     except Exception:
         log.warning("Cancel authority unreadable for %s at a stop; its saved pause is retained",
                     task_id, exc_info=True)

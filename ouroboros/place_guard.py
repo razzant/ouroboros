@@ -23,7 +23,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from ouroboros import places, conversation_lease
-from ouroboros.tool_effects import (EFFECT_MESSAGE, EFFECT_READ, EFFECT_WRITE, ToolEffect, argument_value,
+from ouroboros.tool_effects import (EFFECT_MESSAGE, EFFECT_READ, ToolEffect, argument_value,
                                     bound_declaration, connector_of, effect_of, target_values)
 
 _PREFIX = "⚠️ RESOURCE_CONSTRAINT_BLOCKED: "
@@ -158,18 +158,6 @@ def _author_refusal(ctx: Any, name: str, args: Mapping[str, Any], effect: ToolEf
             keys.append(key)
     _note_message_call(ctx, name, args, keys, effect)
     return ""
-
-
-def verdict_speech_refusal(ctx: Any, name: str, args: Mapping[str, Any], *, is_mcp: bool = False,
-                           ext_tool: Any = None) -> str:
-    """The place guard a verdict's speech mark adds to a connector write the host did not know as words: one author
-    per conversation where its declared targets resolve a place (Silent/Paused and Advises met it as a write at
-    dispatch, before any verdict). A write into a conversation (a reaction, a pin) is not words by itself."""
-    try:
-        effect, targets, resolved, _siblings, _known = _call_destinations(ctx, name, args, ext_tool, is_mcp)
-    except _PlacesUnreadable:
-        return ""  # the dispatch guard already held this connector's writes while its places need repair
-    return _author_refusal(ctx, name, args, effect, targets, resolved) if effect.effect == EFFECT_WRITE else ""
 
 
 def authored_notes(records: Any, place: Any) -> list[dict[str, Any]]:

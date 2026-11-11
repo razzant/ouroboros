@@ -1,4 +1,4 @@
-"""Update preparation publishes new Node/npm generations, never edits live roots."""
+"""Engine CLI delivery publishes new Node/npm generations, never edits live roots."""
 from __future__ import annotations
 
 import io
@@ -87,11 +87,11 @@ def test_ready_full_runtime_beats_npm_less_bundle_for_both_readers(tmp_path, mon
     assert preserved._resolve_preserved_node(NODE_VERSION) == str(pathlib.Path(before).resolve())
     assert not manager._managed_npm_cli(bundled_node).exists()
 
-    prepared = pathlib.Path(manager.prepare_node_toolchain())
-    assert prepared != bundled_node
-    assert manager._resolve_node(pin) == str(prepared)
-    assert preserved._resolve_preserved_node(NODE_VERSION) == str(prepared.resolve())
-    assert manager._managed_npm_cli(prepared).is_file()
+    selected = pathlib.Path(manager._ensure_node_toolchain(pin))
+    assert selected != bundled_node
+    assert manager._resolve_node(pin) == str(selected)
+    assert preserved._resolve_preserved_node(NODE_VERSION) == str(selected.resolve())
+    assert manager._managed_npm_cli(selected).is_file()
     assert len(fetches) == (0 if legacy_schema == 2 else 1)
     assert bundled_node.read_bytes() == b"bundled exact node without npm"
     assert not manager._managed_npm_cli(bundled_node).exists()
@@ -100,7 +100,7 @@ def test_ready_full_runtime_beats_npm_less_bundle_for_both_readers(tmp_path, mon
 
 
 @pytest.mark.parametrize("damage", ["schema1", "invalid_json", "other_pin"])
-def test_prepare_preserves_every_legacy_byte_and_selects_an_exact_new_generation(tmp_path, monkeypatch, damage):
+def test_delivery_preserves_every_legacy_byte_and_selects_an_exact_new_generation(tmp_path, monkeypatch, damage):
     pin, fetches = _fixture(tmp_path, monkeypatch)
     root, old_node, npm = _legacy(pin, schema=1 if damage == "schema1" else 2)
     if damage == "invalid_json":
@@ -108,20 +108,19 @@ def test_prepare_preserves_every_legacy_byte_and_selects_an_exact_new_generation
     elif damage == "missing_npm":
         npm.unlink()
     elif damage == "other_pin":
-        metadata = json.loads((root / "managed-node.json").read_text())
+        metadata = json.loads((root / "managed-node.json").read_text(encoding="utf-8"))
         metadata["archive_sha256"] = "f" * 64
-        (root / "managed-node.json").write_text(json.dumps(metadata))
+        (root / "managed-node.json").write_text(json.dumps(metadata), encoding="utf-8")
     before = _bytes(root)
     manager = runtime.ClaudexorRuntimeManager(pin)
-    node = pathlib.Path(manager.prepare_node_toolchain())
+    node = pathlib.Path(manager._ensure_node_toolchain(pin))
     assert node != old_node and node.parents[2].parent == root.parent
     assert node.parents[2].name.startswith(root.name + ".g-")
     assert _bytes(root) == before  # No rename, additive repair, deletion or metadata rewrite.
     assert manager._resolve_node(pin) == str(node)
     assert runtime.ClaudexorRuntimeManager(None)._resolve_preserved_node(NODE_VERSION) == str(node.resolve())
-    assert manager.prepare_node_toolchain() == str(node)
+    assert manager._ensure_node_toolchain(pin) == str(node)
     assert len(fetches) == 1
-    assert not runtime.managed_runtime_dir(pin).exists(), "Node preparation does not reinstall the engine"
 
 
 def test_ready_exact_legacy_toolchain_is_reused_without_download_or_generation(tmp_path, monkeypatch):
@@ -129,7 +128,7 @@ def test_ready_exact_legacy_toolchain_is_reused_without_download_or_generation(t
     root, node, _ = _legacy(pin)
     manager = runtime.ClaudexorRuntimeManager(pin)
     before = _bytes(root)
-    assert manager.prepare_node_toolchain() == str(node)
+    assert manager._ensure_node_toolchain(pin) == str(node)
     assert manager._resolve_node(pin) == str(node)
     assert not fetches and _bytes(root) == before
     assert not list(root.parent.glob(root.name + ".g-*"))
@@ -138,10 +137,10 @@ def test_ready_exact_legacy_toolchain_is_reused_without_download_or_generation(t
 def test_corrupt_generation_is_retained_when_a_new_complete_one_is_published(tmp_path, monkeypatch):
     pin, _ = _fixture(tmp_path, monkeypatch)
     manager = runtime.ClaudexorRuntimeManager(pin)
-    old = pathlib.Path(manager.prepare_node_toolchain())
+    old = pathlib.Path(manager._ensure_node_toolchain(pin))
     runtime.ClaudexorRuntimeManager._managed_npm_cli(old).unlink()
     before = _bytes(old.parents[2])
-    new = pathlib.Path(manager.prepare_node_toolchain())
+    new = pathlib.Path(manager._ensure_node_toolchain(pin))
     assert new != old and _bytes(old.parents[2]) == before
     assert manager._resolve_node(pin) == str(new)
     # A later release pin does not hide the preserved engine's old Node generation.
@@ -152,12 +151,12 @@ def test_corrupt_generation_is_retained_when_a_new_complete_one_is_published(tmp
 def test_pin_change_preserves_prior_generation_and_selects_matching_archive(tmp_path, monkeypatch):
     pin, _ = _fixture(tmp_path, monkeypatch)
     manager = runtime.ClaudexorRuntimeManager(pin)
-    old = pathlib.Path(manager.prepare_node_toolchain())
+    old = pathlib.Path(manager._ensure_node_toolchain(pin))
     before = _bytes(old.parents[2])
     artifact = replace(pin.node_artifacts["linux-x64"], archive_url="https://mirror.example.test/node.tar.gz")
     new_pin = replace(pin, node_artifacts={**pin.node_artifacts, "linux-x64": artifact})
     other = runtime.ClaudexorRuntimeManager(new_pin)
-    new = pathlib.Path(other.prepare_node_toolchain())
+    new = pathlib.Path(other._ensure_node_toolchain(new_pin))
     assert new != old and _bytes(old.parents[2]) == before
     assert manager._resolve_node(pin) == str(old)
     assert other._resolve_node(new_pin) == str(new)
@@ -170,6 +169,6 @@ def test_failed_promotion_keeps_all_roots_and_removes_only_owned_staging(tmp_pat
     monkeypatch.setattr(runtime.ClaudexorRuntimeManager, "_extract_node_archive", staticmethod(
         lambda *_a, **_kw: (_ for _ in ()).throw(runtime.ClaudexorRuntimeError("fixture_failure", "negative"))))
     with pytest.raises(runtime.ClaudexorRuntimeError, match="negative"):
-        runtime.ClaudexorRuntimeManager(pin).prepare_node_toolchain()
+        runtime.ClaudexorRuntimeManager(pin)._ensure_node_toolchain(pin)
     assert _bytes(root) == before
     assert not list(root.parent.glob(".tmp-*")) and not list(root.parent.glob(root.name + ".g-*"))

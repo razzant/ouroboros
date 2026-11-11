@@ -33,6 +33,7 @@ from contextvars import ContextVar
 from contextlib import contextmanager
 from typing import Any, Dict, Iterable, List, Optional
 
+from ouroboros._outcome_tool_errors import SAFETY_HELD_STATUSES
 from ouroboros.utils import append_jsonl, truncate_for_log
 
 CALL_STARTED = "tool_call_started"
@@ -285,7 +286,8 @@ def replay_evidence(drive_root: pathlib.Path, task_id: str, want: int = 200, *, 
             if row is not None:
                 observations.append({**base, "fact": fact, "live": False,
                     "receipt": base["receipt"] or row.get("completion_control") is True,
-                    "status": ("error" if row.get("is_error") else "ok") if slot == "settled" else "unknown",
+                    "status": ("held" if row.get("status") in SAFETY_HELD_STATUSES else "error" if row.get("is_error")
+                               else "ok") if slot == "settled" else "unknown",  # the live step row's reading
                     "hostError": row.get("status") == "host_error",
                     # The row's own recorded host time, as written; a row without one stays without
                     # (never reconstructed), so a reader can order a call by its first observation.

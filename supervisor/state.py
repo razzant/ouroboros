@@ -137,7 +137,6 @@ def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
     st.setdefault("current_sha", None)
     st.setdefault("last_owner_message_at", "")
     st.setdefault("last_evolution_task_at", "")
-    st.setdefault("budget_messages_since_report", 0)
     st.setdefault("evolution_mode_enabled", False)
     # Durable owner-stop sentinel: set True by the owner-stop sites, cleared by an
     # owner-authorized start (/evolve start or the owner-directed toggle_evolution(True)
@@ -179,10 +178,10 @@ RECOVERY_KEY = "_recovery"
 STATE_READ_KEY = "_state_read"  # projection-only read quality; never persisted
 CONTROL_KEYS = (
     "evolution_mode_enabled", "evolution_owner_stopped", "evolution_stop_source",
-    "post_task_autostop", "bg_consciousness_enabled",
+    "post_task_autostop", "bg_consciousness_enabled", "bg_consciousness_stop_source",
     "owner_id", "owner_chat_id", "owner_external_id", "owner_external_chat_id",
 )
-OPTIONAL_CONTROL_KEYS = frozenset({"evolution_stop_source", "post_task_autostop"})
+OPTIONAL_CONTROL_KEYS = frozenset({"evolution_stop_source", "post_task_autostop", "bg_consciousness_stop_source"})
 CURRENT_QUALITIES = frozenset({"current", "recovered"})
 
 

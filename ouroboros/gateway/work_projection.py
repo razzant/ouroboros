@@ -18,6 +18,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 from ouroboros.external_runs import unbound_starts
 from ouroboros.gateway import work_status as ws
 from ouroboros.owner_pause import owner_stopped
+from ouroboros.project_naming import without_continue, work_shown_name
 from ouroboros.task_results import _TRULY_TERMINAL_STATUSES
 
 log = logging.getLogger(__name__)
@@ -28,23 +29,15 @@ log = logging.getLogger(__name__)
 # documents that projection held anyway; the results are shared read-only.
 _RESULTS: Dict[str, Dict[str, Tuple[tuple, dict]]] = {}
 _RESULTS_LOCK = threading.Lock()
-_CONTINUE_PREFIX = "Continue: "
 # The census's execution facts for a member (gateway/state.py), never a work's identity.
 _EXECUTION_FACTS = frozenset({"running", "owner_pause_warm", "owner_wait", "cancel_pending", "nothing_to_stop",
                               "tail_unknown"})
 
 
-def _strip_continue(name: str) -> str:
-    name = str(name or "").strip()
-    while name.startswith(_CONTINUE_PREFIX):
-        name = name[len(_CONTINUE_PREFIX):].strip()
-    return name
-
-
 def _first_name(*sources: Mapping[str, Any]) -> str:
     for field in ("suggested_name", "title"):
         for source in sources:
-            name = _strip_continue(str((source or {}).get(field) or ""))
+            name = without_continue((source or {}).get(field))
             if name:
                 return name
     return ""
@@ -288,7 +281,8 @@ def _work_of(root_id: str, raw: Mapping[str, Mapping[str, Any]], obs: _Observati
         source = facts if set(facts) - _EXECUTION_FACTS else obs.result(current) or {}
         continuation = _continuation(source)
         if continuation.get("work_id"):
-            work_id, name = str(continuation["work_id"]), str(continuation.get("work_name") or "")
+            work_id = str(continuation["work_id"])
+            name = work_shown_name(obs.result(work_id)) or str(continuation.get("work_name") or "")
             break
         predecessor = str(continuation.get("predecessor_task_id") or source.get("original_task_id") or "")
         if not predecessor:

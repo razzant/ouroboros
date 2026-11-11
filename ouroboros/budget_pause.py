@@ -529,8 +529,8 @@ class ColdSleepWritersUnsettled(ValueError):
     """A fresh cold-sleep census still has writers; no source write failed."""
 
 
-class ColdSleepDependencyBlocked(ValueError):
-    """The proposed sleep fence prevents a selected queued dependency running."""
+class ColdDetachBlocked(ValueError):
+    """A background handoff's final census still finds work: it stays awake instead of holding."""
 
 
 def _hold_row(reason: str, *, exc: Optional[BaseException] = None,
@@ -620,16 +620,13 @@ def _exact_continuation_row(limit_ctx: Any, ctx: Any, *, pause_id: str, rail: st
     """Observe external custody, store the ONE continuation source, build the row."""
     from ouroboros.owner_wait import continuation_state, store_continuation_source
 
-    if rail == RAIL_MODEL_SLEEP:
+    if rail == RAIL_MODEL_SLEEP:  # its own work only: a sleep never fences or waits for its tree's members
+        from ouroboros.model_detach import is_detach
         from ouroboros.model_sleep import cold_blockers
 
-        blockers = cold_blockers(ctx, allow_transfer=True)
-        from ouroboros.model_detach import is_detach
-        if blockers and (is_detach(getattr(ctx, "_model_sleep", None))
-                         or any(blocker.get("kind") == "queued_member" for blocker in blockers)):
-            raise ColdSleepDependencyBlocked(f"selected queued dependency: {blockers}")
-        if blockers:
-            raise ColdSleepWritersUnsettled(f"{HOLD_COLD_WRITERS_UNSETTLED}: {blockers}")
+        if blockers := cold_blockers(ctx, allow_transfer=True):  # a handoff stays awake; a sleep holds
+            raise (ColdDetachBlocked if is_detach(getattr(ctx, "_model_sleep", None)) else ColdSleepWritersUnsettled)(
+                f"{HOLD_COLD_WRITERS_UNSETTLED}: {blockers}")
     # Owner Q8, loop side: resolve THIS context's custody root, then share the
     # one observer body with the grant. A root that cannot be resolved is the
     # same typed ``custody_read=failed`` fact as an unreadable store.
@@ -745,8 +742,7 @@ def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
     Unsettled producers/ambiguous transfer retain the worker and typed pausing hold;
     no paid wrap-up or durable pause is invented. Stop/Panic/deadline/cancel end it.
     Ineligibility or a definite authority-rail save failure returns unavailable;
-    other save failures hold. A cold sleep blocking its selected queued dependency
-    withdraws its exact seed and stays awake instead.
+    other save failures hold. A background handoff whose final census finds work stays awake.
     """
     ctx = getattr(getattr(limit_ctx, "tools", None), "_ctx", None)
     if ctx is None or rail not in RAILS:
@@ -885,10 +881,10 @@ def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
                         set_budget_pause(root, task_id, prepared, expected_pause_id=pause_id)
                         row = prepared
                     break
-                except ColdSleepDependencyBlocked as exc:
+                except ColdDetachBlocked as exc:
                     try:
                         set_budget_pause(root, task_id, {**seed, "state": STATE_ABANDONED,
-                            "abandon_reason": "cold_sleep_dependency_blocked", "abandoned_at": time.time()},
+                            "abandon_reason": "cold_detach_blocked", "abandoned_at": time.time()},
                             expected_pause_id=pause_id, expected_state=STATE_PAUSING)
                     except Exception as write_error:
                         hold = _hold_row(HOLD_PAUSE_RECORD_UNWRITABLE, exc=write_error)
@@ -896,9 +892,8 @@ def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
                         end_dispatch_fence(task_id)
                         ctx._budget_pausing, ctx._model_sleep = False, None
                         usage.pop("budget_pause_hold", None)
-                        limit_ctx.messages.append({"role": "user", "content": (
-                            "[SYSTEM NOTICE]\nCold sleep was not taken: " + str(exc)
-                            + ". Sleep warm to let the selected child run; no child was cancelled.")})
+                        limit_ctx.messages.append({"role": "user", "content": "[SYSTEM NOTICE]\nThe background "
+                            f"handoff was not taken: {exc}. You stay awake; wait for that work or stop it first."})
                         return
                 except ColdSleepWritersUnsettled as exc:
                     hold = _hold_row(HOLD_COLD_WRITERS_UNSETTLED, exc=exc)

@@ -363,10 +363,6 @@ export function documentMessageKey(msg) {
     ].join('|');
 }
 
-export function pendingAttachmentBytes(items = []) {
-    return items.reduce((total, item) => total + Number(item.file?.size || 0), 0);
-}
-
 export function isFileDrag(event) {
     return Array.from(event.dataTransfer?.types || []).includes('Files');
 }
@@ -1388,7 +1384,7 @@ export function costMetaKeys(src) {
 
 const CARD_META_KEYS = [
     ...COST_META_KEYS, 'executor_route', 'execution_evidence', 'actual_substrate',
-    'executor_observation', 'model_execution', 'tool_calls', 'model', 'ts', 'initiator', 'cancel_origin',
+    'executor_observation', 'model_execution', 'tool_calls', 'model', 'ts', 'initiator', 'continue_requester', 'cancel_origin',
     'delegated_activity', 'outcome_axes', 'task_completion', 'effort_level', 'effort_requested', 'effort_source', 'reasoning',
 ];
 export function cardMetaKeys(src) {
@@ -1497,6 +1493,7 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
     const html = portal ? metaLineHtml([
         record.historicalUnavailable ? 'Outcome unavailable' : (record.historicalUnconfirmed ? 'Activity unconfirmed' : ''),
         !record.finished && record.projectHoldDetail || '',
+        record.reviewGateLine || '',  // review_gate_card.js: changes what the owner may trust, so the portal keeps it
         // A settled portal needs no activity clock: its chip states how the work ended and the author's
         // final (with its own end time) arrives as a message.
         toolCalls, ...cost, clock,
@@ -1507,6 +1504,7 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
             record.historicalUnavailable ? 'Outcome unavailable' : (record.historicalUnconfirmed ? 'Activity unconfirmed' : ''),
             !record.finished && record.projectHoldDetail || '',
             record.historyRetentionProblem || '',
+            record.reviewGateLine || '',
             // Under a Done chip the block's own rows name the errors; this line does not repeat them (DESIGN principle 7).
             record.toolErrors > 0 && !(record.finished && record.phaseEl?.dataset?.phase === 'done')
                 ? `${record.toolErrors} error${record.toolErrors === 1 ? '' : 's'}` : '',
@@ -1525,6 +1523,7 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
         // An unobserved execution of a card without an executor is its compact model fact already.
         [execution?.label || 'Model execution', execution && (chip || execution.observed) ? escapeHtml(execution.value) : ''],
         ['Started by', record.scheduleName ? `${tr('task.fact.started_by.schedule', 'Schedule')} · <span data-i18n-authored>${escapeHtml(record.scheduleName)}</span>` : record.initiator === 'consciousness' ? 'Consciousness' : ''],
+        ['Continued by', { owner: 'You', ouroboros: 'Ouroboros', unknown: 'Not recorded' }[record.continueRequester] || ''],
         ['Tool calls', !supervision && record.toolCalls === 0 ? '0' : ''],
         ['Rounds', !supervision && rounds ? `${record.rounds} · usable solve response${record.rounds === 1 ? '' : 's'}` : ''],
         ['Supervision', supervision && (rounds || toolCalls)

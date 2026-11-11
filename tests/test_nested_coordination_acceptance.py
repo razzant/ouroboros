@@ -445,7 +445,6 @@ def test_depth3_waits_for_worker_slot_then_uses_active_cap_reservation(
     monkeypatch.setenv("OUROBOROS_MAX_WORKERS", "4")
     monkeypatch.setenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", "2")
     monkeypatch.setenv("OUROBOROS_MAX_SUBAGENT_DEPTH", "3")
-    monkeypatch.setattr(workers, "MAX_WORKERS", 4)
     monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
     monkeypatch.setattr(workers, "PENDING", pending)
     monkeypatch.setattr(workers, "RUNNING", running)

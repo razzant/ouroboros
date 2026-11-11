@@ -134,7 +134,7 @@ def main(root, generation, mode, scenario="incoming", with_event_bus=False):
     # dead generation's row by the turn's own end fact (its controller), never by its stale lane row.
     from supervisor import queue as _queue, workers as _workers
     _queue.init(h.data)
-    _workers.init(ROOT, h.data, max_workers=1)
+    _workers.init(ROOT, h.data)
     patch.setattr(_queue, "INITIALIZED", False)  # table setup above does not model a supervisor boot
     patch.setattr(_workers, "_get_chat_agent", lambda: (_ for _ in ()).throw(AssertionError("no agent in the Host")))
     reconciled = reconcile_orphaned_running_tasks(h.data)

@@ -2399,6 +2399,64 @@ def test_handle_schedule_task_rejects_legacy_subagent_event_schema(tmp_path, mon
     assert sent[0][2]["progress_meta"]["status"] == STATUS_FAILED
 
 
+@pytest.mark.parametrize("count, wait, pending, blocked, rejected", [
+    (6, "acting", 0, True, False),
+    (6, "warm", 0, False, False),
+    (6, "in_slot", 0, False, False),
+    (6, "slot_flag", 0, False, False),
+    (6, "expired", 0, True, False),
+    (6, "warm", 6, True, False),
+    (0, "cold", 6, False, False),
+    (0, "cold", 499, False, False),
+    (0, "cold", 500, True, True),
+    (499, "warm", 0, False, False),
+    (500, "warm", 0, True, True),
+])
+def test_scheduling_soft_cap_counts_acting_children_but_hard_cap_counts_all(
+        tmp_path, monkeypatch, count, wait, pending, blocked, rejected):
+    from supervisor import events, workers
+
+    monkeypatch.setenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", "6")
+    running, slots, enqueued, sent = {}, {-1: SimpleNamespace(busy_task_id=None)}, [], []
+    for wid in range(count):
+        tid = f"running-{wid}"
+        running[tid] = {"task": {"id": tid, "root_task_id": "root", "delegation_role": "subagent"}, "worker_id": wid}
+        slots[wid] = SimpleNamespace(busy_task_id=tid, active_capacity=wait != "slot_flag")
+        if wait == "warm":
+            running[tid]["owner_wait"] = {"state": "waiting"}
+        elif wait in {"in_slot", "expired"}:
+            running[tid]["active_operation_leases"] = {"wait": {
+                "kind": "in_slot_wait", "until_ts": time.time() + (600 if wait == "in_slot" else -1)}}
+    monkeypatch.setattr(workers, "WORKERS", slots)
+    ctx = SimpleNamespace(
+        DRIVE_ROOT=tmp_path, RUNNING=running, WORKERS=slots,
+        PENDING=[{"id": f"pending-{i}", "root_task_id": "root", "delegation_role": "subagent"}
+                 for i in range(pending)],
+        load_state=lambda: {"owner_chat_id": 1},
+        send_with_budget=lambda chat, text, **kw: sent.append((text, kw)),
+        enqueue_task=lambda task: enqueued.append(dict(task)) or task,
+        persist_queue_snapshot=lambda reason="": None,
+    )
+    if wait == "cold":
+        for task in ctx.PENDING:
+            task["_budget_pause"] = {"reason": "sleep", "sleep": {}}
+    drive = str(tmp_path / "state" / "headless_tasks" / "next" / "data")
+    events._handle_schedule_task({
+        "type": "schedule_subagent", "task_id": "next", "objective": "Inspect", "expected_output": "Findings",
+        "depth": 1, "root_task_id": "root", "parent_task_id": "root", "delegation_role": "subagent",
+        "memory_mode": "forked", "drive_root": drive, "child_drive_root": drive,
+    }, ctx)
+    result = read_result(tmp_path, "next")
+    assert result["status"] == ("failed" if rejected else "scheduled")
+    assert bool(enqueued) is not rejected
+    assert sent
+    if rejected:
+        assert "hard active child limit (500)" in sent[0][0]
+    else:
+        assert ("queued behind active subagent cap" in sent[0][0]) is blocked
+        assert bool(sent[0][1]["progress_meta"].get("queued_behind_active_cap")) is blocked
+
+
 def test_handle_schedule_task_queues_when_active_subagent_cap_is_full(tmp_path, monkeypatch):
     from supervisor import events as ev_module
     from ouroboros.task_results import STATUS_COMPLETED, STATUS_FAILED, STATUS_SCHEDULED, load_task_result, write_task_result

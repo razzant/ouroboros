@@ -116,8 +116,9 @@ def test_continue_retains_an_unanswered_return_address(tmp_path):
 
 def test_a_context_row_the_head_then_tells_to_one_work_flips_its_members_fact_once(tmp_path, monkeypatch):
     """A room row that went to a head stands as context at a root and, carried down, at its helper; the head's
-    tell_task quoting the row makes it this work's addressed mail: the root's next drain writes the helper one more
-    entry under carry:<address>, the helper shows it once more and its fact flips; a drain after that writes nothing."""
+    tell_task quoting the row makes it this work's addressed mail: the host writes the helper one more entry under
+    carry:<address> at the steer (the root's next drain, its catch-up, writes nothing more), the helper shows it once
+    more and its fact flips; a drain after that writes nothing."""
     from supervisor import queue as q
     from supervisor.steering import _handle_steer_task
     from ouroboros.owner_mailbox import drain_owner_entries
@@ -159,6 +160,7 @@ def test_a_context_row_the_head_then_tells_to_one_work_flips_its_members_fact_on
     supervisor.persist_queue_snapshot = lambda **_kwargs: True
     head.event_queue = SimpleNamespace(put_nowait=lambda event: _handle_steer_task(event, supervisor))
     _tell_task(head, "teller", "yours now", [address])
+    assert mail("helper") == [f"relay:carry-context:{address}:helper", f"relay:carry:{address}:helper"]  # at receipt
     drain(root, [])
     assert "carried" not in held_owner_messages(root)[address]
     assert mail("helper") == [f"relay:carry-context:{address}:helper", f"relay:carry:{address}:helper"]

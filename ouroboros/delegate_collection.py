@@ -7,6 +7,7 @@ child prepares heavy captures. The server rechecks custody before publishing the
 """
 from __future__ import annotations
 
+import atexit
 import copy
 import json
 import logging
@@ -15,7 +16,7 @@ import pathlib
 import threading
 import time
 import uuid
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 from typing import Any, NamedTuple
 
 from ouroboros import delegate_custody as c
@@ -25,18 +26,12 @@ from ouroboros.delegate_capture_attempt import (collection_due, record_attempt, 
                                                 capture_required, legacy_cap)
 from ouroboros.delegate_directory import is_in_place_run
 from ouroboros.delegate_named_evidence import saved_named_evidence
+from ouroboros.delegate_containment import granted_shape as _shape, hold_to_grant
+from ouroboros.delegate_feed import Feed, announce_working, journal_listed, journal_refused
 from ouroboros.execution_domain import EngineClients, run_gateway
 from ouroboros._usage_rows import REVIEW_ATTRIBUTION_KEYS
 
 log = logging.getLogger(__name__)
-
-
-def _shape(entry):
-    from ouroboros.subagents import DelegatedRunShape
-    from ouroboros.delegate_registration_policy import INVESTIGATION_AUTHORITY
-    return DelegatedRunShape(access=entry.access, mode=entry.mode, isolation=entry.isolation,
-                             delegated=entry.delegated,
-                             investigation=entry.authority_source == INVESTIGATION_AUTHORITY)
 
 
 def _retain(root, entry, value, suffix):
@@ -498,10 +493,44 @@ class _Held(NamedTuple):
     generation: str
 
 
+class _Jobs:
+    """The body's physical jobs, each on a thread of its own: their number is the held runs' own (one read,
+    one speech follow and one collection per run, plus the compact passes), never a pool width read from the
+    worker setting, behind which a quiet run's held read kept the others waiting (R4 D-h). Threads are joined
+    at interpreter exit as the old pool's were (``_join_at_exit``); a follow ends at its next beat then."""
+    def __init__(self):
+        self.lock, self.threads, self.closed = threading.Lock(), set(), False
+
+    def submit(self, fn, *args, **kwargs) -> Future:
+        future = Future()
+        def run():
+            try:
+                if future.set_running_or_notify_cancel():
+                    try:
+                        future.set_result(fn(*args, **kwargs))
+                    except BaseException as exc:
+                        future.set_exception(exc)
+            finally:
+                with self.lock:
+                    self.threads.discard(threading.current_thread())
+        with self.lock:
+            if self.closed:
+                raise RuntimeError("cannot schedule new futures after shutdown")
+            thread = threading.Thread(target=run, name="run-observe", daemon=True)
+            thread.start()
+            self.threads.add(thread)
+        return future
+
+    def shutdown(self, *, wait=True):
+        with self.lock:
+            self.closed, threads = True, list(self.threads)
+        for thread in threads if wait else ():
+            thread.join()
+
+
 class BodyRuntime:
     """One generation's owned physical jobs. No background job grants actor authority."""
-    def __init__(self, root, *, stop_event=None, gateway_factory=None, max_workers=None, collection_ready=None):
-        from ouroboros.config import get_max_workers
+    def __init__(self, root, *, stop_event=None, gateway_factory=None, collection_ready=None):
         from ouroboros.platform_layer import process_start_time
 
         self.root = pathlib.Path(root).resolve()
@@ -513,10 +542,10 @@ class BodyRuntime:
         self.lock = threading.RLock()
         self.runtime_id = uuid.uuid4().hex
         self.birth = process_start_time(os.getpid())
-        width = max(2, int(max_workers if max_workers is not None else get_max_workers()))
-        self.observers = ThreadPoolExecutor(max_workers=width, thread_name_prefix="run-observe")
+        self.observers = _Jobs()
         self.reads: dict[str, Future] = {}
         self.collections: dict[str, Future] = {}
+        self.feed, self.feeds = Feed(self.root), {}  # the live speech and the engine's reach (``delegate_feed``)
         self.requested: set[str] = set()
         self.collection_failures: dict[str, dict] = {}
         # Each held run's latest dated execution fact, as the last observation read it.
@@ -541,7 +570,7 @@ class BodyRuntime:
             self.thread.start()
         except BaseException:
             self.stop.set()
-            self.observers.shutdown(wait=False, cancel_futures=True)
+            self.observers.shutdown(wait=False)
             raise
 
     @property
@@ -576,12 +605,20 @@ class BodyRuntime:
         from ouroboros.claudexor_daemon import read_owned_gateway
         return read_owned_gateway()
 
-    def _observer_gateway(self, entry=None):
-        """One observation client per engine; discovery and handshake never hold the runtime lock."""
+    def _observer_gateway(self, entries=()):
+        """One observation client per engine; discovery and handshake never hold the runtime lock. A work engine's
+        run (its one entry in ``entries``) is observed through that engine. A client that could not be built is
+        recorded for ``entries``: nothing answered them, so the engine's reach hears it."""
+        from ouroboros.gateways.claudexor import ClaudexorUnavailable
         from ouroboros.gateways.claudexor_metadata import endpoint_generation
 
-        if getattr(entry, "engine_ref", None):
-            return self._work.get(entry)
+        work = next((entry for entry in entries if getattr(entry, "engine_ref", None)), None)
+        if work is not None:
+            try:
+                return self._work.get(work)
+            except ClaudexorUnavailable as exc:
+                self._remember(work, None, error=exc)
+                raise
         with self.lock:
             gateway = self._observing
         endpoint = getattr(gateway, "_endpoint", None)
@@ -605,7 +642,12 @@ class BodyRuntime:
             finally:
                 with self.lock:
                     self._connecting = None
-        return pending.result()
+        try:
+            return pending.result()
+        except ClaudexorUnavailable as exc:
+            for entry in entries:
+                self._remember(entry, None, error=exc)
+            raise
 
     def _observation_key(self, entry):
         from ouroboros.gateways.claudexor_metadata import endpoint_generation
@@ -634,7 +676,7 @@ class BodyRuntime:
         is "not supported this beat", nothing is cached, and the old read runs regardless."""
         from ouroboros.gateways import claudexor_observation as observation
         from ouroboros.gateways.claudexor import SHORT_POLL_TIMEOUT_SEC, ClaudexorUnavailable
-        gateway = self._observer_gateway(entry)
+        gateway = self._observer_gateway([entry])
         try:
             supported = observation.wait_many_supported(gateway, timeout_sec=SHORT_POLL_TIMEOUT_SEC)
         except ClaudexorUnavailable:
@@ -671,6 +713,7 @@ class BodyRuntime:
     def _absorb_detail(self, entry, gateway, detail):
         with self.lock:
             self.observation_gaps.pop(entry.run_id, None)
+        hold_to_grant(self.root, gateway, entry, detail)  # the rights floor, before the facts it read are kept
         # A late valid source fact remains evidence; it grants no wait.
         observe_run(self.root, entry, detail)
         c.bind_daemon_store(self.root, gateway, entry)
@@ -678,6 +721,7 @@ class BodyRuntime:
             c.resolve_containment_fault(self.root, entry, "run_observed",
                                         expected_reason="run_absence_identity_unproven")
         self._remember(entry, detail)
+        self.feed.window(entry, gateway, detail)  # an engine without the run's journal keeps the window view
 
     def _watch(self, entries, *, hold=True):
         """One pass over the watched runs through the observation adapter.
@@ -693,10 +737,10 @@ class BodyRuntime:
         blocked thread to the socket's own end), so a pass ends within the tick plus the
         transport bound (``SHORT_POLL_TIMEOUT_SEC``: about eight seconds), never the engine's window.
         """
-        from ouroboros.delegate_supervision import _TICK_SEC
+        from ouroboros.delegate_feed import _TICK_SEC
         from ouroboros.gateways import claudexor_observation as observation
         from ouroboros.gateways.claudexor import SHORT_POLL_TIMEOUT_SEC, ClaudexorUnavailable
-        gateway = self._observer_gateway()
+        gateway = self._observer_gateway(entries)
         with self.lock:
             targets = [(entry.run_id, self.seen.get(entry.run_id)) for entry in entries]
         try:
@@ -776,7 +820,7 @@ class BodyRuntime:
         """Keep this read's execution fact for readers that must not poll the engine themselves
         (``gateway/reply_preparation.py``), including a received HTTP refusal; ``row`` is the
         compact wait's answer for a run whose detail this pass did not need."""
-        from ouroboros.delegate_supervision import run_activity
+        from ouroboros.delegate_feed import run_activity
         from ouroboros.gateways.claudexor_observation import question_attention
 
         summary = c.summary_of(detail) if detail is not None else {}
@@ -786,16 +830,19 @@ class BodyRuntime:
             # whose questions are all async ``blocking: false``; unknown keeps the blocking meaning.
             summary = {"state": row.status or ""}
             waiting, async_only = bool(row.pending), bool(row.pending) and row.blocking is False
+        answered = detail is not None or row is not None or bool(getattr(error, "status_code", 0))
+        self.feed.reached(entry, answered=answered, error=error)
         fact = {"run_id": entry.run_id, "task_id": entry.task_id, "invocation_id": entry.invocation_id,
-                "answered": detail is not None or row is not None or bool(getattr(error, "status_code", 0)),
+                "answered": answered,
                 "error_code": str(getattr(error, "code", "")), "http_status": getattr(error, "status_code", 0),
                 "run_state": str(summary.get("state") or ""),
                 "waiting_on_user": waiting, "async_questions_only": async_only,
                 "at": time.monotonic()}  # dated on this process's clock, like every in-process reader
         with self.lock:
             previous, self.observed[entry.run_id] = self.observed.get(entry.run_id), fact
+        self.feed.record(entry, fact, error)  # the parent's dated view, written only when it changed
         if run_activity(fact) is True and (previous is None or run_activity(previous) is not True):
-            _announce_working(entry)  # first seen working too: a restarted host's idle cue learns of it
+            announce_working(entry)  # first seen working too: a restarted host's idle cue learns of it
 
     def observation(self, run_id) -> dict:
         with self.lock:
@@ -818,7 +865,7 @@ class BodyRuntime:
         write is seen at the next period, as every tick saw it before. A row is decoded only when its stamp moved, and
         what it owes is judged again only then or in a new generation (a transient collection retries in one): a
         settled run that keeps its patch costs a tick nothing while it stands."""
-        from ouroboros.delegate_supervision import _TICK_SEC
+        from ouroboros.delegate_feed import _TICK_SEC
 
         now, writes, generation = time.monotonic(), current.local_writes(), self.runtime_id
         if self._listed is not None and now - self._listed[0] < _TICK_SEC and self._listed[1:] == (writes, generation):
@@ -841,7 +888,7 @@ class BodyRuntime:
             return
         held = self._held()
         with self.lock:
-            for jobs in (self.reads, self.collections):
+            for jobs in (self.reads, self.collections, self.feeds):
                 for rid, future in list(jobs.items()):
                     if future.done():
                         if not future.cancelled() and future.exception() is not None:
@@ -858,13 +905,12 @@ class BodyRuntime:
                 self.observation_gaps.pop(rid, None)
                 self.seen.pop(rid, None)
                 self._watched.discard(rid)
-        with self.lock:
             for rid in list(self.collection_failures):
                 if rid not in self.collections and not collection_pending(held[rid].entry if rid in held else None):
                     self.collection_failures.pop(rid, None)
-        watch, ready = [], None
-        with self.lock:
-            compact = self._compact_wait
+            watch, ready, compact, gateway = [], None, self._compact_wait, self._observing
+        self.feed.refresh(held)  # who hears a run speak: one look at the queue, outside this body's lock
+        self.feed.place(self, held)  # my human's frames the receipt could not send, once the engine answers
         for run in held.values():
             if not (run.observe or run.collect) or not self.active:
                 continue
@@ -881,6 +927,11 @@ class BodyRuntime:
                     previous = self.collections.get(entry.run_id)
                     if previous is None or previous.done():
                         self.collections[entry.run_id] = self.observers.submit(self._collect, entry.run_id)
+                if (run.observe and entry.task_id in self.feed.live and not journal_refused(entry)
+                        and journal_listed(self._work.held(entry) if entry.engine_ref else gateway) is True):
+                    previous = self.feeds.get(entry.run_id)  # one journal read per run, from its own engine
+                    if previous is None or previous.done():
+                        self.feeds[entry.run_id] = self.observers.submit(self.feed.follow, self, entry.run_id)
         with self.lock:
             pass_ = self.reads.get(self._WATCH)
             if watch and (pass_ is None or pass_.done()):
@@ -896,7 +947,7 @@ class BodyRuntime:
                     self.reads[self._PRIME] = self.observers.submit(self._watch, fresh, hold=False)
 
     def _drive(self):
-        from ouroboros.delegate_supervision import _TICK_SEC
+        from ouroboros.delegate_feed import _TICK_SEC
         try:
             while not self.stop.is_set() and not (self.external_stop is not None and self.external_stop.is_set()):
                 try:
@@ -913,7 +964,7 @@ class BodyRuntime:
             # tick plus the transport bound at the latest (``_watch``), so the join below is
             # bounded by those, never by the engine's window.
             self._drop_observer_gateway()
-            self.observers.shutdown(wait=True, cancel_futures=True)
+            self.observers.shutdown(wait=True)
             with _RUNTIME_LOCK:
                 if _RUNTIMES.get(str(self.root)) is self:
                     del _RUNTIMES[str(self.root)]
@@ -925,54 +976,13 @@ class BodyRuntime:
             self.thread.join()
 
 
-def _announce_working(entry) -> None:
-    """A held run works now and did not at its last read (or had none): say so the way a
-    resumed attempt does, since its task may be a sleeper whose Telegram typing had stopped
-    (DESIGN §9). Best effort: a lost frame costs one missed cue."""
-    from types import SimpleNamespace
-
-    try:
-        from ouroboros.model_sleep import announce_resumed
-        from supervisor import queue as q
-        from supervisor.active_activity import get_direct_activity_registry
-        from supervisor.workers import get_event_q
-
-        with q._queue_lock:
-            rows = [meta.get("task") for meta in q.RUNNING.values() if isinstance(meta, dict)] + list(q.PENDING)
-        task = next((row for row in rows if isinstance(row, dict) and str(row.get("id") or "") == entry.task_id), None)
-        turn = get_direct_activity_registry().get(entry.task_id) if task is None else None
-        if task is None and turn is None:
-            return
-        announce_resumed(SimpleNamespace(event_queue=get_event_q(create=False), task_id=entry.task_id,
-                                         current_chat_id=task.get("chat_id") if task is not None else turn.chat_id))
-    except Exception:
-        log.debug("Working-again announce unavailable for %s", entry.run_id, exc_info=True)
-
-
-def current_activity(root, task_id: str, run_id: str, invocation_id: str = ""):
-    """Whether a held run works now by this observer's latest read: the same run, task and
-    (when given) invocation, read within a few ticks; anything else is None (unknown)."""
-    from ouroboros.delegate_supervision import _OBSERVATION_CURRENT_SEC, run_activity
-
-    runtime = body_runtime(root)
-    fact = runtime.observation(run_id) if runtime is not None else {}
-    try:
-        current = "at" in fact and time.monotonic() - float(fact["at"]) <= _OBSERVATION_CURRENT_SEC
-    except (TypeError, ValueError):
-        current = False
-    if (not current or fact.get("task_id") != str(task_id)
-            or (invocation_id and fact.get("invocation_id") != str(invocation_id))):
-        return None
-    return run_activity(fact)
-
-
-def start_body_runtime(root, *, stop_event=None, gateway_factory=None, max_workers=None, collection_ready=None) -> BodyRuntime:
+def start_body_runtime(root, *, stop_event=None, gateway_factory=None, collection_ready=None) -> BodyRuntime:
     key = str(pathlib.Path(root).resolve())
     with _RUNTIME_LOCK:
         existing = _RUNTIMES.get(key)
         if existing is not None:
             return existing  # A closing generation is not replaced while its jobs remain.
-        runtime = BodyRuntime(key, stop_event=stop_event, gateway_factory=gateway_factory, max_workers=max_workers,
+        runtime = BodyRuntime(key, stop_event=stop_event, gateway_factory=gateway_factory,
                               collection_ready=collection_ready)
         _RUNTIMES[key] = runtime
         return runtime
@@ -989,3 +999,13 @@ def stop_body_runtime(root, *, wait=False) -> None:
         runtime = _RUNTIMES.get(str(pathlib.Path(root).resolve()))
     if runtime is not None:
         runtime.close(wait=wait)
+
+
+@atexit.register
+def _join_at_exit() -> None:
+    """The interpreter exits: every body's jobs return first, as its old pool's did (a follow at its next beat)."""
+    with _RUNTIME_LOCK:
+        runtimes = list(_RUNTIMES.values())
+    for runtime in runtimes:
+        runtime.close()
+        runtime.observers.shutdown(wait=True)

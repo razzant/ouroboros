@@ -552,13 +552,13 @@ def test_a_carrier_ends_a_held_task_itself_and_never_runs_its_body(org, monkeypa
 
 @pytest.mark.parametrize("mode", ["hold", "warn", None])
 def test_the_queue_keeps_ordinary_work_waiting_while_the_server_does_not_run_a_requirement(org, monkeypatch, mode):
-    from supervisor import events_budget, queue, worker_assignment
+    from supervisor import queue, worker_assignment
 
     if mode:
         require(org, monkeypatch, mode=mode)
     reached = []
-    monkeypatch.setattr(events_budget, "budget_resume_dispatch_allowed",
-                        lambda _queue, candidate: reached.append(candidate["id"]) or False)  # the gate after it
+    monkeypatch.setattr(worker_assignment, "continuation_refusal",
+                        lambda candidate: reached.append(candidate["id"]) or True)  # the gate after it
     with queue._queue_lock:
         held = worker_assignment._candidate_ineligible(queue, {"id": "queued-2", "metadata": {}}, 5.0, {})
     assert held is True

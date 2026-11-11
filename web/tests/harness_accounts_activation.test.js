@@ -117,3 +117,27 @@ test('the service banner reports an automatic wake in progress', () => {
         tone: 'muted', text: 'Starting the agent daemon…',
     });
 });
+
+test('mount reads status only; opening visible Accounts reads inventory once', async (t) => {
+    const before = {document: globalThis.document, window: globalThis.window};
+    const {elements, doc, win} = surface();
+    globalThis.document = doc; globalThis.window = win;
+    const inventories = [];
+    t.mock.method(globalThis, 'fetch', async url => { inventories.push(String(url)); return response({harnesses: []}); });
+    const store = createClaudexorStatusStore({fetchImpl: async () => response(RUNNING), doc});
+    try {
+        await initHarnessAccounts({store});
+        assert.deepEqual(inventories, []);
+        elements['harness-accounts-groups'].offsetParent = null;
+        await win.fire('ouro:settings-subtab-shown');
+        assert.deepEqual(inventories, []);
+        elements['harness-accounts-groups'].offsetParent = {};
+        await win.fire('ouro:settings-subtab-shown');
+        assert.equal(inventories.length, 1);
+        assert.match(inventories[0], /fresh=true/);
+        assert.match(inventories[0], /checkLatest=true/);
+    } finally {
+        destroyHarnessAccounts(); store.dispose();
+        globalThis.document = before.document; globalThis.window = before.window;
+    }
+});

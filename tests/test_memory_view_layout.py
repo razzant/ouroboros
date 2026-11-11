@@ -4,8 +4,8 @@ A built request holds common governance (A', marked), the optional handbook (D, 
 identity with my story (B, marked), then knowledge, my rooms and the runtime
 facts (C, unmarked). B depends only on the chronicle, identity, WORLD, the deep review and the
 catalog: the same bytes for Main, a Project's root and a wake. Knowledge edits change only C;
-a new page changes B and never A' or D. Anthropic keeps the message seal and gives schemas
-only a free slot. Codex and direct OpenAI keep all stable items and C as one notice (their cache is
+a new page changes B and never A' or D. Anthropic keeps the message seal and gives a spare
+slot to C before schemas. Codex and direct OpenAI keep all stable items and C as one notice (their cache is
 read only inside the leading system group, by prefix: measured 2026-10-03); the view fact of
 the first send reaches the cap info, the task context, one event and the trace.
 Fixture: ``tests._memory_inventory_shared`` (three rooms besides Main, legacy memory).
@@ -276,7 +276,9 @@ def test_anthropic_preserves_the_message_seal_and_gives_schemas_only_a_free_slot
     kept = LLMClient._payload_cache_breakpoints(payload)
     assert len(kept) == len(_deep_markers(payload)) == 4
     has_book = book and mode == "max"
-    assert ("cache_control" in payload["tools"][-1]) == (not has_book)
+    assert "cache_control" not in payload["tools"][-1]
+    system = payload.get("system", payload["messages"][0].get("content"))
+    assert ("cache_control" in system[-1]) == (not has_book)
     # The newest tool result, or the task message itself: the seal changed neither row.
     assert kept[-1]["text"] == ("result 5" if long else messages[1]["content"])
     assert any(block.get("text", "").startswith("## DEVELOPMENT.md\n") for block in kept) == has_book

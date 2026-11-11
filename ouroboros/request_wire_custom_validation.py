@@ -92,11 +92,13 @@ def _schema_validation_error(
 ) -> str:
     """Contain all jsonschema construction/resolution failures at its boundary."""
     from jsonschema import validators
+    from referencing import Registry
 
     try:
         validator_class = validators.validator_for(schema)
         validator_class.check_schema(schema)
-        validator = validator_class(schema)
+        # Resolve in-document/bundled resources, never fetch server-supplied refs.
+        validator = validator_class(schema, registry=Registry())
         error = next(iter(validator.iter_errors(arguments)), None)
     except Exception:
         # jsonschema has no public common base for schema, regex, and reference

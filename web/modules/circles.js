@@ -21,6 +21,7 @@ import { getContributions } from './contributions.js';
 import { bindModelChoosers, modelChooserHtml, updateModelChooser } from './model_chooser.js';
 import { modelCatalog } from './model_catalog_store.js';
 import { modelSuggestions, openPlaceSheet, statusLine } from './place_sheet.js';
+import { catalogPrograms } from './model_program.js';
 import { openConnectPlace, ownerWordsFieldHtml } from './place_connect.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 
@@ -128,7 +129,7 @@ const actButton = (act, label, attrs = '', tone = 'btn-default') => `<button typ
 
 /** The name, words and model of a circle being made or edited: the owner's voice in its field; Delete only for a
  *  saved one. The model is the place sheet's own chooser: suggestions assist typing, and an empty field inherits. */
-function circleEditorHtml(key, { name = '', text = '', model = '' }, { saved = false, busy = false, models = null, modelsFailed = false, own = '' } = {}) {
+function circleEditorHtml(key, { name = '', text = '', model = '' }, { saved = false, busy = false, models = null, catalog, modelsFailed = false, own = '' } = {}) {
     const id = escapeHtml(key);
     const disabled = busy ? ' disabled' : '';
     const help = [tr('circles.model.help', 'The model its places think with when they wake; empty uses the Consciousness model in Models. A place may keep its own.'),
@@ -137,7 +138,7 @@ function circleEditorHtml(key, { name = '', text = '', model = '' }, { saved = f
         <label class="ui-field">${tr('circles.name', 'Name')}<input class="ui-control" data-circles-draft="${id}:name" data-i18n-authored value="${escapeHtml(name)}" autocomplete="off" spellcheck="false"></label>
         <label class="ui-field">${tr('circles.words', 'Its words: who is here and what Ouroboros is here for')}${ownerWordsFieldHtml(`data-circles-draft="${id}:text"`, text, 4)}</label>
         <label class="ui-field">${tr('circles.model', 'Model')}${modelChooserHtml(`data-circles-draft="${id}:model" aria-label="${escapeHtml(tr('circles.model', 'Model'))}" aria-describedby="circle-model-help-${id}"`,
-            model, `circle-model-options-${id}`, models || [], { placeholder: tr('circles.model.empty', 'Empty uses the consciousness model') })}</label>
+            model, `circle-model-options-${id}`, models || [], { placeholder: tr('circles.model.empty', 'Empty uses the consciousness model'), programs: catalogPrograms(catalog) })}</label>
         <div class="ui-field-help" id="circle-model-help-${id}" data-i18n-fmt="circles.model.help">${escapeHtml(help)}</div>
         <div class="place-sheet-actions">${actButton(saved ? 'save' : 'create', tr('circles.save', 'Save'), `data-circle="${id}"${disabled}`)}${actButton(saved ? 'cancel' : 'cancel-new', tr('circles.cancel', 'Cancel'), `data-circle="${id}"${disabled}`, 'btn-ghost')}${saved
             ? `<span class="circle-editor-end">${actButton('delete', tr('circles.delete', 'Delete circle'), `data-circle="${id}"${disabled}`, 'btn-ghost place-danger')}</span>` : ''}</div>
@@ -154,7 +155,7 @@ export function circleFoldHtml(circle, places, ui = {}, statuses = {}) {
     const own = ownModelsText(circle, places);
     const words = editing
         ? circleEditorHtml(circle.id, { name: drafts[`${circle.id}:name`] ?? circle.name, text: drafts[`${circle.id}:text`] ?? circle.text,
-            model: drafts[`${circle.id}:model`] ?? circle.model }, { saved: true, busy: ui.busy, models: ui.models, modelsFailed: ui.modelsFailed, own })
+            model: drafts[`${circle.id}:model`] ?? circle.model }, { saved: true, busy: ui.busy, models: ui.models, catalog: ui.catalog, modelsFailed: ui.modelsFailed, own })
         : `<div class="circle-words">${circleWordsHtml(circle)}${own ? `<p class="consciousness-copy" data-circle-own-models>${escapeHtml(own)}</p>` : ''}
             <div class="place-sheet-actions">${actButton('edit', tr('circles.edit', 'Edit'), `data-circle="${id}"`, 'btn-ghost')}${actButton('add-place', tr('circles.add_place', 'Add a place'), `data-circle="${id}"`)}</div>
         </div>`;
@@ -194,7 +195,7 @@ export function newCircleCardHtml(ui = {}) {
     return `<section class="ui-card consciousness-card" aria-label="${escapeHtml(tr('circles.new', 'New circle'))}" data-circle-new>
         <div class="consciousness-card-head"><h3 class="dashboard-card-title">${tr('circles.new', 'New circle')}</h3></div>
         ${circleEditorHtml('new', { name: drafts['new:name'] || '', text: drafts['new:text'] || '', model: drafts['new:model'] || '' },
-            { busy: ui.busy, models: ui.models, modelsFailed: ui.modelsFailed })}
+            { busy: ui.busy, models: ui.models, catalog: ui.catalog, modelsFailed: ui.modelsFailed })}
         ${statusLine(ui.status?.new)}
     </section>`;
 }
@@ -277,15 +278,21 @@ export function initCircles({ state, showPage, openSettingsTab, read = readPlace
         if (selection && node?.setSelectionRange) node.setSelectionRange(...selection);
     }
 
+    function onCatalog(event) {
+        if (destroyed) return;
+        const data = event.detail;
+        ui.models = modelSuggestions(data);
+        ui.catalog = data;
+        for (const field of body.querySelectorAll('[data-model-chooser]')) updateModelChooser(field, ui.models, catalogPrograms(data));
+    }
+
     // The Model field's suggestions, read once when an editor first shows; the field works without them (any id can be
     // typed), and they reach the open field without a repaint, so the caret stays where it is.
     async function readSuggestions() {
         if (modelsAsked) return;
         modelsAsked = true;
         try {
-            ui.models = modelSuggestions(await readModels());
-            if (destroyed) return;
-            for (const field of body.querySelectorAll('[data-model-chooser]')) updateModelChooser(field, ui.models);
+            onCatalog({ detail: await readModels() });
         } catch {
             if (destroyed) return;
             modelsAsked = false;  // asked again by the next editor
@@ -529,6 +536,7 @@ export function initCircles({ state, showPage, openSettingsTab, read = readPlace
     window.addEventListener(PLACES_CHANGED_EVENT, onChanged);
     window.addEventListener('ouro:open-circles', onOpen);
     document.addEventListener('visibilitychange', onVisibility);
+    document.addEventListener('settings-model-catalog:updated', onCatalog);
     paint();
     if (shown()) void refresh();
     return {
@@ -548,6 +556,7 @@ export function initCircles({ state, showPage, openSettingsTab, read = readPlace
             window.removeEventListener(PLACES_CHANGED_EVENT, onChanged);
             window.removeEventListener('ouro:open-circles', onOpen);
             document.removeEventListener('visibilitychange', onVisibility);
+            document.removeEventListener('settings-model-catalog:updated', onCatalog);
         },
     };
 }

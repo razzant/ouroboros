@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from ouroboros._outcome_tool_errors import SAFETY_HELD_STATUSES
+
 # The steps that most often stay failed at an ending; any other reads "A tool step".
 _TOOL_NOUNS = {
     "run_command": "A command",
@@ -34,6 +36,7 @@ _TOOL_NOUNS = {
     "apply_patch": "A file edit",
     "github_write": "A GitHub write",
     "send_user_message": "A message send",
+    "place_reply": "A reply",
     "schedule_subagent": "A helper start",
     "commit_reviewed": "A commit",
     "vcs_commit_reviewed": "A commit",
@@ -53,12 +56,14 @@ def _int(value: Any) -> Any:
 
 def _loud(errors: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """The errors the main view names: a failed read (owner 06.11, A) and a details-only leftover (owner 09.11, A)
-    stay in the details. Twin of ``_outcome_tool_errors.warns_without_review``."""
-    return [error for error in errors if not (error.get("read_only") or error.get("details_only"))]
+    stay in the details; a call Safety held only in the open Done card (owner 11.11, A). Twin of
+    ``_outcome_tool_errors.warns_without_review``."""
+    return [error for error in errors if not (error.get("read_only") or error.get("details_only")
+                                              or error.get("status") in SAFETY_HELD_STATUSES)]
 
 
 def residual_tool_errors_phrase(execution: Any) -> str:
-    """The clause naming the first recorded loud tool error, or "" when the record names none."""
+    """The clause naming the first recorded loud tool error; "" when the record names none."""
     execution = execution if isinstance(execution, dict) else {}
     listed_unresolved, listed_cosmetic = _errors(execution, "unresolved_tool_errors"), _errors(execution, "cosmetic_tool_errors")
     unresolved, cosmetic = _loud(listed_unresolved), _loud(listed_cosmetic)

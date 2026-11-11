@@ -112,7 +112,10 @@ def extension_import_identity(skill: LoadedSkill) -> str:
         sys.prefix, sys.platform, str(skill.skill_dir.resolve()),
         *(("trusted_bytes_checked",) if trusted_extensions() is not None else ()),
     )).encode("utf-8") + deps).hexdigest()
-    return f"sha256-{skill.content_hash}-{runtime}"
+    # Hash both complete identities into one leaf; spelling both adds 65 path
+    # characters and can make an otherwise usable Windows import cwd invalid.
+    identity = hashlib.sha256(f"{skill.content_hash}\0{runtime}".encode("utf-8")).hexdigest()
+    return f"sha256-{identity}"
 
 
 @contextmanager

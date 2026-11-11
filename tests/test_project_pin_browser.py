@@ -2,8 +2,9 @@
 
 The existing shell server supplies assets and non-project APIs. Project list/update
 requests exercise the real gateway and registry in a private TestClient drive.
-Pin and Unpin are the first actions of a row's menu (its ⋯ under a mouse, a long press on touch); pinned rows lead
-the one keyed list and one step of air parts them from the rest, with no caption, glyph or column.
+Pin and Unpin are the first actions of a row's menu (its ⋯ under a mouse, a long press on touch) and the row's own
+glyph left of its name for a hovering pointer or the keyboard; pinned rows lead the one keyed list and one step of
+air parts them from the rest, with no caption or column and no glyph at rest.
 Find a project and Show more reach every room beyond the feed; a reference opens its own room by its id.
 """
 import json
@@ -235,15 +236,27 @@ def assert_one_boundary(groups):
             assert group["gap"] == pytest.approx(9 if boundary else 1, abs=0.5), (group, groups)
 
 
+# Each row's glyphs outside its Pin and ⋯ (none), and whether its Pin is drawn or a target; a Pin at rest has no
+# pointer on its row and no keyboard on itself.
+REST = """() => [...document.querySelectorAll('#nav-projects-list > .nav-project-item')].map((item) => {
+    const pin = item.querySelector(':scope > .nav-project-pin'), style = pin && getComputedStyle(pin);
+    return {id: item.dataset.navProjectId, resting: !item.matches(':hover') && !pin?.matches(':focus-visible'),
+            stray: [...item.querySelectorAll('svg')].filter((svg) => !svg.closest('.nav-project-pin, .nav-project-kebab')).length,
+            drawn: Boolean(style) && style.opacity !== '0', target: Boolean(style) && style.pointerEvents !== 'none'};
+})"""
+
+
 def assert_flat_and_unlabelled(page):
-    """One flat keyed list: every child a Project row, and the word Pinned only in names, never drawn."""
+    """One flat keyed list: every child a Project row, the word Pinned only in names, and at rest no row draws its
+    Pin or lets it take a press."""
     children = page.locator('#nav-projects-list > *').evaluate_all(
         'els => els.map(el => [el.className, el.dataset.navProjectId || ""])')
     assert children and all(cls.startswith('nav-project-item') and pid for cls, pid in children), children
     assert len({pid for _, pid in children}) == len(children)
     assert "Pinned" not in page.locator('#primary-sidebar').inner_text()
-    assert page.locator('#primary-sidebar svg').evaluate_all('els => els.filter(el => el.closest(".nav-project-item")'
-                                                            ' && !el.closest(".nav-project-kebab")).length') == 0
+    for item in page.evaluate(REST):
+        assert item["stray"] == 0, item
+        assert not (item["resting"] and (item["drawn"] or item["target"])), item
 
 
 def test_menu_pin_reorders_keyed_rows_without_opening_or_reading_across_reload_and_windows(pins_ui, tmp_path):
@@ -417,6 +430,12 @@ def test_menu_opened_during_save_retires_pending_state_at_settlement(pins_ui, su
     control["hold_writes"] = True
     choose(page, "older", "Pin")
     until(page, lambda: len(control["held_writes"]) == 1)
+    glyph = row(page, "older").locator('.nav-project-pin')
+    expect()(glyph).to_have_attribute("title", "Pinning…")
+    expect()(glyph).to_have_attribute("aria-label", f"Pinning… {LONG}")
+    expect()(glyph).to_have_attribute("aria-disabled", "true")
+    glyph.dispatch_event("click")  # both controls share the existing pending-write guard
+    assert len(control["writes"]) == 1
     anchor = open_menu(page, "older")
     expect()(menu(page).locator('[data-prm="pin"]')).to_have_text("Pinning…")
     assert page.evaluate("document.activeElement.dataset.prm") == "rename"
@@ -434,6 +453,8 @@ def test_menu_opened_during_save_retires_pending_state_at_settlement(pins_ui, su
     action = menu(page).locator('[data-prm="pin"]')
     expect()(action).to_have_text("Unpin" if succeeded else "Pin")
     assert action.get_attribute("aria-disabled") is None
+    expect()(glyph).to_have_attribute("title", "Unpin" if succeeded else "Pin")
+    assert glyph.get_attribute("aria-disabled") is None
     assert len(control["writes"]) == 1
     assert registry.get_project(ui["root"], "older")["pinned"] is succeeded
 
@@ -656,6 +677,184 @@ def test_local_pin_reveal_respects_input_and_visible_scroll_region(pins_ui, heig
         allowance = row(page, "older").evaluate("el => el.getBoundingClientRect().height + parseFloat(getComputedStyle(el).getPropertyValue('--space-2')) + 3")
         assert max(abs(a - b) for a, b in zip(before, page.evaluate(scroll))) <= allowance, "pointer pin must not jump the list"
     expect()(page.locator('#toast-stack').filter(has_text="Could not save project pin")).to_have_count(0)
+
+
+# A row's own Pin as it stands: drawn, a target, what it does and says, its ink beside the row's, and the boxes of
+# the Pin, the name and the Projects header's glyph (the icon column the Pin sits in).
+PIN = """(pid) => {
+    const item = document.querySelector(`.nav-project-item[data-nav-project-id="${pid}"]`);
+    const pin = item.querySelector(':scope > .nav-project-pin'), row = item.querySelector('.nav-project-row');
+    const box = (el) => { const r = el.getBoundingClientRect(); return {left: r.left, right: r.right, top: r.top, bottom: r.bottom}; };
+    const style = getComputedStyle(pin);
+    return {drawn: style.opacity === '1', target: style.pointerEvents !== 'none', action: pin.dataset.action,
+            name: pin.getAttribute('aria-label'), title: pin.title, ink: style.color, ring: style.outlineStyle,
+            rowInk: getComputedStyle(row).color, rowFill: getComputedStyle(row).backgroundColor,
+            focused: pin === document.activeElement, keyboard: pin.matches(':focus-visible'),
+            first: item.firstElementChild === pin, pin: box(pin), label: box(row.querySelector('.nav-row-label')),
+            icon: box(document.querySelector('#nav-projects-toggle svg'))};
+}"""
+# Records what the next click in the document lands on (`window.__landed`): a row's Pin, its row or something else,
+# with that row's id.
+CLICK_TARGET = """() => { window.__landed = null; document.addEventListener('click', (event) => {
+    const hit = event.target.closest('.nav-project-pin, .nav-project-row');
+    window.__landed = hit ? [hit.classList.contains('nav-project-pin') ? 'pin' : 'row',
+        hit.closest('[data-nav-project-id]').dataset.navProjectId] : ['other', ''];
+}, {capture: true, once: true}); }"""
+
+
+def middle(box):
+    return (box["left"] + box["right"]) / 2, (box["top"] + box["bottom"]) / 2
+
+
+def test_row_pin_glyph_serves_a_hovering_pointer_and_the_keyboard_never_a_finger(pins_ui, tmp_path):
+    """The row's own Pin or Unpin, left of its name in the icon column: drawn and pressable only while a pointer
+    hovers the row or the keyboard is on it. A finger there presses the row, on a phone and on a screen that also
+    hovers; the ⋯ and the long press keep Pin and Unpin."""
+    ui, page, control = pins_ui, pins_ui["page"], pins_ui["control"]
+    evidence = producer_evidence_dir(tmp_path, "pin-glyph", env="OUROBOROS_BROWSER_EVIDENCE_OUT")
+    pin = lambda pid: page.evaluate(PIN, pid)  # noqa: E731
+    landed = lambda: page.evaluate("window.__landed")  # noqa: E731
+    settle(page)  # a phone's drawer has slid in: boxes are read where they stay
+    rest = pin("older")
+    assert rest["first"] and rest["action"] == "pin" and not rest["drawn"] and not rest["target"], rest
+    assert (rest["name"], rest["title"]) == (f"Pin {LONG}", "Pin")
+    assert rest["pin"]["right"] < rest["label"]["left"], rest  # in the gutter, short of the name, at every size
+    assert abs(middle(rest["pin"])[0] - middle(rest["icon"])[0]) <= 0.5, rest
+    assert_flat_and_unlabelled(page)
+    if coarse(page):
+        assert page.evaluate("matchMedia('(hover: none)').matches")
+        # The keyboard or assistive technology that moves the focus there draws it with its ring (this engine's Tab
+        # skips buttons, so after a key in the find field the focus moves on by script); once it leaves, nothing is.
+        page.locator('.nav-find-input').focus()
+        page.keyboard.press("ArrowRight")
+        row(page, "older").locator('.nav-project-pin').evaluate("el => el.focus()")
+        focused = pin("older")
+        assert focused["keyboard"] and focused["drawn"] and focused["target"] and focused["ring"] == "solid", focused
+        page.evaluate("document.activeElement.blur()")
+        resting = pin("older")
+        assert not resting["drawn"]
+        x, y = middle(resting["pin"])
+        assert page.evaluate("([x, y]) => document.elementFromPoint(x, y).closest('.nav-project-row')?.dataset.projectId",
+                             [x, y]) == "older"
+        page.locator('#primary-sidebar').screenshot(path=str(evidence / f"touch-rest-{ui['tag']}.png"), animations="disabled")
+        page.evaluate(CLICK_TARGET)
+        page.touchscreen.tap(x, y)
+        assert landed() == ["row", "older"]
+        settle(page)
+        expect()(row(page, "older").locator('.nav-project-row')).to_have_attribute("aria-current", "page")
+        expect()(page.locator('#project-panel')).to_be_visible()
+        assert control["writes"] == [] and registry.get_project(ui["root"], "older")["pinned"] is False
+        return
+    assert page.evaluate("matchMedia('(hover: hover) and (pointer: fine)').matches")
+    older = row(page, "older").locator('.nav-project-row')
+    # A hovering pointer draws the row's Pin; the name keeps its box, and no other row draws one.
+    page.mouse.move(*middle(rest["label"]))
+    hovered = pin("older")
+    assert hovered["drawn"] and hovered["target"] and hovered["label"] == rest["label"], hovered
+    assert hovered["ink"] != hovered["rowInk"], hovered  # quieter than the name it serves
+    assert not pin("newer")["drawn"]
+    page.locator('#primary-sidebar').screenshot(path=str(evidence / f"hover-pin-{ui['tag']}.png"), animations="disabled")
+    # On the Pin the row keeps its hover, and the glyph takes the name's ink; a press pins without opening.
+    page.mouse.move(*middle(hovered["pin"]))
+    on = pin("older")
+    assert on["rowFill"] == hovered["rowFill"] and on["ink"] == on["rowInk"], on
+    page.mouse.down()
+    page.mouse.up()
+    expect()(row(page, "older")).to_have_attribute("data-pinned", "")
+    assert order(page) == ["older", "newer"] and control["writes"] == [{"pinned": True}]
+    assert page.locator('.nav-project-row.active').count() == 0 and page.locator('#project-panel').is_hidden()
+    assert no_read_acknowledged(ui)
+    # A pointer's press leaves no glyph behind once the pointer leaves, though this engine keeps the focus there.
+    page.mouse.move(ui["width"] - 40, 300)
+    left = pin("older")
+    assert left["focused"] and not left["keyboard"] and not left["drawn"] and not left["target"], left
+    assert_flat_and_unlabelled(page)
+    page.mouse.move(*middle(pin("older")["label"]))
+    pinned = pin("older")
+    assert pinned["drawn"] and pinned["action"] == "unpin", pinned
+    assert (pinned["name"], pinned["title"]) == (f"Unpin {LONG}", "Unpin")
+    page.locator('#primary-sidebar').screenshot(path=str(evidence / f"hover-unpin-{ui['tag']}.png"), animations="disabled")
+    # A double click whose first press unpins: the row moves before the second press, which lands on the Pin of the
+    # row now under the pointer and pins or opens nothing.
+    page.mouse.move(*middle(pinned["pin"]))
+    control["hold_writes"] = True
+    page.mouse.down(click_count=1)
+    page.mouse.up(click_count=1)
+    until(page, lambda: len(control["held_writes"]) == 1)
+    control["hold_writes"] = False
+    ui["forward"](*control["held_writes"].pop())
+    expect()(row(page, "older")).not_to_have_attribute("data-pinned", "")
+    assert order(page) == ["newer", "older"]
+    settle(page)
+    assert pin("newer")["drawn"]  # the hover followed the row that moved under the pointer
+    page.evaluate(CLICK_TARGET)
+    page.mouse.down(click_count=2)
+    page.mouse.up(click_count=2)
+    assert landed() == ["pin", "newer"]  # the press the guard exists for
+    settle(page)
+    assert control["writes"] == [{"pinned": True}, {"pinned": False}], control["writes"]
+    assert registry.get_project(ui["root"], "newer")["pinned"] is False
+    assert page.locator('.nav-project-row.active').count() == 0 and page.locator('#project-panel').is_hidden()
+    # The keyboard: Tab from the find field reaches the first row's Pin before its name; it is drawn with the one
+    # ring, Enter pins, and the moved row keeps it, drawn.
+    page.mouse.move(ui["width"] - 40, 300)
+    page.locator('.nav-find-input').focus()
+    page.keyboard.press("Tab")
+    keyed = pin("newer")
+    assert keyed["focused"] and keyed["keyboard"] and keyed["drawn"] and keyed["ring"] == "solid", keyed
+    page.keyboard.press("Enter")
+    expect()(row(page, "newer")).to_have_attribute("data-pinned", "")
+    assert control["writes"][-1] == {"pinned": True} and len(control["writes"]) == 3
+    kept = pin("newer")
+    assert kept["focused"] and kept["drawn"] and kept["action"] == "unpin", kept
+    page.locator('#primary-sidebar').screenshot(path=str(evidence / f"keyboard-{ui['tag']}.png"), animations="disabled")
+    page.keyboard.press("Tab")  # on to the name: the Pin rests again
+    assert page.evaluate("document.activeElement.dataset.projectId") == "newer" and not pin("newer")["drawn"]
+    # A finger on this hovering screen (touch through the browser's own input, hit-tested natively): it began on
+    # the row where the Pin was not drawn, so its tap opens that row even when its hover drew the Pin under the click.
+    page.mouse.move(ui["width"] - 40, 300)
+    x, y = middle(pin("older")["pin"])
+    assert not pin("older")["drawn"]
+    cdp = page.context.new_cdp_session(page)
+    page.evaluate(CLICK_TARGET)
+    cdp.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [{"x": x, "y": y}]})
+    cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+    assert landed() == ["pin", "older"]  # the click the tap brought, once its hover drew the Pin
+    settle(page)
+    expect()(older).to_have_attribute("aria-current", "page")
+    assert len(control["writes"]) == 3 and registry.get_project(ui["root"], "older")["pinned"] is False
+    # Over the chosen row the Pin wears the row's ink, and the row keeps its chosen fill under it.
+    page.mouse.move(*middle(pin("older")["label"]))
+    chosen = pin("older")
+    page.mouse.move(*middle(chosen["pin"]))
+    chosen_on = pin("older")
+    assert chosen["drawn"] and chosen["ink"] == chosen["rowInk"], chosen
+    assert chosen_on["ink"] == chosen["rowInk"] and chosen_on["rowFill"] == chosen["rowFill"], chosen_on
+    page.locator('#primary-sidebar').screenshot(path=str(evidence / f"chosen-{ui['tag']}.png"), animations="disabled")
+    page.evaluate("document.documentElement.dataset.theme = 'light'")  # the other theme's frame, for the record
+    page.mouse.move(*middle(pin("newer")["label"]))
+    page.locator('#primary-sidebar').screenshot(path=str(evidence / f"hover-light-{ui['tag']}.png"), animations="disabled")
+
+
+def test_focused_pin_accepts_semantic_activation_without_a_pointer_press(pins_ui):
+    """A semantic detail-1 click on the visibly focused button activates that button, not its neighbouring row.
+    This fixes the event contract; it is not a native screen-reader qualification."""
+    ui, page, control = pins_ui, pins_ui["page"], pins_ui["control"]
+    settle(page)
+    page.locator('.nav-find-input').focus()
+    page.keyboard.press("ArrowRight")
+    glyph = row(page, "older").locator('.nav-project-pin')
+    glyph.evaluate("el => el.focus()")
+    focused = page.evaluate(PIN, "older")
+    assert focused["keyboard"] and focused["drawn"] and focused["focused"], focused
+    glyph.dispatch_event("click", {"detail": 1})
+    expect()(row(page, "older")).to_have_attribute("data-pinned", "")
+    assert control["writes"] == [{"pinned": True}]
+    assert page.locator('#project-panel').is_hidden() and no_read_acknowledged(ui)
+    page.keyboard.press("Space")
+    expect()(row(page, "older")).not_to_have_attribute("data-pinned", "")
+    assert control["writes"] == [{"pinned": True}, {"pinned": False}]
+    assert page.locator('#project-panel').is_hidden() and no_read_acknowledged(ui)
 
 
 # ---- Rooms beyond the feed: Find a project, Show more and a reference's own room --------------------------------
