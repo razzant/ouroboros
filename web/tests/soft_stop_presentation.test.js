@@ -20,9 +20,11 @@ import { senderLabel, buildTimelineItemHtml } from '../modules/chat_activity.js'
 import { appendProjectRow } from '../modules/project_answer.js';
 
 const chat = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8');
+// A text row's bubble (its class, metadata and Project decoration) is drawn by chat_text_bubble.js.
+const bubbleRenderer = readFileSync(new URL('../modules/chat_text_bubble.js', import.meta.url), 'utf8');
 
 test('Project row delegation preserves the actual producer metadata and terminal options', () => {
-    const delegation = chat.match(/\) decorateProjectRow\(bubble, (\{ \.\.\.meta[\s\S]*?\})\);/);
+    const delegation = bubbleRenderer.match(/\) decorateProjectRow\(bubble, (\{ \.\.\.meta[\s\S]*?\})\);/);
     assert.ok(delegation, 'the chat renderer delegates Project decoration');
     const forward = new Function('meta', 'opts', 'role', 'ts', 'fetchTaskDetailStrict', 'chatMedia', 'withStableViewport',
         'projectRow', `return (${delegation[1]});`);
@@ -128,10 +130,10 @@ test('the bubble keeps the system style class and the system_type marker', () =>
     // Rendered style, not just transported role: the bubble class is derived
     // from the role (`chat-bubble system`, never the assistant class), and the
     // system_type lands on the dataset for targeted styling.
-    assert.match(chat, /bubble\.className = `chat-bubble \$\{role\}`/);
+    assert.match(bubbleRenderer, /bubble\.className = `chat-bubble \$\{role\}`/);
     // Exercise the renderer's shared metadata assignment, rather than pinning
     // the former one-off spelling of the same system_type propagation.
-    const assignment = chat.match(/for \(const key of \[[^\]]*'systemType'[^\]]*\]\) \{\s*if \(meta\[key\]\) bubble\.dataset\[key\] = meta\[key\];\s*\}/)?.[0];
+    const assignment = bubbleRenderer.match(/for \(const key of \[[^\]]*'systemType'[^\]]*\]\) \{\s*if \(meta\[key\]\) bubble\.dataset\[key\] = meta\[key\];\s*\}/)?.[0];
     assert.ok(assignment, 'the bubble renderer must carry systemType metadata');
     const assign = new Function('bubble', 'meta', assignment);
     const bubble = { dataset: {} };

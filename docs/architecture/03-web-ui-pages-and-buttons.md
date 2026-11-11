@@ -55,7 +55,7 @@ Iframes inherit no host tokens or choice; `render.appearance` declares their pol
 
 #### Timeline ownership and ordering
 
-`chat.js` owns timelines/cards/routing, runtime/budget, subscriptions/threads/unread/reconnect and focus. Media/paste/drop/transient sheets: `chat_media.js` (living cards: `chat_cards.js`); staged/owner files: `chat_attachments.js`; field height: `chat_input_sizing.js`. ACKs update only the owner's `client_message_id` sidecar. Share: `message_actions.js` → `message_share.js` (answer or card → Text, PNG, `message_share_file.js` page; Telegram: its skill).
+`chat.js` owns timelines/cards/routing, runtime/budget, subscriptions/threads/unread/reconnect and focus. Text: `chat_text_bubble.js`; media/paste/drop/transient sheets: `chat_media.js` (living cards: `chat_cards.js`); staged/owner files: `chat_attachments.js`; field height: `chat_input_sizing.js`. ACKs update only the owner's `client_message_id` sidecar. Share: `message_actions.js` → `message_share.js` (`message_share_file.js` page; Telegram: its skill).
 
 Rows order by time then arrival (DESIGN). Keyed replay preserves nodes, disclosure, focus, selection and child lifecycle; current results win. Bounds: `LIVE_CARD_CAP` live cards; `chat_history.js` pages; `chat_preview.js` unread saved text without actions/coverage/receipts. `historyCoverage` proves bytes, not EOF/IDs/time. Anchors: `chat_reading_position.js`; newest arrival: `showLatest({arrive})`/`project_read_state.js`. `createHistoryControls` puts gaps at the feed edge, not notices over newest rows. Floating headers reserve measured height. Origins: `project_dialogue.project_origin_identity`.
 
