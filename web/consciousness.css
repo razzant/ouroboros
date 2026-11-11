@@ -28,12 +28,8 @@
 :is(.dashboard-shell, .settings-shell) button.consciousness-inline-link { min-inline-size: 0; min-block-size: 0; }
 @media (hover: hover) { .consciousness-inline-link:hover { text-decoration: underline; text-underline-offset: 3px; } }
 /* Under a finger each such door reaches the touch minimum around its line, so a sentence ending in one and the control
-   under it part by that reach and their hit areas never overlap (ui.css .ui-hit-area): two such sentences
-   (.consciousness-door-line) stand a touch minimum and a hairline gap apart, line to line. */
+   under it part by that reach and their hit areas never overlap (ui.css .ui-hit-area). */
 @media (pointer: coarse) {
-    .consciousness-door-line + .consciousness-door-line {
-        margin-block-start: calc(var(--touch-target-min) - var(--type-meta) * var(--line-meta) + var(--space-1));
-    }
     [data-consciousness-places] + .consciousness-more { margin-block-start: var(--space-5); }
 }
 /* The owner's own words keep the owner's voice: the blue tint and its ink, here in an editable field. */
