@@ -368,7 +368,7 @@ def test_every_producer_retires_only_an_empty_tree(registry, monkeypatch, tmp_pa
     child = Child()
     state = {"remains": remains}
     read = shell_process._tree_remains
-    monkeypatch.setattr(shell_process, "_tree_remains", lambda p: state["remains"] if p is child else read(p))
+    monkeypatch.setattr(shell_process, "_tree_remains", lambda p, **kw: state["remains"] if p is child else read(p, **kw))
     # Patch the birth seam only. No global Popen replacement can intercept a census or unrelated subprocess.
     for module in (shell_process, skill_exec, skill_preflight, extension_process_runner):
         monkeypatch.setattr(module, "contained_popen", lambda *a, **kw: child)

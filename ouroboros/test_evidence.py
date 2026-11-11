@@ -411,7 +411,7 @@ def _published_folders(entry: Path, gaps: list) -> list[Path]:
     if entry.name == "ui":
         return [entry]
     folders = []  # each producer folder declares itself: a public one never opens its retained neighbours
-    for child in sorted(entry.iterdir()):
+    for child in sorted(entry.iterdir(), key=lambda path: path.name):
         try:
             if (_PRODUCER_FOLDER.fullmatch(child.name) and stat.S_ISDIR(child.lstat().st_mode)
                     and _present(child / PUBLISHED_DIAGNOSTICS_MARKER)):
@@ -433,7 +433,7 @@ def run_diagnostics(run) -> tuple[list[Path], list[str], list[tuple[Path, OSErro
     are never read. A path that cannot be listed or examined is a gap ``(path, error)``, and its siblings
     are still read."""
     run, roots, left, gaps = Path(run), [], [], []
-    for entry in sorted(run.iterdir()):
+    for entry in sorted(run.iterdir(), key=lambda path: path.name):  # names: Windows paths sort case-insensitively
         try:
             folders = _published_folders(entry, gaps)
         except OSError as error:

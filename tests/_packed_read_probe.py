@@ -39,3 +39,26 @@ def release_pack_readers(tree) -> int:
                 reader._stream = None
                 closed += 1
     return closed
+
+
+def count_decoding(monkeypatch) -> dict:
+    """Count real XZ decoder starts and the bytes they produce, including what seeks decode and discard."""
+    import lzma
+
+    counts, real = {"starts": 0, "decoded": 0}, lzma.LZMADecompressor
+
+    class Counting:
+        def __init__(self, *args, **kwargs):
+            counts["starts"] += 1
+            self._decoder = real(*args, **kwargs)
+
+        def decompress(self, *args, **kwargs):
+            output = self._decoder.decompress(*args, **kwargs)
+            counts["decoded"] += len(output)
+            return output
+
+        def __getattr__(self, name):
+            return getattr(self._decoder, name)
+
+    monkeypatch.setattr(lzma, "LZMADecompressor", Counting)
+    return counts

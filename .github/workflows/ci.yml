@@ -19,8 +19,8 @@
 # label is ACCEPTED: reported in the summary and the release notes, not blocking. A stopped
 # session (dead worker) is CONTINUED for the tests it never ran. The retry never applies to the
 # live skill-review legs (a second verdict is a new opinion) or to the provider canaries.
-# Every OS and the UI lane split their tests by the durations the previous run recorded
-# (`shard-plan`); every split is reconciled against an unsharded manifest.
+# Every OS and the UI lane split their tests by the durations earlier runs recorded, frozen
+# per run (`shard-plan`); every split is reconciled against an unsharded manifest.
 #
 # Tier 2.5 requires OPENROUTER_API_KEY / OPENROUTER_PROVIDER_ROUTES_API_KEY (its Google, Anthropic, OpenAI routes) / OPENAI_API_KEY / ANTHROPIC_API_KEY.
 # Optional MiniMax / DeepSeek / Cloud.ru / GigaChat rows run when their
@@ -78,11 +78,11 @@ concurrency:
 
 jobs:
   # ──────────────────────────────────────────────────────────────────
-  # The run's one weight table. Every sharded leg and every manifest of this run
-  # reads the same copy, so their deterministic packing agrees; the newest
-  # `ci-durations` artifact of this repository is fetched once here. Without one
-  # (first run, expired artifacts, unreadable API) the legs pack by node count,
-  # as before. Weights steer only the split: reconciliation proves completeness.
+  # The run's one weight table, frozen once here (.github/actions/shard-plan). Every
+  # sharded leg and every manifest of this run reads the same copy, so their
+  # deterministic packing agrees. Without a usable earlier table (first run, expired
+  # artifacts, unreadable API) the plan says so and the legs pack by node count.
+  # Weights steer only the split: reconciliation proves completeness.
   # ──────────────────────────────────────────────────────────────────
   shard-plan:
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
@@ -123,45 +123,8 @@ jobs:
               output.write(f"legs={json.dumps(legs)}\n")
               output.write("systems=" + " ".join(f"{system['name']}:{system['shards']}" for system in systems) + "\n")
               output.write(f"persist={json.dumps(persist)}\n")
-      # A re-run keeps the plan its first attempt published: legs of different
-      # attempts of one run must pack with the same table.
-      - name: Reuse this run's plan on a re-run
-        id: existing
-        continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: shard-plan-${{ github.run_id }}
-          path: ${{ runner.temp }}/existing-plan
-      - name: Fetch the newest recorded test durations
-        if: ${{ steps.existing.outcome != 'success' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PLAN: ${{ runner.temp }}/shard-plan
-        shell: bash
-        run: |
-          set -uo pipefail
-          mkdir -p "$PLAN"
-          echo '{"format": 1, "durations": null}' > "$PLAN/plan.json"
-          id="$(gh api "repos/$REPO/actions/artifacts?name=ci-durations&per_page=30" \
-                --jq '[.artifacts[] | select(.expired | not)] | sort_by(.created_at) | last | .id // empty' 2>/dev/null)"
-          if [[ -n "$id" ]] && gh api "repos/$REPO/actions/artifacts/$id/zip" > "$RUNNER_TEMP/durations.zip" 2>/dev/null \
-             && unzip -o -q "$RUNNER_TEMP/durations.zip" ci-durations.json -d "$PLAN" \
-             && python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "$PLAN/ci-durations.json"; then
-            printf '{"format": 1, "durations": "ci-durations.json", "artifact": %s}\n' "$id" > "$PLAN/plan.json"
-            echo "Shards weigh files by the durations of artifact $id." >> "$GITHUB_STEP_SUMMARY"
-          else
-            rm -f "$PLAN/ci-durations.json"
-            echo "No readable duration table; shards weigh files by node count." >> "$GITHUB_STEP_SUMMARY"
-          fi
-      - name: Upload the plan of this run
-        if: ${{ steps.existing.outcome != 'success' }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: shard-plan-${{ github.run_id }}
-          path: ${{ runner.temp }}/shard-plan/
-          retention-days: 7
-          if-no-files-found: error
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/shard-plan
 
   # ──────────────────────────────────────────────────────────────────
   # Lint: deterministic source checks, on manual runs and release tags (a
@@ -396,8 +359,8 @@ jobs:
 
   # ──────────────────────────────────────────────────────────────────
   # Tier 2: Full 3-OS matrix on manual runs and release tags. Every OS runs the
-  # default suite in whole-file shards packed by the durations the previous run
-  # recorded (`shard-plan`); shard 1 of each OS also collects the two unsharded
+  # default suite in whole-file shards packed by the run's frozen plan
+  # (`shard-plan`); shard 1 of each OS also collects the two unsharded
   # manifests that `full-test` reconciles every shard of that OS against.
   # ──────────────────────────────────────────────────────────────────
   full-test-runs:
@@ -833,8 +796,8 @@ jobs:
   # durations, per OS. Written even after a red run (a red test still took its
   # time); a run without proofs writes nothing and the next run packs by count.
   # A `scope=tests` dispatch (Ubuntu + Windows, no UI lane) publishes nothing:
-  # `shard-plan` takes the newest table, and one that never measured macOS or
-  # the UI shards would pack the next release run's by count.
+  # `shard-plan` takes the newest table's file weights, and one that never
+  # measured macOS would pack the next release run's by count.
   ci-durations:
     needs: [full-test, ui-smoke]
     if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')) && inputs.scope != 'tests' }}
@@ -1193,10 +1156,12 @@ jobs:
         run: docker build -t ouroboros-web:test .
       - uses: ./.github/actions/setup-python-env
         id: setup_python
+      # Bounded downloads with one retry, as the UI lane installs them (#2895).
       - name: Install UI smoke browser binaries
         id: install_browsers
         if: ${{ !cancelled() && steps.docker_build.outcome == 'success' && steps.setup_python.outcome == 'success' }}
-        run: python -m playwright install --with-deps chromium webkit
+        timeout-minutes: 45
+        run: python -I -S scripts/ci_browser_install.py chromium webkit
       - name: Run Docker UI smoke
         if: ${{ !cancelled() && steps.docker_build.outcome == 'success' && steps.setup_python.outcome == 'success' && steps.install_browsers.outcome == 'success' }}
         env:
@@ -1432,9 +1397,11 @@ jobs:
         if: env.HAS_E2E_LIVE_KEY == 'true'
         with:
           node-version: '22'
+      # Bounded downloads with one retry, as the UI lane installs them (#2895).
       - name: Install the UI probe browser (Playwright Chromium)
         if: env.HAS_E2E_LIVE_KEY == 'true'
-        run: python -m playwright install --with-deps chromium
+        timeout-minutes: 45
+        run: python -I -S scripts/ci_browser_install.py chromium
       - name: Rehearse SM1 with the keyless scripted model
         id: rehearsal
         if: env.HAS_E2E_LIVE_KEY == 'true'
