@@ -233,3 +233,35 @@ def test_panic_sleep_refuses_both_mind_doors_and_owner_releases(tmp_path, monkey
     assert current_stop(task)["release"] == "owner"
     assert q.resume_budget_paused_task("child")["ok"]
     assert eb.BUDGET_HOLD_KEY not in task
+
+
+def test_an_application_stop_keeps_the_selection_it_replaces_beside_its_recovery_until_another_stop():
+    """#3047: the selection a saved-work hold replaces stays in the recovery custody that hold sits over, bound to
+    that custody's source (task and attempt): the stop itself is no new decision. A Pause or Panic declared over the
+    row supersedes it; it never lends itself to another source and never becomes a dispatch carrier again."""
+    from ouroboros.work_stop import INTERRUPTED_SELECTION, SELECTION_KEY, interrupted_selection
+
+    selection = {"selected_by": "owner", "selected_at": "T0", "by": {"actor": "owner"}, "root_task_id": "root"}
+    source = {"source_task_id": "child", "from_attempt": 2, "source_ref": {"path": "working-a2.json"}}
+    task = {"id": "child", "root_task_id": "root", "_attempt": 3, SELECTION_KEY: dict(selection),
+            "_working_recovery": dict(source)}
+    eb.hold_budget_row(task, reason=eb.HOLD_SAVED_WORK)
+    kept = {**selection, "source_task_id": "child", "from_attempt": 2}
+    assert SELECTION_KEY not in task and interrupted_selection(task) == kept
+    assert {key: value for key, value in task["_working_recovery"].items() if key != INTERRUPTED_SELECTION} == source
+    assert current_stop(task)["reason"] == eb.HOLD_SAVED_WORK  # the hold still asks for its own Resume
+    unchanged = copy.deepcopy(task)
+    eb.hold_budget_row(task, reason=eb.HOLD_OWNER_RESTART)  # a later stop the door matrix keeps out
+    assert task == unchanged
+    for other in ({"from_attempt": 3}, {"source_task_id": "another"}):
+        assert interrupted_selection({**task, "_working_recovery": {**task["_working_recovery"], **other}}) == {}
+    assert interrupted_selection({**task, "id": "another"}) == {}
+    for reason in ("owner", eb.HOLD_PANIC):  # a newer decision over the released row supersedes the kept one
+        released = {key: value for key, value in copy.deepcopy(task).items() if key != eb.BUDGET_HOLD_KEY}
+        released[SELECTION_KEY] = {**selection, "selected_at": "T1"}
+        eb.hold_budget_row(released, reason=reason)
+        assert SELECTION_KEY not in released and interrupted_selection(released) == {}
+        assert released["_working_recovery"] == source
+    plain = {"id": "plain", "root_task_id": "root", SELECTION_KEY: dict(selection)}
+    eb.hold_budget_row(plain, reason=eb.HOLD_SAVED_WORK)  # nothing saved: no recovery custody to keep it in
+    assert "_working_recovery" not in plain and interrupted_selection(plain) == {}

@@ -13,6 +13,7 @@ export const CANCEL_SOURCE_PHRASES = {
     snapshot_restore: 'The server stopped while this task was still running',
     agent_tool: 'Stopped by Ouroboros',
     silence_resolved: 'Silence check withdrawn: the observed work no longer needed it',
+    work_finished: 'Closed with the work it helped',
 };
 // The English control word each app-stop phrase names (owner decision: these five words stay English).
 export const CANCEL_CONTROL_WORDS = { http_single: 'Stop now', http_cascade: 'Stop now', http_graceful: 'Wrap up' };
@@ -21,6 +22,7 @@ export const CANCEL_SOURCE_LABELS = {
     http_graceful: 'owner requested finalize-then-stop',
     owner_restart: 'Owner restart',
     snapshot_restore: 'server_shutdown',
+    work_finished: 'the work it helped has ended',
 };
 // Twin of CANCEL_REASON_MAX_CHARS / CANCEL_REASON_PREVIEW_NOTE: the record keeps
 // the whole reason, so a shortened clause names itself a preview.

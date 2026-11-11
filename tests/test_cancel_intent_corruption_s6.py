@@ -3,9 +3,9 @@
 The mint (``request_cancel``) reads the projection strictly: a malformed file
 refuses the mutation with a typed ``CancelIntentProjectionCorrupt`` and keeps
 the bytes (pinned by ``tests/test_gate_round3_fixes.py``). This module pins the
-five NON-minting mutators — ``mark_finalize_control_drained``,
-``mark_intent_scope``, ``claim_intent``, ``release_claim``, ``settle_intent`` —
-and the watchdog's enforcement read over the same corrupt file.
+six NON-minting mutators — ``mark_finalize_control_drained``,
+``mark_intent_scope``, ``claim_intent``, ``release_claim``, ``settle_intent``,
+``withdraw_intent`` — and the watchdog's enforcement read over the same corrupt file.
 
 The distinction being characterized is the one the module already draws in
 prose: reading-for-behaviour (fail-soft with disclosure) versus
@@ -51,7 +51,7 @@ def _corrupt_after_mint(tmp_path, payload: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# C1 — the five non-minting mutators over a corrupt projection
+# C1 — the six non-minting mutators over a corrupt projection
 # ---------------------------------------------------------------------------
 
 
@@ -59,9 +59,9 @@ def _corrupt_after_mint(tmp_path, payload: str) -> dict:
 def test_c1_non_minting_mutators_fail_closed_on_a_corrupt_projection(tmp_path, payload):
     """C1/O1: every mutator that AUTHORS a record refuses a corrupt projection.
 
-    Pre-fix these five returned the absent-intent answer (``None``/``False``)
+    Pre-fix the first five returned the absent-intent answer (``None``/``False``)
     without raising, which is indistinguishable from "no cancel was ever
-    requested" — the shape that drops the claim-first fence. They now raise the
+    requested" — the shape that drops the claim-first fence. All six now raise the
     same typed error the mint raises, and the bytes are still never rewritten.
     """
     intent = _corrupt_after_mint(tmp_path, payload)
@@ -84,6 +84,12 @@ def test_c1_non_minting_mutators_fail_closed_on_a_corrupt_projection(tmp_path, p
         ci.mark_intent_scope(tmp_path, "victim", ci.SCOPE_CASCADE)
     with pytest.raises(ci.CancelIntentProjectionCorrupt):
         ci.mark_finalize_control_drained(tmp_path, "victim")
+    with pytest.raises(ci.CancelIntentProjectionCorrupt):
+        ci.withdraw_intent(
+            tmp_path, "victim", withdrawable=lambda row: True,
+            expected_generation=intent.get("generation"),
+            request_id=str(intent.get("request_id") or ""),
+        )
 
     assert _store(tmp_path).read_text(encoding="utf-8") == payload, "bytes are kept"
     refusals = [
@@ -92,7 +98,7 @@ def test_c1_non_minting_mutators_fail_closed_on_a_corrupt_projection(tmp_path, p
     ]
     assert {row.get("op") for row in refusals} == {
         "claim_intent", "settle_intent", "release_claim", "mark_intent_scope",
-        "mark_finalize_control_drained",
+        "mark_finalize_control_drained", "withdraw_intent",
     }, "each refusal is disclosed with the operation that was refused"
 
 
@@ -106,6 +112,7 @@ def test_c1_a_healthy_projection_without_the_row_is_not_corruption(tmp_path):
     assert ci.release_claim(tmp_path, "victim", error="") is False
     assert ci.mark_intent_scope(tmp_path, "victim", ci.SCOPE_CASCADE) is False
     assert ci.mark_finalize_control_drained(tmp_path, "victim") is False
+    assert ci.withdraw_intent(tmp_path, "victim", withdrawable=lambda row: True) is None
     assert list(ci.active_intents(tmp_path)) == ["other"], "the live row is untouched"
 
 

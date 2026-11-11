@@ -1674,6 +1674,7 @@ export function createChatInstance({
         if (summary.model) record.agentModel = summary.model;
         // Keep the observed initiator.
         if (summary.initiator) record.initiator = summary.initiator;
+        if (summary.continueRequester) record.continueRequester = summary.continueRequester;
 
         // Only task facts own the outcome chip under a hold; failed tools are diagnostics.
         if (summary.observedOutcome && !record.finished) record.observedOutcome = summary.observedOutcome;

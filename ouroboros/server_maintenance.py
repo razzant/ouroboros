@@ -165,10 +165,12 @@ def _run_terminal_duty(drive_root: pathlib.Path, step: str, latch: Any,
         if _stop_requested(stop_event):
             return
         if step == "cancel_intent_sweep":
+            from supervisor.ended_work_helpers import close_abandoned_helpers
             from supervisor.task_lifecycle import sweep_cancel_intents
             outcomes = sweep_cancel_intents()
             if outcomes:
                 log.info("Cancel-intent watchdog settled: %s", outcomes)
+            close_abandoned_helpers()  # discovery only, after the watchdog: the next sweep settles what it requests
         elif step == "terminal_delivery_replay":
             from ouroboros import custody_owed
             from ouroboros.dialogue_retry import drain, _requested

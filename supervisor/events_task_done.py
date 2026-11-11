@@ -392,6 +392,20 @@ def _finish_task_done_dispatch(
 
     from ouroboros.post_task_checkpoint import settle_terminal_projection
     from ouroboros.project_dialogue import append_terminal_task_projection
+    from supervisor.ended_work_helpers import WORK_FINISHED, stored_helper_lineage
+
+    # A helper closed with its ended work left the queue before this event: its card still needs the child's notice.
+    if not task and (final_task_result.get("cancel_origin") or {}).get("source") == WORK_FINISHED:
+        task = stored_helper_lineage(final_task_result)
+    # Every terminal producer reaches the live card through here, so a Continue that ends before any
+    # progress frame still names who asked for it; read from the records the admission was stored on.
+    if "continue_requester" not in task_done_event:
+        from ouroboros.subagent_messages import initiator_meta
+
+        for record in (final_task_result, task, evt):
+            if requester := initiator_meta(record).get("continue_requester"):
+                task_done_event["continue_requester"] = requester
+                break
 
     try:  # the durable terminal is established: its own clock settles whatever delivery does next
         from supervisor.consciousness_carriers import finish_pooled_wake

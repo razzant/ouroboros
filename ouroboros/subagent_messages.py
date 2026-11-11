@@ -133,7 +133,18 @@ def initiator_meta(record: Mapping[str, Any] | None) -> Dict[str, Any]:
     nested = source.get("metadata")
     metadata = nested if isinstance(nested, Mapping) else {}
     value = str(source.get("initiator") or metadata.get("initiator") or "").strip()
-    return {"initiator": value} if value else {}
+    continuation = metadata.get("continuation") or source.get("continuation")
+    admission = continuation.get("admission") if isinstance(continuation, Mapping) else None
+    # Who asked for a Continue, apart from the origin it inherits: read here, kept only on the admission that recorded it.
+    requester = {} if not isinstance(admission, Mapping) else {"continue_requester": _requester_of(admission)}
+    return {**({"initiator": value} if value else {}), **requester}
+
+
+def _requester_of(admission: Mapping[str, Any]) -> str:
+    """``owner`` or ``ouroboros`` as the admission recorded it; an undeclared or older admission stays ``unknown``."""
+    by = admission.get("by")
+    actor = str(by.get("actor") or "") if isinstance(by, Mapping) else ""
+    return actor if actor in ("owner", "ouroboros") else "unknown"
 
 
 def subagent_message_meta(
