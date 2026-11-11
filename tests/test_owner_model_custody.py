@@ -362,6 +362,41 @@ def test_fallback_exits_refuse_a_running_primary(host, action):
     assert response.status_code == 409 and response.json()["reason_code"] == "model_action_state"
 
 
+@pytest.mark.parametrize("newer_act", [False, True])
+def test_only_the_decision_holds_the_queue_lock_and_recents_ack_its_own_act(host, monkeypatch, newer_act):
+    from ouroboros import owner_model, task_store
+    from ouroboros.gateway import ui_preferences
+
+    queued(host)
+    q = host[1]
+    patch, record = task_store.patch_document, ui_preferences.record_model_recent
+    locks = []
+    def patched(*args, **kwargs):
+        locks.append(q._queue_lock._is_owned())
+        return patch(*args, **kwargs)
+    def recent(root, model, local):
+        assert not q._queue_lock._is_owned()
+        if model == C:
+            raise OSError("second suggestion still owed")
+        if newer_act:
+            with pytest.raises(owner_model.ModelActRefused, match="model recents pending"):
+                owner_model.admit("work", {"request_id": "second", "action": "set", "model": C})
+        return record(root, model, local)
+    monkeypatch.setattr(task_store, "patch_document", patched)
+    monkeypatch.setattr(ui_preferences, "record_model_recent", recent)
+    first = act(host, model=B)
+    assert first.status_code == 200
+    assert locks == ([True, True, False] if newer_act else [True, False])
+    stored = load_task_result(host[0], "work")
+    assert stored["owner_model"]["recent_recorded"] is (not newer_act)
+    assert stored["metadata"]["lead"]["model"] == (C if newer_act else B)
+    monkeypatch.setattr(ui_preferences, "record_model_recent", record)
+    assert act(host, model=A).json() == first.json()
+    stored = load_task_result(host[0], "work")
+    assert stored["owner_model"]["recent_recorded"] is True
+    assert stored["metadata"]["lead"]["model"] == (C if newer_act else B)
+
+
 def test_continue_and_the_finishing_pipeline_keep_the_new_carrier(host, monkeypatch):
     from ouroboros.agent_task_pipeline import _store_task_result
     from tests.test_continue_work_identity import _successor

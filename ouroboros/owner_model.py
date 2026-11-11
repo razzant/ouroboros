@@ -132,20 +132,27 @@ def admit(task_id: str, body: dict, *, source: str = "owner") -> tuple[dict, dic
                 "receipts": {**receipts, request_id: receipt}}}
 
         stored = patch_document(root, task_id, mutate)
-        if not stored["owner_model"]["recent_recorded"]:
-            from ouroboros.gateway.ui_preferences import record_model_recent
-
-            chosen = stored["metadata"]["lead"]
-            try:
-                record_model_recent(q.DRIVE_ROOT, chosen["model"], chosen["use_local"])
-            except Exception as exc:
-                raise ModelActRefused("model_recents_pending", 503) from exc
-            stored = patch_document(root, task_id, lambda row: {
-                **row, "owner_model": {**row["owner_model"], "recent_recorded": True}})
         task["metadata"] = {**(task.get("metadata") or {}), **copy.deepcopy(stored["metadata"])}
         task["owner_model"] = copy.deepcopy(stored["owner_model"])
         result = copy.deepcopy(stored["owner_model"]["receipts"][request_id])
         current = copy.deepcopy(task)
+    if not stored["owner_model"]["recent_recorded"]:
+        from ouroboros.gateway.ui_preferences import record_model_recent
+
+        chosen = stored["metadata"]["lead"]
+        try:
+            record_model_recent(q.DRIVE_ROOT, chosen["model"], chosen["use_local"])
+        except Exception as exc:
+            raise ModelActRefused("model_recents_pending", 503) from exc
+        # A newer decision may commit while this suggestion is written. Only the
+        # decision whose suggestion completed is acknowledged; a retry repairs the rest.
+        acknowledged = patch_document(root, task_id, lambda row: {
+            **row, "owner_model": {**row["owner_model"], "recent_recorded": True}}
+            if (row.get("owner_model") or {}).get("request_id") == stored["owner_model"]["request_id"] else None)
+        with q._queue_lock:  # mirror only; both disk writes above are outside Q
+            if (task["owner_model"]["request_id"] == acknowledged["owner_model"]["request_id"]
+                    == stored["owner_model"]["request_id"]):
+                task["owner_model"]["recent_recorded"] = current["owner_model"]["recent_recorded"] = True
     # The task document committed before the queue snapshot. A restart can always
     # rebase a stale saved queue/checkpoint from that authority.
     if q.persist_queue_snapshot(reason="owner_model") is False:
