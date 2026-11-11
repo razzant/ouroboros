@@ -592,25 +592,17 @@ def _typed_fact(meta: Mapping[str, Any]) -> str:
 @timed_section("memory_view.working_notes")
 def _working_notes(root: pathlib.Path, tasks: List[str]) -> Dict[str, str]:
     """Per root task whose result names working notes (``main_context_authority.WORKING_NOTES_FIELD``: what its latest
-    applied fold kept), their count and the reader that returns them from any task; their words stay there, read by
-    choice (owner, 3A). The results are read at once; a result naming none, or unreadable, makes no entry, and a
-    named source that cannot be read now is said so."""
-    from ouroboros.artifacts import read_actor_source_bytes  # D03->D05 is lazy-only
+    applied fold kept), the fact and exact reader from that field alone. One batch reads the results; a result
+    without a notes address makes no entry. The notes' words and availability are read only by choice."""
     from ouroboros.main_context_authority import WORKING_NOTES_FIELD, retained_reader
     from ouroboros.task_results import load_task_results
 
     facts: Dict[str, str] = {}
     for task, saved in load_task_results(root, tasks).items():
         ref = saved.get(WORKING_NOTES_FIELD) if isinstance(saved, Mapping) else None
-        if not isinstance(ref, Mapping):
+        if not isinstance(ref, Mapping) or not ref.get("path"):
             continue
-        try:  # one unreadable source is this line's fact, never the whole view's failure
-            reader = source_reader({}, retained_reader(root, task, ref))
-            count = len(json.loads(read_actor_source_bytes(root, task, dict(ref)))["notes"])
-        except Exception as exc:
-            facts[task] = f"working notes named in its result, unreadable now ({type(exc).__name__})"
-            continue
-        facts[task] = f"working notes kept {count}: {reader}"
+        facts[task] = f"working notes kept: {source_reader({}, retained_reader(root, task, ref))}"
     return facts
 
 

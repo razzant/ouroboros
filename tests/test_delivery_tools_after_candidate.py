@@ -49,7 +49,8 @@ def _run_loop(tmp_path, monkeypatch, responses, *, nudges=(True,), mode="off"):
     return result, usage, trace, calls
 
 
-def test_further_write_then_complete_replacement_remain_available(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode", ["off", "auto"])
+def test_further_write_then_complete_replacement_remain_available(tmp_path, monkeypatch, mode):
     replacement = "The requested effect.txt now contains the verified result."
     result, _usage, trace, calls = _run_loop(
         tmp_path, monkeypatch,
@@ -57,31 +58,18 @@ def test_further_write_then_complete_replacement_remain_available(tmp_path, monk
          {"content": None, "tool_calls": [{"id": "write-1", "type": "function", "function": {
              "name": "write_file", "arguments": json.dumps({"path": "effect.txt", "content": "verified result"}),
          }}]},
-         _finish(replacement)],
+         _finish(replacement)], mode=mode,
     )
     prompt = json.dumps(calls[1])
     assert "Continue useful work" in prompt and "available completion tool" in prompt
     assert "action=finish" in prompt and "action=stop" in prompt
+    door = prompt[prompt.index("[DELIVERY_FINALIZATION_CONTROL]"):]
+    door = door[:door.index("not a new completion selection.")]
+    # Text is the contract here: delivery starts no review in Off or Auto and must not promise one.
+    assert "check" not in door.lower() and "review" not in door.lower(), door
+    assert trace["review_decision"] == {"mode": mode, "trigger": {"off": "mode_off", "auto": "not_requested"}[mode]}
     assert (tmp_path / "effect.txt").read_text(encoding="utf-8") == "verified result"
     assert result == replacement
     assert trace["delivery_candidate"]["revision"] == 2
     assert trace["delivery_candidate"]["finalization_control"] == "candidate"
     assert trace["delivery_candidate"]["degraded"] is False
-
-
-@pytest.mark.parametrize("mode", ["off", "auto"])
-def test_the_selection_door_promises_no_check_the_delivery_does_not_run(tmp_path, monkeypatch, mode):
-    """The retained answer's door says what finish and stop do in every task review mode and names no check: under
-    Off and under Auto (the default) the delivery starts no result review (``review_result.result_review_at_delivery``
-    records why), so a promise of completion checks would be false there; finish still delivers the selection."""
-    answer = "The requested effect is in place."
-    result, _usage, trace, calls = _run_loop(tmp_path, monkeypatch, ["The first answer is retained.", _finish(answer)],
-                                             mode=mode)
-    prompt = json.dumps(calls[1])
-    door = prompt[prompt.index("[DELIVERY_FINALIZATION_CONTROL]"):]
-    door = door[:door.index("not a new completion selection.")]
-    assert "action=finish delivers the selection unless the host holds it" in door
-    assert "action=stop with a rationale records unfinished work without cancelling children" in door
-    assert "check" not in door.lower() and "review" not in door.lower(), door
-    assert trace["review_decision"] == {"mode": mode, "trigger": {"off": "mode_off", "auto": "not_requested"}[mode]}
-    assert result == answer

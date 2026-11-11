@@ -411,7 +411,7 @@ def test_the_mind_reads_the_section_its_reviewers_get_whole_and_nothing_beside_i
     from ouroboros import dialogue_store as ds
     from ouroboros.chat_chain import row_address
     from ouroboros.chronicle_store import ChronicleStore
-    from ouroboros.tools.chronicle import _memory_read
+    from ouroboros.tools.chronicle import _memory_read, chronicle_tools
     from ouroboros.tools.review_result import _ask
 
     conscious = _plan_ctx(harness, "conscious", task_id="task-4")
@@ -439,3 +439,7 @@ def test_the_mind_reads_the_section_its_reviewers_get_whole_and_nothing_beside_i
     assert all(account in asked for account in ("Deliver the thing", "exactly 5 slides", "Their standing ask",
                                                 "SCHEDULE TEXT"))
     assert "TOOL_ARG_ERROR" in _memory_read(ctx, owner_words=True, room_id="1")  # one mode, this work's set
+    schema = next(tool.schema for tool in chronicle_tools() if tool.name == "memory_read")
+    for description in (schema["description"], schema["parameters"]["properties"]["owner_words"]["description"]):
+        # Text is the contract here: the words reader must not promise the reviewers' schedule-bearing packet.
+        assert "words section" in description and "append" in description and "schedule text" in description

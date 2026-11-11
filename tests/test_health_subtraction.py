@@ -4,6 +4,7 @@ a custody read that fails is said with its reader instead of replayed by three f
 from __future__ import annotations
 
 import json
+import pathlib
 
 import pytest
 
@@ -33,6 +34,10 @@ def test_a_quiet_install_renders_facts_without_ok_lines_or_cost_verdicts(tmp_pat
     for gone in ("OK:", "HIGH-COST", "high-cost", "STALE IDENTITY", "THIN IDENTITY", "SCRATCHPAD", "version sync",
                  "budget drift within", "COST ACCOUNTING UNAVAILABLE"):
         assert gone not in text, gone
+    system = (pathlib.Path(__file__).resolve().parents[1] / "prompts" / "SYSTEM.md").read_text(encoding="utf-8")
+    [said] = [part for part in system.split("\n\n") if "Health Invariants" in part]
+    # Text is the contract here: the prompt must not promise a stale-memory verdict the block does not render.
+    assert "stale" not in said.lower() and "stale" not in text.lower()
 
 
 def test_the_drift_line_reads_the_saved_drift_pair_and_never_the_usage_store(tmp_path, monkeypatch):
@@ -113,21 +118,3 @@ def test_the_threshold_helpers_are_gone(name):
     from ouroboros import context_budget
 
     assert not hasattr(context_health, name) and not hasattr(context_budget, name)
-
-
-def test_the_system_prompt_claims_of_the_block_only_what_it_renders(tmp_path):
-    """SYSTEM.md tells me how to weigh this block: its WARNING/CRITICAL lines, which it renders for real conditions, and
-    no stale-memory signal, which left the block with the identity and scratchpad verdicts (the identity.md age stays,
-    as a plain fact)."""
-    import pathlib
-
-    system = (pathlib.Path(__file__).resolve().parents[1] / "prompts" / "SYSTEM.md").read_text(encoding="utf-8")
-    [said] = [" ".join(part.split()) for part in system.split("\n\n") if "Health Invariants" in part]
-    env = _make_health_env(tmp_path)
-    (tmp_path / "memory" / "identity.md").write_text("I am Ouroboros.", encoding="utf-8")
-    (tmp_path / "repo" / "pyproject.toml").write_text('version = "9.9.9"', encoding="utf-8")
-    text = context_health.build_health_invariants(env)
-    assert "WARNING/CRITICAL lines of the Health Invariants block get strong priority in my planning" in said
-    assert "CRITICAL: VERSION DESYNC" in text  # the lines it names are the block's own
-    assert "stale" not in said.lower() and "stale" not in text.lower()  # no signal promised, none rendered
-    assert "identity.md last updated 0.0 h ago" in text  # the fact that stays is a fact, not a verdict

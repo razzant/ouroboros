@@ -417,13 +417,11 @@ def _lane2_by_task(text: str) -> dict:
     return {line.split("; task ", 1)[1].split("]", 1)[0]: line for line in lane2 if "; host; task " in line}
 
 
-def test_an_earlier_roots_line_counts_its_kept_notes_beside_a_reader_that_returns_them(tmp_path, monkeypatch):
-    """Owner 3A: a new work learns that an earlier root kept working notes — how many its result names (its latest
-    fold's, ``publish_working_notes``) — and the exact reader, which resolves from another task; their words are not
-    carried. A root that kept none claims nothing, nor does one whose later fold retired them; a named source that
-    cannot be read now is said so."""
+def test_an_earlier_roots_line_names_its_kept_notes_beside_a_reader_that_returns_them(tmp_path, monkeypatch):
+    """An earlier result's working-notes field names the exact reader from another task, without carrying words or
+    probing the source. No field (including retired notes), no claim; the reader reports a missing source itself."""
     from ouroboros.artifacts import task_artifact_dir_path
-    from ouroboros.main_context_authority import publish_working_notes
+    from ouroboros.main_context_authority import WORKING_NOTES_FIELD, publish_working_notes
     from ouroboros.task_results import write_task_result
     from ouroboros.tools.registry import ToolContext, ToolRegistry
     from tests.test_context_renewal import NOTE, _noted
@@ -435,12 +433,11 @@ def test_an_earlier_roots_line_counts_its_kept_notes_beside_a_reader_that_return
     ref = publish_working_notes(writer, folded)
     text = _view(tmp_path, MAIN_TASK)[1]
     after = _lane2_by_task(text)
-    line, fact = after["root1"].split("; working notes kept ", 1)
-    assert line == before["root1"] and fact.startswith("1: read_file(") and NOTE not in text
+    assert after["root1"].startswith(before["root1"] + "; working notes ") and NOTE not in text
     assert {task: row for task, row in after.items() if task != "root1"} == {
         task: row for task, row in before.items() if task != "root1"}  # no notes kept, no claim
     assert not any("working notes" in row for task, row in after.items() if task != "root1")
-    read, _end = json.JSONDecoder().raw_decode(fact.split("read_file(", 1)[1])
+    read, _end = json.JSONDecoder().raw_decode(after["root1"].split("read_file(", 1)[1])
     monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
     reader = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, budget_drive_root=str(tmp_path), task_id="reader01",
                          task_metadata={"delegation_role": "root", "budget_drive_root": str(tmp_path)})
@@ -449,10 +446,14 @@ def test_an_earlier_roots_line_counts_its_kept_notes_beside_a_reader_that_return
     result = registry.execute_result("read_file", read)
     assert result.status == "ok" and NOTE in result.text, result.text  # the named reader returns the words
     (task_artifact_dir_path(tmp_path, "root1") / ref["path"]).unlink()
-    assert _lane2_by_task(_view(tmp_path, MAIN_TASK)[1])["root1"].startswith(
-        before["root1"] + "; working notes named in its result, unreadable now (")
+    assert _lane2_by_task(_view(tmp_path, MAIN_TASK)[1])["root1"] == after["root1"]
+    missing = registry.execute_result("read_file", read)
+    assert "DATA_NOT_YET_CREATED" in missing.text and NOTE not in missing.text  # the reader reports the missing source
     assert publish_working_notes(writer, [row for row in folded if not isinstance(row.get("content"), list)]) is None
     assert _lane2_by_task(_view(tmp_path, MAIN_TASK)[1])["root1"] == before["root1"]  # retired: no claim
+    write_task_result(tmp_path, "root1", "completed", _field_projector=lambda _old, new: {
+        **new, WORKING_NOTES_FIELD: {}})
+    assert _lane2_by_task(_view(tmp_path, MAIN_TASK)[1])["root1"] == before["root1"]  # no address, no reader
 
 
 def test_a_page_seals_rows_only_in_its_room_and_a_row_in_two_rooms_stays_open_in_the_other(tmp_path):

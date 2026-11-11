@@ -18,7 +18,6 @@ from ouroboros.tools.tool_result import ToolResult, _MAX_META_BYTES, _publish_to
 
 KNOWLEDGE_DIR = "memory/knowledge"
 BACKLOG_TOPIC = "improvement-backlog"
-PATTERNS_TOPIC = "patterns"
 # Topics with exactly one home. Whichever room asks for them, they resolve to the
 # global shelf: the overview is the shared orientation every integrating context
 # loads; patterns and improvement-backlog are ordinary notes kept at their old
