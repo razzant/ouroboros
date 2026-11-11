@@ -7,6 +7,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from tests import test_subscription_role_routes_browser as roles
+from tests.settings_browser_helpers import open_settings, press_editor_save
 
 pytestmark = [pytest.mark.ui_browser]
 subscription_ui = roles.subscription_ui
@@ -40,13 +41,15 @@ def route_ui(role_ui, tmp_path, monkeypatch):
 def test_settings_search_and_exact_response_maximum(route_ui):
     page = route_ui['page']
     page.goto(route_ui['url'] + '/#settings')
-    page.locator('[data-settings-tab="models"]').click()
-    page.wait_for_function("document.querySelector('#s-websearch-preview').textContent.includes('OpenRouter')")
+    open_settings(page, 'models/role/websearch')
+    page.wait_for_function("document.querySelector('[data-websearch-preview]').textContent.includes('OpenRouter')")
     assert page.locator('#s-websearch-model').input_value() == 'gpt-5.2'
     page.locator('#s-websearch-source').select_option('openrouter')
     page.locator('#s-websearch-model').fill('vendor/future-search')
     page.locator('#s-websearch-model').blur()
-    page.wait_for_function("document.querySelector('#s-websearch-preview').textContent.includes('vendor/future-search')")
+    page.wait_for_function("document.querySelector('[data-websearch-preview]').textContent.includes('vendor/future-search')")
+    assert press_editor_save(page).startswith('Saved')
+    open_settings(page, 'models/role/main')
     main = page.locator('[data-model-role="main"]')
     main.locator('summary').click()
     maximum = main.locator('[data-response-limit]')
@@ -69,15 +72,17 @@ def test_settings_search_and_exact_response_maximum(route_ui):
     page.wait_for_function("document.querySelector('[data-model-role=main] [data-response-note]').textContent.includes('unknown')")
     assert maximum.input_value() == ''
     page.set_viewport_size({'width': 390, 'height': 844})
+    main.locator('[data-model-role-model]').press('Escape')
+    press_editor_save(page)
+    open_settings(page, 'models/role/websearch')
     page.locator('#s-websearch-model').scroll_into_view_if_needed()
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     roles.capture(page, 'model-routes-search-mobile')
-    page.locator('#btn-save-settings').click()
-    page.wait_for_function("() => !document.querySelector('#btn-save-settings').disabled")
     writes = [body for path, body in route_ui['posts'] if path == '/api/settings']
     assert writes[-1]['OUROBOROS_WEBSEARCH_BACKEND'] == 'openrouter'
     assert writes[-1]['OUROBOROS_WEBSEARCH_MODEL'] == 'vendor/future-search'
-    page.locator('#btn-reload-settings').click()
+    open_settings(page, 'models')
+    open_settings(page, 'models/role/websearch')
     assert page.locator('#s-websearch-model').input_value() == 'vendor/future-search'
     assert not route_ui['errors']
 
@@ -93,7 +98,7 @@ def test_settings_window_history_disagreement_and_clear(route_ui, tmp_path, reti
         400000, 'confirmed', 'provider_metadata', ack['route_fp'], ts=ce.utc_now_iso()).to_json())
     page = route_ui['page']
     page.goto(route_ui['url'] + '/#settings')
-    page.locator('[data-settings-tab="models"]').click()
+    open_settings(page, 'models/role/main')
     main = page.locator('[data-model-role="main"]')
     main.locator('summary').click()
     page.wait_for_function("() => !document.querySelector('[data-model-role=main] [data-window-clear]').hidden")
@@ -121,7 +126,7 @@ def test_response_maximum_preview_keeps_owner_draft(route_ui, edit_order):
 
     page = route_ui['page']
     page.goto(route_ui['url'] + '/#settings')
-    page.locator('[data-settings-tab="models"]').click()
+    open_settings(page, 'models/role/main')
     main = page.locator('[data-model-role="main"]')
     maximum = main.locator('[data-response-limit]')
     note = main.locator('[data-response-note]')
@@ -166,7 +171,7 @@ def test_response_maximum_preview_keeps_owner_draft(route_ui, edit_order):
     route_ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     # A fresh, untouched control still reads the persisted owner maximum.
     page.reload()
-    page.locator('[data-settings-tab="models"]').click()
+    open_settings(page, 'models/role/main')
     main.locator('summary').click()
     expect(maximum).to_have_value('4096')
     expect(note).to_contain_text('4,096 tokens · your maximum')
@@ -196,7 +201,7 @@ def test_response_maximum_deferred_toggle_cannot_cancel_apply(route_ui):
 
     page = route_ui['page']
     page.goto(route_ui['url'] + '/#settings')
-    page.locator('[data-settings-tab="models"]').click()
+    open_settings(page, 'models/role/main')
     main = page.locator('[data-model-role="main"]')
     with page.expect_response('**/api/owner/capability-ack', timeout=5000) as saved:
         main.evaluate("""row => {
