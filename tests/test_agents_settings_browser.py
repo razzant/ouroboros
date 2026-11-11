@@ -287,6 +287,8 @@ def test_the_list_and_an_agents_page_keep_their_shape(subscription_ui, width, he
     # An agent's page: its name is the title, then In use, what it is good at, how it runs with Save, and its removal.
     editor = open_entry(page, "a05")
     assert editor.locator(".settings-page-title").inner_text().strip() == "deepseek-v5"
+    # The shell shows the level before the editor's body has drawn; read the cards once its Save stands.
+    editor.locator("[data-editor-save]").wait_for(state="visible")
     assert [title.inner_text().strip() for title in editor.locator(".agents-card-title").all()] == [
         "In use", "What it is good at", "Runs on"]
     assert editor.locator('[data-subagent-field="rechecks_flags"]').count() == 1, "a packet reviewer may take the re-check"
