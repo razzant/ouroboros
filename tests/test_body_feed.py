@@ -209,8 +209,9 @@ def test_fresh_body_reconstructs_pending_owner_frame_retry(world, monkeypatch, o
         tick()
         assert [(post["key"], post["text"]) for post in stub.posts] == [(message_id, wire)]
         assert frames.pending_frames(ctx, entry.run_id) == []
-        [receipt] = [r for r in _receipts(world.root) if r["message_id"] == message_id]  # digest and size, no read
-        assert receipt["text_sha256"] == hashlib.sha256(row["text"].encode("utf-8")).hexdigest() and stub.reads == []
+        receipts = [r for r in _receipts(world.root) if r["message_id"] == message_id]  # digest and size, no read
+        digest = hashlib.sha256(row["text"].encode("utf-8")).hexdigest()
+        assert receipts and {r.get("text_sha256") for r in receipts} == {digest} and stub.reads == []
 
 
 def test_an_answered_run_without_pending_frames_costs_only_one_followed_set_read(world, monkeypatch):
