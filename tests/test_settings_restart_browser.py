@@ -59,9 +59,129 @@ def settings_server(request, tmp_path, monkeypatch):
     return request.getfixturevalue("direct_server_with_data")
 
 
+RESTART_ROW = '#page-settings [data-settings-card] [data-needs="restart"]'
+FOLDER = "OUROBOROS_SKILLS_REPO_PATH"
+
+
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine,width", [("chromium", 1400), ("webkit", 390)])
-def test_pending_survives_reconnect_draft_and_restart_request(settings_server, engine, width, free_tcp_port):
+def test_pending_survives_reconnect_draft_and_restart_request(settings_server, engine, width):
+    """Saved settings that wait for a restart are one line of Ouroboros's card on the Settings home (settings_home.js),
+    read from the server each time the home is shown: it survives a new page, sending the command does not end it, a
+    typed value survives the reconnect, and it leaves when the saved value is the running one again."""
+    from playwright.sync_api import expect, sync_playwright
+
+    folder = settings_server["data_dir"] / "more-skills"
+    folder.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch(headless=True)
+        page = browser.new_page(viewport={"width": width, "height": 1000})
+        errors = PageErrors(page, engine)
+        page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
+        page.add_init_script("""const originalSend = WebSocket.prototype.send;
+            WebSocket.prototype.send = function(data) {
+                if (JSON.parse(data).cmd === '/restart') { window.restartSent = true; return; }
+                return originalSend.call(this, data);
+            };""")
+        try:
+            def show(path="", row=""):
+                page.wait_for_function("() => Boolean(window.__ouroSettings)", timeout=30_000)
+                assert page.evaluate("([path, row]) => window.__ouroSettings.open(path, { row })", [path, row]) is not False
+                page.evaluate(_SETTLE_RESTORE_FRAMES)
+
+            def open_home():
+                page.goto(settings_server["url"], wait_until="domcontentloaded")
+                show("")
+                expect(page.locator("#page-settings [data-settings-card]")).to_be_visible(timeout=30_000)
+                # The home has read the settings document once its rules row answers.
+                expect(page.locator('#page-settings [data-settings-open="rules"] [data-settings-answer]')).not_to_be_empty(timeout=30_000)
+
+            def save_folder(value):
+                show("skill-sources", FOLDER)
+                field = page.locator(f"#setting-{FOLDER}")
+                expect(field).to_be_visible(timeout=30_000)
+                field.fill(value)
+                field.evaluate("node => node.blur()")
+                row = page.locator(f'#page-settings [data-setting-row="{FOLDER}"]')
+                expect(row.locator("[data-setting-result]")).to_contain_text("Saved", timeout=30_000)
+                return row
+
+            def reconnect():
+                # The same body reconnects, which keeps this document only once the page remembered the served
+                # SHA: dropped before its first read after open, ws.js reloads it as unknown (#2432).
+                page.wait_for_function("() => Boolean(window.__ouroWs?._lastSha)", timeout=30_000)
+                page.evaluate("window.__testSockets[0].close()")
+                page.wait_for_function("window.__testSockets.some(socket => socket.readyState === WebSocket.OPEN)")
+
+            open_home()
+            page.wait_for_function("""async (key) => {
+                const data = await (await fetch('/api/settings')).json();
+                return !data._meta.restart_state.unknown_keys.includes(key);
+            }""", arg=FOLDER, timeout=30_000)
+            expect(page.locator(RESTART_ROW)).to_have_count(0)
+            row = save_folder(str(folder))
+            # INTEGRATED TREE: the row says when the change applies from the server's effect map (`_meta.effects`); a
+            # server without the map answers no receipt, and the row then says only "Saved".
+            if page.evaluate("async () => Boolean((await (await fetch('/api/settings')).json())._meta.effects)"):
+                expect(row.locator("[data-setting-result]")).to_contain_text("applies after restart")
+            show("")
+            expect(page.locator(RESTART_ROW)).to_be_visible(timeout=30_000)
+            expect(page.locator(RESTART_ROW + " .ui-row-title")).to_have_text("Restart to apply: Skills folder")
+            open_home()  # a completely new page, no local latch
+            expect(page.locator(RESTART_ROW)).to_be_visible(timeout=30_000)
+            # Restart asks in the shared confirmation and sends the command; the line stays until the server says so.
+            page.locator(RESTART_ROW + " [data-need-action]").click()
+            page.locator("[data-confirm-ok]").click()
+            page.wait_for_function("window.restartSent === true")
+            expect(page.locator(RESTART_ROW)).to_be_visible()
+            # A value being typed survives the reconnect's re-read; the line is still there.
+            show("skill-sources", "OUROBOROS_CLAWHUB_REGISTRY_URL")
+            typed = page.locator("#setting-OUROBOROS_CLAWHUB_REGISTRY_URL")
+            expect(typed).to_be_visible(timeout=30_000)
+            stored = typed.input_value()
+            typed.fill("https://clawhub.ai/api/v2")
+            reconnect()
+            expect(typed).to_have_value("https://clawhub.ai/api/v2")
+            typed.fill(stored)  # as it was: leaving the field commits nothing
+            show("")
+            expect(page.locator(RESTART_ROW)).to_be_visible()
+            evidence = pathlib.Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", str(settings_server["data_dir"].parent)))
+            evidence.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(evidence / f"settings-card-restart-{engine}.png"))
+            # The saved value is the running one again: nothing waits, and the line has left.
+            save_folder("")
+            show("")
+            expect(page.locator(RESTART_ROW)).to_have_count(0, timeout=30_000)
+
+            # An old launcher that does not say what controls the next start: the card says the address may need one.
+            def old_launcher_metadata(route):
+                response = route.fetch()
+                data = response.json()
+                data["_meta"]["restart_state"]["restart_source_unknown_keys"] = ["OUROBOROS_SERVER_HOST"]
+                route.fulfill(response=response, json=data)
+
+            page.route("**/api/settings", old_launcher_metadata)
+            open_home()
+            expect(page.locator(RESTART_ROW + " .ui-row-title")).to_have_text("The saved server address may need a restart", timeout=30_000)
+            page.screenshot(path=str(evidence / f"settings-card-host-source-unknown-{engine}.png"))
+            page.unroute_all(behavior="wait")
+            assert errors.unexpected() == [], errors
+        except Exception:
+            evidence = pathlib.Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", str(settings_server["data_dir"].parent)))
+            evidence.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(evidence / f"settings-card-failure-{engine}.png"))
+            print(page.locator("body").inner_text()[-4000:])
+            raise
+        finally:
+            browser.close()
+
+
+# The scenes below were the second half of the test above: Models › Local model ("Stop, then Start") and the Agents
+# list (a delegation's history), driven through the tab frame Settings had. They belong to those pages' lanes (E2,
+# E1) and stand here unchanged until each is rewritten on its page.
+@pytest.mark.ui_browser
+@pytest.mark.parametrize("engine,width", [("chromium", 1400), ("webkit", 390)])
+def test_local_model_stop_then_start_and_agent_history_on_their_old_tabs(settings_server, engine, width, free_tcp_port):
     from playwright.sync_api import expect, sync_playwright
 
     with sync_playwright() as pw:
@@ -102,68 +222,6 @@ def test_pending_survives_reconnect_draft_and_restart_request(settings_server, e
                 page.wait_for_function("window.__testSockets.some(socket => socket.readyState === WebSocket.OPEN)")
 
             open_settings()
-            # Worker application is published only after its real pool starts.
-            page.wait_for_function("""async () => {
-                const data = await (await fetch('/api/settings')).json();
-                return !data._meta.restart_state.unknown_keys.includes('OUROBOROS_MAX_WORKERS');
-            }""", timeout=30_000)
-            fill_value('#s-workers', 2)
-            save()
-            expect(page.locator('#btn-restart-now')).to_be_visible()
-            open_settings()  # a completely new page, no local latch
-            expect(page.locator('#btn-restart-now')).to_be_visible()
-            page.locator('#btn-restart-now').click()
-            page.locator('[data-confirm-ok]').click()
-            page.wait_for_function('window.restartSent === true')
-            expect(page.locator('#btn-restart-now')).to_be_visible()
-            fill_value('#s-workers', 3)  # preserve a draft over reconnect metadata
-            reconnect()
-            expect(page.locator('#s-workers')).to_have_value('3')
-            expect(page.locator('#btn-restart-now')).to_be_visible()
-            fill_value('#s-workers', 1)
-            save()
-            expect(page.locator('#btn-restart-now')).to_be_hidden()
-
-            # The real direct-server fixture has an explicit loopback env host.
-            fill_value('#s-server-host', '0.0.0.0')
-            save()
-            expect(page.locator('#settings-restart-status')).to_contain_text('launch configuration overrides')
-            expect(page.locator('#settings-status')).to_have_text('Settings saved')
-            expect(page.locator('#btn-restart-now')).to_be_hidden()
-            evidence = pathlib.Path(os.environ.get('OUROBOROS_UI_EVIDENCE_DIR', str(settings_server['data_dir'].parent)))
-            evidence.mkdir(parents=True, exist_ok=True)
-            page.locator('#settings-restart-status').scroll_into_view_if_needed()
-            page.screenshot(path=str(evidence / f'settings-host-override-{engine}.png'))
-
-            # Exercise the same consumer with an old launcher's missing source;
-            # producer/PID-record matching is covered by test_settings_host_source.
-            def old_launcher_metadata(route):
-                response = route.fetch()
-                data = response.json()
-                state = data['_meta']['restart_state']
-                state['restart_source_unknown_keys'] = ['OUROBOROS_SERVER_HOST']
-                state['summary'] = ('Saved server host differs from the running listener. This launcher did not report '
-                                    'whether a launch override controls the next start; Restart may apply the saved host.')
-                route.fulfill(response=response, json=data)
-
-            page.route('**/api/settings', old_launcher_metadata)
-            open_settings()
-            expect(page.locator('#settings-restart-status')).to_contain_text('Restart may apply')
-            expect(page.locator('#btn-restart-now')).to_be_visible()
-            fill_value('#s-workers', 3)
-            reconnect()
-            expect(page.locator('#s-workers')).to_have_value('3')
-            expect(page.locator('#btn-restart-now')).to_be_visible()
-            page.locator('#settings-restart-status').scroll_into_view_if_needed()
-            page.screenshot(path=str(evidence / f'settings-host-source-unknown-{engine}.png'))
-            # Reconnect refresh may still be inside fetch/fulfill: drain it
-            # before removing interception, rather than continuing its route twice.
-            page.unroute_all(behavior='wait')
-            fill_value('#s-workers', 1)
-            fill_value('#s-server-host', '127.0.0.1')
-            save()
-            expect(page.locator('#btn-restart-now')).to_be_hidden()
-
             fill_value('#s-local-source', 'fixture/model')
             fill_value('#s-local-filename', 'fixture.gguf')
             fill_value('#s-local-port', free_tcp_port)

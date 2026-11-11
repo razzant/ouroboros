@@ -4,7 +4,9 @@ wait for its result line, open an entry's editor and press its Save.
 Settings has no URL: a path is opened through the shell's opener (the loopback debug hook ``window.__ouroSettings``,
 the same function app.js's ``openSettings`` calls), so a test reaches a page the way any caller does. The hooks are
 the shell's (settings.js: ``[data-settings-home]``, ``[data-settings-page]``, ``[data-settings-back]``), the home's
-(settings_home.js: ``[data-settings-open]``, ``[data-settings-answer]``) and the row helper's (settings_controls.js:
+(settings_home.js: ``[data-settings-open]``, ``[data-settings-answer]``, the card ``[data-settings-card]`` with its
+rows ``[data-needs]``, the search field ``#settings-search`` and a result ``[data-settings-result]``) and the row
+helper's (settings_controls.js:
 ``[data-setting-row]``, ``[data-setting-control]``, ``[data-setting-result]``; an editor's ``[data-entry-id]``,
 ``[data-editor-save]``, ``[data-editor-result]``)."""
 from __future__ import annotations
@@ -26,6 +28,43 @@ def open_settings(page, path: str = "", row: str = "", *, timeout: float = 10_00
     level = settings_page(page, path)
     level.wait_for(state="visible", timeout=timeout)
     return level
+
+
+# Settings has no tab strip: what it shows is its home, the pages a home row opens or a module registered, and, where a
+# page lists entries, the editor of one. A skill's page needs a skill: the caller names one that registered a form.
+SETTINGS_PATHS = """async (skill) => {
+    const { settingsPagePrefixes } = await import('/static/modules/settings_pages.js');
+    const { HOME_ROWS } = await import('/static/modules/settings_rows.js');
+    const home = HOME_ROWS.map((row) => row.to).filter((to) => !/^(dashboard|page|main):/.test(to));
+    return [...new Set([...home, ...settingsPagePrefixes()])].filter((path) => path !== 'skill' || skill)
+        .map((path) => (path === 'skill' ? `skill/${skill}` : path));
+}"""
+SETTLED = "() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))"
+
+
+def walk_settings(page, measure, *, skill: str = "", settle=None):
+    """Show every Settings view in turn and call ``measure(name)`` at each: the home, every page, and one editor of
+    a page that lists entries. Ends at the home, where it started, and returns the paths it walked."""
+    settle = settle or (lambda: page.evaluate(SETTLED))
+    open_settings(page, "")
+    page.locator(f"{HOME} [data-settings-card]").wait_for(state="visible")
+    settle()
+    measure("home")
+    paths = page.evaluate(SETTINGS_PATHS, skill)
+    for path in paths:
+        level = open_settings(page, path)
+        if path.startswith("skill/"):
+            level.locator("[data-extension-settings-form]").wait_for(state="visible")
+        settle()
+        measure(path)
+        head = level.locator("[data-entry-id]").first
+        if head.count():
+            open_entry(page, head.get_attribute("data-entry-id"))
+            settle()
+            measure(top_path(page))
+    open_settings(page, "")
+    settle()
+    return paths
 
 
 def top_path(page) -> str:
@@ -51,6 +90,20 @@ def home_answer(page, target: str) -> str:
     row = page.locator(f'{HOME} [data-settings-open="{target}"]')
     row.wait_for(state="attached")
     return row.locator("[data-settings-answer]").inner_text().strip()
+
+
+def needs(page) -> list[str]:
+    """What Ouroboros's card lists now, as ``kind:id`` of each row it shows or keeps behind "Show all"."""
+    return page.locator(f"{HOME} [data-settings-card] [data-needs]").evaluate_all(
+        "rows => rows.map((row) => `${row.dataset.needs}:${row.dataset.needId}`)")
+
+
+def search_settings(page, words: str) -> list[str]:
+    """Type `words` into the home's search and return the ids of the results it shows, in order."""
+    page.locator("#settings-search").fill(words)
+    page.wait_for_function("words => (document.querySelector('#page-settings [data-settings-ask]') !== null) === Boolean(words.trim())",
+                           arg=words)
+    return page.locator(f"{HOME} [data-settings-result]").evaluate_all("rows => rows.map((row) => row.dataset.settingsResult)")
 
 
 def setting_row(page, row_id: str):
