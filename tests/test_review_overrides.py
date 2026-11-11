@@ -315,9 +315,10 @@ process.stdout.write(JSON.stringify(painted));
 """
 
 
-def test_a_page_load_shows_a_finished_works_field_from_the_history_endpoint(tmp_path):
-    """The real history endpoint carries the work's fact on its summary row and the real card paints it before Details,
-    with no detail read; a finished work without decisions shows nothing. Without the overlay the line is absent."""
+@pytest.mark.parametrize("finished", [True, False], ids=["finished", "running"])
+def test_a_page_load_shows_a_works_field_from_the_history_endpoint(tmp_path, finished):
+    """The real history endpoint carries the work's fact on its row and the real card paints it before Details, with no
+    detail read, for a finished and a running work; a work without decisions shows nothing. Without it the line is absent."""
     import asyncio
     import shutil
     from pathlib import Path
@@ -345,6 +346,8 @@ def test_a_page_load_shows_a_finished_works_field_from_the_history_endpoint(tmp_
         if task_id == "gate-work":
             ctx.task_id = task_id
             _decide(ctx, "critical_findings", "[CRITICAL] tests_affected: the new refusal path has no test")
+        if not finished:
+            continue
         _store_task_result(env, task, "Done.", {"rounds": 1, "cost": 0}, {"tool_calls": []})
         _record_task_facts(env, task, {"rounds": 1}, {"tool_calls": []}, root / "logs")
         set_root_post_task_checkpoint(env, task, "completed")  # post-task synthesis settled: the work is finished
@@ -361,6 +364,6 @@ def test_a_page_load_shows_a_finished_works_field_from_the_history_endpoint(tmp_
     assert "Review: 1× continued where Blocking would have stopped · latest: critical findings" in painted["gate"], painted
     assert painted["plain"] is not None and "continued where Blocking" not in painted["plain"], painted
     assert painted["reads"] == [], "the page load needs no per-card detail read"
-    assert painted["finished"] == [True, True], "both are finished works' cards"
+    assert painted["finished"] == [finished, finished], "the works' cards are in their real phase"
     carried = {(m["task_id"], m["review_overrides"]["count"]) for m in messages if "review_overrides" in m}
     assert carried == {("gate-work", 1)}, "only the work with a decision carries its fact, on its history row"

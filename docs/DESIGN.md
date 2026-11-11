@@ -1599,9 +1599,9 @@ reviews create child tasks or prove execution.
 - A work the review gate let continue where Blocking enforcement would have
   stopped it carries one quiet phrase on its card's line, `Review: N× continued
   where Blocking would have stopped · latest: <reason>`, live as each decision
-  lands and, once the work is finalizing or finished, on a page load before
-  Details open (a work still running at a reload shows it at its next decision
-  or once its Details open), and one Details row, `Review gate did not prohibit
+  lands and on a page load before Details open, a running work's too (a Project
+  work's portal in Main shows it live and once its Details open), and one
+  Details row, `Review gate did not prohibit
   continuation`, holding the stored head of the latest reason (300 characters,
   an ellipsis when cut; `review_gate_card.js`): a count, never a row per
   decision; no Main row and no Telegram message of its own, its Telegram

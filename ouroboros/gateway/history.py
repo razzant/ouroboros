@@ -427,6 +427,7 @@ def _annotate_terminal_task_truth(
         live_cost_by_task: Dict[str, Dict[str, Any]] = {}
         finalizing_tasks: set = set()
         unfinished_tasks: set = set()
+        running_gate_by_task: Dict[str, Dict[str, Any]] = {}  # the review-gate fact of a work not finished yet
         unread_tasks: set = set()  # no answer from the store (``_load_terminal_result``'s {}): unknown, not absent
         for task_id in result_task_ids:
             result = _load_terminal_result(data_dir, task_id, cache)
@@ -455,6 +456,8 @@ def _annotate_terminal_task_truth(
                     carriers[task_id]["current_outcome"] = current  # children also need the stored revision on reload
             elif status:
                 unfinished_tasks.add(task_id)
+                if isinstance(result.get("review_overrides"), dict):
+                    running_gate_by_task[task_id] = dict(result["review_overrides"])
             if task_id in finalizing_tasks or task_id in terminal_status_by_task:
                 terminal_truth: Dict[str, Any] = {
                     "outcome_axes": normalize_outcome_axes(result), "_is_direct_chat": bool(result.get("_is_direct_chat")),
@@ -578,6 +581,8 @@ def _annotate_terminal_task_truth(
                 # A saved nonterminal result refutes the legacy "plain speech
                 # is a final" fallback; it does not attest current execution.
                 message["task_phase"] = "unfinished"
+                if latest_progress_by_task.get(task_id) is message and task_id in running_gate_by_task:
+                    message["review_overrides"] = running_gate_by_task[task_id]  # the card's line on a reload
             if (message.get("is_progress") or message.get("system_type") == "task_evidence") and task_id in terminal_status_by_task:
                 message["task_terminal_status"] = terminal_status_by_task[task_id]
                 if latest_progress_by_task.get(task_id) is message:
