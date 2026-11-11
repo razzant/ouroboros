@@ -555,8 +555,9 @@ def test_only_the_owners_own_call_speech_can_be_cited(host_world, monkeypatch, k
         monkeypatch.setattr('ouroboros.presence_call.record_call_utterance', lambda *a, **kw: True)
         monkeypatch.setattr('ouroboros.dialogue_store.rows_by_client_id', lambda *a, **kw: [SimpleNamespace(seq=1)])
     asyncio.run(host.caption('owner', words, 'citation-item', heard=kind == 'heard'))
-    basis, _error = cited_owner_basis(host.ctx, 'Use the other one')
+    assert cited_owner_basis(host.ctx, 'Use the other one')[0] is None
+    basis, _error = cited_owner_basis(host.ctx, 'Use the other one', call_speech=True)
     assert bool(basis) is (kind == 'own')
     if basis:
-        assert basis['content'] == words and basis['source'] == 'owner_corpus'
+        assert basis['cited'] == 'Use the other one' and basis['source'] == 'live_call'
     assert carried_owner_corpus(host.ctx) == before

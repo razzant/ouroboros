@@ -187,7 +187,7 @@ def cited_switch(ctx, *, model: str, owner_words: str, scope: str, project_id: s
 
     if scope in {"room", "main"} and not is_integrating_focus(ctx):
         return refuse(ctx, "Only an integrating work can set a room's model or Main. Ask the work that delegated you to carry your human's choice.")
-    basis, error = cited_owner_basis(ctx, owner_words)
+    basis, error = cited_owner_basis(ctx, owner_words, call_speech=True)
     if error or not basis:
         hint = (" In Cyber Pro you may make your own room or Main change through its existing writer; this tool carries your human's words."
                 if cyber_pro(ctx) and scope in {"room", "main"} else "")

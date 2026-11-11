@@ -272,7 +272,8 @@ def _start_task(
     goal = str(objective or "").strip()
     if not goal:
         return "⚠️ TOOL_ARG_ERROR (start_task): objective is required"
-    owner_basis, cite_error = cited_owner_basis(ctx, owner_words)
+    model_basis, cite_error = cited_owner_basis(ctx, owner_words, call_speech=bool(model))
+    owner_basis = model_basis if model_basis and model_basis["source"] != "live_call" else None
     if cite_error and model:
         cite_error = "The model needs verified owner_words. Nothing was started; cite your human's exact words."
     if cite_error:  # the same typed argument refusal the schedule doors publish: nothing was started
@@ -325,7 +326,7 @@ def _start_task(
     from ouroboros.tools.control_models import start_choice, refuse
 
     try:
-        model_metadata, model_note = start_choice(ctx, model, owner_basis, pid, model_as_typed=model_as_typed)
+        model_metadata, model_note = start_choice(ctx, model, model_basis, pid, model_as_typed=model_as_typed)
     except ValueError as exc:
         return refuse(ctx, str(exc))
     try:

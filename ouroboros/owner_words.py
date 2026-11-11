@@ -470,7 +470,7 @@ def _my_post(ctx: Any, item: Mapping[str, Any]) -> bool:
     return identity in sent_identities(canonical_data_root(ctx))
 
 
-def cited_owner_basis(ctx: Any, owner_words: Any) -> Tuple[Dict[str, Any] | None, str]:
+def cited_owner_basis(ctx: Any, owner_words: Any, *, call_speech: bool = False) -> Tuple[Dict[str, Any] | None, str]:
     """``(basis, error)`` for words a run cites as my human's order for the work it starts.
 
     The host verifies provenance and nothing else: the exact bytes (``chronicle_quotes.quote_in``, emphasis
@@ -481,7 +481,10 @@ def cited_owner_basis(ctx: Any, owner_words: Any) -> Tuple[Dict[str, Any] | None
     human's words) with the cited span as ``cited``, labelled by its real source: the owner door it came through,
     or ``place_owner`` for a confirmed account's place words, read again at the cite: a row my send receipt now names
     is my own echo (``_my_post``). Words not found: a typed refusal, nothing started.
-    Whether the words ask for this work is the citing mind's reading, visible on the card."""
+    Whether the words ask for this work is the citing mind's reading, visible on the card.
+    The owner's decision of 11 November 2026 admits their own call speech only for a model choice:
+    its caller opts in with ``call_speech`` and carries the returned ``live_call`` span only on the lead,
+    never as the new work's owner corpus (the caption rules of 7 November otherwise stand)."""
     from ouroboros.chronicle_quotes import quote_in
 
     wanted = str(owner_words or "").strip()
@@ -496,13 +499,12 @@ def cited_owner_basis(ctx: Any, owner_words: Any) -> Tuple[Dict[str, Any] | None
                 and quote_in(wanted, str(item.get("content") or "")) and not _my_post(ctx, item)):
             return {"source": "place_owner", "content": str(item.get("content") or ""), "cited": wanted, "basis": CITED,
                     "carried": True, **{key: item[key] for key in ("msg_id", "reply_to") if item.get(key)}}, ""
-    # Only the own-call owner-caption branch records live_call directives. Heard speech and
-    # Presence calls do not. The cite creates an owner-corpus copy; the raw caption stays inert.
-    for item in getattr(ctx, "_owner_directives", None) or []:
+    # Only the own-call owner-caption branch records live_call directives; heard speech and
+    # Presence calls do not. A model choice may cite it without granting authority to the work.
+    for item in (getattr(ctx, "_owner_directives", None) or []) if call_speech else ():
         if (isinstance(item, dict) and item.get("source") == "live_call"
                 and quote_in(wanted, str(item.get("content") or ""))):
-            return {"source": "owner_corpus", "content": item["content"], "cited": wanted,
-                    "basis": CITED, "carried": True,
+            return {"source": "live_call", "cited": wanted,
                     **({"msg_id": item["msg_id"]} if item.get("msg_id") else {})}, ""
     return None, ("owner_words were not found verbatim in any message of your human that reached this run (their "
                   "confirmed account, not forwarded): nothing was started. Copy their exact words, or omit owner_words "

@@ -464,12 +464,13 @@ def test_an_owner_lead_uses_no_options_from_a_previously_followed_role(room):
     assert task_processing_preference({"metadata": metadata}) == ""
 
 
-@pytest.mark.parametrize("cited", [False, True])
-def test_promotion_keeps_the_primary_and_only_owner_choices_enter_recents(room, monkeypatch, cited):
+@pytest.mark.parametrize("source", [None, "initial_user", "live_call"])
+def test_promotion_keeps_the_primary_and_only_owner_choices_enter_recents(room, monkeypatch, source):
     from ouroboros.tools.control_routing import _start_task
     from supervisor import queue, workers
 
     root, client = room
+    cited = source is not None
     if cited:
         client.post('/api/owner/chat-model', json={**CHOSEN, 'project_id': 'alpha'})
     monkeypatch.setattr(config, 'get_runtime_mode', lambda: 'cyber_pro')
@@ -477,8 +478,8 @@ def test_promotion_keeps_the_primary_and_only_owner_choices_enter_recents(room, 
                         lambda *a, **kw: {'status': 'scheduled'})
     events = []
     ctx = types.SimpleNamespace(pending_events=events, event_queue=None, current_chat_id=1, drive_root=root,
-        project_id='alpha', task_id='owner-turn', task_metadata={'origin_suppressed': True},
-        _owner_directives=[{'source': 'initial_user', 'content': 'Keep the report whole. Use the other route.'}])
+        project_id='alpha', task_id='owner-turn', task_metadata={} if source == 'live_call' else {'origin_suppressed': True},
+        _owner_directives=[{'source': source or 'initial_user', 'content': 'Keep the report whole. Use the other route.'}])
     text = _start_task(ctx, 'Do the work', title='Report', workspace='none', model=OPUS,
                        owner_words='Use the other route' if cited else '')
     assert text.startswith('OK: task')
@@ -492,10 +493,28 @@ def test_promotion_keeps_the_primary_and_only_owner_choices_enter_recents(room, 
                                         **({'cited': 'Use the other route'} if cited else {})}
     prefs = root / 'state/ui_preferences.json'
     if cited:
-        assert task['metadata']['owner_corpus'][-1]['content'] == ctx._owner_directives[0]['content']
         assert json.loads(prefs.read_text(encoding='utf-8'))['model_recents'][0]['model'] == OPUS
     else:
         assert not prefs.exists() or not json.loads(prefs.read_text(encoding='utf-8')).get('model_recents')
+    if source == 'live_call':
+        from ouroboros.agent_task_pipeline import _store_task_result
+        from ouroboros.owner_continue import owner_sources
+        from ouroboros.owner_words import task_owner_words
+        from ouroboros.task_results import load_task_result
+        from supervisor.continuation_admission import _successor_task
+
+        assert not task['metadata']['owner_corpus']
+        assert task_owner_words(root, task['id'], task=task)[0] == []
+        env = types.SimpleNamespace(drive_root=root, repo_dir=root, drive_path=lambda rel: root / rel)
+        _store_task_result(env, task, 'Done.', {'rounds': 1, 'cost': 0}, {'tool_calls': [], 'reasoning_notes': []})
+        stored = load_task_result(root, task['id'])
+        sources = owner_sources(root, stored, task['id'])
+        assert sources['original'] is None and not sources['later'] and not sources['gaps']
+        successor = _successor_task(types.SimpleNamespace(DRIVE_ROOT=root), task['id'], stored,
+            {'successor_task_id': 'next', 'chat_id': 1}, {'cause': 'context_overflow'}, sources, {})
+        assert successor['metadata']['lead'] == task['metadata']['lead'] and not successor['metadata']['owner_corpus']
+    elif cited:
+        assert task['metadata']['owner_corpus'][-1]['content'] == ctx._owner_directives[0]['content']
 
 
 def test_a_minds_primary_uses_the_same_carrier_and_cannot_be_recaptured(room):

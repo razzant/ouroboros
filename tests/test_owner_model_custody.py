@@ -520,7 +520,8 @@ def test_model_control_is_absent_when_the_owner_act_cannot_hold(host, monkeypatc
 
 @pytest.mark.parametrize("live", [False, True])
 @pytest.mark.parametrize("long_span", [False, True])
-def test_cited_work_switch_keeps_its_words_through_receipt_resume_fallback_and_continue(host, monkeypatch, live, long_span):
+@pytest.mark.parametrize("source", ["owner_mailbox", "live_call"])
+def test_cited_work_switch_keeps_its_words_through_receipt_resume_fallback_and_continue(host, monkeypatch, live, long_span, source):
     from ouroboros.loop_routes import _apply_round_route_overrides
     from ouroboros.owner_model import restore_current
     from ouroboros.tools.control_runtime import _switch_model
@@ -531,7 +532,7 @@ def test_cited_work_switch_keeps_its_words_through_receipt_resume_fallback_and_c
     tools, ctx = turn(host, monkeypatch)
     old_checkpoint = json.loads(json.dumps(owner_wait.continuation_state(ctx, [], {}, {}, 3, [], set())))
     span = "Use the other route" if not long_span else ("Для этой работы выбери эту модель 🙂. " * 40).rstrip()
-    ctx._owner_directives = [{"source": "owner_mailbox", "content": f"Before. {span} After."}]
+    ctx._owner_directives = [{"source": source, "content": f"Before. {span} After."}]
     class Bus:
         def put_nowait(self, event):
             assert event["type"] == "mind_task_control"
@@ -542,6 +543,7 @@ def test_cited_work_switch_keeps_its_words_through_receipt_resume_fallback_and_c
     assert '"ok": true' in result
     carrier = {"source": "owner_words", "model": B, "use_local": False, "cited": span}
     assert task["metadata"]["lead"] == load_task_result(host[0], "work")["metadata"]["lead"] == carrier
+    assert "owner_corpus" not in task["metadata"]
     receipt = json.loads(result.splitlines()[0])["lead"]
     primary = receipt["primary"] if live else receipt
     assert primary == {"model": B, "use_local": False, "basis": "owner_words", "cited": {
@@ -565,7 +567,8 @@ def test_cited_work_switch_keeps_its_words_through_receipt_resume_fallback_and_c
 
 
 @pytest.mark.parametrize("scope", ["room", "main"])
-def test_cited_settings_scopes_use_owner_writers_and_uncited_attempts_refuse(host, monkeypatch, scope):
+@pytest.mark.parametrize("source", ["initial_user", "live_call"])
+def test_cited_settings_scopes_use_owner_writers_and_uncited_attempts_refuse(host, monkeypatch, scope, source):
     from ouroboros.tools.control_runtime import _switch_model
     from ouroboros.projects_registry import create_project
     from ouroboros.composer_cognition import read_model_choice
@@ -575,7 +578,7 @@ def test_cited_settings_scopes_use_owner_writers_and_uncited_attempts_refuse(hos
     create_project(root, "room", origin="owner_ui")
     _tools, ctx = turn(host, monkeypatch)
     ctx.project_id = "room"
-    ctx._owner_directives = [{"source": "initial_user", "content": "Set that model for it."}]
+    ctx._owner_directives = [{"source": source, "content": "Set that model for it."}]
     for mode in ("pro", "cyber_pro"):
         monkeypatch.setattr(config, "get_runtime_mode", lambda: mode)
         refused = _switch_model(ctx, B, scope=scope)

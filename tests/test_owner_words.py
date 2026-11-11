@@ -570,15 +570,15 @@ def test_live_speech_is_citable_but_not_an_owner_source(tmp_path):
 
     ctx = _ctx(tmp_path, directives=[{"source": "live_call", "content": "Keep all these words. Choose the other model.", "msg_id": "spoken"}])
     before = [dict(row) for row in ctx._owner_directives]
-    basis, error = ow.cited_owner_basis(ctx, "Choose the other model.")
-    assert not error and basis["content"] == before[0]["content"] and basis["basis"] == "cited"
-    assert basis["source"] == "owner_corpus" and basis["cited"] == "Choose the other model."
+    assert ow.cited_owner_basis(ctx, "Choose the other model.")[0] is None
+    basis, error = ow.cited_owner_basis(ctx, "Choose the other model.", call_speech=True)
+    assert not error and basis == {"source": "live_call", "cited": "Choose the other model.", "msg_id": "spoken"}
     assert ctx._owner_directives == before
     assert "live_call" not in ow.OWNER_SOURCES | CORPUS_INITIAL_SOURCES | CORPUS_OWNER_SOURCES
     assert ow.carried_owner_corpus(ctx) == [] and ow.directive_owner_rows(ctx) == []
     assert not owner_reply_owed(ctx)
     assert _owner_yes(ctx, lambda: pytest.fail("a caption never supplies an answered approval card")) == ""
-    assert ow.cited_owner_basis(ctx, "invented")[0] is None
+    assert ow.cited_owner_basis(ctx, "invented", call_speech=True)[0] is None
     # Even a caption alongside a card is not the answered-card approval channel.
     ctx._owner_directives[0]["reply_to"] = {"address": "quiz q1", "text": "Publish these words.\nroom-a"}
     subject = lambda: ("Publish these words.", ["room-a"], False, [])
