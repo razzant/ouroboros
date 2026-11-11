@@ -267,8 +267,9 @@ Ouroboros binds Ouroboros as the author, never the subject repository.
   answers are not one) or an internal-only refactor stays advisory. Disclosure
   alone (commit message, changelog) is not acceptance.
 - The `Ouroboros Body Layer` sets the severity of its own items and names the
-  body's addresses for items 5-9. Its editorial calibration of item 5
-  applies only to the body; other core severities remain unchanged.
+  body's addresses for items 4-9. Its replay note for item 4 and its editorial
+  calibration of item 5 apply only to the body; other core severities remain
+  unchanged.
 
 ### Retry convergence for tests_affected
 
