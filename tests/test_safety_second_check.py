@@ -86,15 +86,20 @@ def _quota():
                                model_role="subagent:second")
 
 
+def _unknown():
+    from ouroboros.llm_claudexor import ClaudexorModelError
+    return ClaudexorModelError({"message": "the answer was lost"}, model_role="subagent:second", unknown=True)
+
+
 @pytest.mark.parametrize("bad", ["broken JSON", {"status": "SAFE", "reason": ""}, RuntimeError("offline"), "too large",
-                                 "quota"])
+                                 "quota", "unknown"])
 def test_a_failed_second_check_keeps_the_first_verdict(supervisor, monkeypatch, bad):
-    """A second check that answers nothing (unparseable, a SAFE without a reason, an error, its quota or sign-in
-    refused, a bundle too large for it) leaves the first verdict standing: the call returns with the first reading,
-    never as unread, in one attempt that never waits for resources."""
+    """A second check that answers nothing (unparseable, a SAFE without a reason, an error, an unknown outcome, its
+    quota or sign-in refused, a bundle too large for it) leaves the first verdict standing: the call returns with the
+    first reading, never as unread, in one attempt that never waits for resources."""
     h = supervisor
     h.values["OUROBOROS_SUBAGENTS"] = catalog()
-    bad = _quota() if bad == "quota" else bad
+    bad = {"quota": _quota, "unknown": _unknown}[bad]() if bad in ("quota", "unknown") else bad
     h.replies.extend([{"status": "DANGEROUS", "reason": "first flag"}] + ([] if bad == "too large" else [bad]))
     if bad == "too large":  # the first bundle fits; the second, which carries it, does not
         first = h.module._safety_model_call

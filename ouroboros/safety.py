@@ -1176,7 +1176,7 @@ def _run_llm_check(
     # body) is an infrastructure fact, not a verdict: the check moves along the owner's chain. With no answer the
     # Supervisor's own route decides the outcome exactly as before, its owner question (a model wait) included.
     from ouroboros.llm_claudexor import propagate_model_error
-    from ouroboros.model_wait import current_model_wait, model_wait_reason
+    from ouroboros.model_wait import current_model_wait, model_wait_reason, propagate_model_control
     from ouroboros.transport_custody import outcome_unknown_on_chain
 
     fail_open = _use_local_light and _is_local_fallback and not _needs_checker(ctx)
@@ -1326,8 +1326,7 @@ def _run_llm_check(
                     attempts_limit=1, latch=False, wait_for_resources=False)
                 second = _parse_safety_response(msg.get("content") or "")
             except Exception as exc:
-                if not model_wait_reason(exc):  # its quota or sign-in refusal is this optional check's own failure
-                    propagate_model_error(exc)  # an interruption or an unknown outcome, as the route walk
+                propagate_model_control(exc)  # only Stop or Pause ends it; any other failure is this check's own
                 failure = sanitize_tool_result_for_log(f"{type(exc).__name__}: {exc}")
         if second is not None and (second["status"] != "SAFE" or str(second.get("reason") or "").strip()):
             result = second
