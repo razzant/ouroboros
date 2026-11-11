@@ -241,7 +241,7 @@ test('the confirming sheet says what Main becomes, what running work does, and i
     const doc = { createElement: (tag) => new ElementStub(tag, doc), byId: new Map() };
     const next = { short: 'glm-5.3', id: GLM, source: 'openrouter', lane: 'api', kind: 'openrouter', sourceLabel: 'OpenRouter', pay: 'paid by key', window: '1M' };
     const previous = { short: 'gpt-6-astra', source: 'subscription:codex', lane: 'subscription' };
-    assert.equal(await confirmMainChange({ next, previous, dialog, doc }), true);
+    assert.deepEqual(await confirmMainChange({ next, previous, dialog, doc }), { moves: [] });
     const [sheet] = calls;
     assert.deepEqual([sheet.title, sheet.confirmLabel], ['Change Main', 'Change Main']);
     assert.equal(sheet.body, 'If Main\'s account is pinned it becomes Auto, and a context window set by hand for Main is cleared.');
@@ -249,8 +249,9 @@ test('the confirming sheet says what Main becomes, what running work does, and i
     sheet.content.mount(content);
     assert.match(content.children[0].innerHTML, />OpenRouter · z-ai\/glm-5\.3<\/b><span data-i18n-skip>was gpt-6-astra<\/span>$/);
     assert.deepEqual(content.children.slice(1).map((node) => node.textContent),
-        ['OpenRouter · paid by key · 1M window.', `${MAIN_RULE} ${MAIN_FOLLOW_NOTE}`]);
-    assert.equal(content.children.length, 3, 'the lists of works and rooms come later: nothing stands in for them');
+        ['OpenRouter · paid by key · 1M window.', `${MAIN_RULE} ${MAIN_FOLLOW_NOTE}`,
+            'How many running works follow Main is unknown right now: the list of running work is incomplete.']);
+    assert.equal(content.children.length, 4, 'no census was given: the count is unknown and there is nothing to list (main_sheet.test.js)');
     // The same subscription keeps Main's account, so only the window is said.
     await confirmMainChange({ next: { ...next, source: 'subscription:codex', lane: 'subscription' }, previous, dialog, doc });
     assert.equal(calls[1].body, 'A context window set by hand for Main is cleared.');

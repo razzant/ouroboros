@@ -12,10 +12,11 @@
  * lead a work, one row per (source, model) (chat_model_routes.js); the catalog suggests and never admits, so any id
  * can still be typed. A room's pick saves at once through `POST /api/owner/chat-model`; Send waits for it.
  */
-import { apiClient } from './api_client.js';
+import { apiClient, taskModel } from './api_client.js';
 import { createCapsule } from './capsule.js';
+import { APPLIED_WORDS, basisWords, leadView } from './card_model.js';
 import { openConfirmDialog } from './confirm_dialog.js';
-import { fmt, tr, translateString } from './i18n.js';
+import { fmt, fmtInto, tr, translateString } from './i18n.js';
 import { createModelList, modelSearchField, routeFacts, SEARCH_ICON } from './model_list.js';
 import { haptic } from './haptics.js';
 import { isCoarsePointer, isStackLayout, onLayoutChange } from './layout.js';
@@ -24,6 +25,7 @@ import { MAIN_FOLLOW_NOTE } from './model_roles.js';
 import { sourceMark } from './model_source_mark.js';
 import { bindPopoverPosition } from './ui_interactions.js';
 import { escapeHtmlAttr as esc } from './ui_primitives.js';
+import { clock, workControls } from './work_status.js';
 import {
     MAIN_CHOICE, describeRoute, normalizeChoice, normalizeRoute, routeKey, sameRoute, shortName, sourceUnlisted,
 } from './chat_model_routes.js';
@@ -32,6 +34,8 @@ import {
 export const MODEL_RULE = 'Applies to new work here; running work keeps its model.';
 export const MAIN_RULE = 'New work starts on it everywhere, unless a room has its own model.';
 const MAIN_KEY = 'main';
+// How long Main's sheet waits for a state read taken for it before it lists what the page already has.
+const FRESH_STATE_MS = 700;
 let serial = 0;
 
 /**
@@ -52,45 +56,175 @@ export function modelsRunningElsewhere(works, chatId, shown) {
 }
 
 /**
- * The confirming sheet of a pick in the Main chat, on the shared dialog: what Main becomes and what it was, the new
- * route's facts, what running work does, and in its one sentence what else the change resets. The lists of works and
- * rooms that are not on Main come to its content region with a later change; nothing stands in for them here.
- * Resolves true when the owner confirms.
+ * What a change of Main does not move, from the state the page already has (CONTRACT §5 `works[].lead`, §3
+ * `projects[].model_choice`): how many running works follow Main, the works that are not on Main, and the rooms that
+ * start new work on their own model. `followers` is null when the census is incomplete: an unknown count is never
+ * said as zero. A work on a fallback is one that is not on Main, whatever it left, and never one that will switch.
+ * A row's `id` is the task or the room its tick acts on; a work the server offers no model control for has none.
  */
-export function confirmMainChange({ next, previous, dialog = openConfirmDialog, doc = globalThis.document }) {
+export function mainSheetLists({ works = null, complete = false, projects = [], index = null } = {}) {
+    const rooms = (Array.isArray(projects) ? projects : []).filter((project) => project?.id);
+    const roomOf = (work) => (work.project_id ? rooms.find((project) => project.id === work.project_id)?.name || work.project_id
+        : tr('model.sheet.main_chat', 'Main Chat'));
+    const off = [];
+    let followers = 0;
+    for (const work of Array.isArray(works) ? works : []) {
+        if (!work || work.confirmed === false) continue;
+        const said = leadView(work.lead, { index, since: clock(work.lead?.since) });
+        if (!said) continue;
+        if (said.basis === 'main') { if (work.activity !== 'queued') followers += 1; continue; }
+        off.push({ kind: 'work', id: workControls(work).model, room: roomOf(work),
+            name: String(work.name || '') || tr('model.sheet.unnamed', 'Unnamed work'),
+            model: `${said.said.sourceLabel} · ${said.said.short}`, fallback: said.fallback,
+            why: said.fallback ? (said.since ? fmt('fallback since {time}', { time: said.since }) : basisWords('fallback'))
+                : said.basis === 'room' ? tr('model.basis.room.elsewhere', 'its room\'s model') : basisWords(said.basis) });
+    }
+    const own = rooms.filter((project) => normalizeChoice(project.model_choice).kind === 'model' && !project.closed
+        && !['deleting', 'tombstoned'].includes(project.lifecycle)).map((project) => {
+        const said = describeRoute(index, project.model_choice);
+        return { kind: 'room', id: project.id, name: String(project.name || project.id), model: `${said.sourceLabel} · ${said.short}` };
+    });
+    return { followers: complete && Array.isArray(works) ? followers : null, works: off, rooms: own };
+}
+
+// One row of the sheet's lists: a name over its facts and, where it can be moved, its own tick (a label, so the
+// whole row presses it). After the change the same row says its result instead.
+function offRow(doc, entry, { result = null } = {}) {
+    const made = (tag, className, text) => {
+        const node = doc.createElement(tag);
+        node.className = className;
+        if (text !== undefined) node.textContent = text;
+        return node;
+    };
+    const row = made(entry.id && !result ? 'label' : 'div', 'chat-model-off');
+    const name = made('span', 'chat-model-off-name', entry.name);
+    name.dataset.i18nAuthored = '';
+    const meta = made('span', 'chat-model-off-meta');
+    meta.dataset.i18nSkip = '';
+    if (result) {
+        row.dataset.result = result.ok ? 'moved' : 'refused';
+        meta.append(made('span', '', result.words));
+        row.append(name, meta);
+        return { row, input: null };
+    }
+    meta.append(made('span', '', entry.why ? `${entry.model} · ` : entry.model));
+    if (entry.why) meta.append(made('span', entry.fallback ? 'model-fallback' : '', entry.why));
+    if (entry.room) meta.append(made('span', '', ` · ${entry.room}`));
+    let input = null;
+    if (entry.id) {
+        input = made('input', 'ui-checkbox');
+        input.setAttribute('type', 'checkbox');
+        input.dataset.move = `${entry.kind}:${entry.id}`;
+        input.checked = false;  // nothing is ticked until the owner ticks it
+    }
+    row.append(...[name, input, meta].filter(Boolean));
+    return { row, input };
+}
+function offList(doc, rows) {
+    const list = doc.createElement('ul');
+    list.className = 'chat-model-off-list';
+    for (const { row } of rows) {
+        const item = doc.createElement('li');
+        item.append(row);
+        list.append(item);
+    }
+    return list;
+}
+
+/**
+ * The confirming sheet of a pick in the Main chat, on the shared dialog: what Main becomes and what it was, the new
+ * route's facts, what running work does, how many running works follow Main, and in its one sentence what else the
+ * change resets. Under them, what is not on Main now (`census`: the page's last state, see mainSheetLists): the works
+ * on other models and the rooms with their own, each with a tick to move it too, none ticked beforehand.
+ * Resolves false when the owner cancels, else `{ moves }`: the ticked rows, each to be moved by its own act.
+ */
+export async function confirmMainChange({ next, previous, census = null, dialog = openConfirmDialog, doc = globalThis.document }) {
     const resets = previous?.lane === 'subscription' && next.source !== previous.source
         ? 'If Main\'s account is pinned it becomes Auto, and a context window set by hand for Main is cleared.'
         : 'A context window set by hand for Main is cleared.';
-    return dialog({
+    const lists = mainSheetLists(census || {});
+    const ticks = [];
+    const confirmed = await dialog({
         title: 'Change Main',
         body: resets,
         confirmLabel: 'Change Main',
         content: { label: 'Main model', mount(container) {
+            const line = (text) => {
+                const made = doc.createElement('p');
+                made.className = 'chat-model-sheet-fact';
+                if (text !== undefined) made.textContent = text;
+                return made;
+            };
             const row = doc.createElement('p');
             row.className = 'chat-model-sheet-row';
             row.innerHTML = `${sourceMark(next)}<b data-i18n-skip>${esc(`${next.sourceLabel} · ${next.id}`)}</b>`
                 + (previous ? `<span data-i18n-skip>${esc(fmt('was {model}', { model: previous.short }))}</span>` : '');
-            const facts = doc.createElement('p');
-            facts.className = 'chat-model-sheet-fact';
+            const facts = line(`${routeFacts(next)}.`);
             facts.dataset.i18nSkip = '';
-            facts.textContent = `${routeFacts(next)}.`;
-            const follow = doc.createElement('p');
-            follow.className = 'chat-model-sheet-fact';
-            follow.textContent = `${MAIN_RULE} ${MAIN_FOLLOW_NOTE}`;
-            container.append(row, facts, follow);
+            const count = line();
+            count.dataset.mainFollowers = lists.followers === null ? 'unknown' : String(lists.followers);
+            if (lists.followers === null) count.textContent = 'How many running works follow Main is unknown right now: the list of running work is incomplete.';
+            else if (lists.followers === 0) count.textContent = 'No running work follows Main now.';
+            else if (lists.followers === 1) count.textContent = '1 running work follows Main now.';
+            else fmtInto(count, '{n} running works follow Main now.', { n: lists.followers });
+            container.append(row, facts, line(`${MAIN_RULE} ${MAIN_FOLLOW_NOTE}`), count);
+            const sub = (text) => { const made = line(text); made.className = 'chat-model-sheet-sub'; return made; };
+            const section = (entries, heading) => {
+                if (!entries.length) return;
+                const rows = entries.map((entry) => ({ entry, ...offRow(doc, entry) }));
+                ticks.push(...rows.filter((made) => made.input));
+                container.append(heading, offList(doc, rows));
+            };
+            section(lists.works, sub(lists.works.some((entry) => entry.id) ? 'Not on Main now · tick to move too' : 'Not on Main now'));
+            const roomsHead = sub();
+            fmtInto(roomsHead, 'Rooms that start new work on their own model · {n}', { n: lists.rooms.length });
+            section(lists.rooms, roomsHead);
+            if (!ticks.length) return undefined;
+            container.append(line('A ticked work follows Main from its next step; a ticked room starts new work on Main.'));
+            // The confirming button says how many more it moves, as the ticks change.
+            const onTick = () => {
+                const button = container.closest?.('.confirm-dialog')?.querySelector?.('[data-confirm-ok]');
+                const n = ticks.filter((made) => made.input.checked).length;
+                if (!button) return;
+                if (n) fmtInto(button, 'Change Main and move {n} more', { n });
+                else { button.textContent = 'Change Main'; delete button.dataset.i18nFmt; }
+            };
+            container.addEventListener('change', onTick);
+            return () => container.removeEventListener('change', onTick);
+        } },
+    });
+    return confirmed ? { moves: ticks.filter((made) => made.input.checked).map((made) => made.entry) } : false;
+}
+
+/**
+ * What the ticked rows did, each in its own words, on the shared dialog: every tick was one act after Main was
+ * written, so every row has its own result (a work's answer says when it switches; a refusal says the server's words).
+ */
+export function showMainMoves({ results, dialog = openConfirmDialog, doc = globalThis.document }) {
+    const moved = results.filter((result) => result.ok).length;
+    return dialog({
+        title: 'Main changed',
+        alert: true,
+        body: moved === results.length ? (moved === 1 ? '1 more was moved to Main.' : fmt('{n} more were moved to Main.', { n: moved }))
+            : fmt('{moved} of {n} were moved to Main.', { moved, n: results.length }),
+        content: { label: 'What was moved', mount(container) {
+            container.append(offList(doc, results.map((result) => offRow(doc, result, { result }))));
         } },
     });
 }
 
 /**
  * The capsule in its room's composer row. `save(body)` is the owner write (`apiClient.ownerChatModel`), `openSettings()`
- * Settings › Accounts, `askMain({next, previous})` the Main chat's confirming sheet, `store` the window's catalog store,
+ * Settings › Accounts, `askMain({next, previous, census})` the Main chat's confirming sheet, `moveWork(taskId)` one
+ * work's return to Main and `sayMoves({results})` the sheet of what its ticks did, `store` the window's catalog store,
  * `placeList(list)` the suggestions' place above the row.
  * Returns `{ el, capsule, syncState(data), hasPendingSave, pendingSave, pick, startSearch, destroy }`.
  */
 export function createModelControl({
     el, row, projectId = '', chatId = projectId ? null : 1, save = apiClient.ownerChatModel, openSettings = () => {},
     showToast = () => {}, refreshState = () => {}, onLayout, onSettled, askMain = confirmMainChange, store = modelCatalog,
+    moveWork = (taskId) => taskModel(taskId, globalThis.crypto?.randomUUID?.() || `main-sheet-${Date.now()}-${++serial}`, { action: 'follow' }),
+    sayMoves = showMainMoves,
     isStack = () => isStackLayout(), isCoarse = () => isCoarsePointer(),
     // Anchored to the row, as the hint is to its capsule: the composer under it never moves.
     placeList = (list) => bindPopoverPosition(list, { anchor: row, align: 'start' }),
@@ -121,7 +255,9 @@ export function createModelControl({
 
     // `main` is what Main is now (`/api/state.main_route`), `choice` the room's own (`projects[].model_choice`); the
     // Main chat's capsule is Main, so it has no choice of its own.
-    const state = { main: null, choice: { ...MAIN_CHOICE }, works: null, saving: null, lastOk: true, destroyed: false };
+    // `works`, `complete` and `projects` are the last state body's census, for the hint's fact line and Main's sheet.
+    const state = { main: null, choice: { ...MAIN_CHOICE }, works: null, complete: false, projects: [], saving: null,
+        lastOk: true, destroyed: false };
     const search = { on: false, rows: null, list: null, position: null };  // rows: the list of models while Search is on
     const segs = [];          // the strip's values as the machine's fit measures them: Main, the recents, Search
     const routes = new Map(); // a segment's key → its route
@@ -268,9 +404,43 @@ export function createModelControl({
             state.choice = normalizeChoice(saved);
         });
     }
+    // One act per tick, after Main itself was written (there is no batch endpoint): a work follows Main again, a
+    // room's own model is cleared. Each answers for itself, and a refusal of one stops none of the others.
+    async function moveToMain(moves) {
+        const results = [];
+        for (const move of moves) {
+            try {
+                if (move.kind === 'work') {
+                    const reply = await moveWork(move.id);
+                    results.push({ ...move, ok: true, words: APPLIED_WORDS[reply?.applied] || tr('model.sheet.follows', 'Follows Main now.') });
+                } else {
+                    const reply = await save({ project_id: move.id, kind: 'main' });
+                    if (reply?.ok !== true || reply.model_choice?.kind !== 'main') throw new Error('The server did not confirm it.');
+                    results.push({ ...move, ok: true, words: tr('model.sheet.room_follows', 'New work here starts on Main.') });
+                }
+            } catch (error) {
+                results.push({ ...move, ok: false, words: fmt('Not moved: {reason}', { reason: error?.message || String(error) }) });
+            }
+        }
+        if (state.destroyed) return;
+        refreshState(true);
+        await sayMoves({ results, doc });
+    }
     async function changeMain(route) {
         const next = describe(route);
-        if (!(await askMain({ next, previous: describe(state.main), doc })) || state.destroyed) return false;
+        // The sheet lists the works and rooms of the page's last state: read it once more first, so an act made a
+        // moment ago (a card's model, another room's capsule) is in it. A slow read does not hold the sheet back.
+        await Promise.race([Promise.resolve().then(() => refreshState(true)).catch(() => {}),
+            new Promise((resolve) => { setTimeout(resolve, FRESH_STATE_MS); })]);
+        if (state.destroyed) return false;
+        const answer = await askMain({ next, previous: describe(state.main), doc,
+            census: { works: state.works, complete: state.complete, projects: state.projects, index: store.index() } });
+        if (!answer || state.destroyed) return false;
+        const written = await writeMain(route);
+        if (written && answer.moves?.length && !state.destroyed) await moveToMain(answer.moves);
+        return written;
+    }
+    function writeMain(route) {
         return write({ kind: 'model', model: route.model, use_local: route.use_local }, (reply) => {
             const written = normalizeRoute(reply.main_route);
             if (!written) throw new Error('The server did not confirm the model.');
@@ -395,7 +565,11 @@ export function createModelControl({
          *  save in flight answers for itself; a body without a field keeps what was last read. */
         syncState(data) {
             if (state.destroyed || !data) return;
-            if (Array.isArray(data.works)) state.works = data.works;
+            if (Array.isArray(data.works)) {
+                state.works = data.works;
+                state.complete = data.works_complete === true && data.supervisor_ready === true;
+            }
+            if (Array.isArray(data.projects)) state.projects = data.projects;
             if (!state.saving) {
                 const main = normalizeRoute(data.main_route);
                 if (main) state.main = main;

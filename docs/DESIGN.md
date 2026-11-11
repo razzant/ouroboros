@@ -473,7 +473,14 @@ wears no mark for one (owner 11.11, «Все A», 1); open, its hint adds one fa
 models, over «Applies to new work here; running work keeps its model.» In the Main chat the capsule is Main itself:
 a pick asks first in the shared confirm dialog (what Main becomes and was, the route's facts,
 `model_roles.MAIN_FOLLOW_NOTE`, and in one line the pinned account and manual window it resets), then writes Main
-(owner 10.11, «6. A»). Its strip is `Main · the two most recent models · Search` (one recent in the stack layout)
+(owner 10.11, «6. A»). **The sheet also says what the change does not move** (owner 10.11, «5. A», «6. A»; the notice
+he did not object to on 11.11): how many running works follow Main (said as unknown, never as zero, while the list
+of works is incomplete), then what is not on Main now — running and queued works on other models, each with why
+(`you chose it`, `its room's model`, `Ouroboros switched to it`, `fallback since 02:14` in amber) and its room, and
+rooms that start new work on their own model — each with its own tick to move it too. Nothing is ticked
+beforehand; a work on a fallback is listed as one and never counted among those that will switch; a work the
+server offers no model control for has no tick. Each tick is one act after the Main write (a work follows Main
+again; a room's own model is cleared), there is no batch, and a second sheet says each one's own result. Its strip is `Main · the two most recent models · Search` (one recent in the stack layout)
 under a neutral thumb; a press chooses, arrows only move. **Search is a field in the row; its suggestions float
 above the row like the hint and never move the composer** (owner 10.11, «9. A»): Main, the recents, then the sources
 that can lead a work (those Settings offers the Main role, never agent sessions; with one source, its models at
@@ -2686,8 +2693,8 @@ Accounts is the common connection surface for subscriptions and API keys. An API
 Models and Agents edit assignments; a new connection adds choices without
 replacing them. A model role uses one compact
 Source / Model / Account row. Under Main, Settings (not the wizard or a wait
-picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save, as the Main chat's Model capsule does
-before it writes Main (owner 10.11, «6. A»); it forecasts no tokens
+picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save; its second host is the Main chat's Model capsule, whose
+confirming sheet says it before it writes Main (owner 10.11, «6. A»); it forecasts no tokens
 or cost. The account is a property of that role: Auto
 rotates compatible accounts and an explicit pin stays pinned. A model inherited
 from Main remains visibly inherited while its account can be pinned

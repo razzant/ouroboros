@@ -5437,6 +5437,27 @@ html[data-layout="stack"] .ui-popup.chat-model-list { width: var(--ui-popup-anch
 .chat-model-sheet-row b { flex: 1 1 auto; min-width: 0; overflow: hidden; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .chat-model-sheet-row span { flex: 0 0 auto; color: var(--text-meta); font-size: var(--type-meta); }
 .chat-model-sheet-fact { margin: 0 0 2px; color: var(--text-secondary); font-size: var(--type-meta); }
+/* The sheet's lists (owner 10.11, «5. A», «6. A»): what is not on Main now, each row a name over its facts with
+   its own tick; nothing is ticked until the owner ticks it. After the change the same rows say each one's result. */
+.chat-model-sheet-sub { margin: var(--space-3) 0 var(--space-1); color: var(--text-meta); font-size: var(--type-meta); }
+.chat-model-off-list { margin: 0 calc(-1 * var(--space-2)); padding: 0; list-style: none; }
+.chat-model-off {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 2px var(--space-3);
+    align-items: center;
+    padding: var(--space-2);
+    border-radius: var(--radius-inner);
+}
+label.chat-model-off { cursor: pointer; }
+@media (hover: hover) {
+    label.chat-model-off:hover { background: var(--menu-item-hover); }
+}
+.chat-model-off-name { min-width: 0; overflow: hidden; font-size: var(--type-body); text-overflow: ellipsis; white-space: nowrap; }
+.chat-model-off-meta { grid-column: 1; min-width: 0; color: var(--text-meta); font-size: var(--type-meta); overflow-wrap: anywhere; }
+.chat-model-off .ui-checkbox { grid-row: 1 / span 2; grid-column: 2; width: 18px; height: 18px; }
+.chat-model-off[data-result="refused"] .chat-model-off-meta { color: var(--status-error-fg); }
+
 /* A work's model on its card (card_model.js; DESIGN "A work's model on its card"): the first fact of the meta line,
    in a node of its own before the rest of the line, whose parts stay items of the line itself. Where the server
    offers the control it is a quiet capsule in the line's own ink, stronger for a model of the work's own; the words
