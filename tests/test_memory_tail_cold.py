@@ -804,6 +804,15 @@ def test_a_walk_past_a_places_first_page_reads_the_rest_of_its_chat(monkeypatch,
     _same(monkeypatch, tmp_path, rooms)
 
 
+def test_a_walk_past_a_places_first_page_reads_every_row_between_not_only_the_copies_it_holds(monkeypatch, tmp_path):
+    """My word lies between the first page and the oldest arrival, whose earlier copy of the open word is already read:
+    the walk reads every row below the page before it goes on, so it finds my word there."""
+    rooms, sealed = _long_place(tmp_path, mine_at=3)
+    work = _work(tmp_path, rooms)
+    assert work.get("tail_whole", 0) == 0 and work.get("rows_asked", 0) >= sealed, (work, sealed)
+    _same(monkeypatch, tmp_path, rooms)
+
+
 def test_a_place_where_none_of_us_spoke_reads_every_sealed_row(monkeypatch, tmp_path):
     """Only reading all of them shows that none of its sealed rows is ours: its room stays silent."""
     rooms, sealed = _long_place(tmp_path, mine_at=None)
