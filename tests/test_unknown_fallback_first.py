@@ -131,9 +131,9 @@ def _notices(messages):
 def test_a_lost_answer_asks_the_acting_primary_once_before_the_configured_route(data_root, tmp_path, monkeypatch,
                                                                                 direct, then):
     """One lost answer is evidence about an attempt, not its route. After the wait's entry step and one
-    upstream observation the primary gets ONE new attempt under a new identity. A missed observation or any
-    failure of that attempt walks the configured route on the same pass: no second wait step stands in
-    front of it, and the lost attempt keeps its own row and cost throughout."""
+    upstream observation the primary gets ONE new attempt under a new identity. A missed observation, another
+    lost answer or a refusal walks the configured route on the same pass (a cut reply keeps its own ladder): no
+    second wait step stands in front of it, and the lost attempt keeps its own row and cost throughout."""
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "fb/one")
     probes, sleeps = _observe(monkeypatch, {} if then == "is_not_observed" else REACHED)
     script = {"answers": [_death], "is_lost_again": [_death, _death], "is_not_observed": [_death],
