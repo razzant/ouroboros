@@ -268,8 +268,8 @@ HTTP_SHAPES: dict[str, Shape] = {
         "200:SettingsReadResponse", query="websearch_preview response_limit_preview model account local backend",
         note="masked secrets read back as placeholders; sending a placeholder keeps the stored value"),
     "POST /api/settings": Shape(
-        f"200:SettingsSaveResponse {_SETTINGS_REFUSAL} 500:SettingsPostCommitFailureResponse", "json",
-        note="partial document of setting keys; restart_state names keys that apply only after a restart"),
+        f"200:SettingsSaveResponse {_SETTINGS_REFUSAL} 500:SettingsPostCommitFailureResponse", "SettingsSaveRequest",
+        note="partial setting keys; if_unchanged checks per-key tokens; unset restores omission; restart_state includes running values"),
     "POST /api/settings/secret": Shape("200:SettingsSecretResponse 400,404,409:ErrorResponse", "SettingsSecretRequest",
                                        note="reveals one stored secret, no-store; writes nothing"),
     "GET /api/ui/preferences": Shape("200:UiPreferencesResponse"),
@@ -303,9 +303,9 @@ HTTP_SHAPES: dict[str, Shape] = {
                                           note="helper min <= max; primary independent; optional project_id, otherwise Main"),
     "POST /api/owner/chat-model": Shape(f"200:OwnerChatModelResponse {_SETTINGS_REFUSAL} 404:SettingsWriteRefusal", "OwnerChatModelRequest",
                                         note="the room's model for new owner work; optional project_id, otherwise Main"),
-    "POST /api/owner/safety-rules": Shape(f"200:OwnerSafetyRulesResponse {_SETTINGS_REFUSAL}", "OwnerSafetyRulesRequest"),
-    "POST /api/owner/safety-model": Shape(f"200:OwnerSafetyModelResponse {_SETTINGS_REFUSAL}", "OwnerSafetyModelRequest"),
-    "POST /api/owner/safety-mode": Shape(f"200:OwnerSafetyModeResponse {_SETTINGS_REFUSAL}", "OwnerSafetyModeRequest"),
+    "POST /api/owner/safety-rules": Shape(f"200:OwnerSafetyRulesResponse {_SETTINGS_REFUSAL} 500:SettingsPostCommitFailureResponse", "OwnerSafetyRulesRequest"),
+    "POST /api/owner/safety-model": Shape(f"200:OwnerSafetyModelResponse {_SETTINGS_REFUSAL} 500:SettingsPostCommitFailureResponse", "OwnerSafetyModelRequest"),
+    "POST /api/owner/safety-mode": Shape(f"200:OwnerSafetyModeResponse {_SETTINGS_REFUSAL} 500:SettingsPostCommitFailureResponse", "OwnerSafetyModeRequest"),
     "POST /api/owner/capability-ack": Shape(
         "200:ResponseLimitAckResponse|ContextWindowAckResponse 400:ErrorResponse", "CapabilityAckRequest",
         note="writes acknowledgement evidence for one exact route, never settings; a repeat overwrites it"),
