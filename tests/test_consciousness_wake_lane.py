@@ -589,7 +589,7 @@ def test_consciousness_status_answers_the_caller_only_with_sourced_persisted_fac
         facts = json.loads(control._toggle_consciousness(ctx, "status"))
     assert ctx.pending_events == []  # nothing for the supervisor to publish
     assert facts["source"] == str(tmp_path / "state" / "state.json") and facts["observed_at"]
-    assert "source_modified_at" not in facts and "read_gap" not in facts and "not_recorded" not in facts
+    assert "source_modified_at" not in facts and "read_gap" not in facts and facts["not_recorded"] == ["stopped_by"]
     assert facts["enabled"] is True and facts["chosen_interval_sec"] == 900
     assert facts["stored_next_wake_at"] == "2026-09-26T10:00:00+00:00"
     assert facts["last_wake_ended_at"] == "2026-09-26T09:00:00+00:00"
@@ -653,7 +653,8 @@ def test_consciousness_status_reads_the_callers_canonical_root_and_writes_nothin
     assert facts["source"] == str(canonical / "state" / "state.json")
     assert facts["enabled"] is False and facts["chosen_interval_sec"] == 1800
     assert facts["stored_next_wake_at"] == 0  # recorded zero stays zero, not a guessed time
-    assert facts["not_recorded"] == ["last_wake_ended_at", "last_skip"] and "last_wake_ended_at" not in facts
+    assert facts["not_recorded"] == ["stopped_by", "last_wake_ended_at", "last_skip"]
+    assert "last_wake_ended_at" not in facts
     # A root task with no budget root reads its own drive, which IS its canonical root.
     facts = json.loads(control._toggle_consciousness(SimpleNamespace(pending_events=[], drive_root=forked), "status"))
     assert facts["source"] == str(forked / "state" / "state.json") and facts["enabled"] is True
@@ -670,9 +671,10 @@ def test_consciousness_status_names_a_read_gap_instead_of_defaults(tmp_path):
         before = _tree(root)
         facts = json.loads(control._toggle_consciousness(SimpleNamespace(pending_events=[], drive_root=root), "status"))
         assert _tree(root) == before, "a status read must not write"
-        assert facts["not_read"] == ["enabled", "stored_next_wake_at", "last_wake_ended_at", "chosen_interval_sec",
-                                     "last_skip"]
-        assert not {"enabled", "stored_next_wake_at", "last_wake_ended_at", "chosen_interval_sec", "last_skip"} & set(facts)
+        assert facts["not_read"] == ["enabled", "stopped_by", "stored_next_wake_at", "last_wake_ended_at",
+                                     "chosen_interval_sec", "last_skip"]
+        assert not {"enabled", "stopped_by", "stored_next_wake_at", "last_wake_ended_at", "chosen_interval_sec",
+                    "last_skip"} & set(facts)
         assert facts["source"] == str(root / "state" / "state.json") and facts["observed_at"]
         return facts["read_gap"]
 
@@ -722,6 +724,26 @@ def test_consciousness_status_keeps_an_unproven_toggle_unknown_and_names_a_kept_
     assert panic["enabled"] is True and "no wake starts" in panic["panic_flag_kept"]
 
 
+def test_consciousness_status_names_who_stopped_it_and_an_unrecorded_stop_stays_unknown(tmp_path):
+    """The mind sees the hold (``bg_consciousness_stop_source``): who stopped it, as stored; an off with none recorded
+    (a never-started install, a stop from before the key) is unknown until the owner starts consciousness once; a
+    source the copy cannot prove is unknown, like the toggle beside it."""
+    from ouroboros.tools import control
+
+    def status(name, stored):
+        root = tmp_path / name
+        _initialized_state(root, {"bg_consciousness_enabled": False, **stored})
+        return json.loads(control._toggle_consciousness(SimpleNamespace(pending_events=[], drive_root=root), "status"))
+
+    for source in ("owner", "panic", "agent_tool"):
+        assert status(source, {"bg_consciousness_stop_source": source})["stopped_by"] == source
+    never = status("never", {})
+    assert never["enabled"] is False and "stopped_by" not in never and "stopped_by" in never["not_recorded"]
+    recovered = status("recovered", {"bg_consciousness_stop_source": "agent_tool", "_recovery": {
+        "source": "backup", "unconfirmed": ["bg_consciousness_stop_source"]}})
+    assert recovered["stopped_by"] == {"status": "unknown", "reason": "unconfirmed after a state recovery"}
+
+
 def test_wake_affordances_describe_the_real_alarm_and_the_status_audience():
     from ouroboros.tools.control import get_tools
 
@@ -737,6 +759,7 @@ def test_wake_affordances_describe_the_real_alarm_and_the_status_audience():
     assert "brings the next wake-up forward" not in wake and "pending event" not in wake
     assert len(wake) < 600, "an operational paragraph, not the alarm's whole algorithm"
     assert "answered to you only" in schemas["toggle_consciousness"]["description"]
+    assert "a start does not lift a stop the owner or Panic placed" in schemas["toggle_consciousness"]["description"]
 
 
 def test_an_admission_that_raises_leaves_no_running_row_or_registered_turn(monkeypatch, tmp_path):

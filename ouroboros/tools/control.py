@@ -452,9 +452,9 @@ def get_tools() -> List[ToolEntry]:
         }, _toggle_evolution),
         ToolEntry("toggle_consciousness", {
             "name": "toggle_consciousness",
-            "description": ("Control background consciousness: 'start' or 'stop' (the owner is told), or "
-                            "'status' (answered to you only: the persisted state with its source, never posted to "
-                            "the owner's chat)."),
+            "description": ("Control background consciousness: 'start' or 'stop' (the owner is told; a start does "
+                            "not lift a stop the owner or Panic placed), or 'status' (answered to you only: the "
+                            "persisted state with its source, never posted to the owner's chat)."),
             "parameters": {"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["start", "stop", "status"], "description": "Action to perform"},
             }, "required": ["action"]},
