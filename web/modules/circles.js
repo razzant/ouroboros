@@ -278,6 +278,8 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
         if (selection && node?.setSelectionRange) node.setSelectionRange(...selection);
     }
 
+    // Settings broadcasts every catalog read, a failed one too: that one leaves the suggestions as they are.
+    const onBroadcast = (event) => { if (Array.isArray(event?.detail?.items) && event.detail.read_state !== 'failed') onCatalog(event); };
     function onCatalog(event) {
         if (destroyed) return;
         const data = event.detail;
@@ -536,7 +538,7 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
     window.addEventListener(PLACES_CHANGED_EVENT, onChanged);
     window.addEventListener('ouro:open-circles', onOpen);
     document.addEventListener('visibilitychange', onVisibility);
-    document.addEventListener('settings-model-catalog:updated', onCatalog);
+    document.addEventListener('settings-model-catalog:updated', onBroadcast);
     paint();
     if (shown()) void refresh();
     return {
@@ -556,7 +558,7 @@ export function initCircles({ state, showPage, openSettings, read = readPlaces, 
             window.removeEventListener(PLACES_CHANGED_EVENT, onChanged);
             window.removeEventListener('ouro:open-circles', onOpen);
             document.removeEventListener('visibilitychange', onVisibility);
-            document.removeEventListener('settings-model-catalog:updated', onCatalog);
+            document.removeEventListener('settings-model-catalog:updated', onBroadcast);
         },
     };
 }
