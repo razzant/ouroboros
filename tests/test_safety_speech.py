@@ -11,7 +11,8 @@ MIND = "issuing the identical call in a later step"  # the mind's own exit, name
 GATE_HEAD = "These words to this destination were read DANGEROUS in this work:"  # answered for another call
 WORDS_WAIT = ("Changed words or another destination are read again; the same words there keep waiting, whatever the "
               "tool or request_id.")
-LATER = "A later message of your human in this work (speech in a call is not one) earns it one new reading"
+LATER = ("A later message or card answer of your human in this work (speech in a call is neither) earns it one new "
+         "reading")
 
 
 @pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])

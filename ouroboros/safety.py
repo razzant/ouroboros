@@ -460,8 +460,8 @@ _MIND_DECIDES = ("You decide: change the call (a changed call is read again), dr
                  "the identical call in a later step.")
 _CARD_CHECK = ("The host checks only that they answered that card, not what they answered: issue the identical call "
                "again only if they said yes.")
-# Under every deployment policy:
-_LATER_WORD = "A later message of your human in this work (speech in a call is not one) earns it one new reading"
+_LATER_WORD = ("A later message or card answer of your human in this work (speech in a call is neither) earns it one "
+               "new reading")  # under every deployment policy
 
 
 def _returned_head(level, verdicts, destination="", words=False):
