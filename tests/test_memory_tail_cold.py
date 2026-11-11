@@ -1296,12 +1296,20 @@ def test_a_write_that_keeps_every_tasks_lineage_keeps_the_set(monkeypatch, tmp_p
 
 
 def test_a_changed_running_code_reads_the_whole_tail(monkeypatch, tmp_path):
-    from ouroboros import transcript_prefix
-
     rooms, _row = _sealed_main_row(tmp_path)
-    monkeypatch.setattr(transcript_prefix, "_running_code", lambda: "another-commit")
+    monkeypatch.setattr(cold, "CODE", "another-commit")  # what a process loaded after an update
     assert not _in_use(tmp_path)
     _same(monkeypatch, tmp_path, rooms)
+
+
+def test_a_commit_after_a_process_loaded_its_code_moves_no_mark_of_that_process(monkeypatch, tmp_path):
+    """The code mark names the code a process runs, as it loaded it: a commit checked out later (a self-commit before
+    the restart that loads it) is not that process's, and the set it composed under its own code still stands."""
+    from ouroboros import transcript_prefix
+
+    _rooms, _row = _sealed_main_row(tmp_path)
+    monkeypatch.setattr(transcript_prefix, "_running_code", lambda: "a-commit-this-process-never-loaded")
+    assert _in_use(tmp_path)
 
 
 def test_a_revised_and_refilled_text_reads_the_whole_tail(monkeypatch, tmp_path):
