@@ -273,6 +273,10 @@ def test_catalogue_access_saves_reloads_restarts_and_reaches_the_pool(direct_ser
             # Configuration only: nothing here may wake, log in or refresh an agent engine.
             context.route(re.compile(r".*/api/claudexor/(wake|login|quota|credential-profiles).*"),
                           lambda route: (engine_calls.append(route.request.url), route.abort()))
+            # This scene proves the real roster transaction and Access, not provider discovery. The isolated
+            # server has no provider catalog; serve a successful empty read so Circles' unrelated catalog listener
+            # does not reject it. Settings, the owner write, and the review-pool read remain the real endpoints.
+            context.route("**/api/model-catalog*", lambda route: route.fulfill(json={"items": [], "model_sources": [], "errors": []}))
             page = context.new_page()
             _open(page, url)
 
