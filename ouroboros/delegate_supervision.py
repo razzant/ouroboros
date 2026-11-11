@@ -1,8 +1,9 @@
 """``delegate_wait`` for configured session nannies: a model sleep on runs, its wake delivered once.
 
 The body (``delegate_collection.BodyRuntime``) is the one observer of external runs: it records a run's
-terminal and questions in custody, follows its speech and tells the owner when the engine stops
-answering. A ``delegate_wait`` that nothing answers yet arms the nanny's ordinary sleep
+terminal and questions in custody, follows its speech (``delegate_feed``) and tells the owner when the
+engine stops answering, so no acting slot, nanny tick or LLM call is needed while the nanny sleeps. A
+``delegate_wait`` that nothing answers yet arms the nanny's ordinary sleep
 (``model_sleep``) with a ``run_wait`` descriptor; the result is owed to the first model request
 after the wake (``native_task_wait.deliver_owed``), published there as one wake record
 (``pending_wake`` in ``delegate_supervision_state``) and acknowledged only after its exact text was
@@ -12,9 +13,7 @@ Ready sources answer at once; unacknowledged wakes replay their facts
 (``replay_of``) before sleeping. Owed delivery follows mail drain; durable wakes
 coalesce. Retained output precedes a run-detail read. Without a continuation
 owner the same sources are waited on in-process. There is no wait window or
-run-count cap; legacy ``wait_sec`` is inert. Observation belongs to
-``delegate_collection.BodyRuntime`` and ``delegate_feed`` independently of the
-nanny's turn: no acting slot, nanny tick or LLM call is needed while it sleeps.
+run-count cap; legacy ``wait_sec`` is inert.
 
 ``deliver_wake`` binds typed metadata/JSON to the saved whole view needed for
 loop/startup ACK: inline or complete exact-source reads

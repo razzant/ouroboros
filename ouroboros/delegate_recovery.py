@@ -2,11 +2,10 @@
 
 Schema-2 ``holders`` (``delegate_recovery_holders``) keep independent bindings,
 checkpoints and adopted/deferred/refused status. Transaction/generation/attempt/
-authority proofs stay; a bad holder cannot discard a valid sibling. All owners
-recover before bootstrap. Saved cognition defers probes/POSTs; replay uses the
-original pending binding and keeps wait sources until binding/resolution.
-Orphan exclusions name handles; Stop reaches late-bound runs without POSTs.
-Owner Restart/Panic/signals/deadline/cancellation never resume.
+authority proofs stay; a bad holder cannot discard a valid sibling. Saved
+cognition defers probes/POSTs; replay uses the original pending binding and
+keeps wait sources until binding/resolution. Orphan exclusions name handles;
+Stop reaches late-bound runs without POSTs.
 """
 
 from __future__ import annotations
