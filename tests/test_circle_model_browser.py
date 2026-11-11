@@ -63,6 +63,25 @@ _FACTS = """() => {
 }"""
 
 
+# Whatever the names, nothing of the directory leaves the screen and no head is wider than itself.
+_HOLDS = """() => {
+    const text = (node) => (node ? node.innerText.replace(/\\s+/g, ' ').trim() : null);
+    const box = (node) => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, width: r.width }; };
+    const head = document.querySelector('.circle-fold[data-circle="team"] > summary');
+    return {
+        wide: document.documentElement.scrollWidth - window.innerWidth,
+        out: [...document.querySelectorAll('.circles-directory *')].filter((node) => node.getClientRects().length
+            && (node.getBoundingClientRect().right > window.innerWidth + 0.5 || node.getBoundingClientRect().left < -0.5)).map((node) => node.className || node.tagName),
+        head: head.scrollWidth - head.clientWidth,
+        count: text(head.querySelector('.circle-head-count')), countBox: box(head.querySelector('.circle-head-count')),
+        name: text(head.querySelector('.circle-head-name')), nameBox: box(head.querySelector('.circle-head-name')),
+        rows: Object.fromEntries([...document.querySelectorAll('[data-place-open]')].map((row) => {
+            const facts = row.querySelector('.consciousness-place-facts');
+            return [row.dataset.placeOpen, { facts: text(facts), cut: facts.scrollWidth - facts.clientWidth, over: row.scrollWidth - row.clientWidth }];
+        })),
+    };
+}"""
+
 # The sheet read to its end, where More and its Model field are.
 _TO_END = "() => { const body = document.querySelector('dialog[open] [data-place-body]'); body.scrollTop = body.scrollHeight; }"
 
@@ -192,5 +211,56 @@ def test_a_circles_model_and_what_a_place_inherits_on_a_phone(direct_server_with
             page.wait_for_selector("dialog[open] .place-more", timeout=10_000)
             page.click("dialog[open] .place-more > summary")
             assert page.locator('dialog[open] [data-place-draft="model"]').get_attribute("placeholder") == "Uses the consciousness model: gpt-6-astra"
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_long_circle_and_model_names_hold_on_a_phone(direct_server_with_data, engine, tmp_path):  # noqa: F811
+    """Real model names are long and so are circle names: at 390 px the head's count goes under the name and wraps
+    there, and a place row that shows its overriding model wraps its facts; nothing is wider than the screen."""
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import sync_playwright
+
+    shots = pathlib.Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", str(tmp_path)))
+    shots.mkdir(parents=True, exist_ok=True)
+    kimi, argon, opus = "moonshotai/kimi-k3-thinking-preview", "google/gemini-4-argon-high", "anthropic::claude-opus-5.5"
+    circles = [_circle("team", "Customer research and partner support desk", kimi, 3), _circle("home", "Home and family errands", argon, 4)]
+    places = [
+        _place("alpha", "Chat · the partners' long-named working channel", "team", "", {"value": kimi, "layer": "circle"}),
+        _place("beta", "Chat · beta", "team", argon, {"value": argon, "layer": "place"}, state="paused"),
+        _place("delta", "Chat · delta", "team", opus, {"value": opus, "layer": "place"}),
+        _place("gamma", "Chat · gamma", "home", "", {"value": argon, "layer": "circle"}),
+    ]
+    url = direct_server_with_data["url"]
+    with sync_playwright() as pw:
+        browser, page = _launch(pw, engine, viewport={"width": 390, "height": 844})
+        try:
+            page.route("**/api/places", lambda route: route.fulfill(json={
+                "ok": True, "places": places, "circles": circles, "migration_problems": [],
+                "connectors": [{"connector": "chat-bridge", "label": "Chat", "destination": "vendor:chat",
+                                "readiness": {"text": "Connector on", "tone": "ok"}}]}) if route.request.method == "GET" else route.continue_())
+            page.route("**/api/model-catalog*", lambda route: route.fulfill(json=_catalog()))
+            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            page.wait_for_selector("#chat-input", timeout=30_000)
+            page.evaluate("() => window.dispatchEvent(new CustomEvent('ouro:open-circles', {detail: {circle: 'team'}}))")
+            page.wait_for_selector('.circle-fold[data-circle="team"][open] [data-place-open="delta"]', timeout=30_000)
+            page.wait_for_timeout(400)
+            seen = page.evaluate(_HOLDS)
+            assert seen["wide"] <= 0 and not seen["out"] and seen["head"] <= 0, seen
+            assert seen["count"] == "3 places · 1 paused · model kimi-k3-thinking-preview", seen
+            assert seen["name"] == "Customer research and partner support desk" and seen["nameBox"]["width"] >= 150, \
+                ("the count went under the name: the name keeps its line", seen)
+            assert seen["countBox"]["right"] <= 390 and seen["countBox"]["left"] >= 0, seen
+            assert seen["rows"]["beta"]["facts"].endswith("· model gemini-4-argon-high"), seen
+            assert seen["rows"]["delta"]["facts"].endswith("· model claude-opus-5.5") and "model" not in seen["rows"]["alpha"]["facts"], seen
+            assert all(row["cut"] <= 0 and row["over"] <= 0 for row in seen["rows"].values()), ("a row's facts wrap, never cut", seen)
+            page.screenshot(path=str(shots / f"{engine}-circles-long-names.png"), animations="disabled")
+            # Closed heads too: the other circle's count beside or under its name.
+            page.click('.circle-fold[data-circle="team"] > summary')
+            page.wait_for_timeout(300)
+            closed = page.evaluate(_HOLDS)
+            assert closed["wide"] <= 0 and not closed["out"] and closed["head"] <= 0, closed
+            page.screenshot(path=str(shots / f"{engine}-circles-long-names-closed.png"), animations="disabled")
         finally:
             browser.close()

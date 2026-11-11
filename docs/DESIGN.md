@@ -2141,7 +2141,9 @@ places keep their connection and lose its words. No feed, summary or wake list: 
 A circle may have a model, in the place sheet's own chooser: its places think with it unless one has
 its own, and without one they use the consciousness model; the head names it only when it has one
 (“model glm-5.3”), and the open circle says how many of its places keep a model of their own (owner
-10.11, 7: «Место наследует модель круга, но можно заоверрайдить. По дефолту модель сознания»).
+10.11, 7: «Место наследует модель круга, но можно заоверрайдить. По дефолту модель сознания»). A count the
+name's line cannot hold (a long model name, a long circle name) goes under the name, at the line's end, and
+wraps there; a row's facts wrap the same way, and nothing is ever wider than the head or the row.
 
 A row: mark, the place's own name, service, state word (with “· consciousness off” and the muted dot while Off
 leaves a place that is not Paused only hearing), readiness only when not simply on, the
