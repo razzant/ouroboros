@@ -287,13 +287,17 @@ def render_result_view(
     ``known_result_sha256`` is the child-result identity in every view.  Summary
     and evidence are always rebuilt because cost/custody/retry/authority facts
     can change while the authored answer stays byte-identical; every view keeps
-    the reader's ``current_stop`` beside its status.
+    the reader's ``current_stop`` beside its status, and a root's Continue offer
+    (``owner_continue.offer_view``, as the routing references show it), which an
+    unchanged answer does not freeze either.
     """
     from ouroboros.outcomes import normalize_outcome_axes
+    from ouroboros.owner_continue import offer_view
     from ouroboros.task_finalization import terminal_host_notice_text
 
     answer = str(data.get("result") or "")
     answer_sha = hashlib.sha256(answer.encode("utf-8")).hexdigest()
+    offer = offer_view(dict(data), task_id)
     payload: Dict[str, Any] = {
         "schema_version": 1,
         "view": view,
@@ -305,6 +309,7 @@ def render_result_view(
         "terminal_origin": str(data.get("terminal_origin") or "unknown"),
         "outcome_axes": normalize_outcome_axes(dict(data)),
         **({"current_stop": dict(current_stop)} if current_stop else {}),
+        **({"continuation_offer": offer} if offer is not None else {}),
     }
     notice = terminal_host_notice_text(dict(data))
     if notice:
