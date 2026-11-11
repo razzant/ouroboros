@@ -6509,11 +6509,11 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .dashboard-choice-note { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .dashboard-choice[aria-pressed="true"] > .dashboard-choice-note { color: inherit; }
 /* A tab opened from Settings leads back there with its first row (dashboard.js settingsReturn), drawn as a Settings
-   page draws its Back (settings.css .settings-back-row). It stands above the tab's scroller, at the cards' edge, so it
-   stays in place while the tab scrolls. */
-.dashboard-back { position: static; flex: none; margin: var(--space-2) 0 0; padding-inline: 20px; background: none; }
+   page draws its Back (settings.css .settings-back-row, the later sheet: these rules name both classes to stand over
+   it). It stands above the tab's scroller, at the cards' edge, so it stays in place while the tab scrolls. */
+.settings-back-row.dashboard-back { position: static; flex: none; margin: var(--space-2) 0 var(--space-1); padding: 0 20px; background: none; }
 .dashboard-back + .dashboard-body { padding-top: var(--space-2); }
-html[data-layout="stack"] .dashboard-back { padding-inline: var(--space-3); }
+html[data-layout="stack"] .settings-back-row.dashboard-back { padding-inline: var(--space-3); }
 /* On a phone the tab body's own gutter is the page's: with the shell's added to it a card lost 40 px of a 320 px
    screen, and a three-way choice wrapped two and one (ui.css "On a phone a card keeps 18 px at its sides"). */
 html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
