@@ -8,8 +8,9 @@ import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation
 import { readConsciousness, readConsciousnessFromState } from './consciousness_api.js';
 import { allowanceHold, allowanceText } from './consciousness_words.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
-import { READ_OK, accountName, accountRows, facetReadState } from './claudexor_status_store.js';
-import { quotaSummary } from './harness_accounts.js';
+import { READ_OK, accountRows, facetReadState } from './claudexor_status_store.js';
+import { humanizeResetAt, quotaSummary } from './harness_accounts.js';
+import { controlIcon } from './page_icons.js';
 
 // The limits card is rows of settings_rows.js (their home is this tab), drawn and written by settings_controls.js: each
 // saves itself and says what happened. The consciousness allowance has its one editor here (owner, 10 Nov 2026: moved
@@ -196,31 +197,46 @@ const ALLOWANCE_NOTE = 'Known spend of its wake-ups, its replies in places and t
     + 'consciousness may not spend.';
 
 /** The Subscriptions block's doors, from the passive quota read (`GET /api/claudexor/status?view=quota`: the roster and
- *  windows the engine last observed; it starts and refreshes nothing): one per kind of account, where each account in
- *  rotation says its own window (several are never averaged), then Accounts and keys, which also says when the roster
- *  could not be read. `{ path, name, meta }`, `path` a Settings path. */
+ *  the windows the engine last observed; it starts and refreshes nothing). One per kind of account, in counted facts
+ *  and never an average of several accounts: how many are in rotation, how many of them have room, how many are at
+ *  their limit and when the first of those returns, how many were not checked. An account has room only when its
+ *  window says a share used and nothing else (harness_accounts.js quotaSummary); any other answer, "availability not
+ *  proven" included, is not checked. Then Accounts and keys, which also says when the roster could not be read.
+ *  `{ path, name, meta, value, tone, harness }`, `path` a Settings path. */
 export function subscriptionDoors(payload, { transportError = '', nowMs = Date.now() } = {}) {
     const accountsRead = facetReadState(payload, 'accounts', { transportError });
     const quotaRead = facetReadState(payload, 'quota', { transportError });
     const accounts = accountsRead === READ_OK ? accountRows(payload) : [];
+    const count = (n, words) => (n ? `${n} ${words}` : '');
     const doors = [...new Set(accounts.map((row) => row.harness))].map((harness) => {
         const own = accounts.filter((row) => row.harness === harness);
         const rotation = own.filter((row) => row.enabled);
-        const windows = rotation.map((row) => {
-            const { label } = quotaSummary(payload?.quota || [], harness, row.profile_id, { quotaRead, nowMs, absences: payload?.quota_absences || [] });
-            return rotation.length > 1 ? `${accountName(row)}: ${label}` : label;
-        });
-        const out = own.length - rotation.length;
-        return { path: `accounts/${harness}`, name: harnessPresentation(harness).label,
-            meta: [...windows, out ? `${out} out of rotation` : ''].filter(Boolean).join(' · ') };
+        const windows = rotation.map((row) => quotaSummary(payload?.quota || [], harness, row.profile_id,
+            { quotaRead, nowMs, absences: payload?.quota_absences || [] }));
+        const spent = windows.filter((window) => window.exhausted);
+        const open = windows.filter((window) => !window.exhausted && /^\d+% used( · resets [^·]+)?$/.test(window.label)).length;
+        const checked = spent.length + open;
+        const returns = spent.map((window) => window.resetsAt).filter((at) => Number.isFinite(Date.parse(at))).sort((a, b) => Date.parse(a) - Date.parse(b))[0];
+        const value = !rotation.length ? 'None in rotation' : quotaRead !== READ_OK ? 'Limits not checked' : !checked ? 'Usage not checked'
+            : rotation.length === 1 ? (open ? 'Has room' : 'At its limit') : `${open} of ${rotation.length} have room`;
+        return { path: `accounts/${harness}`, name: harnessPresentation(harness).label, harness, value, tone: checked && !open ? 'warn' : '',
+            meta: [count(rotation.length, 'in rotation'), rotation.length > 1 ? count(spent.length, 'at the limit') : '',
+                returns ? `next reset ${humanizeResetAt(returns, nowMs)}` : '', checked ? count(rotation.length - checked, 'not checked') : '',
+                count(own.length - rotation.length, 'out of rotation')].filter(Boolean).join(' · ') };
     });
     const meta = accountsRead !== READ_OK ? 'The accounts could not be read now.'
         : doors.length ? 'Sign in, add an account or take one out of rotation.' : 'No subscription account yet.';
-    return [...doors, { path: 'accounts', name: 'Accounts and keys', meta }];
+    return [...doors, { path: 'accounts', name: 'Accounts and keys', meta, value: '', tone: '', harness: '' }];
 }
-const subscriptionDoorHtml = ({ path, name, meta }) => `<button type="button" class="ui-row settings-row" data-kind="door" data-costs-account="${escapeHtmlAttr(path)}">`
-    + `<span class="ui-row-title">${escapeHtmlAttr(name)}</span><span class="ui-row-meta">${escapeHtmlAttr(meta)}</span>`
-    + '<span class="ui-row-actions"><span class="settings-row-chevron" aria-hidden="true">›</span></span></button>';
+function subscriptionDoorHtml({ path, name, meta, value, tone, harness }) {
+    const mark = harness ? harnessPresentation(harness) : null;
+    const glyph = mark ? `<svg viewBox="${mark.viewBox}" width="1em" height="1em" fill="currentColor" focusable="false"><path d="${mark.path}"></path></svg>` : controlIcon('globe', 16);
+    return `<button type="button" class="ui-row settings-row" data-kind="door" data-lead data-costs-account="${escapeHtmlAttr(path)}">`
+        + `<span class="dashboard-settings-glyph" aria-hidden="true">${glyph}</span>`
+        + `<span class="ui-row-title">${escapeHtmlAttr(name)}</span><span class="ui-row-meta">${escapeHtmlAttr(meta)}</span><span class="ui-row-actions">`
+        + `${value ? `<span class="settings-row-value"${tone ? ` data-tone="${tone}"` : ''}>${escapeHtmlAttr(value)}</span>` : ''}`
+        + '<span class="settings-row-chevron" aria-hidden="true">›</span></span></button>';
+}
 
 const tableCardHtml = ([id, title, column, , note]) => `<section class="ui-card costs-table-card" aria-labelledby="${id}-title">
         <h3 class="dashboard-card-title" id="${id}-title">${title}</h3>${note ? `<p class="costs-table-note">${note}</p>` : ''}
@@ -271,8 +287,8 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
         </section>
         <section class="ui-card dashboard-settings costs-subscriptions" aria-labelledby="costs-subscriptions-title">
             <h3 class="dashboard-card-title" id="costs-subscriptions-title">Subscriptions</h3>
-            <p class="costs-table-note">Quotas of your accounts. They are not dollars, and no limit above counts them.</p>
-            <div data-costs-subscriptions><p class="costs-table-note">Reading…</p></div>
+            <p class="dashboard-settings-lead">Quotas of your accounts. They are not dollars, and no limit above counts them.</p>
+            <div data-costs-subscriptions><p class="dashboard-settings-lead">Reading…</p></div>
         </section>
         <div class="costs-tables">${TABLES.map(tableCardHtml).join('')}</div>
     `;
