@@ -182,12 +182,12 @@ def test_every_n_tasks_shows_its_count_and_saves_both_keys_in_one_body(ui):
     page.click(f'{card} [data-evo-when="every_n"]')
     page.wait_for_selector(f'{card} [data-evo-when="every_n"][aria-pressed="true"]')
     assert saves == [{ON: True, CADENCE: "every_n:3"}], saves
-    page.wait_for_function("(id) => document.getElementById(id)?.textContent === 'Saved · applies to new tasks · was Off'", arg=result)
+    page.wait_for_function("(id) => document.getElementById(id)?.textContent === 'Saved · applies to new tasks · was Off · Undo'", arg=result)
     page.wait_for_function("(s) => document.querySelector(s)?.textContent.startsWith('After every 3 tasks, chats included,')", arg=caption)
     page.fill(f"{card} [data-evo-n]", "5")
     assert len(saves) == 1, "typing the count saves nothing"
     page.keyboard.press("Tab")
-    page.wait_for_function("(id) => document.getElementById(id)?.textContent === 'Saved · applies to new tasks · was Every 3 tasks'", arg=result)
+    page.wait_for_function("(id) => document.getElementById(id)?.textContent === 'Saved · applies to new tasks · was Every 3 tasks · Undo'", arg=result)
     assert saves[-1] == {ON: True, CADENCE: "every_n:5"}, saves
     page.fill(f"{card} [data-evo-n]", "0")
     page.keyboard.press("Tab")
