@@ -19,6 +19,7 @@ import {
     isFramedWidget,
     isRetainedWidget,
     renderWidgetCardParts,
+    renderWidgetContributionGroup,
     renderWidgetFacade,
     setWidgetCardNote,
     syncWidgetCardControls,
@@ -1152,26 +1153,36 @@ export function initWidgets(ctx = {}) {
     }
 
     const stopFromMenu = (key) => { const tab = tabByKey(key), card = liveCardFor(list, key); if (tab && card) stopWidgetByOwner(card, tab); };
+    // Only each card's "Shown in chat" group follows the contributions store; the trigger, the
+    // lifecycle items, the launch-policy check and focus stay as they are.
     function refreshContributionMenus() {
-        const hidden = new Set(contributions?.hiddenKeys?.() || []);
-        cardMenus?.close?.();
         for (const tab of lastTabs || []) {
+            // An open menu lives on body (widget_card.js moves it past clipped cards) beside its expanded trigger.
             const card = liveCardFor(list, widgetKey(tab));
-            const menu = card?.querySelector('.skills-card-menu');
-            if (!menu) continue;
-            const fresh = document.createElement('template');
-            fresh.innerHTML = renderWidgetCardParts(tab, { contributionVisibility: contributionVisibility(tab.skill) }).menu.trim();
-            menu.replaceWith(fresh.content.firstElementChild);
+            const dialog = card?.querySelector('.skills-card-menu-dialog') || (card?.querySelector('[data-widget-menu-trigger][aria-expanded="true"]')
+                ? document.querySelector('body > .skills-card-menu-dialog[open]') : null);
+            if (!dialog) continue;
+            const current = dialog.querySelector(':scope > [data-widget-contributions]');
+            const html = renderWidgetContributionGroup(contributionVisibility(tab.skill));
+            if ((current?.outerHTML || '') === html) continue;
+            const focusedKey = current?.contains(document.activeElement) ? document.activeElement.dataset.widgetContributionKey : '';
+            const fresh = html ? Object.assign(document.createElement('template'), { innerHTML: html }).content.firstElementChild : null;
+            if (current && fresh) current.replaceWith(fresh);
+            else if (current) current.remove();
+            else if (fresh) dialog.querySelector(':scope > [role="group"][aria-label="Size"]')?.before(fresh);
+            if (focusedKey) fresh?.querySelector(`[data-widget-contribution-key="${CSS.escape(focusedKey)}"]`)?.focus();
         }
-        list.querySelectorAll('[data-widget-contribution-key]').forEach((button) => {
-            const isHidden = hidden.has(button.dataset.widgetContributionKey || '');
-            button.dataset.widgetContributionHidden = isHidden ? 'true' : 'false';
-            button.setAttribute('aria-checked', isHidden ? 'false' : 'true');
-        });
     }
+    // The store's own refresh repaints the menus (onChange); a refused write keeps the last confirmed state.
     async function toggleContribution(key, hidden) {
-        await contributions.setHidden(key, hidden);
-        refreshContributionMenus();
+        try {
+            await contributions.setHidden(key, hidden);
+        } catch (err) {
+            const status = list.parentElement?.querySelector('[data-widget-arrange-status]');
+            const message = `Chat visibility was not saved: ${err?.message || err}`;
+            if (status) Object.assign(status, { textContent: message }).dataset.tone = 'error';
+            else console.warn(message);
+        }
     }
     const cardMenus = bindWidgetCardMenus(list, setWidgetStartMode, widths, removeKeptCard, stopFromMenu, toggleContribution);
     const stopContributionFacts = contributions?.onChange?.(refreshContributionMenus);

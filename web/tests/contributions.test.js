@@ -181,22 +181,65 @@ function room(initial = '') {
     return { composer, get text() { return text; }, set text(value) { text = value; } };
 }
 
-test('composer visibility writes only the hidden contribution keys and refreshes the projection', async () => {
+test('chat visibility writes one key atomically, covers every placement and refreshes the projection', async () => {
     const writes = [];
-    let prefs = { contributions: { hidden: ['other:control'] } };
-    const snapshots = [
-        { contributions: [item('claudexor_quotas:quota', { skill: 'claudexor_quotas', placement: 'composer.chips' })], preferences: prefs },
-        { contributions: [item('claudexor_quotas:quota', { skill: 'claudexor_quotas', placement: 'composer.chips' })], preferences: { contributions: { hidden: ['other:control', 'claudexor_quotas:quota'] } } },
+    const rows = [
+        item('claudexor_quotas:quota', { skill: 'claudexor_quotas', placement: 'composer.chips' }),
+        item('claudexor_quotas:save', { skill: 'claudexor_quotas', placement: 'message.action' }),
+        item('claudexor_quotas:tts', { skill: 'claudexor_quotas', provides: 'tts' }),
     ];
-    const reads = { uiContributions: async () => snapshots.shift(), uiPreferences: async () => prefs,
-        saveUiPreferences: async (payload) => { writes.push(payload); prefs = { contributions: payload.contributions }; } };
+    const snapshots = [
+        { contributions: rows, preferences: { contributions: { hidden: ['other:control'] } } },
+        { contributions: rows, preferences: { contributions: { hidden: ['other:control', 'claudexor_quotas:quota'] } } },
+    ];
+    const reads = { uiContributions: async () => snapshots.shift(),
+        uiPreferences: async () => { throw new Error('a visibility write never reads the whole list first'); },
+        saveUiPreferences: async (payload) => { writes.push(payload); return {}; } };
     const store = createContributionsStore({ client: reads });
+    let changes = 0;
+    store.onChange(() => { changes += 1; });
     await store.refresh();
-    assert.equal(store.visibilityForSkill('claudexor_quotas')[0].hidden, false);
+    changes = 0;
+    assert.deepEqual(store.visibilityForSkill('claudexor_quotas').map((row) => [row.key, row.place, row.hidden]), [
+        ['claudexor_quotas:quota', 'Chip above the composer', false],
+        ['claudexor_quotas:save', 'On replies', false],
+    ], 'placed controls only, a provider is not one');
     assert.equal(await store.setHidden('claudexor_quotas:quota', true), true);
-    assert.deepEqual(writes, [{ contributions: { hidden: ['other:control', 'claudexor_quotas:quota'] } }]);
+    assert.deepEqual(writes, [{ contributions: { hide: ['claudexor_quotas:quota'] } }], 'one key, never the whole list');
+    assert.equal(changes, 1, 'one notification per change');
     assert.equal(store.visibilityForSkill('claudexor_quotas')[0].hidden, true);
     assert.deepEqual(store.byPlacement('composer.chips'), []);
+});
+
+test('a refused visibility write rejects and keeps the last confirmed state; a show sends show', async () => {
+    const rows = [item('q:chip', { skill: 'q', placement: 'composer.chips' })];
+    let fail = true;
+    const writes = [];
+    const reads = { uiContributions: async () => ({ contributions: rows, preferences: { contributions: { hidden: ['q:chip'] } } }),
+        saveUiPreferences: async (payload) => { writes.push(payload); if (fail) throw new Error('503'); return {}; } };
+    const store = createContributionsStore({ client: reads });
+    await store.refresh();
+    await assert.rejects(store.setHidden('q:chip', false), /503/);
+    assert.equal(store.visibilityForSkill('q')[0].hidden, true, 'nothing optimistic: the owner can retry');
+    fail = false;
+    await assert.rejects(store.setHidden('q:chip', false), /read back/, 'a write the projection does not show is not reported as done');
+    assert.deepEqual(writes.at(-1), { contributions: { show: ['q:chip'] } });
+});
+
+test('ui_preferences_changed for contributions re-reads once; another group does not', async () => {
+    const reads = client([{}, {}, {}]);
+    const store = createContributionsStore({ client: reads });
+    const handlers = new Map();
+    const ws = { on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); } };
+    store.attach({ ws, target: new EventTarget() });
+    await tick();
+    assert.equal(reads.calls.length, 1);
+    handlers.get('ui_preferences_changed')({ type: 'ui_preferences_changed', keys: ['widget_size'] });
+    await tick();
+    assert.equal(reads.calls.length, 1);
+    handlers.get('ui_preferences_changed')({ type: 'ui_preferences_changed', keys: ['contributions'] });
+    await tick();
+    assert.equal(reads.calls.length, 2);
 });
 
 test('draft.insert puts words into the visible room\'s draft and never sends; a room without a composer says so', async () => {

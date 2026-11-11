@@ -205,6 +205,32 @@ def test_preferences_merge_and_missing_provider_stays_selected(tmp_path, monkeyp
         assert http.post("/api/ui/preferences", json={"voice": {"stt": "x" * 120}, "contributions": {"hidden": [str(i) for i in range(64)]}}).status_code == 200
 
 
+def test_hide_and_show_change_single_keys_under_the_lock_and_tell_every_window(tmp_path, monkeypatch):
+    from ouroboros.gateway import ws
+
+    frames = []
+    monkeypatch.setattr(ws, "broadcast_ws_sync", lambda msg: frames.append(msg) or True)
+    with client(tmp_path, monkeypatch) as http:
+        assert http.post("/api/ui/preferences", json={"contributions": {"hidden": ["a:one"], "order": ["b:two"]}}).status_code == 200
+        # Two windows that never read each other's choice: each names only its own key.
+        http.post("/api/ui/preferences", json={"contributions": {"hide": ["b:two"]}})
+        saved = http.post("/api/ui/preferences", json={"contributions": {"hide": ["c:three", "c:three"]}}).json()
+        assert saved["contributions"] == {"hidden": ["a:one", "b:two", "c:three"], "order": ["b:two"]}
+        assert http.post("/api/ui/preferences", json={"contributions": {"show": ["a:one", "never:hidden"]}}).json()[
+            "contributions"]["hidden"] == ["b:two", "c:three"]
+        assert http.post("/api/ui/preferences", json={"contributions": {"hide": ["b:two"]}, "widget_order": ["w"]}).json()[
+            "contributions"]["hidden"] == ["b:two", "c:three"], "hiding a hidden key changes nothing"
+        assert frames and all(frame == {"type": "ui_preferences_changed", "keys": ["contributions"]} for frame in frames)
+        frames.clear()
+        assert http.post("/api/ui/preferences", json={"widget_order": ["w"]}).status_code == 200
+        assert frames == [], "only a contributions change is announced"
+        for bad in ({"contributions": {"hide": "a:one"}}, {"contributions": {"show": [3]}},
+                    {"contributions": {"hide": [""]}}, {"contributions": {"hide": ["x" * 121]}},
+                    {"contributions": {"hide": [str(i) for i in range(63)]}}):
+            assert http.post("/api/ui/preferences", json=bad).status_code == 400, bad
+        assert http.get("/api/ui/preferences").json()["contributions"]["hidden"] == ["b:two", "c:three"], "a refused write keeps the file"
+
+
 def test_a_stored_preference_this_release_refuses_never_fails_the_skills_page(tmp_path, monkeypatch):
     installed(tmp_path, entries=[STT])
     prefs = tmp_path / "state" / "ui_preferences.json"

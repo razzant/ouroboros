@@ -76,11 +76,25 @@ export function withWidgetStartMode(current, key, mode) {
 // checked width when the menu opens (`bindWidgetCardMenus`). The head draws the two
 // parts apart (`renderWidgetCardParts`): the lifecycle controls may drop under the
 // title's row, the menu stays with the move handle in one pair that never splits.
+const menuItem = (attrs, label, role = 'menuitemradio') => (
+    `<button type="button" role="${role}" class="skills-menu-item widgets-menu-item" ${attrs}><span class="widgets-menu-check" aria-hidden="true">${role === 'menuitemradio' || role === 'menuitemcheckbox' ? '✓' : ''}</span>${escapeHtml(label)}</button>`
+);
+const menuGroup = (label, items, attrs = '') => `<div role="group" aria-label="${label}"${attrs ? ` ${attrs}` : ''}><div class="widgets-menu-heading" aria-hidden="true">${label}</div>${items}</div>`;
+
+/** The card menu's "Shown in chat" group: one checkbox per placed control of the skill, checked while it shows. */
+export function renderWidgetContributionGroup(rows = []) {
+    if (!rows.length) return '';
+    return menuGroup('Shown in chat', rows.map((row) => {
+        const hidden = row.hidden === true;
+        const label = row.label || 'Skill control';
+        const named = row.place ? `${label}, ${row.place.toLowerCase()}` : label;
+        return menuItem(`data-widget-contribution-key="${escapeHtml(row.key || '')}" data-widget-contribution-hidden="${hidden ? 'true' : 'false'}" aria-checked="${hidden ? 'false' : 'true'}" aria-label="${escapeHtml(named)}" title="${escapeHtml(row.place || '')}"`,
+            label, 'menuitemcheckbox');
+    }).join(''), 'data-widget-contributions');
+}
+
 export function renderWidgetCardParts(tab, { contributionVisibility = [] } = {}) {
-    const item = (attrs, label, role = 'menuitemradio') => (
-        `<button type="button" role="${role}" class="skills-menu-item widgets-menu-item" ${attrs}><span class="widgets-menu-check" aria-hidden="true">${role === 'menuitemradio' || role === 'menuitemcheckbox' ? '✓' : ''}</span>${escapeHtml(label)}</button>`
-    );
-    const group = (label, items) => `<div role="group" aria-label="${label}"><div class="widgets-menu-heading" aria-hidden="true">${label}</div>${items}</div>`;
+    const item = menuItem, group = menuGroup;
     const framed = isFramedWidget(tab);
     const policy = framed ? group('Launch policy', WIDGET_START_MODES.map((mode) => (
         item(`data-widget-start-mode="${mode}" aria-checked="false"`, WIDGET_START_MODE_LABELS[mode])
@@ -88,11 +102,7 @@ export function renderWidgetCardParts(tab, { contributionVisibility = [] } = {})
     const sizes = group('Size', `<p class="widgets-menu-note" data-widget-size-note hidden>Widths apply when the list is wide.</p>${
         WIDGET_WIDTH_STEPS.map(({ w, label }) => item(`data-widget-size="${w}" aria-checked="false"`, label)).join('')
     }${item('data-widget-size="reset"', 'Reset size', 'menuitem')}`);
-    const composer = contributionVisibility.length ? group('Composer', contributionVisibility.map((row) => {
-        const hidden = row.hidden === true;
-        return item(`data-widget-contribution-key="${escapeHtml(row.key || '')}" data-widget-contribution-label="${escapeHtml(row.label || 'composer control')}" data-widget-contribution-hidden="${hidden ? 'true' : 'false'}" aria-checked="${hidden ? 'false' : 'true'}"`,
-            `${hidden ? 'Show' : 'Hide'} ${row.label || 'composer control'}`, 'menuitemcheckbox');
-    }).join('')) : '';
+    const composer = renderWidgetContributionGroup(contributionVisibility);
     // A card kept from the chat (`pinned_card`) is the owner's data: Remove takes it off the board.
     const remove = tab?.pinned_card ? `<div role="group" aria-label="Card">${item('data-widget-unpin', 'Remove', 'menuitem')}</div>` : '';
     const power = framed ? `<span class="ui-status" data-tone="neutral" data-widget-status hidden>Stopped</span>

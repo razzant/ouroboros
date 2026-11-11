@@ -914,6 +914,8 @@ export function initSkills(ctx = {}) {
             showToast(`${name}: ${actionTarget.dataset.submitReason || 'publishing is not available now'}`, 'warn');
             return;
         }
+        // Disabling a focused button drops focus to the page in Chromium; the keyboard owner gets it back below.
+        const hadFocus = document.activeElement === actionTarget;
         actionTarget.disabled = true;
         let refresh = true;
         try {
@@ -928,6 +930,9 @@ export function initSkills(ctx = {}) {
             showToast(`${name}: ${err.message || err}`, err.cancelled ? 'warn' : 'danger');
         } finally {
             actionTarget.disabled = false;
+            if (hadFocus && actionTarget.isConnected && (!document.activeElement || document.activeElement === document.body)) {
+                actionTarget.focus({ preventScroll: true });
+            }
             if (refresh) await readInstalled({ quiet: true });
         }
     };
