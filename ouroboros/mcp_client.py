@@ -719,7 +719,7 @@ def _transport_factory(cfg: MCPServerConfig, host_env: Optional[Dict[str, str]] 
 async def _session(cfg: MCPServerConfig):
     """One fresh client session over ``cfg``'s transport; leaving it joins both contexts."""
     if not _MCP_SDK_AVAILABLE:  # raised before any transport exists: a proven no-send
-        missing = RuntimeError("MCP client SDK not installed. Add `mcp>=1.29` to the runtime.")
+        missing = RuntimeError("MCP client SDK not installed. Add `mcp>=1.30,<2.0` to the runtime.")
         missing.mcp_unsent_joined = True
         raise missing
     async with _transport_factory(cfg) as streams:  # every transport yields (read, write, ...)

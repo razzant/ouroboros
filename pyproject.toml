@@ -54,7 +54,9 @@ dependencies = [
     # dependencies because the packaged hermetic commit gate invokes them.
     "pytest-xdist>=3.5",
     "pytest-timeout>=2.1",
-    "mcp>=1.29,<2.0",
+    # Security floor: CVE-2026-116686 ($ref fetch in tool-result validation) and
+    # CVE-2026-116685 (cross-origin redirects) are fixed in the 1.x line at 1.30.0.
+    "mcp>=1.30,<2.0",
     "PyYAML>=6.0",
     "croniter",
     # Upper-bounded: tree-sitter 0.25.x + language-pack 1.x changed the grammar/
