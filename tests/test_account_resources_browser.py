@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
+from tests.settings_browser_helpers import open_settings
 
 subscription_ui = setup_browser.subscription_ui
 capture = setup_browser.capture
@@ -33,7 +34,7 @@ def resources_ui(subscription_ui):
                   resource_capabilities={"read": True, "refresh": True, "reset": True, "inspect_reset": True})
     profiles = status["profiles"]["profiles"] = []
     for index in range(20):
-        target = TARGET if index == 0 else {"harness": "codex" if index % 2 else "claude",
+        target = TARGET if index == 0 else {"harness": "claude",
                                           "profile_id": f"account-{index:02}"}
         profiles.append({"profile": {"harness_id": target["harness"], "profile_id": target["profile_id"],
                                      "display_name": "Personal default" if index == 0 else f"Workspace {index:02}",
@@ -82,7 +83,7 @@ def open_accounts(ui, width=390, theme="dark"):
     page.set_viewport_size({"width": width, "height": 960})
     page.add_init_script(f"localStorage.setItem('ouroboros.theme', {json.dumps(theme)})")
     page.goto(ui["url"] + "/#settings")
-    page.locator('[data-settings-tab="providers"]').click()
+    open_settings(page, "accounts/claude")
     expect(page.locator(".harness-account-row[data-harness]")).to_have_count(20)
     return page, page.locator(ROW)
 
@@ -97,7 +98,7 @@ def passive_read(page):
 def frame_section(locator):
     """Position evidence below Settings' existing sticky fade, without product scrolling."""
     locator.evaluate("""element => {
-        const host = element.closest('.settings-scroll');
+        const host = element.closest('[data-settings-page]');
         if (host) host.scrollTop += element.getBoundingClientRect().top - host.getBoundingClientRect().top - 48;
         else element.scrollIntoView({block: 'center'});
     }""")
@@ -242,7 +243,7 @@ def test_timeout_before_receipt_survives_session_storage_loss_and_recovers_same_
     page.evaluate("sessionStorage.clear()")
     ui["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
-    page.locator('[data-settings-tab="providers"]').click()
+    open_settings(page, "accounts/claude")
     row.locator("[data-resources]").click()
     expect(row).to_contain_text("Reset outcome is unconfirmed")
     receipt = copy.deepcopy(ui["wire"]["receipt"])
@@ -294,7 +295,7 @@ def test_non_loopback_reset_keeps_original_request_after_reload(resources_ui, sc
     assert original[0] and original[1]["offer_id"] == offer_id and original[1]["target"] == TARGET
     ui["errors"].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     page.reload()
-    page.locator('[data-settings-tab="providers"]').click()
+    open_settings(page, "accounts/claude")
     row.locator("[data-resources]").click()
     expect(row).to_contain_text("Reset outcome is unconfirmed")
     assert len(ui["reset_calls"]) == 1, "reload must not resend an unresolved request"
@@ -453,7 +454,7 @@ def test_maintenance_and_resources_share_refresh_without_losing_pending_reset(re
 
     ui = resources_ui
     entry = _inventory_row("claude")
-    maintenance_only = _inventory_row("agy", targets=["latest"])
+    maintenance_only = _inventory_row("agy", exact=False)
     inventory = {"harnesses": [entry, maintenance_only]}
     operation = {"id": "program-update", "harness": "claude", "state": "running",
                  "phase": "installing", "target": {"kind": "latest", "version": "3.0.0"},
@@ -499,16 +500,18 @@ def test_maintenance_and_resources_share_refresh_without_losing_pending_reset(re
     details.locator("summary").click()
 
     hold_inventory = True
+    family.get_by_role("button", name="Details", exact=True).click()
     family.get_by_role("button", name="Check latest", exact=True).click()
     expect(family.get_by_role("button", name="Checking…", exact=True)).to_be_disabled()
     expect(details).to_have_attribute("open", "")
     assert held
     details.locator("summary").focus()
     hold_inventory = False
-    entry["available"] = {"version": "3.0.0", "observedAt": "2026-10-09T12:00:00Z"}
+    entry["newest"] = {"status": "available", "version": "3.0.0", "observedAt": "2026-10-09T12:00:00Z"}
+    entry["updateAvailable"] = "yes"
     for route in held:
         route.fulfill(json=inventory)
-    expect(family.locator(".harness-maintenance-line")).to_contain_text("Latest 3.0.0")
+    expect(family.locator(".harness-maintenance-line")).to_contain_text("3.0.0 available")
     expect(details).to_have_attribute("open", "")
     expect(details.locator("summary")).to_be_focused()
     expect(row.locator("[data-resources]")).to_have_attribute("aria-expanded", "true")
@@ -516,7 +519,7 @@ def test_maintenance_and_resources_share_refresh_without_losing_pending_reset(re
     assert ui["reset_calls"] == [original]
 
     family.get_by_role("button", name="Update", exact=True).click()
-    expect(family).to_contain_text("Installing 3.0.0")
+    expect(family).to_contain_text("Updating…")
     expect(row.locator("[data-refresh-account]")).to_have_attribute("aria-disabled", "false")
     before_inspections = len(inspections)
     ui["hold_refresh"].append(True)
@@ -539,8 +542,7 @@ def test_maintenance_and_resources_share_refresh_without_losing_pending_reset(re
     expect(family).to_contain_text("Update cancelled")
     assert len(updates) == len(cancellations) == 1
     assert updates[0][0] and updates[0][1] == {"harness": "claude", "target": {"kind": "latest"}}
-    orphan = page.locator('.agent-family-card[data-family="agy"]')
-    expect(orphan.locator("[data-family-add], [data-resources]")).to_have_count(0)
+    expect(page.locator('.agent-family-card[data-family="agy"]')).to_have_count(0)
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     frame_section(family.locator(".agent-family-head"))
     capture(page, f"combined-maintenance-resources-{width}-{theme}")
