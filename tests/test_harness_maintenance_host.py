@@ -852,3 +852,31 @@ def test_connect_real_socket_refusals_and_lost_contact(connect_socket, mode):
         assert failure["code"] == ("fixture_refusal" if mode == "retryable_forever" else "daemon_unreachable")
         assert failure["message"]
         assert state["calls"]["/v2/setup/jobs"] == 1
+
+
+@pytest.mark.parametrize("read", ["silent", "refused", "receipt"])
+def test_connect_join_keeps_only_accepted_receipts_and_request_identity(monkeypatch, connect_clock, read):
+    def active(*_):
+        exc = ClaudexorUnavailable("maintenance_already_active", "Active", status_code=409)
+        exc.problem = {"context": {"operationId": "accepted-operation"}}
+        raise exc
+    receipt = connected_program(state="running", termination="not_applicable", id="accepted-operation")
+    receipt["requester"]["requestId"] = "accepted-key"
+    def inspect(*_, **__):
+        if read == "receipt":
+            return deepcopy(receipt)
+        raise ClaudexorUnavailable("refused" if read == "refused" else "offline", "No receipt",
+                                  status_code=403 if read == "refused" else 0)
+    monkeypatch.setattr(service, "start_maintenance", active)
+    monkeypatch.setattr(service, "inspect_operation", inspect)
+    with pytest.raises(ClaudexorUnavailable) as caught:
+        service.install_for_connect("future-program")
+    context = caught.value.problem["context"]
+    assert context["operationId"] == "accepted-operation"
+    if read == "receipt":
+        assert context["requestId"] == "accepted-key" and context["operation"] == receipt
+        assert "is still installing" in str(caught.value)
+    else:
+        assert "operation" not in context and "requestId" not in context
+        assert (caught.value.status_code == 403) if read == "refused" else "unknown" in str(caught.value)
+    assert connect_clock.now == (1 if read == "refused" else 3)

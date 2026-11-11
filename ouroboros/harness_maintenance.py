@@ -178,16 +178,18 @@ def install_for_connect(harness: str) -> dict:
         identity = ((getattr(exc, "problem", None) or {}).get("context") or {}).get("operationId")
         if exc.code != "maintenance_already_active" or not isinstance(identity, str) or not identity:
             raise
-        operation = {"id": identity, "harness": harness, "state": "queued", "termination": "not_applicable"}
-    identity = operation["id"]
+        operation, request_id = None, None
+    else:
+        identity = operation["id"]
     deadline = time.monotonic() + get_claudexor_harness_install_timeout_sec()
     last_failure = None
-    while operation["state"] in {"queued", "running"} or operation["termination"] == "unconfirmed":
+    while operation is None or operation["state"] in {"queued", "running"} or operation["termination"] == "unconfirmed":
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            known_running = last_failure is None and operation["state"] in {"queued", "running"}
+            known_running = last_failure is None and operation is not None and operation["state"] in {"queued", "running"}
             error = _connect_install_problem(operation, request_id, "harness_install_timeout",
-                                             f"{harness} is still installing" if known_running else "Installation state is unknown")
+                                             f"{harness} is still installing" if known_running else "Installation state is unknown",
+                                             identity=identity, harness=harness)
             if last_failure is not None:
                 error.problem["context"]["lastReadProblem"] = copy.deepcopy(getattr(last_failure, "problem", None)) or {
                     "code": last_failure.code, "message": str(last_failure)}
@@ -198,13 +200,13 @@ def install_for_connect(harness: str) -> dict:
             continue
         try:
             operation = inspect_operation(identity, deadline=min(deadline, time.monotonic() + 5))
+            request_id = (operation.get("requester") or {}).get("requestId") or request_id
             last_failure = None
         except ClaudexorUnavailable as exc:
             last_failure = exc
             if exc.status_code >= 400 and (getattr(exc, "problem", None) or {}).get("retryable") is not True:
                 exc.problem = copy.deepcopy(getattr(exc, "problem", None)) or {"code": exc.code, "message": str(exc)}
-                exc.problem["context"] = {**exc.problem.get("context", {}), "operationId": identity,
-                                           "requestId": request_id, "operation": copy.deepcopy(operation)}
+                exc.problem["context"] = {**exc.problem.get("context", {}), **_connect_context(identity, operation, request_id)}
                 raise
     selected = operation.get("after") or {}
     if (operation["harness"] != harness or operation["state"] != "succeeded"
@@ -216,9 +218,13 @@ def install_for_connect(harness: str) -> dict:
     return operation
 
 
-def _connect_install_problem(operation, request_id, code, message):
-    identity = operation["id"]
-    error = ClaudexorUnavailable(code, f"{message}. See {operation['harness']} in Settings, Accounts", status_code=503)
-    error.problem = {"code": code, "message": str(error), "context": {
-        "operationId": identity, "requestId": request_id, "operation": copy.deepcopy(operation)}}
+def _connect_context(identity, operation, request_id):
+    return {key: copy.deepcopy(value) for key, value in {
+        "operationId": identity, "requestId": request_id, "operation": operation}.items() if value is not None}
+
+
+def _connect_install_problem(operation, request_id, code, message, *, identity=None, harness=None):
+    error = ClaudexorUnavailable(code, f"{message}. See {harness or operation['harness']} in Settings, Accounts", status_code=503)
+    error.problem = {"code": code, "message": str(error), "context":
+                     _connect_context(identity or operation["id"], operation, request_id)}
     return error
