@@ -112,13 +112,13 @@ test('the headline card says the money of the last 24 hours alone; where it went
     assert.equal(spendDetails(snapshot).unpriced, true);
     assert.deepEqual(spendDetails({ ...snapshot, spendByCause: [{ cause: 'own', label: '', usd: 0, unmeteredCalls: 0 }] }),
         { rows: [], unpriced: false }, 'a zero is not listed');
-    // Where the places live, where the allowance is set (Costs, its one editor) and where the rest is: pointers, no list.
+    // Where the places live is a pointer, no list; the allowance, its own tasks and its conversations are the settings
+    // card's rows (dashboard_settings.test.js), so no line here leads to Costs or Settings.
     assert.match(strip(html), /The places it lives in, their words and their circles: Circles ›/);
     assert.match(html, /data-cx-act="circles"/);
-    assert.match(strip(html), /Its spending limit over 24 hours and what it spent: Costs ›/);
-    assert.match(html, /data-cx-act="costs">Costs ›</);
-    assert.match(strip(html), /Its own tasks and concurrent conversations: Settings ›/);
-    assert.doesNotMatch(strip(html), /Allowance, own tasks/, 'Settings no longer holds the allowance');
+    assert.doesNotMatch(html, /data-cx-act="(costs|settings)"|Costs ›|Settings ›/);
+    assert.match(strip(main), /Stop also ends a wake that is running now\./, 'stopping is said to end a running wake');
+    assert.doesNotMatch(summaryHtml({ ...snapshot, enabled: false }), /Stop also ends/, 'said only while there is a Stop');
     assert.match(details, /^<details class="ui-disclosure consciousness-details"><summary>Details<\/summary>/);
     assert.match(strip(details), /Own time\s*\$0\.62.*Some calls have no price\..*Release notes draft \(Slack · Acme\)/);
     assert.equal(countedRootsText(snapshot), 'Its own tasks: 1 of 2 · Release notes draft (Slack · Acme)');
@@ -276,7 +276,8 @@ function fakeMount() {
         innerHTML: '',
         regions,
         querySelector(selector) {
-            if (!regions.has(selector)) regions.set(selector, { innerHTML: '', textContent: '', dataset: {}, querySelector: () => null, querySelectorAll: () => [], closest: () => null });
+            if (!regions.has(selector)) regions.set(selector, { innerHTML: '', textContent: '', dataset: {}, querySelector: () => null, querySelectorAll: () => [], closest: () => null,
+                addEventListener() {}, removeEventListener() {} });
             return regions.get(selector);
         },
         addEventListener() {}, removeEventListener() {},
