@@ -3,8 +3,7 @@ import assert from 'node:assert/strict';
 
 import { readFileSync } from 'node:fs';
 
-import { confirmAndSendRestart } from '../modules/settings.js';
-import { confirmAndSendRestart as sharedRestart, restartConfirmBody } from '../modules/chat_activity.js';
+import { confirmAndSendRestart, restartConfirmBody } from '../modules/chat_activity.js';
 import { summarizeChatLiveEvent } from '../modules/log_events.js';
 
 const noActivities = async () => [];
@@ -45,7 +44,6 @@ test('Restart now confirm-and-send sends exactly one non-queueable /restart', as
 });
 
 test('Settings and the chat header share ONE restart confirmation (owner quiz 285597)', () => {
-    assert.equal(confirmAndSendRestart, sharedRestart);
     const bar = readFileSync(new URL('../modules/chat_header.js', import.meta.url), 'utf8');
     const header = bar.slice(bar.indexOf("if (command === 'restart')"), bar.indexOf("if (command === 'panic')"));
     // The header no longer sends /restart directly: it runs the same dialog.

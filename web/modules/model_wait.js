@@ -398,9 +398,9 @@ export function createModelWaitController({ getRecord, onDomWrite = (fn) => fn()
         });
         node.querySelector('[data-wait-retry]').addEventListener('click', () => { void submit(taskId, view, 'retry'); });
         node.querySelector('[data-wait-repeat]').addEventListener('click', () => { void submit(taskId, view, '', {}, true); });
-        node.querySelector('[data-wait-settings]').addEventListener('click', () => { void openSettings('providers'); });
+        node.querySelector('[data-wait-settings]').addEventListener('click', () => { void openSettings('accounts'); });
         node.querySelector('[data-wait-login]').addEventListener('click', async () => {
-            if (await openSettings('providers') === false) return;
+            if (await openSettings('accounts') === false) return;
             if (view.row.credential_harness && view.row.credential_profile_id) {
                 await login(view.row.credential_harness, view.row.credential_profile_id);
             }

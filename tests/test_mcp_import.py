@@ -412,14 +412,14 @@ def test_preview_contract_twin_and_the_producer_agree():
                             contracts.MCPImportPreviewRequest) == []
 
 
-# The real Settings page markup and modules over the repo's DOM double, which parses nothing: this mounts their own
-# markup, so a renamed control fails here. It stops short of an engine, layout, CSS and the Save button's own handler
-# (settings.js collects these same fields into a larger body); tests/test_mcp_headers_browser.py is the rendered lane.
+# The real MCP section markup and module over the repo's DOM double, which parses nothing: this mounts their own
+# markup (the section settings_ui.js keeps unmounted until the Tools page is rebuilt), so a renamed control fails here.
+# It stops short of an engine, layout and CSS; tests/test_mcp_headers_browser.py is the rendered lane.
 IMPORT_JOURNEY = r'''
 import assert from 'node:assert/strict';
 import { installDomDouble } from './web/tests/dom_double.js';
 import { applyMcpSettings, collectMcpSettings, initMcpSettings } from './web/modules/mcp_settings.js';
-import { renderSettingsPage } from './web/modules/settings_ui.js';
+import { advancedPanel } from './web/modules/settings_ui.js';
 
 const [base, documentText] = process.argv.slice(1);
 const { doc } = installDomDouble();
@@ -468,7 +468,7 @@ nodes.matches = function matchesWithIds(selector, scope) {
 };
 const page = doc.createElement('div');
 doc.body.appendChild(page);
-page.innerHTML = renderSettingsPage();
+page.innerHTML = advancedPanel();
 
 const previews = [];
 const wire = globalThis.fetch;

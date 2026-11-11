@@ -491,13 +491,6 @@ test('saving a choice paints the page from the answer; a refused save leaves the
     assert.equal(client.calls.filter(([name]) => name === 'uiI18n').length, 0);
 }));
 
-test('edits inside the language block never mark the Settings draft dirty', () => {
-    const source = readFileSync(new URL('../modules/settings.js', import.meta.url), 'utf8');
-    const handler = source.slice(source.indexOf('const onServerSettingEdited = (event) => {'), source.indexOf("page.addEventListener('input', onServerSettingEdited);"));
-    assert.match(handler, /closest\?\.\('\[data-i18n-settings\]'\)\) return;/, 'the language saves through its own endpoint');
-    assert.ok(handler.indexOf('[data-i18n-settings]') < handler.indexOf('onSettingsEdited();'), 'before the draft is touched');
-});
-
 test('the block mounted in the wizard offers Import only and hides what is hidden; Settings keeps Export and Regenerate', () => {
     const settings = languageBlockHtml();
     const wizard = languageBlockHtml({ onboarding: true });

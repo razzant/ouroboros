@@ -245,11 +245,11 @@ test('neutral controls have one shared button role in both UI shells', () => {
 test('result/action composition has one shared owner, independent of page and viewport', async () => {
     // Real-container reflow and readability are exercised by the browser consumer.
     const pageCss = await readFile(new URL('../style.css', import.meta.url), 'utf8');
-    // Settings composes the shared row (the footer, the catalog refresh, the LAN hint); the private row stays only for
-    // the screens that still read it (Skills › Browse, Updates) and never reaches the shared sheet.
+    // Settings composes the shared row (the catalog refresh, the LAN hint) and has no page-wide Save bar; the private
+    // row stays only for the screens that still read it (Skills › Browse, Updates) and never reaches the shared sheet.
     assert.doesNotMatch(settingsUiJs, /settings-action-row/);
     assert.doesNotMatch(sharedCss, /\.settings-action-row\s*\{/);
-    assert.match(settingsUiJs, /<div class="settings-footer ui-action-row" data-draft="clean">/);
+    assert.doesNotMatch(settingsUiJs + settingsJs + settingsCss, /settings-footer|btn-save-settings/);
     assert.doesNotMatch(pageCss, /\.skills-card-action-row\s*\{[^}]*(?:display:|grid-template|flex:)/);
     // The shared parts: the action row keeps a reserved result line, the result shares the status sentence's tones.
     assert.match(sharedCss, /\.ui-action-row\s*\{[^}]*flex-wrap:\s*wrap/);
@@ -260,14 +260,12 @@ test('result/action composition has one shared owner, independent of page and vi
 });
 
 test('async actions expose the same busy and status semantics', () => {
-    // Save and every API key's Test share one busy helper and one status vocabulary.
+    // Every API key's Test shares the one busy helper and one status vocabulary.
     assert.match(controlsJs, /export function setButtonBusy\(button, busy\)/);
     assert.match(controlsJs, /setAttribute\('aria-busy', 'true'\)/);
-    assert.match(settingsJs, /setButtonBusy\(saveButton, true\)/);
     assert.match(connectionsJs, /setButtonBusy\(button, true\)/);
     assert.match(connectionsJs, /setInlineStatus\(status, 'Testing…', 'muted'\)/);
     assert.match(connectionsJs, /providerTestStatusText\(data\), data\?\.ok \? 'ok' : 'danger'/);
-    assert.match(settingsJs, /refreshModelCatalog\(\{ button: byId\('btn-refresh-model-catalog'\) \}\)/);
     assert.match(connectionsJs, /setInlineStatus\(row\.querySelector\('\[data-connection-test-status\]'\), '', 'muted'\)/);
     assert.match(primitivesJs, /if \(el\.textContent !== next\) el\.textContent = next/);
     // The catalog's result is the shared result line: its count ends by itself, a read gap stays.

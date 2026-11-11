@@ -9,7 +9,11 @@ import {
     reachesAnotherPair,
 } from '../modules/settings_connections.js';
 import { cyberReviewNote } from '../modules/settings_policy.js';
-import { renderSettingsPage } from '../modules/settings_ui.js';
+import { accountsPanel, advancedPanel, appearancePanel, behaviorPanel, modelsPanel, secretSettingsSection } from '../modules/settings_ui.js';
+
+// The old tabs' sections, unmounted in settings_ui.js until their pages are rebuilt.
+const renderSettingsPage = () => [accountsPanel(), secretSettingsSection(), modelsPanel(), behaviorPanel(), appearancePanel(),
+    advancedPanel()].join('');
 
 test('provider test status uses only the controlled compact vocabulary', () => {
     assert.equal(providerTestStatusText({ ok: true }), 'Works');

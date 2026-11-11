@@ -77,7 +77,7 @@ export function renderSourceRow(source, { items = [], health = null } = {}) {
 /**
  * Mount the Sources view. `host` = { sources(force), sourcesProblem(): string, sourceSuggestions(): rows,
  *   catalog({refresh}), installedSkills(): rows|null, reloadAll(): Promise, toast(msg, tone), showMadeHere(),
- *   openBehaviorSettings() }.
+ *   openSettings(path, options) }.
  */
 export function createSkillSources({ pane, host, api = skillSourcesApi }) {
     let sources = [];
@@ -118,7 +118,7 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
             </section>
             <div class="skills-sources-foot">
                 <p>Skills made on this computer${host.installedSkills() ? ` (${madeHere})` : ''} don’t come from a source. <button type="button" class="skills-link-quiet ui-hit-area" data-source-action="made_here">Publish one to share it ›</button></p>
-                <p>Automatic keys for skills that may run: <button type="button" class="skills-link-quiet ui-hit-area" data-source-action="behavior">Settings → Behavior ›</button></p>
+                <p>Automatic keys for skills that may run: <button type="button" class="skills-link-quiet ui-hit-area" data-source-action="auto_grant">Permissions and checks ›</button></p>
             </div>`;
     }
 
@@ -218,7 +218,7 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
                 if (added) await afterChange(`${added.name || 'The source'} added. Its skills are in Browse.`);
             } else if (action === 'first_start') await confirmFirstStart();
             else if (action === 'made_here') host.showMadeHere();
-            else if (action === 'behavior') host.openBehaviorSettings();
+            else if (action === 'auto_grant') host.openSettings('permissions', { row: 'OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS' });
             else if (source) await run(action, source);
         } catch (err) {
             host.toast(err?.message || String(err), 'danger');

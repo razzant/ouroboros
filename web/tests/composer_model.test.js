@@ -383,7 +383,7 @@ test('one source is no source step; nothing but Main says so and offers the way 
     assert.deepEqual(alone.rows().map((row) => row.key), [`route|${ASTRA}`, 'accounts']);
     assert.equal(alone.rows()[1].text, 'Add a subscription or a key in Settings › Accounts');
     await alone.take('accounts');
-    assert.deepEqual([alone.settingsOpened, alone.el.dataset.open], [['providers'], 'false']);
+    assert.deepEqual([alone.settingsOpened, alone.el.dataset.open], [['accounts'], 'false']);
     alone.controls.destroy();
 
     const failed = room({ storeOptions: { catalog: new Error('offline') } });

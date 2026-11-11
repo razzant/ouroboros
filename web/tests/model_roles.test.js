@@ -200,6 +200,4 @@ test('Settings says under Main, before Save, what a new Main does to running wor
     assert.match(main, /data-model-role-model aria-label="Main Model" aria-describedby="roles-main-note"/);
     assert.equal(html.split('data-main-follow-note').length, 2, 'one note, under Main and not under Fallback');
     assert.ok(!rendered(false).includes('data-main-follow-note'), 'the wizard and the wait card never show it');
-    const settings = readFileSync(new URL('../modules/settings.js', import.meta.url), 'utf8');
-    assert.match(settings, /createModelRolesEditor\(\{ hostId: 'settings-model-roles', mainNote: true,/);
 });
