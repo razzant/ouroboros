@@ -1579,11 +1579,12 @@ textarea.ui-control.settings-rules-text {
 .agent-family-accounts[hidden] { display: none; }
 .agent-family-accounts > .agent-family-id { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-3); }
 .agent-family-accounts > .agent-family-login:empty { display: none; }
-/* Many accounts at a glance: one bar for each, as tall as the quota it has left; a spent one is its rail, one out of
-   rotation a short rail, and the one that needs sign-in stands in the owner's hue. */
+/* Many accounts at a glance: one bar for each, as tall as the quota it has left (--accounts-bar-left, written by the
+   page for each bar); a spent one is its rail, one out of rotation a short rail, and the one that needs sign-in stands
+   in the owner's hue. */
 .accounts-bars { display: flex; align-items: flex-end; gap: 3px; height: 52px; }
 .accounts-bar { flex: 1 1 0; display: flex; align-items: flex-end; max-width: 16px; height: 100%; overflow: hidden; border-radius: 4px; background: rgba(var(--neutral-rgb), 0.1); }
-.accounts-bar > b { display: block; width: 100%; border-radius: 4px; background: var(--text-secondary); }
+.accounts-bar > b { display: block; width: 100%; height: var(--accounts-bar-left, 0%); border-radius: 4px; background: var(--text-secondary); }
 .accounts-bar[data-state="need"] > b { min-height: 6px; background: var(--mark-owner); }
 .accounts-bar[data-state="off"] { align-self: flex-end; height: 22%; }
 /* An account: its mark (the owner's dot while it needs sign-in, else what is left of its window), its name and login

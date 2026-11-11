@@ -350,7 +350,7 @@ function mountProvider(container, { path }) {
         const glance = known && reads.quotaRead === READ_OK && rows.length > 3 ? quotaBars(rows, payload, reads) : null;
         find('[data-provider-quota]').hidden = !glance;
         if (!glance) return;
-        const html = glance.bars.map((bar) => `<i class="accounts-bar" data-state="${bar.state}"><b style="height:${bar.state === 'ok' && bar.left !== null ? Math.max(6, Math.round(bar.left * 100)) : 0}%"></b></i>`).join('');
+        const html = glance.bars.map((bar) => `<i class="accounts-bar" data-state="${bar.state}"><b style="--accounts-bar-left:${bar.state === 'ok' && bar.left !== null ? Math.max(6, Math.round(bar.left * 100)) : 0}%"></b></i>`).join('');
         if (bars !== html) find('[data-provider-bars]').innerHTML = bars = html;
         find('[data-provider-turns]').textContent = glance.words;
     };
