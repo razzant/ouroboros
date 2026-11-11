@@ -8,10 +8,12 @@ the root task's document: a count and the latest decision, never a row per decis
 app (``web/modules/review_gate_card.js``, live from the event) and in its Telegram completion message (``card_line``).
 
 Advisory and Cyber Pro hand every outcome back before Git, so a commit usually lands from a later call naming the
-reviewed attempt. After Git recorded it, ``note_override_landing`` adds it to the counter file's ``landed`` list (the
-newest 64) when that attempt, or this call, met such a decision; ``landed_line`` names those commits in a restart's
-or an adoption's notice, "running" only on an adoption record's word. Nothing here says merged or accepted: the gate
-did not prohibit continuation, which is all it decided.
+reviewed attempt, in this process or another. The decision's reason stays on that durable attempt
+(``review_override_reason``); after Git recorded the commit, ``note_override_landing`` adds it to the counter file's
+``landed`` list (the newest 64) when this call, or the attempt its author
+continuation's validated reference resolved to, met such a decision. ``landed_line`` names those commits in a
+restart's or an adoption's notice, "running" only on an adoption record's word. Nothing here says merged or accepted:
+the gate did not prohibit continuation, which is all it decided.
 """
 from __future__ import annotations
 
@@ -29,10 +31,23 @@ COUNTER_REL = pathlib.Path("state") / "advisory_overrides.json"
 LANDED_KEPT = 64
 
 
-def _attempt_key(ctx: Any, task_id: Any, tool_name: Any, attempt: Any) -> str:
-    from ouroboros.review_state import make_repo_key
+def _keep_on_attempt(ctx: Any, reason: str) -> None:
+    """The reason on this call's durable review attempt, the record a later continuation's validated reference resolves
+    to (``commit_gate.resolve_commit_review_reference``), a Continue successor's or a restarted worker's alike."""
+    from ouroboros.review_state import make_repo_key, update_state
+    from ouroboros.tools.commit_gate import _current_review_tool_name
 
-    return "|".join(str(part) for part in (make_repo_key(pathlib.Path(ctx.repo_dir)), task_id, tool_name, attempt))
+    attempt = getattr(ctx, "_current_review_attempt_number", None)
+    if type(attempt) is not int or attempt < 1:
+        return  # no reviewed attempt yet: only a commit of this call goes over it
+    key = {"repo_key": make_repo_key(pathlib.Path(ctx.repo_dir)), "task_id": str(getattr(ctx, "task_id", "") or ""),
+           "tool_name": _current_review_tool_name(ctx), "attempt": attempt}
+
+    def stamp(state: Any) -> None:
+        if (row := state.latest_attempt_for(**key)) is not None:
+            row.review_override_reason = reason
+
+    update_state(pathlib.Path(ctx.drive_root), stamp)
 
 
 def _keep_on_work(ctx: Any, latest: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
@@ -65,19 +80,15 @@ def record_override(ctx: Any, blocked_msg: str) -> None:
     """One decision the gate let continue where Blocking would have stopped it. Each record is best effort and
     independent: an unwritable store loses that copy, never the others or the decision."""
     from ouroboros.config import get_review_enforcement
-    from ouroboros.tools.commit_gate import _current_review_tool_name
     from ouroboros.tools.review_helpers import review_enforcement_blocks
 
     reason, message = str(getattr(ctx, "_last_review_block_reason", "") or "unknown"), str(blocked_msg or "")
     task_id, at = str(getattr(ctx, "task_id", "") or ""), utc_now_iso()
     try:
         ctx._review_override_this_call = reason  # a commit this same call lands goes over it
-        attempt = getattr(ctx, "_current_review_attempt_number", None)
-        if attempt is not None:  # so does a later continuation naming this attempt
-            vars(ctx).setdefault("_review_override_attempts", {})[
-                _attempt_key(ctx, task_id, _current_review_tool_name(ctx), attempt)] = reason
+        _keep_on_attempt(ctx, reason)  # so does a later continuation naming this attempt
     except Exception:
-        log.debug("A landing over this decision cannot be joined to it", exc_info=True)
+        log.warning("A later landing over this decision cannot be joined to it", exc_info=True)
     head = message if len(message) <= 300 else message[:299].rstrip() + "…"  # a cut head says it is one
     work, fact = _keep_on_work(ctx, {"at": at, "reason": reason, "task_id": task_id, "text": head})
     try:
@@ -101,13 +112,11 @@ def record_override(ctx: Any, blocked_msg: str) -> None:
 
 def note_override_landing(ctx: Any, commit_sha: str) -> None:
     """After Git recorded ``commit_sha``: keep it in ``landed`` when this call, or the reviewed attempt its author
-    continuation names, met a decision Blocking would have stopped. Git already succeeded: nothing here may fail it."""
+    continuation's validated reference resolved to, met a decision Blocking would have stopped. Git already
+    succeeded: nothing here may fail it."""
     try:
-        reason = getattr(ctx, "_review_override_this_call", "")
-        reference = getattr(ctx, "_author_commit_reference", None)
-        if not reason and getattr(ctx, "_author_commit_source", None) is not None and isinstance(reference, dict):
-            reason = (getattr(ctx, "_review_override_attempts", None) or {}).get(_attempt_key(
-                ctx, reference.get("task_id"), reference.get("tool_name"), reference.get("attempt")), "")
+        source = getattr(ctx, "_author_commit_source", None)  # the durable attempt, resolved afresh by each call
+        reason = getattr(ctx, "_review_override_this_call", "") or getattr(source, "review_override_reason", "")
         if not (reason and commit_sha):
             return
         row = {"sha": str(commit_sha), "reason": str(reason), "task_id": str(getattr(ctx, "task_id", "") or ""),

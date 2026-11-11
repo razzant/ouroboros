@@ -83,42 +83,110 @@ def test_each_decision_counts_on_its_work_card_beside_the_event_and_the_counter(
 
 
 def test_a_commit_lands_over_a_decision_only_from_its_call_or_the_attempt_it_continues(tmp_path):
-    from ouroboros.review_state import make_repo_key
+    from ouroboros.review_state import load_state, make_repo_key
+    from ouroboros.tools.commit_gate import _record_commit_attempt
     from ouroboros.tools.git_review_cycle import _reset_commit_review_state
 
     ctx = _make_ctx(tmp_path)
-    ctx.task_id = "t1"
+    ctx.task_id, install = "t1", ctx.drive_root
 
-    def call(attempt=None, *, continues=None):
+    def reviewed(decision=""):  # one call whose review hands its outcome back before Git (Advisory, Cyber Pro)
         _reset_commit_review_state(ctx)
-        ctx._current_review_attempt_number = attempt
-        if continues is not None:  # an author continuation naming a returned commit review
-            ctx._author_commit_source = SimpleNamespace(task_id="t1")
-            ctx._author_commit_reference = {"surface": "commit", "repo_key": make_repo_key(ctx.repo_dir),
-                                            "task_id": "t1", "tool_name": "commit_reviewed", "attempt": continues}
+        _record_commit_attempt(ctx, "change", "reviewing", phase="review")
+        if decision:
+            _decide(ctx, decision)
+        _record_commit_attempt(ctx, "change", "reviewed", phase="review_only", block_reason=decision or "author_decision_required")
+        return ctx._current_review_attempt_number
+
+    def continues(attempt=None):  # a later call; its validated reference resolved to that durable attempt
+        _reset_commit_review_state(ctx)
+        if attempt is not None:
+            ctx._author_commit_source = load_state(ctx.drive_root).latest_attempt_for(
+                repo_key=make_repo_key(ctx.repo_dir), task_id="t1", tool_name="commit_reviewed", attempt=attempt)
 
     def landed():
-        return [row["sha"][:1] for row in (read_json_dict(ctx.drive_root / COUNTER_REL) or {}).get("landed") or []]
+        return [row["sha"][:1] for row in (read_json_dict(install / COUNTER_REL) or {}).get("landed") or []]
 
-    call(3)
-    _decide(ctx, "critical_findings")  # Advisory hands this outcome back before Git
-    call(4)  # the revised candidate's review passes: no decision
-    call(continues=4)
+    over, clean = reviewed("critical_findings"), reviewed()
+    assert load_state(ctx.drive_root).latest_attempt_for(attempt=over).review_override_reason == "critical_findings"
+    continues(clean)
     note_override_landing(ctx, "a" * 40)
-    assert landed() == [], "a commit over a review that passed is not over the earlier decision"
-    call(continues=3)
+    assert landed() == [], "a commit over a review that met no decision is not over the earlier one"
+    continues(over)
     note_override_landing(ctx, "b" * 40)
     assert landed() == ["b"]
-    call()  # a later call that continues nothing keeps no stale reference alive
+    continues()  # a later call that continues nothing keeps no stale reference alive
     note_override_landing(ctx, "c" * 40)
     assert landed() == ["b"]
-    call(continues=4)
+    continues(clean)
     _decide(ctx, "preflight")  # the continuation's own preflight, waved through in this very call
     note_override_landing(ctx, "d" * 40)
     assert landed() == ["b", "d"]
     for index in range(70):
         note_override_landing(ctx, f"{index:040d}")
     assert len(landed()) == 64, "the newest 64 landings are kept"
+
+
+@pytest.mark.parametrize("case", ["warm", "restarted", "successor", "clean"])
+def test_the_author_continuation_lands_over_its_attempts_decision_in_any_context(tmp_path, monkeypatch, case):
+    """Through the real gate: Advisory hands the reviewed outcome back before Git and the author's continuation commits
+    it. Its validated reference names the durable attempt that keeps the decision, so the same context, a fresh one (a
+    restarted worker) and a Continue successor land the commit alike; a review that met no decision lands nothing."""
+    from ouroboros import commit_admission, owner_continue
+    from ouroboros.mutation_attribution import capture_mutation_baseline
+    from ouroboros.review_dispatch import invoke_review_paid_stamp
+    from ouroboros.review_ledger import CouplingOutcome
+    from ouroboros.review_state import load_state
+    from ouroboros.task_results import write_task_result
+    from ouroboros.tools import git, review, review_helpers
+    from ouroboros.tools.registry import ToolContext
+
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+    monkeypatch.setattr(review_helpers, "check_worktree_readiness", lambda *a, **k: [])
+    monkeypatch.setattr(commit_admission, "release_metadata_diagnostics", lambda *a, **k: {
+        "status": "not_applicable", "findings": [], "unavailable": []})
+    for name, stub in (("_managed_candidate_needs_proof", lambda *a: False), ("_run_review_preflight_tests", lambda *a, **k: None),
+                       ("_post_commit_result", lambda *a, **k: None), ("_auto_push", lambda *a, **k: "")):
+        monkeypatch.setattr(git, name, stub)
+    ctx = _make_ctx(tmp_path)
+    ctx.task_id, ctx.branch_dev = "author", "ouroboros"
+    (ctx.repo_dir / "VERSION").write_text("1.0.0\n", encoding="utf-8")
+    subprocess.run(["git", "add", "VERSION"], cwd=ctx.repo_dir, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-qm", "version"], cwd=ctx.repo_dir, check=True, capture_output=True)
+    for task_id in ("author", "successor"):
+        write_task_result(ctx.drive_root, task_id, "running")
+        capture_mutation_baseline(ctx.drive_root, task_id, [{"surface_type": "system_repo", "host_root": str(ctx.repo_dir)}])
+    (ctx.repo_dir / "change.py").write_text("value = 2\n", encoding="utf-8")
+
+    def reviewer(actual, message, **kw):  # the paid model alone is scripted; the gate's decision seam is real
+        invoke_review_paid_stamp(actual._review_paid_stamp)
+        finding = {"item": "code_quality", "severity": "critical", "verdict": "PASS" if case == "clean" else "FAIL",
+                   "reason": "wrong value"}
+        actual._last_triad_raw_results = [{"slot_id": "critic", "status": "responded", "parsed": [finding], "raw_text": "x"}]
+        if case != "clean":
+            actual._last_review_critical_findings, actual._last_review_block_reason = [finding], "critical_findings"
+            assert review._handle_review_block_or_warning(actual, False, "critical feedback", "") is None
+        return None, CouplingOutcome(verdict="PASS", status="responded"), "", []
+
+    monkeypatch.setattr(git, "_run_parallel_review", reviewer)
+    first = git._repo_commit_push(ctx, "Change value", skip_advisory_review=True)
+    assert first.startswith("Review outcome returned before commit"), first
+    reference = json.loads(first.split("\n", 1)[1])["review_reference"]
+    author = ctx
+    if case in {"restarted", "successor"}:  # a context built afresh, as a restarted worker or the successor builds it
+        author = ToolContext(repo_dir=ctx.repo_dir, drive_root=ctx.drive_root,
+                             task_id="successor" if case == "successor" else "author")
+        author.branch_dev = "ouroboros"
+    monkeypatch.setattr(owner_continue, "recorded_continuation", lambda _root, before, after: (before, after) == (
+        "author", "successor"))  # the owner's recorded Continue from the author to its successor
+    monkeypatch.setattr(git, "_run_parallel_review", lambda *a, **k: pytest.fail("the continuation buys no review"))
+    said = git._repo_commit_push(author, "Change value", review_reference=reference, author_disposition={
+        "disposition": "rejected", "rationale": "I read the finding and choose to continue."})
+    assert load_state(ctx.drive_root).attempts[-1].status == "succeeded", said
+    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir, check=True, capture_output=True,
+                         encoding="utf-8").stdout.strip()
+    landed = [row["sha"] for row in (read_json_dict(ctx.drive_root / COUNTER_REL) or {}).get("landed") or []]
+    assert landed == ([] if case == "clean" else [sha]), (case, said)
 
 
 def test_the_restart_line_names_only_landed_commits_of_its_range_and_says_running_only_when_adopted(tmp_path):
@@ -201,9 +269,13 @@ def test_a_failing_join_or_store_never_fails_the_gate_the_commit_or_the_notice(t
     assert _events(ctx)[-1]["block_reason"] == "critical_findings"
     assert read_json_dict(ctx.drive_root / COUNTER_REL)["count"] == 1
     ctx._review_override_this_call = ""
-    ctx._author_commit_source = SimpleNamespace(task_id="t1")
-    ctx._author_commit_reference = {"task_id": "t1", "tool_name": "commit_reviewed", "attempt": 2}
-    note_override_landing(ctx, "a" * 40)  # Git already succeeded: the join's failure is logged, never raised
+    ctx._author_commit_source = SimpleNamespace(review_override_reason="critical_findings")
+
+    def unwritable(*_args):
+        raise OSError("counter unwritable")
+
+    monkeypatch.setattr("ouroboros.review_overrides.update_json_locked", unwritable)
+    note_override_landing(ctx, "a" * 40)  # Git already succeeded: the landing's failure is logged, never raised
     assert "landed" not in read_json_dict(ctx.drive_root / COUNTER_REL)
     assert landed_line(ctx.repo_dir, None, base="a", target="b", running=False) == "", "an unreadable counter names nothing"
 
