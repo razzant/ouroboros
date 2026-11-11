@@ -1309,7 +1309,7 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]]) -> str:
     rows of its human (``project_words``; folded by F7 into dated addresses), notes, two lanes, and last the
     standing facts that change with every row (so the room's earlier bytes stay a reusable prefix)."""
     from ouroboros.owner_words import _FRAMES, _HEADINGS
-    from ouroboros.memory_view_work import folded_work_rows, task_line, works, task_gist_line, task_gists_before_work_lines
+    from ouroboros.memory_view_work import folded_work_rows, task_line, works, task_gist_line, task_gists_before_work_lines, row_reader
 
     retold, mine, people, facts = (set(gone.get(step, ())) for step in ("F4", "F2", "F7", "F1"))
     people |= set(gone.get("F7p", ()))
@@ -1335,14 +1335,17 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]]) -> str:
     if room["notes"]:
         lines += ["", "### My notes not yet sealed"] + _room_note_lines(room["notes"], gone)
     if room["lane1"]:
-        lines += ["", f"### Open conversation since {room['since']} (verbatim: people and my replies)"]
-        lines += [_FRAMES["root"]] if room.get("project_words") is not None else []  # the root's frame over the open rows
         work_rows, work_lines = folded_work_rows(room, gone)
         addressed = mine | people | work_rows
         aggregate = [item for item in room['lane1'] if item['address'] in addressed
                      and not item.get('immune')] if gone.get('F7a') else []
         grouped = {item['address'] for item in aggregate}
         omitted = grouped | work_rows
+        description = "people and my replies" if work_lines and not aggregate else "verbatim: people and my replies"
+        lines += ["", f"### Open conversation since {room['since']} ({description})"]
+        lines += [_FRAMES["root"]] if room.get("project_words") is not None else []  # the root's frame over the open rows
+        if work_lines and not aggregate:
+            lines.append("Completed work replies may stand as their gist. " + row_reader(room['room_id']))
         for item in room['lane1']:
             if aggregate and item is aggregate[0]:
                 lines.append(_rows_line(room, aggregate))
@@ -1354,11 +1357,14 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]]) -> str:
                              if item['address'] in mine else render(item, 'words') if item['address'] in people else item['line'])
     if room["lane2"]:
         early = [item for item in room["lane2"] if item["first"] in facts]
+        gists = task_gists_before_work_lines(room, gone)
+        task_room = ("<room from address>" if any(str(t['gist']['room_id']) != str(room['room_id']) for t in gists)
+                     else f"'{room['room_id']}'")
         folded = {key for key, _rows in works(room) if any("work:" + key + suffix in mine for suffix in (":progress", ":final"))}
         lines += ["", "### Task facts of this conversation (host; one line per task; a row:… address reads with "
-                      f"memory_read(room_id='{room['room_id']}', rows=true, from=<address>, to=<address>))"]
+                      f"memory_read(room_id={task_room}, rows=true, from=<address>, to=<address>))"]
         lines += ([_facts_line(room, early)] if early else []) + [
-            task_gist_line(t) for t in task_gists_before_work_lines(room, gone)] + [
+            task_gist_line(t) for t in gists] + [
             task_line(item, folded=not gone.get("F7a") and item.get("task") in folded)
             for item in room["lane2"] if item["first"] not in facts]
     if len(lines) == 1:

@@ -73,6 +73,22 @@ def test_complete_measurements_do_not_grow_with_finished_works(monkeypatch):
     assert counts[300] <= counts[50] + 8, counts
 
 
+def test_returning_many_small_conversation_lines_batches_complete_measurements(monkeypatch):
+    original, calls = mf.fit_memory_view, []
+    def counted(snapshot, allowances, **kwargs):
+        measure = kwargs['measure']
+        def price(level):
+            calls.append(level)
+            return measure(level)
+        return original(snapshot, allowances, **{**kwargs, 'measure': price})
+    monkeypatch.setattr(mf, 'fit_memory_view', counted)
+    shown = mf.render_view_for_mode(syn.live_scale(), mode='low', owner_mode='max', window_tokens=200_000,
+        known_window=True, output_reserve=10_000, ratio=1, non_memory_tokens=100_000)
+    groups = dict(shown.level.steps).get('F6g', 0)
+    assert 0 < groups < 500, 'the spare room returns many of the 520 conversation blocks'
+    assert len(calls) <= 24, len(calls)
+
+
 def test_a_start_s_request_is_serialized_once_per_form_at_every_row_count(tmp_path, monkeypatch):
     """Serializations equal the request's forms and do not follow the rows: a form is a frame's shape, never a probe."""
     seen = {}

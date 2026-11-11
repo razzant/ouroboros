@@ -83,7 +83,7 @@ def test_replaced_words_are_told_once_in_their_own_block_at_every_level(remote_t
             replaced = any(w["id"] in gone.get("F6w", ()) for w in remote["words"][:2])
             assert text.count(work.first_sentence(gist["summary"])) == int(bool(form or replaced or remote_task))
             if form or replaced and not remote_task:
-                assert f"from='{gist['address']}'" in text
+                assert f"[{gist['address']}]" in text
 
 
 def test_room_range_is_physical_and_returns_surviving_task_tellings():
@@ -235,7 +235,7 @@ def test_unread_summary_does_not_block_return_of_nearest_conversations():
 
 def test_unread_summary_is_not_taken_without_a_saving():
     group = syn.conversation(1, words=1, word_chars=1000)
-    group["rooms"][0]["words"][0].update(address="row:a", author="Ann", text="Hello.")
+    group["rooms"][0]["words"][0].update(address="row:a", author="Ann", text="Hello.\n" + "A later paragraph. " * 20)
     snap = syn.snapshot(conversations=[group])
     counted = mv.FloorLevel((("F6a", (group["key"],)),))
     global_line = mv.FloorLevel((("F6a", (group["key"], "unread")),))
@@ -414,3 +414,124 @@ def test_report_counts_a_work_telling_and_fold_read_once_in_each_visible_form():
         assert view_counts(snap, level)['retellings'] == {'task summary': 1, 'works': 1, 'fold_read': 1}
     counted = mv.FloorLevel((('F6a', (snap.conversations[0]['key'],)),))
     assert view_counts(snap, counted)['retellings'] == {'task summary': 1}
+
+
+@pytest.mark.parametrize("form", [1, 2, 3])
+def test_conversation_lines_keep_quiet_rooms_only_in_the_identity_count(form):
+    from ouroboros import memory_view_conversations as conv
+    group = syn.conversation(1, words=1, notes=1)
+    group["rooms"][0]["notes"][0]["lead_rule"] = 1
+    quiet = syn.conversation(2, engaged=False)["rooms"][0]
+    group["rooms"].append(quiet)
+    full = conv.render_group(group, set(), set(), 0)
+    line = conv.render_group(group, set(), set(), form)
+    assert quiet["silent"] in full
+    assert quiet["silent"] not in line and quiet["label"] not in line
+    assert "1 other;" in line
+    assert "0 works" not in line
+    snap = syn.snapshot(conversations=[group])
+    ident = ("" if form == 1 else "all:" if form == 2 else "last:") + group["key"]
+    counts = forms.form_counts(snap, mv.FloorLevel((("F6g", (ident,)),)))
+    assert "silent rooms" not in counts["host"]
+
+
+def test_repeats_never_add_unread_sources_but_unconsidered_words_do():
+    from ouroboros import memory_view_conversations as conv
+    for genuine in (False, True):
+        group = syn.conversation(1, words=2)
+        remote = group["rooms"][0]
+        remote["words"][0].update(again="row:earlier", line="Already delivered here.")
+        if not genuine:
+            remote["words"].pop()
+        snap = syn.snapshot(conversations=[group])
+        for form in (1, 2, 3):
+            text = conv.render_group(group, set(), set(), form)
+            assert ("No recorded consideration: 1 words;" in text) is genuine
+            assert "2 words;" not in text
+        for aggregate in (False, True):
+            level = mv.FloorLevel((("F6a", (group["key"], "unread") if aggregate else (group["key"],)),))
+            counted = forms.form_counts(snap, level)
+            entry = counted["window"].get("unread count") if aggregate else counted["host"].get("unread")
+            assert (entry or {}).get("sources", 0) == int(genuine)
+
+
+@pytest.mark.parametrize("kind", ["work", "gist", "unread"])
+@pytest.mark.parametrize("number", [1, 2])
+def test_compact_source_heads_read_the_named_rows_and_introduce_the_reader_once(tmp_path, kind, number):
+    import re
+    from ouroboros.chat_chain import format_address, parse_address, row_address
+    from ouroboros import memory_view_conversations as conv
+    from ouroboros.tools.chronicle import _memory_read
+    from ouroboros.tools.registry import ToolContext
+    from tests import _memory_inventory_shared as shared
+
+    shared.world(tmp_path)
+    room_id = 1 if kind == "work" else 777
+    rows = [shared.msg(f"2026-10-20T01:0{i}:00+00:00", f"Source message {i}. " * 80, chat_id=room_id,
+                      direction="in" if kind == "unread" else "out", task_id="done",
+                      **({"source": "presence:telegram", "transport": {"provider": "telegram", "actor": {"display_name": "Ann"}}}
+                         if kind == "unread" else {})) for i in range(number)]
+    terminal = shared.msg("2026-10-20T01:03:00+00:00", "Completed.", chat_id=room_id, direction="system",
+                          task_id="done", type="task_summary", summary_kind="terminal_root_projection",
+                          wake_summary="Completed outcome. A second sentence.")
+    shared.append(tmp_path / "logs" / "chat.jsonl", *rows, *([] if kind == "unread" else [terminal]))
+    task = {"id": "next-turn", "chat_id": 1, "_is_direct_chat": True}
+    snap = mv.capture_memory_view(tmp_path, task, mv.view_spec_for_task(task, tmp_path))
+    if kind == "work":
+        before = mv._room_text(snap.room, {})
+        text = mv._room_text(snap.room, {"F2": {"work:done:final"}})
+        line = next(line for line in text.splitlines() if "work done]" in line)
+        assert f"{number} replies," in line
+        assert "Completed work replies may stand as their gist." in text
+    else:
+        group = next(g for g in snap.conversations if any(r["room_id"] == str(room_id) for r in g["rooms"]))
+        before = "\n\n".join(conv.pieces([group], {}, lambda _key, make: make()))
+        text = "\n\n".join(conv.pieces([group], {"F6g": {"all:" + group["key"]}}, lambda _key, make: make()))
+        line = next(line for line in text.splitlines() if ("«Completed outcome." in line if kind == "gist"
+                                                         else line.startswith("No recorded consideration:")))
+    reader = "from=<first>, to=<last>"
+    assert reader not in before and text.count(reader) == 1
+    assert "memory_read(" not in line
+    expected = [format_address(row_address(row)) for row in ([terminal] if kind == "gist" else rows)]
+    found = re.findall(r"row:\d+@[^\s;'\])]+#[a-f0-9]+", line.split("«", 1)[0])
+    assert found == ([expected[0]] if len(expected) == 1 else [expected[0], expected[-1]])
+    assert all(line.count(parse_address(address)["ts"]) == 1 for address in found)
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="reader", current_chat_id=1)
+    read = _memory_read(ctx, room_id=str(parse_address(found[0])["chat_id"]), rows=True,
+                        **{"from": found[0], "to": found[-1]})
+    assert "complete: no further rows" in read
+    assert re.findall(r"row:\d+@[^\s;'\])]+#[a-f0-9]+", "\n".join(read.splitlines()[2:])) == expected
+
+
+def test_work_range_stands_at_the_last_reply_without_repeating_its_time():
+    snap, _gist = completed_room()
+    middle = syn.spoken(1, "human", 50)
+    snap.room["lane1"] = [snap.room["lane1"][0], middle, snap.room["lane1"][-1]]
+    rows = [r for r in snap.room["lane1"] if r["kind"] == "ouroboros"]
+    text = mv._room_text(snap.room, {"F2": {"work:done:final"}})
+    line = next(line for line in text.splitlines() if "work done]" in line)
+    assert text.index(middle["line"]) < text.index(line)
+    assert f"{rows[0]['address']} → {rows[-1]['address']}" in line.split("«", 1)[0]
+    assert line.count(rows[0]["ts"]) == line.count(rows[-1]["ts"]) == 1
+
+
+def test_task_gist_reader_uses_the_source_room_when_its_terminal_is_elsewhere(tmp_path):
+    from ouroboros.chat_chain import format_address, row_address
+    from ouroboros.tools.chronicle import _memory_read
+    from ouroboros.tools.registry import ToolContext
+    from tests import _memory_inventory_shared as shared
+
+    shared.world(tmp_path)
+    terminal = shared.msg('2026-10-20T02:00:00+00:00', 'Terminal in another room.', chat_id=777,
+                          direction='system', task_id='done', type='task_summary',
+                          summary_kind='terminal_root_projection', wake_summary='A completed result.')
+    shared.append(tmp_path / 'logs/chat.jsonl', terminal)
+    snap, _gist = completed_room()
+    address = format_address(row_address(terminal))
+    work.bind(snap.room, [], {'done': dict(summary=terminal['wake_summary'], address=address, room_id='777')})
+    text = mv._room_text(snap.room, {'F1': {snap.room['lane2'][0]['first']}})
+    assert f'[{address}; task done]' in text
+    assert 'memory_read(room_id=<room from address>, rows=true, from=<address>, to=<address>)' in text
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id='reader', current_chat_id=1)
+    read = _memory_read(ctx, room_id='777', rows=True, **{'from': address, 'to': address})
+    assert terminal['text'] in read and 'complete: no further rows' in read

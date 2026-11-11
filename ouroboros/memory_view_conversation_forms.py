@@ -37,24 +37,46 @@ def _gist_records(group):
 
 def _gist_lines(group, excluded=(), *, gists=None):
     from ouroboros.memory_view_work import first_sentence
-    return [f"{gist.get('ts', '')[:10]}; «{first_sentence(gist['summary'])}»; "
-            f"memory_read(room_id='{gist['room_id']}', rows=true, from='{gist['address']}', to='{gist['address']}')"
+    return [f"[{gist['address']}] «{first_sentence(gist['summary'])}»"
             for key, gist in (_gist_records(group) if gists is None else gists) if key not in excluded]
 
 
-def _unread_line(room, words):
+def _unread_line(words):
+    from ouroboros.memory_view_work import row_range
     latest = max(words, key=lambda word: word["pos"])
     first = min(words, key=lambda word: word["pos"])
     opening = str(latest.get("text") or latest["line"].removeprefix(latest["head"])).strip().splitlines()[0:1]
-    return (f"No recorded consideration: {len(words)} words; latest by {latest.get('author') or latest['head']}, "
-            f"{latest['ts']}: «{' '.join(opening)[:160]}»; memory_read(room_id='{room['room_id']}', rows=true, "
-            f"from='{first['address']}', to='{latest['address']}')")
+    author = latest.get("author") or latest["head"].split(";", 2)[1].strip()
+    return (f"No recorded consideration: {len(words)} words; [{row_range(first['address'], latest['address'])}; "
+            f"latest by {author}] «{' '.join(opening)[:160]}»")
 
 
 def _fold_line(room):
+    from ouroboros.memory_view_work import row_range
     fold = room.get("folded")
-    return (f"«{fold['sentence']}» ({fold['ts'][:10]}): {fold['count']} words read and folded; "
-            f"memory_read(room_id='{room['room_id']}', rows=true, from='{fold['from']}', to='{fold['to']}')") if fold else ""
+    return (f"[{row_range(fold['from'], fold['to'])}] «{fold['sentence']}»: "
+            f"{fold['count']} words read and folded") if fold else ""
+
+
+def _visible_gists(group, data, gone):
+    """Tellings whose words yielded, except those already carried by this block's task lines."""
+    if not data["gists"]:
+        return ()
+    tasks = {t.get("task") for room in group["rooms"] for t in room["tasks"] if t.get("gist")}
+    folded = {w.get("work_id") or w.get("task_id") for w in data["words"] if w["id"] in gone}
+    whole = {w.get("work_id") or w.get("task_id") for w in data["words"]} - folded
+    excluded = tasks | whole
+    return tuple((key, gist) for key, gist in data["gists"] if key not in excluded)
+
+
+def _has_compact_rows(group, data, state, aggregate_unread):
+    form, gone = state[3:5]
+    unread = any(parts["unread"] for parts in data["rooms"].values())
+    if form == 4:
+        return unread and not aggregate_unread
+    folded = any(room.get("folded") for room in group["rooms"])
+    return (folded or bool(data["gists"]) or unread) if form else (
+        folded or any(data["kinds"].get(ident) == "unread" for ident in gone) or bool(_visible_gists(group, data, gone)))
 
 
 def ordinary_group(group):
@@ -167,14 +189,12 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
             untold = data["untold"]
             notes = sum(len(room["notes"]) for room in group["rooms"])
             lines.append(f"Emergency: {untold} untold rows" + (f"; {notes} notes by count" if notes else "")
-                         + f"; {len(gists)} works, "
-                         + ("only the last gist shown." if as_line == 3 else "every gist shown."))
+                         + (f"; {len(gists)} works, " + ("only the last gist shown." if as_line == 3 else "every gist shown.")
+                            if gists else "."))
         for room in group["rooms"]:
-            if room.get("silent"):
-                lines.append(f"- {room['label']}; {room['silent']}")
             lines += [_note_pointer(note) for note in room["notes"]] if as_line == 1 else []
             if unread := data["rooms"][room["room_id"]]["unread"]:
-                lines.append(_unread_line(room, unread))
+                lines.append(_unread_line(unread))
             if fold := _fold_line(room):
                 lines.append(fold)
         no_gist = sum(not task.get("gist") for room in group["rooms"] for task in room["tasks"])
@@ -195,7 +215,7 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
             lines.append(fold)
         unread = [word for word in data["rooms"][room["room_id"]]["unread"] if word["id"] in gone]
         if unread:
-            lines.append(_unread_line(room, unread))
+            lines.append(_unread_line(unread))
         for word in room["words"]:
             if word["id"] in owners_gone:
                 lines.append(_row_pointer(word, "words"))
@@ -207,11 +227,7 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
             elif word.get("again") or word["kind"] == "place_fact":
                 lines.append(word["line"])
         lines += tasks[room["room_id"]]
-    if data["gists"]:
-        task_gists = {task.get("task") for room in group["rooms"] for task in room["tasks"] if task.get("gist")}
-        folded_words = {w.get("work_id") or w.get("task_id") for r in group["rooms"] for w in r["words"] if w["id"] in gone}
-        all_gists = {w.get("work_id") or w.get("task_id") for r in group["rooms"] for w in r["words"]}
-        lines += _gist_lines(group, excluded=task_gists | (all_gists - folded_words), gists=data["gists"])
+    lines += _gist_lines(group, gists=_visible_gists(group, data, gone))
     return "\n".join(lines)
 
 
@@ -235,7 +251,7 @@ def _counted_text(groups, owners, aggregate_unread, *, index=None):
             f"{len({room['room_id'] for room, _word in unread})} rooms, {days[0]} → {days[-1]}; "
             f"latest by {latest.get('author') or latest['head']} at {latest['ts']}: «{opening}»; memory_read(room_id='*')")
     elif unread:
-        lines += [_unread_line(room, words) for room in rooms
+        lines += [_unread_line(words) for room in rooms
                   if (words := sources[room["room_id"]]["unread"])]
     lines += [_row_pointer(word, "words") if word["id"] in owners else word["line"]
               for room in rooms for word in sources[room["room_id"]]["owner"]]
@@ -254,20 +270,23 @@ def local_key(group, gone, data):
 def pieces(groups: List[Mapping[str, Any]], gone: Mapping[str, Iterable[str]],
             piece: Callable[[Any, Callable[[], str]], Any], *, index=None) -> List[Any]:
     """Local form keys name every state their renderer reads; pricing never draws a complete view."""
+    from ouroboros.memory_view_work import row_reader
     index = index if index is not None else {g["key"]: _sources(g) for g in groups}
     words, owners = set(gone.get("F6w", ())), set(gone.get("F7", ()))
     counts = set(gone.get("F6a", ()))
     choices = {"F6w": words, "F7": owners, "F6a": counts, "F6g": set(gone.get("F6g", ()))}
     counted = [group for group in groups if group["key"] in counts]
-    parts = [piece(("conversations", "head"), lambda: "\n".join(["## Other conversations", "", f"{AUTHORITY} {AUDIENCE}", _INTRO]))]
+    states = [(group, local_key(group, choices, index[group["key"]])) for group in groups]
+    reader = any(_has_compact_rows(group, index[group["key"]], state, "unread" in counts) for group, state in states)
+    parts = [piece(("conversations", "head", reader), lambda: "\n".join([
+        "## Other conversations", "", f"{AUTHORITY} {AUDIENCE}", _INTRO + (" " + row_reader() if reader else "")]))]
     if counted:
         ids = {w["id"] for g in counted for w in index[g["key"]]["owners"]}
         parts.append(piece(("conversations", "counted", tuple(g["key"] for g in counted), frozenset(ids & owners),
                             "unread" in counts), lambda: _counted_text(counted, owners, "unread" in counts, index=index)))
-    for group in groups:
+    for group, key in states:
         if group["key"] in counts:
             continue
-        key = local_key(group, choices, index[group["key"]])
         form, local_words, local_owners = key[3:]
         parts.append(piece(key,
                            lambda group=group, form=form, words=local_words, owners=local_owners:

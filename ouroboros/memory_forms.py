@@ -4,7 +4,8 @@ Each element keeps an existing rung and source identity. Stages order those
 elements; the clean-start guard walks only ordinary forms. Event counts reserve
 their place without changing a silent room into an event.
 """
-from collections import defaultdict
+from collections import defaultdict, deque
+from itertools import groupby
 
 from ouroboros import memory_view as mv, memory_view_conversations as conversations, memory_view_legacy as legacy
 from ouroboros.memory_view_work import works, work_line, task_gist_line, task_line
@@ -227,6 +228,52 @@ def swallowed(snapshot, step, ident, selected):
         or step == "F6g" and ident != "last:" + key and ("F6g", "last:" + key) in selected)
 
 
+def restore(snapshot, table, taken, added, target, current, level, measure):
+    """Probe a stage's affordable prefix together; failed batches replay its single steps.
+
+    Return order and blocking stay local to a stage. The accumulated price is
+    only an estimate: every accepted batch has its complete price checked, and
+    a failed batch restores its original choices before trying a shorter prefix.
+    """
+    if target is None:
+        return current
+    for _stage, entries in groupby(reversed(added), key=lambda item: table.stages[item[0]]):
+        pending = deque(entries)
+        while pending:
+            batch, cost = [], 0
+            while pending:
+                pair, delta = pending[0]
+                if swallowed(snapshot, *pair, taken):
+                    pending.popleft()
+                    continue
+                if current + cost + delta > target:
+                    break
+                pending.popleft()
+                taken.discard(pair)
+                batch.append((pair, delta))
+                cost += delta
+            if not batch:
+                break
+            actual = measure(level(taken))
+            if actual <= target:
+                current = actual
+                continue
+            for pair, _delta in reversed(batch):
+                taken.add(pair)
+            if len(batch) > 1:
+                for pair, delta in batch:
+                    if current + delta > target:
+                        break
+                    taken.discard(pair)
+                    actual = measure(level(taken))
+                    if actual > target:
+                        taken.add(pair)
+                        break
+                    current = actual
+            break
+    return current
+
+
 def list_elements(snapshot):
     if not snapshot.active:
         return []
@@ -238,8 +285,8 @@ def list_elements(snapshot):
     for key, rows in works(room):
         partial = [r for r in rows[:-1] if not r.get("protected_reply")]
         if partial:
-            work.append(("work:" + key + ":progress", "\n".join(r["line"] for r in partial), work_line(room, partial)))
-        work.append(("work:" + key + ":final", "\n".join(r["line"] for r in rows), work_line(room, rows)))
+            work.append(("work:" + key + ":progress", "\n".join(r["line"] for r in partial), work_line(partial)))
+        work.append(("work:" + key + ":final", "\n".join(r["line"] for r in rows), work_line(rows)))
     story = sorted(snapshot.story, key=lambda r: tuple(r.get("floor_order", (0, 0))))
     work_keys = {key for key, _rows in works(room)}
     steps = {

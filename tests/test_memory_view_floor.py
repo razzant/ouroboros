@@ -141,7 +141,8 @@ def test_other_conversations_fold_their_words_then_a_group_to_its_line_and_only_
     keys = tuple(group["key"] for group in groups)
     counted = mv.render_room(snapshot, mv.FloorLevel((("F6g", keys), ("F6a", keys))))
     assert len(counted) < len(lined) < len(full) and len(worded) < len(full)
-    assert "from='" in worded and first["rooms"][0]["words"][0]["line"] not in worded
+    assert "from=<first>, to=<last>" in worded and first["rooms"][0]["words"][0]["line"] not in worded
+    assert first["rooms"][0]["words"][0]["address"] in worded
     assert conversations.identity_line(first) in lined and first["rooms"][0]["notes"][0]["text"] in full
     assert "164 conversations by count: 164 open rooms" in counted
     assert "memory_read(room_id='*', start=0)" in counted and counted.count("No recorded consideration:") == 164

@@ -20,7 +20,7 @@ from ouroboros import memory_view as mv
 from ouroboros import memory_view_conversations as conversations
 from ouroboros import memory_view_legacy as legacy
 from ouroboros.memory_forms import (LADDER, list_elements as _list_elements, ordinary_pairs, normalized, swallowed,
-                                    form_counts, holding_room, Selection, supersedes, WorkPrices)
+                                    form_counts, holding_room, Selection, supersedes, WorkPrices, restore)
 from ouroboros.chat_chain import parse_address
 from ouroboros.context_layout import WHOLE_OR_OUTLINE_STEPS
 from ouroboros.section_floor import PROTECTED, relocated_text, retain_section, section_views
@@ -408,21 +408,7 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
         if step == "F6a" and ident != "unread":
             counted_groups.add(ident)
     current = measure(level(taken))
-    # A coarse form may leave room for finer ones. Already grouped sources are not independently restored.
-    blocked = set()
-    for (step, ident), delta in reversed(added):
-        stage = table.stages[step, ident]
-        if stage in blocked or swallowed(snapshot, step, ident, taken):
-            continue
-        if target is not None and current + delta <= target:
-            taken.discard((step, ident))
-            actual = measure(level(taken))
-            if actual <= target:
-                current = actual
-            else:
-                taken.add((step, ident))
-        if (step, ident) in taken:
-            blocked.add(stage)
+    current = restore(snapshot, table, taken, added, target, current, level, measure)
     physical = allowances.get("physical")
     for step, ident, _whole, _short in uncovered:
         if physical is None or current <= physical:

@@ -12,6 +12,17 @@ def first_sentence(text):
     return re.split(r'(?<=[.!?。！？])\s+', str(text).strip(), maxsplit=1)[0]
 
 
+def row_range(first, last):
+    """Source coordinates carry their own room and time; a single row needs one address."""
+    return first if first == last else f"{first} → {last}"
+
+
+def row_reader(room_id=None):
+    room = f"'{room_id}'" if room_id is not None else "<room from address>"
+    return (f"Read row addresses with memory_read(room_id={room}, rows=true, from=<first>, to=<last>); "
+            "for a single row use its address for both endpoints.")
+
+
 def speech_facts(row, author):
     relay = row.get("relay") or {}
     task = ((relay.get("sender") or {}).get("task_id") if row.get("type") == "relay_entry" else
@@ -65,8 +76,7 @@ def task_line(task, *, folded=False):
 
 def task_gist_line(task):
     gist = task["gist"]
-    return (f"[{gist.get('ts', '')}; task {task['task']}] — summary: «{gist['summary']}»; "
-            f"memory_read(room_id='{gist['room_id']}', rows=true, from='{gist['address']}', to='{gist['address']}')")
+    return f"[{gist['address']}; task {task['task']}] — summary: «{gist['summary']}»"
 
 
 def task_gists_before_work_lines(room, gone):
@@ -103,11 +113,10 @@ def works(room):
     return sorted(found.items(), key=lambda pair: pair[1][-1]["pos"])
 
 
-def work_line(room, rows):
+def work_line(rows):
     first, last = rows[0], rows[-1]
-    return (f"[{first['ts']}; work {last.get('task_id') or 'relay'}] «{last['gist']['summary']}»; "
-            f"{len(rows)} replies, {sum(r['chars'] for r in rows)} chars; "
-            f"memory_read(room_id='{room['room_id']}', rows=true, from='{first['address']}', to='{last['address']}')")
+    return (f"[{row_range(first['address'], last['address'])}; work {last.get('task_id') or 'relay'}] "
+            f"«{last['gist']['summary']}»; {len(rows)} replies, {sum(r['chars'] for r in rows)} chars")
 
 
 def folded_work_rows(room, gone):
@@ -123,5 +132,5 @@ def folded_work_rows(room, gone):
             continue
         if taken:
             hidden.update(row["address"] for row in taken)
-            lines[rows[-1]["address"]] = work_line(room, taken)
+            lines[rows[-1]["address"]] = work_line(taken)
     return hidden, lines

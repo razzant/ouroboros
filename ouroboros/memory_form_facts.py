@@ -110,6 +110,7 @@ def _remote_counts(snapshot, gone, add):
 
 def _group_counts(group, data, sources, state, aggregate_unread):
     """Only numbers for one local form; grouping another conversation cannot change them."""
+    from ouroboros.memory_view_conversation_forms import _visible_gists
     form, words, owners = state[3:]
     count = form == 4
     facts, lost, global_unread = [], 0, 0
@@ -127,11 +128,7 @@ def _group_counts(group, data, sources, state, aggregate_unread):
         no_gist = sum(not t.get("gist") for r in group["rooms"] for t in r["tasks"])
         add("host", "tasks without gist", int(bool(no_gist)), no_gist)
     elif not count and data["gists"]:
-        tasks = {t.get("task") for r in group["rooms"] for t in r["tasks"] if t.get("gist")}
-        folded = {w.get("work_id") or w.get("task_id") for w in data["words"] if w["id"] in words}
-        all_work = {w.get("work_id") or w.get("task_id") for w in data["words"]}
-        excluded = tasks | (all_work - folded)
-        n = sum(key not in excluded for key, _gist in data["gists"])
+        n = len(_visible_gists(group, data, words))
         add("retold", "work gists", n, n)
     for remote in group["rooms"]:
         unread, owner, rest = sources[remote["room_id"]]
@@ -139,8 +136,6 @@ def _group_counts(group, data, sources, state, aggregate_unread):
             lost += len(rest) + len(remote["notes"]) + len(remote["tasks"]) + int((remote.get("folded") or {}).get("count", 0))
             lost += int(not remote["engaged"])
         elif form:
-            if not remote["engaged"]:
-                add("host", "silent rooms", 1, 1)
             if form == 1:
                 add("retold", "note leads", len(remote["notes"]), len(remote["notes"]))
         else:
