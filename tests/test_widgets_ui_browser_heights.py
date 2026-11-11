@@ -734,7 +734,14 @@ def test_board_carry_keys_menu_and_returning_keep_every_frame(direct_server_with
             page.wait_for_function("() => document.getElementById('widgets-list').dataset.widgetLayout === 'stack'", timeout=5_000)
             wait_frame_height(page, "long", 360)
             assert page.locator(f"{card('long')} [data-widget-resize-handle]").is_hidden()
+            if page.evaluate("() => document.documentElement.dataset.pointer") == "coarse":
+                # Under a finger the bottom edge is the grip of the one card its menu's Resize chose, and of no other.
+                assert page.locator(f"{card('long')} [data-widget-height-handle]").is_hidden()
+                page.locator(f"{card('long')} [data-widget-menu-trigger]").click()
+                page.locator("body > .skills-card-menu-dialog[open] [data-widget-adjust]").click()
             assert page.locator(f"{card('long')} [data-widget-height-handle]").is_visible()
+            page.keyboard.press("Escape")
+            assert page.evaluate("() => document.querySelectorAll('[data-widget-adjusting]').length") == 0
             page.set_viewport_size({"width": 1440, "height": 1000})
             page.wait_for_function("() => document.getElementById('widgets-list').dataset.widgetLayout === 'columns'", timeout=5_000)
             assert errors == [], errors
@@ -2587,10 +2594,56 @@ def _write_touch_cards(data_dir: pathlib.Path) -> str:
 
 HIT = """([x, y]) => { const t = document.elementFromPoint(x, y);
     return t?.closest('[data-widget-height-handle]') ? 'grip' : t?.closest('[data-widget-expand]') ? 'show-all'
-        : t?.closest('iframe') ? 'frame' : t?.closest('[data-widget-key]') ? 'card' : 'gap'; }"""
+        : t?.closest('[data-widget-adjust-done]') ? 'done' : t?.closest('iframe') ? 'frame'
+        : t?.closest('[data-widget-key]') ? 'card' : 'gap'; }"""
+ADJUSTING = "() => [...document.querySelectorAll('[data-widget-adjusting]')].map((node) => node.dataset.widgetKey)"
+FOCUSED = """() => { const a = document.activeElement; return a?.matches?.('[data-widget-height-handle]') ? 'grip'
+    : a?.matches?.('[data-widget-menu-trigger]') ? 'trigger' : (a?.tagName || '').toLowerCase();
+    }"""
+FOCUSED_CARD = "() => document.activeElement?.closest?.('[data-widget-key]')?.dataset.widgetKey || ''"
+SCROLL = "() => document.querySelector('.widgets-scroll').scrollTop"
+SIZES = "async () => (await (await fetch('/api/ui/preferences')).json()).widget_size || {}"
+# Every card's foot: how far its border box reaches below the last thing it draws (its body, or its Show all line), and
+# what a finger meets just inside its bottom right corner.
+FEET = """() => [...document.querySelectorAll('#widgets-list [data-widget-key]')].map((node) => {
+    const box = node.getBoundingClientRect();
+    const more = node.querySelector('[data-widget-more]');
+    const last = (more && !more.hidden ? more : node.querySelector('[data-widget-mount]')).getBoundingClientRect();
+    const shown = (selector) => getComputedStyle(node.querySelector(selector)).display !== 'none';
+    const t = document.elementFromPoint(box.right - 22, box.bottom - 22);
+    return { key: node.dataset.widgetKey, foot: box.bottom - last.bottom, grip: shown('[data-widget-height-handle]'),
+        done: shown('.widgets-card-adjust'), corner: t?.closest('[data-widget-height-handle]') ? 'grip' : 'content' };
+})"""
 
 
-def test_a_finger_scrolls_from_the_gap_and_sizes_a_card_only_from_its_own_foot(direct_server_with_data):
+def _tap(page, selector: str) -> None:
+    """One finger tap at the middle of `selector`, brought into view if it is not (the page's touchscreen: Chromium and
+    WebKit alike)."""
+    page.locator(selector).scroll_into_view_if_needed()
+    box = page.locator(selector).bounding_box()
+    page.touchscreen.tap(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    page.wait_for_timeout(300)
+
+
+def _resize(page, selector: str) -> None:
+    """By finger: the card's ⋮ menu, then its Resize."""
+    _tap(page, f"{selector} [data-widget-menu-trigger]")
+    item = "body > .skills-card-menu-dialog[open] [data-widget-adjust]"
+    page.locator(item).wait_for(state="visible", timeout=5_000)
+    _tap(page, item)
+
+
+def _in_view(page, selector: str) -> dict:
+    box = page.locator(selector).bounding_box()
+    view = page.evaluate("() => { const r = document.querySelector('.widgets-scroll').getBoundingClientRect(); return [r.top, r.bottom]; }")
+    return {"box": box, "view": view, "inside": bool(box) and box["y"] >= view[0] - 0.5 and box["y"] + box["height"] <= view[1] + 0.5}
+
+
+def test_a_finger_scrolls_from_the_gap_and_sizes_only_the_card_it_chose_to_resize(direct_server_with_data):
+    """Native touch through Chromium's CDP (DESIGN "Widgets board": under a finger only the card picked by its menu's
+    Resize has a foot). No other card reserves a strip or catches a finger at its corner; the chosen card's foot sits
+    below its Show all line; it survives scrolling and repeated gestures; Done, a tap outside and Escape put it away;
+    entering and leaving write nothing; a frame keeps its document throughout."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import sync_playwright
 
@@ -2599,8 +2652,9 @@ def test_a_finger_scrolls_from_the_gap_and_sizes_a_card_only_from_its_own_foot(d
     probe = _write_touch_cards(data_dir)
     shots = evidence_dir(data_dir)
     report = {}
-    scroll = "() => document.querySelector('.widgets-scroll').scrollTop"
-    sizes = "async () => (await (await fetch('/api/ui/preferences')).json()).widget_size || {}"
+    key = lambda tab: f"{probe}:{tab}"  # noqa: E731
+    sel = lambda tab: f'[data-widget-key="{probe}:{tab}"]'  # noqa: E731
+    stored = {key("c2"): {"w": 0, "h": 120}, key("c4"): {"w": 0, "h": 2700}}
     with sync_playwright() as pw:
         browser, context = launch(pw, "chromium", viewport={"width": 390, "height": 844}, has_touch=True, is_mobile=True)
         page = context.new_page()
@@ -2609,134 +2663,235 @@ def test_a_finger_scrolls_from_the_gap_and_sizes_a_card_only_from_its_own_foot(d
             assert page.evaluate("""async (skill) => (await fetch(`/api/skills/${encodeURIComponent(skill)}/toggle`, {
                 method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({enabled: true}),
             })).status""", probe) == 200
-            # One card under an owner height below its content: its Show all line shows.
-            page.evaluate("""async (key) => fetch('/api/ui/preferences', {method: 'POST',
-                headers: {'Content-Type': 'application/json'}, body: JSON.stringify({widget_size: {[key]: {w: 0, h: 120}}})})""",
-                          f"{probe}:c2")
+            # One card under an owner height below its content (its Show all line shows), one far taller than its own.
+            page.evaluate("""async (sizes) => fetch('/api/ui/preferences', {method: 'POST',
+                headers: {'Content-Type': 'application/json'}, body: JSON.stringify({widget_size: sizes})})""", stored)
             page.goto(f"{url}#widgets", wait_until="domcontentloaded", timeout=30_000)
             page.reload(wait_until="domcontentloaded", timeout=30_000)
             for i in range(6):
-                page.locator(f'[data-widget-key="{probe}:c{i}"] .widget-callout').nth(3).wait_for(state="attached", timeout=30_000)
-            corner = f'[data-widget-key="{probe}:corner"]'
+                page.locator(f"{sel(f'c{i}')} .widget-callout").nth(3).wait_for(state="attached", timeout=30_000)
+            corner = sel("corner")
             page.wait_for_function("(selector) => document.querySelector(`${selector} iframe`)?.dataset.widgetContentHeight",
                                    arg=corner, timeout=30_000)
             page.wait_for_timeout(500)
+            assert page.evaluate("() => document.documentElement.dataset.pointer") == "coarse"
             assert page.evaluate("() => document.getElementById('widgets-list').dataset.widgetLayout") == "stack"
-            # The board must be able to scroll for a swipe to prove anything.
             assert page.evaluate("() => { const s = document.querySelector('.widgets-scroll'); return s.scrollHeight - s.clientHeight; }") > 400
-            note = f'[data-widget-key="{probe}:c1"]'
-            page.locator(note).scroll_into_view_if_needed()
+            note = sel("c1")
             page.evaluate("() => { document.querySelector('.widgets-scroll').scrollTop = 0; }")
             page.wait_for_timeout(300)
-            assert page.locator(f"{note} [data-widget-corner-handle]").is_hidden()
-            assert page.locator(f"{note} [data-widget-resize-handle]").is_hidden()
 
-            def geometry(selector=note):
-                return (page.locator(selector).bounding_box(), page.locator(f"{selector} [data-widget-height-handle]").bounding_box(),
-                        page.locator(f"{selector} [data-widget-mount]").bounding_box())
+            # No card is adjusted: none reserves a strip, none shows Done or a grip, none catches a finger at its corner.
+            feet = page.evaluate(FEET)
+            report["feet"] = feet
+            assert page.evaluate(ADJUSTING) == [], report
+            assert all(not f["grip"] and not f["done"] and f["corner"] == "content" and f["foot"] <= 1.5 for f in feet), report
+            for selector in ("[data-widget-corner-handle]", "[data-widget-resize-handle]", "[data-widget-height-handle]"):
+                assert page.locator(f"{note} {selector}").is_hidden(), selector
+            page.screenshot(path=str(shots / "chromium-touch-board.png"))
 
-            box, grip, body = geometry()
-            report["card"], report["grip"], report["body"] = box, grip, body
-            # The grip is the touch minimum each way, inside its card, below everything the card draws.
-            assert round(grip["width"]) == 44 and round(grip["height"]) == 44, report
-            assert grip["x"] >= box["x"] and grip["x"] + grip["width"] <= box["x"] + box["width"], report
-            assert grip["y"] >= body["y"] + body["height"] - 0.5 and grip["y"] + grip["height"] <= box["y"] + box["height"] + 0.5, report
-            centre = (grip["x"] + grip["width"] / 2, grip["y"] + grip["height"] / 2)
-            # The gap below the card: a quarter across, and under the grip itself.
+            box = page.locator(note).bounding_box()
             gap = (box["x"] + box["width"] * 0.25, box["y"] + box["height"] + 5)
-            under = (centre[0], box["y"] + box["height"] + 5)
-            report["hit"] = {name: page.evaluate(HIT, list(point)) for name, point in
-                             (("gap", gap), ("under_grip", under), ("grip", centre))}
-            assert report["hit"] == {"gap": "gap", "under_grip": "gap", "grip": "grip"}, report
-
+            report["hit_gap"] = page.evaluate(HIT, list(gap))
+            assert report["hit_gap"] == "gap", report
             # A swipe from the gap scrolls the board and saves nothing.
-            before = page.evaluate(scroll)
+            before = page.evaluate(SCROLL)
             _touch(page, _line(*gap, -200))
-            report["gap_swipe"] = {"before": before, "after": page.evaluate(scroll), "sizes": page.evaluate(sizes)}
-            assert report["gap_swipe"]["after"] > before + 50, report
-            assert report["gap_swipe"]["sizes"] == {f"{probe}:c2": {"w": 0, "h": 120}}, report
+            report["gap_swipe"] = {"before": before, "after": page.evaluate(SCROLL), "sizes": page.evaluate(SIZES)}
+            assert report["gap_swipe"]["after"] > before + 50 and report["gap_swipe"]["sizes"] == stored, report
 
             # The widget's own control at its bottom right is the widget's: a tap reaches it, nothing is resized.
             page.locator(corner).scroll_into_view_if_needed()
             page.wait_for_timeout(300)
             frame = page.locator(f"{corner} iframe").element_handle().content_frame()
+            frame.evaluate("() => { window.__boardMark = 'same-window'; }")
             control = frame.locator("#corner").bounding_box()
-            corner_box, corner_grip, _ = geometry(corner)
+            corner_height = page.locator(corner).bounding_box()["height"]
             tap = (control["x"] + control["width"] - 6, control["y"] + control["height"] - 6)
-            report["corner"] = {"control": control, "grip": corner_grip, "hit": page.evaluate(HIT, list(tap))}
+            report["corner"] = {"control": control, "hit": page.evaluate(HIT, list(tap))}
             assert report["corner"]["hit"] == "frame", report
-            assert corner_grip["y"] >= control["y"] + control["height"] - 0.5, report
             _touch(page, [tap])
             report["corner"]["taps"] = frame.evaluate("() => window.__cornerTaps")
-            report["corner"]["height"] = page.locator(corner).bounding_box()["height"]
-            assert report["corner"]["taps"] == 1 and abs(report["corner"]["height"] - corner_box["height"]) <= 1, report
+            assert report["corner"]["taps"] == 1 and abs(page.locator(corner).bounding_box()["height"] - corner_height) <= 1, report
 
-            # Show all is Show all: its line shares the foot's row with the grip, each hit as itself, and a tap on it
-            # lifts the height in this window only.
-            bounded = f'[data-widget-key="{probe}:c2"]'
+            # Show all is Show all, its whole row its own: a tap lifts the height in this window only, Back returns it.
+            bounded = sel("c2")
             page.locator(bounded).scroll_into_view_if_needed()
             page.wait_for_timeout(300)
             expand = page.locator(f"{bounded} [data-widget-expand]").bounding_box()
-            _, bounded_grip, _ = geometry(bounded)
             ex, ey = expand["x"] + expand["width"] / 2, expand["y"] + expand["height"] / 2
-            report["show_all"] = {"button": expand, "grip": bounded_grip, "hit": [page.evaluate(HIT, [x, y]) for x, y in
+            report["show_all"] = {"button": expand, "hit": [page.evaluate(HIT, [x, y]) for x, y in
                                   ((ex, ey), (expand["x"] + 2, ey), (expand["x"] + expand["width"] - 2, ey), (ex, ey - 21), (ex, ey + 21))]}
             assert report["show_all"]["hit"] == ["show-all"] * 5, report
-            assert expand["x"] + expand["width"] <= bounded_grip["x"], report
             _touch(page, [(ex, ey)])
-            report["show_all"]["after"] = page.locator(f"{bounded} [data-widget-expand]").inner_text()
-            assert report["show_all"]["after"].startswith("Back to 120"), report
-            assert page.evaluate(sizes) == {f"{probe}:c2": {"w": 0, "h": 120}}, "Show all is never saved"
+            assert page.locator(f"{bounded} [data-widget-expand]").inner_text().startswith("Back to 120")
+            page.locator(f"{bounded} [data-widget-expand]").scroll_into_view_if_needed()
+            _tap(page, f"{bounded} [data-widget-expand]")
+            assert page.locator(f"{bounded} [data-widget-expand]").inner_text().startswith("Show all")
+            assert page.evaluate(SIZES) == stored, "Show all is never saved"
 
-            page.locator(note).scroll_into_view_if_needed()
+            # Resize from the card's menu: that card alone gets its foot, Done at the left and the 44 px grip at the
+            # right, below everything it draws; its grip takes the focus. Choosing it writes nothing.
             page.evaluate("() => { document.querySelector('.widgets-scroll').scrollTop = 0; }")
-            page.wait_for_timeout(200)
-            box, grip, _ = geometry()
+            page.wait_for_timeout(300)
+            _resize(page, note)
+            box = page.locator(note).bounding_box()
+            grip = page.locator(f"{note} [data-widget-height-handle]").bounding_box()
+            body = page.locator(f"{note} [data-widget-mount]").bounding_box()
+            done = page.locator(f"{note} [data-widget-adjust-done]").bounding_box()
+            report["adjust"] = {"card": box, "grip": grip, "body": body, "done": done, "adjusting": page.evaluate(ADJUSTING),
+                                "focus": page.evaluate(FOCUSED), "sizes": page.evaluate(SIZES), "feet": page.evaluate(FEET)}
+            assert report["adjust"]["adjusting"] == [key("c1")] and report["adjust"]["focus"] == "grip", report
+            assert round(grip["width"]) == 44 and round(grip["height"]) == 44, report
+            assert grip["x"] >= box["x"] and grip["x"] + grip["width"] <= box["x"] + box["width"], report
+            assert grip["y"] >= body["y"] + body["height"] - 0.5 and grip["y"] + grip["height"] <= box["y"] + box["height"] + 0.5, report
+            assert done["x"] + done["width"] <= grip["x"] and done["y"] >= body["y"] + body["height"] - 0.5, report
+            assert [f["key"] for f in report["adjust"]["feet"] if f["grip"] or f["done"] or f["foot"] > 1.5] == [key("c1")], report
+            assert report["adjust"]["sizes"] == stored, report
+            page.screenshot(path=str(shots / "chromium-touch-resize.png"))
+
+            # A swipe from the gap still scrolls the board, and the card stays chosen.
+            gap = (box["x"] + box["width"] * 0.25, box["y"] + box["height"] + 5)
+            assert page.evaluate(HIT, list(gap)) == "gap"
+            before = page.evaluate(SCROLL)
+            _touch(page, _line(*gap, -150))
+            report["adjust_scroll"] = {"before": before, "after": page.evaluate(SCROLL), "adjusting": page.evaluate(ADJUSTING)}
+            assert report["adjust_scroll"]["after"] > before + 50 and report["adjust_scroll"]["adjusting"] == [key("c1")], report
+            page.evaluate("() => { document.querySelector('.widgets-scroll').scrollTop = 0; }")
+            page.wait_for_timeout(300)
+            grip = page.locator(f"{note} [data-widget-height-handle]").bounding_box()
             centre = (grip["x"] + grip["width"] / 2, grip["y"] + grip["height"] / 2)
-            height = box["height"]
+            height = page.locator(note).bounding_box()["height"]
             # A tap on the grip, and a drag on it that the browser cancels, save nothing and leave the card as it was.
             _touch(page, [centre, (centre[0], centre[1] + 2)])
             _touch(page, _line(*centre, -60, steps=6), end="touchCancel")
-            report["tap_and_cancel"] = {"sizes": page.evaluate(sizes), "height": page.locator(note).bounding_box()["height"]}
-            assert f"{probe}:c1" not in report["tap_and_cancel"]["sizes"] and abs(report["tap_and_cancel"]["height"] - height) <= 1, report
-
-            # A swipe on the grip sets a custom height (widths do not apply on a phone, so a sideways part does nothing).
+            report["tap_and_cancel"] = {"sizes": page.evaluate(SIZES), "height": page.locator(note).bounding_box()["height"]}
+            assert report["tap_and_cancel"]["sizes"] == stored and abs(report["tap_and_cancel"]["height"] - height) <= 1, report
+            # A swipe on the grip sets a custom height (widths do not apply on a phone, so a sideways part does nothing);
+            # the card stays chosen, and a second swipe sets another.
             _touch(page, _line(*centre, -80, dx=-40))
-            report["grip_swipe"] = {"sizes": page.evaluate(sizes),
-                                    "body": page.locator(f"{note} [data-widget-mount]").evaluate("(body) => body.clientHeight")}
-            saved = report["grip_swipe"]["sizes"].get(f"{probe}:c1")
-            assert saved and saved["w"] == 0 and saved["h"] >= 120, report
-            # The card's body now stands at the height the grip set.
-            assert abs(report["grip_swipe"]["body"] - saved["h"]) <= 1, report
-            page.screenshot(path=str(shots / "chromium-touch-grip.png"))
-
+            first = page.evaluate(SIZES).get(key("c1"))
+            assert first and first["w"] == 0 and first["h"] >= 120, first
+            assert abs(page.locator(f"{note} [data-widget-mount]").evaluate("(b) => b.clientHeight") - first["h"]) <= 1
+            assert page.evaluate(ADJUSTING) == [key("c1")]
+            grip = page.locator(f"{note} [data-widget-height-handle]").bounding_box()
+            centre = (grip["x"] + grip["width"] / 2, grip["y"] + grip["height"] / 2)
+            # Past the content's own height (near it the grip catches the natural height again).
+            _touch(page, _line(*centre, 160))
+            second = page.evaluate(SIZES).get(key("c1"))
+            report["grip_swipes"] = [first, second]
+            assert second and second["h"] > first["h"] + 120, report
             # The grip's keys still step the height: Home is the least, End the content's own again.
-            handle = page.locator(f"{note} [data-widget-height-handle]")
-            handle.focus()
+            page.locator(f"{note} [data-widget-height-handle]").focus()
             page.keyboard.press("Home")
             page.wait_for_timeout(300)
-            report["keys_home"] = page.evaluate(sizes).get(f"{probe}:c1")
+            report["keys_home"] = page.evaluate(SIZES).get(key("c1"))
             page.keyboard.press("End")
             page.wait_for_timeout(300)
-            report["keys_end"] = page.evaluate(sizes).get(f"{probe}:c1")
+            report["keys_end"] = page.evaluate(SIZES).get(key("c1"))
             assert report["keys_home"] == {"w": 0, "h": 120} and not (report["keys_end"] or {}).get("h"), report
+            sizes_now = page.evaluate(SIZES)
+
+            # A tap on its own content keeps it; Done puts it away and gives the focus back to its menu button without
+            # moving the board.
+            _tap(page, f"{note} .widget-callout >> nth=0")
+            assert page.evaluate(ADJUSTING) == [key("c1")]
+            page.evaluate("() => { document.querySelector('.widgets-scroll').scrollTop = 40; }")
+            page.wait_for_timeout(200)
+            before = page.evaluate(SCROLL)
+            _tap(page, f"{note} [data-widget-adjust-done]")
+            report["done"] = {"adjusting": page.evaluate(ADJUSTING), "focus": page.evaluate(FOCUSED),
+                              "focus_card": page.evaluate(FOCUSED_CARD), "scroll": [before, page.evaluate(SCROLL)]}
+            assert report["done"]["adjusting"] == [] and report["done"]["focus"] == "trigger", report
+            assert report["done"]["focus_card"] == key("c1") and abs(report["done"]["scroll"][1] - before) <= 1, report
+            assert all(not f["grip"] and f["foot"] <= 1.5 for f in page.evaluate(FEET)), "the foot is gone"
+
+            # A tap on another card puts it away and moves no focus there.
+            page.evaluate("() => { document.querySelector('.widgets-scroll').scrollTop = 0; }")
+            page.wait_for_timeout(200)
+            _resize(page, note)
+            _tap(page, f"{sel('c3')} .widget-callout >> nth=0")
+            report["outside"] = {"adjusting": page.evaluate(ADJUSTING), "focus": page.evaluate(FOCUSED)}
+            assert report["outside"]["adjusting"] == [] and report["outside"]["focus"] != "trigger", report
+
+            # Under Show all: the foot is its own row below the line; Show all and Back keep the card chosen; Escape
+            # (a keyboard on the tablet) puts it away and returns to the menu button.
+            page.locator(bounded).scroll_into_view_if_needed()
+            page.wait_for_timeout(300)
+            _resize(page, bounded)
+            more = page.locator(f"{bounded} [data-widget-more]").bounding_box()
+            grip = page.locator(f"{bounded} [data-widget-height-handle]").bounding_box()
+            report["show_all_foot"] = {"more": more, "grip": grip, "adjusting": page.evaluate(ADJUSTING)}
+            assert report["show_all_foot"]["adjusting"] == [key("c2")], report
+            assert grip["y"] >= more["y"] + more["height"] - 0.5, report
+            page.locator(bounded).screenshot(path=str(shots / "chromium-touch-resize-show-all.png"))
+            _tap(page, f"{bounded} [data-widget-expand]")
+            assert page.locator(f"{bounded} [data-widget-expand]").inner_text().startswith("Back to 120")
+            page.locator(f"{bounded} [data-widget-expand]").scroll_into_view_if_needed()
+            _tap(page, f"{bounded} [data-widget-expand]")
+            assert page.locator(f"{bounded} [data-widget-expand]").inner_text().startswith("Show all")
+            assert page.evaluate(ADJUSTING) == [key("c2")]
+            page.locator(f"{bounded} [data-widget-height-handle]").focus()
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(200)
+            report["escape"] = {"adjusting": page.evaluate(ADJUSTING), "focus": page.evaluate(FOCUSED), "card": page.evaluate(FOCUSED_CARD)}
+            assert report["escape"] == {"adjusting": [], "focus": "trigger", "card": key("c2")}, report
+
+            # A card taller than the screen: Resize from its menu at its top brings its grip into view.
+            tall = sel("c4")
+            page.evaluate("(selector) => document.querySelector(selector).scrollIntoView({block: 'start'})", tall)
+            page.wait_for_timeout(300)
+            _resize(page, tall)
+            report["tall"] = _in_view(page, f"{tall} [data-widget-height-handle]")
+            report["tall"]["focus"] = page.evaluate(FOCUSED)
+            report["tall"]["card"] = page.locator(tall).bounding_box()
+            assert report["tall"]["card"]["height"] > 2700 and report["tall"]["inside"] and report["tall"]["focus"] == "grip", report
+            page.screenshot(path=str(shots / "chromium-touch-resize-tall.png"))
+            _tap(page, f"{tall} [data-widget-adjust-done]")
+
+            # The framed card: chosen, resized and put away, its document is the one it had.
+            page.locator(corner).scroll_into_view_if_needed()
+            page.wait_for_timeout(300)
+            _resize(page, corner)
+            grip = page.locator(f"{corner} [data-widget-height-handle]").bounding_box()
+            _touch(page, _line(grip["x"] + 22, grip["y"] + 22, 60))
+            _tap(page, f"{corner} [data-widget-adjust-done]")
+            report["frame_kept"] = {"mark": frame.evaluate("() => window.__boardMark ?? null"),
+                                    "frames": page.locator(f"{corner} iframe").count(), "sizes": page.evaluate(SIZES)}
+            assert report["frame_kept"]["mark"] == "same-window" and report["frame_kept"]["frames"] == 1, report
+            assert report["frame_kept"]["sizes"].get(key("corner"), {}).get("h", 0) > 0, report
+            # Best effort, not a promise: a tap inside another card's frame is heard only as the window's blur.
+            _resize(page, note)
+            frame_box = page.locator(f"{corner} iframe").bounding_box()
+            page.locator(corner).scroll_into_view_if_needed()
+            frame_box = page.locator(f"{corner} iframe").bounding_box()
+            page.touchscreen.tap(frame_box["x"] + 20, frame_box["y"] + 20)
+            page.wait_for_timeout(300)
+            report["frame_tap_ends"] = page.evaluate(ADJUSTING) == []
+            for k, v in sizes_now.items():
+                if k != key("corner"):
+                    assert page.evaluate(SIZES).get(k) == v, ("entering and leaving wrote nothing", k)
         finally:
             (shots / "chromium-touch-grip.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
             context.close()
 
-        # A two-column tablet under a finger: the same foot, and a sideways swipe on the grip sets the width too.
+        # A two-column tablet under a finger: no card has a foot until Resize, then a sideways swipe on its grip sets
+        # the width too.
         context = browser.new_context(viewport={"width": 1024, "height": 768}, has_touch=True)
         page = context.new_page()
         tablet = {}
         try:
             page.goto(f"{url}#widgets", wait_until="domcontentloaded", timeout=30_000)
             for i in range(6):
-                page.locator(f'[data-widget-key="{probe}:c{i}"] .widget-callout').nth(3).wait_for(state="attached", timeout=30_000)
+                page.locator(f"{sel(f'c{i}')} .widget-callout").nth(3).wait_for(state="attached", timeout=30_000)
             page.wait_for_timeout(500)
             assert page.evaluate("() => document.getElementById('widgets-list').dataset.widgetLayout") == "columns"
-            target = f'[data-widget-key="{probe}:c3"]'
+            target = sel("c3")
             page.locator(target).scroll_into_view_if_needed()
             page.wait_for_timeout(300)
+            tablet["feet"] = page.evaluate(FEET)
+            assert all(not f["grip"] and f["foot"] <= 1.5 for f in tablet["feet"]), tablet
+            _resize(page, target)
             box = page.locator(target).bounding_box()
             grip = page.locator(f"{target} [data-widget-height-handle]").bounding_box()
             tablet["card"], tablet["grip"] = box, grip
@@ -2745,12 +2900,136 @@ def test_a_finger_scrolls_from_the_gap_and_sizes_a_card_only_from_its_own_foot(d
             assert page.locator(f"{target} [data-widget-resize-handle]").is_hidden(), "no thin edge for a finger"
             centre = (grip["x"] + grip["width"] / 2, grip["y"] + grip["height"] / 2)
             _touch(page, _line(*centre, -60, dx=420))
-            tablet["sizes"] = page.evaluate(sizes)
-            saved = tablet["sizes"].get(f"{probe}:c3")
-            assert saved and saved["w"] > 0 and saved["h"] > 0, tablet
+            tablet["sizes"] = page.evaluate(SIZES)
+            saved_size = tablet["sizes"].get(key("c3"))
+            assert saved_size and saved_size["w"] > 0 and saved_size["h"] > 0, tablet
             page.screenshot(path=str(shots / "chromium-touch-grip-tablet.png"))
         finally:
             (shots / "chromium-touch-grip-tablet.json").write_text(json.dumps(tablet, indent=2), encoding="utf-8")
+            context.close()
+            browser.close()
+
+
+@pytest.mark.parametrize("engine", ("chromium", "webkit"))
+def test_resize_from_the_menu_is_a_finger_mode_a_mouse_never_sees(direct_server_with_data, engine):
+    """In both engines: under a touch screen the menu's Resize gives one card the foot (Done, the grip, focus on the
+    grip), Done and a tap outside put it away, nothing is written for either; with a mouse the menu offers no Resize,
+    no card has a foot and the thin edges are where they were."""
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import sync_playwright
+
+    url = direct_server_with_data["url"]
+    data_dir = direct_server_with_data["data_dir"]
+    probe = _write_touch_cards(data_dir)
+    shots = evidence_dir(data_dir)
+    report = {}
+    key = lambda tab: f"{probe}:{tab}"  # noqa: E731
+    sel = lambda tab: f'[data-widget-key="{probe}:{tab}"]'  # noqa: E731
+    stored = {key("c2"): {"w": 0, "h": 120}}
+
+    def ready(page):
+        for i in range(6):
+            page.locator(f"{sel(f'c{i}')} .widget-callout").nth(3).wait_for(state="attached", timeout=30_000)
+        page.wait_for_timeout(500)
+
+    with sync_playwright() as pw:
+        browser, context = launch(pw, engine, viewport={"width": 390, "height": 844}, has_touch=True)
+        page = context.new_page()
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            assert page.evaluate("""async (skill) => (await fetch(`/api/skills/${encodeURIComponent(skill)}/toggle`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({enabled: true}),
+            })).status""", probe) == 200
+            page.evaluate("""async (sizes) => fetch('/api/ui/preferences', {method: 'POST',
+                headers: {'Content-Type': 'application/json'}, body: JSON.stringify({widget_size: sizes})})""", stored)
+            page.goto(f"{url}#widgets", wait_until="domcontentloaded", timeout=30_000)
+            page.reload(wait_until="domcontentloaded", timeout=30_000)
+            ready(page)
+            report["pointer"] = page.evaluate("() => document.documentElement.dataset.pointer")
+            if report["pointer"] != "coarse":
+                pytest.skip(f"{engine} with a touch screen does not report a coarse primary pointer here")
+            feet = page.evaluate(FEET)
+            report["feet"] = feet
+            assert all(not f["grip"] and not f["done"] and f["foot"] <= 1.5 and f["corner"] == "content" for f in feet), report
+            note = sel("c1")
+            _resize(page, note)
+            box = page.locator(note).bounding_box()
+            grip = page.locator(f"{note} [data-widget-height-handle]").bounding_box()
+            report["adjust"] = {"adjusting": page.evaluate(ADJUSTING), "focus": page.evaluate(FOCUSED), "card": box, "grip": grip,
+                                "in_view": _in_view(page, f"{note} [data-widget-height-handle]")["inside"], "sizes": page.evaluate(SIZES)}
+            assert report["adjust"]["adjusting"] == [key("c1")] and report["adjust"]["focus"] == "grip", report
+            assert round(grip["width"]) == 44 and round(grip["height"]) == 44 and report["adjust"]["in_view"], report
+            assert report["adjust"]["sizes"] == stored, report
+            page.screenshot(path=str(shots / f"{engine}-touch-resize.png"))
+            # The grip answers a pointer's drag (a mouse here: the engine's own touch drag is CDP-only).
+            drag(page, f"{note} [data-widget-height-handle]", 0, -60)
+            page.wait_for_timeout(300)
+            report["dragged"] = page.evaluate(SIZES).get(key("c1"))
+            assert report["dragged"] and report["dragged"]["h"] >= 120, report
+            _tap(page, f"{note} [data-widget-adjust-done]")
+            report["done"] = {"adjusting": page.evaluate(ADJUSTING), "focus": page.evaluate(FOCUSED), "card": page.evaluate(FOCUSED_CARD)}
+            assert report["done"] == {"adjusting": [], "focus": "trigger", "card": key("c1")}, report
+            after_done = page.evaluate(SIZES)
+            # A tap in the gap below it (no control there) puts it away.
+            _resize(page, note)
+            box = page.locator(note).bounding_box()
+            gap = (box["x"] + box["width"] * 0.25, box["y"] + box["height"] + 5)
+            report["gap"] = {"hit": page.evaluate(HIT, list(gap))}
+            page.touchscreen.tap(*gap)
+            page.wait_for_timeout(300)
+            report["gap"]["adjusting"] = page.evaluate(ADJUSTING)
+            assert report["gap"] == {"hit": "gap", "adjusting": []}, report
+            # A tap on a neighbouring card's button is that button's, and it puts the foot away too: the foot is not
+            # taken off before the click, so nothing moves under the finger.
+            bounded = sel("c2")
+            _resize(page, note)
+            _tap(page, f"{bounded} [data-widget-expand]")
+            report["neighbour"] = {"adjusting": page.evaluate(ADJUSTING),
+                                   "button": page.locator(f"{bounded} [data-widget-expand]").inner_text()}
+            assert report["neighbour"]["adjusting"] == [] and report["neighbour"]["button"].startswith("Back to 120"), report
+            _tap(page, f"{bounded} [data-widget-expand]")
+            # Under Show all the foot is its own row below the line.
+            page.locator(bounded).scroll_into_view_if_needed()
+            page.wait_for_timeout(300)
+            _resize(page, bounded)
+            more = page.locator(f"{bounded} [data-widget-more]").bounding_box()
+            grip = page.locator(f"{bounded} [data-widget-height-handle]").bounding_box()
+            report["show_all_foot"] = {"more": more, "grip": grip}
+            assert grip["y"] >= more["y"] + more["height"] - 0.5, report
+            page.locator(bounded).screenshot(path=str(shots / f"{engine}-touch-resize-show-all.png"))
+            _tap(page, f"{sel('c4')} .widget-callout >> nth=0")
+            assert page.evaluate(ADJUSTING) == [], "a tap outside"
+            assert page.evaluate(SIZES) == after_done, "choosing and putting away write nothing"
+        finally:
+            (shots / f"{engine}-touch-resize.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+            context.close()
+
+        context = browser.new_context(viewport={"width": 1100, "height": 750})
+        page = context.new_page()
+        desk = {}
+        try:
+            page.goto(f"{url}#widgets", wait_until="domcontentloaded", timeout=30_000)
+            ready(page)
+            assert page.evaluate("() => document.documentElement.dataset.pointer") == "fine"
+            desk["feet"] = page.evaluate(FEET)
+            assert all(not f["done"] and f["foot"] <= 1.5 for f in desk["feet"]), desk
+            note = sel("c1")
+            edge = page.locator(f"{note} [data-widget-height-handle]").bounding_box()
+            desk["edge"] = edge
+            assert round(edge["height"]) == 12, desk
+            page.locator(f"{note} [data-widget-menu-trigger]").click()
+            page.locator("body > .skills-card-menu-dialog[open]").wait_for(state="visible")
+            desk["resize_offered"] = page.locator("body > .skills-card-menu-dialog[open] [data-widget-adjust]").is_visible()
+            assert desk["resize_offered"] is False, desk
+            page.keyboard.press("Escape")
+            # The bottom edge still drags a height with a mouse.
+            drag(page, f"{note} [data-widget-height-handle]", 0, 80)
+            page.wait_for_timeout(300)
+            desk["dragged"] = page.evaluate(SIZES).get(key("c1"))
+            assert desk["dragged"] and desk["dragged"]["h"] > 0, desk
+            assert page.evaluate(ADJUSTING) == []
+        finally:
+            (shots / f"{engine}-desk-no-resize.json").write_text(json.dumps(desk, indent=2), encoding="utf-8")
             context.close()
             browser.close()
 

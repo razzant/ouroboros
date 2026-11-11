@@ -111,7 +111,9 @@ export function renderWidgetCardParts(tab, { contributionVisibility = [] } = {})
     const policy = framed ? group('Launch policy', WIDGET_START_MODES.map((mode) => (
         item(`data-widget-start-mode="${mode}" aria-checked="false"`, WIDGET_START_MODE_LABELS[mode])
     )).join('')) : '';
+    // Resize: where the primary input is a finger, the one card whose foot and grip show (widget_reorder.js).
     const sizes = group('Size', `<p class="widgets-menu-note" data-widget-size-note hidden>Widths apply when the list is wide.</p>${
+        item('data-widget-adjust hidden', 'Resize', 'menuitem')}${
         WIDGET_WIDTH_STEPS.map(({ w, label }) => item(`data-widget-size="${w}" aria-checked="false"`, label)).join('')
     }${item('data-widget-size="reset"', 'Reset size', 'menuitem')}`);
     const composer = renderWidgetContributionGroup(contributionVisibility);
@@ -274,7 +276,8 @@ export function renderWidgetFacade(mount, tab, height = 0) {
  * Card-menu domain adapter over the shared keyboard/viewport menu: a launch
  * policy goes to `onSelectMode(key, mode)`, a width step to `widths.setWidth(key, w)`, Reset size to
  * `widths.resetSize(key)`, a height (0: Natural height) to `widths.setHeight(key, h)`, a move to
- * `onMove(key, where)`, a kept card's Remove to `onRemove(key)`; the menu opens with the card's current width
+ * `onMove(key, where)`, a kept card's Remove to `onRemove(key)`, Resize (offered under a finger: `widths.canAdjust()`)
+ * to `widths.adjust(key)`; the menu opens with the card's current width
  * (`widths.widthOf(key)`) and height (`widths.heightOf(key)`) checked, only the moves its place
  * (`placeOf(key)`: `{index, count}`) allows, and on the stacked column it says that widths apply to the wide board only.
  */
@@ -298,6 +301,7 @@ export function bindWidgetCardMenus(list, onSelectMode, widths = null, onRemove 
             item.setAttribute('aria-checked', Number(item.dataset.widgetSize) === width ? 'true' : 'false');
         });
         popover.querySelector('[data-widget-size-note]')?.toggleAttribute('hidden', list.dataset.widgetLayout !== 'stack');
+        popover.querySelector('[data-widget-adjust]')?.toggleAttribute('hidden', !widths?.canAdjust?.());
         const height = widths?.heightOf?.(key) || 0;
         const own = popover.querySelector('[data-widget-height-own]');
         const listed = height === 0 || WIDGET_HEIGHT_PRESETS.includes(height);
@@ -321,11 +325,12 @@ export function bindWidgetCardMenus(list, onSelectMode, widths = null, onRemove 
         popover.show();
         trigger.setAttribute('aria-expanded', 'true');
         const onSelect = (selection) => {
-            const item = selection.target.closest('[data-widget-start-mode], [data-widget-size], [data-widget-height], [data-widget-move], [data-widget-unpin], [data-widget-stop], [data-widget-contribution-key]');
+            const item = selection.target.closest('[data-widget-start-mode], [data-widget-size], [data-widget-height], [data-widget-move], [data-widget-unpin], [data-widget-stop], [data-widget-contribution-key], [data-widget-adjust]');
             if (!item) return;
             active?.binding.close({ restoreFocus: true });
             const size = item.dataset.widgetSize;
-            if (item.hasAttribute('data-widget-stop')) onStop(key);
+            if (item.hasAttribute('data-widget-adjust')) widths?.adjust?.(key);
+            else if (item.hasAttribute('data-widget-stop')) onStop(key);
             else if (item.hasAttribute('data-widget-unpin')) onRemove(key);
             else if (item.hasAttribute('data-widget-contribution-key')) onToggleContribution(item.dataset.widgetContributionKey, item.dataset.widgetContributionHidden !== 'true');
             else if (item.dataset.widgetMove) onMove(key, item.dataset.widgetMove);
