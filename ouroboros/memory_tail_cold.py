@@ -53,15 +53,13 @@ def gate(store: Any) -> Optional[Gate]:
     """The marks outside the index, read once for this capture; ``None`` when one cannot be read: then nothing stands
     and nothing is composed, and the capture reads the whole tail."""
     from ouroboros.memory_inventory import _membership_facts
-    from ouroboros.projects_registry import project_thread_chat_ids
     from ouroboros.transcript_prefix import _running_code
 
     try:
         facts = _membership_facts(store.data_root)
         if facts.lineage is None:
             return None
-        rooms = facts.rooms
-        rooms._projects = project_thread_chat_ids(store.data_root)  # read here once: the mark and the rule read the same
+        rooms = facts.rooms  # its Project rooms were read once with the facts: the mark and the rule read the same
         registry = [sorted(facts.project_chat_ids), facts.bindings, rooms.bindings, sorted(rooms._projects),
                     sorted([list(key), sorted(chats)] for key, chats in facts.projects_by_source_key.items())]
         digest = hashlib.sha256(json.dumps(registry, sort_keys=True, default=str).encode("utf-8")).hexdigest()

@@ -785,6 +785,28 @@ def test_a_tail_still_filling_composes_no_set(monkeypatch, tmp_path):
     assert _in_use(tmp_path)
 
 
+def test_a_project_that_comes_to_hold_a_tasks_admitted_chat_moves_its_rows_warm_and_fresh(monkeypatch, tmp_path):
+    """A Project's room is its id's chat (``project_chat_id``): a task admitted in that chat before the Project existed
+    joins it when the Project is made. The registry mark moves; this process also answers that task again, as a fresh
+    one does, so the set it composes holds what a fresh process would show."""
+    from ouroboros.contracts.chat_id_policy import project_chat_id
+
+    rooms = _settled(tmp_path)
+    chat = project_chat_id("gamma")
+    write_task_result(tmp_path, "early", "completed", result="done", chat_id=chat)
+    _append(tmp_path, shared.msg(_ts(1), "Early row.", direction="out", task_id="early"))
+    _append(tmp_path, shared.msg(_ts(2), "Later word.", client_message_id="later"))
+    _fill(tmp_path)
+    row = _entry(tmp_path, "Early row.")
+    _seal(tmp_path, row, 1)
+    _compose(tmp_path)
+    assert row[2] not in _open_in(tmp_path, chat)
+    create_project(tmp_path, "gamma", name="Gamma")
+    assert not _in_use(tmp_path)
+    assert row[2] in _open_in(tmp_path, chat)
+    _same(monkeypatch, tmp_path, rooms)
+
+
 def test_two_rows_of_one_task_with_different_lineage_fields_get_their_own_answers(monkeypatch, tmp_path):
     """The rule's answer is remembered by its whole input (task, parent, root): the order the rows are judged in,
     which a standing set changes, never changes a row's rooms."""

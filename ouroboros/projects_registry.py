@@ -597,7 +597,7 @@ def _emit_origin_ambiguous(drive_root: Any, key: tuple, candidates: list, chosen
 _TASK_LINEAGE: Dict[tuple, Dict[str, Any]] = {}
 _TASK_LINEAGE_LIMIT = 50_000  # a memory bound, not a policy: the facts are re-read on the next sight
 _ROOM_ANSWERS: Dict[str, tuple] = {}
-_LINEAGE_SEEN: Dict[str, Any] = {}  # each root's task-store lineage writes its remembered lineage was read under
+_LINEAGE_SEEN: Dict[str, Any] = {}  # each root's lineage writes and Project rooms its remembered answers were read under
 # One capture (``store_capture``). ``chat_id`` is the column its writer derived (``store_hot_facts.admitted_chat``);
 # only a row an older writer left underived, and every row of a store before that column, reads its body for it:
 # text or, from a JSON real, its integer part (what ``int()`` gave). A derived row's body is never read
@@ -608,14 +608,15 @@ _LINEAGE_SELECT = ("SELECT t.task_id, t.parent_task_id, t.root_task_id, t.delega
                    "FROM tasks t WHERE t.task_id IN (SELECT value FROM json_each(?))")
 
 
-def forget_lineage(drive_root: Any, writes: Any) -> None:
+def forget_lineage(drive_root: Any, writes: Any, projects: Any = None) -> None:
     """Drop the lineage facts and room answers this process remembers for ``drive_root`` unless they were read under
-    these lineage writes (``store_hot_facts.lineage_writes``): a task whose lineage changed is read again, as a fresh
-    process reads it. Writes the store cannot answer change nothing."""
+    these lineage writes (``store_hot_facts.lineage_writes``) and Project rooms: a task whose lineage changed, or whose
+    admitted chat a Project now holds or gave up, is answered again, as a fresh process answers it. Writes the store
+    cannot answer change nothing."""
     root = str(drive_root)
-    if writes is None or _LINEAGE_SEEN.get(root) == writes:
+    if writes is None or _LINEAGE_SEEN.get(root) == (writes, projects):
         return
-    _LINEAGE_SEEN[root] = writes
+    _LINEAGE_SEEN[root] = (writes, projects)
     for key in [key for key in _TASK_LINEAGE if key[0] == root]:
         del _TASK_LINEAGE[key]
     _ROOM_ANSWERS.pop(str(_bindings_path(drive_root)), None)
@@ -673,8 +674,8 @@ class RoomResolver:
 
     __slots__ = ("root", "bindings", "answers", "misses", "_projects", "strict")
 
-    def __init__(self, drive_root: Any, *, strict: bool = False) -> None:
-        self.root, self.strict = drive_root, strict
+    def __init__(self, drive_root: Any, *, strict: bool = False, projects: Optional[frozenset] = None) -> None:
+        self.root, self.strict = drive_root, strict  # ``projects``: the Project rooms its caller read for this rule
         self.bindings = _load_bindings(drive_root, strict=strict)["bindings"]  # one ``stat`` per resolver
         key = str(_bindings_path(drive_root))
         cached = None if strict else _ROOM_ANSWERS.get(key)
@@ -684,7 +685,7 @@ class RoomResolver:
                 _ROOM_ANSWERS[key] = cached
         self.answers: Dict[tuple, int] = cached[1]
         self.misses: set = set()
-        self._projects: Optional[frozenset] = None
+        self._projects: Optional[frozenset] = projects
 
     def _facts(self, task_id: str) -> Optional[Dict[str, Any]]:
         """Cached or read facts; ``{}`` for a known miss; ``None`` when unavailable now."""

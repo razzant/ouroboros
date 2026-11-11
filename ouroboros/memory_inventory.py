@@ -177,11 +177,11 @@ def membership_facts(root: Any) -> MembershipFacts:
 def _membership_facts(root: Any) -> MembershipFacts:
     from ouroboros.project_dialogue import _source_ref_identity  # D15->D17 is lazy-only
     from ouroboros.projects_registry import (all_task_bindings, forget_lineage, list_reserved_projects,
-                                             project_task_bindings, RoomResolver)
+                                             project_task_bindings, project_thread_chat_ids, RoomResolver)
     from ouroboros.store_hot_facts import lineage_writes
 
-    lineage = lineage_writes(root)
-    forget_lineage(root, lineage)  # a lineage written since this process read it is read again, as a fresh one would
+    lineage, rooms = lineage_writes(root), project_thread_chat_ids(root)
+    forget_lineage(root, lineage, rooms)  # what changed since this process read it is answered again, as a fresh one would
     projects = frozenset(int(project["chat_id"]) for project in list_reserved_projects(root))
     by_key: Dict[Tuple[Any, ...], set] = {}
     for binding in project_task_bindings(root).values():
@@ -194,7 +194,8 @@ def _membership_facts(root: Any) -> MembershipFacts:
         if key is not None:
             by_key.setdefault(key, set()).add(chat)
     return MembershipFacts(projects, dict(all_task_bindings(root)),
-                           {key: frozenset(chats) for key, chats in by_key.items()}, RoomResolver(root), lineage)
+                           {key: frozenset(chats) for key, chats in by_key.items()}, RoomResolver(root, projects=rooms),
+                           lineage)
 
 
 def rooms_of_row(meta: Mapping[str, Any], facts: MembershipFacts) -> FrozenSet[str]:
