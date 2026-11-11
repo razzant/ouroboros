@@ -166,7 +166,7 @@ ARCHITECTURE §10 "Continuity data-flow map" owns sources, projections and reten
 
 | Store / surface | Complete source → interactive projection | Growth and retention proof |
 |---|---|---|
-| Chat and biography | `state/dialog.sqlite` (`dialogue_store.py`; the frozen archive imported once) and `memory/chronicle/records.jsonl` → the memory view (`memory_view.py`) and `chat_history` | Reads and host work cost the page, never another room's history (tail: a named debt); import coverage is disclosed; pages and parts compress the horizon, never delete it |
+| Chat and biography | `state/dialog.sqlite` (`dialogue_store.py`; the frozen archive imported once) and `memory/chronicle/records.jsonl` → the memory view (`memory_view.py`) and `chat_history` | Reads and host work cost the page, never another room's history (tail: a named pass); import coverage is disclosed; pages and parts compress the horizon, never delete it |
 | Plan/review evidence | ARCHITECTURE §10.1, "Plan/review authority" | Source and retention rules live in that row |
 | Skill-review root tasks | The review ledger's hot index (`state/review_ledger/index.jsonl`; a `surface="skill"` row names its skill) → `skill_readiness._skill_names_from_review_history`, bounded; a legacy `review_history.jsonl` is only read | Append-only; archived segments are disclosed as truncation; size under App state |
 | Task/project execution | ARCHITECTURE §10.1, "Execution evidence" | Promotion and retention rules live in that row |
