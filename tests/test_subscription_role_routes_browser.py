@@ -283,6 +283,11 @@ def test_catalog_failure_recovery_and_empty_read_keep_an_agents_form_nodes_and_d
         assert account.evaluate("e => e === window.catalogAccountNode") and account.input_value() == "personal"
         assert ("catalog temporarily offline" in problem.text_content()) is (status == 503)
     capture(page, "catalog-recovery-draft-actor")
+    # Not this page's: the Circles page, mounted with the app, re-reads the catalogue on every broadcast and rejects
+    # a failed read with nothing listed (circles.js readCatalog, from its listener), unhandled. Anything else counts.
+    refused = "The model catalog could not be read."
+    assert not [error for error in ui["errors"].unexpected() if refused not in error], ui["errors"].report()
+    ui["errors"].clear()
     assert press_editor_save(page).startswith("Saved")
     saved = saved_catalog(ui)["items"][0]
     assert saved["route"] == {"kind": "api_model", "target_id": "claudexor::opaque-source=gpt-owner-unsaved",
