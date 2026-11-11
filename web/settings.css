@@ -590,12 +590,14 @@ html[data-layout="stack"] .settings-needs:not([data-all]) > .settings-needs-more
     align-items: center;
     gap: 10px;
 }
-/* Rows that wrap on a phone (a toolbar, a secret's buttons, an account's actions and its resources):
+/* Rows that wrap on a phone (a toolbar, a secret's buttons, an account's actions and its resources, an action row
+   of three controls or more such as the local model's Start, Stop and Test):
    under a finger their controls take the touch minimum as their own height through the control tokens (the lock
    writes the box), so no reach covers a neighbour (DESIGN "Touch and containment"). */
 @media (pointer: coarse) {
     :is(.settings-toolbar, .secret-input-row, .harness-account-actions, .account-resource-panel,
-        .settings-extension-actions, .harness-maintenance-actions) {
+        .settings-extension-actions, .harness-maintenance-actions),
+    .settings-shell .ui-action-row:has(> .btn ~ .btn ~ .btn) {
         --control-h: var(--touch-target-min);
         --control-h-sm: var(--touch-target-min);
     }
@@ -1358,8 +1360,9 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
 }
 
 /* A head: one entry of a list (an agent, a tool server, a provider, a key, a fallback). Its mark, its name with one
-   line of state (the press that opens its page), then its switch or its actions and its sign, which keep the row's
-   end; a head with buttons (`data-actions`) puts them under the words in a narrow row, the sign still at its end. */
+   line of state (the press that opens its page; under a finger it reaches the touch minimum through ui.css
+   .ui-hit-area, inside its own row), then its switch or its actions and its sign, which keep the row's end; a head
+   with buttons (`data-actions`) puts them under the words in a narrow row, the sign still at its end. */
 .settings-head { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "mark words actions"; cursor: pointer; transition: var(--motion-tone); }
 .settings-head-glyph {
     grid-area: mark;
@@ -1494,6 +1497,9 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
    the page is the container their columns read, as a card is in setup. */
 .agents-filters { display: flex; flex-wrap: wrap; gap: var(--space-1); margin-inline: calc(-1 * var(--space-1)); }
 .agents-filters > .filter-chip { --control-h: var(--control-h-sm); }
+/* Under a finger the small capsules reach 8px past their look: in a narrow card Add agent wraps to stand right above
+   the filters, so the two rows part by both reaches and neither covers the other (DESIGN "Touch and containment"). */
+@media (pointer: coarse) { .agents-filters { margin-top: var(--space-1); } }
 .agents-root .settings-head-open > .ui-row-meta { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
 .agent-page { container: subagentcard / inline-size; }
 .agent-page .available-subagent-purpose textarea { min-height: 84px; max-height: none; }

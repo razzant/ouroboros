@@ -508,7 +508,7 @@ function subagentHeadHtml(row, state, index, list = false) {
     if (list) {
         const name = agentName(row, state);
         return `<span class="settings-head-glyph" aria-hidden="true">${mark}</span>
-            <button type="button" class="settings-head-open" data-subagent-field="open">
+            <button type="button" class="settings-head-open ui-hit-area" data-subagent-field="open">
                 <span class="ui-row-title">${escapeHtml(name)}${row.review_eligible === true ? chip('Reviewer') : ''}${status.tone === 'warn' ? chip(status.label, 'warn') : ''}</span>
                 <span class="ui-row-meta">${escapeHtml([identity.label, row.recommended_use.trim()].filter(Boolean).join(' · '))}</span>
             </button>

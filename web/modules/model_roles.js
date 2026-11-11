@@ -794,7 +794,7 @@ function mountModels(container, { path, ctx }) {
             const words = routeWords(entry.value, { account: entry.account, local: localFallback });
             return `<div class="ui-row settings-head" data-entry-id="fallback/${index + 1}" data-actions>
                 <span class="settings-head-glyph settings-head-order" aria-hidden="true">${index + 1}</span>
-                <button type="button" class="settings-head-open" data-entry-open><span class="ui-row-title">${escapeHtml(words.name)}</span><span class="ui-row-meta">${escapeHtml(words.source)}</span></button>
+                <button type="button" class="settings-head-open ui-hit-area" data-entry-open><span class="ui-row-title">${escapeHtml(words.name)}</span><span class="ui-row-meta">${escapeHtml(words.source)}</span></button>
                 <div class="ui-row-actions"><button type="button" class="btn btn-ghost btn-sm" data-fallback-move="-1" aria-label="Move fallback ${index + 1} up" ${index ? '' : 'disabled'}>↑</button>
                     <button type="button" class="btn btn-ghost btn-sm" data-fallback-move="1" aria-label="Move fallback ${index + 1} down" ${index < list.length - 1 ? '' : 'disabled'}>↓</button>
                     <button type="button" class="btn btn-ghost btn-sm" data-fallback-remove>Remove</button>${doorSign()}</div></div>`;

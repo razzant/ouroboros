@@ -735,7 +735,7 @@ function headHtml(server) {
     const busy = wanted.has(server);
     return `<div class="ui-row settings-head" data-entry-id="${escapeHtml(pageId(server))}"${need ? ' data-actions' : ''}>
         <span class="settings-head-glyph" aria-hidden="true">${controlIcon('plug', 16)}</span>
-        <button type="button" class="settings-head-open" data-entry-open>
+        <button type="button" class="settings-head-open ui-hit-area" data-entry-open>
             <span class="ui-row-title">${escapeHtml(serverName(server))}</span>
             <span class="ui-row-meta">${stateHtml(server)}<span> · ${VIA[server.transport] || escapeHtml(String(server.transport))}</span></span>
         </button>

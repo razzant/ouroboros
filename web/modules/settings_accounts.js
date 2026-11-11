@@ -121,7 +121,7 @@ let list = null;  // the mounted list: a key's page says there what it added or 
 function providerHeadHtml(group, facts) {
     return `<div class="ui-row settings-head" data-entry-id="${escapeHtml(group.harness)}" data-open-path="accounts/${encodeURIComponent(group.harness)}">
         <span class="settings-head-glyph" aria-hidden="true">${providerMarkHtml(group.harness)}</span>
-        <button type="button" class="settings-head-open" data-entry-open>
+        <button type="button" class="settings-head-open ui-hit-area" data-entry-open>
             <span class="ui-row-title">${escapeHtml(group.label)}${chipHtml(facts.chip)}</span>
             <span class="ui-row-meta">${escapeHtml(facts.meta)}</span>
         </button>
@@ -133,7 +133,7 @@ function keyHeadHtml(head, busy) {
     const use = head.fixed ? '' : switchHtml(`data-entry-switch aria-label="${escapeHtml(`Use ${head.title}`)}"${busy ? ' disabled aria-busy="true"' : ''}`, head.enabled);
     return `<div class="ui-row settings-head" data-entry-id="${escapeHtml(head.id)}" data-open-path="${escapeHtml(head.path)}">
         <span class="settings-head-glyph" aria-hidden="true">${providerIconHtml(head.card) || KEY_GLYPH}</span>
-        <button type="button" class="settings-head-open" data-entry-open>
+        <button type="button" class="settings-head-open ui-hit-area" data-entry-open>
             <span class="ui-row-title" data-i18n-skip>${escapeHtml(head.title)}${chipHtml(head.chip)}</span>
             <span class="ui-row-meta">${escapeHtml(head.meta)}</span>
         </button>
