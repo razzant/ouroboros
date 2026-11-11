@@ -38,6 +38,19 @@ test('one head: the name opens the detail sheet, marks stay beside it, the who l
     assert.doesNotMatch(html, / title="/, 'no explanation lives in a hover title');
 });
 
+test('Details lists each placed control in the Details row layout with a polarity-true Hide/Show', () => {
+    const rows = [{ key: 'demo:chip', label: 'Meter', place: 'Chip above the composer', hidden: false },
+        { key: 'demo:save', label: 'Save', place: 'On replies', hidden: true }];
+    const html = renderInstalledSkillCard(skill(), new Set(), new Set(), {}, { contributionVisibility: () => rows });
+    const section = html.split('data-skill-detail-contributions>')[1].split('<div class="skills-details-facts" data-skill-detail-facts>')[0];
+    assert.match(section, /<span class="skills-detail-label">Shown in chat<\/span>/);
+    assert.match(section, /data-contribution-row="demo:chip"><span class="skills-detail-label">Meter<\/span><span class="skills-detail-value">Chip above the composer <button[^>]*data-skill-action="toggle_contribution"[^>]*data-contribution-key="demo:chip" data-contribution-hidden="false" aria-label="Hide Meter, chip above the composer">Hide<\/button>/);
+    assert.match(section, /On replies · hidden <button[^>]*data-contribution-hidden="true" aria-label="Show Save, on replies">Show<\/button>/);
+    assert.doesNotMatch(section, /<small>|<strong>|<h4>/, 'no raw small text or ad-hoc headings');
+    assert.doesNotMatch(renderInstalledSkillCard(skill(), new Set(), new Set(), {}, { contributionVisibility: () => [] }),
+        /data-skill-detail-contributions/, 'a skill without placed controls has no such rows');
+});
+
 test('normal On and Off state lives in the switch; only attention states get a status chip', () => {
     assert.equal(chipOf(renderInstalledSkillCard(row('telegram'))), null);
     assert.equal(chipOf(renderInstalledSkillCard(skill())), null);

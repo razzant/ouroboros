@@ -298,7 +298,10 @@ caps with `text-transform`.
 **A secondary page orders by meaning, not paint** (audit №9, owner
 2026-10-28T22:09Z). Costs leads with the known spend and, in the same card,
 whether it is final, its unresolved upper bound and what is unknown; the
-composition, the hold and technical counts follow, quieter. Activity names a
+composition, the hold and technical counts follow, quieter. Budget edits three limits; the consciousness
+field shows its 24-hour spend (pending, unpriced). Below the fields, a full-width row names that limit with
+“If its charges stay as they are, there is room again by HH:MM ZONE” (rounded up, zone named, else unknown) and a
+wake held at it with its card's door. Save posts edited limits only. Activity names a
 work whole in primary ink above its facts; a duration reads in seconds below a
 minute, then in minutes or hours, and one the row lacks is absent, never `0s`. A narrow temporary-space tray puts
 a qualified size under its group's name. A widget card's ⋮ menu and move handle
@@ -893,7 +896,8 @@ status sentence's or a composer chip's dot is its tone, §4).
   question, or what only the owner can do: sign in, a spending limit, Resume after a
   restart, crash or Panic, grant access, a skill review that must run first, local
   changes before an update, an Evolution chip, the consciousness chip or a Consciousness sentence that needs the owner
-  or was stopped by the spending limit; (2) a warning worth reading — warn toasts and sentences,
+  or was stopped by the spending limit (new starts refused, or its wake proven held at the allowance it started
+  with); (2) a warning worth reading — warn toasts and sentences,
   Settings and onboarding notes, warnings inside task timelines, reviews and Logs
   events, account quota; (3) the System voice (a pale tint in the light theme, its name
   in the dark one), a voice, not a status; (4) a few data categories that are not statuses (Logs and Storage
@@ -1928,12 +1932,11 @@ file (owner choice 1C/2A/3A/4A/5A/6A with mobile first-class).
 
 ### Replies
 
-A reply names the row meant; Ouroboros decides what to do, routing nothing by it. A direct Reply in Main to a
-Project's message also stands in that Project at its time, the one Main message (owner 28.10, A): it tells,
-wakes and resumes nothing there, and a Reply to it, like other Main talk, stays in Main. Saved rows offer Reply beside
-Copy on bubbles and in row menus, a work card in its row menu only; never on hover only. Reply stages one
-strip, the composer field's first line (`Replying to`, quoted author, one line, ×; Esc cancels). Send
-carries only the address; the host makes the snippet. Answerable questions use their own field.
+Reply addresses a row for Ouroboros to interpret, never routes. A Main reply to a Project message also
+appears there at its time as the same Main message (owner 28.10, A), without telling, waking or resuming
+anything; replies stay in Main. Saved bubbles offer Reply beside Copy and in row menus; work cards in
+menus only, never hover-only. Reply stages the composer's first-line strip (`Replying to`, quoted author,
+one line, ×; Esc cancels). Send carries the address; the host builds the snippet. Questions use their own field.
 
 One quote component serves bubbles, strips and relays: above the text, a 2 px
 bar and tint in the quoted author's ink (the tint lies on the quote glass, so inside a
@@ -1943,17 +1946,14 @@ capsule step, its author in the voice's readable word), one line cut on a word; 
 with its thumbnail. Pressing a reply quote reveals the exact row, loading its
 bounded page in this room when present, otherwise its available home. Containing
 timelines open and scroll; the line is focused and highlighted below the header.
-A card, portal or retained copy cannot substitute. A refused or failed read
-keeps the view, and a reader following the newest message keeps following it;
-its toast says why and offers Try again only when asking again can differ. Newer
-gestures/navigation cancel it. Only the quoted row's stream is positioned: the
-other stream (narration beside an owner message, or the reverse) stays unloaded
-down that page chain until `Scroll to latest message`. Old sources read no newer
-messages. Ouroboros quotes the message it answers only when it is not directly
-above (its own card does not count).
+A card, portal or retained copy cannot substitute. Refusal/failure preserves the view and newest-following intent; a toast explains why, offering Try again
+only if a retry can differ. New gestures/navigation cancel the read. Only the quoted stream is positioned:
+the other (narration beside owner speech or vice versa) stays unloaded down that chain until `Scroll to
+latest message`. Old sources read no newer messages. Ouroboros quotes its addressee only when not directly
+above; its own card does not count.
 
 A relay is a note one work leaves another (`tell_task`), drawn so a reader sees at once
-that it is not a reply and which room wrote to which (`web/modules/chat_relay_deck.js`):
+that it is not a reply and which room wrote to which (`chat_relay_deck.js`):
 a card of Ouroboros's voice one quiet step back from a reply, on its own token in both
 themes (dark: the cherry mixed 74 % toward the room; light: the work card's rose as a
 value, never that card's token), narrower than a reply (680 px, 72 % of a wide column,
@@ -1980,8 +1980,8 @@ right-hand unit that wraps whole. Pressing the capsule or the face fans the stac
 downward into a column in time order; `Show less` on the column's first card folds it.
 His words are the blue quote component, two lines until the note is opened; a folded
 stack whose tucked cards carry them adds the blue mark `Your words in N earlier notes`
-under the excerpt (singular for one; N counts cards, not quotations), so the 16 Oct rule
-that his words stay prominent holds while their cards are tucked, and a jump to a tucked
+under the excerpt (singular for one; N counts cards, not quotations), so his words stay
+prominent while tucked (16 Oct rule), and a jump to a tucked
 row opens its stack before landing on it. Motion: the stack's height lands at once inside
 the reading write; fanning out, the front card glides from where the stack lay (never
 from below its place) while the older cards emerge from the stack's place, all on
@@ -1992,9 +1992,8 @@ fades and lets nothing travel. The capsules are real buttons with the touch hit 
 face is not a second tab stop, focus follows the stack's one control only when it had it,
 the ledges are hidden from assistive technology, and a column fanned at the bottom of a
 room that does not fit scrolls its first card under the header, folding returning to the
-front card (a reader who was following the newest message keeps following it). The owner chose this drawing on 25 Oct 2026 («Стопка как принято») after
-rejecting the edges drawn above the front card (24 Oct) that had replaced the 22 Oct
-deck. Telegram receives only a relay that passes his words, as plain text. Main keeps
+front card (a reader who was following the newest message keeps following it). On 25 Oct 2026 the owner chose «Стопка как принято», rejecting the 24 Oct upward edges that had replaced the 22 Oct deck.
+Telegram receives only a relay that passes his words, as plain text. Main keeps
 its one receipt line. The row menu (right-click, Shift+F10, ContextMenu on the focused
 row, long press on touch) offers Reply, Copy, Open project and a work card's
 Resume, Pause and Stop… exactly when the card does. Esc/outside press closes it
@@ -2003,22 +2002,23 @@ the desktop shell removes only commands that cannot work there (navigation away,
 On touch the row sinks a little while held and lifts over the dimmed feed while its
 menu is open.
 
-Across reading, setup and dialog surfaces, people can copy a link's destination,
-copy selected text and edit fields through familiar host actions (owner choice, 2 Nov 2026).
-Yielding to a menu that the host disables does not meet this rule. Text copy buttons
-share one clipboard path; image copy writes the image. Both report the actual outcome,
-including refusal; text fallback preserves focus and selection.
+Reading, setup and dialogs support familiar host actions to copy links and selected text and edit fields
+(owner, 2 Nov 2026); a disabled native menu is insufficient. Text buttons share one clipboard path,
+image copy writes the image; both report refusals and outcomes. Text fallback preserves focus and selection.
 
-On a phone a row that offers Reply can be swiped left to reply, as in Telegram: it
-follows the finger, a reply mark at the room's right side fills as it nears the reply
-point (56 px), and released past it the row replies exactly as its Reply does; it
-settles back either way, past the point with a rubber band
-(`web/modules/chat_row_swipe.js`). Rightwards stays the drawer's; a field, a slider,
-selected words, anything that scrolls sideways and an open menu keep their finger.
-A saved reply's registered actions (Read aloud, a skill's message action) come from one registry: icon
-controls named for their action between Reply and Copy, Copy keeping its corner, and items after the row's own
-doors in the row menu, in words. An action that is on now names its state (Stop while reading aloud) and wears
-the crimson ink; a work card offers none.
+On phones a replyable row swiped left follows the finger, fills a right-edge mark toward 56 px and, released
+past it, replies as Reply does, settling back either way with a rubber band past the point
+(`chat_row_swipe.js`). Rightward gestures are the drawer's; fields, sliders, selections, horizontal scrollers
+and open menus keep theirs.
+One registry supplies saved-reply actions: named icons between Reply and corner Copy; words after the row's
+own menu doors; active ones name their state in crimson (Stop while reading aloud); work cards offer none.
+Share previews one answer (mirrored Project answers too) or living card, never its question or metadata.
+Text keeps URLs and code; pick parts or exact words in its preview. PNG Card refuses unsupported or oversized
+content without cropping or shrinking. File is the whole source as an offline page: tabs as sections, empty
+inert controls, an app stateless in its sandbox behind its words until it runs. Live skill widgets offer Text.
+The preview is the file. Only actual Copy/Download/Share show: Telegram's Text picker, else a supported system
+sheet; no Download in Telegram. Nothing leaves before a press; cancel is quiet, other outcomes explicit.
+Room closure, Escape, Back and Panic close the sheet (`message_share.js`).
 
 ### Skills in the page
 
@@ -2040,6 +2040,7 @@ leads), each chip is listed in "+" under its skill's name. A skill's trusted pag
 only through its small context (its provider, a notice, words into the draft)
 and never draws into the composer or the feed. A module that fails is off for
 this page with one notice naming it; the rest of the page keeps working.
+The owner hides or shows each placed control (chip, "+" item, reply action) without turning its skill off, in the skill's Details and its widget card's ⋮ menu, one saved choice every window follows.
 
 **A start the page did not outlive is not repeated by itself.** A page
 module, a skill's module or route frame and an app card are code the core did
@@ -2091,7 +2092,9 @@ Money keeps card scope: confirmed zero is `$0.00`, an unavailable amount is
 “spend unknown”; known parts retain “Tracked:” and “up to”.
 Open accounting keeps “so far”; it is no final total.
 The allowance's “Some calls have no price” and “next check at” promise no admission.
-Visible and accessible words agree.
+Visible and accessible words agree. The allowance is edited only in Costs › Budget, behind a door line;
+own tasks and conversations stay in Settings. A wake held at the allowance it started with says so without a
+clock; beneath it, quieter: Resume keeps that limit, a higher allowance does not raise it, Stop now frees the clock.
 
 “Open in Main ↗” lands on the card Main draws, else finds it through around-history; a focus door
 opens its captured conversation in the sheet, Back returns. An unowned room disables
@@ -2488,65 +2491,84 @@ The Widgets page is a board of live cards. The owner arranges the board; each
 widget's content belongs to its author. The board scrolls with crisp edges: no
 fade dims a card where the list cuts it.
 
+- **One surface per card.** A card is its head (title; a framed card's status and
+  Start; the ⋮ menu and the move grip) over its content: a frame lies on the card
+  itself, with no second box around it, and a stopped frame's facade is a tray in
+  its place. A narrow page (a phone, the mini app) keeps nearly its whole width.
 - **A masonry in the owner's order.** Cards are packed into columns like a
-  Pinterest board: in the order the owner set with each card's move handle,
-  every card goes to the lowest free place its width fits, so cards of different
-  heights stack without a row layout's voids. The board takes its column count
-  from the list's width and the widths its cards ask for; a board where the
-  owner set no width is exactly the board before owner widths existed. A new
-  widget joins the end of the order; the order is stored when the owner moves a
-  card, so after a window reload the widgets added since the last move follow
-  the stored ones alphabetically. A widget whose skill is off is not drawn; its
-  place in the order (moving the other cards keeps its slot) and its width stay
+  Pinterest board: in the order the owner set, every card goes to the lowest free
+  place its width fits. The board takes its column count from the list's width and
+  the widths its cards ask for; a board where the owner set no width is exactly the
+  board before owner widths existed. A card that cannot fit beside the cards above
+  it starts below them, and the board never repacks cards out of the owner's order
+  to hide the gap. A new widget joins the end of the order; the order is stored when
+  the owner moves a card, so after a window reload the widgets added since the last
+  move follow the stored ones alphabetically. A widget whose skill is off is not
+  drawn; its place in the order (moving the others keeps it) and its size stay
   stored for its return, and nothing is reserved meanwhile.
+- **Moving is carrying.** A pointer or a finger on the grip, or a mouse on the
+  head, picks the card up: it follows the pointer, the cards after it make room and
+  an outline marks where it lands; release puts it there, Escape back, and the board
+  scrolls near its edges. The grip's arrow keys and the menu's Move step it.
 - **Width is a column span, the owner's over the author's.** A card spans 1,
   2 or 3 columns, or Full width. Until the owner picks one, the author's `span`
-  decides (`1` one column, `2` two), and the board may widen a lone one-column
-  card beside wide ones to fill its lane. The board never widens or narrows a
-  width the owner chose, except that no card is wider than the board: 3
-  columns on a board of 2 is the whole row. Full width is always the whole
-  row. Because the column count follows the widths the cards ask for, a
-  card's width can make the other cards' columns wider or narrower. The
-  owner's choice holds for that card on every screen of the installation
-  until Reset size returns the author's default.
-- **Widths that do not tile leave gaps; the board does not backfill.** A
-  card that cannot fit beside the cards above it starts below them: a
-  3-column card after a 2-column one on a 4-column board leaves the column
-  beside the first card empty above it. The board never repacks cards out of
-  the owner's order to hide such a gap; the owner closes it by changing a
-  width or the order.
-- **Height follows content.** A card is as tall as its widget: a table shows
-  every row, a framed widget its declared or reported frame height
-  (`docs/CREATING_SKILLS.md`). No card is pinned to a height. When a card
-  grows or shrinks, the masonry packs again, so cards after it can move,
-  even to another column.
+  decides, and the board may widen a lone one-column card beside wide ones to fill
+  its lane. The board never widens or narrows a width the owner chose, except that
+  no card is wider than the board; Full width is always the whole row. Because the
+  column count follows the widths the cards ask for, a card's width can make the
+  other cards' columns wider or narrower.
+- **Height follows content until the owner sets one.** A card is as tall as its
+  widget: a table shows every row, a self-sizing frame its reported content, a
+  fixed frame its declared height (`docs/CREATING_SKILLS.md`); 320 px is a loading
+  height only, held until something is drawn. The owner's height, set apart from the
+  width, is the content's height exactly, enlarging or reducing any card: taller
+  than the content leaves room below it, shorter scrolls (a frame its own document, a
+  host-drawn card its body, never both). A card with more than its height says so on
+  one line under it, `Show all · N px more` (N only what the owner's height hides
+  under an author's ceiling); Show all lifts it and `Back to N px` returns, in this
+  window only, never saved. Natural height and Reset size take the owner's height
+  off and measure again from the loading height; a fixed frame or route page takes
+  the height as its viewport, and Show all returns its declared height. A frame whose
+  document keeps asking for more at every height it is given stops growing where it
+  stands and scrolls; the owner can still set any height, and returning to the
+  board does not start that growth over. When a card's height changes, the masonry
+  packs again.
 - **A narrow list is one column.** When the list is too narrow for two
   columns of 280px — a phone, the Telegram mini app, a narrow window — the
-  cards stack at full width in the same order and widths do not apply; the
-  board returns when the list is wide again. The list's own width decides,
-  not the viewport.
-- **The card menu works on every surface.** Every card's ⋮ menu carries Size
-  (1, 2, 3 columns, Full width and Reset size) beside a framed card's launch
-  policy, so a touch screen, a keyboard or the mini app — no hover there, and
-  a vertical drag collapses it — can size any card; on a narrow list the menu
-  says that widths apply when the list is wide. Wherever a step would change a
-  card's width, its right edge can also be dragged between the widths the
-  steps give it (Escape cancels) or stepped with its arrow keys; the only card
-  on a board, which every step leaves the whole row, offers no edge.
-- **Arranging never restarts a widget.** Reordering, resizing or a change of
-  the column count changes only where a card is painted; a running widget
-  keeps its frame and its state. Keyboard focus keeps the card's original
-  position until the window reloads.
+  cards stack at full width in the same order and widths do not apply (heights
+  do). The list's own width decides, not the viewport.
+- **Edges, keys and the menu size every card.** The right edge drags the width
+  between its steps, the bottom edge the height, above or below the content's own
+  (within a few pixels of it, where the board sees it, it is natural again), the
+  corner both, each previewed live, Escape cancelling; the edges lie mostly in the
+  gap beside the card, so content near its edge stays the widget's. Under a finger a
+  card keeps a touch-tall foot, its grip at the right: up and down the height,
+  sideways the width; gaps scroll. Their arrow keys step widths and heights. Every
+  card's ⋮ menu carries Move, Size (1, 2, 3 columns, Full width, Reset size:
+  author's width, natural height) and Height (Natural height and three heights)
+  beside a framed card's launch policy and, for a skill that places controls in the
+  chat, Shown in chat (one checked item per control), for touch, keyboard and the
+  mini app; on a narrow list the menu says that widths apply when the list is wide.
+  The only card on a board has no right edge.
+- **Arranging never restarts a widget.** Moving, resizing, Show all, Back or a
+  change of the column count changes only where and how tall a card is painted; a
+  running widget keeps its frame and its state. Keyboard focus keeps the card's
+  original position until the window reloads.
+- **Each card starts on its own.** Cards start together when Widgets is shown,
+  each showing Running or its fault when its own start ends, so a slow widget never
+  holds back the others. Leaving Widgets stops the cards that do not keep running;
+  one that starts again on return keeps its last height meanwhile (its frame is a
+  new document).
 - **Stop holds until Start.** A running card's Stop is in its ⋮ menu. A card the
   owner stopped rests as its facade with Start on this device across reloads,
   until Start or a launch policy of Auto or Keep running starts it. A card whose
   start the page did not outlive, or whose files went away, rests the same way
   and says so in one line (Skills in the page).
-- **One arrangement per installation.** Order and widths are owner UI state
+- **One arrangement per installation.** Order and sizes are owner UI state
   stored on the server, the same for every window and device of the
   installation; when two windows arrange at once the last change wins. A
-  width that failed to save stays on screen and says so under the list until
-  a later width change saves it; nothing retries on its own.
+  size that failed to save stays on screen and says so under the list until
+  a later change saves it; nothing retries on its own.
 
 ### Storage
 
@@ -3179,7 +3201,7 @@ or `since HH:MM` only for `due` (appointment, `due` if unknown), with the `still
 Its word uses the viewer's zone and a short date when not today; passed explained
 outcomes and passed allowance resets show no time.
 `Evolving` replaces the word during a campaign, even when off; Off is grey.
-Running shows moving dots, never a breathing glyph; held shows pause bars without time; unknown a ring,
+Running shows moving dots, never a breathing glyph; held shows pause bars without time (the amber dot when held at its allowance); unknown a ring,
 failure a red dot, amber only the owner's move (§4). The word stays visible at every width, except where the room covers Main (a phone, a
 finger's docked column) while a Project's one-line name is still cut, where the chip keeps its brain and mark (above).
 Its accessible name and the Shade state use the host sentence without adding a clock.
@@ -3187,7 +3209,7 @@ A press opens its own sheet of the work list's material (the Shade), hung under 
 capsules, and switches nothing: state, Start/Stop, `$X of $Y in the last 24 hours`, “Its own wakes” then
 “Wakes in places” (three rows each, Dashboard's empty sentences, one coverage or failure above both; a place's row is a
 door to that place's sheet (Active · Silent · Paused there), read from the places at the press: a
-failed read says so on that line, a place gone since disables its row), `Dashboard ›`
+failed read says so on that line, a place gone since disables its row), `Dashboard ›`, `Costs ›` while the allowance is the next step
 and, during a campaign, `Evolution ›`
 (`web/modules/consciousness_status.js`). Evolve and Review live in Dashboard › Evolution (`Run review…` opens
 `/review`'s picker). In Main and Project, the bar has no continuous backing strip:

@@ -281,6 +281,8 @@
        largest side on a wide screen, and its one reading measure. */
     --document-reader-size: 920px;
     --document-reader-measure: 76ch;
+    /* The Share sheet's width (DESIGN "Replies"): a card's whole width beside the reader's insets. */
+    --message-share-width: 640px;
     /* Bounded scroll window for the sidebar project list (v6.32.0 geometry): a
        share of the visual viewport height below, so the navigation column keeps
        its height whatever the project count. Distinct from the fixed Updates

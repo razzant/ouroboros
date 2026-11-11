@@ -593,3 +593,136 @@ def test_recent_focus_as_comes_from_stored_metadata(tmp_path, wake, cause, ident
         assert row["as"] == {"label": "At the event", "owner": owner}
     else:
         assert "as" not in row
+
+
+# --- what holds my own held wake --------------------------------------------------------------------
+
+
+def _pause(rail="graceful_ceiling", *, state="paused", reason="budget", scope="root", ceiling=2.99,
+           basis="producer_allowance", cap=50.0):
+    row = {"pause_id": "p", "state": state, "reason": reason, "rail": rail, "scope": scope, "task_attempt": 1}
+    if basis is not None:
+        row["cost_ceiling"] = {"state": "active", "ceiling_usd": ceiling, "root_cap_usd": cap,
+                               "planning_margin_usd": None, "basis": basis}
+    return row
+
+
+def _launched(source="allowance", ceiling=2.99, **extra):
+    from ouroboros.consciousness_wake import wake_task_metadata
+    return {**wake_task_metadata("act", "heartbeat", root_cost_ceiling_usd=ceiling, root_cost_ceiling_source=source),
+            **extra}
+
+
+CHILD_AT_CEILING = _pause(basis="root_resolved_ceiling")
+
+
+@pytest.mark.parametrize("metadata,own,members,cause", [
+    # The launch stamp names the limit that set the ceiling the wake paused at.
+    (_launched("allowance"), _pause(), (), "allowance"),
+    (_launched("both"), _pause(), (), "allowance_and_cap"),
+    (_launched("per_task_cap"), _pause(), (), "per_task_cap"),
+    # A per-task cap of 0 left the allowance alone to set it (stamped "allowance"); a saved null cap changes nothing.
+    (_launched("allowance"), _pause(cap=None), (), "allowance"),
+    # The cap was raised and Resume pressed: the re-resolved cap is above the ceiling, the stamp still says the cap.
+    (_launched("per_task_cap", ceiling=10.0), _pause(ceiling=10.0, cap=80.0), (), "per_task_cap"),
+    # A record from before the stamp proves the launch ceiling only, never which limit.
+    (_launched(""), _pause(), (), "launch_ceiling"),
+    (_launched(""), _pause(basis=None), (), "launch_ceiling"),
+    # Child first: the tree's latch refused the wake while a member paused at the inherited number.
+    (_launched("allowance"), _pause("dispatch_refused", basis=None), (CHILD_AT_CEILING,), "allowance"),
+    # A member at a number of its own (an explicit profile's) proves nothing about the wake's launch ceiling.
+    (_launched("allowance"), _pause("dispatch_refused", basis=None),
+     (_pause(basis="min(global_pct, root_cap_minus_margin, non_root_member, root_resolved_ceiling)"),), "per_task_fence"),
+    (_launched("allowance"), _pause("dispatch_refused", basis=None), (_pause(basis="root_resolved_ceiling", ceiling=1.0),),
+     "per_task_fence"),
+    # The cap was lowered after launch, before the task started: its fence refused first.
+    (_launched("allowance"), _pause("dispatch_refused", basis=None), (), "per_task_fence"),
+    (_launched("allowance"), _pause("dispatch_refused", scope="global", basis=None), (), "total_budget"),
+    (_launched("allowance"), _pause("global_exhausted", scope="global", basis=None), (), "total_budget"),
+    # Pauses that are not money keep their own reason.
+    (_launched("allowance"), _pause("owner_pause", reason="owner", basis=None), (), "owner"),
+    (_launched("allowance"), _pause("model_sleep", reason="sleep", scope="task", basis=None), (CHILD_AT_CEILING,), "sleep"),
+    (_launched("allowance"), _pause("billing_authority_unreadable", reason="authority", basis=None), (), "technical"),
+    # No live pause proves nothing: a Resume granted, a resumed record, no row at all.
+    (_launched("allowance"), _pause(state="resume_granted"), (), ""),
+    (_launched("allowance"), _pause(state="resumed"), (), ""),
+    (_launched("allowance"), {}, (), ""),
+    # A saved ceiling that is not the launch number, or an allowance the owner's Resume lifted, proves nothing.
+    (_launched("allowance"), _pause(ceiling=5.0), (), ""),
+    ({**{k: v for k, v in _launched("allowance").items() if k != "root_cost_ceiling_usd"},
+      "producer_allowance_lifted": {"ceiling_usd": 2.99}}, _pause(), (), ""),
+])
+def test_a_held_wake_is_said_held_by_its_allowance_only_where_its_records_prove_it(metadata, own, members, cause):
+    held = view.hold_cause(metadata, own, members)
+    assert held["cause"] == cause
+    stamped = cause in {"allowance", "allowance_and_cap", "per_task_cap", "launch_ceiling"}
+    assert held["ceiling_usd"] == (metadata["root_cost_ceiling_usd"] if stamped else None)
+
+
+def test_an_exhausted_skip_whose_later_window_read_failed_says_its_amount_unknown_never_zero():
+    """A later read that failed after an exhausted check leaves the 24-hour amount unknown, never $0.00; the skip
+    itself stays what happened (the Consciousness tab, the Shade and /bg say this detail)."""
+    snapshot = {"last_wake_outcome": "skipped:allowance_exhausted", "spent_24h_usd": None, "daily_usd": 390.0,
+                "allowance_status": "allowance_unknown", "next_wake_at": "", "unknown_unmetered": 0}
+    detail = view.describe_consciousness_state(snapshot, True)["detail"]
+    assert detail.startswith("Daily allowance spent at its last check; what it spent in the last 24 h is unknown now; "
+                             "next check "), detail
+    assert "$0.00" not in detail
+    known = view.describe_consciousness_state({**snapshot, "spent_24h_usd": 391.5}, True)["detail"]
+    assert known.startswith("Daily allowance spent ($391.50 of $390.00 in the last 24 h); next check "), known
+
+
+HELD_NOTE = ("Resume keeps that limit, so it pauses again while its known spend is at it, and a higher allowance does "
+             "not raise it. Stop now on its card ends it and frees the clock for its next check.")
+
+
+@pytest.mark.parametrize("cause,ceiling,said", [
+    ("allowance", 2.99, "Wake-up w1 stopped at the allowance it had left when it started ($2.99)."),
+    ("allowance_and_cap", 50.0, "Wake-up w1 stopped at the allowance it had left when it started ($50.00, the per-task "
+     "cap too)."),
+    ("launch_ceiling", 2.99, "Wake-up w1 is paused at the spending limit it started with; its card shows why. "
+     "The next wake-up follows it."),
+    ("per_task_cap", 10.0, "Wake-up w1 is paused at the per-task cost cap it started with; its card shows why. "
+     "The next wake-up follows it."),
+    ("owner", None, "Wake-up w1 is on an explicit pause; its card shows who paused it and how to continue."),
+    ("", None, "Wake-up w1 is paused or waiting in the queue; its card shows why. The next wake-up follows it."),
+])
+def test_the_held_wake_sentence_names_only_a_proven_launch_limit(cause, ceiling, said):
+    snapshot = {"live_wake_task_id": "w1", "live_wake_held": True, "next_wake_at": "2026-10-24T09:30:00+00:00",
+                "live_wake_hold": {"cause": cause, "ceiling_usd": ceiling}}
+    described = view.describe_consciousness_state(snapshot, True)
+    assert described["status"] == "wake_paused" and described["detail"] == said
+    # What follows from an allowance hold is said beneath it; every other hold has no note.
+    assert described.get("detail_note") == (HELD_NOTE if cause in view.ALLOWANCE_HOLDS else None)
+    assert "09:30" not in described["detail"] + described.get("detail_note", ""), "no clock: Costs alone says when"
+    # Off still wins over any hold, and a note the snapshot carried from an earlier hold never outlives it.
+    off = view.describe_consciousness_state({**snapshot, "detail_note": HELD_NOTE}, False)
+    assert off["status"] == "disabled" and "detail_note" not in off
+
+
+def test_an_unreadable_pause_leaves_the_cause_unknown(monkeypatch, tmp_path):
+    def unreadable(_root, _task_id):
+        raise OSError("store busy")
+
+    monkeypatch.setattr("ouroboros.store_hot_facts.controls", unreadable)
+    assert view.held_wake_cause(tmp_path, "wake-x") == {"cause": "", "ceiling_usd": None}
+
+
+@pytest.mark.parametrize("fence,cause", [
+    ({"state": "requested"}, "owner"),
+    ({"state": "paused"}, "owner"),
+    ({"state": "released"}, "allowance"),
+    ({"state": "paused", "selected_members": {"wake-x": {"grant_id": "g"}}}, "allowance"),
+])
+def test_owner_pause_over_a_parked_budget_wake_takes_precedence(tmp_path, monkeypatch, fence, cause):
+    """Pause-all need not rewrite a parked wake's old budget row: its root fence owns the current hold."""
+    metadata = _launched()
+    seed_result(tmp_path, "wake-x", {"task_id": "wake-x", "status": "paused", "metadata": metadata,
+                                    "budget_pause": _pause(), "owner_pause": fence})
+    monkeypatch.setattr("supervisor.consciousness_carriers.live_task_rows",
+                        lambda _ids: {"wake-x": {"metadata": metadata}})
+    held = view.held_wake_cause(tmp_path, "wake-x")
+    assert held == {"cause": cause, "ceiling_usd": 2.99 if cause == "allowance" else None}
+    described = view.describe_consciousness_state({"live_wake_task_id": "wake-x", "live_wake_held": True,
+                                                  "live_wake_hold": held}, True)
+    assert ("Stop now" in described.get("detail_note", "")) is (cause == "allowance")

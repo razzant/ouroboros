@@ -198,6 +198,20 @@ def test_forced_native_and_text_completion_select_the_same_result(at_limit, form
     assert LIMIT_TEXT not in spoken and LIMIT_TEXT not in stored["result"]
 
 
+@pytest.mark.parametrize("form", ["native", "text"])
+def test_a_forced_stop_carrying_pending_review_keeps_its_bytes_reason_and_sentence(at_limit, form):
+    """pending_review has no effect on a stop and the forced rail reads the same pure contract: a stop that carries it
+    is adopted whole at the round limit, its bytes, reason and one sentence published, never refused or dropped."""
+    request = {"action": "stop", "rationale": RATIONALE, "answer": PARTIAL, "pending_review": "wait", "summary": SUMMARY}
+    text, usage, trace, bus = at_limit.run([call("chat_history", {}), FORMS[form](request)])
+    assert len(at_limit.calls) == 2 and _request_fact(trace) == {"form": form, "status": "selected", "tool_call_count": None}
+    pending, stored = emit(at_limit, text, usage, trace, bus=bus)
+    assert (text, stored["result"], stored["reason_code"]) == (PARTIAL, PARTIAL, "round_limit")
+    assert trace["task_completion"]["rationale"] == RATIONALE and stored.get("wake_summary") == SUMMARY
+    assert stored["outcome_axes"]["objective"]["reason"] == "author_stop"
+    assert PARTIAL in _spoken(at_limit, pending, bus)
+
+
 def test_an_earlier_live_send_stays_the_only_message_and_is_never_resent(at_limit):
     """The forced silent finish adds no speech: the run's earlier live reply stays the one message."""
     from tests.test_finish_silent_wake import drained

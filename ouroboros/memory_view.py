@@ -281,6 +281,11 @@ class MemoryViewSnapshot:
     fallback_refusals: Tuple[Dict[str, Any], ...] = ()
     owner_words: str = ""  # the rendered block of the owner's words that caused a helper's work
     waiting: Dict[str, Any] = dataclasses.field(default_factory=dict)
+    # The newest chronicle record this capture read (its marks among them); later mark changes reach a running
+    # focus's tail (``mark_anchors.append_mark_changes``). None: the view read no chronicle. It rides beside the view
+    # (``context_fit.ContextCore.memory_view_sequence``), never in ``snapshot_json``: a record no section shows moves
+    # no hash.
+    chronicle_sequence: Optional[int] = dataclasses.field(default=None, compare=False)
 
     @property
     def active(self) -> bool:
@@ -308,8 +313,11 @@ def json_chars(text: str) -> int:
 
 
 def snapshot_json(snapshot: MemoryViewSnapshot) -> str:
-    """The canonical JSON of a snapshot (sorted keys): the context core keeps it and hashes it."""
-    return json.dumps(dataclasses.asdict(snapshot), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    """The canonical JSON of a snapshot (sorted keys): the context core keeps it and hashes it. The capture's journal
+    boundary is not in it (``chronicle_sequence``)."""
+    data = dataclasses.asdict(snapshot)
+    data.pop("chronicle_sequence")
+    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def snapshot_from_json(text: str) -> MemoryViewSnapshot:
@@ -588,9 +596,27 @@ def _typed_fact(meta: Mapping[str, Any]) -> str:
     return name
 
 
+@timed_section("memory_view.working_notes")
+def _working_notes(root: pathlib.Path, tasks: List[str]) -> Dict[str, str]:
+    """Per root task whose result names working notes (``main_context_authority.WORKING_NOTES_FIELD``: what its latest
+    applied fold kept), the fact and exact reader from that field alone. One batch reads the results; a result
+    without a notes address makes no entry. The notes' words and availability are read only by choice."""
+    from ouroboros.main_context_authority import WORKING_NOTES_FIELD, retained_reader
+    from ouroboros.task_results import load_task_results
+
+    facts: Dict[str, str] = {}
+    for task, saved in load_task_results(root, tasks).items():
+        ref = saved.get(WORKING_NOTES_FIELD) if isinstance(saved, Mapping) else None
+        if not isinstance(ref, Mapping) or not ref.get("path"):
+            continue
+        facts[task] = f"working notes kept: {source_reader({}, retained_reader(root, task, ref))}"
+    return facts
+
+
 def _task_line(root_id: str, group: List[Tuple[Entry, Dict[str, Any]]], texts: Mapping[str, Dict[str, Any]],
-               summaries: Mapping[str, Any]) -> Dict[str, str]:
-    """One line for a task's lane-2 rows: the host's status, never a child's report or a retelling."""
+               summaries: Mapping[str, Any], notes: str = "") -> Dict[str, str]:
+    """One line for a task's lane-2 rows: the host's status, never a child's report or a retelling; ``notes``: the
+    working notes its result names (``_working_notes``)."""
     def summary(kinds: frozenset, task: str, kind: str = "task_summary") -> Optional[Entry]:
         return next((entry for entry, _cls in reversed(group) if entry[1].get("type") == kind
                      and entry[1].get("summary_kind") in kinds and str(entry[1].get("task_id") or "") == task), None)
@@ -624,7 +650,7 @@ def _task_line(root_id: str, group: List[Tuple[Entry, Dict[str, Any]]], texts: M
     parts += [f"rows {len(group)}", f"get_task_result(task_id='{root_id}')",
               f"{chat_chain.format_address(first[0])}..{chat_chain.format_address(last[0])}"]
     parts += [f"{name}: {chat_chain.format_address(entry[0])}" for entry, _cls in group
-              if (name := _typed_fact(entry[1]))]
+              if (name := _typed_fact(entry[1]))] + ([notes] if notes else [])
     head = f"[{first[1].get('ts') or 'time not recorded'}; host; task {root_id}] "
     without = head + "; ".join(parts)
     if gist := summaries.get(root_id):
@@ -667,11 +693,12 @@ def _lanes(root: pathlib.Path, entries: List[Entry], lineage: Mapping[str, Any],
                 not task and cls["author"].get("kind") == "host"):
             needed.append(entry)
     texts = _row_texts(root, needed)
+    notes = _working_notes(root, list(groups))
     lane1 = [_spoken(entry, cls["author"], texts) for entry, cls in classed if cls["lane"] == 1]
     lane2 = []
     for pos, task, loose in order:
         rows = groups[task] if task else [loose]
-        lines = _task_line(task, rows, texts, summaries) if task else {"line": _loose_line(loose[0], loose[1], texts)}
+        lines = _task_line(task, rows, texts, summaries, notes.get(task, "")) if task else {"line": _loose_line(loose[0], loose[1], texts)}
         lane2.append({**lines, "task": task, "ts": rows[0][0][1].get("ts"), "pos": pos,
                       "first": chat_chain.format_address(rows[0][0][0]), "last_ts": rows[-1][0][1].get("ts"),
                       "last": chat_chain.format_address(rows[-1][0][0]), "last_pos": rows[-1][0][2]})
@@ -825,8 +852,30 @@ def _late_review_entry(mark: Mapping[str, Any], label: Callable[..., str]) -> Di
                             "sha256": str(target.get("sha256") or "")}}
 
 
+def mark_in_view(mark: Mapping[str, Any], spec: ViewSpec, *, running: bool = False) -> bool:
+    """Whether a role keeps a mark in view by its scope: none, every room's, or this room's and the global ones.
+    A focus already running meets later changes of its room's (``spec.room_id``: the room it is in now) and the
+    global ones only, whatever its start view holds (``mark_anchors.append_mark_changes``)."""
+    if spec.marks == "none":
+        return False
+    return (spec.marks == "all" and not running) or mark.get("scope") == "global" or str(mark.get("room_id")) == spec.room_id
+
+
+def mark_entry(mark: Mapping[str, Any], label: Callable[..., str]) -> Dict[str, Any]:
+    """A mark as every view names it: its words, who marked it and when, its target, its quote while visibility
+    is full, and the action it is tied to."""
+    author = _mapping(mark.get("author"))
+    by = _mapping(author.get("focus")).get("role") or (
+        "the old dialogue writer" if author.get("kind") == "legacy_helper" else author.get("kind") or "not recorded")
+    return {"id": mark["id"], "scope": str(mark.get("scope") or "room"),
+            "room": label(mark.get("room_id")), "text": str(mark.get("text") or ""), "by": str(by),
+            "date": _minute(mark.get("ts")).split(" ")[0], "target": _mark_target(mark.get("target_ref")),
+            "quote": str(mark.get("quote") or "") if mark.get("visibility", "full") == "full" else "",
+            "anchor": describe_anchor(mark["anchor"]) if isinstance(mark.get("anchor"), dict) else ""}
+
+
 def _capture_marks(store: ChronicleStore, spec: ViewSpec, label: Callable[..., str], marks=None) -> List[Dict[str, Any]]:
-    """The acting marks a role keeps in view: every room's, or this room's and the global ones.
+    """The acting marks a role keeps in view (``mark_in_view``).
 
     Late review feedback the host keeps in view belongs to the room of its work whatever the role's
     mark scope: that room holds its words, every role alike. Other rooms' late reviews are counted in the
@@ -837,22 +886,13 @@ def _capture_marks(store: ChronicleStore, spec: ViewSpec, label: Callable[..., s
     if spec.marks == "none":
         return []
     marks = store.active_marks(None) if marks is None else marks
-    if spec.marks == "room_and_global":
-        marks = [mark for mark in marks if mark.get("scope") == "global" or str(mark.get("room_id")) == spec.room_id]
     entries = []
-    for mark in marks:
+    for mark in (mark for mark in marks if mark_in_view(mark, spec)):
         if is_late_review_mark(mark):
             if str(mark.get("room_id")) == spec.room_id:
                 entries.append(_late_review_entry(mark, label))
             continue
-        author = _mapping(mark.get("author"))
-        by = _mapping(author.get("focus")).get("role") or (
-            "the old dialogue writer" if author.get("kind") == "legacy_helper" else author.get("kind") or "not recorded")
-        entries.append({"id": mark["id"], "scope": str(mark.get("scope") or "room"),
-                        "room": label(mark.get("room_id")), "text": str(mark.get("text") or ""), "by": str(by),
-                        "date": _minute(mark.get("ts")).split(" ")[0], "target": _mark_target(mark.get("target_ref")),
-                        "quote": str(mark.get("quote") or "") if mark.get("visibility", "full") == "full" else "",
-                        "anchor": describe_anchor(mark["anchor"]) if isinstance(mark.get("anchor"), dict) else ""})
+        entries.append(mark_entry(mark, label))
     return sorted(entries, key=lambda entry: (entry["scope"] == "global", "" if entry["scope"] == "global" else entry["room"]))
 
 
@@ -932,7 +972,7 @@ def capture_memory_view(drive_root: Any, task: Mapping[str, Any], spec: ViewSpec
         tail = ("all" if spec.other_conversations else
                 "terminal" if spec.story or spec.room_id is not None and spec.room_page else "none")
         with capture(root, tail=tail) as derived:
-            frontier = legacy_frontier(store)
+            frontier, sequence = legacy_frontier(store), store.newest_sequence()  # the marks below read this state
             story, story_status, refusals = capture_story(store, root, label) if spec.story else ([], {}, [])
             room, groups, marks, waiting, acting = _capture_live(store, root, spec, label, story)
         owner_words = words(acting)
@@ -962,7 +1002,8 @@ def capture_memory_view(drive_root: Any, task: Mapping[str, Any], spec: ViewSpec
     return MemoryViewSnapshot(spec=spec, store_status=status,
                               frontier={"status": frontier.get("status"), "pos": frontier.get("pos")},
                               story=tuple(story), room=room, conversations=tuple(groups), marks=tuple(marks), waiting=waiting,
-                              legacy_blocks=story_status, fallback_refusals=tuple(refusals), owner_words=owner_words)
+                              legacy_blocks=story_status, fallback_refusals=tuple(refusals), owner_words=owner_words,
+                              chronicle_sequence=sequence)
 
 
 # --- rendering ------------------------------------------------------------------------------------

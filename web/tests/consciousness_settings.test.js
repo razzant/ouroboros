@@ -472,16 +472,20 @@ test('the roster keeps the owner\'s second-check mark exactly as loaded and refu
     assert.match(bad.error, /second-check mark must be true or false/);
 });
 
-test('Consciousness: Advises · Acts · Evolves with notes, the allowance and task copy, the moved fields keep their ids', () => {
+test('Consciousness: Advises · Acts · Evolves with notes and task copy; the allowance is a door to Costs, the moved fields keep their ids', () => {
     const html = consciousnessSectionHtml();
     assert.match(html, /What Ouroboros does when nobody asked: on its own clock, and in the places you connected\./);
     assert.deepEqual([...html.matchAll(/data-effort-value="(\w+)">(\w+)</g)].map((m) => [m[1], m[2]]), [['observe', 'Advises'], ['act', 'Acts'], ['full', 'Evolves']]);
     assert.match(html, /<strong>Acts<\/strong> &mdash; Also acts on its own/);
-    assert.match(html, />Daily allowance \(USD\)</);
-    assert.match(html, /Spending cap over a rolling 24 hours: its own wakes, wakes in places, and the work they start\. Settled dollars only; a subscription shows as unmetered\./);
+    // The allowance has one editor, Costs: no field here, only the door to it.
+    assert.doesNotMatch(html, /Daily allowance|s-consciousness-daily-usd|OUROBOROS_CONSCIOUSNESS_DAILY_USD/);
+    // In the allowance's former cell: its name and the door to its one editor.
+    assert.match(html, /<label id="s-consciousness-allowance-label">Spending limit over 24 hours<\/label>/);
+    assert.match(html, /aria-labelledby="s-consciousness-allowance-label"[^>]*>\s*<span>Set beside what it spent in<\/span> <button[^>]*data-costs-open>Costs ›<\/button>/);
+    assert.ok(html.indexOf('data-costs-open') < html.indexOf('s-consciousness-max-tasks'), 'the cell the allowance had, before the task limit');
     assert.match(html, />Max concurrent tasks</);
     assert.match(html, /How many of its own tasks may run at once\. Work you asked for never counts\./);
-    for (const id of ['s-consciousness-autonomy', 's-consciousness-daily-usd', 's-consciousness-max-tasks', 's-bg-wakeup-min', 's-bg-wakeup-max', 's-presence-max-active']) {
+    for (const id of ['s-consciousness-autonomy', 's-consciousness-max-tasks', 's-bg-wakeup-min', 's-bg-wakeup-max', 's-presence-max-active']) {
         assert.equal(html.split(`id="${id}"`).length, 2, `${id} is rendered once`);
     }
     assert.match(html, /<details class="consciousness-more"[^>]*>\s*<summary>.*More<\/summary>/s);
@@ -510,4 +514,19 @@ test('Settings › Consciousness lists no places: its one link opens Circles and
     dispose();
     await section.fire('click', { target: link });
     assert.equal(opened.length, 1, 'the disposer unbinds the link');
+});
+
+test('Settings › Consciousness opens Costs for its allowance, reading and writing nothing', async (t) => {
+    setup(t);
+    const root = new NodeStub();
+    root.innerHTML = consciousnessSectionHtml();
+    const tabs = [];
+    const dispose = bindConsciousnessSettings(root, { openDashboardTab: async (tab) => { tabs.push(tab); } });
+    const link = root.querySelector('[data-costs-open]');
+    const section = link.closest('.form-section') || root.querySelector('[data-consciousness-costs]');
+    await section.fire('click', { target: link });
+    assert.deepEqual(tabs, ['costs'], 'Dashboard › Costs, the one editor of the allowance');
+    dispose();
+    await section.fire('click', { target: link });
+    assert.deepEqual(tabs, ['costs'], 'the disposer unbinds it too');
 });

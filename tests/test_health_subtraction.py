@@ -4,6 +4,7 @@ a custody read that fails is said with its reader instead of replayed by three f
 from __future__ import annotations
 
 import json
+import pathlib
 
 import pytest
 
@@ -33,6 +34,10 @@ def test_a_quiet_install_renders_facts_without_ok_lines_or_cost_verdicts(tmp_pat
     for gone in ("OK:", "HIGH-COST", "high-cost", "STALE IDENTITY", "THIN IDENTITY", "SCRATCHPAD", "version sync",
                  "budget drift within", "COST ACCOUNTING UNAVAILABLE"):
         assert gone not in text, gone
+    system = (pathlib.Path(__file__).resolve().parents[1] / "prompts" / "SYSTEM.md").read_text(encoding="utf-8")
+    [said] = [part for part in system.split("\n\n") if "Health Invariants" in part]
+    # Text is the contract here: the prompt must not promise a stale-memory verdict the block does not render.
+    assert "stale" not in said.lower() and "stale" not in text.lower()
 
 
 def test_the_drift_line_reads_the_saved_drift_pair_and_never_the_usage_store(tmp_path, monkeypatch):

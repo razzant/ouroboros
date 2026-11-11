@@ -262,7 +262,7 @@ answer through §7.
   - `log` carries one runtime event row in `data` (`data.type` names the event) for live activity displays; the task's durable facts come from §6.
   - `message_annotation`, the routing outcome shown on an owner message, is that row's `chat_annotation` in history.
   - `task_named` gives a card its title; history rows carry `suggested_name`.
-  - `projects_changed`, `extension_lifecycle`, `update_status_ready`, `update_progress_changed`, `ui_language_changed` and `ui_i18n_updated` mean "read the named state again".
+  - `projects_changed`, `extension_lifecycle`, `ui_preferences_changed` (its keys name the changed groups), `update_status_ready`, `update_progress_changed`, `ui_language_changed` and `ui_i18n_updated` mean "read the named state again".
   - `typing` (transient) and `heartbeat`.
 
 Some `chat` frames are transient notices history never shows, for example `system_type: "initialization_notice"` (a message could not be accepted yet) and a repair/admission receipt with `task_id_pending: true` (no proof a durable task is readable yet).
@@ -439,7 +439,7 @@ time, independent of the incoming actor; own-clock rows and undeclared identitie
 
 Optional `summary` copies a non-empty string from the accepted attempt's `wake_summary`; `note` is the whole stored `result` from a PK read. Neither is clipped or synthesized. Optional `tool_calls` copies the card count; `rounds` copies `loop_outcome.usage.total_rounds`. Missing counts stay absent; null stays null. `checks: RecentWakeCheck[]` copies `safety_checks` as `{chip, tool}`, empty when absent. Declared-read and Supervisor-off skips and a message my human's answer sent unjudged share `not_checked`; the row cannot distinguish them or claim every call was checked. Present `TASK_COST_META_FIELDS`, including scoped `cost_presentation`, pass through unchanged to the card renderer; missing money stays missing.
 
-The headline uses `status`/`detail` from `describe_consciousness_state`; unknown/disabled control wins. `live_wake_task_id` spans binding through settlement: `thinking`, or `wake_paused` with `live_wake_held` (PENDING); neither shows a time. `owner_turn_live` was removed because owner work no longer holds the clock. Otherwise explained outcomes precede `due`/`sleeping`. A past `next_wake_at` means `due`, naming `appointment_at` only when known; legacy state says “Due” without time. Skips/refusals move the next attempt, not the appointment; their explanations label future attempts “at” and past attempts “due since”. Finish sets both times. Host times include a date unless today in the server's zone; the client adds no second clock to the sentence. Host words use `tr`/`fmt`; summaries/notes stay authored.
+The headline uses `status`/`detail` from `describe_consciousness_state`; unknown/disabled control wins. `live_wake_task_id` spans binding through settlement: `thinking`, or `wake_paused` with `live_wake_held` (PENDING); neither shows a time. `live_wake_hold` (`{cause, ceiling_usd}`, null unless held) is what its records prove (`consciousness_view.hold_cause`): `allowance`/`allowance_and_cap` (the allowance left set its launch ceiling; only these add `detail_note` and are the owner's move), `per_task_cap`, `launch_ceiling` (unstamped; each names its launch limit in `detail`), `owner`, `sleep`, `technical`, `total_budget`, `per_task_fence` or `""`. `allowance_status` is the current window's verdict, `allowance_open_rows` its rows that may still settle (null unknown), `allowance_room_after` when known spend would fall below the limit if its charges stay as they are (`""` withheld). `owner_turn_live` was removed because owner work no longer holds the clock. Otherwise explained outcomes precede `due`/`sleeping`. A past `next_wake_at` means `due`, naming `appointment_at` only when known; legacy state says “Due” without time. Skips/refusals move the next attempt, not the appointment; their explanations label future attempts “at” and past attempts “due since”. Finish sets both times. Host times include a date unless today in the server's zone; the client adds no second clock to the sentence. Host words use `tr`/`fmt`; summaries/notes stay authored.
 
 **Following a task.** Both event methods answer `text/event-stream`:
 
@@ -715,7 +715,10 @@ module again by itself after a start of that revision the page did not outlive; 
 `contributions: {hidden:[], order:[]}` in the install-wide preference file.
 POST merges named nested keys, replaces each supplied list, and rejects unknown
 nested keys, non-string keys, strings over 120 characters and lists over 64 items
-with 400. A missing provider never clears or substitutes a saved key.
+with 400. `contributions.hide` / `contributions.show` (lists of keys) add or remove
+single keys of `hidden` under the file's lock, so concurrent windows keep each
+other's choices; a resulting `hidden` over 64 keys answers 400. A committed
+`contributions` change broadcasts `ui_preferences_changed`. A missing provider never clears or substitutes a saved key.
 The contribution response includes these preferences and `voice[kind]` as
 `{key, available, reason}`: reason is empty when available, `not_selected` for an
 empty choice or `provider_unavailable` for a missing chosen engine. Client API

@@ -196,6 +196,16 @@ def _materialized_predecessor(task: Mapping[str, Any]) -> str:
     return owner if valid_task_result_authority_source(source, owner) else ""
 
 
+def retained_reader(drive_root: Any, owner: str, ref: Mapping[str, Any]) -> Dict[str, Any]:
+    """The ``read_file`` call that returns task ``owner``'s retained handle ``ref`` from any task: the handle's own
+    ``artifact_store`` recipe is scoped to ``owner``, so its runtime path is named instead (the notes rows here and
+    the room view's line of an earlier work name a task's notes by it)."""
+    from ouroboros.artifacts import task_artifact_dir_path
+
+    path = task_artifact_dir_path(drive_root, owner, create=False) / str(ref["path"])
+    return {"tool": "read_file", "arguments": {"root": "runtime_data", "path": str(path)}}
+
+
 def _kept_notes(drive_root: Any, owner: str, saved: Mapping[str, Any], *, cleared_is_final: bool = False) -> Any:
     """``(texts, exact source)`` of the notes task ``owner``'s result ``saved`` names, ``None`` when
     it kept none, or the error that stopped the search of its chat log.
@@ -209,15 +219,14 @@ def _kept_notes(drive_root: Any, owner: str, saved: Mapping[str, Any], *, cleare
     retired. A named source that cannot be read raises.
     """
     from ouroboros import review_history_view as view
-    from ouroboros.artifacts import read_actor_source_bytes, task_artifact_dir_path
+    from ouroboros.artifacts import read_actor_source_bytes
     from ouroboros.project_dialogue import continuation_narrative_is_valid, resolve_legacy_continuation_narrative
 
     reader = f"get_task_result(task_id={owner!r}, include_authority=True)"
 
     def source(ref: Mapping[str, Any], field: str) -> str:
         # The immutable handle belongs to owner, not the receiving task's artifact_store.
-        path = task_artifact_dir_path(drive_root, owner, create=False) / str(ref["path"])
-        read = {"tool": "read_file", "arguments": {"root": "runtime_data", "path": str(path)}}
+        read = retained_reader(drive_root, owner, ref)
         return (f"{reader} -> {field}; read from this task with {json.dumps(read, sort_keys=True)}; "
                 f"original task-local reference (its relative reader is scoped to {owner}): "
                 f"{json.dumps(ref, ensure_ascii=False, sort_keys=True)}")
@@ -398,5 +407,5 @@ def publish_working_notes(ctx: Any, messages: Any) -> Optional[Dict[str, Any]]:
 
 __all__ = ["LATE_ANSWER_NOTES_NAME", "PREDECESSOR_NOTES_NAME", "WORKING_NOTES_AT_FIELD", "WORKING_NOTES_FIELD",
            "late_answer_notes_message", "predecessor_notes_message", "publish_working_notes",
-           "project_main_task_authority",
+           "project_main_task_authority", "retained_reader",
            "project_helper_predecessor_authority"]

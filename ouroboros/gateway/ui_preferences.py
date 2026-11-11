@@ -32,11 +32,11 @@ DEFAULT_UI_PREFERENCES: dict[str, Any] = {
     # checked against live widgets, so a temporarily disabled or removed skill keeps
     # the owner's choice instead of losing it with the next discovery.
     "widget_start_mode": {},
-    # Owner width of a Widgets card, keyed like widget_start_mode: {"w": masonry columns
-    # the card spans, 12 = full width; "h": 0}. ``h`` is reserved for a pinned card height
-    # and is stored as 0 until that exists. A POST merges by key and a null value deletes
-    # one (the card falls back to its author ``span``); keys are never checked
-    # against live widgets. Semantics: docs/DESIGN.md "Widgets board".
+    # Owner size of a Widgets card, keyed like widget_start_mode: {"w": masonry columns the
+    # card spans, 12 = full width, 0 = the author's span; "h": the content's height in px,
+    # 0 = as tall as its content}. The two are independent; a size with neither is no size.
+    # A POST merges by key and a null value deletes one (author width, natural height); keys
+    # are never checked against live widgets. Semantics: docs/DESIGN.md "Widgets board".
     "widget_size": {},
     "nested_subagents_expanded": False,
     # Resizable side sections (0 = use the CSS default). Clamped to sane ranges so
@@ -70,12 +70,36 @@ _MAX_WIDGET_START_MODE_ITEMS = 200
 _MAX_WIDGET_KEY_LENGTH = 200
 _MAX_WIDGET_SIZE_ITEMS = 200
 WIDGET_GRID_COLUMNS = 12  # the bound of w and its full-width value (web/modules/widget_size.js WIDGET_FULL_SPAN)
+WIDGET_HEIGHT_MIN, WIDGET_HEIGHT_MAX = 120, 8192  # bounds of a set h (widget_size.js WIDGET_HEIGHT_MIN / _MAX)
 _SIDEBAR_WIDTH_MIN, _SIDEBAR_WIDTH_MAX = 180, 560
 _PROJECT_PANEL_WIDTH_MIN, _PROJECT_PANEL_WIDTH_MAX = 320, 1100
 _MAX_PROJECT_CURSORS = 1000
 _MAX_PROJECT_ID_LENGTH = 64
 _MAX_WELCOME_CHARS = 500
 _MAX_SHARED_READS = 64  # addresses one POST may name; recorded facts are never capped
+_MAX_CONTRIBUTION_KEYS = 64  # the bound _normalize_preferences enforces on contributions lists
+
+
+def _contribution_visibility_ops(body: dict[str, Any]) -> dict[str, list[str]]:
+    """Pop the atomic ``contributions.hide`` / ``contributions.show`` key lists from a POST body.
+
+    They change single keys of ``contributions.hidden`` under the preferences lock, so two windows that hide
+    different controls never overwrite each other's choice; the full-list ``hidden`` form stays as it was."""
+    group = body.get("contributions")
+    if not isinstance(group, dict):
+        return {}
+    ops: dict[str, list[str]] = {}
+    for op in ("hide", "show"):
+        if op not in group:
+            continue
+        values = group.pop(op)
+        if (not isinstance(values, list) or len(values) > _MAX_CONTRIBUTION_KEYS
+                or any(not isinstance(v, str) or not v.strip() or len(v) > 120 for v in values)):
+            raise ValueError(f"contributions.{op} must be a list of at most {_MAX_CONTRIBUTION_KEYS} keys of at most 120 characters")
+        ops[op] = list(dict.fromkeys(v.strip() for v in values))
+    if ops and not group:
+        body.pop("contributions")
+    return ops
 
 
 @contextmanager
@@ -105,7 +129,7 @@ def _normalize_width(value: Any, lo: int, hi: int) -> int:
 
 
 def _normalize_widget_size(value: Any) -> dict[str, dict[str, int] | None]:
-    """Owner card widths clamped to the board; ``None`` is a key a POST deletes."""
+    """Owner card sizes clamped to the board; ``None`` is a key a POST deletes, as is a size with neither axis set."""
     if not isinstance(value, dict):
         raise ValueError("widget_size must be an object of {widget_key: {w, h}}")
     sizes: dict[str, dict[str, int] | None] = {}
@@ -119,7 +143,9 @@ def _normalize_widget_size(value: Any) -> dict[str, dict[str, int] | None]:
         w, h = (size.get("w"), size.get("h", 0)) if isinstance(size, dict) else (None, None)
         if not all(isinstance(n, int) and not isinstance(n, bool) for n in (w, h)):
             raise ValueError("widget_size values must be null or objects of integer w and h")
-        sizes[key] = {"w": max(1, min(WIDGET_GRID_COLUMNS, w)), "h": 0}
+        w = max(0, min(WIDGET_GRID_COLUMNS, w))
+        h = 0 if h <= 0 else max(WIDGET_HEIGHT_MIN, min(WIDGET_HEIGHT_MAX, h))
+        sizes[key] = {"w": w, "h": h} if w or h else None
     return sizes
 
 
@@ -360,13 +386,21 @@ async def api_ui_preferences_post(request: Request) -> JSONResponse:
         return json_error(f"shared_read must be a list of at most {_MAX_SHARED_READS} row addresses", 400)
     drive_root = request_drive_root(request)
     path = pathlib.Path(drive_root) / "state" / "ui_preferences.json"
+    contributions_changed = "contributions" in body
     try:
+        visibility = _contribution_visibility_ops(body)
         with _preferences_lock(path):
             prefs = _stored_preferences(path)
             incoming = _normalize_preferences(body, fill_defaults=False)
             for group in ("voice", "contributions"):
                 if group in incoming:
                     prefs[group] = {**prefs[group], **incoming.pop(group)}
+            if visibility:
+                hidden = [key for key in prefs["contributions"].get("hidden", []) if key not in visibility.get("show", [])]
+                hidden += [key for key in visibility.get("hide", []) if key not in hidden]
+                if len(hidden) > _MAX_CONTRIBUTION_KEYS:
+                    raise ValueError(f"contributions.hidden holds at most {_MAX_CONTRIBUTION_KEYS} keys")
+                prefs["contributions"] = {**prefs["contributions"], "hidden": hidden}
             if "project_seen_revision" in incoming:
                 from ouroboros.projects_registry import get_project
 
@@ -417,6 +451,14 @@ async def api_ui_preferences_post(request: Request) -> JSONResponse:
         return json_error(str(exc), 503)
     except StoreError as exc:
         return json_error(f"dialogue history unavailable: {exc}", 503)
+    if contributions_changed:
+        # Other windows re-read their contributions projection (one coalesced read each).
+        try:
+            from ouroboros.gateway.ws import broadcast_ws_sync
+
+            broadcast_ws_sync({"type": "ui_preferences_changed", "keys": ["contributions"]})
+        except Exception:  # a missing socket loop must not fail a committed write
+            pass
     return JSONResponse({"ok": True, **prefs})
 
 

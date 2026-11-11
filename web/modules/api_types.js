@@ -85,6 +85,7 @@
  * @property {boolean} enabled
  * @property {string} status  // disabled | starting | stopped | thinking | due | sleeping | waiting_for_first_conversation | allowance_exhausted | allowance_unknown | wake_rejected | wake_failed | wake_paused | wake_outcome_unknown
  * @property {string} detail  // one honest owner-readable line (e.g. "Sleeping until 14:05.")
+ * @property {string=} detail_note  // what follows from that state, said beneath it; only a proven allowance hold has one
  * @property {string} level  // observe | act | full
  * @property {string} next_wake_at  // next attempt, moved by skips/refusals; ISO instant or ""
  * @property {string} appointment_at  // scheduled time, retained through retries; "" on legacy state
@@ -99,8 +100,12 @@
  * @property {number} max_tasks
  * @property {string} live_wake_task_id  // own wake through direct custody, queue and settlement; "" when absent
  * @property {boolean} live_wake_held  // own wake in PENDING: paused, held or awaiting dispatch
+ * @property {?{cause: string, ceiling_usd: ?number}} live_wake_hold  // what its records prove holds it (consciousness_view.hold_cause); null when not held
  * @property {number} unknown_unmetered  // window rows without a price: spent_24h_usd is then a floor ("at least")
  * @property {boolean} integrity_degraded  // the ledger was quarantined/repaired; the numbers are best-effort
+ * @property {string} allowance_status  // the current window's verdict: available | exhausted | allowance_unknown
+ * @property {?number} allowance_open_rows  // window rows that may still settle; null unknown
+ * @property {string} allowance_room_after  // ISO instant after which known spend falls below the limit if nothing more is charged; "" withheld
  */
 /** @typedef {import('./task_activity_types.js').ActiveDirectTurn} ActiveDirectTurn */
 /** @typedef {import('./task_activity_types.js').ActiveChatActivity} ActiveChatActivity */
@@ -713,6 +718,11 @@
  * @property {"projects_changed"} type
  * @property {string=} project_id
  * @property {number=} chat_id  // new project thread; client learns it before /api/state (v6.32.0)
+ */
+
+/** @typedef {Object} UiPreferencesChangedOutbound A committed POST /api/ui/preferences change: read it again.
+ * @property {"ui_preferences_changed"} type
+ * @property {string[]} keys  // the changed groups, e.g. ["contributions"]
  */
 
 /** @typedef {Object} MessageAnnotationOutbound Bubble-free update for an existing owner message.
@@ -1498,7 +1508,7 @@
  * @property {{hidden:string[],order:string[]}} contributions
  * @property {string[]} widget_order
  * @property {Object.<string,'auto'|'manual'|'retain'>} widget_start_mode  // owner per-card launch-policy override, keyed "<skill>:<tab_id>"
- * @property {Object.<string,{w:number,h:number}>} widget_size  // owner Widgets card width: w masonry columns the card spans (12 = full width), h 0 (reserved)
+ * @property {Object.<string,{w:number,h:number}>} widget_size  // owner Widgets card size: w columns spanned (12 = full, 0 = author's), h content px (0 = natural)
  * @property {boolean} nested_subagents_expanded
  * @property {number} sidebar_width  // px; 0 = CSS default (v6.33.0)
  * @property {number} project_panel_width  // px; 0 = CSS default
