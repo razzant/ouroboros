@@ -35,7 +35,8 @@ def primary_basis(ctx: Any) -> str:
     return str((getattr(ctx, "primary_route", None) or {}).get("role") or "main")
 
 
-def _publishes(ctx: Any) -> bool:
+def is_integrating_focus(ctx: Any) -> bool:
+    """Roots integrate; delegated children, nannies and reviewers retain their own scope."""
     metadata = getattr(ctx, "task_metadata", {}) or {}
     return not (metadata.get("delegation_role") == "subagent" or metadata.get("parent_task_id")
                 or getattr(ctx, "parent_task_id", None) or metadata.get("review_role")
@@ -50,7 +51,7 @@ def lead_fact(ctx: Any, *, model: str | None = None, use_local: bool | None = No
     account is still a departure. Role is published for that row, never its account.
     ``_lead_episode`` is one bounded observation, retained with the route checkpoint.
     """
-    if not _publishes(ctx):
+    if not is_integrating_focus(ctx):
         return {}
     if held := getattr(ctx, "_lead_return_from", None):
         return copy.deepcopy(held)
@@ -180,7 +181,7 @@ def chooser_words(basis: str) -> str:
 
 
 def model_fact_words(ctx: Any, model: str) -> str:
-    if ctx is None or not _publishes(ctx):
+    if ctx is None or not is_integrating_focus(ctx):
         return f"model {model}"
     source = (getattr(ctx, "route_choice", None) or {}).get("source")
     basis = {"switch_model": "mind", "fallback": "fallback"}.get(source, primary_basis(ctx))

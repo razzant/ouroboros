@@ -303,6 +303,43 @@ def local_model_choices(model_start, monkeypatch, request):
     assert not transports
 
 
+@pytest.mark.parametrize("scope", ["room", "main"])
+@pytest.mark.parametrize("actor", ["root", "presence", "child", "nanny", "reviewer"])
+def test_only_integrating_foci_may_carry_owner_choices_to_room_or_main(configured_model_start, monkeypatch, scope, actor):
+    from ouroboros.owner_words import PLACE_CONFIRMED
+    from ouroboros.tools.control_runtime import _switch_model
+    from ouroboros.tools.tool_result import _published_tool_result
+
+    ctx, _events = configured_model_start
+    ctx.task_metadata = {"delegation_role": "subagent", "parent_task_id": "parent"} if actor == "child" else {}
+    if actor == "nanny":
+        ctx._nanny_route_dispatched = True
+    if actor == "reviewer":
+        ctx.task_metadata["review_role"] = "result"
+    if actor == "presence":
+        ctx.task_metadata["_presence_turn"] = True
+        ctx._owner_directives[0]["source"] = PLACE_CONFIRMED
+    writes, recents = [], []
+    monkeypatch.setattr("ouroboros.composer_cognition.update_project_model_choice",
+                        lambda root, pid, choice: writes.append(choice) or ({"kind": "main"}, choice))
+    monkeypatch.setattr("ouroboros.gateway.owner_effort._write_main_route",
+                        lambda _request, choice, **kw: writes.append(choice) or {"ok": True, "main_route": choice})
+    monkeypatch.setattr("ouroboros.gateway.ui_preferences.record_model_recent", lambda *a: recents.append(a))
+    text = _switch_model(ctx, model="vendor/fast-one", owner_words="use the other one", scope=scope,
+                         project_id="alpha" if scope == "room" else "")
+    if actor in {"root", "presence"}:
+        assert json.loads(text.splitlines()[0])["ok"] is True
+        assert len(writes) == len(recents) == 1 and writes[0]["model"] == "vendor/fast-one"
+    else:
+        assert not writes and not recents
+        result = _published_tool_result(ctx, None)
+        assert result.status == "error" and result.code == "TOOL_ARG_ERROR"
+        assert "Ask the work that delegated you" in text
+        monkeypatch.setattr("ouroboros.llm.LLMClient.available_models", lambda _self: ["vendor/fast-one"])
+        _switch_model(ctx, model="vendor/fast-one")
+        assert ctx.active_model_override == "vendor/fast-one" and not writes
+
+
 @pytest.mark.parametrize("cache", [True, False], ids=["recorded", "absent"])
 def test_inexact_model_uses_the_host_catalogue_without_fetching(local_model_choices, cache):
     from ouroboros.tools.tool_result import _published_tool_result

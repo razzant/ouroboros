@@ -157,6 +157,12 @@ def request_work_model(ctx, choice: dict) -> tuple[str, bool]:
 
 
 def cited_switch(ctx, *, model: str, owner_words: str, scope: str, project_id: str, effort: str = "") -> str:
+    """Only an integrating focus can carry the owner's room or Main choice.
+
+    Presence is an integrating focus too: its confirmed place-owner cite may choose
+    either scope. Delegated actors keep their own acting model and effort controls.
+    """
+    from ouroboros.lead_fact import is_integrating_focus
     from ouroboros.owner_words import cited_owner_basis
     from ouroboros.gateway.ui_preferences import record_model_recent
     from ouroboros.gateway.owner_effort import _write_main_route
@@ -164,6 +170,8 @@ def cited_switch(ctx, *, model: str, owner_words: str, scope: str, project_id: s
     from ouroboros.composer_cognition import update_project_model_choice
     from ouroboros.tools.control_routing import _inherited_project_scope
 
+    if scope in {"room", "main"} and not is_integrating_focus(ctx):
+        return refuse(ctx, "Only an integrating work can set a room's model or Main. Ask the work that delegated you to carry your human's choice.")
     basis, error = cited_owner_basis(ctx, owner_words)
     if error or not basis:
         hint = (" In Cyber Pro you may make your own room or Main change through its existing writer; this tool carries your human's words."
