@@ -209,8 +209,8 @@ details[data-settings-fold] > .settings-rows { margin-top: var(--space-3); }
 .settings-needs > .settings-need {
     grid-template-columns: 22px minmax(0, 1fr) auto;
     grid-template-areas: "lead words actions" "lead meta actions";
+    row-gap: 2px;
     min-height: 40px;
-    margin: 0;
     padding: var(--space-1) 0;
     background: transparent;
 }
