@@ -726,6 +726,31 @@ def test_a_project_made_inside_a_capture_leaves_one_state(monkeypatch, tmp_path)
     _one_state(monkeypatch, tmp_path, lambda: create_project(tmp_path, "gamma", name="Gamma"), "gate")
 
 
+# Writes a capture may meet from another thread or process, by the chain's changes ("revise_fill": a text revised and
+# the stored tail filled anew; an index rebuilt is the same class as a refill and stays out of a reader's way here).
+INSIDE = ("row", "bind", "bind_origin", "new_project", "relineage", "direct_write", "remove_task", "admit",
+          "restore_target", "seal", "reject", "accept", "correct", "revise_chat", "revise_progress", "fill", "revise_fill",
+          "become_place", "place_repeat", "seal_place", "owner_account")
+
+
+@pytest.mark.parametrize("seed", [3, 7, 11, 19])
+def test_a_write_inside_a_capture_along_a_chain_leaves_one_state(monkeypatch, tmp_path, seed):
+    """Along a chain of changes, each change lands inside a capture of a fresh process (after its marks, at its first
+    lineage read, at its block's first place read): that view is a whole pass's of the state before it or after it, and
+    the next captures equal a whole pass again, warm and fresh."""
+    monkeypatch.setattr(mi._PlaceReads, "_NEWEST", 2)  # every page, copy and walk past a page on a short chain
+    chain, rng, trace = Chain(tmp_path, seed), random.Random(seed), []
+    for _ in range(10):
+        name, at = rng.choice(INSIDE), rng.choice(("gate", "pass", "lazy"))
+        trace.append((name, at))
+        write = (lambda: (chain.revise_chat(), chain.fill())) if name == "revise_fill" else getattr(chain, name)
+        try:
+            _one_state(monkeypatch, tmp_path, write, at)
+            _same(monkeypatch, tmp_path, chain.rooms)
+        except AssertionError as exc:
+            raise AssertionError(f"after {trace}: {exc}") from None
+
+
 # --- each hot rule ------------------------------------------------------------------------------------------
 
 def _scribe(tmp_path: pathlib.Path) -> tuple:
@@ -1447,6 +1472,85 @@ def test_a_process_that_failed_to_forget_a_moved_lineage_forgets_it_at_its_next_
         pr.forget_lineage(tmp_path, [None, 1], frozenset())
     pr.forget_lineage(tmp_path, [None, 1], frozenset())
     assert (root, "old") not in memory
+
+
+def test_a_task_store_before_the_lineage_count_decides_nothing(monkeypatch, tmp_path):
+    """A store an older body left before the count (no triggers, schema 11) answers no lineage mark: no set stands on
+    it and none is composed over it, so a lineage write nothing counts reaches every start."""
+    rooms, _row = _sealed_main_row(tmp_path)
+    with store.open_store(tmp_path, write=True) as txn:
+        for name in ("tasks_lineage_replaced", "tasks_lineage_updated", "tasks_lineage_removed"):
+            txn.conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+        txn.conn.execute("UPDATE meta SET value='11' WHERE key='schema_version'")
+    store.close_connections(store.store_path(tmp_path))
+    assert not _in_use(tmp_path)
+    mi.open_rows_by_room(tmp_path)  # a whole pass: nothing composed over a store that cannot mark
+    with store.open_store(tmp_path, write=True) as txn:
+        txn.conn.execute("UPDATE tasks SET chat_id=? WHERE task_id='late'", (str(rooms["alpha"]),))
+    assert not _in_use(tmp_path)
+    _same(monkeypatch, tmp_path, rooms)
+
+
+def test_the_rule_reads_the_registry_facts_its_mark_was_taken_from(monkeypatch, tmp_path):
+    """A binding lands after a capture read its marks and before its pass: the pass decides rooms by the very facts the
+    registry mark digests (one object), so its rows are those of one state, never a task's newer row in its new Project
+    with its sealed row left nowhere; a caller with no reader of places' rows reads no further check."""
+    _moving_task(tmp_path, 1)
+
+    def open_rows() -> dict:
+        return json.loads(json.dumps(mi.open_rows_by_room(tmp_path)))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cold, "gate", lambda _store: None)
+        before = open_rows()
+    real, fired = cold.gate, []
+
+    def binding_after_the_marks(store_):
+        marks = real(store_)
+        if not fired:
+            fired.append(bind_task_to_project(tmp_path, "moving", "beta", origin={"absent": "post_hoc_unresolved"}))
+        return marks
+
+    _forget_process_memos()
+    with monkeypatch.context() as patch:
+        patch.setattr(cold, "gate", binding_after_the_marks)
+        got = open_rows()
+    with monkeypatch.context() as patch:
+        patch.setattr(cold, "gate", lambda _store: None)
+        after = open_rows()
+    assert fired and got in (before, after), _first_difference({"open": got}, {"open": before})
+
+
+def test_a_candidate_pages_writer_keeps_its_later_terminal_rows_read(monkeypatch, tmp_path):
+    """A delegated helper's candidate page links its writer's later terminal rows once it is accepted, and an acceptance
+    moves no mark: the writer of every page record, drafts and candidates too, keeps its terminal rows read."""
+    rooms, before, _finish = _scribe(tmp_path)
+    child = {**LIGHT, "task_id": "scribe", "focus": {"role": "child", "task_id": "scribe"}}
+    candidate = ChronicleStore(tmp_path).publish_page(
+        room_id="1", text="A candidate.", author=child, metadata={"candidate": True},
+        covers={"rows": [before[0]["row_sha256"]], "stream_span": [before[2], before[2]]})
+    assert candidate.ok, candidate.reason
+    _compose(tmp_path)
+    assert ChronicleStore(tmp_path).decide(candidate.record["id"], True, shared.MIND, "adopted").ok
+    assert _in_use(tmp_path)
+    views = _same(monkeypatch, tmp_path, rooms)
+    assert "Later terminal rows of task scribe" in _texts(views)
+
+
+def test_a_task_stores_lineage_mark_names_the_store_file_it_counted_in(monkeypatch, tmp_path):
+    """The lineage mark names the store file it counted in: a store made anew (another file, an import) counts from zero
+    again, so two stores at the same count never answer the same mark, and a set composed over one never stands over
+    the other."""
+    from ouroboros.store_hot_facts import lineage_writes
+
+    marks = []
+    for name in ("one", "other"):
+        root = tmp_path / name
+        root.mkdir()
+        monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
+        write_task_result(root, "late", "completed", result="done", chat_id=1)
+        marks.append(lineage_writes(root))
+    assert marks[0][1] == marks[1][1] == 0 and marks[0] != marks[1], marks
 
 
 def test_two_rows_of_one_task_with_different_lineage_fields_get_their_own_answers(monkeypatch, tmp_path):
