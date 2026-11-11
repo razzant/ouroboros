@@ -4,8 +4,6 @@ import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { bindPopoverPosition } from './ui_interactions.js';
 import { bindModelProgramFooter } from './model_program.js';
 
-export const MODEL_PROGRAM_PLACEMENT = 'list';
-
 const choosers = new WeakMap();
 
 export function modelOptions(items = []) {
@@ -27,15 +25,15 @@ function optionsHtml(items, listId) {
             data-model-value="${escapeHtml(value)}"${custom ? ' data-model-custom-option' : ''} aria-selected="false">${escapeHtml(label || value)}</div>`).join('');
 }
 
-export function modelChooserHtml(attrs, value, listId, items = [], { placeholder = 'Choose a model', labelUnlisted = true, programs = [], programPlacement = MODEL_PROGRAM_PLACEMENT } = {}) {
+export function modelChooserHtml(attrs, value, listId, items = [], { placeholder = 'Choose a model', labelUnlisted = true, programs = [] } = {}) {
     const options = `<div id="${escapeHtml(listId)}" role="listbox">${optionsHtml(items, listId)}</div>`;
     const footer = '<div class="ui-model-footer" data-model-footer role="group" aria-label="Supplying program" aria-live="polite" aria-atomic="true" hidden></div>';
-    const popup = `<div class="ui-popup ui-model-options" data-model-popup hidden>${options}${programPlacement === 'list' ? footer : ''}</div>`;
+    const popup = `<div class="ui-popup ui-model-options" data-model-popup hidden>${options}${footer}</div>`;
     return `<span class="ui-model-chooser"><input class="ui-control" type="text" ${attrs}
-        data-model-chooser data-model-programs="${escapeHtml(JSON.stringify(programs))}" data-program-placement="${programPlacement}" role="combobox" aria-autocomplete="list" aria-expanded="false"
+        data-model-chooser data-model-programs="${escapeHtml(JSON.stringify(programs))}" role="combobox" aria-autocomplete="list" aria-expanded="false"
         aria-controls="${escapeHtml(listId)}" value="${escapeHtml(value)}"
         placeholder="${escapeHtml(placeholder)}" autocomplete="off" spellcheck="false">
-        ${popup}${programPlacement === 'line' ? footer : ''}${labelUnlisted ? '<span class="ui-field-help" data-model-custom role="status" hidden>Custom ID · Not in this list</span>' : ''}</span>`;
+        ${popup}${labelUnlisted ? '<span class="ui-field-help" data-model-custom role="status" hidden>Custom ID · Not in this list</span>' : ''}</span>`;
 }
 
 function readOptions(list) {

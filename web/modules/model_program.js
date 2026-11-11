@@ -136,7 +136,7 @@ export function bindModelProgramFooter(input, footer, changed) {
             const producers = (groups) => JSON.stringify(groups.map(({harness, programs}) => [harness, programs]));
             const same = producers(programs) === producers(next);
             programs = next;
-            if (opened || input.dataset.programPlacement === 'line') view.render();
+            if (opened) view.render();
             if (opened && !same) read();
         },
         open() {
