@@ -266,7 +266,7 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
             </details>
         </section>
         <section class="ui-card costs-budget" aria-labelledby="costs-budget-title">
-            <h3 class="dashboard-card-title" id="costs-budget-title">Budget</h3>
+            <h3 class="dashboard-card-title" id="costs-budget-title">Budget limits</h3>
             <div class="costs-limits dashboard-settings">${limitRows(false)}</div>
             <div class="costs-allowance">
                 <p class="ui-field-help costs-allowance-spend" id="costs-allowance-spend">Reading…</p>
