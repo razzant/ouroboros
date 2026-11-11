@@ -1,7 +1,13 @@
-"""One start allowance and an ordered walk over an immutable memory snapshot.
+"""One start allowance and a distance-ordered walk over an immutable memory snapshot.
 
-After the start, only a physical deficit narrows the selected forms. This room's owner
-rows without carried commitments may spend the work room, but never silently disappear.
+A replacement is my telling of that source in the same block beside its address,
+a host fact, or a recorded window/mode emergency. ``memory_forms.STAGES`` starts
+with remote ordinary forms, then this room's task facts and intermediate replies,
+remote untold words, this room's final replies, remote last-gist counts and story/notes;
+physical forms follow, with owner words last. The clean-start guard excludes emergencies
+when ordinary forms fit the same complete frame with the work room.
+After the start, automatic fitting narrows selected forms only for a physical deficit.
+This room's uncovered owner words may spend the work room.
 """
 from __future__ import annotations
 

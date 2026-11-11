@@ -21,10 +21,13 @@ A writer's terminal rows its page links below it (``memory_sealing.linked_rows``
 here. A room's later delivery of words it already holds (the same ``text_sha256``, not my human's; by the same
 recorded speaker, or by none, with the same connector facts), and one row several rooms hold by membership beyond the one keeping it whole
 (``_once``), is one line naming that earlier copy and its reader; its text is not read.
-The capture keeps consideration and author facts. The distance-ordered floor uses
-only this capture: ordinary work tellings and unread facts first, emergency forms
-later, and owner words whole until the final physical address form. Rendering and
-source classification live in ``memory_view_conversation_forms``. Texts are read
+The capture keeps consideration and author facts. A replacement is my telling of the
+same source printed in this block beside its address, a host fact, or a recorded
+window/mode emergency. ``memory_forms.STAGES`` orders remote ordinary forms first,
+then this room's intermediate replies, remote untold words, this room's final replies,
+remote last-gist counts and story/notes; owner words stay whole until the physical floor.
+The clean-start guard excludes emergencies when ordinary forms fit the complete frame.
+Rendering and source classification live in ``memory_view_conversation_forms``. Texts are read
 only for the open words a group may show, in one read;
 sizes come from stored ``text_chars``.
 """

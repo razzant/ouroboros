@@ -11,7 +11,7 @@ from ouroboros.memory_view_work import works, work_line, task_gist_line, task_li
 from ouroboros.memory_form_facts import form_counts as form_counts, holding_room as holding_room
 
 LADDER = ("F1", "F6w", "F6g", "F3", "F2", "F4", "F7p", "F5l", "F5", "F5a", "F7", "F7a", "F8", "F8a", "F6a")
-# The owner's pending alternative swaps work_final and remote_last here.
+# The owner's order A keeps work_final before remote_last.
 STAGES = ("remote_events", "remote_told", "remote_unread", "remote_gists", "task_facts", "work_progress",
           "remote_mine", "remote_people", "remote_all", "work_final", "remote_last", "story_ordinary",
           "story_openings", "room_emergency", "task_only", "protected_replies", "remote_count", "story_count",
