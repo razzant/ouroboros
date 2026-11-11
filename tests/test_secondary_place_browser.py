@@ -17,6 +17,7 @@ import pytest
 from ouroboros import dialogue_store
 from tests._dialogue import advance_room_revision
 from tests._room_browser_shared import _nav
+from tests.settings_browser_helpers import open_settings, settings_page
 from tests.test_ui_smoke_playwright import direct_server_with_data as direct_server_with_data
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _SETTLE_RESTORE_FRAMES
 
@@ -322,7 +323,7 @@ def test_logs_reader_inside_the_newest_open_card_keeps_their_place_when_that_car
 
 
 @pytest.mark.parametrize("engine", ENGINES)
-def test_safety_counter_defers_its_tail_until_the_behavior_tab_is_shown(direct_server_with_data, engine):
+def test_safety_counter_defers_its_tail_until_permissions_is_shown(direct_server_with_data, engine):
     from playwright.sync_api import expect, sync_playwright
 
     with sync_playwright() as pw:
@@ -330,19 +331,19 @@ def test_safety_counter_defers_its_tail_until_the_behavior_tab_is_shown(direct_s
         try:
             page, logs, errors = _page(browser, direct_server_with_data["url"])
             _nav(page, "settings")
-            page.locator('#s-gh-repo').wait_for(state='attached')
+            settings_page(page, "").locator("[data-settings-card]").wait_for(state="visible")
             page.wait_for_timeout(400)
             tails = lambda: [url for url in logs if '/events?limit=2000' in url]
-            assert tails() == [], 'hidden Safety section reads no whole event tail'
-            page.click('[data-settings-tab="behavior"]')
-            expect(page.locator('#s-safety-skip-counter')).to_contain_text('let through')
+            assert tails() == [], 'the home reads no whole event tail'
+            counter = open_settings(page, "permissions").locator("[data-safety-skips]")
+            expect(counter).to_contain_text('let through')
             assert len(tails()) == 1
             _nav(page, 'chat')
             page.wait_for_timeout(400)
             assert len(tails()) == 1, 'a hidden counter reads no additional tail'
             _nav(page, 'settings')
-            expect(page.locator('#s-safety-skip-counter')).to_contain_text('let through')
-            # A new settings load owes a fresh counter while its Behavior tab is visible.
+            # Settings comes back on the page it showed, and the counter of that page is filled again.
+            expect(settings_page(page, "permissions").locator("[data-safety-skips]")).to_contain_text('let through')
             assert not errors, errors
         finally:
             browser.close()
