@@ -58,15 +58,16 @@ class Stand:
     ]
 
     def __init__(self) -> None:
-        since = datetime.datetime.now().replace(hour=2, minute=14, second=0, microsecond=0)
+        # The server dates a departure as an ISO instant in UTC; the page says it in the viewer's clock.
+        since = datetime.datetime.now().replace(hour=2, minute=14, second=0, microsecond=0).astimezone(datetime.timezone.utc).isoformat()
         self.main = _route(ASTRA)
         self.leads = {
             "t-follow": _lead(ASTRA, "main"),
             "t-own": _lead(KIMI, "owner"),
             "t-queued": _lead(ASTRA, "main"),
-            "t-fallback": _lead(OPUS, "fallback", role="fallback:0", primary=_lead(ASTRA, "main"), since=since.timestamp(),
-                                cause="gpt-6-astra did not answer after 3 tries"),
-            "t-plain": _lead(GLM, "mind", since=since.timestamp()),
+            "t-fallback": _lead(OPUS, "fallback", role="fallback:0", primary=_lead(ASTRA, "main"), since=since,
+                                cause="subscription_window_exhausted"),
+            "t-plain": _lead(GLM, "mind", since=since, cause="switch_model"),
         }  # t-old publishes no fact: its card keeps today's line
         self.room = {"id": "p7", "name": "Research", "chat_id": 7, "pinned": False, "lifecycle": "active",
                      "cognition": COGNITION, "model_choice": {"kind": "model", **_route(KIMI)}}
@@ -248,6 +249,7 @@ def _show(page, task: str) -> None:
 
 def _quiet(page) -> None:
     """No toast left over the page: a picture shows the state it names."""
+    page.mouse.move(1, 1)  # a toast under the pointer does not expire
     page.wait_for_function("() => !document.querySelector('.toast')", timeout=15_000)
 
 
@@ -317,7 +319,7 @@ def _walk(page, url: str, shots: pathlib.Path, tag: str, transcript: int | None)
     _show(page, "t-queued")
     shoot("1-cards")
 
-    # 2. The popover of a work on its own model: Follow Main, then Main, the recent models and Search. Nothing in the
+    # 2. The popover of a work on its own model: Main (the one way to follow it), the recent models and Search. Nothing in the
     #    transcript moves when it opens.
     _show(page, "t-own")
     before = page.evaluate(_CARDS)["cards"]
@@ -326,8 +328,8 @@ def _walk(page, url: str, shots: pathlib.Path, tag: str, transcript: int | None)
     page.wait_for_timeout(350)
     pop = page.evaluate(_POPOVER)
     assert pop["title"] == "Model for this work · you chose it" and pop["expanded"] == "t-own", pop
-    assert pop["acts"] == [["follow", "Follow Main", "Codex · gpt-6-astra"]], pop
-    assert pop["rows"][0][0] == f"route|{ASTRA}" and "Main" in pop["rows"][0][2], pop
+    assert pop["acts"] == [], "no separate action: the list's Main row is the way to follow Main"
+    assert pop["rows"][0][0] == f"route|{ASTRA}" and pop["rows"][0][2] == "gpt-6-astra Main this work will follow Main", pop
     assert [row[0] for row in pop["rows"][1:3]] == [f"route|{GLM}", f"route|{KIMI}"] and pop["sections"][0] == "Recent", pop
     assert pop["rows"][2][1] == "true", "the work's own model is the chosen row"
     assert pop["field"] and pop["rule"] == NEXT_STEP and pop["inside"], pop
@@ -336,7 +338,7 @@ def _walk(page, url: str, shots: pathlib.Path, tag: str, transcript: int | None)
         "the popover floats: no card moved or changed size"
     held(after)
     shoot("2-popover")
-    page.click('.card-model-pop [data-act="follow"]')
+    page.click(f'.card-model-pop .chat-model-row[data-row="route|{ASTRA}"]')
     _said(page, NEXT_STEP)
     page.wait_for_function("() => !document.querySelector('.card-model-pop')")
     assert stand.writes[-1] == ("task", "t-own", {"action": "follow"}), stand.writes
@@ -366,7 +368,8 @@ def _walk(page, url: str, shots: pathlib.Path, tag: str, transcript: int | None)
     page.wait_for_selector(".card-model-pop .card-model-act", timeout=10_000)
     page.wait_for_timeout(350)
     pop = page.evaluate(_POPOVER)
-    assert pop["title"].startswith("Left Main at 02:14") and pop["title"].endswith("gpt-6-astra did not answer after 3 tries"), pop
+    assert pop["title"].startswith("Left Main at 02:14") and pop["title"].endswith("· Waiting for quota"), \
+        ("the cause is the server's code, said in the wait card's words", pop)
     assert [act[:2] for act in pop["acts"]] == [["return", "Return to Main"], ["wait", "Wait for Main"], ["keep", "Keep on claude-opus-5.5"]], pop
     assert pop["inside"], pop
     held(page.evaluate(_CARDS))
