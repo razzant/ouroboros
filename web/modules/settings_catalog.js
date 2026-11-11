@@ -270,13 +270,15 @@ export function refreshMaintenanceCatalogs(harness, evidence) {
     let read = programReads.get(harness);
     if (!read) {
         document.dispatchEvent(new CustomEvent('harness-maintenance:settled', {detail: {harness}}));
-        read = Promise.allSettled([claudexorStatus.refresh({includeModels: true, afterCurrent: true}), refreshModelCatalog()])
+        let timeout;
+        const expired = new Promise(resolve => { timeout = setTimeout(() => resolve(false), MODEL_CATALOG_TIMEOUT_MS); });
+        read = Promise.race([expired, Promise.allSettled([claudexorStatus.refresh({includeModels: true, afterCurrent: true}), refreshModelCatalog()])
             .then(([native, raw]) => {
                 const row = native.value?.harnesses?.find((item) => item.id === harness);
                 return native.status === 'fulfilled' && !claudexorStatus.error && row?.model_catalog
                     && !row.models_error && !row.model_catalog.partial
                     && raw.status === 'fulfilled' && catalogReadState(raw.value) === 'ok';
-            }).finally(() => programReads.delete(harness));
+            })]).finally(() => { clearTimeout(timeout); programReads.delete(harness); });
         programReads.set(harness, read);
     }
     return read.then((succeeded) => {

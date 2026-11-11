@@ -185,3 +185,42 @@ test('an already-open footer sees Accounts observations immediately, before its 
     binding.dispose(); accounts.dispose();
     release({ok: false, json: async () => ({error: 'Fixture read closed'})}); await flush();
 });
+
+test('an unanswered native catalog releases the shared read at its bound; reopening can recover', async (t) => {
+    const {bindModelProgramFooter} = await import('../modules/model_program.js');
+    const {claudexorStatus} = await import('../modules/claudexor_status_store.js');
+    const {MODEL_CATALOG_TIMEOUT_MS} = await import('../modules/settings_catalog.js');
+    const harness = 'hung-native', current = {...producer, version: '3.0.0'};
+    const doc = new EventTarget(); doc.getElementById = () => null;
+    const oldDoc = globalThis.document; globalThis.document = doc;
+    t.after(() => { globalThis.document = oldDoc; });
+    t.mock.timers.enable({apis: ['setTimeout']});
+    let raw = 0;
+    const native = [];
+    t.mock.method(globalThis, 'fetch', async (url) => {
+        if (String(url).includes('/maintenance/harnesses')) return {ok: true, json: async () => ({harnesses: [{harness, selection: current}]})};
+        raw++;
+        return {ok: true, json: async () => ({items: []})};
+    });
+    t.mock.method(claudexorStatus, 'refresh', () => new Promise(resolve => native.push(resolve)));
+    const binding = bindModelProgramFooter({dataset: {}, ownerDocument: {activeElement: null}},
+        {contains: () => false, addEventListener() {}, removeEventListener() {}}, () => {});
+    t.after(() => binding.dispose());
+    const group = {harness, label: 'Future', programs: [producer]};
+    const flush = async () => { for (let n = 0; n < 100; n++) await Promise.resolve(); };
+    const reopen = async () => { binding.close(); binding.open(); await flush(); };
+    binding.update([group]); binding.open(); await flush();
+    assert.equal(raw, 1); assert.equal(native.length, 1);
+    t.mock.timers.tick(MODEL_CATALOG_TIMEOUT_MS - 1); await flush(); await reopen();
+    assert.equal(raw, 1, 'openings share the pending read until its deadline');
+    t.mock.timers.tick(1); await flush();
+    assert.equal(raw, 1, 'expiry itself never retries');
+    await reopen();
+    assert.equal(raw, 2); assert.equal(native.length, 2, 'an opening starts a fresh pair of reads');
+    const answer = {harnesses: [{id: harness, model_catalog: {partial: false}}]};
+    native[0](answer); await flush(); await reopen();
+    assert.equal(raw, 2, 'a late answer cannot retire the newer shared read');
+    native[1](answer); await flush();
+    binding.update([{...group, programs: [current]}]); await flush(); await reopen();
+    assert.equal(raw, 2, 'a recovered list needs no further catalog read');
+});
