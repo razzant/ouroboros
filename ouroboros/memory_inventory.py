@@ -456,9 +456,10 @@ def open_rows_by_room(root: Any, gaps: Optional[Dict[str, set]] = None,
             memory_tail_cold.settle(store, derived, tail, found)
             return (found, facts, memory_tail_cold.standing(derived)), derived
 
-    # A reader of places answers after a capture opened here has closed: with one asked for, none is opened that stands
-    # on the set (inside its caller's capture this is that capture, as its owner opened it).
-    read_once = read(False)[0] if sealed is not None else over_one_state(root, read)
+    # Its own capture closes before a reader of places answers: asked for one, it reads without the set. Inside its
+    # caller's capture it is that capture whatever is asked, and stays under ``over_one_state``'s one rule for it.
+    own = sealed is not None and store._pinned() is None
+    read_once = read(False)[0] if own else over_one_state(root, read)
     if read_once is None:
         return {}
     found, facts, held = read_once
