@@ -215,3 +215,28 @@ def test_v2_cannot_smuggle_a_session_snapshot_into_cognition():
     with pytest.raises(SubagentSelectionError, match="invalid_parent_cognitive_route"):
         validate_cognitive_route(bad)
     assert validate_cognitive_route(task["parent_cognitive_route"])["chosen_by"] == "delegator"
+
+
+@pytest.mark.parametrize("own_primary", [True, False])
+def test_nanny_of_fallback_parent_inherits_primary_or_live_followed_role(monkeypatch, own_primary):
+    from ouroboros import route_choice
+    from ouroboros.supervisor_route import _inherited_cognition
+
+    main, chosen, fallback = "claudexor::codex=main", "claudexor::codex=chosen", "claudexor::codex=fallback"
+    monkeypatch.setenv("OUROBOROS_MODEL", main)
+    monkeypatch.setenv("OUROBOROS_MODEL_ACCOUNTS", '{"main":"main-pin","fallback":["fallback-pin"]}')
+    monkeypatch.setenv("OUROBOROS_MODEL_PROCESSING_PREFERENCES", '{"main":"fast","fallback":["economy"]}')
+    monkeypatch.setenv("OUROBOROS_PROCESSING_PREFERENCE", "standard")
+    lead = {"source": "owner", "model": chosen, "use_local": False} if own_primary else {"source": "main"}
+    ctx = parent(task_metadata={"lead": lead}, context_fit_plan=SimpleNamespace(model_role="fallback:0"))
+    route_choice.bind_task_route(ctx, ctx.task_metadata, presence=False)
+    ctx.primary_route = {"model": chosen if own_primary else "old-main", "use_local": False,
+                         "role": "lead" if own_primary else "main"}
+    ctx.active_model, ctx.route_choice = fallback, route_choice.explicit("fallback")
+    route = _inherited_cognition(ctx, {"OUROBOROS_MODEL_ACCOUNTS": '{"main":"main-pin"}'})
+    assert route["model"] == (chosen if own_primary else main)
+    assert route["source_role"] == ("lead" if own_primary else "main")
+    assert route["credential_profile_id"] == ("" if own_primary else "main-pin")
+    assert route["processing_preference"] == ("standard" if own_primary else "fast")
+    assert route["follows_role"] == ("" if own_primary else "main")
+    assert route["chosen_by"] == ("parent_switch" if own_primary else "inherited")

@@ -113,7 +113,8 @@ export function setup(t) {
         body,
         hidden: false,
         activeElement: null,
-        defaultView: { getComputedStyle: () => ({ visibility: 'visible' }) },
+        // A window a bound control may listen to (a model chooser closes its list on the window's blur).
+        defaultView: { getComputedStyle: () => ({ visibility: 'visible' }), addEventListener() {}, removeEventListener() {} },
         createElement: (tag) => new NodeStub(tag),
         createTextNode: (data) => new TextStub(data),
         getElementById: (id) => mount.querySelector(`#${id}`) || body.querySelector(`#${id}`),

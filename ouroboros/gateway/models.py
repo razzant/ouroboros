@@ -303,6 +303,21 @@ def _provider_specs(
     return specs
 
 
+def _local_model_entry(settings: dict) -> dict | None:
+    """The configured local model as one row with ``use_local``, or None when none is configured.
+
+    A local model has no route prefix (a "use local" flag reaches it), so ``id`` names the artifact and
+    ``value`` is a label no API source claims, never a route to store."""
+    source = str(settings.get("LOCAL_MODEL_SOURCE") or "").strip()
+    if not source:
+        return None
+    filename = str(settings.get("LOCAL_MODEL_FILENAME") or "").strip()
+    name = (filename or source).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] or source
+    window = settings.get("LOCAL_MODEL_CONTEXT_LENGTH")
+    known = {"context_window": window} if type(window) is int and window > 0 else {}
+    return {**_build_model_catalog_entry("local", "Local", name, name), "use_local": True, **known}
+
+
 def _catalog_error_stage(exc: Exception) -> str:
     if isinstance(exc, httpx.TimeoutException):
         return "timeout"
@@ -502,6 +517,7 @@ async def api_model_catalog(_request: Request) -> JSONResponse:
             seen_values.add(value)
             items.append(item)
 
+    items.extend(filter(None, [_local_model_entry(settings)]))
     items.sort(key=lambda item: (item.get("provider", "").lower(), item.get("name", "").lower()))
     return JSONResponse({
         **subscription,

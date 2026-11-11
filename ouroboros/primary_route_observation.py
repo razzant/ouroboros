@@ -187,14 +187,19 @@ def route_facts_text(tool_ctx, *, model: str, use_local: bool, role: str, failed
              if failure.get("error") else "")
     acting = (route_binding(model, use_local, role, overrides=overrides) if own_call is None
               else (*call_route(own_call, model, use_local), call_account(own_call)))
-    return (f"[ROUTE FACTS] This task's primary route is {label(target, primary['role'])}; "
+    from ouroboros.lead_fact import chooser_words, primary_basis
+
+    chooser = chooser_words(primary_basis(tool_ctx), (getattr(tool_ctx, "task_metadata", None) or {}).get("lead"))
+    return (f"[ROUTE FACTS] This task's primary route is {label(target, primary['role'])}"
+            f"{'; ' + chooser if chooser else ''}; "
             f"{label(acting, role)} "
             f"{'answered this round' if answered else 'is now acting without a usable answer this round'} after "
             f"{failure.get('model') or failed_model} failed with {code}{f' ({detail})' if detail else ''} at {failure.get('ts') or 'an unrecorded time'}"
             f"{f' (its engine dated a reset at {reset})' if reset else ''}.{meaning}{error} {answer} {before} "
-            "Facts, not an instruction: stay on this route, return with switch_model(primary=\"return\") (the next real "
-            "request tests the primary; a refusal there moves on to configured routes again), or return and wait for it "
-            "with switch_model(primary=\"wait\"). No timer returns this task; a primary-route observation, when shown, "
+            'Facts, not an instruction: stay on this route, return with switch_model(primary="return") '
+            '(the next real request tests the primary; a refusal there moves on to configured routes again), '
+            'or return and wait for it with switch_model(primary="wait"). '
+            "No timer returns this task; a primary-route observation, when shown, "
             "is non-generating metadata and never proves that the primary generates.")
 
 
@@ -298,6 +303,9 @@ def record_primary_return_request(owner, model: str, use_local: bool, role: str)
     waiter = current_model_wait()
     row = {"requested_binding": route_binding(model, use_local, role, overrides=waiter.overrides if waiter else None),
            "status": "requested", "at": utc_now_iso()}
+    from ouroboros.lead_fact import requested_return
+
+    requested_return(owner)
     owner._primary_return_requested = row
     if isinstance(getattr(owner, "_execution_trace", None), dict):
         owner._execution_trace.setdefault("primary_return_requests", []).append(row)
@@ -325,6 +333,9 @@ def record_round_route_result(ctx, role: str, *, accepted: bool) -> None:
             owner._execution_trace.setdefault("primary_return_results", []).append(outcome)
     if not accepted:
         return
+    from ouroboros.lead_fact import accepted_return
+
+    accepted_return(owner, ctx.active_model, ctx.active_use_local, role, binding)
     primary, call = getattr(owner, "primary_route", None), accepted_call(ctx.accumulated_usage, getattr(ctx, "round_idx", None))
     if (isinstance(primary, dict) and primary.get("model") and call
             and tuple(binding) == route_binding(primary["model"], bool(primary["use_local"]), primary["role"],

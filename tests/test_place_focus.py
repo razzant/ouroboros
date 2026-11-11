@@ -845,3 +845,127 @@ def test_a_presence_focus_reads_a_foreign_project_journal_but_never_writes_it(fo
     child = SimpleNamespace(task_id="child", project_id="", drive_root=focus[0], task_contract={},
                             task_metadata={"parent_task_id": "root-1", "delegation_role": "subagent"})
     assert "TOOL_FORBIDDEN" in _resolve_project_id(child, "nova", write=False)[1]
+
+
+@pytest.mark.parametrize("place_model,circle_model,model,layer", [
+    ("place/chosen", "circle/chosen", "place/chosen", "place"),
+    ("", "circle/chosen", "circle/chosen", "circle"),
+    ("", "", None, None),
+    ("place/chosen", None, "place/chosen", "place"),
+    ("", None, None, None),
+])
+def test_focus_model_inherits_the_admitted_scope(focus, monkeypatch, place_model, circle_model, model, layer):
+    from ouroboros.presence_context import frame_focus_content
+    root, place, _, event = focus
+    p.edit_place(root, place.place_id, "set_model", author="owner", model=place_model)
+    if circle_model is not None:
+        circle = p.create_circle(root, name="Team", text="Shared words", model=circle_model, author="owner")
+        p.edit_place(root, place.place_id, "set_circle", author="owner", circle_id=circle["circle_id"])
+    admission = admit_presence_turn(drive_root=root, authenticated_transport_skill="bridge", binding_id=place.place_id)
+    if circle_model is not None:
+        p.edit_circle(root, circle["circle_id"], author="owner", model="circle/later")
+    task = task_for((root, admission.place, admission, event))
+    metadata = task["metadata"]
+    assert metadata["model_role"] == "consciousness"
+    assert metadata.get("lead") == ({"model": model, "source": layer, "use_local": False} if model else None)
+    if model is None:
+        assert "model" not in metadata and "model_layer" not in metadata
+    rendered = frame_focus_content(task, event.text)
+    assert "circle/chosen" not in rendered and "circle/later" not in rendered
+    if circle_model is not None:
+        assert "Shared words" in rendered
+
+
+@pytest.mark.parametrize("layer", ["place", "circle"])
+@pytest.mark.parametrize("alias", ["main", "light"])
+@pytest.mark.parametrize("local", [False, True])
+def test_focus_aliases_remain_admission_snapshots(focus, monkeypatch, layer, alias, local):
+    root, place, _, event = focus
+    settings = {"main": "main/first", "light": "light/first", "local": local}
+    monkeypatch.setattr("ouroboros.model_slots._main_model", lambda: settings["main"])
+    monkeypatch.setattr("ouroboros.config.get_light_model", lambda: settings["light"])
+    from ouroboros.config import runtime_setting
+    monkeypatch.setattr("ouroboros.config.runtime_setting", lambda key, default="": (
+        str(settings["local"]).lower() if key in {"USE_LOCAL_MAIN", "USE_LOCAL_LIGHT"} else runtime_setting(key, default)))
+    circle = p.create_circle(root, name="Team", model=alias if layer == "circle" else "circle/model", author="owner")
+    p.edit_place(root, place.place_id, "set_circle", author="owner", circle_id=circle["circle_id"])
+    if layer == "place":
+        p.edit_place(root, place.place_id, "set_model", author="owner", model=alias)
+    admission = admit_presence_turn(drive_root=root, authenticated_transport_skill="bridge", binding_id=place.place_id)
+    frozen = task_for((root, admission.place, admission, event))["metadata"]
+    settings.update(main="main/next", light="light/next", local=not local)
+    current = task_for((root, admission.place, admission, event))["metadata"]
+    assert frozen["lead"]["model"] == alias + "/first" and current["lead"]["model"] == alias + "/next"
+    assert frozen["lead"]["source"] == current["lead"]["source"] == layer
+    assert frozen["lead"]["use_local"] is local and current["lead"]["use_local"] is not local
+    records = p.place_records(root)
+    assert (records.places[place.place_id].model if layer == "place" else records.circle(circle["circle_id"])["model"]) == alias
+
+
+@pytest.mark.parametrize('layer', ['place', 'circle', 'consciousness'])
+def test_an_explicit_place_model_has_its_own_lead_options_and_initial_effort(focus, monkeypatch, layer):
+    from ouroboros.agent_dispatch import _initial_effort_for
+    from ouroboros.model_slots import task_model_binding, model_role_option, MODEL_CONTEXT_WINDOWS_KEY, task_processing_preference
+    from ouroboros.route_choice import bind_task_route, open_route
+    from ouroboros.presence_context import focus_metadata
+    from ouroboros.tools.registry import ToolContext
+
+    root, place, admission, event = focus
+    model = 'claudexor::cursor=chosen-model-high'
+    monkeypatch.setenv('OUROBOROS_MODEL_CONSCIOUSNESS', 'claudexor::cursor=conscious-model-low')
+    monkeypatch.setenv('OUROBOROS_MODEL_ACCOUNTS', json.dumps({'consciousness': 'chosen-account'}))
+    monkeypatch.setenv('OUROBOROS_MODEL_CONTEXT_WINDOWS', json.dumps({'consciousness': 123456}))
+    monkeypatch.setenv('OUROBOROS_MODEL_PROCESSING_PREFERENCES', json.dumps({'consciousness': 'fast'}))
+    admission = replace(admission, place=replace(place, model=model if layer == 'place' else ''),
+                        circle={'model': model} if layer == 'circle' else None)
+    metadata = focus_metadata(admission, event, 'turn', 1, root)
+    task = {'metadata': metadata, '_presence_turn': True}
+    ctx = ToolContext(repo_dir=root, drive_root=root, task_metadata=metadata)
+    bind_task_route(ctx, metadata, presence=True)
+    role, pin = task_model_binding(task)
+    acting, local, _choice = open_route(ctx, None)
+    if layer == 'consciousness':
+        assert role == 'consciousness' and pin is None
+        assert model_role_option('OUROBOROS_MODEL_ACCOUNTS', role) == 'chosen-account'
+        assert model_role_option(MODEL_CONTEXT_WINDOWS_KEY, role) == 123456
+        assert task_processing_preference(task) == 'fast'
+        assert acting == 'claudexor::cursor=conscious-model-low'
+        assert _initial_effort_for(task, 'presence') == 'low'
+    else:
+        assert role == 'lead' and pin == ''
+        assert model_role_option(MODEL_CONTEXT_WINDOWS_KEY, role) == 0
+        assert task_processing_preference(task) == ''
+        assert acting == model and not local
+        assert metadata['lead']['source'] == layer
+        assert _initial_effort_for(task, 'presence') == 'high'
+
+
+def test_a_place_lead_keeps_the_wakes_effort_range_when_its_model_has_no_named_level(focus, monkeypatch):
+    from ouroboros.agent_dispatch import _initial_effort_for
+    from ouroboros.tools.control_runtime import _effort_switch
+
+    root, place, admission, event = focus
+    monkeypatch.setenv('OUROBOROS_EFFORT_TASK', 'medium')
+    monkeypatch.setenv('OUROBOROS_EFFORT_MAX', 'ultra')
+    monkeypatch.setenv('OUROBOROS_MODEL_CONSCIOUSNESS', 'claudexor::cursor=other-model-low')
+    task = task_for((root, place, replace(admission, place=replace(place, model='vendor/own-model')), event))
+    assert _initial_effort_for(task, 'task') == 'ultra'
+    ctx = SimpleNamespace(task_metadata=task['metadata'], current_task_type='task', active_effort='ultra')
+    assert _effort_switch(ctx, 'high')[0] == 'high'
+
+
+@pytest.mark.parametrize('alias', ['main', 'light'])
+@pytest.mark.parametrize('local', [False, True])
+def test_place_model_aliases_keep_the_resolved_locality_on_the_lead(focus, monkeypatch, alias, local):
+    from ouroboros.presence_context import focus_metadata
+    from ouroboros.route_choice import bind_task_route, open_route
+    from ouroboros.tools.registry import ToolContext
+
+    root, place, admission, event = focus
+    monkeypatch.setenv('OUROBOROS_MODEL' + ('_LIGHT' if alias == 'light' else ''), 'chosen-model')
+    monkeypatch.setenv('USE_LOCAL_' + alias.upper(), 'true' if local else 'false')
+    metadata = focus_metadata(replace(admission, place=replace(place, model=alias)), event, 'turn', 1, root)
+    ctx = ToolContext(repo_dir=root, drive_root=root, task_metadata=metadata)
+    bind_task_route(ctx, metadata, presence=True)
+    assert metadata['model_role'] == 'consciousness'
+    assert open_route(ctx, None)[:2] == ('chosen-model', local)

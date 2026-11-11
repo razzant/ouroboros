@@ -477,6 +477,9 @@ def write_task_result(
         projected_fields = _field_projector(existing, {**prepared_fields, "status": status}) if _field_projector else prepared_fields
         if projected_fields is None:  # projector saw a terminal/stale row: no mutation
             return None
+        from ouroboros.owner_model import preserve_carrier
+
+        projected_fields = preserve_carrier(existing, projected_fields)
         # The owner's lift of a producer allowance outlives any writer's older copy of the task (a warm stack's own
         # dict at its terminal): nothing re-arms the number a restart, a member or a Continue would read (#2566).
         metadata = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}

@@ -828,7 +828,7 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int, drive
     from ouroboros.config import get_consciousness_autonomy, runtime_setting
     from ouroboros.presence_runner import presence_event_identity
     from ouroboros.places import (PlaceError, is_owner_account, observed_facts, owner_author, place_owner_accounts,
-                                  wake_matches, writes_as_owner)
+                                  place_model_route, wake_matches, writes_as_owner)
     place = admission.place
     try:
         accounts = place_owner_accounts(drive_root) if drive_root is not None else {}
@@ -863,12 +863,16 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int, drive
     if remaining is not None and float(remaining) > 0:
         cap = float(runtime_setting("OUROBOROS_PER_TASK_COST_USD", "0") or 0)
         metadata["root_cost_ceiling_usd"] = min(cap, float(remaining)) if cap > 0 else float(remaining)
-    if place.model:
+    model, layer = place_model_route(place, admission.circle)
+    if model:
         from ouroboros.config import get_light_model
         from ouroboros.model_slots import _main_model
-        metadata["model"] = get_light_model() if place.model == "light" else _main_model() if place.model == "main" else place.model
-        if place.model == "light":
-            metadata["use_local_model"] = runtime_setting("USE_LOCAL_LIGHT", "").lower() in {"true", "1"}
+        metadata["lead"] = {
+            "source": layer,
+            "model": get_light_model() if model == "light" else _main_model() if model == "main" else model,
+            "use_local": model in {"main", "light"} and runtime_setting(
+                f"USE_LOCAL_{model.upper()}", "").lower() in {"true", "1"},
+        }
     return metadata
 
 
