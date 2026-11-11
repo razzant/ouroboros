@@ -1,7 +1,8 @@
 """The consciousness allowance in Costs › Budget, through the real candidate server (owner, 10 Nov 2026).
 
-Costs is the allowance's one editor: a typed 0 and decimals save and read back after a reload, the posted body is
-the one edited limit, and an unrelated Settings save keeps it (Settings has no field for it, only a door to Costs).
+Costs is the allowance's one editor, a setting row that saves when its field is left: a typed 0 and decimals save
+and read back after a reload, the posted body is that one limit, and an unrelated Settings save keeps it (Settings has
+no field for it, only a door to Costs).
 Under the field stands the clock's own 24-hour window, from spend seeded through the ledger itself: what it leaves
 out, a reached limit with its conditional room time in the viewer's named zone. A wake held at the allowance it started
 with, the Off switch and an unreadable ledger are said apart; the held state's snapshot is the consciousness
@@ -23,6 +24,7 @@ pytestmark = [pytest.mark.ui_browser]
 
 HOUR = 3600.0
 KEY = "OUROBOROS_CONSCIOUSNESS_DAILY_USD"
+FIELD = f"#setting-{KEY}"  # the allowance's setting row (settings_controls.js settingsRow)
 ZONE = "Europe/Moscow"  # the viewer's zone: the room time must name it
 COMBOS = [(1440, 900, "light"), (1440, 900, "dark"), (390, 844, "light"), (390, 844, "dark")]
 
@@ -69,10 +71,15 @@ def _costs(page, url: str, *, load: bool = True) -> None:
         page.wait_for_selector("#page-chat", timeout=30_000)
     _nav(page, "dashboard")
     page.click('[data-dashboard-tab="costs"]')
-    expect(page.locator("#s-consciousness-allowance")).to_be_visible(timeout=30_000)
+    expect(page.locator(FIELD)).to_be_visible(timeout=30_000)
     page.wait_for_function("document.getElementById('costs-allowance-spend').textContent.trim() !== 'Reading…'"
-                           " && document.getElementById('s-consciousness-allowance').dataset.loaded !== undefined",
-                           timeout=30_000)
+                           f" && document.getElementById('setting-{KEY}').value !== ''", timeout=30_000)
+
+
+def _saving(page):
+    """The settings write a row sends when its field is left, awaited to its answer."""
+    return page.expect_response(lambda response: response.request.method == "POST"
+                                and response.url.endswith("/api/settings"), timeout=30_000)
 
 
 def _switch(page, url: str, on: bool) -> None:
@@ -124,18 +131,21 @@ def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_settin
                     if request.method == "POST" and request.url.endswith("/api/settings") else None)
             _switch(page, url, True)  # a fresh install starts it Off, which this card says first
             _costs(page, url)
-            allowance = page.locator("#s-consciousness-allowance")
+            allowance = page.locator(FIELD)
             expect(allowance).to_have_value("20")
-            expect(page.locator("label[for=s-consciousness-allowance]")).to_have_text("Consciousness per 24 hours ($)")
+            expect(page.locator(f"label[for=setting-{KEY}]")).to_have_text("Consciousness per 24 hours")
             # The keyboard reaches it after the per-task cap, as the card reads.
-            page.focus("#s-per-task-cost")
+            page.focus("#setting-OUROBOROS_PER_TASK_COST_USD")
             page.keyboard.press("Tab")
-            assert page.evaluate("document.activeElement.id") == "s-consciousness-allowance"
-            allowance.fill("0")
-            page.click("#btn-save-budget")
-            status = page.locator("#budget-save-status")
-            expect(status).to_contain_text("Saved. The next consciousness check uses it; a paused wake keeps its launch limit.",
-                                           timeout=30_000)
+            assert page.evaluate("document.activeElement.id") == f"setting-{KEY}"
+            with _saving(page):
+                allowance.fill("0")
+                allowance.press("Tab")  # leaving the field saves it
+            status = page.locator(f"#setting-{KEY}-result")
+            expect(status).to_contain_text("Saved", timeout=30_000)
+            # LANE A: with the server's receipt the line also says when it applies and "was 20", with Undo.
+            said = status.inner_text()
+            assert said == "Saved" or (said.startswith("Saved · ") and "was 20" in said), said
             assert posts[-1] == {KEY: 0}, posts
             assert float(_settings(data_dir)[KEY]) == 0
             expect(page.locator("#costs-allowance-state")).to_contain_text(
@@ -158,12 +168,10 @@ def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_settin
             _costs(page, url)
             expect(allowance).to_have_value("0")
             allowance.fill("12.75")
-            page.locator("[data-costs-consciousness]").click()
+            with _saving(page):  # leaving the field for the Consciousness door saves it first
+                page.locator("[data-costs-consciousness]").click()
             _costs(page, url, load=False)
-            expect(allowance).to_have_value("12.75")  # tab return must not replace the draft with stored 0
-            page.focus("#btn-save-budget")
-            page.keyboard.press("Enter")
-            expect(status).to_contain_text("The next consciousness check uses it", timeout=30_000)
+            expect(allowance).to_have_value("12.75")
             assert posts[-1] == {KEY: 12.75}, posts
             assert float(_settings(data_dir)[KEY]) == 12.75
             _costs(page, url)
@@ -186,7 +194,7 @@ def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_settin
             if (shot := _evidence(f"{engine}-settings-door.png")) is not None:
                 page.locator("#settings-consciousness").screenshot(path=str(shot))
             door.click()
-            expect(page.locator("#s-consciousness-allowance")).to_be_visible(timeout=30_000)
+            expect(page.locator(FIELD)).to_be_visible(timeout=30_000)
             expect(allowance).to_have_value("12.75")
             assert page.errors.unexpected() == [], page.errors.report()
         finally:
@@ -311,9 +319,10 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
                                          expect(page.locator("#costs-allowance-state")).to_be_empty()))
             # 2. The limit reached: what waits, and when room returns if nothing more is charged, in the viewer's zone.
             page = pages[COMBOS[0]]
-            page.locator("#s-consciousness-allowance").fill("10")
-            page.click("#btn-save-budget")
-            expect(page.locator("#budget-save-status")).to_contain_text("The next consciousness check uses it", timeout=30_000)
+            with _saving(page):
+                page.locator(FIELD).fill("10")
+                page.locator(FIELD).press("Enter")  # Enter commits the field as leaving it does
+            expect(page.locator(f"#setting-{KEY}-result")).to_contain_text("Saved", timeout=30_000)
             served = page.evaluate("fetch('/api/consciousness').then(r => r.json())")
             assert served["allowance_status"] == "exhausted" and served["daily_usd"] == 10, served
             assert abs(dt.datetime.fromisoformat(served["allowance_room_after"]).timestamp() - leaves) < 1, served
@@ -348,7 +357,7 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
                 if (shot := _evidence(f"{engine}-{width}-{theme}-held-consciousness.png")) is not None:
                     page.locator("[data-cx-summary]").screenshot(path=str(shot))
                 page.locator('[data-cx-act="costs"]').click()
-                expect(page.locator("#s-consciousness-allowance")).to_be_visible(timeout=30_000)
+                expect(page.locator(FIELD)).to_be_visible(timeout=30_000)
                 _nav(page, "chat")
                 chip = page.locator("#page-chat .cx-chip")
                 expect(chip).to_be_visible(timeout=30_000)
@@ -367,7 +376,7 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
                 if (shot := _evidence(f"{engine}-{width}-{theme}-held-shade.png")) is not None:
                     page.screenshot(path=str(shot))
                 costs.click()
-                expect(page.locator("#s-consciousness-allowance")).to_be_visible(timeout=30_000)
+                expect(page.locator(FIELD)).to_be_visible(timeout=30_000)
             # 4. An unreadable ledger: unknown, never $0, and no time.
             for page in pages.values():
                 _overlay(page, _unreadable)
