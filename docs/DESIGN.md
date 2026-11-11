@@ -298,10 +298,10 @@ caps with `text-transform`.
 **A secondary page orders by meaning, not paint** (audit №9, owner
 2026-10-28T22:09Z). Costs leads with the known spend and, in the same card,
 whether it is final, its unresolved upper bound and what is unknown; the
-composition, the hold and technical counts follow, quieter. Budget edits three limits; the consciousness
-field shows its 24-hour spend (pending, unpriced). Below the fields, a full-width row names that limit with
+composition, the hold and technical counts follow, quieter. Budget's three limits are rows; under them the consciousness
+limit shows its 24-hour spend (pending, unpriced) and a full-width row names that limit with
 “If its charges stay as they are, there is room again by HH:MM ZONE” (rounded up, zone named, else unknown) and a
-wake held at it with its card's door. Save posts edited limits only. Activity names a
+wake held at it with its card's door. Activity names a
 work whole in primary ink above its facts; a duration reads in seconds below a
 minute, then in minutes or hours, and one the row lacks is absent, never `0s`. A narrow temporary-space tray puts
 a qualified size under its group's name. A widget card's ⋮ menu and move handle
@@ -399,12 +399,12 @@ changing the alignment of neighboring controls and their actions.
 
 **Secret visibility has one meaning across Settings.** Show reveals the complete
 current value as selectable, read-only text in the masked field's own place,
-never as a second field; long values wrap within the column. An edited value is
-shown from the local draft; an untouched saved value is read only when requested.
+never as a second field; long values wrap within the column. A typed value is
+shown as typed; an untouched saved value is read only when requested.
 A prefix or a configured-value placeholder is never a successful reveal. Hide
-brings back the unchanged masked field and its draft; typing a new value starts
-with Hide or Clear. Viewing changes neither the dirty state nor the values
-submitted by Save or Test. Clearing, renaming the entry, reloading or leaving the
+brings back the unchanged masked field and what was typed; typing a new value starts
+with Hide or Clear. Viewing changes neither the value nor what a save or Test
+sends. Clearing, renaming the entry, reloading or leaving the
 page closes the reveal, and a late read cannot reopen it. Built-in, custom,
 skill-requested and MCP header fields use the same interaction; loading Settings
 keeps saved secrets masked. Pending reads and failures are shown at the field.
@@ -426,8 +426,8 @@ Availability never rewrites a selection: a Claude `[1m]` variant whose base
 model a usable account lists reads Available, noting that the engine checks the
 variant at session start, and an unread catalog reads Not checked. Maximum
 response sits beside the context window as Auto or a whole number for this
-exact model, server and account; Apply acknowledges it outside the Settings
-draft, and a route change clears it. Web search is its own Source and Model:
+exact model, server and account; Apply acknowledges it at once, and
+a route change clears it. Web search is its own Source and Model:
 Auto lists the routes it may use, a chosen source is strict, and skills, MCP
 and browser tools stay independent.
 
@@ -688,9 +688,9 @@ its timer pauses on hover or focus, and a non-expiring toast has a visible keybo
 The problem, needed restart or unconfirmed outcome stays in its authoritative view (a card, Updates record or
 in-feed history edge) until it changes or the owner resolves it. Dismissing a notice hides it per browser,
 never its record (the Update indicator, owner 1B, 25.10). A plain acknowledgement in
-place may end by itself, but where the line is its fact's only home (Costs' budget save) an error, a warning or a
-needed restart stays until the next save, or an edit of what it is about, replaces it. A current fact ends with its fact; unread ends when the message
-is shown; a retained record (Updates, history, the Settings save result, `Input saved`) lives with its record, with
+place may end by itself, but where the line is its fact's only home (a setting's row) an error, a warning or a
+needed restart stays until the row's next result, an edit of it or leaving its page. A current fact ends with its fact; unread ends when the message
+is shown; a retained record (Updates, history, `Input saved`) lives with its record, with
 no timer. Toasts and statuses older than this rule are checked against it when touched.
 
 Activity schedule rows use the same factual status rule: `active`, `disabled`,
@@ -1084,7 +1084,7 @@ A standalone System row exists only where nothing else can carry the fact: no mi
 can speak, no mind will read the message, the owner's own direct act, the
 runtime's state (a settings change saved outside the app: one
 `settings_changed` row per save, what changed and who changed it; the app's own
-Save publishes none), Main's Project lifecycle, or words signed by their author (a reminder, a
+writes publish none), Main's Project lifecycle, or words signed by their author (a reminder, a
 skill notice). It is one short typed mark in owner words, never a
 paragraph or text written for a model. `tests/test_host_message_voice.py` keeps
 every host type stamped as a literal at its send site in one of these classes, with
@@ -2696,8 +2696,8 @@ a server entry):
 visible and a value keeps its honest form (`up to`, `Tracked:`, unknown). Accounts keeps
 an explicit store failure in view, metrics under Diagnostics and exact program text under
 Details.
-A rule every row shares is said once for the section, an unsaved draft once by the editor
-or its host page, and a checked box is not re-said beside it. A conditional line never
+A rule every row shares is said once for the section, an unsaved draft once by its editor,
+and a checked box is not re-said beside it. A conditional line never
 moves the control that caused it.
 
 The result of an action sits in the row of its control, right after it, on a line
