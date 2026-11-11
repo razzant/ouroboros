@@ -2,6 +2,7 @@
 from pathlib import Path
 
 import pytest
+from tests.settings_browser_helpers import open_settings
 from ouroboros.test_evidence import diagnostic_directory
 
 pytest_plugins = ('tests.test_ui_smoke_playwright',)
@@ -52,7 +53,7 @@ def test_engine_facts_status_line_at_both_widths(direct_server_with_data, tmp_pa
                 page.route('**/api/claudexor/status**', lambda route: route.fulfill(json=payload))
                 page.goto(direct_server_with_data['url'] + '/#settings', wait_until='domcontentloaded')
                 page.wait_for_selector('.settings-shell')
-                page.click('[data-settings-tab="providers"]')
+                open_settings(page, "accounts/claude")
                 line = page.locator('#agents-service-banner')
                 line.wait_for(state='visible')
                 page.locator('.harness-account-row[data-profile="kept-account"]').wait_for(state='visible')
