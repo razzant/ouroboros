@@ -53,7 +53,7 @@ def assigning(pool, monkeypatch):
 
 
 def test_lane_slot_is_never_chosen_for_pending_work(assigning, monkeypatch):
-    monkeypatch.setattr(workers, "MAX_WORKERS", 3)
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", str(3))
     spare = add_slot(1, lane=LANE_CONVERSATION)
     workers.PENDING.append(task("queued"))
     workers.assign_tasks()  # the sole project worker is busy: demand spawns a project slot, never takes the spare
@@ -64,7 +64,7 @@ def test_lane_slot_is_never_chosen_for_pending_work(assigning, monkeypatch):
 
 
 def test_one_lane_spare_is_kept_and_replenished_outside_max_workers(pool, monkeypatch):
-    monkeypatch.setattr(workers, "MAX_WORKERS", 1)  # the project pool is full (its one worker is busy)
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", str(1))  # the project pool is full (its one worker is busy)
     lifecycle.reconcile_worker_capacity(lambda: 0)
     lane = [slot for slot in workers.WORKERS.values() if slot.lane == LANE_CONVERSATION]
     assert len(lane) == 1 and lane[0].booting and len(pool.created) == 1
@@ -94,7 +94,7 @@ def test_lane_spare_is_not_doubled_beside_a_parked_unready_carrier(pool):
 
 def test_project_pool_keeps_no_spare_once_the_lane_holds_one(pool, monkeypatch):
     """The pool's one quiescent spare is the lane's: an idle project worker is probed for retirement."""
-    monkeypatch.setattr(workers, "MAX_WORKERS", 4)
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", str(4))
     workers.RUNNING.clear()
     pool.original.busy_task_id = None  # the only project worker is now idle
     add_slot(1, lane=LANE_CONVERSATION)
@@ -105,7 +105,7 @@ def test_project_pool_keeps_no_spare_once_the_lane_holds_one(pool, monkeypatch):
 
 
 def test_project_pool_without_a_lane_spare_keeps_its_last_idle_worker(pool, monkeypatch):
-    monkeypatch.setattr(workers, "MAX_WORKERS", 4)
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", str(4))
     monkeypatch.setattr(conversation_lane, "reconcile_conversation_lane", lambda: None)
     workers.RUNNING.clear()
     pool.original.busy_task_id = None

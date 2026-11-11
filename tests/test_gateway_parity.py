@@ -847,3 +847,23 @@ def test_owner_continuation_envelopes_are_exported():
     from ouroboros.gateway import contracts
     for cls in (TaskPauseRequest, TaskPauseResponse, TaskContinueRequest, TaskContinueResponse, ContinuationOffer):
         assert cls.__name__ in contracts.__all__
+
+
+def test_vendor_program_contracts_have_complete_javascript_twins():
+    from ouroboros.gateway import management_contracts as contracts
+
+    text = (pathlib.Path(__file__).resolve().parent.parent
+            / "web/modules/management_contract_types.js").read_text(encoding="utf-8")
+    prefixes = ("ClaudexorSelectedProgram", "ClaudexorProgram", "ClaudexorNewest", "ClaudexorMaintenance")
+    types = [value for name, value in vars(contracts).items()
+             if name.startswith(prefixes) and hasattr(value, "__annotations__")]
+    for cls in types:
+        assert _js_typedef_fields(text, cls.__name__) == set(get_type_hints(cls)), cls.__name__
+    operation = get_type_hints(contracts.ClaudexorMaintenanceOperation, include_extras=True)
+    assert contracts.ClaudexorMaintenanceOperation.__total__
+    assert _notrequired_fields(contracts.ClaudexorMaintenanceOperation) == {"profileCleanup"}
+    assert get_args(operation["outcome"]) == ("changed", "not_changed", "changed_elsewhere", "unknown")
+    entry = get_type_hints(contracts.ClaudexorMaintenanceEntry)
+    assert get_args(entry["updateAvailable"]) == ("yes", "no", "cannot_tell")
+    assert not {"mechanism", "targetVersion"} & operation.keys()
+    assert not {"maintainable", "targets", "installed", "releaseTested", "previous", "available"} & entry.keys()

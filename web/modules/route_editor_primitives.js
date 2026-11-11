@@ -324,12 +324,12 @@ export function routeModelSuggestions(route, items = []) {
 }
 
 /** Catalog suggestions, not an entitlement or context claim for the selected account. */
-export function routeModelInputHtml(attrs, route, items, listId, { placeholder = 'Choose a model' } = {}) {
+export function routeModelInputHtml(attrs, route, items, listId, { placeholder = 'Choose a model', programs = [] } = {}) {
     const values = catalogModelOptions(routeCatalogItems(route, items).map((item) => {
         const value = String(item?.value || item?.id || item);
         return { ...(typeof item === 'object' ? item : {}), value: parseModelSource(value).model };
     }));
-    return modelChooserHtml(attrs, routeModelFields(route).model, listId, values, { placeholder });
+    return modelChooserHtml(attrs, routeModelFields(route).model, listId, values, { placeholder, programs });
 }
 
 /** Catalog repaint owns suggestions and native option labels, never a draft node. */
@@ -659,7 +659,7 @@ export function sessionModelOptions(harness, currentModel, { catalogKnown = true
         const baseOnly = matches.length && matches.every((match) => match.basis === 'claude_1m_base');
         if (existing && baseOnly && harnessModelsKnown(harness, catalogKnown)) existing.label = `${currentModel} (base model listed; variant checked at start)`;
         if (!existing) options.push({
-            value: currentModel,
+            value: currentModel, custom: !matches.length,
             label: harnessModelsKnown(harness, catalogKnown) && matches.length
                 ? `${currentModel}${matches.every((match) => match.basis === 'claude_1m_base') ? ' (base model listed; variant checked at start)' : ''}`
                 : undiscoveredLabel(currentModel, harnessModelsKnown(harness, catalogKnown)),

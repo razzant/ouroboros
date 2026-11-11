@@ -2,8 +2,9 @@
 
 Owner Main/room turns, consciousness wakes, Presence bodies and the auto-resume
 turn execute in worker processes like any task, but they are admitted by routing
-(never through PENDING), hold no project lease and sit outside ``MAX_WORKERS``
-and the readiness-exhaustion fence. Their slots live in the same ``WORKERS``
+(never through PENDING), hold no project lease and sit outside the owner's cap
+(``OUROBOROS_MAX_WORKERS``), the memory admission of project processes and the
+readiness-exhaustion fence. Their slots live in the same ``WORKERS``
 table as project workers with ``lane="conversation"``, so health, custody, Panic
 and quiescence retirement iterate every slot alike; the project fences filter by lane.
 My human's own turn that a stop door, a Resume or its own sleep returns to the queue
@@ -105,7 +106,7 @@ def idle_carriers() -> list:
 
     return [slot for slot in lane_carriers()
             if slot.busy_task_id is None and worker_ready(slot) and not slot.retiring
-            and getattr(slot, "active_capacity", True) and not getattr(slot, "resume_hold", "")]
+            and getattr(slot, "active_capacity", True)]
 
 
 def carrier_rss() -> Dict[str, Any]:
@@ -121,9 +122,9 @@ def carrier_rss() -> Dict[str, Any]:
 
 
 def note_carrier_rss(slot: Any, sample: Any) -> None:
-    """In the server: a lane carrier's own report (``carrier_rss``, riding its turn's heartbeat) stays on its slot."""
-    if (isinstance(sample, dict) and type(sample.get("rss_bytes")) is int
-            and getattr(slot, "lane", "") == LANE_CONVERSATION):
+    """In the server: a worker's own report (``carrier_rss``, riding every task's heartbeat, both lanes) stays on its
+    slot: the lane's vitals read it, and memory admission's typical worker size (``pool_admission.typical_size``)."""
+    if slot is not None and isinstance(sample, dict) and type(sample.get("rss_bytes")) is int:
         slot.rss = {"rss_bytes": sample["rss_bytes"], "rss_measure": str(sample.get("rss_measure") or "")}
 
 

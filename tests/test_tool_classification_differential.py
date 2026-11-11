@@ -97,7 +97,8 @@ APPROVED_DELTAS: Mapping[str, Delta] = MappingProxyType({
     # `_UNAVAILABLE` marker keeps its own status instead of the coarse error).
     "REVIEW_BINDING_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
     "REVIEW_STATE_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
-    "SAFETY_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
+    "SAFETY_UNAVAILABLE": Delta(True, "error", True, "safety_unavailable", "A.18",
+                                "a missing Safety reading gets its own status name: no failure, named on the card"),
     "SUBAGENT_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
     "EXTRACT_VIDEO_FRAMES_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
     "GH_TARGET_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
@@ -358,6 +359,10 @@ def _golden() -> dict[str, dict]:
 # unavailable. Keep the historical corpus intact and assert the new observed
 # outcome explicitly rather than manufacture old evidence (04-AGENCY S1/S3).
 CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's size notice rides a successful update_world
+    # check_safety: a flagged call returns before any effect with its own status (no failure of the tool); a call let
+    # through without a new reading trails the tool's own result with a note, so the note alone reads ok.
+    "SAFETY_RETURNED": (True, "safety_returned"),
+    "SAFETY_NOTE": (False, "ok"),
     # read_archive: a file that is no ZIP, a folder, an encrypted member or a compression the reader does not decode is
     # named without reading anything, as the PDF reader's own UNAVAILABLE notices are; a damaged member fails the read.
     "ARCHIVE_UNAVAILABLE": (True, "unavailable"),
@@ -480,7 +485,6 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     "OWNER_OPERATION_REFUSED": (True, "blocked"),
     "TOOL_ADMISSION_UNAVAILABLE": (True, "unavailable"),
     "STOP_ACTION_CONFLICT": (True, "blocked"),
-    "SAFETY_ADVICE": (False, "ok"),
     "LIGHT_MODE_REPO_CHANGED": (False, "ok"),
     "BROWSER_ACTION_OUTCOME_UNKNOWN": (True, "error"),
     # tools/vision.py `_no_image_route`: no configured model could take the image at all,

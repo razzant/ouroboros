@@ -43,10 +43,10 @@ def test_real_pytest_manifests_and_xdist_prove_both_passes_by_whole_file(tmp_pat
             "    global calls\n"
             "    calls += 1\n"
             "    return calls\n"
-            f"@pytest.mark.parametrize('n', range({parallel}))\n"
+            f"@pytest.mark.parametrize('n', range({parallel}), ids={['x@y', 'x::y', 'x@y::z', 'plain'][:parallel]!r})\n"
             "def test_parallel(n, shared): assert shared == 1\n"
             "@pytest.mark.serial('exclusive')\n"
-            f"@pytest.mark.parametrize('n', range({serial}))\n"
+            f"@pytest.mark.parametrize('n', range({serial}), ids={['x@y', 'x::y', 'x@y::z'][:serial]!r})\n"
             "def test_serial(n, shared): assert shared == 1\n"
             "@pytest.mark.ui_browser\n"
             "def test_excluded(): raise AssertionError('opt-in lane ran')\n", encoding="utf-8")

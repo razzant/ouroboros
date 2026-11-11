@@ -1,4 +1,12 @@
-"""Narrow successor proofs for configured-session worker/restart recovery."""
+"""Narrow successor proofs for configured-session worker/restart recovery.
+
+Schema-2 ``holders`` (``delegate_recovery_holders``) keep independent bindings,
+checkpoints and adopted/deferred/refused status. Transaction/generation/attempt/
+authority proofs stay; a bad holder cannot discard a valid sibling. Saved
+cognition defers probes/POSTs; replay uses the original pending binding and
+keeps wait sources until binding/resolution. Orphan exclusions name handles;
+Stop reaches late-bound runs without POSTs.
+"""
 
 from __future__ import annotations
 
@@ -944,7 +952,8 @@ def prepare_planned_restart_handoffs(
     restart_transaction_id: str = "",
     additional_task_ids: Optional[set[str]] = None,
 ) -> set[str]:
-    """Reserve only exact tasks durably in event-only supervising sleep."""
+    """Reserve only exact tasks with an unacknowledged wake or a deferred holder (``sleeping`` is the retired
+    supervising tick's status, read tolerantly; a nanny asleep on its runs returns through its own sleep)."""
 
     transaction_id = str(restart_transaction_id or uuid.uuid4().hex)
     preserved: set[str] = set(additional_task_ids or ())

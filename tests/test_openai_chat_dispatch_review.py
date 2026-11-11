@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import pathlib
+
+import pytest
 
 import ouroboros.openai_chat_dispatch as dispatch
 from ouroboros.context_fit import estimate_context_prompt_tokens
@@ -219,6 +222,45 @@ def test_current_tool_registry_exposes_and_measures_both_projections(tmp_path):
         provider="openai",
         reasoning_effort="medium",
     ) == max(token_sizes)
+
+
+@pytest.mark.parametrize("provider,effort", [
+    ("", ""), ("claudexor", "high"), ("anthropic", "high"),
+    ("openrouter", "medium"), (" OpenAI ", " NONE "), ("openai", ""),
+])
+@pytest.mark.parametrize("tool_kind", ["list", "mapping", "none"])
+def test_non_ladder_estimate_reads_without_owned_projection(monkeypatch, provider, effort, tool_kind):
+    from collections import UserDict
+
+    messages = [{"role": "assistant", "content": None, "tool_calls": [{
+        "id": "c", "type": "function", "function": {
+            "name": "read_file", "arguments": {"path": ["allowed", {"more": True}]},
+        },
+    }]}]
+    tools = None if tool_kind == "none" else [UserDict(_read_tool()) if tool_kind == "mapping" else _read_tool()]
+    before = copy.deepcopy((messages, tools))
+    expected_chars = len(_serialized_projection(messages, [dict(item) for item in tools or []]))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("no-ladder estimate requested owned projection")
+
+    monkeypatch.setattr(dispatch, "direct_openai_context_projections", forbidden)
+    assert estimate_context_prompt_tokens(messages, tools, provider=provider,
+                                          reasoning_effort=effort, chars=True) == expected_chars
+    assert estimate_context_prompt_tokens(messages, tools, provider=provider,
+                                          reasoning_effort=effort) == max(1, (expected_chars + 3) // 4)
+    assert (messages, tools) == before
+
+
+def test_public_non_ladder_projection_still_returns_owned_nested_values():
+    messages = [{"role": "assistant", "tool_calls": [{"function": {"name": "read_file"}}]}]
+    tools = [_read_tool()]
+    before = copy.deepcopy((messages, tools))
+    projected, schema = dispatch.direct_openai_context_projections(
+        messages, tools, provider="claudexor", reasoning_effort="high")[0]
+    projected[0]["tool_calls"][0]["function"]["name"] = "changed"
+    schema[0]["function"]["parameters"]["properties"].clear()
+    assert (messages, tools) == before
 
 
 def test_context_sizing_uses_canonical_projection_for_unknown_historical_tool():

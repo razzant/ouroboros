@@ -1583,6 +1583,8 @@ def test_login_job_browser_envelopes_keep_their_required_discriminators():
     assert set(problem) - {"error"} == {
         "code",
         "required_actions",
+        "context",
+        "retryable",
     }
     assert get_args(success["setup_login_source"]) == (
         "per_harness", "setup_job_admission", "legacy_global_operation",

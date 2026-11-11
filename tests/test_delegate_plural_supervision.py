@@ -9,6 +9,7 @@ import pytest
 from ouroboros import delegate_supervision as supervision
 from ouroboros import delegate_supervision_state as checkpoints
 from ouroboros.delegate_shared import delegate_payload
+from tests._run_wait_shared import held_run, wake_now
 
 
 def context(root):
@@ -16,7 +17,7 @@ def context(root):
 
 
 def wake(ctx, run_id, sequence=1):
-    return supervision.supervised_wait(ctx, run_id, wait_once=lambda _ctx, rid, *_a, **_k: json.dumps({
+    return wake_now(ctx, run_id, wait_once=lambda _ctx, rid, *_a, **_k: json.dumps({
         "status": "waiting_on_user", "run_id": rid, "last_seq": sequence,
         "pending_interactions": [{"interaction_id": f"q-{rid}"}]}))
 
@@ -80,16 +81,24 @@ def test_failed_ack_persistence_never_marks_an_unseen_sibling(tmp_path, monkeypa
 
 
 def test_plural_wait_wakes_on_any_selected_run_without_acking_others(tmp_path):
+    """The wake of a plural wait speaks for the selected run whose terminal the body recorded, read once; the
+    quiet sibling is neither read nor given a wake."""
+    from ouroboros import model_sleep
+
     ctx = context(tmp_path)
+    held_run(tmp_path, "a", "nanny")
+    held_run(tmp_path, "b", "nanny", ended="succeeded")
     observed = []
 
     def observer(_ctx, run, *_args, **_kwargs):
         observed.append(run)
         return json.dumps({"status": "terminal" if run == "b" else "progress", "run_id": run, "last_seq": 1})
 
-    result = delegate_payload(supervision.supervised_wait(ctx, ["a", "b"], wait_once=observer))
-    assert result["run_id"] == "b" and observed == ["a", "b"]
-    assert supervision.supervision_checkpoint(ctx)["runs"]["a"].get("pending_wake") is None
+    woke_by = model_sleep.wake_reason(ctx, supervision._choice({"runs": ["a", "b"]}))
+    assert woke_by == "run:b"
+    result = delegate_payload(wake_now(ctx, ["a", "b"], wait_once=observer, woke_by=woke_by))
+    assert result["run_id"] == "b" and observed == ["b"]
+    assert supervision.supervision_checkpoint(ctx)["runs"].get("a", {}).get("pending_wake") is None
     assert delegate_payload(supervision.delegate_wait_entry(ctx, "a", runs=["b"]))["reason"] == "run_selector_conflict"
 
 
@@ -109,8 +118,8 @@ def test_singleton_migration_is_read_only_until_next_mutation(tmp_path):
     assert saved["schema"] == 2 and set(saved["runs"]) == {"a", "b"}
     assert saved["runs"]["a"]["pending_wake"] == {"wake_id": "held"}
     path.write_text('{"schema":2,"runs":null}')
-    refused = delegate_payload(supervision.supervised_wait(ctx, "a", wait_once=lambda *_a: pytest.fail("unknown state observed")))
-    assert refused["reason"] == "supervision_state_unknown"
+    refused = delegate_payload(supervision.run_wait(ctx, "a"))
+    assert refused["reason"] == "supervision_state_unknown" and not getattr(ctx, "_pending_task_wait", None)
 
 
 @pytest.mark.parametrize("corrupt", [False, True])
@@ -135,49 +144,43 @@ def test_unknown_hold_latch_never_replaces_unreadable_run_checkpoints(tmp_path, 
 
 
 def test_child_projection_reads_each_runs_own_observation(tmp_path):
+    """Each run's cursor comes from the child's own record and each run's observation from the body's record of it."""
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
     from ouroboros.tools.control_task_results import _delegated_run_facts
-    from tests.test_wait_child_projection_and_window import _seed_child, CHILD
+    from tests.test_wait_child_projection_and_window import _observed, _seed_child, CHILD
 
-    _seed_child(tmp_path, record={"schema": 2, "runs": {
-        "run-a": {"journal_cursor": 11, "observation": {"answered": True, "run_state": "running"}},
-        "run-b": {"journal_cursor": 23, "observation": {"answered": False, "reason": "daemon_unreachable"}},
-    }}, runs=("run-a", "run-b"))
-    facts = {item["run_id"]: item["supervision"] for item in _delegated_run_facts(tmp_path, CHILD)}
-    assert facts["run-a"]["journal_cursor"] == 11 and facts["run-a"]["observation_failure"] == ""
-    assert facts["run-b"]["journal_cursor"] == 23 and facts["run-b"]["observation_failure"] == "daemon_unreachable"
-
-
-def _wait_stage(view):
-    """Identify the save from state, without depending on the diagnostic's stage argument."""
-    base = view.get("_base") or {}
-    if view.get("status") == "wake_pending" and view.get("pending_wake") != base.get("pending_wake"):
-        return "wake_publication"
-    if int(view.get("quiet_renewals") or 0) > int(base.get("quiet_renewals") or 0):
-        return "quiet_renewal"
-    return "wait_entry" if view.get("status") == "sleeping" and base.get("status") != "sleeping" else ""
+    _seed_child(tmp_path, record={"schema": 2, "runs": {"run-a": {"journal_cursor": 11}, "run-b": {"journal_cursor": 23}}},
+                runs=("run-a", "run-b"))
+    _observed(tmp_path, "run-a")
+    _observed(tmp_path, "run-b", error=ClaudexorUnavailable(
+        "daemon_unreachable", "nothing answered", observation_timeout=True, observation_reason="daemon_unreachable"))
+    facts = {item["run_id"]: item for item in _delegated_run_facts(tmp_path, CHILD)}
+    assert facts["run-a"]["supervision"] == {"journal_cursor": 11} and facts["run-a"]["observation"]["observation_failure"] == ""
+    assert facts["run-b"]["supervision"] == {"journal_cursor": 23}
+    assert facts["run-b"]["observation"]["observation_failure"] == "daemon_unreachable"
 
 
-@pytest.mark.parametrize("stage,first_status", [
-    ("wait_entry", "waiting_on_user"), ("wake_publication", "waiting_on_user"), ("quiet_renewal", "progress"),
-])
-def test_unsaved_wait_names_its_stage_and_platform_cause_without_deciding_custody(tmp_path, monkeypatch, stage, first_status):
+def test_unsaved_wake_names_its_stage_and_platform_cause_without_deciding_custody(tmp_path, monkeypatch):
+    """#3051 on the sleep: the wake publication is the wait's one save (the entry and quiet-renewal saves went with
+    the tick); its failure names the stage and the platform cause, returns the observation already produced, writes no
+    custody fact and leaves nothing pending, so a later wait publishes the same facts."""
     from ouroboros import delegate_custody as custody
     from ouroboros.gateways import claudexor as cx
-    from ouroboros.tools import delegate
+    from tests._run_wait_shared import scripted_reads
     from tests.test_builtin_refusal_results import _delegate_registry
     from tests.test_delegate_body_collection import started
 
     registry = _delegate_registry(tmp_path, monkeypatch)
     entry = started(tmp_path, tid=registry._ctx.task_id, daemon_store_id="store-a")
+    held_run(tmp_path, entry.run_id, registry._ctx.task_id, asks="q-1")  # a question already in custody: ready at once
     monkeypatch.setattr(cx, "ClaudexorGateway", lambda *a, **k: pytest.fail("reached real engine"))
-    monkeypatch.setattr(supervision, "_loop_gateway", lambda: SimpleNamespace(close=lambda: None))
-    statuses = [first_status, "waiting_on_user"]
+    monkeypatch.setattr(supervision, "_loop_gateway", lambda *a: SimpleNamespace(close=lambda: None))
 
     def observe(_ctx, rid, *_a, **_k):
-        asks = {"pending_interactions": [{"interaction_id": "q-1"}]} if statuses[0] == "waiting_on_user" else {}
-        return json.dumps({"status": statuses[0], "run_id": rid, "last_seq": 5, **asks})
+        return json.dumps({"status": "waiting_on_user", "run_id": rid, "last_seq": 5,
+                           "pending_interactions": [{"interaction_id": "q-1"}]})
 
-    monkeypatch.setattr(delegate, "_delegate_wait", observe)
+    scripted_reads(monkeypatch, observe)
     before = [row["type"] for row in custody.custody_rows(tmp_path)]
     real_save, real_open, armed, fired = checkpoints.save_view, os.open, [], []
 
@@ -189,30 +192,24 @@ def test_unsaved_wait_names_its_stage_and_platform_cause_without_deciding_custod
         return real_open(path, flags, *args, **kwargs)
 
     def save(path, drive, task_id, view, *rest):
-        if _wait_stage(view) == stage and not fired and not armed:
-            armed.append(stage)
+        if view.get("status") == "wake_pending" and not fired and not armed:
+            armed.append("wake_publication")
         return real_save(path, drive, task_id, view, *rest)
 
     monkeypatch.setattr(os, "open", create)
     monkeypatch.setattr(checkpoints, "save_view", save)
     text = registry.execute("delegate_wait", {"run_id": entry.run_id})
-    assert fired == [stage]
+    assert fired == ["wake_publication"]
     assert "errno 28 ENOSPC" in text and os.strerror(errno.ENOSPC) in text, text
-    assert "supervision_state_unsaved" in text and f"The {stage} save did not land" in text, text
-    if stage == "wake_publication":
-        assert "Nothing was cancelled" not in text
-        assert '"observed_payload"' in text and '"waiting_on_user"' in text
+    assert "supervision_state_unsaved" in text and "The wake_publication save did not land" in text, text
+    assert "Nothing was cancelled" not in text
+    assert '"observed_payload"' in text and '"waiting_on_user"' in text
     saved = supervision.supervision_checkpoint(registry._ctx)["runs"].get(entry.run_id, {})
-    if stage == "wait_entry":
-        assert saved.get("status") != "sleeping"
-    else:
-        assert not saved.get("pending_wake") and not saved.get("quiet_renewals")
-        assert int(saved.get("journal_cursor") or 0) == 0
+    assert not saved.get("pending_wake") and int(saved.get("journal_cursor") or 0) == 0
     after = [row["type"] for row in custody.custody_rows(tmp_path)]
     assert after[:len(before)] == before
     assert all(kind.startswith("delegate_supervision_") for kind in after[len(before):])
     assert not custody.replay(tmp_path)[entry.run_id].settled
-    statuses.pop(0)
     again = registry.execute("delegate_wait", {"run_id": entry.run_id})
     assert "waiting_on_user" in again and "supervision_wake_id" in again, again
     assert "supervision_state_unsaved" not in again

@@ -160,6 +160,12 @@ export const HOME_ROWS = [
     { id: 'home:computer', group: 'System', name: 'This computer', to: 'computer', glyph: 'monitor', aliases: ['Advanced', 'About', 'Network', 'Startup'] },
 ];
 
+// Doors search offers to pages of Settings that no home row opens (settings_home.js searchEntries): the list of the
+// forms skills registered, which stood under Advanced as "Extension Settings".
+export const SEARCH_DOORS = [
+    { id: 'door:skill', name: 'Skill settings', to: 'skill', glyph: 'skills', aliases: ['Extension Settings', 'Advanced', 'Settings of skills'] },
+];
+
 /** A page's rows in order; `fold` true or false keeps only the rows behind (or before) the page's fold. */
 export function rowsOf(page, { fold } = {}) {
     return ROWS.filter((row) => row.page === page && (fold === undefined || row.fold === fold));

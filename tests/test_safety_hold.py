@@ -37,9 +37,9 @@ def test_no_checker_hold_and_no_retry_grant(supervisor, monkeypatch, mode, requi
 
 @pytest.mark.parametrize("cause", ["outage", "oversize"])
 def test_held_words_wait_in_cyber_pro_whatever_tool_carries_them(supervisor, monkeypatch, published_tool, cause):
-    """Unjudged words wait in every mode: a generic tool's declared send and an MCP call that is no declared read
-    are held like speech in Cyber Pro (the 04.11 slack_api route); that tool's other calls, a write into a
-    conversation (a reaction) and a built-in without declarations keep the advice Cyber Pro gives any unjudged call."""
+    """Unread words wait in every mode: a generic tool's declared send and an MCP call that is no declared read are
+    held in Cyber Pro (the 04.11 slack_api route), naming my human's card; that tool's other calls, a write into a
+    conversation (a reaction) and a built-in without declarations are let through there with a note naming the cause."""
     h = supervisor
     monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
     monkeypatch.setattr(_tool_effects, "effect_of", REAL_EFFECT_OF)
@@ -49,20 +49,22 @@ def test_held_words_wait_in_cyber_pro_whatever_tool_carries_them(supervisor, mon
         h.replies.extend([RuntimeError("provider_failed: Codex reported a failed response")] * 5)
     else:
         monkeypatch.setattr(h.module, "_SAFETY_BUNDLE_BYTE_BUDGET", 10)
-    held = "SAFETY_UNAVAILABLE" if cause == "outage" else "TOO_LARGE"
-    for words, held_words in (((name, {"path": "chat.postMessage", "body": {"channel": "C1", "text": "hi"}}), True),
-                              (("mcp_slack__conversations_add_message", {"channel_id": "C1", "payload": "hi"}), False)):
+    held = "Issue the identical call again in a later step" if cause == "outage" else "A smaller call may fit"
+    reason = ("its check failed: RuntimeError" if cause == "outage"
+              else "the complete mandatory evidence bundle is too large")
+    for words in ((name, {"path": "chat.postMessage", "body": {"channel": "C1", "text": "hi"}}),
+                  ("mcp_slack__conversations_add_message", {"channel_id": "C1", "payload": "hi"})):
         ok, message = h.module.check_safety(*words, ctx=h.ctx)
-        assert not ok and held in message, words[0]
-        # Held words say so; an MCP call, which declares no words or destination, names its exact call for the card.
-        assert ("These words wait" in message) is held_words
-        assert ("This call waits" in message and "exact call on its own line" in message) is not held_words
+        assert not ok and message.startswith(f"⚠️ SAFETY_UNAVAILABLE: not run. The Safety Supervisor could not read "
+                                              f"this call ({reason}") and held in message, words[0]
+        # Neither declares the words as an argument, so the card holds the exact call.
+        assert f"a card holding this exact call on its own line: {words[0]} " in message
     for other in ((name, {"path": "pins.add", "body": {"channel": "C1"}}), ("github_write", {"method": "comment"})):
         ok, message = h.module.check_safety(*other, ctx=h.ctx)
-        assert ok and "SAFETY_ADVICE" in message and held in message, other[0]
+        assert ok and message.startswith(f"⚠️ SAFETY_NOTE: let through without a Safety reading ({reason}"), other[0]
     reaction, _tool = published_tool("write", target="channel", conversation="channel")  # "a reaction is not speech"
     ok, message = h.module.check_safety(reaction, {"channel": "C1", "name": "eyes", "timestamp": "1.1"}, ctx=h.ctx)
-    assert ok and "SAFETY_ADVICE" in message and held in message
+    assert ok and message.startswith(f"⚠️ SAFETY_NOTE: let through without a Safety reading ({reason}")
 
 
 @pytest.mark.parametrize("card,sent", [("exact", True), ("other words", False), ("no destination", False),
@@ -94,9 +96,10 @@ def test_my_humans_answer_on_the_exact_words_sends_them(supervisor, monkeypatch,
         return
     h.replies.append(RuntimeError("provider_failed"))
     ok, message = h.module.check_safety("place_reply", reply, ctx=h.ctx)
-    assert not ok and "SAFETY_UNAVAILABLE" in message and "no verdict" in message
-    assert "these exact words on their own lines, unprefixed, and the destination Telegram · FusionBrain on the card" in message
-    assert "Never route these words through another tool" in message
+    assert not ok and "SAFETY_UNAVAILABLE" in message and "no verdict either way" in message
+    assert ("a card holding these exact words on their own lines and the destination Telegram · FusionBrain: their "
+            "answer lets the identical call through unread.") in message
+    assert "do not reword it as if it had been judged" in message
     h.ctx._owner_directives = answer
     h.replies.append(RuntimeError("provider_failed"))
     assert not h.module.check_safety("place_reply", reply, ctx=h.ctx)[0]  # the same model call decides nothing new
@@ -145,7 +148,7 @@ def test_my_humans_yes_on_an_exact_held_mcp_call_runs_it_on_a_later_decision(sup
     for card, sent in ((exact.replace("Friday", "Monday"), False), (exact, True)):
         h.replies.append(RuntimeError("provider_failed"))
         ok, message = h.module.check_safety(name, call, ctx=h.ctx)
-        assert not ok and f"on its own line of the card: {exact}\n" in message
+        assert not ok and f"a card holding this exact call on its own line: {exact}: their answer" in message
         h.ctx._owner_directives = [{"source": "owner_quiz_answer", "content": "1. Run it", "quiz_id": "q7",
                                     "reply_to": {"address": "quiz q7 of task work", "text": f"Run exactly this?\n{card}"}}]
         h.later()
@@ -156,9 +159,10 @@ def test_my_humans_yes_on_an_exact_held_mcp_call_runs_it_on_a_later_decision(sup
     assert [event["quiz_id"] for event in h.events if event["type"] == "safety_sent_without_assessment"] == ["q7"]
 
 
-def test_my_humans_card_reaches_an_unjudged_mcp_call_never_a_judged_action(supervisor, monkeypatch):
-    """The card reaches words and an MCP call no verdict judged: a call the check judged an action (DANGEROUS, not
-    words) keeps its level outside Cyber Pro though a card quotes its exact call; an unjudged call runs on its card."""
+def test_my_humans_card_releases_a_dangerous_mcp_call_and_an_unread_one(supervisor, monkeypatch):
+    """Outside Cyber Pro a DANGEROUS reading of an MCP call waits for my human's card on its exact call: a card on
+    another argument releases nothing (a later word of my human, it earns one new reading), the card on the call
+    releases it in a later step without one. A call no reading judged runs on its own card at once, unread."""
     h = supervisor
     monkeypatch.setattr(_tool_effects, "effect_of", REAL_EFFECT_OF)
     monkeypatch.setattr(_tool_effects, "_MCP_ANNOTATIONS", {})
@@ -166,17 +170,21 @@ def test_my_humans_card_reaches_an_unjudged_mcp_call_never_a_judged_action(super
     card = lambda args: [{"source": "owner_quiz_answer", "quiz_id": "q3", "content": "1. Yes", "reply_to": {
         "address": "quiz q3 of task work", "text": f"Run exactly this?\n{h.module._exact_call(name, args)}\n1. Yes"}}]
     h.replies.append({"status": "DANGEROUS", "reason": "deletes a project", "speech": False})
-    assert not h.module.check_safety(name, call, ctx=h.ctx)[0]
+    ok, message = h.module.check_safety(name, call, ctx=h.ctx)
+    assert not ok and "waits for your human" in message
+    h.ctx._owner_directives = card(other)
+    h.later()
+    h.replies.append({"status": "DANGEROUS", "reason": "still deletes a project", "speech": False})
+    assert not h.module.check_safety(name, call, ctx=h.ctx)[0] and len(h.calls) == 2
     h.ctx._owner_directives = card(call)
     h.later()
-    h.replies.append({"status": "DANGEROUS", "reason": "deletes a project", "speech": False})
-    assert not h.module.check_safety(name, call, ctx=h.ctx)[0] and len(h.calls) == 2
-    h.later()
-    h.replies.append(RuntimeError("provider_failed"))  # with the checker down the judged action still keeps its level
-    assert not h.module.check_safety(name, call, ctx=h.ctx)[0] and len(h.calls) == 3
+    ok, message = h.module.check_safety(name, call, ctx=h.ctx)
+    assert ok and "(q3), without a new reading." in message and len(h.calls) == 2
+    assert h.events[-1]["type"] == "safety_sent_despite_check"
     h.ctx._owner_directives = card(other)
     ok, message = h.module.check_safety(name, other, ctx=h.ctx)
-    assert ok and "(q3)" in message and len(h.calls) == 3
+    assert ok and "(q3), without a reading." in message and len(h.calls) == 2
+    assert h.events[-1]["type"] == "safety_sent_without_assessment"
 
 
 def test_my_humans_card_releases_an_unjudged_undeclared_call(supervisor):
@@ -210,7 +218,7 @@ def test_my_humans_yes_reaches_a_declared_send_whose_room_is_no_place(supervisor
     for room, sent in (("C2", False), ("C12", False), ("C1", True)):
         h.replies.append(RuntimeError("provider_failed"))
         ok, message = h.module.check_safety(name, call, ctx=h.ctx)
-        assert not ok and "the destination C1 on the card" in message
+        assert not ok and "the destination C1: their answer" in message
         h.ctx._owner_directives = [{"source": "owner_quiz_answer", "content": "1. Send it", "quiz_id": "q8",
                                     "reply_to": {"address": "quiz q8 of task work",
                                                  "text": f"Send this to {room}?\nShip it on Friday.\n1. Send it"}}]
@@ -239,7 +247,27 @@ def test_my_humans_card_must_name_every_recipient(supervisor, monkeypatch, cc, n
     h.replies.append({"status": "DANGEROUS", "reason": "an outsider on the Cc"})
     ok, message = h.module.check_safety("connector_send", call, ctx=h.ctx)
     assert ok is sent and len(h.calls) == (0 if sent else 1)
-    assert sent or "the destination Internal team, outsider@example.test on the card" in message
+    assert sent or "the destination Internal team, outsider@example.test." in message
+
+
+def test_a_prompt_that_cannot_be_loaded_is_a_missing_reading(supervisor, monkeypatch):
+    """No stand-in prompt judges a call: an unreadable ``prompts/SAFETY.md`` is a missing reading whose cause names
+    the file, with no model call; a readable one is what the Supervisor is sent."""
+    import pathlib
+    h = supervisor
+    prompt = pathlib.Path(h.module.__file__).parent.parent / "prompts" / "SAFETY.md"
+    real = pathlib.Path.read_text
+
+    def unreadable(self, *args, **kwargs):
+        if self == prompt:
+            raise OSError("permission denied")
+        return real(self, *args, **kwargs)
+    monkeypatch.setattr(pathlib.Path, "read_text", unreadable)
+    ok, message = h.module.check_safety("write_remote", {}, ctx=h.ctx)
+    assert not ok and message.startswith("⚠️ SAFETY_UNAVAILABLE") and "prompts/SAFETY.md" in message and not h.calls
+    monkeypatch.setattr(pathlib.Path, "read_text", real)
+    assert h.module.check_safety("write_remote", {}, ctx=h.ctx) == (True, "")
+    assert h.calls[-1]["system_prompt"] == real(prompt, encoding="utf-8")
 
 
 def test_legacy_owner_backend_absence_still_warns(supervisor, monkeypatch):
@@ -250,7 +278,7 @@ def test_legacy_owner_backend_absence_still_warns(supervisor, monkeypatch):
     assert not h.module.check_safety("write_remote", {}, ctx=h.ctx)[0]
 
 
-@pytest.mark.parametrize("source", ["subject", "directives", "prior"])
+@pytest.mark.parametrize("source", ["subject", "directives", "returned"])
 def test_mandatory_bundle_never_truncated(supervisor, monkeypatch, source):
     h = supervisor
     monkeypatch.setattr(h.module, "_SAFETY_BUNDLE_BYTE_BUDGET", 2000)
@@ -262,14 +290,12 @@ def test_mandatory_bundle_never_truncated(supervisor, monkeypatch, source):
     elif source == "directives":
         h.ctx._owner_directives = [{"role": "user", "content": "exact" * 1000}]
     else:
-        h.module._PRIOR_VERDICTS["work"] = {"x": {"digest": "x", "tool": "remote_write",
-                                                  "verdicts": [{"stage": "first", "status": "SUSPICIOUS",
-                                                                "reason": "earlier" * 1000}]}}
+        h.module._RETURNED["work"] = {"place_reply": {"status": "SUSPICIOUS", "reason": "earlier" * 1000}}
     for _ in range(2):
         ok, msg = h.module.check_safety("place_reply", args, ctx=h.ctx)
-        assert not ok and "TOO_LARGE" in msg
+        assert not ok and msg.startswith("⚠️ SAFETY_UNAVAILABLE: not run.") and "A smaller call may fit" in msg
     assert not h.calls
-    h.module._PRIOR_VERDICTS.clear()
+    h.module._RETURNED.clear()
     h.values["OUROBOROS_SAFETY_OWNER_RULES"] = ""
     h.ctx._owner_directives = []
     assert h.module.check_safety("place_reply", {"text": "fits"}, ctx=h.ctx)[0]
@@ -311,7 +337,7 @@ def test_unavailable_supervisor_route_hands_the_check_to_the_owners_chain(superv
     calls.clear()
     own = ({"content": json.dumps({"status": "DANGEROUS", "reason": "leaks a secret"})}, {})
     ok, msg = h.module.check_safety("place_reply", {"text": "the key is"}, ctx=h.ctx)
-    assert not ok and "SAFETY_VIOLATION" in msg and calls == [("test/checker", "safety", True, False)]
+    assert not ok and msg.startswith("⚠️ SAFETY_RETURNED") and calls == [("test/checker", "safety", True, False)]
     # Nor is an unknown outcome, typed or of a direct call that may have answered: it never moves to another route.
     calls.clear()
     own = ClaudexorModelError({"code": "provider_failed"}, unknown=True)
@@ -390,11 +416,11 @@ def test_with_no_answer_the_supervisors_own_route_decides_as_before(supervisor, 
     monkeypatch.setattr(h.module, "_resolve_safety_routing", lambda: (True, True, None))
     unknown = TimeoutError("read timed out")
     unknown.physical_attempt_capture = SimpleNamespace(state="unresolved")
-    for chain, outcome in ((RuntimeError("down"), "WARNING"), (unknown, "UNAVAILABLE"), ("not json", "UNAVAILABLE")):
+    for chain, outcome in ((RuntimeError("down"), "NOTE"), (unknown, "UNAVAILABLE"), ("not json", "UNAVAILABLE")):
         now[0] += 60
         replies["safety"], replies["fallback:0"] = [RuntimeError("local offline")], [chain, storm()]
         ok, msg = h.module.check_safety("write_remote", {"chain": repr(chain)}, ctx=h.ctx)
-        assert ok == (outcome == "WARNING") and msg.startswith(f"⚠️ SAFETY_{outcome}")
+        assert ok == (outcome == "NOTE") and msg.startswith(f"⚠️ SAFETY_{outcome}")
 
 
 def test_routes_carry_the_effective_binding_of_a_live_switch(supervisor, monkeypatch):

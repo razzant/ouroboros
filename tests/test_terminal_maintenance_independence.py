@@ -121,7 +121,7 @@ def test_failed_duty_releases_latch_without_clearing_another_failure(tmp_path, m
 
 def test_cold_transfer_observation_uses_body_cadence_without_running_each_tick(tmp_path, monkeypatch):
     from ouroboros import server_maintenance as sm
-    from ouroboros.delegate_supervision import _TICK_SEC
+    from ouroboros.delegate_feed import _TICK_SEC
     from supervisor import active_activity, queue
 
     clock, started = [1000.0], []

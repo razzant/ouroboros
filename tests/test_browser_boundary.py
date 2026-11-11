@@ -14,7 +14,9 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route, WebSocketRoute
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocket, WebSocketDisconnect
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
+import ouroboros.browser_boundary as browser_boundary
 import ouroboros.server_auth as server_auth
 
 OWN = "http://testserver"
@@ -60,7 +62,6 @@ def _refused(response):
 @pytest.mark.parametrize("headers", [
     {},                                                         # native: CLI, launcher, sidecar, skills
     {"sec-fetch-site": "none"},                                 # a navigation the owner typed
-    # Behind a proxy that terminates TLS or rewrites Host, the browser's own verdict decides.
     {"origin": "HTTP://TESTSERVER:80"},                         # case and the default port are the same origin
 ])
 def test_native_and_same_origin_requests_reach_the_handler(client, headers):
@@ -156,3 +157,76 @@ def test_another_sites_body_is_refused_whatever_it_holds(client, content_type):
     headers = {"origin": "http://evil.example", "sec-fetch-site": "cross-site"}
     _refused(client.post("/api/settings", content=b'{"OUROBOROS_MODEL": "x"}',
                          headers=headers | ({"content-type": content_type} if content_type else {})))
+
+
+# One public origin behind a reverse proxy. Chromium (151 and 157 tested) sends a WebSocket handshake with
+# ``Origin`` alone, no Fetch Metadata, so the core's own socket passes only when the browser's Host, port
+# included, and its HTTPS scheme reach the core: uvicorn applies X-Forwarded-Proto only from an address in
+# FORWARDED_ALLOW_IPS (here the test client, when trusted), and nothing reads X-Forwarded-Host.
+PAGE = "https://agent.example"
+
+
+@pytest.fixture
+def refusals(monkeypatch, caplog):
+    monkeypatch.setattr(browser_boundary, "_refused_seen", set())
+    caplog.set_level("WARNING", logger="ouroboros.browser_boundary")
+    return lambda: [r.getMessage() for r in caplog.records if r.name == "ouroboros.browser_boundary"]
+
+
+def _behind_proxy(monkeypatch, *, trusted: bool) -> TestClient:
+    monkeypatch.setattr(server_auth, "get_configured_network_password", lambda: "")
+    HANDLED.clear()
+    gate = server_auth.NetworkAuthGate(Starlette(routes=[
+        Route("/api/{path:path}", endpoint=_record, methods=_METHODS), WebSocketRoute("/ws", endpoint=_ws)]))
+    return TestClient(ProxyHeadersMiddleware(gate, trusted_hosts=["testclient"] if trusted else "127.0.0.1"))
+
+
+@pytest.mark.parametrize("host,origin", [("agent.example", PAGE), ("agent.example:8443", f"{PAGE}:8443")])
+def test_a_proxy_passing_the_browsers_host_and_https_admits_the_pages_socket(monkeypatch, host, origin):
+    with _behind_proxy(monkeypatch, trusted=True) as client, client.websocket_connect(
+            "/ws", headers={"host": host, "x-forwarded-proto": "https", "origin": origin}) as ws:
+        assert ws.receive_json() == {"ok": True}
+    assert HANDLED == [("WS", "/ws", b"")]
+
+
+@pytest.mark.parametrize("trusted,headers,origin,expected", [
+    # The proxy names its upstream instead of the browser's Host; X-Forwarded-Host is never read.
+    (True, {"host": "127.0.0.1:8765", "x-forwarded-host": "agent.example"}, PAGE, "https://127.0.0.1:8765"),
+    (True, {"host": "agent.example"}, f"{PAGE}:8443", PAGE),  # the browser's port dropped
+    (False, {"host": "agent.example"}, PAGE, "http://agent.example"),  # X-Forwarded-Proto from an untrusted address
+])
+def test_a_proxy_that_loses_host_or_https_gets_the_socket_refused_and_logged(
+        monkeypatch, refusals, trusted, headers, origin, expected):
+    with _behind_proxy(monkeypatch, trusted=trusted) as client:
+        with pytest.raises(WebSocketDisconnect) as closed, client.websocket_connect(
+                "/ws", headers={**headers, "x-forwarded-proto": "https", "origin": origin}):
+            pass
+        assert closed.value.code == 4403 and HANDLED == []
+        # The page's own fetches still pass by the browser's Sec-Fetch-Site: only the live socket fails.
+        response = client.post("/api/reset", headers={**headers, "x-forwarded-proto": "https", "origin": origin,
+                                                      "sec-fetch-site": "same-origin"})
+        assert response.status_code == 200 and HANDLED == [("POST", "/api/reset", b"")]
+    assert refusals() == [f"browser_boundary refused WEBSOCKET /ws origin={origin} expected={expected} sec-fetch-site=-"]
+
+
+def test_a_refusal_logs_sanitized_origins_once_per_expected_origin(client, refusals):
+    secret = "https://user:hunter2@evil.example/next?token=t0ps3cret"
+    for _ in range(2):
+        _refused(client.post("/api/reset?password=hunter2", headers={"origin": secret, "sec-fetch-site": "cross-site"}))
+    _refused(client.post("/api/reset", headers={"origin": "HTTPS://EVIL.EXAMPLE:443"}))
+    # The same page against a corrected Host is a new fact; a Host with credentials is never written.
+    _refused(client.post("/api/reset", headers={"origin": "HTTPS://EVIL.EXAMPLE:443", "host": "core.example"}))
+    _refused(client.post("/api/reset", headers={"origin": "http://evil.example", "host": "user:hunter2@core"}))
+    # A decoded path is written as a bounded URL path: no line breaks, no unbounded text.
+    _refused(client.post("/api/x%0Aforged" + "a" * 300, headers={"origin": "http://evil.example"}))
+    lines = refusals()
+    assert lines[:4] == [
+        "browser_boundary refused POST /api/reset origin=malformed expected=http://testserver sec-fetch-site=cross-site",
+        "browser_boundary refused POST /api/reset origin=https://evil.example expected=http://testserver sec-fetch-site=-",
+        "browser_boundary refused POST /api/reset origin=https://evil.example expected=http://core.example sec-fetch-site=-",
+        "browser_boundary refused POST /api/reset origin=http://evil.example expected=malformed sec-fetch-site=-",
+    ]
+    path = lines[4].split(" ")[3]
+    assert len(lines) == 5 and "\n" not in lines[4]
+    assert path.startswith("/api/x%0Aforgedaaa") and path.endswith("…") and len(path) == 201
+    assert not any(word in line for line in lines for word in ("hunter2", "token", "t0ps3cret", "user"))

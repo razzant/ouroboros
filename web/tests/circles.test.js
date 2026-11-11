@@ -172,7 +172,7 @@ test('an open circle says how many of its places keep a model of their own, sinc
     assert.doesNotMatch(circleFoldHtml(teamModel, [inherits], { open: 'team' }), /data-circle-own-models/);
     // The editor says it under the Model field, where the circle's model is chosen.
     const editing = strip(circleFoldHtml(teamModel, [inherits, overrides], { open: 'team', editing: 'team' }));
-    assert.match(editing, /Model The model its places think with when they wake; empty uses the Consciousness model in Models\. A place may keep its own\. 1 place here keeps a model of its own and does not follow the circle&#39;s\./);
+    assert.match(editing, /The model its places think with when they wake; empty uses the Consciousness model in Models\. A place may keep its own\. 1 place here keeps a model of its own and does not follow the circle&#39;s\./);
 });
 
 function page(t, { response = RESPONSE, writes = {}, askConfirm = async () => true, openSheet = () => {}, openConnect = () => {},
@@ -666,6 +666,45 @@ test('a new circle may be made with a model; suggestions that cannot be read say
     await settled();
     assert.deepEqual(made, [{ name: 'Work', text: '', model: 'openai::gpt-6' }]);
     assert.equal(view.body.querySelector('[data-circles-draft="new:model"]'), null, 'made once: no second New circle');
+});
+
+for (const count of [1, 18]) test(`circle editors share the catalog producer at ${count} accounts without another read`, async (t) => {
+    const source = { path: '/vendor/codex', version: '2.0.0' };
+    const items = Array.from({ length: count }, (_, index) => ({ id: 'choice', value: 'claudexor::transport=choice',
+        source_id: 'transport', source: 'Claudexor', credential_profile_id: String(index) }));
+    const catalog = { items, model_sources: [{ id: 'transport', credentialHarness: 'codex' }],
+        account_catalogs: [{ source: 'transport', accounts: items.map((item) => ({ catalog: {
+            source: 'transport', credentialProfileId: item.credential_profile_id, sourceProgram: source, models: [{ id: item.id }],
+        } })) }] };
+    let reads = 0;
+    const view = page(t, { readModels: async () => { reads++; return catalog; } });
+    await settled();
+    assert.equal(reads, 0);
+    await view.press('[data-circles-act="edit"][data-circle="home"]');
+    await settled();
+    const field = view.body.querySelector('[data-circles-draft="home:model"]');
+    const programs = (input) => JSON.parse(input.dataset.modelPrograms);
+    assert.equal(programs(field).length, 1);
+    assert.deepEqual(programs(field)[0].programs, [source]);
+    assert.equal(programs(field)[0].mixed, false);
+    await view.type('home:model', 'owner/private');
+    const publish = (detail) => view.env.document.dispatchEvent(new CustomEvent('settings-model-catalog:updated', { detail }));
+    const api = { id: 'api', value: 'openai::api' };
+    publish({ ...catalog, items: [...items, api] });
+    assert.equal(view.body.querySelector('[data-circles-draft="home:model"]'), field, 'catalog updates keep the real field');
+    assert.equal(field.value, 'owner/private');
+    assert.equal(programs(field)[0].mixed, true);
+    await view.press('[data-circles-act="new"]');
+    await settled();
+    const created = view.body.querySelector('[data-circles-draft="new:model"]');
+    assert.deepEqual(programs(created), programs(field), 'new and saved editors use the same producer');
+    assert.equal(reads, 1, 'the existing catalog read supplies every editor and refresh event');
+    publish({ items: [api], model_sources: [], account_catalogs: [] });
+    for (const input of view.body.querySelectorAll('[data-model-chooser]')) assert.deepEqual(programs(input), []);
+    view.destroy();
+    publish(catalog);
+    assert.deepEqual(programs(created), [], 'destroy releases the catalog listener');
+    assert.equal(reads, 1);
 });
 
 test('a model typed while Save is out stays a draft on the revision that Save made', async (t) => {

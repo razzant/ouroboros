@@ -217,8 +217,8 @@ def test_reads_refusals_failures_and_timeouts_produce_nothing_and_force_no_revie
     assert json.loads(rows[-1]["result"])["ok"] is True, "the remote shell ran; it still declares no effect"
 
     calls_before = len(desktop.transport.calls)
-    blocked = desktop.call("click", allowed=False, warning="⚠️ SAFETY_VIOLATION: blocked.", x=1, y=1, raw=True)
-    assert blocked["tool_result_code"] == "SAFETY_VIOLATION" and len(desktop.transport.calls) == calls_before
+    blocked = desktop.call("click", allowed=False, warning="⚠️ SAFETY_RETURNED: not run.", x=1, y=1, raw=True)
+    assert blocked["tool_result_code"] == "SAFETY_RETURNED" and len(desktop.transport.calls) == calls_before
 
     def raises(**_kwargs):
         raise RuntimeError("the handler crashed after an unknown amount of work")

@@ -27,7 +27,7 @@ import { PAGE_ICONS, SHELL_ICONS, controlIcon, strokeIcon } from './page_icons.j
 import { readSkills, skillForms } from './settings_extension_forms.js';
 import { settingsPageFor } from './settings_pages.js';
 import { policyValueLabel } from './settings_policy.js';
-import { HAND_WRITTEN, HOME_ROWS, ROWS } from './settings_rows.js';
+import { HAND_WRITTEN, HOME_ROWS, ROWS, SEARCH_DOORS } from './settings_rows.js';
 import { getSpeech } from './speech_providers.js';
 import { readStateSnapshot } from './state_snapshots.js';
 import { paintStatusMark, statusMarkHtml } from './status_mark.js';
@@ -200,10 +200,10 @@ export function homeAnswers(facts = {}) {
 
 const fold = (text) => String(text ?? '').normalize('NFKC').toLocaleLowerCase().trim();
 
-/** Everything search can find, each with the words it answers to: the home's rows, every settings row (its name,
- *  meta, aliases, keys and its page's title) and the forms skills registered. */
-export function searchEntries({ rows = ROWS, handWritten = HAND_WRITTEN, home = HOME_ROWS, forms = skillForms(), title = settingsTitle } = {}) {
-    const entries = home.map((row) => ({ id: row.id, name: row.name, where: '', to: row.to, row: '', glyph: row.glyph,
+/** Everything search can find, each with the words it answers to: the home's rows and the doors to pages no home row
+ *  opens, every settings row (its name, meta, aliases, keys and its page's title) and the forms skills registered. */
+export function searchEntries({ rows = ROWS, handWritten = HAND_WRITTEN, home = HOME_ROWS, doors = SEARCH_DOORS, forms = skillForms(), title = settingsTitle } = {}) {
+    const entries = [...home, ...doors].map((row) => ({ id: row.id, name: row.name, where: '', to: row.to, row: '', glyph: row.glyph,
         words: [row.name, ...(row.aliases || [])] }));
     for (const row of [...rows, ...handWritten]) {
         const where = title(row.page);
@@ -336,8 +336,9 @@ function needRowHtml(row) {
 
 /**
  * Draw the home into `root` and take its presses. `open(path, { row, opener })` opens a row's page or door; `ctx`
- * is the shell's (`ws`, `showPage`, `readSettings`, `stateSnapshots`). Answers `{ mark(path), refresh(), dispose() }`:
- * `mark` names the row whose page is shown beside the home; `refresh` reads the facts again and repaints.
+ * is the shell's (`ws`, `showPage`, `readSettings`, `stateSnapshots`). Answers `{ mark(path), search(words), refresh(),
+ * dispose() }`: `mark` names the row whose page is shown beside the home; `search` puts words into the search field and
+ * shows their results; `refresh` reads the facts again and repaints.
  */
 export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatus, ask = openConfirmDialog } = {}) {
     root.innerHTML = `<div class="settings-column settings-home-column">
@@ -500,6 +501,11 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
         mark(path) {
             current = String(path || '').split('/')[0];
             paintRows();
+        },
+        search(words) {
+            searchEl.value = String(words || '');
+            paintList();
+            searchEl.parentElement?.scrollIntoView?.({ block: 'start' });
         },
         refresh,
         dispose() {

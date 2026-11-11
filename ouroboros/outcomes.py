@@ -44,6 +44,7 @@ from ouroboros._outcome_tool_errors import (  # explicit re-exports, one stateme
     _POLICY_DENIAL_STATUSES as _POLICY_DENIAL_STATUSES,
     _RECOVERY_TOOL_NAMES as _RECOVERY_TOOL_NAMES,
     _ROOT_WRITE_TOOLS as _ROOT_WRITE_TOOLS,
+    SAFETY_HELD_STATUSES as SAFETY_HELD_STATUSES,
     _unresolved_tool_errors as _unresolved_tool_errors,
     warns_without_review as warns_without_review,
     _user_file_basenames as _user_file_basenames,
@@ -274,6 +275,7 @@ _LEDGER_NON_FAILURE_STATUSES = (
     # tool_reported_failure: the tool RAN and answered honestly ({"ok": false} — a
     # diagnostic reporting what it was called to find). A finding, not a failure.
     | frozenset({"tool_reported_failure"}) | _NON_EFFECT_OBSERVATION_STATUSES
+    | SAFETY_HELD_STATUSES  # a call Safety held is no failure; its execution-axis record keeps it visible
 )
 
 
