@@ -18,6 +18,7 @@ import pathlib
 import pytest
 from tests.test_ui_smoke_agents_panel import _AGENTS_PANEL_ROSTER
 from tests import test_subscription_setup_browser as setup_browser
+from tests.settings_browser_helpers import open_entry, open_settings
 
 subscription_ui = setup_browser.subscription_ui
 
@@ -35,7 +36,7 @@ _CUSTOM_SECRET_KEY = "SLACK_WEBHOOK_URL"
 
 _MEASURE_JS = """
     (selector) => {
-        const scroll = document.querySelector('.settings-scroll');
+        const scroll = document.querySelector('#page-settings [data-settings-page]:not([hidden])');
         const box = scroll.getBoundingClientRect();
         const nodes = [...document.querySelectorAll(selector)];
         const past = nodes.map((node) => ({
@@ -74,13 +75,8 @@ def _open_settings(page, url: str, tab: str) -> None:
 
 
 @pytest.mark.ui_browser
-def test_settings_grid_tracks_never_scroll_the_body_sideways(direct_server_with_data):
-    """At 780x680 the Agents route grid and a custom secret row stay inside the
-    Settings column: the scroll body does not scroll sideways and no control (a route
-    select, the secret row's Remove) is pushed past its right edge. At 1280x800 the
-    five route controls use Source + Model above Account / Effort / Access.
-    Every measurement is taken before the
-    first assertion, so one failing run reports both grids."""
+def test_custom_secret_grid_tracks_never_scroll_the_body_sideways(direct_server_with_data):
+    """The custom-key grid retains its narrow fit and wide shape; its E3 page is still pending."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
@@ -104,15 +100,6 @@ def test_settings_grid_tracks_never_scroll_the_body_sideways(direct_server_with_
             browser = pw.chromium.launch()
             try:
                 page = browser.new_page(viewport=_NARROW)
-                _open_settings(page, url, "agents")
-                page.wait_for_selector(
-                    "#available-subagents-editor .available-subagent-row", timeout=20_000)
-                seen["agents@780"] = page.evaluate(_MEASURE_JS, ".available-subagent-route > *")
-                seen["agents-selects@780"] = page.evaluate(
-                    _MEASURE_JS, ".available-subagent-route select")
-                seen["agents-route@780"] = page.evaluate(_SHAPE_JS, ".available-subagent-route")
-                page.screenshot(path=str(evidence_dir / "settings-agents-780.png"))
-
                 _open_settings(page, url, "secrets")
                 page.wait_for_selector(".settings-custom-secret-row", timeout=20_000)
                 seen["secrets@780"] = page.evaluate(_MEASURE_JS, ".settings-custom-secret-row > *")
@@ -123,12 +110,7 @@ def test_settings_grid_tracks_never_scroll_the_body_sideways(direct_server_with_
 
                 wide = browser.new_page(viewport=_DESKTOP)
                 try:
-                    _open_settings(wide, url, "agents")
-                    wide.wait_for_selector(
-                        "#available-subagents-editor .available-subagent-row", timeout=20_000)
-                    seen["agents-route@1280"] = wide.evaluate(_SHAPE_JS, ".available-subagent-route")
-                    wide.screenshot(path=str(evidence_dir / "settings-agents-1280.png"))
-                    wide.click('[data-settings-tab="secrets"]')
+                    _open_settings(wide, url, "secrets")
                     wide.wait_for_selector(".settings-custom-secret-row", timeout=20_000)
                     seen["secrets-row@1280"] = wide.evaluate(_SHAPE_JS, ".settings-custom-secret-row")
                 finally:
@@ -140,19 +122,9 @@ def test_settings_grid_tracks_never_scroll_the_body_sideways(direct_server_with_
             pytest.skip(str(exc))
         raise
 
-    agents, selects = seen["agents@780"], seen["agents-selects@780"]
     secrets, remove = seen["secrets@780"], seen["secrets-remove@780"]
-    shape = seen["agents-route@1280"]
     where = json.dumps(seen, indent=2, sort_keys=True)
-    assert agents["measured"] >= 3 and selects["measured"] >= 3, f"nothing measured:\n{where}"
-    assert remove["measured"] == 1, f"the Remove button was not found:\n{where}"
-
-    assert agents["overflow"] <= 1, (
-        f"Settings → Agents scrolls sideways at 780px by {agents['overflow']}px:\n{where}")
-    assert selects["worst"]["over"] <= 1, (
-        f"a route select is pushed past the Settings scroll body:\n{where}")
-    assert agents["worst"]["over"] <= 1, (
-        f"a route control is pushed past the Settings scroll body:\n{where}")
+    assert remove["measured"] == 1, f"the Remove button was not found: {where}"
 
     assert secrets["overflow"] <= 1, (
         f"Settings → Secrets scrolls sideways at 780px by {secrets['overflow']}px:\n{where}")
@@ -161,12 +133,6 @@ def test_settings_grid_tracks_never_scroll_the_body_sideways(direct_server_with_
     assert secrets["worst"]["over"] <= 1, (
         f"a custom secret field escapes the scroll body:\n{where}")
 
-    # The narrow fit is not bought with the wide layout: given the room, the open card
-    # keeps Source beside a wide Model, then Account / Effort / Access on one line
-    # (docs/DESIGN.md §6) — three tracks, two rows, never a one-column stack.
-    assert shape["children"] == 5, f"unexpected route controls at 1280px:\n{where}"
-    assert len(shape["template"].split()) == 3, f"the route grid lost its three tracks at 1280px:\n{where}"
-    assert shape["rows"] == 2, f"the route controls no longer form Source+Model / Account+Effort+Access at 1280px:\n{where}"
 
 
 @pytest.mark.ui_browser
@@ -230,3 +196,35 @@ def test_action_results_reflow_before_their_text_is_squeezed(subscription_ui, th
     button.press("Enter")
     expect(button).to_be_enabled()
     assert sum('/api/model-catalog' in url for url in ui["reads"]) > before
+
+
+@pytest.mark.ui_browser
+def test_agent_editor_grid_tracks_fit_the_page_at_both_widths(direct_server_with_data):
+    from playwright.sync_api import sync_playwright
+
+    server = direct_server_with_data
+    path = server['data_dir'] / 'settings.json'
+    saved = json.loads(path.read_text(encoding='utf-8'))
+    saved['OUROBOROS_SUBAGENTS'] = json.dumps(_AGENTS_PANEL_ROSTER)
+    path.write_text(json.dumps(saved), encoding='utf-8')
+    server['restart_server']()
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        try:
+            for viewport in (_NARROW, _DESKTOP):
+                page = browser.new_page(viewport=viewport)
+                page.goto(server['url'], wait_until='domcontentloaded')
+                open_settings(page, 'agents')
+                form = open_entry(page, _AGENTS_PANEL_ROSTER['items'][0]['subagent_id'])
+                form.locator('[data-subagent-field="route"]').wait_for(state='visible')
+                controls = page.evaluate(_MEASURE_JS, '.available-subagent-route > *')
+                selects = page.evaluate(_MEASURE_JS, '.available-subagent-route select')
+                shape = page.evaluate(_SHAPE_JS, '.available-subagent-route')
+                assert controls['measured'] == 5 and selects['measured'] >= 3
+                assert controls['overflow'] <= 1 and controls['worst']['over'] <= 1, controls
+                assert selects['worst']['over'] <= 1, selects
+                if viewport == _DESKTOP:
+                    assert len(shape['template'].split()) == 3 and shape['rows'] == 2, shape
+                page.close()
+        finally:
+            browser.close()
