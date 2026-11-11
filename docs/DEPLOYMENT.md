@@ -271,17 +271,23 @@ the last `X-Forwarded-For` entry that is not such a proxy:
   is loopback by design.
 - A proxy on another machine must be listed in `FORWARDED_ALLOW_IPS`; otherwise
   the core treats the proxy itself as the client and does not see TLS, so the
-  session cookie is not marked `Secure`.
-- The core accepts a browser's requests and WebSocket handshakes by the
-  browser's `Sec-Fetch-Site: same-origin`, so the proxy may rewrite `Host` or
-  terminate TLS. A browser that sends no Fetch Metadata is accepted only when
-  its `Origin` equals the scheme and host the core sees: pass `Host` through,
-  plus `X-Forwarded-Proto` from a proxy in `FORWARDED_ALLOW_IPS`.
+  session cookie is not marked `Secure` and Chromium's WebSocket is refused.
+- The proxy passes the browser's `Host` unchanged, port included, and its TLS as
+  `X-Forwarded-Proto: https`; the core never reads `X-Forwarded-Host`. The
+  browser's `Sec-Fetch-Site: same-origin` passes a request's origin check even
+  with a rewritten `Host` (a malformed or `null` `Origin` is still refused, and
+  the password gate still applies), but Chromium (151 and 157 tested; Firefox
+  153 and WebKit 26.5 add the header) opens the WebSocket with `Origin` alone,
+  accepted only when it equals the scheme and host the core sees. A proxy that
+  breaks this serves a working page whose live updates never connect
+  (`Reconnecting… · server answers`); the core logs each refused `origin=`
+  beside the `expected=` origin it saw.
 - Visitors who are not loopback need `OUROBOROS_FILE_BROWSER_DEFAULT` for Files;
   without it the path-addressed `/api/files/*` operations refuse them.
 
 With or without a password, on loopback too, the core answers another site's
-page with 403 (a WebSocket closes with 4403). Pages and files any page may load
+page with HTTP 403, including at the WebSocket handshake (browsers usually report
+1006, not the server's internal 4403). Pages and files any page may load
 (the interface, setup and login pages, their static files, extensions' reviewed
 widget files) pass this check; the password gate above still applies. A request with neither
 `Origin` nor `Sec-Fetch-Site` counts as a native client (the CLI, sidecars,

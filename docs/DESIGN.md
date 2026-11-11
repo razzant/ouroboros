@@ -1487,7 +1487,8 @@ something that ends by itself, two bars while paused, a faint ring when
 unconfirmed. While something waits for the owner the amber dot replaces that shape
 beside the room's word; a Pause is not the owner's turn. At rest `Online` keeps its
 green dot, a status sentence's own. Only what the client alone knows lies over the
-server's mark: `Reconnecting…` (a ring), `Updating…` (a ring) while a room shown again or
+server's mark: `Reconnecting…` (a ring; `· server answers` once the core answered and a later
+attempt still failed: an observation, never a cause), `Updating…` (a ring) while a room shown again or
 reconnected still reads what it missed after 300 ms, the owner's own unconfirmed send and the
 owner's own Stop press (moving), and `Starting…` with the boot phases that refine it
 (no mark). The transcript's typing bubble shows only while the room's work moves and
@@ -2746,6 +2747,27 @@ rotates compatible accounts and an explicit pin stays pinned. A model inherited
 from Main remains visibly inherited while its account can be pinned
 independently. Fallbacks use the same row in their saved order, with adjacent
 move/remove controls and the group's Add action.
+
+Accounts has one program row per family, regardless of account count. Installed and
+newest versions keep one place; operation state and Details keep another. The engine's
+verdict reads “X available”, “Up to date” or “Latest unknown”. Update is present for
+newer/unknown versions only; Install for absence, exactly when the engine allows it.
+Nothing updates itself. An unavailable action names the engine's reason. Details holds
+Check latest, paths, override, command/script evidence, vendor lines, limitations and
+release notes through the host opener, keeping the app open. “Ran” appears only if
+different from “Command”; show time, never an
+operation id. A changed receipt can offer Return to its prior version when supported.
+A nonzero installer exit can still mean Updated: retain the limitation sentence.
+A package-manager updater's advice remains advice, never an automatic command.
+
+Only an opened model list shows a non-option closing row per producer: “List from”
+when it supplies every suggestion, otherwise the supplied subset with its source label
+(e.g. “Claudexor entries supplied by Codex”), then the newest fact and Update when needed.
+Every editor built on the shared chooser follows this rule. Closed
+editors stay quiet; API-only lists have no such row. Mouse, touch and keyboard Update
+keep the list open through progress and result, then refresh its suggestions. Typed
+values/carets survive; “Custom ID · Not in this list” stays under an unlisted input.
+Full evidence stays in Accounts. Flex gaps wrap facts without an orphan separator.
 
 Restart Claudexor (Accounts toolbar, after Refresh) asks first in the shared confirm
 dialog: its body is one sentence of fact, `Restarting Claudexor ends N runs: X of

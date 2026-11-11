@@ -9358,6 +9358,9 @@ html[data-layout="stack"] .project-panel {
     gap: var(--space-1) var(--space-2);
     min-width: 0;
 }
+.harness-maintenance-facts { display: flex; flex-direction: column; min-width: 0; }
+.harness-maintenance-row > .harness-maintenance-actions { min-height: var(--control-h); }
+.harness-maintenance-state > [data-maintenance-details] { margin-left: auto; }
 .harness-maintenance-line {
     flex: 1 1 auto;
     font-size: var(--type-meta);
@@ -9392,8 +9395,13 @@ html[data-layout="stack"] .project-panel {
 .harness-maintenance-exact code { white-space: pre-wrap; overflow-wrap: anywhere; }
 .harness-maintenance-details dl { margin: var(--space-2) 0; }
 .harness-maintenance-details dt { color: var(--text-meta); }
-.harness-maintenance-details dd { margin: 0 0 var(--space-1); color: var(--text-primary); }
+.harness-maintenance-details dd { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 var(--space-1); color: var(--text-primary); }
 .harness-maintenance-details pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.harness-model-program { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); }
+.ui-model-options[data-model-popup] { display: flex; flex-direction: column; overflow: hidden; }
+.ui-model-options[data-model-popup] > [role="listbox"] { min-height: 0; overflow-y: auto; }
+.ui-model-footer { flex: 0 0 auto; padding: var(--space-2) var(--space-3); overflow-wrap: anywhere; }
+
 /* Account rows are purpose-built (identity left, actions right), not the
    settings key/value grid — .settings-custom-secret-row's 0.65fr/1.35fr
    columns inverted the proportions and its align-items:end sank the text.

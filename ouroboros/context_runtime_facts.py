@@ -748,7 +748,7 @@ def vitals_fact(data_root: Any, *, observed_at: str, captured_at: Optional[str] 
     journal's reader. ``observed_at`` is the fact's own instant (the clocks' day); it is written only
     when it differs from ``captured_at``, the Runtime JSON's ``context_captured_at`` beside it (a stale
     snapshot), so the same instant is not printed twice. Every absent source omits its key, except
-    ``engine_pool``, which stays and names each source it could not read. Never
+    ``engine_pool`` and ``vendor_programs``, which name unobserved sources. Never
     raises."""
     import os
 
@@ -779,6 +779,8 @@ def vitals_fact(data_root: Any, *, observed_at: str, captured_at: Optional[str] 
         except Exception:
             log.debug("engine pool fact unavailable", exc_info=True)
             fact["engine_pool"] = "engine: not observed"
+        from ouroboros.harness_program_facts import vendor_programs_line
+        fact["vendor_programs"] = vendor_programs_line(root)
         if tail.get("inline"):
             # Owner decision 2A: the turns the body ran on a thread of the server instead of a carrier, newest
             # last — the degraded executor's reason (a refused spawn, a marker window) or a live call.
@@ -851,7 +853,7 @@ def vitals_line(fact: Optional[Dict[str, Any]]) -> str:
     if not isinstance(fact, dict):
         return ""
     parts = [f"body as of {fact['observed_at']}" if fact.get("observed_at") else "body"]
-    for key in ("owner_turns", "owner_turns_note", _STALLS_KEY, "busy_minute", "engine_pool", "conversation_carriers",
+    for key in ("owner_turns", "owner_turns_note", _STALLS_KEY, "busy_minute", "engine_pool", "vendor_programs", "conversation_carriers",
                 "inline_executors", "route_health", "runtime", "wal_gate", "last_update", "boot"):
         value = fact.get(key)
         if isinstance(value, list) and value:

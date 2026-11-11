@@ -777,8 +777,9 @@ export function createClaudexorStatusStore({
      * `includeModels` upgrades the store permanently; a caller that needs
      * models while a model-less read is already in flight is served by ONE
      * queued follow-up read, shared by every other upgrading caller.
+     * `afterCurrent` requests evidence after an event (e.g. program maintenance).
      */
-    function refresh({ includeModels = false } = {}) {
+    function refresh({ includeModels = false, afterCurrent = false } = {}) {
         if (inner.disposed) return Promise.resolve(inner.snapshot);
         if (includeModels) inner.includeModels = true;
         if (inner.resourcesInFlight) return inner.resourcesInFlight.then(() => refresh({ includeModels }));
@@ -788,10 +789,10 @@ export function createClaudexorStatusStore({
         // client at all. The refresh JOINS the wake instead (and the wake waits
         // out an already-running read before POSTing — see `wake`), so the two
         // writers never overlap in either order.
-        if (inner.wakeInFlight) return inner.wakeInFlight.then(() => inner.snapshot);
+        if (inner.wakeInFlight) return inner.wakeInFlight.then(() => afterCurrent ? refresh({includeModels}) : inner.snapshot);
         const wantModels = inner.includeModels;
         if (inner.inFlight) {
-            if (!wantModels || inner.inFlightModels) return inner.inFlight;
+            if (!afterCurrent && (!wantModels || inner.inFlightModels)) return inner.inFlight;
             if (!inner.queued) {
                 // BOTH arms re-check disposal: they run after an await, and the
                 // world they were queued in may no longer exist.
@@ -807,7 +808,7 @@ export function createClaudexorStatusStore({
                     if (inner.resourcesInFlight) {
                         return inner.resourcesInFlight.then(() => refresh({ includeModels: true }));
                     }
-                    return startRead(true);
+                    return startRead(wantModels);
                 };
                 inner.queued = inner.inFlight.then(follow, follow);
             }

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { WS, decide, decideServedPage, pageOwnedByCore, RECOVERY_HEALTHY_PROBE_LIMIT } from '../modules/ws.js';
+import { WS, decide, decideServedPage, pageOwnedByCore, RECOVERY_HEALTHY_PROBE_LIMIT, SERVER_ANSWERS_EVENT } from '../modules/ws.js';
 
 // Behavior coverage for the served-SHA reconciliation contract (netres Lane B):
 // one SSOT decision drives both the post-open refresh and the socket-down
@@ -970,6 +970,121 @@ test('a 401 that resolves after the socket reopened, or in a dead episode, is di
         assert.deepEqual(env.replaced, [], 'a stale episode decides nothing');
     } finally {
         releases.forEach((release) => release({ ok: false, status: 500, json: async () => ({}) }));
+        await teardown(ws);
+    }
+});
+
+// ---------------------------------------------------------------------------
+// The server answers while the socket stays down: an observation for the
+// room's status (never a cause: a handshake refused before accept, a dropped
+// upgrade and a frozen runtime all reach the page as the same 1006).
+// ---------------------------------------------------------------------------
+
+test('a socket attempt failing after the core answered is said; an unanswered probe, sign-in, a reload and an open end it', async () => {
+    const env = installEnv([]);
+    const answers = [];
+    env.setFetch(() => new Promise((resolve) => { answers.push(resolve); }));
+    const answer = async (script) => {
+        await waitFor(() => answers.length > 0, 'a probe in flight');
+        answers.shift()({ ok: script.ok !== false, status: script.status ?? 200, json: async () => script.body ?? {} });
+        await settle(6);
+    };
+    const ws = new WS('ws://unused');
+    const said = [];
+    ws.on(SERVER_ANSWERS_EVENT, ({ serverAnswers }) => said.push(serverAnswers));
+    const failAttempt = () => {
+        ws.connect();
+        FakeSocket.instances.at(-1).onclose();
+        ws._clearReconnectTimer();  // the test starts every attempt itself
+    };
+    try {
+        Object.assign(ws, { _wasConnected: true, _lastSha: 'abc', _recoveryReloadFired: true });  // the fuse stays out
+        failAttempt();
+        ws._clearUiRecoveryTimer();
+        ws.connect();  // still under way when the core answers
+        const early = FakeSocket.instances.at(-1);
+        ws._scheduleUiRecovery('socket-disconnect', 0);
+        await answer({ body: { sha: 'abc' } });
+        assert.deepEqual([said, ws.serverAnswersWhileDown()], [[], false], 'an answer alone proves nothing about the socket');
+        early.onclose();
+        ws._clearReconnectTimer();
+        assert.deepEqual(said, [], 'an attempt begun before the answer may have met a core that was down');
+        ws.connect();
+        const slow = FakeSocket.instances.at(-1);  // begun after the first successful probe
+        await answer({ body: { sha: 'abc' } });  // another success while this attempt is still connecting
+        slow.onclose();
+        ws._clearReconnectTimer();
+        assert.deepEqual([said, ws.serverAnswersWhileDown()], [[true], true],
+            'a later healthy probe must not erase the observation preceding this slow attempt');
+        await answer({ ok: false, status: 502 });
+        assert.deepEqual([said, ws.serverAnswersWhileDown()], [[true, false], false], 'the core no longer answers');
+        failAttempt();
+        assert.deepEqual(said, [true, false], 'without a new answer a failure is only Reconnecting');
+        await answer({ body: { sha: 'abc' } });
+        failAttempt();
+        assert.deepEqual(said, [true, false, true]);
+        // An open ends it with the episode (the open event re-derives every status); the opened socket's
+        // later close proves nothing either.
+        ws.connect();
+        const opened = FakeSocket.instances.at(-1);
+        opened.readyState = FakeSocket.OPEN;
+        opened.onopen();
+        assert.equal(ws.serverAnswersWhileDown(), false);
+        opened.readyState = FakeSocket.CLOSED;
+        opened.onclose();
+        ws._clearReconnectTimer();
+        assert.deepEqual([said, ws.serverAnswersWhileDown()], [[true, false, true], false]);
+    } finally {
+        while (answers.length) answers.shift()({ ok: false, status: 500, json: async () => ({}) });
+        await teardown(ws);
+    }
+    for (const [what, script, reload] of [['sign-in', { ok: false, status: 401 }, /^\/auth\/login\?next=/],
+        ['a changed build', { body: { sha: 'def' } }, /_ouro_reason=sha-change/]]) {
+        const other = installEnv([]);
+        const pending = [];
+        other.setFetch(() => new Promise((resolve) => { pending.push(resolve); }));
+        const probe = new WS('ws://unused');
+        const heard = [];
+        probe.on(SERVER_ANSWERS_EVENT, ({ serverAnswers }) => heard.push(serverAnswers));
+        try {
+            Object.assign(probe, { _wasConnected: true, _lastSha: 'abc', _serverAnswers: true, _answeredAtAttempt: 0 });
+            probe._scheduleUiRecovery('socket-disconnect', 0);
+            await waitFor(() => pending.length === 1, `${what}: probe in flight`);
+            pending.shift()({ ok: script.ok !== false, status: script.status ?? 200, json: async () => script.body ?? {} });
+            await waitFor(() => other.replaced.length === 1, `${what}: the page leaves`);
+            assert.match(other.replaced[0], reload);
+            assert.deepEqual(heard, [false], `${what} ends the observation before the page leaves`);
+        } finally {
+            while (pending.length) pending.shift()({ ok: false, status: 500, json: async () => ({}) });
+            await teardown(probe);
+        }
+    }
+});
+
+test('a page whose socket never opened is not reloaded by the fuse; after its first open the next episode has one', async () => {
+    const env = installEnv([{ body: { sha: 'abc' } }]);
+    const ws = new WS('ws://unused');
+    try {
+        // Never connected (a refused socket, or the fuse's own reload of one): the same served page, a socket that
+        // stays down, and no reload every few minutes.
+        ws._scheduleUiRecovery('socket-disconnect', 0);
+        await waitFor(() => env.fetchCalls() >= RECOVERY_HEALTHY_PROBE_LIMIT + 3, 'probes past the limit');
+        assert.deepEqual(env.replaced, []);
+        // A connection ends the episode; the next one has its own fuse.
+        ws.ws = { readyState: FakeSocket.OPEN };
+        await settle(6);
+        ws.ws = null;
+        ws._clearUiRecoveryTimer();
+        ws.connect();
+        const sock = FakeSocket.instances.at(-1);
+        sock.readyState = FakeSocket.OPEN;
+        sock.onopen();
+        await settle();
+        ws.ws = null;
+        ws._scheduleUiRecovery('socket-disconnect', 0);
+        await waitFor(() => env.replaced.length === 1, 'the next episode\'s fuse');
+        assert.match(env.replaced[0], /_ouro_reason=socket-disconnect/);
+    } finally {
         await teardown(ws);
     }
 });

@@ -241,6 +241,7 @@ export function roomSocket(ws) {
         get paused() { return paused; },
         send: (...args) => ws.send(...args),
         isConnected: () => !paused && ws.isConnected?.() !== false,
+        serverAnswersWhileDown: () => !paused && ws.serverAnswersWhileDown?.() === true,
         on(event, fn) {
             const sub = { event, fn, off: null };
             subscriptions.add(sub);

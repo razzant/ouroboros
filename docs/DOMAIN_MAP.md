@@ -556,7 +556,6 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/body_candidate.py`
 - `ouroboros/claudexor_daemon.py`
 - `ouroboros/claudexor_exit_facts.py`
-- `ouroboros/claudexor_harness_install.py`
 - `ouroboros/claudexor_node_seed.py`
 - `ouroboros/claudexor_observations.py`
 - `ouroboros/claudexor_restart.py`
@@ -623,6 +622,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/gateways/claudexor_uploads.py`
 - `ouroboros/genesis_project.py`
 - `ouroboros/harness_maintenance.py`
+- `ouroboros/harness_program_facts.py`
 - `ouroboros/historical_retirement.py`
 - `ouroboros/nanny_pacing.py`
 - `ouroboros/owner_keep.py`

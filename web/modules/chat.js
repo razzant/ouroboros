@@ -19,6 +19,7 @@ import { createChatPreview } from './chat_preview.js';
 import { createUnconfirmedSends } from './chat_attachments.js';
 import { createChatDecision } from './chat_decision.js';
 import { createRoomWork } from './room_work.js';
+import { SERVER_ANSWERS_EVENT } from './ws.js';
 import { applyCardWorkViews, cardControls, cardMenuActions, changedOffers, emptyWorkState, openCardControls, ownStopPress, reconcileWorkState, roomStatusView } from './work_status.js';
 import { statusMarkHtml } from './status_mark.js';
 import { createMainWaiting } from './main_waiting.js';
@@ -502,7 +503,7 @@ export function createChatInstance({
         if (!statusBadge) return;
         statusBadge.className = `status-badge ${kind}`;
         statusBadge.textContent = text;
-        statusBadge.title = title; // a failed boot step's cause; empty otherwise
+        statusBadge.title = title; // a failed boot step's cause, or the server-answers sentence; empty otherwise
         Object.assign(statusBadge.dataset, { tone, mark, owner: owner ? '1' : '', amber, step });
         roomWork?.update();
     }
@@ -3066,7 +3067,8 @@ export function createChatInstance({
 
     // The server's room under this client's own facts.
     function deriveChatStatus() {
-        return roomStatusView(workState, { connected: ws.isConnected ? ws.isConnected() : true, catchingUp: catchUp.active,
+        return roomStatusView(workState, { connected: ws.isConnected ? ws.isConnected() : true,
+            serverAnswers: ws.serverAnswersWhileDown?.() === true, catchingUp: catchUp.active,
             ready: hostStart.ready(),
             boot: hostStart.status().bootPhase,
             sending: pendingSubmissions.size > 0, stopping: ownStopPress(workState, liveCardRecords) });
@@ -3442,6 +3444,7 @@ export function createChatInstance({
         if (leaving) { outageAway = [...outageAway || [], ...unconfirmed.written()]; return; }
         showOutage();
     });
+    onWs(SERVER_ANSWERS_EVENT, () => syncChatStatus());
     function showOutage(doubted) {
         unconfirmed.unsettle(doubted);
         mainWaiting?.setConnected(false);

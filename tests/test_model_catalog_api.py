@@ -441,3 +441,20 @@ def test_model_catalog_reports_a_bad_extra_ca_bundle_instead_of_a_bare_500(monke
     assert [item["value"] for item in payload["items"]] == ["engine-model"]
     trust = [row for row in payload["errors"] if row.get("provider_id") == "extra_ca_bundle"]
     assert trust and "not readable" in trust[0]["error"] and trust[0]["stage"] == "trust"
+
+
+@pytest.mark.parametrize("program", [None, {"path": "/vendor/program", "version": "2.1.319"}, {"path": "/vendor/program", "version": None}])
+def test_catalog_producer_survives_flattening_without_borrowing_a_version(account_engine, program):
+    gateway, accounts = account_engine
+    for account in accounts:
+        if account["catalog"]:
+            account["catalog"]["sourceProgram"] = program
+    payload = model_catalog_api._subscription_model_catalog("codex")
+    assert payload["items"]
+    assert all("sourceProgram" not in item for item in payload["items"])
+    assert all("credentialHarness" not in item for item in payload["items"])
+    assert payload["model_sources"][0]["credentialHarness"] == "codex"
+    accounts[0]["catalog"]["models"] = []
+    payload = model_catalog_api._subscription_model_catalog("codex", "a")
+    assert payload["items"] == []
+    assert payload["account_catalogs"][0]["accounts"][0]["catalog"]["sourceProgram"] == program

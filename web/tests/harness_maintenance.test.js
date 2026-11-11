@@ -10,17 +10,16 @@ import {
     harnessMaintenanceOperation, cancelHarnessMaintenance,
 } from '../modules/api_client.js';
 
+const allowed = { available: true, reason: null, commands: [{kind: 'exec', command: '/vendor/program', args: ['update']}] };
 const entry = (extra = {}) => ({
-    harness: 'fixture', maintainable: true, canCheckLatest: true, targets: ['latest', 'version', 'previous', 'baseline'],
-    selection: { kind: 'managed', binary: '/managed/program', version: '2.0.0' },
-    installed: { version: '2.0.0', binary: '/managed/program', proved: true },
-    releaseTested: { version: '1.0.0', verification: 'deterministic_only' },
-    available: null, previous: { version: '1.8.0', operationId: 'previous-op' },
-    operation: null, ...extra,
+    harness: 'fixture', actions: { install: allowed, update: allowed, exactVersion: allowed },
+    selection: { path: '/vendor/program', realPath: '/vendor/program', version: '2.0.0', versionOutput: '2.0.0', overrideEnv: null, overrideValue: null },
+    newest: {status: 'not_read', source: null}, updateAvailable: 'cannot_tell', releaseNotesUrl: null,
+    observedAt: '2026-10-01T12:00:00Z', operation: null, ...extra,
 });
 const operation = (extra = {}) => ({
     id: 'operation-1', harness: 'fixture', state: 'running', phase: 'installing',
-    target: { kind: 'latest', version: '3.0.0' }, mutation: 'unknown',
+    target: { kind: 'latest', version: null }, mutation: 'unknown', outcome: 'unknown',
     termination: 'not_applicable', ...extra,
 });
 const deferred = () => {
@@ -42,39 +41,32 @@ function setup(overrides = {}) {
     return { api, calls, intents, controller };
 }
 
-test('selected version and release baseline stay independent, including external selection', () => {
-    assert.equal(maintenanceVersionLine(entry()), 'Program 2.0.0 · Managed · Latest not checked');
-    const external = entry({ selection: { kind: 'override', binary: '/custom/bin', overrideEnv: 'CUSTOM_BIN' } });
-    assert.match(maintenanceVersionLine(external), /version unknown · External install/);
-    assert.doesNotMatch(maintenanceVersionLine(external), /2\.0\.0|1\.0\.0/);
-    assert.match(maintenanceVersionLine({ ...external, selection: { ...external.selection, version: '4.0.0' } }), /Program 4\.0\.0/);
-    assert.match(maintenanceVersionLine(entry(), { unknownCurrent: true }), /version unknown/);
-    assert.match(maintenanceVersionLine(entry({ selection: { kind: 'managed', version: null } })), /version unknown/,
-        'a failed selected-program probe cannot borrow the managed package version');
-    assert.match(maintenanceVersionLine(entry(), { inspectionError: 'offline' }), /Last known/);
-    assert.match(harnessMaintenanceMarkup(entry()), /Bundled baseline<\/dt><dd>1\.0\.0/);
-    // A program that is not installed has no version to name and is installed, not updated (typed kind, no words guessed).
-    const missing = entry({ selection: { kind: 'missing', binary: null, version: null }, targets: ['latest'] });
-    assert.equal(maintenanceVersionLine(missing), 'Not installed · Latest not checked');
-    assert.match(harnessMaintenanceMarkup(missing), /data-maintenance-action="latest"[^>]*>Install</);
-    assert.doesNotMatch(harnessMaintenanceMarkup(missing), />Update</);
-    assert.equal(maintenanceOperationLine({ state: 'failed' }, { missing: true }), 'Install failed');
-    assert.equal(maintenanceOperationLine({ state: 'failed' }), 'Update failed');
+test('selected version is the answering program, including overrides and absence', () => {
+    assert.equal(maintenanceVersionLine(entry()), 'Program 2.0.0');
+    const unknown = entry({selection: {path: '/custom/bin', version: null}});
+    assert.equal(maintenanceVersionLine(unknown), 'Program version unknown');
+    assert.match(maintenanceVersionLine(entry(), {unknownCurrent: true}), /version unknown/);
+    assert.match(maintenanceVersionLine(entry(), {inspectionError: 'offline'}), /Last known/);
+    const missing = entry({selection: {path: null, version: null}});
+    assert.equal(maintenanceVersionLine(missing), 'Not installed');
+    assert.match(harnessMaintenanceMarkup(missing), /action="latest"[^>]*>Install</);
+    assert.equal(maintenanceOperationLine({state: 'failed'}, {missing: true}), 'Install failed');
 });
 
-test('engine facts alone determine buttons for all harnesses and unknown future ones', () => {
+test('engine verdict and actions determine buttons for every program', () => {
     for (const harness of ['codex', 'claude', 'cursor', 'agy', 'future-harness']) {
-        const html = harnessMaintenanceMarkup(entry({ harness, canCheckLatest: false, targets: ['latest'] }));
-        assert.match(html, /data-maintenance-action="latest"/);
-        assert.match(html, />Check version</);
-        assert.doesNotMatch(html, />Check latest</);
-        assert.doesNotMatch(html, /data-maintenance-action="(previous|version|baseline)"/);
+        for (const updateAvailable of ['yes', 'no', 'cannot_tell']) {
+            const html = harnessMaintenanceMarkup(entry({harness, updateAvailable,
+                newest: {status: 'available', version: '1.0.0'}}));
+            assert.equal(/action="latest"/.test(html), updateAvailable !== 'no', 'no host version ordering');
+            assert.match(html, />Check latest</);
+            assert.match(html, updateAvailable === 'no' ? /Up to date/ : updateAvailable === 'yes' ? /1.0.0 available/ : /Latest unknown/);
+            assert.doesNotMatch(html, /Managed|External install|Bundled baseline|Release verification|Install exact version|Install release version/);
+        }
+        const html = harnessMaintenanceMarkup(entry({harness, actions: {update: {available: false, reason: 'Clear the override first.', commands: []}}}));
+        assert.match(html, /Clear the override first/);
+        assert.doesNotMatch(html, /action="latest"/);
     }
-    const unavailable = harnessMaintenanceMarkup(entry({ maintainable: false, remedy: 'Use the selected external installer.' }));
-    assert.match(unavailable, /Use the selected external installer/);
-    assert.doesNotMatch(unavailable, /data-maintenance-action="(latest|previous|version|baseline)"/);
-    const noHistory = harnessMaintenanceMarkup(entry({ previous: null, releaseTested: { version: null } }));
-    assert.doesNotMatch(noHistory, /data-maintenance-action="(previous|baseline)"/);
 });
 
 test('one maintenance host per family, independent of the account count', () => {
@@ -91,15 +83,15 @@ test('one maintenance host per family, independent of the account count', () => 
 });
 
 test('version details and failure/progress text are escaped, successful no-change is not called updated', () => {
-    const html = harnessMaintenanceMarkup(entry({ selection: { kind: 'path', binary: '<img onerror=bad>' } }), {
+    const html = harnessMaintenanceMarkup(entry({ selection: { path: '<img onerror=bad>' } }), {
         operation: operation({ problem: { message: '<script>bad()</script>' }, progress: ['<b>verifying</b>'] }),
     });
     assert.doesNotMatch(html, /<script>|<img |<b>/);
     assert.match(html, /&lt;script&gt;bad/);
     assert.match(html, /&lt;b&gt;verifying/);
     assert.equal(maintenanceOperationLine(operation({ state: 'succeeded', target: { kind: 'latest', version: null },
-        mutation: 'applied', after: { version: '2.0.0', selected: true, proved: true } })),
-    'Operation completed · Version 2.0.0');
+        mutation: 'applied', outcome: 'not_changed', after: { version: '2.0.0' } })),
+    'Nothing changed');
 });
 
 test('named API helpers preserve keys, exact target and typed error receipt', async () => {
@@ -136,14 +128,14 @@ test('old/unreachable engine has only inspection retry and never a legacy instal
     assert.doesNotMatch(harnessMaintenanceMarkup(null, { inspectionError: controller.view('fixture').inventoryError }), /action="latest"/);
 });
 
-test('native updater inspection never pretends it can check latest', async () => {
+test('explicit inspection asks newest independently of update capability', async () => {
     const queries = [];
     const { controller } = setup({ harnessMaintenanceInventory: async (query) => {
         queries.push(query);
-        return { harnesses: [entry({ canCheckLatest: false, targets: ['latest'] })] };
+        return { harnesses: [entry()] };
     } });
     await controller.refresh(); await controller.act('fixture', 'inspect');
-    assert.deepEqual(queries[1], { harness: 'fixture', fresh: true, checkLatest: false });
+    assert.deepEqual(queries[1], { harness: 'fixture', fresh: true, checkLatest: true });
 });
 
 test('HTTP clients without secure-context randomUUID can still create a retained request key', async () => {
@@ -202,7 +194,7 @@ test('lost POST reply retains exact key/body through remount and ignores unrelat
 test('a fresh view rejoins inventory operation and does not submit work', async () => {
     const { controller, calls } = setup({ harnessMaintenanceInventory: async () => ({ harnesses: [entry({ operation: operation() })] }) });
     await controller.refresh(); await flush();
-    assert.equal(calls.filter(([kind]) => kind === 'read').length, 1);
+    assert.equal(calls.filter(([kind]) => kind === 'read').length, 0, 'inventory already has the full receipt');
     assert.equal(calls.filter(([kind]) => kind === 'start').length, 0);
     assert.equal(controller.view('fixture').operation.phase, 'installing');
 });
@@ -210,8 +202,8 @@ test('a fresh view rejoins inventory operation and does not submit work', async 
 test('historical unknown effect keeps a newer inspected version and its warning', async () => {
     const terminal = operation({ state: 'failed', phase: 'settled', mutation: 'unknown',
         termination: 'confirmed', finishedAt: '2026-10-09T12:00:00Z' });
-    const row = entry({ selection: { kind: 'managed', version: '3.1.0' }, observedAt: '2026-10-09T12:01:00Z',
-        operation: { id: terminal.id, state: terminal.state, phase: terminal.phase, finishedAt: terminal.finishedAt } });
+    const row = entry({ selection: { path: '/vendor/program', version: '3.1.0' }, observedAt: '2026-10-09T12:01:00Z',
+        operation: terminal });
     let inspections = 0;
     const { controller, calls } = setup({
         harnessMaintenanceInventory: async () => { inspections++; return { harnesses: [row] }; },
@@ -242,8 +234,8 @@ test('historical unknown effect cannot borrow stale or absent version evidence',
     ]) {
         const terminal = operation({ state: 'interrupted', phase: 'settled', mutation: 'unknown',
             termination: 'confirmed', finishedAt });
-        const row = entry({ observedAt, selection: { kind: 'managed', version },
-            operation: { id: terminal.id, state: terminal.state, phase: terminal.phase, finishedAt } });
+        const row = entry({ observedAt, selection: { path: '/vendor/program', version },
+            operation: terminal });
         const { controller } = setup({ harnessMaintenanceInventory: async () => ({ harnesses: [row] }),
             harnessMaintenanceOperation: async () => terminal });
         await controller.refresh(); await flush();
@@ -257,8 +249,8 @@ test('historical unknown effect cannot borrow stale or absent version evidence',
 test('fresh terminal version observation does not release uncertain operation custody', async () => {
     const terminal = operation({ state: 'cancelled', phase: 'settled', mutation: 'unknown',
         termination: 'unconfirmed', finishedAt: '2026-10-09T12:00:00Z' });
-    const row = entry({ observedAt: '2026-10-09T12:01:00Z', selection: { kind: 'managed', version: '3.1.0' },
-        operation: { id: terminal.id, state: terminal.state, phase: terminal.phase, finishedAt: terminal.finishedAt } });
+    const row = entry({ observedAt: '2026-10-09T12:01:00Z', selection: { path: '/vendor/program', version: '3.1.0' },
+        operation: terminal });
     const { controller } = setup({ harnessMaintenanceInventory: async () => ({ harnesses: [row] }),
         harnessMaintenanceOperation: async () => terminal });
     await controller.refresh(); await flush();
@@ -268,7 +260,7 @@ test('fresh terminal version observation does not release uncertain operation cu
     const html = harnessMaintenanceMarkup(row, view);
     assert.match(html, /Installer may still be running/);
     assert.match(html, /data-maintenance-action="cancel"/);
-    assert.doesNotMatch(html, /data-maintenance-action="latest"/);
+    assert.match(html, /data-maintenance-action="latest" disabled/);
 });
 
 test('newer timestamps cannot unmask an in-flight install', async () => {
@@ -319,7 +311,7 @@ test('cancel acknowledgement is not settlement or termination proof', async () =
     const unconfirmed = operation({ state: 'cancelled', termination: 'unconfirmed' });
     assert.equal(maintenanceOperationPending(unconfirmed), true);
     assert.match(harnessMaintenanceMarkup(entry(), { operation: unconfirmed }), /Installer may still be running/);
-    assert.doesNotMatch(harnessMaintenanceMarkup(entry(), { operation: unconfirmed }), /action="latest"/);
+    assert.match(harnessMaintenanceMarkup(entry(), { operation: unconfirmed }), /action="latest" disabled/);
     assert.equal(maintenanceOperationPending({ ...unconfirmed, termination: 'confirmed' }), false);
 });
 
@@ -338,10 +330,10 @@ test('partial failure hides old version until fresh inventory, retains result an
     assert.match(maintenanceVersionLine(controller.view('fixture').entry, controller.view('fixture')), /version unknown/);
     assert.equal(settles, 1);
     inspect.resolve({ harnesses: [entry({ observedAt: '2026-10-09T12:01:00Z',
-        selection: { kind: 'managed', version: '2.5.0' }, installed: { version: '2.5.0', proved: true } })] });
+        selection: { path: '/vendor/program', version: '2.5.0' } })] });
     await flush();
     assert.equal(controller.view('fixture').unknownCurrent, false);
-    assert.equal(controller.view('fixture').entry.installed.version, '2.5.0');
+    assert.equal(controller.view('fixture').entry.selection.version, '2.5.0');
     assert.equal(controller.view('fixture').operation.state, 'failed');
 });
 
@@ -357,28 +349,50 @@ test('an old running poll cannot undo a confirmed cancellation', async () => {
     assert.equal(controller.view('fixture').cancelling, false);
 });
 
+test('an old inventory cannot erase a terminal receipt whose termination is still unconfirmed', async () => {
+    const stale = deferred();
+    let reads = 0, settled = 0;
+    const failed = operation({state: 'failed', phase: 'settled', termination: 'unconfirmed', mutation: 'unknown'});
+    const {api} = setup({harnessMaintenanceInventory: async () => ++reads === 2 ? stale.promise
+        : {harnesses: [entry({operation: reads > 2 ? failed : null})]}, harnessMaintenanceOperation: async () => failed});
+    const controller = createHarnessMaintenanceController({api, intents: new Map(), onSettled: () => settled++});
+    await controller.refresh(); await controller.start('fixture', {kind: 'latest'});
+    const read = controller.refresh(); await flush();
+    await controller.readOperation('fixture');
+    stale.resolve({harnesses: [entry({operation: operation()})]}); await read; await flush();
+    assert.equal(controller.view('fixture').operation.state, 'failed');
+    assert.equal(controller.view('fixture').operation.termination, 'unconfirmed');
+    assert.equal(settled, 0);
+});
+
 test('an inspection begun before update cannot restore the old current version', async () => {
     let reads = 0;
     const stale = deferred();
     const { controller } = setup({ harnessMaintenanceInventory: async () => {
         reads++;
         if (reads === 2) return stale.promise;
-        return { harnesses: [entry({ installed: { version: reads > 2 ? '3.0.0' : '2.0.0', proved: true } })] };
+        return { harnesses: [entry({ selection: { path: '/vendor/program', version: reads > 2 ? '3.0.0' : '2.0.0' } })] };
     } });
     await controller.refresh();
     const read = controller.refresh(); await flush();
     await controller.start('fixture', { kind: 'latest' });
     stale.resolve({ harnesses: [entry()] }); await read; await flush();
-    assert.equal(controller.view('fixture').entry.installed.version, '3.0.0');
+    assert.equal(controller.view('fixture').entry.selection.version, '3.0.0');
     assert.equal(controller.view('fixture').unknownCurrent, true, 'active replacement still stays unknown');
 });
 
-test('exact-version input uses shared dialog and typed request', async () => {
-    const { api, calls } = setup();
-    const controller = createHarnessMaintenanceController({ api, intents: new Map(), newKey: () => 'exact-key',
-        dialog: async (options) => { assert.equal(options.input, true); return { confirmed: true, value: ' 1.7.0 ' }; } });
-    await controller.refresh(); await controller.act('fixture', 'version');
-    assert.deepEqual(calls.find(([kind]) => kind === 'start')[1], { harness: 'fixture', target: { kind: 'version', version: '1.7.0' } });
+test('Return uses only the changed receipt before.version and the declared exact action', async () => {
+    const receipt = operation({state: 'succeeded', outcome: 'changed', mutation: 'applied', before: {version: '1.7.0'}});
+    const {api, calls} = setup({harnessMaintenanceInventory: async () => ({harnesses: [entry({operation: receipt})]}),
+        harnessMaintenanceOperation: async () => receipt});
+    const controller = createHarnessMaintenanceController({api, intents: new Map()});
+    await controller.refresh(); await flush(); await controller.act('fixture', 'return');
+    assert.deepEqual(calls.find(([kind]) => kind === 'start')[1], {harness: 'fixture', target: {kind: 'version', version: '1.7.0'}});
+    assert.match(harnessMaintenanceMarkup(entry({operation: receipt})), /Return to 1.7.0/);
+    for (const outcome of ['not_changed', 'changed_elsewhere', 'unknown']) {
+        assert.doesNotMatch(harnessMaintenanceMarkup(entry({operation: {...receipt, outcome}})), /Return to/);
+    }
+    assert.doesNotMatch(harnessMaintenanceMarkup(entry({operation: receipt, actions: {exactVersion: {available: false}}})), /Return to/);
 });
 
 test('disposed view retains late acceptance without rendering or refreshing unrelated state', async () => {
@@ -393,41 +407,20 @@ test('disposed view retains late acceptance without rendering or refreshing unre
 });
 
 
-function preparationError(status = 409) {
-    return Object.assign(new Error('Environment preparation complete; CLI update not started. Use Restart Claudexor in Accounts, then repeat Update.'), {
-        status, body: { error: { code: 'maintenance_restart_required', context: {
-            acceptance: 'not_submitted', scope: 'this_attempt', preparation: 'ready', restartRequired: true,
+function acquisitionError(status = 409) {
+    return Object.assign(new Error('Could not acquire the engine'), {
+        status, body: { error: { code: 'daemon_spawn_failed', context: {
+            acceptance: 'not_submitted', scope: 'this_attempt',
         } } },
     });
 }
-
-test('preparation-only result enables a later explicit Update and never claims an operation or unknown install', async () => {
-    let ready = false;
-    const { controller, calls } = setup({ startHarnessMaintenance: async () => {
-        if (!ready) throw preparationError();
-        return operation();
-    } });
-    await controller.refresh();
-    await controller.start('fixture', { kind: 'latest' });
-    const view = controller.view('fixture');
-    assert.equal(view.request, null);
-    assert.equal(view.operation, null);
-    assert.notEqual(view.unknownCurrent, true);
-    assert.match(harnessMaintenanceMarkup(entry(), view), /preparation complete.*Use Restart Claudexor in Accounts/);
-    assert.match(harnessMaintenanceMarkup(entry(), view), />Update</);
-    assert.doesNotMatch(harnessMaintenanceMarkup(entry(), view), /Cancel update|Operation completed|acceptance unconfirmed/);
-    assert.equal(calls.filter(([kind]) => kind === 'read' || kind === 'cancel').length, 0);
-    ready = true;
-    await controller.start('fixture', { kind: 'latest' });
-    assert.equal(controller.view('fixture').operation.id, 'operation-1');
-});
 
 test('a local pre-submit response cannot clear an earlier lost POST or change its key/body', async () => {
     const sent = [];
     const { controller, intents, api } = setup({ startHarnessMaintenance: async (body, key) => {
         sent.push({ body, key });
         if (sent.length === 1) throw new Error('Lost POST');
-        if (sent.length === 2) throw preparationError();
+        if (sent.length === 2) throw acquisitionError();
         return operation();
     } });
     await controller.refresh();
@@ -444,7 +437,7 @@ test('a local pre-submit response cannot clear an earlier lost POST or change it
 });
 
 test('a host-observed pre-submit transport failure is not unknown acceptance on a first press', async () => {
-    const { controller } = setup({ startHarnessMaintenance: async () => { throw preparationError(503); } });
+    const { controller } = setup({ startHarnessMaintenance: async () => { throw acquisitionError(503); } });
     await controller.refresh();
     await controller.start('fixture', { kind: 'latest' });
     assert.equal(controller.view('fixture').request, null);
@@ -482,36 +475,23 @@ for (const code of ['daemon_spawn_failed', 'daemon_starting', 'foreign_daemon_ho
 // Refined A (owner 21.10): the program row says its state concisely — the operation status, a short cause only where
 // a typed source names it, and this view's own actionable sentence — while the engine's exact text, what an update
 // does and the version facts sit under one Details toggle whose open state the controller keeps across rebuilds.
-test('the state row is concise; exact engine text, the update note and version facts wait under Details', () => {
-    const failed = harnessMaintenanceMarkup(entry(), {
-        operation: operation({ state: 'failed', phase: 'settled', mutation: 'none', termination: 'confirmed',
-            problem: { message: 'the registry did not answer one exact latest version for @openai/codex (npm exit 1)' } }),
-    });
-    const state = failed.slice(failed.indexOf('harness-maintenance-state'), failed.indexOf('harness-maintenance-details"'));
-    assert.match(state, /role="status">Update failed</);
-    assert.doesNotMatch(state, /registry did not answer/, 'the exact engine text is not on the row');
-    assert.doesNotMatch(state, /harness-maintenance-cause/, 'an operation problem has no typed cause to paraphrase');
-    assert.match(state, /<button type="button" class="settings-disclosure ui-hit-area" data-maintenance-details aria-expanded="false" aria-controls="harness-maintenance-details-fixture">Details/);
-    const panel = failed.slice(failed.indexOf('harness-maintenance-details"'));
-    assert.match(panel, /^harness-maintenance-details" id="harness-maintenance-details-fixture" hidden>/);
-    assert.match(panel, /Exact message: <code>the registry did not answer one exact latest version for @openai\/codex \(npm exit 1\)<\/code>/);
-    assert.match(panel, /Program updates replace files in place and may interrupt new starts\./);
-    assert.match(panel, /Bundled baseline<\/dt><dd>1\.0\.0/);
-    assert.match(panel, /Install exact version…/, 'the rarer actions stay under Details');
-    // Only the inventory's problem with the latest version is a typed cause; its exact text still waits under Details.
-    const latest = harnessMaintenanceMarkup(entry({ availableProblem: { message: 'npm view exited 1' } }));
-    assert.match(latest, /<span class="harness-maintenance-cause">Latest version not determined<\/span>/);
-    assert.match(latest, /Exact message: <code>npm view exited 1<\/code>/);
-    // This view's own sentence says what to do next, so it stays on the row.
-    const unconfirmed = harnessMaintenanceMarkup(entry(), { request: { key: 'k', body: {} },
-        operationError: 'Update acceptance unconfirmed: offline. Retry the same request to recover its result.' });
-    const unconfirmedRow = unconfirmed.slice(0, unconfirmed.indexOf('harness-maintenance-details"'));
-    assert.match(unconfirmedRow, /Update acceptance unconfirmed: offline\. Retry the same request/);
-    assert.match(unconfirmedRow, /Retry same request/);
-    // Opened, the panel renders open, and the toggle says so.
-    const open = harnessMaintenanceMarkup(entry(), { expanded: true });
-    assert.match(open, /aria-expanded="true"/);
-    assert.match(open, /id="harness-maintenance-details-fixture">/);
+test('details carry actual commands once, script evidence, limitations and no internal IDs', () => {
+    const receipt = operation({state: 'succeeded', outcome: 'changed', mutation: 'applied', exitCode: 7,
+        commands: [{binary: '/vendor/program', args: ['update'], env: {}, script: {url: 'https://vendor.test/install', size: 123, sha256: 'abcdef'}}],
+        before: {version: '1.0.0'}, after: {version: '2.0.0'},
+        limitations: ['Installer exited 7; the replacement answers its version.'], progress: ['Vendor finished.']});
+    const html = harnessMaintenanceMarkup(entry({operation: receipt, releaseNotesUrl: 'https://vendor.test/notes'}));
+    assert.doesNotMatch(html, /<dt>Ran|operation-1/);
+    for (const text of ['123 bytes', 'abcdef', 'Installer exited 7', 'Vendor finished.', 'Exit 7', 'https://vendor.test/notes']) assert.ok(html.includes(text));
+    assert.match(html, /Updated from 1.0.0/);
+    assert.match(html, /target="_blank" rel="noopener noreferrer" data-skill-external/);
+    assert.doesNotMatch(harnessMaintenanceMarkup(entry()), /Release notes|data-skill-external/);
+    const different = {...receipt, commands: [{binary: '/other/program', args: ['update'], env: {}}]};
+    assert.match(harnessMaintenanceMarkup(entry({operation: different})), /<dt>Ran/);
+    const latest = harnessMaintenanceMarkup(entry({newest: {status: 'unavailable', problem: {message: 'Pointer unreadable'}}}));
+    assert.match(latest, /Latest unknown/);
+    assert.match(latest, /Pointer unreadable/);
+    assert.match(latest, /action="latest"/);
 });
 
 // ---- A current inspection whose reported executable is gone (#2461) ----
@@ -552,7 +532,11 @@ test('a failed fresh inspection stays one dated section fact, through a cached r
     assert.equal(controller.inspectionProblem?.code, 'ENOENT', 'a cached success proves nothing current');
     assert.ok(controller.view('fixture').inventoryError);
     controller.dispose();
+    const before = world.reads.length;
     const remount = createHarnessMaintenanceController({ api: world.api, intents });
+    assert.equal(remount.view('fixture').entry.observedAt, OBSERVED, 'remount keeps the dated last observation without a read');
+    assert.equal(remount.inspectionProblem?.code, 'ENOENT');
+    assert.equal(world.reads.length, before);
     await remount.refresh();
     assert.equal(remount.inspectionProblem?.code, 'ENOENT', 'survives the remount and its first cached read');
     world.failing = false;
@@ -659,10 +643,10 @@ test('the row says Last known with the row\'s own date, and no paragraph or diag
     const view = controller.view('fixture');
     const row = entry({ observedAt: OBSERVED });
     const line = maintenanceVersionLine(row, { inspectionError: view.inventoryError });
-    assert.match(line, /Program 2\.0\.0 · Managed · Latest not checked · Last known /);
+    assert.match(line, /Program 2\.0\.0 · Last known /);
     assert.match(line, /2026/);
     assert.doesNotMatch(line, /T12:00:00Z|2026-11/, 'human-readable, and never the top inventory time');
-    assert.equal(maintenanceVersionLine(entry(), { inspectionError: 'offline' }).endsWith('· Last known'), true);
+    assert.equal(maintenanceVersionLine(entry({observedAt: null}), { inspectionError: 'offline' }).endsWith('· Last known'), true);
     const html = harnessMaintenanceMarkup(row, { inspectionProblem: controller.inspectionProblem, inspectionError: view.inventoryError });
     assert.doesNotMatch(html, /ENOENT|no longer present|Restart|Program inspection unavailable/);
     assert.match(html, /data-maintenance-action="inspect"/, 'the current check stays available');
@@ -696,8 +680,8 @@ test('a retained failed operation after a healthy replacement advises nothing an
     const failed = operation({ state: 'failed', phase: 'settled', mutation: 'unknown', termination: 'unconfirmed',
         finishedAt: '2026-10-09T12:00:00Z', problem: { code: 'ENOENT', message: `spawn ${MISSING} ENOENT`, retryable: false } });
     // The replacement fixture engine answers healthy, its row still pointing at the retained failure.
-    const row = entry({ observedAt: '2026-10-09T12:05:00Z', selection: { kind: 'managed', version: '3.1.0' },
-        operation: { id: failed.id, state: failed.state, phase: failed.phase, finishedAt: failed.finishedAt } });
+    const row = entry({ observedAt: '2026-10-09T12:05:00Z', selection: { path: '/vendor/program', version: '3.1.0' },
+        operation: failed });
     const asked = [], keys = [];
     let settles = 0;
     const api = {
@@ -711,11 +695,12 @@ test('a retained failed operation after a healthy replacement advises nothing an
     const controller = createHarnessMaintenanceController({ api, intents: new Map(), newKey: () => 'same-key', onSettled: () => { settles++; } });
     await controller.refresh();
     await controller.start('fixture', { kind: 'latest' });
-    await controller.readOperation('fixture'); await flush();
+    await controller.readOperation('fixture');
+    await controller.refresh({harness: 'fixture', fresh: true}); await flush();
     assert.deepEqual(keys, ['same-key']);
     const view = controller.view('fixture');
     assert.equal(controller.inspectionProblem, null);
-    assert.equal(settles, 1);
+    assert.equal(settles, 0, 'unconfirmed termination retains custody');
     assert.deepEqual(asked.at(-1), { harness: 'fixture', fresh: true, checkLatest: false }, 'the existing settled read supplies current evidence');
     assert.equal(view.operation.mutation, 'unknown');
     assert.equal(view.operation.termination, 'unconfirmed');
@@ -900,4 +885,54 @@ test('a program read the transport lost is said in owner words; an engine senten
     await engine.controller.refresh({ fresh: true });
     assert.equal(engine.controller.view('fixture').inventoryError, 'Program inspection unavailable: child timed out');
     controller.dispose(); engine.controller.dispose();
+});
+
+test('an external settled inventory receipt refreshes catalogs once; unconfirmed custody waits', async () => {
+    const settled = operation({state: 'succeeded', outcome: 'not_changed', phase: 'settled', mutation: 'none', termination: 'confirmed'});
+    let receipt = {...settled, termination: 'unconfirmed'};
+    let settles = 0;
+    const controller = createHarnessMaintenanceController({intents: new Map(), onSettled: () => settles++, api: {
+        harnessMaintenanceInventory: async () => ({harnesses: [entry({operation: receipt})]}),
+    }});
+    await controller.refresh(); assert.equal(settles, 0);
+    receipt = settled;
+    await controller.refresh(); assert.equal(settles, 1);
+    await controller.refresh(); assert.equal(settles, 1);
+});
+
+for (const prior of ['history', 'pending', 'empty', 'different']) {
+    test(`seven programs: ${prior} receipts cause at most one catalog refresh per inventory`, async () => {
+        let stage = 0;
+        const settled = [];
+        const receipt = (harness, n) => operation({harness, id: `retained-${n}`,
+            state: 'succeeded', termination: 'confirmed', mutation: 'applied'});
+        const rows = () => Array.from({length: 7}, (_, n) => {
+            const harness = `program-${n}`;
+            let op = receipt(harness, n);
+            if (!stage && prior === 'pending') op = {...op, state: 'running'};
+            if (!stage && prior === 'empty') op = null;
+            if (!stage && prior === 'different') op = {...op, id: `older-${n}`};
+            return entry({harness, operation: op});
+        });
+        const controller = createHarnessMaintenanceController({intents: new Map(),
+            api: {harnessMaintenanceInventory: async () => ({harnesses: rows()})},
+            onSettled: (...args) => settled.push(args)});
+        await controller.refresh();
+        assert.equal(settled.length, 0, 'first settled receipts are history');
+        stage++;
+        await controller.refresh();
+        assert.equal(settled.length, prior === 'history' ? 0 : 1);
+        await controller.refresh();
+        assert.equal(settled.length, prior === 'history' ? 0 : 1, 'unchanged receipts stay quiet');
+        controller.dispose();
+    });
+}
+
+for (const reason of ['Update the app or connect an engine at version 6.0.0 or newer to install or update harness programs.', 'Engine offline']) test(`inspection refusal is introduced once: ${reason}`, async () => {
+    const {controller} = setup({harnessMaintenanceInventory: async () => { throw new Error(reason); }});
+    await controller.refresh();
+    const message = controller.view('fixture').inventoryError;
+    assert.equal((message.match(/Program inspection unavailable/g) || []).length, 1);
+    assert.equal(message, `Program inspection unavailable: ${reason}`);
+    controller.dispose();
 });

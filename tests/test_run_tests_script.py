@@ -49,10 +49,11 @@ def standalone_budget(monkeypatch, tmp_path):
     return tmp_path / "slots"
 
 
-def _item(nodeid, *, serial):
+def _item(nodeid, *, serial, parent=None):
     """A collected item; ``serial`` is None (no mark), "" (a bare mark) or the resource the mark names."""
     markers = [] if serial is None else [types.SimpleNamespace(name="serial", args=(serial,) if serial else ())]
-    item = types.SimpleNamespace(nodeid=nodeid, stash={})
+    scope = parent or nodeid.split("[", 1)[0].rsplit("::", 1)[0]
+    item = types.SimpleNamespace(nodeid=nodeid, parent=types.SimpleNamespace(nodeid=scope), stash={})
     item.get_closest_marker = lambda name: next((m for m in markers if m.name == name), None)
     return item
 
@@ -476,6 +477,14 @@ def test_lane_groups_pin_resources_and_keep_other_files_whole(run_tests, monkeyp
                                                             "tests/test_s.py"]
     assert [item.nodeid for item in items[-3:]] == ["tests/test_x.py::test_alone", "tests/test_t.py::test_one",
                                                     "tests/test_c.py::TestBox::test_one"]
+    # Parameter text is not a collector scope, even when it contains the node separator.
+    for scope in ("tests/test_a.py", "tests/test_a.py::TestBox"):
+        parameter_items = [_item(f"{scope}::test_case[{value}]", serial=None, parent=scope)
+                           for value in ("x@y", "x::y", "x@y::z")]
+        original = [item.nodeid for item in parameter_items]
+        conftest._pin_lane_groups(parameter_items, _config())
+        assert [_group(item) for item in parameter_items] == [scope] * 3
+        assert [item.nodeid for item in parameter_items] == original
     # The controller reads the table once and hands every worker that reading: a table a neighbour's session
     # rewrote between two workers' starts cannot sort them into two orders. A plain `-n` run hands nothing.
     system = ci_verdicts.platform_name(run_tests.sys.platform)
@@ -539,8 +548,12 @@ def test_a_real_xdist_pass_runs_a_resources_tests_in_its_group_on_one_worker(tmp
             "        request.node.nodeid, os.environ['PYTEST_XDIST_WORKER'],\n"
             "        request.config.workerinput['lane_group_seconds']]), encoding='utf-8')\n\n\n"
             f"@pytest.mark.serial('port')\ndef test_shared(request):\n    note(request, {name + '-shared'!r})\n\n\n"
-            f"@pytest.mark.parametrize('who', ['x@y'])\ndef test_free(request, who):\n"
-            f"    note(request, {name + '-free'!r})\n", encoding="utf-8")
+            "@pytest.mark.parametrize('who', ['x@y', 'x::y', 'x@y::z'])\ndef test_free(request, who):\n"
+            f"    note(request, {name + '-free-'!r} + who.replace('::', '-').replace('@', '-at-'))\n\n"
+            "class TestBox:\n"
+            "    @pytest.mark.parametrize('who', ['x@y', 'x::y', 'x@y::z'])\n"
+            "    def test_free(self, request, who):\n"
+            f"        note(request, {name + '-class-'!r} + who.replace('::', '-').replace('@', '-at-'))\n", encoding="utf-8")
     env = {**isolated_environment(owner, REPO), "OUROBOROS_TEST_TEMP_ROOT": str(owner), NESTED_WORKERS_ENV: "2",
            TEST_DURATIONS_ENV: str(tmp_path / "durations.json")}
     run = subprocess.run([sys.executable, "-m", "pytest", "-p", "tests.conftest", "--rootdir", str(suite), "--confcutdir",
@@ -551,14 +564,19 @@ def test_a_real_xdist_pass_runs_a_resources_tests_in_its_group_on_one_worker(tmp
     reported = [ran.pop(name) for name in sorted(ran) if name.startswith("reported-")]
     assert len(reported) == 2 and reported[0] == reported[1], "two workers reported two collections"
     # Longest group first: the resource's (its two files' 5010 ms), then b's (5000), then a's (10).
-    assert reported[0] == ["tests/test_a.py::test_shared@serial:port", "tests/test_b.py::test_shared@serial:port",
-                           "tests/test_b.py::test_free[x@y]@tests/test_b.py",
-                           "tests/test_a.py::test_free[x@y]@tests/test_a.py"]
-    assert {name: row[0] for name, row in ran.items()} == {
-        "a-shared": "tests/test_a.py::test_shared", "b-shared": "tests/test_b.py::test_shared",
-        "a-free": "tests/test_a.py::test_free[x@y]", "b-free": "tests/test_b.py::test_free[x@y]"}
+    expected = {f"{name}-shared": f"tests/test_{name}.py::test_shared" for name in ("a", "b")}
+    collection = [node + "@serial:port" for node in expected.values()]
+    for name in ("b", "a"):
+        for kind, suffix in (("free", ""), ("class", "::TestBox")):
+            scope = f"tests/test_{name}.py{suffix}"
+            for value in ("x@y", "x::y", "x@y::z"):
+                plain = f"{scope}::test_free[{value}]"
+                collection.append(f"{plain}@{scope}")
+                expected[f"{name}-{kind}-" + value.replace("::", "-").replace("@", "-at-")] = plain
+    assert reported[0] == collection
+    assert {name: row[0] for name, row in ran.items()} == expected
     assert ran["a-shared"][1] == ran["b-shared"][1], "one resource's tests ran on two workers"
-    assert [row[2] for row in ran.values()] == [seconds] * 4
+    assert [row[2] for row in ran.values()] == [seconds] * 14
 
 
 def test_the_documented_command_is_the_script():

@@ -1,6 +1,7 @@
 """Reusable imports and explicitly declared catalog inputs across reload/boot."""
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
 import subprocess
@@ -30,6 +31,12 @@ def test_import_tree_reused_and_invalidated_by_code_and_dependencies(tmp_path, m
 
     first = reload()
     assert len(copies) == 1
+    assert first.name.startswith("sha256-") and len(first.name) == 71
+    # An empty trusted domain still requires the checked-byte identity variant.
+    from ouroboros import deployment_policy
+    with monkeypatch.context() as trusted:
+        trusted.setattr(deployment_policy, "trusted_extensions", lambda: {})
+        assert staging.extension_import_identity(skill) != first.name
     loader.unload_extension("reuse")  # a fresh process starts with empty registries too
     copies.clear()
     assert reload() == first
@@ -66,6 +73,43 @@ def test_shared_tree_sweep_requires_no_current_hash_and_dead_owners(tmp_path, mo
     assert tree.exists()  # retain the current payload across boots
     staging._sweep_stale_extension_imports(drive, skill.name)
     assert not tree.exists()
+
+
+def test_trees_under_the_earlier_two_digest_name_are_not_reused_and_leave_by_the_existing_sweep(tmp_path, monkeypatch):
+    """Earlier generations' ``sha256-<content>-<runtime>`` trees are never taken for the one-digest name; the sweep
+    keeps each while its payload is current or one of its owners lives, then reclaims it: no migration or reaper."""
+    skill, repo, drive = _prepare_extension(tmp_path, "renamed", "def register(api): pass\n", [])
+    dead = {777001, 777003}  # the earlier server, and the worker that used only the idle tree
+
+    def earlier(runtime: bytes, worker: int) -> pathlib.Path:
+        tree = (skill_state_dir(drive, skill.name) / "__extension_imports"
+                / f"sha256-{skill.content_hash}-{hashlib.sha256(runtime).hexdigest()}")
+        staging._copy_extension_tree(skill, tree)  # the unchanged publisher, under the earlier name
+        complete = json.loads((tree / "complete.json").read_text(encoding="utf-8"))
+        (tree / "complete.json").write_text(json.dumps({**complete, "owner_pid": 777001}), encoding="utf-8")
+        (tree / "owners").mkdir()
+        (tree / "owners" / str(worker)).touch()
+        return tree
+
+    held, idle = earlier(b"an earlier runtime", 777002), earlier(b"an older runtime", 777003)
+    monkeypatch.setattr("ouroboros.platform_layer.pid_is_alive", lambda pid: pid not in dead)
+    copies, copytree = [], staging.shutil.copytree
+    monkeypatch.setattr(staging.shutil, "copytree", lambda *a, **kw: (copies.append(a), copytree(*a, **kw))[1])
+
+    def reload():
+        assert loader.reload_all(drive, lambda: {}, repo_path=str(repo)) == {"renamed": None}
+        return pathlib.Path(loader._extensions["renamed"].import_root)
+
+    current = reload()
+    assert current.name == staging.extension_import_identity(skill) and len(copies) == 1  # neither was reused
+    assert len(held.name) - len(current.name) == 65 and held.is_dir() and idle.is_dir()  # the payload is current
+    (skill.skill_dir / "plugin.py").write_text("def register(api): return None\n", encoding="utf-8")
+    changed = find_skill(drive, "renamed", repo_path=str(repo))
+    save_review_state(drive, "renamed", SkillReviewState(status="pass", content_hash=changed.content_hash))
+    assert reload() != current and held.is_dir() and not idle.exists()  # only a live owner keeps one now
+    dead.add(777002)
+    reload()
+    assert not held.exists() and current.is_dir()  # nothing holds it; ``current``'s creator (this process) lives
 
 
 def test_catalog_reload_counts_and_declared_input_invalidation(tmp_path, monkeypatch):

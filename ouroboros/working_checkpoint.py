@@ -188,7 +188,7 @@ def _list_working_parts(ctx: Any, parts: Dict[str, bytes]) -> int:
     the earlier listings. A part counts as listed only once a manifest naming it landed, so a
     failed write is written again by the next save. Returns the number of parts written.
     """
-    from ouroboros.observability import call_manifest_path, write_call_manifest, write_part
+    from ouroboros.observability import call_manifest_path, write_call_manifest, write_parts
 
     root, task_id = _root(ctx), str(ctx.task_id)
     attempt = int(getattr(ctx, "task_attempt", None) or 1)
@@ -207,8 +207,7 @@ def _list_working_parts(ctx: Any, parts: Dict[str, bytes]) -> int:
     if not new:
         return 0
     union = dict(listed)
-    for digest, raw in new.items():
-        union[digest] = write_part(root, digest, raw)
+    union.update(write_parts(root, new))
     created_at = getattr(ctx, "_working_parts_created_at", None)
     write_call_manifest(root, task_id=task_id, call_id=call_id, manifest={
         "call_type": WORKING_PARTS_CALL_TYPE, "task_attempt": attempt, "shared_parts": list(union.values()),

@@ -254,7 +254,7 @@ def test_run_shell_list_cmd_works(tmp_path):
     ctx = MagicMock(spec=ToolContext)
     ctx.repo_dir = tmp_path
     ctx.drive_logs.return_value = tmp_path
-    result = _run_shell(ctx, ["echo", "hello"])
+    result = _run_shell(ctx, [sys.executable, "-c", "print('hello')"])
     assert "hello" in result
 
 
