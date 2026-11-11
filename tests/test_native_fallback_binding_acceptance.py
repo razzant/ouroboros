@@ -81,8 +81,9 @@ def test_native_loop_fallback_then_symbolic_return_uses_real_role_account_and_fi
     pins[role] = primary_account
     monkeypatch.setenv(MODEL_ACCOUNTS_KEY, json.dumps(pins))
     monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_args: False)
-    monkeypatch.setattr(loop_transport, "upstream_transport_reachable",
-                        lambda *_args, **_kwargs: pytest.fail("healthy configured routes require no recovery probe"))
+    # The primary's own lost answer takes one upstream observation first; a miss walks the configured routes.
+    monkeypatch.setattr(loop_transport, "upstream_transport_reachable", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", lambda *_args: False)
 
     # Metadata is the only route observation stub. _rebind_context_fit_plan,
     # task_model_binding and every physical preparation/send stay real.
@@ -261,6 +262,9 @@ def test_duplicate_model_slots_keep_their_distinct_native_accounts(main_call, mo
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", f"{MODEL},{MODEL}")
     monkeypatch.setenv(MODEL_ACCOUNTS_KEY, json.dumps({"main": "account-a", "fallback": ["account-b", "account-c"]}))
     monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_args: False)
+    # The primary's own lost answer takes one upstream observation first; a miss walks both configured slots.
+    monkeypatch.setattr(loop_transport, "upstream_transport_reachable", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", lambda *_args: False)
     tools = _loop_tools(ctx, owner)
     gateway.results = [result(outcome="unknown", route=ROUTE), result(outcome="unknown", route=ROUTE_B),
                        _reply(ROUTE_C, {"role": "assistant", "content": "Third account answered."})]

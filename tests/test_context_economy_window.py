@@ -516,6 +516,14 @@ def _native(main_call, monkeypatch, tmp_path, *, task_text="hi", owner_mode="low
     return ctx, gateway, tools, events, plan, windows
 
 
+def _unobserved_upstream(monkeypatch):
+    """A primary's lost answer takes one upstream observation before its configured fallback; here it misses."""
+    from ouroboros import loop_transport
+
+    monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", lambda *_a: False)
+    monkeypatch.setattr(loop_transport, "upstream_transport_reachable", lambda *_a, **_kw: {})
+
+
 def _run(ctx, tools, events, plan):
     from ouroboros import loop
 
@@ -541,8 +549,8 @@ def _answer(route, message):
 @pytest.mark.parametrize("primary,fallback", [("tight", "roomy"), ("roomy", "tight")], ids=["to-larger", "to-smaller"])
 def test_a_fallback_and_its_return_resend_the_shown_history_byte_for_byte_on_the_wire(main_call, monkeypatch, tmp_path,
                                                                                         primary, fallback):
-    """#1728 on the production send. The primary's outcome is unknown; its configured fallback answers on
-    another account and window and calls switch_model back; the primary answers. While each request fits,
+    """#1728 on the production send. The primary's outcome is unknown, its upstream unobserved; its fallback
+    answers on another account and window and calls switch_model back; the primary answers. While each request fits,
     every request the gateway receives repeats the previous one byte for byte -- the leading system items,
     the [SYSTEM NOTICE] with the memory rooms and their floor note, the task, every turn -- and only appends;
     the request-local clock row alone is replaced. A larger window unfolds nothing, and a smaller one that
@@ -555,6 +563,7 @@ def test_a_fallback_and_its_return_resend_the_shown_history_byte_for_byte_on_the
 
     ctx, gateway, tools, events, plan, windows = _native(main_call, monkeypatch, tmp_path,
                                                        view=snapshot_json(syn.actor("main")))
+    _unobserved_upstream(monkeypatch)
     roomy = plan(900_000)
     full = roomy.projected_tokens_with_tools("low", initial_tool_schemas(tools, context_mode="low"))
     width = {"roomy": 900_000, "tight": max(180_000, full + roomy.output_reserve_tokens + 8_000)}
@@ -759,8 +768,8 @@ def test_a_selected_lower_view_with_an_unsent_ones_counts_still_carries_the_show
 def test_an_owner_max_task_in_task_local_low_rebinds_a_fallback_and_its_return_from_low(main_call, monkeypatch, tmp_path,
                                                                                        fallback):
     """#1728 on the production send with the owner's Max: the task already runs task-local Low (an earlier
-    overflow lowered it). The primary's outcome is unknown; its configured fallback answers on another account
-    and calls switch_model back; the primary answers. Both rebinds start from the mode the task shows. On a
+    overflow lowered it). The primary's outcome is unknown, its upstream unobserved; its fallback answers on another
+    account and calls switch_model back; the primary answers. Both rebinds start from the mode the task shows. On a
     window that holds Low every request repeats the previous one byte for byte and Max's books never return;
     on one that cannot hold Low even with my shortest memory, Nano narrows the shown Low view, and the
     primary's roomier window keeps Nano: a route never raises the mode."""
@@ -771,6 +780,7 @@ def test_an_owner_max_task_in_task_local_low_rebinds_a_fallback_and_its_return_f
 
     ctx, gateway, tools, events, plan, windows = _native(main_call, monkeypatch, tmp_path, owner_mode="max",
                                                          view=snapshot_json(syn.actor("main")))
+    _unobserved_upstream(monkeypatch)
     # The primary holds the Low view it shows with room for this scenario's turns. Every request carries the real
     # tool schemas, so the window is measured from them: their growth must never decide what a return re-cuts.
     floor = plan(150_000)
