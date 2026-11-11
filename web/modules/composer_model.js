@@ -251,7 +251,7 @@ export function createModelControl({
     strip.dataset.scroll = 'none';
     el.querySelector('.chat-capsule-body').append(strip);
 
-    // `main` is what Main is now (`/api/state.main_route`), `choice` the room's own (`projects[].model_choice`); the
+    // `main` is what Main is now (the state body's `main_route` field), `choice` the room's own (`projects[].model_choice`); the
     // Main chat's capsule is Main, so it has no choice of its own.
     // `works`, `complete` and `projects` are the last state body's census, for the hint's fact line and Main's sheet.
     const state = { main: null, choice: { ...MAIN_CHOICE }, works: null, complete: false, projects: [], saving: null,
