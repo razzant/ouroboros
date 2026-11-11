@@ -33,8 +33,8 @@ def has_log_sink() -> bool:
     return _log_sink is not None
 
 
-def utc_now_iso() -> str:
-    return _dt.datetime.now(tz=_dt.timezone.utc).isoformat()
+def utc_now_iso(timespec: str = "auto") -> str:
+    return _dt.datetime.now(tz=_dt.timezone.utc).isoformat(timespec=timespec)
 
 
 # Worker processes set OUROBOROS_IN_WORKER=1 before importing the agent stack.

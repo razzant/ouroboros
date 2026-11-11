@@ -210,7 +210,7 @@ def test_subagent_process_uses_one_configured_supervisor_decision(tmp_path, monk
         {"cmd": ["cat", str(data / "settings.json")]},
     )
 
-    assert (result.status, result.code) == (("ok", "OK") if allowed else ("blocked", "SAFETY_VIOLATION"))
+    assert (result.status, result.code) == (("ok", "OK") if allowed else ("blocked", "SAFETY_RETURNED"))
     assert calls == {"safety": 1, "handler": int(allowed)}
 
 
