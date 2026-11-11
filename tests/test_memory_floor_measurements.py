@@ -13,6 +13,32 @@ from ouroboros.context_timing import measured_sections, section_spans
 from tests import _memory_scale_fixture as scale, _memory_view_synthetic as syn
 
 
+@pytest.mark.parametrize("groups", [100, 1000])
+def test_returning_from_global_unread_count_does_not_measure_every_conversation(groups):
+    rooms = [syn.conversation(i, words=3, word_chars=500) for i in range(groups)]
+    for group in rooms:
+        for word in group["rooms"][0]["words"]:
+            word.update(text="Unread question.\n" + "More details. " * 30, author="Ann")
+    snapshot = syn.snapshot(conversations=rooms)
+    bound, calls = groups * 30, 0
+    def price(level):
+        nonlocal calls
+        calls += 1
+        return mf.tokens_of(mv.story_chars(snapshot, level)) + mf.tokens_of(mv.room_chars(snapshot, level))
+    level = mf.fit_memory_view(snapshot, {"margin": bound, "physical": 10**9}, measure=price)
+    measured = calls
+    counted = set(dict(level.addressed)["F6a"])
+    assert "unread" in counted
+    kept = [g["key"] for g in rooms if g["key"] in counted]
+    assert 0 < len(kept) < groups - 5
+    assert kept == [g["key"] for g in rooms[:len(kept)]]  # an unbroken older prefix
+    assert price(level) <= bound
+    next_level = mv.FloorLevel(tuple((s, tuple(i for i in ids if s != "F6a" or i != kept[-1]))
+                                     for s, ids in level.addressed))
+    assert price(next_level) > bound  # the nearest still-counted conversation cannot return
+    assert measured <= 32, f"{groups} conversations needed {measured} complete measurements"
+
+
 def test_a_floor_walk_prices_from_pieces_and_chooses_as_a_drawn_view_would():
     """Owner shape under a zero bound: the walk prices every level from the snapshot's pieces, so no form of the view is
     drawn whole (a piece's text is built to be measured), no piece is made twice, and the level is exactly the one a

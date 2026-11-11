@@ -232,8 +232,51 @@ def swallowed(snapshot, step, ident, selected):
         or step == "F6g" and ident != "last:" + key and ("F6g", "last:" + key) in selected)
 
 
+def _unread_return_prices(snapshot):
+    """The shared unread form hides these local rows in addition to each group's original saving."""
+    cached = snapshot.__dict__.get("_unread_return_prices")
+    if cached is None:
+        from ouroboros.memory_view_conversation_forms import counted_unread_lines
+        from ouroboros.memory_floor import view_tokens
+        index = conversations.source_index(snapshot)
+        cached = {g["key"]: view_tokens("\n".join(counted_unread_lines(g, index[g["key"]])))
+                  for g in snapshot.conversations}
+        object.__setattr__(snapshot, "_unread_return_prices", cached)
+    return cached
+
+
+def _return_counted_prefix(batch, taken, current, target, failed, level, measure):
+    """Locate the fitting nearest prefix after a failed batch, without replaying every conversation.
+
+    The full batch has already failed. Its measured cost supplies the first
+    estimate; subsequent probes bisect the remaining prefix lengths. Every
+    accepted view is measured, and the immediately older prefix is known not to fit.
+    """
+    low, high, shown = 0, len(batch), 0
+    probe = max(1, min(high - 1, int(high * (target - current) / (failed - current))))
+    def move(count):
+        nonlocal shown
+        if count > shown:
+            for pair, _delta in batch[shown:count]:
+                taken.discard(pair)
+        else:
+            for pair, _delta in reversed(batch[count:shown]):
+                taken.add(pair)
+        shown = count
+    while high - low > 1:
+        move(probe)
+        actual = measure(level(taken))
+        if actual <= target:
+            low, current = probe, actual
+        else:
+            high = probe
+        probe = (low + high) // 2
+    move(low)
+    return current
+
+
 def restore(snapshot, table, taken, added, target, current, level, measure):
-    """Probe a stage's affordable prefix together; failed batches replay its single steps.
+    """Probe a stage's affordable prefix together; unread count batches search prefix lengths on failure.
 
     Return order and blocking stay local to a stage. The accumulated price is
     only an estimate: every accepted batch has its complete price checked, and
@@ -242,7 +285,8 @@ def restore(snapshot, table, taken, added, target, current, level, measure):
     if target is None:
         return current
     for _stage, entries in groupby(reversed(added), key=lambda item: table.stages[item[0]]):
-        pending = deque(entries)
+        extra = _unread_return_prices(snapshot) if _stage == "remote_count" and ("F6a", "unread") in taken else {}
+        pending = deque((pair, delta + extra.get(pair[1], 0)) for pair, delta in entries)
         while pending:
             batch, cost = [], 0
             while pending:
@@ -276,7 +320,9 @@ def restore(snapshot, table, taken, added, target, current, level, measure):
                 continue
             for pair, _delta in reversed(batch):
                 taken.add(pair)
-            if len(batch) > 1:
+            if len(batch) > 1 and _stage == "remote_count" and ("F6a", "unread") in taken and current <= target:
+                current = _return_counted_prefix(batch, taken, current, target, actual, level, measure)
+            elif len(batch) > 1:
                 for pair, delta in batch:
                     if current + delta > target:
                         break

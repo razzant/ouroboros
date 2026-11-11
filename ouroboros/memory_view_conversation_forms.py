@@ -282,6 +282,15 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
     return "\n".join(lines)
 
 
+def counted_unread_lines(group, data):
+    """The local unread rows a conversation regains when it leaves the global window count."""
+    lines = [_unread_line(words) for room in group["rooms"] if not room.get("overheard")
+             and (words := data["rooms"][room["room_id"]]["unread"])]
+    if overheard := _overheard_line(group, data):
+        lines.append(group["label"] + ": " + overheard)
+    return lines
+
+
 def _counted_text(groups, owners, aggregate_unread, *, index=None):
     from ouroboros.memory_view import _rooms_line, _row_pointer
     index = index if index is not None else {g["key"]: _sources(g) for g in groups}
@@ -303,10 +312,7 @@ def _counted_text(groups, owners, aggregate_unread, *, index=None):
             f"latest by {author} at {latest['ts']}: {opening}; memory_read(room_id='*')")
     elif unread:
         for group in groups:
-            lines += [_unread_line(words) for room in group["rooms"] if not room.get("overheard")
-                      and (words := sources[room["room_id"]]["unread"])]
-            if overheard := _overheard_line(group, index[group["key"]]):
-                lines.append(group["label"] + ": " + overheard)
+            lines += counted_unread_lines(group, index[group["key"]])
     lines += [_row_pointer(word, "words") if word["id"] in owners else word["line"]
               for room in rooms for word in sources[room["room_id"]]["owner"]]
     return "\n".join(lines)
