@@ -17,7 +17,7 @@ function providerCredentials(settings = {}) {
 }
 
 export function modelWaitRoleLabel(role = '') {
-    // `lead` is a work on a model of its own (its room's, or one the owner gave it): no Settings slot (CONTRACT §5).
+    // `lead` is a work on a model of its own (its room's, or one the owner gave it): no Settings slot (CLIENT_CONTRACT §5).
     const labels = { main: 'Main', light: 'Light', vision: 'Vision', consciousness: 'Consciousness',
         safety: 'Safety Supervisor', deep_review: 'Deep self-review', websearch: 'Web search', lead: 'This work\'s model' };
     if (labels[role]) return labels[role];

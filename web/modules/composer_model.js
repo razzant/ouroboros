@@ -40,7 +40,7 @@ let serial = 0;
 
 /**
  * The models of this room's live works that differ from what the capsule shows, by their short names: the hint's one
- * fact line (CONTRACT §5 `works[].lead`). A work without the fact says nothing, so a server that does not publish it
+ * fact line (CLIENT_CONTRACT §5 `works[].lead`). A work without the fact says nothing, so a server that does not publish it
  * yet shows no line.
  */
 export function modelsRunningElsewhere(works, chatId, shown) {
@@ -56,7 +56,7 @@ export function modelsRunningElsewhere(works, chatId, shown) {
 }
 
 /**
- * What a change of Main does not move, from the state the page already has (CONTRACT §5 `works[].lead`, §3
+ * What a change of Main does not move, from the state the page already has (CLIENT_CONTRACT §5 `works[].lead`, §9
  * `projects[].model_choice`): how many running works follow Main, the works that are not on Main, and the rooms that
  * start new work on their own model. `followers` is null when the census is incomplete: an unknown count is never
  * said as zero. A work on a fallback is one that is not on Main, whatever it left, and never one that will switch.

@@ -50,7 +50,7 @@ const unconfirmedWork = (work) => ({ ...work, activity: 'unknown', transition: '
  * portal's work runs in its Project) and `members` holds every member id; `attempts` is each census row's attempt,
  * so a control opened for one attempt of an episode is not pressed on the next. `main` is Main's route as the body
  * says it (the last one said, when this body does not) and `leads` the model fact of each activity row that
- * publishes one, for a direct turn's card (CONTRACT §5). Only a complete supervisor-ready
+ * publishes one, for a direct turn's card (CLIENT_CONTRACT §5). Only a complete supervisor-ready
  * body read over an open socket proves absence; an incomplete one keeps the works it omitted, unconfirmed. A body
  * without the projection, or a failed read (null), changes nothing.
  */

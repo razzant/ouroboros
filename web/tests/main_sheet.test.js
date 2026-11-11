@@ -1,7 +1,7 @@
 // The Main sheet's lists (composer_model.js; DESIGN "Composer owner controls"): before Main changes the sheet says how
 // many running works follow it and lists what is not on Main (works on other models, rooms with their own), each
-// with its own tick, none ticked beforehand. They are computed from the state the page has (CONTRACT §5
-// `works[].lead`, §3 `projects[].model_choice`); every tick is one act after the Main write, with its own result.
+// with its own tick, none ticked beforehand. They are computed from the state the page has (CLIENT_CONTRACT §5
+// `works[].lead`, §9 `projects[].model_choice`); every tick is one act after the Main write, with its own result.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { APPLIED_WORDS } from '../modules/card_model.js';

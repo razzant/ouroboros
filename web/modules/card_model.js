@@ -1,6 +1,6 @@
 /**
  * A work's model on its card (docs/DESIGN.md "A work's model on its card"): the first fact of the card's meta line,
- * said from the server's published fact (CONTRACT §5: `works[].lead`, and `active_chat_activities[].lead` for a
+ * said from the server's published fact (CLIENT_CONTRACT §5: `works[].lead`, and `active_chat_activities[].lead` for a
  * direct turn). The line itself is rebuilt as one string by chat_activity.js, so the fact stands in a node of its
  * own before it: the rest of the line moves into a wrapper the card's record then writes to, a repaint of the line
  * never touches the fact, and an open popover keeps its anchor. A card whose work publishes no such fact (an older
@@ -9,7 +9,7 @@
  * Where the server offers the work's `model` control the fact is a button. It opens the list of models the
  * composer's Model capsule uses (model_list.js): its Main row is the one way to follow Main, as `Main` is in the
  * capsule's strip, and its facts say so; while the work runs on a fallback its three exits stand above the list:
- * Return, Wait and Keep. Each press is one `POST /api/tasks/{id}/model` (CONTRACT §6) whose answer says when it
+ * Return, Wait and Keep. Each press is one `POST /api/tasks/{id}/model` (CLIENT_CONTRACT §5) whose answer says when it
  * applies; a refusal is said in the popover in the owner's words, and one whose decision the server saved (a 503)
  * offers the same request again. Without the control the fact is plain text: a control is the server's decision and
  * is never guessed here.

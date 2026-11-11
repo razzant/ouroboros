@@ -1,6 +1,6 @@
 // A work's model on its card (card_model.js; DESIGN "A work's model on its card"): the first fact of the card's meta
-// line in a node of its own, said from the server's published fact (CONTRACT §5), pressable only where the server
-// offers the work's `model` control, amber while the work runs on a fallback, and one POST per act (CONTRACT §6).
+// line in a node of its own, said from the server's published fact (CLIENT_CONTRACT §5), pressable only where the server
+// offers the work's `model` control, amber while the work runs on a fallback, and one POST per act (CLIENT_CONTRACT §5).
 // Fixtures are in the contract's shapes; geometry and the real page are the browser lane's.
 import assert from 'node:assert/strict';
 import test from 'node:test';

@@ -5,11 +5,12 @@ fallback by itself is amber until that is resolved; before Main changes, the she
 follow it and lists what is not on Main, each with its own tick and nothing ticked beforehand. 11.11.2026: the amber
 line names where the fallback came from and gives three exits.
 
-One look before the backend lands: the real page, with ``/api/state``, the chat history, the catalog and the two
-writes answered by the test in the shapes of the sprint's contract (§3, §5, §6); the work rows are the server's own
-projection of the census rows, with the published ``lead`` and the ``model`` control added. Nothing here runs both
-ends together. It walks the states at the owner's two pane widths and on a phone, in both themes, and asserts that
-nothing is wider than the screen and that the transcript does not move when the popover opens.
+The real page, with ``/api/state``, the chat history, the catalog and the two writes answered by the test in the
+published shapes (CLIENT_CONTRACT §5 and §9); the work rows are the server's own projection of the census rows,
+with the published ``lead`` and the ``model`` control added. Both ends run together in
+``test_chat_model_wire_browser.py``; this test walks the states one server run cannot hold at once, at the owner's
+two pane widths and on a phone, in both themes, and asserts that nothing is wider than the screen and that the
+transcript does not move when the popover opens.
 """
 from __future__ import annotations
 
@@ -96,7 +97,7 @@ class Stand:
         return next(phase for name, _, phase, _ in self.TASKS if name == task) == "queued"
 
     def task_model(self, task: str, body: dict) -> dict:
-        """CONTRACT §6: one act on a work's model; the answer says when it applies and carries the work's fact."""
+        """CLIENT_CONTRACT §5: one act on a work's model; the answer says when it applies and carries the work's fact."""
         assert body.get("request_id"), body
         act = {key: value for key, value in body.items() if key != "request_id"}
         self.writes.append(("task", task, act))
@@ -116,7 +117,7 @@ class Stand:
         return {"ok": True, "task_id": task, "applied": "at_start" if queued else "next_step", "lead": lead}
 
     def chat_model(self, body: dict) -> dict:
-        """CONTRACT §2: a room's own model, or Main itself; a running follower then has a pending route."""
+        """CLIENT_CONTRACT §9: a room's own model, or Main itself; a running follower then has a pending route."""
         if body.get("project_id"):
             self.writes.append(("room", body["project_id"], {key: value for key, value in body.items() if key != "project_id"}))
             previous, self.room["model_choice"] = self.room["model_choice"], {"kind": "main"}

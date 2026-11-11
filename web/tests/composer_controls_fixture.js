@@ -106,7 +106,7 @@ export function mountPair({ hover = false, reply, win, withBox = false, projectI
             return reply || { ok: true, project_id: projectId, subagents_mode: body.mode, cognition: { subagents_mode: body.mode } };
         },
     } : {};
-    // The endpoint's own answers (CONTRACT §2): a room's saved choice, or Main as written.
+    // The endpoint's own answers (CLIENT_CONTRACT §9): a room's saved choice, or Main as written.
     const modelWriter = model ? {
         saveChatModel: async (body) => {
             posts.push(['/api/owner/chat-model', body]);
