@@ -249,13 +249,18 @@ export const amberNote = (kind) => (kind === 'question' ? tr('work.amber.questio
  * room ('finalize' | 'immediate'); until the host is `ready`, an idle room says its start in the words of the host's
  * `boot` phases (host_starting_status.js). A room still preparing names as its `step` the step its speaking work
  * stands at (a direct turn's start step), said beside the word and dropped before it on a short bar, so nothing in
- * the bar reads as a model call before one is sent.
+ * the bar reads as a model call before one is sent. `serverAnswers` (ws.serverAnswersWhileDown) is said the same way
+ * beside `Reconnecting…`: an observation, never a cause.
  */
 export function roomStatusView(state, {
-    connected = true, catchingUp = false, ready = true, boot = null, sending = false, stopping = '',
+    connected = true, serverAnswers = false, catchingUp = false, ready = true, boot = null, sending = false, stopping = '',
 } = {}) {
     const view = (kind, text, tone, mark, extra = {}) => ({ kind, text, tone, mark, owner: false, amber: '', ...extra });
-    if (!connected) return view('offline', 'Reconnecting…', 'offline', 'ring');
+    if (!connected) {
+        return view('offline', 'Reconnecting…', 'offline', 'ring', serverAnswers ? {
+            step: tr('work.server_answers.step', 'server answers'),
+            title: tr('work.server_answers', 'The server answers, but live updates cannot connect.') } : {});
+    }
     const room = state?.room || IDLE_ROOM;
     const mark = String(room.mark || 'none');
     const turn = { owner: list(room.turn).length > 0, amber: roomAmber(room) };

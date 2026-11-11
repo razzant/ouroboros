@@ -26,7 +26,7 @@ working, and only loading `/` fails.
 - `OUROBOROS_NETWORK_PASSWORD`. The core asks for it only when the visitor is not loopback.
 - Keep the core on its default `127.0.0.1` bind when the proxy runs on the same machine. A proxy on another
   machine must be named in uvicorn's `FORWARDED_ALLOW_IPS`. Otherwise the core ignores its
-  `X-Forwarded-For` and `X-Forwarded-Proto`.
+  `X-Forwarded-For` and `X-Forwarded-Proto`, and refuses Chromium's WebSocket.
 - `OUROBOROS_FILE_BROWSER_DEFAULT`, a directory, if visitors use Files. A visitor who is not loopback gets
   400 from `/api/files/*` without it.
 
@@ -65,8 +65,9 @@ caddy run --config Caddyfile
   `/*` form. The test compares them.
 - `header_up X-Forwarded-For {client_ip}` overwrites what the visitor sent with the peer Caddy saw.
   Do not trust a visitor-supplied forwarding claim; align the core's trusted proxy list with this topology.
-- Caddy forwards `X-Forwarded-Proto: https`, so the core marks its session cookie `Secure`. WebSocket
-  upgrades on `/ws` pass through without extra settings.
+- Caddy passes the browser's `Host` through and forwards `X-Forwarded-Proto: https`, so the core marks its
+  session cookie `Secure` and accepts Chromium's WebSocket, which carries `Origin` alone. Keep both: no
+  `header_up Host`; the core never reads `X-Forwarded-Host`.
 - Access logs go to Caddy's log, one line per request. `log_append` names the upstream that answered, and
   Caddy writes `Cookie` and `Authorization` values as `REDACTED`.
 
