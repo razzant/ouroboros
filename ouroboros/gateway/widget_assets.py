@@ -11,12 +11,15 @@ disconnect would; expiry is noticed when such a response next sends or at anothe
 a timer. The mount's parent may re-establish a route lease under the token its frame already holds (the
 table is ephemeral: a core restart or a missed renewal must not cost the running document); a token ended
 by Stop (revoke), logout or a password change stays ended in this process, within the last MAX_ENDED such
-tokens. Neither kind authenticates any other API.
+tokens. Neither kind authenticates any other API. Publication readiness reads the skill's state on disk, so it
+runs outside the table's lock, which the gate's own requests also take: after it the lease is checked again
+(epoch, admission, Stop, expiry, the same lease), and a late "not ready" ends only the lease it was read for.
 """
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import pathlib
 import re
 import secrets
@@ -67,6 +70,29 @@ class _MintAdmission:
     cancelled: bool = False
 
 
+def _identity(lease: _Lease) -> tuple:
+    """What a lease authorizes apart from its deadline: a renewal keeps it, another mint of the token may not.
+    A route lease follows its tab's live publication, so its minted generation is not part of it."""
+    return (lease.owner, lease.skill, lease.tab_id, lease.kind, lease.drive_root,
+            lease.generation if lease.kind == "files" else "")
+
+
+def _probe(lease: _Lease, follow_live: bool) -> tuple[bool, dict | None]:
+    """Whether the lease's publication is live, read without the table's lock and without touching the table.
+    A file lease pins its own publication (``(True, files)``); a route lease needs its tab's live framed
+    publication, the minted one for a first mint and whichever is live once it holds a token (``follow_live``)."""
+    if lease.kind == "routes":
+        generation = live_widget_route_generation(lease.skill, lease.tab_id)
+        ready = bool(generation and (follow_live or generation == lease.generation)
+                     and widget_publication_ready(lease.skill, generation, lease.drive_root))
+        return ready, None
+    if widget_publication_ready(lease.skill, lease.generation, lease.drive_root):
+        files = live_widget_files(lease.skill, lease.tab_id, lease.generation)
+        if files is not None:
+            return True, files
+    return False, None
+
+
 class WidgetAssetLeases:
     """Ephemeral mount lifecycle; immutable bytes remain owned by the live bundle."""
 
@@ -91,6 +117,11 @@ class WidgetAssetLeases:
             return admission
 
     def password_changed(self, password: str) -> None:
+        # Every request through the gate calls this on its event loop. Only this method writes ``_password``, so an
+        # unchanged epoch is read without the lock; a change still ends every lease under it, and each lease
+        # operation compares its own epoch under the lock again.
+        if self._password == password:
+            return
         with self._lock:
             if self._password != password:
                 for admission in self._admissions.values():
@@ -122,52 +153,63 @@ class WidgetAssetLeases:
         for token in [key for key, lease in self._leases.items() if lease.expires <= now]:
             self._end(token)
 
-    def _files(self, token: str, lease: _Lease):
-        if lease.kind == "files" and widget_publication_ready(lease.skill, lease.generation, lease.drive_root):
-            files = live_widget_files(lease.skill, lease.tab_id, lease.generation)
-            if files is not None:
-                return files
-        self._end(token)
-        return None
-
-    def _routes(self, token: str, lease: _Lease) -> bool:
-        """The tab is still a live framed tab of its skill. A first mint also requires the mount's own
-        publication; a held or re-established lease (any ``token``) follows the tab's live one."""
-        generation = live_widget_route_generation(lease.skill, lease.tab_id)
-        if (lease.kind == "routes" and generation and (token or generation == lease.generation)
-                and widget_publication_ready(lease.skill, generation, lease.drive_root)):
-            return True
-        self._end(token)
-        return False
-
-    def _ready(self, token: str, lease: _Lease) -> bool:
-        return self._routes(token, lease) if lease.kind == "routes" else self._files(token, lease) is not None
+    def _settle(self, token: str, read: _Lease, ready: bool) -> _Lease | None:
+        """After a probe, under the lock: the lease now held for ``token`` when it is still the lease the probe was
+        read for (a renewal since keeps that), else ``None``. Expiry is pruned first. A probe that found the
+        publication gone ends the lease only while the table still holds that very lease: a late answer never
+        ends one minted or re-established for the token meanwhile."""
+        self._prune()
+        current = self._leases.get(token)
+        if current is None or _identity(current) != _identity(read):
+            return None
+        if not ready:
+            if current is read:
+                self._end(token)
+            return None
+        return current
 
     def open(self, owner: str, skill: str, tab_id: str, generation: str, drive_root: pathlib.Path,
              epoch: str, admission: _MintAdmission, kind: str = "files", token: str | None = None):
         """A new lease, or with ``token`` a route lease re-established under the URL its frame already uses:
         the same owner's live lease of that tab is renewed, a lost one is recreated for the tab's current
         publication, and one ended explicitly in this process answers ``GONE``."""
+        if token is not None and kind != "routes":
+            return None
+        same_tab = (owner, skill, tab_id, kind)
         with self._lock:
             if epoch != self._password or admission.cancelled:
                 return None
             self._prune()
-            lease = _Lease(owner, skill, tab_id, generation, drive_root, time.monotonic() + LEASE_TTL_SECONDS, kind)
+            held = None
             if token is not None:
                 if token in self._ended:
                     return GONE
                 held = self._leases.get(token)
-                if held is not None and (held.owner, held.skill, held.tab_id, held.kind) != (owner, skill, tab_id, kind):
+                if held is not None and (held.owner, held.skill, held.tab_id, held.kind) != same_tab:
                     return None
-                if not self._routes(token if held is not None else "-", lease):
-                    return None
-            elif not self._ready("", lease):
+            if held is None and len(self._leases) >= MAX_LEASES:
                 return None
-            if token is None or token not in self._leases:
-                if len(self._leases) >= MAX_LEASES:
-                    return None
-                token = token or secrets.token_urlsafe(32)
-            self._leases[token] = lease
+        lease = _Lease(owner, skill, tab_id, generation, drive_root, 0.0, kind)
+        ready, _ = _probe(lease, follow_live=token is not None)
+        with self._lock:
+            # The probe may have crossed Stop, logout or a password change (one changed back as well: its
+            # admission stays cancelled), an expiry, or another mint of this token.
+            if epoch != self._password or admission.cancelled:
+                return None
+            self._prune()
+            if token is not None and token in self._ended:
+                return GONE
+            current = self._leases.get(token) if token is not None else None
+            if current is not None and (current.owner, current.skill, current.tab_id, current.kind) != same_tab:
+                return None
+            if not ready:
+                if held is not None and current is held:
+                    self._end(token)
+                return None
+            if current is None and len(self._leases) >= MAX_LEASES:
+                return None
+            token = token or secrets.token_urlsafe(32)
+            self._leases[token] = dataclasses.replace(lease, expires=time.monotonic() + LEASE_TTL_SECONDS)
             return self._description(token, kind)
 
     @staticmethod
@@ -182,11 +224,17 @@ class WidgetAssetLeases:
                 return None
             self._prune()
             lease = self._leases.get(token)
-            if lease is None or lease.owner != owner or not self._ready(token, lease):
+            if lease is None or lease.owner != owner:
                 return None
-            self._leases[token] = _Lease(lease.owner, lease.skill, lease.tab_id, lease.generation,
-                                         lease.drive_root, time.monotonic() + LEASE_TTL_SECONDS, lease.kind)
-            return self._description(token, lease.kind)
+        ready, _ = _probe(lease, follow_live=True)
+        with self._lock:
+            if epoch != self._password:
+                return None
+            current = self._settle(token, lease, ready)
+            if current is None:
+                return None
+            self._leases[token] = dataclasses.replace(current, expires=time.monotonic() + LEASE_TTL_SECONDS)
+            return self._description(token, current.kind)
 
     def revoke(self, owner: str, token: str) -> None:
         """Stop ends a well-formed token for good, held or not: a restart or a prune may already have dropped
@@ -205,18 +253,26 @@ class WidgetAssetLeases:
             lease = self._leases.get(token)
             if lease is None or lease.kind != "files":
                 return None
-            files = self._files(token, lease)
-            return files.get(path) if files is not None else None
+        ready, files = _probe(lease, follow_live=False)
+        with self._lock:
+            if self._settle(token, lease, ready) is None:
+                return None
+        return files.get(path)
 
     def route_skill(self, token: str, stream) -> str | None:
         """The skill a route lease reads, with ``stream`` attached so that ending the lease ends it."""
         with self._lock:
             self._prune()
             lease = self._leases.get(token)
-            if lease is None or lease.kind != "routes" or not self._routes(token, lease):
+            if lease is None or lease.kind != "routes":
+                return None
+        ready, _ = _probe(lease, follow_live=True)
+        with self._lock:
+            current = self._settle(token, lease, ready)
+            if current is None:
                 return None
             self._streams.setdefault(token, set()).add(stream)
-            return lease.skill
+            return current.skill
 
     def detach(self, token: str, stream) -> None:
         with self._lock:

@@ -483,7 +483,7 @@ def test_the_widgets_board_scrolls_with_crisp_edges_under_its_plain_band(engine_
         # A dragged card: the band lets the pointer through to the board's top edge, where the engine scrolls a drag
         # upward, and is the window's handle again once the card is dropped.
         through = """dragging => { const card = document.querySelector('#widgets-list .widgets-card');
-            card.classList.toggle('dragging', dragging); const l = document.querySelector('#page-widgets .widgets-scroll');
+            card.toggleAttribute('data-widget-lifted', dragging); const l = document.querySelector('#page-widgets .widgets-scroll');
             return Boolean(document.elementFromPoint(l.getBoundingClientRect().left + 40, 10)?.closest('.widgets-scroll')); }"""
         assert page.evaluate(through, True), 'a drag reaches the board under the band'
         assert not page.evaluate(through, False), 'at rest the band is the handle'

@@ -17,12 +17,12 @@ the same thing sit together: when your diff adds a row, read its neighbours.
 | ↑ | `btn btn-default` | modules/model_roles.js | 1 |
 | ↓ | `btn btn-default` | modules/model_roles.js | 1 |
 | ↓ | `btn btn-default btn-sm` | modules/chat_media.js | 1 |
-| ↕ | `btn btn-ghost btn-sm widgets-card-drag` | modules/widgets.js | 1 |
 | ↻ | `btn btn-default btn-sm` | modules/chat_media.js | 1 |
 | − | `btn btn-default` | modules/document_reader.js | 1 |
 | ⋮ | `btn btn-ghost btn-sm skills-card-menu-trigger` | modules/skill_card_renderer.js | 1 |
 | ⋮ | `btn btn-ghost btn-sm skills-card-menu-trigger` | modules/skill_sources_view.js | 1 |
 | ⋮ | `btn btn-ghost btn-sm skills-card-menu-trigger` | modules/widget_card.js | 1 |
+| ✓ | `skills-menu-item widgets-menu-item` | modules/widget_card.js | 1 |
 | ×1 | `btn btn-default btn-sm` | modules/chat_media.js | 1 |
 | Adapter warnings | `(no class)` | modules/skill_card_renderer.js | 1 |
 | Add account & connect | `btn btn-primary` | modules/harness_login_cards.js | 1 |
@@ -226,6 +226,7 @@ the same thing sit together: when your diff adds a row, read its neighbours.
 | Reset | `btn btn-default` | modules/document_reader.js | 1 |
 | Reset All Data | `btn btn-danger` | modules/settings_ui.js | 1 |
 | Reset to 100% | `btn btn-default btn-sm` | modules/settings_ui.js | 1 |
+| [icon] Resize widget: drag; arrow keys change height | `widgets-card-edge` | modules/widgets.js | 1 |
 | [icon] Resize width: drag or use arrow keys | `widgets-card-resize` | modules/widgets.js | 1 |
 | ▸ Resources | `btn btn-default` | modules/harness_accounts.js | 1 |
 | Restart | `btn btn-default btn-sm` | modules/consciousness_dashboard.js | 1 |

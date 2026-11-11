@@ -1205,7 +1205,7 @@ html[data-layout="docked"] .app-page-header[data-empty] {
 }
 /* While a card is dragged the band lets the pointer through to the board, whose top edge is where the engine scrolls
    a drag upward; at rest the band is the window's handle. */
-:root[data-window-chrome="integrated"][data-layout="docked"] #page-widgets .app-page-header[data-empty]:has(~ .widgets-scroll .widgets-card.dragging) {
+:root[data-window-chrome="integrated"][data-layout="docked"] #page-widgets .app-page-header[data-empty]:has(~ .widgets-scroll .widgets-card[data-widget-lifted]) {
     pointer-events: none;
 }
 
@@ -6991,67 +6991,201 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
     height: var(--masonry-h, auto);
 }
 
+/* One surface per card (docs/DESIGN.md "Widgets board"): the frame lies on the card itself, with no inner box, its
+   bottom corners rounded to the card's; a host-drawn card keeps its own inset. Nothing clips the card, so its edges
+   can reach into the gap beside it rather than cover its content. */
 .widgets-card {
     position: absolute;
     left: 0;
     top: 0;
     width: var(--masonry-w, auto);
     transform: translate(var(--masonry-x, 0px), var(--masonry-y, 0px));
+    padding: 0;
 }
 
-.widgets-card.dragging {
-    opacity: 0.68;
-}
-
-/* A widget being dropped on or resized wears the focus ring over its lift. */
-.widgets-card.drag-over,
+/* A card being carried floats over the board in the pointer's hand; the place it would take is outlined, the cards
+   after it glide to make room, and it glides into place when dropped. A card being resized wears the same ring. */
+.widgets-card[data-widget-lifted],
 .widgets-card.resizing {
+    z-index: 2;
     box-shadow: var(--elev-float), 0 0 0 2px var(--focus-accent-border);
 }
 
-/* While a width is dragged: no text selection, and frames ignore the pointer so
-   the drag keeps its events over them. */
+.widgets-card[data-widget-lifted] {
+    cursor: grabbing;
+}
+
+.widgets-list[data-widget-arranging] .widgets-card:not([data-widget-lifted]) {
+    transition: transform var(--motion-fade) var(--ease-sheet);
+}
+
+.widgets-list[data-widget-moving]::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: var(--widget-slot-w, 0px);
+    height: var(--widget-slot-h, 0px);
+    transform: translate(var(--widget-slot-x, 0px), var(--widget-slot-y, 0px));
+    border: 2px dashed rgba(var(--neutral-rgb), 0.28);
+    border-radius: var(--radius-object);
+    background: rgba(var(--neutral-rgb), 0.04);
+    pointer-events: none;
+    transition: transform var(--motion-fade) var(--ease-sheet);
+}
+
+/* While a card is carried or resized: no text selection, and frames ignore the pointer so the gesture keeps its
+   events over them, from the press on (widget_reorder.js). */
+.widgets-list[data-widget-arranging],
 .widgets-list.resizing {
-    cursor: col-resize;
     -webkit-user-select: none;
     user-select: none;
 }
 
+.widgets-list[data-widget-pressed] iframe,
+.widgets-list[data-widget-arranging] iframe,
 .widgets-list.resizing iframe {
     pointer-events: none;
 }
 
-/* The width handle: a thin strip on the card's right edge, the edge vocabulary
-   of the side-panel `.resize-handle`. A list too narrow for two columns
-   ignores widths, and a card no step can widen or narrow (the only card on the
-   board) is width-fixed: neither offers the handle; the card menu sets widths
-   everywhere. */
-.widgets-card-resize {
+/* The edges: the right one sets the width, the bottom one the height, the corner both. Each lies mostly in the gap
+   beside the card (3 px over it), so a frame's own scrollbar and its controls near the edge stay the widget's. Quiet
+   until the pointer is on the card, then a short pill on the card's edge marks where to take them; a finger always
+   sees them. A list too narrow for two columns ignores widths and a card no step can widen or narrow (the only card on
+   the board) is width-fixed: neither offers the right edge or the corner; the card menu sizes every card everywhere. */
+.widgets-card-resize,
+.widgets-card-edge,
+.widgets-card-corner {
     position: absolute;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    width: 8px;
+    z-index: 3;
     padding: 0;
     border: 0;
-    border-radius: 0 var(--radius-object) var(--radius-object) 0;
+    border-radius: 0;
     background: transparent;
-    cursor: col-resize;
     touch-action: none;
 }
 
-.widgets-card-resize:hover,
-.widgets-card.resizing .widgets-card-resize {
-    background: var(--accent-10);
+.widgets-card-resize { top: 12px; right: -9px; bottom: 12px; width: 12px; cursor: ew-resize; }
+.widgets-card-edge { left: 12px; right: 12px; bottom: -9px; height: 12px; cursor: ns-resize; }
+.widgets-card-corner { right: -9px; bottom: -9px; width: 20px; height: 20px; cursor: nwse-resize; }
+
+.widgets-card-resize::after,
+.widgets-card-edge::after {
+    content: "";
+    position: absolute;
+    border-radius: 999px;
+    background: rgba(var(--neutral-rgb), 0.34);
+    opacity: 0;
+    transition: opacity var(--motion-fade) ease;
 }
 
-.widgets-card-resize:focus-visible {
+.widgets-card-resize::after { top: 50%; right: 7px; width: 4px; height: 36px; margin-top: -18px; }
+.widgets-card-edge::after { left: 50%; bottom: 7px; width: 36px; height: 4px; margin-left: -18px; }
+
+@media (prefers-reduced-motion: reduce) {
+    .widgets-list[data-widget-arranging] .widgets-card:not([data-widget-lifted]),
+    .widgets-list[data-widget-moving]::before,
+    .widgets-card-resize::after,
+    .widgets-card-edge::after { transition: none; }
+}
+
+.widgets-card.resizing > .widgets-card-resize::after,
+.widgets-card.resizing > .widgets-card-edge::after {
+    opacity: 1;
+}
+
+.widgets-card-resize:focus-visible::after,
+.widgets-card-edge:focus-visible::after {
+    opacity: 1;
+    background: var(--focus-accent-border);
+}
+
+/* Only a pointer that can hover reveals the edges: a tap leaves no stuck mark. */
+@media (hover: hover) {
+    .widgets-card:hover > .widgets-card-resize::after,
+    .widgets-card:hover > .widgets-card-edge::after {
+        opacity: 1;
+    }
+
+    .widgets-card-resize:hover::after,
+    .widgets-card-edge:hover::after {
+        opacity: 1;
+        background: var(--focus-accent-border);
+    }
+}
+
+/* A finger sizes a card from the card's own foot, never from a gap or over what the widget draws: under a coarse
+   pointer every card keeps a strip the touch minimum tall at its bottom, inside the card, and the bottom edge's button
+   is its grip at the strip's right end (up and down set the height, sideways the width where widths apply:
+   widget_reorder.js). A card that shows its Show all / Back line puts the grip in that line's row, the button centred
+   in the rest. The gaps scroll the board; the thin right edge and the corner are not offered. */
+@media (pointer: coarse) {
+    .widgets-list .widgets-card { padding-bottom: var(--touch-target-min); }
+    .widgets-list .widgets-card[data-widget-more-shown] { padding-bottom: 0; }
+    .widgets-list .widgets-card:not([data-widget-framed]) .widgets-card-body,
+    .widgets-list .widgets-card-body:has(> .skills-load-error) { padding-bottom: 0; }
+    .widgets-list .widgets-card-more {
+        min-height: var(--touch-target-min);
+        padding-right: calc(var(--touch-target-min) + var(--space-3));
+    }
+    .widgets-card-edge {
+        left: auto;
+        right: var(--space-2);
+        bottom: 0;
+        width: var(--touch-target-min);
+        height: var(--touch-target-min);
+    }
+    .widgets-card-edge::after { bottom: calc(50% - 2px); opacity: 0.8; }
+    .widgets-card-resize,
+    .widgets-card-corner { display: none; }
+    #page-widgets .widgets-card :is(.widgets-frame, .widgets-facade) { border-radius: 0; }
+    /* Where the finger on the grip does not cover it. */
+    .widgets-list .widgets-card[data-widget-size-chip]::after { left: var(--space-3); right: auto; bottom: 10px; }
+}
+
+.widgets-card-resize:focus-visible,
+.widgets-card-edge:focus-visible {
     outline: 2px solid var(--focus-accent-border);
     outline-offset: -2px;
 }
 
-.widgets-list[data-widget-layout="stack"] .widgets-card-resize,
-.widgets-card[data-widget-width-fixed] .widgets-card-resize {
+.widgets-list[data-widget-layout="stack"] :is(.widgets-card-resize, .widgets-card-corner),
+.widgets-card[data-widget-width-fixed] :is(.widgets-card-resize, .widgets-card-corner) {
+    display: none;
+}
+
+/* What an edge being dragged would leave, on the card: a capsule floating over its content. */
+.widgets-card[data-widget-size-chip]::after {
+    content: attr(data-widget-size-chip);
+    position: absolute;
+    right: 16px;
+    bottom: 20px;
+    z-index: 4;
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: var(--surface-float);
+    color: var(--text-primary);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    white-space: nowrap;
+    box-shadow: var(--elev-float);
+    pointer-events: none;
+}
+
+/* A host-drawn card under an owner height scrolls in its body (the one scroller the host gives it); a frame scrolls
+   its own document, and the line under the card says how much an owner height keeps out of view. */
+.widgets-card-body[data-widget-bounded] {
+    height: var(--widget-body-height);
+    overflow-y: auto;
+}
+
+.widgets-card-more {
+    display: flex;
+    justify-content: center;
+    padding: var(--space-2) var(--space-3) var(--space-3);
+}
+
+.widgets-card-more[hidden] {
     display: none;
 }
 
@@ -7085,9 +7219,10 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
 .widgets-card-head {
     display: flex;
     justify-content: space-between;
-    gap: 12px;
-    align-items: flex-start;
-    margin-bottom: 12px;
+    gap: var(--space-2);
+    align-items: center;
+    min-height: 48px;
+    padding: var(--space-2) var(--space-2) 6px var(--space-4);
 }
 
 .widgets-card-title {
@@ -7098,16 +7233,21 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
     align-items: baseline;
     gap: 4px 8px;
     min-width: 0;
-    min-height: 32px;
     /* A title breaks between its words: the card's own overflow-wrap (anywhere) split it inside one. */
     overflow-wrap: break-word;
-    hyphens: auto;
+    hyphens: manual;
+}
+
+.widgets-card-title strong {
+    font-size: var(--type-body);
+    font-weight: 600;
 }
 
 /* The menu and the move handle are one quiet icon control twice: the ⋮ of every card menu (its rule is the Skills
-   card menu's) and the ↕ share the shared small capsule without a body (.btn.btn-ghost.btn-sm), its touch reach
+   card menu's) and the move grip share the shared small capsule without a body (.btn.btn-ghost.btn-sm), its touch reach
    included (DESIGN §3, bible principle 4). */
-.widgets-card-drag { --control-pad-x: 0; --button-font-size: var(--type-section); width: var(--control-h); cursor: grab; }
+.widgets-card-drag { --control-pad-x: 0; width: var(--control-h); color: var(--text-meta); cursor: grab; touch-action: none; }
+.widgets-card-drag svg { display: block; margin: 0 auto; }
 .widgets-card-drag:active { cursor: grabbing; }
 
 /* Framed-card head controls (widgets lifecycle phase 2): status as dot + text
@@ -7173,14 +7313,16 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
 }
 
 /* A narrow card (under 360px; widget_reorder.js marks it from the board's plan, a card being no query container of
-   its own width) keeps only ⋮ and ↕ beside its title and puts its lifecycle row under it, so the title keeps the
+   its own width) keeps only ⋮ and the move grip beside its title and puts its lifecycle row under it, so the title keeps the
    card's width and breaks between words. */
 .widgets-card[data-widget-narrow] .widgets-card-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .widgets-card[data-widget-narrow] .widgets-card-controls { display: contents; }
 .widgets-card[data-widget-narrow] .widgets-card-title { grid-column: 1; grid-row: 1; }
 .widgets-card[data-widget-narrow] .widgets-card-tools { grid-column: 2; grid-row: 1; align-self: start; }
 .widgets-card[data-widget-narrow] .widgets-card-run { grid-column: 1 / -1; grid-row: 2; justify-content: flex-start; }
-/* Under a finger the lifecycle row parts from ⋮ and ↕ above it by the two small capsules' reaches. */
+/* Start (stopped, starting) and the status alone (running) share one row height, so a card that starts moves nothing. */
+.widgets-card[data-widget-narrow] .widgets-card-run:not(:empty) { min-height: var(--control-h-sm); }
+/* Under a finger the lifecycle row parts from ⋮ and the move grip above it by the two small capsules' reaches. */
 @media (pointer: coarse) {
     .widgets-card[data-widget-narrow] .widgets-card-head { row-gap: var(--space-4); }
 }
@@ -7219,9 +7361,10 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
     color: var(--text-meta);
 }
 
-/* A stopped framed card stands in for its frame: same box, same declared
-   height (the `--widget-frame-height` custom property the frame itself uses),
-   so Start does not move the layout. */
+/* A stopped framed card stands in for its frame: same box, same height (the
+   `--widget-frame-height` custom property the frame itself uses), so Start does
+   not move the layout. On the board it is a tray on the card, as the frame lies
+   on the card; the 320 px is the loading height only. */
 .widgets-facade {
     display: flex;
     flex-direction: column;
@@ -7265,6 +7408,13 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
     margin-top: 0;
 }
 
+/* A host-drawn card's body keeps the card's inset; so does a framed card's body that holds its failed start's words
+   instead of a frame. */
+.widgets-card:not([data-widget-framed]) .widgets-card-body,
+.widgets-card-body:has(> .skills-load-error) {
+    padding: 2px var(--space-4) var(--space-4);
+}
+
 .widgets-frame {
     width: 100%;
     height: var(--widget-frame-height, 320px);
@@ -7273,6 +7423,43 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
     border: 1px solid rgba(var(--neutral-rgb), 0.08);
     border-radius: var(--radius-inner);
     background: rgba(var(--shell-rgb), 0.88);
+}
+
+/* The board's frame is no second box: no edge, no fill, no 320 px floor under short content (the board gives it its
+   height); a frame in a message keeps its own rule (cards.css). */
+#page-widgets .widgets-frame,
+#page-widgets .widgets-facade {
+    border: 0;
+    border-radius: 0 0 calc(var(--radius-object) - 1px) calc(var(--radius-object) - 1px);
+}
+
+#page-widgets .widgets-frame {
+    min-height: 0;
+    background: transparent;
+}
+
+/* Exactly as tall as its frame, however short (a facade too short for its title shows its top). */
+#page-widgets .widgets-facade {
+    min-height: 0;
+    overflow: hidden;
+    justify-content: safe center;
+    background: var(--surface-tray);
+}
+
+/* With the line under it shown, the frame no longer meets the card's bottom corners. */
+#page-widgets .widgets-card[data-widget-more-shown] :is(.widgets-frame, .widgets-facade) {
+    border-radius: 0;
+}
+
+/* A phone-wide page (a phone, the Telegram mini app) keeps its widgets nearly edge to edge; the page's own width
+   decides. Wider pages keep the board's margins, so the width at which the list stacks does not move. */
+#page-widgets { container: widgetspage / inline-size; }
+
+@container widgetspage (max-width: 560px) {
+    .widgets-scroll {
+        padding-left: var(--space-3);
+        padding-right: var(--space-3);
+    }
 }
 
 .widget-form,
