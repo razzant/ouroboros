@@ -9,6 +9,7 @@ import textwrap
 import pytest
 
 from tests import test_ui_smoke_playwright as smoke
+from tests.settings_browser_helpers import open_entry, open_settings, settings_page
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _SETTLE_RESTORE_FRAMES
 from tests.ui_console_errors import PageErrors
 
@@ -246,48 +247,22 @@ def test_a_saved_local_model_setting_waits_for_the_local_models_own_stop_then_st
 
 # The scene below was the last part of the first test: the Agents list (a delegation's history), driven through the
 # tab frame Settings had. It belongs to the Agents page's lane (E1) and stands here until it is rewritten on that page.
+
+
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine,width", [("chromium", 1400), ("webkit", 390)])
-def test_agent_history_on_its_old_tab(settings_server, engine, width):
+def test_agents_history_keeps_the_execution_identity_when_access_changes(settings_server, engine, width):
     from playwright.sync_api import expect, sync_playwright
 
+    evidence = pathlib.Path(os.environ.get('OUROBOROS_UI_EVIDENCE_DIR', str(settings_server['data_dir'].parent)))
+    evidence.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as pw:
         browser = getattr(pw, engine).launch(headless=True)
         page = browser.new_page(viewport={"width": width, "height": 1000})
         errors = PageErrors(page, engine)
-        page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
-        page.add_init_script("""const originalSend = WebSocket.prototype.send;
-            WebSocket.prototype.send = function(data) {
-                if (JSON.parse(data).cmd === '/restart') { window.restartSent = true; return; }
-                return originalSend.call(this, data);
-            };""")
         try:
-            def open_settings():
-                page.goto(settings_server["url"], wait_until="domcontentloaded")
-                if width < 980:
-                    page.locator('#page-chat [data-mobile-nav-toggle]').click()
-                page.locator('[data-nav-page="settings"]').click()
-                expect(page.locator('#btn-save-settings')).to_be_enabled(timeout=30_000)
-                page.evaluate(_SETTLE_RESTORE_FRAMES)
-
-            def fill_value(selector, value):
-                page.locator(selector).evaluate("(node, value) => {node.value=value; node.dispatchEvent(new Event('input',{bubbles:true}));}", str(value))
-
-            def save():
-                page.locator('#btn-save-settings').click()
-                page.wait_for_function("!document.querySelector('#btn-save-settings').disabled || document.querySelector('[data-confirm-ok]')")
-                if page.locator('[data-confirm-ok]').is_visible():
-                    page.locator('[data-confirm-ok]').click()
-                expect(page.locator('#btn-save-settings')).to_be_enabled(timeout=30_000)
-                expect(page.locator('#settings-status')).to_contain_text('saved', timeout=30_000)
-
-            def reconnect():
-                # The same body reconnects, which keeps this document only once the page remembered the served
-                # SHA: dropped before its first read after open, ws.js reloads it as unknown (#2432).
-                page.wait_for_function("() => Boolean(window.__ouroWs?._lastSha)", timeout=30_000)
-                page.evaluate("window.__testSockets[0].close()")
-                page.wait_for_function("window.__testSockets.some(socket => socket.readyState === WebSocket.OPEN)")
-
+            page.route('**/api/model-catalog*', lambda route: route.fulfill(json={'items': [], 'model_sources': [], 'errors': []}))
+            page.goto(settings_server['url'], wait_until='domcontentloaded')
             # The same actual receipt consumer on the owner-facing Agents card.
             actor = {"subagent_id": "fixture-helper", "recommended_use": "Fixture helper",
                      "route": {"kind": "api_model", "target_id": "openai-compatible::mock-model"},
@@ -308,8 +283,8 @@ def test_agent_history_on_its_old_tab(settings_server, engine, width):
                 "OUROBOROS_SUBAGENTS": json.dumps({"enabled": True, "items": [actor, session_actor]}),
                 "allow_empty_review_pool": True})
             assert response.ok, response.text()
-            open_settings()
-            page.locator('[data-settings-tab="agents"]').click()
+            open_settings(page, "agents")
+            open_entry(page, "fixture-helper")
             # A past failure is history behind Details & history, never a standing caption.
             page.locator('[data-subagent-details] > summary').first.click()
             meta = page.locator('[data-subagent-last-task] dd').first
@@ -319,7 +294,8 @@ def test_agent_history_on_its_old_tab(settings_server, engine, width):
             assert meta.evaluate("node => node.scrollWidth <= node.clientWidth")
             meta.scroll_into_view_if_needed()
             page.screenshot(path=str(evidence / f'subagent-history-{engine}.png'))
-            session_card = page.locator('[data-subagent-row]').nth(1)
+            open_settings(page, 'agents')
+            session_card = open_entry(page, 'fixture-session').locator('[data-subagent-row]')
             expect(session_card.locator('[data-subagent-field="access"]')).to_have_value('full')
             session_card.locator('[data-subagent-details] > summary').click()
             expect(session_card.locator('[data-subagent-last-task] dd')).to_contain_text('codex session')
@@ -328,17 +304,13 @@ def test_agent_history_on_its_old_tab(settings_server, engine, width):
             session_card.locator('[data-subagent-field="access"]').select_option('workspace_write')
             expect(session_card.locator('[data-subagent-last-task] dd')).to_contain_text('Earlier settings · ')
             # Editing a catalog that marks no reviewer asks the owner to confirm it again.
-            page.locator('[data-review-pool-allow-empty]').check()
-            save()
-            open_settings()
-            page.locator('[data-settings-tab="agents"]').click()
+            page.locator('[data-editor-save]').click()
+            page.locator('[data-confirm-ok]').click()
+            expect(settings_page(page, 'agents/fixture-session').locator('[data-editor-result]')).to_contain_text('Saved')
+            page.reload(wait_until='domcontentloaded')
+            open_settings(page, 'agents')
+            open_entry(page, 'fixture-session')
             expect(page.locator('[data-subagent-field="access"]')).to_have_value('workspace_write')
             assert errors.unexpected() == [], errors
-        except Exception:
-            evidence = pathlib.Path(os.environ.get('OUROBOROS_UI_EVIDENCE_DIR', str(settings_server['data_dir'].parent)))
-            evidence.mkdir(parents=True, exist_ok=True)
-            page.screenshot(path=str(evidence / f'settings-failure-{engine}.png'))
-            print(page.locator('body').inner_text()[-4000:])
-            raise
         finally:
             browser.close()
