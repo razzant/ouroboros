@@ -596,7 +596,7 @@ def test_connect_deadline_preserves_the_durable_install_without_cancel(owned, co
         service.install_for_connect("future-program")
     assert failure.value.code == "harness_install_timeout"
     assert failure.value.problem["context"]["operation"] == receipt
-    assert "installation is still pending" in str(failure.value)
+    assert "is still installing" in str(failure.value)
     assert receipt["id"] not in str(failure.value)
     assert len(reads) == 2 and connect_clock.now == 3
     assert owned.budgets == [{"timeout_sec": 2.0}, {"timeout_sec": 1.0}]
@@ -679,7 +679,7 @@ def connect_socket(monkeypatch):
     from ouroboros.gateways import claudexor as wire
     from tests.test_harness_maintenance_transport import OPERATIONS
 
-    state = dict(mode="success", installed=False, version="6.0.0", keys=[], calls=Counter())
+    state = dict(mode="success", installed=False, version="6.0.0", keys=[], calls=Counter(), stops=[])
     receipt = connected_program(state="running", after=None, termination="not_applicable")
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_): pass
@@ -720,7 +720,11 @@ def connect_socket(monkeypatch):
                     self.close_connection = True
                     return
                 body = receipt if state["mode"] in {"slow_read", "slow_phases", "running"} else connected_program()
-                state["installed"] = body["state"] == "succeeded"
+                if state["mode"] in {"refused", "not_found", "retryable_forever"} or (state["mode"] == "retryable" and state["calls"][path] == 1):
+                    status = 403 if state["mode"] == "refused" else 404 if state["mode"] == "not_found" else 503
+                    body = {"code": "fixture_refusal", "message": "The receipt cannot be read.",
+                            "retryable": state["mode"].startswith("retryable"), "context": {"fixture": True}}
+                state["installed"] = body.get("state") == "succeeded"
             else:
                 status, body = 500, {"code": "unexpected_request", "message": path}
             raw = json.dumps(body).encode()
@@ -730,11 +734,19 @@ def connect_socket(monkeypatch):
                 self.send_header("Content-Length", str(len(raw)))
                 self.end_headers()
                 self.wfile.write(raw)
+                self.wfile.flush()
+                if state["mode"] == "gone" and path == "/v2/maintenance/operations":
+                    stopper = threading.Thread(target=stop_server)
+                    state["stops"].append(stopper)
+                    stopper.start()
             except (BrokenPipeError, ConnectionResetError):
                 pass
         do_GET = do_POST = respond
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.daemon_threads = False
+    def stop_server():
+        server.shutdown()
+        server.server_close()
     thread = threading.Thread(target=server.serve_forever)
     thread.start()
     endpoint = wire.DaemonEndpoint("127.0.0.1", server.server_port, "fixture-only-token")
@@ -755,7 +767,12 @@ def connect_socket(monkeypatch):
         with TestClient(Starlette(routes=[Route("/api/claudexor/login", claudexor_accounts.api_claudexor_login, methods=["POST"])])) as login_http:
             yield state, login_http
     finally:
-        server.shutdown(); server.server_close(); thread.join(timeout=5)
+        if not state["stops"]:
+            stop_server()
+        for stopper in state["stops"]:
+            stopper.join(timeout=5)
+            assert not stopper.is_alive()
+        thread.join(timeout=5)
         assert not thread.is_alive()
 
 
@@ -803,3 +820,35 @@ def test_real_login_on_old_engine_sends_no_vendor_maintenance_requests(connect_s
     assert response.status_code == 503 and response.json()["code"] == "maintenance_unavailable"
     assert "Update the app" in response.json()["error"]
     assert not any(path.startswith("/v2/maintenance") for path in state["calls"])
+
+
+@pytest.mark.parametrize("mode", ["refused", "not_found", "retryable", "retryable_forever", "gone"])
+def test_connect_real_socket_refusals_and_lost_contact(connect_socket, mode):
+    import time
+    state, login_http = connect_socket
+    state["mode"] = mode
+    started = time.monotonic()
+    response = login_http.post("/api/claudexor/login", json={"harness": "future-program"})
+    elapsed = time.monotonic() - started
+    body = response.json()
+    assert not any(path.endswith("/cancel") for path in state["calls"])
+    assert len(state["keys"]) == 1
+    reads = state["calls"]["/v2/maintenance/operations/maintenance-one"]
+    if mode in {"refused", "not_found"}:
+        assert response.status_code == (403 if mode == "refused" else 404)
+        assert body["code"] == "fixture_refusal" and body["retryable"] is False
+        assert body["error"] == "The receipt cannot be read."
+        assert body["context"]["fixture"] is True
+        assert body["context"]["operationId"] == "maintenance-one"
+        assert reads == 1 and elapsed < 2.5
+    elif mode == "retryable":
+        assert response.status_code == 200 and reads == 2
+        assert state["calls"]["/v2/setup/jobs"] == 2
+    else:
+        assert response.status_code == 503 and 3 <= elapsed < 3.7
+        assert "state is unknown" in body["error"] and "still installing" not in body["error"]
+        assert "Settings, Accounts" in body["error"]
+        failure = body["context"]["lastReadProblem"]
+        assert failure["code"] == ("fixture_refusal" if mode == "retryable_forever" else "daemon_unreachable")
+        assert failure["message"]
+        assert state["calls"]["/v2/setup/jobs"] == 1

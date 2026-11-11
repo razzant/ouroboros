@@ -181,19 +181,31 @@ def install_for_connect(harness: str) -> dict:
         operation = {"id": identity, "harness": harness, "state": "queued", "termination": "not_applicable"}
     identity = operation["id"]
     deadline = time.monotonic() + get_claudexor_harness_install_timeout_sec()
+    last_failure = None
     while operation["state"] in {"queued", "running"} or operation["termination"] == "unconfirmed":
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise _connect_install_problem(operation, request_id, "harness_install_timeout",
-                                           f"{harness} installation is still pending")
+            known_running = last_failure is None and operation["state"] in {"queued", "running"}
+            error = _connect_install_problem(operation, request_id, "harness_install_timeout",
+                                             f"{harness} is still installing" if known_running else "Installation state is unknown")
+            if last_failure is not None:
+                error.problem["context"]["lastReadProblem"] = copy.deepcopy(getattr(last_failure, "problem", None)) or {
+                    "code": last_failure.code, "message": str(last_failure)}
+            raise error
         time.sleep(min(1, remaining))
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             continue
         try:
             operation = inspect_operation(identity, deadline=min(deadline, time.monotonic() + 5))
-        except ClaudexorUnavailable:
-            continue  # A repeated GET cannot create or cancel an operation.
+            last_failure = None
+        except ClaudexorUnavailable as exc:
+            last_failure = exc
+            if exc.status_code >= 400 and (getattr(exc, "problem", None) or {}).get("retryable") is not True:
+                exc.problem = copy.deepcopy(getattr(exc, "problem", None)) or {"code": exc.code, "message": str(exc)}
+                exc.problem["context"] = {**exc.problem.get("context", {}), "operationId": identity,
+                                           "requestId": request_id, "operation": copy.deepcopy(operation)}
+                raise
     selected = operation.get("after") or {}
     if (operation["harness"] != harness or operation["state"] != "succeeded"
             or not all(isinstance(selected.get(field), str) and selected[field].strip()
