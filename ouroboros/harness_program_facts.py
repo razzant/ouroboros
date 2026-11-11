@@ -79,6 +79,7 @@ def _record_inventory(inventory, complete, root):
         selected, newest = row.get("selection") or {}, row.get("newest") or {}
         programs[row["harness"]] = {"path": selected.get("path"), "version": selected.get("version"),
             "updateAvailable": row.get("updateAvailable", "cannot_tell"),
+            "newestStatus": newest.get("status", "not_read"),
             "newestVersion": newest.get("version") if newest.get("status") == "available" else None,
             "newestObservedAt": newest.get("observedAt"), "observedAt": at}
     if complete:
@@ -138,11 +139,15 @@ def vendor_programs_line(root=None):
         fact = (f"{newest} available" if verdict == "yes" and newest else
                 "up to date" if verdict == "no" else
                 f"newest {newest}, order unknown" if newest else "newest not read")
+        if row.get("newestStatus") == "unavailable":
+            fact = "newest unavailable " + date(row.get("newestObservedAt"))
         if not shared_newest and (newest or verdict == "no"):
             fact += ", newest read " + date(row.get("newestObservedAt"))
         parts.append(f"{name} {installed} ({fact}{seen})")
     if absent:
         parts.append("not installed: " + ", ".join(absent))
+    if not saved.get("completeObservedAt"):
+        parts.append("other programs not observed")
     return f"Harness programs ({age}): " + ("; ".join(parts) or "none listed") + "."
 
 

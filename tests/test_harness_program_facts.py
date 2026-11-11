@@ -53,7 +53,7 @@ def test_absent_unknown_and_empty_inventories_are_distinct_and_sorted(tmp_path):
     data["harnesses"][0]["newest"] = {"status": "unavailable", "observedAt": data["observedAt"]}
     data["harnesses"].append({"harness": "absent", "selection": None, "updateAvailable": "cannot_tell"})
     facts.record_inventory(data, root=tmp_path)
-    assert facts.vendor_programs_line(tmp_path).endswith("future-program version unknown (newest not read); not installed: absent.")
+    assert facts.vendor_programs_line(tmp_path).endswith("future-program version unknown (newest unavailable 2026-11-10); not installed: absent.")
     facts.record_inventory({"observedAt": "2026-11-11T00:00:00Z", "harnesses": []}, root=tmp_path)
     assert facts.vendor_programs_line(tmp_path).endswith("none listed.")
 
@@ -352,3 +352,23 @@ def test_two_process_writers_keep_all_programs_and_newer_selection(tmp_path):
     rows = saved(tmp_path)["programs"]
     assert set(rows) == set(names) and rows[names[0]]["version"] == "2"
     assert not (tmp_path / facts.OBSERVATION_FILE).with_suffix(".lock").exists()
+
+
+def test_partial_coverage_is_explicit_until_a_complete_answer_lands(tmp_path):
+    facts.record_inventory(inventory(), complete=False, root=tmp_path)
+    assert "other programs not observed" in facts.vendor_programs_line(tmp_path)
+    facts.record_inventory(inventory(), root=tmp_path)
+    assert "other programs not observed" not in facts.vendor_programs_line(tmp_path)
+    facts.record_inventory(inventory("2026-11-12"), complete=False, root=tmp_path)
+    assert "other programs not observed" not in facts.vendor_programs_line(tmp_path)
+
+
+@pytest.mark.parametrize("status", ["not_read", "unavailable", "available"])
+def test_newest_gap_has_its_own_status_and_date(tmp_path, status):
+    data = inventory(verdict="cannot_tell")
+    data["harnesses"][0]["newest"] = {"status": status, "observedAt": "2026-11-09T10:00:00Z", "version": "nightly"}
+    facts.record_inventory(data, root=tmp_path)
+    line = facts.vendor_programs_line(tmp_path)
+    assert ("newest unavailable 2026-11-09" in line) == (status == "unavailable")
+    assert ("newest not read" in line) == (status == "not_read")
+    assert ("newest nightly, order unknown" in line) == (status == "available")
