@@ -616,10 +616,10 @@ def forget_lineage(drive_root: Any, writes: Any, projects: Any = None) -> None:
     root = str(drive_root)
     if writes is None or _LINEAGE_SEEN.get(root) == (writes, projects):
         return
-    _LINEAGE_SEEN[root] = (writes, projects)
-    for key in [key for key in _TASK_LINEAGE if key[0] == root]:
-        del _TASK_LINEAGE[key]
+    for key in [key for key in list(_TASK_LINEAGE) if key[0] == root]:  # a copy: another thread may add meanwhile
+        _TASK_LINEAGE.pop(key, None)
     _ROOM_ANSWERS.pop(str(_bindings_path(drive_root)), None)
+    _LINEAGE_SEEN[root] = (writes, projects)  # last: a failure midway leaves the next capture to forget again
 
 
 def _answer_key(task_id: Any, parent_task_id: Any, root_task_id: Any) -> tuple:

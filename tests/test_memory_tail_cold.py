@@ -1420,6 +1420,35 @@ def test_a_project_that_comes_to_hold_a_tasks_admitted_chat_moves_its_rows_warm_
     _same(monkeypatch, tmp_path, rooms)
 
 
+def test_a_process_that_failed_to_forget_a_moved_lineage_forgets_it_at_its_next_capture(monkeypatch, tmp_path):
+    """The lineage writes a process forgot under are recorded only once it has forgotten: a failure midway leaves the
+    next capture to forget again, never a fact read before the move under the new writes."""
+    root = str(tmp_path)
+
+    class Failing(dict):  # this process's lineage memory, its first removal failing
+        failed = False
+
+        def _fail(self) -> None:
+            if not Failing.failed:
+                Failing.failed = True
+                raise RuntimeError("a removal failed")
+
+        def __delitem__(self, key):
+            self._fail()
+            super().__delitem__(key)
+
+        def pop(self, key, *default):
+            self._fail()
+            return super().pop(key, *default)
+
+    memory = Failing({(root, "old"): {"parent_task_id": "", "root_task_id": "", "delegation_role": "", "chat_id": 1}})
+    monkeypatch.setattr(pr, "_TASK_LINEAGE", memory)
+    with pytest.raises(RuntimeError):
+        pr.forget_lineage(tmp_path, [None, 1], frozenset())
+    pr.forget_lineage(tmp_path, [None, 1], frozenset())
+    assert (root, "old") not in memory
+
+
 def test_two_rows_of_one_task_with_different_lineage_fields_get_their_own_answers(monkeypatch, tmp_path):
     """The rule's answer is remembered by its whole input (task, parent, root): the order the rows are judged in,
     which a standing set changes, never changes a row's rooms."""
