@@ -878,12 +878,15 @@ def test_an_informed_turn_that_returned_with_no_known_end_is_never_sent_again(tm
 
 def test_the_execution_that_heard_no_known_end_keeps_its_configured_route(tmp_path, monkeypatch, isolated, endpoint):
     """Control: only a restart meets that claim as interrupted. The execution that heard the call return keeps the
-    round's ordinary unknown-outcome rail, here its configured route, whose send is claimed as its own."""
+    round's ordinary unknown-outcome rail, here its configured route after one missed upstream observation, whose
+    send is claimed as its own."""
     def connection_dies(_request):
         raise httpx.ReadError("synthetic connection death")
     client, sent = endpoint([CUTS["length"], connection_dies, "answer"], stream=False)
     kw, _notes = configured_loop(tmp_path, monkeypatch, client)
-    monkeypatch.setattr(loop, "_transport_wait_step", lambda *_a, **_k: False)  # ends only the passive network wait
+    from ouroboros import loop_transport
+    monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", lambda *_a: False)  # the wait's entry step, at once
+    monkeypatch.setattr(loop_transport, "upstream_transport_reachable", lambda *_a, **_k: {})
     saved = _spy_pending(monkeypatch, sent, recovery.UNFINISHED_KEY)
     text, usage, trace = loop.run_llm_loop(**kw)
     assert text == "done" and [s["model"] for s in sent] == ["primary-fixture", "primary-fixture", "fallback-fixture"]

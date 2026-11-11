@@ -935,7 +935,7 @@ def _record_llm_call_error(
             **({"same_operation_recoverable": True} if getattr(error, "same_operation_recoverable", False) else {}),
         }
         # Only an explicit low-level repeat budget repeats here; each running turn's
-        # new generation belongs to the round's recovery (configured routes, then the wait).
+        # new generation belongs to the round's recovery (its continuation and the configured routes).
         if (
             is_retryable_transport_death(error)
             and repeats < ctx.transport_death_retries and ctx.attempt < ctx.transient_budget - 1

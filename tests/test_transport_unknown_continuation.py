@@ -380,8 +380,10 @@ def test_stop_before_unknown_probe_preserves_no_send_boundary(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("remaining", [2700.0, 3.0])
-def test_upstream_head_uses_connection_window_in_every_socket_phase(monkeypatch, remaining):
-    """A metadata HEAD cannot hold an unleased task for the cognition read window."""
+def test_upstream_metadata_read_uses_connection_window_on_every_route(monkeypatch, remaining):
+    """A metadata read, a provider HEAD or the engine's catalog, cannot hold an unleased task for the
+    cognition read window."""
+    from ouroboros import llm_claudexor
     from ouroboros.llm import LLMClient
 
     requests = []
@@ -404,6 +406,11 @@ def test_upstream_head_uses_connection_window_in_every_socket_phase(monkeypatch,
     # allowance, retaining a shorter owner remainder on every socket phase.
     bound = min(remaining, llm._no_proxy_timeout(remaining).connect)
     assert requests[0].extensions["timeout"] == dict(connect=bound, read=bound, write=bound, pool=bound)
+    budgets = []
+    monkeypatch.setattr(llm_claudexor, "model_catalog", lambda *a, **kw: budgets.append(kw["timeout_sec"]) or {})
+    monkeypatch.setattr("ouroboros.model_slots.model_role_option", lambda *a: "")
+    assert not transport.upstream_transport_reachable(None, "claudexor::codex=test", timeout=remaining)
+    assert budgets == [bound]
 
 
 def test_unknown_policy_admits_configured_session_model_to_managed_continuation(tmp_path):

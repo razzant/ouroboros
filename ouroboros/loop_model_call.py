@@ -196,7 +196,7 @@ def _run_cross_model_fallback_chain(
     accumulated_usage, task_type, emit_progress, context_fit_plan,
     active_context_mode,
 ) -> tuple:
-    """Try the configured routes other than the acting binding before any wait begins. An eligible unknown
+    """Try the configured routes other than the acting binding ahead of any further wait. An eligible unknown
     outcome moves on with facts-only recovery input (a real, possibly charged generation); an ineligible
     one (an accepted operation still readable) or a spent deadline stops the walk. A round whose own
     failure is an outage or an unknown outcome keeps that failure as its wait when none answers."""
@@ -441,7 +441,9 @@ def _recover_failed_round(limit_ctx: Any, tools: ToolRegistry, msg: Any, episode
 
     Each observed failure can use configured alternatives, including during an existing
     outage. That episode keeps its elapsed clock, backoff and prior custody; a failed
-    alternative never resets those bounds. Returns ``(msg, model, use_local, plan, mode, episode)``.
+    alternative never resets those bounds. An acting primary's first lost answer opens its
+    wait instead, so its own continuation precedes the walk (``fallback_chain_allowed``).
+    Returns ``(msg, model, use_local, plan, mode, episode)``.
     """
     from ouroboros.model_wait import current_model_wait
 
@@ -458,8 +460,9 @@ def _recover_failed_round(limit_ctx: Any, tools: ToolRegistry, msg: Any, episode
         if msg is not None:
             return msg, model, use_local, context_fit_plan, active_context_mode, episode
     kind, pending = str(usage.get("_last_llm_error_kind") or ""), usage.get("_pending_transport_outcome")
-    if (msg is None and _loop()._fallback_chain_allowed(ctx, kind, None, usage) and _route_candidates(
-            ctx, model, use_local, str(getattr(context_fit_plan, "model_role", "") or ""), current_model_wait())):
+    if (msg is None and (rows := _route_candidates(
+            ctx, model, use_local, str(getattr(context_fit_plan, "model_role", "") or ""), current_model_wait()))
+            and _loop()._fallback_chain_allowed(ctx, kind, episode, usage, primary_acting=not rows[0][3])):
         msg, model, use_local, context_fit_plan, active_context_mode = _loop()._run_cross_model_fallback_chain(
             llm=limit_ctx.llm, ctx=ctx, tools=tools, messages=limit_ctx.messages, active_model=model,
             active_use_local=use_local, tool_schemas=limit_ctx.tool_schemas, active_effort=limit_ctx.active_effort,
