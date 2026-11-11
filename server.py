@@ -470,7 +470,8 @@ def _handle_bridge_update_batch(bridge, updates, offset: int, ctx: Any, cursor: 
 
                 known, enabled = control_value(ctx.load_state(), "bg_consciousness_enabled")
                 described = _describe_bg_consciousness_state(bool(enabled) if known else None)
-                reply(f"🧠 Background consciousness: {described['status']} — {described['detail']}")
+                note = f" {described['detail_note']}" if described.get("detail_note") else ""
+                reply(f"🧠 Background consciousness: {described['status']} — {described['detail']}{note}")
         elif lowered.startswith("/status"):
             from supervisor.state import status_text
 

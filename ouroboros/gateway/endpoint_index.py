@@ -249,7 +249,7 @@ HTTP_SHAPES: dict[str, Shape] = {
     "GET /api/health": Shape("200:HealthResponse"),
     "GET /api/contract": Shape("200:GatewayContractResponse"),
     "GET /api/state": Shape("200:StateResponse 500:ErrorResponse", query="bindings_since"),
-    "GET /api/consciousness": Shape("200:json 503:json", note="status/detail, appointment_at, live_wake_held, spend by cause, places_brief; RecentWakesView: recent_wakes: RecentWake[] | null, recent_wakes_coverage names the shared 50-wake/48 h cap or read failure; full Places use /api/places"),
+    "GET /api/consciousness": Shape("200:json 503:json", note="status/detail, appointment_at, live_wake_held, live_wake_hold, allowance_status/open_rows/room_after, spend by cause, places_brief; RecentWakesView: recent_wakes: RecentWake[] | null, recent_wakes_coverage names the shared 50-wake/48 h cap or read failure; full Places use /api/places"),
     "GET /onboarding": Shape("200:html", query="builtin", note="selected setup or builtin wizard; builtin=1 forces builtin"),
     "GET /api/onboarding": Shape("200:html 204:empty", note="204: a ready provider exists, no setup needed"),
     "GET /api/onboarding/bootstrap": Shape("200:OnboardingBootstrapResponse", note="read-only; writes nothing"),

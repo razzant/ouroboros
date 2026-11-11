@@ -48,8 +48,9 @@ ROW = '[data-consciousness-offer] .consciousness-offer-row'
 DEFAULT_ROW = ("Consciousness Start consciousness with Ouroboros Between your requests it continues topics that interest "
                "it and you, notices opportunities and brings you suggestions. Autonomy: Acts. Also acts on its own: starts work, "
                "runs commands, speaks and acts in places. It does not change itself. Up to $20.00 a day in recorded "
-               "spending. Subscription quota is separate. At most 2 of its own tasks at once. Change these in "
-               "Settings › Behavior › Consciousness. Stop or start it any time in Dashboard › Consciousness.")
+               "spending. Subscription quota is separate. At most 2 of its own tasks at once. Change the allowance in "
+               "Dashboard › Costs and the rest in Settings › Behavior › Consciousness. Stop or start it any time in "
+               "Dashboard › Consciousness.")
 
 
 def _provider(llm_url: str) -> dict:
@@ -323,8 +324,9 @@ def test_markerless_install_offers_its_own_limits_and_an_unticked_finish_sends_n
                     "Consciousness Start consciousness with Ouroboros Between your requests it continues topics that "
                     "interest it and you, notices opportunities and brings you suggestions. Autonomy: Advises. On its own it "
                     "studies, keeps its memory and tells you; it changes nothing outside. Up to $5.00 a day in recorded "
-                    "spending. Subscription quota is separate. At most 1 of its own tasks at once. Change these in "
-                    "Settings › Behavior › Consciousness. Stop or start it any time in Dashboard › Consciousness.")
+                    "spending. Subscription quota is separate. At most 1 of its own tasks at once. Change the "
+                    "allowance in Dashboard › Costs and the rest in Settings › Behavior › Consciousness. Stop or start it "
+                    "any time in Dashboard › Consciousness.")
                 page.screenshot(path=str(out / f"markerless-summary-{engine}-{theme}.png"), full_page=True)
                 page.locator(".summary-card").screenshot(path=str(out / f"markerless-summary-card-{engine}-{theme}.png"))
                 overflow = page.evaluate("document.documentElement.scrollWidth - document.documentElement.clientWidth")

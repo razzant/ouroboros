@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 
 import pytest
-from ouroboros.test_evidence import diagnostic_directory
 from tests import test_subscription_setup_browser as setup_browser
 
 subscription_ui = setup_browser.subscription_ui
@@ -349,64 +348,6 @@ def test_older_failed_settings_reload_cannot_disable_newer_success(subscription_
     page.evaluate("testSettingsReads[2].reject(new Error('current read failed'))")
     expect(page.locator('#btn-save-settings')).to_be_disabled()
     expect(page.locator('#settings-status')).to_contain_text('current read failed')
-
-
-@pytest.mark.ui_browser
-@pytest.mark.parametrize("engine", ["chromium", "webkit"])
-def test_stored_zero_allowance_survives_an_unrelated_settings_save(direct_server_with_data, engine):
-    """A saved 0 is a value, not an absence: a save from another tab keeps it.
-
-    Real server read, form and write, from the owner typing 0 over the default.
-    The load path once rendered the stored 0 as its '20' fallback, so the next
-    save of any tab persisted 20.
-    """
-    from playwright.sync_api import expect, sync_playwright
-
-    url = direct_server_with_data["url"]
-    settings_path = direct_server_with_data["data_dir"] / "settings.json"
-    key = "OUROBOROS_CONSCIOUSNESS_DAILY_USD"
-    assert key not in json.loads(settings_path.read_text(encoding="utf-8"))  # starts at the default
-
-    with sync_playwright() as pw:
-        browser = getattr(pw, engine).launch()
-        try:
-            page = browser.new_page(viewport={"width": 1280, "height": 900})
-            allowance = page.locator("#s-consciousness-daily-usd")
-
-            def open_settings_tab(tab):
-                page.goto(url, wait_until="domcontentloaded")
-                page.wait_for_selector("#page-chat", timeout=30_000)
-                page.click('[data-nav-page="settings"]')
-                expect(page.locator("#btn-save-settings")).to_be_enabled(timeout=30_000)
-                page.click(f'[data-settings-tab="{tab}"]')
-
-            def save_and_read():
-                page.click("#btn-save-settings")
-                expect(page.locator("#settings-status")).to_contain_text("Settings saved", timeout=30_000)
-                return json.loads(settings_path.read_text(encoding="utf-8"))
-
-            open_settings_tab("behavior")
-            expect(allowance).to_have_value("20")
-            allowance.fill("0")
-            stored = save_and_read()
-            assert float(stored[key]) == 0, stored[key]
-
-            open_settings_tab("behavior")  # a full reload reads the saved 0 back
-            expect(allowance).to_have_value("0")
-            page.click('[data-settings-tab="advanced"]')
-            page.locator("#s-gh-repo").fill("owner/unrelated-edit")
-            stored = save_and_read()
-            assert stored["GITHUB_REPO"] == "owner/unrelated-edit"
-            assert float(stored[key]) == 0, stored[key]
-
-            open_settings_tab("behavior")  # a full reload reads the saved document back
-            expect(allowance).to_have_value("0")
-            allowance.scroll_into_view_if_needed()
-            screenshot = diagnostic_directory(settings_path.parent, "settings-drafts", publish=True) / f"settings-zero-saved-{engine}.png"
-            page.screenshot(path=str(screenshot), full_page=True)
-            print(f"ZERO_SETTINGS_SCREENSHOT {screenshot}")
-        finally:
-            browser.close()
 
 
 @pytest.mark.ui_browser
