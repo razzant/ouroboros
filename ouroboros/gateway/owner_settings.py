@@ -53,7 +53,6 @@ from typing import Any, Callable, Dict, Optional, Sequence
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from ouroboros.config import DATA_DIR
 from ouroboros.config import defaults_for_settings_document as _defaults_for_settings_document
 from ouroboros.context_mode_compat import normalize_context_mode_compat
 from ouroboros.control_actor import PAUSE_AUTHORS
@@ -226,7 +225,9 @@ def owner_audit(request: Request, action: str, payload: Dict[str, Any]) -> None:
     try:
         drive_root = request_drive_root(request)
     except Exception:
-        drive_root = pathlib.Path(DATA_DIR)
+        from ouroboros import config
+
+        drive_root = pathlib.Path(config.DATA_DIR)
     try:
         client = getattr(request, "client", None)
         append_jsonl(
@@ -319,7 +320,8 @@ def settings_change_text(changes: Dict[str, Dict[str, Any]], origin: Dict[str, s
     return " ".join(parts) + " " + _ROW_ACTORS.get(str(origin.get("actor") or ""), "Changed outside the app.")
 
 
-def record_settings_change(request: Request, changes: Dict[str, Dict[str, Any]]) -> None:
+def record_settings_change(request: Request | None, changes: Dict[str, Dict[str, Any]], *,
+                           origin: Dict[str, str] | None = None) -> None:
     """Record one committed settings write: the writer's receipt, never a second reading of the file.
 
     One ``owner_api_action`` (``action="settings_changed"``) names every changed key: a scalar with its
@@ -330,7 +332,7 @@ def record_settings_change(request: Request, changes: Dict[str, Dict[str, Any]])
     if not changes:
         return
     try:
-        origin = declared_settings_origin(request)
+        origin = origin or declared_settings_origin(request)
         projected = {key: {"withheld": reason} if (reason := _withheld(key, change)) else dict(change)
                      for key, change in changes.items()}
         owner_audit(request, "settings_changed", {**origin, "changes": projected})

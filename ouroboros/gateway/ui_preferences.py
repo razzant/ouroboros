@@ -2,8 +2,9 @@
 
 Keys: ``voice`` (``stt``, ``tts``, ``tts_voice``), ``contributions``, ``widget_order``, ``widget_size``, ``widget_start_mode`` (values from
 ``extension_ui_validation.WIDGET_START_MODES``), ``nested_subagents_expanded``, the
-empty-Main ``welcome`` copy, the two side-section widths, the read cursors and
-``read_ahead_revisions``. A POST may carry any subset of keys; an unknown key answers 400.
+empty-Main ``welcome`` copy, the two side-section widths, the read cursors,
+``read_ahead_revisions`` and up to four recent model routes (``model_recents``).
+The latter two are server-written; a POST naming either or an unknown key answers 400.
 ``shared_read`` (row addresses) is an input only: the host records it as read-ahead.
 """
 from __future__ import annotations
@@ -63,6 +64,8 @@ DEFAULT_UI_PREFERENCES: dict[str, Any] = {
     # Main's empty-state copy, a hidden install-wide preference (no Settings control):
     # never a model reply or a chat-history row.
     "welcome": {"mode": "default", "text": ""},
+    # Server-written owner choices, newest first; suggestions never authorize a model.
+    "model_recents": [],
 }
 _KNOWN_KEYS = frozenset(DEFAULT_UI_PREFERENCES)
 _MAX_WIDGET_ORDER_ITEMS = 200
@@ -77,6 +80,7 @@ _MAX_PROJECT_CURSORS = 1000
 _MAX_PROJECT_ID_LENGTH = 64
 _MAX_WELCOME_CHARS = 500
 _MAX_SHARED_READS = 64  # addresses one POST may name; recorded facts are never capped
+_MAX_MODEL_RECENTS = 4
 _MAX_CONTRIBUTION_KEYS = 64  # the bound _normalize_preferences enforces on contributions lists
 
 
@@ -221,6 +225,22 @@ def _normalize_preferences(
     if "widget_size" in raw:
         value = raw.get("widget_size")
         prefs["widget_size"] = {} if value is None else _normalize_widget_size(value)
+    if "model_recents" in raw:
+        from ouroboros.composer_cognition import normalize_model_choice
+
+        routes = []
+        value = raw["model_recents"]
+        for item in value if isinstance(value, list) else []:
+            try:
+                choice = normalize_model_choice({**item, "kind": "model"})
+            except (TypeError, ValueError):
+                continue
+            route = {key: choice[key] for key in ("model", "use_local")}
+            if route not in routes:
+                routes.append(route)
+            if len(routes) == _MAX_MODEL_RECENTS:
+                break
+        prefs["model_recents"] = routes
     if "nested_subagents_expanded" in raw:
         value = raw.get("nested_subagents_expanded")
         if not isinstance(value, bool):
@@ -361,6 +381,19 @@ def _stored_preferences(path: pathlib.Path) -> dict[str, Any]:
     return _normalize_preferences(stored)
 
 
+def record_model_recent(drive_root: Any, model: str, use_local: bool = False) -> None:
+    """Record an owner model act in the shared bounded store, under its existing lock."""
+    from ouroboros.composer_cognition import normalize_model_choice
+
+    choice = normalize_model_choice({"kind": "model", "model": model, "use_local": use_local})
+    route = {key: choice[key] for key in ("model", "use_local")}
+    path = pathlib.Path(drive_root) / "state" / "ui_preferences.json"
+    with _preferences_lock(path):
+        prefs = _stored_preferences(path)
+        prefs["model_recents"] = [route, *(item for item in prefs["model_recents"] if item != route)][:_MAX_MODEL_RECENTS]
+        atomic_write_json(path, prefs, trailing_newline=True)
+
+
 async def api_ui_preferences_get(request: Request) -> JSONResponse:
     drive_root = request_drive_root(request)
     path = pathlib.Path(drive_root) / "state" / "ui_preferences.json"
@@ -379,6 +412,8 @@ async def api_ui_preferences_post(request: Request) -> JSONResponse:
     unknown = sorted(set(body) - _KNOWN_KEYS)
     if unknown:
         return json_error(f"unknown ui preference key: {unknown[0]}", 400)
+    if "model_recents" in body:
+        return json_error("model_recents is recorded by the host on owner model choices", 400)
     if "read_ahead_revisions" in body:
         return json_error("read_ahead_revisions is recorded by the host; post shared_read addresses", 400)
     if shared is not None and (not isinstance(shared, list) or len(shared) > _MAX_SHARED_READS
@@ -467,4 +502,5 @@ __all__ = [
     "api_ui_preferences_get",
     "api_ui_preferences_post",
     "main_room_revision",
+    "record_model_recent",
 ]

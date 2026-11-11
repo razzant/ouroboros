@@ -113,7 +113,8 @@ def _queue_revision() -> Tuple[Any, ...]:
         active = (meta.get("active_llm_call") or {}) if isinstance(meta, dict) else {}
         running.append((str(task_id), meta.get("attempt") if isinstance(meta, dict) else None,
                         json.dumps([active.get("model_activity"), meta.get("context_attempt") if isinstance(
-                            meta, dict) else None], sort_keys=True, default=str),
+                            meta, dict) else None, meta.get("lead") if isinstance(meta, dict) else None,
+                            meta.get("_lead_request_id") if isinstance(meta, dict) else None], sort_keys=True, default=str),
                         str(meta.get("turn_phase") or "") if isinstance(meta, dict) else ""))
     return (queue_revision(), tuple(pending), tuple(running))
 
@@ -433,6 +434,7 @@ def produced_fields(snap: Dict[str, Any]) -> Dict[str, Any]:
         "spent_calls": int(snap["breakdown"].get("physical_calls") or 0) if available else None,
         "subagents_mode": snap["subagents_mode"],
         "subagents_availability": snap["subagents_availability"],
+        "main_route": snap["main_route"],
         "github_token_configured": snap["github_token_configured"],
         "accounting": _accounting_block(snap["accounting"], available, limit),
         "projects": snap["projects"],

@@ -766,12 +766,18 @@ def test_an_owner_max_task_in_task_local_low_rebinds_a_fallback_and_its_return_f
     primary's roomier window keeps Nano: a route never raises the mode."""
     from ouroboros.memory_view import snapshot_json
     from ouroboros.send_clock import CLOCK_NOTE_PREFIX
+    from ouroboros.tool_policy import initial_tool_schemas
     from tests import _memory_view_synthetic as syn
 
     ctx, gateway, tools, events, plan, windows = _native(main_call, monkeypatch, tmp_path, owner_mode="max",
                                                          view=snapshot_json(syn.actor("main")))
-    windows.update({"account-a": 150_000, "account-b": {"roomy": 900_000, "tight": 100_000}[fallback]})
-    built = dataclasses.replace(plan(150_000), initial_mode="low")  # the owner's Max plan, task-local Low shown
+    # The primary holds the Low view it shows with room for this scenario's turns. Every request carries the real
+    # tool schemas, so the window is measured from them: their growth must never decide what a return re-cuts.
+    floor = plan(150_000)
+    primary = max(150_000, floor.projected_tokens_with_tools("low", initial_tool_schemas(tools, context_mode="max"))
+                  + floor.output_reserve_tokens + 8_000)
+    windows.update({"account-a": primary, "account-b": {"roomy": 900_000, "tight": 100_000}[fallback]})
+    built = dataclasses.replace(plan(primary), initial_mode="low")  # the owner's Max plan, task-local Low shown
     low = built.messages_for("low")[0]
     assert built.preferred_mode == "max" and low != built.messages_for("max")[0]
     ctx.messages[:] = [*built.messages_for("low"), result()["message"],

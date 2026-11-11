@@ -668,6 +668,8 @@ def prepare_conversation_task(agent: Any, task: Dict[str, Any], drive_root: Any,
     apply_consciousness_authority(task)
     from ouroboros.settings_integrity import record_subagents_admission
     record_subagents_admission(task, root)
+    from ouroboros.route_choice import capture_lead  # the admitted primary (route_choice)
+    capture_lead(task, root)
     attach_task_contract(task)
     from ouroboros.tool_access_roots import freeze_tool_profile
     freeze_tool_profile(task)

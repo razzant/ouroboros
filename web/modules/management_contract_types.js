@@ -528,7 +528,8 @@
  */
 
 /**
- * One selectable model; `value` is what a model setting stores.
+ * One selectable model; `value` is what a model setting stores. The local model's row says `use_local`: `id` names
+ * it and its `value` is a label, never a route.
  * @typedef {Object} ModelCatalogItem
  * @property {string} provider_id
  * @property {string} provider
@@ -554,6 +555,7 @@
  * @property {*=} availability
  * @property {*=} problem
  * @property {*=} processing
+ * @property {boolean=} use_local
  */
 
 /**

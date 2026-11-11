@@ -7,7 +7,7 @@ import test from 'node:test';
 
 import { normalizeConnector, normalizePlace, normalizePlacesResponse, normalizePlaceStatus } from '../modules/consciousness_api.js';
 import { SILENT_CARD, WAKE_FACT_WORDS } from '../modules/consciousness_words.js';
-import { placeChangeFor, placeSheetBodyHtml, placeSheetMetaText, openPlaceSheet, recentRooms } from '../modules/place_sheet.js';
+import { inheritedModelWords, placeChangeFor, placeSheetBodyHtml, placeSheetMetaText, openPlaceSheet, recentRooms } from '../modules/place_sheet.js';
 import { applyPayload, setMissTransport } from '../modules/i18n.js';
 
 import { setup, NodeStub } from './dashboard_dom_fixture.js';
@@ -985,4 +985,80 @@ test('words typed while a description Save is out stay a draft on the revision t
     await click(body, '[data-place-act="save-description"]');
     assert.deepEqual(server.writes.map((write) => write.expected_revision), [4, 5], 'on the revision the first Save made');
     assert.equal(server.raw.description.text, 'First words, and more');
+});
+
+// A place inherits its circle's model and may override it; the default is the consciousness model (owner 10.11).
+const GLM = 'z-ai/glm-5.3';
+const ASTRA = 'claudexor::codex=gpt-6-astra';
+const TEAM = { id: 'team', name: 'Team', text: '', textAuthor: '', textAt: '', model: GLM, revision: 3 };
+const HOME = { id: 'home', name: 'Home', text: '', textAuthor: '', textAt: '', model: '', revision: 4 };
+const placed = (circle, model, route) => normalizePlace({ ...FIXTURE.places.places[0], model, model_route: route,
+    circle: circle ? { circle_id: circle, placed_by: 'owner', placed_at: '' } : null });
+const modelField = (html) => ({ value: /data-place-draft="model"[^>]*value="([^"]*)"/.exec(html)[1],
+    placeholder: /data-place-draft="model"[^>]*placeholder="([^"]*)"/.exec(html)[1].replaceAll('&#39;', "'"),
+    help: /id="place-model-help"[^>]*>([^<]*)</.exec(html)[1].replaceAll('&#39;', "'") });
+
+test('an empty Model field names what the place uses: its circle\'s model, else the consciousness model', () => {
+    const circles = [TEAM, HOME];
+    const inherits = modelField(placeSheetBodyHtml(placed('team', '', { value: GLM, layer: 'circle' }), { circles }));
+    assert.deepEqual(inherits, { value: '', placeholder: "Uses Team's model: glm-5.3",
+        help: "The model it thinks with when it wakes here; empty uses Team's model, glm-5.3." });
+    const follows = modelField(placeSheetBodyHtml(placed('home', '', { value: ASTRA, layer: 'consciousness' }), { circles }));
+    assert.deepEqual(follows, { value: '', placeholder: 'Uses the consciousness model: gpt-6-astra',
+        help: 'The model it thinks with when it wakes here; empty uses the Consciousness model in Models, gpt-6-astra.' });
+    // In no circle the default is the same; a server that does not say names no model.
+    assert.equal(modelField(placeSheetBodyHtml(placed('', '', { value: ASTRA, layer: 'consciousness' }), { circles })).placeholder,
+        'Uses the consciousness model: gpt-6-astra');
+    assert.deepEqual(modelField(placeSheetBodyHtml(placed('home', '', undefined), { circles })), { value: '',
+        placeholder: 'Empty uses the consciousness model', help: 'The model it thinks with when it wakes here; empty uses the Consciousness model in Models.' });
+    assert.match(placeSheetBodyHtml(placed('team', '', { value: GLM, layer: 'circle' }), { circles }),
+        /aria-describedby="place-model-help"[\s\S]*id="place-model-help" data-i18n-fmt="places\.model\.help">/, 'the help describes the field and names a model, not chrome');
+});
+
+test('the field holds only the place\'s own model; under an override the help says what clearing it returns to', () => {
+    const circles = [TEAM, HOME];
+    const own = modelField(placeSheetBodyHtml(placed('team', 'openai::gpt-6', { value: 'openai::gpt-6', layer: 'place' }), { circles }));
+    assert.deepEqual(own, { value: 'openai::gpt-6', placeholder: "Uses Team's model: glm-5.3",
+        help: "The model it thinks with when it wakes here; empty uses Team's model, glm-5.3." }, 'the circle is read for the inherited value');
+    // The place's row carries its own model then, so the consciousness model is not named by this read.
+    assert.equal(modelField(placeSheetBodyHtml(placed('home', 'main', { value: ASTRA, layer: 'place' }), { circles })).help,
+        'The model it thinks with when it wakes here; empty uses the Consciousness model in Models.');
+    // A draft is the field's value until it is saved or cleared; the inherited words stay what the circle says.
+    assert.equal(modelField(placeSheetBodyHtml(placed('team', 'openai::gpt-6', { value: 'openai::gpt-6', layer: 'place' }), { circles, drafts: { model: '' } })).value, '');
+});
+
+test('a circle\'s alias is named by what it resolves to for a place that inherits it, by its role otherwise', () => {
+    const aliased = [{ ...TEAM, model: 'main' }, HOME];
+    assert.equal(inheritedModelWords(placed('team', '', { value: ASTRA, layer: 'circle' }), aliased).placeholder, "Uses Team's model: gpt-6-astra");
+    assert.equal(inheritedModelWords(placed('team', GLM, { value: GLM, layer: 'place' }), aliased).placeholder, "Uses Team's model: Main");
+    // A circle whose model was edited does not revise its places' rows: the circle as last read is what is named.
+    assert.equal(inheritedModelWords(placed('team', '', { value: ASTRA, layer: 'circle' }), [{ ...TEAM, model: 'openai::gpt-6' }]).placeholder,
+        "Uses Team's model: gpt-6");
+    assert.equal(inheritedModelWords(placed('team', '', { value: GLM, layer: 'circle' }), null).placeholder, 'Empty uses the consciousness model',
+        'circles not read yet: nothing is claimed for them');
+});
+
+test('clearing the field returns the place to inheriting: one write of the empty model, then what it uses now', async (t) => {
+    const { document } = sheetDom(t);
+    const requests = [];
+    const start = placed('team', 'openai::gpt-6', { value: 'openai::gpt-6', layer: 'place' });
+    const sheet = openPlaceSheet(start, { circles: [TEAM, HOME], update: async (id, change) => {
+        requests.push(change);
+        return change.model ? { ...start, model: change.model, modelRoute: { value: change.model, layer: 'place' }, revision: start.revision + requests.length }
+            : { ...start, model: '', modelRoute: { value: GLM, layer: 'circle' }, revision: start.revision + requests.length };
+    } });
+    t.after(() => sheet.close());
+    const body = document.body.querySelector('[data-place-body]');
+    await input(body, 'model', '  ');
+    await click(body, '[data-place-act="save-model"]');
+    assert.deepEqual(requests, [{ model: '', expected_revision: start.revision }]);
+    const plain = (text) => text.replaceAll('&#39;', "'");  // the stub DOM keeps an escaped apostrophe as written
+    assert.match(plain(body.textContent), /Now uses Team's model: glm-5\.3\./);
+    assert.equal(plain(body.querySelector('[data-place-draft="model"]').getAttribute('placeholder')), "Uses Team's model: glm-5.3");
+    assert.equal(body.querySelector('[data-place-draft="model"]').getAttribute('value'), '');
+    // And an override again is saved as the place's own.
+    await input(body, 'model', GLM);
+    await click(body, '[data-place-act="save-model"]');
+    assert.deepEqual(requests[1], { model: GLM, expected_revision: start.revision + 1 });
+    assert.match(body.textContent, /Model saved\./);
 });
