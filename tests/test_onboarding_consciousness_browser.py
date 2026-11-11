@@ -30,6 +30,7 @@ from tests.test_ui_smoke_playwright import (
     REPO_ROOT, _assert_served_candidate, _browser_missing, _fixture_interpreter, _fixture_python, _free_port,
     _wait_health, _wait_supervisor_ready,
 )
+from tests.ui_console_errors import PageErrors
 from ouroboros.test_environment import isolated_environment, owned_process_temp
 from ouroboros.test_evidence import keep_startup_log
 
@@ -172,8 +173,8 @@ def _text(page, selector: str) -> str:
 
 
 def _record(page) -> dict:
-    seen = {"commands": [], "completions": [], "errors": []}
-    page.on("pageerror", lambda error: seen["errors"].append(str(error)))
+    seen = {"commands": [], "completions": [], "errors": PageErrors(None, page.context.browser.browser_type.name)}
+    seen["errors"].watch(page, navigates=False)  # strict: only a caller driving a hand-off declares it
 
     def request(req):
         if req.url.endswith("/api/command") and req.method == "POST":
@@ -253,6 +254,7 @@ def test_first_setup_ticked_starts_once_through_the_queue_and_a_later_stop_wins(
             page.screenshot(path=str(out / "first-setup-summary-unticked-webkit-light.png"), full_page=True)
             box.check()
             page.locator(ROW).screenshot(path=str(out / "first-setup-row-ticked-webkit-light.png"))
+            seen["errors"].watch(page)  # Finish hands off to the app: leaving may cut off the page's own reads (tests/ui_console_errors.py)
             _finish(page)
             page.wait_for_selector("[data-consciousness-run]", timeout=60_000)
             page.screenshot(path=str(out / "first-setup-after-save-webkit-light.png"))
@@ -276,7 +278,7 @@ def test_first_setup_ticked_starts_once_through_the_queue_and_a_later_stop_wins(
                                          "ui_control": {"name": "setup_consciousness"}}], seen["commands"]
             assert len(seen["completions"]) == 1
             assert not any("onscious" in key for key in seen["completions"][0]), "nothing rides the save"
-            assert not seen["errors"], seen["errors"]
+            assert not seen["errors"].unexpected(), seen["errors"].report()
         finally:
             browser.close()
     assert _control(srv.url) is True, "observed on through the real state"
@@ -344,6 +346,7 @@ def test_markerless_install_offers_its_own_limits_and_an_unticked_finish_sends_n
             page.goto(srv.url + "/onboarding?builtin=1", wait_until="networkidle", timeout=60_000)
             _to_summary(page, pro=False)
             assert not page.locator("[data-consciousness-start]").is_checked()
+            seen["errors"].watch(page)  # Finish hands off to the app: leaving may cut off the page's own reads (tests/ui_console_errors.py)
             _finish(page)
             page.wait_for_url(srv.url + "/", timeout=120_000)
             assert seen["commands"] == [], "an unticked Finish sends no Start"
@@ -355,7 +358,7 @@ def test_markerless_install_offers_its_own_limits_and_an_unticked_finish_sends_n
             _to_summary(page, pro=False)
             assert page.locator(ROW).count() == 0
             page.screenshot(path=str(out / "completed-setup-summary-no-row-webkit-light.png"), full_page=True)
-            assert not seen["errors"], seen["errors"]
+            assert not seen["errors"].unexpected(), seen["errors"].report()
         finally:
             browser.close()
 

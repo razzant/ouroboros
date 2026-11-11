@@ -69,9 +69,12 @@ def disclosable_effort_fact(data: Dict[str, Any]) -> Dict[str, str]:
             "source": str(fact["source"] or "")}
 
 
-def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None, reader: str = "") -> str:
+def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None, reader: str = "",
+                             task_id: str = "") -> str:
     from ouroboros.delegate_output import project_task_output_readers
+    from ouroboros.owner_continue import offer_view
 
+    offer = offer_view(data, task_id) if task_id else None  # the short views' offer, from the whole row
     data = project_task_output_readers(data)
     summary: Dict[str, Any] = {
         "outcome_axes": normalize_outcome_axes(data),
@@ -80,6 +83,8 @@ def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None,
         summary["execution_observation"] = dict(data["execution_observation"])
     if stop := stop_for_reader(data.get("current_stop") or {}, data, reader):
         summary["current_stop"] = stop  # what holds it now, beside the historical axes
+    if offer is not None:  # a root's Continue, read afresh like current_stop; a child names none
+        summary["continuation_offer"] = offer
     if isinstance(data.get("swarm_receipt"), dict):
         summary["swarm_receipt"] = data["swarm_receipt"]
     # R5: current custody beside historical axes, on full get_task_result/wait_task
@@ -466,7 +471,7 @@ def _get_task_result(
     except Exception:
         receipts = []
     reader = str(getattr(ctx, "task_id", "") or "")
-    outcome_summary = _subtask_outcome_summary(data, receipts=receipts, reader=reader)
+    outcome_summary = _subtask_outcome_summary(data, receipts=receipts, reader=reader, task_id=str(task_id))
     from ouroboros.tools.join_ledger import _child_result_sha256
 
     child_result_sha256 = _child_result_sha256(data)
