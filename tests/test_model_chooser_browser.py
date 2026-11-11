@@ -212,3 +212,275 @@ def test_chooser_popup_reachable_in_narrow_short_view(role_ui, width, height):
     option.click()
     assert field.input_value() == 'choice-29'
     roles.capture(page, f'chooser-narrow-{width}-{height}')
+
+
+def vendor_scene(ui, count=1):
+    """The real consumer catalog, including an empty-independent API source and six editors."""
+    import copy
+    from urllib.parse import parse_qs, urlparse
+    from tests.test_harness_maintenance_browser import _inventory_row
+
+    roles.configure_mixed(ui)
+    roles.api_lane(ui, "openai")
+    profiles = ui["fixture"]["status"]["profiles"]["profiles"]
+    seed = copy.deepcopy(profiles[0])
+    profiles[:] = []
+    for index in range(count):
+        profile = copy.deepcopy(seed)
+        profile["profile"]["profile_id"] = "personal" if not index else f"account-{index}"
+        profiles.append(profile)
+    actors = [{"subagent_id": f"worker{index}", "recommended_use": f"Work {index}", "review_eligible": index == 0,
+               "route": {"kind": "api_model" if index == 0 else "agent_session",
+                         "target_id": "claudexor::opaque-source=choice-old" if index == 0 else "codex=choice-old"}}
+              for index in range(4)]
+    actors += [{"subagent_id": "current", "recommended_use": "Other program", "route": {"kind": "agent_session", "target_id": "claude=choice-old"}},
+               {"subagent_id": "api", "recommended_use": "Direct API", "route": {"kind": "api_model", "target_id": "openai::choice-api"}}]
+    ui["settings"].update(OUROBOROS_SUBAGENTS={"enabled": True, "items": actors}, OUROBOROS_MODEL="claudexor::opaque-source=choice-old")
+    world = {"version": "2.0.0", "op": None, "new": False, "posts": [], "inventories": [], "catalogs": 0}
+    row = _inventory_row("codex")
+    row.update(updateAvailable="yes", newest={"status": "available", "version": "3.0.0", "observedAt": "2026-11-10T10:00:00Z"})
+    other = _inventory_row("claude")
+    other.update(updateAvailable="no", newest={"status": "available", "version": "2.0.0", "observedAt": "2026-11-10T10:00:00Z"})
+
+    def catalogs():
+        version = world["version"]
+        producer = {"path": "/vendor/codex", "version": version}
+        models = [{"id": "choice-old"}] + ([{"id": "choice-new"}] if world["new"] else [])
+        raw, native, flat = [], [], []
+        for profile in profiles:
+            pin = profile["profile"]["profile_id"]
+            common = {"credentialProfileId": pin, "provenance": "vendor", "observedAt": "2026-11-10T12:00:00Z", "sourceProgram": producer, "models": models}
+            raw.append({"credentialProfileId": pin, "catalog": {**common, "source": "opaque-source"}, "availability": "available", "problem": None})
+            native.append({"credentialProfileId": pin, "catalog": {**common, "harnessId": "codex", "source": "api"}, "availability": "available", "problem": None})
+            flat += [{**model, "value": f"claudexor::opaque-source={model['id']}", "source_id": "opaque-source", "credentialHarness": "codex", "credential_profile_id": pin, "sourceProgram": producer} for model in models]
+        ui["fixture"]["catalog"] = {"items": flat + [{"id": "choice-api", "value": "openai::choice-api"}],
+            "model_sources": [{"id": "opaque-source", "label": "Codex", "credentialHarness": "codex"}],
+            "account_catalogs": [{"source": "opaque-source", "accounts": raw, "partial": False}], "errors": []}
+        ui["fixture"]["status"]["harnesses"] = [
+            {"id": "codex", "display_name": "Codex", "enabled": True, "status": "ok", "models": models,
+             "model_catalog": {"harnessId": "codex", "accounts": native, "partial": False}},
+            {"id": "claude", "display_name": "Claude Code", "enabled": True, "status": "ok", "models": [{"id": "choice-old"}],
+             "model_catalog": {"harnessId": "claude", "sourceProgram": {"path": "/vendor/claude", "version": "2.0.0"}, "models": [{"id": "choice-old"}]}},
+        ]
+
+    catalogs()
+
+    def catalog_reply(route):
+        world["catalogs"] += 1
+        payload = copy.deepcopy(ui["fixture"]["catalog"])
+        source = parse_qs(urlparse(route.request.url).query).get("source_id", [""])[0]
+        if source:
+            payload["items"] = [item for item in payload["items"] if item.get("source_id") == source]
+        route.fulfill(json=payload)
+
+    def maintenance(route):
+        path = urlparse(route.request.url).path
+        if path.endswith("/harnesses"):
+            world["inventories"].append(route.request.url)
+            row["selection"]["version"] = world["version"]
+            row["updateAvailable"] = "no" if world["new"] else "yes"
+            row["operation"] = world["op"]
+            row["observedAt"] = "2026-11-10T12:01:00Z"
+            route.fulfill(json={"observedAt": row["observedAt"], "harnesses": [row, other]})
+        elif route.request.method == "POST":
+            world["posts"].append(route.request.post_data_json)
+            world["op"] = {"id": "vendor-update", "harness": "codex", "state": "running", "phase": "installing",
+                "before": {"path": "/vendor/codex", "version": "2.0.0"}, "after": None, "target": {"kind": "latest", "version": None},
+                "mutation": "unknown", "termination": "not_applicable", "outcome": "unknown", "limitations": [], "progress": ["Vendor is updating."]}
+            route.fulfill(json=world["op"])
+        else:
+            route.fulfill(json=world["op"])
+
+    ui["page"].route("**/api/model-catalog*", catalog_reply)
+    ui["page"].route("**/api/claudexor/maintenance/**", maintenance)
+    world["catalogs_refresh"] = catalogs
+    world["other_inventory"] = other
+    return world
+
+
+def vendor_consumer(ui, consumer):
+    page = ui["page"]
+    if consumer in ("Models", "Fallback"):
+        page.get_by_role("tab", name="Models", exact=True).click()
+        if consumer == "Fallback":
+            page.locator("[data-model-add]").click()
+        row = page.locator('[data-model-role="main"]') if consumer == "Models" else page.locator('[data-model-role-group="fallback"] .model-role-row').last
+        row.locator("[data-model-role-source]").select_option("subscription:opaque-source")
+        return row.locator("[data-model-role-model]")
+    page.get_by_role("tab", name="Agents", exact=True).click()
+    return page.locator("[data-subagent-row]").nth(0 if consumer == "Reviewer" else 1).locator('[data-subagent-field="model"]')
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+@pytest.mark.parametrize("account_count", [1, 18])
+def test_vendor_footer_every_settings_consumer_at_scale(role_ui, width, account_count):
+    from playwright.sync_api import expect
+
+    ui, page = role_ui, role_ui["page"]
+    world = vendor_scene(ui, account_count)
+    page.set_viewport_size({"width": width, "height": 950})
+    roles.open_agents(ui)
+    expect(page.locator("[data-subagent-row]")).to_have_count(6)
+    expect(page.locator("[data-model-footer]:visible")).to_have_count(0)
+    roles.capture(page, f"program-editors-closed-{account_count}-{width}")
+    for consumer in ("Reviewer", "Agent", "Models", "Fallback"):
+        field = vendor_consumer(ui, consumer)
+        field.fill("choice")
+        footer = page.locator("[data-model-footer]:visible")
+        expect(footer).to_have_count(1)
+        expect(footer).to_contain_text("List from Codex 2.0.0")
+        expect(footer.locator("[data-program]")).to_have_count(1)
+        expect(footer.get_by_role("button", name="Update", exact=True)).to_be_enabled()
+        expect(page.locator('[role="listbox"]:visible [role="option"]')).to_have_count(1)
+        assert footer.locator('[role="option"]').count() == 0
+        field.fill("owner-new-id")
+        expect(field.locator("..").locator("[data-model-custom]")).to_be_visible()
+        field.press("Escape")
+        expect(page.locator("[data-model-footer]:visible")).to_have_count(0)
+        assert field.input_value() == "owner-new-id"
+    page.get_by_role("tab", name="Agents", exact=True).click()
+    current = page.locator("[data-subagent-row]").nth(4).locator('[data-subagent-field="model"]')
+    current.fill("choice")
+    footer = page.locator("[data-model-footer]:visible")
+    expect(footer).to_have_text("List from Claude Code 2.0.0")
+    expect(footer.locator("button")).to_have_count(0)
+    current.press("Escape")
+    api = page.locator("[data-subagent-row]").nth(5).locator('[data-subagent-field="model"]')
+    api.fill("choice")
+    expect(page.locator("[data-model-footer]:visible")).to_have_count(0)
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    api.press("Escape")
+    vendor_consumer(ui, "Agent").fill("choice")
+    roles.capture(page, f"program-editors-open-{account_count}-{width}")
+    before = len(world["inventories"])
+    page.evaluate("async () => (await import('/static/modules/claudexor_status_store.js')).claudexorStatus.refresh()")
+    assert len(world["inventories"]) == before, "passive status never reads newest or inventory"
+    assert not world["posts"]
+
+
+@pytest.mark.parametrize("interaction,consumer", [("mouse", "Agent"), ("keyboard", "Models"), ("touch", "Reviewer")])
+def test_vendor_update_keeps_chooser_open_and_refreshes_its_real_catalog(touch_role_ui, interaction, consumer):
+    from playwright.sync_api import expect
+
+    ui, page = touch_role_ui, touch_role_ui["page"]
+    world = vendor_scene(ui, 18)
+    page.set_viewport_size({"width": 390 if interaction == "touch" else 1440, "height": 950})
+    roles.open_agents(ui)
+    field = vendor_consumer(ui, consumer)
+    field.fill("choice")
+    field.evaluate("e => {window.ownerModelField = e; e.setSelectionRange(2, 3);}")
+    footer = page.locator("[data-model-footer]:visible")
+    action = footer.get_by_role("button", name="Update", exact=True)
+    expect(action).to_be_enabled()
+    if interaction == "keyboard":
+        field.press("Tab")
+        expect(action).to_be_focused()
+        action.press("Shift+Tab")
+        expect(field).to_be_focused()
+        field.press("Tab")
+        action.press("Enter")
+    elif interaction == "touch":
+        action.tap()
+    else:
+        action.click()
+    expect(footer).to_contain_text("Updating…")
+    expect(field).to_have_attribute("aria-expanded", "true")
+    assert field.input_value() == "choice"
+    assert world["posts"] == [{"harness": "codex", "target": {"kind": "latest"}}]
+    before = world["catalogs"]
+    world.update(version="3.0.0", new=True)
+    world["op"].update(state="succeeded", phase="settled", outcome="changed", mutation="applied", termination="confirmed",
+        after={"path": "/vendor/codex", "version": "3.0.0"}, finishedAt="2026-11-10T12:00:00Z", progress=["Vendor finished."],
+        exitCode=7, limitations=["Installer exited 7; replacement verified."])
+    world["catalogs_refresh"]()
+    page.evaluate("async () => (await import('/static/modules/claudexor_status_store.js')).claudexorStatus.refresh()")
+    expect(footer).to_contain_text("Updated from 2.0.0")
+    expect(footer).to_contain_text("List from Codex 3.0.0")
+    expect(footer).to_contain_text("Installer exited 7; replacement verified.")
+    expect(page.locator('[role="listbox"]:visible [data-model-value="choice-new"]')).to_be_visible()
+    expect(field).to_have_attribute("aria-expanded", "true")
+    assert field.evaluate("e => e === window.ownerModelField")
+    assert field.input_value() == "choice"
+    assert world["catalogs"] > before
+    expect(footer.locator("button")).to_have_count(0)
+    roles.capture(page, f"program-chooser-{interaction}-settled")
+    field.press("Tab")
+    expect(page.locator("[data-model-footer]:visible")).to_have_count(0)
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+@pytest.mark.parametrize("account_count", [1, 18])
+def test_vendor_footer_in_wizard_models_reviewers_and_place_sheet(role_ui, width, account_count):
+    import json
+    from pathlib import Path
+    from playwright.sync_api import expect
+
+    ui, page = role_ui, role_ui["page"]
+    world = vendor_scene(ui, account_count)
+    ui["bootstrap"]["initialState"].update(mainModel="claudexor::opaque-source=choice-old", openaiKey="fixture")
+    ui["fixture"]["preview"]["model_settings"]["OUROBOROS_MODEL"] = "claudexor::opaque-source=choice-old"
+    ui["fixture"]["preview"]["available_subagents"] = ui["settings"]["OUROBOROS_SUBAGENTS"]
+    page.set_viewport_size({"width": width, "height": 950})
+    page.goto(ui["url"] + "/onboarding")
+    page.click("#next-btn")
+    field = page.locator('[data-model-role="main"] [data-model-role-model]')
+    page.locator('[data-model-role="main"] [data-model-role-source]').select_option("subscription:opaque-source")
+    field.fill("choice")
+    footer = page.locator("[data-model-footer]:visible")
+    expect(footer).to_have_count(1)
+    expect(footer).to_contain_text("List from Codex 2.0.0")
+    expect(footer.locator("[data-program]")).to_have_count(1)
+    expect(footer.get_by_role("button", name="Update", exact=True)).to_be_enabled()
+    roles.capture(page, f"program-wizard-model-{account_count}-{width}")
+    field.press("Escape")
+    page.locator('[data-collapse="subagents"] > summary').click()
+    reviewer = page.locator('[data-subagent-row]').first
+    expect(reviewer.locator('[data-subagent-field="review_eligible"]')).to_be_checked()
+    field = reviewer.locator('[data-subagent-field="model"]')
+    field.fill("choice")
+    expect(footer).to_have_count(1)
+    expect(footer).to_contain_text("List from Codex 2.0.0")
+    expect(footer.get_by_role("button", name="Update", exact=True)).to_be_enabled()
+    roles.capture(page, f"program-wizard-reviewer-{account_count}-{width}")
+    field.press("Escape")
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+    # Open the production Place sheet through its ordinary entry point (as Circles does), then More / Model.
+    # This general chooser can contain several vendors. Each gets one closing
+    # row regardless of account count, and every action must be keyboard reachable.
+    ui["fixture"]["catalog"]["model_sources"].append({"id": "other-source", "label": "Claude Code", "credentialHarness": "claude"})
+    ui["fixture"]["catalog"]["items"] += [{"id": "choice-other", "value": "claudexor::other-source=choice-other",
+        "source_id": "other-source", "credential_profile_id": f"other-{index}",
+        "sourceProgram": {"path": "/vendor/claude", "version": "2.0.0"}} for index in range(account_count)]
+    world["other_inventory"].update(updateAvailable="yes", newest={"status": "available", "version": "3.0.0"})
+    ui["errors"].watch(page)
+    page.goto(ui["url"] + "/#settings")
+    data = json.loads((Path(__file__).resolve().parents[1] / "web/tests/fixtures/consciousness_contract.json").read_text(encoding="utf-8"))
+    page.evaluate("""async raw => {
+        const [{openPlaceSheet}, {normalizePlace}] = await Promise.all([
+            import('/static/modules/place_sheet.js'), import('/static/modules/consciousness_api.js')]);
+        openPlaceSheet(normalizePlace(raw), {circles: []});
+    }""", data["places"]["places"][0])
+    page.locator(".place-more > summary").click()
+    field = page.locator('[data-place-draft="model"]')
+    field.fill("choice")
+    expect(footer).to_have_count(1)
+    expect(footer).to_contain_text("List from Codex 2.0.0")
+    expect(footer.locator("[data-program]")).to_have_count(2)
+    expect(footer).to_contain_text("List from Claude Code 2.0.0")
+    action = footer.locator('[data-program="codex"]').get_by_role("button", name="Update", exact=True)
+    other_action = footer.locator('[data-program="claude"]').get_by_role("button", name="Update", exact=True)
+    expect(action).to_be_enabled()
+    field.press("Tab")
+    expect(action).to_be_focused()
+    action.press("Tab")
+    expect(other_action).to_be_focused()
+    other_action.press("Shift+Tab")
+    expect(action).to_be_focused()
+    action.press("Shift+Tab")
+    expect(field).to_be_focused()
+    expect(field).to_have_attribute("aria-expanded", "true")
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    roles.capture(page, f"program-place-{account_count}-{width}")
+    field.press("Escape")
+    expect(footer).to_have_count(0)

@@ -171,6 +171,7 @@ def test_status_native_models_reuse_negotiated_account_catalog(metadata_engine, 
         {"credentialProfileId": profile, "availability": availability, "problem": None,
          "catalog": {"harnessId": "codex", "credentialProfileId": profile, "source": "manifest",
                      "verifiedAgainst": "fixture-v1", "provenance": "manifest", "observedAt": None,
+                     "sourceProgram": {"path": "/vendor/program", "version": "2.0.0"},
                      "models": [{"id": model, "processing": {"modes": modes, "eligible": None}}]}}
         for profile, availability, model, modes in (
             ("account-a", "available", "model-a", ["standard"]),
@@ -205,6 +206,7 @@ def test_status_native_models_reuse_negotiated_account_catalog(metadata_engine, 
         assert [(model["id"], model["credential_profile_id"], model["availability"]) for model in harness["models"]] == [
             ("model-a", "account-a", "available"), ("model-b", "account-b", "unavailable")]
         assert all(model["observed_at"] is None and model["catalog_source"] == "manifest" for model in harness["models"])
+        assert all(model["sourceProgram"] == {"path": "/vendor/program", "version": "2.0.0"} for model in harness["models"])
         assert harness["models"][1]["processing"]["modes"] == ["standard", "fast"]
     else:
         assert harness["models"] == [{"id": "legacy"}] and "model_catalog" not in harness

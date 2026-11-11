@@ -8,6 +8,7 @@ import { renderSegmentedField } from './page_header.js';
 import { chipHtml, skillIconHtml } from './skill_presentation.js';
 import { tr, fmt } from './i18n.js';
 import { fetchJson } from './api_client.js';
+import { catalogPrograms } from './model_program.js';
 import { bindModelChoosers, modelChooserHtml, updateModelChooser } from './model_chooser.js';
 import { disconnectPlace, failureText, normalizePlace, normalizePlaceStatus, PLACES_CHANGED_EVENT, readPlaceConnector, readPlaceRooms, readPlaces, updatePlace } from './consciousness_api.js';
 import { mountPlaceHistory, placeRoomsHtml } from './place_history.js';
@@ -236,7 +237,7 @@ function moreHtml(place, ui) {
             <div class="consciousness-more-body">
                 <label class="ui-field">Model
                     <div class="place-field-row">
-                        ${modelChooserHtml(`data-place-draft="model" aria-label="${escapeHtml(tr('places.model', 'Model'))}"`, value, 'place-model-options', ui.models || [], { placeholder: tr('places.model.empty', 'Empty uses the consciousness model') })}
+                        ${modelChooserHtml(`data-place-draft="model" aria-label="${escapeHtml(tr('places.model', 'Model'))}"`, value, 'place-model-options', ui.models || [], { placeholder: tr('places.model.empty', 'Empty uses the consciousness model'), programs: catalogPrograms(ui.catalog, {sources: ui.catalog?.model_sources}) })}
                         <button type="button" class="btn btn-default btn-sm" data-place-act="save-model">Save</button>
                     </div>
                 </label>
@@ -397,8 +398,15 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
     const dialog = sheetShell(`<span class="place-glyph" aria-hidden="true">${skillIconHtml(place.icon, 22)}</span><span data-place-label data-i18n-authored>${escapeHtml(titleOf(place))}</span>`,
         placeSheetMetaText(named(place), titleOf(place)));
     const sheet = showSheet(dialog, { returnFocus, onBack: () => { if (!history) return false; backToPlace(); return true; },
-        onClose: () => { abort.abort(); disposeModels(); roomGeneration += 1; listGeneration += 1; roomController?.abort(); history?.close(); window.removeEventListener(PLACES_CHANGED_EVENT, onExternal); onClose?.(); } });
+        onClose: () => { abort.abort(); document.removeEventListener('settings-model-catalog:updated', onCatalog); disposeModels(); roomGeneration += 1; listGeneration += 1; roomController?.abort(); history?.close(); window.removeEventListener(PLACES_CHANGED_EVENT, onExternal); onClose?.(); } });
     const { body } = sheet;
+    function onCatalog(event) {
+        const data = event.detail;
+        if (!Array.isArray(data?.items) || sheet.closed) return;
+        ui.catalog = data; ui.models = data.items;
+        updateModelChooser(body.querySelector('[data-model-chooser]'), ui.models, catalogPrograms(data, {sources: data.model_sources}));
+    }
+    document.addEventListener('settings-model-catalog:updated', onCatalog);
     // The editor holds the sections; a captured conversation opens in the reader beside it (one sheet, Back returns).
     const editor = document.createElement('div'); editor.className = 'place-sheet-editor';
     const reader = document.createElement('div'); reader.hidden = true;
@@ -571,8 +579,7 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
         try {
             const data = await readModels({ cache: 'no-store', signal: abort.signal });
             if (!Array.isArray(data?.items) || data.read_state === 'failed') throw new Error();
-            ui.models = data.items;
-            if (!sheet.closed) updateModelChooser(body.querySelector('[data-model-chooser]'), ui.models);
+            onCatalog({detail: data});
         } catch { ui.status.more = { text: tr('places.models.unavailable', 'Model suggestions could not be read; your model is kept.'), tone: 'warn' }; paint(); }
     }, true);
     body.addEventListener('click', async (event) => {

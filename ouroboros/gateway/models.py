@@ -429,6 +429,8 @@ def _subscription_model_catalog(source_id: str = "", profile_id: str = "") -> di
                         model_id, str(model.get("label") or model_id), source="Claudexor")
                     entry.update({
                         "source_id": identifier,
+                        "sourceProgram": catalog.get("sourceProgram"),
+                        "credentialHarness": source.get("credentialHarness"),
                         "value": f"claudexor::{identifier}={model_id}",
                         "credential_profile_id": catalog.get("credentialProfileId"),
                         "account_fingerprint": catalog.get("accountFingerprint"),

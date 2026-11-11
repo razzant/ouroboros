@@ -455,7 +455,7 @@ def _read_status_payload(include_models: bool) -> Dict[str, Any]:
                                 {**model, "credential_profile_id": account.get("credentialProfileId"),
                                  "availability": account.get("availability"), "problem": account.get("problem"),
                                  "provenance": source.get("provenance"), "observed_at": source.get("observedAt"),
-                                 "catalog_source": source.get("source")}
+                                 "catalog_source": source.get("source"), "sourceProgram": source.get("sourceProgram")}
                                 for account, source, model in account_catalog_models(envelope)
                             ]
                         else:

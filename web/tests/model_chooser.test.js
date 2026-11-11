@@ -23,3 +23,14 @@ test('model choice markup escapes catalog text and retains arbitrary current IDs
         { value: 'a', label: 'a' }, { value: 'b', label: 'B' }, { value: '', label: 'Engine default' },
     ]);
 });
+test('the supplying-program footer is a sibling of the listbox and placement is swappable', () => {
+    const programs = [{harness: 'future', label: 'Future', programs: [{path: '/vendor/future', version: '7'}]}];
+    for (const programPlacement of ['list', 'line']) {
+        const html = modelChooserHtml('', 'typed', 'models', [], {programs, programPlacement});
+        assert.match(html, /role="group" aria-label="Supplying program"/);
+        assert.match(html, /<div id="models" role="listbox"><\/div>/);
+        assert.match(html, /data-model-custom/);
+        assert.match(html, new RegExp(`data-program-placement="${programPlacement}"`));
+        assert.equal((html.match(/data-model-footer/g) || []).length, 1);
+    }
+});
