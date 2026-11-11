@@ -440,9 +440,13 @@ def retire_tracked(proc, *, live_groups: Optional[dict[int, bool]] = None) -> bo
 
     A task-group record is discovery, not transfer of this live OS witness.
     Foreground/external receipts describe the root separately. Idle workers
-    keep this registry alive; stop/idle probes retire naturally ended trees.
+    keep this registry alive; stop/idle probes and Linux spawn retries retire
+    naturally ended trees. Spawn retries wait for the owner's first attempt,
+    so publication bookkeeping can still read the retained leader's identity.
     """
     held = _held(proc)
+    if live_groups is None:
+        held["_ouroboros_retirement_pending"] = True
     if proc.poll() is None:
         return False
     remains = _tree_remains(proc) if live_groups is None else _tree_remains(proc, live_groups=live_groups)
@@ -530,19 +534,21 @@ def maintain_tracked_children() -> None:
     """Retry exited trees at spawn boundaries; Linux batches a non-spawning census.
 
     The snapshot belongs to this call, never to the shared process handles. An
-    unreadable census retains POSIX groups without falling back to per-group ps;
-    Windows still measures each owned Job. No global waitpid consumes others' status.
+    unreadable census retains POSIX groups without falling back to per-group ps.
+    Jobs keep owner/idle/stop retirement. No global waitpid consumes others' status.
     """
     from ouroboros.process_containment import process_groups_have_live_members
 
-    candidates = [proc for proc in _active_subprocesses.copy() if proc.poll() is not None]
+    candidates = [proc for proc in _active_subprocesses.copy()
+                  if _held(proc).get("_ouroboros_retirement_pending")
+                  and _held(proc).get("_ouroboros_pgid") and proc.poll() is not None]
     if not candidates:
         return
     pgids = {int(_held(proc).get("_ouroboros_pgid", 0) or 0) for proc in candidates}
     census = process_groups_have_live_members(pgids) or {}
     for proc in candidates:
         pgid = int(_held(proc).get("_ouroboros_pgid", 0) or 0)
-        if pgid and census.get(pgid) is not False:
+        if census.get(pgid) is not False:
             continue  # no identity lock/probe for a live or unknown POSIX group
         retire_tracked(proc, live_groups=census)
 

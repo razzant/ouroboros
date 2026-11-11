@@ -149,6 +149,8 @@ def process_group_has_live_members(pgid: int) -> bool:
     """
     if not _pl.process_group_is_alive(pgid):
         return False
+    if not _pl.IS_WINDOWS and os.path.isdir("/proc"):
+        return (process_groups_have_live_members({pgid}) or {}).get(pgid) is not False
     try:
         rows = subprocess.run(["ps", "-A", "-o", "pgid=,state="],
                               capture_output=True, text=True, timeout=5)
@@ -165,44 +167,61 @@ def process_group_has_live_members(pgid: int) -> bool:
     return _pl.process_group_is_alive(pgid)
 
 
-def process_groups_have_live_members(pgids: "set[int]") -> Optional[dict[int, bool]]:
-    """Take one Linux process-table census without spawning another process.
+def _linux_group_members(pgids: "set[int]") -> "tuple[dict[int, dict[str, bytes]], bool]":
+    """One /proc listing; a vanished row makes negative membership incomplete."""
+    members = {pgid: {} for pgid in pgids}
+    live = set()
+    complete = True
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/stat", "rb") as handle:
+                fields = handle.read().rpartition(b")")[2].split()
+        except (FileNotFoundError, ProcessLookupError):
+            complete = False  # it may have forked a member absent from this listing
+            continue
+        if len(fields) < 5:
+            raise ValueError("unreadable /proc stat row")
+        pgid = int(fields[2])
+        if pgid in members:
+            members[pgid][name] = fields[0]
+            if fields[0] != b"Z":
+                live.add(pgid)
+                if live == pgids:
+                    break  # positive witnesses need no further enumeration
+    return members, complete
 
-    ``None`` means unreadable or unsupported, never an empty table. Linux uses
-    ``/proc`` even at process exhaustion. macOS maintenance remains unknown; its
-    ordinary caller/idle retirement keeps the existing per-group probe.
+
+def process_groups_have_live_members(pgids: "set[int]") -> Optional[dict[int, bool]]:
+    """Read Linux groups without spawning; confirm only apparent-quiet groups.
+
+    A single listing can miss a child forked before its parent's stat becomes Z.
+    Quiet requires the same nonempty zombie membership in two reads, with no
+    vanished row in the confirming read. Churn/unknown defers retirement to a
+    later spawn, never command admission. No result survives this call.
+    macOS and Windows keep their owner/idle/stop retirement paths.
     """
     wanted = {int(pgid) for pgid in pgids if int(pgid) > 0}
     if not wanted:
         return {}
-    if _pl.IS_WINDOWS:
+    if _pl.IS_WINDOWS or not os.path.isdir("/proc"):
         return None
-    if os.path.isdir("/proc"):
-        states = {pgid: [] for pgid in wanted}
-        try:
-            names = os.listdir("/proc")
-            for name in names:
-                if not name.isdigit():
-                    continue
-                try:
-                    with open(f"/proc/{name}/stat", "rb") as handle:
-                        fields = handle.read().rpartition(b")")[2].split()
-                    if len(fields) < 5:
-                        return None
-                    pgid = int(fields[2])
-                    if pgid in states:
-                        states[pgid].append(fields[0].decode("ascii", "replace"))
-                except (FileNotFoundError, ProcessLookupError):
-                    continue
-                except (OSError, ValueError, IndexError):
-                    return None
-        except OSError:
-            return None
-        return {pgid: any(not state.startswith("Z") for state in members)
-                for pgid, members in states.items() if members}
-    # Do not spawn an untracked census process on macOS.  Unknown is fail-closed;
-    # the existing per-group ps probe remains available outside maintenance.
-    return None
+    try:
+        first, _ = _linux_group_members(wanted)
+        result = {pgid: True for pgid, rows in first.items()
+                  if any(state != b"Z" for state in rows.values())}
+        quiet = {pgid for pgid, rows in first.items() if rows and pgid not in result}
+        if quiet:
+            second, complete = _linux_group_members(quiet)
+            for pgid, rows in second.items():
+                if any(state != b"Z" for state in rows.values()):
+                    result[pgid] = True
+                elif complete and rows == first[pgid]:
+                    result[pgid] = False
+        return result
+    except (OSError, ValueError):
+        return None  # unreadable is never an empty tree; no ps fallback here
 
 
 def _unattributed_candidate(pid: int, since_ticks: int) -> bool:

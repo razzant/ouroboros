@@ -110,6 +110,7 @@ def test_real_ui_assets_survive_same_process_child_pressure(boot_app, monkeypatc
     import pathlib
     import subprocess
     import sys
+    import time
     from starlette.testclient import TestClient
     from ouroboros import platform_layer
     from ouroboros.tools import shell_process as sp
@@ -144,7 +145,12 @@ def test_real_ui_assets_survive_same_process_child_pressure(boot_app, monkeypatc
                 platform_layer.request_process_tree_kill(proc)
                 assert wait_test_child_stop(child, timeout_sec=5)["child_stopped"]
             # The new launch is in this application process, not a remote test controller.
-            assert sp._tracked_subprocess_run([sys.executable, "-c", "pass"], timeout=5).returncode == 0
+            deadline = time.monotonic() + 5
+            while True:
+                assert sp._tracked_subprocess_run([sys.executable, "-c", "pass"], timeout=5).returncode == 0
+                if not sys.platform.startswith("linux") or all(proc not in sp._active_subprocesses for proc, _ in owned):
+                    break
+                assert time.monotonic() < deadline, "spawn retries did not retire quiet trees"
             if sys.platform.startswith("linux"):
                 for proc, _ in owned:
                     assert proc not in sp._active_subprocesses and proc.wait() == 7
