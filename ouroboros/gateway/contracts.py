@@ -1237,10 +1237,8 @@ class ClaudexorCredentialProfileDeleteResponse(TypedDict):
 
 
 class ClaudexorLoginJobProblem(TypedDict, total=False):
-    """Typed job errors preserve engine prose/status/code and bounded actions
-    (16 strings, 512 chars each). Covers absent jobs, input/reconcile conflicts,
-    setup 400/409, terminal-probe 503 and Connect maintenance problems/context.
-    Other unmarked transport/discovery failures use the generic proxy 503."""
+    """Engine job/Connect problems; setup actions are bounded (16 × 512 chars).
+    Unmarked transport/discovery failures remain generic proxy 503s."""
 
     error: Required[str]
     code: str
