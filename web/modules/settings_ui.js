@@ -406,12 +406,19 @@ export function servedUiStatus(servedUi) {
 let servedUi = null;  // the last answer of /api/state about what is served
 const mountAdvanced = rowsPage('computer/advanced', {
     ids: () => rowsOf('computer/advanced').map((row) => row.id),
-    tune: (rows, settings, row) => {
-        const served = servedUiStatus(servedUi);
-        row('OUROBOROS_UI_DIR').meta = [rowById('OUROBOROS_UI_DIR').meta, served?.text].filter(Boolean).join(' ');
-    },
     draw: (row) => lead('Most installations never change these.')
         + card({ rows: rowsOf('computer/advanced').map((each) => settingsRow(row(each.id))).join('') }),
+    // What is served now stands in the Interface folder row, after its one line: a fact of the running core, in the
+    // warning's tone when it refused the saved folder.
+    bind: (container) => {
+        const fact = globalThis.document.createElement('span');
+        fact.className = 'ui-result settings-row-result';
+        fact.setAttribute('data-served-ui', '');
+        fact.setAttribute('role', 'status');
+        rowNode(container, 'OUROBOROS_UI_DIR')?.querySelector('.ui-row-meta')?.append(fact);
+        return null;
+    },
+    paint: (container) => setResult(container.querySelector('[data-served-ui]'), servedUiStatus(servedUi) || {}),
     shown: (container, again) => { apiClient.state().then((state) => { servedUi = state?.served_ui || null; again(); }, () => {}); },
 });
 

@@ -405,7 +405,15 @@ test('Advanced holds what an installation rarely changes, and About the reset in
     assert.deepEqual(advanced.container.querySelectorAll('[data-setting-row]').map((row) => row.dataset.settingRow),
         ['OUROBOROS_MAX_WORKERS', 'OUROBOROS_UI_DIR', 'OUROBOROS_EXTRA_CA_BUNDLE']);
     await advanced.shown();
-    assert.equal(advanced.meta('OUROBOROS_UI_DIR'), 'Empty serves the built-in interface. Serving now: the built-in interface.');
+    assert.equal(advanced.meta('OUROBOROS_UI_DIR'), 'Empty serves the built-in interface.');
+    const served = advanced.row('OUROBOROS_UI_DIR').querySelector('[data-served-ui]');
+    assert.deepEqual([served.textContent, served.dataset.tone], ['Serving now: the built-in interface.', 'muted'],
+        'what the core serves now stands in the row, after its line');
+    // A folder the core refused is a warning with the core's own sentence.
+    advanced.routes.set('/api/state', response({ served_ui: { source: 'builtin', error: "OUROBOROS_UI_DIR '/srv/ui' was not applied: no index.html" } }));
+    await advanced.shown();
+    assert.deepEqual([served.textContent, served.dataset.tone],
+        ["Serving now: the built-in interface. OUROBOROS_UI_DIR '/srv/ui' was not applied: no index.html", 'warn']);
     const about = await open(t, 'computer/about');
     assert.ok(about.container.querySelector('#about-version'));
     const fold = about.container.querySelector('details[data-settings-fold]');
