@@ -51,7 +51,7 @@ _FACTS = ("SELECT json_group_array(json_array(t.pos,t.seq,t.row_sha256,json(t.le
 _IN_CHATS = "SELECT pos FROM tail_cold WHERE chat IN (SELECT value FROM json_each(?))"
 _NEWEST = ("SELECT pos FROM (SELECT pos, row_number() OVER (PARTITION BY chat ORDER BY pos DESC) AS n FROM tail_cold "
            "WHERE chat IN (SELECT value FROM json_each(?))) WHERE n<=?")
-_OLDER = "SELECT pos FROM tail_cold WHERE chat=? AND pos<?"
+_OLDER = "SELECT pos FROM (SELECT pos FROM tail_cold WHERE chat=? AND pos<? ORDER BY pos DESC LIMIT ?)"
 _COPIES = ("SELECT pos FROM tail_cold WHERE (chat, digest) IN "
            "(SELECT json_extract(value,'$[0]'), json_extract(value,'$[1]') FROM json_each(?))")
 _PAGE = 2_000
@@ -152,9 +152,10 @@ def rows_of(store: Any, held: Mapping[str, Any], chats: Iterable[int], newest: O
     return _read(store, held, _IN_CHATS, (keys,)) if newest is None else _read(store, held, _NEWEST, (keys, newest))
 
 
-def older_of(store: Any, held: Mapping[str, Any], chat: int, before: int) -> Optional[list]:
-    """The stored facts of the set's rows in one chat before a position, by position."""
-    return _read(store, held, _OLDER, (chat, before))
+def older_of(store: Any, held: Mapping[str, Any], chat: int, before: int, count: int = -1) -> Optional[list]:
+    """The stored facts of the set's rows in one chat before a position, the ``count`` newest of them (-1: all), by
+    position."""
+    return _read(store, held, _OLDER, (chat, before, count))
 
 
 def copies_of(store: Any, held: Mapping[str, Any], words: Iterable[tuple]) -> Optional[list]:

@@ -480,13 +480,13 @@ class _PlaceReads:
     """What one capture reads of its place rooms' sealed rows (``PlaceRows``): the rows its pass holds and, standing on
     the cold set, the rows the set left unread in each asked room's chat, a room neither a Project nor Main, which holds
     rows of its own chat only (``room_membership.row_rooms``): first the newest few of every asked chat and every row of
-    those chats with an asked word, all at once; the rest of one chat when a walk goes past the newest few
-    (``memory_tail_cold``: the room key and the digest the set stored). Where the set or the stored tail changed since
+    those chats with an asked word, all at once; then, when a walk goes past what is read of a chat, its next older rows,
+    each page twice the last (``memory_tail_cold``: the room key and the digest the set stored). Where the set or the stored tail changed since
     the capture read them, a chat's rows come from the dialogue store instead, up to the end its tail was read to (its
     ``chat_id`` column is ``int`` of the row's, as ``chat_chain._row_chat_id`` reads). Every row read is decided again
     by the pass's own rule and facts and counted as read, as asked for and as kept by the place rule (``rows_kept``);
     the pass's own row wins where both hold a position, and its sealed set says which are sealed."""
-    _NEWEST = 32  # rows of each chat read first: a page, never a bound on what a walk may read
+    _NEWEST = 8  # rows of each chat read first, and half a walk's next page: pages, never a bound on what a walk reads
 
     def __init__(self, root: Any, store: ChronicleStore, facts: MembershipFacts, frontier: Mapping[str, Any],
                  tail: Tail, found: "_Pass", held: Optional[Dict[str, Any]]) -> None:
@@ -494,6 +494,7 @@ class _PlaceReads:
         self.held, self.projects = held, _project_rooms(facts)
         self.unread: Dict[str, Dict[int, Entry]] = {}  # an asked room's rows read from the set (or live), by position
         self.edge: Dict[str, int] = {}  # a room whose chat may hold unread rows below this position
+        self.page: Dict[str, int] = {}  # the size of a room's next older page
         self.words: Dict[str, Set[str]] = {}
         self.known: Dict[str, Tuple[List[Entry], List[int]]] = {}  # a room's sealed rows so far, and their positions
         self.warm: Callable[[List[Entry]], None] = lambda _entries: None
@@ -547,7 +548,7 @@ class _PlaceReads:
 
     def whole(self, room: str) -> List[Entry]:
         if room in self.edge:
-            self._older(room)
+            self._older(room, every=True)
         return list(self._known(room)[0])
 
     def copies(self, room: str) -> List[Entry]:
@@ -565,14 +566,18 @@ class _PlaceReads:
             self.known[room] = rows, [entry[2] for entry in rows]
         return self.known[room]
 
-    def _older(self, room: str) -> None:
-        older = memory_tail_cold.older_of(self.store, self.held, int(room), self.edge[room])
+    def _older(self, room: str, every: bool = False) -> None:
+        count = -1 if every else self.page.get(room, 2 * self._NEWEST)
+        older = memory_tail_cold.older_of(self.store, self.held, int(room), self.edge[room], count)
         if older is None:
             self._live([room])
-        else:
+            return
+        if every or len(older) < count:  # nothing of the chat is left unread
             del self.edge[room]
-            self._take([room], older)
-            self.warm(self._known(room)[0])
+        else:
+            self.edge[room], self.page[room] = min(fact[0] for fact in older), 2 * count
+        self._take([room], older)
+        self.warm(self._known(room)[0])
 
     def _take(self, rooms: List[str], facts: List[list]) -> None:
         for counter in ("rows_read", "rows_asked", "rows_kept"):
