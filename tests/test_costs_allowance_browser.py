@@ -93,6 +93,11 @@ def _fits(page) -> None:
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), "the page scrolls sideways"
     assert page.evaluate("""() => { const c = document.querySelector('.costs-budget');
         return c.scrollWidth <= c.clientWidth + 1; }"""), "the Budget card overflows"
+    # The shell gate's hit test also covers the populated states: a held wake adds its own sentence link.
+    from tests.test_design_system_gate_browser import MEASURE
+
+    reach = page.evaluate(MEASURE, '.costs-budget')
+    assert not any(reach.values()), reach
 
 
 def _shoot(page, name: str) -> None:
