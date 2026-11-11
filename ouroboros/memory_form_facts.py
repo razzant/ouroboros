@@ -296,6 +296,28 @@ def _rows_reader(room_id, rows):
     return f"memory_read(room_id='{room_id}', rows=true{span})"
 
 
+def _holding_pieces(entries, kind, pieces, label):
+    """Keep the joined form's price, including newline/rounding, while naming its source readers.
+
+    A shared count or gist can cover several rooms. Its existing price is divided
+    among those readers; the category total never grows from splitting the unit.
+    """
+    chars, priced = 0, 0
+    for text, readers in pieces:
+        if not text:
+            continue
+        chars += mv.json_chars(text) + (2 if chars else 0)
+        total = (chars + 5) // 4
+        tokens, priced = total - priced, total
+        weight = sum(n for _reader, n in readers)
+        used, through = 0, 0
+        for reader, n in readers:
+            through += n
+            share = tokens * through // weight
+            entries.append((kind, share - used, reader, label, 0))
+            used = share
+
+
 def _hold_conversations(snapshot, gone, hold, price, counts):
     from ouroboros import memory_view_conversation_forms as conv
     index = conv.source_index(snapshot)
@@ -307,20 +329,20 @@ def _hold_conversations(snapshot, gone, hold, price, counts):
         aggregate_unread = form == 4 and "unread" in gone.get("F6a", ())
         key = (*state, aggregate_unread)
         if key not in cache:
-            newest = max(group["rooms"], key=lambda r: (r.get("last", r.get("first", 0)), r["facts"].get("latest", "")))
-            reader = f"memory_read(room_id='{newest['room_id']}', rows=true)"
             entries = []
-            def add(kind, text, source=reader, label=group["label"], unmarked=0):
+            def add(kind, text, source, label=group["label"], unmarked=0):
                 entries.append((kind, price(text), source, label, unmarked))
-            untold = [w for r in data["rooms"].values() for w in r["untold"]]
-            if untold:
-                add("untold in other conversations", "\n".join(w["line"] for w in untold))
+            def rows(kind, source_kind, render, include=lambda w: True):
+                pieces = []
+                for remote in group["rooms"]:
+                    kept = [w for w in data["rooms"][remote["room_id"]][source_kind] if include(w)]
+                    if kept:
+                        pieces.append(("\n".join(render(w) for w in kept), [(_rows_reader(remote["room_id"], kept), 1)]))
+                _holding_pieces(entries, kind, pieces, group["label"])
+            rows("untold in other conversations", "untold", lambda w: w["line"])
             if not form:
-                add("replies of completed works", "\n".join(w["line"] for r in data["rooms"].values()
-                    for w in r["told"] if w["id"] not in words))
-            if data["owners"]:
-                add("owner words in other rooms", "\n".join(mv._row_pointer(w, "words") if w["id"] in owners
-                                                            else w["line"] for w in data["owners"]))
+                rows("replies of completed works", "told", lambda w: w["line"], lambda w: w["id"] not in words)
+            rows("owner words in other rooms", "owner", lambda w: mv._row_pointer(w, "words") if w["id"] in owners else w["line"])
             for remote in group["rooms"]:
                 for note in remote["notes"] if form < 2 else ():
                     add("notes", mv._note_pointer(note) if form else "\n".join(mv._note_lines([note])),
@@ -328,27 +350,40 @@ def _hold_conversations(snapshot, gone, hold, price, counts):
                 unread = data["rooms"][remote["room_id"]]["unread"]
                 if not aggregate_unread:
                     if form and not remote.get("overheard") and unread:
-                        add("unread host facts", conv._unread_line(unread))
+                        add("unread host facts", conv._unread_line(unread), _rows_reader(remote["room_id"], unread))
                     elif not form:
-                        whole = [w["line"] for w in unread if w["id"] not in words]
+                        whole = [w for w in unread if w["id"] not in words]
                         folded = [w for w in unread if w["id"] in words]
-                        add("unread words in other conversations", "\n".join(whole))
+                        add("unread words in other conversations", "\n".join(w["line"] for w in whole),
+                            _rows_reader(remote["room_id"], whole))
                         if folded:
-                            add("unread host facts", conv._unread_line(folded))
+                            add("unread host facts", conv._unread_line(folded), _rows_reader(remote["room_id"], folded))
                 if form < 4 and (fold := remote.get("folded")):
                     add("read and folded", conv._fold_line(remote),
                         f"memory_read(room_id='{remote['room_id']}', rows=true, from='{fold['from']}', to='{fold['to']}')")
             if form and not aggregate_unread:
-                add("unread host facts", conv._overheard_line(group, data))
-            if 0 < form < 4:
-                gists = data["gists"][-1:] if form == 3 else data["gists"]
-                add("work gists", "\n".join(conv._gist_lines(group, gists=gists, replies=data["replies"])))
-            elif not form:
-                add("work gists", "\n".join(conv._gist_lines(group, gists=conv._visible_gists(group, data, words))))
+                readers = [(_rows_reader(r["room_id"], data["rooms"][r["room_id"]]["unread"]),
+                            len(data["rooms"][r["room_id"]]["unread"])) for r in group["rooms"]
+                           if r.get("overheard") and data["rooms"][r["room_id"]]["unread"]]
+                _holding_pieces(entries, "unread host facts", [(conv._overheard_line(group, data), readers)], group["label"])
+            if form < 4:
+                gists = (data["gists"][-1:] if form == 3 else data["gists"]) if form else conv._visible_gists(group, data, words)
+                lines = conv._gist_lines(group, gists=gists, replies=data["replies"] if form else None)
+                pieces = []
+                for (work, gist), line in zip(gists, lines):
+                    spans = data["replies"].get(work, gist["address"]) if form else gist["address"]
+                    readers = []
+                    for span in spans.split(", "):
+                        ends = span.split(" → ")
+                        readers.append((_rows_reader(ends[0].partition("@")[0].removeprefix("row:"),
+                                                     [{"address": ends[0]}, {"address": ends[-1]}]), 1))
+                    pieces.append((line, readers))
+                _holding_pieces(entries, "work gists", pieces, group["label"])
+            if not form:
                 for remote in group["rooms"]:
                     for task in remote["tasks"]:
-                        if task.get("gist"):
-                            add("task gists", task_line(task))
+                        if gist := task.get("gist"):
+                            add("task gists", task_line(task), _rows_reader(gist["room_id"], [gist]))
             cache[key] = tuple(entries)
         for kind, tokens, reader, label, unmarked in cache[key]:
             hold(kind, "", reader, tokens=tokens, label=label, unmarked=unmarked)

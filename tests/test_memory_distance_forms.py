@@ -493,9 +493,9 @@ def test_holding_counts_hidden_untold_words_and_ranks_units_with_readers():
         largest = held["largest"]
         assert [text.split(", ", 1)[0] for _n, text in largest] == [
             "untold in other conversations", "untold in this room", "owner words in other rooms"]
-        assert f"{remote['label']}: memory_read(room_id='2001', rows=true)" in largest[0][1]
+        assert f"{remote['label']}: memory_read(room_id='2001', rows=true, from='{remote['rooms'][0]['words'][0]['address']}'" in largest[0][1]
         assert f"from='{room['lane1'][0]['address']}'" in largest[1][1]
-        assert f"{owner['label']}: memory_read(room_id='2002', rows=true)" in largest[2][1]
+        assert f"{owner['label']}: memory_read(room_id='2002', rows=true, from='{owner['rooms'][0]['words'][0]['address']}'" in largest[2][1]
 
 
 @pytest.mark.parametrize("mode,physical", [("low", ""), ("nano", ""), ("low", "F7"), ("low", "F6a")])
