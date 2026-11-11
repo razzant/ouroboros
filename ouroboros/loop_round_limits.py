@@ -399,7 +399,7 @@ def _run_round_compaction(
     """The round's transcript maintenance before the send: the mind's pending authored
     view (Main fit owns every automatic decision), then -- on the transcript that will
     actually go out -- the host roster of independent roots as a TAIL row when it changed
-    (owner 6C), and the mark changes other works made that no row states yet
+    (owner 6C), and the mark changes no row or memory_mark result in view states yet
     (``mark_anchors.append_mark_changes``). These rows follow any view so they are never
     folded into a rewrite, and precede the acceptance observation and the seal."""
     from ouroboros.mark_anchors import append_mark_changes

@@ -1147,8 +1147,8 @@ def words_stamp(row: Mapping[str, Any]) -> str:
 
 
 def work_words_text(ctx: Any, *, audience: str = "reviewer") -> str:
-    """``render_owner_words`` over this run's set at this handoff (``work_words``): my human's words alone, the section
-    its reviewers and plan council read, which the mind reads whole with ``memory_read(owner_words=true)``."""
+    """``render_owner_words`` over this run's set at this handoff (``work_words``): my human's words alone. Reviewers
+    and the plan council read it with the schedule text appended; ``memory_read(owner_words=true)`` returns it whole."""
     rows, absent, gaps = work_words(ctx)
     root = str(_ctx_metadata(ctx).get("root_task_id") or getattr(ctx, "task_id", "") or "")
     return render_owner_words(rows, absent, audience=audience, root_task_id=root, gaps=gaps)
