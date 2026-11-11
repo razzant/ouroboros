@@ -6047,6 +6047,15 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .costs-table-note { margin: calc(-1 * var(--space-2)) 0 0; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .costs-budget-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: var(--space-3) var(--space-5); align-items: start; }
 .costs-copy { margin: 0; max-width: 72ch; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+/* The consciousness allowance under its field (costs.js allowancePresentation): the clock's own spend in its words, what
+   that leaves out in the meta ink and the door to Consciousness; then at most two status sentences (.ui-status), each
+   its fact in the line's tone and what follows from it in the meta ink, a held wake's ending in its card's door. */
+.costs-allowance-spend { margin: 0; }
+.costs-allowance-spend .cost-cell-note { display: inline; }
+.costs-allowance-state { display: grid; gap: var(--space-2); }
+.costs-allowance-state:empty { display: none; }
+.costs-allowance-line { margin: 0; max-width: 72ch; }
+.costs-allowance-note { color: var(--text-meta); }
 .costs-tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: var(--space-4); align-items: start; }
 .cost-cell-name { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cost-table .cost-cell-right { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -10103,6 +10112,221 @@ html[data-layout="stack"] .project-panel {
     .document-reader.is-image-scene .document-reader-body.is-image {
         padding: calc(var(--space-3) + var(--inset-top)) var(--space-3) calc(var(--space-4) + var(--inset-bottom));
     }
+}
+
+/* Share (message_share.js, DESIGN "Replies"): the reader's chrome around exactly what would leave, as tall as that
+   and no taller; on a phone the reader's full sheet with the ways out at its foot. */
+.message-share[open] { display: flex; flex-direction: column; container: message-share / inline-size; }
+.message-share .document-reader-panel { flex: 1 1 auto; height: auto; }
+
+@media (min-width: 621px) {
+    .message-share {
+        width: min(var(--message-share-width), calc(100vw - 2 * var(--space-5)));
+        height: -webkit-fit-content;
+        height: fit-content;
+        max-height: min(var(--document-reader-size), calc(100vh - 2 * var(--space-5)));
+        max-height: min(var(--document-reader-size), calc(100dvh - 2 * var(--space-5)));
+    }
+}
+
+.message-share-text {
+    max-width: var(--document-reader-measure);
+    margin: 0 auto;
+    color: var(--text-primary);
+    font: inherit;
+    font-size: var(--type-section);
+    line-height: var(--line-body);
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+    unicode-bidi: plaintext;
+    tab-size: 4;
+}
+
+/* The card is the PNG itself, at its own size where it fits. */
+.message-share-card {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    margin: 0 auto;
+}
+
+/* The File is the file itself (message_share_file.js): a page without script at its own height, an app's page in a
+   frame that scrolls inside. It paints its own room, so the frame adds none. */
+.message-share-file {
+    display: block;
+    width: 100%;
+    height: var(--message-share-file-height, min(70vh, 640px));
+    border: 0;
+    border-radius: var(--radius-inner);
+    background: transparent;
+}
+
+.message-share-file-note {
+    margin: var(--space-2) 0 0;
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+}
+
+/* Where a card's charts are drawn once for the File's pictures: laid out at the card's width, never seen. */
+.message-share-stage {
+    position: fixed;
+    top: 0;
+    left: -10000px;
+    width: var(--message-share-stage-width);
+    visibility: hidden;
+    pointer-events: none;
+}
+
+.message-share-parts {
+    display: grid;
+    gap: var(--space-1);
+    max-width: var(--document-reader-measure);
+    margin: 0 auto;
+    color: var(--text-primary);
+    font-size: var(--type-section);
+    line-height: var(--line-body);
+}
+
+.message-share-part {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: start;
+    column-gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    /* Depth indents at most 40% of the list's width, so a deep leaf's words stay on screen. */
+    padding-inline-start: calc(var(--space-3) + min(var(--share-depth, 0) * var(--space-5), 40%));
+    border-radius: var(--radius-inner);
+    cursor: pointer;
+    transition: var(--motion-tone);
+}
+
+.message-share-part:hover { background: var(--menu-item-hover); }
+.message-share-part[aria-checked="true"] { background: var(--accent-12); }
+.message-share-part:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: -2px; }
+
+@media (pointer: coarse) {
+    .message-share-part { min-height: var(--touch-target-min); align-content: center; }
+}
+
+.message-share-marker {
+    min-width: 1.5em;
+    color: var(--text-meta);
+    font-variant-numeric: tabular-nums;
+}
+
+.message-share-marker:empty { display: none; }
+
+/* Exact words are selectable inside the preview; a part's own words start where an item's marker does. */
+.message-share-words {
+    grid-column: 2;
+    min-width: 0;
+    margin: 0;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+    unicode-bidi: plaintext;
+    cursor: text;
+}
+
+.message-share-part:not(.is-item) .message-share-words { grid-column: 1 / span 2; }
+.message-share-words[data-level] { font-weight: 600; line-height: var(--line-title); }
+.message-share-words:is([data-level="1"], [data-level="2"]) { font-size: var(--md-heading-major); }
+.message-share-words[data-level="3"] { font-size: var(--md-heading-minor); }
+.message-share-words .is-bold { font-weight: 600; }
+.message-share-words .is-italic { font-style: italic; }
+.message-share-words .is-strike { text-decoration: line-through; }
+.message-share-words .is-link { color: var(--accent-light); text-decoration: underline; text-underline-offset: 2px; }
+
+.message-share-part:is(.is-code, .is-diagram, .is-chart, .is-table) .message-share-words {
+    padding: var(--space-2) var(--space-3);
+    overflow-x: auto;
+    border-radius: var(--radius-inner);
+    background: var(--code-bg);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    font-size: var(--type-body);
+    white-space: pre;
+    unicode-bidi: normal;
+}
+
+.message-share-part:not(.is-code, .is-diagram, .is-chart, .is-table) .is-code {
+    padding: 0 0.2em;
+    border-radius: 4px;
+    background: var(--code-bg);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    font-size: 0.9em;
+}
+
+.message-share-part.is-quoted .message-share-words {
+    padding-inline-start: var(--space-3);
+    border-inline-start: 3px solid var(--field-border);
+}
+
+.message-share-words hr {
+    margin: 0.75em 0;
+    border: 0;
+    border-top: 1px solid var(--divider);
+}
+
+.message-share-check {
+    grid-column: 3;
+    display: inline-flex;
+    padding-top: 0.2em;
+    color: var(--tone-crimson-word);
+    opacity: 0;
+}
+
+.message-share-part[aria-checked="true"] .message-share-check { opacity: 1; }
+
+.message-share-foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+    padding: var(--space-3) var(--space-4) var(--space-3) var(--space-5);
+    border-top: 1px solid var(--divider);
+}
+
+/* Two groups: the count with Choose excerpt, and the ways out, which keep together at the end. */
+.message-share-scope {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+    min-width: 0;
+}
+
+.message-share-count {
+    margin: 0;
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    font-variant-numeric: tabular-nums;
+}
+
+.message-share-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: var(--space-2);
+    margin-inline-start: auto;
+}
+
+.message-share-status {
+    flex: 1 0 100%;
+    margin: 0;
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+}
+
+.message-share-status[data-tone="ok"] { color: var(--status-ok-fg); }
+.message-share-status[data-tone="warn"] { color: var(--status-warn-fg); }
+.message-share-status[data-tone="error"] { color: var(--status-error-fg); }
+
+@container message-share (max-width: 620px) {
+    .message-share .document-reader-body { padding-bottom: var(--space-4); }
+    .message-share-foot { padding: var(--space-2) var(--space-3) calc(var(--space-2) + var(--inset-bottom)); }
+    .message-share-scope { flex: 1 0 100%; }
 }
 
 .chat-media-player {

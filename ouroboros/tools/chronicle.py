@@ -39,7 +39,9 @@ its continuation on the second line (``next_after_seq``, ``next: from=…`` or
 ``next_start``); a single record or row larger than one page is reached by its
 own address. Once the chronicle is active, reading writes nothing to disk.
 
-Each tool first makes sure the chronicle is activated: the first call on an
+Each tool first makes sure the chronicle is activated (``memory_read`` of a
+retained source, or of my human's words for this work with ``owner_words=true``,
+reads them where they are without it): the first call on an
 install imports the legacy dialogue memory once (``chronicle_import``, no model
 call), and every later call finds the receipt and goes straight on. A call that
 meets another importer waits for it; when the import still has not completed
@@ -1273,14 +1275,15 @@ def _read_proposal(ctx: Any, root: Path, store: ChronicleStore, proposal: Dict[s
 @completed_local_read
 def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: int = 0, rows: bool = False,
                  task_id: str = "", period: Any = None, source_ref: Any = None, start: int = 0, revision: str = "",
-                 story: bool = False, proposed_selection: Any = None, fingerprint: str = "", **bounds: Any) -> str:
+                 story: bool = False, proposed_selection: Any = None, fingerprint: str = "", owner_words: bool = False,
+                 **bounds: Any) -> str:
     unknown = sorted(set(bounds) - {"from", "to"})
     if unknown:
         return _arg_error(ctx, f"unknown argument(s): {', '.join(unknown)}")
-    if (sum(bool(mode) for mode in (node_id, source_ref, rows, story, proposed_selection is not None)) > 1
-            or story and room_id is not None):
-        return _arg_error(ctx, "choose one mode: node_id, source_ref, rows=true, story=true, proposed_selection, "
-                               "or a room's records")
+    if (sum(bool(mode) for mode in (node_id, source_ref, rows, story, owner_words, proposed_selection is not None)) > 1
+            or (story or owner_words) and room_id is not None):
+        return _arg_error(ctx, "choose one mode: node_id, source_ref, rows=true, story=true, owner_words=true, "
+                               "proposed_selection, or a room's records")
     if revision and not node_id:
         return _arg_error(ctx, "revision reads one record (node_id) as of that revision")
     if fingerprint and (proposed_selection is None or not isinstance(fingerprint, str)):
@@ -1290,9 +1293,15 @@ def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: in
     limit = tool_result_limit("memory_read")
     try:
         root = _root(ctx)
-        store = None if source_ref else _activated(root)  # a retained source is verified on read, without the chronicle
+        # A retained source is verified on read, and my human's words are read where they are, without the chronicle.
+        store = None if source_ref or owner_words else _activated(root)
         if source_ref:
             text = _read_source(root, source_ref, start, limit)
+        elif owner_words:  # this work's set exactly as its reviewers and plan council read it (owner_words.work_words)
+            from ouroboros.owner_words import work_words_text
+
+            text = _window(f"my human's words for task {getattr(ctx, 'task_id', '') or 'not recorded'}",
+                           work_words_text(ctx), start, limit, lambda n: f"memory_read(owner_words=true, start={n})")
         elif story:
             text = _read_story(root, store, start, limit)
         elif proposed_selection is not None:
@@ -1493,6 +1502,7 @@ def chronicle_tools() -> List[ToolEntry]:
     }
     read = {
         "story": {"type": "boolean", "description": "true: list every current page, part and selected account with its id and reader; continue with start."},
+        "owner_words": {"type": "boolean", "description": "true: my human's words section for this work, which its reviewers and plan council render; their packets append the run's schedule text. The same rows (those that marks in force target among them), each verbatim and dated, a store that could not be read named as a gap, else the host's marker that none are recorded. No objective, plan, brief or schedule text in this reader; continue with start."},
         "proposed_selection": {"type": "object", "additionalProperties": False, "required": ["target_id"],
                                "description": "What chronicle_write kind=selection with these fields would change, read before choosing; nothing is written, a refusal is the write's. My story and room_id's page (default this task's room) now and with it, line by line, then every record the account would tell or stop telling, whole as it acts now, all from one state; continue with start and fingerprint.",
                                "properties": {"target_id": string, "replaces": {"type": "array", "items": string},
@@ -1541,10 +1551,10 @@ def chronicle_tools() -> List[ToolEntry]:
             write, ["kind"]), _chronicle_write),
         ToolEntry("memory_read", schema(
             "memory_read",
-            "Read memory by address, as text: a room's records and the marks placed in it (first line: room, head and how many global marks are in force — they are in my view, not repeated), one record: what identifies it, its text, then its corrections, quotes and stamp (node_id; an account also names each source's version, what changed in it since, and the accounts a record informs; revision= reads a record as of one revision), a room's chat rows verbatim (rows=true with from/to, task_id or period), a retained source (source_ref), or a selection before I make it (proposed_selection). Every page fits one tool result and its second line names the continuation (next_after_seq, next: from=…, or next_start), older to newer; chat rows in stored order. Choose the depth yourself.",
+            "Read memory by address, as text: a room's records and the marks placed in it (first line: room, head and how many global marks are in force — they are in my view, not repeated), one record: what identifies it, its text, then its corrections, quotes and stamp (node_id; an account also names each source's version, what changed in it since, and the accounts a record informs; revision= reads a record as of one revision), a room's chat rows verbatim (rows=true with from/to, task_id or period), a retained source (source_ref), my human's words section for this work which its reviewers and plan council render (owner_words=true; their packets append the run's schedule text), or a selection before I make it (proposed_selection). Every page fits one tool result and its second line names the continuation (next_after_seq, next: from=…, or next_start), older to newer; chat rows in stored order. Choose the depth yourself.",
             read, []), _memory_read),
         ToolEntry("memory_mark", schema(
             "memory_mark",
-            "Mark what matters in my own words on one target: a chronicle record (node_id), a chat row (address), a task (task_id) or a retained source (source_ref); room or global scope (a room mark is in view of every integrating focus and of that room's helpers and session starts, a global one of every focus, helper and session start; a mark adds nothing to my human's chat); an optional quote is verified as an exact substring of the target; an optional anchor ties the mark to an action, so its words also meet me in that action's result. Change a mark's visible detail (mark_id, visibility full/meaning, reason) or release marks (release_ids, one reason) when they no longer hold.",
+            "Mark what matters in my own words on one target: a chronicle record (node_id), a chat row (address), a task (task_id) or a retained source (source_ref); an optional quote is verified as an exact substring of the target; an optional anchor ties the mark to an action, so its words also meet me in that action's result. A room mark is in view of every integrating focus and of that room's helpers and session starts, a global one of every focus, helper and session start: each view, mine included, shows the mark's own text, its quote while visibility is full and its target's address; a mark adds nothing to my human's chat. A mark on a chat row of my human's own words also carries that row, verbatim and dated, among my human's words for the work to every helper, session, plan council and reviewer of each work in the mark's room (a Main mark: each work outside the Projects; a global mark: every work). A mark, a change of its visible detail and its release also reach the works already running in its room (a global one: in every room) at their next round of the loop: roots, Main turns, wakes, Presence turns, helpers and nannies; the work that made one has it in its own result. An external session a nanny supervises and the realtime live conversation do not receive them. Change a mark's visible detail (mark_id, visibility full/meaning, reason) or release marks (release_ids, one reason) when they no longer hold.",
             mark, []), _memory_mark),
     ]

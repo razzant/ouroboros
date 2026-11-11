@@ -1,9 +1,9 @@
 // Settings › Behavior › Consciousness (formerly Background Cognition): what Ouroboros does when nobody asked,
-// on its own clock and in the places the owner connected. The autonomy level with its three notes, the daily
-// allowance, how many of its own tasks may run, one link to Circles (where the places and their words live) and,
-// under More, the wake interval bounds, the physical bound on concurrent conversations (moved here from Advanced,
-// same key) and a pointer to its model. The fields keep their ids and keys, so settings.js reads and saves them as
-// before; nothing here reads or writes a place.
+// on its own clock and in the places the owner connected. The autonomy level with its three notes, how many of its
+// own tasks may run, one link to Costs (the spending limit over 24 hours has its one editor there, beside what it
+// spent), one link to Circles (where the places and their words live) and, under More, the wake interval bounds, the
+// physical bound on concurrent conversations (moved here from Advanced, same key) and a pointer to its model. The
+// fields keep their ids and keys, so settings.js reads and saves them as before; nothing here reads or writes a place.
 import { renderSegmentedField } from './page_header.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { parseModelSource } from './route_editor_primitives.js';
@@ -27,9 +27,9 @@ export function consciousnessSectionHtml() {
         </div>
         <div class="form-grid two">
             <div class="form-field ui-field">
-                <label for="s-consciousness-daily-usd">Daily allowance (USD)</label>
-                <input id="s-consciousness-daily-usd" placeholder="20" class="ui-control" name="s-consciousness-daily-usd" type="text" aria-describedby="s-consciousness-daily-usd-help">
-                <div class="settings-inline-note ui-field-help" id="s-consciousness-daily-usd-help">Spending cap over a rolling 24 hours: its own wakes, wakes in places, and the work they start. Settled dollars only; a subscription shows as unmetered.</div>
+                <label id="s-consciousness-allowance-label">Spending limit over 24 hours</label>
+                <div class="consciousness-model-value" aria-labelledby="s-consciousness-allowance-label" data-consciousness-costs>
+                    <span>Set beside what it spent in</span> <button type="button" class="consciousness-inline-link ui-hit-area" data-costs-open>Costs ›</button></div>
             </div>
             <div class="form-field ui-field">
                 <label for="s-consciousness-max-tasks">Max concurrent tasks</label>
@@ -81,14 +81,16 @@ export function applyConsciousnessSettings(root, settings = {}) {
     if (model) model.textContent = consciousnessModelText(settings);
 }
 
-/** Bind once: an in-page link opens the Settings tab it names; the Circles link opens the Circles page. */
-export function bindConsciousnessSettings(root) {
+/** Bind once: an in-page link opens the Settings tab it names; the Circles link opens the Circles page; the Costs link
+ *  opens Dashboard › Costs (`openDashboardTab`, app.js). */
+export function bindConsciousnessSettings(root, { openDashboardTab = null } = {}) {
     const host = root.querySelector('[data-consciousness-places]');
     if (!host) return () => {};
     const section = host.closest('.form-section') || host;
     const onClick = (event) => {
         const goto = event.target.closest?.('[data-settings-goto]');
         if (goto && section.contains(goto)) { root.activateSettingsTab?.(goto.dataset.settingsGoto); return; }
+        if (event.target.closest?.('[data-costs-open]')) { void openDashboardTab?.('costs'); return; }
         if (event.target.closest?.('[data-circles-open]')) openCircles();
     };
     section.addEventListener('click', onClick);

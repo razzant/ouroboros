@@ -83,8 +83,7 @@ def _retain_dialogue(ctx: Any, evt: dict, mode: str) -> None:
     attribution = row_class(row)
     private_contact = evt.get("presence_contact") or (evt.get("progress_meta") or {}).get("presence_contact")
     if (attribution["lane"] != 1 or attribution["author"]["kind"] != "ouroboros"
-            or is_a2a_chat_id(evt.get("chat_id"))
-            or (presence_caller_binding(ctx) is not None and not private_contact)):
+            or is_a2a_chat_id(evt.get("chat_id"))):
         return
     kind = evt.get("type")
     fields = {"send_message": ("text",), "send_photo": ("caption",),
@@ -93,6 +92,10 @@ def _retain_dialogue(ctx: Any, evt: dict, mode: str) -> None:
               "send_quiz": ("question", "options", "stake", "assumption")}.get(kind, ())
     words = {key: evt[key] for key in fields if evt.get(key) not in (None, "", [])}
     if not words:
+        return
+    # A place's local room is the Ouroboros side of the place, not my human's conversation; a frame landing in
+    # Main or a Project room is, as for any work there (``delivery_audience``). Unreadable proves neither.
+    if presence_caller_binding(ctx) is not None and not private_contact and not _lands_with_my_human(ctx, evt):
         return
     if mode == "live" and kind == "send_message":
         from ouroboros.loop_messages import owner_input_revision
@@ -261,28 +264,48 @@ def deliver_owner_event(ctx: Any, evt: Dict[str, Any]) -> str:
     return _accepted("live")
 
 
-def delivery_audience(ctx: Any, evt: Dict[str, Any]) -> tuple[str, bool]:
-    """``(room, place_bound)`` for a stamped frame, by the supervisor's own rule (lineage binding, else its chat).
+def _resolved_room(ctx: Any, evt: Dict[str, Any]) -> tuple[Any, Any]:
+    """``(chat, Project name or None)`` the supervisor will pick for a stamped frame; a peer has no Project.
 
-    ``room`` is empty for an ordinary owner room. A place room shares
-    the Project id range, so the registry decides, never the number.
+    A place room shares the Project id range, so the registry decides, never the number. Unreadable sources raise.
     """
-    from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, WEB_UI_CHAT_ID, is_a2a_chat_id
-    from ouroboros.dialogue_provenance import presence_caller_binding
+    from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
     from ouroboros.projects_registry import project_thread_name
     from ouroboros.tool_access import canonical_data_root
 
-    place_bound = presence_caller_binding(ctx) is not None
-    chat: Any = evt.get("chat_id")
+    root = canonical_data_root(ctx)
+    chat = _delivery_chat(root, evt)
+    return chat, (None if is_a2a_chat_id(chat) else project_thread_name(root, chat))
+
+
+def _lands_with_my_human(ctx: Any, evt: Dict[str, Any]) -> bool:
+    """Whether a frame lands in Main or a Project room: the rooms ``delivery_audience`` names as my human's."""
+    from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+
     try:
-        root = canonical_data_root(ctx)
-        chat = _delivery_chat(root, evt)
-        if is_a2a_chat_id(chat):
-            return "the peer conversation", False
-        name = project_thread_name(root, chat)
+        chat, name = _resolved_room(ctx, evt)
+    except Exception:
+        log.debug("delivery room unread for task %s", evt.get("task_id"), exc_info=True)
+        return False
+    return name is not None or chat == WEB_UI_CHAT_ID
+
+
+def delivery_audience(ctx: Any, evt: Dict[str, Any]) -> tuple[str, bool]:
+    """``(room, place_bound)`` for a stamped frame, by the supervisor's own rule (``_resolved_room``).
+
+    ``room`` is empty for an ordinary owner room.
+    """
+    from ouroboros.contracts.chat_id_policy import HIDDEN_CHAT_ID, WEB_UI_CHAT_ID, is_a2a_chat_id
+    from ouroboros.dialogue_provenance import presence_caller_binding
+
+    place_bound = presence_caller_binding(ctx) is not None
+    try:
+        chat, name = _resolved_room(ctx, evt)
     except Exception:
         log.debug("delivery audience unread for task %s", evt.get("task_id"), exc_info=True)
         return "a local room (exact destination unavailable)", place_bound
+    if is_a2a_chat_id(chat):
+        return "the peer conversation", False
     if name is not None:
         return f'Project room "{_label(name)}"', place_bound
     if chat == HIDDEN_CHAT_ID:

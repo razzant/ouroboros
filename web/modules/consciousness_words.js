@@ -181,16 +181,28 @@ export function allowanceText(snapshot) {
     const { spentUsd, dailyUsd } = snapshot;
     if (spentUsd === null || dailyUsd === null) return '';
     const floor = snapshot.unknownUnmetered > 0 ? '≥ ' : '';
+    // Open accounting keeps "so far" (DESIGN): a call still open may add more, so even $0.00 is no final total.
+    const sofar = !floor && snapshot.allowanceOpenRows > 0 ? ' so far' : '';
     const degraded = snapshot.integrityDegraded ? ' (ledger integrity degraded)' : '';
-    return `${floor}${formatUsd(spentUsd)} of ${formatUsd(dailyUsd)} in the last 24 hours${degraded}`;
+    return `${floor}${formatUsd(spentUsd)}${sofar} of ${formatUsd(dailyUsd)} in the last 24 hours${degraded}`;
 }
 
-// The owner's move (DESIGN "Status marks", amber): consciousness stopped by its spending limit or waiting for a first
-// conversation. A failure is an outcome's red dot, an unconfirmed outcome a ring, a paused wake two bars, a due wake
-// the still mark.
+// The owner's move (DESIGN "Status marks", amber): consciousness stopped by its spending limit (new starts refused, or
+// its own wake held at the allowance it started with) or waiting for a first conversation. A failure is an outcome's
+// red dot, an unconfirmed outcome a ring, any other paused wake two bars, a due wake the still mark.
 const OWNER_MOVE = new Set(['allowance_exhausted', 'waiting_for_first_conversation']);
 const FAILED = new Set(['wake_failed', 'wake_rejected', 'stopped']);
 const UNCONFIRMED = new Set(['wake_outcome_unknown', 'allowance_unknown']);
+const ALLOWANCE_HOLDS = new Set(['allowance', 'allowance_and_cap']);
+
+/** Whether its own wake is held, proven, at the allowance it started with (consciousness_view.hold_cause): the
+ *  status word stays `wake_paused`; the cause is its own fact. */
+export const allowanceHold = (snapshot) => snapshot.enabled === true && snapshot.status === 'wake_paused'
+    && snapshot.liveWakeHeld === true && ALLOWANCE_HOLDS.has(snapshot.holdCause);
+
+/** Whether the next step is the allowance, edited in Costs: new starts refused by it, or a wake held at it. */
+export const allowanceMove = (snapshot) => snapshot.enabled === true
+    && (snapshot.status === 'allowance_exhausted' || allowanceHold(snapshot));
 
 /** The one status mark of a consciousness state, for the bar's chip and the Dashboard's headline alike; `owner` adds
  *  an owner's move the caller knows of (an Evolution campaign that waits for the owner). */
@@ -198,7 +210,7 @@ export function consciousnessMark(snapshot, { owner = false } = {}) {
     const off = snapshot.enabled === false;
     const unknown = snapshot.enabled === null;
     const status = snapshot.status;
-    if (owner || (!off && !unknown && OWNER_MOVE.has(status))) return { shape: 'dot', hue: 'owner' };
+    if (owner || (!off && !unknown && (OWNER_MOVE.has(status) || allowanceHold(snapshot)))) return { shape: 'dot', hue: 'owner' };
     if (status === 'thinking') return { shape: 'moving', hue: 'ink' };
     if (off) return { shape: 'none', hue: 'ink' };
     if (FAILED.has(status)) return { shape: 'dot', hue: 'failed' };

@@ -205,10 +205,11 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         "context_model_role": getattr(getattr(ctx, "context_fit_plan", None), "model_role", ""),
         # The task's own start (mode, cause): a restore's new fit is not it (``context_fit.restored_start``).
         "context_start": list(getattr(getattr(ctx, "context_fit_plan", None), "start", None) or ("", "")),
-        # Exposure facts gate automatic compaction; a resumed task keeps them.
+        # Exposure facts gate automatic compaction; a resumed task keeps them, and the journal boundary of its first
+        # memory capture, from which mark changes are read again after a new capture (``mark_anchors``).
         "context_observations": {key: getattr(ctx, key) for key in (
             "_last_context_observation", "_inspected_context_view", "_pending_compaction",
-            "_historical_author_inputs", "_pending_owner_dialogue", *_SEND_OBSERVER_KEYS,
+            "_historical_author_inputs", "_pending_owner_dialogue", "_mark_changes_since", *_SEND_OBSERVER_KEYS,
         ) if getattr(ctx, key, None) is not None},
         "round_idx": round_idx, "tool_schemas": tool_schemas,
         **({"actor_loaded_tool_names": sorted(ctx._actor_loaded_tool_names)}
@@ -1155,7 +1156,8 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     for key in ("_nanny_metered_progress", "_nanny_delegate_baseline"):
         setattr(ctx, key, (state.get("nanny_activity") or {}).get(key, {}))
     for key, value in (state.get("context_observations") or {}).items():
-        if key in {"_last_context_observation", "_inspected_context_view", "_pending_compaction", "_historical_author_inputs", "_pending_owner_dialogue", *_SEND_OBSERVER_KEYS}:
+        if key in {"_last_context_observation", "_inspected_context_view", "_pending_compaction", "_historical_author_inputs",
+                   "_pending_owner_dialogue", "_mark_changes_since", *_SEND_OBSERVER_KEYS}:
             setattr(ctx, key, value)
     messages[:] = state["messages"]
     # This set is also bound into enable_tools; never replace the closure's object.

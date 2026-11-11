@@ -3,11 +3,23 @@ import { APP_SETTINGS_ORIGIN, apiFetch, jsonPost } from './api_client.js';
 import { clearResultOnEdit, errorWords, escapeHtmlAttr, setResult } from './ui_primitives.js';
 import { statusMarkHtml } from './status_mark.js';
 import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
+import { readConsciousness, readConsciousnessFromState } from './consciousness_api.js';
+import { allowanceHold, allowanceText } from './consciousness_words.js';
+import { openTaskReference, taskReferenceHtml } from './task_reference.js';
 
 const COST_BUDGET_INPUTS = {
     TOTAL_BUDGET: 's-budget',
     OUROBOROS_PER_TASK_COST_USD: 's-per-task-cost',
 };
+// The three limits of Budget. The consciousness allowance has its one editor here (owner, 10 Nov 2026: moved from
+// Settings with the spend it counts); its 0 is a real choice (it may not spend), so it is no setup-contract budget
+// field, whose minimum is 0.01. Only an edited limit is posted: a Costs tab left open never writes back an old value.
+const ALLOWANCE_KEY = 'OUROBOROS_CONSCIOUSNESS_DAILY_USD';
+export const BUDGET_LIMITS = [
+    { id: 's-budget', key: 'TOTAL_BUDGET', min: 0.01, invalid: 'Budget values must be at least 0.01.' },
+    { id: 's-per-task-cost', key: 'OUROBOROS_PER_TASK_COST_USD', min: 0.01, invalid: 'Budget values must be at least 0.01.' },
+    { id: 's-consciousness-allowance', key: ALLOWANCE_KEY, min: 0, invalid: 'The consciousness limit must be a number, 0 or more.' },
+];
 // A breakdown table shows its largest rows; the rest wait behind its "Show all (N)" (the list's one length control).
 const TABLE_ROWS = 8;
 // Each table says what it groups by (owner, Track09 A, 9 Nov 2026). The ledger's `by_api_key` groups by provider; a
@@ -32,12 +44,14 @@ const BUDGET_NOTE_FALLBACK =
     'Budget limits use known spend: Total Budget applies globally, while Per-task Cost Cap applies to one root task tree. '
     + 'Unpriced calls remain unknown and are not counted as $0; reservations and unresolved charges are not counted as spending.';
 
-function readPositiveBudget(id) {
-    const input = document.getElementById(id);
-    const raw = String(input?.value || '').trim();
-    const value = Number(raw);
-    const min = Number(input?.min || 0.01);
-    return Number.isFinite(value) && value >= min ? value : null;
+/** One limit's draft against the value it was loaded with (`data-loaded`): `{ value, edited, valid }`. An empty field
+ *  is no number (never 0); an untouched one, or one typed back to its loaded number, is not edited. */
+export function limitDraft(raw, loaded, min) {
+    const text = String(raw ?? '').trim();
+    const base = String(loaded ?? '').trim();
+    const value = text === '' ? NaN : Number(text);
+    const edited = text === '' ? base !== '' : !(base !== '' && Number(base) === value);
+    return { value, edited, valid: Number.isFinite(value) && value >= min };
 }
 
 function optionalFiniteNumber(value) {
@@ -68,16 +82,32 @@ export function costBucketPresentation(info) {
     return { text, open, detail };
 }
 
-/** What one budget save says and whether that saying may end by itself: `{ text, tone, transient }`. */
-export function budgetSavePresentation(data = {}) {
+// The consciousness clock reads the allowance at its next check, never at a task's start; a wake already paused at the
+// allowance it started with keeps that number (consciousness_view.held_sentence).
+const ALLOWANCE_SAVED = 'The next consciousness check uses it; a paused wake keeps its launch limit.';
+const ALLOWANCE_SAVED_BESIDE = 'The next consciousness check uses the new consciousness limit; a paused wake keeps its launch limit.';
+
+/** What one budget save says and whether that saying may end by itself: `{ text, tone, transient }`. `sent` names the
+ *  edited limits the save posted: the server files the allowance under the next task, which it is not, so its own
+ *  sentence stands for it and the other limits keep their words. */
+export function budgetSavePresentation(data = {}, { sent = null } = {}) {
     let text;
+    const keys = sent ? new Set(sent) : null;
+    const allowance = Boolean(keys?.has(ALLOWANCE_KEY));
+    const others = !keys || [...keys].some((key) => key !== ALLOWANCE_KEY);
+    // The per-task cap is the one other limit applying on the next task; Total budget takes effect at once.
+    const nextTask = data.next_task_changed && (!allowance || keys.has('OUROBOROS_PER_TASK_COST_USD'));
     // `restart_required` is the server's whole restart state, so with nothing changed it is a setting saved earlier.
     if (data.no_changes) text = data.restart_required ? 'No changes. Restart still required.' : 'No changes.';
-    else if (data.restart_required) text = 'Saved. Restart required.';
-    else if (data.immediate_changed && data.next_task_changed) {
-        text = 'Saved. Some changes took effect immediately; others apply on the next task.';
-    } else if (data.immediate_changed) text = 'Saved. Took effect immediately.';
-    else text = 'Saved. Applies on the next task.';
+    else if (allowance && !others && !data.restart_required) text = `Saved. ${ALLOWANCE_SAVED}`;
+    else {
+        if (data.restart_required) text = 'Saved. Restart required.';
+        else if (data.immediate_changed && nextTask) {
+            text = 'Saved. Some changes took effect immediately; others apply on the next task.';
+        } else if (data.immediate_changed) text = 'Saved. Took effect immediately.';
+        else text = 'Saved. Applies on the next task.';
+        if (allowance) text += ` ${others ? ALLOWANCE_SAVED_BESIDE : ALLOWANCE_SAVED}`;
+    }
     const warned = Boolean(data.warnings?.length);
     if (warned) text += ' Warnings: ' + data.warnings.join(' | ');
     const standing = warned || Boolean(data.restart_required);
@@ -136,13 +166,82 @@ export function costDashboardPresentation(data) {
     };
 }
 
+/** `21:41 GMT+3` (a date first when not today), the whole minute by which room is back after ``iso``, the instant after
+ *  which it returns: rounded up past it, so the words are never early. The zone is named: the host sentences of the
+ *  Consciousness tab keep the server's clock, this one the viewer's. '' for an unreadable or past instant. */
+export function roomTimeText(iso, { now = Date.now(), timeZone } = {}) {
+    const after = Date.parse(String(iso || ''));
+    if (!Number.isFinite(after) || after < now) return '';
+    const at = new Date(Math.floor(after / 60000) * 60000 + 60000);
+    const zone = timeZone ? { timeZone } : {};
+    const day = (date) => date.toLocaleDateString('en-CA', zone);  // YYYY-MM-DD in that zone
+    const date = day(at) === day(new Date(now)) ? '' : `${at.toLocaleDateString([], { month: 'short', day: 'numeric', ...zone })}, `;
+    return date + at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false, timeZoneName: 'short', ...zone });
+}
+
+const NEW_STARTS = 'new wake-ups, replies in places and its own tasks';
+
+/** The consciousness allowance under its field, from the consciousness snapshot (consciousness_api.js): the spend line
+ *  is the clock's own window (`allowanceText`, the Shade's and the Dashboard's words), never a sum of the tables;
+ *  `detail` what it leaves out (pending calls, calls without a price); `lines` at most two: the window (its limit
+ *  reached, with a conditional time when room returns) and a held wake (its proven cause, with its card's door), each
+ *  its fact (`text`, in the line's tone) and what follows from it (`note`, quieter). Off, a $0 limit and an
+ *  unreadable ledger say so instead. No time is guessed: a withheld or stale forecast says so. */
+export function allowancePresentation(snapshot, { now = Date.now(), timeZone } = {}) {
+    if (!snapshot) return { spend: 'What it spent in the last 24 hours could not be read.', detail: '', lines: [] };
+    const spend = allowanceText(snapshot) || 'What it spent in the last 24 hours is unknown.';
+    const detail = [snapshot.allowanceOpenRows > 0 ? 'pending' : '',
+        snapshot.unknownUnmetered > 0 ? `${number(snapshot.unknownUnmetered)} without a price` : ''].filter(Boolean).join(' · ');
+    const lines = [];
+    if (snapshot.enabled === false) {
+        lines.push({ text: 'Consciousness is off: it starts nothing that counts here until it is started again.', tone: 'muted' });
+        return { spend, detail, lines };
+    }
+    const exhausted = snapshot.allowanceStatus ? snapshot.allowanceStatus === 'exhausted' : snapshot.status === 'allowance_exhausted';
+    if (snapshot.dailyUsd === 0) {
+        lines.push({ text: `At $0 consciousness may not spend: ${NEW_STARTS} do not start.`, tone: 'muted' });
+    } else if (exhausted) {
+        const time = roomTimeText(snapshot.allowanceRoomAfter, { now, timeZone });
+        lines.push({ text: `Consciousness limit reached: ${NEW_STARTS} wait.`, tone: 'warn',
+            note: time ? `If its charges stay as they are, there is room again by ${time}.` : 'When there is room again cannot be said now.' });
+    } else if (snapshot.allowanceStatus === 'allowance_unknown' || snapshot.status === 'allowance_unknown') {
+        lines.push({ text: 'The usage ledger could not be read, so whether consciousness has room is unknown.', tone: 'muted' });
+    }
+    const wake = snapshot.liveWakeTaskId;
+    if (allowanceHold(snapshot)) {
+        const facts = [snapshot.holdCeilingUsd !== null ? formatUsd(snapshot.holdCeilingUsd) : '',
+            snapshot.holdCause === 'allowance_and_cap' ? 'the per-task cap too' : ''].filter(Boolean);
+        lines.push({ wake, tone: 'warn', text: `The consciousness wake-up is paused at the allowance it had left when it started`
+            + `${facts.length ? ` (${facts.join(', ')})` : ''}.`,
+        note: 'Resume keeps that limit, so it pauses again while its known spend is at it; room returning or a higher '
+            + 'limit does not raise it. Stop now on its card ends it and frees the clock for its next check.' });
+    } else if (snapshot.liveWakeHeld && snapshot.holdCause === 'per_task_cap') {
+        lines.push({ wake, tone: 'muted', text: 'The consciousness wake-up is paused at the per-task cost cap it started with; its card shows why.' });
+    } else if (snapshot.liveWakeHeld && snapshot.holdCause === 'launch_ceiling') {
+        lines.push({ wake, tone: 'muted', text: 'The consciousness wake-up is paused at the spending limit it started with; its card shows why.' });
+    } else if (snapshot.liveWakeHeld && snapshot.holdCause === 'owner') {
+        lines.push({ wake, tone: 'muted', text: 'The consciousness wake-up is on an explicit pause; its card shows who paused it and how to continue.' });
+    }
+    return { spend, detail, lines };
+}
+
+// What the allowance counts, in this card's own note: the shared note of the setup contract speaks of the total budget
+// and the per-task cap alone (settings_setup_contract._BUDGET_NOTE).
+const ALLOWANCE_NOTE = 'Known spend of its wake-ups, its replies in places and the work they start, over the last 24 hours: '
+    + 'confirmed and estimated prices count, calls without a price add nothing to it, and calls still open may add more. '
+    + `When it is reached, ${NEW_STARTS} wait until older spending leaves the 24 hours. A wake-up may spend at most `
+    + 'what was left of this limit when it started (and no more than the per-task cap); there it pauses. A higher limit '
+    + 'does not raise what it was given and Resume keeps it, so a wake-up whose known spend is still at it pauses again. '
+    + 'Stop now on its card ends it, and the clock\'s next check starts a new wake-up if there is room. At $0 '
+    + 'consciousness may not spend.';
+
 const tableCardHtml = ([id, title, column, , note]) => `<section class="ui-card costs-table-card" aria-labelledby="${id}-title">
         <h3 class="dashboard-card-title" id="${id}-title">${title}</h3>${note ? `<p class="costs-table-note">${note}</p>` : ''}
         <table class="cost-table" id="${id}"><thead><tr><th>${column}</th><th class="cost-cell-right">Calls</th><th class="cost-cell-right">Cost</th></tr></thead><tbody></tbody></table>
         <button type="button" class="btn btn-ghost btn-sm ui-list-more" data-costs-more hidden></button>
     </section>`;
 
-export function initCosts({ state, mount }) {
+export function initCosts({ state, mount, openDashboardTab = null }) {
     // The tab's one root and scroller (style.css "The Dashboard tab body"): the known spend of the limit leads, the
     // budget it is set against follows as the tab's action row, then where the money went.
     const page = document.createElement('div');
@@ -176,10 +275,22 @@ export function initCosts({ state, mount }) {
                     <input id="s-per-task-cost" class="ui-control" type="number" value="50" aria-describedby="costs-per-task-note costs-budget-help">
                     <div class="ui-field-help" id="costs-per-task-note">A task and its helpers stop when their known spend reaches it.</div>
                 </div>
+                <div class="form-field ui-field costs-allowance">
+                    <label for="s-consciousness-allowance">Consciousness per 24 hours ($)</label>
+                    <input id="s-consciousness-allowance" class="ui-control" type="number" min="0" step="any" inputmode="decimal"
+                        aria-describedby="costs-allowance-note costs-allowance-spend costs-allowance-state costs-allowance-help">
+                    <div class="ui-field-help" id="costs-allowance-note">Its wake-ups, replies in places and the work they start, over a rolling 24 hours.</div>
+                    <p class="ui-field-help costs-allowance-spend" id="costs-allowance-spend">Reading…</p>
+                </div>
             </div>
+            <div class="costs-allowance-state" id="costs-allowance-state" aria-live="polite"></div>
             <details class="ui-disclosure">
-                <summary>How the limits count</summary>
+                <summary>How the total and per-task limits count</summary>
                 <p class="costs-copy" id="costs-budget-help" role="note">${BUDGET_NOTE_FALLBACK}</p>
+            </details>
+            <details class="ui-disclosure">
+                <summary>How the consciousness limit counts</summary>
+                <p class="costs-copy" id="costs-allowance-help" role="note">${ALLOWANCE_NOTE}</p>
             </details>
             <div class="ui-action-row">
                 <button type="button" class="btn btn-save" id="btn-save-budget">Save</button>
@@ -195,6 +306,15 @@ export function initCosts({ state, mount }) {
     clearResultOnEdit(budgetCard, statusEl);
     const expanded = new Set();
     let lastBreakdown = null;
+    let allowanceRead = 0;
+    let allowanceExpiry = null;
+    let budgetRead = 0;
+    budgetCard.addEventListener('input', (event) => {
+        const limit = BUDGET_LIMITS.find(({ id }) => id === event.target.id);
+        // While a save of the field is on its way, an edit is measured against what that save sends.
+        if (limit) event.target.dataset.edited = String(limitDraft(event.target.value,
+            event.target.dataset.saving ?? event.target.dataset.loaded, limit.min).edited);
+    });
 
     function renderBreakdownTable(tableId, data, emptyLabel = 'No data') {
         const table = page.querySelector('#' + tableId);
@@ -253,6 +373,36 @@ export function initCosts({ state, mount }) {
         facts.innerHTML = available ? view.facts.map(([label, value]) => `<dt>${escapeHtmlAttr(label)}</dt><dd>${escapeHtmlAttr(value)}</dd>`).join('') : '';
     }
 
+    // The allowance's facts under its field: the consciousness snapshot read when the tab is shown, refreshed and
+    // saved, from `/api/consciousness` (its window is current), else `/api/state`; no polling of its own. A room time
+    // it gave is read once more when it passes, so an old time never stands as current.
+    function renderAllowance(snapshot) {
+        clearTimeout(allowanceExpiry);
+        const wait = Date.parse(String(snapshot?.allowanceRoomAfter || '')) - Date.now();
+        if (wait > 0 && wait < 2 ** 31 - 1000) {
+            allowanceExpiry = setTimeout(() => { if (page.isConnected !== false) loadAllowance(); }, wait + 1000);
+            allowanceExpiry?.unref?.();  // a test runner's clock is never kept alive by it
+        }
+        const view = allowancePresentation(snapshot);
+        const door = '<button type="button" class="consciousness-inline-link ui-hit-area" data-costs-consciousness>Consciousness ›</button>';
+        // Each separator keeps to the word before it (a no-break space), so a wrapped line never starts with one.
+        page.querySelector('#costs-allowance-spend').innerHTML = `${escapeHtmlAttr(view.spend)}`
+            + `${view.detail ? `\u00a0· <span class="cost-cell-note">${escapeHtmlAttr(view.detail)}</span>` : ''}\u00a0· ${door}`;
+        page.querySelector('#costs-allowance-state').innerHTML = view.lines.map((line) => `<p class="ui-status costs-allowance-line" `
+            + `data-tone="${line.tone}">${escapeHtmlAttr(line.text)}`
+            + `${line.note ? ` <span class="costs-allowance-note">${escapeHtmlAttr(line.note)}</span>` : ''}`
+            + `${line.wake ? ` ${taskReferenceHtml(line.wake)}` : ''}</p>`).join('');
+    }
+
+    async function loadAllowance() {
+        const read = ++allowanceRead;
+        let snapshot = null;
+        try { snapshot = await readConsciousness(); } catch {
+            try { snapshot = await readConsciousnessFromState(); } catch { snapshot = null; }
+        }
+        if (read === allowanceRead) renderAllowance(snapshot);
+    }
+
     async function loadCosts() {
         renderLead({ state: 'loading' });
         try {
@@ -271,9 +421,11 @@ export function initCosts({ state, mount }) {
     }
 
     async function loadBudget() {
+        const read = ++budgetRead;
         try {
             const resp = await apiFetch('/api/settings', { cache: 'no-store' });
             const s = await resp.json().catch(() => ({}));
+            if (!resp.ok || read !== budgetRead) return;
             const fields = s?._meta?.setup_contract?.budgetFields || [];
             const note = fields.map((field) => String(field.note || '').trim()).find(Boolean) || '';
             const noteEl = document.getElementById('costs-budget-help');
@@ -286,16 +438,28 @@ export function initCosts({ state, mount }) {
                 if (!input) return;
                 input.min = field.min || '0.01';
                 input.step = field.step || 'any';
-                if (field.default != null && !String(input.value || '').trim()) {
+                if (field.default != null && input.dataset.edited !== 'true' && !String(input.value || '').trim()) {
                     input.value = field.default;
                 }
             });
-            if (s.TOTAL_BUDGET != null) document.getElementById('s-budget').value = s.TOTAL_BUDGET;
-            if (s.OUROBOROS_PER_TASK_COST_USD != null) document.getElementById('s-per-task-cost').value = s.OUROBOROS_PER_TASK_COST_USD;
+            BUDGET_LIMITS.forEach(({ id, key }) => {
+                const input = document.getElementById(id);
+                // A tab return or a Settings notification may finish reading while the owner is typing.
+                // Keep that draft; update only fields still showing their last loaded/saved value.
+                if (input.dataset.edited !== 'true' && input.dataset.saving === undefined && s[key] != null) {
+                    input.value = String(s[key]);
+                    input.dataset.loaded = String(input.value);
+                }
+            });
         } catch {}
     }
 
-    page.querySelector('#btn-refresh-costs').addEventListener('click', loadCosts);
+    page.querySelector('#btn-refresh-costs').addEventListener('click', () => { loadCosts(); loadAllowance(); });
+    // The allowance's doors: a held wake's card in Main, and the Consciousness tab.
+    budgetCard.addEventListener('click', (event) => {
+        if (openTaskReference(event)) return;
+        if (event.target.closest?.('[data-costs-consciousness]')) void openDashboardTab?.('consciousness');
+    });
     page.querySelector('.costs-tables').addEventListener('click', (event) => {
         const more = event.target.closest?.('[data-costs-more]');
         if (!more) return;
@@ -309,26 +473,42 @@ export function initCosts({ state, mount }) {
     // acknowledgement ends by itself, a restart still required, a warning or a failure stays until the next save or
     // an edit of the fields replaces it.
     page.querySelector('#btn-save-budget').addEventListener('click', async (event) => {
-        const budget = readPositiveBudget('s-budget');
-        const perTask = readPositiveBudget('s-per-task-cost');
-        if (budget === null || perTask === null) {
-            setResult(statusEl, { text: 'Budget values must be at least 0.01.', tone: 'danger' });
+        const drafts = BUDGET_LIMITS.map((limit) => {
+            const input = document.getElementById(limit.id);
+            const draft = limitDraft(input.value, input.dataset.loaded, limit.min);
+            return { ...limit, ...draft, edited: draft.edited && input.dataset.edited === 'true' };
+        });
+        const invalid = drafts.find((draft) => draft.edited && !draft.valid);
+        if (invalid) {
+            setResult(statusEl, { text: invalid.invalid, tone: 'danger' });
             return;
         }
+        // Only what was edited travels; nothing edited still asks the server, which says so (and any restart owed).
+        const sending = drafts.filter((draft) => draft.edited);
+        const body = Object.fromEntries(sending.map((draft) => [draft.key, draft.value]));
+        sending.forEach((draft) => { document.getElementById(draft.id).dataset.saving = String(draft.value); });
         const saveButton = event.currentTarget;
         saveButton.disabled = true;
         saveButton.setAttribute('aria-busy', 'true');
         setResult(statusEl, { text: 'Saving…', tone: 'muted' });
         try {
-            const data = await jsonPost('/api/settings', { TOTAL_BUDGET: budget, OUROBOROS_PER_TASK_COST_USD: perTask },
-                { headers: APP_SETTINGS_ORIGIN });
-            const saved = budgetSavePresentation(data || {});
+            const data = await jsonPost('/api/settings', body, { headers: APP_SETTINGS_ORIGIN });
+            ++budgetRead;  // a read started before this save must not put the old value back
+            const saved = budgetSavePresentation(data || {}, { sent: Object.keys(body) });
             setResult(statusEl, { text: saved.text, tone: saved.tone, ends: saved.transient });
+            sending.forEach((draft) => { document.getElementById(draft.id).dataset.loaded = String(draft.value); });
+            if (ALLOWANCE_KEY in body) loadAllowance();
             window.dispatchEvent(new CustomEvent('ouro:settings-updated', { detail: { reason: 'budget saved', source: 'costs' } }));
         } catch (error) {
             const words = errorWords(error);
             setResult(statusEl, { text: `Not saved. ${words.text}`, tone: words.tone, details: words.details });
         } finally {
+            // What was typed while it travelled stays a draft against what is now saved (or, failed, still loaded).
+            sending.forEach((draft) => {
+                const input = document.getElementById(draft.id);
+                delete input.dataset.saving;
+                input.dataset.edited = String(limitDraft(input.value, input.dataset.loaded, draft.min).edited);
+            });
             saveButton.disabled = false;
             saveButton.removeAttribute('aria-busy');
         }
@@ -337,6 +517,7 @@ export function initCosts({ state, mount }) {
     function refreshCostsPanel() {
         loadCosts();
         loadBudget();
+        loadAllowance();
     }
 
     window.addEventListener('ouro:dashboard-subtab-shown', (event) => {

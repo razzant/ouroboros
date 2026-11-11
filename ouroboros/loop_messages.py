@@ -332,7 +332,7 @@ OWNER_REPLY_OWED_REFUSAL = "owner_reply_owed: your human wrote after your last l
 
 
 def owner_reply_owed(ctx: Any) -> bool:
-    """Owner rows arrived after this run's latest LIVE text send (``tools/owner_delivery.py``).
+    """Owner rows arrived after this run's latest LIVE text send to my human (``tools/owner_delivery.py``).
 
     A failed or deferred send discharges nothing; queue admission is not a read receipt, and
     whether a sent line answered completely remains the author's judgment, not the host's.

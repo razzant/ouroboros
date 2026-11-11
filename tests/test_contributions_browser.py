@@ -121,11 +121,12 @@ def test_a_saved_reply_offers_the_skill_action_and_a_failing_page_module_costs_o
     answer = page.locator(".chat-bubble.assistant").first
     action = answer.locator(".chat-message-actions > [data-message-action='contribution:lists:save']")
     action.wait_for()
-    # The host's Read aloud (the voice module registered a device engine) comes first, the skill's action after it.
+    # The host's own actions (Read aloud: the voice module registered a device engine; Share) come first, the skill's
+    # action after them.
     answer.locator("[data-message-action='read-aloud']").wait_for()
     controls = answer.locator(".chat-message-actions > *").evaluate_all(
         "nodes => nodes.map(node => node.dataset.messageAction || node.className.split(' ')[0])")
-    assert controls == ["chat-message-reply", "read-aloud", "contribution:lists:save", "chat-message-copy"], controls
+    assert controls == ["chat-message-reply", "read-aloud", "share", "contribution:lists:save", "chat-message-copy"], controls
     targets = answer.locator(".chat-message-actions > *").evaluate_all(
         "nodes => nodes.every(node => node.classList.contains('ui-hit-area'))")
     assert targets, "under a finger every control of the row has the same hit area"
@@ -323,7 +324,7 @@ def test_hold_all_starts_without_page_code_and_start_it_mounts_it_in_place(subsc
     page, loaded, _posted = open_app(subscription_ui, "/?hold=all#chat")
     notice = toast(page, "did not start: this page was opened with everything held.")
     notice.wait_for()
-    page.locator(".chat-bubble.assistant .chat-message-action").wait_for()
+    page.locator(".chat-bubble.assistant .chat-message-action[data-message-action^='contribution:']").wait_for()
     assert loaded == [], "no page module is even fetched"
     assert page.evaluate("window.voiceContext") is None
     assert urlparse(page.url).query == "", "the flag leaves the address once read: a reload starts as usual"

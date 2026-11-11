@@ -290,6 +290,8 @@ class ContextCore:
     # The captured memory view (``memory_view.snapshot_json``); each projection renders
     # it for its own mode and window. Empty: no memory view was captured.
     memory_view_json: str = ""
+    # That capture's journal boundary (``MemoryViewSnapshot.chronicle_sequence``), beside the view and not hashed.
+    memory_view_sequence: Optional[int] = None
     # Captured source rows follow the assignment, outside the immutable system view.
     supplementary_messages_json: str = "[]"
     semi_stable_sections: Tuple[HostSection, ...] = ()

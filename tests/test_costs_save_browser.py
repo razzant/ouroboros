@@ -5,7 +5,8 @@ answered per scenario and time moved by the browser clock: the result stands in 
 a plain acknowledgement ends by itself after its time, while a restart still required (by this save or an earlier
 one), a warning and an error stay until the next save or an edit of the form replaces them, and an older
 acknowledgement never erases what a newer save says or its tone (a validation message included). A failure says it in
-owner words, the server's text one disclosure away. Light and dark, phone and window.
+owner words, the server's text one disclosure away. Only an edited limit is posted (a Costs tab left open never
+writes an old value back): the bodies below are exactly the edits. Light and dark, phone and window.
 """
 from __future__ import annotations
 
@@ -31,6 +32,8 @@ def costs_ui(request, monkeypatch):
 
 def _open_costs(ui, *, width, theme, answers):
     """The Costs tab with a settings endpoint that answers each save from ``answers`` in order."""
+    # This fixture's route serves a sparse settings dict; the real endpoint includes effective defaults.
+    ui["settings"].update(TOTAL_BUDGET=200, OUROBOROS_PER_TASK_COST_USD=50)
     page = ui["new_page"](viewport={"width": width, "height": 844}, color_scheme=theme)
     saves = []
 
@@ -101,7 +104,7 @@ def test_plain_acknowledgement_ends_while_restart_warning_and_error_stay(costs_u
     page, saves = _open_costs(costs_ui, width=width, theme=theme, answers=answers)
     tag = f"{width}-{theme}"
     # A plain acknowledgement of what the owner just did: there, then gone after its time, with its tone.
-    _save(page)
+    _save(page, budget="201")
     assert _words(page) == ["Saved. Took effect immediately.", "ok"]
     assert _beside_save(page), "the result sits right after Save in its row"
     page.clock.fast_forward(ACK_MS - 200)
@@ -109,7 +112,7 @@ def test_plain_acknowledgement_ends_while_restart_warning_and_error_stay(costs_u
     page.clock.fast_forward(400)
     assert _words(page) == ["", ""], "it ended by itself"
     # A restart the save requires is a standing condition, not an acknowledgement: no time ends it.
-    _save(page)
+    _save(page, budget="202")
     assert _words(page) == ["Saved. Restart required.", "warn"]
     _shot(page, costs_ui, f"restart-required-{tag}")
     page.clock.fast_forward(ACK_MS + 500)  # past any acknowledgement time, short of the socket watchdog's 45 s
@@ -118,22 +121,23 @@ def test_plain_acknowledgement_ends_while_restart_warning_and_error_stay(costs_u
     page.fill("#s-per-task-cost", "51")
     assert _words(page) == ["", ""], "an edit clears the last save's words"
     # The same values again change nothing, and the restart is still owed: the line says so, and stays.
-    _save(page)
+    _save(page, budget="202")
     page.clock.fast_forward(ACK_MS + 500)  # past any acknowledgement time, short of the socket watchdog's 45 s
     assert _words(page) == ["No changes. Restart still required.", "warn"]
     _shot(page, costs_ui, f"no-changes-restart-{tag}")
     # A warning stays too, and the next save replaces it.
-    _save(page)
+    _save(page, budget="203")
     page.clock.fast_forward(ACK_MS + 500)  # past any acknowledgement time, short of the socket watchdog's 45 s
     assert _words(page) == ["Saved. Took effect immediately. Warnings: Limit is below known spend.", "warn"]
     # An error is never an acknowledgement.
-    _save(page)
+    _save(page, budget="204")
     page.clock.fast_forward(ACK_MS + 500)  # past any acknowledgement time, short of the socket watchdog's 45 s
     assert _words(page) == ["Not saved. Settings file is read-only.", "danger"], "the server's own reason is its words"
     assert _raw(page) == "Settings file is read-only.", "the raw text stays one disclosure away"
     assert _beside_save(page)
     _shot(page, costs_ui, f"error-{tag}")
-    assert len(saves) == 5 and all(save == {"TOTAL_BUDGET": 200, "OUROBOROS_PER_TASK_COST_USD": 50} for save in saves), saves
+    # Each save posted only what moved since the last saved values; typed back to them, nothing at all.
+    assert saves == [{"TOTAL_BUDGET": 201}, {"TOTAL_BUDGET": 202}, {}, {"TOTAL_BUDGET": 203}, {"TOTAL_BUDGET": 204}], saves
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     assert page.evaluate("""() => { const c = document.querySelector('.costs-budget');
         return c.scrollWidth <= c.clientWidth + 1; }""")
@@ -144,14 +148,14 @@ def test_an_older_acknowledgement_never_erases_a_newer_save_or_a_validation_mess
                (503, {"error": "Offline."}),
                (200, {"ok": True, "saved": True, "next_task_changed": True})]
     page, saves = _open_costs(costs_ui, width=1100, theme="dark", answers=answers)
-    _save(page)
+    _save(page, budget="201")
     page.clock.fast_forward(ACK_MS - 1000)  # the first acknowledgement is one second from ending
-    _save(page)                              # a failing save inside that second
+    _save(page, budget="202")                # a failing save inside that second
     page.clock.fast_forward(ACK_MS)          # past the first timer's deadline: the error is still the answer
     assert _words(page) == ["Not saved. Offline.", "danger"]
     assert _raw(page) == "Offline."
     # An invalid value after an acknowledgement is answered at once and is not erased by that acknowledgement's timer.
-    _save(page)
+    _save(page, budget="202")  # still an edit: the failed save changed no saved value
     assert _words(page) == ["Saved. Applies on the next task.", "ok"]
     page.clock.fast_forward(ACK_MS - 500)
     page.fill("#s-budget", "0")
