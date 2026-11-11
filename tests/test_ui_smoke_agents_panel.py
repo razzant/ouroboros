@@ -247,7 +247,9 @@ def test_ui_smoke_agents_panel_wizard_finish_judges_the_roster(direct_server_wit
     for key in ("OUROBOROS_MODEL", "OUROBOROS_MODEL_HEAVY", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_FALLBACKS"):
         saved.pop(key, None)
     saved["OPENROUTER_API_KEY"] = "sk-or-v1-smoke-placeholder-not-real"
-    saved["OUROBOROS_SUBAGENTS"] = json.dumps(_AGENTS_PANEL_ROSTER)
+    roster = json.loads(json.dumps(_AGENTS_PANEL_ROSTER))
+    roster['items'][0]['review_eligible'] = True  # the first Finish tests the missing route, then the empty pool
+    saved["OUROBOROS_SUBAGENTS"] = json.dumps(roster)
     settings_path.write_text(json.dumps(saved), encoding="utf-8")
     direct_server_with_data["restart_server"]()
     url = direct_server_with_data["url"]
@@ -287,17 +289,16 @@ def test_ui_smoke_agents_panel_wizard_finish_judges_the_roster(direct_server_wit
                 tinted.scroll_into_view_if_needed()
                 capture(page, "wizard-roster-invalid")
 
-                # A model the generated roster does not run yet: its own Auto actor rows (no effort)
-                # would make the same model on another Auto row their twin.
-                tinted.locator('[data-subagent-field="model"]').fill("openai/gpt-5.6-sol")
+                # A distinct fixture model fixes the missing route without creating a twin of another row.
+                tinted.locator('[data-subagent-field="model"]').fill("owner/roster-validation-fixture")
                 page.wait_for_function(
                     "() => document.querySelector('#onboarding-available-subagents [data-subagents-validation]').hidden"
                     " && !document.querySelector('#onboarding-available-subagents .available-subagent-row[data-invalid]')",
                     timeout=5_000)
                 capture(page, "wizard-roster-repaired")
 
-                # With every Reviewer box cleared (the generated roster marks the factory
-                # reviewers), Finish names the empty pool until the owner says Save without reviewers.
+                # With every Reviewer box cleared, Finish names the empty pool until the owner
+                # says Save without reviewers.
                 boxes = page.locator('#onboarding-available-subagents [data-subagent-field="review_eligible"]')
                 for index in range(boxes.count()):
                     boxes.nth(index).set_checked(False)
