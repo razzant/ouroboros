@@ -533,7 +533,7 @@ def _write_correction(ctx: Any, root: Path, store: ChronicleStore, author: Dict[
 
 def _write_decision(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
     if not a["target_id"] or not isinstance(a["accepted"], bool):
-        return _arg_error(ctx, "a decision needs target_id (a helper's draft), accepted true/false and a reason")
+        return _arg_error(ctx, "a decision needs target_id (a page or part), accepted true/false and a reason")
     return _published(ctx, store.decide(str(a["target_id"]), a["accepted"], author, str(a["reason"] or "")))
 
 
@@ -1485,7 +1485,7 @@ def chronicle_tools() -> List[ToolEntry]:
                                        "speaker": {"type": "string", "enum": sorted(SPEAKERS)}}}}
     write = {
         "kind": {"type": "string", "enum": ["page", "part", "note", "correction", "decision", "account", "selection"],
-                 "description": "page seals one or more closed arcs of a room; part folds adjacent records of one lower level (pages, legacy sections or parts); note is a separate record for my future self; correction stands under the record's words wherever the record is shown, signed and dated — it adds and never replaces them, so to say a record anew I fold it into a part over it; decision accepts or rejects a helper's draft; account is my own text connecting experience of several rooms, based on the exact versions I read (sources) — it seals no row, folds nothing and leaves every source free to be folded or read anew; selection chooses the common view: show an account (shown) in place of the records it names (replaces), or withdraw it."},
+                 "description": "page seals one or more closed arcs of a room; part folds adjacent records of one lower level (pages, legacy sections or parts); note is a separate record for my future self; correction stands under the record's words wherever the record is shown, signed and dated — it adds and never replaces them, so to say a record anew I fold it into a part over it; decision lets me accept a helper draft or withdraw a draft, my own page or part, or a draft I accepted; account is my own text connecting experience of several rooms, based on the exact versions I read (sources) — it seals no row, folds nothing and leaves every source free to be folded or read anew; selection chooses the common view: show an account (shown) in place of the records it names (replaces), or withdraw it."},
         "room_id": room,
         "text": {"type": "string", "description": "The record in my own words. No length limit; it is read back through memory_read pages."},
         "covers": {"type": "object", "additionalProperties": False,
@@ -1504,7 +1504,7 @@ def chronicle_tools() -> List[ToolEntry]:
         "shown": {"type": "boolean", "description": "selection: true (default) shows the account in the common view, false withdraws it; the latest selection of an account acts."},
         "expected_revision": {"type": "string", "description": "correction: the target's current revision when it already has a correction (memory_read node_id shows it)."},
         "expected_sequence": {"type": "integer", "minimum": 0, "description": "The room head your text is based on (memory_read room's first line). Required for a part; optional for a page or correction. A newer head is refused with the current head and the newer record ids."},
-        "accepted": {"type": "boolean", "description": "decision: accept (true) or reject (false) the draft."},
+        "accepted": {"type": "boolean", "description": "decision: I accept an undecided helper draft (true), or withdraw a draft, my own page or part, or a draft I accepted (false), with my reason. I withdraw its acting part first; the original stays readable, and its rows reopen or its members unfold."},
         "reason": {"type": "string", "description": "decision or selection: why."},
     }
     read = {
@@ -1554,7 +1554,7 @@ def chronicle_tools() -> List[ToolEntry]:
     return [
         ToolEntry("chronicle_write", schema(
             "chronicle_write",
-            LEAD_RULE + "\n\n" + "Write my own chronicle record: seal a page over a room's closed arcs (the host expands covers into the exact row set, stamps each covered task with its recorded outcome and checks quotes), fold adjacent records into a part, keep a note for my future self, correct a record (a signed revision under its own words wherever it is shown; to say it anew, fold it into a part), accept/reject a helper's draft, write an account connecting experience of several rooms over the exact source versions I read (sources; nothing sealed or folded), or select an account for the common view in place of the records it names (replaces; the latest selection acts, shown=false withdraws). A delegated child or nanny publishes pages and parts only as drafts signed in its own name for the integrating mind to accept or reject; its part folds only legacy sections and its own drafts (its note, correction, decision, account or selection, or a part over other records, is refused: not_integrator). Records are never rewritten. A refusal returns the current revision or room head and the conflicting ids; read them with memory_read.",
+            LEAD_RULE + "\n\n" + "Write my own chronicle record: seal a page over a room's closed arcs (the host expands covers into the exact row set, stamps each covered task with its recorded outcome and checks quotes), fold adjacent records into a part, keep a note for my future self, correct a record (a signed revision under its own words wherever it is shown; to say it anew, fold it into a part), accept a helper draft or withdraw a draft, my own page or part, or a draft I accepted, write an account connecting experience of several rooms over the exact source versions I read (sources; nothing sealed or folded), or select an account for the common view in place of the records it names (replaces; the latest selection acts, shown=false withdraws). A delegated child or nanny publishes pages and parts only as drafts signed in its own name for the integrating mind to accept or reject; its part folds only legacy sections and its own drafts (its note, correction, decision, account or selection, or a part over other records, is refused: not_integrator). Records are never rewritten. A refusal returns the current revision or room head and the conflicting ids; read them with memory_read.",
             write, ["kind"]), _chronicle_write),
         ToolEntry("memory_read", schema(
             "memory_read",

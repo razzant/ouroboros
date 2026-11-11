@@ -19,10 +19,10 @@ a page whose set intersects an already sealed set is refused
 folds adjacent effective records of one lower level of its room (pages, legacy
 sections or parts), each at most once (``folded``). A helper's page or part (the
 Light writer's, or a delegated child's or nanny's signed with its focus) is
-a draft that acts at once; the mind's ``decision`` accepts or rejects it, and a
-rejected draft stops acting, so its rows are open and its members unfolded
-again; a draft already folded into a part is not rejected while that part acts
-(``already_folded``). Only the mind corrects, and a correction stands under the
+a draft that acts at once; the mind's ``decision`` accepts or rejects it. The same
+``accepted=false`` withdraws its own or an accepted page or part: status ``rejected``
+opens its rows and unfolds its members. A record folded into a part cannot be
+withdrawn while that part acts (``already_folded``). Only the mind corrects, and a correction stands under the
 original wherever the record is shown, signed and dated (``_interpret``); it never
 replaces the record's words.
 
@@ -677,7 +677,7 @@ class ChronicleStore:
                 db.executemany("INSERT INTO folded VALUES (?,?)",
                                [(str(member), record_id) for member in record["covers"]["member_ids"]])
             elif kind == "decision" and not record.get("accepted"):
-                # A rejected draft stops acting: its rows are open and its members unfolded again.
+                # Rejection or withdrawal stops the target acting; its words stay in records.
                 db.execute("DELETE FROM page_rows WHERE page_id=?", (record["target_id"],))
                 db.execute("DELETE FROM folded WHERE part_id=?", (record["target_id"],))
             elif kind == "selection":  # an account's latest selection is its only acting claim on what it tells
@@ -830,7 +830,7 @@ class ChronicleStore:
                                       "text": text, "author": author}], pre=pre)
 
     def decide(self, draft_id: str, accepted: bool, author: Dict[str, Any], reason: str) -> PublishResult:
-        """The mind accepts or rejects a helper's draft page or part, once, with a reason."""
+        """Accept a helper draft, or withdraw a draft, own or accepted page/part, with a reason."""
         with self._publishing() as db:
             target = self._get(db, draft_id)
             if target is None:
@@ -1017,6 +1017,8 @@ class ChronicleStore:
         return None
 
     def _rule_decision(self, db, record):
+        if _mapping(record["author"].get("focus")).get("role") in DELEGATED_FOCUS_ROLES:
+            return _refuse("not_integrator", "only the integrating mind decides or withdraws a page or part")
         if record["author"]["kind"] != "mind" or not _nonblank(record.get("reason")):
             return _refuse("invalid", "a decision is the mind's, with a reason")
         if not isinstance(record.get("accepted"), bool):
@@ -1024,19 +1026,20 @@ class ChronicleStore:
         target = self._get(db, record.get("target_id", ""))
         if target is None:
             return _refuse("target_missing", conflict_ids=(str(record.get("target_id", "")),))
-        if (target["kind"] not in ("page", "part") or target.get("author", {}).get("kind") != "helper"
+        if (target["kind"] not in ("page", "part") or target.get("author", {}).get("kind") not in ("mind", "helper")
                 or target["room_id"] != record["room_id"]):
-            return _refuse("invalid", "only a helper's draft page or part takes a decision")
-        prior = db.execute("SELECT id FROM records WHERE target=? AND kind='decision'", (target["id"],)).fetchone()
-        if prior:
-            return _refuse("invalid", "the draft is already decided", conflict_ids=(prior[0],))
+            return _refuse("invalid", "a decision targets a mind's or helper's page or part of its room")
+        status = self._status(db, target)
+        if status == "rejected" or record["accepted"] and status not in ("draft", "candidate"):
+            prior = _lookups(db).targeting(target["id"], ("decision",))
+            return _refuse("invalid", "only an undecided draft can be accepted; a withdrawn record stays withdrawn",
+                           conflict_ids=(prior[-1][1]["id"],) if prior else ())
         if record["accepted"] and target.get("metadata", {}).get("candidate"):
             return self._rule_page(db, target)  # adoption must still have exclusive coverage
         holder = db.execute("SELECT part_id FROM folded WHERE member_id=?", (target["id"],)).fetchone()
         if holder and not record["accepted"]:
-            # A rejected draft stops acting, so it cannot stay a member of an acting part.
-            return _refuse("already_folded", "the draft is folded into a part: reject that part first when it "
-                           "is a helper's draft, or correct this draft beside its original", conflict_ids=(holder[0],))
+            return _refuse("already_folded", "the record is folded into a part: withdraw that part first",
+                           conflict_ids=(holder[0],))
         return None
 
     def _source_version(self, db, given) -> Tuple[Optional[Dict[str, Any]], Optional[PublishResult]]:
@@ -1172,12 +1175,12 @@ class ChronicleStore:
     def _status(self, db, record) -> Optional[str]:
         if record.get("kind") not in ("page", "part"):
             return None
+        decisions = _lookups(db).targeting(record["id"], ("decision",))
+        if decisions:
+            return "accepted" if decisions[-1][1].get("accepted") else "rejected"
         if record.get("author", {}).get("kind") != "helper":
             return "final"
-        decisions = _lookups(db).targeting(record["id"], ("decision",))
-        if not decisions:
-            return "candidate" if record.get("metadata", {}).get("candidate") else "draft"
-        return "accepted" if decisions[-1][1].get("accepted") else "rejected"
+        return "candidate" if record.get("metadata", {}).get("candidate") else "draft"
 
     def _order_key(self, db, record, cache) -> Tuple[Any, ...]:
         """Legacy sections by block, pages by ``stream_span[0]``, a part by its first member."""
@@ -1477,11 +1480,12 @@ class ChronicleStore:
         return self.interpreted(kinds=("account",))
 
     def folded_members(self, part_id: Any) -> List[str]:
-        """Every record under a part through nested parts: its own members first, then theirs (no member read whole)."""
+        """Every record an acting part folds, through nested parts; withdrawn parts fold nothing (no body read whole)."""
         with self._reading() as look:
             out, todo = [], [str(part_id)]
             while todo:
-                members = look.members_of(todo.pop(0))
+                parent = todo.pop(0)
+                members = [member for member in look.members_of(parent) if look.part_of(member) == parent]
                 out += members
                 todo += members
             return out
