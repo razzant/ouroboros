@@ -234,7 +234,7 @@ only; nothing decides by them.
 
 - `work` (`context_timing.counted`): `secret_scan`, bytes of request-view parts
   the redaction worked out (once per part per task, §3.2); `new_parts`, bytes
-  of shared parts the CAS stored for the first time (`observability.write_part`).
+  of shared parts the CAS stored for the first time (`observability.write_parts`).
   R1 (`tests/test_cost_round.py`): round 2 scans exactly the bytes it adds, at
   any start size. A scan is keyed by the part's own key order and the CAS by its
   sorted bytes, so a part met in two orders is scanned twice and stored once.

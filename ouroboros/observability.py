@@ -105,10 +105,8 @@ def _json_bytes(payload: Any) -> bytes:
 
 
 def _publish_blob_file(path: pathlib.Path, raw: bytes) -> bool:
-    """Publish ``raw`` as gzip-1 at ``path`` (temp + atomic replace, 0600); a present file is kept.
+    """Publish into a prepared directory (gzip-1, atomic replace, 0600); keep a present file.
     True when this call stored the bytes."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _chmod_private_dir(path.parent)
     if path.exists():
         _chmod_private(path)
         return False
@@ -141,7 +139,7 @@ def _blob_ref(path: pathlib.Path, digest: str, kind: str, size: int) -> Dict[str
 def write_blob_bytes(drive_root: pathlib.Path, raw: bytes, *, kind: str = "json") -> Dict[str, Any]:
     """Persist exact bytes as a content-addressed gzip blob: the one CAS write."""
     digest = hashlib.sha256(raw).hexdigest()
-    path = _observability_root(pathlib.Path(drive_root)) / "blobs" / f"{digest}.{kind}.gz"
+    path = _blob_directory(drive_root) / f"{digest}.{kind}.gz"
     _publish_blob_file(path, raw)
     return _blob_ref(path, digest, kind, len(raw))
 
@@ -156,11 +154,32 @@ def write_part(drive_root: pathlib.Path, digest: str, raw: bytes) -> Dict[str, A
     """Store one shared element (``shared_values``) as the blob of its bytes, ``digest`` their sha256 as the tokenizer
     computed it; bytes stored for the first time count as the window's ``new_parts`` (``context_timing.counted``).
     Returns the part's ref as a manifest lists it."""
+    return write_parts(drive_root, {digest: raw})[digest]
+
+
+def write_parts(drive_root: pathlib.Path, parts: Dict[str, bytes]) -> Dict[str, Dict[str, Any]]:
+    """Publish one batch with one directory preparation; no existence proof survives this operation."""
+    if not parts:
+        return {}
+    return _write_parts(_blob_directory(drive_root), parts)
+
+
+def _blob_directory(drive_root: pathlib.Path) -> pathlib.Path:
+    directory = _observability_root(pathlib.Path(drive_root)) / "blobs"
+    directory.mkdir(parents=True, exist_ok=True)
+    _chmod_private_dir(directory)
+    return directory
+
+
+def _write_parts(directory: pathlib.Path, parts: Dict[str, bytes]) -> Dict[str, Dict[str, Any]]:
     from ouroboros.context_timing import counted
 
-    if _publish_blob_file(_observability_root(pathlib.Path(drive_root)) / "blobs" / f"{digest}.json.gz", raw):
-        counted("new_parts", len(raw), key=digest)
-    return {"sha256": digest, "kind": "json", "encoding": "gzip", "size": len(raw)}
+    refs = {}
+    for digest, raw in parts.items():
+        if _publish_blob_file(directory / f"{digest}.json.gz", raw):
+            counted("new_parts", len(raw), key=digest)
+        refs[digest] = {"sha256": digest, "kind": "json", "encoding": "gzip", "size": len(raw)}
+    return refs
 
 
 def write_shared_blob(drive_root: pathlib.Path, payload: Any, parts: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
@@ -181,12 +200,11 @@ def write_shared_blob(drive_root: pathlib.Path, payload: Any, parts: Dict[str, D
     if tokenized is None:
         return write_blob(drive_root, payload)
     digest, size = tokenized.whole_digest()
-    loose = _observability_root(pathlib.Path(drive_root)) / "blobs" / f"{digest}.json.gz"
+    directory = _blob_directory(drive_root)
+    loose = directory / f"{digest}.json.gz"
     if loose.exists():
         return _blob_ref(loose, digest, "json", size)
-    for part_digest, raw in tokenized.parts.items():
-        if part_digest not in parts:
-            parts[part_digest] = write_part(drive_root, part_digest, raw)
+    parts.update(_write_parts(directory, {key: raw for key, raw in tokenized.parts.items() if key not in parts}))
     placement = loose.with_name(f"{digest}.json{SHARED_PLACEMENT_SUFFIX}")
     _publish_blob_file(placement, tokenized.skeleton)
     return {**_blob_ref(loose, digest, "json", size), "compressed_size": placement.stat().st_size}

@@ -981,7 +981,10 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # share the existing inventory; the combined AST census below pins their union.
 # Audited census after function-local isolation, including the pool's two
 # delegate_observation paths. The -5/+3 spelling correction retires no writers.
-EXPECTED_SCAN_PATHS = 464
+# 464 -> 465 (#3127): ``observability._blob_directory`` returns the CAS directory it prepares once
+# per publication, so the scan names ``observability/blobs`` itself (the observability row). The
+# directory always existed as each blob's parent; no writer spelling was added or removed.
+EXPECTED_SCAN_PATHS = 465
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
