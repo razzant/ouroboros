@@ -29,6 +29,8 @@ import {
 function hasSkillUiTab(skill, live = {}) {
     return (live?.ui_tabs || []).some((tab) => (tab?.skill || tab?.skill_name || tab?.extension || '') === skill.name);
 }
+/** Whether the skill registered a settings form: its card then opens the skill's page in Settings. */
+const hasSkillSettings = (skill, live = {}) => (live?.settings_sections || []).some((section) => section?.skill === skill.name);
 
 const sourceTag = (skill) => String(skill?.source || 'native').toLowerCase();
 const installFacts = (skill) => (skill?.install && typeof skill.install === 'object' ? skill.install : null);
@@ -449,6 +451,7 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
         lockReason: required ? REQUIRED_LOCK : (skill.enabled ? '' : lockReason),
         update: offersChanges(skill) && Boolean(update || withdrawn || install?.update_rejected || install?.pending_update), withdrawn: Boolean(withdrawn),
         widgets: skill.enabled && skill.type === 'extension' && skill.live_loaded && hasSkillUiTab(skill, live),
+        settings: hasSkillSettings(skill, live),
     };
 }
 
@@ -705,10 +708,11 @@ function submitHubReady(skill, githubTokenConfigured) {
     return { visible: true, publication_ready: false, task_start_allowed: true, disabled: false, reason: '' };
 }
 
-function menuHtml(skill, { reviewing, repairing, submit }) {
+function menuHtml(skill, { reviewing, repairing, submit, settings = false }) {
     const name = escapeHtml(skill.name);
     const items = [];
     items.push(`<button type="button" role="menuitem" class="skills-menu-item" ${actionAttrs(skill.name, 'open_detail')}>Details…</button>`);
+    if (settings) items.push(`<button type="button" role="menuitem" class="skills-menu-item" ${actionAttrs(skill.name, 'open_settings')}>Settings</button>`);
     if (!reviewing && !untrusted(skill) && !(preflightFailed(skill) && repairReady(skill))) {
         const label = skill.review_status === 'pending' && !skill.review_stale ? 'Review' : 'Review again';
         items.push(`<button type="button" role="menuitem" class="skills-menu-item skills-review" ${actionAttrs(skill.name, skill.review_stale ? 'rereview' : 'review')}>${label}</button>`);
@@ -801,8 +805,9 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
         model.modified ? chipHtml(model.modified.by === 'owner' ? 'Modified · edited by you' : 'Modified', 'neutral') : '',
         connectsText(skill) ? chipHtml(connectsText(skill), 'neutral') : '',
     ].join('');
-    const widgetsButton = model.widgets && !model.trays.length
-        ? `<div class="skills-card-quiet-actions">${buttonHtml('Open widgets', { tone: 'ghost', attrs: actionAttrs(skill.name, 'open_widgets') })}</div>` : '';
+    const quiet = [model.widgets ? buttonHtml('Open widgets', { tone: 'ghost', attrs: actionAttrs(skill.name, 'open_widgets') }) : '',
+        model.settings ? buttonHtml('Settings', { tone: 'ghost', attrs: actionAttrs(skill.name, 'open_settings') }) : ''].join('');
+    const widgetsButton = quiet && !model.trays.length ? `<div class="skills-card-quiet-actions">${quiet}</div>` : '';
     const errors = [
         skill.lifecycle_status === 'failed' && skill.lifecycle_error && !skill.lifecycle_virtual ? `<div class="skills-load-error">${escapeHtml(skill.lifecycle_error)}</div>` : '',
         skill.health_regressed ? `<div class="skills-load-error">Regression: was live at ${escapeHtml(String((skill.last_known_good || {}).version || '?'))} (${escapeHtml(String((skill.last_known_good || {}).sha || '').slice(0, 12))}); broken after a code update.</div>` : '',
@@ -834,7 +839,7 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
                 <div class="skills-card-who">${installedWhoHtml(skill, model)}</div>
                 ${countsAsYoursText(skill) ? `<p class="skills-card-facts">${escapeHtml(countsAsYoursText(skill))}</p>` : ''}
             </div>
-            <div class="skills-card-toggle"><span class="skills-card-status">${model.chip}</span>${toggle}${skill.lifecycle_virtual ? '' : menuHtml(skill, { reviewing, repairing, submit })}</div>
+            <div class="skills-card-toggle"><span class="skills-card-status">${model.chip}</span>${toggle}${skill.lifecycle_virtual ? '' : menuHtml(skill, { reviewing, repairing, submit, settings: model.settings })}</div>
         </header>
         ${skill.lifecycle_virtual ? '' : details}
         <div class="skills-card-trays" id="${trayId}" data-skill-trays>${model.trays.join('')}${widgetsButton}</div>
