@@ -8,6 +8,8 @@ import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation
 import { readConsciousness, readConsciousnessFromState } from './consciousness_api.js';
 import { allowanceHold, allowanceText } from './consciousness_words.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
+import { READ_OK, accountName, accountRows, facetReadState } from './claudexor_status_store.js';
+import { quotaSummary } from './harness_accounts.js';
 
 // The limits card is rows of settings_rows.js (their home is this tab), drawn and written by settings_controls.js: each
 // saves itself and says what happened. The consciousness allowance has its one editor here (owner, 10 Nov 2026: moved
@@ -193,13 +195,40 @@ const ALLOWANCE_NOTE = 'Known spend of its wake-ups, its replies in places and t
     + 'Stop now on its card ends it, and the clock\'s next check starts a new wake-up if there is room. At $0 '
     + 'consciousness may not spend.';
 
+/** The Subscriptions block's doors, from the passive quota read (`GET /api/claudexor/status?view=quota`: the roster and
+ *  windows the engine last observed; it starts and refreshes nothing): one per kind of account, where each account in
+ *  rotation says its own window (several are never averaged), then Accounts and keys, which also says when the roster
+ *  could not be read. `{ path, name, meta }`, `path` a Settings path. */
+export function subscriptionDoors(payload, { transportError = '', nowMs = Date.now() } = {}) {
+    const accountsRead = facetReadState(payload, 'accounts', { transportError });
+    const quotaRead = facetReadState(payload, 'quota', { transportError });
+    const accounts = accountsRead === READ_OK ? accountRows(payload) : [];
+    const doors = [...new Set(accounts.map((row) => row.harness))].map((harness) => {
+        const own = accounts.filter((row) => row.harness === harness);
+        const rotation = own.filter((row) => row.enabled);
+        const windows = rotation.map((row) => {
+            const { label } = quotaSummary(payload?.quota || [], harness, row.profile_id, { quotaRead, nowMs, absences: payload?.quota_absences || [] });
+            return rotation.length > 1 ? `${accountName(row)}: ${label}` : label;
+        });
+        const out = own.length - rotation.length;
+        return { path: `accounts/${harness}`, name: harnessPresentation(harness).label,
+            meta: [...windows, out ? `${out} out of rotation` : ''].filter(Boolean).join(' · ') };
+    });
+    const meta = accountsRead !== READ_OK ? 'The accounts could not be read now.'
+        : doors.length ? 'Sign in, add an account or take one out of rotation.' : 'No subscription account yet.';
+    return [...doors, { path: 'accounts', name: 'Accounts and keys', meta }];
+}
+const subscriptionDoorHtml = ({ path, name, meta }) => `<button type="button" class="ui-row settings-row" data-kind="door" data-costs-account="${escapeHtmlAttr(path)}">`
+    + `<span class="ui-row-title">${escapeHtmlAttr(name)}</span><span class="ui-row-meta">${escapeHtmlAttr(meta)}</span>`
+    + '<span class="ui-row-actions"><span class="settings-row-chevron" aria-hidden="true">›</span></span></button>';
+
 const tableCardHtml = ([id, title, column, , note]) => `<section class="ui-card costs-table-card" aria-labelledby="${id}-title">
         <h3 class="dashboard-card-title" id="${id}-title">${title}</h3>${note ? `<p class="costs-table-note">${note}</p>` : ''}
         <table class="cost-table" id="${id}"><thead><tr><th>${column}</th><th class="cost-cell-right">Calls</th><th class="cost-cell-right">Cost</th></tr></thead><tbody></tbody></table>
         <button type="button" class="btn btn-ghost btn-sm ui-list-more" data-costs-more hidden></button>
     </section>`;
 
-export function initCosts({ state, mount, openDashboardTab = null }) {
+export function initCosts({ state, mount, openDashboardTab = null, openSettings = null }) {
     // The tab's one root and scroller (style.css "The Dashboard tab body"): the known spend of the limit leads, the
     // budget it is set against follows as the tab's action row, then where the money went.
     const page = document.createElement('div');
@@ -240,6 +269,11 @@ export function initCosts({ state, mount, openDashboardTab = null }) {
                 <div class="costs-limits">${limitRows(true)}</div>
             </details>
         </section>
+        <section class="ui-card dashboard-settings costs-subscriptions" aria-labelledby="costs-subscriptions-title">
+            <h3 class="dashboard-card-title" id="costs-subscriptions-title">Subscriptions</h3>
+            <p class="costs-table-note">Quotas of your accounts. They are not dollars, and no limit above counts them.</p>
+            <div data-costs-subscriptions><p class="costs-table-note">Reading…</p></div>
+        </section>
         <div class="costs-tables">${TABLES.map(tableCardHtml).join('')}</div>
     `;
     mount.appendChild(page);
@@ -251,6 +285,7 @@ export function initCosts({ state, mount, openDashboardTab = null }) {
     let lastBreakdown = null;
     let allowanceRead = 0;
     let allowanceExpiry = null;
+    let subscriptionsRead = 0;
 
     function renderBreakdownTable(tableId, data, emptyLabel = 'No data') {
         const table = page.querySelector('#' + tableId);
@@ -356,6 +391,20 @@ export function initCosts({ state, mount, openDashboardTab = null }) {
         }
     }
 
+    // Read when the tab is shown and on Refresh, never on a save elsewhere: no answer of it changes with a setting.
+    async function loadSubscriptions() {
+        const read = ++subscriptionsRead;
+        let payload = null;
+        let transportError = '';
+        try {
+            const resp = await apiFetch('/api/claudexor/status?view=quota', { cache: 'no-store' });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            payload = await resp.json();
+        } catch (error) { transportError = String(error?.message || error || 'unreachable'); }
+        if (read !== subscriptionsRead) return;
+        page.querySelector('[data-costs-subscriptions]').innerHTML = subscriptionDoors(payload, { transportError }).map(subscriptionDoorHtml).join('');
+    }
+
     async function loadLimits() {
         try {
             const settings = await readSettings();
@@ -367,7 +416,12 @@ export function initCosts({ state, mount, openDashboardTab = null }) {
         limits.paint();
     }
 
-    page.querySelector('#btn-refresh-costs').addEventListener('click', () => { loadCosts(); loadAllowance(); });
+    page.querySelector('#btn-refresh-costs').addEventListener('click', () => { loadCosts(); loadAllowance(); loadSubscriptions(); });
+    // Each door opens its Settings page, which leads back here.
+    page.querySelector('.costs-subscriptions').addEventListener('click', (event) => {
+        const path = event.target.closest?.('[data-costs-account]')?.dataset.costsAccount;
+        if (path !== undefined) void openSettings?.(path, { back: { label: 'Costs', go: () => openDashboardTab?.('costs') } });
+    });
     // The allowance's doors: a held wake's card in Main, and the Consciousness tab.
     budgetCard.addEventListener('click', (event) => {
         if (openTaskReference(event)) return;
@@ -391,7 +445,7 @@ export function initCosts({ state, mount, openDashboardTab = null }) {
     // A result the owner saw ends when the tab or the Dashboard is left.
     window.addEventListener('ouro:dashboard-subtab-shown', (event) => {
         if (event.detail?.tab !== 'costs') limits.leave();
-        else if (state.activePage === 'dashboard') refreshCostsPanel();
+        else if (state.activePage === 'dashboard') { refreshCostsPanel(); loadSubscriptions(); }
     });
     window.addEventListener('ouro:page-shown', (event) => { if (event.detail?.page !== 'dashboard') limits.leave(); });
     window.addEventListener('ouro:settings-updated', (event) => {
