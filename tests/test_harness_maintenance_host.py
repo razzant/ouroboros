@@ -123,6 +123,8 @@ def test_tools_share_service_and_update_crosses_existing_pause_boundary(tmp_path
     {"action": "update", "request_id": "missing-harness"},
     {"action": "update", "harness": "agy", "request_id": "key", "target": "version"},
     {"action": "update", "harness": "agy", "request_id": "key", "target": "unknown"},
+    {"action": "update", "harness": "agy", "request_id": "key", "target": "previous"},
+    {"action": "update", "harness": "agy", "request_id": "key", "target": "baseline"},
     {"action": "cancel"},
 ])
 def test_flat_schema_keeps_action_requirements_enforced_before_engine(tmp_path, owned, arguments):
@@ -595,3 +597,18 @@ def test_connect_does_not_repeat_an_unanswered_submission_or_observation(owned, 
     else:
         assert facts["operationId"] == receipt["id"]
     assert not owned.calls
+
+
+@pytest.mark.parametrize(("target", "version"), [("latest", ""), ("version", "1.2.3")])
+def test_mind_targets_preserve_the_requested_selector_and_pause(tmp_path, monkeypatch, owned, target, version):
+    from ouroboros import owner_pause
+    ctx, crossed = context(tmp_path), []
+    monkeypatch.setattr(owner_pause, "run_operation", lambda ctx, fn: crossed.append(ctx) or fn())
+    result = json.loads(tools._maintain_harness(ctx, "update", harness="future-program", target=target,
+                                              version=version, request_id="mind-key"))
+    assert result == OPERATION
+    requested = {"kind": target, **({"version": version} if version else {})}
+    assert owned.calls == [("create", {"harness": "future-program", "target": requested}, "mind-key")]
+    assert crossed == [ctx]
+    schemas = {entry.name: entry.schema for entry in tools.maintenance_tool_entries()}
+    assert schemas["maintain_harness"]["parameters"]["properties"]["target"]["enum"] == ["latest", "version"]
