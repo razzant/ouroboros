@@ -23,9 +23,10 @@ poll/cancel/reconcile; typed 409 passes through only for input and reconcile,
 with stable ``code`` plus ``required_actions`` when the engine names the
 continuation. A create-time daemon 400/409 — or the frozen retryable 503
 terminal-transport probe verdict — passes through with its status, code,
-actions and the engine's own sentence. Transport/discovery failure before
-setup creation, other daemon 5xx, and untyped poll/cancel conflicts collapse
-to this proxy's honest 503.
+actions and the engine's own sentence. Connect maintenance problems also keep
+the engine's status, context and retryability. Outside that maintenance branch,
+transport/discovery failures, other daemon 5xx and untyped poll/cancel conflicts
+collapse to this proxy's honest 503.
 
 Login shapes ("красота-сначала", D30): a structural link/device-code card
 wherever the engine can host the flow itself — codex device-code today, and

@@ -582,7 +582,8 @@ HTTP_SHAPES: dict[str, Shape] = {
              "is a stopped engine that did not start"),
     "POST /api/claudexor/login": Shape(
         "200:ClaudexorLoginJobResponse 400,409:ErrorResponse|ClaudexorLoginJobProblem 503:ClaudexorLoginJobProblem|ErrorResponse",
-        "ClaudexorLoginRequest", note="not idempotent: every call may start a job; can start the engine"),
+        "ClaudexorLoginRequest", note="not idempotent: every call may start a job; can start the engine; "
+             "Connect maintenance refusals preserve engine status, code, context, retryability and required_actions"),
     "GET /api/claudexor/login/{job_id}": Shape(_LOGIN_JOB, note="a snapshot {job, cursor, sequence, deviceCode?}; poll it"),
     "DELETE /api/claudexor/login/{job_id}": Shape(_LOGIN_JOB, note="cancel; a repeat is harmless"),
     "POST /api/claudexor/login/{job_id}/input": Shape(
