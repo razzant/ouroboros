@@ -377,6 +377,21 @@ test('writeEntry changes one entry of a fresh read with its token, and a stale l
     assert.equal(server.posts.length, 2);
 });
 
+test('writeEntry skips empty identities and keeps a non-empty id ahead of slug and name', async (t) => {
+    const servers = [{ id: '', slug: '', name: 'first', enabled: true },
+        { id: '', slug: 'second', name: 'alias', enabled: true },
+        { id: 'third', slug: 'second', name: 'first', enabled: true }];
+    const { server } = await start(t, [], { values: { MCP_SERVERS: servers } });
+    for (const [id, index] of [['second', 1], ['first', 0], ['third', 2]]) {
+        assert.equal((await writeEntry('MCP_SERVERS', id, { enabled: false })).state, 'saved');
+        servers[index].enabled = false;
+        assert.deepEqual(server.posts.at(-1).MCP_SERVERS, servers);
+    }
+    const count = server.posts.length;
+    assert.equal((await writeEntry('MCP_SERVERS', '', { enabled: true })).state, 'changed_elsewhere');
+    assert.equal(server.posts.length, count, 'an empty identity cannot select the first empty id');
+});
+
 test('writeEntry: the empty-pool refusal asks and repeats the same body with the flag; an editor\'s adapter carries the write', async (t) => {
     const roster = { items: [{ subagent_id: 'helper', enabled: true, review: true }] };
     const { server } = await start(t, [], { values: { OUROBOROS_SUBAGENTS: JSON.stringify(roster) } });

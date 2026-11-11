@@ -574,7 +574,7 @@ function entryList(document) {
     const list = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.items) ? parsed.items : null;
     return list ? { list, wrap: (next) => (Array.isArray(parsed) ? next : { ...parsed, items: next }) } : null;
 }
-const entryId = (entry) => String(entry?.id ?? entry?.subagent_id ?? entry?.slug ?? entry?.name ?? '');
+const entryId = (entry) => String(entry?.id || entry?.subagent_id || entry?.slug || entry?.name || '');
 
 /**
  * Change one entry of a list setting (`MCP_SERVERS`, `OUROBOROS_SUBAGENTS`, ...): a fresh read, the one entry

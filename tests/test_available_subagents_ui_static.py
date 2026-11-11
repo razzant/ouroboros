@@ -72,8 +72,8 @@ def test_heavy_card_is_gone_but_provider_test_contract_and_controls_remain() -> 
     assert "s-model-heavy" not in ui
     assert "OUROBOROS_MODEL_HEAVY" not in _read(MODULES / "settings.js")
     # Role labels and copy come from the shared setup contract, not a second
-    # hand-maintained card table in Settings.
-    assert "modelRolesHost('settings-model-roles')" in ui
+    # hand-maintained card table in Settings: a role's page draws the shared editor.
+    assert "modelRolesHost(hostId)" in _read(MODULES / "model_roles.js")
     assert "slot.note" in _read(MODULES / "model_roles.js")
     # Every API key row carries its Test; the probe runs against that row's draft only.
     connections = _read(MODULES / "settings_connections.js")

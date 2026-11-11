@@ -1,6 +1,7 @@
-"""Processing intent through existing Settings and onboarding, with no model calls."""
+"""Processing intent through Settings › Models and onboarding, with no model calls."""
 import pytest
 from tests import test_subscription_role_routes_browser as roles
+from tests.settings_browser_helpers import commit_row, open_settings, press_editor_save
 
 pytestmark = [pytest.mark.ui_browser]
 subscription_ui = roles.subscription_ui
@@ -21,55 +22,46 @@ def caret(summary, angle):
 
 
 def test_processing_settings_save_reopen_and_actor_reference(role_ui):
+    """Models: the install's Processing is a row of the fold that saves itself, and Main's own choice is a field of
+    Main's page, saved by its Save through the checker's transaction. (An agent's line that says "Fast (from
+    Models)" is the Agents page's, test_agents_settings_browser.py.)"""
     ui = role_ui
     roles.configure_mixed(ui)
-    page = roles.open_agents(ui)
-    page.locator('[data-settings-tab="models"]').click()
-    assert page.locator('[data-global-processing]').input_value() == ''
-    page.locator('[data-global-processing]').select_option('fast')
-    main = page.locator('[data-model-role="main"]')
+    page = ui["page"]
+    page.goto(ui["url"] + "/#settings")
+    level = open_settings(page, "models", "OUROBOROS_PROCESSING_PREFERENCE")
+    row = level.locator('[data-setting-row="OUROBOROS_PROCESSING_PREFERENCE"]')
+    row.wait_for(state="visible")  # the row the page was opened for: its fold is open
+    assert row.locator("[data-setting-control]").input_value() == ''
+    assert commit_row(page, "OUROBOROS_PROCESSING_PREFERENCE", "fast").startswith("Saved")
+    assert ui['posts'][-1] == ('/api/settings', {'OUROBOROS_PROCESSING_PREFERENCE': 'fast'})
+    main_model = ui['settings']['OUROBOROS_MODEL']
+    level = open_settings(page, "models/role/main")
+    main = level.locator('[data-model-role="main"]')
+    main.locator("[data-editor-save]").wait_for(state="visible")
     assert not main.locator('details').evaluate('e => e.open')
-    # The collapsed override must be recognizable as a disclosure: the caret is
+    # The collapsed fold must be recognizable as a disclosure: the caret is
     # drawn by CSS, so only a real render can prove it is there and flips open.
     caret(main.locator('summary'), -45)
     main.locator('summary').click()
     caret(main.locator('summary'), 45)
+    assert 'Fast (from Models)' in main.locator('summary').text_content()
     main.locator('[data-model-role-processing]').select_option('standard')
     assert 'Standard (override)' in main.locator('summary').text_content()
-    main_model = ui['settings']['OUROBOROS_MODEL']
-    page.locator('[data-settings-tab="agents"]').click()
-    actor = page.locator('[data-subagent-row]').first
-    assert 'Fast (from Models)' in actor.locator('[data-processing-summary]').text_content()
-    caret(actor.locator('[data-processing-details] > summary'), -45)
-    actor.locator('[data-processing-details] > summary').click()
-    # The first row is a reviewer: its processing is the processing of its reviews.
-    assert actor.locator('[data-subagent-field="review_eligible"]').is_checked()
-    actor.locator('[data-subagent-field="processing_preference"]').select_option('economy')
-    field = actor.locator('[data-subagent-field="model"]')
-    field.focus()
-    field.evaluate('e => { window.processingModelNode = e; e.setSelectionRange(1, 4); }')
-    page.evaluate("""() => document.dispatchEvent(new CustomEvent('settings-model-catalog:updated',
-        {detail:{read_state:'transport',errors:[{error:'offline'}]}}))""")
-    assert field.evaluate('e => e === window.processingModelNode && document.activeElement === e')
-    assert field.evaluate('e => [e.selectionStart, e.selectionEnd]') == [1, 4]
-    assert actor.locator('[data-processing-details]').evaluate('e => e.open')
-    assert actor.locator('[data-subagent-field="processing_preference"]').input_value() == 'economy'
-    roles.capture(page, 'processing-actor-reference-and-inline')
-    with page.expect_response('**/api/settings'):
-        page.locator('#btn-save-settings').click()
-    saved = roles.settings_saves(ui)[-1]
-    assert saved['OUROBOROS_PROCESSING_PREFERENCE'] == 'fast'
-    assert saved['OUROBOROS_MODEL_PROCESSING_PREFERENCES']['main'] == 'standard'
-    assert saved['OUROBOROS_MODEL'] == main_model
-    assert saved['OUROBOROS_SUBAGENTS']['items'][0]['processing_preference'] == 'economy'
-    assert 'processing_preference' not in saved['OUROBOROS_SUBAGENTS']['items'][1]
-    assert 'OUROBOROS_REVIEWER_SLOTS' not in saved
-    page = roles.open_agents(ui)
-    reopened = page.locator('[data-subagent-row]').first
-    assert reopened.locator('[data-subagent-field="processing_preference"]').input_value() == 'economy'
-    page.locator('[data-settings-tab="models"]').click()
-    assert page.locator('[data-global-processing]').input_value() == 'fast'
-    assert page.locator('[data-model-role="main"] [data-model-role-processing]').input_value() == 'standard'
+    roles.capture(page, 'processing-main-role-page')
+    before = len(ui['posts'])
+    assert press_editor_save(page).startswith('Saved')
+    # Only what changed is written: Main's entry of the processing map, by the checker; the model is not sent again.
+    assert ui['posts'][before:] == [('/api/owner/safety-model', {'settings': {'OUROBOROS_MODEL_PROCESSING_PREFERENCES': {'main': 'standard'}}})]
+    assert ui['settings']['OUROBOROS_MODEL'] == main_model
+    page.reload()
+    level = open_settings(page, "models", "OUROBOROS_PROCESSING_PREFERENCE")
+    expect_value = level.locator('[data-setting-row="OUROBOROS_PROCESSING_PREFERENCE"] [data-setting-control]')
+    page.wait_for_function("() => document.querySelector('#page-settings [data-setting-row=\"OUROBOROS_PROCESSING_PREFERENCE\"] [data-setting-control]')?.value === 'fast'")
+    assert expect_value.input_value() == 'fast'
+    level = open_settings(page, "models/role/main")
+    level.locator("[data-editor-save]").wait_for(state="visible")
+    assert level.locator('[data-model-role="main"] [data-model-role-processing]').input_value() == 'standard'
 
 
 def test_onboarding_processing_draft_returns_and_reaches_finish(subscription_ui):

@@ -11,7 +11,6 @@ import { getContributions } from './contributions.js';
 import { mountDesktopShell } from './desktop_shell.js';
 import { renderAgentAccountsSection } from './harness_accounts.js';
 import { mountInterfaceSize } from './interface_size.js';
-import { modelRolesHost } from './model_roles.js';
 import { getNotifier } from './notifications.js';
 import { bindAutostartControl } from './settings_autostart.js';
 import { CODECS, HIDDEN_WHEN, bindSettingRows, settingsRow, settingsSection } from './settings_controls.js';
@@ -472,8 +471,7 @@ registerSettingsPage('computer/about', { title: 'About', mount: mountAbout });
 // the app starts, not when a page is opened: where an alert goes depends on them long before anyone opens Settings.
 if (globalThis.document) mountDesktopShell(null, (shell) => getNotifier().configure({ shell }));
 
-/* ---- What is left of the old tabs, unmounted, for the editor lanes: Accounts and Secrets (lane E3), Models, tool
-   servers and the local model (lane E2). Each lane rebuilds its section as a page and deletes it here. ----------- */
+/* ---- What is left of the old tabs, unmounted, for the editor lanes: Accounts and Secrets (lane E3). Each lane rebuilds its section as a page and deletes it here. ----------- */
 
 function secretField({ id, settingKey, label, placeholder }) {
     return `
@@ -559,67 +557,9 @@ export function accountsPanel() {
     `;
 }
 
-export function modelsPanel() {
-    return `
-        ${settingsSection({
-            title: 'Model Routing',
-            lead: 'Which model does each kind of work.',
-            details: 'Choose a source, model, and subscription account for each role. Auto rotates compatible accounts. Local uses the runtime configured in Advanced.',
-            body: `<div class="ui-action-row">
-                <button type="button" class="btn btn-default" id="btn-refresh-model-catalog">Refresh model catalog</button>
-                <span id="settings-model-catalog-status" class="ui-result" role="status" aria-live="polite" aria-atomic="true"></span>
-            </div>
-            ${modelRolesHost('settings-model-roles')}`,
-        })}
-
-        <!-- Reviewers and Delegation live in the Agents tab (D-10):
-             they answer "who does the work", not "which API model
-             id". One capability, one section — no control here
-             duplicates one there. -->
-
-        ${settingsSection({
-            title: 'Web search',
-            lead: 'Where the built-in web search runs.',
-            body: `<div class="form-grid two">
-                <div class="form-field ui-field">
-                    <label for="s-websearch-source">Source</label>
-                    <select id="s-websearch-source" class="ui-control"><option value="auto">Auto</option><option value="openai">OpenAI</option><option value="openrouter">OpenRouter</option><option value="anthropic">Anthropic</option><option value="ddgs">DuckDuckGo</option></select>
-                </div>
-                <div class="form-field ui-field">
-                    <label for="s-websearch-model">Model</label>
-                    <input id="s-websearch-model" placeholder="Recommended for each source" class="ui-control" name="s-websearch-model" type="text" aria-describedby="s-websearch-model-help">
-                    <div class="settings-inline-note ui-field-help" id="s-websearch-model-help">Built-in <code>web_search</code> only. Skills, MCP and browser tools remain independent choices. Empty follows the model Ouroboros recommends for each source.</div>
-                </div>
-            </div>
-            <div class="ui-field-help" id="s-websearch-preview" role="status"></div>`,
-        })}
-    `;
-}
-
-// Tool servers, the repository and the local model, as the Advanced tab drew them.
+// Repository settings awaiting the Accounts page.
 export function advancedPanel() {
     return `
-        ${settingsSection({
-            title: 'MCP Servers',
-            lead: 'Tool servers Ouroboros may borrow tools from.',
-            details: 'External Model Context Protocol tool servers. MCP is a base-runtime client: it borrows tools from trusted HTTP/SSE servers or local stdio processes and exposes them as non-core <code>mcp_&lt;server&gt;__&lt;tool&gt;</code> tools after refresh. Changes are hot-reloadable. Treat server descriptions and results as untrusted third-party data.',
-            actions: `<button type="button" class="btn btn-default" id="btn-mcp-add-server">Add server</button>
-                <button type="button" class="btn btn-default" id="btn-mcp-import">Import mcp.json</button>
-                <button type="button" class="btn btn-default" id="btn-mcp-refresh-all">Refresh all</button>`,
-            body: `<div class="form-grid two">
-                <label class="local-toggle ui-field ui-field-inline">
-                    <input type="checkbox" id="s-mcp-enabled" class="ui-checkbox" name="s-mcp-enabled">
-                    Enable MCP client
-                </label>
-                <div class="form-field ui-field">
-                    <label for="s-mcp-tool-timeout">Per-tool timeout (s)</label>
-                    <input id="s-mcp-tool-timeout" type="number" min="1" value="60" class="ui-control" name="s-mcp-tool-timeout">
-                </div>
-            </div>
-            <div id="mcp-global-status" class="settings-inline-status">Checking MCP status…</div>
-            <div id="mcp-servers-list" class="mcp-servers-list"></div>`,
-        })}
-
         ${settingsSection({
             title: 'Source Control',
             lead: 'The GitHub repository Ouroboros works in.',
@@ -632,61 +572,7 @@ export function advancedPanel() {
             </div>`,
         })}
 
-        ${settingsSection({
-            title: 'Local Model Runtime',
-            lead: 'A GGUF model running on this machine, if you want one.',
-            details: 'Only fill this in when you want Ouroboros to start and route to a GGUF model on this machine.',
-            body: `<div class="form-grid two">
-                <div class="form-field ui-field">
-                    <label for="s-local-source">Model Source</label>
-                    <input id="s-local-source" placeholder="bartowski/Llama-3.3-70B-Instruct-GGUF or /path/to/model.gguf" class="ui-control" name="s-local-source" type="text">
-                </div>
-                <div class="form-field ui-field">
-                    <label for="s-local-filename">GGUF Filename (for HF repos)</label>
-                    <input id="s-local-filename" placeholder="Llama-3.3-70B-Instruct-Q4_K_M.gguf" class="ui-control" name="s-local-filename" type="text">
-                </div>
-            </div>
-            <div class="form-grid four">
-                <div class="form-field ui-field">
-                    <label for="s-local-port">Port</label>
-                    <input id="s-local-port" type="number" value="8766" class="ui-control" name="s-local-port">
-                </div>
-                <div class="form-field ui-field">
-                    <label for="s-local-gpu-layers">GPU Layers (-1 = all)</label>
-                    <input id="s-local-gpu-layers" type="number" value="-1" class="ui-control" name="s-local-gpu-layers">
-                </div>
-                <div class="form-field ui-field">
-                    <label for="s-local-ctx">Context Length</label>
-                    <input id="s-local-ctx" type="number" value="16384" class="ui-control" name="s-local-ctx">
-                </div>
-                <div class="form-field ui-field">
-                    <label for="s-local-chat-format">Chat Format</label>
-                    <input id="s-local-chat-format" placeholder="auto-detect" class="ui-control" name="s-local-chat-format" type="text">
-                </div>
-            </div>
-            <div class="settings-inline-note" data-local-model-fixed hidden>Your organization’s Safety Supervisor answers from this model: its source, filename, port and chat format are set by your organization. Start and Stop stay yours.</div>
-            <div class="settings-toolbar">
-                <button class="btn btn-primary" id="btn-local-start">Start</button>
-                <button class="btn btn-default" id="btn-local-stop">Stop</button>
-                <button class="btn btn-default" id="btn-local-test">Test Tool Calling</button>
-            </div>
-            <div id="local-model-status" class="settings-inline-status" role="status" aria-live="polite">Status: Offline</div>
-            <div id="local-model-action-status" class="settings-inline-status" role="status" aria-live="polite" aria-atomic="true"></div>
-            <div id="local-model-progress-wrap" class="local-model-progress-wrap local-model-hidden" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-                <div id="local-model-progress-bar" class="local-model-progress-bar"></div>
-            </div>
-            <button class="btn btn-default local-model-install-btn local-model-hidden" id="btn-local-install-runtime">Install Local Runtime</button>
-            <div id="local-model-test-result" class="settings-test-result"></div>`,
-        })}
     `;
-}
-
-// The slot wait the concurrency help names: a finite value, below 0 shown as 0 because
-// `model_concurrency._max_slot_wait_sec` counts it so, else the 180 s default. Only the
-// sentence follows it; the saved value stays.
-export function slotWaitSeconds(saved) {
-    const wait = Number.parseFloat(saved);
-    return Number.isFinite(wait) ? Math.max(0, wait) : 180;
 }
 
 // Reset All Data (the Danger Zone's button): asks first, then deletes the runtime data and restarts.

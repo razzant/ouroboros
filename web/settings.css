@@ -481,47 +481,18 @@ html[data-layout="stack"] .settings-needs:not([data-all]) > .settings-needs-more
 }
 
 
-/* MCP servers: one tray per server (DESIGN "List editors"): the row (name, one state chip, Enabled, its actions),
-   the action's result under it, then the form behind Edit and the stamps behind Details (the shared disclosure). */
-.mcp-servers-list {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-}
-
-.mcp-server-card {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-2);
-    padding: var(--space-3);
-}
-
-.mcp-server-card-head {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-2) var(--space-3);
-}
-
-.mcp-server-card-title {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--space-1) var(--space-2);
-    flex: 1 1 16rem;
-    min-width: 0;
-}
-
-.mcp-server-card-actions,
+/* A tool server's form (mcp_settings.js): a tick with its words, and the chip of a sign-in state or an imported
+   entry, a flat status tint (DESIGN "Status and chips"): the state word in its hue, never pressable. */
 .mcp-server-enabled {
     display: flex;
-    align-items: center;
-    flex-wrap: wrap;
+    align-items: flex-start;
     gap: var(--space-2);
+    color: var(--text-primary);
+    font-size: var(--type-body);
+    line-height: var(--line-body);
 }
+.mcp-server-enabled > .ui-checkbox { flex: none; margin-top: 2px; }
 
-/* The chip is a flat status tint (DESIGN "Status and chips"): the state word in its hue, never pressable. */
 .mcp-server-status {
     max-width: 100%;
     overflow-wrap: anywhere;
@@ -543,8 +514,6 @@ html[data-layout="stack"] .settings-needs:not([data-all]) > .settings-needs-more
 .mcp-sign-in-details { flex-basis: 100%; }
 .mcp-sign-in-details label { display: grid; gap: 6px; margin: 8px 0; }
 
-.mcp-server-message:empty, .mcp-server-message[hidden] { display: none; }
-
 .mcp-server-form {
     display: flex;
     flex-direction: column;
@@ -555,7 +524,8 @@ html[data-layout="stack"] .settings-needs:not([data-all]) > .settings-needs-more
 .mcp-server-facts > div { display: flex; flex-wrap: wrap; gap: 0 var(--space-3); font-size: var(--type-meta); line-height: var(--line-meta); }
 .mcp-server-facts dt { flex: 0 1 9em; color: var(--text-meta); }
 .mcp-server-facts dd { flex: 1 1 16rem; min-width: 0; margin: 0; color: var(--text-primary); overflow-wrap: anywhere; }
-.mcp-server-facts:empty + [data-mcp-weight][hidden] { display: none; }
+/* The tools a server lists stand at the end of their card, after its facts. */
+.mcp-server-facts:empty { display: none; }
 
 .mcp-tools-list {
     display: flex;
@@ -586,14 +556,9 @@ html[data-layout="stack"] .settings-needs:not([data-all]) > .settings-needs-more
 .settings-inline-note[data-tone="warn"] { color: var(--status-warn-fg); }
 .settings-inline-note[data-tone="error"] { color: var(--status-error-fg); }
 
-/* Utility: hide elements that start as hidden and are revealed via JS */
-.local-model-hidden {
-    display: none !important;
-}
-
 /* Local model download progress bar */
+.local-model-progress-wrap[hidden] { display: none; }
 .local-model-progress-wrap {
-    margin-top: 8px;
     height: 6px;
     border-radius: var(--pill-radius);
     background: rgba(var(--neutral-rgb), 0.08);
@@ -606,11 +571,6 @@ html[data-layout="stack"] .settings-needs:not([data-all]) > .settings-needs-more
     background: var(--accent);
     width: 0%;
     transition: width 0.4s ease;
-}
-
-/* Install Local Runtime button */
-.local-model-install-btn {
-    margin-top: 10px;
 }
 
 .settings-toolbar {
@@ -1393,35 +1353,112 @@ button.settings-row { width: 100%; color: inherit; font: inherit; text-align: st
 .agent-page .available-subagent-purpose textarea { min-height: 84px; max-height: none; }
 .agent-status { margin: 0; }
 .agents-foot { padding: 0 var(--space-1); }
+/* ---- Settings › Tools and Models (mcp_settings.js, model_roles.js, settings_local_model.js) -----------------------
+   A page is cards of rows, as every Settings page (the card, its title, lead and rows are the shell's rules above).
+   A card's head carries its title, the result of what its list did and its one action; a note under a card's rows is
+   meta words. A row with nothing under its name stands on one line; a door says its value before its chevron. */
+.settings-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); }
+.settings-card-head > .settings-card-title { flex: 1 1 6rem; min-width: 0; }
+.settings-card-head > .ui-result { flex: 0 1 auto; min-height: 0; }
+.settings-card-head > .ui-result:empty { display: none; }
+.settings-card-head + .settings-card-lead { margin-top: calc(-1 * var(--space-2)); }
+.settings-card-note { margin: 0; padding-inline: var(--space-1); color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.settings-rows > :is(.settings-row, .settings-head) { box-sizing: border-box; min-height: 52px; }
+.settings-row > .ui-row-meta:not(:has(> :not(:empty))) { display: none; }
+.settings-rows > .settings-row > .ui-row-title { grid-row: 1 / span 2; }
+.settings-rows > .settings-row > .ui-row-title:has(+ .ui-row-meta > :not(:empty)) { grid-row: 1; }
+@media (hover: hover) { :is(button.settings-row, .settings-head):hover { background: var(--tone-quiet-hover); } }
 /* ---- The plain pages (settings_ui.js): a page is cards of rows --------------------------------------------------
    The page's lead, a card, its title, its lead, its rows and the fold are the shell's recipe above ("An object of a
    page"). What these pages add to it: a card's head with a word at its end, a note under a card's rows, a stack of
    cards one module binds as a whole, and the rows' own details. Width is read from the row's own box (ui.css
    .ui-row), never from the window. */
 .settings-stack { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
-.settings-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); }
-.settings-card-head > .settings-card-title { flex: 1 1 10rem; min-width: 0; }
-.settings-card-head + .settings-card-lead { margin-top: calc(-1 * var(--space-2)); }
-.settings-card-note { margin: 0; padding-inline: var(--space-1); color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
 .settings-card-note:empty { display: none; }
 /* Choices kept while their master switch is off say so once, in the card's head (the page shows and hides it). */
 .settings-card-held[hidden] { display: none; }
-.settings-rows > .settings-row { box-sizing: border-box; min-height: 52px; }
 /* A row with no line under its name stands on one line: its name is centred against the control, and takes the
    first row alone once the line under it says something. */
-.settings-row > .ui-row-meta:not(:has(> :not(:empty))) { display: none; }
-.settings-rows > .settings-row > .ui-row-title { grid-row: 1 / span 2; }
-.settings-rows > .settings-row > .ui-row-title:has(+ .ui-row-meta > :not(:empty)) { grid-row: 1; }
 .settings-row-fact:empty { display: none; }
 /* A door row: the whole tray is the press. */
-@media (hover: hover) { button.settings-row:hover { background: var(--tone-quiet-hover); } }
 button.settings-row { transition: var(--motion-tone); }
 button.settings-row:active { filter: var(--press); }
 button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 .settings-row-chevron { color: var(--text-disabled); font-size: var(--type-section); line-height: 1; }
+.settings-row-value { min-width: 0; color: var(--text-meta); font-size: var(--type-body); font-weight: 600; line-height: var(--line-body); overflow-wrap: anywhere; }
+.settings-foot { padding: 0 var(--space-1); }
+/* A door and a switch keep their place at the row's end at every width (ui.css moves a narrow row's actions under
+   its words; a value of a word or two, or a switch, fits beside them). */
+@container (max-width: 28rem) {
+    .settings-rows > :is(button.settings-row, .settings-row[data-kind="switch"]) > :is(.ui-row-title, .ui-row-meta) { grid-column: 1; }
+    .settings-rows > :is(button.settings-row, .settings-row[data-kind="switch"]) > .ui-row-actions { grid-column: 2; grid-row: 1 / span 2; flex-wrap: nowrap; justify-content: flex-end; }
+}
+/* A head: one entry of a list (a tool server, a fallback). Its mark, its name with one line of state (the press that
+   opens its page), then its switch or its actions, which keep the row's end; a head with buttons (`data-actions`)
+   puts them under the words in a narrow row. */
+.settings-head { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "mark words actions"; cursor: pointer; transition: var(--motion-tone); }
+.settings-head-glyph {
+    grid-area: mark;
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: var(--surface-object);
+    color: var(--text-secondary);
+    font-size: var(--type-body);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+.settings-head-order { width: 24px; height: 24px; font-size: var(--type-meta); }
+.settings-head-open {
+    grid-area: words;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-inner);
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+}
+.settings-head-open:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+.settings-head-open > .ui-row-title { display: block; overflow: visible; }
+.settings-head > .ui-row-actions { grid-area: actions; flex-wrap: nowrap; justify-content: flex-end; }
+@container (max-width: 28rem) {
+    .settings-head[data-actions] { grid-template-areas: "mark words" "mark actions"; grid-template-columns: auto minmax(0, 1fr); }
+    .settings-head[data-actions] > .ui-row-actions { justify-content: flex-start; }
+}
+/* Models: the Main model leads its page (its mark, its name at the section size, where it runs, Change). */
+.models-main { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3) var(--space-4); cursor: pointer; }
+.models-main-glyph { flex: none; width: 48px; height: 48px; background: var(--surface-tray); font-size: 24px; }
+.models-main-glyph > svg { width: 24px; height: 24px; }
+.models-main-words { flex: 1 1 11rem; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.models-kicker { color: var(--text-meta); font-size: var(--type-meta); font-weight: 600; line-height: var(--line-meta); }
+.models-main-name { color: var(--text-primary); font-size: var(--type-page); font-weight: 600; line-height: var(--line-title); overflow-wrap: anywhere; }
+.models-main-meta { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); overflow-wrap: anywhere; }
+.models-main-meta:empty { display: none; }
+/* A role's page: the shared role editor as a form of labelled fields in its card, Save under them, then its fold. */
+.models-role .model-role-editor { gap: var(--space-3); }
+.model-role-row[data-solo] { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
+.model-role-row[data-solo] > .model-role-controls,
+.models-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); align-items: start; gap: var(--space-3); }
+.model-role-field { min-width: 0; }
+.model-role-field > :is(select, .ui-model-chooser) { width: 100%; min-width: 0; }
+.model-role-row[data-solo] > .model-role-notes:not(:has(> :not(:empty))) { display: none; }
+.model-role-row[data-solo] .model-role-meta { margin-top: 0; }
+.model-role-row[data-solo] > .model-role-details { margin-top: 0; }
+.models-role .model-role-copy { margin: 0; }
+/* A tool server's page: its state under the title, then its cards. */
+.tools-editor { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
+.tools-editor > .settings-page-lead { margin-top: calc(var(--space-1) - var(--space-4)); }
+.local-model-state { margin: 0; }
 /* What a row shows at its end when it is a fact, not a control: a saved choice, an address. */
 .settings-row-end { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); min-width: 0; }
-.settings-row-value { min-width: 0; color: var(--text-meta); font-size: var(--type-body); font-weight: 600; line-height: var(--line-body); overflow-wrap: anywhere; }
 a.settings-row-value { color: var(--accent); text-decoration: none; }
 /* A slider with its value and its one action (the interface size, the app tone's level). */
 .settings-slider { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); min-width: 0; }
