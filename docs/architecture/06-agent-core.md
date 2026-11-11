@@ -356,7 +356,7 @@ Selected terminal, any owned ordinary run's new question, a direct child's atten
 
 **Questions.** `pendingInteractions` wake `waiting_on_user`; async rows hold nothing. Answers echo custody keys, escalating beyond authority to the nearest live ancestor. `same_session` costs each turn; terminal `input_required` needs `continue_from` + `prompt=<answers>` in task custody.
 
-**Recovery** (`delegate_recovery_holders.py`) keeps independent successor proofs and precedes bootstrap; owner Restart/Panic/signals/deadline/cancellation never resume. Binding/replay/orphan protocol: `delegate_recovery.py` docstring; schema: PERSISTENCE.md.
+**Recovery** (`delegate_recovery.py`) keeps independent successor proofs and precedes bootstrap; owner Restart/Panic/signals/deadline/cancellation never resume. Binding/replay/orphan protocol: its docstring; holders: `delegate_recovery_holders.py`; schema: PERSISTENCE.md.
 
 `delegate_wait`: exclusive `run_id`/`runs`, wake on any; holds need positively live ordinary leaves. Checkpoint schema, migration and downgrade limits: PERSISTENCE.md; sibling-safe merges and corruption: `delegate_supervision_state.py` docstring. Legacy wake replay: `delegate_supervision.unseen_wake_view`.
 
