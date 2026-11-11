@@ -1735,13 +1735,37 @@ def test_a_changed_running_code_reads_the_whole_tail(monkeypatch, tmp_path):
 
 
 def test_a_commit_after_a_process_loaded_its_code_moves_no_mark_of_that_process(monkeypatch, tmp_path):
-    """The code mark names the code a process runs, as it loaded it: a commit checked out later (a self-commit before
-    the restart that loads it) is not that process's, and the set it composed under its own code still stands."""
+    """The code mark names the code a process runs, as its first gate named it: a commit checked out later (a self-commit
+    before the restart that loads it) is not that process's, and the set it composed under its own code still stands."""
     from ouroboros import transcript_prefix
 
     _rooms, _row = _sealed_main_row(tmp_path)
     monkeypatch.setattr(transcript_prefix, "_running_code", lambda: "a-commit-this-process-never-loaded")
     assert _in_use(tmp_path)
+
+
+def test_importing_the_store_runs_nothing_and_the_first_gate_names_the_running_code(tmp_path):
+    """A fresh interpreter that imports the chronicle store (an extension's child does, to read memory) starts no process
+    and loads no work-domain machinery; the first gate it reads names the code it runs as the set's code mark."""
+    _settled(tmp_path)
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    code = ("import json, sys\n"
+            "started = []\n"
+            "sys.addaudithook(lambda event, _args: started.append(event) if event in ('subprocess.Popen', 'os.system',"
+            " 'os.posix_spawn') or event.startswith(('os.spawn', 'os.exec')) else None)\n"
+            "import ouroboros.chronicle_store as cs\n"
+            "from ouroboros import memory_tail_cold as cold\n"
+            "imported = [started[:], 'ouroboros.work_domain' in sys.modules]\n"
+            "gate = cold.gate(cs.ChronicleStore(sys.argv[1]))\n"
+            "from ouroboros.transcript_prefix import _running_code\n"
+            "print(json.dumps([imported, gate and gate.marks['code'], _running_code()]))\n")
+    env = {**os.environ, "OUROBOROS_DATA_DIR": str(tmp_path), "PYTHONPATH": str(repo), "PYTHONDONTWRITEBYTECODE": "1"}
+    done = subprocess.run([sys.executable, "-c", code, str(tmp_path)], capture_output=True, text=True, encoding="utf-8",
+                          env=env, cwd=str(tmp_path), timeout=600)
+    assert done.returncode == 0, done.stderr[-4000:]
+    imported, mark, running = json.loads(done.stdout.strip().splitlines()[-1])
+    assert imported == [[], False], imported  # the import ran nothing: no git, no work domain
+    assert mark and mark == running, (mark, running)  # its first gate named the code it runs
 
 
 def test_a_revised_and_refilled_text_reads_the_whole_tail(monkeypatch, tmp_path):

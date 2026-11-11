@@ -16,7 +16,7 @@ Marks, all equal or the whole tail:
 - the task store's lineage writes (``store_hot_facts.lineage_writes``: its triggers count every change or removal of a
   task's parent, root, role or admitted chat, and every rewrite of a row whose chat is underived, in that writer's own
   transaction, whichever body wrote it);
-- the code this process loaded (``CODE``: an update composes anew);
+- the code this process runs, named by its first gate (``CODE``: an update composes anew);
 - nothing journaled after the set's sequence returns a row to reading: no decision that rejected a page (its seals
   go), no page by a writer whose terminal row the set left unread (``memory_sealing`` links it below the page).
 
@@ -49,8 +49,6 @@ import hashlib
 import json
 from typing import Any, Dict, Iterable, Mapping, NamedTuple, Optional
 
-from ouroboros.transcript_prefix import _running_code
-
 STANDS, GATE, HELD = "tail_cold", "tail_cold_gate", "tail_cold_held"  # a capture's facts of the set (``capture_memo``)
 MEMO = (STANDS, GATE, HELD)
 MARKS = "tail_cold"  # the set's marks, in the index's ``state``
@@ -65,9 +63,10 @@ _END = 1 << 62  # past every position: a chat's newest rows
 _COPIES = ("SELECT pos FROM tail_cold WHERE (chat, digest) IN "
            "(SELECT json_extract(value,'$[0]'), json_extract(value,'$[1]') FROM json_each(?))")
 _PAGE = 2_000
-# The code this process runs, named as it loads the set (with the chronicle, at start): an update restarts every process,
-# and a commit checked out later, before the restart that loads it, is not this process's code.
-CODE = _running_code()
+# The code this process runs, named once, by its first gate (an import runs no git): an update restarts every process,
+# and a commit checked out after that gate, before the restart that loads it, is not this process's code; a process
+# whose first gate follows a self-commit names that commit as it runs the old code, until the restart that follows.
+CODE: Optional[str] = None
 
 
 class Gate(NamedTuple):
@@ -88,7 +87,9 @@ def gate(store: Any) -> Optional[Gate]:
     """The marks outside the index, read once for this capture; ``None`` when one cannot be read: then nothing stands
     and nothing is composed, and the capture reads the whole tail."""
     from ouroboros.memory_inventory import _membership_facts
+    from ouroboros.transcript_prefix import _running_code
 
+    global CODE
     try:
         files = _registry_files(store.data_root)
         facts = _membership_facts(store.data_root)
@@ -98,6 +99,7 @@ def gate(store: Any) -> Optional[Gate]:
         registry = [sorted(facts.project_chat_ids), facts.bindings, rooms.bindings, sorted(rooms._projects),
                     sorted([list(key), sorted(chats)] for key, chats in facts.projects_by_source_key.items())]
         digest = hashlib.sha256(json.dumps(registry, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+        CODE = CODE or _running_code()  # named once, by this process's first gate
         return Gate(facts, {"registry": digest, "lineage": facts.lineage, "code": CODE}, files)
     except Exception:  # a mark not read decides nothing: the whole tail
         return None
