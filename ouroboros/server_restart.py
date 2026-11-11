@@ -18,6 +18,7 @@ from typing import Any, Dict
 
 from ouroboros.server_process import (
     DATA_DIR, _owner_restart_requested, _request_restart_exit, _restart_requested, end_task_runs, log,
+    restart_gate_line,
 )
 
 _RESTARTABLE_UPDATE_PHASES = frozenset({"pending_boot_smoke", "applying_replace"})
@@ -793,13 +794,8 @@ def _handle_restart_in_supervisor(server, evt: Dict[str, Any], ctx: Any) -> None
         return  # preparation/delivery stays executable until this host consumes the exact ready event
     st = ctx.load_state()
     if st.get("owner_chat_id"):
-        from ouroboros.review_overrides import landed_line  # commits since this body started, over a review
-        from ouroboros.server_process import server_source_baseline
-        gate = landed_line(ctx.REPO_DIR, ctx.DRIVE_ROOT, base=server_source_baseline(), target="HEAD", running=False)
-        ctx.send_with_budget(
-            int(st["owner_chat_id"]),
-            f"♻️ Restart requested by agent: {evt.get('reason')}" + (f"\n{gate}" if gate else ""),
-            role="system", system_type="restart_notice")
+        notice = f"♻️ Restart requested by agent: {evt.get('reason')}" + restart_gate_line(ctx.REPO_DIR, ctx.DRIVE_ROOT)
+        ctx.send_with_budget(int(st["owner_chat_id"]), notice, role="system", system_type="restart_notice")
     from ouroboros.config import get_restart_drain_max_sec
 
     max_wait = get_restart_drain_max_sec()
