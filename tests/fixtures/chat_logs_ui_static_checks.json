@@ -259,9 +259,15 @@
   },
   {
     "id": "test_live_card_recovery_keeps_step_failures_non_terminal",
-    "path": "web/modules/log_events.js",
+    "path": "web/modules/task_reason_words.js",
     "kind": "contains",
     "value": "A command returned"
+  },
+  {
+    "id": "test_live_card_recovery_keeps_step_failures_non_terminal",
+    "path": "web/modules/log_events.js",
+    "kind": "contains",
+    "value": "headline: failedStepHeadline(evt),"
   },
   {
     "id": "test_live_card_recovery_keeps_step_failures_non_terminal",

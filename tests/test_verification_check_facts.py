@@ -131,7 +131,7 @@ def test_bytes_equal_keeps_the_producers_own_detail(process_context, case, prefi
     (workspace / "a.bin").write_bytes(b"abcdef")
     if case != "missing":
         (workspace / "b.bin").write_bytes(b"abcdef" if case == "equal" else b"abcXef")
-    result = _verify(registry, workspace, check=["true"], expected_match="bytes_equal",
+    result = _verify(registry, workspace, check=[sys.executable, "-c", "pass"], expected_match="bytes_equal",
                      artifact_paths=["a.bin", "b.bin"])
     fact = result.meta["verification"]
     # A missing file is not "differing bytes": no byte verdict, so no `matched`, and the
@@ -170,13 +170,15 @@ def test_selected_secret_cannot_rewrite_the_verdict_vocabulary(process_context, 
 
 
 def test_wide_characters_stay_inside_the_result_meta_bound(process_context):
-    registry, _ctx, workspace, _data = process_context
+    registry, ctx, workspace, data = process_context
     wide = "\U0001F600" * 400
-    result = _verify(registry, workspace, check=["sh", "-c", f"echo {wide}"], expected="absent",
+    result = _verify(registry, workspace, check=[sys.executable, "-c", "pass", wide], expected="absent",
                      criterion_id=wide)
     fact = result.meta["verification"]
     assert fact["status"] == "fail" and len(fact["criterion_id"]) == 120
     assert "truncated" in fact["check"]
+    receipt = _receipts(data, ctx.task_id)[-1]
+    assert receipt["returncode"] == 0 and receipt["matched"] is False
 
 
 # ---------------------------------------------------------------------------

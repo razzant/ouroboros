@@ -464,7 +464,7 @@ def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(en
         assert compute_content_hash(installed) == previous_hash
         assert read_install_record(drive, name) == previous_record
     else:
-        version = {'live_conversation': '0.1.32', 'grok_realtime': '0.1.12', 'gemini_live': '0.1.21', 'openai_realtime': '0.1.10',
+        version = {'live_conversation': '0.1.33', 'grok_realtime': '0.1.12', 'gemini_live': '0.1.21', 'openai_realtime': '0.1.10',
                    'unix_computer_use': '0.7.1'}.get(name, '0.1.1')
         assert f"version: {version}\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
         assert compute_content_hash(installed) == compute_content_hash(repo / "skills" / name)

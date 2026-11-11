@@ -286,17 +286,17 @@ def _compose_subagent_text(
             # schedule time, when the executor is unknown — it states WHERE
             # changes land, never that the child executes them natively itself
             # (the dispatch-time executor note owns execution framing).
-            "All changes land inside the write root only. Do NOT commit, run review gates / "
-            "runtime / skills lifecycle, grant yourself tools, or write identity or scratchpad. "
-            "You may optionally ask independent reviewers about work in your write root with "
-            "review_change; it never approves, commits or integrates that work. "
-            + _CHILD_MEMORY_SENTENCE + " Your "
-            "Git changes are recorded as a workspace.patch; ordinary-folder outputs use their "
-            "registered file artifacts. Isolated self_worktree changes are applied; shared "
-            "external_workspace files are verified without reapplying. "
-            "The parent is the sole committer of the live body. Nested delegation is "
-            "allowed within configured depth/cap limits; depth bounds how DEEP delegation "
-            "nests and never how strong a descendant is — ask for the lane you need.",
+            "Your changes to the project are captured from the write root: that is where this work's result "
+            "lives. Scratch, logs, caches and test evidence are not part of the result; keep them out of it, "
+            "wherever your tools let you write. Committing, review gates, runtime and skills lifecycle, "
+            "granting yourself tools and writing identity or scratchpad are the parent's steps, not yours. You "
+            "may optionally ask independent reviewers about work in your write root with review_change; it "
+            "never approves, commits or integrates that work. "
+            + _CHILD_MEMORY_SENTENCE + " Your Git changes are recorded as a workspace.patch; ordinary-folder "
+            "outputs use their registered file artifacts. Isolated self_worktree changes are applied; shared "
+            "external_workspace files are verified without reapplying. The parent is the sole committer of the "
+            "live body. Nested delegation is allowed within configured depth/cap limits; depth bounds how DEEP "
+            "delegation nests and never how strong a descendant is — ask for the lane you need.",
         ])
         if surface == "genesis":
             parts.append(

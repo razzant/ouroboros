@@ -426,6 +426,19 @@ def test_completion_receipts_replay_host_facts_without_hiding_errors(tmp_path):
         (True, "unknown"), (True, "ok"), (True, "error"), (False, "ok")]
 
 
+def test_a_replayed_call_safety_held_settles_as_held_as_its_live_row_does(tmp_path):
+    """A call Safety returned or could not read took no effect but is no error: replay settles it as held, like the
+    live step row, so a reloaded block counts no error for it; a real failure still replays as one."""
+    from ouroboros.tool_call_log import replay_evidence
+
+    rows = [_log_row("tool_call", "returned", tool="run_command", is_error=True, status="safety_returned"),
+            _log_row("tool_call", "unread", tool="run_command", is_error=True, status="safety_unavailable"),
+            _log_row("tool_call", "failed", tool="run_command", is_error=True, status="non_zero_exit")]
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "tools.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    assert [row["status"] for row in replay_evidence(tmp_path, "t")["observations"]] == ["held", "held", "error"]
+
+
 def test_replayed_observations_keep_each_rows_own_host_time_and_invent_none(tmp_path):
     """The evidence row stands at its call's first observation, so replay carries every
     observation's own recorded ``ts`` (started, wait end, settlement) and never builds one."""

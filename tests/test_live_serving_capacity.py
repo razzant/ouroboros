@@ -234,7 +234,7 @@ def test_catalog_record_survives_native_resume_but_new_fit_rebinds(host_world, r
         call.delivered_catalog = old
         async def complete(): return None
         async def wait(): await asyncio.Future()
-        call.peers, call.provider, call.mailbox, call.refit_boundary = complete, wait, wait, wait
+        call.peers, call.provider, call.mailbox = complete, wait, wait
         call.finalize = complete
         await call.consume(SimpleNamespace(renewal_ready=True, selected=SimpleNamespace(tools_json='[]')))
         assert call.delivered_catalog == (old if resume else None)

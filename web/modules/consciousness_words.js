@@ -67,7 +67,7 @@ export const AUTHOR_WORDS = Object.freeze({
 export const CHECK_CHIPS = Object.freeze({
     checked: { label: 'checked', tone: 'neutral' },
     warned: { label: 'warned', tone: 'warn' },
-    sent_despite: { label: 'sent despite the check', tone: 'warn' },
+    sent_despite: { label: 'let through despite the check', tone: 'warn' },
     held: { label: 'held', tone: 'warn' },
     not_checked: { label: 'not checked', tone: 'neutral' },
 });
@@ -287,8 +287,8 @@ export function wakeFactsText(wake) {
 export function wakeCheckText(check) {
     const words = {
         checked: 'Safety Supervisor checked {tool}', warned: 'Safety Supervisor warned about {tool}',
-        held: 'Safety Supervisor held {tool}', sent_despite: '{tool} sent despite the check',
-        not_checked: 'not checked ({tool})',
+        held: 'Safety Supervisor held {tool}', not_checked: 'not checked ({tool})',
+        sent_despite: check.tool === 'place_reply' ? '{tool} sent despite the check' : '{tool} let through despite the check',
     };
     if (check.chip === 'not_checked' && !check.tool) return tr('consciousness.check.not_checked', 'Not checked');
     const named = { place_reply: tr('consciousness.tool.reply', 'the reply'), send_user_message: tr('consciousness.tool.message', 'the message') }[check.tool];
@@ -302,7 +302,7 @@ export function wakeCheckText(check) {
 export function wakeCheckChip(check) {
     if (!check.tool || ['place_reply', 'send_user_message'].includes(check.tool)) return wakeCheckText(check);
     const words = { checked: 'Safety Supervisor checked a step', warned: 'Safety Supervisor warned about a step',
-        held: 'Safety Supervisor held a step', sent_despite: 'A step was sent despite the check', not_checked: 'Not checked' };
+        held: 'Safety Supervisor held a step', sent_despite: 'A step was let through despite the check', not_checked: 'Not checked' };
     return words[check.chip] ? tr(`consciousness.chip.${check.chip}`, words[check.chip]) : '';
 }
 

@@ -7,6 +7,7 @@ import pathlib
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from typing import Any, Dict, Optional
 
 from ouroboros.utils import utc_now_iso
@@ -20,9 +21,9 @@ _CHIP_LOCK = threading.RLock()
 
 
 def parse_safety_response(text: str) -> Optional[Dict[str, Any]]:
-    """Parse the ``{"status", "reason", "speech", "quote"}`` verdict from a Safety model response.
+    """Parse the ``{"status", "reason", "quote"}`` verdict from a Safety model response.
 
-    ``speech`` is kept only as a boolean and ``quote`` only as non-empty text; both are the checker's claims.
+    ``quote`` is kept only as non-empty text, the checker's claim. Words are a host fact, so any other key is dropped.
     Models occasionally wrap the JSON in prose or code fences despite the prompt.
     The whole reply and every outermost ``{...}`` in it are candidates; the
     strictest recognized status wins (DANGEROUS > SUSPICIOUS > SAFE, first of
@@ -67,7 +68,6 @@ def parse_safety_response(text: str) -> Optional[Dict[str, Any]]:
             return None
         quote = obj.get("quote")
         return {"status": status, "reason": str(obj.get("reason") or ""),
-                **({"speech": obj["speech"]} if isinstance(obj.get("speech"), bool) else {}),
                 **({"quote": quote} if isinstance(quote, str) and quote.strip() else {})}
 
     for candidate in candidates:
@@ -109,6 +109,65 @@ def verdict_history_bytes(history):
         {**verdict, "repeat_count": 0} for verdict in row.get("verdicts", ())]}
         for key, row in history.items()}
     return len(json.dumps(evidence, ensure_ascii=False).encode("utf-8", "replace"))
+
+
+# A work's returned and held calls (``safety._remember``), each tool's pending reading and the flagged calls its bound
+# no longer keeps: process memory, keyed by work (``_work_key``) and bounded to 512 works.
+_PRIOR_VERDICTS: OrderedDict[str, dict[str, dict]] = OrderedDict()  # work -> subject digest -> returned or held call
+_RETURNED: OrderedDict[str, dict[str, dict]] = OrderedDict()  # work -> tool -> the reading its last call came back with
+_JUDGED: dict[str, set] = {}  # work -> digests and words gates of flagged calls no longer kept: read, never unread
+_PRIOR_LOCK = threading.RLock()
+
+
+def _root_id(ctx):
+    metadata = getattr(ctx, "task_metadata", None) or {}
+    return str(metadata.get("root_task_id") or getattr(ctx, "root_task_id", "") or getattr(ctx, "task_id", "") or "")
+
+
+def _work_key(ctx):
+    """Whose returned and held calls these are: the root task, else a key minted once on a context that has none;
+    "" without a context, which keeps nothing."""
+    key = _root_id(ctx)
+    if key or ctx is None:
+        return key
+    with _PRIOR_LOCK:
+        if not getattr(ctx, "_safety_work_key", ""):
+            ctx._safety_work_key = "context:" + uuid.uuid4().hex
+        return ctx._safety_work_key
+
+
+def clear_safety_work(root_task_id: str) -> None:
+    """Root terminal hook: audit persists, retry authority and returned readings do not."""
+    with _PRIOR_LOCK:
+        for store in (_PRIOR_VERDICTS, _RETURNED, _JUDGED):
+            store.pop(str(root_task_id), None)
+
+
+def _drop(key, rows, digest, judged=True):
+    """A kept call leaves its work's record; a flagged one stays judged (``_JUDGED``). A fresh SAFE reading drops it
+    unjudged (``judged=False``): its marks and its gate's leave too, and the call is as one never flagged."""
+    row = rows.pop(digest, None) or {}
+    marks = set(filter(None, (digest, row.get("gate"))))
+    if not judged:
+        _JUDGED.get(key, set()).difference_update(marks)
+    elif row.get("flagged"):
+        _JUDGED.setdefault(key, set()).update(marks)
+
+
+def _track_returned(ctx, tool_name, result):
+    """Per tool, the reading this work's last call through it was returned with; a call let through ends it."""
+    verdicts = () if result[0] else getattr(result, "verdicts", ())
+    key = (result[0] or verdicts) and _work_key(ctx)
+    if key:
+        with _PRIOR_LOCK:
+            tools = _RETURNED.pop(key, {})
+            tools.pop(tool_name, None)
+            if verdicts:
+                tools[tool_name] = {"status": verdicts[-1].get("status", ""), "reason": verdicts[-1].get("reason", "")}
+            if tools:
+                _RETURNED[key] = tools
+            while len(_RETURNED) > 512:
+                _RETURNED.popitem(last=False)
 
 
 def _record_task_checks(ctx: Optional[Any], event: Dict[str, Any]) -> None:
