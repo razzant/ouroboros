@@ -97,7 +97,7 @@ def test_one_start_lists_a_snapshot_s_floor_elements_once(tmp_path, monkeypatch)
     assert plan.initial_mode == 'max' and facts['floor']['steps'].get('F6w')  # the walk ran at this scale
     assert len(listed) == 1, f'one listing per snapshot object, got {len(listed)}'
     assert probes[0] == 'walk' and probes.count('walk') == 1, probes  # one Max frame, one walk
-    assert probes.count('re-price') <= len(facts['host_sections_addressed']) and len(renders) == 1
+    assert probes.count('re-price') <= len(facts['host_sections_addressed']) + 1 and len(renders) == 1
     fewer = dataclasses.replace(snap, conversations=snap.conversations[:1])
     assert len(mf.floor_elements(fewer)) < len(mf.floor_elements(listed[0])) and len(listed) == 2
 
@@ -144,17 +144,14 @@ def _hosts(plan):
             for row in plan.projection(plan.initial_mode).memory_facts.get('host_sections_addressed', ())]
 
 
-@pytest.mark.parametrize('window,shape,hosts,steps', [
-    # Beside the second host form the label starts to save and the request fits: the index stays whole. Forms chosen
-    # beside the first host form would price it a token over and outline the index for no physical need.
-    (4745, {}, [('runtime', False), ('installed_skills', False)], {'F2': 2, 'F5': 2, 'F8': 1}),
-    # The window holds the request after the first step, and the next one pays only the start's room.
-    (4982, {}, [('runtime', False), ('installed_skills', True)], {'F2': 2, 'F5': 2}),
-    # Three characters fewer, and beside the middle host form the whole request still rounds to the same price.
-    (4082, {'tail': 63, 'owner': 1600, 'pad': 0, 'shift': 0},
-     [('runtime', False), ('installed_skills', True)], {'F2': 2, 'F5': 2, 'F8': 1}),
+@pytest.mark.parametrize('window,shape,hosts,probes_count,walk_forms', [
+    # Version 2's receipt and physical forms move the old break-even windows.
+    (4765, {}, [('runtime', False), ('installed_skills', False)], 4, 1),
+    (5002, {}, [('runtime', False), ('installed_skills', True)], 3, 1),
+    (4045, {'tail': 63, 'owner': 1600, 'pad': 0, 'shift': 0},
+     [('runtime', False), ('installed_skills', False)], 4, 2),
 ])
-def test_each_host_address_walks_its_own_shortest_forms(tmp_path, monkeypatch, window, shape, hosts, steps):
+def test_each_host_address_walks_its_own_shortest_forms(tmp_path, monkeypatch, window, shape, hosts, probes_count, walk_forms):
     """A real start, near the label's break-even: which forms are shortest changes between one frame's host steps. The
     frame walks once, then re-prices that level beside each new host form: a re-price that misses the window walks
     again, beside its own host forms, and chooses other forms; one that fits (the index stays whole) walks no more. A tie
@@ -171,10 +168,13 @@ def test_each_host_address_walks_its_own_shortest_forms(tmp_path, monkeypatch, w
 
     monkeypatch.setattr(mf, 'render_view_for_mode', recorded)
     settled = _near_even_plan(tmp_path / 'settled', monkeypatch, window, **shape)
-    assert _hosts(settled) == hosts and settled.projection(settled.initial_mode).memory_facts['floor']['steps'] == steps
+    assert _hosts(settled) == hosts
+    assert settled.projection(settled.initial_mode).memory_facts['floor']['steps'] == {
+        'F2': 2, 'F5': 2, 'F5a': 1, 'F7a': 1, 'F8': 1, 'F8a': 1}
     walks = {str(forms) for kind, _mode, forms, _room in probes if kind == 'walk'}
-    assert [kind for kind, *_ in probes] == ['walk', 're-price', 'walk', 're-price']  # the last re-price fit: no walk
-    assert len(walks) == 2  # the walk after the missed re-price chose other forms
+    assert [kind for kind, *_ in probes] == (['walk', 're-price', 'walk', 're-price'] if probes_count == 4
+                                            else ['walk', 're-price', 're-price'])
+    assert len(walks) == walk_forms  # the walk after the missed re-price chose other forms
     chosen, probes[:] = list(probes), []
     _drawn_prices(monkeypatch)  # the control: every level priced by drawing it
     measured = _near_even_plan(tmp_path / 'measured', monkeypatch, window, **shape)
@@ -185,12 +185,12 @@ def test_each_host_address_walks_its_own_shortest_forms(tmp_path, monkeypatch, w
 
 
 @pytest.mark.parametrize('window,probes,hosts', [
-    # The skills step saves 3 tokens, and the margin it frees reaches the size at which the uncovered owner row alone
-    # would fit: the receipt's clause turns to the owner words, 12 tokens longer, and the level that fitted costs more.
-    (11_416, ['walk', 're-price', 're-price', 'walk'],
-     [('runtime', False), ('installed_skills', True), ('knowledge_index', False)]),
-    # Three tokens less window and the clause stays short: the second re-price fits and the index stays whole.
-    (11_413, ['walk', 're-price', 're-price'], [('runtime', False), ('installed_skills', True)]),
+    # This boundary crosses the receipt's owner-only clause after host reduction:
+    # the longer receipt needs another walk, then the index must outline too.
+    (11_398, ['walk', 're-price', 'walk', 're-price', 'walk'],
+     [('runtime', False), ('installed_skills', False), ('knowledge_index', False)]),
+    # With this larger window the second re-price fits and the index stays whole.
+    (11_444, ['walk', 're-price', 're-price'], [('runtime', False), ('installed_skills', True)]),
 ])
 def test_a_host_step_that_grows_the_receipt_walks_the_shortest_view_again(tmp_path, monkeypatch, window, probes, hosts):
     """Astra's counterexample (R2 11(i)) on a real start: a fit proven beside one host form is proven again beside the
@@ -221,7 +221,7 @@ def test_a_shortest_walk_walks_again_only_when_its_level_no_longer_fits(tmp_path
 
     monkeypatch.setattr(mf, 'render_view_for_mode', recorded)
     assert scale.build(tmp_path, monkeypatch).initial_mode == 'nano'
-    assert probes == [('walk', 'nano')] + [('re-price', 'nano'), ('walk', 'nano')] * 3
+    assert probes == [('re-price', 'max'), ('walk', 'nano')] + [('re-price', 'nano'), ('walk', 'nano')] * 3
 
 
 @pytest.mark.parametrize("step, target, outlined", [

@@ -62,6 +62,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tupl
 from ouroboros import chat_chain, memory_inventory
 from ouroboros.chronicle_import import LEGACY_ROOM_ID, row_lineage
 from ouroboros.chronicle_quotes import SPEAKERS
+from ouroboros.chronicle_lead import LEAD_RULE
 from ouroboros.chronicle_store import (DELEGATED_FOCUS_ROLES, STORY_KINDS, ChronicleStore, PublishResult, capture,
                                        draft_signer, source_time_span, verify_quotes)
 from ouroboros.dialogue_provenance import (memory_row_header, quote_words, recorded_finality, render_row_text,
@@ -72,6 +73,7 @@ from ouroboros.memory_view_account import (quote_line, selection_facts, source_c
                                          told_records)
 from ouroboros.store import StoreError
 from ouroboros.tool_capabilities import tool_result_limit
+from ouroboros.tool_call_log import chronicle_lead_metadata
 from ouroboros.tools.registry import ToolEntry
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
 from ouroboros.utils import sha256_text, utc_now_iso
@@ -401,11 +403,13 @@ def check_quotes(root: Any, quotes: Any) -> Tuple[bool, Optional[int]]:
     return True, None
 
 
+
+
 # --- chronicle_write ------------------------------------------------------------------------------
 
 def publish_covered_page(root: Path, store: ChronicleStore, author: Dict[str, Any], room: str, text: str,
                          covers_arg: Dict[str, Any], *, quotes: Iterable[Any] = (), expected_sequence: Optional[int] = None,
-                         closes_project: str = "", closure_delivery: str = "",
+                         closes_project: str = "", closure_delivery: str = "", lead_rule: Optional[int] = None,
                          ) -> Tuple[PublishResult, Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     """Expand a page's covers (``_expand``) and publish it: ``(result, covers, coverage facts, host stamp)``, as
     ``chronicle_write(kind='page')`` and ``close_project`` (its closing note, ``closes_project``: the notice it posts
@@ -427,6 +431,7 @@ def publish_covered_page(root: Path, store: ChronicleStore, author: Dict[str, An
             f" (whole conversation, {len(covers['rooms'])} rooms)")
     result = store.publish_page(room_id=room, text=text, covers=covers, author=author, quotes=quotes or (), host_stamp=stamp,
                                 metadata={"coverage_facts": facts, "room_label": label,
+                                          **({"lead_rule": lead_rule} if lead_rule is not None else {}),
                                           "terminal_after_pos": max((pos for _a, _r, pos in chat_chain.iter_room_rows(root, room)), default=-1),
                                           **({"closes_project": closes_project, "closure_delivery": closure_delivery}
                                              if closes_project else {})},
@@ -448,7 +453,8 @@ def _write_page(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, A
     try:
         result, covers, facts, stamp = publish_covered_page(root, store, author, _room(ctx, root, a["room_id"]), a["text"],
                                                             covers_arg, quotes=a["quotes"] or (),
-                                                            expected_sequence=a["expected_sequence"])
+                                                            expected_sequence=a["expected_sequence"],
+                                                            **chronicle_lead_metadata())
     except chat_chain.RowAddressError as exc:
         return _refused(ctx, "target_missing", f"a covers bound does not resolve: {exc.resolution.get('status')}")
     if not result.ok:
@@ -503,7 +509,8 @@ def _write_part(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, A
         room = first["room_id"] if first else _room(ctx, root, None)
     resolver = _quote_resolver(root, row_lineage(root))
     result = store.publish_part(room_id=room, text=a["text"], member_ids=[str(m) for m in members], author=author,
-                                expected_sequence=a["expected_sequence"], quotes=a["quotes"] or (), quote_resolver=resolver)
+                                expected_sequence=a["expected_sequence"], quotes=a["quotes"] or (), quote_resolver=resolver,
+                                metadata=chronicle_lead_metadata())
     return _published(ctx, result, effect=_fold_effect(store, "folded", members, a["text"], _STORY_MEASURE)
                       if result.ok else None)
 
@@ -511,7 +518,7 @@ def _write_part(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, A
 def _write_note(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
     task = str(a["task_id"] or author.get("task_id") or "")
     return _published(ctx, store.write_note(room_id=_room(ctx, root, a["room_id"]), task_id=task, text=a["text"],
-                                            author=author))
+                                            author=author, metadata=chronicle_lead_metadata()))
 
 
 def _write_correction(ctx: Any, root: Path, store: ChronicleStore, author: Dict[str, Any], a: Dict[str, Any]) -> str:
@@ -1537,7 +1544,7 @@ def chronicle_tools() -> List[ToolEntry]:
     return [
         ToolEntry("chronicle_write", schema(
             "chronicle_write",
-            "Write my own chronicle record: seal a page over a room's closed arcs (the host expands covers into the exact row set, stamps each covered task with its recorded outcome and checks quotes), fold adjacent records into a part, keep a note for my future self, correct a record (a signed revision under its own words wherever it is shown; to say it anew, fold it into a part), accept/reject a helper's draft, write an account connecting experience of several rooms over the exact source versions I read (sources; nothing sealed or folded), or select an account for the common view in place of the records it names (replaces; the latest selection acts, shown=false withdraws). A delegated child or nanny publishes pages and parts only as drafts signed in its own name for the integrating mind to accept or reject; its part folds only legacy sections and its own drafts (its note, correction, decision, account or selection, or a part over other records, is refused: not_integrator). Records are never rewritten. A refusal returns the current revision or room head and the conflicting ids; read them with memory_read.",
+            LEAD_RULE + "\n\n" + "Write my own chronicle record: seal a page over a room's closed arcs (the host expands covers into the exact row set, stamps each covered task with its recorded outcome and checks quotes), fold adjacent records into a part, keep a note for my future self, correct a record (a signed revision under its own words wherever it is shown; to say it anew, fold it into a part), accept/reject a helper's draft, write an account connecting experience of several rooms over the exact source versions I read (sources; nothing sealed or folded), or select an account for the common view in place of the records it names (replaces; the latest selection acts, shown=false withdraws). A delegated child or nanny publishes pages and parts only as drafts signed in its own name for the integrating mind to accept or reject; its part folds only legacy sections and its own drafts (its note, correction, decision, account or selection, or a part over other records, is refused: not_integrator). Records are never rewritten. A refusal returns the current revision or room head and the conflicting ids; read them with memory_read.",
             write, ["kind"]), _chronicle_write),
         ToolEntry("memory_read", schema(
             "memory_read",

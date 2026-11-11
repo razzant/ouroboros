@@ -15,7 +15,8 @@ def record_session_view(host, evidence, manifest_ref):
 
     record_context_view(host.ctx, host.messages, host.schemas, fit_measurement=evidence['fit']['measurement'])
     host.ctx._last_context_observation.update(
-        work_room=copy.deepcopy(evidence['work_room']), physical_source_ref=manifest_ref)
+        work_room=copy.deepcopy(evidence['work_room']), physical_source_ref=manifest_ref,
+        chronicle_lead_rule=(manifest_ref or {}).get('chronicle_lead_rule'))
     if evidence['work_room'].get('reason') == 'start_room_shortfall' and host.ctx.emit_progress_fn:
         # The progress notice reaches the owner even when the physical candidate
         # cannot accommodate another in-model notice without losing held content.
@@ -54,7 +55,7 @@ def record_live_exposure(view, response_id):
         record_context_view(context, rows, schemas, fit_measurement=previous.get('fit_measurement'))
         context._last_context_observation.update(
             exposed_units=list(exposed_context_units(rows, held)), exposure_basis='live_delivered_rows',
-            **{key: previous[key] for key in ('work_room', 'physical_source_ref') if key in previous})
+            **{key: previous[key] for key in ('work_room', 'physical_source_ref', 'chronicle_lead_rule') if key in previous})
         return context._last_context_observation
     def publish(observation):
         if getattr(owner, '_connection_view', view) is view:

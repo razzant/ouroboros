@@ -38,12 +38,18 @@ from ouroboros.utils import append_jsonl, truncate_for_log
 CALL_STARTED = "tool_call_started"
 CALL_SETTLED = "tool_call"
 CALL_WAIT_ENDED = "tool_call_timeout"
-_FROZEN_KEYS = ("invocation_id", "tool_call_id", "task_attempt", "execution_id", "round_id", "llm_call_id", "args_source_ref", "args_source_status")
+_FROZEN_KEYS = ("invocation_id", "tool_call_id", "task_attempt", "execution_id", "round_id", "llm_call_id", "args_source_ref", "args_source_status", "chronicle_lead_rule")
 _ACTIVE_CALL = ContextVar("active_tool_call", default=None)
 
 
 def current_tool_call_id() -> str:
     return str((_ACTIVE_CALL.get() or {}).get("tool_call_id") or "")
+
+
+def chronicle_lead_metadata() -> Dict[str, Any]:
+    """The producing attempt's lead fact, frozen before this worker was submitted."""
+    rule = (_ACTIVE_CALL.get() or {}).get("chronicle_lead_rule")
+    return {"lead_rule": rule} if rule is not None else {}
 
 
 def current_args_source() -> Dict[str, Any]:

@@ -411,6 +411,7 @@ def _story_pages(store: ChronicleStore, label: Callable[..., str], units: Mappin
         keyed.append(((period.first, record["sequence"]), {
             "kind": record["kind"], "id": record["id"], "room_id": room,
             "label": str(_mapping(record.get("metadata")).get("room_label") or label(room)),
+            **({"lead_rule": record["metadata"]["lead_rule"]} if "lead_rule" in _mapping(record.get("metadata")) else {}),
             "source_period": period.span, "period_basis": period.source,
             "period": _period(period.span, period.note()), "text": str(record.get("current_text") or ""),
             "status": str(record.get("status") or ""), "signer": draft_signer(record.get("author")),
@@ -566,9 +567,10 @@ def _spoken(entry: Entry, author: Mapping[str, Any], texts: Mapping[str, Dict[st
     """A verbatim lane-1 line with the facts its address line needs (head, size, position); my human's side is
     ``owner_speech``'s."""
     from ouroboros.dialogue_provenance import owner_speech
+    from ouroboros.memory_view_work import speech_facts
 
     row = texts.get(entry[0]["row_sha256"])
-    return {"owner_side": owner_speech(entry[1], author),
+    return {**speech_facts(row or entry[1], author), "owner_side": owner_speech(entry[1], author),
             "ref": f"chat {entry[0]['chat_id']} / {entry[1].get('client_message_id') or ''}",
             "text_sha256": sha256_text(str(row.get("text") or "")) if row else "",
             "line": _row_line(entry, author, texts), "head": _row_head(entry, author), "kind": author.get("kind"),
@@ -681,7 +683,8 @@ def _notes_by_room(store: ChronicleStore) -> Dict[str, List[Dict[str, Any]]]:
     notes: Dict[str, List[Dict[str, Any]]] = {}
     for room in sorted(by_room):
         sealed = store.sealed_row_refs(room)
-        kept = [{"id": record["id"], "date": _minute(record.get("ts")).split(" ")[0], "ts": str(record.get("ts") or ""),
+        kept = [{**({"lead_rule": record["metadata"]["lead_rule"]} if "lead_rule" in _mapping(record.get("metadata")) else {}),
+                 "id": record["id"], "date": _minute(record.get("ts")).split(" ")[0], "ts": str(record.get("ts") or ""),
                  "author_kind": str(_mapping(record.get("author")).get("kind") or ""),
                  "task_id": str(record.get("author", {}).get("task_id") or ""),
                  "role": str(_mapping(_mapping(record.get("author")).get("focus")).get("role") or "mind"),
@@ -887,6 +890,10 @@ def _capture_live(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
             projects = None
     groups = (conversations.capture(store, root, spec, label, by_room, notes, lineage, quiet=quiet, sealed=sealed,
                                     gaps=gaps, projects=projects or []) if spec.other_conversations else [])
+    from ouroboros.memory_view_work import bind, gists
+    read = {rid: [*sealed.get(rid, ()), *quiet.get(rid, ()), *by_room.get(rid, ())]
+            for rid in set(by_room) | set(sealed) | set(quiet)}
+    bind(room, groups, gists(read, chat_chain.format_address))
     if integrating:
         from ouroboros.memory_waiting import measure
 
@@ -933,8 +940,12 @@ def capture_memory_view(drive_root: Any, task: Mapping[str, Any], spec: ViewSpec
             # Governing words bind by identity: their ref, or (without one) the row's own exact text.
             governing, _absence = task_governing_words(task)
             ids = {g.get("ref") or sha256_text(g.get("text") or "") for g in governing if g.get("ref") or g.get("text")}
-            last_reply = max((item["pos"] for item in room["lane1"] if item["kind"] == "ouroboros"), default=-1)
+            last_reply = max((item["pos"] for item in room["lane1"] if item["kind"] == "ouroboros" and item.get("via") != "own_account"), default=-1)
+            targets = {item.get("reply_to") for item in room["lane1"]
+                       if item.get("owner_side") and item["pos"] > last_reply}
             for item in room["lane1"]:
+                item["protected_reply"] = item["kind"] == "ouroboros" and (
+                    item["pos"] == last_reply or item["address"] in targets)
                 item["immune"] = item.get("owner_side", False) and (
                     item["pos"] > last_reply or bool({item.get("ref"), item.get("text_sha256")} & ids))
                 # Open rows have no page coverage. A reply alone is not proof of carried commitments.
@@ -987,7 +998,8 @@ def _page_label(entry: Mapping[str, Any]) -> str:
     sentence = re.split(r'(?<=[.!?。！？])\s+', entry['text'].strip(), maxsplit=1)[0]
     attribution = (f" (draft by {entry.get('signer') or 'Light'}, not yet accepted)"
                    if entry.get('status') == 'draft' else '')
-    return _page_pointer(entry) + attribution + "\n" + _indented(sentence)
+    missing = " (record opening, no lead)" if "lead_rule" not in entry else ""
+    return _page_pointer(entry) + attribution + missing + "\n" + _indented(sentence)
 
 
 def _told_lines(account_id: str, children: Mapping[str, List[Dict[str, Any]]]) -> List[str]:
@@ -1048,6 +1060,13 @@ def _row_pointer(item: Mapping[str, Any], what: str) -> str:
     if item.get("kind") == "place_fact":  # no words to size
         return f"{item['head']} (reaction — read by address)"
     return f"{item['head']} ({what}, {item['chars']} chars — read by address)"
+
+
+def _row_opening(item: Mapping[str, Any], what: str) -> str:
+    if item.get("kind") == "place_fact":
+        return _row_pointer(item, what)
+    opening = str(item.get("text") or item["line"].removeprefix(item["head"])).strip().splitlines()[0:1]
+    return f"{item['head']} ({what}, {item['chars']} chars; opening, no retelling): " + " ".join(opening)[:160]
 
 
 def _rows_line(room: Mapping[str, Any], items: List[Dict[str, Any]]) -> str:
@@ -1226,7 +1245,7 @@ def _note_lines(notes: List[Dict[str, Any]]) -> List[str]:
 def _note_pointer(note: Mapping[str, Any]) -> str:
     """A source-derived label, never a summary or a function of the start allowance."""
     sentence = re.split(r'(?<=[.!?。！？])\s+', ' '.join(note['text'].split()), maxsplit=1)[0]
-    label = sentence if len(sentence) <= 160 else sentence[:159].rstrip() + '…'
+    label = sentence + (" (record opening, no lead)" if "lead_rule" not in note else "")
     return (f"note {note['id']} by {note['role']} on {note['date']}: {label}; "
             f"memory_read(node_id='{note['id']}')")
 
@@ -1288,9 +1307,13 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]]) -> str:
     rows of its human (``project_words``; folded by F7 into dated addresses), notes, two lanes, and last the
     standing facts that change with every row (so the room's earlier bytes stay a reusable prefix)."""
     from ouroboros.owner_words import _FRAMES, _HEADINGS
+    from ouroboros.memory_view_work import folded_work_rows, task_line, works
 
     retold, mine, people, facts = (set(gone.get(step, ())) for step in ("F4", "F2", "F7", "F1"))
     people |= set(gone.get("F7p", ()))
+    bare = {ident[5:] for ident in mine | people if ident.startswith("bare:")}
+    mine |= {ident[5:] for ident in mine if ident.startswith("bare:")}
+    people |= {ident[5:] for ident in people if ident.startswith("bare:")}
     lines = [f"## This room ({room['label']}) — head {room['head']}"]
     if room["legacy"]:
         lines += ["", "### Retold before the update (helper retelling, not lived)"]
@@ -1312,31 +1335,32 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]]) -> str:
     if room["lane1"]:
         lines += ["", f"### Open conversation since {room['since']} (verbatim: people and my replies)"]
         lines += [_FRAMES["root"]] if room.get("project_words") is not None else []  # the root's frame over the open rows
-        addressed = mine | people
+        work_rows, work_lines = folded_work_rows(room, gone)
+        addressed = mine | people | work_rows
         aggregate = [item for item in room['lane1'] if item['address'] in addressed
                      and not item.get('immune')] if gone.get('F7a') else []
         grouped = {item['address'] for item in aggregate}
         for item in room['lane1']:
             if aggregate and item is aggregate[0]:
                 lines.append(_rows_line(room, aggregate))
-            if item['address'] not in grouped:
-                lines.append(item['line'] if item.get('immune') else _row_pointer(item, 'my reply')
-                             if item['address'] in mine else _row_pointer(item, 'words')
-                             if item['address'] in people else item['line'])
+            if item['address'] in work_lines and not aggregate:
+                lines.append(work_lines[item['address']])
+            if item['address'] not in grouped | work_rows:
+                render = _row_pointer if item['address'] in bare or item['address'] in gone.get('F7', ()) else _row_opening
+                lines.append(item['line'] if item.get('immune') else render(item, 'my reply')
+                             if item['address'] in mine else render(item, 'words') if item['address'] in people else item['line'])
     if room["lane2"]:
         early = [item for item in room["lane2"] if item["first"] in facts]
+        folded = {key for key, _rows in works(room) if any("work:" + key + suffix in mine for suffix in (":progress", ":final"))}
         lines += ["", "### Task facts of this conversation (host; one line per task; a row:… address reads with "
                       f"memory_read(room_id='{room['room_id']}', rows=true, from=<address>, to=<address>))"]
         lines += ([_facts_line(room, early)] if early else []) + [
-            item["line"] for item in room["lane2"] if item["first"] not in facts]
+            task_line(item, folded=item.get("task") in folded) for item in room["lane2"] if item["first"] not in facts]
     if len(lines) == 1:
         lines += ["", "Nothing open, retold or noted in this room."]
     lines += ["", "### This room now", _facts_text(room["facts"])]
     lines += [f"- sealed with the page {item['id']} of {item['label']}: memory_read(node_id='{item['id']}')"
               for item in room.get("sealed_by") or ()]
-    if room.get("newest"):  # S1: the act a finishing response that changed, learned or closed something takes here
-        lines.append(f"A page with covers={{'to': '{room['newest']}'}} seals this room's open rows, the earlier turns' with "
-                     "mine, so the rest of me reads my words, not theirs; my task's later terminal rows are linked below it.")
     return "\n".join(lines)
 
 
@@ -1354,10 +1378,15 @@ def render_room(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, 
 
 def room_chars(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, floor_note: str = "") -> int:
     """``json_chars(render_room(snapshot, level, floor_note=...))`` from the snapshot's pieces and the blank lines joining them."""
-    chars = [count for count in _room_parts(snapshot, dict(level.addressed), snapshot.piece) if count]
+    sizes = snapshot.__dict__.setdefault("_room_sizes", {})
+    key = tuple((step, ids) for step, ids in level.addressed if step in (*_ROOM_STEPS, 'F6w', 'F6g', 'F6a'))
+    if key not in sizes:
+        chars = [count for count in _room_parts(snapshot, dict(level.addressed), snapshot.piece) if count]
+        sizes[key] = sum(chars) + 4 * max(0, len(chars) - 1), bool(chars)
+    total, present = sizes[key]
     if floor_note and snapshot.active:
-        chars.append(json_chars(floor_note))
-    return sum(chars) + 4 * max(0, len(chars) - 1)  # JSON spells a newline in two characters
+        total += json_chars(floor_note) + (4 if present else 0)
+    return total  # Only numeric prices are cached, never candidate texts.
 
 
 _ROOM_STEPS = ("F1", "F2", "F4", "F7", "F7p", "F7a", "F8", "F8a")  # the steps ``_room_text`` reads
@@ -1391,7 +1420,7 @@ def _room_parts(snapshot: MemoryViewSnapshot, gone: Mapping[str, Tuple[str, ...]
         parts.append(piece(("room", tuple((step, gone.get(step, ())) for step in _ROOM_STEPS)),
                            lambda: _room_text(room, gone)))
     if snapshot.spec.other_conversations and snapshot.conversations:
-        parts.extend(conversations.pieces(list(snapshot.conversations), gone, piece))
+        parts.extend(conversations.pieces(list(snapshot.conversations), gone, piece, index=conversations.source_index(snapshot)))
     return parts
 
 

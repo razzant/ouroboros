@@ -10,7 +10,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 |---|---|---:|---:|
 | D01 | Agent core & main loop | 64 | 0 |
 | D02 | LLM client, routing & providers | 48 | 0 |
-| D03 | Context assembly, fit & compaction | 34 | 0 |
+| D03 | Context assembly, fit & compaction | 39 | 0 |
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
 | D05 | Tool surfaces: files, code, shell, media, external | 55 | 0 |
 | D06 | Review stack | 100 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 40 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 26 | 0 |
-| **total** | | **1017** | **0** |
+| **total** | | **1022** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -325,6 +325,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 ### D03 — Context assembly, fit & compaction
 
 - `ouroboros/capability_evidence.py`
+- `ouroboros/chronicle_lead.py`
 - `ouroboros/context.py`
 - `ouroboros/context_anchor.py`
 - `ouroboros/context_budget.py`
@@ -347,11 +348,15 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/density_probe.py`
 - `ouroboros/main_context_authority.py`
 - `ouroboros/memory_floor.py`
+- `ouroboros/memory_form_facts.py`
+- `ouroboros/memory_forms.py`
 - `ouroboros/memory_room_activity.py`
 - `ouroboros/memory_view.py`
 - `ouroboros/memory_view_account.py`
+- `ouroboros/memory_view_conversation_forms.py`
 - `ouroboros/memory_view_conversations.py`
 - `ouroboros/memory_view_legacy.py`
+- `ouroboros/memory_view_work.py`
 - `ouroboros/memory_waiting.py`
 - `ouroboros/response_limits.py`
 - `ouroboros/review_history_view.py`

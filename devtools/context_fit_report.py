@@ -53,50 +53,8 @@ def start_text(messages):
 
 
 def view_counts(snapshot, level):
-    """The memory view's forms by the law of forms: whatever stands in place of what was said is a retelling printed in
-    the view, a fact the host knows itself, or an emergency form. Counted from the snapshot and its level (a task
-    line's closing sentence and a silent room's count read from their lines): ``retellings`` records, parts, accounts,
-    standing parts, folds and closing sentences shown whole; ``host_facts`` a task line without a closing sentence,
-    the earlier-tasks line, a repeat by its first copy, a silent room's line; ``unconsidered`` people's words no
-    consideration is recorded for, as a line or as text; ``emergency`` every other reduced form by its step (pages and
-    notes by their first sentence among them: no record carries a lead mark yet) and closing sentences folded into the
-    earlier-tasks line; ``rows_as_words`` the rows no retelling stands for that still stand as words."""
-    import re
-    from collections import Counter
-
-    gone = {step: set(ids) for step, ids in level.addressed}
-    room, lined, legacy = snapshot.room or {}, gone.get('F6g', set()), "legacy, a helper's"
-    rooms = [(group, item) for group in snapshot.conversations for item in group['rooms']]
-    words = [(group, word) for group, item in rooms for word in item['words']]
-    hidden = lambda group, word: (word['id'] in gone.get('F7', ()) if word['owner_side'] and not word.get('again')
-                                  else group['key'] in lined or word['id'] in gone.get('F6w', ()))
-    summary = lambda line: '— summary: «' in line or '; «' in line
-    early = [item for item in room.get('lane2', ()) if item['first'] in gone.get('F1', ())]
-    lines = [item['line'] for item in room.get('lane2', ()) if item not in early] + [
-        task['line'] for group, item in rooms if group['key'] not in lined for task in item['tasks']]
-    told = Counter(legacy if e['kind'] == 'legacy' else e['kind'] + (' draft' if e.get('status') == 'draft' else '')
-                   for e in snapshot.story if not e.get('told_by') and (e['room_id'] not in gone.get('F3', ()) if
-                   e['kind'] == 'legacy' else e['id'] not in gone.get('F5', set()) | gone.get('F5l', set())))
-    told.update('standing part member' if item.get('standing') else item.get('kind', legacy)
-                for item in [*room.get('legacy', ()), *room.get('under_parts', ())]
-                if item.get('standing') or item['id'] not in gone.get('F4', ()))
-    told.update({'fold_read': sum(bool(i.get('folded')) for group, i in rooms if group['key'] not in lined),
-                 'task summary': sum(map(summary, lines))})
-    silent = [(group['key'] in lined, re.search(r'(\d+) words nobody considered', i['silent']))
-              for group, i in rooms if not i['engaged']]
-    host = Counter({'task line': len(lines) - told['task summary'], 'earlier tasks': int(bool(early)),
-                    'repeat': sum(bool(w.get('again')) and not hidden(g, w) for g, w in words),
-                    'silent room': sum(not in_line for in_line, _found in silent)})
-    unconsidered = Counter('as a line' if hidden(g, w) else 'as text' for g, w in words if w['rank'] == 2)
-    unconsidered['as a line'] += sum(int(found.group(1)) for _in_line, found in silent if found)
-    emergency = Counter({step: len(ids) for step, ids in level.addressed if step != 'F1'})
-    emergency['F6w'] -= sum(w['rank'] == 2 and w['id'] in gone.get('F6w', ()) for _g, w in words)
-    emergency['closing sentences in earlier tasks'] = sum(summary(item['line']) for item in early)
-    addressed = gone.get('F2', set()) | gone.get('F7', set()) | gone.get('F7p', set())
-    rows = [*room.get('lane1', ()), *(item for item in room.get('project_words') or () if item.get('address'))]
-    return {'retellings': dict(+told), 'host_facts': dict(+host), 'unconsidered': dict(+unconsidered),
-            'emergency': dict(+emergency), 'rows_as_words': sum(item['address'] not in addressed for item in rows)
-            + len(room.get('origins', ())) + sum(not hidden(g, w) and not w.get('again') for g, w in words)}
+    from devtools._context_fit_forms import view_counts as count
+    return count(snapshot, level)
 
 
 def measure_core(core, schemas, *, root, window, reserve, mode='max', prepared=None, fit=None,
@@ -183,10 +141,11 @@ def measure_core(core, schemas, *, root, window, reserve, mode='max', prepared=N
             add(label, fallback)
     gone = dict(level.addressed)
     from ouroboros import memory_view_conversations as conversations
-    lined, counted = set(gone.get('F6g', ())), bool(gone.get('F6a'))
+    counts = set(gone.get('F6a', ()))
+    lined = {g['key'] for g in snapshot.conversations if conversations.group_form(g, gone)} | counts
     for form, groups in (
-        ('count', [g for g in snapshot.conversations if g['key'] in lined and counted]),
-        ('line', [g for g in snapshot.conversations if g['key'] in lined and not counted]),
+        ('count', [g for g in snapshot.conversations if g['key'] in counts]),
+        ('line', [g for g in snapshot.conversations if g['key'] in lined and g['key'] not in counts]),
         ('words by address', [g for g in snapshot.conversations if g['key'] not in lined and any(
             w['id'] in gone.get('F6w', ()) for room in g['rooms'] for w in room['words'])]),
         ('whole', [g for g in snapshot.conversations if g['key'] not in lined and not any(

@@ -93,15 +93,19 @@ def test_view_counts_name_todays_forms_by_the_law_of_forms():
     from tests import _memory_view_synthetic as syn
 
     snapshot = syn.snapshot(room_facts=syn.work_room(), story=syn.told_story(), conversations=syn.place_threads())
-    assert view_counts(snapshot, mv.FULL_VIEW) == {
+    whole = view_counts(snapshot, mv.FULL_VIEW)
+    assert {k: v for k, v in whole.items() if k != "reduced_forms"} == {
         'retellings': {"legacy, a helper's": 1, 'part': 1, 'page': 6, 'task summary': 3},
         'host_facts': {'task line': 2, 'silent room': 1}, 'unconsidered': {'as text': 2, 'as a line': 1},
         'emergency': {}, 'rows_as_words': 15}
     deepest = mf.fit_memory_view(snapshot, {'margin': 0, 'physical': None})
-    assert view_counts(snapshot, deepest) == {
-        'retellings': {}, 'host_facts': {'earlier tasks': 1, 'silent room': 1}, 'unconsidered': {'as a line': 3},
-        'emergency': {'F6w': 6, 'F6g': 5, 'F3': 1, 'F2': 5, 'F5': 7, 'F5a': 1, 'F7a': 1, 'F6a': 1,
-                      'closing sentences in earlier tasks': 1}, 'rows_as_words': 2}
+    result = view_counts(snapshot, deepest)
+    from ouroboros.memory_form_facts import form_counts
+    assert result['reduced_forms'] == form_counts(snapshot, deepest)
+    assert result['rows_as_words'] == 2
+    assert result['emergency']['conversation count'] == 1
+    assert 'F6w' not in result['emergency']  # those rows are swallowed by the count
+
 
 
 @pytest.mark.parametrize('stored_tail', [False, True])

@@ -753,10 +753,11 @@ class ChronicleStore:
             return self._commit(db, [record], quotes_verified=True,
                                 pre=lambda: self._head_refusal(db, room, expected_sequence))
 
-    def write_note(self, *, room_id: Any, task_id: str, text: str, author: Dict[str, Any]) -> PublishResult:
+    def write_note(self, *, room_id: Any, task_id: str, text: str, author: Dict[str, Any],
+                   metadata: Optional[Dict[str, Any]] = None) -> PublishResult:
         """The mind's separate record for its future self; a page later covers it by ``note:<id>``."""
         return self.publish([{"kind": "note", "room_id": str(room_id), "task_id": task_id, "text": text,
-                              "author": author}])
+                              "author": author, **({"metadata": metadata} if metadata else {})}])
 
     def publish_account(self, *, room_id: Any, text: str, sources: Iterable[Any], author: Dict[str, Any],
                         metadata: Optional[Dict[str, Any]] = None, record_id: Optional[str] = None,
