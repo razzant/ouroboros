@@ -7,8 +7,10 @@ that say two values: raising Access asks and then says the level in force beside
 level asks and raising one does not; Your rules keeps the text when the server refuses it; opening to the network
 asks and carries the typed password in the same write.
 
-The settings server is this file's own fake: it keeps a document, answers a write with the receipt the server gives
-(`changes`: old, new) and the facts a read derives from it (`_meta.policy_state`, `_meta.restart_state`)."""
+The settings server is this file's own fake, shaped like the server's answer: it keeps a document, answers a write
+with its receipt (`changes`: old, new and the installed value's token) and a read with what the server derives
+(`_meta.effects`, `_meta.tokens`, `_meta.policy_state`, `_meta.restart_state.running`). The same rows against the real
+server are in test_settings_policy_browser.py, test_deployment_policy_ui_browser.py and test_ui_selection_browser.py."""
 from __future__ import annotations
 
 import json
@@ -16,8 +18,10 @@ from urllib.parse import urlparse
 
 import pytest
 
+from tests import test_live_conversation_browser as calls
 from tests import test_subscription_setup_browser as setup_browser
-from tests.settings_browser_helpers import commit_row, open_settings, setting_row, settings_page
+from tests import settings_browser_helpers as helpers
+from tests.settings_browser_helpers import commit_row, go_back, open_settings, setting_row, settings_page
 
 subscription_ui = setup_browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser]
@@ -37,6 +41,8 @@ class FakeSettings:
     def __init__(self, ui, **values):
         self.posts = []
         self.refuse = {}  # path -> (status, body): the next write to it is refused
+        self.effects = dict(EFFECTS)
+        self.versions = {}  # key -> how many times it was written: the token of its installed value
         self.running = {"OUROBOROS_RUNTIME_MODE": "pro", "OUROBOROS_SERVER_HOST": "127.0.0.1"}
         self.values = {
             **{key: value for key, value in ui["settings"].items() if key != "_meta"},
@@ -54,7 +60,8 @@ class FakeSettings:
         pending = sorted(key for key, value in self.running.items() if str(values.get(key)) != str(value))
         lan = self.running["OUROBOROS_SERVER_HOST"] == "0.0.0.0"
         meta = {
-            "setup_contract": self.setup_contract, "effects": EFFECTS,
+            "setup_contract": self.setup_contract, "effects": self.effects,
+            "tokens": {key: self._token(key) for key in values if key != "OUROBOROS_NETWORK_PASSWORD"},
             "bind_host": self.running["OUROBOROS_SERVER_HOST"], "bind_port": 8765,
             "reachability": "lan_reachable" if lan else "loopback_only",
             "recommended_url": "http://192.168.1.20:8765" if lan else "", "warning": "",
@@ -71,14 +78,18 @@ class FakeSettings:
         masked = {**values, "OUROBOROS_NETWORK_PASSWORD": "***set***" if values["OUROBOROS_NETWORK_PASSWORD"] else ""}
         return {**masked, "_meta": meta}
 
+    def _token(self, key):
+        return f"{key}#{self.versions.get(key, 0)}"
+
     def _write(self, changed):
         changes = {}
         for key, value in changed.items():
             if str(self.values.get(key)) == str(value):
                 continue
+            old, self.values[key] = self.values.get(key), value
+            self.versions[key] = self.versions.get(key, 0) + 1
             changes[key] = ({"withheld": "secret"} if key == "OUROBOROS_NETWORK_PASSWORD"
-                            else {"old": self.values.get(key), "new": value})
-            self.values[key] = value
+                            else {"old": old, "new": value, "token": self._token(key)})
         return changes
 
     def answer(self, route):
@@ -94,7 +105,7 @@ class FakeSettings:
             route.fulfill(status=status, content_type="application/json", body=json.dumps(refusal))
             return
         if path == "/api/settings":
-            changes = self._write({key: value for key, value in body.items() if key != "if_unchanged"})
+            changes = self._write({key: value for key, value in body.items() if key not in ("if_unchanged", "unset")})
             answer = {"status": "saved", "changes": changes, **({} if changes else {"no_changes": True})}
         elif path == "/api/owner/runtime-mode":
             answer = {"ok": True, "runtime_mode": body["mode"], "changes": self._write({"OUROBOROS_RUNTIME_MODE": body["mode"]})}
@@ -123,11 +134,6 @@ def _page(ui, width, height, theme="dark", **values):
     page.route("**/api/logs/events**", lambda route: route.fulfill(content_type="application/json", body='{"entries": []}'))
     page.route("**/api/ui/i18n", lambda route: route.fulfill(content_type="application/json", body=json.dumps(
         {"language": "en", "english": True, "chosen": False, "languages": [], "revision": 1, "entries": {}})))
-    # A skill that registered a live conversation, as the contributions projection lists it (no page module to load).
-    page.route("**/api/ui/contributions", lambda route: route.fulfill(content_type="application/json", body=json.dumps(
-        {"contributions": [{"key": "talk_skill:call", "id": "call", "skill": "talk_skill", "skill_label": "talk_skill",
-                            "provides": "conversation", "runtime": "client", "label": "Live Conversation", "revision": "1"}],
-         "offers": {}, "preferences": {}, "voice": {}, "icons": [], "problems": {}})))
     page.goto(ui["url"] + "/#settings")
     page.wait_for_function("() => Boolean(window.__ouroSettings && window.ouroTheme)")
     page.evaluate("theme => window.ouroTheme.set(theme)", theme)
@@ -177,8 +183,8 @@ def test_raising_access_asks_first_and_then_says_both_values(subscription_ui):
     assert row.locator('[role="radio"][aria-checked="true"]').inner_text().startswith("Pro")
     assert row.locator("[data-setting-meta]").inner_text() == "How far it reaches into its own code and this computer."
 
-    # Lowering Access asks nothing and writes at once.
-    row.locator('[data-setting-value="advanced"]').click()
+    # Lowering Access asks nothing and writes at once; a restart row says no "was" (its meta says both values).
+    assert commit_row(page, "OUROBOROS_RUNTIME_MODE", "advanced") == "Saved · applies after restart"
     page.wait_for_function("() => /Running: Pro · after restart: Advanced/.test(document.querySelector("
                            "'[data-setting-row=\"OUROBOROS_RUNTIME_MODE\"] [data-setting-meta]').textContent)")
     assert server.writes("/api/owner/runtime-mode") == [{"mode": "advanced"}]
@@ -198,7 +204,8 @@ def test_raising_access_asks_first_and_then_says_both_values(subscription_ui):
     page.wait_for_function("() => /Running: Pro · after restart: Cyber Pro/.test(document.querySelector("
                            "'[data-setting-row=\"OUROBOROS_RUNTIME_MODE\"] [data-setting-meta]').textContent)")
     assert server.writes("/api/owner/runtime-mode")[-1] == {"mode": "cyber_pro"}
-    assert row.locator("[data-setting-result]").inner_text().startswith("Saved · applies after restart")
+    assert row.locator("[data-setting-result]").inner_text() == "Saved · applies after restart"
+    assert row.locator("[data-setting-undo]").count() == 0, "Access is undone by choosing again, which may ask"
     setup_browser.capture(page, "c2-permissions-restart-waits-1087x740-dark")
 
 
@@ -217,9 +224,9 @@ def test_lowering_a_safety_level_asks_and_raising_does_not(subscription_ui):
     page.wait_for_function("() => document.querySelector('[data-setting-row=\"OUROBOROS_SAFETY_MODE\"] "
                            "[data-setting-value=\"light\"]').getAttribute('aria-pressed') === 'true'")
     assert server.writes("/api/owner/safety-mode") == [{"mode": "light"}]
-    assert "applies to new tasks" in row.locator("[data-setting-result]").inner_text()
+    assert row.locator("[data-setting-result]").inner_text() == "Saved · applies to new tasks · was + Commands"
     # Raising the other level asks nothing.
-    assert "applies to new tasks" in commit_row(page, "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "full")
+    assert commit_row(page, "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "full") == "Saved · applies to new tasks · was Outgoing"
     assert server.writes("/api/owner/safety-mode")[-1] == {"mode": "full", "kind": "consciousness"}
     assert not page.locator("dialog[open]").count()
 
@@ -263,28 +270,71 @@ def test_opening_to_the_network_asks_and_carries_the_typed_password(subscription
     assert hosts == [{"OUROBOROS_SERVER_HOST": "0.0.0.0", "OUROBOROS_NETWORK_PASSWORD": "correct horse battery"}], \
         "the host and the typed password travel in one body"
     assert server.values["OUROBOROS_NETWORK_PASSWORD"] == "correct horse battery"
+    assert row.locator("[data-setting-result]").inner_text() == "Saved · applies after restart · Undo"
+    # A secret says it is saved and nothing of its value; it offers no Undo.
+    password = setting_row(page, "OUROBOROS_NETWORK_PASSWORD")
+    assert password.locator("[data-setting-result]").inner_text() == "Saved"
+    assert password.locator("[data-setting-meta]").inner_text().startswith("Set.")
     setup_browser.capture(page, "c2-computer-restart-waits-1087x740-dark")
+    # Undo puts the address back with the token of the value this write installed.
+    row.locator("[data-setting-undo]").click()
+    page.wait_for_function("() => document.querySelector('[data-setting-row=\"OUROBOROS_SERVER_HOST\"] "
+                           "[data-setting-meta]').textContent === 'Only this computer.'")
+    assert server.writes("/api/settings")[-1] == {"OUROBOROS_SERVER_HOST": "127.0.0.1",
+                                                  "if_unchanged": {"OUROBOROS_SERVER_HOST": "OUROBOROS_SERVER_HOST#1"}}
 
 
-def test_voice_and_calls_says_the_saved_choices_and_opens_the_form_of_the_skill_that_registered_a_call(subscription_ui):
-    """No setting lives on this page. On this branch the skill's own form page (`skill/<id>`, the shell lane's) is not
-    registered yet: the door opens its level, which shows the page chrome alone; the form inside it is asserted on the
-    integrated tree."""
-    page, server = _page(subscription_ui, 1087, 740)
+def test_voice_and_calls_says_the_saved_choices_and_opens_the_form_of_the_skill_that_registered_a_call(subscription_ui, monkeypatch):
+    """No setting lives on this page. The skill is the bundled Calls skill as its own tests stand it up: its real
+    registration (the conversation it contributes, the settings section "Calls (beta)") and its real page module."""
+    page, _posts = calls.open_call_ui(subscription_ui, monkeypatch, width=1087, scheme="dark")
+    writes = []
+    page.on("request", lambda request: request.method == "POST" and writes.append(request.url))
     level = open_settings(page, "voice")
-    _settled(page, "voice")
+    door = level.locator('[data-setting-row="voice:skill:live_conversation"]')
+    door.wait_for(state="visible")  # drawn once the skills were read: a skill with a form gets a door
     assert level.locator("[data-setting-row]").evaluate_all("rows => rows.map((row) => row.dataset.settingRow)") == \
-        ["voice:dictation", "voice:read-aloud", "voice:skill:talk_skill"]
+        ["voice:dictation", "voice:read-aloud", "voice:skill:live_conversation"]
     assert level.locator("input, select, textarea, [role='switch']").count() == 0
     dictation = setting_row(page, "voice:dictation")
     assert dictation.locator("[data-setting-meta]").inner_text() == "Chosen at the message field: +, then Add dictation."
-    assert dictation.locator('[data-fact="voice:dictation"]').inner_text() == "Not chosen"
+    assert dictation.locator('[data-fact="voice:dictation"]').inner_text() == "Whisper", "the engine saved in the preferences"
     assert setting_row(page, "voice:read-aloud").locator("[data-setting-meta]").inner_text().startswith("Chosen in a reply")
-    door = setting_row(page, "voice:skill:talk_skill")
-    assert door.locator(".ui-row-title").inner_text() == "Live Conversation"
+    assert door.locator(".ui-row-title").inner_text() == "Calls (beta)", "the door is named by the form's own title"
     setup_browser.capture(page, "c2-voice-with-calls-1087x740-dark")
     door.click()
-    opened = settings_page(page, "skill/talk_skill")
+    opened = settings_page(page, "skill/live_conversation")
     opened.wait_for(state="visible")
     assert opened.locator("[data-settings-back]").inner_text().strip() == "Voice and calls"
-    assert server.posts == []
+    assert opened.locator(".settings-page-title").inner_text().strip() == "Calls (beta)"
+    form = opened.locator('[data-extension-settings-form][data-skill="live_conversation"]')
+    form.wait_for(state="visible")
+    assert form.locator('[name="enabled"]').count() == 1 and form.locator('button[type="submit"]').count() == 1
+    setup_browser.capture(page, "c2-voice-calls-form-1087x740-dark")
+    assert go_back(page) == "voice"
+    assert not [url for url in writes if "/api/settings" in url or "/api/owner/" in url or "/config" in url], writes
+
+
+def test_the_shared_helper_settles_a_save_that_says_the_same_words_and_presses_a_switch_by_its_track(subscription_ui):
+    """tests/settings_browser_helpers.py `commit_row`. Two Access saves both say "Saved · applies after restart": the
+    second settles because the row was seen busy, not because its words changed; and an old line alone, with no write,
+    is no sign. A switch is pressed on its track: its input lies under it."""
+    page, server = _page(subscription_ui, 1087, 740, OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS="true")
+    server.effects["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"] = "next_task"  # a delayed switch says a line; one that acts now is quiet
+    open_settings(page, "permissions")
+    _settled(page, "permissions")
+    assert commit_row(page, "OUROBOROS_RUNTIME_MODE", "advanced") == "Saved · applies after restart"
+    assert commit_row(page, "OUROBOROS_RUNTIME_MODE", "light") == "Saved · applies after restart"
+    assert server.writes("/api/owner/runtime-mode") == [{"mode": "advanced"}, {"mode": "light"}]
+    # The watch alone, with nothing pressed: the old line is still there and is not taken for a new save.
+    page.evaluate(helpers._WATCH_ROW, "OUROBOROS_RUNTIME_MODE")
+    page.wait_for_timeout(300)
+    assert setting_row(page, "OUROBOROS_RUNTIME_MODE").locator("[data-setting-result]").inner_text() == "Saved · applies after restart"
+    assert page.evaluate("() => window.__ouroRowWatch.seen.moved") is False
+    # The switch: Playwright cannot press the input (the track lies over it); the helper presses the track.
+    box = setting_row(page, "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS").locator("[data-setting-control]")
+    assert box.is_checked()
+    with pytest.raises(Exception, match="intercepts pointer events"):
+        box.click(timeout=1_500)
+    assert commit_row(page, "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", False) == "Saved · applies to new tasks"
+    assert not box.is_checked() and server.writes("/api/owner/auto-grant") == [{"enabled": False}]
