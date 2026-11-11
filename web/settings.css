@@ -1499,6 +1499,14 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
 .agent-page { container: subagentcard / inline-size; }
 .agent-page .available-subagent-purpose textarea { min-height: 84px; max-height: none; }
 .agent-status { margin: 0; }
+/* How it runs: Source, Model and Account side by side, then a Reasoning effort wide enough to say its Auto whole,
+   beside Access; one field a line once the page is too narrow for three. */
+.agent-page .available-subagent-field-model:has(+ .available-subagent-field > [data-subagent-field="account"]) { grid-column: auto; }
+.agent-page .available-subagent-field:has(> [data-subagent-effort-facet]) { grid-column: span 2; }
+@container subagentcard (max-width: 34rem) {
+    .agent-page .available-subagent-route { grid-template-columns: minmax(0, 1fr); }
+    .agent-page .available-subagent-route > .available-subagent-field { grid-column: auto; }
+}
 
 /* Models (model_roles.js): the Main model leads its page (its mark, its name at the page size, where it runs,
    Change). */
