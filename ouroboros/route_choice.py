@@ -368,7 +368,7 @@ def opening_choice(ctx: Any) -> dict:
 
 
 def open_route(ctx: Any, llm: Any) -> Tuple[str, bool, dict]:
-    """The route a turn opens on and its choice; a locality the task carries without a model still applies."""
+    """The route a turn opens on and its choice."""
     override = str(getattr(ctx, "task_model_override", "") or "").strip()
     local_override = getattr(ctx, "task_use_local_override", None)
     ctx._route_binding = None  # the binding a following route last resolved to (``round_route``)
@@ -376,7 +376,7 @@ def open_route(ctx: Any, llm: Any) -> Tuple[str, bool, dict]:
         return override, bool(local_override), opening_choice(ctx)
     role = opening_role(ctx)
     model, use_local = ctx._route_binding = following_route(role, llm)
-    return model, bool(local_override) if local_override is not None else use_local, following(role)
+    return model, use_local, following(role)
 
 
 def _dispatch_source(metadata: Mapping) -> str:

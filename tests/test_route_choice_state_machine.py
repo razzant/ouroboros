@@ -29,6 +29,16 @@ def _document(main, light=B, **extra):
             "OPENAI_API_KEY": "key", "OUROBOROS_MODEL_ACCOUNTS": json.dumps({"main": ""}), **extra}
 
 
+@pytest.mark.parametrize("carried_model", [None, B])
+@pytest.mark.parametrize("local", [False, True])
+def test_open_route_uses_locality_only_beside_a_carried_model(carried_model, local):
+    save_owner(_document(A, USE_LOCAL_MAIN=not local))
+    ctx = SimpleNamespace(task_model_override=carried_model, task_use_local_override=local)
+    model, use_local, choice = route_choice.open_route(ctx, None)
+    assert (model, use_local) == ((B, local) if carried_model else (A, not local))
+    assert choice == (route_choice.explicit("task_argument") if carried_model else route_choice.following("main"))
+
+
 @pytest.fixture
 def stubbed_rebind(monkeypatch):
     monkeypatch.setattr(loop_mod, "_rebind_context_fit_plan", lambda plan, *_a, **_kw: (plan, "max"))
