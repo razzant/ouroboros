@@ -4,6 +4,7 @@ from __future__ import annotations
 import pytest
 
 from tests import test_subscription_role_routes_browser as roles
+from tests.settings_browser_helpers import open_settings, press_editor_save
 
 pytestmark = [pytest.mark.ui_browser]
 subscription_ui = roles.subscription_ui
@@ -22,15 +23,16 @@ def select_model_field(ui, consumer):
     # OpenRouter API lane the suggestions belong to.
     lane = roles.api_lane(ui)
     data = catalog(ui)
+    if consumer in ['Models', 'Fallback']:
+        page = roles.open_models(ui, 'main' if consumer == 'Models' else 'fallback/1')
+        page.evaluate("""detail => document.dispatchEvent(new CustomEvent(
+            'settings-model-catalog:updated', {detail}))""", data)
+        row = page.locator('[data-model-role]').first
+        row.locator('[data-model-role-source]').select_option(lane)
+        return page, row.locator('[data-model-role-model]')
     page = roles.open_agents(ui)
     page.evaluate("""detail => document.dispatchEvent(new CustomEvent(
         'settings-model-catalog:updated', {detail}))""", data)
-    if consumer in ["Models", "Fallback"]:
-        page.locator('[data-settings-tab="models"]').click()
-        if consumer == 'Fallback': page.locator('[data-model-add]').click()
-        group = page.locator('[data-model-role="main"]') if consumer == 'Models' else page.locator('[data-model-role-group="fallback"] .model-role-row').first
-        group.locator('[data-model-role-source]').select_option(lane)
-        return page, group.locator('[data-model-role-model]')
     # Actor: a row marked Reviewer, so the reviewer chooser is this same field.
     row = page.locator('[data-subagent-row]').nth(1)
     row.locator('[data-subagent-field="route"]').select_option(lane)
@@ -112,7 +114,7 @@ def touch_role_ui(monkeypatch, request):
 
 
 def test_chooser_touch_selection(touch_role_ui):
-    page, field = select_model_field(touch_role_ui, 'Actor')
+    page, field = select_model_field(touch_role_ui, 'Models')
     page.set_viewport_size({'width': 390, 'height': 600})
     field.tap()
     field.fill('choice-')
@@ -126,8 +128,7 @@ def test_chooser_touch_selection(touch_role_ui):
 def test_partial_numeric_context_blocks_save_and_preserves_auto(role_ui):
     roles.configure_mixed(role_ui)
     role_ui['settings']['OUROBOROS_MODEL_CONTEXT_WINDOWS'] = {'main': 8192}
-    page = roles.open_agents(role_ui)
-    page.locator('[data-settings-tab="models"]').click()
+    page = roles.open_models(role_ui)
     row = page.locator('[data-model-role="main"]')
     row.locator('summary').click()
     field = row.locator('[data-model-role-context]')
@@ -136,30 +137,26 @@ def test_partial_numeric_context_blocks_save_and_preserves_auto(role_ui):
     field.press('1')
     field.press('e')
     assert field.evaluate('e => e.validity.badInput')
-    page.locator('#btn-save-settings').click()
+    page.locator('[data-editor-save]').click()
     assert not [path for path, _ in role_ui['posts'] if path == '/api/settings']
     assert field.get_attribute('aria-invalid') == 'true'
     field.fill('16384')
     assert field.get_attribute('aria-invalid') == 'false'
-    with page.expect_response('**/api/settings'):
-        page.locator('#btn-save-settings').click()
+    press_editor_save(page)
     saved = roles.settings_saves(role_ui)[-1]
     assert saved['OUROBOROS_MODEL_CONTEXT_WINDOWS']['main'] == 16384
-    page.wait_for_function("() => !document.querySelector('#btn-save-settings').disabled")
     row.locator('summary').click()
     field.fill('')
     assert not field.evaluate('e => e.validity.badInput')
-    with page.expect_response('**/api/settings'):
-        page.locator('#btn-save-settings').click()
+    press_editor_save(page)
     saved = roles.settings_saves(role_ui)[-1]
     assert saved['OUROBOROS_MODEL_CONTEXT_WINDOWS']['main'] == 0
     roles.capture(page, 'numeric-context-corrected-auto')
-    page.wait_for_function("() => !document.querySelector('#btn-save-settings').disabled")
     row.locator('summary').click()
     field.press('1')
     field.press('e')
     assert field.evaluate('e => e.validity.badInput')
-    assert page.locator('#settings-status').text_content() == 'Unsaved changes'
+    assert page.locator('[data-editor-discard]').is_visible()
 
 
 def test_chooser_scrolls_with_mobile_keyboard_boundary(role_ui):
@@ -171,7 +168,7 @@ def test_chooser_scrolls_with_mobile_keyboard_boundary(role_ui):
         Object.defineProperty(window,'visualViewport',{value:viewport,configurable:true});
         window.testViewport = viewport;
     })();""")
-    page, field = select_model_field(role_ui, 'Actor')
+    page, field = select_model_field(role_ui, 'Models')
     field.click()
     field.fill('choice')
     popup = page.locator('[id="' + field.get_attribute('aria-controls') + '"]')
@@ -196,7 +193,7 @@ def test_chooser_scrolls_with_mobile_keyboard_boundary(role_ui):
 @pytest.mark.parametrize("width,height", [(320, 480), (390, 600), (640, 360), (641, 540),
     (760, 600), (768, 600), (980, 600), (981, 540), (1440, 900), (1920, 900)])
 def test_chooser_popup_reachable_in_narrow_short_view(role_ui, width, height):
-    page, field = select_model_field(role_ui, 'Actor')
+    page, field = select_model_field(role_ui, 'Models')
     page.set_viewport_size({'width': width, 'height': height})
     field.click()
     field.fill('choice')
@@ -319,12 +316,18 @@ def vendor_role_field(page, slot):
 
 
 def vendor_consumer(ui, consumer):
-    page = ui["page"]
-    if consumer not in ("Reviewer", "Agent"):
-        page.get_by_role("tab", name="Models", exact=True).click()
-        return vendor_role_field(page, "main" if consumer == "Models" else consumer.lower())
-    page.get_by_role("tab", name="Agents", exact=True).click()
-    return page.locator("[data-subagent-row]").nth(0 if consumer == "Reviewer" else 1).locator('[data-subagent-field="model"]')
+    page = ui['page']
+    if consumer not in ('Reviewer', 'Agent'):
+        slot = 'main' if consumer == 'Models' else 'fallback/1' if consumer == 'Fallback' else consumer.lower()
+        open_settings(page, 'models/role/' + slot)
+        row = page.locator('[data-model-role]').first
+        local = row.locator('[data-model-local]')
+        if local.count() and local.is_checked():
+            local.uncheck()
+        row.locator('[data-model-role-source]').select_option('subscription:opaque-source')
+        return row.locator('[data-model-role-model]')
+    roles.open_agents(ui)
+    return page.locator('[data-subagent-row]').nth(0 if consumer == 'Reviewer' else 1).locator('[data-subagent-field="model"]')
 
 
 def open_circle_editor(ui):
@@ -447,11 +450,10 @@ def test_vendor_footer_every_settings_consumer_at_scale(role_ui, width, account_
     ui, page = role_ui, role_ui["page"]
     world = vendor_scene(ui, account_count)
     page.set_viewport_size({"width": width, "height": 950})
-    roles.open_agents(ui)
-    expect(page.locator("[data-subagent-row]")).to_have_count(6)
+    roles.open_models(ui)
     expect(page.locator("[data-model-footer]:visible")).to_have_count(0)
     roles.capture(page, f"program-editors-closed-{account_count}-{width}")
-    for consumer in ("Reviewer", "Agent", "Models", "Light", "Safety", "Vision", "Consciousness", "Fallback"):
+    for consumer in ("Models", "Light", "Safety", "Vision", "Consciousness", "Fallback"):
         field = vendor_consumer(ui, consumer)
         field.fill("choice")
         footer = page.locator("[data-model-footer]:visible")
@@ -466,7 +468,33 @@ def test_vendor_footer_every_settings_consumer_at_scale(role_ui, width, account_
         field.press("Escape")
         expect(page.locator("[data-model-footer]:visible")).to_have_count(0)
         assert field.input_value() == "owner-new-id"
-    page.get_by_role("tab", name="Agents", exact=True).click()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    assert not world['posts']
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+@pytest.mark.parametrize("account_count", [1, 18])
+def test_vendor_footer_agent_consumers_at_scale(role_ui, width, account_count):
+    from playwright.sync_api import expect
+    ui, page = role_ui, role_ui['page']
+    world = vendor_scene(ui, account_count)
+    page.set_viewport_size({'width': width, 'height': 950})
+    roles.open_agents(ui)
+    for consumer in ("Reviewer", "Agent"):
+        field = vendor_consumer(ui, consumer)
+        field.fill("choice")
+        footer = page.locator("[data-model-footer]:visible")
+        expect(footer).to_have_count(1)
+        expect(footer).to_contain_text("List from Codex 2.0.0")
+        expect(footer.locator("[data-program]")).to_have_count(1)
+        expect(footer.get_by_role("button", name="Update", exact=True)).to_be_enabled()
+        expect(page.locator('[role="listbox"]:visible [role="option"]')).to_have_count(1)
+        assert footer.locator('[role="option"]').count() == 0
+        field.fill("owner-new-id")
+        expect(field.locator("..").locator("[data-model-custom]")).to_be_visible()
+        field.press("Escape")
+        expect(page.locator("[data-model-footer]:visible")).to_have_count(0)
+        assert field.input_value() == "owner-new-id"
     current = page.locator("[data-subagent-row]").nth(4).locator('[data-subagent-field="model"]')
     current.fill("choice")
     footer = page.locator("[data-model-footer]:visible")
@@ -493,7 +521,7 @@ def test_vendor_update_keeps_chooser_open_and_refreshes_its_real_catalog(touch_r
     ui, page = touch_role_ui, touch_role_ui["page"]
     world = vendor_scene(ui, 18)
     page.set_viewport_size({"width": 390 if interaction == "touch" else 1440, "height": 950})
-    roles.open_agents(ui)
+    roles.open_models(ui)
     field = vendor_consumer(ui, consumer)
     field.fill("choice")
     field.evaluate("e => {window.ownerModelField = e; e.setSelectionRange(2, 3);}")
@@ -643,7 +671,7 @@ def test_models_role_names_only_program_supplied_entries_in_a_mixed_source(role_
     ui["fixture"]["catalog"]["items"].append({"id": "choice-hint", "value": "claudexor::opaque-source=choice-hint",
         "source_id": "opaque-source", "credential_profile_id": "personal", "sourceProgram": None})
     page.set_viewport_size({"width": width, "height": 950})
-    roles.open_agents(ui)
+    roles.open_models(ui)
     field = vendor_consumer(ui, "Models")
     field.fill("choice")
     footer = page.locator("[data-model-footer]:visible")
@@ -664,7 +692,7 @@ def test_outside_update_then_chooser_open_renews_list_once_at_44_accounts(role_u
     ui, page = role_ui, role_ui["page"]
     world = vendor_scene(ui, 44)
     page.set_viewport_size({"width": width, "height": 950})
-    roles.open_agents(ui)
+    roles.open_models(ui)
     field = vendor_consumer(ui, consumer)
     field.fill("choice")
     footer = page.locator("[data-model-footer]:visible")
@@ -692,7 +720,7 @@ def test_failed_catalog_refresh_recovers_on_next_open_at_44_accounts(role_ui, wi
     ui, page = role_ui, role_ui["page"]
     world = vendor_scene(ui, 44)
     page.set_viewport_size({"width": width, "height": 950})
-    roles.open_agents(ui)
+    roles.open_models(ui)
     field = vendor_consumer(ui, "Models")
     field.fill("choice")
     footer = page.locator("[data-model-footer]:visible")
@@ -728,7 +756,7 @@ def test_two_chooser_openings_share_producer_refresh_at_44_accounts(role_ui, wid
     ui, page = role_ui, role_ui["page"]
     world = vendor_scene(ui, 44)
     page.set_viewport_size({"width": width, "height": 950})
-    roles.open_agents(ui)
+    roles.open_models(ui)
     first = vendor_consumer(ui, "Agent")
     second = page.locator('[data-subagent-row]').nth(2).locator('[data-subagent-field="model"]')
     first.fill("choice")
