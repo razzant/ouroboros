@@ -100,7 +100,7 @@ for (const name of ['cwd', 'env_from_settings', 'env', 'args', 'command']) asser
 assert.match(page.text(), /Fields kept but not used:.*future_field/);
 assert.ok(!page.text().includes('auth_configured'));
 assert.ok(!Object.hasOwn(saved(), 'auth_configured'));
-assert.equal(page.field('cwd').getAttribute('value'), '/project/&quot;quoted&quot;', 'a quote in a value never ends its attribute');
+assert.equal(page.field('cwd').getAttribute('value'), '/project/"quoted"', 'a quote in a value never ends its attribute');
 applyMcpSettings({ MCP_SERVERS: [{ ...row, env_from_settings: '{unfinished', args: 'unsupported' }] });
 assert.equal(saved().env_from_settings, '{unfinished');
 assert.equal(saved().args, 'unsupported');

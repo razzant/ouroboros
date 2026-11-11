@@ -385,3 +385,34 @@ def test_the_local_model_page_saves_a_row_for_its_own_restart_and_never_offers_a
     assert [button.strip() for button in level.locator(".ui-action-row .btn:visible").all_inner_texts()] == ["Start", "Stop", "Test tool calling"]
     assert go_back(page) == "models"
     page.close()
+
+
+@pytest.mark.parametrize('width', [1087, 320])
+def test_every_role_editor_keeps_vendor_program_inside_open_chooser(subscription_ui, width):
+    from playwright.sync_api import expect
+    from tests.test_model_chooser_browser import vendor_scene
+
+    ui, page = subscription_ui, subscription_ui['page']
+    world = vendor_scene(ui, 18)
+    ui['settings']['OUROBOROS_MODEL_FALLBACKS'] = 'claudexor::opaque-source=choice-old'
+    page.set_viewport_size({'width': width, 'height': 640})
+    page.goto(ui['url'] + '/#settings')
+    for slot in ['main', 'light', 'safety', 'vision', 'consciousness', 'fallback/1']:
+        level = open_settings(page, 'models/role/' + slot)
+        source = level.locator('[data-model-role-source]')
+        expect(source.locator('option[value="subscription:opaque-source"]')).to_have_count(1)
+        source.select_option('subscription:opaque-source')
+        field = level.locator('[data-model-role-model]')
+        field.fill('choice')
+        popup = page.locator('[id="' + field.get_attribute('aria-controls') + '"]')
+        popup = popup.locator('..')
+        footer = popup.locator('[data-model-footer]')
+        expect(footer).to_be_visible()
+        expect(footer).to_contain_text('List from Codex 2.0.0')
+        expect(footer.get_by_role('button', name='Update', exact=True)).to_be_enabled()
+        assert footer.locator('[role="option"]').count() == 0
+        assert popup.evaluate('e => e.lastElementChild.matches("[data-model-footer]")')
+        field.press('Escape')
+        expect(footer).to_be_hidden()
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    assert not world['posts']
