@@ -302,6 +302,15 @@ def _tool_error_record(item: Dict[str, Any], *, recovered_by: int | None = None)
 # (``tool_error_words``).
 _UNEXECUTED_STATUSES = frozenset({"argument_error", "unknown_tool"})
 _DETAILS_ONLY_COMMAND_STATUSES = frozenset({"non_zero_exit", "shell_error", "timeout"})
+# What the registry answers before its Safety check (``registry_core``: the guards, argument and target binding, mode
+# and protection gates and the shell guard ahead of ``check_safety``; the MCP name lookup; an extension found not
+# live; a launch refused at hand-off): such a call never got past Safety and leaves a held call named. A status a
+# handler can return as well stays here, since naming a held call too long is the safe side.
+_BEFORE_SAFETY_STATUSES = _UNEXECUTED_STATUSES | frozenset({
+    "blocked", "cwd_blocked", "edit_ops_blocked", "edit_text_blocked", "error", "git_error", "git_via_shell_blocked",
+    "light_mode_blocked", "protected_blocked", "resource_constraint_blocked", "resource_policy_blocked",
+    "root_required_active_workspace", "root_required_user_files", "skill_payload_blocked", "unavailable",
+    "user_files_path_blocked", "workspace_blocked", "write_file_blocked"})
 
 
 def _is_details_only_leftover(record: Dict[str, Any]) -> bool:
@@ -392,11 +401,11 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
         args = item.get("args") if isinstance(item.get("args"), dict) else {}
         target_key, target_paths = _call_target_signature(args)
         recovered_by: int | None = None
-        held = status in SAFETY_HELD_STATUSES  # its identical call got past Safety, whatever that call then did
+        held = status in SAFETY_HELD_STATUSES  # its identical call got past Safety, then succeeded or failed
         for later_idx, later in enumerate(calls[idx + 1:], start=idx + 2):
             later_tool = str(later.get("tool") or "")
             later_status = str(later.get("status") or "ok")
-            if (later_status in SAFETY_HELD_STATUSES if held
+            if (later_status in SAFETY_HELD_STATUSES | _BEFORE_SAFETY_STATUSES if held
                     else later.get("is_error") or later_status not in _OK_TOOL_STATUSES):
                 continue
             later_args = later.get("args") if isinstance(later.get("args"), dict) else {}
