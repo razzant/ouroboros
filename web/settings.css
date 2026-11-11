@@ -479,14 +479,13 @@ html[data-layout="stack"] .settings-needs:not([data-all]) > .settings-needs-more
 
 .settings-shell .form-field {
     min-width: 0;
-    gap: 8px;
 }
 
-/* Uppercase micro-label retired (docs/DESIGN.md "Hierarchy rule"). */
+/* A field's name reads as every `.ui-field` name does: meta size and ink, regular weight, close above its field.
+   Uppercase micro-label retired (docs/DESIGN.md "Hierarchy rule"). */
 .settings-shell .form-field label {
     font-size: var(--type-meta);
     line-height: var(--line-meta);
-    font-weight: 600;
     color: var(--text-meta);
     text-transform: none;
     letter-spacing: normal;
