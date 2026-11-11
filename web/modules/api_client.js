@@ -342,12 +342,13 @@ export function hurryTask(taskId, requestId) {
 }
 
 /**
- * One act on a work's model (CONTRACT §6): `set` a model for it, `follow` Main again, or leave a fallback by
- * `return`, `wait` or `keep`. The answer says when it applies (`applied`) and carries the work's fact (`lead`); a
- * refusal rejects with the server's own words.
+ * One act on a work's model: `set` a model for it, `follow` Main again, or leave a fallback by `return`, `wait` or
+ * `keep`. The answer says when it applies (`applied`) and carries the work's fact (`lead`); a refusal rejects with
+ * the server's `reason_code` and status on the error (card_model.js says it in the owner's words).
  * @param {string} taskId
- * @param {string} requestId
- * @param {{action: string, model?: string, use_local?: boolean}} act
+ * @param {string} requestId  // a retry of the same act carries the same id
+ * @param {Omit<import('./work_types.js').TaskModelRequest, 'request_id'>} act
+ * @returns {Promise<import('./work_types.js').TaskModelResponse>}
  */
 export function taskModel(taskId, requestId, act) {
     return jsonPost(

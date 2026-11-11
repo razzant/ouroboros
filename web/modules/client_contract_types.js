@@ -631,38 +631,40 @@
  */
 
 /**
- * The room's model for new owner work: `main` or `fallback` (the configured reference) or `model`.
+ * A Project follows Main (`main`) or chooses a model (`model`); without `project_id` the write is Main itself, and
+ * then only `model` is a choice.
  * @typedef {Object} OwnerChatModelRequest
- * @property {"main"|"fallback"|"model"} kind
+ * @property {"main"|"model"} kind
  * @property {string=} model  // kind "model" only: the raw route, its source included
  * @property {boolean=} use_local  // kind "model" only
  * @property {string=} project_id
  */
 /**
- * A room's model for new owner work: the configured Main's or first Fallback's reference, or one raw route.
+ * A room follows Main or chooses a route; following is a reference, never the same model pinned.
  * @typedef {Object} ChatModelChoice
- * @property {"main"|"fallback"|"model"} kind
+ * @property {"main"|"model"} kind
  * @property {string=} model  // kind "model" only: the raw route, its source included
  * @property {boolean=} use_local  // kind "model" only
  */
 
-/** @typedef {Object} ChatModelRoute
+/** A model route shared by room choices, Main, a work's lead and the owner's recent models.
+ * @typedef {Object} ChatModelRoute
  * @property {string} model
  * @property {boolean} use_local
  */
 
-/** What a room's two references resolve to now.
- * @typedef {Object} ChatModelRoutes
- * @property {ChatModelRoute} main
- * @property {?ChatModelRoute} fallback  // null: no Fallback configured, so its reference admits work on Main
- */
-
 /**
+ * A Project's answer carries its choice; Main's own carries what Main is and was, what became of its pinned account
+ * (`kept`, dropped to `auto`, or `none` on a route without accounts) and whether a window set by hand was cleared.
  * @typedef {Object} OwnerChatModelResponse
  * @property {boolean} ok
- * @property {string} project_id
- * @property {ChatModelChoice} model_choice
- * @property {ChatModelChoice} previous_model_choice
+ * @property {string} project_id  // '' for Main
+ * @property {ChatModelChoice=} model_choice  // Project response
+ * @property {ChatModelChoice=} previous_model_choice
+ * @property {ChatModelRoute=} main_route  // Main response
+ * @property {ChatModelRoute=} previous_main_route
+ * @property {"kept"|"auto"|"none"=} account
+ * @property {boolean=} window_reset
  */
 
 /**
