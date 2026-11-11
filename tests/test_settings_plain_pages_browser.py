@@ -1,0 +1,259 @@
+"""The plain pages of Settings in a browser (docs/DESIGN.md "Settings"; web/modules/settings_ui.js): Permissions and
+checks, Your rules, Appearance, Notifications, Voice and calls, This computer with its Advanced and About.
+
+Each page is opened by its path, at the owner's window (1087 x 740) and at a phone's (320 x 640), dark and light:
+nothing scrolls sideways and every strip fits its row or wraps inside it. Then the rows that ask first and the ones
+that say two values: raising Access asks and then says the level in force beside the saved one; lowering a Safety
+level asks and raising one does not; Your rules keeps the text when the server refuses it; opening to the network
+asks and carries the typed password in the same write.
+
+The settings server is this file's own fake: it keeps a document, answers a write with the receipt the server gives
+(`changes`: old, new) and the facts a read derives from it (`_meta.policy_state`, `_meta.restart_state`)."""
+from __future__ import annotations
+
+import json
+from urllib.parse import urlparse
+
+import pytest
+
+from tests import test_subscription_setup_browser as setup_browser
+from tests.settings_browser_helpers import commit_row, open_settings, setting_row, settings_page
+
+subscription_ui = setup_browser.subscription_ui
+pytestmark = [pytest.mark.ui_browser]
+
+PAGES = ["permissions", "rules", "appearance", "notifications", "voice", "computer", "computer/advanced", "computer/about"]
+SIZES = [(1087, 740), (320, 640)]
+EFFECTS = {"OUROBOROS_RUNTIME_MODE": "restart", "OUROBOROS_SERVER_HOST": "restart", "OUROBOROS_MAX_WORKERS": "restart",
+           "OUROBOROS_UI_DIR": "restart", "OUROBOROS_REVIEW_ENFORCEMENT": "next_task", "OUROBOROS_TASK_REVIEW_MODE": "next_task",
+           "OUROBOROS_REVIEW_MAX_CYCLES": "next_task", "OUROBOROS_SAFETY_MODE": "next_task",
+           "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "next_task", "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "now",
+           "OUROBOROS_NETWORK_PASSWORD": "now", "OUROBOROS_EXTRA_CA_BUNDLE": "next_task"}
+
+
+class FakeSettings:
+    """The settings document behind a page: reads, writes with their receipt, and the owner endpoints."""
+
+    def __init__(self, ui, **values):
+        self.posts = []
+        self.refuse = {}  # path -> (status, body): the next write to it is refused
+        self.running = {"OUROBOROS_RUNTIME_MODE": "pro", "OUROBOROS_SERVER_HOST": "127.0.0.1"}
+        self.values = {
+            **{key: value for key, value in ui["settings"].items() if key != "_meta"},
+            "OUROBOROS_RUNTIME_MODE": "pro", "OUROBOROS_SAFETY_MODE": "full", "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "light",
+            "OUROBOROS_SAFETY_OWNER_RULES": "Never email my clients without asking me first.",
+            "OUROBOROS_REVIEW_ENFORCEMENT": "advisory", "OUROBOROS_TASK_REVIEW_MODE": "auto", "OUROBOROS_REVIEW_MAX_CYCLES": "2",
+            "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "false", "OUROBOROS_SERVER_HOST": "127.0.0.1", "OUROBOROS_NETWORK_PASSWORD": "",
+            "OUROBOROS_MAX_WORKERS": 10, "OUROBOROS_UI_DIR": "", "OUROBOROS_EXTRA_CA_BUNDLE": "", "OUROBOROS_MODEL_SAFETY": "",
+            **values,
+        }
+        self.setup_contract = ui["settings"]["_meta"]["setup_contract"]
+
+    def document(self):
+        values = self.values
+        pending = sorted(key for key, value in self.running.items() if str(values.get(key)) != str(value))
+        lan = self.running["OUROBOROS_SERVER_HOST"] == "0.0.0.0"
+        meta = {
+            "setup_contract": self.setup_contract, "effects": EFFECTS,
+            "bind_host": self.running["OUROBOROS_SERVER_HOST"], "bind_port": 8765,
+            "reachability": "lan_reachable" if lan else "loopback_only",
+            "recommended_url": "http://192.168.1.20:8765" if lan else "", "warning": "",
+            "policy_state": {
+                "access": {"configured": values["OUROBOROS_RUNTIME_MODE"], "effective": self.running["OUROBOROS_RUNTIME_MODE"],
+                           "current_process": self.running["OUROBOROS_RUNTIME_MODE"],
+                           "restart_required": values["OUROBOROS_RUNTIME_MODE"] != self.running["OUROBOROS_RUNTIME_MODE"]},
+                "review": {"configured": values["OUROBOROS_REVIEW_ENFORCEMENT"], "next_task": values["OUROBOROS_REVIEW_ENFORCEMENT"],
+                           "effective": values["OUROBOROS_REVIEW_ENFORCEMENT"]},
+            },
+            "restart_state": {"restart_required": bool(pending), "restart_keys": pending,
+                              "running": {key: self.running[key] for key in pending}},
+        }
+        masked = {**values, "OUROBOROS_NETWORK_PASSWORD": "***set***" if values["OUROBOROS_NETWORK_PASSWORD"] else ""}
+        return {**masked, "_meta": meta}
+
+    def _write(self, changed):
+        changes = {}
+        for key, value in changed.items():
+            if str(self.values.get(key)) == str(value):
+                continue
+            changes[key] = ({"withheld": "secret"} if key == "OUROBOROS_NETWORK_PASSWORD"
+                            else {"old": self.values.get(key), "new": value})
+            self.values[key] = value
+        return changes
+
+    def answer(self, route):
+        request = route.request
+        path = urlparse(request.url).path
+        if request.method != "POST":
+            route.fulfill(content_type="application/json", body=json.dumps(self.document()))
+            return
+        body = request.post_data_json or {}
+        self.posts.append((path, body))
+        if path in self.refuse:
+            status, refusal = self.refuse.pop(path)
+            route.fulfill(status=status, content_type="application/json", body=json.dumps(refusal))
+            return
+        if path == "/api/settings":
+            changes = self._write({key: value for key, value in body.items() if key != "if_unchanged"})
+            answer = {"status": "saved", "changes": changes, **({} if changes else {"no_changes": True})}
+        elif path == "/api/owner/runtime-mode":
+            answer = {"ok": True, "runtime_mode": body["mode"], "changes": self._write({"OUROBOROS_RUNTIME_MODE": body["mode"]})}
+        elif path == "/api/owner/safety-mode":
+            key = "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE" if body.get("kind") == "consciousness" else "OUROBOROS_SAFETY_MODE"
+            answer = {"ok": True, "safety_mode": body["mode"], "changes": self._write({key: body["mode"]})}
+        elif path == "/api/owner/safety-rules":
+            answer = {"ok": True, "rules": body["rules"], "changes": self._write({"OUROBOROS_SAFETY_OWNER_RULES": body["rules"]})}
+        else:  # /api/owner/auto-grant
+            value = "true" if body.get("enabled") else "false"
+            answer = {"ok": True, "enabled": body.get("enabled"), "changes": self._write({"OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": value})}
+        route.fulfill(content_type="application/json", body=json.dumps(answer))
+
+    def writes(self, path):
+        return [body for posted, body in self.posts if posted == path]
+
+
+def _page(ui, width, height, theme="dark", **values):
+    page = ui["new_page"](viewport={"width": width, "height": height}, has_touch=width < 720)
+    server = FakeSettings(ui, **values)
+    # The page's own routes answer before the fixture's catch-all.
+    page.route(lambda url: urlparse(url).path == "/api/settings" and not urlparse(url).query, server.answer)
+    page.route("**/api/owner/**", server.answer)
+    page.route("**/api/desktop/autostart", lambda route: route.fulfill(content_type="application/json", body='{"state": "on"}'))
+    page.route("**/api/desktop/background", lambda route: route.fulfill(content_type="application/json", body='{"state": "off"}'))
+    page.route("**/api/logs/events**", lambda route: route.fulfill(content_type="application/json", body='{"entries": []}'))
+    page.goto(ui["url"] + "/#settings")
+    page.wait_for_function("() => Boolean(window.__ouroSettings && window.ouroTheme)")
+    page.evaluate("theme => window.ouroTheme.set(theme)", theme)
+    return page, server
+
+
+def _settled(page, path):
+    """The page at `path` has drawn its body and holds no write in flight."""
+    level = settings_page(page, path)
+    level.locator(".settings-page-body > *").first.wait_for(state="visible")
+    page.wait_for_function("() => !document.querySelector('#page-settings [aria-busy=\"true\"]')")
+    return level
+
+
+@pytest.mark.parametrize("width,height", SIZES)
+@pytest.mark.parametrize("theme", ["dark", "light"])
+def test_every_plain_page_fits_its_window_without_sideways_scroll(subscription_ui, width, height, theme):
+    page, _server = _page(subscription_ui, width, height, theme, OUROBOROS_RUNTIME_MODE="cyber_pro")
+    for path in PAGES:
+        open_settings(page, path)
+        level = _settled(page, path)
+        if path == "permissions":  # a restart waits: the Access row says both values
+            page.wait_for_function("() => /Running: Pro/.test(document.querySelector("
+                                   "'[data-setting-row=\"OUROBOROS_RUNTIME_MODE\"] [data-setting-meta]')?.textContent || '')")
+        fits = level.evaluate("""level => {
+            const wide = (el) => el.scrollWidth - el.clientWidth;
+            const out = [...level.querySelectorAll('.ui-segment-group, .settings-choices, .settings-slider, .ui-row-actions')]
+                .filter((el) => el.getClientRects().length)
+                .filter((el) => { const row = el.closest('.ui-row, .settings-card'); const a = el.getBoundingClientRect();
+                    const b = row.getBoundingClientRect(); return a.left < b.left - 0.5 || a.right > b.right + 0.5; })
+                .map((el) => el.className);
+            return { page: wide(level), doc: wide(document.documentElement), out };
+        }""")
+        assert fits == {"page": 0, "doc": 0, "out": []}, f"{path} at {width}x{height} {theme}: {fits}"
+        setup_browser.capture(page, f"c2-{path.replace('/', '-')}-{width}x{height}-{theme}")
+        if path == "permissions":
+            level.locator("details[data-settings-fold] > summary").click()
+            level.evaluate("level => { level.scrollTop = level.scrollHeight; }")
+            setup_browser.capture(page, f"c2-permissions-end-{width}x{height}-{theme}")
+
+
+def test_raising_access_asks_first_and_then_says_both_values(subscription_ui):
+    page, server = _page(subscription_ui, 1087, 740)
+    open_settings(page, "permissions")
+    _settled(page, "permissions")
+    row = setting_row(page, "OUROBOROS_RUNTIME_MODE")
+    assert row.locator('[role="radio"][aria-checked="true"]').inner_text().startswith("Pro")
+    assert row.locator("[data-setting-meta]").inner_text() == "How far it reaches into its own code and this computer."
+
+    # Lowering Access asks nothing and writes at once.
+    row.locator('[data-setting-value="advanced"]').click()
+    page.wait_for_function("() => /Running: Pro · after restart: Advanced/.test(document.querySelector("
+                           "'[data-setting-row=\"OUROBOROS_RUNTIME_MODE\"] [data-setting-meta]').textContent)")
+    assert server.writes("/api/owner/runtime-mode") == [{"mode": "advanced"}]
+    assert [mark for mark in row.locator("[data-setting-mark]").all_inner_texts() if mark] == ["After restart", "Now"]
+
+    # Raising it asks first; declined, nothing is sent.
+    row.locator('[data-setting-value="cyber_pro"]').click()
+    dialog = page.locator("dialog[open], .confirm-dialog").last
+    dialog.wait_for(state="visible")
+    assert "Raise Access from Advanced to Cyber Pro" in dialog.inner_text()
+    dialog.get_by_role("button", name="Cancel").click()
+    dialog.wait_for(state="hidden")
+    assert len(server.writes("/api/owner/runtime-mode")) == 1
+    row.locator('[data-setting-value="cyber_pro"]').click()
+    dialog = page.locator("dialog[open], .confirm-dialog").last
+    dialog.get_by_role("button", name="Raise Access").click()
+    page.wait_for_function("() => /Running: Pro · after restart: Cyber Pro/.test(document.querySelector("
+                           "'[data-setting-row=\"OUROBOROS_RUNTIME_MODE\"] [data-setting-meta]').textContent)")
+    assert server.writes("/api/owner/runtime-mode")[-1] == {"mode": "cyber_pro"}
+    assert row.locator("[data-setting-result]").inner_text().startswith("Saved · applies after restart")
+    setup_browser.capture(page, "c2-permissions-restart-waits-1087x740-dark")
+
+
+def test_lowering_a_safety_level_asks_and_raising_does_not(subscription_ui):
+    page, server = _page(subscription_ui, 1087, 740)
+    open_settings(page, "permissions")
+    _settled(page, "permissions")
+    row = setting_row(page, "OUROBOROS_SAFETY_MODE")
+    assert row.locator(".ui-segment").all_inner_texts() == ["Off", "Outgoing", "+ Commands"]
+    assert row.locator("[data-setting-meta]").inner_text() == "Shell commands and scripts are read first too. File edits are not."
+    row.locator('[data-setting-value="light"]').click()
+    dialog = page.locator("dialog[open], .confirm-dialog").last
+    dialog.wait_for(state="visible")
+    assert "from + Commands to Outgoing" in dialog.inner_text()
+    dialog.get_by_role("button", name="Lower the level").click()
+    page.wait_for_function("() => document.querySelector('[data-setting-row=\"OUROBOROS_SAFETY_MODE\"] "
+                           "[data-setting-value=\"light\"]').getAttribute('aria-pressed') === 'true'")
+    assert server.writes("/api/owner/safety-mode") == [{"mode": "light"}]
+    assert "applies to new tasks" in row.locator("[data-setting-result]").inner_text()
+    # Raising the other level asks nothing.
+    assert "applies to new tasks" in commit_row(page, "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "full")
+    assert server.writes("/api/owner/safety-mode")[-1] == {"mode": "full", "kind": "consciousness"}
+    assert not page.locator("dialog[open]").count()
+
+
+def test_your_rules_saves_by_its_own_button_and_keeps_the_text_the_server_refused(subscription_ui):
+    page, server = _page(subscription_ui, 1087, 740)
+    level = open_settings(page, "rules")
+    field = level.locator("#settings-rules")
+    page.wait_for_function("() => document.querySelector('#settings-rules').value.startsWith('Never email')")
+    typed = "Never email my clients.\nAlways ask before spending more than $20."
+    server.refuse["/api/owner/safety-rules"] = (400, {"error": "Rules are limited to 64,000 bytes.", "saved": False})
+    field.fill(typed)
+    level.locator("[data-editor-save]").click()
+    result = level.locator("[data-editor-result]")
+    page.wait_for_function("() => /Not saved/.test(document.querySelector('[data-editor-result]').textContent)")
+    assert result.inner_text() == "Not saved. Rules are limited to 64,000 bytes."
+    assert field.input_value() == typed, "a refusal keeps the text in the field"
+    level.locator("[data-editor-save]").click()
+    page.wait_for_function("() => /^Saved/.test(document.querySelector('[data-editor-result]').textContent)")
+    assert result.inner_text() == "Saved · applies from the next task or turn"
+    assert server.writes("/api/owner/safety-rules")[-1] == {"rules": typed}
+    assert "Running work keeps the text it started with." in level.inner_text()
+
+
+def test_opening_to_the_network_asks_and_carries_the_typed_password(subscription_ui):
+    page, server = _page(subscription_ui, 1087, 740)
+    level = open_settings(page, "computer")
+    _settled(page, "computer")
+    row = setting_row(page, "OUROBOROS_SERVER_HOST")
+    assert row.locator(".ui-segment").all_inner_texts() == ["Only here", "My network"]
+    assert not level.locator('[data-setting-row="computer:address"]').is_visible(), "no address while only this computer reaches it"
+    level.locator('[id="setting-OUROBOROS_NETWORK_PASSWORD"]').type("correct horse battery")
+    row.locator('[data-setting-value="0.0.0.0"]').click()
+    dialog = page.locator("dialog[open], .confirm-dialog").last
+    dialog.wait_for(state="visible")
+    assert "Other devices on your network will reach Ouroboros with the network password" in dialog.inner_text()
+    dialog.get_by_role("button", name="Open to the network").click()
+    page.wait_for_function("() => /Running: Only here · after restart: My network/.test(document.querySelector("
+                           "'[data-setting-row=\"OUROBOROS_SERVER_HOST\"] [data-setting-meta]').textContent)")
+    hosts = [body for body in server.writes("/api/settings") if "OUROBOROS_SERVER_HOST" in body]
+    assert hosts == [{"OUROBOROS_SERVER_HOST": "0.0.0.0", "OUROBOROS_NETWORK_PASSWORD": "correct horse battery"}], \
+        "the host and the typed password travel in one body"
+    assert server.values["OUROBOROS_NETWORK_PASSWORD"] == "correct horse battery"
+    setup_browser.capture(page, "c2-computer-restart-waits-1087x740-dark")
