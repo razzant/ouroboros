@@ -101,16 +101,16 @@ def test_a_step_the_host_cannot_name_is_a_later_step(supervisor, monkeypatch, st
 
 
 def test_a_live_tool_round_is_the_step_a_return_is_read_against(supervisor, monkeypatch):
-    """A live call's tool round stamps its ``round_id`` and no model call: the same round re-presenting a returned
-    call decides nothing, and the next round's identical call is the mind's release."""
+    """A live call's tool round names its own step (``_live_tool_step``) and no model call: the same round
+    re-presenting a returned call decides nothing, and the next round's identical call is the mind's release."""
     h = supervisor
     monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
-    h.ctx._current_llm_call_meta = {"round_id": "work:call-tools:1"}
+    h.ctx._current_llm_call_meta, h.ctx._live_tool_step = {}, "work:call-tools:1"
     h.replies.append({"status": "SUSPICIOUS", "reason": "a style note"})
     assert not h.module.check_safety("remote_write", {"x": 1}, ctx=h.ctx)[0]
     ok, message = h.module.check_safety("remote_write", {"x": 1}, ctx=h.ctx)
     assert not ok and "returned earlier in this same step" in message
-    h.ctx._current_llm_call_meta = {"round_id": "work:call-tools:2"}
+    h.ctx._live_tool_step = "work:call-tools:2"
     ok, message = h.module.check_safety("remote_write", {"x": 1}, ctx=h.ctx)
     assert ok and "let through on your later identical call" in message and len(h.calls) == 1
     assert (h.events[-1]["flagged_in"], h.events[-1]["sent_by"]) == ("work:call-tools:1", "work:call-tools:2")

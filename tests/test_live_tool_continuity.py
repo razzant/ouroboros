@@ -142,12 +142,12 @@ def test_call_ids_decide_replay_and_each_request_is_recorded_once(host_world, mo
 
 
 def test_each_tool_round_is_the_step_a_reissue_is_read_against(host_world):
-    """A live call has no model call per tool round, so each round stamps its own ``round_id`` on the context's call
-    meta (what Safety reads a returned call's re-issue against), keeping what the meta already held."""
+    """A live call has no model call per tool round, so each round names its own step on the context
+    (``_live_tool_step``, what Safety reads a returned call's re-issue against); the call meta stays as it was."""
     host, seen = host_world.host, []
 
     def handler(ctx, **_):
-        seen.append(dict(ctx._current_llm_call_meta))
+        seen.append((dict(ctx._current_llm_call_meta), ctx._live_tool_step))
         return 'read.'
     host.tools.override_handler('get_task_result', handler)
     host.ctx._current_llm_call_meta, start = {'origin': 'kept'}, host.rounds
@@ -157,7 +157,7 @@ def test_each_tool_round_is_the_step_a_reissue_is_read_against(host_world):
             await host.tool_batch([invocation(call_id, 'get_task_result', task_id='none')])
     asyncio.run(run())
     rounds = [f'{host.ctx.task_id}:call-tools:{start + n}' for n in (1, 2)]
-    assert seen == [{'origin': 'kept', 'round_id': round_id} for round_id in rounds]
+    assert seen == [({'origin': 'kept'}, step) for step in rounds]
 
 
 def test_an_effect_s_loaded_tools_and_image_follow_its_unit_while_history_changes(host_world, monkeypatch, tmp_path):

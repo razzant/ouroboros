@@ -517,9 +517,9 @@ def _let_through(cause):
 
 def _authoring_call(ctx):
     """The step that authored this tool call: the model call (the loop's ``_current_llm_call_meta``), else a live
-    call's tool round (its ``round_id``); "" when unknown, which is never the same step."""
+    call's tool round (``_live_tool_step``); "" when unknown, which is never the same step."""
     meta = getattr(ctx, "_current_llm_call_meta", None)
-    return str(meta.get("llm_call_id") or meta.get("round_id") or "") if isinstance(meta, dict) else ""
+    return str((meta.get("llm_call_id") if isinstance(meta, dict) else "") or getattr(ctx, "_live_tool_step", "") or "")
 
 
 def _owner_ids(ctx):
