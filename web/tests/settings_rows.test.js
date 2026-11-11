@@ -20,6 +20,11 @@ const SECRET = testRow('T_SECRET', { kind: 'secret' });
 const ACCESS = testRow('T_ACCESS', { kind: 'strip', options: [option('light', 'Light'), option('pro', 'Pro'), option('cyber_pro', 'Cyber Pro')] },
     { writer: 'runtimeMode', confirm: 'raiseAccess' });
 const CHECKER = testRow('OUROBOROS_MODEL_SAFETY', { kind: 'text' }, { writer: 'checker' });
+// Options that each carry a line of meaning: drawn one under another (`choices`), or a strip that says the chosen one's.
+const noted = (value, label, note) => ({ value, label, note });
+const LADDER = testRow('T_ACCESS', { kind: 'choices', options: [noted('light', 'Light', 'Its own code is closed.'),
+    noted('pro', 'Pro', 'Its core is open, through review.'), noted('cyber_pro', 'Cyber Pro', 'It decides.')] }, { writer: 'runtimeMode' });
+const NOTED = testRow('T_REVIEW', { kind: 'strip', options: [noted('advisory', 'Advisory', 'It decides.'), noted('blocking', 'Blocking', 'It waits.')] });
 const TEST_ROWS = [SWITCH, STRIP, SECRET, ACCESS, CHECKER];
 const [TOTAL, PER_TASK, ALLOWANCE, ROUNDS] = ['TOTAL_BUDGET', 'OUROBOROS_PER_TASK_COST_USD', 'OUROBOROS_CONSCIOUSNESS_DAILY_USD',
     'OUROBOROS_MAX_ROUNDS'].map(rowById);
@@ -385,4 +390,53 @@ test('the rows are data: they survive JSON, ids are unique, and every key has ex
     assert.deepEqual(rowsOf('dashboard:costs', { fold: true }).map((row) => row.id), ['OUROBOROS_MAX_ROUNDS', 'OUROBOROS_TASK_ABS_CEILING_SEC']);
     assert.equal(rowById('TOTAL_BUDGET').control.from, 'setup:totalBudget', 'the setup contract describes the budget fields');
     assert.equal(rowById('nope'), null);
+});
+
+test('a choices row is a radio group of options with their lines; a restart that waits marks the one in force and the chosen one', async (t) => {
+    forgetSettingRows();
+    const env = setup(t);
+    const server = fakeServer(env.routes, { T_ACCESS: 'pro' });
+    env.routes.set('/api/owner/runtime-mode', async (_url, init) => {
+        const { mode } = JSON.parse(init.body);
+        const old = server.values.T_ACCESS;
+        server.values.T_ACCESS = mode;
+        return response({ ok: true, runtime_mode: mode, changes: { T_ACCESS: { old, new: mode } }, restart_state: { running: { T_ACCESS: 'pro' } } });
+    });
+    await readSettings();
+    const container = new NodeStub();
+    container.innerHTML = settingsRow(LADDER);
+    bindSettingRows(container, { rows: [LADDER] });
+    const group = container.querySelector('[role="radiogroup"]');
+    const options = container.querySelectorAll('[role="radio"]');
+    const facts = () => options.map((option) => [option.getAttribute('aria-checked'), option.tabIndex, option.querySelector('[data-setting-mark]').textContent]);
+    assert.equal(group.getAttribute('aria-labelledby'), 'setting-T_ACCESS-name');
+    assert.deepEqual(options.map((option) => [option.dataset.settingValue, option.querySelector('.settings-choice-name').textContent,
+        option.querySelector('.settings-choice-note').textContent]),
+    [['light', 'Light', 'Its own code is closed.'], ['pro', 'Pro', 'Its core is open, through review.'], ['cyber_pro', 'Cyber Pro', 'It decides.']]);
+    assert.deepEqual(facts(), [['false', -1, ''], ['true', 0, ''], ['false', -1, '']], 'the chosen option is the one tab stop; nothing is marked');
+    assert.equal(container.querySelector('[data-setting-meta]').textContent, 'T_ACCESS meta', 'each option says its own line: the row keeps its meta');
+    // The arrows move the focus between the options and write nothing; a press writes.
+    let prevented = 0;
+    await container.fire('keydown', { target: options[1], key: 'ArrowDown', preventDefault: () => { prevented += 1; } });
+    assert.equal(globalThis.document.activeElement, options[2]);
+    await container.fire('keydown', { target: options[2], key: 'ArrowDown', preventDefault: () => { prevented += 1; } });
+    assert.equal(globalThis.document.activeElement, options[0], 'the last option wraps to the first');
+    await container.fire('keydown', { target: options[0], key: 'End', preventDefault: () => { prevented += 1; } });
+    assert.equal(globalThis.document.activeElement, options[2]);
+    await container.fire('keydown', { target: options[2], key: 'x', preventDefault: () => { prevented += 1; } });
+    assert.equal(prevented, 3);
+    assert.deepEqual(server.log, ['GET']);
+    await container.fire('click', { target: options[2] });
+    await settle();
+    assert.deepEqual(facts(), [['false', -1, ''], ['false', -1, 'Now'], ['true', 0, 'After restart']]);
+    assert.equal(container.querySelector('[data-setting-meta]').textContent, 'Running: Pro · after restart: Cyber Pro');
+});
+
+test('a strip whose options carry a line says the chosen one\'s as the row\'s meta, and a plain strip keeps its own', async (t) => {
+    const { view } = await start(t, [NOTED], { ctx: { rows: [NOTED] } });
+    assert.equal(view.meta(NOTED), 'It decides.');
+    await view.press(view.container.querySelectorAll('[data-setting-value]')[1]);
+    assert.equal(view.meta(NOTED), 'It waits.', 'the line follows the choice');
+    const plain = await start(t, [STRIP]);
+    assert.equal(plain.view.meta(STRIP), 'T_REVIEW meta');
 });

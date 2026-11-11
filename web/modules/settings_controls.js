@@ -319,7 +319,8 @@ function failureOutcome(row, value, error) {
 const refusal = (row, message, code = 'invalid_value') => ({ state: 'refused', effect: effectOf(row), withheld: '', message, code });
 const unchanged = (row) => ({ state: 'unchanged', effect: effectOf(row), withheld: '', message: '', code: '' });
 
-async function attempt(row, value, call) {
+/** One call as an Outcome: what a page's own writer (`WRITERS.<name>`, added by its module) wraps its request in. */
+export async function attempt(row, value, call) {
     try { return savedOutcome(row, value, await call()); } catch (error) { return failureOutcome(row, value, error); }
 }
 
@@ -675,6 +676,11 @@ function controlHtml(row, control, ctx) {
         + '<span class="ui-switch-track" aria-hidden="true"><span class="ui-switch-thumb"></span></span></label>';
     case 'strip': return `<div class="ui-segment-group" role="group" ${named}>${options.map((option) =>
         `<button type="button" class="ui-segment" data-setting-value="${escapeHtmlAttr(option.value)}" aria-pressed="false">${escapeHtmlAttr(option.label ?? option.value)}</button>`).join('')}</div>`;
+    // Options that each need a line of meaning: one under another, a radio group; the chosen one is `aria-checked`.
+    case 'choices': return `<div class="settings-choices" role="radiogroup" ${named}>${options.map((option) =>
+        `<button type="button" class="settings-choice" role="radio" aria-checked="false" data-setting-value="${escapeHtmlAttr(option.value)}">`
+        + `<span class="settings-choice-name">${escapeHtmlAttr(option.label ?? option.value)}<span class="settings-choice-mark" data-setting-mark></span></span>`
+        + `<span class="settings-choice-note">${escapeHtmlAttr(option.note || '')}</span></button>`).join('')}</div>`;
     case 'door': return '<span class="settings-row-chevron" aria-hidden="true">›</span>';
     default: return ctx.custom?.(row) || '';
     }
@@ -727,6 +733,10 @@ function paintRow(node, row) {
     const forced = Boolean(state.outcome && !state.seen && state.outcome.state === 'changed_elsewhere');
     const doc = node.ownerDocument || globalThis.document;
     const controls = node.querySelectorAll('[data-setting-control]');
+    // The value still in force while a restart waits: the write's answer, the row's codec, else the server's list.
+    const running = state.outcome?.running ?? CODECS[row.codec]?.running?.(lastSettings, row)
+        ?? lastSettings?._meta?.restart_state?.running?.[row.keys[0]];
+    const waits = running !== undefined && stored !== undefined && !sameValue(running, stored);
     if (row.hiddenWhen) node.hidden = Boolean(HIDDEN_WHEN[row.hiddenWhen]?.(lastSettings));
     if (isTyped(row)) {
         const text = (value) => (value === undefined ? undefined : control.kind === 'secret' || (control.noLimit && isUnlimited(value)) ? '' : String(value ?? ''));
@@ -754,6 +764,18 @@ function paintRow(node, row) {
             button.classList.toggle('active', chosen);
             button.setAttribute('aria-pressed', String(chosen));
         });
+    } else if (control.kind === 'choices') {
+        // One tab stop, on the chosen option (the first while none is); while a restart waits the option in force
+        // and the one chosen say so in words.
+        const options = [...node.querySelectorAll('[data-setting-value]')];
+        const at = options.findIndex((button) => shown !== undefined && String(button.dataset.settingValue) === String(shown ?? ''));
+        options.forEach((button, i) => {
+            button.setAttribute('aria-checked', String(i === at));
+            button.tabIndex = i === Math.max(at, 0) ? 0 : -1;
+            const words = !waits ? '' : sameValue(button.dataset.settingValue, running) ? 'Now' : i === at ? 'After restart' : '';
+            const mark = button.querySelector('[data-setting-mark]');
+            if (mark && mark.textContent !== words) mark.textContent = words;
+        });
     }
     // A write in flight: the control is disabled and busy; nothing else is drawn for "saving". Disabling moves the
     // focus away, so a control that had it takes it back when the answer comes, unless the owner has moved on.
@@ -774,9 +796,9 @@ function paintRow(node, row) {
             }
         }
     });
-    const running = state.outcome?.running ?? lastSettings?._meta?.restart_state?.running?.[row.keys[0]];
-    const meta = running !== undefined && stored !== undefined && !sameValue(running, stored)
-        ? `Running: ${valueWords(row, running)} · after restart: ${valueWords(row, stored)}` : row.meta || '';
+    // A strip or a select whose options carry a line of meaning says the chosen one's.
+    const noted = control.kind === 'choices' ? '' : (control.options || []).find((option) => String(option.value) === String(shown ?? ''))?.note;
+    const meta = waits ? `Running: ${valueWords(row, running)} · after restart: ${valueWords(row, stored)}` : noted || row.meta || '';
     const metaNode = node.querySelector('[data-setting-meta]');
     if (metaNode && metaNode.textContent !== meta) metaNode.textContent = meta;
     paintResult(node.querySelector('[data-setting-result]'), outcomeLine(row, state.outcome));
@@ -870,9 +892,22 @@ export function bindSettingRows(container, ctx = {}) {
             void commitValue(row, hit('[data-setting-value]').dataset.settingValue, ctx);
         } else if (hit('[data-setting-door]')) ctx.openDoor?.(row);
     };
+    // A `choices` group as a radio group: the arrows, Home and End move between its options. A press chooses, never
+    // the arrow itself: a choice is written at once and may ask first.
+    const onKeydown = (event) => {
+        const option = event.target?.closest?.('[role="radio"][data-setting-value]');
+        const step = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 }[event.key];
+        if (!option || !of(event) || !(step || event.key === 'Home' || event.key === 'End')) return;
+        const options = [...option.parentElement.querySelectorAll('[data-setting-value]')].filter((each) => !each.disabled);
+        const next = event.key === 'Home' ? options[0] : event.key === 'End' ? options[options.length - 1]
+            : options[(options.indexOf(option) + step + options.length) % options.length];
+        event.preventDefault();
+        next?.focus?.();
+    };
     container.addEventListener('input', onInput);
     container.addEventListener('change', onChange);
     container.addEventListener('click', onClick);
+    container.addEventListener('keydown', onKeydown);
     const leave = () => bindings.forEach(({ row, paint }) => {
         const state = rowState(row);
         if (state.seen && !state.busy) Object.assign(state, { outcome: null, typed: null });
@@ -887,6 +922,7 @@ export function bindSettingRows(container, ctx = {}) {
             container.removeEventListener('input', onInput);
             container.removeEventListener('change', onChange);
             container.removeEventListener('click', onClick);
+            container.removeEventListener('keydown', onKeydown);
         },
     };
 }
