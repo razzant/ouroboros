@@ -127,6 +127,9 @@ async def _effect(host, fresh, cached, silent):
     from ouroboros.tools.tool_discovery import bind_resident_schemas
     async with host._tools_lock:
         host.rounds += 1
+        meta = getattr(host.ctx, "_current_llm_call_meta", None)  # the step Safety reads a re-issue against
+        host.ctx._current_llm_call_meta = {**(meta if isinstance(meta, dict) else {}),
+                                           "round_id": f"{host.ctx.task_id}:call-tools:{host.rounds}"}
         maximum = _resolve_loop_max_rounds(host.ctx)
         if maximum is not None and host.rounds > maximum:
             raise RealtimeSetupError("round_limit", "ordinary tool round limit reached")

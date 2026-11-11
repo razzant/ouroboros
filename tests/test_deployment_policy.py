@@ -42,7 +42,7 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from tests._safety_fixtures import supervisor as supervisor_fixture
+from tests._safety_fixtures import reset_safety_stores, supervisor as supervisor_fixture
 
 supervisor = supervisor_fixture
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -780,7 +780,7 @@ def test_an_unavailable_mandatory_checker_holds_only_the_action_that_needs_it(in
     monkeypatch.setattr(tool_effects, "effect_of", lambda _name, **_kw: tool_effects.BUILTIN)
     monkeypatch.setattr(place_guard, "call_place_facts", lambda *_a, **_kw: {})
     monkeypatch.setattr(safety, "_safety_model_call", lambda **_kw: pytest.fail("no checker connection is configured"))
-    safety._PRIOR_VERDICTS.clear()
+    reset_safety_stores()
     ctx = SimpleNamespace(task_id="work", task_metadata={"work_kind": "owner"}, drive_root=install.data)
     allowed, message = safety.check_safety("write_remote", {"path": "notes.txt"}, ctx=ctx)
     assert safety.check_safety("read_file", {"path": "notes.txt"}, ctx=ctx) == (True, ""), "reads stay available"
@@ -816,11 +816,11 @@ def walk(install, monkeypatch):
     monkeypatch.setattr(safety, "_CHAIN_STORMS", {})
     monkeypatch.setattr(tool_effects, "effect_of", lambda _name, **_kw: tool_effects.BUILTIN)
     monkeypatch.setattr(place_guard, "call_place_facts", lambda *_a, **_kw: {})
-    safety._PRIOR_VERDICTS.clear()
+    reset_safety_stores()
     ctx = SimpleNamespace(task_id="work", task_metadata={"work_kind": "owner"}, drive_root=install.data)
     yield SimpleNamespace(check=lambda: safety.check_safety("write_remote", {"path": "notes.txt"}, ctx=ctx),
                           calls=calls, events=events, answers=answers)
-    safety._PRIOR_VERDICTS.clear()
+    reset_safety_stores()
 
 
 SUBSCRIPTION_FALLBACK = "claudexor::codex=org-fallback"

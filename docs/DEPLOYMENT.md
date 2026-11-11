@@ -378,6 +378,8 @@ Supervisor route checks.
   a returned DANGEROUS call, which outside that Cyber exit waits for it. `release_unjudged`: the
   same card releases a call without a verdict. A card may precede the send; it proves no
   assessment. Closed exits leave a returned call refused, or an unjudged call waiting for a check.
+  Under every list, a later word of the employee in the same work earns a waiting DANGEROUS call
+  one new reading; a new reading on new evidence is not a release.
   Unretained verdicts still prevent unchecked release in the same context; losing all state
   requires a fresh check unless unchecked release is enabled. An explicit list never gains another
   exit implicitly. Omitted, the ordinary exits remain except `release_unjudged` under `safety.checker`,

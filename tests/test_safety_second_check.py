@@ -80,12 +80,21 @@ def test_second_check_reads_an_answer_envelope(supervisor, second, allowed):
     assert msg == "" if allowed else "second: DANGEROUS — second reason" in msg
 
 
-@pytest.mark.parametrize("bad", ["broken JSON", {"status": "SAFE", "reason": ""}, RuntimeError("offline"), "too large"])
+def _quota():
+    from ouroboros.llm_claudexor import ClaudexorModelError
+    return ClaudexorModelError({"code": "subscription_window_exhausted", "message": "Quota exhausted"},
+                               model_role="subagent:second")
+
+
+@pytest.mark.parametrize("bad", ["broken JSON", {"status": "SAFE", "reason": ""}, RuntimeError("offline"), "too large",
+                                 "quota"])
 def test_a_failed_second_check_keeps_the_first_verdict(supervisor, monkeypatch, bad):
-    """A second check that answers nothing (unparseable, a SAFE without a reason, an error, a bundle too large for it)
-    leaves the first verdict standing: the call returns with the first reading, never as unread, in one attempt."""
+    """A second check that answers nothing (unparseable, a SAFE without a reason, an error, its quota or sign-in
+    refused, a bundle too large for it) leaves the first verdict standing: the call returns with the first reading,
+    never as unread, in one attempt that never waits for resources."""
     h = supervisor
     h.values["OUROBOROS_SUBAGENTS"] = catalog()
+    bad = _quota() if bad == "quota" else bad
     h.replies.extend([{"status": "DANGEROUS", "reason": "first flag"}] + ([] if bad == "too large" else [bad]))
     if bad == "too large":  # the first bundle fits; the second, which carries it, does not
         first = h.module._safety_model_call
@@ -100,6 +109,31 @@ def test_a_failed_second_check_keeps_the_first_verdict(supervisor, monkeypatch, 
     assert len(failed) == 1 and failed[0]["error"]
     verdict = next(event for event in h.events if event["type"] == "safety_verdict")
     assert [v["stage"] for v in verdict["verdicts"]] == ["first"]
+    assert bad == "too large" or h.calls[1]["wait_for_resources"] is False
+
+
+@pytest.mark.parametrize("tool", ["write_remote", "place_reply"])
+def test_a_refused_second_check_in_cyber_pro_keeps_the_first_verdict_and_a_stop_still_stops(supervisor, monkeypatch,
+                                                                                         tool):
+    """In Cyber Pro, where a built-in's hold is advice, a second check refused for its quota still leaves the first
+    DANGEROUS reading standing: the write returns, never let through, and words return with the mind's exit, the
+    verdict recorded. Stop or Pause during the second check still ends the check."""
+    from ouroboros.model_wait import ModelWaitInterrupted
+
+    h = supervisor
+    monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
+    h.values["OUROBOROS_SUBAGENTS"] = catalog()
+    h.replies.extend([{"status": "DANGEROUS", "reason": "an undelegated disclosure"}, _quota()])
+    ok, message = h.module.check_safety(tool, {"text": "private words"}, ctx=h.ctx)
+    assert not ok and message.startswith("⚠️ SAFETY_RETURNED: not run;") and "an undelegated disclosure" in message
+    assert "issuing the identical call in a later step" in message and h.calls[1]["wait_for_resources"] is False
+    verdict = next(event for event in h.events if event["type"] == "safety_verdict")
+    assert [v["stage"] for v in verdict["verdicts"]] == ["first"]
+    assert [event["type"] for event in h.events].count("safety_second_check_failed") == 1
+    h.replies.extend([{"status": "DANGEROUS", "reason": "an undelegated disclosure"},
+                      ModelWaitInterrupted("owner_stop", role="subagent:second")])
+    with pytest.raises(ModelWaitInterrupted):
+        h.module.check_safety(tool, {"text": "other words"}, ctx=h.ctx)
 
 
 def test_unmarked_or_disabled_never_second_checks(supervisor):

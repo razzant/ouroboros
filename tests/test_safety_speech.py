@@ -7,6 +7,9 @@ from ouroboros.place_guard import call_place_facts as published_destinations
 supervisor = supervisor_fixture
 
 MIND = "issuing the identical call in a later step"  # the mind's own exit, named only where it is the exit
+GATE_HEAD = "These words to this destination were read DANGEROUS in this work:"  # answered for another call
+WORDS_WAIT = ("Changed words or another destination are read again; the same words there keep waiting, whatever the "
+              "tool or request_id.")
 
 
 @pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
@@ -74,6 +77,41 @@ def test_flag_retry_and_changed_subject(supervisor, monkeypatch, mode, status, n
     assert len(h.calls) == 4
 
 
+@pytest.mark.parametrize(("status", "mode"), [("SUSPICIOUS", "advanced"), ("DANGEROUS", "cyber_pro"),
+                                              ("DANGEROUS", "advanced")])
+def test_a_step_the_host_cannot_name_is_a_later_step(supervisor, monkeypatch, status, mode):
+    """A context with no step stamp gives up the same-step guard, never the exits: its second issue is released, by
+    the mind (SUSPICIOUS; DANGEROUS in Cyber Pro) or, in an ordinary mode, by my human's card."""
+    h = supervisor
+    monkeypatch.setattr(h.module, "get_runtime_mode", lambda: mode)
+    del h.ctx._current_llm_call_meta
+    command = {"cmd": "rm -rf ~/scratch"}
+    h.replies.append({"status": status, "reason": "deletes a folder"})
+    assert not h.module.check_safety("run_command", command, ctx=h.ctx)[0]
+    if mode == "advanced" and status == "DANGEROUS":
+        h.ctx._owner_directives = [{"source": "owner_quiz_answer", "content": "1. Run it", "quiz_id": "q1",
+                                    "reply_to": {"address": "quiz q1 of task work",
+                                                 "text": f"Run this?\n{h.module._exact_call('run_command', command)}"}}]
+    ok, message = h.module.check_safety("run_command", command, ctx=h.ctx)
+    assert ok and message.startswith("⚠️ SAFETY_NOTE: let through on your") and len(h.calls) == 1
+
+
+def test_a_live_tool_round_is_the_step_a_return_is_read_against(supervisor, monkeypatch):
+    """A live call's tool round stamps its ``round_id`` and no model call: the same round re-presenting a returned
+    call decides nothing, and the next round's identical call is the mind's release."""
+    h = supervisor
+    monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
+    h.ctx._current_llm_call_meta = {"round_id": "work:call-tools:1"}
+    h.replies.append({"status": "SUSPICIOUS", "reason": "a style note"})
+    assert not h.module.check_safety("remote_write", {"x": 1}, ctx=h.ctx)[0]
+    ok, message = h.module.check_safety("remote_write", {"x": 1}, ctx=h.ctx)
+    assert not ok and "returned earlier in this same step" in message
+    h.ctx._current_llm_call_meta = {"round_id": "work:call-tools:2"}
+    ok, message = h.module.check_safety("remote_write", {"x": 1}, ctx=h.ctx)
+    assert ok and "let through on your later identical call" in message and len(h.calls) == 1
+    assert (h.events[-1]["flagged_in"], h.events[-1]["sent_by"]) == ("work:call-tools:1", "work:call-tools:2")
+
+
 def test_dangerous_words_wait_for_my_human_outside_cyber_pro(supervisor, monkeypatch):
     """Outside Cyber Pro words read DANGEROUS wait for my human: neither a later identical call nor the same words
     under a new request_id lets them through or buys a fresh reading, changed words are read again, and my human's
@@ -93,10 +131,12 @@ def test_dangerous_words_wait_for_my_human_outside_cyber_pro(supervisor, monkeyp
     assert not ok and "waits for your human" in message and MIND not in message
     assert f"Flagged words: \"{text}\"" in message
     assert "a card holding these exact words on their own lines and the destination Telegram · FusionBrain." in message
-    for attempt in (reply, {**reply, "request_id": "r-2"}):
+    for attempt, head in ((reply, "The Safety Supervisor read this call as DANGEROUS:"),
+                          ({**reply, "request_id": "r-2"}, GATE_HEAD)):
         h.later()
         ok, message = h.module.check_safety("place_reply", attempt, ctx=h.ctx)
-        assert not ok and "waits for your human" in message and "read this call as DANGEROUS" in message
+        assert not ok and "waits for your human" in message and head in message and WORDS_WAIT in message
+        assert ("read this call" in message) is (attempt is reply) and "A changed call is read again" not in message
     assert len(h.calls) == 1 and not any(event["type"] == "safety_sent_despite_check" for event in h.events)
     assert h.module.check_safety("place_reply", {**reply, "text": "Atlas is on track."}, ctx=h.ctx) == (True, "")
     assert len(h.calls) == 2
@@ -106,6 +146,7 @@ def test_dangerous_words_wait_for_my_human_outside_cyber_pro(supervisor, monkeyp
                         if name == "connector_send" else tool_effects.BUILTIN)
     ok, message = h.module.check_safety("connector_send", {"text": text, "chat_id": "-100"}, ctx=h.ctx)
     assert not ok and "waits for your human" in message and len(h.calls) == 2
+    assert GATE_HEAD in message and "read this call" not in message and WORDS_WAIT in message
     h.ctx._owner_directives = [{"source": "owner_quiz_answer", "content": "1. Send it", "quiz_id": "q9", "reply_to": {
         "address": "quiz q9 of task work", "text": f"Send this to Telegram · FusionBrain?\n{text}\n1. Send it"}}]
     ok, message = h.module.check_safety("place_reply", reply, ctx=h.ctx)
@@ -135,7 +176,8 @@ def test_dangerous_words_wait_for_my_human_outside_cyber_pro(supervisor, monkeyp
 
 @pytest.mark.parametrize("release", ["owner_card", "cyber_pro", "owner_closed", "cyber_closed"])
 def test_later_dangerous_words_hold_older_suspicious_retry(supervisor, monkeypatch, release):
-    """A DANGEROUS word/recipient gate outranks an older exact-call SUSPICIOUS retry, not its owner's release."""
+    """A DANGEROUS word/recipient gate outranks an older exact-call SUSPICIOUS retry, not its owner's release; where
+    the card exit is closed my human's answer earns one new reading instead."""
     from ouroboros import tool_effects, place_guard, extension_registry_state
     from ouroboros.extension_surface_names import extension_surface_name
     h = supervisor
@@ -169,14 +211,50 @@ def test_later_dangerous_words_hold_older_suspicious_retry(supervisor, monkeypat
         from ouroboros.deployment_policy import RELEASE_AFTER_DANGEROUS, REPEAT_AFTER_DANGEROUS
         shut = RELEASE_AFTER_DANGEROUS if release == "owner_closed" else REPEAT_AFTER_DANGEROUS
         monkeypatch.setattr(h.module, "safety_exit_open", lambda exit_: exit_ != shut)
+        h.replies.append({"status": "DANGEROUS", "reason": "the audience is still outside the circle"})
     h.later()
     allowed, message = check(older)
     if release.endswith("_closed"):
-        assert not allowed and len(h.calls) == 2, "an older flag cannot reopen a closed deployment exit"
+        assert not allowed and len(h.calls) == 2 + (release == "owner_closed"), (
+            "an older flag cannot reopen a closed deployment exit; my human's answer earns one new reading")
         return
     assert allowed and len(h.calls) == 2
     assert h.events[-1]["type"] == "safety_sent_despite_check"
     assert ("(q-later)" if release == "owner_card" else "let through on your later identical call") in message
+
+
+@pytest.mark.parametrize("second", ["SAFE", "DANGEROUS"])
+@pytest.mark.parametrize("gate", [False, True])
+def test_a_later_word_of_my_human_earns_a_waiting_call_one_new_reading(supervisor, monkeypatch, gate, second):
+    """A DANGEROUS call that waits for my human is answered by its kept verdict however often it is issued, until my
+    human writes in this work: then one new reading. SAFE lets it through and the old verdict answers it no more;
+    DANGEROUS waits again, unread, until their next word. The same words under a new request_id meet the same gate."""
+    from ouroboros import place_guard
+    h = supervisor
+    monkeypatch.setattr(place_guard, "call_place_facts", lambda *a, **kw: {
+        "places": [{"place_id": "p", "place_label": "Telegram · Team", "conversation_id": "-100"}], "targets": {}})
+    reply = {"place_id": "p", "text": "Atlas passed 70 and 95.", "request_id": "r-1"}
+    issue = lambda n: {**reply, "request_id": f"r-{n}"} if gate else reply
+    word = lambda n: {"source": "owner_mailbox", "content": f"Note {n}.", "msg_id": f"chat 1 / m-{n}"}
+
+    def check(n):
+        h.later()
+        return h.module.check_safety("place_reply", issue(n), ctx=h.ctx)
+    h.replies.append({"status": "DANGEROUS", "reason": "the note keeps this circle apart"})
+    assert not h.module.check_safety("place_reply", reply, ctx=h.ctx)[0]
+    for n in (2, 3):
+        ok, message = check(n)
+        assert not ok and "A later word of your human in this work earns it one new reading" in message
+    assert len(h.calls) == 1, "no new word of my human: the kept verdict answers"
+    h.ctx._owner_directives = [word(1)]
+    h.replies.append({"status": second, "reason": "they asked for it" if second == "SAFE" else "still apart"})
+    assert check(4)[0] is (second == "SAFE") and len(h.calls) == 2, "exactly one new reading"
+    h.replies.append({"status": "DANGEROUS", "reason": "read afresh"})
+    assert not check(5)[0] and len(h.calls) == 2 + (second == "SAFE"), "SAFE: the old verdict answers no more"
+    if second == "DANGEROUS":
+        assert not check(6)[0] and len(h.calls) == 2, "waits again until another word"
+        h.ctx._owner_directives.append(word(2))
+        assert not check(7)[0] and len(h.calls) == 3
 
 
 def test_an_unchecked_mode_meets_no_flag_wait_or_card(supervisor, monkeypatch):

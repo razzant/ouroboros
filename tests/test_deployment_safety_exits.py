@@ -112,8 +112,9 @@ def test_declared_words_a_verdict_returned_leave_only_through_an_open_exit(super
                                                                          monkeypatch, case, mode):
     """A connector's declared send (its real published effect) returned DANGEROUS: an open repeat lets its identical
     call from a later model call through in Cyber Pro; elsewhere my human's matching card does, where that exit is
-    open; closed, the saved verdict answers with no model call, card or not. The step that received the return
-    decides nothing; a new request_id is read again where the mind decides and keeps waiting elsewhere."""
+    open; closed, the saved verdict answers with no model call, and my human's answer, a later word of theirs, earns
+    one new reading. The step that received the return decides nothing; a new request_id is read again where the
+    mind decides and keeps waiting elsewhere."""
     h = supervisor
     opened = exits(case)
     mind = opened[REPEAT] and mode == "cyber_pro"
@@ -138,15 +139,17 @@ def test_declared_words_a_verdict_returned_leave_only_through_an_open_exit(super
     assert ok is mind and len(h.calls) == 1, "no second model roll, open or closed"
     assert [event["type"] for event in h.events].count("safety_sent_despite_check") == int(mind)
     assert not closed or (CLOSED in message and SAID[REPEAT] not in message)
-    if not mind:  # my human's matching card: an open exit lets it through in any mode, a closed one nothing
+    if not mind:  # my human's matching card: an open exit lets it through in any mode; closed, one new reading
         _answered(h, "q3", name, args)
         h.later()
+        h.replies.extend([] if card else [{"status": "DANGEROUS", "reason": "the place note still asks for a quiz"}])
         ok, message = h.module.check_safety(name, args, ctx=h.ctx)
-        assert ok is card and ("(q3)" in message) is card and len(h.calls) == 1
-        h.ctx._owner_directives = []
+        assert ok is card and ("(q3)" in message) is card and len(h.calls) == 1 + closed
+        if card:
+            h.ctx._owner_directives = []
     rechecked = mind or _subject(h, name, args)[2]  # an exact-call card keys no words to a destination
     ok, message = h.module.check_safety(name, {**args, "request_id": "r-2"}, ctx=h.ctx)
-    assert ok is bool(rechecked) and len(h.calls) == 1 + bool(rechecked)
+    assert ok is bool(rechecked) and len(h.calls) == 1 + closed + bool(rechecked)
 
 
 @pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
@@ -154,8 +157,8 @@ def test_declared_words_a_verdict_returned_leave_only_through_an_open_exit(super
 def test_an_action_a_verdict_returned_leaves_only_through_an_open_exit(supervisor, exits, monkeypatch, case, mode):
     """A built-in without declarations returned DANGEROUS (a ``speech`` key in its verdict changes nothing): an open
     repeat lets its identical call from a later model call through in Cyber Pro; elsewhere it waits for my human's
-    card on the exact call, which releases it where that exit is open; closed, it stays returned, card or not. No
-    issue is read twice."""
+    card on the exact call, which releases it where that exit is open; closed, it stays returned, and my human's
+    answer earns it one new reading. No identical issue is read twice on the same words of my human."""
     h = supervisor
     opened = exits(case)
     mind = opened[REPEAT] and mode == "cyber_pro"
@@ -176,7 +179,7 @@ def test_an_action_a_verdict_returned_leaves_only_through_an_open_exit(superviso
         _answered(h, "q5", "github_write", comment)
         h.later()
         ok, message = h.module.check_safety("github_write", comment, ctx=h.ctx)
-        assert ok is card and len(h.calls) == 1
+        assert ok is card and len(h.calls) == 1 + (not card)
 
 
 @pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
@@ -184,7 +187,7 @@ def test_an_action_a_verdict_returned_leaves_only_through_an_open_exit(superviso
 def test_a_dangerous_command_waits_for_the_card_where_the_mind_does_not_decide(supervisor, exits, monkeypatch, case, mode):
     """A command read DANGEROUS returns once in every mode. Its identical call from a later model call is let through
     without a new reading only where the mind decides (Cyber Pro, the repeat open); elsewhere it waits for my human's
-    card on the exact call, which releases it where that exit is open. No issue is read twice."""
+    card on the exact call, which releases it where that exit is open; closed, their answer earns one new reading."""
     h = supervisor
     opened = exits(case)
     mind = opened[REPEAT] and mode == "cyber_pro"
@@ -202,8 +205,9 @@ def test_a_dangerous_command_waits_for_the_card_where_the_mind_does_not_decide(s
     if not mind:
         _answered(h, "q2", "run_command", command)
         h.later()
+        h.replies.extend([] if card else [{"status": "DANGEROUS", "reason": "still deletes the home directory"}])
         ok, message = h.module.check_safety("run_command", command, ctx=h.ctx)
-        assert ok is card and len(h.calls) == 1
+        assert ok is card and len(h.calls) == 1 + (not card)
         assert not card or message.startswith("⚠️ SAFETY_NOTE: let through on your human's answer (q2)")
 
 
@@ -274,12 +278,13 @@ def test_the_registry_runs_the_tool_only_once_an_open_exit_lets_it(supervisor, e
     if exit_ == RELEASE:
         _answered(h, "q1", "fixture_send", {"text": "hello"}, context)
         h.replies.append(RuntimeError("still down"))
-    else:  # an ordinary mode's DANGEROUS words leave on my human's card, and a closed repeat refuses even that
+    else:  # an ordinary mode's DANGEROUS words leave on my human's card; closed, their answer earns one reading
         _answered(h, "q1", "fixture_send", {"text": "hello"}, context)
+        h.replies.extend([] if open_ else [{"status": "DANGEROUS", "reason": "still not delegated"}])
     context._current_llm_call_meta = {"llm_call_id": "llm-round-2"}
     second = registry.execute_result("fixture_send", {"text": "hello"})
     assert (second.status == "ok", sent) == (open_, ["hello"] if open_ else [])
-    assert len(h.calls) == (1 if open_ else 1 + (exit_ == RELEASE)), "a closed repeat asks no model; a hold, the checker"
+    assert len(h.calls) == (1 if open_ else 2), "closed: a hold is read again, a return once on my human's answer"
 
 
 def test_a_return_kept_under_an_open_card_is_answered_by_its_verdict_once_the_exit_reads_closed(
@@ -303,8 +308,8 @@ def test_a_verdict_larger_than_the_bound_is_kept_and_ends_the_hold_it_answered(
         supervisor, exits, monkeypatch, tmp_path):
     """Held while the checker was down, then judged DANGEROUS with a verdict larger than the work's record bound: the
     newest call is kept whatever its size, so it returns with that verdict said and audited, never as unjudged or too
-    large, and my human's later matching answer to the old hold releases nothing; the kept verdict answers its next
-    issue without a new model call."""
+    large; the kept verdict answers its next issue without a new model call, and my human's later matching answer to
+    the old hold releases nothing unread: a later word of theirs, it earns one new reading."""
     h = supervisor
     exits("release")  # the unjudged release open, the repeat closed
     registry, context, sent = _registry(tmp_path, monkeypatch)
@@ -317,33 +322,58 @@ def test_a_verdict_larger_than_the_bound_is_kept_and_ends_the_hold_it_answered(
     assert "first: DANGEROUS — Not delegated." in judged
     assert not any(phrase in judged for phrase in ("TOO_LARGE", "not checked", "no verdict", "wait until a check", SAID[RELEASE]))
     assert [event["verdicts"][0]["status"] for event in h.events if event["type"] == "safety_verdict"] == ["DANGEROUS"]
-    _answered(h, "q-late", "fixture_send", {"text": "hello"}, context)
     context._current_llm_call_meta = {"llm_call_id": "llm-round-3"}
     third = registry.execute_result("fixture_send", {"text": "hello"})
-    assert (third.status, sent, len(h.calls)) == ("blocked", [], 2), "answered by its kept verdict, never unjudged"
+    assert (third.status, sent, len(h.calls)) == ("blocked", [], 2), "answered by its kept verdict"
+    _answered(h, "q-late", "fixture_send", {"text": "hello"}, context)
+    context._current_llm_call_meta = {"llm_call_id": "llm-round-4"}
+    h.replies.append({"status": "DANGEROUS", "reason": "Still not delegated."})
+    fourth = registry.execute_result("fixture_send", {"text": "hello"})
+    assert (fourth.status, sent, len(h.calls)) == ("blocked", [], 3), "one new reading, never unjudged"
     assert not [event for event in h.events if event["type"] == "safety_sent_without_assessment"]
 
 
 @pytest.mark.parametrize("rootless", [False, True])
 def test_a_judged_call_does_not_become_unchecked_when_a_card_arrives(supervisor, exits, monkeypatch, rootless):
-    """Judged DANGEROUS with only the unjudged release open: kept whatever its verdict's size, its refusal answers the
-    identical call; rootless, nothing is kept and the call is judged again. My human's card releases nothing."""
+    """Judged DANGEROUS with only the unjudged release open, rootless or not: kept whatever its verdict's size, its
+    refusal answers the identical call, and my human's card releases nothing (their answer earns one new reading).
+    Once the work's bound no longer keeps it, it is read afresh and never leaves unread: while the checker is down
+    the card still releases nothing. A call no reading judged keeps its card."""
     h = supervisor
     exits("release")  # only unchecked release, not a known-DANGEROUS override
-    ctx = (SimpleNamespace(task_metadata={"work_kind": "owner"}, drive_root=h.ctx.drive_root,
-                           _current_llm_call_meta={"llm_call_id": "first"}) if rootless else h.ctx)
+    ctx = SimpleNamespace(task_metadata={"work_kind": "owner"}, drive_root=h.ctx.drive_root) if rootless else h.ctx
+    steps = iter(range(1, 100))
+
+    def check(arguments):
+        ctx._current_llm_call_meta = {"llm_call_id": f"step-{next(steps)}"}
+        return h.module.check_safety("place_reply", arguments, ctx=ctx)
     monkeypatch.setattr(h.module, "_SAFETY_PRIOR_BYTE_BUDGET", 1000)
-    args = {"text": "kept words", "destination": "room"}
+    args, down = {"text": "kept words", "destination": "room"}, RuntimeError("provider_failed: down")
     h.replies.append({"status": "DANGEROUS", "reason": "Not permitted. " * 300})
-    assert not h.module.check_safety("place_reply", args, ctx=ctx)[0]
+    assert not check(args)[0]
     h.replies.append({"status": "SAFE", "reason": "An unrelated ordinary message."})
-    assert h.module.check_safety("place_reply", {**args, "text": "other words"}, ctx=ctx) == (True, "")
+    assert check({**args, "text": "other words"}) == (True, "")
+    assert not check(args)[0] and len(h.calls) == 2, "its kept verdict answers"
     _answered(h, "card-later", "place_reply", args, ctx)
-    ctx._current_llm_call_meta = {"llm_call_id": "second"}
     h.replies.append({"status": "DANGEROUS", "reason": "Still not permitted."})
-    assert not h.module.check_safety("place_reply", args, ctx=ctx)[0]
-    assert len(h.calls) == (3 if rootless else 2)
+    assert not check(args)[0] and len(h.calls) == 3, "the card releases nothing"
+    h.replies.append({"status": "DANGEROUS", "reason": "Not permitted either. " * 300})
+    assert not check({**args, "text": "newer words"})[0]
+    assert h.module._subject_digest("place_reply", args) not in h.module._PRIOR_VERDICTS[h.module._work_key(ctx)]
+    for calls in (5, 6):  # no longer kept: read afresh, and the card answers nothing while the checker is down
+        h.replies.append(down)
+        ok, message = check(args)
+        assert not ok and message.startswith("⚠️ SAFETY_UNAVAILABLE") and SAID[RELEASE] not in message
+        assert len(h.calls) == calls
     assert not [e for e in h.events if e["type"] == "safety_sent_without_assessment"]
+    fresh = {**args, "text": "never judged"}
+    h.replies.append(down)
+    ok, message = check(fresh)
+    assert not ok and SAID[RELEASE] in message
+    _answered(h, "card-fresh", "place_reply", fresh, ctx)
+    ok, message = check(fresh)
+    assert ok and "(card-fresh), without a reading." in message and len(h.calls) == 7
+    assert [e["quiz_id"] for e in h.events if e["type"] == "safety_sent_without_assessment"] == ["card-fresh"]
 
 
 @pytest.mark.parametrize("declared", [True, False])
@@ -363,25 +393,34 @@ def test_a_preanswered_card_after_a_required_check_uses_only_the_dangerous_relea
 
 
 @pytest.mark.parametrize("case", ["unmanaged", "none", "both"])
-def test_no_exit_is_offered_where_nothing_was_kept(supervisor, exits, monkeypatch, case):
-    """A rootless call keeps no refusal or hold: their refusal and hold name no repeat, no closed repeat and no card,
-    and their next issue is checked again. A rooted refusal is kept whatever its verdict's size, never held for it."""
+def test_a_rootless_context_keeps_its_own_returns_and_no_context_keeps_nothing(supervisor, exits, monkeypatch, case):
+    """A context with no root task keeps its returned calls under a key minted once on it: its later step meets the
+    exits a rooted work's does and its bundle the same pending row, and another rootless context sees neither.
+    Without a context nothing is kept and no exit is named. A rooted refusal is kept whatever its verdict's size,
+    never held for it."""
     from ouroboros import place_guard
 
     h = supervisor
-    exits(case)
-    monkeypatch.setattr(place_guard, "call_place_facts", lambda *a, **kw: {
-        "places": [{"place_id": "p", "place_label": "Telegram · Team"}]})
-    rootless = SimpleNamespace(task_metadata={"work_kind": "owner"}, drive_root=h.ctx.drive_root,
-                               _current_llm_call_meta={"llm_call_id": "llm-round-1"})
-    named = (*SAID.values(), CLOSED)
-    h.replies.extend([{"status": "DANGEROUS", "reason": "not delegated"}, RuntimeError("provider_failed")])
-    for text in ("refused", "held"):
-        ok, message = h.module.check_safety("place_reply", {"place_id": "p", "text": text}, ctx=rootless)
-        assert not ok and not any(phrase in message for phrase in named), message
-    rootless._current_llm_call_meta = {"llm_call_id": "llm-round-2"}
-    assert h.module.check_safety("place_reply", {"place_id": "p", "text": "refused"}, ctx=rootless) == (True, "")
-    assert len(h.calls) == 3, "nothing kept: the same call is checked again"
+    repeat = exits(case)[REPEAT]
+    monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
+    monkeypatch.setattr(place_guard, "call_place_facts", lambda ctx, *a, **kw: {  # no context names no place
+        "places": [{"place_id": "p", "place_label": "Telegram · Team"}]} if ctx is not None else {})
+    one, two = (SimpleNamespace(task_metadata={"work_kind": "owner"}, drive_root=h.ctx.drive_root,
+                                _current_llm_call_meta={"llm_call_id": "llm-round-1"}) for _ in range(2))
+    command, named = {"cmd": "rm -rf ~/scratch"}, (*SAID.values(), CLOSED)
+    h.replies.extend([{"status": "DANGEROUS", "reason": "deletes a folder"}] * 2)
+    ok, message = h.module.check_safety("run_command", command, ctx=one)
+    assert not ok and (SAID[REPEAT] in message, CLOSED in message) == (repeat, not repeat), message
+    ok, message = h.module.check_safety("run_command", command, ctx=None)
+    assert not ok and not any(phrase in message for phrase in named), message  # nothing kept, no exit named
+    one._current_llm_call_meta = two._current_llm_call_meta = {"llm_call_id": "llm-round-2"}
+    h.replies.extend([{"status": "SAFE", "reason": "fine"}] * 2)
+    assert h.module.check_safety("run_command", command, ctx=two)[0] and len(h.calls) == 3, "never another's record"
+    assert "returned_and_pending" not in h.calls[-1]["user_prompt"]
+    assert h.module.check_safety("run_command", {"cmd": "rm -rf ~/scratch/old"}, ctx=one)[0]
+    assert '"returned_and_pending"' in h.calls[-1]["user_prompt"] and "deletes a folder" in h.calls[-1]["user_prompt"]
+    ok, message = h.module.check_safety("run_command", command, ctx=one)
+    assert (ok, len(h.calls)) == (repeat, 4) and (CLOSED in message) is not repeat
     monkeypatch.setattr(h.module, "_SAFETY_PRIOR_BYTE_BUDGET", 1000)
     h.replies.append({"status": "DANGEROUS", "reason": "not delegated " * 100})
     ok, message = h.module.check_safety("place_reply", {"place_id": "p", "text": "too much"}, ctx=h.ctx)
@@ -453,10 +492,19 @@ def test_no_safety_string_claims_an_effect(supervisor, exits, monkeypatch):
         "places": [{"place_id": "p", "place_label": "Telegram · Team"}], "targets": {"chat_id": ["-100"]}})
     reply = {"place_id": "p", "text": "Ship it.", "destination": {"conversation_id": "-100"}}
     assert not check("cyber_pro", "place_reply", reply, RuntimeError("provider_failed: down"))  # words wait
+    _answered(h, "q4", "place_reply", reply)
+    h.later()
+    assert check("cyber_pro", "place_reply", reply)  # my human's card on words no reading judged
+    words = {**reply, "text": "Ship it on Friday."}
+    assert not check("advanced", "place_reply", words, {"status": "DANGEROUS", "reason": "not delegated"})
+    h.later()
+    assert not check("advanced", "place_reply", {**words, "request_id": "r-2"})  # the words' gate answers
     exits("none")
     assert not check("advanced", "run_command", {"cmd": "rm -rf /"}, {"status": "DANGEROUS", "reason": "wipes it"})
     said.append((False, h.module._unread("the complete mandatory evidence bundle is too large", "TOO_LARGE")))
-    assert len(said) == 10 and CLOSED in said[-2][1] and "A smaller call may fit" in said[-1][1]
+    assert len(said) == 13 and CLOSED in said[-2][1]
+    assert said[-1][1].endswith("that is no verdict either way. A smaller call may fit.")
+    assert "(q4), without a reading." in said[8][1] and "These words to this destination were read" in said[10][1]
     for ok, message in said:
         assert message.startswith("⚠️ SAFETY_NOTE: let through" if ok else (
             "⚠️ SAFETY_RETURNED: not run", "⚠️ SAFETY_UNAVAILABLE: not run")), message

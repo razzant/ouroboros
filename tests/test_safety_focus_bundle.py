@@ -16,6 +16,7 @@ from ouroboros import places as p
 from ouroboros.presence_admission import admit_presence_turn
 from ouroboros.presence_bindings import conversation_key
 from ouroboros.presence_runner import PresenceTurnEvent, _build_task
+from tests._safety_fixtures import reset_safety_stores
 from tests.test_place_focus import focus as _focus
 
 focus = _focus
@@ -41,8 +42,7 @@ def checker(monkeypatch):
     from ouroboros import safety
 
     prompts = []
-    safety._PRIOR_VERDICTS.clear()
-    monkeypatch.setattr(safety, "_RETURNED", type(safety._RETURNED)())
+    reset_safety_stores()
     monkeypatch.setattr(safety, "_SAFETY_STORM_UNTIL", 0)
     monkeypatch.setattr(safety, "_resolve_safety_routing", lambda: (False, False, None))
     monkeypatch.setattr(safety, "_emit_durable_safety_event", lambda ctx, event: None)
@@ -55,7 +55,7 @@ def checker(monkeypatch):
         return {"content": json.dumps({"status": "SAFE", "reason": "fine"})}, {}
     monkeypatch.setattr(safety, "_safety_model_call", call)
     yield prompts
-    safety._PRIOR_VERDICTS.clear()
+    reset_safety_stores()
 
 
 def _focus_task(root, *, text="hello there", thread="", staged=(), conversation=None, message=None):

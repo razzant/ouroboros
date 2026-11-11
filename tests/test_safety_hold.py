@@ -160,8 +160,8 @@ def test_my_humans_yes_on_an_exact_held_mcp_call_runs_it_on_a_later_decision(sup
 
 def test_my_humans_card_releases_a_dangerous_mcp_call_and_an_unread_one(supervisor, monkeypatch):
     """Outside Cyber Pro a DANGEROUS reading of an MCP call waits for my human's card on its exact call: a card on
-    another argument releases nothing and buys no new reading, the card on the call releases it in a later step
-    without one. A call no reading judged runs on its own card at once, unread."""
+    another argument releases nothing (a later word of my human, it earns one new reading), the card on the call
+    releases it in a later step without one. A call no reading judged runs on its own card at once, unread."""
     h = supervisor
     monkeypatch.setattr(_tool_effects, "effect_of", REAL_EFFECT_OF)
     monkeypatch.setattr(_tool_effects, "_MCP_ANNOTATIONS", {})
@@ -173,14 +173,17 @@ def test_my_humans_card_releases_a_dangerous_mcp_call_and_an_unread_one(supervis
     assert not ok and "waits for your human" in message
     h.ctx._owner_directives = card(other)
     h.later()
-    assert not h.module.check_safety(name, call, ctx=h.ctx)[0] and len(h.calls) == 1
+    h.replies.append({"status": "DANGEROUS", "reason": "still deletes a project", "speech": False})
+    assert not h.module.check_safety(name, call, ctx=h.ctx)[0] and len(h.calls) == 2
     h.ctx._owner_directives = card(call)
     h.later()
     ok, message = h.module.check_safety(name, call, ctx=h.ctx)
-    assert ok and "(q3)" in message and len(h.calls) == 1 and h.events[-1]["type"] == "safety_sent_despite_check"
+    assert ok and "(q3), without a new reading." in message and len(h.calls) == 2
+    assert h.events[-1]["type"] == "safety_sent_despite_check"
     h.ctx._owner_directives = card(other)
     ok, message = h.module.check_safety(name, other, ctx=h.ctx)
-    assert ok and "(q3)" in message and len(h.calls) == 1 and h.events[-1]["type"] == "safety_sent_without_assessment"
+    assert ok and "(q3), without a reading." in message and len(h.calls) == 2
+    assert h.events[-1]["type"] == "safety_sent_without_assessment"
 
 
 def test_my_humans_card_releases_an_unjudged_undeclared_call(supervisor):

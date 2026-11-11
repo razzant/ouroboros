@@ -141,6 +141,25 @@ def test_call_ids_decide_replay_and_each_request_is_recorded_once(host_world, mo
     assert [(is_request(row, 'same-1'), is_request(row, 'same-2')) for row in requests] == [(True, False), (False, True)]
 
 
+def test_each_tool_round_is_the_step_a_reissue_is_read_against(host_world):
+    """A live call has no model call per tool round, so each round stamps its own ``round_id`` on the context's call
+    meta (what Safety reads a returned call's re-issue against), keeping what the meta already held."""
+    host, seen = host_world.host, []
+
+    def handler(ctx, **_):
+        seen.append(dict(ctx._current_llm_call_meta))
+        return 'read.'
+    host.tools.override_handler('get_task_result', handler)
+    host.ctx._current_llm_call_meta, start = {'origin': 'kept'}, host.rounds
+
+    async def run():
+        for call_id in ('round-a', 'round-b'):
+            await host.tool_batch([invocation(call_id, 'get_task_result', task_id='none')])
+    asyncio.run(run())
+    rounds = [f'{host.ctx.task_id}:call-tools:{start + n}' for n in (1, 2)]
+    assert seen == [{'origin': 'kept', 'round_id': round_id} for round_id in rounds]
+
+
 def test_an_effect_s_loaded_tools_and_image_follow_its_unit_while_history_changes(host_world, monkeypatch, tmp_path):
     import ouroboros.safety as safety
     import ouroboros.tools.vision as vision
