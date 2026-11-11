@@ -33,24 +33,22 @@ export const ROWS = [
         aliases: ['Task Lifetime Limit (s)', 'longest task'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
 
-    // Dashboard › Consciousness: what it does on its own, its two doors, then its fold. The strip's labels are
-    // AUTONOMY_LEVELS (consciousness_autonomy.js); a test keeps the two equal.
+    // Dashboard › Consciousness: the card "On its own" (the first four, then its fold), then the doors of "Around it".
+    // The strip's labels are AUTONOMY_LEVELS (consciousness_autonomy.js); a test keeps the two equal. A row without a
+    // meta says its value in its own words on the tab (the chosen level, the range in minutes or hours).
     { id: 'OUROBOROS_CONSCIOUSNESS_AUTONOMY', keys: ['OUROBOROS_CONSCIOUSNESS_AUTONOMY'], page: 'dashboard:consciousness', fold: false,
-        name: 'How far it goes', meta: 'What it may do when nobody asked.',
-        more: 'Advises: On its own it studies, keeps its memory and tells you; it changes nothing outside. '
-            + 'Acts: Also acts on its own: starts work, runs commands, speaks and acts in places. It does not change itself. '
-            + 'Evolves: Also changes itself: its own code, its settings, connecting new places.',
+        name: 'How far it goes', meta: '', more: '',
         control: { kind: 'strip', options: [{ value: 'observe', label: 'Advises' }, { value: 'act', label: 'Acts' },
             { value: 'full', label: 'Evolves' }] },
         aliases: ['Autonomy', 'Consciousness autonomy'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'OUROBOROS_BG_WAKEUP', keys: ['OUROBOROS_BG_WAKEUP_MIN', 'OUROBOROS_BG_WAKEUP_MAX'], page: 'dashboard:consciousness', fold: false,
-        name: 'Wakes every', meta: 'It picks a moment inside this range.', more: '',
+        name: 'Wakes every', meta: '', more: '',
         control: { kind: 'pair', unit: 's', min: 60, labels: ['Shortest wait, in seconds', 'Longest wait, in seconds'] },
         aliases: ['Shortest wake interval (s)', 'Longest wake interval (s)', 'wake interval'],
         writer: 'wakeRange', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'OUROBOROS_CONSCIOUSNESS_MAX_TASKS', keys: ['OUROBOROS_CONSCIOUSNESS_MAX_TASKS'], page: 'dashboard:consciousness', fold: false,
-        name: 'Own tasks at once', meta: 'Zero: it thinks and writes, and starts no tasks.', more: 'Work you asked for never counts.',
+        name: 'Own tasks at once', meta: 'Zero: it thinks and writes, and starts no tasks.', more: '',
         control: { kind: 'number', min: 0, max: 32 },
         aliases: ['Max concurrent tasks', 'its own tasks'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
@@ -59,31 +57,33 @@ export const ROWS = [
         control: { kind: 'door' },
         aliases: [],
         writer: '', codec: '', confirm: '', hiddenWhen: '' },
-    { id: 'consciousness-model', keys: [], page: 'dashboard:consciousness', fold: false,
-        name: 'Thinks with', meta: 'Its model, chosen in Models.', more: '',
-        control: { kind: 'door' },
-        aliases: [],
-        writer: '', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'OUROBOROS_PRESENCE_MAX_ACTIVE', keys: ['OUROBOROS_PRESENCE_MAX_ACTIVE'], page: 'dashboard:consciousness', fold: true,
         name: 'Concurrent conversations', meta: 'Places it talks in at the same time. Others wait their turn.', more: '',
         control: { kind: 'number', min: 1, max: 20 },
         aliases: ['conversations at once'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
+    { id: 'consciousness-model', keys: [], page: 'dashboard:consciousness', fold: false,
+        name: 'Thinks with', meta: '', more: '',
+        control: { kind: 'door' },
+        aliases: [],
+        writer: '', codec: '', confirm: '', hiddenWhen: '' },
+    { id: 'consciousness-places', keys: [], page: 'dashboard:consciousness', fold: false,
+        name: 'Where it lives', meta: 'Its places, their words and their circles.', more: '',
+        control: { kind: 'door' },
+        aliases: [],
+        writer: '', codec: '', confirm: '', hiddenWhen: '' },
 
-    // Dashboard › Evolution: whether a cycle may follow your tasks (one choice over two keys), its floor and its
-    // standing direction.
+    // Dashboard › Evolution: whether a cycle may follow your tasks (one choice over two keys, said in its own words on
+    // the tab), its floor, and its standing direction (a card of its own).
     { id: 'OUROBOROS_POST_TASK_EVOLUTION', keys: ['OUROBOROS_POST_TASK_EVOLUTION', 'OUROBOROS_POST_TASK_EVOLUTION_CADENCE'],
         page: 'dashboard:evolution', fold: false,
-        name: 'After finishing your tasks', meta: 'A cycle it chooses runs later, once it is idle.',
-        more: 'After each task, it asks itself whether one improvement is worth a cycle. Every N tasks, it asks after '
-            + 'every Nth task. Every finished task counts, chats included.',
+        name: 'After finishing your tasks', meta: '', more: '',
         control: { kind: 'custom', options: [{ value: 'off', label: 'Off' }, { value: 'llm', label: 'After each task' },
             { value: 'every_n', label: 'Every N tasks' }] },
         aliases: ['Post-Task Self-Evolution', 'Every N Tasks', 'evolution cadence'],
         writer: 'evolutionWhen', codec: 'evolutionWhen', confirm: '', hiddenWhen: '' },
     { id: 'OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD', keys: ['OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD'], page: 'dashboard:evolution', fold: false,
-        name: 'Start only above', meta: 'Budget that must be left before a cycle starts.',
-        more: '0 leaves it to the other limits. A running cycle still keeps to the per-task cap and the total budget.',
+        name: 'Start only above', meta: 'Budget that must be left before a cycle starts. 0 sets no floor.', more: '',
         control: { kind: 'number', unit: '$', min: 0 },
         aliases: ['Post-task Start Floor (USD)', 'start floor'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
@@ -93,21 +93,20 @@ export const ROWS = [
         aliases: ['Standing Objective (optional)', 'standing objective'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
 
-    // Dashboard › Updates: which official branch Update follows. A deployment that updates the installation itself
-    // leaves the row out.
+    // Dashboard › Updates: which official branch Update follows, each choice with its sentence. A deployment that
+    // updates the installation itself leaves the row out.
     { id: 'OUROBOROS_UPDATE_CHANNEL', keys: ['OUROBOROS_UPDATE_CHANNEL'], page: 'dashboard:updates', fold: false,
-        name: 'Channel', meta: 'Which official branch Update follows.',
-        more: 'Stable follows released code on main, the default. QA follows ouroboros-stable. Development follows '
-            + 'ouroboros. Your own work branch stays ouroboros.',
-        control: { kind: 'strip', options: [{ value: 'stable', label: 'Stable' }, { value: 'qa', label: 'QA' },
-            { value: 'development', label: 'Development' }] },
-        aliases: ['Update Channel', 'release channel'],
+        name: 'Which updates', meta: '', more: '',
+        control: { kind: 'custom', options: [
+            { value: 'stable', label: 'Stable', note: 'Released versions. The main branch.' },
+            { value: 'qa', label: 'QA', note: 'Release candidates. The ouroboros-stable branch.' },
+            { value: 'development', label: 'Development', note: 'Every change as it lands. The ouroboros branch.' }] },
+        aliases: ['Update Channel', 'Channel', 'release channel'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: 'managedDeployment' },
 
-    // Dashboard › Storage: how long finished work is kept, in its Cleanup part.
+    // Dashboard › Storage: how long finished work is kept, the first row of its Cleanup card.
     { id: 'OUROBOROS_GC_RETENTION_DAYS', keys: ['OUROBOROS_GC_RETENTION_DAYS'], page: 'dashboard:storage', fold: false,
-        name: 'Keep finished work for', meta: 'Older working copies and task files are removed. Project folders stay.',
-        more: 'It covers the working copies agents used, the folders of finished tasks and leftover service logs.',
+        name: 'Keep finished work for', meta: 'Older working copies and task files are removed. Project folders stay.', more: '',
         control: { kind: 'number', unit: 'days', min: 1, max: 365 },
         aliases: ['GC Retention (days)', 'retention'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },

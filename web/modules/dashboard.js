@@ -2,6 +2,7 @@ import { bindPageHeader, bindTabStrip, renderPageHeader, renderTabStrip } from '
 import { SHELL_ICONS } from './page_icons.js';
 import { bindSettingRows, readSettings, settingsRow } from './settings_controls.js';
 import { rowsOf } from './settings_rows.js';
+import { escapeHtmlAttr as escape } from './ui_primitives.js';
 
 // By importance and expected use (docs/DESIGN.md §5): the log first and by default, then what
 // runs now, what Ouroboros does on its own (consciousness and its places) and what it costs, then
@@ -22,27 +23,58 @@ const DASHBOARD_TABS = [
 const BACK_LAYER = 'dashboard-back';
 
 /**
- * A tab's settings: its rows of settings_rows.js (page `dashboard:<tab>`) drawn once into `host`, which lies outside
- * every region the tab repaints, the rare ones in a fold named `fold`; each row saves itself. The rows are read when
- * the tab is shown, painted again after a save on any page and read again after one of their own. `custom` draws a
- * custom control, `openDoor(row)` takes a door's press, `onPaint(settings)` follows each paint with the last read,
- * `onSaved(rowId)` hears this tab's own saves. Answers `{ dispose }`.
+ * A tab's settings: its rows of settings_rows.js (page `dashboard:<tab>`), each saving itself, drawn once into `host`,
+ * which lies outside every region the tab repaints. `cards` are the objects they stand in, `{ title, lead, label, rows,
+ * fold, solo }`: `rows` names a card's rows by id (one card without it takes the rest), `fold` names the fold of its
+ * rare rows, and a `solo` card is one row drawn as the card itself (its name the title, its meta the lead, its control
+ * the body). Without `cards` the rows go straight into `host`, a part of a card the tab already has. The rows are read
+ * when the tab is shown, painted after a save on any page and read again after one of their own. `custom(row)` draws a
+ * custom control, `openDoor(row)` takes a door's press, `onSaved(rowId)` hears this tab's own saves, and
+ * `words(settings)` says what a row adds from the last read: `{ [rowId]: { caption, value } }`, the caption in its meta
+ * line and a door's value before its chevron. Answers `{ dispose }`.
  */
-export function mountTabSettings(host, tab, { state, title = '', fold = '', custom = null, openDoor = null, onPaint = null, onSaved = null } = {}) {
+export function mountTabSettings(host, tab, { state, cards = null, custom = null, openDoor = null, words = null, onPaint = null, onSaved = null } = {}) {
     const page = `dashboard:${tab}`;
     const ctx = { custom, openDoor };
-    const draw = (inFold) => rowsOf(page, { fold: inFold }).map((row) => settingsRow(row, ctx)).join('');
-    const folded = draw(true);
-    host.innerHTML = `${title ? `<h3 class="dashboard-card-title">${title}</h3>` : ''}${draw(false)}`
-        + (folded ? `<details class="ui-disclosure dashboard-settings-more"><summary>${fold}</summary>${folded}</details>` : '');
+    const named = new Set((cards || []).flatMap((card) => card.rows || []));
+    const draw = (card, inFold) => rowsOf(page, { fold: inFold }).filter((row) => (card.rows ? card.rows.includes(row.id) : !named.has(row.id)))
+        .map((row) => settingsRow(row, ctx)).join('');
+    const body = (card) => {
+        const folded = draw(card, true);
+        return `${card.title ? `<h3 class="dashboard-card-title">${escape(card.title)}</h3>` : ''}`
+            + `${card.lead ? `<p class="dashboard-settings-lead">${escape(card.lead)}</p>` : ''}${draw(card, false)}`
+            + (folded ? `<details class="ui-disclosure dashboard-settings-fold" data-settings-fold><summary>${escape(card.fold)}</summary>${folded}</details>` : '');
+    };
+    host.innerHTML = cards ? cards.map((card) => `<section class="ui-card dashboard-settings"${card.solo ? ' data-solo' : ''}`
+        + ` aria-label="${escape(card.label || card.title)}">${body(card)}</section>`).join('') : body({});
     const rows = bindSettingRows(host, ctx);
+    const nodes = Array.from(host.querySelectorAll('[data-setting-row]'));
     const shown = () => !document.hidden && state?.activePage === 'dashboard' && state?.dashboardActiveSubtab === tab;
     let settings = null;
     let reads = 0;
+    // A row's own words from the last read: made once, then only their text changes.
+    const say = (node, kind, text) => {
+        let span = node.querySelector(`[data-row-${kind}]`);
+        if (!span && text) {
+            span = host.ownerDocument.createElement('span');
+            span.className = `settings-row-${kind}`;
+            span.setAttribute(`data-row-${kind}`, '');
+            const box = node.querySelector(kind === 'caption' ? '.ui-row-meta' : '.ui-row-actions');
+            box.insertBefore(span, kind === 'caption' ? node.querySelector('[data-setting-result]') : box.firstChild);
+        }
+        if (span && span.textContent !== (text || '')) span.textContent = text || '';
+    };
     const paint = () => {
         rows.paint();
+        const said = (settings && words?.(settings)) || {};
+        nodes.forEach((node) => {
+            say(node, 'caption', said[node.dataset.settingRow]?.caption);
+            say(node, 'value', said[node.dataset.settingRow]?.value);
+        });
         // A card whose every row is left out (a managed deployment's channel) takes no room.
-        host.hidden = !Array.from(host.querySelectorAll('[data-setting-row]')).some((node) => !node.hidden);
+        (cards ? Array.from(host.children) : [host]).forEach((card) => {
+            card.hidden = !Array.from(card.querySelectorAll('[data-setting-row]')).some((node) => !node.hidden);
+        });
         onPaint?.(settings);
     };
     const read = async () => {
@@ -85,10 +117,10 @@ export function focusSettingRow(panel, id) {
 }
 
 /**
- * The way back to Settings from a tab it opened (PINS §2): a first row "‹ Settings" above the tab's scroller and one
- * `page: true` layer, so Escape and the system's Back return there too, on a desk and on a phone alike. Every way of
- * returning blurs a focused field first, so a typed value is saved as it would be on leaving it; leaving the tab or
- * the Dashboard any other way drops it. Answers `{ show(panel, path), clear() }`.
+ * The way back to Settings from a tab it opened (PINS §2): a first row that names Settings, above the tab's scroller,
+ * drawn as a Settings page draws its own Back (settings.css), and one `page: true` layer, so Escape and the system's
+ * Back return there too. Every way of returning leaves a focused field first, so a typed value is saved as it would be
+ * on leaving it; leaving the tab or the Dashboard any other way drops the row. Answers `{ show(panel, path), clear() }`.
  */
 export function settingsReturn({ layers = null, openSettings = null } = {}) {
     let row = null;
@@ -101,13 +133,13 @@ export function settingsReturn({ layers = null, openSettings = null } = {}) {
         const field = document.activeElement;
         if (field && row?.parentElement?.contains(field)) field.blur?.();
         clear();
-        void openSettings(path);
+        void openSettings?.(path);
     };
     const show = (panel, path) => {
         clear();
         row = document.createElement('div');
-        row.className = 'dashboard-back';
-        row.innerHTML = `<button type="button" class="btn btn-ghost btn-sm" data-dashboard-back><span aria-hidden="true">${SHELL_ICONS.back}</span><span>Settings</span></button>`;
+        row.className = 'settings-back-row dashboard-back';
+        row.innerHTML = `<button type="button" class="settings-back ui-hit-area" data-dashboard-back aria-label="Back to Settings">${SHELL_ICONS.back}<span>Settings</span></button>`;
         row.querySelector('[data-dashboard-back]').addEventListener('click', () => go(path));
         panel.insertBefore(row, panel.firstChild);
         layers?.push({ id: BACK_LAYER, el: panel, page: true, modal: false, focus: false, opener: null, onClose: () => go(path) });
@@ -115,7 +147,7 @@ export function settingsReturn({ layers = null, openSettings = null } = {}) {
     return { show, clear };
 }
 
-export function initDashboard({ state, layers = null, openSettings = null, showPage = null }) {
+export function initDashboard({ state, layers = null, openSettings = null }) {
     const page = document.createElement('div');
     page.id = 'page-dashboard';
     page.className = 'page app-page-glass';
@@ -152,8 +184,7 @@ export function initDashboard({ state, layers = null, openSettings = null, showP
     });
     // On a desk the six tabs are the bar's start (docs/DESIGN.md "Page header").
     const disposeBar = bindPageHeader(page.querySelector('.app-page-header'));
-    // Until Settings opens by path, its page is where Back leads.
-    const back = settingsReturn({ layers, openSettings: openSettings || (() => showPage?.('settings')) });
+    const back = settingsReturn({ layers, openSettings });
     const onPageShown = (event) => { if (event.detail?.page !== 'dashboard') back.clear(); };
     window.addEventListener('ouro:page-shown', onPageShown);
 
@@ -177,7 +208,6 @@ export function initDashboard({ state, layers = null, openSettings = null, showP
 
     activateTab(DASHBOARD_TABS.some((tab) => tab.value === state.dashboardActiveSubtab)
         ? state.dashboardActiveSubtab : 'logs');
-    page.activateDashboardTab = activateTab;
     return {
         page,
         activateTab,
