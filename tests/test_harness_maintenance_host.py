@@ -644,6 +644,7 @@ def test_mind_targets_preserve_the_requested_selector_and_pause(tmp_path, monkey
     assert crossed == [ctx]
     schemas = {entry.name: entry.schema for entry in tools.maintenance_tool_entries()}
     assert schemas["maintain_harness"]["parameters"]["properties"]["target"]["enum"] == ["latest", "version"]
+    assert "latest also installs a program that is not installed" in schemas["maintain_harness"]["description"]
 
 
 @pytest.mark.parametrize("surface", ["connect", "tool", "row", "background"])

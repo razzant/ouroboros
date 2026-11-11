@@ -89,6 +89,8 @@ on:
     paths:
       - 'ouroboros/gateways/**'
       - 'ouroboros/claudexor_daemon.py'
+      - 'ouroboros/harness_maintenance.py'
+      - 'ouroboros/harness_program_facts.py'
       - 'ouroboros/claudexor_runtime.py'
       - 'ouroboros/claudexor_runtime_pin.json'
       - 'ouroboros/platform_layer.py'
@@ -120,6 +122,8 @@ on:
     paths:
       - 'ouroboros/gateways/**'
       - 'ouroboros/claudexor_daemon.py'
+      - 'ouroboros/harness_maintenance.py'
+      - 'ouroboros/harness_program_facts.py'
       - 'ouroboros/claudexor_runtime.py'
       - 'ouroboros/claudexor_runtime_pin.json'
       - 'ouroboros/platform_layer.py'

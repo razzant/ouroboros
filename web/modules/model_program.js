@@ -101,7 +101,7 @@ export function bindModelProgramFooter(input, footer, changed) {
     let programs = [], opened = false, signature = '';
     const view = { pending: () => programs.some((program) => {
         const state = programsController().view(program.harness);
-        return state.request || maintenanceOperationPending(state.operation);
+        return maintenanceOperationPending(state.operation);
     }), render() {
         const html = programs.map((program) => modelProgramMarkup(program, programsController().view(program.harness))).join('');
         footer.hidden = !programs.length;

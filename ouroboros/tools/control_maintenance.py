@@ -76,6 +76,7 @@ def maintenance_tool_entries() -> list[ToolEntry]:
             "name": "maintain_harness",
             "description": (
                 "Request the engine's declared CLI update/return capability, or cancel an operation. "
+                "Update with target latest also installs a program that is not installed. "
                 "Inspect first: available actions and refusal reasons come from the engine. "
                 "This changes installed program files in place; new native starts may fail, and returning a version "
                 "may require vendor network access. It never changes accounts or starts a login. "

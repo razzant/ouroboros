@@ -83,7 +83,7 @@ test('opening renews a changed producer once; status subscription exists only fo
     const doc = new EventTarget(); doc.getElementById = () => null;
     t.mock.method(globalThis, 'fetch', async (url, options = {}) => {
         let body = {};
-        if (String(url).includes('/maintenance/harnesses')) body = {harnesses: [{harness: 'test-open', selection: {...producer, version}, actions: {update: {available: true}}, updateAvailable: 'yes', operation: receipt}]};
+        if (String(url).includes('/maintenance/harnesses')) body = {harnesses: [{harness: 'test-open', selection: {path, version}, actions: {update: {available: true}}, updateAvailable: 'yes', operation: receipt}]};
         else if (String(url).includes('/maintenance/operations')) {
             if (options.method === 'POST') receipt = {id: 'open-op', harness: 'test-open', state: 'running', termination: 'not_applicable'};
             body = receipt;
@@ -92,7 +92,7 @@ test('opening renews a changed producer once; status subscription exists only fo
     });
     const oldDoc = globalThis.document; globalThis.document = doc;
     t.after(() => { globalThis.document = oldDoc; });
-    let version = '2.0.0', raw = 0, native = 0, subscriptions = 0, releases = 0, poll, receipt = null;
+    let path = producer.path, version = '2.0.0', raw = 0, native = 0, subscriptions = 0, releases = 0, poll, receipt = null;
     t.mock.method(claudexorStatus, 'refresh', async () => { native++; });
     t.mock.method(claudexorStatus, 'subscribe', (callback) => { subscriptions++; poll = callback; return () => { releases++; }; });
     const input = {dataset: {}, ownerDocument: {activeElement: null}};
@@ -108,10 +108,13 @@ test('opening renews a changed producer once; status subscription exists only fo
     binding.update([{...group, programs: [{...producer, version}]}]);
     binding.close(); binding.open(); await flush();
     assert.equal(raw, 1); assert.equal(subscriptions, 0);
+    path += '-replacement'; binding.close(); binding.open(); await flush();
+    assert.equal(raw, 2, 'a path change also renews the list');
+    binding.update([{...group, programs: [{path, version}]}]);
     click({target: {closest: () => ({dataset: {programAction: 'latest'}, closest: () => ({dataset: {program: 'test-open'}})})}});
     await flush(); assert.equal(subscriptions, 1);
-    receipt = {...receipt, state: 'succeeded', termination: 'confirmed', after: {...producer, version}};
+    receipt = {...receipt, state: 'succeeded', termination: 'confirmed', after: {path, version}};
     poll({loading: false}); await flush();
-    assert.equal(releases, 1); assert.equal(raw, 2);
+    assert.equal(releases, 1); assert.equal(raw, 3);
     binding.dispose();
 });

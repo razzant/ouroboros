@@ -1506,7 +1506,6 @@ async function _init(store, restartDeps) {
     // page may not be visible yet, and the panel would sit on "Checking
     // daemon…" until the first tick (#125).
     state.store.refresh();
-    void state.maintenance.refresh();
     renderRows();
     return true;
 }

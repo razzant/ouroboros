@@ -156,7 +156,8 @@ def test_platform_gate_runs_the_toolchain_witness_on_windows_pull_requests():
     workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
     triggers = workflow.get("on", workflow.get(True))
     for event in ("push", "pull_request"):
-        assert "scripts/claudexor_toolchain_smoke.py" in triggers[event]["paths"]
+        assert {"scripts/claudexor_toolchain_smoke.py", "ouroboros/harness_maintenance.py",
+                "ouroboros/harness_program_facts.py"} <= set(triggers[event]["paths"])
     assert triggers["pull_request"]["branches"] == ["ouroboros"]
     job = workflow["jobs"]["toolchain"]
     assert "if" not in job
