@@ -12,8 +12,8 @@ import { bindModelChoosers, modelChooserHtml, updateModelChooser } from './model
 import { disconnectPlace, failureText, normalizePlace, normalizePlaceStatus, PLACES_CHANGED_EVENT, readPlaceConnector, readPlaceRooms, readPlaces, updatePlace } from './consciousness_api.js';
 import { mountPlaceHistory, placeRoomsHtml } from './place_history.js';
 import {
-    PLACE_STATES, SILENT_CARD, WAKE_FACT_WORDS, accountIdText, authorWord, capitalized, listWords, placeService, placeStateOf, placeStateWord,
-    placeTitle, placedByWord, sameWords, signalLabels, wakeFactWord, writtenByWord,
+    PLACE_STATES, SILENT_CARD, WAKE_FACT_WORDS, accountIdText, authorWord, capitalized, inheritedModel, listWords, placeService, placeStateOf,
+    placeStateWord, placeTitle, placedByWord, sameWords, signalLabels, wakeFactWord, writtenByWord,
 } from './consciousness_words.js';
 
 /** Ask the Skills page for one installed skill's card, or Browse filtered to connectors. */
@@ -229,18 +229,40 @@ function folderHtml(place, ui) {
         <div class="ui-field-help" id="place-folder-help">An address, not a fence: work for this place starts here.</div>`;
 }
 
+/** What an empty Model field uses, in the field's own words: the circle's model, else the consciousness model, each
+ *  with the model's name when this read says it (`inheritedModel`). `placeholder` stands in the empty field, `help`
+ *  under it, `done` is said once the field was cleared and saved. */
+export function inheritedModelWords(place, circles) {
+    const { circle, model } = inheritedModel(place, circles?.find((entry) => entry.id === place.circle?.id) || null);
+    if (circle) {
+        return { placeholder: fmt("Uses {circle}'s model: {model}", { circle, model }),
+            help: fmt("The model it thinks with when it wakes here; empty uses {circle}'s model, {model}.", { circle, model }),
+            done: fmt("Now uses {circle}'s model: {model}.", { circle, model }) };
+    }
+    if (model) {
+        return { placeholder: fmt('Uses the consciousness model: {model}', { model }),
+            help: fmt('The model it thinks with when it wakes here; empty uses the Consciousness model in Models, {model}.', { model }),
+            done: fmt('Now uses the consciousness model: {model}.', { model }) };
+    }
+    return { placeholder: tr('places.model.empty', 'Empty uses the consciousness model'),
+        help: tr('places.model.help', 'The model it thinks with when it wakes here; empty uses the Consciousness model in Models.'),
+        done: tr('places.model.cleared', 'Now uses the consciousness model.') };
+}
+
+// The field holds only the place's own model; empty, the place inherits, and the placeholder and the help say from where.
 function moreHtml(place, ui) {
     const value = ui.drafts.model ?? place.model;
+    const words = inheritedModelWords(place, ui.circles);
     return `<details class="consciousness-more place-more"${ui.moreOpen ? ' open' : ''}>
             <summary><span class="consciousness-marker" aria-hidden="true">▸</span>More</summary>
             <div class="consciousness-more-body">
                 <label class="ui-field">Model
                     <div class="place-field-row">
-                        ${modelChooserHtml(`data-place-draft="model" aria-label="${escapeHtml(tr('places.model', 'Model'))}"`, value, 'place-model-options', ui.models || [], { placeholder: tr('places.model.empty', 'Empty uses the consciousness model') })}
+                        ${modelChooserHtml(`data-place-draft="model" aria-label="${escapeHtml(tr('places.model', 'Model'))}" aria-describedby="place-model-help"`, value, 'place-model-options', ui.models || [], { placeholder: words.placeholder })}
                         <button type="button" class="btn btn-default btn-sm" data-place-act="save-model">Save</button>
                     </div>
                 </label>
-                <div class="ui-field-help">The model it thinks with when it wakes here; empty uses the Consciousness model in Models.</div>
+                <div class="ui-field-help" id="place-model-help" data-i18n-fmt="places.model.help">${escapeHtml(words.help)}</div>
             </div>
         </details>`;
 }
@@ -329,6 +351,13 @@ export function showSheet(dialog, { returnFocus, onClose, onBack }) {
     return { close, body, get closed() { return closed; } };
 }
 
+/** What one `/api/model-catalog` answer suggests for a place's or a circle's Model field. Both store a route string,
+ *  and the local model has none (its row says `use_local`), so that row is left out. Throws for an unread catalog. */
+export function modelSuggestions(data) {
+    if (!Array.isArray(data?.items) || data.read_state === 'failed') throw new Error('The model catalog could not be read.');
+    return data.items.filter((item) => !item?.use_local);
+}
+
 /** The one write a press on the sheet asks for, as the contract's change; null when it needs no write. */
 export function placeChangeFor(action, place, { value = '', fact = '', note = '', actor = '', actorLabel = '', drafts = {} } = {}) {
     const facts = place.wakes.map((item) => item.fact);
@@ -368,7 +397,9 @@ const DONE_WORDS = {
     state: (place) => `Now ${placeStateOf(place.state)?.label || place.state}.`, 'add-wake': () => 'Added.', 'remove-wake': () => 'Removed.',
     'add-note': () => 'Note added.', 'remove-note': () => 'Note removed.', confirm: () => 'Confirmed as you.',
     'confirm-typed': () => 'Confirmed as you.', revoke: () => 'Removed from your accounts.',
-    'save-folder': () => 'Folder saved.', 'save-model': () => 'Model saved.',
+    'save-folder': () => 'Folder saved.',
+    // A cleared field says what the place inherits from now on.
+    'save-model': (place, circles) => (place.model ? 'Model saved.' : inheritedModelWords(place, circles).done),
     circle: (place, circles) => (place.circle ? fmt('Now in {circle}.', { circle: circles?.find((c) => c.id === place.circle.id)?.name || '' })
         : tr('circles.left', 'In no circle now.')),
     'keep-circle': () => tr('places.circle.kept', 'Your choice now.'),
@@ -569,9 +600,7 @@ export function openPlaceSheet(place, { returnFocus = document.activeElement, on
         if (!ui.moreOpen || modelsRead) return;
         modelsRead = true;
         try {
-            const data = await readModels({ cache: 'no-store', signal: abort.signal });
-            if (!Array.isArray(data?.items) || data.read_state === 'failed') throw new Error();
-            ui.models = data.items;
+            ui.models = modelSuggestions(await readModels({ cache: 'no-store', signal: abort.signal }));
             if (!sheet.closed) updateModelChooser(body.querySelector('[data-model-chooser]'), ui.models);
         } catch { ui.status.more = { text: tr('places.models.unavailable', 'Model suggestions could not be read; your model is kept.'), tone: 'warn' }; paint(); }
     }, true);

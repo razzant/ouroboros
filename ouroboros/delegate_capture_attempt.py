@@ -3,6 +3,13 @@
 The receipt lives on RunCustody. A terminal revision, binding or observed named-source
 change earns work; a clock does not. Transient failures may try once in a new body/child
 generation. Readers disclose debt without requesting another attempt.
+
+``collection_attempt`` binds inputs and outcomes, output included. Output retries
+need changed terminal facts, an explicit wait or a new body after transient failure;
+capture retries need new facts, explicit recapture or a new body/child after
+transient failure. Permissions and reclaimed/over-cap output need changed input
+or explicit retry. Ticks visit only runs owing work and decode no summaries;
+plain retained reads request no retry. Money retries stay local to collection.
 """
 from __future__ import annotations
 

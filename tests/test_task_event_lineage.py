@@ -62,8 +62,10 @@ def test_the_pooled_endpoint_stamps_lineage_and_chat_on_the_telemetry_lane_only(
     # Control events keep their producer shape (they are handled while RUNNING exists).
     done = {"type": "task_done", "task_id": "child-1", "status": "completed"}
     assert endpoint.stamp(done) == {"type": "task_done", "task_id": "child-1", "status": "completed"}
-    heartbeat = {"type": "task_heartbeat", "task_id": "child-1", "phase": "running"}
-    assert endpoint.stamp(heartbeat) == {"type": "task_heartbeat", "task_id": "child-1", "phase": "running"}
+    heartbeat = endpoint.stamp({"type": "task_heartbeat", "task_id": "child-1", "phase": "running"})
+    assert "_carrier_rss" in heartbeat, "the worker's own size rides every task's beat (memory admission)"
+    heartbeat.pop("_carrier_rss")
+    assert heartbeat == {"type": "task_heartbeat", "task_id": "child-1", "phase": "running"}
     send = {"type": "send_message", "task_id": "child-1", "text": "answer"}
     assert "root_task_id" not in endpoint.stamp(send) and "chat_id" not in send
 

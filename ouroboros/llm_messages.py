@@ -231,6 +231,46 @@ class _MessageShapingMixin:
     """Send-copy message transforms and reasoning-artifact predicates."""
 
     @classmethod
+    def _cache_declared_system_context(cls, source: List[Dict[str, Any]], payload: Dict[str, Any]) -> None:
+        """Use a spare Anthropic breakpoint for Main's complete starting context.
+
+        A rolling history entry cannot preserve the unmarked system tail after
+        compaction. Keep the declared governance/story endpoints and the rolling
+        one; C takes priority over the finalizer's optional tools-only endpoint.
+        No spare slot (e.g. a full separate handbook) means no change. Unsealed
+        prompts stay unchanged: caching their previously uncached C would buy a
+        write rather than merely split an already-cached prefix.
+
+        Called only by direct/OR Anthropic builders on their fresh payload, before
+        TTL finalization. The original transcript and native replay receipts are
+        never copied through a different lane's metadata scrubber here.
+        """
+        if not source or source[0].get("role") != "system":
+            return
+        leading = source[0]
+        declared = leading.get(STABLE_PREFIX_BLOCKS_KEY)
+        content = leading.get("content")
+        if (not isinstance(declared, int) or declared < 1 or not isinstance(content, list)
+                or len(content) <= declared or not all(
+                    isinstance(block, dict) and block.get("type") == "text"
+                    and isinstance(block.get("text"), str) for block in content)
+                or not content[-1]["text"].strip()):
+            return
+        if not any(message.get("role") in {"user", "tool"}
+                   and isinstance(message.get("cache_control"), dict) for message in source):
+            return
+        blocks = payload.get("system")
+        if blocks is None:
+            messages = payload.get("messages") or []
+            blocks = messages[0].get("content") if messages and messages[0].get("role") == "system" else None
+        if (not isinstance(blocks, list) or not blocks or not isinstance(blocks[-1], dict)
+                or blocks[-1].get("text") != content[-1]["text"]
+                or isinstance(blocks[-1].get("cache_control"), dict)
+                or len(cls._payload_cache_breakpoints(payload)) >= cls._MAX_CACHE_BREAKPOINTS):
+            return
+        blocks[-1]["cache_control"] = {"type": "ephemeral"}
+
+    @classmethod
     def _copy_messages_with_cache_policy(
         cls,
         messages: List[Dict[str, Any]],

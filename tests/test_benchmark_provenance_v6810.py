@@ -62,6 +62,15 @@ def test_a_settings_mapping_with_no_slots_fails_OPEN_and_discloses_it(monkeypatc
 # enforces — a new runtime code with no row here fails the suite, which is the only thing
 # that stops the vocabulary from being hand-copied beside the check again.
 _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
+    "task_model_invalid": (False, "gateway/task_model.py: malformed model act refused before admission; no execution is truncated"),
+    "presence_model_unsupported": (False, "owner_model.py: this control is unavailable for a Presence turn; the turn continues"),
+    "not_a_root_task": (False, "owner_model.py: a delegated actor cannot move a root primary; no execution ends"),
+    "model_control_unavailable": (False, "owner_model.py: no durable record for a primary act; execution is unchanged"),
+    "cancel_pending": (False, "owner_model.py: a pending cancellation excludes this model act; the cancellation owns any terminal"),
+    "model_action_state": (False, "owner_model.py: Return, Wait and Keep require a running fallback; refusing the act ends no work"),
+    "model_recents_pending": (False, "owner_model.py: the primary was saved but its suggestion write needs retry; no work is truncated"),
+    "model_queue_publish_failed": (False, "owner_model.py: primary saved, queue publication unconfirmed; not a task terminal"),
+    "model_wake_failed": (False, "owner_model.py: primary saved, wake unconfirmed; the same request can repair delivery"),
     # Logs reads refuse selectors, sources or byte ranges; no task is stopped.
     "invalid_view": (False, "gateway/logs.py unknown view (400); not a task terminal"),
     "invalid_log_source": (False, "gateway/logs.py scope/projection refusal (400); not execution truncation"),
@@ -377,6 +386,20 @@ def _runtime_reason_code_literals() -> dict[str, str]:
         # Conditional/fallback reason values remain producers; their spelling
         # need not be adjacent to the keyword on one source line.
         tree = parse(source)
+        if path.name == "owner_model.py":
+            # The endpoint forwards this typed exception's code, including the
+            # eligibility function's returned refusal; those are wire reasons too.
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                        and node.func.id == "ModelActRefused" and node.args):
+                    for code in values(node.args[0]):
+                        found.setdefault(code, f"{path.relative_to(root.parent)}:{node.lineno}")
+            eligibility = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "eligibility")
+            for node in ast.walk(eligibility):
+                if isinstance(node, ast.Return):
+                    for code in values(node.value):
+                        if code:
+                            found.setdefault(code, f"{path.relative_to(root.parent)}:{node.lineno}")
         forwarded = _forwarded_reason_arguments(tree)
         constants = {target.id: node.value for node in tree.body if isinstance(node, ast.Assign)
                      for target in node.targets if isinstance(target, ast.Name) and isinstance(node.value, ast.Constant)}

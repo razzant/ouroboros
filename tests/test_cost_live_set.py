@@ -48,7 +48,11 @@ PASSES = (*DUTY_NAMES, "extension-reconcile", "heartbeat", "state", "publication
 GROWTH = {"running": 50, "paused": 20, "pending": 61, "held": 122, "schedules": 35, "markers": 60}
 # (axis, pass) and pass -> the breach with its measured numbers and the unit that removes it, a strict xfail until that unit
 # lands, then the row goes. Both empty on 02.11: every row the base (1d88f843b) had was removed by the unit it named.
-GAPS: Dict[tuple, str] = {}
+GAPS: Dict[tuple, str] = {
+    ("held", "delegated-body"): "The body follows each live held run with its own job threads (one read, one follow, one "
+    "collection per run, so a quiet run delays no other): thread starts grow with the live held runs (0 to 36 here, 0 to 8 "
+    "on the stand). A follower thread that lives as long as its run would remove this.",
+}
 REST_GAPS: Dict[str, str] = {}
 # (pass -> counts its own work allows at rest). The duty exists to look at the open attempts: one indexed read, zero rows here.
 ALLOWED_AT_REST = {"abandoned_usage_reconciliation": {"usage_row_reads": 1}}

@@ -33,7 +33,7 @@ def pool(tmp_path, monkeypatch):
     for name in ("ADMISSION_RESERVATIONS", "ACCEPTANCE_FENCES", "BUDGET_ROOT_FENCES"):
         monkeypatch.setattr(queue, name, {})
     monkeypatch.setattr(workers, "WORKERS", slots)
-    monkeypatch.setattr(workers, "MAX_WORKERS", 1)
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", str(1))
     monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "")
     monkeypatch.setattr(workers, "repo_writer_admission_closed", lambda: "")
     monkeypatch.setattr(workers, "_reconcile_confirmed_dead_review_owner", lambda _pid: None)

@@ -96,7 +96,7 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
     "budget_pause": _handled(
         "supervisor.events_budget", "ouroboros/agent.py", idle_input=True),
     "mind_task_control": _handled(
-        "supervisor.events_mind_controls", "ouroboros/tools/control_mind.py", idle_input=True),
+        "supervisor.events_mind_controls", "ouroboros/tools/control_mind.py", "ouroboros/tools/control_models.py", idle_input=True),
     "budget_resume_child": _handled(
         # #1196 (owner Q9): the resumed root's model selects one paused child.
         "supervisor.events_budget", "ouroboros/tools/join_ledger.py", idle_input=True),
@@ -111,8 +111,6 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
         "supervisor.events_runtime_controls", "ouroboros/tools/control_runtime.py"),
     "ensure_project_scope": _handled(
         "supervisor.events_project_routing", "ouroboros/tools/control_delegation.py"),
-    "external_wait_lease": _handled(
-        "supervisor.events_worker_reports", "ouroboros/delegate_progress.py", idle_input=True),
     "llm_usage": _handled(
         "supervisor.events_budget", "ouroboros/agent.py",
         "ouroboros/pricing.py", "ouroboros/tools/search.py", "ouroboros/tools/vision.py",
@@ -125,6 +123,7 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
         "supervisor.events_worker_reports", "ouroboros/utils.py", lane=TELEMETRY_LANE,
         note="the envelope every worker log line rides; the payload types that "
              "need their own answer are the nested_log_event rows below"),
+    "work_lead": _handled("supervisor.events", "ouroboros/lead_fact.py"),
     "main_llm_call_state": _handled(
         "supervisor.events", "ouroboros/llm_observability.py",
         note="the last handler still resolving on the facade itself", idle_input=True),

@@ -11,6 +11,7 @@
  * ready yet (Starting…, no mark) and the owner's own Stop press on a card (Cancelling… / Finalizing…, moving). Whether something waits for the owner (`owner`: the server's `turn`) is a separate fact;
  * status_mark.js draws the two together.
  */
+import { paintCardModel } from './card_model.js';
 import { fmt, tr, tx } from './i18n.js';
 import { isTerminalTaskDetail, taskPresentation, taskTerminalPhase } from './log_events.js';
 import { startingStatus } from './host_starting_status.js';
@@ -34,7 +35,8 @@ const asked = (state) => list(state?.turn).some((item) => item?.kind === 'questi
 
 /** The state one chat instance shows before its first body: an idle room and no works. */
 export function emptyWorkState() {
-    return { room: IDLE_ROOM, works: [], episodes: new Map(), members: new Set(), attempts: new Map(), complete: false };
+    return { room: IDLE_ROOM, works: [], episodes: new Map(), members: new Set(), attempts: new Map(), complete: false,
+        main: null, leads: new Map() };
 }
 
 // What an incomplete body did not list again: still shown, never as confirmed work and never with controls or a line;
@@ -46,7 +48,9 @@ const unconfirmedWork = (work) => ({ ...work, activity: 'unknown', transition: '
  * One body applied to an instance's work state. `room` and `works` are this chat's (`works[].room`, keyed as the
  * server keys `rooms`); `episodes` maps every work's current episode task id to its work in EVERY room (a Main
  * portal's work runs in its Project) and `members` holds every member id; `attempts` is each census row's attempt,
- * so a control opened for one attempt of an episode is not pressed on the next. Only a complete supervisor-ready
+ * so a control opened for one attempt of an episode is not pressed on the next. `main` is Main's route as the body
+ * says it (the last one said, when this body does not) and `leads` the model fact of each activity row that
+ * publishes one, for a direct turn's card (CLIENT_CONTRACT §5). Only a complete supervisor-ready
  * body read over an open socket proves absence; an incomplete one keeps the works it omitted, unconfirmed. A body
  * without the projection, or a failed read (null), changes nothing.
  */
@@ -69,9 +73,12 @@ export function reconcileWorkState(prior, data, chatId, connected = true) {
         if (work.episode?.task_id) episodes.set(String(work.episode.task_id), work);
         for (const id of list(work.members?.ids)) members.add(String(id));
     }
-    const attempts = new Map(list(data.active_chat_activities).filter((row) => row?.activity_id)
-        .map((row) => [String(row.activity_id), row.task_attempt ?? null]));
-    return { room, works: [...listed, ...kept], episodes, members, attempts, complete };
+    const rows = list(data.active_chat_activities).filter((row) => row?.activity_id);
+    const attempts = new Map(rows.map((row) => [String(row.activity_id), row.task_attempt ?? null]));
+    const leads = new Map(rows.filter((row) => row.lead && typeof row.lead === 'object')
+        .map((row) => [String(row.activity_id), row.lead]));
+    const main = data.main_route && typeof data.main_route === 'object' ? data.main_route : before.main || null;
+    return { room, works: [...listed, ...kept], episodes, members, attempts, complete, main, leads };
 }
 
 /** A work's or a room's one short word, from its activity, transition and exact call (the cards' chip words). */
@@ -348,12 +355,24 @@ export function cardWorkView(work) {
  * Apart from the optional word, a work's live current episode keeps the work's look: its mark and whether something
  * in it waits for the owner (the server takes the turn from every member, a helper's included). A turn the body lists
  * is a fact even when another member could not be confirmed; a work an incomplete body omitted keeps no look.
+ * The card's model fact is painted from the same state (card_model.js): the work's published `lead`, or its
+ * activity row's for a direct turn; a Main portal, the collapsed form of a work shown in its own room, has none.
  */
 export function applyCardWorkViews(records, state) {
     let changed = false;
     for (const record of records?.values?.() || []) {
         if (record?.isSubagent) continue;
-        const work = state?.episodes?.get(String(record.groupId || ''));
+        const id = String(record.groupId || '');
+        const work = state?.episodes?.get(id);
+        const portal = record.root?.dataset?.portal === '1';
+        const lead = portal ? null : work?.lead || state?.leads?.get(id) || null;
+        // An unconfirmed work offers nothing (cardControls): its fact stays, as plain text. So does the fact of a work
+        // an incomplete body did not list again: only a complete body proves it gone.
+        if (lead) {
+            paintCardModel(record, { lead, target: work && work.confirmed !== false ? workControls(work).model : '',
+                main: state.main, queued: work?.activity === 'queued', since: clock(lead.since) });
+        } else if (record.cardModel && !portal && !state?.complete) paintCardModel(record, { ...record.cardModel.view, target: '' });
+        else paintCardModel(record, null);
         const view = cardWorkView(work);
         const look = work?.episode?.live ? { mark: String(work.mark || 'none'), owner: list(work.turn).length > 0 } : null;
         if (JSON.stringify([view, look]) !== JSON.stringify([record.workView || null, record.workLook || null])) changed = true;
@@ -365,11 +384,12 @@ export function applyCardWorkViews(records, state) {
 
 /**
  * A work's controls, one press each: Stop (every episode root that still owns live work, in the server's order),
- * Stop earlier attempt (each earlier root that does) and the current episode's Pause, Resume, Hurry and Wrap up.
+ * Stop earlier attempt (each earlier root that does), the current episode's Pause, Resume, Hurry and Wrap up, and
+ * the task whose model may be changed (`model`: the card's model fact is its door, card_model.js).
  * Unknown actions are not offered.
  */
 export function workControls(work) {
-    const out = { stop: [], stopEarlier: [], pause: '', resume: '', hurry: '', wrapUp: '' };
+    const out = { stop: [], stopEarlier: [], pause: '', resume: '', hurry: '', wrapUp: '', model: '' };
     for (const control of list(work?.controls)) {
         // A reusable slot (`active`) hosts many cycles: no control reaches one of them by that id.
         const target = String(control?.target || '').trim();
@@ -377,7 +397,7 @@ export function workControls(work) {
         if (control.action === 'resume' && control.scope === 'single') continue;
         const many = { stop: out.stop, stop_earlier: out.stopEarlier }[control.action];
         if (many) { if (!many.includes(target)) many.push(target); continue; }
-        const one = { pause: 'pause', resume: 'resume', hurry: 'hurry', wrap_up: 'wrapUp' }[control.action];
+        const one = { pause: 'pause', resume: 'resume', hurry: 'hurry', wrap_up: 'wrapUp', model: 'model' }[control.action];
         if (one && !out[one]) out[one] = target;
     }
     return out;

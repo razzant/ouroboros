@@ -9,9 +9,10 @@ BETWEEN projects and via subagent swarms WITHIN a task).
 against each other. Subagents carry their parent's stored ``project_id`` but
 hold no lease of their own — the parent task IS the project's writer and its
 swarm must not deadlock against itself, so only top-level (non-subagent)
-tasks count as lane occupants. A conversation-lane turn (an owner's room turn,
-a wake, a Presence body) holds no lease either: it answers beside the room's
-work, so a Resume or Continue it grants starts at once.
+tasks count as lane occupants; the lane is their tree's (``lane_holders``). A
+conversation-lane turn (an owner's room turn, a wake, a Presence body) holds no
+lease either: it answers beside the room's work, so a Resume or Continue it
+grants starts at once.
 """
 
 from __future__ import annotations
@@ -61,25 +62,55 @@ def running_project_ids(running: Iterable[Any]) -> Set[str]:
     return out
 
 
-def cold_project_holders(pending: Iterable[Any]) -> Dict[str, Set[str]]:
-    """Accepted cold external writers keep their original top-level project lane."""
+def _tree(task: Any) -> str:
+    """The tree a row belongs to: its logical root (a root's retry keeps the original id)."""
+    task = _as_task(task)
+    return str(task.get("root_task_id") or task.get("id") or "") if isinstance(task, dict) else ""
+
+
+def _asleep(task: Dict[str, Any]) -> bool:
+    """Parked in its own model sleep, or granted back from it and not started yet."""
+    marker = task.get("_budget_pause") or (task.get("_budget_pause_resume") or {}).get("pause")
+    return isinstance(marker, dict) and marker.get("reason") == "sleep"
+
+
+def lane_holders(running: Iterable[Any], pending: Iterable[Any]) -> Dict[str, Set[str]]:
+    """The trees (root ids) holding each project lane; the caller holds the queue lock. A running
+    top-level writer holds its lane. A queued one keeps it while its tree lives: its accepted cold
+    custody, or, asleep (a sleep is its wait), a running or claimed member; with members only queued,
+    a lane no other tree holds, the first queued such tree keeping it, so a tree that released its
+    lane takes it back only once it is free and no two trees wait on each other."""
     from ouroboros.sleep_custody import carrier_receipt
 
+    running, pending = list(running or ()), [task for task in pending or () if isinstance(task, dict)]
     holders: Dict[str, Set[str]] = {}
-    for task in pending:
-        if _is_lane_occupant(task) and carrier_receipt(task).get("retains_project_lane"):
-            holders.setdefault(_task_project_id(task), set()).add(str(task.get("id") or ""))
+    for item in running:
+        if _is_lane_occupant(item) and not (isinstance(item, dict) and item.get("lane") == LANE_CONVERSATION):
+            holders.setdefault(_task_project_id(item), set()).add(_tree(item))
+    sleepers = [task for task in pending if _is_lane_occupant(task)
+                and (_asleep(task) or carrier_receipt(task).get("retains_project_lane"))]
+    acting, queued, waiting = {_tree(item) for item in running}, {}, {}  # waiting: project -> first queued-only tree
+    for task in pending if sleepers else ():
+        queued.setdefault(_tree(task), set()).add(str(task.get("id") or ""))
+    for task in sleepers:
+        tree, project = _tree(task), _task_project_id(task)
+        if carrier_receipt(task).get("retains_project_lane") or tree in acting:
+            holders.setdefault(project, set()).add(tree)
+        elif queued.get(tree, set()) - {str(task.get("id") or "")}:
+            waiting.setdefault(project, tree)
+    for project, tree in waiting.items():
+        holders.setdefault(project, {tree})
     return holders
 
 
 def candidate_is_leasable(candidate: Dict[str, Any], running_ids: Set[str], *,
-                         cold_holders: Dict[str, Set[str]] | None = None) -> bool:
-    """True when ``candidate`` may be assigned now under the one-writer rule."""
-    if not _is_lane_occupant(candidate):
-        return True
+                         holders: Dict[str, Set[str]] | None = None) -> bool:
+    """True when ``candidate`` may be assigned now under the one-writer rule: never beside a lane
+    another tree holds (``lane_holders``), and a top-level task never beside a running writer."""
     project = _task_project_id(candidate)
-    return project not in running_ids and not ((cold_holders or {}).get(project, set())
-                                               - {str(candidate.get("id") or "")})
+    if project and (holders or {}).get(project, set()) - {_tree(candidate)}:
+        return False
+    return not _is_lane_occupant(candidate) or project not in running_ids
 
 
 def task_lane_project_state(running: Any, pending: Any, tid: Any) -> dict:
@@ -146,7 +177,7 @@ def mark_task_project(running: Any, pending: Any, tid: Any, pid: Any, *, authori
 
 __all__ = [
     "candidate_is_leasable",
-    "cold_project_holders",
+    "lane_holders",
     "mark_task_project",
     "running_project_ids",
     "task_lane_project_state",

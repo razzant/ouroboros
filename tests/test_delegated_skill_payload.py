@@ -177,7 +177,7 @@ def _terminal_wait(ctx, monkeypatch, *, run_id="run-p1",
             pass
 
     monkeypatch.setattr(gw, "ClaudexorGateway", lambda *a, **k: _Stub())
-    return json.loads(delegate._delegate_wait(ctx, run_id, wait_sec=1))
+    return json.loads(delegate._read_run(ctx, run_id))
 
 
 # -- 1A: selector, authority, custody shape -------------------------------------

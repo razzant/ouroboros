@@ -1189,7 +1189,7 @@ def test_registered_message_handler_observes_current_questions_over_real_gateway
 
 def test_message_question_observation_does_not_consume_the_next_real_wait(tmp_path, monkeypatch):
     from ouroboros import delegate_interactions as interactions
-    from ouroboros.tools.delegate import _delegate_wait
+    from ouroboros.tools.delegate import _read_run
 
     ctx = _ctx(tmp_path)
     _own_run()
@@ -1201,7 +1201,7 @@ def test_message_question_observation_does_not_consume_the_next_real_wait(tmp_pa
     }))
     refused = json.loads(interactions._delegate_message(ctx, "run-1", "steer").text)
     assert refused["interaction_observation"]["status"] == "observed" and not memo
-    waited = json.loads(_delegate_wait(ctx, "run-1", wait_sec=1, since_seq=5))
+    waited = json.loads(_read_run(ctx, "run-1", 5))
     assert waited["status"] == "waiting_on_user"
     assert waited["pending_interactions"][0]["interaction_id"] == "int-current"
     assert waited["pending_interactions"][0]["questions"][0]["question_id"] == "q-port"

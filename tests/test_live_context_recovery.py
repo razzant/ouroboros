@@ -136,7 +136,7 @@ def test_speculative_capacity_failure_is_not_ready_and_retries_only_changed_view
     host = host_world.host
     async def run():
         call = _Call(host)
-        call.session = type('Serving', (), {'silent_context_updates': True})()
+        call.session = type('Serving', (), {'silent_context_updates': True, 'renewal_ready': True})()
         attempts = []
         async def fail(options):
             attempts.append(options)
@@ -145,15 +145,16 @@ def test_speculative_capacity_failure_is_not_ready_and_retries_only_changed_view
         call.request_renewal()
         call.tool_refit.set()
         call.input_open = True
-        boundary = asyncio.create_task(call.refit_boundary())
         await asyncio.sleep(0)
         assert not call.preparation_ready()
-        await call.check_preparation()
+        peers = asyncio.create_task(call.peers())  # its pass settles the failed fit before judging the boundary
+        await asyncio.sleep(0)
+        assert call.preparing is None and not call.tool_refit.is_set()
         call.input_open = False
         await asyncio.sleep(.02)
-        assert not boundary.done(), 'a cleared failed refit must not end the serving consumer'
-        boundary.cancel()
-        await asyncio.gather(boundary, return_exceptions=True)
+        assert not peers.done(), 'a cleared failed refit must not end the serving consumer'
+        peers.cancel()
+        await asyncio.gather(peers, return_exceptions=True)
         assert not call.renewing and call.session is not None
         call.request_renewal()
         assert len(attempts) == 1 and call.preparing is None

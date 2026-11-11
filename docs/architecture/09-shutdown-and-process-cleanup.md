@@ -2,6 +2,8 @@
 
 Signals, timeouts and engine terminal facts prove no OS exit; jobs stay until return. Cold receipts grant custody, not Resume or survival (§6). Switching restores stopped handles; boot retries unconfirmed custody.
 
+Server startup raises descriptor capacity for per-run transports (`server_process.raise_open_file_limit`; platform rules and failures: its docstring).
+
 ### Shutdown doors
 
 | Door | Stops | Keeps | Durable mark |
@@ -27,13 +29,11 @@ Manual Restart (`server_restart._perform_owner_restart`) refuses conflicts/unwri
 
 **Retention.** `restart_retention.py` keeps pauses, revokes unused grants and yields spent carriers to newer continuation custody. Warm owner Pause converts to cold; acknowledged planned/update sleep returns, manual Restart holds it. Doors replace only `saved_sleep_recovery` and `continuation_writer_unsettled`; stronger prior stops survive, even Panic. Panic gives sleeping work `panic_hold`/owner, working work `saved_work_hold{door:panic}`/resume; stored release never changes retrospectively. Source/money/time/Stop still govern; unknown dispatch is not unstarted. Rollback loses Q9 checks; old launchers may need the removed Restart flag (PERSISTENCE).
 
-Schema-2 delegated handoffs (§6) keep each holder, cursor and wake independent; migration is effect-free; live v2 forbids downgrade.
-
 ### Panic path
 
-Panic latches at ingress; a failed thread start runs it synchronously. Owned stops (restart successor too) precede bounded persistence and installation census, daemon or not; the executing process, parent and pid 1 are spared. Census follows observed Panic exit or local tray/window Panic; the indicator leaves without waiting. Boot retries only saved pid/birth pairs in `state/panic_sweep_pending.json`; a flag grants no new discovery, so undiscovered work is missed; stopping old controllers may affect new attachments. Diagnostic faults spare other stop owners; failed writes cannot prevent exit 99, which authorizes no successor. Worker socket grace, lifelines and parent kills have separate bounds; lane carriers die by measured identity like any worker, an inline executor's pid-less slot by a cooperative stop only. Requests prove no exit; inaccessible/unpublished/backend-only children stay unconfirmed. WS/HTTP uses `LocalChatBridge.panic` without supervisor I/O; Host Service authenticates skill and pinned owner (§12). Only installation gates read `installation_stop.py`: Panic bytes and file identity. Boot persists work stops and disabled controls, then `state.json.panic_ingress_receipt`, then unlinks. Failed unlink repeats only deletion; new identity reapplies Panic; failed controls keep it closed.
+Panic latches at ingress; a failed thread start runs it synchronously. Owned stops (restart successor too) precede bounded persistence and installation census, daemon or not; the executing process, parent and pid 1 are spared. Census follows observed Panic exit or local tray/window Panic; the indicator leaves without waiting. Boot retries only saved pid/birth pairs in `state/panic_sweep_pending.json`; a flag grants no new discovery, so undiscovered work is missed; stopping old controllers may affect new attachments. Diagnostic faults spare other stop owners; failed writes cannot prevent exit 99, which authorizes no successor. Worker socket grace, lifelines and parent kills have separate bounds; lane carriers die by measured identity like any worker, an inline executor's pid-less slot by a cooperative stop only. Requests prove no exit; inaccessible/unpublished/backend-only children stay unconfirmed. WS/HTTP uses `LocalChatBridge.panic` without supervisor I/O; Host Service authenticates skill and pinned owner (§12). Only installation gates read `installation_stop.py` (Panic bytes and file identity; boot order, receipt, failures and repeats: its docstring).
 
-Browser Panic sends once on its captured open socket with no buffered output; `panic_accepted` means latch, not exit. No confirmation, upload/save wait, replay or clock check; sent bytes may arrive late. `panic_source.py` journals causal ids and guards newer snapshots from late enrichment. Unknown PIDs stay unknown; diagnostics neither authorize nor veto.
+Browser Panic sends once on its captured open socket with no buffered output; `panic_accepted` means latch, not exit. No confirmation, upload/save wait, replay or clock check; sent bytes may arrive late. `panic_source.py` keeps its causal evidence (docstring). Unknown PIDs stay unknown; diagnostics neither authorize nor veto.
 
 Local tray/window Panic bypasses the observed-99 `kill_runtime_orphans` finalizer, which signals saved companion PIDs/ports without fresh identity proof. Escaped companions with unreadable/absent scope markers remain unconfirmed by captured trees and census (§12).
 

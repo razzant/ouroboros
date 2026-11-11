@@ -824,7 +824,6 @@ def _validate_launch(source: Any, root_resume=None):
         if member_id not in observations:
             observations[member_id] = _control_projection(root_drive, member_id)
         return observations[member_id]
-    selected_resume_start = actor = False
     if fence:
         from ouroboros.budget_pause import STATE_RESUME_GRANTED
 
@@ -832,7 +831,7 @@ def _validate_launch(source: Any, root_resume=None):
         if root_resume and fence_closed(fence):
             row = controls(task_id).get("budget_pause") or {}
             grant = row.get("grant") or {}
-            actor = root_allowed = root_actor(root_drive, root_id, task_id)
+            root_allowed = root_actor(root_drive, root_id, task_id)
             if not root_allowed and grant.get("selected_by") == "owner":
                 from ouroboros.task_results import _TRULY_TERMINAL_STATUSES
                 root_allowed = controls(root_id).get("status") in _TRULY_TERMINAL_STATUSES
@@ -845,34 +844,24 @@ def _validate_launch(source: Any, root_resume=None):
                 and not grant.get("revoked_at") and not grant.get("consumed_at"))
         if not allowed:
             raise OwnerPauseRefused(str(fence.get("reason") or "owner_pause"))
-        selected_resume_start = not actor
     from ouroboros.budget_pause import STATE_PAUSING, STATE_PAUSED, STATE_RESUME_GRANTED
 
     if root_drive and task_id:
-        for member_id in {root_id, task_id}:
-            try:
-                row = controls(member_id).get("budget_pause") or {}
-            except StoreBusy:
-                raise
-            except Exception as exc:
-                raise OwnerPauseRefused("model_sleep_authority_unreadable") from exc
-            if row.get("reason") != "sleep" or row.get("state") not in {
-                    STATE_PAUSING, STATE_PAUSED, STATE_RESUME_GRANTED}:
-                continue
-            if member_id == root_id and task_id != root_id:
-                selected = read_fence(root_drive, root_id, _observations=observations).get("selected_members") or {}
-                if selected_resume_start or task_id in selected:
-                    # Explicit member Resume outlives its terminal root's
-                    # saved sleep. It does not release any sibling or root.
-                    continue
-            grant = row.get("grant") or {}
-            resume_start = bool(root_resume and member_id == task_id
-                and row.get("state") == STATE_RESUME_GRANTED
-                and row.get("pause_id") == root_resume.get("pause_id")
-                and grant.get("grant_id") == root_resume.get("grant_id")
-                and not grant.get("revoked_at") and not grant.get("consumed_at"))
-            if not resume_start:
-                raise OwnerPauseRefused("model_sleep")
+        # Only a task's own sleep fences its launches, until its own grant starts it. A sleep is its
+        # actor's wait: a sleeping root fences no member (owner Pause, money and Stop keep their gates).
+        try:
+            row = controls(task_id).get("budget_pause") or {}
+        except StoreBusy:
+            raise
+        except Exception as exc:
+            raise OwnerPauseRefused("model_sleep_authority_unreadable") from exc
+        grant = row.get("grant") or {}
+        if (row.get("reason") == "sleep" and row.get("state") in {STATE_PAUSING, STATE_PAUSED, STATE_RESUME_GRANTED}
+                and not (root_resume and row.get("state") == STATE_RESUME_GRANTED
+                         and row.get("pause_id") == root_resume.get("pause_id")
+                         and grant.get("grant_id") == root_resume.get("grant_id")
+                         and not grant.get("revoked_at") and not grant.get("consumed_at"))):
+            raise OwnerPauseRefused("model_sleep")
 
     return observations.get(root_id, {})
 

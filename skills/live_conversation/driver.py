@@ -397,8 +397,6 @@ class _Call:
         peers = asyncio.create_task(self.peers())
         provider = asyncio.create_task(self.provider())
         children = [provider, peers, asyncio.create_task(self.mailbox()), asyncio.create_task(self.delivery())]
-        boundary = asyncio.create_task(self.refit_boundary())
-        children.append(boundary)
         try:
             while True:
                 done, _ = await asyncio.wait(children, return_when=asyncio.FIRST_COMPLETED)
@@ -415,7 +413,7 @@ class _Call:
                             raise
                 await self.rows.join()
                 # Joining canonical rows yields. Native input or an answer may
-                # have started since the boundary worker observed quiet; retain
+                # have started since the peer loop observed its boundary; retain
                 # its reader and receipt instead of cancelling a newly busy turn.
                 quiet = self.refit_ready() if self.tool_refit.is_set() else self.quiet()
                 if (self.renewing and not self.provider_closed and not quiet
@@ -424,10 +422,6 @@ class _Call:
                         children.remove(peers)
                         peers = asyncio.create_task(self.peers())
                         children.append(peers)
-                    if boundary in done:
-                        children.remove(boundary)
-                        boundary = asyncio.create_task(self.refit_boundary())
-                        children.append(boundary)
                     continue
                 break
             # Queued and running calls need no wait: their requests are host facts in the fit.
@@ -677,16 +671,6 @@ class _Call:
         result = await joined(asyncio.gather(task, return_exceptions=True))
         if not isinstance(result[0], BaseException) and result[0] is not None:
             await result[0].close()
-
-    async def refit_boundary(self):
-        while True:
-            await self.tool_refit.wait()
-            # A failed speculative fit can release the old tool obligation and
-            # clear this request. Its waiter then waits again, never ends the call.
-            while self.tool_refit.is_set() and not self.refit_ready():
-                await asyncio.sleep(.01)
-            if self.tool_refit.is_set():
-                return
 
     def refit_ready(self):
         return (self.preparation_ready() and not self.input_unsettled()
@@ -1159,6 +1143,11 @@ class _Call:
                     self.renewing = False
                     return
             else:
+                if self.tool_refit.is_set() and self.refit_ready():
+                    # A withheld result's fit is taken here, between whole peer events: a planned switch never
+                    # cancels a microphone write and then guesses what it did. Consume rechecks after joining
+                    # its rows, so the page hears of no reconnection yet.
+                    return
                 if self.host.context_view_pending() and self.quiet():
                     await self.rows.join()
                     if self.quiet() and await self.host.apply_context_view():

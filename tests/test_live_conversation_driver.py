@@ -933,7 +933,8 @@ def test_owner_audio_at_fifty_frames_per_second_survives_slow_control_reads(chec
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize('maintenance', ['offer', 'revisit', 'renewal', 'context_view', 'preparation_failure', 'native_quiet'])
+@pytest.mark.parametrize('maintenance', ['offer', 'revisit', 'renewal', 'context_view', 'preparation_failure', 'native_quiet',
+                                         'tool_refit'])
 def test_continuous_due_audio_reaches_outer_call_maintenance(maintenance):
     from ouroboros.call_peers import LiveCallHub
     from ouroboros.contracts.live_conversation import Audio, ContextUpdate
@@ -946,7 +947,9 @@ def test_continuous_due_audio_reaches_outer_call_maintenance(maintenance):
         call = _Call(host)
         call.session, call.input_rate = Session(), 24000
         call.connected.set()
-        delivered, expected, reached = [], [], []
+        delivered, expected, reached, states = [], [], [], []
+        send_state = host.hub.send_state
+        host.hub.send_state = lambda state, *args, **kwargs: states.append(state) or send_state(state, *args, **kwargs)
 
         def enqueue():
             index = len(expected) + 1
@@ -968,6 +971,10 @@ def test_continuous_due_audio_reaches_outer_call_maintenance(maintenance):
                     elif maintenance == 'preparation_failure':
                         call.preparing = asyncio.get_running_loop().create_future()
                         call.preparing.set_exception(RealtimeSetupError('credentials', 'Synthetic preparation refusal'))
+                    elif maintenance == 'tool_refit':
+                        # A withheld result asks for its fit; its open native call never lets the session go quiet.
+                        call.session.renewal_ready, call.renewing = False, True
+                        call.tool_refit.set()
                 if maintenance == 'native_quiet' and len(delivered) == 12:
                     assert not reached
                     call.session.renewal_ready = True
@@ -1000,7 +1007,11 @@ def test_continuous_due_audio_reaches_outer_call_maintenance(maintenance):
                 if maintenance in ('renewal', 'native_quiet'):
                     assert call.renewing
                     reached.append('renewal')
+                elif maintenance == 'tool_refit' and not host.hub.closed:
+                    reached.append('tool_refit')
             assert reached and 3 <= len(delivered) < 80, (maintenance, len(delivered), reached)
+            # An ordinary renewal announces itself to the page; a result's fit is rechecked by consume first.
+            assert (cp.STATE_RECONNECTING in states) is (maintenance in ('renewal', 'native_quiet')), states
             assert delivered == expected[:len(delivered)]
             if maintenance == 'revisit':
                 assert call.attention.revisit_at is None

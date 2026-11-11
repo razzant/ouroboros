@@ -18,14 +18,14 @@ test('mounting Markdown carries presentation without wrapping the content or own
 
 test('rich Markdown mounts use the seam or the existing message template contract', () => {
     const modules = new URL('../modules/', import.meta.url);
-    // The existing message factory builds one HTML template, preserving its
+    // The existing message factory (a text row's bubble) builds one HTML template, preserving its
     // direct-child layout. Its explicit host is the one string-rendering seam.
-    const chat = readFileSync(new URL('chat.js', modules), 'utf8');
-    assert.ok(chat.includes("message${richMarkdown ? ' ui-rich-content' : ''}"));
-    assert.match(chat, /: renderChatMarkdown\(painted\);/);
-    assert.equal([...chat.matchAll(/\brenderChatMarkdown\s*\(/g)].length, 1,
-        'a second raw render must not bypass the mounting seam inside chat.js');
-    for (const file of readdirSync(modules).filter((name) => name.endsWith('.js') && !['chat_markdown.js', 'chat.js'].includes(name))) {
+    const bubble = readFileSync(new URL('chat_text_bubble.js', modules), 'utf8');
+    assert.ok(bubble.includes("message${richMarkdown ? ' ui-rich-content' : ''}"));
+    assert.match(bubble, /: renderChatMarkdown\(painted\);/);
+    assert.equal([...bubble.matchAll(/\brenderChatMarkdown\s*\(/g)].length, 1,
+        'a second raw render must not bypass the mounting seam inside chat_text_bubble.js');
+    for (const file of readdirSync(modules).filter((name) => name.endsWith('.js') && !['chat_markdown.js', 'chat_text_bubble.js'].includes(name))) {
         const source = readFileSync(new URL(file, modules), 'utf8');
         assert.doesNotMatch(source, /\brenderChatMarkdown\b/,
             `${file}: mountChatMarkdown must attach the content contract with the HTML`);

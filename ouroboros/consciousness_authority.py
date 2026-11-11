@@ -3,8 +3,8 @@
 Three autonomy levels (owner decision В10', PLAN 5.4): ``observe`` researches,
 keeps internal notes and may read or stop/restore existing schedules while remaining
 resource-narrowed, ``act`` (the default) starts and steers work but may not evolve,
-restart, change settings or touch its own alarm, ``full`` is an owner turn in
-everything the install's runtime mode allows. A wake carries the level it
+restart, change settings (including Main/room models) or touch its own alarm.
+``full`` is an owner turn in everything the install's runtime mode allows. A wake carries the level it
 started under as ``metadata.consciousness_autonomy`` beside its origin label
 ``metadata.initiator = "consciousness"``; both are inherited by everything the
 wake starts (a promoted root, a follow-up, a subagent, an evolution cycle)
@@ -64,6 +64,7 @@ OBSERVE_ARGUMENT_NARROWED: frozenset[str] = frozenset({
     "cancel_task",
     "manage_schedules",  # reads and lifecycle controls remain; authoring does not
     "configure_presence",  # its reads remain, for Act too (``PLACE_READ_ACTIONS``)
+    "switch_model",  # own-work choices remain; room/Main writes require Full, for Act too
 })
 # Observe withholds every verb that starts work or changes the world beyond
 # this mind's own memory (the table beside ``ROUTING_VERBS``) plus publication.
@@ -315,8 +316,8 @@ def observe_argument_refusal(task_metadata: Any, name: str, args: Mapping[str, A
     arguments, never about the tool.
 
     The protected dispatch guard asks this on every call, so it also carries the
-    one narrowing Act shares: below Full, ``configure_presence`` lists and
-    inspects places (``PLACE_READ_ACTIONS``) and changes none.
+    narrowings Act shares: below Full, ``configure_presence`` lists and inspects
+    places (``PLACE_READ_ACTIONS``), and ``switch_model`` writes no room/Main choice.
     """
     tool = str(name or "").strip()
     values = args if isinstance(args, Mapping) else {}
@@ -328,6 +329,14 @@ def observe_argument_refusal(task_metadata: Any, name: str, args: Mapping[str, A
             "⚠️ RESOURCE_CONSTRAINT_BLOCKED: below Full autonomy a wake lists and inspects "
             "places, it does not change one; your human changes a place on its sheet or by "
             "a word in Main, a Full wake with configure_presence."
+        )
+    if (tool == "switch_model" and is_consciousness_origin(metadata)
+            and normalize_level(metadata.get("consciousness_autonomy")) != LEVEL_FULL
+            and str(values.get("scope") or "") in {"room", "main"}):
+        return (
+            "⚠️ RESOURCE_CONSTRAINT_BLOCKED: below Full autonomy a wake does not change Main "
+            "or a room's model; your human changes either in the Model capsule or by a word "
+            "in Main, a Full wake may carry the cite."
         )
     if not is_observe_origin(task_metadata):
         return ""
