@@ -28,6 +28,7 @@ import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { setResult } from './ui_primitives.js';
 // The page modules: each registers its family when it is imported (settings_pages.js).
 import './settings_ui.js';
+import './settings_accounts.js';
 import './subagents_settings.js';
 import './mcp_settings.js';
 import './model_roles.js';

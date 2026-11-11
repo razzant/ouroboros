@@ -4,14 +4,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { ROWS, rowById } from '../modules/settings_rows.js';
-import { accountsPanel, advancedPanel, secretSettingsSection, servedUiStatus } from '../modules/settings_ui.js';
+import { servedUiStatus } from '../modules/settings_ui.js';
 
 test('the choice is one row of This computer › Advanced, a plain field that travels only when edited', () => {
     const row = rowById('OUROBOROS_UI_DIR');
     assert.deepEqual([row.page, row.fold, row.control.kind, row.writer], ['computer/advanced', false, 'text', 'generic']);
     assert.equal(ROWS.filter((each) => each.keys.includes('OUROBOROS_UI_DIR')).length, 1);
-    // The sections the editor lanes still hold draw no second field for it.
-    for (const other of [accountsPanel(), secretSettingsSection(), advancedPanel()]) assert.doesNotMatch(other, /s-ui-dir|OUROBOROS_UI_DIR/);
     assert.ok(row.aliases.includes('Interface directory'), 'the old label finds it');
 });
 

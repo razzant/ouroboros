@@ -149,7 +149,7 @@ def test_reopened_setup_reaches_and_keeps_a_legacy_compatible_pair(direct_server
         expect(status).to_have_text('Ready')
         expect(meta).to_be_visible()
         expect(meta).to_contain_text(f'Legacy OpenAI Base URL {legacy_url} with the OpenAI API key'
-                                     ' · change the address in Settings → Accounts · used by Main')
+                                     ' · change the address in Settings → Accounts and keys · used by Main')
         expect(default.locator('[data-connection-field="base_url"]')).to_have_value('')
         expect(default.locator('[data-connection-field="api_key"]')).to_have_value('')
         expect(default.locator('[data-connection-remove]')).to_be_hidden()

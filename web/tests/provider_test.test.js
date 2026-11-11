@@ -9,10 +9,10 @@ import {
     reachesAnotherPair,
 } from '../modules/settings_connections.js';
 import { cyberReviewNote } from '../modules/settings_policy.js';
-import { accountsPanel, advancedPanel, secretSettingsSection } from '../modules/settings_ui.js';
+import { PROVIDER_CARDS, providerSettingsCard } from '../modules/settings_provider_cards.js';
 
-// The old tabs' sections settings_ui.js still holds for the editor lanes, unmounted until their pages are rebuilt.
-const renderSettingsPage = () => [accountsPanel(), secretSettingsSection(), advancedPanel()].join('');
+// Setup retains the shared provider cards, each with its keys and forms.
+const renderSettingsPage = () => PROVIDER_CARDS.map(providerSettingsCard).join('');
 
 test('provider test status uses only the controlled compact vocabulary', () => {
     assert.equal(providerTestStatusText({ ok: true }), 'Works');
@@ -111,7 +111,7 @@ test('each key row docks Test beside its other actions and reports in its own li
         }
         assert.match(row, /data-connection-test-status[^>]*role="status" aria-live="polite"/);
     }
-    // Catalogue refresh is on Models (settings_tools_models.test.js); Accounts keeps each key's own result.
+    // The model catalogue action now belongs to Models, verified by settings_models.test.js.
     assert.doesNotMatch(html, /settings-action-row/);
     assert.doesNotMatch(html, /settings-claude-code/);
     assert.doesNotMatch(html, /settings-ghost-btn/);
@@ -139,3 +139,4 @@ test('the Cyber Pro note says what a saved Blocking means now and after the rest
     assert.equal(cyberReviewNote(policy({ now: 'cyber_pro', saved: 'pro', review: 'blocking' })),
         'Not enforced now, under Cyber Pro. Enforced after the restart that applies Pro.');
 });
+
