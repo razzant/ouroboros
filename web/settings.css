@@ -1373,7 +1373,7 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
     font-size: 16px;
 }
 .settings-head-glyph > :is(svg, img) { width: 16px; height: 16px; }
-.settings-head-glyph > img { margin: 0; object-fit: contain; }
+.settings-head-glyph > img { margin: 0; border-radius: 3px; object-fit: contain; }
 .settings-head-glyph .harness-identity-label { display: none; }
 /* A fallback's place in the order stands where a mark would. */
 .settings-head-order { width: 22px; height: 22px; background: var(--status-neutral-bg); color: var(--status-neutral-fg); font-size: var(--type-meta); font-weight: 600; font-variant-numeric: tabular-nums; }
