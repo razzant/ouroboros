@@ -558,10 +558,12 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     # it starts.
     # A project root may execute from a forked child drive.  Its budget-root
     # result therefore receives this admitted contract before worker startup.
-    if model_metadata:
+    from ouroboros.route_choice import OWNER_LEAD_SOURCES, lead_snapshot
+
+    chosen = lead_snapshot(model_metadata.get("lead"))
+    if chosen and chosen["source"] in OWNER_LEAD_SOURCES:
         from ouroboros.gateway.ui_preferences import record_model_recent
 
-        chosen = task["metadata"]["lead"]
         try:
             record_model_recent(_pool().DRIVE_ROOT, chosen["model"], chosen["use_local"])
         except Exception:

@@ -464,19 +464,23 @@ def test_an_owner_lead_uses_no_options_from_a_previously_followed_role(room):
     assert task_processing_preference({"metadata": metadata}) == ""
 
 
-def test_a_cited_start_keeps_its_lead_through_real_supervisor_admission(room, monkeypatch):
+@pytest.mark.parametrize("cited", [False, True])
+def test_promotion_keeps_the_primary_and_only_owner_choices_enter_recents(room, monkeypatch, cited):
     from ouroboros.tools.control_routing import _start_task
     from supervisor import queue, workers
 
     root, client = room
-    client.post('/api/owner/chat-model', json={**CHOSEN, 'project_id': 'alpha'})
+    if cited:
+        client.post('/api/owner/chat-model', json={**CHOSEN, 'project_id': 'alpha'})
+    monkeypatch.setattr(config, 'get_runtime_mode', lambda: 'cyber_pro')
     monkeypatch.setattr('ouroboros.tools.control_events._wait_for_promotion_admission',
                         lambda *a, **kw: {'status': 'scheduled'})
     events = []
     ctx = types.SimpleNamespace(pending_events=events, event_queue=None, current_chat_id=1, drive_root=root,
         project_id='alpha', task_id='owner-turn', task_metadata={'origin_suppressed': True},
         _owner_directives=[{'source': 'initial_user', 'content': 'Keep the report whole. Use the other route.'}])
-    text = _start_task(ctx, 'Do the work', title='Report', workspace='none', model=OPUS, owner_words='Use the other route')
+    text = _start_task(ctx, 'Do the work', title='Report', workspace='none', model=OPUS,
+                       owner_words='Use the other route' if cited else '')
     assert text.startswith('OK: task')
     event = events[0]
     host = types.SimpleNamespace(enqueue_task=queue.enqueue_task, persist_queue_snapshot=lambda **kw: True,
@@ -484,9 +488,13 @@ def test_a_cited_start_keeps_its_lead_through_real_supervisor_admission(room, mo
     assert queue.reserve_task_admission(event['task_id'], event['routing_token'], drive_root=root)['status'] == 'reserved'
     assert workers.promote_chat_to_task(event, host)['status'] == 'scheduled'
     task = queue.PENDING[-1]
-    assert task['metadata']['lead'] == {'source': 'owner_words', 'model': OPUS, 'use_local': False}
-    assert task['metadata']['owner_corpus'][-1]['content'] == ctx._owner_directives[0]['content']
-    assert json.loads((root / 'state/ui_preferences.json').read_text(encoding='utf-8'))['model_recents'][0]['model'] == OPUS
+    assert task['metadata']['lead'] == {'source': 'owner_words' if cited else 'mind', 'model': OPUS, 'use_local': False}
+    prefs = root / 'state/ui_preferences.json'
+    if cited:
+        assert task['metadata']['owner_corpus'][-1]['content'] == ctx._owner_directives[0]['content']
+        assert json.loads(prefs.read_text(encoding='utf-8'))['model_recents'][0]['model'] == OPUS
+    else:
+        assert not prefs.exists() or not json.loads(prefs.read_text(encoding='utf-8')).get('model_recents')
 
 
 def test_a_minds_primary_uses_the_same_carrier_and_cannot_be_recaptured(room):
