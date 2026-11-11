@@ -12,6 +12,7 @@
 // copies not verified saved are a separate, deliberate form: their own list read whole, each id chosen by the owner
 // (nothing chosen to begin with), the shared confirm dialog as the acknowledgement of the whole copy's loss.
 // The folders deleted projects left behind are one read-only fold under the groups (storage_deleted.js).
+// Cleanup ends with how long finished work is kept: a row that saves itself (dashboard.js mountTabSettings).
 
 import { apiClient, isStoreMigrating } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
@@ -20,6 +21,7 @@ import { showToast } from './toast.js';
 import { escapeHtmlAttr, escapeHtmlText } from './utils.js';
 import { DOTS, durationLabel, formatBytes, isSize, largestPartsHtml, number, plural, signedBytes as signed, whenLabel } from './storage_format.js';
 import { DELETED_ROWS, deletedProjectsHtml } from './storage_deleted.js';
+import { mountTabSettings } from './dashboard.js';
 import { EMPTY_LIST, MANUAL_ROWS, OUTDATES_PLAN, acceptPage, attemptSentences, confirmCopy, doorOffered, excludedCount, holdsPhrase, lostNotice, manualConfirmCopy, manualFacts, manualKnown, manualOf, notStarted, resultSentences, savedGroups, trayHtml, trayState } from './storage_free.js';
 
 export { durationLabel, formatBytes, whenLabel };
@@ -392,7 +394,6 @@ export function renderStorage(response, { pending = false, readFailed = false, n
         summary: summaryHtml(response, { readFailed, now }),
         facts: countFactsHtml(response?.count),
         bar: barHtml(response, now),
-        auto: response ? fmt('Files of finished tasks are also removed by the app {days} days after the task ends. Project folders stay.', { days: response.retention_days ?? 7 }) : '',
         status: countStatusHtml(response, now),
         announce: announceSentence(response, { readFailed, now, tray }),
         places: placesHtml(response, now, deletedShown),
@@ -442,7 +443,7 @@ export function initStorage({ state, mount } = {}) {
             <h3 class="storage-card-title">Cleanup</h3>
             <div class="storage-tray" data-storage-tray></div>
             <div class="storage-actions storage-cleanup-door"><button type="button" class="btn btn-primary btn-sm" data-free-preview data-key="data-free-preview" data-storage-door hidden>Check for files to remove</button></div>
-            <p class="storage-auto" data-storage-auto data-i18n-fmt="storage.auto"></p>
+            <div class="storage-retention" data-storage-settings></div>
         </section>
         <section class="storage-panel ui-card" aria-label="Folders" data-storage-panel hidden>
             <div class="storage-tray-head"><h3 class="storage-card-title">Folders</h3></div>
@@ -478,7 +479,9 @@ export function initStorage({ state, mount } = {}) {
     const measureButton = page.querySelector('[data-storage-action="measure"]');
     const stopButton = page.querySelector('[data-storage-action="stop"]');
     const door = page.querySelector('[data-storage-door]');
-    const auto = page.querySelector('[data-storage-auto]');
+    // How long finished work is kept is a row that saves itself (settings_rows.js); no repaint of the tab touches it,
+    // and a saved value reads the tab again, since the server's retention shapes the cleanup it plans.
+    const retention = mountTabSettings(page.querySelector('[data-storage-settings]'), 'storage', { state, onSaved: () => void refresh() });
     const scroller = page;
     const details = page.querySelector('[data-storage-details]');
     const painted = new Map();
@@ -520,7 +523,6 @@ export function initStorage({ state, mount } = {}) {
         patch(regions.facts, view.facts, painted);
         details.hidden = !view.facts;
         if (live.textContent !== view.announce) live.textContent = view.announce;
-        if (auto.textContent !== view.auto) auto.textContent = view.auto;
         patch(regions.status, view.status, painted);
         patch(regions.bar, view.bar, painted);
         patch(regions.places, view.places, painted);
@@ -967,6 +969,7 @@ export function initStorage({ state, mount } = {}) {
         if (disposed) return;
         disposed = true;
         cancelRead();
+        retention.dispose();
         measureButton.removeEventListener('click', onClick);
         stopButton.removeEventListener('click', onClick);
         door.removeEventListener('click', onTrayClick);
