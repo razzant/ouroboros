@@ -637,6 +637,7 @@ D20 = "Presence"
 "ouroboros/review_projection.py" = "D06"
 "ouroboros/review_price.py" = "D06"
 "ouroboros/review_status_projection.py" = "D06"
+"ouroboros/review_overrides.py" = "D06"  # the owner-visible trace of decisions Blocking would have stopped (P3)
 "ouroboros/review_records.py" = "D06"
 "ouroboros/review_continuation.py" = "D06"
 "ouroboros/review_session_custody.py" = "D06"

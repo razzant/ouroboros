@@ -102,6 +102,15 @@ def server_source_baseline() -> str:
         return _source_baseline or ""
 
 
+def restart_gate_line(repo_dir: Any, data_dir: Any) -> str:
+    """A restart notice's own line: the commits since this body started that Git recorded over a review Blocking would
+    have stopped, deployment unconfirmed (``review_overrides.landed_line``); "" when there is none."""
+    from ouroboros.review_overrides import landed_line
+
+    line = landed_line(repo_dir, data_dir, base=server_source_baseline(), target="HEAD", running=False)
+    return f"\n{line}" if line else ""
+
+
 def record_applied_restart_settings(values: dict, *, server_host_source: str | None = None) -> None:
     """Publish only known startup inputs, after their component starts."""
     from ouroboros.settings_scales import RESTART_REQUIRED_SETTINGS

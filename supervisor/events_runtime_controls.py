@@ -421,12 +421,14 @@ def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
 
 
 def _handle_toggle_consciousness(evt: Dict[str, Any], ctx: Any) -> None:
-    """Toggle background consciousness from LLM tool call."""
+    """Toggle background consciousness from the mind's tool: an agent-provenance switch, so a start never lifts
+    the owner's, Panic's or an unknown stop (the clock decides; owner 11.11, 5A), queued or not."""
+    from ouroboros.consciousness import AGENT_STOP
+
     action = str(evt.get("action") or "status")
     if action in ("start", "on", "stop", "off"):
         on = action in ("start", "on")
-        result = ctx.consciousness.start() if on else ctx.consciousness.stop()
-        result = f"{result}{persist_consciousness_choice(on)}"
+        result = ctx.consciousness.start(source=AGENT_STOP) if on else ctx.consciousness.stop(source=AGENT_STOP)
     else:
         # Status is answered to its caller by the tool itself; reading it is not
         # an event the owner is told about (#1324). Only start/stop publish.
@@ -434,19 +436,6 @@ def _handle_toggle_consciousness(evt: Dict[str, Any], ctx: Any) -> None:
     st = ctx.load_state()
     if st.get("owner_chat_id"):
         ctx.send_with_budget(int(st["owner_chat_id"]), f"🧠 {result}", role="system", system_type="consciousness_notice")
-
-
-def persist_consciousness_choice(enabled: bool) -> str:
-    """Persist a background-consciousness decision as a KNOWN control; "" or a
-    disclosure that it holds only in this process (#1307)."""
-    from supervisor.state import StateUnavailable, update_state
-
-    try:
-        update_state(lambda st: st.__setitem__("bg_consciousness_enabled", bool(enabled)),
-                     confirm=("bg_consciousness_enabled",))
-    except StateUnavailable as exc:
-        return f" (not persisted: runtime state unavailable, {exc.reason})"
-    return ""
 
 
 def _handle_owner_message_injected(evt: Dict[str, Any], ctx: Any) -> None:

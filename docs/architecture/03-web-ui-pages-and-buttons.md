@@ -45,7 +45,7 @@ Iframes inherit no host tokens or choice; `render.appearance` declares their pol
 - `toast.js`, `masonry.js`, `widget_frame.js`, `widget_job.js` ← toasts (DESIGN §4), layout, framed-widget bootstrap/lifecycle, bounded widget request/job policy.
 - `result_files.js` ← Files and validated question materials via canonical artifacts, the reader and explicit downloads.
 - `history_retention.js` ← history-transfer details and storage problems for Chat and Logs; routine transfer alters no task outcome.
-- `settled_card.js` ← `syncSettledItems`: the settled card's Files row and Continue action follow one detail.
+- `settled_card.js` ← `syncSettledItems`: the settled card's Files row and Continue action follow one detail; `review_gate_card.js`, every detail's review-gate field.
 - `task_continue.js` ← Continue projects the host's `continuation_offer` (who may: §6 Continue); `hard_limit_reached` is one neutral reason that buys no model call; one stored nonce per task makes a retry return the same admission.
 - `task_control_menu.js` ← Chat and Activity share Wrap up, Hurry up, Pause, Stop earlier attempt and Stop now with the same endpoints, stop policy, request-id retry and verbatim refusals, offering a work only the controls it lists; Pause is root-only and its `request_id` survives uncertain or `latch_pending` replies until a confirmed Pause or Resume retires it.
 

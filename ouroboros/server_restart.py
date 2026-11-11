@@ -18,6 +18,7 @@ from typing import Any, Dict
 
 from ouroboros.server_process import (
     DATA_DIR, _owner_restart_requested, _request_restart_exit, _restart_requested, end_task_runs, log,
+    restart_gate_line,
 )
 
 _RESTARTABLE_UPDATE_PHASES = frozenset({"pending_boot_smoke", "applying_replace"})
@@ -709,15 +710,12 @@ def _restart_current_process(server, host: str, port: int) -> None:
     # native waits were already moved to PENDING before its resolver ran.
     try:
         from ouroboros.delegate_recovery import PLANNED_RESTART_TRANSACTION_ENV, arm_active_planned_restart_transaction
-        from ouroboros.server_restart import _RESTARTABLE_UPDATE_PHASES
         from supervisor.update_merge import read_update_tx_strict
 
         from ouroboros.server_control import _restart_stop_requested
         if _restart_stop_requested:
             server.os.environ.pop(PLANNED_RESTART_TRANSACTION_ENV, None)
         elif server.DATA_DIR == DATA_DIR and _OWNER_STOP_BEGAN.is_set():
-            from ouroboros.server_restart import arm_owner_restart_transaction
-
             arm_owner_restart_transaction()  # only the work THIS owner Restart named returns
         elif getattr(server, "_planned_delegate_restart_transaction_id", ""):
             own = server._planned_delegate_restart_transaction_id
@@ -796,10 +794,8 @@ def _handle_restart_in_supervisor(server, evt: Dict[str, Any], ctx: Any) -> None
         return  # preparation/delivery stays executable until this host consumes the exact ready event
     st = ctx.load_state()
     if st.get("owner_chat_id"):
-        ctx.send_with_budget(
-            int(st["owner_chat_id"]),
-            f"♻️ Restart requested by agent: {evt.get('reason')}",
-            role="system", system_type="restart_notice")
+        notice = f"♻️ Restart requested by agent: {evt.get('reason')}" + restart_gate_line(ctx.REPO_DIR, ctx.DRIVE_ROOT)
+        ctx.send_with_budget(int(st["owner_chat_id"]), notice, role="system", system_type="restart_notice")
     from ouroboros.config import get_restart_drain_max_sec
 
     max_wait = get_restart_drain_max_sec()

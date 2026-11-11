@@ -8,12 +8,11 @@ from typing import Any, List, Optional
 from ouroboros.llm import LLMClient  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
 from ouroboros.utils import (
     run_cmd,
-    append_jsonl,
     estimate_tokens,  # noqa: F401 — patchable seam: fit_triad_prompt resolves it through THIS namespace
     truncate_review_artifact,  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
-    utc_now_iso,
 )
 from ouroboros import config as _cfg
+from ouroboros.review_overrides import record_override
 from ouroboros.owner_words import owner_words_text
 from ouroboros.review_substrate import SLOT_ID_PREFIX, TYPED_FAILURE_FACT_KEYS, slot_id_for_row  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
 from ouroboros.tools.registry import ToolContext
@@ -293,54 +292,11 @@ def _handle_review_block_or_warning(
         return blocked_msg
     if cyber:
         advisory_prefix = "Cyber Pro: review does not prohibit action; original signal follows. "
-    _record_advisory_override(ctx, blocked_msg)
+    record_override(ctx, blocked_msg)
     _append_review_warning(ctx, advisory_prefix + blocked_msg)
     ctx._review_iteration_count = 0
     ctx._review_history = []
     return None
-
-
-def _record_advisory_override(ctx: ToolContext, blocked_msg: str) -> None:
-    """Durable trace of a blocking signal waved through by advisory enforcement.
-
-    Constitutional requirement (BIBLE P3 "Owner-chosen enforcement, loud
-    advisory"): every decision blocking enforcement would have stopped must
-    leave a durable, owner-visible trace. Persisted to events.jsonl AND to a
-    persistent counter file surfaced by the review_status tool.
-    """
-    reason = str(getattr(ctx, "_last_review_block_reason", "") or "unknown")
-    try:
-        append_jsonl(ctx.drive_logs() / "events.jsonl", {
-            "ts": utc_now_iso(),
-            "type": "review_advisory_override",
-            "review_enforcement": _cfg.get_review_enforcement(),
-            "decision_authority": "cyber_pro" if not review_enforcement_blocks("blocking") else "advisory",
-            "block_reason": reason,
-            "message_head": str(blocked_msg or "")[:600],
-            "task_id": str(getattr(ctx, "task_id", "") or ""),
-        })
-    except Exception:
-        log.debug("Failed to emit review_advisory_override event", exc_info=True)
-    try:
-        from ouroboros.utils import update_json_locked
-
-        path = ctx.drive_root / "state" / "advisory_overrides.json"
-
-        def _bump(current: dict) -> dict:
-            recent = list(current.get("recent") or [])
-            recent.append({
-                "ts": utc_now_iso(),
-                "block_reason": reason,
-                "message_head": str(blocked_msg or "")[:300],
-            })
-            return {
-                "count": int(current.get("count") or 0) + 1,
-                "recent": recent[-10:],
-            }
-
-        update_json_locked(path, _bump)
-    except Exception:
-        log.warning("Failed to persist advisory override visibility", exc_info=True)
 
 
 def _collect_review_findings(ctx: ToolContext, model_results: list, row_plan: Optional[dict] = None) -> tuple[list[str], list[str], list[str], list[dict]]:
@@ -1156,7 +1112,7 @@ def _dispatch_unified_review(ctx: ToolContext, commit_message: str, prepared: di
                 ctx, commit_message, critical_fails, advisory_warns, errored_note,
             )
 
-        _record_advisory_override(ctx, "; ".join(critical_fails[:5]))
+        record_override(ctx, "; ".join(critical_fails[:5]))
         _append_review_warning(
             ctx,
             ("Cyber Pro: critical review findings do not prohibit action."

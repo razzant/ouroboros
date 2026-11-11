@@ -295,6 +295,7 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame):
     # review_records_omitted is 0|"1+"|"unknown", never proof of a review by itself.
     review_projection: NotRequired[Dict[str, Any]]
     body_adoptions: NotRequired[List[Dict[str, Any]]]  # the task's settled adoptions (TaskDetailResponse), on its summary
+    review_overrides: NotRequired[Dict[str, Any]]  # the work's review-gate field (TaskDetailResponse), on its summary
     worker_saturation_warning: NotRequired[bool]
     source: NotRequired[str]
     sender_label: NotRequired[str]
@@ -1191,6 +1192,7 @@ class TaskDetailResponse(TypedDict, total=False):
     # Every adoption this task authorized, as boot settled them: {adoption_id, outcome, commit_sha, previous_sha, branch,
     # note, settled_at, revision, commits?, commits_complete?, commits_omitted?}; commits (newest first) only when adopted.
     body_adoptions: List[Dict[str, Any]]
+    review_overrides: Dict[str, Any]  # a root's decisions Blocking would have stopped: {count, latest} (review_overrides.py)
     error: str
 
 

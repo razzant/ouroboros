@@ -29,10 +29,15 @@ def test_drive_state_section_is_typed_projection_with_pointer(tmp_path):
             return tmp_path / p
 
     (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state" / "state.initialized.json").write_text(  # a completed initialization proves its controls
+        json.dumps({"initialization_id": "init-1", "phase": "complete"}), encoding="utf-8")
     (tmp_path / "state" / "state.json").write_text(json.dumps({
+        "initialization_id": "init-1",
         "session_id": "abc123",
         "current_branch": "ouroboros",
         "evolution_mode_enabled": False,
+        "bg_consciousness_enabled": False,
+        "bg_consciousness_stop_source": "owner",  # the mind sees who holds the clock off
         "budget_drift_alert": True,
         "budget_drift_pct": 48.05,
         "spent_usd": 1699.3,
@@ -46,6 +51,7 @@ def test_drive_state_section_is_typed_projection_with_pointer(tmp_path):
     assert section.startswith("## Drive state")
     assert '"session_id": "abc123"' in section
     assert '"budget_drift_alert": true' in section
+    assert '"bg_consciousness_stop_source": "owner"' in section
     # Internal caches / duplicated spend narrative are OMITTED but NAMED.
     assert '"managed_update_cache"' not in section
     assert '"usage_accounting"' not in section
