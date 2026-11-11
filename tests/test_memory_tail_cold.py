@@ -2060,7 +2060,7 @@ def _in_thread(run) -> None:
 
     thread = threading.Thread(target=target)
     thread.start()
-    thread.join(600)
+    thread.join(120)
     assert not thread.is_alive() and not failed, failed
 
 
@@ -2147,18 +2147,18 @@ def test_a_capture_shares_no_room_answer_read_under_other_project_rooms_than_its
         if threading.get_ident() != main and not earlier:  # the earlier capture: its marks are read, it has not forgotten
             earlier.append(projects)
             at_forget.set()
-            assert go.wait(600)
+            assert go.wait(120)
             return forget(root, writes, projects)
         forget(root, writes, projects)
         if threading.get_ident() == main and earlier and not later:  # the later capture has forgotten: the earlier one
             later.append(projects)  # forgets now, reads its pass and stops before its end check
             go.set()
-            assert at_end.wait(600)
+            assert at_end.wait(120)
 
     def end_check(store_, gate_):
         if threading.get_ident() != main:
             at_end.set()
-            assert done.wait(600)
+            assert done.wait(120)
         return moved(store_, gate_)
 
     other = threading.Thread(target=lambda: mi.open_rows_by_room(tmp_path))
@@ -2166,13 +2166,13 @@ def test_a_capture_shares_no_room_answer_read_under_other_project_rooms_than_its
         patch.setattr(pr, "forget_lineage", forgetting)
         patch.setattr(cold, "moved", end_check)
         other.start()
-        assert at_forget.wait(600)
+        assert at_forget.wait(120)
         create_project(tmp_path, "gamma", name="Gamma")
         try:
             got = _main_view(tmp_path)
         finally:
             go.set(), done.set()
-            other.join(600)
+            other.join(120)
     assert not other.is_alive() and chat not in earlier[0] and chat in later[0], (earlier, later)
     assert _child(tmp_path, rooms, whole=False) == _child(tmp_path, rooms, whole=True)
     shared_answers = pr._ROOM_ANSWERS[str(pr._bindings_path(tmp_path))]
