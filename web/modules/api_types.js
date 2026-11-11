@@ -41,6 +41,7 @@
  * @property {"available"|"disabled"|"unsaved"} subagents_availability
  * @property {boolean} context_mode_auto_low  // frozen compatibility field; always false
  * @property {EffortRange} effort_range  // the owner's effort range (POST /api/owner/effort-range), the tolerant read
+ * @property {ChatModelRoute} main_route  // Main itself, written by POST /api/owner/chat-model without project_id
  * @property {string} safety_mode
  * @property {boolean} skills_repo_configured
  * @property {boolean} github_token_configured
@@ -807,6 +808,7 @@
  * @property {string=} last_task_result_id
  * @property {boolean=} created
  * @property {ProjectCognition} cognition
+ * @property {ChatModelChoice=} model_choice  // the room's own model for new owner work; never copied from Main
  */
 
 /** @typedef {Object} ProjectDeleteResponse
@@ -942,6 +944,9 @@
  * @property {string} context_mode
  * @property {EffortRange} effort_range
  */
+
+/** @typedef {import('./client_contract_types.js').ChatModelChoice} ChatModelChoice */
+/** @typedef {import('./client_contract_types.js').ChatModelRoute} ChatModelRoute */
 
 /**
  * @typedef {Object} OwnerSafetyModeResponse
@@ -1516,6 +1521,7 @@
  * @property {?number} main_seen_revision  // Main's monotonic paint ACK; null until a client first reads Main
  * @property {Object.<string,number[][]>} read_ahead_revisions  // per chat id: revisions read in full in another room (host-owned)
  * @property {{mode:'default'|'hidden'|'custom',text:string}} welcome  // install-wide empty-Main UI copy, not chat history
+ * @property {ChatModelRoute[]} model_recents  // server-written on each owner model act: newest first, at most four distinct routes; a POST may not carry it
  * @property {boolean=} ok
  */
 /**

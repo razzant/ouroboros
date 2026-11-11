@@ -17,6 +17,16 @@ def _apply(evt: dict) -> dict:
         return {"ok": False, "error": "control_call_identity_missing"}
     if action == "pause_task" and actor == task_id:
         return {"ok": False, "error": "self_pause_refused"}
+    if action == "switch_model":
+        from ouroboros.owner_model import request, ModelActRefused
+
+        if actor != task_id:
+            return {"ok": False, "error": "model_actor_mismatch"}
+        try:
+            return request(task_id, {"request_id": nonce, "action": "set", "model": evt["model"],
+                                     "use_local": bool(evt.get("use_local")), "cited": evt["cited"]}, source="owner_words")
+        except ModelActRefused as exc:
+            return {"ok": False, "error": exc.code}
     reason = str(evt.get("reason") or "")
     named = evt.get("accept_unknown") if action == "resume_task" and isinstance(evt.get("accept_unknown"), list) else ()
     with mind_control(actor, reason), accepting_unknown(named, reason):

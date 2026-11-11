@@ -133,10 +133,10 @@ def _inherited_cognition(ctx: Any, settings: dict) -> dict:
     """The parent's actual send binding, with its route choice: a parent following its role hands the role
     down (``follows_role``, the nanny follows it live); a parent on its own route (``switch_model``, a
     wait-card choice) hands a frozen ``parent_switch``. An emergency fallback answers the parent only:
-    children follow its role. Historical ``parent_fallback`` bindings remain readable."""
+    children inherit its primary (or follow its role). Historical ``parent_fallback`` bindings remain readable."""
     from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option, task_model_binding, task_processing_preference
     from ouroboros.provider_models import provider_for_model
-    from ouroboros.route_choice import following_route, follows, opening_role
+    from ouroboros.route_choice import following_route, follows, opening_choice
 
     ctx = cognitive_parent_context(ctx)
     metadata = getattr(ctx, "task_metadata", None) or {}
@@ -149,12 +149,18 @@ def _inherited_cognition(ctx: Any, settings: dict) -> dict:
     followed = follows(choice)
     # Older parents can carry only the fit role; current parents record the
     # adopted fallback as an explicit choice. Neither is a child's own route.
+    primary = None
     if ((isinstance(choice, dict) and choice.get("source") == "fallback")
             or (not isinstance(choice, dict) and role.startswith("fallback:"))):
-        followed = opening_role(ctx)
+        followed = follows(opening_choice(ctx))
+        if not followed:
+            primary = getattr(ctx, "primary_route", None)
     if followed:
         role, pin = followed, None
         model, local = following_route(role)
+    elif primary and primary.get("model"):
+        role, pin = task_model_binding(task, overrides=overrides)
+        model, local = str(primary["model"]), bool(primary.get("use_local"))
     else:
         live = overrides.get(role) or {}
         model = str(live.get("model", getattr(ctx, "active_model", "") or metadata.get("model") or ""))

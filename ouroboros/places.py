@@ -213,6 +213,7 @@ def _document(value: Any) -> dict:
 def _valid_circle(row: Any) -> bool:
     return (isinstance(row, dict) and type(row.get("revision")) is int and row["revision"] >= 0
             and all(isinstance(row.get(key), str) for key in ("circle_id", "name", "text", "text_author", "text_at"))
+            and isinstance(row.get("model", ""), str)
             and bool(row["circle_id"].strip() and row["name"].strip()) and row["text_author"] in ("", *AUTHORS))
 
 
@@ -311,6 +312,7 @@ class PlaceRecords:
         if circle is None:
             return None
         return {**{key: circle[key] for key in ("circle_id", "name", "text", "text_author", "text_at", "revision")},
+                "model": circle.get("model", ""),
                 "placed_by": choice["placed_by"], "placed_at": choice.get("placed_at", ""),
                 "standing_delegation": bool(circle["text"]) and circle["text_author"] in OWNER_VOICE
                 and choice["placed_by"] in OWNER_VOICE}
@@ -320,6 +322,15 @@ class PlaceRecords:
         choice = self.choices.get(place_id) or {}
         return ({"text": choice["description"], "author": choice.get("description_author", ""),
                  "at": choice.get("description_at", "")} if choice.get("description") else None)
+
+
+def place_model_route(place: Place, circle: Mapping[str, Any] | None) -> tuple[str, str]:
+    """The place's chosen model and scope; an empty value follows consciousness. Aliases stay stored choices."""
+    if place.model:
+        return place.model, "place"
+    if circle and circle.get("model"):
+        return circle["model"], "circle"
+    return "", "consciousness"
 
 
 def _records(document: dict) -> PlaceRecords:
@@ -810,16 +821,16 @@ def _circle_name(value: Any, circles: Iterable[Mapping[str, Any]], own_id: str =
     return name
 
 
-def _circle_words(value: Any) -> str:
+def _circle_string(value: Any, field: str) -> str:
     if not isinstance(value, str):
-        raise PlaceError("place_invalid_string", "text")
+        raise PlaceError("place_invalid_string", field)
     return value.strip()
 
 
-def create_circle(drive_root: Any, *, name: str, text: str = "", author: str) -> dict:
+def create_circle(drive_root: Any, *, name: str, text: str = "", model: str = "", author: str) -> dict:
     """A new circle at the end of the order; its words, when given, are ``author``'s."""
     _author(author)
-    words, made = _circle_words(text), {}
+    words, model, made = _circle_string(text, "text"), _circle_string(model, "model"), {}
 
     def mutate(current: dict) -> dict:
         circles, revision = list(current.get("circles", ())), current["revision"] + 1
@@ -827,7 +838,7 @@ def create_circle(drive_root: Any, *, name: str, text: str = "", author: str) ->
         while any(row["circle_id"] == circle_id for row in circles):
             circle_id = uuid.uuid4().hex[:12]
         made.clear()
-        made.update(circle_id=circle_id, name=_circle_name(name, circles), text=words,
+        made.update(circle_id=circle_id, name=_circle_name(name, circles), text=words, model=model,
                     text_author=author if words else "", text_at=utc_now_iso() if words else "", revision=revision)
         return {**current, "revision": revision, "circles": [*circles, dict(made)]}
 
@@ -836,14 +847,15 @@ def create_circle(drive_root: Any, *, name: str, text: str = "", author: str) ->
 
 
 def edit_circle(drive_root: Any, circle_id: str, *, author: str, expected_revision: int | None = None,
-                name: str | None = None, text: str | None = None) -> dict:
-    """Rename a circle or change its words. A rename keeps who wrote the words; new words are ``author``'s, and the
-    same words saved again stay my human's unless my human saves them (then they become theirs)."""
+                name: str | None = None, text: str | None = None, model: str | None = None) -> dict:
+    """Change a circle's name, words or model. Name/model edits keep word authorship; new words are ``author``'s.
+    The same words saved again stay my human's unless my human saves them (then they become theirs)."""
     _author(author)
     _expected(expected_revision)
-    if name is None and text is None:
-        raise PlaceError("circle_update_invalid", "circle", "circle_update_invalid: give a new name or new words.")
-    words, saved = None if text is None else _circle_words(text), {}
+    if name is None and text is None and model is None:
+        raise PlaceError("circle_update_invalid", "circle", "circle_update_invalid: give a name, words or model.")
+    words, saved = None if text is None else _circle_string(text, "text"), {}
+    model = None if model is None else _circle_string(model, "model")
 
     def mutate(current: dict) -> dict | None:
         circles = list(current.get("circles", ()))
@@ -852,6 +864,8 @@ def edit_circle(drive_root: Any, circle_id: str, *, author: str, expected_revisi
         if expected_revision is not None and old["revision"] != expected_revision:
             raise PlaceError("circle_revision_conflict", "revision", f"Current revision: {old['revision']}")
         row = {**old, **({"name": _circle_name(name, circles, circle_id)} if name is not None else {})}
+        if model is not None:
+            row["model"] = model
         if words is not None and (words != old["text"] or (words and old["text_author"] not in (*OWNER_VOICE, author))):
             row.update(text=words, text_author=author if words else "", text_at=utc_now_iso() if words else "")
         saved.clear()

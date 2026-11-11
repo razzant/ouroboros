@@ -321,6 +321,14 @@ def test_every_published_and_owned_shape_has_one_field_identical_browser_twin():
         "ouroboros.gateway.management_contracts", "ouroboros.gateway.history_contracts"))
 
 
+@pytest.mark.parametrize("name", ["WorkLead", "WorkPrimaryRoute", "CitedModelWords"])
+def test_nested_lead_provenance_has_a_field_identical_browser_twin(name):
+    # Inline schemas do not appear in the published document's top-level name list.
+    text = (REPO / "web" / "modules" / "work_types.js").read_text(encoding="utf-8")
+    assert re.search(rf"@typedef \{{Object\}} {name}\b", text), f"work contract twins lack {name}"
+    assert _js_typedef_fields(text, name) == set(typing.get_type_hints(contract_typed_dict(name), include_extras=True)), name
+
+
 def test_every_request_and_header_fact_is_published_for_the_journeys():
     requests = {token: entry.get("request", {}).get("schemas") for token, entry in BY_TOKEN.items()}
     for token in ("POST /api/files/write", "POST /api/projects/from-task", "POST /api/skills/{skill}/toggle",
@@ -443,14 +451,14 @@ def test_place_request_shapes_cover_the_owner_journey(client, monkeypatch):
     monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _root: [{
         "skill": "bridge", "id": "chat", "destination": "vendor:chat", "label": "Test chat", "wakes": ["mention"],
     }])
-    made = {"name": "Team", "text": "Help the team by the facts."}
+    made = {"name": "Team", "text": "Help the team by the facts.", "model": "circle/model"}
     assert BY_TOKEN["POST /api/circles"]["request"]["schemas"] == ["CircleCreateRequest"]
     assert _declared("CircleCreateRequest") == set(made) and not validate_ingress(made, contract_typed_dict("CircleCreateRequest"))
     created = client.post("/api/circles", json=made)
     assert created.status_code == 200, created.text
     circle = created.json()["circle"]
     assert not validate_ingress(circle, contract_typed_dict("CircleSummary")) and set(circle) == _declared("CircleSummary")
-    assert circle["text_author"] == "owner" and circle["name"] == "Team"
+    assert circle["text_author"] == "owner" and circle["name"] == "Team" and circle["model"] == "circle/model"
     connect = {"connector": "bridge", "account_id": "account", "conversation_id": "room", "label": "Room",
                "note": "The team's room: answer when asked.", "description": "Where the team asks",
                "circle_id": circle["circle_id"]}
@@ -465,6 +473,9 @@ def test_place_request_shapes_cover_the_owner_journey(client, monkeypatch):
     place = connected.json()["place"]
     assert place["label"] == "Test chat · Room" and place["state"] == "silent"
     assert not validate_ingress(place, contract_typed_dict("PlaceSummary"))
+    assert place["model_route"] == {"value": "circle/model", "layer": "circle"}
+    assert set(place["model_route"]) == _declared("PlaceModelRoute")
+    assert validate_ingress({**place, "model_route": {"value": "x", "layer": "unknown"}}, contract_typed_dict("PlaceSummary"))
     assert set(place) <= _declared("PlaceSummary") and "connector_label" not in place
     # The derived «only hears» fact is an optional boolean: present, it validates; any other type does not.
     assert not validate_ingress({**place, "only_hears": True}, contract_typed_dict("PlaceSummary"))
@@ -508,12 +519,13 @@ def test_place_request_shapes_cover_the_owner_journey(client, monkeypatch):
     assert conflict.json()["place"] == removed.json()["place"]
     placed = client.post(path, json={"circle_id": circle["circle_id"], "expected_revision": removed.json()["place"]["revision"]})
     assert placed.status_code == 200 and placed.json()["place"]["circle"]["placed_by"] == "owner"
-    reword = {"name": "Team room", "text": "New words", "expected_revision": circle["revision"]}
+    reword = {"name": "Team room", "text": "New words", "model": "circle/next", "expected_revision": circle["revision"]}
     assert BY_TOKEN["POST /api/circles/{circle_id}"]["request"]["schemas"] == ["CircleUpdateRequest"]
     assert _declared("CircleUpdateRequest") == set(reword) and not validate_ingress(reword, contract_typed_dict("CircleUpdateRequest"))
     circle_path = f"/api/circles/{circle['circle_id']}"
     reworded = client.post(circle_path, json=reword)
     assert reworded.status_code == 200 and reworded.json()["circle"]["name"] == "Team room"
+    assert reworded.json()["circle"]["model"] == "circle/next"
     stale = client.post(circle_path, json=reword)
     assert stale.status_code == 409 and stale.json()["code"] == "circle_revision_conflict"
     assert stale.json()["circle"] == reworded.json()["circle"]

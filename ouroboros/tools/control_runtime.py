@@ -905,7 +905,8 @@ def _set_next_wakeup(ctx: ToolContext, seconds: int) -> str:
             "next wake-up (a wake-up already pending keeps its time; a wake-up calling this sets its own next one).")
 
 
-def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: str = "") -> str:
+def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: str = "",
+                  owner_words: str = "", scope: str = "work", project_id: str = "", model_as_typed: bool = False) -> str:
     """LLM-driven model/effort switch (Constitution P5: LLM-first).
 
     Stored in ToolContext, applied on the next LLM call in the loop. ``primary``
@@ -929,6 +930,15 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: 
     requested_effort = str(effort or "").strip().lower()
     if requested_effort and requested_effort not in EFFORT_SCALE:
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(f"⚠️ Unknown effort: {effort}. Valid: {', '.join(EFFORT_SCALE)}")))
+    from ouroboros.tools.control_models import cited_switch, refuse
+
+    if scope not in {"work", "room", "main"} or (project_id and scope != "room"):
+        return refuse(ctx, "scope must be work, room or main; project_id belongs to room only.")
+    if (owner_words or scope != "work") and primary:
+        return refuse(ctx, "primary return/wait acts on this work; omit owner_words, scope and project_id.")
+    if owner_words or scope != "work":
+        return cited_switch(ctx, model=model, owner_words=owner_words, scope=scope, project_id=project_id,
+                            effort=requested_effort, model_as_typed=model_as_typed)
     requested_primary = str(primary or "").strip().lower()
     route = getattr(ctx, "primary_route", None)
     if requested_primary and (requested_primary not in ("return", "wait") or model):
@@ -940,17 +950,9 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: 
 
     from ouroboros import route_choice
     if requested_primary:
-        waiter = getattr(ctx, "model_wait_context", None)
-        chosen = ((getattr(waiter, "overrides", None) or {}).get(route["role"]) or {})
-        ctx.active_model_override = str(chosen.get("model") or route["model"])
-        ctx.active_use_local_override = bool(chosen.get("use_local", route["use_local"]))
-        ctx.active_role_override = route["role"]
-        ctx.route_wait_on_primary = requested_primary == "wait"
-        # The primary's own choice again: a following primary is re-read at the round boundary (the CURRENT one).
-        ctx.route_choice = route_choice.explicit("wait_card") if chosen else route_choice.opening_choice(ctx)
-        changes.append(f"primary route {ctx.active_model_override}{' (local)' if ctx.active_use_local_override else ''}"
-                       f" (role {route['role']}; if it refuses: "
-                       f"{'wait for it' if requested_primary == 'wait' else 'configured routes again'})")
+        from ouroboros.owner_model import primary_action
+
+        changes.append(primary_action(ctx, requested_primary))
     elif model:
         if model not in available:
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(f"⚠️ Unknown model: {model}. Available: {', '.join(available)}")))
@@ -968,6 +970,7 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: 
         ctx.active_model_override = model
         ctx.active_use_local_override = use_local
         ctx.route_wait_on_primary, ctx.active_role_override = False, None  # an explicit route ends a declared wait
+        ctx._lead_return_from = None  # it also cancels the requested return's held fallback fact
         ctx.route_choice = route_choice.explicit("switch_model")  # the mind's own route: Settings no longer move it
         changes.append(f"model={model}{' (local)' if use_local else ''}")
 

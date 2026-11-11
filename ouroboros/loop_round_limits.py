@@ -222,6 +222,13 @@ def _drain_incoming_messages(
                 apply_latch(owner_ctx, entry, event_queue=event_queue)
                 controls["hurry"] = str(entry.get("msg_id") or "hurry")
                 continue
+            from ouroboros.owner_mailbox import KIND_OWNER_MODEL
+            if kind == KIND_OWNER_MODEL:
+                from ouroboros.owner_model import apply_current
+
+                controls["owner_model"] = apply_current(owner_ctx) or controls.get("owner_model", False)
+                acknowledge_transcript_entry(drive_root, task_id, entry, wake_id="owner_model_wake")
+                continue
             dmsg = entry.get("text") or ""
             if kind == KIND_TASK_MESSAGE:
                 # A principal's words to this task are premises every review reads
@@ -907,6 +914,8 @@ def _handle_model_wait_control(
     # catches a hold's interruption raised outside the model call, must not
     # hand the same error back here.
     error.control_rails_seen = True
+    if reason == "owner_model":
+        return None  # a refused call's wait yielded; the next drain applies the durable primary
     if reason == "owner_launch_authority_unavailable":
         # Only the positively unsent handoff waits, and only on positive lock contention;
         # sent effects never retry. Reuse this task's live stack and control/deadline

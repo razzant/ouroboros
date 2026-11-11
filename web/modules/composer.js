@@ -1,7 +1,7 @@
 // The Main and Project composer (docs/DESIGN.md "Controls and editable choices", "Composer owner controls",
 // "Chat attachments"): its markup inside the room's input dock, the message field (its growth, Enter, the input
-// recall and the room's draft), the room's Subagents, Context and Effort capsules with their readback, the "+" menu
-// (Attach file first, then the sections later controls set), the voice and chips slots, the staged attachments with
+// recall and the room's draft), the room's Model, Subagents, Context and Effort capsules with their readback, the "+"
+// menu (Attach file first, then the sections later controls set), the voice and chips slots, the staged attachments with
 // their paste and drop routes, and the send path that turns the draft into the owner's frame. Skills' "+" items and
 // chips follow the live contributions (composer_plus.js, composer_chips.js). The room (chat.js) mounts the markup,
 // namespaces its ids and shows in its feed what was sent.
@@ -38,6 +38,7 @@ export function composerMarkup() {
                 <div id="chat-attachment-preview" class="chat-attachment-preview"></div>
                 <div class="chat-toolbar-row">
                     ${renderMobileNavToggle({ inComposer: true })}
+                    <div class="chat-model-mode" id="chat-model-mode"></div>
                     <div class="chat-subagents-mode" id="chat-subagents-mode"></div>
                     <div class="chat-context-mode" id="chat-context-mode" data-context-mode="max"></div>
                     <span class="chat-composer-chips" data-composer-chips hidden></span>
@@ -169,7 +170,7 @@ export function createPlusMenu({ button, hostItems = [] }) {
  * resolves a namespaced id; `page` is the room (the drop target and the capsules' docking box); `ws` the shared
  * socket; `replies` the room's reply controller, whose reference rides the frame; `storeKey(base)` the room's
  * sessionStorage key. `refreshState()` re-reads the room's settings after a capsule saves, `openSettings(tab)` opens a
- * Settings tab (the Subagents capsule's way to Agents), `onLayout()` re-measures
+ * Settings tab (the Subagents capsule's way to Agents, the Model capsule's to Accounts), `onLayout()` re-measures
  * the room's dock, `onSent({ text, frame, result, views })` shows an accepted send in the feed and returns the row it
  * added (the sent draft rises into it, send_flight.js), and `readingBack()`
  * says whether the owner's own gesture took the room off its newest row (the phone fold reads it: composer_fold.js).
@@ -344,11 +345,11 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         }
     }
 
-    // Each composer owns its room's Subagents, Context and Effort settings.
+    // Each composer owns its room's Model, Subagents, Context and Effort settings.
     const ownerControls = createComposerOwnerControls({ row: page.querySelector('.chat-toolbar-row'), box: page, byId, apiFetch, showToast,
         projectId, chatId, saveEffortRange: apiClient.ownerEffortRange,
-        saveSubagentsMode: apiClient.ownerSubagentsMode,
-        openSettings: () => openSettings?.('agents'), refreshState, onLayout, readingBack });
+        saveSubagentsMode: apiClient.ownerSubagentsMode, saveChatModel: apiClient.ownerChatModel,
+        openSettings: (tab) => openSettings?.(tab), refreshState, onLayout, readingBack });
 
     // Rooms outside the bounded sidebar still read their settings.
     async function refreshProjectCognition() {
@@ -432,7 +433,7 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
         // After a send, once the feed shows it: the emptied field's height and the room's dock.
         resize: resizeChatInput,
         seedInputHistory,
-        // The room's Subagents, Context and Effort readback, from Main's state or the named Project.
+        // The room's Model, Subagents, Context and Effort readback, from Main's state or the named Project.
         syncState(data) {
             ownerControls.syncState(data);
             if (projectId && !data?.projects?.some(project => project.id === projectId && project.cognition)) void refreshProjectCognition();
