@@ -439,7 +439,7 @@ function focusSnapshot(host, doc) {
         rowId: row?.dataset?.subagentRow || '', field: active.dataset?.subagentField || '',
         summary: active.tagName === 'SUMMARY' ? disclosureKind(active.parentElement) : '',
         start: typeof active.selectionStart === 'number' ? active.selectionStart : null,
-        end: typeof active.selectionEnd === 'number' ? active.selectionEnd : null, scrollTop: host.scrollTop,
+        end: typeof active.selectionEnd === 'number' ? active.selectionEnd : null,
     };
 }
 
@@ -451,7 +451,6 @@ function restoreFocus(host, saved) {
         : saved.summary ? row?.querySelector?.(`[${DISCLOSURES[saved.summary]}] > summary`) : row?.querySelector?.('[data-editor-save]');
     if (field?.focus) field.focus({ preventScroll: true });
     if (saved.start !== null && field?.setSelectionRange) field.setSelectionRange(saved.start, saved.end);
-    host.scrollTop = saved.scrollTop;
 }
 
 // Session access choices; one list, so a further native profile lands in one place.
@@ -1056,6 +1055,7 @@ export function createAvailableSubagentsEditor({
             return true;
         }
         disposeChoosers();
+        const scroller = container.closest?.('.settings-page'), top = scroller?.scrollTop;  // Settings scrolls in the level: a redraw keeps the place
         const pool = reviewPoolSummary(state, Boolean(page));
         const intent = editorIntent(state);
         const items = state.setting.items;
@@ -1168,6 +1168,7 @@ export function createAvailableSubagentsEditor({
             paint();
             revealRow(row._uiKey);
         });
+        if (scroller) scroller.scrollTop = top;
         bindRows(container);
         disposeChoosers = bindModelChoosers(container);
         restoreFocus(container, focused);
@@ -1312,8 +1313,7 @@ export function createAvailableSubagentsEditor({
     function destroy() {
         // An agent page that is left keeps its unsaved form for the next opening; a clean one keeps nothing.
         if (page?.entry) { if (state.dirty && current()) DRAFTS.set(page.entry, current()); else DRAFTS.delete(page.entry); }
-        state.destroyed = true;
-        state.previewGeneration += 1;
+        Object.assign(state, { destroyed: true, previewGeneration: state.previewGeneration + 1 });
         disposeChoosers();
         for (const disposer of ['statusDisposer', 'catalogDisposer']) { state[disposer]?.(); state[disposer] = null; }
     }

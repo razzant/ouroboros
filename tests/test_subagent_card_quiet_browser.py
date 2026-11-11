@@ -87,13 +87,14 @@ def _agent(page, agent_id):
     return form
 
 
-def _settled(page, field, checked):
-    """A switch of the open agent's page shows `checked`, its write is over and it holds the focus it had."""
+def _settled(page, field, checked, focused=False):
+    """A switch of the open agent's page shows `checked` and its write is over; `focused`: it holds the focus it
+    had when it was pressed from the keyboard (WebKit need not focus a control pressed by the pointer)."""
     page.wait_for_function("""([field, checked, focused]) => {
         const level = [...document.querySelectorAll('#page-settings [data-settings-page]')].filter((el) => !el.hidden).at(-1);
         const input = level?.querySelector(`[data-subagent-field="${field}"]`);
         return input && input.checked === checked && input.getAttribute('aria-busy') !== 'true' && !input.disabled
-            && (!focused || document.activeElement === input); }""", arg=[field, checked, True])
+            && (!focused || document.activeElement === input); }""", arg=[field, checked, focused])
 
 
 def _box(locator):
@@ -140,7 +141,7 @@ def test_reviewer_keeps_its_place_under_pointer_and_keyboard_and_the_form_keeps_
     box.focus()
     for expected in (True, False, True):
         page.keyboard.press("Space")
-        _settled(page, "review_eligible", expected)
+        _settled(page, "review_eligible", expected, focused=True)
         assert _box(switch) == start and _box(form) == card_top
     assert text.input_value() == draft, "the unsaved text survives every repaint"
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
@@ -324,7 +325,7 @@ def test_narrow_consumers_lay_the_form_out_by_their_own_width(role_ui, long_labe
     start, card_top = _box(place), _box(card)
     page.keyboard.press("Space")
     if consumer == "settings":
-        _settled(page, "review_eligible", True)  # one write of the entry; the focus returns to the switch
+        _settled(page, "review_eligible", True, focused=True)  # one write of the entry; the focus returns to the switch
     assert box.is_checked() and _box(place) == start and _box(card) == card_top
     assert box.evaluate("e => e === document.activeElement")
     if consumer == "wizard":
