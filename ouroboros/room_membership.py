@@ -74,8 +74,9 @@ def _stream_ends(root: Any) -> tuple:
     """The dialogue streams' ends (``dialogue_store.stream_end``, the readers' change counter): an append and
     a newly planned segment move them. The archive import stores rows under unchanged ends, but only into
     intervals planned before it, and while one is pending ``resolve_row`` answers importing, so no not-found
-    decision is kept. Nothing else rewrites the rows or skipped lines of an imported interval in place; were it
-    done by hand, this process would see it after the next append, text revision or restart."""
+    decision is kept. Apart from a text revision (``_text_revision``) no code rewrites the rows or skipped lines
+    of an imported interval in place; were it done by hand, this process would see it after the next append,
+    text revision or restart."""
     from ouroboros import dialogue_store as ds
 
     return tuple(ds.stream_end(root, stream) for stream in ds.STREAMS)
@@ -85,7 +86,7 @@ def _saved_target(rooms: Any, ref: Mapping[str, Any]) -> tuple:
     """``(home, task, chat)`` of a Reply target saved before ``target_home``, read from the target row
     itself at its exact address (chat, then progress, as ``chat_references.resolve_reply`` does), as
     that address answers now: no link is kept apart from it, so a target whose text was revised is
-    absent until its text is back (owner decision 2026-11-11: such a Reply stays Main's alone).
+    not found until its text is back (owner decision 2026-11-11: such a Reply stays Main's alone).
     One proven absent is ``TARGET_ABSENT``; one whose bytes cannot be read (a recorded unreadable
     interval, an ambiguous address, another row of its chat and time beside unreadable lines, as
     ``chat_references.resolve_history_row`` holds) is ``TARGET_UNKNOWN``: both with the saved
