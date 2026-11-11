@@ -46,7 +46,7 @@ def store_transactions(monkeypatch):
     def connection(*args, **kwargs):
         files = [frame.filename for frame in traceback.extract_stack()]
         seen.append({"under_q": queue._queue_lock._is_owned(),
-                     "chooser": any(name.endswith("supervisor/dispatch_choice.py") for name in files)})
+                     "chooser": any(pathlib.PurePath(name).parts[-2:] == ("supervisor", "dispatch_choice.py") for name in files)})
         with real(*args, **kwargs) as conn:
             yield conn
 
