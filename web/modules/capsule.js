@@ -1,7 +1,8 @@
 // The capsule machine: what every inline composer control shares. A capsule opens into its strip on the
 // composer's line, a press pins it, a mouse may open it early, and the one hint above says what its value
-// means. Subagents, Context and Effort run on it (composer_owner_controls.js, composer_subagents.js); the
-// fit that keeps a strip on the line is capsule_fit.js, the open and close motion capsule_morph.js.
+// means. Model, Subagents, Context and Effort run on it (composer_model.js, composer_owner_controls.js,
+// composer_subagents.js); the fit that keeps a strip on the line is capsule_fit.js, the open and close
+// motion capsule_morph.js.
 import { beginMorph, stopMorph } from './capsule_morph.js';
 import { SEG_PAD, createCapsuleFit } from './capsule_fit.js';
 import { createHint } from './ui_hint.js';

@@ -91,7 +91,7 @@ Owner-source resolution, routing-picker origin reads, `owner_words`, the legacy 
 
 Speech helpers share one audio lease, bound uploads to provider limits and offer Insert/Copy when a draft changes during transcription; bundled recognition is opt-in, device voices prefer localService.
 
-`composer.js` owns attachments, Send and four capsules: Model first (`composer_model.js`), then Subagents, Context and Effort (§7), opening inline (`capsule_fit.js`). Main state and project `cognition` hold the choices (even past the sidebar list). Closed Context reads census `context_attempt` (`context_observation.js`). Accepted Swarm messages carry a quiet label; sending creates no project or plan; routing and `move_to_project` apply (§6). `composer_fold.js` folds the phone row. Room bars lack a More menu; phone Restart/budget sit in the status Shade. Derived Low alters no owner choice or review authority.
+`composer.js` owns attachments, Send and four capsules: Model first (`composer_model.js`), then Subagents, Context and Effort (§7), opening inline (`capsule_fit.js`). Main state and the project row hold the choices (even past the sidebar list). Closed Context reads census `context_attempt` (`context_observation.js`). Accepted Swarm messages carry a quiet label; sending creates no project or plan; routing and `move_to_project` apply (§6). `composer_fold.js` folds the phone row. Room bars lack a More menu; phone Restart/budget sit in the status Shade. Derived Low alters no owner choice or review authority.
 
 Module contracts: `capsule.js`, `model_list.js`, `model_catalog_store.js`, `model_source_mark.js` headers. Appearance and interaction: DESIGN "Composer owner controls".
 
