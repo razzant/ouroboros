@@ -67,7 +67,7 @@ def test_maintenance_lost_reply_cancel_and_drafts(subscription_ui, width, accoun
             route.fulfill(json=operation)
         elif route.request.method == "POST":
             requests.append((route.request.post_data_json, route.request.headers.get("idempotency-key")))
-            row["operation"] = {"id": operation["id"], "state": "running", "phase": "installing"}
+            row["operation"] = copy.deepcopy(operation)
             if len(requests) == 1:
                 route.abort("failed")
             else:
@@ -156,24 +156,24 @@ def test_historical_unknown_effect_preserves_newer_version(subscription_ui, term
         "id": "historical-operation", "harness": "codex", "state": "failed", "phase": "settled",
         "finishedAt": "2026-10-09T12:00:00Z", "mutation": "unknown", "termination": termination,
     }
-    row["operation"] = {key: operation[key] for key in ("id", "state", "phase", "finishedAt")}
-    held_details, requests = [], []
+    row["operation"] = copy.deepcopy(operation)
+    details, requests = [], []
 
     def maintenance(route):
         requests.append(route.request.method)
         if urlparse(route.request.url).path.endswith("/harnesses"):
             route.fulfill(json={"harnesses": [row]})
         else:
-            held_details.append(route)
+            details.append(route.request.url)
+            route.fulfill(json=operation)
 
     page.route("**/api/claudexor/maintenance/**", maintenance)
     page.goto(ui["url"] + "/#settings")
     page.locator('[data-settings-tab="providers"]').click()
     family = page.locator('.agent-family-card[data-family="codex"]')
     expect(family.locator('.harness-maintenance-line')).to_contain_text("Program 3.1.0")
-    assert held_details
-    for route in held_details:
-        route.fulfill(json=operation)
+    if termination == "confirmed":
+        assert not details  # Full settled receipts need no detail fetch; unresolved custody still polls.
     expect(family).to_contain_text("Installed files may have changed")
     expect(family.locator('.harness-maintenance-line')).to_contain_text("Program 3.1.0")
     expect(family).to_contain_text("Update failed")
@@ -333,7 +333,7 @@ def test_missing_executable_is_one_explained_section_fact_until_a_real_fresh_rea
     _remount(page)
     expect(banner).to_contain_text("no longer present")
     expect(codex.locator(".harness-maintenance-line")).to_contain_text("Last known")
-    assert False in reads[before:]
+    assert reads[before:]  # Reopening Accounts is now a current/newest read.
 
     # A true fresh success removes the current instruction and the last-known mark.
     world["broken"] = False
@@ -361,7 +361,7 @@ def test_retained_failed_operation_on_a_healthy_replacement_advises_nothing(subs
         "problem": {**PINNED_SPAWN_FAILURE["body"], "message": f"spawn {gone} ENOENT"},
     }
     row = _inventory_row("codex")
-    row.update(observedAt="2026-10-09T12:05:00Z", operation={key: operation[key] for key in ("id", "state", "phase", "finishedAt")})
+    row.update(observedAt="2026-10-09T12:05:00Z", operation=copy.deepcopy(operation))
     methods = []
 
     def maintenance(route):

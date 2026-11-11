@@ -262,3 +262,12 @@ export async function refreshModelCatalog({ button } = {}) {
         }
     }
 }
+
+const settledPrograms = new Map();
+export function refreshMaintenanceCatalogs(harness, operation) {
+    const stamp = `${operation.id}:${operation.finishedAt || ''}`;
+    if (settledPrograms.get(harness) === stamp) return;
+    settledPrograms.set(harness, stamp);
+    document.dispatchEvent(new CustomEvent('harness-maintenance:settled', {detail: {harness}}));
+    return Promise.allSettled([claudexorStatus.refresh({includeModels: true, afterCurrent: true}), refreshModelCatalog()]);
+}

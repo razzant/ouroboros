@@ -1,12 +1,31 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { catalogReadNote, catalogReadState, mergeModelCatalog, refreshModelCatalog, summarizeReadErrors, withConnectionCatalogs } from '../modules/settings_catalog.js';
+import { catalogReadNote, catalogReadState, mergeModelCatalog, refreshMaintenanceCatalogs, refreshModelCatalog, summarizeReadErrors, withConnectionCatalogs } from '../modules/settings_catalog.js';
+import { claudexorStatus } from '../modules/claudexor_status_store.js';
 
 const first = {
     items: [{ value: 'claudexor::opaque=owner-model', source_id: 'opaque', credential_profile_id: 'personal', observed_at: 'earlier' }],
     model_sources: [{ id: 'opaque', label: 'Model service', credentialHarness: 'codex' }],
     observed_at: 'earlier', errors: [],
 };
+
+test('one settlement refreshes native and raw catalogs and notifies scoped consumers even if the general read fails', async (t) => {
+    const previousDocument = globalThis.document, previousFetch = globalThis.fetch;
+    t.after(() => { globalThis.document = previousDocument; globalThis.fetch = previousFetch; });
+    const doc = new EventTarget(); doc.getElementById = () => null; globalThis.document = doc;
+    const events = [], native = []; let raw = 0;
+    doc.addEventListener('harness-maintenance:settled', event => events.push(event.detail));
+    t.mock.method(claudexorStatus, 'refresh', async options => { native.push(options); });
+    globalThis.fetch = async () => { raw++; throw new Error('general catalog unavailable'); };
+    const receipt = {id: 'one', finishedAt: '2026-11-10'};
+    await refreshMaintenanceCatalogs('future', receipt);
+    await refreshMaintenanceCatalogs('future', {...receipt});
+    assert.deepEqual(events, [{harness: 'future'}]);
+    assert.deepEqual(native, [{includeModels: true, afterCurrent: true}]);
+    assert.equal(raw, 1);
+    await refreshMaintenanceCatalogs('future', {...receipt, id: 'two'});
+    assert.equal(events.length, 2); assert.equal(raw, 2);
+});
 
 test('connection discovery replaces only the exact source and preserves general refresh provenance', () => {
     const general = mergeModelCatalog({}, { ...first, coverage: { complete: true },

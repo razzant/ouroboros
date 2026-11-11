@@ -41,6 +41,7 @@ import { RESTART_LABEL, createRestartController } from './claudexor_restart.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { harnessIdentityMarkup, planLabel } from './harness_presentation.js';
 import { SIGN_IN_SCOPE_NOTE, createLoginCardController, normalizeProfileName, preserveCardFocus } from './harness_login_cards.js';
+import { refreshMaintenanceCatalogs } from './settings_catalog.js';
 import { createHarnessMaintenanceController } from './harness_maintenance.js';
 import { settingsSection } from './settings_controls.js';
 import { formatRelativeAge } from './ui_helpers.js';
@@ -1433,14 +1434,14 @@ async function refreshHarnessStatusOnActivation() {
     // the panel can keep useful context.  That retained snapshot is not fresh
     // evidence for an owner-triggered write: a transient outage must never
     // turn yesterday's `stale + ready` into a wake request.
-    if (state.store.error) return state.maintenance?.refresh({ fresh: true });
+    if (state.store.error) return state.maintenance?.refresh({ fresh: true, checkLatest: true });
     const daemon = snapshot?.daemon || state.store.snapshot?.daemon || {};
     if (String(daemon.state || '') === 'stale'
         && String(daemon.runtime?.state || '') === 'ready'
         && !daemon.ownership_problem) {
         await wakeDaemon();
     }
-    return state.maintenance?.refresh({ fresh: true });
+    return state.maintenance?.refresh({ fresh: true, checkLatest: true });
 }
 
 /**
@@ -1467,7 +1468,7 @@ async function _init(store, restartDeps) {
         host: () => document.getElementById('harness-accounts-groups'),
         onInventory: renderRows,
         onInspectionProblem: paintServiceBanner,
-        onSettled: () => state.store.refresh(),
+        onSettled: refreshMaintenanceCatalogs,
         visible: () => !document.hidden
             && document.getElementById('harness-accounts-groups')?.offsetParent != null,
     });

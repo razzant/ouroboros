@@ -194,7 +194,7 @@ test('lost POST reply retains exact key/body through remount and ignores unrelat
 test('a fresh view rejoins inventory operation and does not submit work', async () => {
     const { controller, calls } = setup({ harnessMaintenanceInventory: async () => ({ harnesses: [entry({ operation: operation() })] }) });
     await controller.refresh(); await flush();
-    assert.equal(calls.filter(([kind]) => kind === 'read').length, 1);
+    assert.equal(calls.filter(([kind]) => kind === 'read').length, 0, 'inventory already has the full receipt');
     assert.equal(calls.filter(([kind]) => kind === 'start').length, 0);
     assert.equal(controller.view('fixture').operation.phase, 'installing');
 });
@@ -203,7 +203,7 @@ test('historical unknown effect keeps a newer inspected version and its warning'
     const terminal = operation({ state: 'failed', phase: 'settled', mutation: 'unknown',
         termination: 'confirmed', finishedAt: '2026-10-09T12:00:00Z' });
     const row = entry({ selection: { path: '/vendor/program', version: '3.1.0' }, observedAt: '2026-10-09T12:01:00Z',
-        operation: { id: terminal.id, state: terminal.state, phase: terminal.phase, finishedAt: terminal.finishedAt } });
+        operation: terminal });
     let inspections = 0;
     const { controller, calls } = setup({
         harnessMaintenanceInventory: async () => { inspections++; return { harnesses: [row] }; },
@@ -235,7 +235,7 @@ test('historical unknown effect cannot borrow stale or absent version evidence',
         const terminal = operation({ state: 'interrupted', phase: 'settled', mutation: 'unknown',
             termination: 'confirmed', finishedAt });
         const row = entry({ observedAt, selection: { path: '/vendor/program', version },
-            operation: { id: terminal.id, state: terminal.state, phase: terminal.phase, finishedAt } });
+            operation: terminal });
         const { controller } = setup({ harnessMaintenanceInventory: async () => ({ harnesses: [row] }),
             harnessMaintenanceOperation: async () => terminal });
         await controller.refresh(); await flush();
@@ -250,7 +250,7 @@ test('fresh terminal version observation does not release uncertain operation cu
     const terminal = operation({ state: 'cancelled', phase: 'settled', mutation: 'unknown',
         termination: 'unconfirmed', finishedAt: '2026-10-09T12:00:00Z' });
     const row = entry({ observedAt: '2026-10-09T12:01:00Z', selection: { path: '/vendor/program', version: '3.1.0' },
-        operation: { id: terminal.id, state: terminal.state, phase: terminal.phase, finishedAt: terminal.finishedAt } });
+        operation: terminal });
     const { controller } = setup({ harnessMaintenanceInventory: async () => ({ harnesses: [row] }),
         harnessMaintenanceOperation: async () => terminal });
     await controller.refresh(); await flush();
@@ -347,6 +347,22 @@ test('an old running poll cannot undo a confirmed cancellation', async () => {
     stale.resolve(operation()); await read;
     assert.equal(controller.view('fixture').operation.state, 'cancelled');
     assert.equal(controller.view('fixture').cancelling, false);
+});
+
+test('an old inventory cannot erase a terminal receipt whose termination is still unconfirmed', async () => {
+    const stale = deferred();
+    let reads = 0, settled = 0;
+    const failed = operation({state: 'failed', phase: 'settled', termination: 'unconfirmed', mutation: 'unknown'});
+    const {api} = setup({harnessMaintenanceInventory: async () => ++reads === 2 ? stale.promise
+        : {harnesses: [entry({operation: reads > 2 ? failed : null})]}, harnessMaintenanceOperation: async () => failed});
+    const controller = createHarnessMaintenanceController({api, intents: new Map(), onSettled: () => settled++});
+    await controller.refresh(); await controller.start('fixture', {kind: 'latest'});
+    const read = controller.refresh(); await flush();
+    await controller.readOperation('fixture');
+    stale.resolve({harnesses: [entry({operation: operation()})]}); await read; await flush();
+    assert.equal(controller.view('fixture').operation.state, 'failed');
+    assert.equal(controller.view('fixture').operation.termination, 'unconfirmed');
+    assert.equal(settled, 0);
 });
 
 test('an inspection begun before update cannot restore the old current version', async () => {
@@ -659,7 +675,7 @@ test('a retained failed operation after a healthy replacement advises nothing an
         finishedAt: '2026-10-09T12:00:00Z', problem: { code: 'ENOENT', message: `spawn ${MISSING} ENOENT`, retryable: false } });
     // The replacement fixture engine answers healthy, its row still pointing at the retained failure.
     const row = entry({ observedAt: '2026-10-09T12:05:00Z', selection: { path: '/vendor/program', version: '3.1.0' },
-        operation: { id: failed.id, state: failed.state, phase: failed.phase, finishedAt: failed.finishedAt } });
+        operation: failed });
     const asked = [], keys = [];
     let settles = 0;
     const api = {
@@ -673,11 +689,12 @@ test('a retained failed operation after a healthy replacement advises nothing an
     const controller = createHarnessMaintenanceController({ api, intents: new Map(), newKey: () => 'same-key', onSettled: () => { settles++; } });
     await controller.refresh();
     await controller.start('fixture', { kind: 'latest' });
-    await controller.readOperation('fixture'); await flush();
+    await controller.readOperation('fixture');
+    await controller.refresh({harness: 'fixture', fresh: true}); await flush();
     assert.deepEqual(keys, ['same-key']);
     const view = controller.view('fixture');
     assert.equal(controller.inspectionProblem, null);
-    assert.equal(settles, 1);
+    assert.equal(settles, 0, 'unconfirmed termination retains custody');
     assert.deepEqual(asked.at(-1), { harness: 'fixture', fresh: true, checkLatest: false }, 'the existing settled read supplies current evidence');
     assert.equal(view.operation.mutation, 'unknown');
     assert.equal(view.operation.termination, 'unconfirmed');
@@ -862,4 +879,17 @@ test('a program read the transport lost is said in owner words; an engine senten
     await engine.controller.refresh({ fresh: true });
     assert.equal(engine.controller.view('fixture').inventoryError, 'Program inspection unavailable: child timed out');
     controller.dispose(); engine.controller.dispose();
+});
+
+test('an external settled inventory receipt refreshes catalogs once; unconfirmed custody waits', async () => {
+    const settled = operation({state: 'succeeded', outcome: 'not_changed', phase: 'settled', mutation: 'none', termination: 'confirmed'});
+    let receipt = {...settled, termination: 'unconfirmed'};
+    let settles = 0;
+    const controller = createHarnessMaintenanceController({intents: new Map(), onSettled: () => settles++, api: {
+        harnessMaintenanceInventory: async () => ({harnesses: [entry({operation: receipt})]}),
+    }});
+    await controller.refresh(); assert.equal(settles, 0);
+    receipt = settled;
+    await controller.refresh(); assert.equal(settles, 1);
+    await controller.refresh(); assert.equal(settles, 1);
 });

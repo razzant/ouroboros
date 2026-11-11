@@ -137,7 +137,7 @@ export function harnessMaintenanceMarkup(entry, view = {}) {
 
 /** View controller. reads/presses coalesce; dispose releases only the view. */
 export function createHarnessMaintenanceController({
-    api = apiClient, host = () => null, onInventory = () => {}, onInspectionProblem = () => {}, onSettled = () => {},
+    api = apiClient, host = () => null, onInventory = () => {}, onInspectionProblem = () => {}, onSettled = () => {}, onChange = () => {},
     visible = () => true, intents = sessionIntents,
     newKey = () => globalThis.crypto?.randomUUID?.()
         || `maintenance-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
@@ -205,9 +205,10 @@ export function createHarnessMaintenanceController({
                 control.addEventListener('click', () => act(harness, control.dataset.maintenanceAction));
             });
         });
+        onChange();
     }
 
-    function accept(harness, operation) {
+    function accept(harness, operation, fromInventory = false) {
         if (!operation?.id || operation.harness && operation.harness !== harness) throw new Error('No matching operation receipt was returned.');
         const state = record(harness);
         const previous = state.operation;
@@ -219,10 +220,12 @@ export function createHarnessMaintenanceController({
         // of a historical operation's effect or process-termination evidence.
         const inspectedAfter = inspectedAfterOperation(rows.get(harness), operation);
         if (operation.phase === 'installing' || operation.mutation === 'unknown') state.unknownCurrent = !inspectedAfter;
-        if (TERMINAL.has(operation.state) && (previous?.id !== operation.id || !TERMINAL.has(previous?.state))) {
-            state.revision += 1;
+        if (TERMINAL.has(operation.state) && (previous?.id !== operation.id || previous.state !== operation.state
+            || previous.termination !== operation.termination)) state.revision += 1;
+        if (TERMINAL.has(operation.state) && !maintenanceOperationPending(operation)
+            && (previous?.id !== operation.id || maintenanceOperationPending(previous))) {
             state.unknownCurrent = operation.mutation !== 'none' && !inspectedAfter;
-            void refresh({ harness, fresh: true });
+            if (!fromInventory) void refresh({ harness, fresh: true });
             if (!disposed) onSettled(harness, operation);
         }
         return operation;
@@ -277,14 +280,8 @@ export function createHarnessMaintenanceController({
                     settle(entry.harness);
                     state.unknownCurrent = (ACTIVE.has(state.operation?.state) && state.operation?.phase === 'installing')
                         || (state.operation?.mutation === 'unknown' && !inspectedAfterOperation(entry, state.operation));
-                    // Inventory offers a handle, not the full result. Do not
-                    // replace a retained full receipt with its shorter summary.
-                    if (!state.request && entry.operation?.id && entry.operation.id !== state.operation?.id) {
-                        state.operation = entry.operation;
-                        state.request = null;
-                        state.operationError = '';
-                        void readOperation(entry.harness);
-                    }
+                    if (!state.request && entry.operation?.id && (entry.operation.id !== state.operation?.id
+                        || maintenanceOperationPending(state.operation))) accept(entry.harness, entry.operation, true);
                 }
                 if (!disposed) onInventory([...rows.keys()]);
                 return inventory;
@@ -421,7 +418,7 @@ export function createHarnessMaintenanceController({
         poll() {
             if (disposed || !visible()) return;
             for (const [harness, state] of intents) {
-                if (ACTIVE.has(state.operation?.state) && !state.operationError && !state.busy) void readOperation(harness);
+                if (maintenanceOperationPending(state.operation) && !state.operationError && !state.busy) void readOperation(harness);
             }
         },
         dispose() { disposed = true; },
