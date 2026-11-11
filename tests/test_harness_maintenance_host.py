@@ -573,7 +573,7 @@ def test_connect_rejects_a_settled_receipt_without_selected_version_evidence(own
     assert failure.value.code == "harness_install_unverified"
     assert failure.value.problem["context"]["operation"] == receipt
     assert receipt["id"] not in str(failure.value)
-    assert f"{receipt['harness']} in Settings, Accounts" in str(failure.value)
+    assert "this program in Settings, Accounts" in str(failure.value)
     assert not owned.calls and connect_clock.now == 0
 
 
@@ -794,7 +794,7 @@ def test_connect_real_socket_deadline_and_read_recovery(connect_socket, mode):
     else:
         assert response.status_code == 503, response.json()
         assert response.json()["code"] == "harness_install_timeout"
-        assert "future-program in Settings, Accounts" in response.json()["error"]
+        assert "this program in Settings, Accounts" in response.json()["error"]
         assert "maintenance-one" not in response.json()["error"]
         assert state["calls"]["/v2/setup/jobs"] == 1
         assert 3 <= elapsed < 3.6, elapsed
@@ -883,3 +883,13 @@ def test_connect_join_keeps_only_accepted_receipts_and_request_identity(monkeypa
         assert "operation" not in context and "requestId" not in context
         assert (caught.value.status_code == 403) if read == "refused" else "unknown" in str(caught.value)
     assert connect_clock.now == (1 if read == "refused" else 3)
+
+
+@pytest.mark.parametrize("harness", ["agy", "future-program"])
+def test_connect_guidance_uses_the_named_card_not_a_raw_harness_id(owned, connect_clock, harness):
+    receipt = connected_program(harness=harness, state="failed", problem={"message": "Installer failed"})
+    owned.gateway.maintenance_create = lambda *_: receipt
+    with pytest.raises(ClaudexorUnavailable) as caught:
+        service.install_for_connect(harness)
+    assert str(caught.value) == "Installer failed. See this program in Settings, Accounts"
+    assert harness not in str(caught.value)

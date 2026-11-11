@@ -188,8 +188,8 @@ def install_for_connect(harness: str) -> dict:
         if remaining <= 0:
             known_running = last_failure is None and operation is not None and operation["state"] in {"queued", "running"}
             error = _connect_install_problem(operation, request_id, "harness_install_timeout",
-                                             f"{harness} is still installing" if known_running else "Installation state is unknown",
-                                             identity=identity, harness=harness)
+                                             "The program is still installing" if known_running else "Installation state is unknown",
+                                             identity=identity)
             if last_failure is not None:
                 error.problem["context"]["lastReadProblem"] = copy.deepcopy(getattr(last_failure, "problem", None)) or {
                     "code": last_failure.code, "message": str(last_failure)}
@@ -223,8 +223,8 @@ def _connect_context(identity, operation, request_id):
         "operationId": identity, "requestId": request_id, "operation": operation}.items() if value is not None}
 
 
-def _connect_install_problem(operation, request_id, code, message, *, identity=None, harness=None):
-    error = ClaudexorUnavailable(code, f"{message}. See {harness or operation['harness']} in Settings, Accounts", status_code=503)
+def _connect_install_problem(operation, request_id, code, message, *, identity=None):
+    error = ClaudexorUnavailable(code, f"{message}. See this program in Settings, Accounts", status_code=503)
     error.problem = {"code": code, "message": str(error), "context":
                      _connect_context(identity or operation["id"], operation, request_id)}
     return error
