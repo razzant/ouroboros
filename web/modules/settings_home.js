@@ -320,7 +320,7 @@ export function homeGroupsHtml(rows = HOME_ROWS) {
 export function resultsHtml(query, found) {
     const hits = found.map((entry) => doorHtml({ to: entry.to, name: entry.name, glyph: entry.glyph, answer: entry.where, result: entry.id })).join('');
     const ask = `<button type="button" class="settings-door" data-settings-ask><span class="settings-door-glyph" aria-hidden="true">${glyphHtml('chat')}</span>`
-        + `<span class="settings-door-words"><span class="settings-door-title" data-i18n-fmt="settings.ask">${escapeHtml(fmt('Ask Ouroboros: "{words}"', { words: query.trim() }))}</span>`
+        + `<span class="settings-door-words"><span class="settings-door-title" data-i18n-fmt="settings.ask">${escapeHtml(fmt('Ask Ouroboros: “{words}”', { words: query.trim() }))}</span>`
         + `<span class="settings-door-answer">The words wait in Main as a draft you send.</span></span><span class="settings-door-end" aria-hidden="true">${OUT_ICON}</span></button>`;
     return `${hits ? groupHtml('Settings', hits) : '<p class="settings-search-empty">No setting has these words.</p>'}${groupHtml('', ask)}`;
 }
