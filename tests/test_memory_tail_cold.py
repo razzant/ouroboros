@@ -47,6 +47,7 @@ LIGHT = {"kind": "helper", "route": "configured-light"}
 TASK = {"id": "turn0001", "chat_id": 1}
 PLACE = 777
 PLACE2 = 778  # a room that becomes a place along the chain
+LONG = 779  # a place with more sealed rows than a walk's first page
 _START = datetime.datetime(2026, 11, 10, tzinfo=datetime.timezone.utc)
 _PROVENANCE = {"binding_id": "p1", "place_id": "p1", "conversation_key": "k", "provider": "slack"}
 _TRANSPORT = {"provider": "slack", "account_id": "A", "conversation_id": "C7", "thread_id": "",
@@ -477,8 +478,13 @@ class Chain:
         return name
 
 
-@pytest.mark.parametrize("seed", [1, 5, 24, 29])  # together they take every change in STEPS, a place page's acceptance (24) and rejection (29)
-def test_after_every_change_the_normal_path_equals_the_whole_tail_warm_and_fresh(monkeypatch, tmp_path, seed):
+# Together the seeds take every change in STEPS, a place page's acceptance (24) and rejection (29); a place's walks read
+# its first page of unread rows two at a time there (``memory_inventory._PlaceReads._NEWEST``), so every read past it,
+# every earlier copy below it and every return to the dialogue store happens on these short chains too.
+@pytest.mark.parametrize("seed,page", [(1, 2), (5, 2), (24, 2), (29, 2), (1, None)])
+def test_after_every_change_the_normal_path_equals_the_whole_tail_warm_and_fresh(monkeypatch, tmp_path, seed, page):
+    if page is not None and hasattr(mi, "_PlaceReads"):
+        monkeypatch.setattr(mi._PlaceReads, "_NEWEST", page)
     chain = Chain(tmp_path, seed)
     _same(monkeypatch, tmp_path, chain.rooms)
     acted, trace = 0, []
@@ -679,7 +685,7 @@ def test_a_place_no_view_shows_leaves_its_sealed_rows_unread(monkeypatch, tmp_pa
     _compose(tmp_path)
     assert {_entry(tmp_path, words)[2] for words in ("Unshown one.", "Unshown two.")} <= _cold_positions(tmp_path)
     asked, real = [], cold.rows_of
-    monkeypatch.setattr(cold, "rows_of", lambda store_, held, chats: asked.append(sorted(chats)) or real(store_, held, chats))
+    monkeypatch.setattr(cold, "rows_of", lambda store_, held, chats, *more: asked.append(sorted(chats)) or real(store_, held, chats, *more))
     for name in ("main", "wake", "presence", "project"):
         work = _work(tmp_path, rooms, name)
         assert work.get("tail_whole", 0) == 0 and "rows_cold" in work, (name, work)
@@ -754,6 +760,55 @@ def test_a_row_of_a_places_chat_whose_work_joined_a_project_is_not_read_as_the_p
     assert moved[2] in _cold_positions(tmp_path)
     work = _work(tmp_path, rooms)
     assert work.get("tail_whole", 0) == 0 and work.get("rows_asked", 0) >= 1, work
+    _same(monkeypatch, tmp_path, rooms)
+
+
+def _long_place(tmp_path: pathlib.Path, mine_at) -> tuple:
+    """Forty arrivals of a person in a place of its own (no other row of its chat), all sealed, with a delivery of mine
+    at ``mine_at`` (from the oldest; None: none), then an open arrival with the oldest one's words: its room shows, and
+    asks for its sealed rows; who of ours spoke there is walked down to that open row."""
+    rooms = _settled(tmp_path)
+    place = {"source": "presence:slack", "transport": _TRANSPORT, "presence_provenance": _PROVENANCE}
+    for n in range(40):
+        if n == mine_at:
+            _append(tmp_path, shared.msg(_ts(n + 1), "My word there.", chat_id=LONG, direction="out", task_id="free1",
+                                         type="presence_delivery", **place))
+        else:
+            _append(tmp_path, shared.msg(_ts(n + 1), f"Words {n}.", chat_id=LONG, client_message_id=f"w{n}", **place))
+    _append(tmp_path, shared.msg(_ts(50), "Words 0." if mine_at != 0 else "Words 1.", chat_id=LONG,
+                                 client_message_id="again", **place))
+    _fill(tmp_path)
+    sealed = [_entry(tmp_path, "My word there." if n == mine_at else f"Words {n}.") for n in range(40)]  # no capture yet
+    result = ChronicleStore(tmp_path).publish_page(room_id=str(LONG), text="A page.", author=shared.MIND, covers={
+        "rows": [entry[0]["row_sha256"] for entry in sealed], "stream_span": [sealed[0][2], sealed[-1][2]]})
+    assert result.ok, result.reason
+    _compose(tmp_path)
+    return rooms, len(sealed)
+
+
+def test_a_shown_places_walks_read_its_unread_rows_only_as_far_as_they_go(monkeypatch, tmp_path):
+    """My word among its newest rows: who of ours spoke there is known within the first page; the oldest arrival's
+    earlier copy is found by its words; the rows between are never read."""
+    rooms, sealed = _long_place(tmp_path, mine_at=30)
+    work = _work(tmp_path, rooms)
+    assert work.get("tail_whole", 0) == 0 and 0 < work.get("rows_asked", 0) < sealed, (work, sealed)
+    assert work["rows_read"] == work["rows_open"] + work["rows_kept"] + work.get("rows_stale", 0), work  # law L7d
+    views = _same(monkeypatch, tmp_path, rooms)
+    assert "delivered again" in _texts(views), "the earlier copy below the first page was not found by its words"
+
+
+def test_a_walk_past_a_places_first_page_reads_the_rest_of_its_chat(monkeypatch, tmp_path):
+    rooms, sealed = _long_place(tmp_path, mine_at=0)  # my word is its oldest row: the walk goes past the first page
+    work = _work(tmp_path, rooms)
+    assert work.get("tail_whole", 0) == 0 and work.get("rows_asked", 0) >= sealed, (work, sealed)
+    _same(monkeypatch, tmp_path, rooms)
+
+
+def test_a_place_where_none_of_us_spoke_reads_every_sealed_row(monkeypatch, tmp_path):
+    """Only reading all of them shows that none of its sealed rows is ours: its room stays silent."""
+    rooms, sealed = _long_place(tmp_path, mine_at=None)
+    work = _work(tmp_path, rooms)
+    assert work.get("tail_whole", 0) == 0 and work.get("rows_asked", 0) >= sealed, (work, sealed)
     _same(monkeypatch, tmp_path, rooms)
 
 
