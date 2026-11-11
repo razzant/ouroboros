@@ -27,6 +27,8 @@ def primary_basis(ctx: Any) -> str:
     source = choice.get("source")
     if source in route_choice.OWNER_LEAD_SOURCES:
         return source
+    if source == "switch_model":
+        return "mind"
     if source == "presence":
         metadata = getattr(ctx, "task_metadata", {}) or {}
         return str(metadata.get("model_layer") or "place")
@@ -137,6 +139,9 @@ def project_lead(fact: Any = None, task: Mapping | None = None, *, queued: bool 
     if queued:
         carrier = route_choice.lead_snapshot((task.get("metadata") or {}).get("lead"))
         if not carrier:
+            metadata = task.get("metadata") or {}
+            if metadata.get("model_role") == "lead" and metadata.get("model"):
+                return {"model": metadata["model"], "use_local": bool(metadata.get("use_local_model")), "basis": "mind"}
             return {}
         if carrier["source"] == "main":
             model, local = route_choice.following_route("main")

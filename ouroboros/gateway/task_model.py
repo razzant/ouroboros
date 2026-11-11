@@ -7,7 +7,7 @@ from starlette.responses import JSONResponse
 from ouroboros.gateway._helpers import json_error, json_exception, request_json_or
 from ouroboros.gateway.schema import validate_ingress
 from ouroboros.gateway.work_contracts import TaskModelRequest
-from ouroboros.owner_model import ModelActRefused, admit
+from ouroboros.owner_model import ModelActRefused, request as request_model
 
 
 async def api_task_model(request: Request) -> JSONResponse:
@@ -36,16 +36,7 @@ async def api_task_model(request: Request) -> JSONResponse:
     except ValueError as exc:
         return json_error(str(exc), 400, task_id=task_id, reason_code="task_model_invalid")
     try:
-        result, task, _duplicate = admit(task_id, body)
-        from ouroboros.owner_mailbox import KIND_OWNER_MODEL, write_owner_message
-        from supervisor.queue import _task_drive_for_task
-
-        control = task["owner_model"]
-        if result["applied"] == "next_step" and not write_owner_message(
-                _task_drive_for_task(task, task_id), "owner_model", task_id,
-                msg_id=f"owner_model:{control['request_id']}", kind=KIND_OWNER_MODEL):
-            return json_error("Primary saved; its wake could not be written. Retry this request_id.", 503,
-                              task_id=task_id, reason_code="model_wake_failed")
+        result = request_model(task_id, body)
     except ModelActRefused as exc:
         return json_error(str(exc), exc.status, task_id=task_id, reason_code=exc.code)
     except Exception as exc:

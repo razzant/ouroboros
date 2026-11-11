@@ -455,3 +455,111 @@ def test_model_control_is_absent_when_the_owner_act_cannot_hold(host, monkeypatc
     assert all(control["action"] != "model" for work in works for control in work["controls"])
     if kind == "direct":
         registry.unregister("work")
+
+
+def test_cited_work_switch_uses_supervisor_primary_and_returns_there_after_fallback(host, monkeypatch):
+    from ouroboros.tools.control_runtime import _switch_model
+    from supervisor.events_mind_controls import handle_mind_task_control
+
+    task = running(host)
+    tools, ctx = turn(host, monkeypatch)
+    ctx._owner_directives = [{"source": "owner_mailbox", "content": "Use the other route for this work."}]
+    class Bus:
+        def put_nowait(self, event):
+            assert event["type"] == "mind_task_control"
+            handle_mind_task_control(event, SimpleNamespace(DRIVE_ROOT=host[0], bridge=SimpleNamespace(push_log=lambda row: None)))
+    ctx.event_queue = Bus()
+    result = _switch_model(ctx, B, owner_words="Use the other route")
+    assert '"ok": true' in result
+    assert task["metadata"]["lead"] == {"source": "owner_words", "model": B, "use_local": False}
+    assert ctx.primary_route == {"model": B, "use_local": False, "role": "lead"}
+    ctx.active_model, ctx.route_choice = C, route_choice.explicit("fallback")
+    _switch_model(ctx, primary="return")
+    assert ctx.active_model_override == B and ctx.active_role_override == "lead"
+    restored = turn(host, monkeypatch)[1]
+    from ouroboros.owner_model import restore_current
+    restore_current(restored)
+    assert restored.primary_route == ctx.primary_route
+
+
+@pytest.mark.parametrize("scope", ["room", "main"])
+def test_cited_settings_scopes_use_owner_writers_and_uncited_attempts_refuse(host, monkeypatch, scope):
+    from ouroboros.tools.control_runtime import _switch_model
+    from ouroboros.projects_registry import create_project
+    from ouroboros.composer_cognition import read_model_choice
+    from ouroboros import config
+
+    root = host[0]
+    create_project(root, "room", origin="owner_ui")
+    _tools, ctx = turn(host, monkeypatch)
+    ctx.project_id = "room"
+    ctx._owner_directives = [{"source": "initial_user", "content": "Set that model for it."}]
+    for mode in ("pro", "cyber_pro"):
+        monkeypatch.setattr(config, "get_runtime_mode", lambda: mode)
+        refused = _switch_model(ctx, B, scope=scope)
+        assert "requires verified owner_words" in refused
+        assert read_model_choice(root, "room") == {"kind": "main"}
+        assert json.loads(config.SETTINGS_PATH.read_text(encoding="utf-8"))["OUROBOROS_MODEL"] == A
+    result = _switch_model(ctx, B, owner_words="Set that model", scope=scope)
+    assert '"ok": true' in result
+    if scope == "room":
+        assert read_model_choice(root, "room")["model"] == B
+        _switch_model(ctx, "main", owner_words="Set that model", scope=scope, project_id="room")
+        assert read_model_choice(root, "room") == {"kind": "main"}
+    else:
+        assert '"account": "none"' in result and '"window_reset": false' in result
+        assert json.loads(config.SETTINGS_PATH.read_text(encoding="utf-8"))["OUROBOROS_MODEL"] == B
+        rows = (root / "logs/events.jsonl").read_text(encoding="utf-8")
+        assert '"surface": "tool"' in rows and '"actor_task_id": "work"' in rows
+    assert json.loads((root / "state/ui_preferences.json").read_text(encoding="utf-8"))["model_recents"][0]["model"] == B
+
+
+def test_cited_work_switch_reports_a_failed_wake_even_after_the_primary_was_saved(host, monkeypatch):
+    from ouroboros import owner_mailbox
+    from ouroboros.tools.control_runtime import _switch_model
+    from supervisor.events_mind_controls import handle_mind_task_control
+
+    running(host)
+    _tools, ctx = turn(host, monkeypatch)
+    ctx._owner_directives = [{"source": "owner_mailbox", "content": "Use the other route."}]
+    monkeypatch.setattr(owner_mailbox, "write_owner_message", lambda *a, **kw: False)
+    class Bus:
+        def put_nowait(self, event):
+            handle_mind_task_control(event, SimpleNamespace(DRIVE_ROOT=host[0], bridge=SimpleNamespace(push_log=lambda row: None)))
+    ctx.event_queue = Bus()
+    result = _switch_model(ctx, B, owner_words="Use the other route")
+    assert json.loads(result) == {"ok": False, "error": "model_wake_failed"}
+    assert load_task_result(host[0], "work")["metadata"]["lead"]["model"] == B
+    assert ctx.primary_route["model"] == A
+
+
+def test_cited_main_write_discloses_a_failed_recent_suggestion_without_claiming_no_effect(host, monkeypatch):
+    from ouroboros.tools.control_runtime import _switch_model
+    from ouroboros.gateway import ui_preferences
+    from ouroboros import config
+
+    _tools, ctx = turn(host, monkeypatch)
+    ctx._owner_directives = [{"source": "initial_user", "content": "Use the other route."}]
+    def unavailable(*args):
+        raise OSError("preferences unavailable")
+    monkeypatch.setattr(ui_preferences, "record_model_recent", unavailable)
+    result = _switch_model(ctx, B, owner_words="Use the other route", scope="main")
+    assert "Model choice saved; recent suggestion could not be recorded" in result
+    assert json.loads(config.SETTINGS_PATH.read_text(encoding="utf-8"))["OUROBOROS_MODEL"] == B
+
+
+@pytest.mark.parametrize("action", ["return", "wait"])
+def test_a_card_returns_an_uncited_cyber_start_to_its_own_primary(host, monkeypatch, action):
+    task = queued(host, metadata={"model_role": "lead", "model": B, "use_local_model": False})
+    host[2].PENDING.remove(task)
+    host[2].RUNNING["work"] = {"task": task, "attempt": 1, "lead": {
+        "model": C, "use_local": False, "basis": "fallback",
+        "primary": {"model": B, "use_local": False, "basis": "mind"}}}
+    write_task_result(host[0], "work", "running")
+    assert act(host, action).status_code == 200
+    _tools, ctx = turn(host, monkeypatch)
+    from ouroboros.owner_model import restore_current
+    restore_current(ctx)
+    assert ctx.primary_route == {"model": B, "use_local": False, "role": "lead"}
+    assert ctx.route_wait_on_primary is (action == "wait")
+    assert lead_fact.primary_basis(ctx) == "mind"

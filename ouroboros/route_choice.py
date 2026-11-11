@@ -303,10 +303,12 @@ def capture_lead(task: dict, drive_root: Any, *, project: Mapping | None = None,
 
     given = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     canonical_root, actor = _actor_scope(task, drive_root)
-    if (LEAD_KEY in given or task.get("model") or task.get("model_role") or given.get("model_role")
-            or actor.get("parent_task_id") or actor.get("autonomous")
+    mind_start = (task.get("source") == "promote_chat_to_task" and given.get("model_role") == LEAD_ROLE
+                  and bool(given.get("model")))
+    if (LEAD_KEY in given or task.get("model") or task.get("model_role") or (given.get("model_role") and not mind_start)
+            or actor.get("parent_task_id") or (actor.get("autonomous") and not mind_start)
             or str(task.get("delegation_role") or given.get("delegation_role") or "").lower() == "subagent"
-            or (task.get("actor_id") == "consciousness" and not actor.get("scheduled"))):
+            or (task.get("actor_id") == "consciousness" and not actor.get("scheduled") and not mind_start)):
         return
     metadata = task.setdefault("metadata", {})
     if not isinstance(metadata, dict):
@@ -323,6 +325,8 @@ def capture_lead(task: dict, drive_root: Any, *, project: Mapping | None = None,
         logging.getLogger(__name__).warning("Room model choice unreadable for %s; admitted on Main",
                                             project_id or "Main", exc_info=True)
         choice = {"kind": "main"}
+    if mind_start and choice["kind"] == "main":
+        return
     metadata[LEAD_KEY] = ({"source": "room", "model": choice["model"], "use_local": choice["use_local"]}
                           if choice["kind"] == "model" else {"source": "main"})
 
@@ -393,6 +397,11 @@ def bind_task_route(ctx: Any, task_metadata: Mapping, *, presence: bool) -> None
         if carrier:
             ctx.task_model_override, ctx.task_use_local_override = carrier["model"], carrier["use_local"]
             ctx.task_route_source = carrier["source"]
+        elif not lead_snapshot(task_metadata.get(LEAD_KEY)) and task_metadata.get("model_role") == LEAD_ROLE:
+            # An uncited Cyber Pro start names the lead role explicitly; stray model metadata stays inert.
+            ctx.task_model_override = str(task_metadata.get("model") or "") or None
+            ctx.task_use_local_override = bool(task_metadata.get("use_local_model"))
+            ctx.task_route_source = "switch_model"
         return
     if delegated and kind == "agent_session" and cognitive.get("follows_role"):
         return

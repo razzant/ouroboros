@@ -42,6 +42,8 @@ def primary_role(row: Mapping) -> str:
     if carrier:
         return "main" if carrier["source"] == "main" else "lead"
     role = str(metadata.get("model_role") or "main")
+    if role == "lead" and metadata.get("model"):
+        return role
     return role if role in route_choice.MODEL_ROLE_SETTINGS and role != "fallback" else "main"
 
 
@@ -51,17 +53,22 @@ def recorded_primary(row: Mapping) -> dict:
     role = primary_role(row)
     if carrier and carrier["source"] != "main":
         model, local = carrier_route(carrier)
+    elif role == "lead":
+        metadata = row["metadata"]
+        model, local = metadata["model"], bool(metadata.get("use_local_model"))
     else:
         model, local = route_choice.following_route(role)
     return {"model": model, "use_local": local, "role": role}
 
 
-def admit(task_id: str, body: dict) -> tuple[dict, dict, bool]:
+def admit(task_id: str, body: dict, *, source: str = "owner") -> tuple[dict, dict, bool]:
     """Write under Q, returning the durable receipt and the current queue task.
 
     Receipts live with the task. Even an older request repeated after a newer
     decision returns its original answer without rewriting either carrier.
     """
+    if source not in {"owner", "owner_words"}:
+        raise ValueError("A work model act requires an owner source")
     from ouroboros.lead_fact import project_lead
     from ouroboros.task_results import load_task_result
     from ouroboros.task_store import patch_document
@@ -107,7 +114,7 @@ def admit(task_id: str, body: dict) -> tuple[dict, dict, bool]:
                 carrier = {"source": "main"}
             elif action in {"set", "keep"}:
                 chosen = body if action == "set" else fact
-                carrier = {"source": "owner", "model": chosen["model"], "use_local": chosen.get("use_local", False)}
+                carrier = {"source": source, "model": chosen["model"], "use_local": chosen.get("use_local", False)}
             metadata = {**(row.get("metadata") or {}), **({"lead": carrier} if carrier else {})}
             if action == "follow":
                 metadata["model_role"] = "main"
@@ -144,6 +151,20 @@ def admit(task_id: str, body: dict) -> tuple[dict, dict, bool]:
     if q.persist_queue_snapshot(reason="owner_model") is False:
         raise ModelActRefused("model_queue_publish_failed", 503)
     return result, current, duplicate
+
+
+def request(task_id: str, body: Mapping, *, source: str = "owner") -> dict:
+    """Both the card and a cited tool ask the supervisor to save, then wake the same decision."""
+    from ouroboros.owner_mailbox import KIND_OWNER_MODEL, write_owner_message
+    from supervisor.queue import _task_drive_for_task
+
+    result, task, _duplicate = admit(task_id, body, source=source)
+    control = task["owner_model"]
+    if result["applied"] == "next_step" and not write_owner_message(
+            _task_drive_for_task(task, task_id), "owner_model", task_id,
+            msg_id=f"owner_model:{control['request_id']}", kind=KIND_OWNER_MODEL):
+        raise ModelActRefused("model_wake_failed", 503)
+    return result
 
 
 def preserve_carrier(existing: Mapping, fields: dict) -> dict:
@@ -218,9 +239,11 @@ def apply_current(ctx: Any) -> bool:
         ctx.task_metadata["lead"] = carrier
     else:
         ctx.task_metadata.pop("lead", None)
+        if not following:
+            ctx.task_metadata.update(model=model, use_local_model=local)
     ctx.task_model_override = None if following else model
     ctx.task_use_local_override = None if following else local
-    ctx.task_route_source = None if following else carrier["source"]
+    ctx.task_route_source = None if following else carrier["source"] if carrier else "switch_model"
     ctx.primary_route = primary
     ctx._route_binding = None
     if request_id == getattr(ctx, "_owner_model_applied_id", None):

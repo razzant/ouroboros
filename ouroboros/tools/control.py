@@ -299,6 +299,7 @@ def get_tools() -> List[ToolEntry]:
                     "review_answer": {"type": "boolean", "default": False, "description": "true when your human asks that this work's answer itself be checked: under task review Required the host reviews its whole final answer before delivery even when no file was made."},
                     "source": {"type": "string", "description": "Attach an existing folder or clone a git URL (https://... or git@host:path) server-side into the projects root; private auth failures are typed auth_required. Registers the folder with provenance + trusted_at as the Project/task workspace. Use for work on a supplied repo/folder.", "default": ""},
                     **_START_CHOICE_PARAMS,
+                    "model": {"type": "string", "description": "Model for this new work, with your human's verbatim owner_words. An uncited choice is your own only in Cyber Pro; an owner choice still binds.", "default": ""},
                     "owner_words": {"type": "string", "description": _OWNER_WORDS_PARAM, "default": ""},
                 },
                 "required": ["objective", "title"],
@@ -474,10 +475,16 @@ def get_tools() -> List[ToolEntry]:
             "name": "switch_model",
             "description": (
                 'Switch model or reasoning effort on the next round. No arguments lists available models. After a host '
-                "fallback, primary='return' or 'wait' returns to this turn's primary route."
+                "fallback, primary='return' or 'wait' returns to this turn's primary route. "
+                "A model beyond Main and Light needs your human's cited words. Verified owner_words choose "
+                "this work's primary, its room's saved model, or Main itself through the owner's settings paths."
             ),
             "parameters": {"type": "object", "properties": {
-                "model": {"type": "string", "description": "Model name (e.g. anthropic/claude-sonnet-4). Leave empty to keep current."},
+                "model": {"type": "string", "description": "Exact model route. Cited work/Main choices require it; cited scope room accepts empty or main to follow Main. An uncited empty work switch keeps its acting route."},
+                "owner_words": {"type": "string", "description": "Your human's verbatim words choosing the model; the host checks provenance by bytes, you read their meaning."},
+                "scope": {"type": "string", "enum": ["work", "room", "main"], "default": "work",
+                          "description": "With owner_words: work sets this work's primary; room saves its room's model; main changes Main itself. Without a cite, work keeps the existing Main/Light acting switch; in Cyber Pro use the settings writer for your own room or Main changes."},
+                "project_id": {"type": "string", "description": "For scope room: existing room id; omitted uses this work's room."},
                 "effort": {"type": "string", "enum": list(EFFORT_SCALE),
                            "description": "Reasoning effort for the next round, inside my human's effort range. Main keeps its level outside Cyber Pro (delegate deeper thinking: schedule_subagent(effort=…)); a child, an evolution task or a wake moves inside the range; a pinned or model-named focus keeps its level. Leave empty to keep current."},
                 "primary": {"type": "string", "enum": ["return", "wait"],

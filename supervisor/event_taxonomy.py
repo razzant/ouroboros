@@ -96,7 +96,7 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
     "budget_pause": _handled(
         "supervisor.events_budget", "ouroboros/agent.py", idle_input=True),
     "mind_task_control": _handled(
-        "supervisor.events_mind_controls", "ouroboros/tools/control_mind.py", idle_input=True),
+        "supervisor.events_mind_controls", "ouroboros/tools/control_mind.py", "ouroboros/tools/control_models.py", idle_input=True),
     "budget_resume_child": _handled(
         # #1196 (owner Q9): the resumed root's model selects one paused child.
         "supervisor.events_budget", "ouroboros/tools/join_ledger.py", idle_input=True),

@@ -36,6 +36,8 @@ typed; the pre-existing sites are counted per file in ``ALLOWED_DYNAMIC`` and ma
 from __future__ import annotations
 
 import ast
+
+import pytest
 import pathlib
 import re
 
@@ -162,3 +164,84 @@ def test_dynamic_marker_returns_do_not_grow() -> None:
     for path, (_count, why) in ALLOWED_DYNAMIC.items():
         assert why.strip(), f"ALLOWED_DYNAMIC[{path!r}] needs a written reason"
 
+
+
+@pytest.fixture
+def model_start(tmp_path, monkeypatch):
+    from ouroboros.tools.registry import ToolContext
+    from ouroboros.tools import control_models, control_routing
+    from ouroboros import config
+
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="caller", task_metadata={})
+    ctx._owner_directives = [{"source": "initial_user", "content": "Please use the other one, then keep the report complete."}]
+    monkeypatch.setattr(config, "get_runtime_mode", lambda: "pro")
+    monkeypatch.setattr(control_models, "known_models", lambda: [
+        {"model": "vendor/fast-one", "use_local": False}, {"model": "vendor/fast-two", "use_local": False}])
+    events = []
+    monkeypatch.setattr(control_routing, "_emit_and_wait_for_routing",
+                        lambda _ctx, event: (events.append(event) or "live", {"status": "scheduled"}))
+    monkeypatch.setattr(control_routing, "_promotion_pool_disabled_from_snapshot", lambda _ctx: "")
+    from ouroboros.tools.tool_result import _install_tool_result_sidecar, _restore_tool_result_sidecar
+    token = _install_tool_result_sidecar(ctx, object())
+    try:
+        yield ctx, events
+    finally:
+        _restore_tool_result_sidecar(token)
+
+
+@pytest.mark.parametrize("cite", ["", "words never spoken"])
+def test_a_model_without_verified_words_is_a_typed_refusal_with_no_uncited_retry(model_start, cite):
+    from ouroboros.tools.control_routing import _start_task
+    from ouroboros.tools.tool_result import _published_tool_result
+
+    ctx, events = model_start
+    text = _start_task(ctx, "Write the report", title="Report", model="vendor/fast-one", owner_words=cite)
+    assert not events
+    result = _published_tool_result(ctx, None)
+    assert result.status == "error" and result.code == "TOOL_ARG_ERROR"
+    assert "omit owner_words" not in text and "as your own" not in text
+
+
+@pytest.mark.parametrize("model,starts", [("fast", False), ("vendor/fast-one", True), ("vendor/unlisted", True)])
+def test_model_suggestions_never_guess_or_admit_a_route(model_start, model, starts):
+    from ouroboros.tools.control_routing import _start_task
+
+    ctx, events = model_start
+    text = _start_task(ctx, "Write the report", title="Report", model=model, owner_words="use the other one")
+    assert bool(events) is starts
+    if not starts:
+        assert "vendor/fast-one" in text and "vendor/fast-two" in text
+    else:
+        assert events[0]["metadata"]["lead"] == {"source": "owner_words", "model": model, "use_local": False}
+        assert events[0]["owner_corpus"][-1]["content"] == ctx._owner_directives[0]["content"]
+        if model == "vendor/unlisted":
+            assert "not verified" in text
+
+
+def test_an_unreadable_local_catalog_preserves_the_typed_choice(model_start, monkeypatch):
+    from ouroboros.tools import control_models, control_routing
+
+    ctx, events = model_start
+    def unreadable():
+        raise OSError("unavailable")
+    monkeypatch.setattr(control_models, "known_models", unreadable)
+    text = control_routing._start_task(ctx, "Write", title="Report", model="arbitrary/new", owner_words="use the other one")
+    assert "not verified" in text and events[0]["metadata"]["lead"]["model"] == "arbitrary/new"
+
+
+def test_cyber_start_names_the_minds_choice_without_overruling_a_room_owner(model_start, monkeypatch):
+    from ouroboros import config, route_choice, lead_fact
+    from ouroboros.tools import control_models, control_routing
+
+    ctx, events = model_start
+    monkeypatch.setattr(config, "get_runtime_mode", lambda: "cyber_pro")
+    control_routing._start_task(ctx, "Write", title="Report", model="vendor/fast-one")
+    ctx.task_metadata = events[0]["metadata"]
+    route_choice.bind_task_route(ctx, ctx.task_metadata, presence=False)
+    assert ctx.task_model_override == "vendor/fast-one" and lead_fact.primary_basis(ctx) == "mind"
+    monkeypatch.setattr(control_models, "read_model_choice", lambda *a: {"kind": "model", "model": "owner/choice", "use_local": False})
+    events.clear()
+    text = control_routing._start_task(ctx, "Write", title="Report", model="vendor/fast-two")
+    assert not events and "choice for this room binds" in text
+    control_routing._start_task(ctx, "Write", title="Report", model="vendor/fast-two", owner_words="use the other one")
+    assert events[0]["metadata"]["lead"]["source"] == "owner_words"

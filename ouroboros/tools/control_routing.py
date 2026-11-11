@@ -255,6 +255,7 @@ def _start_task(
     source: str = "",
     context_requires_self_body_docs: bool = False,
     reasoning_effort: Any = None,
+    model: str = "",
     context_requires_development: Optional[bool] = None,
     destination: str = "",
     owner_quote: str = "",
@@ -271,6 +272,8 @@ def _start_task(
     if not goal:
         return "⚠️ TOOL_ARG_ERROR (start_task): objective is required"
     owner_basis, cite_error = cited_owner_basis(ctx, owner_words)
+    if cite_error and model:
+        cite_error = "The model needs verified owner_words. Nothing was started; cite your human's exact words."
     if cite_error:  # the same typed argument refusal the schedule doors publish: nothing was started
         return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
                                                  text=f"⚠️ OWNER_WORDS_UNVERIFIED (start_task): {cite_error}"))
@@ -318,6 +321,12 @@ def _start_task(
         # Without an explicit owner project, ordinary owner work starts in Main;
         # a selected project is still honored above.
         pid = ""
+    from ouroboros.tools.control_models import start_choice, refuse
+
+    try:
+        model_metadata, model_note = start_choice(ctx, model, owner_basis, pid)
+    except ValueError as exc:
+        return refuse(ctx, str(exc))
     try:
         current_chat_id = int(getattr(ctx, "current_chat_id", None) or 0)
     except (TypeError, ValueError):
@@ -375,6 +384,7 @@ def _start_task(
         "task_id": tid,
         "routing_token": routing_token,
         "objective": goal,
+        **({"metadata": model_metadata} if model_metadata else {}),
         "expected_output": str(expected_output or "").strip(),
         "project_id": pid,
         "project_name": display_name,
@@ -442,9 +452,9 @@ def _start_task(
     _attach_drafted_objective(ctx, evt)
     if owner_basis:  # the cited words ride into the new root alone, never back into this run's own corpus
         evt["owner_corpus"] = [*evt.get("owner_corpus", []), owner_basis]
-    kind_note = ""
+    kind_note = " " + model_note if model_note else ""
     if is_focus_wake(metadata) and not private:  # a place turn's start: whose work it is, in one plain sentence
-        kind_note = (" Started as your human's work on their cited words." if owner_basis else
+        kind_note += (" Started as your human's work on their cited words." if owner_basis else
                      " Started as your own work (consciousness kind): it draws on the consciousness allowance, and "
                      "the Off switch stops it.")
     mode, confirmation = _emit_and_wait_for_routing(ctx, evt)
@@ -506,7 +516,7 @@ def _start_task(
                     + admission_observation(root, observed_at=utc_now_iso()))
     response = (
         f"Not confirmed yet: separate task {tid} is waiting to start. Its complete intent is durable; "
-        f"admission to {_requested_scope_label(display_name, pid)} is pending ({mode}).{observed} "
+        f"admission to {_requested_scope_label(display_name, pid)} is pending ({mode}).{observed} {model_note} "
         "A [ROUTING_RECEIPTS] row reports its recorded outcome. "
         f"Use get_task_result({tid}) to reconcile it before an explicit retry."
     )

@@ -164,7 +164,7 @@ def _api_owner_chat_model_sync(request: Request, body: Any) -> JSONResponse:
     return JSONResponse(result)
 
 
-def _write_main_route(request: Request, choice: dict) -> dict:
+def _write_main_route(request: Request | None, choice: dict, *, origin: dict | None = None) -> dict:
     """Main's role writer owns the save; only same-source subscription pins survive."""
     from ouroboros.gateway.settings import _active_main_route
     from ouroboros.model_slots import (
@@ -196,7 +196,7 @@ def _write_main_route(request: Request, choice: dict) -> dict:
         return updated
 
     record_settings_change(request, _owner_update_settings(
-        transform, settings_document_digest(), authored_keys=("OUROBOROS_MODEL", "USE_LOCAL_MAIN")))
+        transform, settings_document_digest(), authored_keys=("OUROBOROS_MODEL", "USE_LOCAL_MAIN")), origin=origin)
     return result
 
 
