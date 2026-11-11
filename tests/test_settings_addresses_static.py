@@ -11,9 +11,6 @@ LIVING = (
 # The convener empties this list on the integrated tree; each owner rewrites its files.
 PENDING = {
     "web/modules/": "B2/C1/C2/D/E1/E2/E3: controls, shell, pages, dashboard and editors",
-    "docs/DESIGN.md": "Books and gates: convener",
-    "docs/architecture/03-web-ui-pages-and-buttons.md": "Books and gates: convener",
-    "docs/development/": "Books and gates: convener",
 }
 # Exact (file, line) exceptions only: protected text and blocked bundled-skill releases.
 # Each entry must explain the debt; new addresses elsewhere in these files still fail.
