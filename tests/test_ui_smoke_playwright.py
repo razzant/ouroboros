@@ -2876,110 +2876,77 @@ def test_ui_smoke_v639_skip_review_button(direct_server_with_data):
 
 @pytest.mark.ui_browser
 def test_ui_smoke_v679_subagent_depth_zero_round_trips_through_settings(direct_server_with_data):
-    """v6.79.0: the owner can actually reach, save, and re-read a Subagent Depth of 0.
+    """v6.79.0: the owner can actually reach, save, and re-read a helper depth of 0.
 
     The structural fix (``_bounded_positive_int_setting`` honouring a configured 0) is
     unreachable if the visible control refuses the value or the load path rewrites it back to
-    the fallback. This drives the real consumer flow — Settings -> Advanced -> type -> save ->
-    full page reload — and pins the three neighbouring states so the fix cannot silently break
-    them: 0 (no delegation), a normal positive value, and empty (falls back, does not persist
-    an invalid value). Screenshots are written for vision inspection; a saved screenshot is
-    not verification on its own (docs/DEVELOPMENT.md "Responsive and accessible
-    behavior").
+    the fallback. This drives the real consumer flow (Settings › Agents › the fold's "Helpers of
+    helpers" row: type, leave the field, full page reload) and pins the three neighbouring
+    states so the fix cannot silently break them: 0 (no delegation), a normal positive value,
+    and empty (refused in the row; nothing invalid is persisted). Screenshots are written for
+    vision inspection; a saved screenshot is not verification on its own (docs/DEVELOPMENT.md
+    "Responsive and accessible behavior").
     """
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
+    from tests.settings_browser_helpers import commit_row, open_settings
 
     url = direct_server_with_data["url"]
     data_dir = direct_server_with_data["data_dir"]
     settings_path = data_dir / "settings.json"
     evidence_dir = pathlib.Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", str(data_dir.parent)))
     evidence_dir.mkdir(parents=True, exist_ok=True)
+    row = "OUROBOROS_MAX_SUBAGENT_DEPTH"
 
     def saved_depth():
-        return json.loads(settings_path.read_text(encoding="utf-8")).get("OUROBOROS_MAX_SUBAGENT_DEPTH", "<absent>")
+        return json.loads(settings_path.read_text(encoding="utf-8")).get(row, "<absent>")
 
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch(headless=True)
             page = browser.new_page(viewport={"width": 1400, "height": 1000})
             try:
-                def open_settings_advanced():
-                    """Reload the whole app the way an owner would, then reopen the field."""
+                def open_depth(expected):
+                    """Reload the whole app the way an owner would, then land on the row: its fold opens."""
                     page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                     page.click('[data-nav-page="settings"]')
-                    page.wait_for_selector("#s-subagent-depth", state="attached", timeout=30_000)
-                    # D-10: depth bounds the agents, so it lives in Agents -> Delegation.
-                    page.click('[data-settings-tab="agents"]')
-                    depth = page.locator("#s-subagent-depth")
+                    level = open_settings(page, "agents", row, timeout=30_000)
+                    depth = level.locator(f'[data-setting-row="{row}"] [data-setting-control]')
                     depth.wait_for(state="visible", timeout=30_000)
-                    # Saving is blocked until the settings load succeeds; waiting on the real
-                    # enablement avoids racing the first fetch.
-                    page.wait_for_function("() => document.querySelector('#btn-save-settings')?.disabled === false",
-                                           timeout=30_000)
-                    depth.scroll_into_view_if_needed()
+                    page.wait_for_function("([row, v]) => document.querySelector(`[data-setting-row=\"${row}\"] "
+                                           "[data-setting-control]`)?.value === v", arg=[row, expected], timeout=30_000)
                     return depth
-
-                def type_depth(value):
-                    page.fill("#s-subagent-depth", value)
-                    page.dispatch_event("#s-subagent-depth", "input")
-                    page.dispatch_event("#s-subagent-depth", "change")
 
                 def shot(name):
                     page.screenshot(path=str(evidence_dir / f"v679-depth-{name}.png"))
 
-                def save_and_wait(phrase="Settings saved"):
-                    with page.expect_response(lambda r: r.url.endswith("/api/settings")
-                                              and r.request.method == "POST", timeout=30_000) as answer:
-                        page.click("#btn-save-settings")
-                    assert bool(answer.value.json().get("no_changes")) is (phrase == "No changes detected")
-                    # This click showed "Saving…" before posting, so the status is its own.
-                    page.wait_for_function("p => document.querySelector('#settings-status')?.textContent"
-                                           ".startsWith(p)", arg=phrase, timeout=30_000)
-                    return answer.value.request.post_data_json["OUROBOROS_MAX_SUBAGENT_DEPTH"]
-
-                depth = open_settings_advanced()
-                # The control must admit 0 at all: a min of 1 would make it unreachable.
-                assert (depth.get_attribute("min"), depth.get_attribute("max")) == ("0", "10")
+                depth = open_depth("3")  # unset -> visible fallback
                 assert depth.is_enabled()
-                assert depth.input_value() == "3"  # unset -> visible fallback
                 shot("01-initial-unset")
 
-                # 0 is a valid value for the control, not a validation error.
-                type_depth("0")
-                assert depth.evaluate("e => [e.validity.valid, e.validationMessage]") == [True, ""]
-                shot("02-typed-zero")
-
-                assert save_and_wait() == 0
-                assert page.locator("#s-subagent-depth").input_value() == "0"
-                assert saved_depth() == 0
+                # 0 is a valid value for the row, not a refusal: leaving the field saves it.
+                assert commit_row(page, row, "0", timeout=30_000).startswith("Saved")
+                assert depth.input_value() == "0" and saved_depth() == 0
                 shot("03-saved-zero")
 
                 # The round trip is the point: a reload must not rewrite 0 back to 3.
-                open_settings_advanced()
-                assert page.locator("#s-subagent-depth").input_value() == "0"
+                open_depth("0")
                 assert saved_depth() == 0
                 shot("04-reload-zero")
 
                 # Neighbouring state: an ordinary positive value still round-trips.
-                type_depth("3")
-                assert save_and_wait() == 3
+                assert commit_row(page, row, "3", timeout=30_000).startswith("Saved")
                 assert saved_depth() == 3
-                open_settings_advanced()
-                assert page.locator("#s-subagent-depth").input_value() == "3"
+                open_depth("3")
                 shot("05-reload-three")
 
-                # Neighbouring state: empty is not a value — it falls back to 3 rather than
-                # persisting an unparsable setting. That is the saved 3, so Save is a no-op.
-                type_depth("")
-                shot("06-empty-typed")
+                # Neighbouring state: empty is not a value. The row refuses it and nothing is written.
                 before = settings_path.read_bytes()
-                assert save_and_wait("No changes detected") == 3
-                assert json.loads(settings_path.read_bytes()) == json.loads(before)
-                assert saved_depth() == 3
-                open_settings_advanced()
-                assert page.locator("#s-subagent-depth").input_value() == "3"
+                assert commit_row(page, row, "", timeout=30_000) == "Not saved. Enter a number from 0 to 10."
+                shot("06-empty-typed")
+                assert settings_path.read_bytes() == before and saved_depth() == 3
+                open_depth("3")
                 shot("07-reload-after-empty")
             finally:
                 browser.close()
@@ -3048,34 +3015,30 @@ def test_ui_owner_context_mode_and_reviewer_row_save(direct_server_with_data):
                 assert after["context_mode"] == "max"
                 assert after["context_mode_auto_low"] is False
 
-                # 2. A reviewer row saves with no window question anywhere.
-                # Select the fixture's configured provider, then edit its model;
-                # the grouped combobox uses provider-specific API choices.
+                # 2. A reviewer saves with no window question anywhere: on its agent's page the mark
+                # writes at once, then the page's Save writes the provider and the model.
+                from tests.settings_browser_helpers import open_entry, open_settings, press_editor_save
                 page.click('[data-nav-page="settings"]')
-                page.wait_for_selector("#s-context-mode", state="attached", timeout=30_000)
-                page.locator('[data-settings-tab="agents"]').click()
-                row_route = page.locator('[data-subagent-row] [data-subagent-field="route"]').first
-                row_route.wait_for(state="visible", timeout=30_000)
+                level = open_settings(page, "agents", timeout=30_000)
+                level.locator("[data-entry-id]").first.wait_for(state="visible", timeout=30_000)
+                form = open_entry(page, level.locator("[data-entry-id]").first.get_attribute("data-entry-id"), timeout=30_000)
+                mark = form.locator('[data-subagent-field="review_eligible"]')
+                if not mark.is_checked():
+                    form.locator('.agent-use:has([data-subagent-field="review_eligible"]) .ui-switch').click()
+                page.wait_for_function("() => { const i = document.querySelector('#page-settings [data-subagent-field=\"review_eligible\"]');"
+                                       " return i && i.checked && i.getAttribute('aria-busy') !== 'true'; }", timeout=60_000)
+                row_route = form.locator('[data-subagent-field="route"]')
                 row_route.select_option("api:openai-compatible")
                 assert row_route.input_value() == "api:openai-compatible"
-                custom_input = page.locator('[data-subagent-row] [data-subagent-field="model"]').first
-                custom_input.wait_for(state="visible", timeout=30_000)
-                custom_input.fill("scope-reviewer-x")
-                page.locator('[data-subagent-row] [data-subagent-field="review_eligible"]').first.check()
-                page.locator("#btn-save-settings").click()
-                page.wait_for_function(
-                    "() => !document.querySelector('#btn-save-settings').disabled",
-                    timeout=60_000,
-                )
+                form.locator('[data-subagent-field="model"]').fill("scope-reviewer-x")
+                status_text = press_editor_save(page, timeout=60_000)
                 page.screenshot(path=str(evidence_dir / "reviewer-row-save-no-window-question.png"),
                                 full_page=True)
 
                 # No dialog of any kind: the owner is never asked to confirm a
                 # reviewer's window, so a route with no evidence saves silently.
                 assert page.locator(".confirm-dialog").count() == 0
-                status_text = page.locator("#settings-status").inner_text()
-                assert "context window" not in status_text, status_text
-                assert "Settings saved" in status_text, status_text
+                assert "context window" not in status_text and status_text.startswith("Saved"), status_text
                 stored = json.loads(settings_path.read_text(encoding="utf-8"))
                 assert "OUROBOROS_REVIEWER_SLOTS" not in stored
                 rows = json.loads(stored["OUROBOROS_SUBAGENTS"])["items"]

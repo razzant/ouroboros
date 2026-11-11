@@ -20,7 +20,7 @@ const HOME_PAGES = HOME_ROWS.map((row) => row.to).filter((to) => !isDoorId(to));
 
 // Pages another lane registers and rows another lane describes: named here until that lane lands, then removed. A
 // name left here after its page is registered fails below, so both lists are empty on the integrated tree.
-const PENDING_PAGES = { agents: 'lane E1', accounts: 'lane E3' };
+const PENDING_PAGES = {};
 const PENDING_ROWS = {};
 
 /** Why `path` is no address ('' when it is one): the home, a door, or a page that a home row opens or a module serves. */

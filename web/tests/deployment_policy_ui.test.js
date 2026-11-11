@@ -76,7 +76,7 @@ test('a built-in checker fixes only the flat fields it reads, and says so beside
     fixCheckerField(input, note, null, 'OPENAI_BASE_URL', 'Legacy OpenAI Base URL');
     assert.deepEqual([input.readOnly, note.hidden, note.textContent], [false, true, ''], 'unmanaged: as it was');
     const shared = { enabled: true, configured: true, usedBy: ['Main'], legacyAddress: 'https://organization.invalid/v1' };
-    assert.match(connectionRowFacts(shared).meta, /change the address in Settings → Accounts/);
+    assert.match(connectionRowFacts(shared).meta, /change the address in Settings → Accounts and keys/);
     assert.doesNotMatch(connectionRowFacts({ ...shared, fixed: true }).meta, /change the address/,
         'a fixed row never points at a change its fields refuse');
 });

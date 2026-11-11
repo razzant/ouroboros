@@ -30,11 +30,11 @@ def select_model_field(ui, consumer):
         row = page.locator('[data-model-role]').first
         row.locator('[data-model-role-source]').select_option(lane)
         return page, row.locator('[data-model-role-model]')
-    page = roles.open_agents(ui)
+    row = roles.open_agent(ui, 'direct')
+    page = ui['page']
     page.evaluate("""detail => document.dispatchEvent(new CustomEvent(
         'settings-model-catalog:updated', {detail}))""", data)
     # Actor: a row marked Reviewer, so the reviewer chooser is this same field.
-    row = page.locator('[data-subagent-row]').nth(1)
     row.locator('[data-subagent-field="route"]').select_option(lane)
     return page, row.locator('[data-subagent-field="model"]')
 
@@ -72,8 +72,8 @@ def test_chooser_keyboard_free_values_and_catalog_identity(role_ui, consumer):
 
 def test_agent_session_uses_same_chooser_and_keeps_native_short_choices(role_ui):
     roles.configure_mixed(role_ui)
-    page = roles.open_agents(role_ui)
-    row = page.locator('[data-subagent-row]').nth(2)
+    row = roles.open_agent(role_ui, 'agent')
+    page = role_ui['page']
     model = row.locator('[data-subagent-field="model"]')
     assert model.evaluate('e => e.tagName') == 'INPUT'
     assert model.get_attribute('role') == 'combobox'
@@ -87,22 +87,21 @@ def test_agent_session_uses_same_chooser_and_keeps_native_short_choices(role_ui)
     roles.capture(page, 'chooser-session-reference-preserved')
 
 
-def test_incomplete_reviewer_holds_whole_settings_save_until_corrected(role_ui):
+def test_incomplete_reviewer_holds_own_save_until_corrected(role_ui):
     roles.configure_mixed(role_ui)
-    page = roles.open_agents(role_ui)
-    reviewer = page.locator('[data-subagent-row]').first
+    reviewer = roles.open_agent(role_ui, 'native')
+    page = role_ui['page']
     assert reviewer.locator('[data-subagent-field="review_eligible"]').is_checked()
     model = reviewer.locator('[data-subagent-field="model"]')
     model.fill('')
-    page.locator('#btn-save-settings').click()
-    assert not [path for path, _ in role_ui['posts'] if path == '/api/settings']
+    page.locator('[data-editor-save]').click()
+    assert not [path for path, _ in role_ui['posts'] if path in ('/api/settings', '/api/owner/safety-model')]
     assert model.input_value() == ''
     assert model.get_attribute('aria-invalid') == 'true'
     model.fill('owner-unknown-review-model')
     assert model.get_attribute('aria-invalid') == 'false'
-    with page.expect_response('**/api/settings'):
-        page.locator('#btn-save-settings').click()
-    writes = [payload for path, payload in role_ui['posts'] if path == '/api/settings']
+    assert press_editor_save(page).startswith('Saved')
+    writes = roles.roster_writes(role_ui)
     assert len(writes) == 1
     roles.capture(page, 'chooser-reviewer-corrected-save')
 
@@ -326,8 +325,8 @@ def vendor_consumer(ui, consumer):
             local.uncheck()
         row.locator('[data-model-role-source]').select_option('subscription:opaque-source')
         return row.locator('[data-model-role-model]')
-    roles.open_agents(ui)
-    return page.locator('[data-subagent-row]').nth(0 if consumer == 'Reviewer' else 1).locator('[data-subagent-field="model"]')
+    row = roles.open_agent(ui, 'worker0' if consumer == 'Reviewer' else 'worker1', fresh=False)
+    return row.locator('[data-subagent-field="model"]')
 
 
 def open_circle_editor(ui):
@@ -495,13 +494,13 @@ def test_vendor_footer_agent_consumers_at_scale(role_ui, width, account_count):
         field.press("Escape")
         expect(page.locator("[data-model-footer]:visible")).to_have_count(0)
         assert field.input_value() == "owner-new-id"
-    current = page.locator("[data-subagent-row]").nth(4).locator('[data-subagent-field="model"]')
+    current = roles.open_agent(ui, 'current', fresh=False).locator('[data-subagent-field="model"]')
     current.fill("choice")
     footer = page.locator("[data-model-footer]:visible")
     expect(footer).to_have_text("List from Claude Code 2.0.0")
     expect(footer.locator("button")).to_have_count(0)
     current.press("Escape")
-    api = page.locator("[data-subagent-row]").nth(5).locator('[data-subagent-field="model"]')
+    api = roles.open_agent(ui, 'api', fresh=False).locator('[data-subagent-field="model"]')
     api.fill("choice")
     expect(page.locator("[data-model-footer]:visible")).to_have_count(0)
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
@@ -758,7 +757,6 @@ def test_two_chooser_openings_share_producer_refresh_at_44_accounts(role_ui, wid
     page.set_viewport_size({"width": width, "height": 950})
     roles.open_models(ui)
     first = vendor_consumer(ui, "Agent")
-    second = page.locator('[data-subagent-row]').nth(2).locator('[data-subagent-field="model"]')
     first.fill("choice")
     footer = page.locator("[data-model-footer]:visible")
     expect(footer).to_contain_text("List from Codex 2.0.0")
@@ -772,13 +770,16 @@ def test_two_chooser_openings_share_producer_refresh_at_44_accounts(role_ui, wid
     pattern = "**/api/claudexor/maintenance/harnesses?*"
     page.route(pattern, hold)
     page.on("request", lambda request: requests.append(request.url))
-    world.update(version="3.0.0", new=True)
     first.press("ArrowDown")
     expect(footer).to_contain_text("List from Codex 2.0.0")
+    second = roles.open_agent(ui, "worker2", fresh=False).locator('[data-subagent-field="model"]')
     second.fill("choice")  # The first opening still awaits the same program read.
     expect(footer).to_contain_text("List from Codex 2.0.0")
     page.wait_for_timeout(100)
     assert len(pending) == 1
+    # Page navigation reads its own catalogue; count the producer refresh separately.
+    requests.clear()
+    world.update(version="3.0.0", new=True)
     page.unroute(pattern, hold)
     pending[0].fallback()
     expect(footer).to_contain_text("List from Codex 3.0.0")

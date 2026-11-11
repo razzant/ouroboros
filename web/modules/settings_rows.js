@@ -426,11 +426,79 @@ export const ROWS = [
         control: { kind: 'text' },
         aliases: ['Chat Format'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
+    // Settings › Agents: the roster (its page draws the switch and the list of agents and writes them), then the fold.
+    { id: 'OUROBOROS_SUBAGENTS', keys: ['OUROBOROS_SUBAGENTS'], page: 'agents', fold: false,
+        name: 'Hand work to helpers', meta: 'Ouroboros decides when. Off stops it in every room.', more: '',
+        control: { kind: 'custom' },
+        aliases: ['Delegation', 'Available subagents', 'Subagents', 'Reviewers', 'Agents list'],
+        writer: 'checker', codec: '', confirm: '', hiddenWhen: '' },
+    { id: 'OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS', keys: ['OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS'], page: 'agents', fold: true,
+        name: 'Helpers may change files', meta: 'Auto follows Access.',
+        more: 'Whether a helper may write in its own copy of the work, an outside folder or a new project. Helpers that only read stay available.',
+        control: { kind: 'strip', options: [{ value: 'false', label: 'Off' }, { value: '', label: 'Auto' }, { value: 'true', label: 'On' }] },
+        aliases: ['Allow mutative subagents', 'write access'],
+        writer: 'generic', codec: 'helperMutation', confirm: '', hiddenWhen: '' },
+    { id: 'OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT', keys: ['OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT'], page: 'agents', fold: true,
+        name: 'At once, for one task', meta: 'Helpers one task may run at the same time.', more: '',
+        control: { kind: 'number', min: 1, max: 500 },
+        aliases: ['Active subagents per root', 'Active at once per task'],
+        writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
+    { id: 'OUROBOROS_MAX_SUBAGENT_DEPTH', keys: ['OUROBOROS_MAX_SUBAGENT_DEPTH'], page: 'agents', fold: true,
+        name: 'Helpers of helpers', meta: 'How many levels deep. 0 turns helpers off.', more: '',
+        control: { kind: 'number', min: 0, max: 10 },
+        aliases: ['Subagent depth', 'Depth'],
+        writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
+    { id: 'OUROBOROS_SUBAGENT_WORKTREE_ROOT', keys: ['OUROBOROS_SUBAGENT_WORKTREE_ROOT'], page: 'agents', fold: true,
+        name: 'Folder for working copies', meta: 'Blank: ~/Ouroboros/subagent_worktrees. Old copies are cleaned up.', more: '',
+        control: { kind: 'text' },
+        aliases: ['Subagent worktree root', 'worktrees'],
+        writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
+    { id: 'OUROBOROS_SUBAGENT_PROJECTS_ROOT', keys: ['OUROBOROS_SUBAGENT_PROJECTS_ROOT'], page: 'agents', fold: true,
+        name: 'Folder for new projects', meta: 'Blank: ~/Ouroboros/projects. Projects are kept.', more: '',
+        control: { kind: 'text' },
+        aliases: ['Subagent projects root (genesis)', 'projects root'],
+        writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
+    // Accounts and keys (settings_accounts.js composes the page): after the subscriptions and the API keys, which are
+    // lists the page draws (HAND_WRITTEN), the keys Ouroboros itself uses. A stored key is a `secret` row: it says
+    // only whether a value is saved (settings_secrets.js). The keys skills asked for and the owner's own keys are
+    // rows of the same kind that the page learns of when it reads. The legacy base address stands in the fold of the
+    // OpenAI key's page.
+    { id: 'GITHUB_TOKEN', keys: ['GITHUB_TOKEN'], page: 'accounts', fold: false,
+        name: 'GitHub token', meta: 'Pull requests, issues and its own repository.', more: '',
+        control: { kind: 'secret' }, aliases: ['GitHub Token', 'Stored Secrets', 'Secrets', 'personal access token', 'PAT'],
+        writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
+    { id: 'GITHUB_REPO', keys: ['GITHUB_REPO'], page: 'accounts', fold: false,
+        name: 'GitHub repository', meta: 'Where Ouroboros keeps its own code, as owner/name.', more: '',
+        control: { kind: 'text', empty: 'none' }, aliases: ['GitHub Repo', 'Source Control', 'repository', 'owner/repo-name'],
+        writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
+    { id: 'OPENAI_BASE_URL', keys: ['OPENAI_BASE_URL'], page: 'accounts/key/openai', fold: true,
+        name: 'Legacy base address', meta: 'An older OpenAI-style server reached with the OpenAI key. Empty uses OpenAI itself.',
+        more: 'For installs that still use one. A new custom server gets its own key under OpenAI Compatible. '
+            + 'Built-in web search works only with OpenAI itself, so keep this empty when you want it.',
+        control: { kind: 'text', empty: 'none' }, aliases: ['Legacy OpenAI Base URL', 'Legacy Compatibility', 'OPENAI_BASE_URL'],
+        writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
 ];
 
 /** Rows drawn by their page's own code: `{ id, keys, page }`, read by search and by the "one key, one control" test.
  *  One that has words carries them here (`name`, `meta`, `aliases`), and names its `writer` when its keys are written. */
 export const HAND_WRITTEN = [
+    // Accounts and keys: the API keys are a list of heads, each opening its key's page (settings_connections.js). A
+    // provider's built-in key is its flat settings, written by that page's Save; the keys added beside it are the
+    // entries of OUROBOROS_CONNECTIONS, written one at a time by a head's switch and by a key's Save and Remove.
+    { id: 'OUROBOROS_CONNECTIONS', keys: ['OUROBOROS_CONNECTIONS'], page: 'accounts', name: 'API keys',
+        meta: 'Paid by use. A role or an agent names the key it uses.', aliases: ['Add key', 'Providers', 'API key'] },
+    { id: 'accounts:key:openrouter', keys: ['OPENROUTER_API_KEY'], page: 'accounts/key/openrouter', name: 'OpenRouter key', aliases: ['OpenRouter'] },
+    { id: 'accounts:key:openai', keys: ['OPENAI_API_KEY'], page: 'accounts/key/openai', name: 'OpenAI key', aliases: ['OpenAI'] },
+    { id: 'accounts:key:anthropic', keys: ['ANTHROPIC_API_KEY'], page: 'accounts/key/anthropic', name: 'Anthropic key', aliases: ['Anthropic'] },
+    { id: 'accounts:key:openai-compatible', keys: ['OPENAI_COMPATIBLE_BASE_URL', 'OPENAI_COMPATIBLE_API_KEY'], page: 'accounts/key/openai-compatible',
+        name: 'OpenAI Compatible key', aliases: ['OpenAI Compatible', 'Custom OpenAI-style endpoint', 'Base URL'] },
+    { id: 'accounts:key:cloudru', keys: ['CLOUDRU_FOUNDATION_MODELS_API_KEY', 'CLOUDRU_FOUNDATION_MODELS_BASE_URL'], page: 'accounts/key/cloudru',
+        name: 'Cloud.ru key', aliases: ['Cloud.ru Foundation Models', 'More providers'] },
+    { id: 'accounts:key:minimax', keys: ['MINIMAX_API_KEY', 'MINIMAX_REGION'], page: 'accounts/key/minimax', name: 'MiniMax key', aliases: ['MiniMax', 'More providers'] },
+    { id: 'accounts:key:deepseek', keys: ['DEEPSEEK_API_KEY'], page: 'accounts/key/deepseek', name: 'DeepSeek key', aliases: ['DeepSeek', 'More providers'] },
+    { id: 'accounts:key:zai', keys: ['ZAI_API_KEY', 'ZAI_PLAN'], page: 'accounts/key/zai', name: 'Z.ai key', aliases: ['Z.ai (GLM)', 'GLM', 'More providers'] },
+    { id: 'accounts:key:gigachat', keys: ['GIGACHAT_CREDENTIALS', 'GIGACHAT_SCOPE', 'GIGACHAT_USER', 'GIGACHAT_PASSWORD', 'GIGACHAT_BASE_URL', 'GIGACHAT_VERIFY_SSL_CERTS'],
+        page: 'accounts/key/gigachat', name: 'GigaChat key', aliases: ['GigaChat', 'More providers'] },
     // Settings › Tools: the list of tool servers, a head each; a head's switch and a server's Save write one entry.
     { id: 'MCP_SERVERS', keys: ['MCP_SERVERS'], page: 'tools', name: 'Tool servers', aliases: ['MCP Servers', 'Add server'], writer: 'generic' },
     // Settings › Models: a line per role, each opening its own page. The routes of Main, Light and the Safety
