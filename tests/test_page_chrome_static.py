@@ -28,14 +28,17 @@ def _read(rel: str) -> str:
 
 
 def test_settings_secrets_are_generic_and_integrations_tab_removed():
-    ui = _read("web/modules/settings_ui.js")
-    settings = _read("web/modules/settings.js")
-    assert "Integrations" not in ui
-    assert "TELEGRAM_" not in ui
-    assert "TELEGRAM_" not in settings
-    assert "skill-requested-secrets" in ui
-    assert "custom-secrets-list" in ui
-    assert "Source Control" in ui
+    # Stored keys are drawn from data (what installed skills asked for, the owner's own keys), never from a
+    # skill's name written into the core UI.
+    for name in ("settings_ui.js", "settings.js", "settings_home.js", "settings_accounts.js", "settings_rows.js"):
+        text = _read(f"web/modules/{name}")
+        assert "Integrations" not in text, name
+        assert "TELEGRAM_" not in text, name
+    accounts = _read("web/modules/settings_accounts.js")
+    assert "requested_keys" in accounts
+    assert "custom_secret_keys" in accounts
+    # The old section's name still finds the GitHub rows in search.
+    assert "'Source Control'" in _read("web/modules/settings_rows.js")
 
 
 def test_onboarding_compact_access_step_keeps_default_width_two_column():
