@@ -354,3 +354,35 @@ def test_launch_preparation_still_probes_the_exact_node(monkeypatch, tmp_path):
     monkeypatch.setattr(manager, "_probe", lambda command, requested_pin: calls.append("engine"))
     assert manager.ensure()[0] == str(tmp_path / "node")
     assert calls == ["node", "engine"]
+
+
+@pytest.mark.parametrize("accounts", [1, 44])
+def test_status_at_scale_carries_program_once_per_catalog_not_model(metadata_engine, monkeypatch, accounts):
+    from ouroboros.gateway.claudexor_accounts import _status_payload
+    state, calls, _clients, provision, _ = metadata_engine
+    state["accounts_view"] = True
+    program = {"path": "/fixture/vendor/releases/program/bin/program", "version": "2.1.322"}
+    records = [{"credentialProfileId": f"account-{n}", "availability": "available", "problem": None,
+                "catalog": {"harnessId": "future", "credentialProfileId": f"account-{n}", "source": "vendor",
+                            "sourceProgram": program, "models": [{"id": f"model-{m}"} for m in range(24)]}}
+               for n in range(accounts)]
+    state["responses"] = {
+        "/v2/agent-capabilities": {"harnesses": [{"id": "future", "enabled": True}]},
+        "/v2/harnesses": {"harnesses": []},
+        "/v2/credential-profiles": {"profiles": [], "harnessAccounts": [], "accountPools": []},
+        "/v2/quota": {"snapshots": [], "absences": []},
+        "/v2/harnesses/future/models": {"harnessId": "future", "accounts": records, "partial": False},
+    }
+    monkeypatch.setattr(owned, "get_owned_daemon", lambda: SimpleNamespace(status_dict=lambda: {"state": "running"}))
+    provision()
+    for _ in range(12):
+        payload = _status_payload(include_models=True)
+        family, = payload["harnesses"]
+        assert len(family["models"]) == 24 * accounts
+        assert all("sourceProgram" not in row for row in family["models"])
+        assert all(row["catalog"]["sourceProgram"] == program for row in family["model_catalog"]["accounts"])
+    assert sum(path == "/v2/harnesses/future/models" for _, path, _ in calls) == 12
+    assert not any("/maintenance" in path for _, path, _ in calls)
+    old_rows = [{**row, "sourceProgram": program} for row in family["models"]]
+    saved_bytes = len(json.dumps(old_rows)) - len(json.dumps(family["models"]))
+    assert saved_bytes == accounts * 24 * (len(json.dumps(program)) + len(', "sourceProgram": '))
