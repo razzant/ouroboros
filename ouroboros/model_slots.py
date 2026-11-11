@@ -217,7 +217,7 @@ def task_processing_preference(task: dict, *, model_role: str = "",
         if authored:
             return resolve_processing_preference(override=str(authored))
         role = supervisor_role or (f"subagent:{actor_id}" if actor_id and (actor.get("route") or {}).get("kind") == "api_model"
-                                  else LEAD_ROLE if task_lead(metadata) else "main")
+                                  else LEAD_ROLE if task_lead(metadata) or metadata.get("model_role") == LEAD_ROLE else "main")
     if supervisor_role and role == supervisor_role:
         return resolve_processing_preference(override=cognitive["processing_preference"])
     if actor_id and role == f"subagent:{actor_id}":

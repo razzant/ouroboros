@@ -991,7 +991,10 @@ def _effort_switch(ctx: ToolContext, requested: str) -> tuple[str, str]:
     metadata = metadata if isinstance(metadata, dict) else {}
     child = str(metadata.get("delegation_role") or "").lower() == "subagent"
     task_type = str(getattr(ctx, "current_task_type", "") or metadata.get("type") or "").lower()
-    strong_role = task_type == "evolution" or str(metadata.get("model_role") or "").lower() == "consciousness"
+    from ouroboros.consciousness_authority import is_focus_wake
+
+    strong_role = (task_type == "evolution" or str(metadata.get("model_role") or "").lower() == "consciousness"
+                   or is_focus_wake(metadata))
     binds = effort_range_binds(metadata)
     rng = effort_range()
     holding = str(getattr(ctx, "active_effort", "") or "")

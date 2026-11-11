@@ -283,8 +283,10 @@ def _initial_effort_for(task: Dict[str, Any], task_type: str) -> str:
             return named
     if stored in EFFORT_SCALE:
         return stored
+    from ouroboros.consciousness_authority import is_focus_wake
+
     role = str(metadata.get("model_role") or "").strip().lower()
-    return resolve_effort(role or task_type)
+    return resolve_effort("consciousness" if is_focus_wake(metadata) else role or task_type)
 
 
 def main_model_named_effort(task_metadata: Dict[str, Any]) -> str:
@@ -295,8 +297,9 @@ def main_model_named_effort(task_metadata: Dict[str, Any]) -> str:
 
     metadata = task_metadata if isinstance(task_metadata, dict) else {}
     carried = task_lead(metadata)
-    override = None if carried else model_role_slot_override(metadata)
-    model = carried["model"] if carried else override[0] if override else str(runtime_setting("OUROBOROS_MODEL", "") or "")
+    explicit = str(metadata.get("model") or "") if metadata.get("model_role") == "lead" else ""
+    override = None if carried or explicit else model_role_slot_override(metadata)
+    model = carried["model"] if carried else explicit or (override[0] if override else str(runtime_setting("OUROBOROS_MODEL", "") or ""))
     return api_model_named_effort(model)
 
 

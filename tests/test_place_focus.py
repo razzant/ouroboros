@@ -866,7 +866,7 @@ def test_focus_model_inherits_the_admitted_scope(focus, monkeypatch, place_model
         p.edit_circle(root, circle["circle_id"], author="owner", model="circle/later")
     task = task_for((root, admission.place, admission, event))
     metadata = task["metadata"]
-    assert metadata["model_role"] == "consciousness"
+    assert metadata["model_role"] == ("lead" if model else "consciousness")
     assert metadata.get("model") == model and metadata.get("model_layer") == layer
     if model is None:
         assert "model" not in metadata and "model_layer" not in metadata
@@ -886,7 +886,7 @@ def test_focus_aliases_remain_admission_snapshots(focus, monkeypatch, layer, ali
     monkeypatch.setattr("ouroboros.config.get_light_model", lambda: settings["light"])
     from ouroboros.config import runtime_setting
     monkeypatch.setattr("ouroboros.config.runtime_setting", lambda key, default="": (
-        str(settings["local"]).lower() if key == "USE_LOCAL_LIGHT" else runtime_setting(key, default)))
+        str(settings["local"]).lower() if key in {"USE_LOCAL_MAIN", "USE_LOCAL_LIGHT"} else runtime_setting(key, default)))
     circle = p.create_circle(root, name="Team", model=alias if layer == "circle" else "circle/model", author="owner")
     p.edit_place(root, place.place_id, "set_circle", author="owner", circle_id=circle["circle_id"])
     if layer == "place":
@@ -897,9 +897,75 @@ def test_focus_aliases_remain_admission_snapshots(focus, monkeypatch, layer, ali
     current = task_for((root, admission.place, admission, event))["metadata"]
     assert frozen["model"] == alias + "/first" and current["model"] == alias + "/next"
     assert frozen["model_layer"] == current["model_layer"] == layer
-    if alias == "light":
-        assert frozen["use_local_model"] is local and current["use_local_model"] is not local
-    else:
-        assert "use_local_model" not in frozen and "use_local_model" not in current
+    assert frozen["use_local_model"] is local and current["use_local_model"] is not local
     records = p.place_records(root)
     assert (records.places[place.place_id].model if layer == "place" else records.circle(circle["circle_id"])["model"]) == alias
+
+
+@pytest.mark.parametrize('layer', ['place', 'circle', 'consciousness'])
+def test_an_explicit_place_model_has_its_own_lead_options_and_initial_effort(focus, monkeypatch, layer):
+    from ouroboros.agent_dispatch import _initial_effort_for
+    from ouroboros.model_slots import task_model_binding, model_role_option, MODEL_CONTEXT_WINDOWS_KEY, task_processing_preference
+    from ouroboros.route_choice import bind_task_route, open_route
+    from ouroboros.presence_context import focus_metadata
+    from ouroboros.tools.registry import ToolContext
+
+    root, place, admission, event = focus
+    model = 'claudexor::cursor=chosen-model-high'
+    monkeypatch.setenv('OUROBOROS_MODEL_CONSCIOUSNESS', 'claudexor::cursor=conscious-model-low')
+    monkeypatch.setenv('OUROBOROS_MODEL_ACCOUNTS', json.dumps({'consciousness': 'chosen-account'}))
+    monkeypatch.setenv('OUROBOROS_MODEL_CONTEXT_WINDOWS', json.dumps({'consciousness': 123456}))
+    monkeypatch.setenv('OUROBOROS_MODEL_PROCESSING_PREFERENCES', json.dumps({'consciousness': 'fast'}))
+    admission = replace(admission, place=replace(place, model=model if layer == 'place' else ''),
+                        circle={'model': model} if layer == 'circle' else None)
+    metadata = focus_metadata(admission, event, 'turn', 1, root)
+    task = {'metadata': metadata, '_presence_turn': True}
+    ctx = ToolContext(repo_dir=root, drive_root=root, task_metadata=metadata)
+    bind_task_route(ctx, metadata, presence=True)
+    role, pin = task_model_binding(task)
+    acting, local, _choice = open_route(ctx, None)
+    if layer == 'consciousness':
+        assert role == 'consciousness' and pin is None
+        assert model_role_option('OUROBOROS_MODEL_ACCOUNTS', role) == 'chosen-account'
+        assert model_role_option(MODEL_CONTEXT_WINDOWS_KEY, role) == 123456
+        assert task_processing_preference(task) == 'fast'
+        assert acting == 'claudexor::cursor=conscious-model-low'
+        assert _initial_effort_for(task, 'presence') == 'low'
+    else:
+        assert role == 'lead' and pin == ''
+        assert model_role_option(MODEL_CONTEXT_WINDOWS_KEY, role) == 0
+        assert task_processing_preference(task) == ''
+        assert acting == model and not local
+        assert metadata['model_layer'] == layer
+        assert _initial_effort_for(task, 'presence') == 'high'
+
+
+def test_a_place_lead_keeps_the_wakes_effort_range_when_its_model_has_no_named_level(focus, monkeypatch):
+    from ouroboros.agent_dispatch import _initial_effort_for
+    from ouroboros.tools.control_runtime import _effort_switch
+
+    root, place, admission, event = focus
+    monkeypatch.setenv('OUROBOROS_EFFORT_TASK', 'medium')
+    monkeypatch.setenv('OUROBOROS_EFFORT_MAX', 'ultra')
+    monkeypatch.setenv('OUROBOROS_MODEL_CONSCIOUSNESS', 'claudexor::cursor=other-model-low')
+    task = task_for((root, place, replace(admission, place=replace(place, model='vendor/own-model')), event))
+    assert _initial_effort_for(task, 'task') == 'ultra'
+    ctx = SimpleNamespace(task_metadata=task['metadata'], current_task_type='task', active_effort='ultra')
+    assert _effort_switch(ctx, 'high')[0] == 'high'
+
+
+@pytest.mark.parametrize('alias', ['main', 'light'])
+@pytest.mark.parametrize('local', [False, True])
+def test_place_model_aliases_keep_the_resolved_locality_on_the_lead(focus, monkeypatch, alias, local):
+    from ouroboros.presence_context import focus_metadata
+    from ouroboros.route_choice import bind_task_route, open_route
+    from ouroboros.tools.registry import ToolContext
+
+    root, place, admission, event = focus
+    monkeypatch.setenv('OUROBOROS_MODEL' + ('_LIGHT' if alias == 'light' else ''), 'chosen-model')
+    monkeypatch.setenv('USE_LOCAL_' + alias.upper(), 'true' if local else 'false')
+    metadata = focus_metadata(replace(admission, place=replace(place, model=alias)), event, 'turn', 1, root)
+    ctx = ToolContext(repo_dir=root, drive_root=root, task_metadata=metadata)
+    bind_task_route(ctx, metadata, presence=True)
+    assert metadata['model_role'] == 'lead'
+    assert open_route(ctx, None)[:2] == ('chosen-model', local)
