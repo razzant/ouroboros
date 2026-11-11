@@ -98,6 +98,7 @@ def test_passive_ready_event_is_once_per_generation_and_never_during_recovery(me
     from ouroboros import claudexor_daemon
 
     state, calls, _clients, provision, config_dir = metadata_engine
+    state["engine_version"] = "6.0.0"
     launched = []
     monkeypatch.setattr(facts, "_pending", set())
     monkeypatch.setattr(facts, "_launch", lambda *args: launched.append(args))
@@ -218,7 +219,7 @@ def test_eighteen_independent_hosts_share_generation_and_settlement_observations
         # Each worker has independent globals; its dispatch runs on our controlled thread.
         monkeypatch.setattr(module, "_launch", module._refresh)
         workers.append(module)
-    gateway = SimpleNamespace(_endpoint="existing-endpoint")
+    gateway = SimpleNamespace(_endpoint="existing-endpoint", engine_version="6.0.0")
     def meet(event):
         barrier = Barrier(len(workers))
         def run(module):
@@ -270,7 +271,7 @@ def test_failed_ready_observation_does_not_mark_generation_observed(monkeypatch,
     monkeypatch.setattr(facts, "_launch", facts._refresh)
     monkeypatch.setattr(facts, "_pending", set())
     for _ in range(2):
-        facts.engine_ready(SimpleNamespace(_endpoint="existing-endpoint"))
+        facts.engine_ready(SimpleNamespace(_endpoint="existing-endpoint", engine_version="6.0.0"))
         assert facts._read(tmp_path) == {} and not facts._pending
     assert len(attempts) == 2, "another event can retry; failure is not an observation"
 

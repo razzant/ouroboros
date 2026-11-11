@@ -201,6 +201,10 @@ def _request(endpoint, event):
 
 def engine_ready(gateway):
     """Once per engine generation across the install; a current observation does nothing."""
+    from ouroboros.gateways.claudexor_maintenance import supports_program_maintenance
+
+    if not supports_program_maintenance(gateway):
+        return
     endpoint = getattr(gateway, "_endpoint", None)
     generation = _generation(endpoint)
     if generation is not None:

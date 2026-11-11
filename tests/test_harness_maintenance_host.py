@@ -342,14 +342,14 @@ def spawn_failure_body(path):
 
 @pytest.fixture
 def real_wire(client, monkeypatch):  # noqa: F811
-    """The real gateway and its error parsing, answering with the pinned engine's captured bytes."""
+    """A supported engine returning the captured missing-executable problem bytes."""
     from ouroboros import review_run_isolation
     monkeypatch.setattr(review_run_isolation, "attach_home", lambda: None)
     monkeypatch.delenv("OUROBOROS_CLAUDEXOR_BIN", raising=False)
 
     def build(respond):
         gateway, seen = client(respond)
-        gateway._engine_version = PINNED_SPAWN_FAILURE["provenance"]["engine_version"]
+        gateway._engine_version = "6.0.0"
         gateway._engine_build_sha = PINNED_SPAWN_FAILURE["provenance"]["engine_build_sha"]
 
         @contextmanager
@@ -378,7 +378,7 @@ def test_pinned_wire_reports_the_missing_executable_over_http_and_tool(http, rea
     assert problem["requiredActions"] == [], "may help is never a required action"
     facts = problem["context"]
     assert facts["observation"] == "reported_executable_missing"
-    assert facts["engineVersion"] == PINNED_SPAWN_FAILURE["provenance"]["engine_version"]
+    assert facts["engineVersion"] == "6.0.0"
     assert facts["engineBuildSha"] == PINNED_SPAWN_FAILURE["provenance"]["engine_build_sha"]
     assert facts["observedAt"]
     assert facts["remedy"].startswith("The executable reported by this inspection is no longer present.")
@@ -648,3 +648,21 @@ def test_mind_targets_preserve_the_requested_selector_and_pause(tmp_path, monkey
     assert crossed == [ctx]
     schemas = {entry.name: entry.schema for entry in tools.maintenance_tool_entries()}
     assert schemas["maintain_harness"]["parameters"]["properties"]["target"]["enum"] == ["latest", "version"]
+
+
+@pytest.mark.parametrize("surface", ["connect", "tool", "row", "background"])
+def test_old_engine_cannot_receive_any_vendor_contract_request(client, monkeypatch, tmp_path, surface):
+    from ouroboros import harness_program_facts as facts
+    gateway, seen = client(lambda _: pytest.fail("No contract request to an old engine"), version="5.1.0")
+    monkeypatch.setattr(service, "ensure_owned_gateway", lambda: gateway)
+    monkeypatch.setattr(service, "read_owned_gateway", lambda: gateway)
+    monkeypatch.setattr(facts, "_launch", lambda *_: pytest.fail("No old-engine background observation"))
+    if surface == "tool":
+        answer = json.loads(tools._maintain_harness(context(tmp_path), "update", harness="agy", request_id="old"))
+        assert answer["error"]["code"] == "maintenance_unavailable"
+    elif surface == "background":
+        facts.engine_ready(gateway)
+    else:
+        with pytest.raises(ClaudexorUnavailable, match="Program inspection unavailable"):
+            service.install_for_connect("agy") if surface == "connect" else service.inspect_harnesses()
+    assert seen == []

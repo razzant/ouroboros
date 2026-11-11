@@ -10,6 +10,12 @@ from __future__ import annotations
 from urllib.parse import quote, urlencode
 
 
+def supports_program_maintenance(gateway) -> bool:
+    from ouroboros.gateways.claudexor import engine_at_least
+
+    return engine_at_least(str(getattr(gateway, "engine_version", "") or ""), "6.0.0")
+
+
 def maintenance_request_id(value: str) -> str:
     if (not isinstance(value, str) or not value.strip() or len(value) > 256
             or any(ord(char) < 32 or ord(char) > 126 for char in value)):
@@ -37,6 +43,10 @@ class ClaudexorMaintenanceGateway:
     def _maintenance_require(self, operation: str, *, timeout_sec=None) -> None:
         from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
+        if not supports_program_maintenance(self):
+            raise ClaudexorUnavailable("maintenance_unavailable",
+                                      "Program inspection unavailable. Update the app or connect an engine "
+                                      "at version 6.0.0 or newer to install or update harness programs.", status_code=503)
         if not any(row.get("id") == operation for row in self.operations(**({"timeout_sec": timeout_sec} if timeout_sec is not None else {}))):
             raise ClaudexorUnavailable("maintenance_unavailable",
                                       "This engine does not provide the requested CLI maintenance operation",

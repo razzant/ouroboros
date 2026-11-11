@@ -38,7 +38,7 @@ def client(monkeypatch):
     original = httpx.Client
     clients = []
 
-    def build(respond, operations=OPERATIONS):
+    def build(respond, operations=OPERATIONS, version="6.0.0"):
         seen = []
 
         def handle(request):
@@ -56,7 +56,9 @@ def client(monkeypatch):
             return value
 
         monkeypatch.setattr(wire.httpx, "Client", factory)
-        return wire.ClaudexorGateway(wire.DaemonEndpoint("127.0.0.1", 1, "fixture-maintenance-token")), seen
+        gateway = wire.ClaudexorGateway(wire.DaemonEndpoint("127.0.0.1", 1, "fixture-maintenance-token"))
+        gateway._engine_version = version  # Acquisition's handshake has already completed.
+        return gateway, seen
 
     yield build
     for value in clients:
@@ -113,13 +115,18 @@ def test_old_receipt_after_create_keeps_acceptance_unknown(client, removed):
         "remedy": "Retry the same body with the same Idempotency-Key"}
 
 
-def test_old_engine_refuses_before_mutation_and_never_reinstalls(client):
-    gateway, seen = client(lambda request: pytest.fail("No maintenance call on an old engine"), [])
+@pytest.mark.parametrize("action", ["inventory", "create", "read", "cancel"])
+def test_old_engine_refuses_all_contract_requests_even_when_routes_exist(client, action):
+    gateway, seen = client(lambda request: pytest.fail("No maintenance call on an old engine"), version="5.1.0")
     with pytest.raises(wire.ClaudexorUnavailable) as caught:
-        gateway.maintenance_create(REQUEST, "request-one")
+        {"inventory": gateway.maintenance_harnesses,
+         "create": lambda: gateway.maintenance_create(REQUEST, "request-one"),
+         "read": lambda: gateway.maintenance_operation("one"),
+         "cancel": lambda: gateway.maintenance_cancel("one")}[action]()
     assert caught.value.code == "maintenance_unavailable"
     assert caught.value.status_code == 503
-    assert [request.url.path for request in seen] == ["/v2/operations"]
+    assert "Update the app" in str(caught.value)
+    assert seen == []
 
 
 def test_control_problem_keeps_existing_operation_remedy(client):
