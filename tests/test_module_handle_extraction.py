@@ -170,7 +170,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "_acquire_git_lock", "_format_commit_result", "_managed_commit_gate_failure",
         "_managed_post_commit_tests_gate", "_post_commit_result", "_publish_post_commit_test_fact",
         "_record_commit_attempt", "_release_git_lock", "_verify_reviewed_commit_binding",
-        "record_bound_commit_success", "run_cmd",
+        "note_override_landing", "record_bound_commit_success", "run_cmd",
     })),
     "ouroboros/tools/git_plumbing.py": ("ouroboros/tools/git.py", "_git", frozenset({
         "_BINARY_EXTENSIONS", "acquire_exclusive_file_lock", "format_protected_paths",
