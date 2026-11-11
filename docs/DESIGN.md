@@ -2626,23 +2626,23 @@ fade dims a card where the list cuts it.
   stands and scrolls; the owner can still set any height, and returning to the
   board does not start that growth over. When a card's height changes, the masonry
   packs again.
-- **A narrow list is one column.** When the list is too narrow for two
-  columns of 280px — a phone, the Telegram mini app, a narrow window — the
-  cards stack at full width in the same order and widths do not apply (heights
-  do). The list's own width decides, not the viewport.
+- **A narrow list is one column.** When the list is too narrow for two 280px
+  columns (a phone, the Telegram mini app, a narrow window), the cards stack
+  full width in order; widths do not apply, heights do. The list's own width
+  decides, not the viewport.
 - **Edges, keys and the menu size every card.** The right edge drags the width
   between its steps, the bottom edge the height, above or below the content's own
-  (within a few pixels of it, where the board sees it, it is natural again), the
-  corner both, each previewed live, Escape cancelling; the edges lie mostly in the
-  gap beside the card, so content near its edge stays the widget's. Under a finger a
-  card keeps a touch-tall foot, its grip at the right: up and down the height,
-  sideways the width; gaps scroll. Their arrow keys step widths and heights. Every
-  card's ⋮ menu carries Move, Size (1, 2, 3 columns, Full width, Reset size:
-  author's width, natural height) and Height (Natural height and three heights)
-  beside a framed card's launch policy and, for a skill that places controls in the
-  chat, Shown in chat (one checked item per control), for touch, keyboard and the
-  mini app; on a narrow list the menu says that widths apply when the list is wide.
-  The only card on a board has no right edge.
+  (natural again within a few pixels of it, where the board sees it), the corner
+  both, each previewed live, Escape cancelling; the edges lie mostly in the gap
+  beside the card, leaving its edge content to the widget. On touch screens,
+  Resize in ⋮ opens only that card's touch-tall foot: Done and a grip (vertical:
+  height, sideways: width). Done, Escape, leaving or an outside tap the board
+  hears closes it; scrolling keeps it. Opening and closing save nothing. Edge
+  arrow keys step widths and heights. Every ⋮ menu offers Move, Size (1, 2, 3
+  columns, Full width, Reset size: author's width, natural height) and Height
+  (Natural height and three heights), plus framed cards' launch policy and
+  Shown in chat (one checked item per chat control the skill supplies). In narrow
+  lists the menu says widths apply when wide. A lone card has no right edge.
 - **Arranging never restarts a widget.** Moving, resizing, Show all, Back or a
   change of the column count changes only where and how tall a card is painted; a
   running widget keeps its frame and its state. Keyboard focus keeps the card's
