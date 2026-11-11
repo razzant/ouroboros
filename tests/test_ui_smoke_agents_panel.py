@@ -403,8 +403,7 @@ def test_ui_smoke_list_editor_remove_hands_the_caret_on(direct_server_with_data,
     hands the caret to the entry now in that place (the next, else the previous) and, once the list is empty, to
     the group's Add: never to the page (docs/DESIGN.md "List editors").
 
-    LANES E2 and E3: these editors still walk the retired tabs here; their lanes move them to their pages. The
-    agents' own Remove is the test above."""
+    The agents' own Remove is the test above; each other entity is reached through its page."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import expect, sync_playwright
     from tests.test_subscription_setup_browser import capture
@@ -431,29 +430,33 @@ def test_ui_smoke_list_editor_remove_hands_the_caret_on(direct_server_with_data,
                 if value is not None:
                     expect(page.locator(":focus")).to_have_value(value)
 
-            page.click('[data-settings-tab="models"]')
-            fallbacks = page.locator("[data-model-remove]")
-            remove(fallbacks, 0, "[data-model-role-model]")
-            remove(fallbacks, 1, "[data-model-role-model]")
-            remove(fallbacks, 0, "[data-model-add]")
+            open_settings(page, 'models')
+            fallbacks = page.locator('[data-fallback-remove]')
+            remove(fallbacks, 0, '[data-entry-open]')
+            remove(fallbacks, 1, '[data-entry-open]')
+            remove(fallbacks, 0, '[data-fallback-add]')
 
-            page.click('[data-settings-tab="advanced"]')
-            # A saved server is a row; its headers are in the form behind its Edit.
-            page.locator('[data-mcp-index="0"] [data-mcp-edit] > summary').click()
-            headers = page.locator("[data-mcp-header-remove]")
-            remove(headers, 0, '[data-mcp-header-field="name"]', "X-B")
-            remove(headers, 0, "[data-mcp-header-add]")
-            servers = page.locator("[data-mcp-remove]")
-            # The entry now in that place takes the caret in its first field while its form is open, else on the
-            # Edit that opens it.
-            remove(servers, 2, "[data-mcp-edit] > summary")
-            expect(page.locator("[data-mcp-card]:has(summary:focus) .mcp-server-card-title strong")).to_have_text("beta")
-            page.keyboard.press("Enter")
-            expect(page.locator('[data-mcp-index="1"] [data-mcp-edit]')).to_have_attribute("open", "")
-            remove(servers, 0, '[data-mcp-field="id"]', "beta")
-            remove(servers, 0, "#btn-mcp-add-server")
+            open_settings(page, 'tools')
+            open_entry(page, 'alpha')
+            headers = page.locator('[data-mcp-header-remove]')
+            remove(headers, 0, '[data-mcp-header-field="name"]', 'X-B')
+            remove(headers, 0, '[data-mcp-header-add]')
+            # Removing a saved server asks first and returns to its list.
+            for identity, next_id in [('gamma', 'beta'), ('alpha', 'beta'), ('beta', '')]:
+                open_settings(page, 'tools')
+                open_entry(page, identity)
+                page.locator('[data-editor-remove]').focus()
+                page.keyboard.press('Enter')
+                page.locator('[data-confirm-ok]').click()
+                level = settings_page(page, 'tools')
+                level.wait_for(state='visible')
+                expect(level.locator(f'[data-entry-id="{identity}"]')).to_have_count(0)
+                if next_id:
+                    expect(level.locator(f'[data-entry-id="{next_id}"] [data-entry-open]')).to_be_focused()
+                else:
+                    expect(level.locator('[data-server-add]')).to_be_focused()
 
-            page.click('[data-settings-tab="secrets"]')
+            open_settings(page, 'accounts')
             keys = page.locator("[data-custom-secret-row]:not([hidden]) [data-custom-secret-remove]")
             remove(keys, 0, "[data-custom-secret-key]", "REMOVE_FOCUS_TWO")
             remove(keys, 0, "#btn-add-custom-secret")
