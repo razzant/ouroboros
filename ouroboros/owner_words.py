@@ -360,20 +360,28 @@ def _opening(item: Mapping[str, Any], origin_ref: Mapping[str, Any]) -> bool:
     return bool(origin_ref) and (source == "initial_user" or (source == "origin_message" and not row_ref(item)))
 
 
-def _dated_directives(ctx: Any):
-    """``(item, time, reference, door-stamped)`` for each owner-sourced item of the run's corpus: the door's stamp
-    for its first message, and for its origin row recorded without an identity of its own, under the reference
-    the held origin row keeps when the run holds one (``_held_origin``: a legacy door without a client id keeps
-    its carrier's address); else the item's own room, client id and time (empty here: ``_words_rows`` reads them);
-    an item without a room reads under the chat row this focus holds for it (``_held_twin``), so one message is
-    one row whichever carrier names it, and an answer recorded without its card takes the card its twin answers,
-    so the card renders beside the answer."""
+def _door_ref(ctx: Any) -> str:
+    """The run's first message under the door's stamp (``origin_message_ref``): the reference the held origin row
+    keeps when the run holds one (``_held_origin``: a legacy door without a client id keeps its carrier's address),
+    else its room and client id. The copy a helper inherits carries the same reference."""
     from ouroboros.owner_relay import owner_row_address
 
     origin_ref = _mapping(_ctx_metadata(ctx).get("origin_message_ref"))
     held = _mapping(getattr(ctx, "_held_owner_messages", None))
     known = _held_origin(origin_ref, held or _ctx_metadata(ctx).get("held_owner_messages"))
-    reference = _carrier_ref(known, canonical=owner_row_address(known)) if known else _chat_ref(origin_ref)
+    return _carrier_ref(known, canonical=owner_row_address(known)) if known else _chat_ref(origin_ref)
+
+
+def _dated_directives(ctx: Any):
+    """``(item, time, reference, door-stamped)`` for each owner-sourced item of the run's corpus: the door's stamp
+    for its first message, and for its origin row recorded without an identity of its own, under the door's
+    reference (``_door_ref``); else the item's own room, client id and time (empty here: ``_words_rows`` reads them);
+    an item without a room reads under the chat row this focus holds for it (``_held_twin``), so one message is
+    one row whichever carrier names it, and an answer recorded without its card takes the card its twin answers,
+    so the card renders beside the answer."""
+    origin_ref = _mapping(_ctx_metadata(ctx).get("origin_message_ref"))
+    held = _mapping(getattr(ctx, "_held_owner_messages", None))
+    reference = _door_ref(ctx)
     for item in getattr(ctx, "_owner_directives", None) or []:
         if not isinstance(item, dict) or item.get("source") not in OWNER_SOURCES:
             continue
@@ -896,6 +904,20 @@ def safety_sources(ctx: Any) -> List[Dict[str, Any]]:
             add({"source": "owner_mailbox", "content": owner_text(row), "msg_id": str(key),
                  **({"ts": when} if (when := _item_time(row)) else {}), **({"reply_to": replied} if replied else {})})
     return rows
+
+
+def safety_owner_ids(ctx: Any) -> List[set]:
+    """One identity per row of my human's that ``safety_sources`` lists (``OWNER_SOURCES`` and ``PLACE_CONFIRMED``):
+    the references it names its message by (``source_refs``), the opening message's with the door's (``_door_ref``),
+    which its copy in a helper carries too; a row naming no message, its words and time. Two rows are one message
+    when their identities meet. Reads the context's attributes and writes nothing."""
+    from ouroboros.project_dialogue import _text_sha256
+
+    origin = _mapping(_ctx_metadata(ctx).get("origin_message_ref"))
+    door = {_door_ref(ctx)} if origin else set()
+    return [source_refs(row) | (door if _opening(row, origin) else set())
+            or {f"words {_text_sha256(row.get('content'))} {row.get('ts') or ''}"}
+            for row in safety_sources(ctx) if row.get("source") in OWNER_SOURCES | {PLACE_CONFIRMED}]
 
 
 def _inbound_rows(drive_root: Any, client_ids: Mapping[str, str], accounts: Any = None) -> List[Dict[str, Any]]:

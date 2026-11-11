@@ -522,20 +522,25 @@ def _authoring_call(ctx):
     return str(meta.get("llm_call_id") or meta.get("round_id") or "") if isinstance(meta, dict) else ""
 
 
-def _owner_mark(ctx):
-    """My human's rows in this work as the Supervisor's bundle lists them (``safety_sources``, the labels the author
-    table gives to the owner), by count and reference, never their words: a later word changes it."""
-    from ouroboros.owner_words import safety_sources, source_refs
-    from ouroboros.safety_evidence import SOURCE_AUTHORS
-    owner = {label for label, author in SOURCE_AUTHORS.items() if author.startswith("the owner")}
-    rows = [row for row in safety_sources(ctx) if row.get("source") in owner]
-    return _subject_digest("owner_words", [len(rows), sorted(ref for row in rows for ref in source_refs(row))])
+def _owner_ids(ctx):
+    """My human's rows in this work as the Supervisor's bundle lists them, each as short digests of the identities
+    it names (``owner_words.safety_owner_ids``), never their words."""
+    from ouroboros.owner_words import safety_owner_ids
+    return [{_subject_digest("owner_words", ident)[:12] for ident in ids} for ids in safety_owner_ids(ctx)]
 
 
-def _remember(ctx, digest, tool_name, assessment, *, flagged="", gate="", held="", owner=""):
+def _owner_seen(kept, listed=()):
+    """``(digests, rows)``: what the readings kept for this call and these words' gate (``kept``) saw of my human's
+    rows, ``listed`` (``_owner_ids``) added: the digests of every row seen, and the most rows one context listed."""
+    marks = [row["owner_words"] for row in kept if row and row.get("owner_words")]
+    return (set().union(*(mark["seen"] for mark in marks), *listed),
+            max([len(listed), *(mark["rows"] for mark in marks)]))
+
+
+def _remember(ctx, digest, tool_name, assessment, *, flagged="", gate="", held="", owner=None):
     """Keep a returned call (``flagged``: its level) or a held one (``held``: UNAVAILABLE or TOO_LARGE), with its
-    verdicts, the step that authored it and, for DANGEROUS, my human's rows it was read with (``owner``,
-    ``_owner_mark``) and, for declared words, their words-and-destination key (``gate``). Past the byte bound the
+    verdicts, the step that authored it and, for DANGEROUS, what its readings saw of my human's rows (``owner``,
+    ``_owner_seen``) and, for declared words, their words-and-destination key (``gate``). Past the byte bound the
     oldest calls leave first, never the newest; a flagged call no longer kept is read afresh and never leaves
     unread. Without a context nothing is kept (False)."""
     key = _work_key(ctx)
@@ -548,7 +553,7 @@ def _remember(ctx, digest, tool_name, assessment, *, flagged="", gate="", held="
                         "verdicts": coalesce_verdicts(before.get("verdicts", ()), assessment.verdicts),
                         **({"flagged": flagged} if flagged else {"held": held} if held else {}),
                         "llm_call_id": _authoring_call(ctx), **({"gate": gate} if gate else {}),
-                        **({"owner_words": owner} if owner else {})}
+                        **({"owner_words": {"seen": sorted(owner[0]), "rows": owner[1]}} if owner else {})}
         while len(rows) > 1 and verdict_history_bytes(rows) > _SAFETY_PRIOR_BYTE_BUDGET:
             _drop(key, rows, next(iter(rows)))
         _PRIOR_VERDICTS[key] = rows
@@ -1380,7 +1385,8 @@ def _assess_call(tool_name, arguments, messages, ctx, python_resolution, resolve
     notes (the final stage's verdict, a second check included). The identical call (request_id included) from a later
     model call is let through unread for SUSPICIOUS in every mode and for DANGEROUS in Cyber Pro, the mode read at
     that issue; elsewhere DANGEROUS waits for my human, declared words keyed on words and destination so a new
-    request_id or another tool buys no fresh reading; a later word of my human in this work earns one (``_owner_mark``).
+    request_id or another tool buys no fresh reading; a later message of my human in this work earns one: a row of
+    theirs no reading of the call or gate saw, issued where no fewer of their rows are listed (``_owner_seen``).
     My human's answer whose card holds the exact words as whole lines and the destination (any other call: the exact
     call) lets it through, one given before the issue included (``_owner_yes``): the host checks that the card was
     answered, never what the answer says. The step that received a return never releases it; an unknown step is a
@@ -1486,8 +1492,9 @@ def _assess_call(tool_name, arguments, messages, ctx, python_resolution, resolve
                            f"step; decide in a later step. {close(waits)}", status=level, verdicts=basis)
     if waits and release_dangerous and not same_step and (quiz := _owner_yes(ctx, subject)):
         return released(quiz)
-    mark = _owner_mark(ctx) if waits and not same_step else ""  # my human's later word earns one new reading
-    reread = bool(mark) and mark != (gated or prior).get("owner_words")
+    listed = _owner_ids(ctx) if waits and not same_step else None  # my human's rows as this context lists them
+    seen, saw = _owner_seen((gated, prior))  # a later message of theirs, no fewer rows listed, earns one new reading
+    reread = bool(listed) and len(listed) >= saw and any(not ids & seen for ids in listed)
     if waits and not reread:
         return waiting()
     if flag and not waits:
@@ -1523,7 +1530,8 @@ def _assess_call(tool_name, arguments, messages, ctx, python_resolution, resolve
         danger = status == "DANGEROUS"
         kept = _remember(ctx, digest, tool_name, assessment, flagged=status,
                          gate=_words_key(subject()) if danger else "",
-                         owner=(mark or _owner_mark(ctx)) if danger and key else "")
+                         owner=_owner_seen((gated, prior), _owner_ids(ctx) if listed is None else listed)
+                         if danger and key else None)
         tail = f" {close(danger and not (cyber and repeat))}" if kept else ""  # nothing kept, no exit
         return _Assessment(False, _returned_head(status, verdicts, assessment.destination) + tail, status=status,
                            verdicts=verdicts)

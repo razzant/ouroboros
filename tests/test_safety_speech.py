@@ -2,9 +2,10 @@
 import pytest
 
 from tests._safety_fixtures import supervisor as supervisor_fixture
+from tests.test_deployment_safety_exits import exits as exits_fixture
 from ouroboros.tool_effects import effect_of as published_effect
 from ouroboros.place_guard import call_place_facts as published_destinations
-supervisor = supervisor_fixture
+supervisor, exits = supervisor_fixture, exits_fixture
 
 MIND = "issuing the identical call in a later step"  # the mind's own exit, named only where it is the exit
 GATE_HEAD = "These words to this destination were read DANGEROUS in this work:"  # answered for another call
@@ -261,6 +262,115 @@ def test_a_later_word_of_my_human_earns_a_waiting_call_one_new_reading(superviso
         assert not check(7)[0] and len(h.calls) == 2, "waits again until another word"
         h.ctx._owner_directives.append(word(2))
         assert not check(8)[0] and len(h.calls) == 3
+
+
+def _at(n):
+    return f"2026-01-01T10:{n:02d}:00+00:00"
+
+
+def _work(tmp_path):
+    """A work my human opened at the door: its stamp and first turn as the door records them."""
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.tools.tool_context import ToolContext
+    words = "Prepare the release notes."
+    door = build_owner_message_ref(chat_id=1, client_message_id="c-1", ts=_at(1), text=words)
+    root = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="work", current_task_type="task",
+                       task_metadata={"work_kind": "owner", "origin_message_ref": door, "origin_message_text": words})
+    _initialize_owner_directives(root, [{"role": "user", "content": words}])
+    return root
+
+
+def _helper(tmp_path, root):
+    """A helper the work schedules now, my human's rows carried by value as a schedule carries them."""
+    from ouroboros.loop_messages import _initialize_owner_directives
+    from ouroboros.owner_words import governing_words_for_schedule
+    from ouroboros.tools.tool_context import ToolContext
+    helper = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="helper", current_task_type="task",
+                         task_metadata={"work_kind": "owner", "root_task_id": "work", "parent_task_id": "work",
+                                        "delegation_role": "subagent", **governing_words_for_schedule(root)})
+    _initialize_owner_directives(helper, [{"role": "user", "content": "Help with the release notes."}])
+    return helper
+
+
+def _bring(tmp_path, ctx, n, *, carried=True):
+    """My human's message ``n`` in the work's room, brought to ``ctx`` through its mailbox: carried by the host to a
+    member of the work and held there by its address, else relayed by another task into its corpus."""
+    import queue
+    from ouroboros.loop_round_limits import _drain_incoming_messages
+    from ouroboros.owner_relay import owner_quote, owner_row_address, write_relay
+    row = {"chat_id": 1, "direction": "in", "ts": _at(n), "client_message_id": f"c-{n}", "text": f"Note {n}."}
+    address = owner_row_address(row)
+    write_relay(tmp_path, ctx.task_id, relay_id=f"{'carry' if carried else 'relay'}:{address}", note="",
+                quotes=[owner_quote(tmp_path, row, address=address)], chat_id=1,
+                teller_task_id="work" if carried else "peer", canonical_root=tmp_path,
+                host_carried={"went_to": ""} if carried else None)
+    _drain_incoming_messages([], queue.Queue(), tmp_path, ctx.task_id, None, set(), owner_ctx=ctx)
+
+
+def _write(ctx, n):
+    """My human's message ``n`` delivered to ``ctx`` through its own mailbox: its corpus row."""
+    from ouroboros.loop_messages import _record_owner_directive
+    _record_owner_directive(ctx, source="owner_mailbox", content=f"Note {n}.", msg_id=f"mail-{n}",
+                            origin={"chat_id": 1, "client_message_id": f"c-{n}", "ts": _at(n)})
+
+
+def _issue(h, ctx, step):
+    """The identical DANGEROUS-read command, issued by ``ctx`` from a later model call of its own."""
+    ctx._current_llm_call_meta = {"llm_call_id": f"step-{step}"}
+    return h.module.check_safety("run_command", {"cmd": "git push --force origin main"}, ctx=ctx)[0]
+
+
+@pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
+def test_one_opening_message_earns_no_reading_from_the_root_and_its_helper_in_turn(supervisor, exits, monkeypatch,
+                                                                                   tmp_path, mode):
+    """My human's opening message is one message to the root, whose own row names none, and to its helper's
+    inherited copy: the identical DANGEROUS call issued from either in turn waits on the kept verdict, in an
+    ordinary mode and in Cyber Pro with every exit closed."""
+    h = supervisor
+    exits("none")
+    monkeypatch.setattr(h.module, "get_runtime_mode", lambda: mode)
+    root = _work(tmp_path)
+    helper = _helper(tmp_path, root)
+    h.replies.append({"status": "DANGEROUS", "reason": "rewrites the published branch"})
+    assert [_issue(h, ctx, step) for step, ctx in enumerate((root, helper, root, helper, root))] == [False] * 5
+    assert len(h.calls) == 1, "one opening message, however its carriers print it"
+
+
+def test_a_message_held_and_then_relayed_into_the_corpus_is_one_message(supervisor, tmp_path):
+    """A message the host carried to a helper is held there by its address when the call is read DANGEROUS; the same
+    message relayed into its corpus later is a second carrier, not a new message: no reading, while a message that
+    is new earns exactly one."""
+    h = supervisor
+    helper = _helper(tmp_path, _work(tmp_path))
+    _bring(tmp_path, helper, 2)
+    h.replies.extend([{"status": "DANGEROUS", "reason": "rewrites the published branch"}] * 2)
+    assert not _issue(h, helper, 0) and not _issue(h, helper, 1) and len(h.calls) == 1
+    _bring(tmp_path, helper, 2, carried=False)
+    assert not _issue(h, helper, 2) and len(h.calls) == 1, "the same message through a second carrier"
+    _bring(tmp_path, helper, 3)
+    assert not _issue(h, helper, 3) and len(h.calls) == 2, "a new message earns exactly one"
+
+
+def test_a_context_listing_fewer_of_my_humans_rows_than_a_reading_saw_earns_none(supervisor, exits, tmp_path):
+    """Contexts of one work list different sets of my human's rows. A helper listing fewer than the root's reading
+    saw earns no new reading, though a message carried only to it is among them; one more carried to it, so it lists
+    as many, earns exactly one. Every reading's rows stay seen, so alternating earns none until the root lists a
+    message no reading saw: exactly one, and again none."""
+    h = supervisor
+    exits("none")
+    root = _work(tmp_path)
+    helper = _helper(tmp_path, root)
+    _write(root, 2), _write(root, 3), _bring(tmp_path, helper, 4)
+    h.replies.extend([{"status": "DANGEROUS", "reason": "rewrites the published branch"}] * 3)
+    assert not _issue(h, root, 0) and not _issue(h, helper, 1) and len(h.calls) == 1, "fewer rows than it saw"
+    _bring(tmp_path, helper, 5)
+    assert not _issue(h, helper, 2) and len(h.calls) == 2, "as many rows, one no reading saw: exactly one"
+    assert not _issue(h, root, 3) and not _issue(h, helper, 4) and len(h.calls) == 2, "each reading's rows stay seen"
+    _write(root, 6)
+    assert not _issue(h, root, 5) and len(h.calls) == 3, "the root lists a message no reading saw"
+    assert [_issue(h, ctx, step) for step, ctx in enumerate((helper, root, helper), start=6)] == [False] * 3
+    assert len(h.calls) == 3
 
 
 def test_an_unchecked_mode_meets_no_flag_wait_or_card(supervisor, monkeypatch):
