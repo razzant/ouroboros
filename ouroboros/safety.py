@@ -530,11 +530,10 @@ def _owner_ids(ctx):
 
 
 def _owner_seen(kept, listed=()):
-    """``(digests, rows)``: what the readings kept for this call and these words' gate (``kept``) saw of my human's
-    rows, ``listed`` (``_owner_ids``) added: the digests of every row seen, and the most rows one context listed."""
+    """The digests of my human's rows the readings kept for this call and these words' gate (``kept``) saw,
+    ``listed`` (``_owner_ids``) added."""
     marks = [row["owner_words"] for row in kept if row and row.get("owner_words")]
-    return (set().union(*(mark["seen"] for mark in marks), *listed),
-            max([len(listed), *(mark["rows"] for mark in marks)]))
+    return set().union(*(mark["seen"] for mark in marks), *listed)
 
 
 def _remember(ctx, digest, tool_name, assessment, *, flagged="", gate="", held="", owner=None):
@@ -553,7 +552,7 @@ def _remember(ctx, digest, tool_name, assessment, *, flagged="", gate="", held="
                         "verdicts": coalesce_verdicts(before.get("verdicts", ()), assessment.verdicts),
                         **({"flagged": flagged} if flagged else {"held": held} if held else {}),
                         "llm_call_id": _authoring_call(ctx), **({"gate": gate} if gate else {}),
-                        **({"owner_words": {"seen": sorted(owner[0]), "rows": owner[1]}} if owner else {})}
+                        **({"owner_words": {"seen": sorted(owner)}} if owner is not None else {})}
         while len(rows) > 1 and verdict_history_bytes(rows) > _SAFETY_PRIOR_BYTE_BUDGET:
             _drop(key, rows, next(iter(rows)))
         _PRIOR_VERDICTS[key] = rows
@@ -1385,7 +1384,7 @@ def _assess_call(tool_name, arguments, messages, ctx, python_resolution, resolve
     model call is let through unread for SUSPICIOUS in every mode and for DANGEROUS in Cyber Pro, the mode read at
     that issue; elsewhere DANGEROUS waits for my human, declared words keyed on words and destination so a new
     request_id or another tool buys no fresh reading; a later message of my human in this work earns one: a row of
-    theirs no reading of the call or gate saw, issued where no fewer of their rows are listed (``_owner_seen``).
+    theirs no reading of the call or gate saw (``_owner_seen``).
     A SAFE one leaves the call as one never flagged; one not made says why, and the next issue tries again.
     My human's answer whose card holds the exact words as whole lines and the destination (any other call: the exact
     call) lets it through, one given before the issue included (``_owner_yes``): the host checks that the card was
@@ -1493,8 +1492,8 @@ def _assess_call(tool_name, arguments, messages, ctx, python_resolution, resolve
     if waits and release_dangerous and not same_step and (quiz := _owner_yes(ctx, subject)):
         return released(quiz)
     listed = _owner_ids(ctx) if waits and not same_step else None  # my human's rows as this context lists them
-    seen, saw = _owner_seen((gated, prior))  # a later message of theirs, no fewer rows listed, earns one new reading
-    reread = bool(listed) and len(listed) >= saw and any(not ids & seen for ids in listed)
+    seen = _owner_seen((gated, prior))  # a later message of theirs earns one new reading
+    reread = bool(listed) and any(not ids & seen for ids in listed)
     if waits and not reread:
         return waiting()
     if flag and not waits:

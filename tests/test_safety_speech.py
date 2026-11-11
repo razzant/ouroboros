@@ -388,20 +388,21 @@ def test_a_message_held_and_then_relayed_into_the_corpus_is_one_message(supervis
     assert not _issue(h, helper, 3) and len(h.calls) == 2, "a new message earns exactly one"
 
 
-def test_a_context_listing_fewer_of_my_humans_rows_than_a_reading_saw_earns_none(supervisor, exits, tmp_path):
-    """Contexts of one work list different sets of my human's rows. A helper listing fewer than the root's reading
-    saw earns no new reading, though a message carried only to it is among them; one more carried to it, so it lists
-    as many, earns exactly one. Every reading's rows stay seen, so alternating earns none until the root lists a
-    message no reading saw: exactly one, and again none."""
+def test_a_row_no_reading_saw_earns_one_however_few_rows_its_context_lists(supervisor, exits, tmp_path):
+    """Contexts of one work list different sets of my human's rows; a row none of whose identities a reading saw
+    counts, never how many a context lists. A helper listing only rows the root's reading saw, and fewer of them,
+    earns no new reading; a message carried only to it earns exactly one although it still lists fewer. Every
+    reading's rows stay seen, so alternating earns none until the root lists a message no reading saw: exactly one,
+    and again none."""
     h = supervisor
     exits("none")
     root = _work(tmp_path)
     helper = _helper(tmp_path, root)
-    _write(root, 2), _write(root, 3), _bring(tmp_path, helper, 4)
+    _write(root, 2), _write(root, 3)
     h.replies.extend([{"status": "DANGEROUS", "reason": "rewrites the published branch"}] * 3)
-    assert not _issue(h, root, 0) and not _issue(h, helper, 1) and len(h.calls) == 1, "fewer rows than it saw"
-    _bring(tmp_path, helper, 5)
-    assert not _issue(h, helper, 2) and len(h.calls) == 2, "as many rows, one no reading saw: exactly one"
+    assert not _issue(h, root, 0) and not _issue(h, helper, 1) and len(h.calls) == 1, "only rows the root saw, fewer"
+    _bring(tmp_path, helper, 4)
+    assert not _issue(h, helper, 2) and len(h.calls) == 2, "a message carried only to it, still fewer: exactly one"
     assert not _issue(h, root, 3) and not _issue(h, helper, 4) and len(h.calls) == 2, "each reading's rows stay seen"
     _write(root, 6)
     assert not _issue(h, root, 5) and len(h.calls) == 3, "the root lists a message no reading saw"
