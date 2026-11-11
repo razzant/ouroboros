@@ -24,7 +24,7 @@ from ouroboros.runtime_mode_policy import mode_has_unrestricted_agency
 from ouroboros.llm import LLMClient
 from ouroboros.loop_llm_call import classify_llm_exception, is_rate_limit_text
 from ouroboros.pricing import emit_llm_usage_event, normalize_usage_cost, infer_provider_from_model
-from ouroboros.utils import sanitize_tool_result_for_log
+from ouroboros.utils import sanitize_tool_result_for_log, utc_now_iso
 from ouroboros.config import runtime_setting
 from ouroboros.deployment_policy import (
     RELEASE_AFTER_DANGEROUS, RELEASE_UNJUDGED, REPEAT_AFTER_DANGEROUS, checker, organization_rules, safety_exit_open,
@@ -432,16 +432,15 @@ def _render_subject_json(arguments: Dict[str, Any]) -> str:
     return rendered.encode("utf-8", "replace").decode("utf-8")
 
 
-# Mandatory evidence and decisive history must fit; omitted SAFE rows are counted.
+# Mandatory evidence must fit; a work's returned and held calls keep their own bound, the oldest leaving first.
 _SAFETY_BUNDLE_BYTE_BUDGET = 512_000
 _SAFETY_PRIOR_BYTE_BUDGET = 64_000
-_PRIOR_VERDICTS: OrderedDict[str, dict[str, dict]] = OrderedDict()
+_PRIOR_VERDICTS: OrderedDict[str, dict[str, dict]] = OrderedDict()  # root -> subject digest -> returned or held call
+_RETURNED: OrderedDict[str, dict[str, dict]] = OrderedDict()  # root -> tool -> the reading its last call came back with
 _PRIOR_LOCK = threading.RLock()
-
-
-class _VerdictHistory(dict):
-    """Retained decisive rows plus an explicit count of omitted SAFE verdicts."""
-    omitted_safe = 0
+_PENDING_NOTE = ("host fact: the last call this work presented through this tool was returned to the acting mind with "
+                 "this reading, and no call through this tool has been let through since; the present call may be its "
+                 "changed version")
 
 
 class _Assessment(tuple):
@@ -458,9 +457,10 @@ def _root_id(ctx):
 
 
 def clear_safety_work(root_task_id: str) -> None:
-    """Root terminal hook: audit persists, retry authority does not."""
+    """Root terminal hook: audit persists, retry authority and returned readings do not."""
     with _PRIOR_LOCK:
         _PRIOR_VERDICTS.pop(str(root_task_id), None)
+        _RETURNED.pop(str(root_task_id), None)
 
 
 def _subject_digest(tool_name, arguments):
@@ -488,47 +488,46 @@ def _authoring_call(ctx):
 
 
 def _remember(ctx, digest, tool_name, assessment, *, flagged="", marked=False, gate="", held=""):
-    """Retain a verdict. Flagged words keep their level, authoring model call, whether only the verdict saw them as
-    words and, if DANGEROUS, their words-and-destination key (``gate``); a hold keeps its cause and authoring call.
-    True when kept, False when decisive history would not fit (a verdict then ends this call's stored hold and marks
-    the row ``judged``, so no answer releases a judged call unjudged), None without a root, which keeps nothing."""
+    """Keep a returned call (``flagged``: its level) or a held one (``held``: its cause) for this work, with its
+    verdicts, the model call that authored it and, for DANGEROUS declared words, their words-and-destination key
+    (``gate``). Past the byte bound the oldest calls leave first, never the newest; a call no longer kept is read
+    afresh. Without a root nothing is kept (False), but a verdict stays known for this context's lifetime, so a
+    judged call never leaves through the unjudged exit."""
     root = _root_id(ctx)
     if not root:
         if ctx is not None and assessment.verdicts:
-            judged = getattr(ctx, "_safety_judged_subjects", set())
-            judged.add(digest)
-            ctx._safety_judged_subjects = judged  # this context's lifetime only; a fresh head has no such fact
-        return None  # rootless calls never earn a reusable speech flag, so no exit is offered for them
+            ctx._safety_judged_subjects = {*getattr(ctx, "_safety_judged_subjects", ()), digest}
+        return False
     with _PRIOR_LOCK:
-        previous = _PRIOR_VERDICTS.get(root, {})
-        before = previous.get(digest, {})
-        row = {"digest": digest, "tool": tool_name,
-               "verdicts": coalesce_verdicts(before.get("verdicts", ()), assessment.verdicts),
-               **({"flagged": flagged} if flagged else {"held": held} if held else {}),
-               **({"judged": True} if held and before.get("judged") else {}),
-               **({"llm_call_id": _authoring_call(ctx)} if flagged or held else {}),
-               **({"marked": True} if flagged and marked else {}), **({"gate": gate} if gate else {})}
-        history = _VerdictHistory({**previous, digest: row})
-        history.omitted_safe = getattr(previous, "omitted_safe", 0)
-        safe_rows = iter([key for key, value in history.items()
-                         if not value.get("flagged") and value.get("verdicts")
-                         and all(verdict["status"] == "SAFE" for verdict in value["verdicts"])])
-        while verdict_history_bytes(history) > _SAFETY_PRIOR_BYTE_BUDGET:
-            key = next(safe_rows, None)
-            if key is None:  # decisive flags must fit in full
-                if not held:  # even a first verdict ends unchecked authority when its full text will not fit
-                    for name in ("held", "llm_call_id") if before.get("held") else ():
-                        before.pop(name, None)
-                    before["judged"] = True
-                    previous[digest] = before
-                    _PRIOR_VERDICTS[root] = previous
-                return False
-            history.omitted_safe += sum(1 + verdict.get("repeat_count", 0) for verdict in history.pop(key)["verdicts"])
-        if root not in _PRIOR_VERDICTS and len(_PRIOR_VERDICTS) >= 512:
-            _PRIOR_VERDICTS.popitem(last=False)  # an evicted root earns no speech reissue
-        _PRIOR_VERDICTS[root] = history
-        _PRIOR_VERDICTS.move_to_end(root)
+        rows = _PRIOR_VERDICTS.pop(root, {})
+        before = rows.pop(digest, {})
+        rows[digest] = {"digest": digest, "tool": tool_name,
+                        "verdicts": coalesce_verdicts(before.get("verdicts", ()), assessment.verdicts),
+                        **({"flagged": flagged} if flagged else {"held": held} if held else {}),
+                        "llm_call_id": _authoring_call(ctx),
+                        **({"marked": True} if flagged and marked else {}), **({"gate": gate} if gate else {})}
+        while len(rows) > 1 and verdict_history_bytes(rows) > _SAFETY_PRIOR_BYTE_BUDGET:
+            rows.pop(next(iter(rows)))
+        _PRIOR_VERDICTS[root] = rows
+        while len(_PRIOR_VERDICTS) > 512:
+            _PRIOR_VERDICTS.popitem(last=False)  # an evicted root's calls are read afresh
     return True
+
+
+def _track_returned(ctx, tool_name, result):
+    """Per tool, the reading this work's last call through it was returned with; a call let through ends it."""
+    verdicts = () if result[0] else getattr(result, "verdicts", ())
+    root = _root_id(ctx)
+    if root and (result[0] or verdicts):
+        with _PRIOR_LOCK:
+            tools = _RETURNED.pop(root, {})
+            tools.pop(tool_name, None)
+            if verdicts:
+                tools[tool_name] = {"status": verdicts[-1].get("status", ""), "reason": verdicts[-1].get("reason", "")}
+            if tools:
+                _RETURNED[root] = tools
+            while len(_RETURNED) > 512:
+                _RETURNED.popitem(last=False)
 
 
 def _runtime_mode(ctx):
@@ -541,12 +540,11 @@ def _needs_checker(ctx):
         and get_safety_mode("consciousness") == "full")
 
 
-def _hold(ctx, tool_name, reason, *, status="UNAVAILABLE", judged=""):
-    """Hold this one call. ``judged``: the reasons of a verdict reached but not kept, said as such, never unjudged."""
+def _hold(ctx, tool_name, reason, *, status="UNAVAILABLE"):
+    """Hold this one call: no reading was reached."""
     _emit_durable_safety_event(ctx, {"type": "safety_hold", "tool": tool_name, "reason": reason, "hold": status})
     marker = "SAFETY_SUBJECT_TOO_LARGE_BLOCKED" if status == "TOO_LARGE" else "SAFETY_UNAVAILABLE"
-    told = (f"This call was judged; its verdict cannot be kept:\n{judged}" if judged else
-            "This call was not checked: that is no verdict. " + ("A smaller call may fit." if status == "TOO_LARGE" else "Retry later."))
+    told = "This call was not checked: that is no verdict. " + ("A smaller call may fit." if status == "TOO_LARGE" else "Retry later.")
     return _Assessment(False, f"⚠️ {marker}: {reason}. {told}", status=status)
 
 
@@ -630,7 +628,7 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
     from ouroboros import owner_words
     from ouroboros.place_guard import call_place_facts, place_evidence
     from ouroboros.tool_effects import mcp_sends_as
-    from ouroboros.safety_evidence import focus_event_source
+    from ouroboros.safety_evidence import focus_event_source, with_author
 
     metadata = getattr(ctx, "task_metadata", None) or {}
     kind = work_kind(metadata)
@@ -661,32 +659,26 @@ def _build_check_prompt(tool_name, arguments, messages=None, *, args_json=None, 
         occasion = "owner door"
     directives = getattr(ctx, "_owner_directives", None)
     # User messages are quoted input when the caller has no retained host source; never certify them as owner words.
-    sources = [*directives, *owner_words.safety_sources(ctx)] if isinstance(directives, list) else [m for m in (messages or []) if m.get("role") == "user"]
-    sources = [focus_event_source(row, metadata, notes) for row in sources]  # the evidence diet: what a row costs
+    rows = owner_words.safety_sources(ctx) if isinstance(directives, list) else [m for m in (messages or []) if m.get("role") == "user"]
+    sources = [with_author(focus_event_source(row, metadata, notes), metadata) for row in rows]  # diet, then author
     target = asdict(resolved_binding) if is_dataclass(resolved_binding) else resolved_binding
     # Whose credential an MCP call acts with (e.g. a server signed in as my human); connectors carry it per place.
     sends_as = {"sends_as": mcp} if tool_name.startswith("mcp_") and (mcp := mcp_sends_as(tool_name)) else {}
     with _PRIOR_LOCK:
-        root = _root_id(ctx)
-        history = _PRIOR_VERDICTS.get(root, {})
-        if root in _PRIOR_VERDICTS:
-            _PRIOR_VERDICTS.move_to_end(root)
-        earlier = [{key: value for key, value in row.items() if key != "gate"} for row in history.values()]
-        omitted_safe = getattr(history, "omitted_safe", 0)
+        pending = dict(_RETURNED.get(_root_id(ctx), {}).get(tool_name) or {})
     bundle = {
         "work": {"kind": kind, "label": "your work" if kind == "owner" else "consciousness",
                  "root_task_id": _root_id(ctx), "task_id": getattr(ctx, "task_id", ""), "runtime_mode": _runtime_mode(ctx),
-                 "consciousness_autonomy": metadata.get("consciousness_autonomy")},
+                 "consciousness_autonomy": metadata.get("consciousness_autonomy"), "now": utc_now_iso()},
         "occasion": {"cause": occasion, "consciousness_cause": metadata.get("consciousness_cause"),
                      "origin_wake_task_id": metadata.get("origin_wake_task_id"), "focus": focus,
                      "sources": sources, "retained_host_sources": isinstance(directives, list)},
-        "subject": {"tool": tool_name, "physical_target": target, "place": place, **sends_as},
+        "subject": {"tool": tool_name, "physical_target": target, "place": place, **sends_as,
+                    **({"returned_and_pending": {"note": _PENDING_NOTE, **pending}} if pending else {})},
         # The acting mind's context reads the same key through the same snapshot (``owner_rules_section``);
         # a deployment's rules keep their own author, the policy file (``organization_rules_section``).
         "standing_delegation": {"owner_rules": runtime_setting(OWNER_RULES_KEY, ""), "place_notes": notes,
                                 **({"organization_rules": rules} if (rules := organization_rules()) else {})},
-        "earlier_verdicts": earlier,
-        "earlier_safe_verdicts_omitted": omitted_safe,
     }
     if isinstance(evidence, dict):
         evidence.update(place=place, notes=notes)
@@ -1385,7 +1377,17 @@ def check_safety(
     declared_policy: str = "",
     ext_tool: Optional[Any] = None,
 ) -> Tuple[bool, str]:
-    """Return ``(allowed, warning_or_error)`` for one tool call.
+    """Return ``(allowed, warning_or_error)`` for one tool call (``_assess_call``); the reading a returned call came
+    back with stays beside its tool until a call through that tool is let through (``_track_returned``)."""
+    tool_name = str(tool_name or "").strip()
+    result = _assess_call(tool_name, arguments or {}, messages, ctx, python_resolution, resolved_binding,
+                          declared_policy, ext_tool)
+    _track_returned(ctx, tool_name, result)
+    return result
+
+
+def _assess_call(tool_name, arguments, messages, ctx, python_resolution, resolved_binding, declared_policy, ext_tool):
+    """One call's assessment.
 
     ``declared_policy`` is a first-party ``ToolEntry``'s own declaration; a
     ``TOOL_POLICY`` entry outranks it and an invalid value is ``DEFAULT_POLICY``.
@@ -1399,14 +1401,10 @@ def check_safety(
     answered, never what the answer says. A hold on speech, or on an MCP call without a verdict, binds in every mode
     and names the same exit. Deployment exits separately govern an agent's DANGEROUS repeat, a human's card after
     DANGEROUS and a card without a verdict. Permissions are read at sending; a closed exit buys no second roll of
-    a kept exact-call verdict. An unretained verdict is still known to be judged for this context's lifetime, so
-    it cannot leave through the unchecked exit; a fresh check can recover. The speech mark is the final
+    a kept exact-call verdict; a call no longer kept is read afresh. The speech mark is the final
     stage's; words only it saw meet the one-author guard first. ``ext_tool`` is the extension descriptor being
     dispatched: its effect and the brief's place facts are the publication it was read with
     (``tool_effects.bound_declaration``)."""
-    # Arguments can be None for no-parameter tool calls.
-    tool_name = str(tool_name or "").strip()
-    arguments = arguments or {}
     declared = declared_policy if isinstance(declared_policy, str) else ""
     policy = TOOL_POLICY.get(tool_name) or (declared if declared in POLICY_VALUES else DEFAULT_POLICY)
 
@@ -1505,7 +1503,7 @@ def check_safety(
     if flag and closed:
         return False, _NOT_SENT[level] + ": this exact call was refused before. " + _REPEAT_CLOSED
     # My human's card reaches words (declared, or marked by a verdict) and an MCP call no verdict judged an action; a
-    # call no verdict judged only through an open release, and never one whose verdict was reached but not kept.
+    # call no verdict judged only through an open release, and never one judged in this context.
     if (speech or prior.get("marked") or (is_mcp and not prior.get("verdicts"))) and call and (
             call != prior.get("llm_call_id")) and card_open and (level or (release and not prior.get("judged"))) and (
             quiz := _owner_yes(ctx, subject)):
@@ -1540,29 +1538,24 @@ def check_safety(
         card_open = flag != "DANGEROUS" or release_dangerous
         closed = flag == "DANGEROUS" and not (mind_may or card_open)
         # Every refusal of words is kept, whatever its exit is now: its next issue reads the exit as it then stands.
-        kept = _remember(ctx, digest, tool_name, assessment, flagged=flag, marked=marked,
-                         gate=_words_key(subject()) if flag == "DANGEROUS" else "")
+        kept = bool(flag or not allowed) and _remember(ctx, digest, tool_name, assessment, flagged=flag, marked=marked,
+                                                       gate=_words_key(subject()) if flag == "DANGEROUS" else "")
         _emit_durable_safety_event(ctx, {"type": "safety_verdict", "tool": tool_name,
                                        "subject_digest": digest, "verdicts": verdicts})
-        if kept is False:  # reached but not kept: held, its verdict said
-            assessment = _hold(ctx, tool_name, "This work's mandatory prior-verdict history is too large",
-                               status="TOO_LARGE", judged=_reasons(verdicts))
-            allowed, message = assessment
-        else:
-            if flag and marked and call and card_open and (quiz := _owner_yes(ctx, subject)):  # answered before the send
-                prior = {"verdicts": list(verdicts), "llm_call_id": call}
-                basis = prior["verdicts"]
-                return released(quiz, True)
-            if flag:  # private to the mind: the words, the rule, where they would land and a kept exit
-                quote = next((v["quote"] for v in reversed(verdicts) if v.get("quote")), "")
-                tail = (_REPEAT_CLOSED if closed else _owner_line(subject(), _SEND_DESPITE if mind_may else _WAIT)
-                        if card_open else _SEND_DESPITE) if kept else ""
-                return False, (_NOT_SENT[flag] + ".\n" + _reasons(verdicts)
+        if flag and marked and call and card_open and (quiz := _owner_yes(ctx, subject)):  # answered before the send
+            prior = {"verdicts": list(verdicts), "llm_call_id": call}
+            basis = prior["verdicts"]
+            return released(quiz, True)
+        if flag:  # private to the mind: the words, the rule, where they would land and a kept exit
+            quote = next((v["quote"] for v in reversed(verdicts) if v.get("quote")), "")
+            tail = (_REPEAT_CLOSED if closed else _owner_line(subject(), _SEND_DESPITE if mind_may else _WAIT)
+                    if card_open else _SEND_DESPITE) if kept else ""
+            return _Assessment(False, _NOT_SENT[flag] + ".\n" + _reasons(verdicts)
                                + (f"\nFlagged words: {json.dumps(quote, ensure_ascii=False)}" if quote else "")
                                + (f"\n{assessment.destination}" if getattr(assessment, "destination", "") else "")
-                               + (f"\n{tail}" if tail else ""))
-            if marked and allowed and (refusal := one_author()):  # the guard a message meets at dispatch
-                return False, refusal
+                               + (f"\n{tail}" if tail else ""), status=flag, verdicts=verdicts)
+        if marked and allowed and (refusal := one_author()):  # the guard a message meets at dispatch
+            return False, refusal
     # A call never judged a non-SAFE action leaves on my human's card for its exact form (a pre-approved github_write),
     # where this deployment leaves that release open. Speech holds bind in every mode, as does an MCP call's (built-in
     # undeclared tools' holds stay advice).
@@ -1572,18 +1565,18 @@ def check_safety(
         return released(quiz, False)
     if not allowed and (speech or (is_mcp and not getattr(assessment, "verdicts", ()))):
         if verdicts:  # a judged call is no hold: no wait for a check, no exit
-            return False, message
+            return assessment
         held = _remember(ctx, digest, tool_name, assessment, held=getattr(assessment, "status", "") or "UNAVAILABLE")
         head = ("This call waits until a check judges it: its server does not mark it read-only, so it may deliver "
                 "words." if effect.source == "mcp" else "These words wait until a check judges them.")
-        if held is True and release:
+        if held and release:
             return False, (message + "\n" + _owner_line(subject(), head + " Retry in a later step. ")
                            + " Never route these words through another tool.")
-        retry = _RELEASE_CLOSED if held is True else "."  # nothing kept names no exit
+        retry = _RELEASE_CLOSED if held else "."  # nothing kept names no exit
         return False, f"{message}\n{head} Retry in a later step{retry} Never route these words through another tool."
     if cyber and not allowed:
         _emit_durable_safety_event(ctx, {"type": "safety_advisory", "tool": tool_name,
             "assessment_allowed": False, "assessment": message, "runtime_mode": _runtime_mode(ctx), "execution_allowed": True})
         return True, ("⚠️ SAFETY_ADVICE: Cyber Pro leaves the decision to Ouroboros. "
                       "Assessment recorded before execution:\n" + message)
-    return allowed, message
+    return assessment

@@ -258,11 +258,3 @@ def test_terminal_clears_only_the_root_retry_authority(supervisor, monkeypatch):
     assert h.module.check_safety("place_reply", {"text": "hi"}, ctx=h.ctx)[0]
     assert len(h.calls) == 2
 
-
-def test_repeated_write_keeps_both_earlier_verdicts(supervisor):
-    h = supervisor
-    h.replies.extend([{"status": "DANGEROUS", "reason": "first refusal"}, {"status": "SAFE", "reason": "later approval"}])
-    assert not h.module.check_safety("remote_write", {}, ctx=h.ctx)[0]
-    assert h.module.check_safety("remote_write", {}, ctx=h.ctx)[0]
-    h.module.check_safety("remote_write", {"new": 1}, ctx=h.ctx)
-    assert "first refusal" in h.calls[-1]["user_prompt"] and "later approval" in h.calls[-1]["user_prompt"]

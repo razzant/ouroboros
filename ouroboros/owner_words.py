@@ -839,16 +839,34 @@ def work_words(ctx: Any) -> Tuple[List[Dict[str, Any]], str, List[str]]:
     return rows, "" if rows else _absent(ctx), gaps
 
 
+def source_refs(item: Mapping[str, Any]) -> set:
+    """Every reference a row names its message by: its typed identity (``row_ref``) and the one a carrier printed
+    into its ``msg_id`` (``_chat_ref``'s ``chat N / client``), so one message under two formats is one source. A row
+    that names no message has none: an empty reference never makes two rows one, and coincident words never do."""
+    return {row_ref(item), str(item.get("msg_id") or "")} - {""}
+
+
 def safety_sources(ctx: Any) -> List[Dict[str, Any]]:
-    """The rows addressed to this run's work beside its corpus, shaped as the corpus rows the Safety check reads
-    (``source``, ``content``, ``msg_id`` = the row's reference, ``reply_to`` = the card or message it answers): the
-    field it inherited, a reply target folded into its row and a row the corpus already holds skipped; then the
-    rows it holds that reached this work. Never a room, context or marked row: a permission my human gave another
-    work is not this one's. Reads the context's attributes as they stand and writes nothing."""
+    """The rows the Safety check reads for this run's work, shaped as its corpus rows (``source``, ``content``,
+    ``msg_id`` = the row's reference, ``reply_to`` = the card or message it answers, ``ts`` = its time where one was
+    recorded): the corpus, the field it inherited (a reply target folded into its row), then the rows it holds that
+    reached this work; one row per source (``source_refs``), the first kept. Never a room, context or marked row: a
+    permission my human gave another work is not this one's. Reads the context's attributes and writes nothing."""
     from ouroboros.owner_relay import owner_text
 
-    corpus = {row_ref(item) for item in getattr(ctx, "_owner_directives", None) or [] if isinstance(item, Mapping)}
     rows: List[Dict[str, Any]] = []
+    seen: set = set()
+
+    def add(row: Mapping[str, Any]) -> Any:  # the row, unless its source is already listed
+        refs = source_refs(row)
+        if refs & seen:
+            return None
+        seen.update(refs)
+        rows.append(row)
+        return row
+    for item in getattr(ctx, "_owner_directives", None) or []:
+        if isinstance(item, Mapping):
+            add(item)
     last: Dict[str, Any] | None = None  # the field row a following reply target belongs to
     for row in task_governing_words(_ctx_metadata(ctx))[0]:
         if row["source"] == REPLY_TARGET:
@@ -856,15 +874,15 @@ def safety_sources(ctx: Any) -> List[Dict[str, Any]]:
                 last["reply_to"] = {"address": row["ref"], "author": row.get("author") or "", "text": row["text"]}
             last = None
             continue
-        last = None if row["ref"] in corpus - {""} else {"source": row["source"], "content": row["text"], "msg_id": row["ref"]}
-        rows += [last] if last is not None else []
+        last = add({"source": row["source"], "content": row["text"], "msg_id": row["ref"],
+                    **({"ts": row["ts"]} if row["ts"] else {})})
     root = _data_root(ctx)
     for key, row in _mapping(getattr(ctx, "_held_owner_messages", None)).items():
         if isinstance(row, Mapping) and isinstance(row.get("carried"), dict) and not row["carried"].get("went_to"):
             replied = answered_card_reply(*answered_card_source(row)) or reply_target(
                 row.get("_owner_source_root") or root, row.get("reply_to"))
-            rows.append({"source": "owner_mailbox", "content": owner_text(row), "msg_id": str(key),
-                         **({"reply_to": replied} if replied else {})})
+            add({"source": "owner_mailbox", "content": owner_text(row), "msg_id": str(key),
+                 **({"ts": when} if (when := _item_time(row)) else {}), **({"reply_to": replied} if replied else {})})
     return rows
 
 
