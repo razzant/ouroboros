@@ -518,7 +518,7 @@ def _start_task(
                     + admission_observation(root, observed_at=utc_now_iso()))
     response = (
         f"Not confirmed yet: separate task {tid} is waiting to start. Its complete intent is durable; "
-        f"admission to {_requested_scope_label(display_name, pid)} is pending ({mode}).{observed} {model_note} "
+        f"admission to {_requested_scope_label(display_name, pid)} is pending ({mode}).{observed}{' ' + model_note if model_note else ''} "
         "A [ROUTING_RECEIPTS] row reports its recorded outcome. "
         f"Use get_task_result({tid}) to reconcile it before an explicit retry."
     )
