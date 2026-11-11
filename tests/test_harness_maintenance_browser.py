@@ -328,12 +328,12 @@ def test_missing_executable_is_one_explained_section_fact_until_a_real_fresh_rea
     codex.locator(".agent-family-head").scroll_into_view_if_needed()
     capture(page, f"maintenance-missing-executable-details-{width}-{theme}")
 
-    # A remount's cached read answers 200: not proof of anything current.
+    # A remount keeps the dated observation without an eager read or clearing the failure.
     before = len(reads)
     _remount(page)
     expect(banner).to_contain_text("no longer present")
     expect(codex.locator(".harness-maintenance-line")).to_contain_text("Last known")
-    assert reads[before:]  # Reopening Accounts is now a current/newest read.
+    assert not reads[before:]
 
     # A true fresh success removes the current instruction and the last-known mark.
     world["broken"] = False

@@ -532,7 +532,11 @@ test('a failed fresh inspection stays one dated section fact, through a cached r
     assert.equal(controller.inspectionProblem?.code, 'ENOENT', 'a cached success proves nothing current');
     assert.ok(controller.view('fixture').inventoryError);
     controller.dispose();
+    const before = world.reads.length;
     const remount = createHarnessMaintenanceController({ api: world.api, intents });
+    assert.equal(remount.view('fixture').entry.observedAt, OBSERVED, 'remount keeps the dated last observation without a read');
+    assert.equal(remount.inspectionProblem?.code, 'ENOENT');
+    assert.equal(world.reads.length, before);
     await remount.refresh();
     assert.equal(remount.inspectionProblem?.code, 'ENOENT', 'survives the remount and its first cached read');
     world.failing = false;

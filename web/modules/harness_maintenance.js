@@ -143,13 +143,13 @@ export function createHarnessMaintenanceController({
     newKey = () => globalThis.crypto?.randomUUID?.()
         || `maintenance-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
 } = {}) {
-    const rows = new Map();
+    const rows = new Map([...intents].filter(([, state]) => state.entry).map(([id, state]) => [id, state.entry]));
     const reads = new Map();
     let disposed = false;
     // Answers can cross: the later-asked read stands, whichever answers last. `observed` keeps, per slot,
     // the newest applied failure or proved success (a cached success proves nothing current, so it marks
     // nothing); `engineObserved` the newest current observation of the engine-wide fact. A released view
-    // applies nothing, so its successor, whose reads are all asked later, starts empty.
+    // applies nothing; its successor retains the last applied row, with a fresh read sequence.
     let asked = 0;
     let engineObserved = 0;
     const observed = new Map();
@@ -175,7 +175,7 @@ export function createHarnessMaintenanceController({
     }
 
     // "Checking…" answers a check the owner asked for: this card's own, or a fresh read of every program (Refresh);
-    // the cached read a mount starts changes no card's words (U106).
+    // a cached read changes no card's words (U106).
     const inspectionPending = (harness) => reads.has(harness) || Boolean(reads.get(WHOLE_INVENTORY)?.current);
 
     function render() {
@@ -281,6 +281,7 @@ export function createHarnessMaintenanceController({
                         continue;
                     }
                     rows.set(entry.harness, entry);
+                    state.entry = entry;
                     settle(entry.harness);
                     state.unknownCurrent = (ACTIVE.has(state.operation?.state) && state.operation?.phase === 'installing')
                         || (state.operation?.mutation === 'unknown' && !inspectedAfterOperation(entry, state.operation));
