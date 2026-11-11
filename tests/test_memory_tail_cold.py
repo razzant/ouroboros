@@ -673,6 +673,24 @@ def test_a_sealed_place_row_revised_and_refilled_inside_a_capture_leaves_one_sta
     _one_state(monkeypatch, tmp_path, revise_and_fill, "lazy")
 
 
+def test_a_refill_an_older_body_made_inside_a_capture_leaves_one_state(monkeypatch, tmp_path):
+    """The same revision and refill, by an older body that keeps the set's marks beside the tail it projected anew: a
+    read of the set's rows also compares the stored tail's source, so it never reads the new projection's rows by the
+    old set's positions."""
+    _rooms, _sealed = _long_place(tmp_path, mine_at=30)
+    index = ChronicleStore(tmp_path).index_path
+    with sqlite3.connect(str(index)) as db:
+        marks = db.execute("SELECT value FROM state WHERE key='tail_cold'").fetchone()[0]
+
+    def revise_and_fill_keeping_the_marks() -> None:
+        ds.revise_text(tmp_path, "chat", _entry(tmp_path, "Words 0.")[0]["hint"]["seq"], "Words 0, edited.")
+        _fill(tmp_path)
+        with sqlite3.connect(str(index)) as db:
+            db.execute("INSERT OR REPLACE INTO state VALUES ('tail_cold', ?)", (marks,))
+
+    _one_state(monkeypatch, tmp_path, revise_and_fill_keeping_the_marks, "lazy")
+
+
 def _moving_task(tmp_path: pathlib.Path, chat, newest: bool = True) -> dict:
     """A task admitted in ``chat`` with a row sealed in its rooms and (``newest``) a later open one: its lineage moves
     both."""
@@ -701,6 +719,35 @@ def test_a_lineage_written_inside_a_capture_leaves_one_state(monkeypatch, tmp_pa
     lineage as it is then, so the capture reads the whole tail under it, never a cold row left in a room it left."""
     rooms = _moving_task(tmp_path, 1)
     _one_state(monkeypatch, tmp_path, lambda: store.update_task(tmp_path, "moving", lambda doc: {**doc, "chat_id": rooms["alpha"]}), at)
+
+
+def test_a_lineage_written_inside_a_capture_with_no_reader_of_places_leaves_one_state(monkeypatch, tmp_path):
+    """A capture whose caller reads no place's rows (``open_rows_by_room`` alone) checks the lineage after its own pass:
+    a write that landed before its rooms were decided makes it read the whole tail under the lineage as it is then."""
+    rooms = _moving_task(tmp_path, 1)
+
+    def open_rows() -> dict:
+        return json.loads(json.dumps(mi.open_rows_by_room(tmp_path)))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cold, "gate", lambda _store: None)
+        before = open_rows()
+    real, fired = cold.gate, []
+
+    def moved_after_the_marks(store_):
+        marks = real(store_)
+        if not fired:
+            fired.append(store.update_task(tmp_path, "moving", lambda doc: {**doc, "chat_id": rooms["alpha"]}))
+        return marks
+
+    _forget_process_memos()
+    with monkeypatch.context() as patch:
+        patch.setattr(cold, "gate", moved_after_the_marks)
+        got = open_rows()
+    with monkeypatch.context() as patch:
+        patch.setattr(cold, "gate", lambda _store: None)
+        after = open_rows()
+    assert fired and got in (before, after), _first_difference({"open": got}, {"open": after})
 
 
 def test_a_lineage_written_while_a_block_reads_a_place_leaves_one_state(monkeypatch, tmp_path):
