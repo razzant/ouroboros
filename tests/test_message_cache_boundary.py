@@ -187,7 +187,9 @@ def test_each_round_seals_the_newest_text_row_and_only_marker_lanes_render_it(mo
             if lane in ("anthropic", "openrouter-anthropic"):
                 tools = payload["tools"]
                 assert len(LLMClient._payload_cache_breakpoints(payload)) == 4
-                assert ("cache_control" in tools[-1]) == (not book), "schemas get a marker only from a free slot"
+                assert "cache_control" not in tools[-1], "starting context takes the spare slot before schemas"
+                system = payload.get("system", payload["messages"][0].get("content"))
+                assert ("cache_control" in system[-1]) == (not book), "declared endpoints and rolling are preserved"
     for lane, payloads in seen.items():
         for previous, current in zip(payloads, payloads[1:]):
             if lane in _MARKED:
@@ -293,3 +295,71 @@ def test_user_send_copy_block_shapes_survive_boundary_moves_without_changing_cal
     assert _unmarked(messages[:len(originals)]) == originals
     unsealed = _payload("openrouter-anthropic", originals, None)
     assert unsealed["messages"][-1]["content"] == "host facts"
+
+
+@pytest.mark.parametrize("lane", ["anthropic", "openrouter-anthropic"])
+@pytest.mark.parametrize("shape,expected", [
+    ("spare", True), ("handbook", False), ("unsealed", False),
+    ("empty-tail", False), ("undeclared", False), ("all-stable", False),
+])
+def test_system_context_endpoint_respects_declared_budget_and_uncached_inputs(monkeypatch, lane, shape, expected):
+    messages = [_system(shape == "handbook"), {"role": "user", "content": "task"}]
+    if shape == "empty-tail":
+        messages[0]["content"][-1]["text"] = ""
+    if shape == "undeclared":
+        messages[0].pop(STABLE_PREFIX_BLOCKS_KEY)
+    if shape == "all-stable":
+        messages[0][STABLE_PREFIX_BLOCKS_KEY] = len(messages[0]["content"])
+    if shape != "unsealed":
+        seal_task_transcript(messages)
+    original = copy.deepcopy(messages)
+    actual = _payload(lane, messages, monkeypatch)
+    with monkeypatch.context() as baseline:
+        baseline.setattr(LLMClient, "_cache_declared_system_context", lambda *_a: None)
+        before = _payload(lane, messages, monkeypatch)
+
+    def strip_marks(value):
+        if isinstance(value, dict):
+            return {k: strip_marks(v) for k, v in value.items() if k != "cache_control"}
+        return [strip_marks(v) for v in value] if isinstance(value, list) else value
+
+    assert strip_marks(actual) == strip_marks(before), "only cache metadata changes, never input or routing"
+    assert messages == original, "canonical messages and their declarations stay intact"
+    system = actual.get("system", actual["messages"][0].get("content"))
+    tail = next((b for b in system if b.get("text") == "runtime facts"), {})
+    assert ("cache_control" in tail) == expected
+    assert len(LLMClient._payload_cache_breakpoints(actual)) <= LLMClient._MAX_CACHE_BREAKPOINTS
+    assert _marked_texts(actual) == _marked_texts(before), "rolling survives"
+    if not expected:
+        assert actual == before
+
+
+@pytest.mark.parametrize("lane", ["anthropic", "openrouter-anthropic"])
+def test_compaction_preserves_a_written_endpoint_for_the_whole_system(monkeypatch, lane):
+    messages = [_system(False), {"role": "user", "content": "task"}]
+    for n in range(30):
+        messages.extend([{"role": "assistant", "content": f"answer {n}"},
+                         {"role": "user", "content": f"observation {n}"}])
+    seal_task_transcript(messages)
+    original = copy.deepcopy(messages)
+    previous = _payload(lane, messages, monkeypatch)
+    compacted = [messages[0], messages[1], {"role": "user", "content": "retold observations"}]
+    seal_task_transcript(compacted)
+    current = _payload(lane, compacted, monkeypatch)
+    old_system = previous.get("system", previous["messages"][0].get("content"))
+    new_system = current.get("system", current["messages"][0].get("content"))
+    assert old_system == new_system
+    assert "cache_control" in old_system[-1], "the unchanged prefix has its own written endpoint"
+    assert _marked_texts(previous) != _marked_texts(current), "the old rolling endpoint cannot match"
+    assert messages == original
+
+
+@pytest.mark.parametrize("lane", ["openrouter-openai", "openrouter-grok", "openai", "claudexor", "local", "gigachat"])
+def test_other_lanes_never_reallocate_system_context_cache_markers(monkeypatch, lane):
+    messages = [_system(False), {"role": "user", "content": "task"}]
+    seal_task_transcript(messages)
+    before = _payload(lane, messages, monkeypatch)
+    def forbidden(*_args):
+        raise AssertionError("Anthropic-only cache projection reached another route")
+    monkeypatch.setattr(LLMClient, "_cache_declared_system_context", forbidden)
+    assert _payload(lane, messages, monkeypatch) == before

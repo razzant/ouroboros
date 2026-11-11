@@ -401,7 +401,7 @@ def test_a_widened_run_is_cancelled_and_typed_not_reported_as_progress(tmp_path,
         task_id="t-nanny", route_id="some-route", model="m",
         project_id="prj", project_owned=False,
     )
-    out = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=1))
+    out = json.loads(delegate._read_run(ctx, "run-1"))
     delegate._CUSTODY.clear()
     assert out["status"] == "refused"
     assert out["reason"] == "access_profile_widened"
@@ -431,7 +431,7 @@ def test_a_delegated_run_can_only_be_touched_by_the_task_that_started_it(tmp_pat
     )
 
     for tool, call in (
-        ("delegate_wait", lambda ctx, rid: delegate._delegate_wait(ctx, rid, wait_sec=1)),
+        ("delegate_wait", lambda ctx, rid: delegate._read_run(ctx, rid)),
         # delegate_wait is the tick contract (str); cancel answers natively.
         ("delegate_cancel", lambda ctx, rid: delegate._delegate_cancel(ctx, rid, reason="x").text),
     ):

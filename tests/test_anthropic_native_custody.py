@@ -179,6 +179,30 @@ def test_builder_places_exact_content_immediately_before_matching_results():
     ]
 
 
+def test_system_cache_endpoint_keeps_native_replay_in_the_full_candidate(monkeypatch):
+    from ouroboros.context_fit import seal_task_transcript
+    from ouroboros.llm_messages import STABLE_PREFIX_BLOCKS_KEY
+
+    target = _target()
+    source = [{"role": "system", STABLE_PREFIX_BLOCKS_KEY: 2, "content": [
+        {"type": "text", "text": value, "cache_control": {"type": "ephemeral"}}
+        for value in ("governance", "identity")
+    ] + [{"type": "text", "text": "starting context"}]},
+        {"role": "user", "content": "task"}, _canonical_message(target), *_tool_results()]
+    seal_task_transcript(source, min_prefix_tokens=0)
+    original = copy.deepcopy(source)
+    client = LLMClient(api_key="unused")
+    monkeypatch.setattr(config, "resolve_prompt_cache_ttl", lambda: "1h")
+    with anthropic_replay_scope():
+        payload = client._build_remote_candidate(target, source, "high", 512, "auto", None, None)
+        client._normalize_payload_cache_ttl(target, payload)
+    assert payload["system"][-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    assert payload["messages"][1] == {"role": "assistant", "content": _raw_content()}
+    assert source == original and source[2][ANTHROPIC_NATIVE_RECEIPT_KEY] == original[2][ANTHROPIC_NATIVE_RECEIPT_KEY]
+    assert len(client._payload_cache_breakpoints(payload)) == 4
+    assert client._cache_breakpoint_tls.pending is None
+
+
 def test_complete_tool_unit_stays_active_until_successful_continuation_consumes_it():
     target = _target()
     message = _canonical_message(target)

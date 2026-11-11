@@ -103,7 +103,7 @@ def member_memory(container, detached=None) -> list[MemberMemory]:
     return members
 
 
-def stop_reason(total: int, memory, *, floor: int, reserve: int) -> str:
+def stop_reason(total: int, memory, *, floor: int) -> str:
     """Why an owned tree must stop now, or "".
 
     Only real pressure stops a tree that outgrew what admission gave it: the machine
@@ -115,7 +115,7 @@ def stop_reason(total: int, memory, *, floor: int, reserve: int) -> str:
     """
     if memory is None or total <= floor:
         return ""
-    if memory.available_bytes < reserve:
+    if memory.available_bytes < memory.reserve_bytes:
         return "machine under its reserve and tree past its admitted size"
     if memory.pressure:
         return "kernel reports critical memory pressure and tree past its admitted size"
@@ -144,8 +144,8 @@ class OverloadWatch:
         self._thread = thread  # A failed start must never leave an unjoinable thread.
 
     def _run(self) -> None:
-        from ouroboros.config import TEST_MEMORY_RESERVE_FRACTION, TEST_PROCESS_TOKEN_SCAN_SEC
-        from ouroboros.test_parallelism import physical_memory
+        from ouroboros.config import TEST_PROCESS_TOKEN_SCAN_SEC
+        from ouroboros.host_memory import physical_memory
 
         detached, scanned = None, None
         while not self._done.is_set():
@@ -164,13 +164,12 @@ class OverloadWatch:
                     print(self.degraded, file=sys.stderr, flush=True)
             else:
                 total = sum(member.rss_bytes for member in members)
-                reserve = int(memory.total_bytes * TEST_MEMORY_RESERVE_FRACTION)
-                why = stop_reason(total, memory, floor=self.floor_bytes, reserve=reserve)
+                why = stop_reason(total, memory, floor=self.floor_bytes)
                 if members and why:
                     largest = max(members, key=lambda member: member.rss_bytes)
                     self.diagnostic = (
                         f"overload_stop: {why}; tree_rss={total} floor={self.floor_bytes} "
-                        f"available={memory.available_bytes} reserve={reserve}; "
+                        f"available={memory.available_bytes} reserve={memory.reserve_bytes}; "
                         f"largest pid={largest.pid} name={largest.name!r} rss={largest.rss_bytes}"
                     )
                     try:

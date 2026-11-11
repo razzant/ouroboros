@@ -291,11 +291,31 @@ def engine_locator(detail: Any) -> Dict[str, Any]:
 # Proven-coverage ledger for staged artifacts: merged, sorted character intervals
 # actually SERVED to the reader, keyed by path, content hash and successor identity. A re-wait
 # re-stages the identical payload and must not void an honest reader's partial proof,
-# while changed content honestly resets it. Process-local by design: the DURABLE fact
-# is the acknowledgement row itself; a restarted worker re-proves coverage by
-# re-reading, it never inherits an unproven claim.
+# while changed content honestly resets it. The DURABLE fact is the acknowledgement row
+# itself; a restarted worker re-proves staged-output coverage by re-reading. An actor's
+# exact wake and hold sources ride its continuation (``read_coverage``): the ranges they
+# count were delivered into the very transcript that continuation saves.
 _READ_COVERAGE: Dict[str, List[List[int]]] = {}
 _READ_COVERAGE_MAX_KEYS = 128
+
+
+def _carried(task_id: str) -> tuple:
+    return (f"wake:{task_id}|", f"held:{task_id}|")
+
+
+def read_coverage(task_id: str) -> Dict[str, List[List[int]]]:
+    """This actor's delivered ranges of its exact wake and hold sources, for its continuation."""
+    return {key: [list(span) for span in spans] for key, spans in _READ_COVERAGE.items()
+            if key.startswith(_carried(str(task_id)))}
+
+
+def restore_read_coverage(task_id: str, saved: Any) -> None:
+    """Merge a restored continuation's delivered ranges into this process's ledger (its own keys only)."""
+    for key, spans in (saved.items() if isinstance(saved, dict) else ()):
+        if isinstance(key, str) and key.startswith(_carried(str(task_id))) and isinstance(spans, list):
+            for span in spans:
+                if isinstance(span, list) and len(span) == 2 and all(type(n) is int for n in span) and 0 <= span[0]:
+                    _covered_whole(key, span[0], span[1], span[1] + 1)
 
 
 def record_output_consumed(drive_root: Any, custody: _RunCustody, *,
@@ -461,7 +481,7 @@ def credit_exact_source(ctx: Any, row: Dict[str, Any], view: Dict[str, Any], sou
     whose ``read_view`` opened that very file at its exact bytes (target path and ``source_revision``), credited
     by its actually delivered ranges, a window the delivery cut included. The same bytes under another name,
     another file or a skipped middle credit nothing. Coverage merges in this process's reading ledger under
-    ``ledger``, so a restarted worker proves it again by reading. Crediting never breaks delivery."""
+    ``ledger`` and rides the actor's continuation (``read_coverage``). Crediting never breaks delivery."""
     from ouroboros.artifacts import read_actor_source_bytes, task_artifact_dir_path, task_id_for_artifacts
     from ouroboros.tool_result_delivery import RESULT_VIEW_BASIS, reader_text
 

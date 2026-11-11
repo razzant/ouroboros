@@ -12,7 +12,11 @@ Paths use `OUROBOROS_*` overrides or `launch_roots`' pre-import `APP_ROOT` (`~/O
 
 Tasks privately keep their entry Context/Effort, review settings and catalog (`TaskSettingsSnapshot`); route keys (`route_choice.ROUTE_SETTING_KEYS`) read the saved document as it is now (none saved: as every other key). Absent/empty differ; route overrides win; a deployment policy reads last. Cognition stays private through Resume; fallback uses pre-room env. `RoomResolver` follows lineage/conversion. `composer_cognition.py` copies Main's cognition once on project creation/recovery and seeds legacy cognition before Main changes. Subagents stays live: Main's `OUROBOROS_SUBAGENTS_MODE` or project `cognition.subagents_mode`, default Auto, including legacy rooms. It bypasses checkpoints; Settings only masks it. `metadata.lead`: CLIENT_CONTRACT §9; `route_choice.py`. Main effort is independent of helper bounds (`_effort_range_format=1`). Immediate keys, writers, granted skill keys and process `env_from_settings` read current disk, including clears; credential-free skill children reread it, payloads carry operator variables. Access stays boot-pinned; reload failures disclose prior env and missing values.
 
-`normalize_settings_raw()` runs before defaults in `load_settings`, `_owner_read_settings_raw` and `build_colab_settings`; dropped keys stay dropped. Colab budget/mode/workers: launch > saved Drive > fresh 200/advanced/1. `safety_config.normalize_consciousness_safety` seeds absent coverage from saved owner coverage; explicit choices stay and guards compare the disk-derived value. `review_pool_migration.apply_at_read_seam` maps run seats to roster rows, retaining refused values. Retired keys/comma-lists drop with notice; comma-only/lane-free installs get factory rows. Review env keys are inert (one startup notice). Reads are pure/idempotent. The loader proposes unauthored slots (§2); `apply_runtime_provider_defaults` only respells them, unpersisted. `apply_settings_to_env` marks slot/catalog echoes in internal `OUROBOROS_PROJECTED_PROPOSALS`, inherited by children, distinct from operator variables. Provider Test (minus the search Model) and credential plans (its route legs) share `provider_models.ACTIVE_MODEL_SETTING_KEYS`, including Safety pins; blank inherits.
+`normalize_settings_raw()` runs before defaults in `load_settings`, `_owner_read_settings_raw` and `build_colab_settings`; dropped keys stay dropped. Colab budget/mode: launch > saved Drive > fresh 200/advanced; workers have no default cap. `safety_config.normalize_consciousness_safety` seeds absent coverage from saved owner coverage; explicit choices stay and guards compare the disk-derived value. `review_pool_migration.apply_at_read_seam` maps run seats to roster rows, retaining refused values. Retired keys/comma-lists drop with notice; comma-only/lane-free installs get factory rows. Review env keys are inert (one startup notice). Reads are pure/idempotent. The loader proposes unauthored slots (§2); `apply_runtime_provider_defaults` only respells them, unpersisted. `apply_settings_to_env` marks slot/catalog echoes in internal `OUROBOROS_PROJECTED_PROPOSALS`, inherited by children, distinct from operator variables. Provider Test (minus the search Model) and credential plans (its route legs) share `provider_models.ACTIVE_MODEL_SETTING_KEYS`, including Safety pins; blank inherits.
+
+`OUROBOROS_MAX_WORKERS` migration: unmarked saved 10, or Colab's first-launch 1, reads as empty until the next save writes `_owner_cap_format=1`; other values stay, explicit Colab launch values win. Malformed values fall back to finite 10. Normalization drops retired `OUROBOROS_DELEGATE_WAIT_SEC`/`OUROBOROS_DELEGATE_WAIT_MAX_SEC`; no wait-window setting remains.
+
+`HOST_MEMORY_RESERVE_FRACTION = 0.10` is the shared code constant for process/test memory admission and the test overload stop (DEVELOPMENT §9), not an owner setting.
 
 Optional bounds: `OUROBOROS_MAX_ROUNDS`/`OUROBOROS_TASK_ABS_CEILING_SEC` use `parse_positive_or_unlimited` (also review cycles). Money, deadlines and Stop/Panic still bind; silence triggers attention (§5). Legacy missing keys retain 200 rounds/21600 s (`OPTIONAL_BOUND_LEGACY`); blank, zero, negative or malformed values also take those finite defaults, logged and announced once by `upgrade_notices.py`. Readers return `None` for unlimited. Operations take only true bounds (window, deadline, finite execution), else none.
 
@@ -97,8 +101,8 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_FALLBACK_COOLDOWN_SEC | 120 | Cooldown window |
 | OUROBOROS_FALLBACK_ATTEMPTS_PER_MODEL | 1 | Attempts per model in the fallback walk |
 | OUROBOROS_MODEL_DEEP_SELF_REVIEW | (migrated) | Retired with the review lanes: a stored value becomes the deep-review helper row of `OUROBOROS_SUBAGENTS` (no Reviewer mark) at load; env inert (`/review` reviewer: §6 Deep self-review) |
-| OUROBOROS_MAX_WORKERS | 10 | Active project capacity ceiling; parked slots/carriers separate |
-| OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT | 6 | Live-subagent cap per root (hard caps in `runtime_limits.py`) |
+| OUROBOROS_MAX_WORKERS | "" | Optional cap on acting project tasks; blank: memory admits |
+| OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT | 6 | Acting-subagent cap per root (hard caps in `runtime_limits.py`) |
 | OUROBOROS_MAX_SUBAGENT_DEPTH | 3 | Subagent tree depth |
 | OUROBOROS_DISABLE_MANAGED_UPDATES | unset | Env-only: `1` disables managed updates (`git_ops.py`) |
 | OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS | "" | Mutative-subagent Auto override |
@@ -108,8 +112,6 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_SUBAGENTS | "" | Configured-subagent roster (`configured_subagents.py`; §6 Delegated subagents) |
 | OUROBOROS_SUBAGENT_HARNESS | "" | Narrow harness input, read for migration |
 | OUROBOROS_SUBAGENT_PROFILE | "" | Narrow profile input, read for migration |
-| OUROBOROS_DELEGATE_WAIT_SEC | 120 | Default `delegate_wait` window |
-| OUROBOROS_DELEGATE_WAIT_MAX_SEC | 1800 | `delegate_wait` ceiling |
 | OUROBOROS_DELIVERABLES_ROOT | "" | Deliverables root (empty: basis default; `tool_access.py`) |
 | OUROBOROS_GC_RETENTION_DAYS | 7 | Unified GC retention (`retention.py`) |
 | OUROBOROS_RESTART_DRAIN_MAX_SEC | 120 | Restart drain bound |

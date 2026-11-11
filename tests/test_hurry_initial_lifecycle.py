@@ -51,7 +51,7 @@ def pool(tmp_path, monkeypatch):
     for module in (workers, git_ops):
         monkeypatch.setattr(module, "REPO_DIR", tmp_path / "repo")
     monkeypatch.setattr(git_ops, "DRIVE_ROOT", tmp_path)
-    monkeypatch.setattr(workers, "MAX_WORKERS", 1)
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", str(1))
     monkeypatch.setattr(workers, "_WORKER_POOL_DISABLED_REASON", "")
     monkeypatch.setattr(workers, "_repo_writer_gate_reason", "")
     monkeypatch.setattr(workers, "_LAST_SPAWN_TIME", 0)

@@ -935,10 +935,12 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # and ``task_results/artifacts/*/*.*.zip``; both are still written, under their artifacts row.
 # 456 -> 457 (owner A, 07.11): the open Low episode of memory-lowered starts, ``state/low_start_episode.json``
 # (``ouroboros/context_view_facts.py``); its own row.
+# 457 -> 459 (pool-capacity WP5b): the body's dated record of each held run for a parent's wait_task,
+# ``state/delegate_observation/<run_id>.json`` and its directory (``ouroboros/delegate_feed.py``); its own row.
 # Result-review retained material/restored source views and published kept-service declarations
 # share the existing inventory; the combined AST census below pins their union.
 # The current vendor program observation adds one named singleton.
-EXPECTED_SCAN_PATHS = 465
+EXPECTED_SCAN_PATHS = 467
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

@@ -46,7 +46,7 @@ supervisor/ — background thread inside server.py (§5)
   message_bus.py — local message bus for the Web UI and transport skills; re-exports the ingress names
   message_ingress.py — one accepted row per message id, its dispatch a durable obligation (§4 WebSocket chat)
   workers.py — worker pool: forkserver on Linux, spawn elsewhere, never fork (why: its comment)
-  worker_assignment.py, worker_chat_lane.py, worker_health.py, worker_pool_lifecycle.py, worker_process.py, worker_promotion.py — pool leaves, one concern each as named (§5; §6 Owner routing verbs)
+  worker_assignment.py, dispatch_choice.py, worker_chat_lane.py, worker_health.py, worker_pool_lifecycle.py, worker_process.py, worker_promotion.py — pool leaves, one concern each as named (§5; §6 Owner routing verbs)
   worker_owner_wait.py — a required owner wait lends its active slot; the task stays RUNNING, custodied (§5)
   conversation_lane.py, inline_carrier.py — the lane's slots, admission, spare and census; the two inline executors (§5 Conversation lane)
   state.py, state_initialization.py — `state/state.json` updates with typed read quality; init witness
@@ -228,7 +228,7 @@ ouroboros/ — agent core and shared runtime (§6)
   project_dialogue.py — read-only chat lens; append-only `logs/chat_annotations.jsonl` (`ROUTING_RECEIPT_FIELDS`) routes only `needs_manual_target` cards; `routing_refusal_cause` (§3 Chat and Projects)
   room_membership.py, room_appearances.py, room_messages.py — stored-row membership and its derived facts (§3)
   owner_words.py — a work's owner words, one dated verbatim set; schedule text as provenance; by value for roots, helpers, sessions, reviewers
-  project_lease.py — one-writer-per-project lease in `assign_tasks`; same-project swarms exempt (§6 Project registry and lease)
+  project_lease.py — one-writer-per-project lease in `assign_tasks`, held per tree (§6 Project registry and lease)
   context.py, context_timing.py — Main context, timing, subagent catalog (§6)
   context_input_selection.py — declared inputs, historical author views (not criteria), first-build overflow rescue (§6 Selected first-input sources; Context fitting)
   main_context_authority.py — Main's authority view and helpers' idempotent predecessor briefs (§6)
@@ -252,16 +252,16 @@ ouroboros/ — agent core and shared runtime (§6)
   workspace_copies.py — git-copy source/baseline identity and own-body policy (§6 Delegated subagents)
   coop_checkpoint.py — quiescent checkpoint commits of cooperative trees from a mutative child's `write_root`; a root mid merge/rebase/cherry-pick/revert is skipped (§5)
   delegate_output.py, delegate_directory.py, workspace_file_outputs.py — retained terminal JSON with physical-task reads; directory apply/discard and ordinary-folder results with exact before/after identities (§6 Terminal products)
-  delegate_activity.py, delegate_observe.py — typed executor activity JSONL with an emission-committed cursor; the supervised wait's beat (§6 Delegated activity)
+  delegate_activity.py, delegate_feed.py — typed activity, emission-committed cursor; the body's feed (§6 Delegated activity)
   delegate_containment.py — engine-derived isolation facts (§6 Access disclosure)
-  delegate_progress.py — poll-bound transport retry and event-local executor observations (§6 Delegated subagents)
+  delegate_progress.py — current run views and body-streamed activity (§6 Delegated subagents)
   nanny_pacing.py — round/cost anchors; no reset on coordination (§6 Supervision)
   delegate_interactions.py, delegate_shared.py — nanny input into a live session: typed `waiting_on_user`, validated `_delegate_answer`, capability-gated `_delegate_message`; `_owned_run` keeps live control with the starter, confirmed successors can read and dispose of settled products (§6 Delegated subagents)
   route_spec.py — neutral route primitive: kind/target/pin normalization and effort validation
   configured_subagents.py, subagent_runtime.py — the canonical `OUROBOROS_SUBAGENTS` parser/serializer; immutable task-start snapshots and exact `subagent_id` selection (§6 Delegated subagents)
   subagent_route_health.py, claudexor_observations.py, subagent_inspection.py — manifest route health, shared passive evidence and exact configured-actor inspection (§6 Route health)
   subagent_work_order.py, subagent_bootstrap.py, delegate_start_instructions.py — owner-word-preserving work orders, host pre-start, stable instructions with a separately hashed coordination appendix (§6 Delegated subagents)
-  delegate_supervision.py — event-only sleeping-nanny loop (§6 Supervision, activity and recovery)
+  delegate_supervision.py — sleep on runs and owed wake delivery (§6 Supervision, activity and recovery)
   delegate_recovery.py, delegate_continuation.py, delegate_pending.py — exact-leaf recovery, `continue_from` after any stop, pending-invocation replay with the original key (§6 Delegated subagents)
   delegate_registration_policy.py, delegate_result_taken.py, historical_retirement.py, delegate_readonly_inputs.py, delegate_documents.py — registration/taken/history, STARTED fields, lineage/selected files and documents (§6)
   delegate_terminal.py, owner_stop_receipt.py — terminal reconciliation, audit-only custody persistence, typed custody card rows, Wrap up's saved-work receipt (§6 Delegated subagents)
@@ -580,14 +580,14 @@ ouroboros/ — agent core and shared runtime (§6)
     subagent_integration.py — integrate_subagent_patch (sha256, 3-way --index, protected-path gated, genesis refused), external-workspace audited verdict, compare_subagent_patches
     patch_verdict.py, patch_staging.py — both patch pipelines' verdict writer (`run_<rid>` subjects; artifact plus typed `delegate_run_patch_verdict` custody row) and index staging
   delegate_start_claims.py — Serializes custody recheck and `START_REQUESTED`; transport/run waits are outside locks. Unsent retries may hold actor/payload locks, never root/store locks
-  process_containment.py, process_lifeline.py, process_overload.py — Token/Job custody, POSIX owner-death guardian and pressure stop; unconfirmed cleanup blocks; not a quota (DEVELOPMENT §9)
+  process_containment.py, process_lifeline.py, process_overload.py — Token/Job custody, POSIX owner-death guardian and pressure stop (DEVELOPMENT §9)
   process_scope.py, process_census.py — work scopes (membership, records, task-end/Panic reap, engine index); kernel-state readers (§9)
   process_custody.py, launch_custody.py — `spawn_supervised`, ledger, `retained_purposes`, kept-service list/Stop; measured identity/exit (§9)
   obligations.py — Atomic current sets (incl. `owner_questions`); owning transitions publish before work and retire after discharge
   startup_migrations.py, startup_task_files.py — Explicit inherited-state import/repair and addressed file recovery
   delegate_custody_current.py — Custody on the store: run rows, pending invocations, outbox, importer's fold
   owned_shutdown.py — the ownership set, the one bounded exit stop with its next-start retry and entry `state/shutdown_entry.json` (§9)
-  platform_layer.py, platform_win32_abi.py, platform_darwin_abi.py, platform_process_target.py, process_identity.py — OS locks/processes, native ABI, held targets and birth tokens (Platform substrate below)
+  platform_layer.py, platform_win32_abi.py, platform_darwin_abi.py, platform_process_target.py, process_identity.py, host_memory.py — OS locks/processes/memory, native ABI, held targets and birth tokens (Platform substrate below)
   verified_download.py — exact-size/digest-verified atomic cached downloads
   node_runtime.py — Execution-probed Node runtime health (`node_runtime_health`; a missing binary is never cached), `select_skill_node_runtime`, `skill_node_emergency_path_dir`
 
