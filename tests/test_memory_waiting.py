@@ -375,7 +375,7 @@ def test_overheard_unread_is_per_conversation_only_in_line_forms(tmp_path, provi
     assert room_lines.count("No recorded consideration:") == 4 and "with no recorded word of my human or reply of mine" not in room_lines
     for gone in ({"F6g": {prefix + group["key"]}} for prefix in ("", "all:", "last:")):
         shown = draw(gone)
-        assert "No recorded consideration: 6 words from 3 people, 2026-09-09 → 2026-09-09, in 3 rooms with no recorded word of my human or reply of mine;" in shown
+        assert "No recorded consideration: 6 words from 1 person, 2026-09-09 → 2026-09-09, in 3 rooms with no recorded word of my human or reply of mine;" in shown
         assert "No recorded consideration: 1 words;" in shown and shown.count("No recorded consideration:") == 2
         counter = next(line for line in shown.splitlines() if "with no recorded word of my human or reply of mine" in line)
         assert latest["address"] in counter and latest["author"] in counter and "Topic 5 opening." in counter
@@ -479,7 +479,7 @@ def test_unread_counter_names_the_predicate_people_days_and_its_conversation(tmp
     from ouroboros import memory_view_conversation_forms as forms
     from ouroboros.memory_view_events import catalogue_lines
     group = _event_group(_overheard_view(tmp_path))
-    expected = ("No recorded consideration: 6 words from 3 people, 2026-09-09 → 2026-09-09, "
+    expected = ("No recorded consideration: 6 words from 1 person, 2026-09-09 → 2026-09-09, "
                 "in 3 rooms with no recorded word of my human or reply of mine;")
     assert expected in forms.render_group(group, set(), set(), 1)
     counted = forms._counted_text([group], set(), False)
@@ -490,6 +490,32 @@ def test_unread_counter_names_the_predicate_people_days_and_its_conversation(tmp
         predicate = "a person spoke here; no word of my human or reply of mine"
         assert (predicate in line) is room["overheard"]
         assert ("a person or I spoke here" in line) is not room["overheard"]
+
+
+@pytest.mark.parametrize("last_person, phrase", [("Ann", "1 person"), ("Ben", "2 people")])
+def test_unread_people_ignore_threads_but_keep_connection_and_speaker(tmp_path, last_person, phrase):
+    from ouroboros import dialogue_store as ds, memory_view_conversation_forms as forms
+    from ouroboros.memory_view_work import speech_facts
+    shared.world(tmp_path)
+    for i, person in enumerate(("Ann", "Ann", last_person)):
+        ds.append(tmp_path, "chat", _event_row("harbor", f"thread{i}", i + 1, person))
+    group = _event_group(view(tmp_path))
+    assert f"3 words from {phrase}," in forms.render_group(group, set(), set(), 1)
+    counted = forms._counted_text([group], set(), True)
+    assert f"consideration, {phrase}, 3 rooms" in counted
+    assert " authors," not in counted
+    # A restored old snapshot keeps its historical label-based count.
+    old = json.loads(json.dumps(group))
+    for room in old["rooms"]:
+        for word in room["words"]:
+            word.pop("speaker", None)
+    assert "3 words from 3 people," in forms.render_group(old, set(), set(), 1)
+    row = _event_row("harbor", "first", 1, "Ann")
+    key = speech_facts(row, {})["speaker"]
+    row["transport"].update(conversation_id="elsewhere", thread_id="second")
+    assert speech_facts(row, {})["speaker"] == key
+    row["transport"]["account_id"] = "another-connection"
+    assert speech_facts(row, {})["speaker"] != key
 
 
 def test_unread_host_counts_do_not_create_page_debt_or_restore_it_at_the_window_floor(tmp_path):

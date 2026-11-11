@@ -59,12 +59,17 @@ def _unread_line(words):
             f"latest by {author}] {opening}")
 
 
+def _person(word):
+    """Captured connection and speaker; old snapshots retain their recorded label."""
+    return tuple(word["speaker"]) if "speaker" in word else word.get("author") or word["head"]
+
+
 def _overheard_line(group, data):
     rooms, words = data["overheard"]
     if not words:
         return ""
     latest, author, opening = _latest_unread(words)
-    people = len({w.get("author") or w["head"] for w in words})
+    people = len({_person(w) for w in words})
     days = [str(w["ts"])[:10] for w in words]
     return (f"No recorded consideration: {len(words)} words from {people} {'person' if people == 1 else 'people'}, "
             f"{min(days)} → {max(days)}, in {rooms} room{'' if rooms == 1 else 's'} "
@@ -305,9 +310,10 @@ def _counted_text(groups, owners, aggregate_unread, *, index=None):
     unread = [(room, word) for room in rooms for word in sources[room["room_id"]]["unread"]]
     if unread and aggregate_unread:
         latest, author, opening = _latest_unread([word for _room, word in unread], first_line=False)
-        authors = {word.get("author") or word["head"] for _room, word in unread}
+        people = len({_person(word) for _room, word in unread})
         days = sorted(str(word["ts"])[:10] for _room, word in unread)
-        lines.append(f"Emergency window form: {len(unread)} words without recorded consideration, {len(authors)} authors, "
+        lines.append(f"Emergency window form: {len(unread)} words without recorded consideration, "
+            f"{people} {'person' if people == 1 else 'people'}, "
             f"{len({room['room_id'] for room, _word in unread})} rooms, {days[0]} → {days[-1]}; "
             f"latest by {author} at {latest['ts']}: {opening}; memory_read(room_id='*')")
     elif unread:

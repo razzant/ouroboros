@@ -20,6 +20,8 @@ def row_reader(room_id=None):
 
 
 def speech_facts(row, author):
+    from ouroboros.dialogue_provenance import dialogue_speaker
+    transport = row.get("transport") or {}
     relay = row.get("relay") or {}
     task = ((relay.get("sender") or {}).get("task_id") if row.get("type") == "relay_entry" else
             row.get("task_id") or ((row.get("transport") or {}).get("origin") or {}).get("task_id"))
@@ -28,6 +30,7 @@ def speech_facts(row, author):
         # (presence_runner.capture_presence_event). Confirmed deliveries are outward.
         task = ""
     return {"task_id": str(task or ""), "via": author.get("via", ""),
+            "speaker": [str(transport.get(k) or "") for k in ("provider", "account_id")] + [dialogue_speaker(row)],
             "text": str(row.get("text") or ""), "reply_to": (row.get("reply_to") or {}).get("address", ""),
             "author": author.get("label", ""), "relay_summary": str(relay.get("summary") or "")}
 
