@@ -1033,6 +1033,38 @@ def test_a_row_the_stored_tail_does_not_hold_yet_is_never_left_unread(monkeypatc
     assert "delivered again" in _texts(views)
 
 
+def test_a_walk_reads_the_lineage_of_the_rows_it_reads_in_one_read_a_batch(monkeypatch, tmp_path):
+    """The Done rows of a place's Presence turns, each its own task, read by the block's walk: their tasks' lineages
+    come in one read a batch, as the pass reads its rows' (``RoomResolver.warm``), never one read a row."""
+    reads = []
+    for size in (4, 8):  # both within the first page
+        root = tmp_path / str(size)
+        root.mkdir()
+        monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
+        _forget_process_memos()
+        rooms = _settled(root)
+        place = {"source": "presence:slack", "transport": _TRANSPORT, "presence_provenance": _PROVENANCE}
+        for n in range(size):
+            write_task_result(root, f"turn{n}", "completed", result="done", chat_id=LONG)
+            _append(root, shared.msg(_ts(n + 1), "", chat_id=LONG, direction="system", type="task_summary",
+                                     task_id=f"turn{n}", status="completed", **place))
+        _append(root, shared.msg(_ts(20), "A place word.", chat_id=LONG, client_message_id="word", **place))
+        _fill(root)
+        done = [_last_of(root, task_id=f"turn{n}") for n in range(size)]
+        assert ChronicleStore(root).publish_page(room_id=str(LONG), text="A page.", author=shared.MIND, covers={
+            "rows": [entry[0]["row_sha256"] for entry in done], "stream_span": [done[0][2], done[-1][2]]}).ok
+        _compose(root)
+        _forget_process_memos()  # a fresh process: none of these lineages is held
+        counted, real = [0], pr._read_lineage
+        monkeypatch.setattr(pr, "_read_lineage", lambda *args, **kwargs: counted.__setitem__(0, counted[0] + 1)
+                            or real(*args, **kwargs))
+        work = _work(root, rooms)
+        monkeypatch.setattr(pr, "_read_lineage", real)
+        assert work.get("tail_whole", 0) == 0 and work.get("rows_asked", 0) >= size, work
+        reads.append(counted[0])
+    assert reads[0] == reads[1], reads
+
+
 def test_a_place_where_none_of_us_spoke_reads_every_sealed_row(monkeypatch, tmp_path):
     """Only reading all of them shows that none of its sealed rows is ours: its room stays silent."""
     rooms, sealed = _long_place(tmp_path, mine_at=None)

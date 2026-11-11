@@ -574,12 +574,18 @@ class _PlaceReads:
     def _take(self, rooms: List[str], facts: List[list]) -> None:
         for counter in ("rows_read", "rows_asked", "rows_kept"):
             counted(counter, len(facts))
-        wanted = set(rooms)
-        for pos, address, meta, _terminal in map(_entry, facts):
+        wanted, entries = set(rooms), [_entry(fact) for fact in facts]
+        self.facts.rooms.warm(_task_ids(meta for _pos, _address, meta, _terminal in entries))  # one read a generation
+        for pos, address, meta, _terminal in entries:
             for room in rooms_of_row(meta, self.facts) & wanted:
                 self.unread[room][pos] = (address, meta, pos)
         for room in rooms:
             self.known.pop(room, None)
+
+
+def _task_ids(metas: Iterable[Mapping[str, Any]]) -> Set[str]:
+    """The tasks whose lineage the room rule may ask for these rows (``RoomResolver.warm`` reads them at once)."""
+    return {str(meta.get(key) or "") for meta in metas for key in ("task_id", "parent_task_id", "root_task_id")} - {""}
 
 
 def words_of(meta: Mapping[str, Any]) -> str:
@@ -601,9 +607,7 @@ class _Pass(NamedTuple):
 def _open_pass(root: Any, store: ChronicleStore, facts: MembershipFacts, tail: Tail, want_gaps: bool, want_quiet: bool,
                want_sealed: bool) -> _Pass:
     projected = [(address, meta, pos) for pos, address, meta, _terminal in tail.rows]
-    # The rows' task lineages in one read a generation (``RoomResolver.warm``), not one read per task.
-    facts.rooms.warm({str(entry[1].get(key) or "") for entry in projected
-                      for key in ("task_id", "parent_task_id", "root_task_id")} - {""})
+    facts.rooms.warm(_task_ids(entry[1] for entry in projected))  # one read a generation, not one read per task
     if want_gaps:
         from ouroboros.room_appearances import REPLY_TARGET_UNREADABLE  # D15->D17 is lazy-only
         from ouroboros.room_membership import unknown_target_rooms
