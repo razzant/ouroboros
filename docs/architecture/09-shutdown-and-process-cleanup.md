@@ -2,7 +2,7 @@
 
 Signals, timeouts and engine terminal facts prove no OS exit; jobs stay until return. Cold receipts grant custody, not Resume or survival (§6). Switching restores stopped handles; boot retries unconfirmed custody.
 
-Server startup raises descriptor capacity for per-run transports (`server_process.raise_open_file_limit`; platform rules/failures: module docstring).
+Server startup raises descriptor capacity for per-run transports (`server_process.raise_open_file_limit`; platform rules and failures: its docstring).
 
 ### Shutdown doors
 
