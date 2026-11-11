@@ -440,7 +440,8 @@ def open_rows_by_room(root: Any, gaps: Optional[Dict[str, set]] = None,
     place room's sealed rows for the rooms its reader asks (``PlaceRows``). A capture standing on the cold set
     (``memory_tail_cold``) holds every row these answers come from, or reads a place's by its chat when asked; a pass
     over the whole tail composes the set. Its capture is its caller's where it runs inside one, a caller whose readers
-    ask a place's rows holding it through ``over_one_state``; else its own, begun again the same way."""
+    ask a place's rows holding it through ``over_one_state``; else its own, begun again the same way, or, where its
+    caller takes a reader of places, read without the set: that reader answers after this capture has closed."""
     store = ChronicleStore(root)
 
     def read(consult: bool) -> tuple:
@@ -455,7 +456,8 @@ def open_rows_by_room(root: Any, gaps: Optional[Dict[str, set]] = None,
             memory_tail_cold.settle(store, derived, tail, found)
             return (found, facts, memory_tail_cold.standing(derived)), derived
 
-    read_once = over_one_state(root, read)
+    own = sealed is not None and store._pinned() is None  # its reader of places outlives this capture: no set to read
+    read_once = read(False)[0] if own else over_one_state(root, read)
     if read_once is None:
         return {}
     found, facts, held = read_once

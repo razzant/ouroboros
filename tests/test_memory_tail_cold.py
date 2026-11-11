@@ -1194,6 +1194,44 @@ def test_a_set_composed_anew_under_a_captures_reads_makes_it_read_the_whole_tail
     assert work.get("capture_restarts") == 1, work
 
 
+def test_a_reader_of_places_taken_outside_any_capture_reads_without_the_set(monkeypatch, tmp_path):
+    """``open_rows_by_room`` asked for a reader of places by a caller that holds no capture: its own capture closes
+    before that reader answers, so no end check would cover a later read of the set's rows. It reads the whole tail and
+    its reader holds every row: once the stored tail is projected anew it still answers, as the path without the set
+    does, and reads nothing of the set. A caller that holds the capture still stands on the set."""
+    _settled(tmp_path)
+    _quiet_place(tmp_path, PLACE, ("Early place.", "Middle place.", "Open place."))
+    _append(tmp_path, shared.msg(_ts(20), "Latest main.", client_message_id="latest"))
+    _fill(tmp_path)
+    for words in ("Early place.", "Middle place."):
+        _seal(tmp_path, _entry(tmp_path, words), PLACE)
+    _compose(tmp_path)
+    with monkeypatch.context() as patch:
+        patch.setattr(cold, "gate", lambda _store: None)
+        reference = mi.PlaceRows()
+        mi.open_rows_by_room(tmp_path, sealed=reference)
+        want = json.loads(json.dumps(_every_sealed(reference, [PLACE])))
+    assert len(want[str(PLACE)]) == 2
+
+    def held_by_its_caller(consult: bool) -> tuple:
+        with cs.capture(tmp_path, tail="all", cold=consult) as derived:
+            sealed = mi.PlaceRows()
+            mi.open_rows_by_room(tmp_path, sealed=sealed)
+            return (bool(derived.get("tail_cold")), json.loads(json.dumps(_every_sealed(sealed, [PLACE])))), derived
+
+    assert mi.over_one_state(tmp_path, held_by_its_caller) == (True, want)  # the other side: an owner stands on the set
+    sealed = mi.PlaceRows()
+    with measured_sections():
+        mi.open_rows_by_room(tmp_path, sealed=sealed)
+        work = section_spans()["work"]
+    assert work.get("tail_whole") == 1 and "rows_cold" not in work and not work.get("capture_restarts"), work
+    ds.revise_text(tmp_path, "chat", _entry(tmp_path, "Latest main.")[0]["hint"]["seq"], "Latest main, edited.")
+    _fill(tmp_path)  # the tail projected anew: the set its capture could have stood on is gone
+    reads, real = [], cold._read
+    monkeypatch.setattr(cold, "_read", lambda *args: reads.append(1) or real(*args))
+    assert json.loads(json.dumps(_every_sealed(sealed, [PLACE]))) == want and not reads
+
+
 def test_a_row_of_a_places_chat_whose_work_joined_a_project_is_not_read_as_the_places(monkeypatch, tmp_path):
     """The set keeps a row's chat, never its rooms: a row of a place's chat that the rule moved to a Project (its work
     bound there) is read with that chat and decided again by the rule, so the place never takes it as its own."""
