@@ -963,16 +963,15 @@ def capture_memory_view(drive_root: Any, task: Mapping[str, Any], spec: ViewSpec
         # the view reads: every row for my other conversations' open rows, else the story's terminal rows.
         tail = ("all" if spec.other_conversations else
                 "terminal" if spec.story or spec.room_id is not None and spec.room_page else "none")
-        with capture(root, tail=tail) as derived:
-            frontier, sequence = legacy_frontier(store), store.newest_sequence()  # the marks below read this state
-
-            def read() -> tuple:  # the story and the live rooms, their labels too, over one state of the registry
-                labels = room_labeler(root)
+        def read(consult: bool) -> tuple:  # one capture, read as the path without the set reads: labels, then its state
+            labels = room_labeler(root)
+            with capture(root, tail=tail, cold=consult) as derived:
+                frontier, sequence = legacy_frontier(store), store.newest_sequence()  # the marks below read this state
                 told = capture_story(store, root, labels) if spec.story else ([], {}, [])
-                return told, _capture_live(store, root, spec, labels, told[0])
+                return (derived, frontier, sequence, told, _capture_live(store, root, spec, labels, told[0])), derived
 
-            (story, story_status, refusals), (room, groups, marks, waiting, acting) = memory_inventory.over_one_state(
-                root, read)
+        derived, frontier, sequence, (story, story_status, refusals), (room, groups, marks, waiting, acting) = (
+            memory_inventory.over_one_state(root, read))
         owner_words = words(acting)
         if room:
             from ouroboros.owner_words import task_governing_words

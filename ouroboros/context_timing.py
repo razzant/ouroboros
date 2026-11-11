@@ -77,6 +77,23 @@ def counted(verb: str, n: int = 1, key: Optional[Hashable] = None) -> None:
     seen.add((verb, key))
 
 
+def work_mark() -> Optional[Tuple[Dict[str, int], Set[Tuple[str, Hashable]]]]:
+    """A copy of what the window being measured has counted so far (``back_to``), or None outside one."""
+    window = _WORK.get()
+    return None if window is None else (dict(window[0]), set(window[1]))
+
+
+def back_to(mark: Optional[Tuple[Dict[str, int], Set[Tuple[str, Hashable]]]]) -> Dict[str, int]:
+    """The window as it was at ``mark``: work dropped is not this receipt's (its owner names it). What was counted
+    since, by verb."""
+    window = _WORK.get()
+    if window is None or mark is None:
+        return {}
+    since = {verb: n - mark[0].get(verb, 0) for verb, n in window[0].items() if n != mark[0].get(verb, 0)}
+    window[0].clear(), window[0].update(mark[0]), window[1].clear(), window[1].update(mark[1])
+    return since
+
+
 def host_step(name: str) -> None:
     """The round's step ``name`` ends here: its wall and thread CPU time since the previous mark, or since the window
     opened, add to its span (nothing outside a window). A step that ends on another thread than it began (the model

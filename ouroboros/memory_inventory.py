@@ -56,7 +56,7 @@ from typing import Any, Callable, Dict, FrozenSet, Iterable, Iterator, List, Map
 from ouroboros import chat_chain, memory_tail_cold
 from ouroboros.chronicle_import import legacy_frontier
 from ouroboros.chronicle_store import ChronicleStore, capture, capture_memo, source_time_span
-from ouroboros.context_timing import counted, timed_section
+from ouroboros.context_timing import back_to, counted, timed_section, work_mark
 from ouroboros.dialogue_provenance import (in_reading_order, place_message_facts, recorded_person, rooms_read_by_time,
                                            row_class, row_provenance)
 
@@ -278,15 +278,13 @@ def _tail(root: Any, frontier: Mapping[str, Any]) -> Tail:
 
 
 @timed_section("memory_view.tail")
-def _read_tail(root: Any, frontier: Mapping[str, Any], *, terminal_only: bool = False, whole: bool = False) -> Tail:
-    """``_tail``'s read; ``terminal_only`` keeps the rows with a terminal status (the stored ones read alone);
-    ``whole`` reads the index again for every stored row a capture standing on the cold set left unread, and counts
-    nothing: its capture counts what the first read left out (``_whole_again``)."""
+def _read_tail(root: Any, frontier: Mapping[str, Any], *, terminal_only: bool = False) -> Tail:
+    """``_tail``'s read; ``terminal_only`` keeps the rows with a terminal status (the stored ones read alone)."""
     from ouroboros import dialogue_store as ds
 
     store, source = ChronicleStore(root), _tail_source(root, frontier)
     end = ds.stream_end(root, "chat")
-    held = store.tail_facts(source, terminal_only=terminal_only, whole=whole)
+    held = store.tail_facts(source, terminal_only=terminal_only)
     if held is not None:
         state, stored = held
         anchor = state.get("anchor")
@@ -297,13 +295,13 @@ def _read_tail(root: Any, frontier: Mapping[str, Any], *, terminal_only: bool = 
             if state.get("complete") and end > state["upper"]:  # one zero-wait attempt; a busy lock leaves it
                 store.extend_tail(state, gap, {**state, "upper": end, "anchor": gap[-1][1:3] if gap else anchor})
             rows = [_entry(fact) for fact in stored + gap if not terminal_only or fact[5] is not None]
-            counted("rows_read", 0 if terminal_only or whole else len(rows))
-            counted("rows_new", 0 if terminal_only or whole else len(gap))
+            counted("rows_read", 0 if terminal_only else len(rows))
+            counted("rows_new", 0 if terminal_only else len(gap))
             return Tail(rows, bool(state.get("complete")))
     lower = chat_chain.position_boundary(root, source["frontier"])
     rows = [_entry(fact) for fact in _projected(chat_chain.iter_stream(root, lower=lower, upper=end))
             if not terminal_only or fact[5] is not None]
-    counted("rows_read", 0 if terminal_only or whole else len(rows))  # nothing stored: every row is read live, none new
+    counted("rows_read", 0 if terminal_only else len(rows))  # nothing stored: every row is read live, none new
     return Tail(rows, False)
 
 
@@ -440,24 +438,27 @@ def open_rows_by_room(root: Any, gaps: Optional[Dict[str, set]] = None,
     (``room_membership.unknown_target_rooms``). ``quiet`` collects typed quiet finishes, including sealed ones,
     from the same tail; they can consider earlier words of a room, never seal them. ``sealed`` then answers each
     place room's sealed rows for the rooms its reader asks (``PlaceRows``). A capture standing on the cold set
-    (``memory_tail_cold``) holds every row these answers come from, or reads a place's by its chat when asked; one where
-    a Project became a place since, or a task's lineage was written since its marks, reads the whole tail again here,
-    and a pass over the whole tail composes the set. A caller whose readers ask a place's rows holds the capture over
-    them and reads through ``over_one_state``."""
+    (``memory_tail_cold``) holds every row these answers come from, or reads a place's by its chat when asked; a pass
+    over the whole tail composes the set. Its capture is its caller's where it runs inside one, a caller whose readers
+    ask a place's rows holding it through ``over_one_state``; else its own, begun again the same way."""
     store = ChronicleStore(root)
-    with capture(root) as derived:  # one state of the chronicle: its frontier and every room's sealed set
-        frontier = _active_frontier(store)
-        if frontier is None:
-            return {}
-        facts, tail = membership_facts(root), _tail(root, frontier)
-        wants, projects = (gaps is not None, quiet is not None, sealed is not None), _project_rooms(facts)
-        found = _open_pass(root, store, facts, tail, *wants)
-        if memory_tail_cold.again(store, derived, tail, found.places & projects):  # rows it left unread may count now
-            derived["tail"] = tail = _whole_again(root, frontier, tail)  # type: ignore[index]
-            facts = membership_facts(root)  # read anew where its lineage moved (``memory_tail_cold.forgo``)
+
+    def read(consult: bool) -> tuple:
+        with capture(root, cold=consult) as derived:  # one state of the chronicle: its frontier and every sealed set
+            frontier = _active_frontier(store)
+            if frontier is None:
+                return None, derived
+            facts, tail = membership_facts(root), _tail(root, frontier)
+            wants, projects = (gaps is not None, quiet is not None, sealed is not None), _project_rooms(facts)
             found = _open_pass(root, store, facts, tail, *wants)
-        memory_tail_cold.settle(store, derived, tail, found)
-        held = memory_tail_cold.standing(derived)
+            memory_tail_cold.again(store, derived, tail, found.places & projects)  # the set no longer serves: Moved
+            memory_tail_cold.settle(store, derived, tail, found)
+            return (found, facts, memory_tail_cold.standing(derived)), derived
+
+    read_once = over_one_state(root, read)
+    if read_once is None:
+        return {}
+    found, facts, held = read_once
     for into, got in ((gaps, found.gaps), (quiet, found.quiet)):
         if into is not None:
             into.update(got)
@@ -467,33 +468,30 @@ def open_rows_by_room(root: Any, gaps: Optional[Dict[str, set]] = None,
     return found.rooms
 
 
-def over_one_state(root: Any, read: Callable[[], Any]) -> Any:
-    """``read()``, inside a capture: its pass and every reader that asks its places' rows, over one state. Where what
-    the capture read with its marks moved before ``read`` was done (another set or stored tail under a read of its rows,
-    a task's lineage or the registry's facts written since: ``memory_tail_cold.Moved``, ``moved``; standing on the set
-    or not, its rule took those facts), the capture stands on nothing from there and ``read`` runs again over the whole
-    tail and the facts as they are now."""
+def over_one_state(root: Any, read: Callable[[bool], Tuple[Any, Any]]) -> Any:
+    """``read(consult)``'s result: ``read`` opens one capture of the chronicle (``capture(..., cold=consult)``), reads
+    in it every fact its result shows, and returns the result with that capture's derived facts. Where what the capture
+    stood on moved before ``read`` was done (a read of the set's rows, its pass's own check, or the marks compared once
+    it returned: ``memory_tail_cold.Moved``, ``moved``; standing on the set or not, its rule took the facts read with
+    the marks), nothing that capture read is kept: ``read(False)`` begins a new one, read as the path without the set
+    reads, which does not consult the set; so at most once. Its receipt names that read; the dropped one is a fact of
+    its own (``capture_restarts``, ``rows_abandoned``). Inside another capture ``read``'s is that capture: its owner
+    begins it again."""
     store = ChronicleStore(root)
-    derived = store._pinned().memo if store._pinned() is not None else None
-    if derived is None:
-        return read()
-    gate = derived.get(memory_tail_cold.GATE)  # its rule's facts came with the marks, whether or not the set stands
+    if store._pinned() is not None:
+        return read(True)[0]
+    mark = work_mark()
     try:
-        got = read()
+        got, derived = read(True)
+        gate = (derived or {}).get(memory_tail_cold.GATE)
         if gate is None or not memory_tail_cold.moved(store, gate):
             return got
     except memory_tail_cold.Moved:
         pass
-    memory_tail_cold.forgo(derived)  # the registry and the lineage read anew
-    derived["tail"] = _whole_again(root, _active_frontier(store), derived.get("tail"))
-    return read()
-
-
-def _whole_again(root: Any, frontier: Mapping[str, Any], tail: Optional[Tail]) -> Tail:
-    """The whole tail read again for a capture that first read ``tail``: only the rows that read left out count."""
-    whole = _read_tail(root, frontier, whole=True)
-    counted("rows_read", len(whole.rows) - len(tail.rows if tail is not None else ()))
-    return whole
+    dropped = back_to(mark)
+    counted("capture_restarts")
+    counted("rows_abandoned", dropped.get("rows_read", 0))
+    return read(False)[0]
 
 
 def _project_rooms(facts: MembershipFacts) -> Set[str]:
@@ -506,8 +504,8 @@ class _PlaceReads:
     rows of its own chat only (``room_membership.row_rooms``): first the newest few of every asked chat and every row of
     those chats with an asked word, all at once; then, when a walk goes past what is read of a chat, its next older rows,
     each page twice the last (``memory_tail_cold``: the room key and the digest the set stored). Each read compares the
-    set and the stored tail with the capture's in its own transaction; where either changed, the capture reads the whole
-    tail again (``memory_tail_cold.Moved``, ``over_one_state``). Every row read is decided again by the pass's own rule
+    set and the stored tail with the capture's in its own transaction; where either changed, its owner begins the
+    capture again without the set (``memory_tail_cold.Moved``, ``over_one_state``). Every row read is decided again by the pass's own rule
     and facts; the pass's sealed set says which are sealed. Each is counted once: as read and asked for, as no longer
     left unread (``rows_cold``), and as read ahead (``rows_ahead``) until a walk gives it to its reader or a copy of an
     asked word is in it, then as kept by the place rule (``rows_kept``): law L7d tells a walk that reads a page from one

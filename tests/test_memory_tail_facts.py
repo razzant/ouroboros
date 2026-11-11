@@ -259,7 +259,7 @@ def test_each_focus_holds_in_its_one_capture_the_stored_rows_its_view_shows(tmp_
         entered.clear()
         view = mv.capture_memory_view(tmp_path, task, spec)
         assert held == [(scope, list(range(10, 20)) if scope == "all" else [16])] and len(entered) == 2, role
-        monkeypatch.setattr(mv, "capture", lambda root, tail: chronicle_store.capture(root, tail="all"))
+        monkeypatch.setattr(mv, "capture", lambda root, tail, cold=False: chronicle_store.capture(root, tail="all"))
         assert mv.capture_memory_view(tmp_path, task, spec) == view, role
         assert any(entry.get("terminal_links") for entry in [*view.story, *(view.room or {}).get("under_parts", ())]
                    ) or not spec.story, role

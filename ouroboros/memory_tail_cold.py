@@ -28,13 +28,14 @@ wrote a page record; a row whose answer rested on a task the store did not hold 
 other place room (its earlier deliveries of the same words, who of ours spoke there) are read for the rooms a reader
 shows, when it asks (``older_of``): the set keeps each row's room key, the chat ``chat_chain._row_chat_id`` reads, as
 the room rule reads it, and no other room holds a row of that chat. A Project that became a place since the set was
-composed makes the capture read the whole tail (``again``).
+composed may hold earlier rows among those the set left unread (``again``).
 
 One capture, one state: the marks and the facts the rule decides rooms by are read together (the gate's one object),
 and a task's lineage, read later as the rule asks, is checked against its mark after the pass and after the readers
 are done (``again``, ``moved``); every later read of the set's rows checks the set and the stored tail in its own
-transaction (``_read``). Where any moved, the capture reads the whole tail again over the facts as they are then
-(``Moved``, ``memory_inventory.over_one_state``), as when no gate was read.
+transaction (``_read``). Where any moved, nothing that capture read is kept: its owner begins a new capture, read as the
+path without the set reads, which does not consult the set (``Moved``, ``memory_inventory.over_one_state``). Only such
+an owner's capture of every row stands on the set (``chronicle_store.capture``, ``cold``); every other reads the whole tail.
 
 The set is a projection: a reset of the chronicle index takes it with its marks (``_RESET``), and the first whole pass
 after an update, a rebuild or any change composes it again; nothing to migrate or fill. It ages while it stands: rows a
@@ -79,7 +80,8 @@ class Gate(NamedTuple):
 
 
 class Moved(Exception):
-    """What a capture's set stood on moved before its readers were done: the capture reads the whole tail again."""
+    """What a capture's set stood on moved, or no longer serves it, before its readers were done: its owner begins it
+    again without the set."""
 
 
 def gate(store: Any) -> Optional[Gate]:
@@ -125,19 +127,6 @@ def moved(store: Any, gate_: Gate) -> bool:
         return False
     now = gate(store)
     return now is None or now.marks["registry"] != gate_.marks["registry"]
-
-
-def forgo(derived: Dict[str, Any]) -> None:
-    """A capture whose set moved under it stands on nothing from here: it composes nothing, and its rule decides rooms
-    again over the facts as they are now: the registry read anew, each task's lineage asked again (this process's memory
-    of it dropped where the counter moved, ``memory_inventory._membership_facts``)."""
-    from ouroboros.memory_inventory import _membership_facts
-
-    derived.update({STANDS: False, HELD: {}})
-    derived.pop(GATE, None)
-    facts = derived.get("membership")
-    if facts is not None:
-        derived["membership"] = _membership_facts(facts.rooms.root)
 
 
 def stands(db: Any, gate_: Gate) -> Optional[Dict[str, Any]]:
@@ -186,23 +175,21 @@ class Watch:
         return unsure
 
 
-def again(store: Any, derived: Optional[Dict[str, Any]], tail: Any, places: Iterable[str]) -> bool:
-    """After the pass of a capture standing on the set: whether it reads the whole tail instead. A Project that is a
-    place now and was none when the set was composed may hold earlier rows among those left unread (no room key finds
-    them); a task's lineage written since the marks were read leaves the pass's rooms on lineage the set was not composed
-    under (``forgo``). A capture whose rows were read live (the stored facts stand for another source) left none unread.
-    Either stands no more."""
+def again(store: Any, derived: Optional[Dict[str, Any]], tail: Any, places: Iterable[str]) -> None:
+    """After the pass of a capture standing on the set: ``Moved`` where the set no longer serves it — a task's lineage
+    written since the marks were read leaves the pass's rooms on lineage the set was not composed under; a Project that
+    is a place now and was none when the set was composed may hold earlier rows among those left unread (no room key
+    finds them). A capture whose rows were read live (the stored facts stand for another source) left none unread: it
+    stands no more."""
     from ouroboros.store_hot_facts import lineage_writes
 
     if not (derived and derived.get(STANDS)):
-        return False
-    if lineage_writes(store.data_root) != derived[HELD]["marks"]["lineage"]:
-        forgo(derived)
-        return tail.complete
-    if tail.complete and set(places) <= set(derived[HELD].get("places") or ()):
-        return False
-    derived[STANDS] = False
-    return tail.complete
+        return
+    if lineage_writes(store.data_root) != derived[HELD]["marks"]["lineage"] or tail.complete and not set(
+            places) <= set(derived[HELD].get("places") or ()):
+        raise Moved
+    if not tail.complete:
+        derived[STANDS] = False
 
 
 def standing(derived: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -225,7 +212,7 @@ def copies_of(store: Any, held: Mapping[str, Any], words: Iterable[tuple]) -> li
 def _read(store: Any, held: Mapping[str, Any], asks: Iterable[tuple]) -> list:
     """The stored facts of the set's rows each ``(selection, parameters)`` names, all in one transaction where the set
     and the stored tail are still the ones a capture stood on (``held``, its marks); ``Moved`` where they are not or
-    cannot be read: that capture reads the whole tail again (``memory_inventory.over_one_state``)."""
+    cannot be read: its owner begins that capture again without the set (``memory_inventory.over_one_state``)."""
     import sqlite3
 
     from ouroboros.chronicle_store import ChronicleStore

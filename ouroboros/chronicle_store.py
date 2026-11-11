@@ -447,7 +447,7 @@ _CAPTURE: ContextVar[Optional[Tuple[str, _Snapshot]]] = ContextVar("chronicle_ca
 
 
 @contextmanager
-def capture(data_root: Any, *, tail: str = "all", proposed: Optional[Mapping[str, Any]] = None):
+def capture(data_root: Any, *, tail: str = "all", proposed: Optional[Mapping[str, Any]] = None, cold: bool = False):
     """One state of this installation's chronicle for every reader inside the block (one capture).
 
     The index is read once (``_SNAPSHOT_SQL`` and, page by page, the stored tail facts its view reads, in one
@@ -458,7 +458,9 @@ def capture(data_root: Any, *, tail: str = "all", proposed: Optional[Mapping[str
     without a journal nothing is pinned and it yields None. A publication inside the block is not seen
     by its readers. With ``proposed`` (a checked, unsaved selection) it is a capture of its own where
     every reader reads that selection as acting: inside a capture, of that state and the memo facts no
-    selection changes (``_SELECTION_FREE``), never read anew.
+    selection changes (``_SELECTION_FREE``), never read anew. ``cold``: a capture of every row whose owner begins
+    it again where its cold set moves (``memory_inventory.over_one_state``) may stand on that set; any other
+    capture reads the whole tail.
     """
     store = ChronicleStore(data_root)
     snapshot = store._pinned()
@@ -466,7 +468,7 @@ def capture(data_root: Any, *, tail: str = "all", proposed: Optional[Mapping[str
         yield None if snapshot is None else snapshot.memo
         return
     if snapshot is None:
-        snapshot = timed("memory_view.chronicle", _read_snapshot, store, tail)
+        snapshot = timed("memory_view.chronicle", _read_snapshot, store, tail, cold)
     if proposed is not None:  # read as published after every record: [sequence, id, kind, room, target, body]
         rows, kept = snapshot.tables[0], {key: snapshot.memo[key] for key in _SELECTION_FREE if key in snapshot.memo}
         snapshot = _Snapshot([[*rows, [max((row[0] for row in rows), default=0) + 1, proposed["id"], proposed["kind"],
@@ -480,11 +482,11 @@ def capture(data_root: Any, *, tail: str = "all", proposed: Optional[Mapping[str
         _CAPTURE.reset(token)
 
 
-def _read_snapshot(store: "ChronicleStore", tail: str) -> _Snapshot:
+def _read_snapshot(store: "ChronicleStore", tail: str, cold: bool = False) -> _Snapshot:
     """One state of the index in one read transaction, then parsed outside it (``capture``). A capture of every row
     compares the cold set's marks in this same read and, while they stand, leaves its rows unread (``memory_tail_cold``)."""
     terminal_only = _TAIL_SCOPES[tail]
-    gate = memory_tail_cold.gate(store) if tail == "all" else None
+    gate = memory_tail_cold.gate(store) if cold and tail == "all" else None
     with store._index() as db:
         texts = [db.execute(sql).fetchone()[0] for sql in _SNAPSHOT_SQL]
         held = memory_tail_cold.stands(db, gate) if gate is not None else None
@@ -1342,15 +1344,14 @@ class ChronicleStore:
 
     # --- the dialogue tail's facts: a projection of state/dialog.sqlite kept beside the journal's ------
 
-    def tail_facts(self, source: Mapping[str, Any], *, terminal_only: bool = False,
-                   whole: bool = False) -> Optional[Tuple[Dict[str, Any], List[List[Any]]]]:
+    def tail_facts(self, source: Mapping[str, Any], *,
+                   terminal_only: bool = False) -> Optional[Tuple[Dict[str, Any], List[List[Any]]]]:
         """``(state, rows)`` of the stored facts of the chat rows after the legacy frontier (only those with a
         terminal status: ``terminal_only``), when they were projected from ``source`` (``memory_inventory`` names
         the dialogue store and frontier, projects the rows and checks the state's ``anchor``); rows
-        ``[pos, seq, row_sha256, legacy, meta, terminal]`` by position. ``whole``: every stored row, past a
-        capture that left its cold set unread."""
+        ``[pos, seq, row_sha256, legacy, meta, terminal]`` by position."""
         snapshot = self._pinned()  # a capture that holds less of the tail than asked leaves it to the index
-        with self._reading(pinned=snapshot is not None and snapshot.holds_tail(terminal_only) and not whole) as look:
+        with self._reading(pinned=snapshot is not None and snapshot.holds_tail(terminal_only)) as look:
             state = look.state("tail")
             return ((state, look.tail(terminal_only)) if isinstance(state, dict) and state.get("source") == source
                     else None)

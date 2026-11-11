@@ -65,7 +65,9 @@ def _host_work_line(receipts: List[Mapping[str, Any]]) -> str:
         repeating += bool(again)
     newest = builds[-1]
     read, opened, new = (int(newest.get(name) or 0) for name in ("rows_read", "rows_open", "rows_new"))
-    facts = [f"the newest capture read the whole chat tail, {read:,} rows for {opened:,} open and {new:,} new"
+    again = (f" (begun again without its cold set: {int(newest.get('rows_abandoned') or 0):,} rows read and dropped)"
+             if newest.get("capture_restarts") else "")
+    facts = [f"the newest capture read the whole chat tail, {read:,} rows for {opened:,} open and {new:,} new{again}"
              ] if newest.get("tail_whole") else [
         f"the newest capture read {int(newest['rows_stale']):,} rows sealed since its cold set was composed"
         ] if newest.get("rows_stale") else []
