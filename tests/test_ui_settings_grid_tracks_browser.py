@@ -71,7 +71,7 @@ def _open_settings(page, url: str, tab: str) -> None:
     page.wait_for_selector("#page-chat", timeout=30_000)
     page.click('[data-nav-page="settings"]')
     page.wait_for_selector(".settings-shell", timeout=15_000)
-    page.click(f'[data-settings-tab="{tab}"]')
+    open_settings(page, "accounts" if tab == "secrets" else tab)
 
 
 @pytest.mark.ui_browser
@@ -152,7 +152,7 @@ def test_action_results_reflow_before_their_text_is_squeezed(subscription_ui, th
     page.set_viewport_size({"width": 1100, "height": 750})
     page.add_init_script(f"localStorage.setItem('ouroboros.theme', {json.dumps(theme)})")
     page.goto(ui["url"] + "/#settings")
-    page.locator('[data-settings-tab="models"]').click()
+    open_settings(page, 'models', 'models:catalogue')
     button = page.locator("#btn-refresh-model-catalog")
     row = button.locator("..")
     expect(button).to_be_visible()
