@@ -104,7 +104,6 @@ _SCHEMA = """
     CREATE TABLE IF NOT EXISTS tail_cold (pos INTEGER PRIMARY KEY, task TEXT, chat INTEGER NOT NULL, digest TEXT);
     CREATE INDEX IF NOT EXISTS tail_cold_task ON tail_cold(task) WHERE task IS NOT NULL;
     CREATE INDEX IF NOT EXISTS tail_cold_chat ON tail_cold(chat, pos);
-    CREATE INDEX IF NOT EXISTS tail_cold_digest ON tail_cold(chat, digest) WHERE digest IS NOT NULL;
 """
 # ``tail_cold`` (``memory_tail_cold``) takes no SCHEMA_VERSION step: a lock-free reader reaches it only through its marks
 # in ``state``, which a locked open that created it wrote, and every reset takes the marks with it. An index holding the
