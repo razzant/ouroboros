@@ -93,12 +93,14 @@ def test_receipt_check_text_round_trips_so_two_argvs_are_two_verifications(tmp_p
 
     # The property, independent of any filesystem: join is the lexer's inverse.
     for argv in (["echo", "a b"], ["echo", "a", "b"], ["sh", "-c", "pytest -q | tail"],
-                 ["python", "-c", "assert v == 'a  b'"]):
+                 ["python", "-c", "assert v == 'a  b'"], ["pytest", "-m", ""]):
         assert shell_tokens(shlex.join(argv)) == argv
 
     # ...so the two argv spellings are two DIFFERENT verifications.
     assert R.receipt_identity({"check": shlex.join(["echo", "a b"])}) != \
         R.receipt_identity({"check": shlex.join(["echo", "a", "b"])})
+    assert R.receipt_identity({"check": shlex.join(["pytest", "-m", ""])}) != \
+        R.receipt_identity({"check": shlex.join(["pytest", "-m"])})
 
     if sys.platform == "win32" or not shutil.which("echo"):
         pytest.skip("the end-to-end half needs a POSIX `echo` binary")

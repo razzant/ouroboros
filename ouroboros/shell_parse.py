@@ -68,9 +68,13 @@ def normalize_check_argv(check: Any) -> List[str] | None:
         if not text:
             return None
         recovered = recover_stringified_argv(text)
-        return recovered if recovered is not None else ["sh", "-c", text]
+        if recovered is not None:
+            if not recovered or not str(recovered[0] or "").strip():
+                return None
+            return recovered
+        return ["sh", "-c", text]
     if isinstance(check, (list, tuple)):
-        if not any(str(part or "").strip() for part in check):
+        if not check or not str(check[0] or "").strip():
             return None
         return [str(part) for part in check if part is not None]
     return None
@@ -342,11 +346,11 @@ def shell_tokens_typed(raw_cmd: Any) -> List[tuple[str, bool]] | None:
     try:
         lexer = shlex.shlex(text, posix=True, punctuation_chars=_PUNCTUATION_CHARS)
         lexer.whitespace_split = True
-        raw = [t for t in lexer if t]
+        raw = list(lexer)
     except ValueError:
         return None
     return [
-        (_unmark(t), _LITERAL_MARK not in t and all(ch in _PUNCTUATION_CHARS for ch in t))
+        (_unmark(t), bool(t) and _LITERAL_MARK not in t and all(ch in _PUNCTUATION_CHARS for ch in t))
         for t in raw
     ]
 

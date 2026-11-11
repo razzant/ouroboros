@@ -309,6 +309,10 @@ def test_v651_stringified_argv_recovery_and_check_normalization():
     assert normalize_check_argv([""]) is None
     assert normalize_check_argv(["   "]) is None
     assert normalize_check_argv([]) is None
+    # reject blank argv[0] without shifting argument positions
+    assert normalize_check_argv(["", "pytest", "tests/test_foo.py"]) is None
+    assert normalize_check_argv(["   ", "pytest"]) is None
+    assert normalize_check_argv('["", "pytest"]') is None
 
 
 def test_v651_orchestrate_timeout_reaps_group_and_container(monkeypatch):
