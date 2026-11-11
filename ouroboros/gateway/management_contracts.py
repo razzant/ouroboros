@@ -502,6 +502,19 @@ class ClaudexorMaintenanceProblem(TypedDict):
     error: Dict[str, Any]
 
 
+class ClaudexorLoginJobProblem(TypedDict, total=False):
+    """Typed job errors preserve engine prose/status/code and bounded actions
+    (16 strings, 512 chars each). Covers absent jobs, input/reconcile conflicts,
+    setup 400/409, terminal-probe 503 and Connect maintenance problems/context.
+    Other unmarked transport/discovery failures use the generic proxy 503."""
+
+    error: Required[str]
+    code: str
+    required_actions: List[str]
+    context: Dict[str, Any]
+    retryable: bool
+
+
 class ClaudexorRestartRun(TypedDict):
     """One live engine run a restart ends. ``owner`` is ``ouroboros`` when this installation's
     own delegated-run records hold the run (or the run the engine started it for), else ``other``:
@@ -1312,6 +1325,7 @@ __all__ = [
     "MarketplaceUninstallResponse", "MarketplaceSearchResponse", "MarketplaceInstalledResponse",
     "HubPublicationClearRequest", "HubPublicationClearResponse",
     "ClaudexorProblem", "ClaudexorMaintenanceProblem", "ClaudexorAccountTarget",
+    "ClaudexorLoginJobProblem",
     "ClaudexorRestartRun", "ClaudexorRestartRuns", "ClaudexorRestartWarning", "ClaudexorRestartPreview",
     "ClaudexorRestartRequest", "ClaudexorRestartReceipt", "ClaudexorRestartResponse", "ClaudexorRestartProblem",
     "ClaudexorMaintenanceRequest", "ClaudexorMaintenanceOperation", "ClaudexorMaintenanceInventory",
