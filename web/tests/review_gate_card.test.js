@@ -28,7 +28,7 @@ test('one Details item and one meta phrase, replaced in place; an older count ne
     assert.equal(item.headline, 'Review gate did not prohibit continuation');
     assert.match(item.body, /^12 times the review gate let this work continue where Blocking enforcement would have stopped it/);
     assert.match(item.body, /\nLatest \(task child-1\): review quorum — \[CRITICAL\]/);
-    assert.ok(item.body.endsWith(LONG), 'the latest reason is kept whole in Details');
+    assert.ok(item.body.endsWith(LONG), 'Details shows the stored reason as stored (its head, review_overrides.py)');
     const { prior } = installDom();
     try {
         renderLiveCardMeta(record);
