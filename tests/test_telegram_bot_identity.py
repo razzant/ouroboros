@@ -1101,8 +1101,22 @@ def test_both_owner_saves_reach_every_consumer_through_the_strict_grant_reader(c
     api = _core(world)
     form_save = _secret_form(world, monkeypatch)
     notifier = sys.modules[world.plugin.__package__ + ".lib.telegram_notifier"]
+    import httpx
+    post, admitted, gate = httpx.AsyncClient.post, [], {}
+
+    async def observed_post(client, url, **kwargs):
+        path = httpx.URL(url).path
+        if path.startswith('/bot'):
+            token, method = path[4:].split('/', 1)
+            admitted.append((token.split(':', 1)[0], method))
+            if gate.get('hold') and token == B and method == 'getUpdates':
+                gate['entered'].set()
+                await gate['release'].wait()
+        return await post(client, url, **kwargs)
+    monkeypatch.setattr(httpx.AsyncClient, 'post', observed_post)
 
     async def scenario():
+        gate.update(entered=asyncio.Event(), release=asyncio.Event())
         poller = world.plugin._make_poller(api)
         async with _running(world, poller, fast.make_token_observer(api)) as (polling, _observer):
             await asyncio.sleep(0.4)
@@ -1120,20 +1134,29 @@ def test_both_owner_saves_reach_every_consumer_through_the_strict_grant_reader(c
             _settings_post(monkeypatch, B)
             bot_b = world.bots.bot(B)
             await _until(lambda: len(bot_b.methods("getUpdates")) >= 2)
-            asked_a = len(bot_a.methods("getUpdates")) + len(bot_a.methods("getMe"))
+            asked_a = [call for call in admitted if call[0] == A_ID and call[1] in {'getUpdates', 'getMe'}]
             bot_b.push(_owner(60, "to the second bot"))
             await _until(lambda: f"tg:{B_ID}:42:60" in world.ids())
             await world.outbound({"chat_id": 1, "text": "answer two", "row_address": "row-b"})
             assert await notifier._push_notification(api, 42, "done") == ("sent", None)
             assert [form["text"] for form in bot_b.methods("sendMessage")] == ["answer two", "done"]
 
-            _settings_post(monkeypatch, "")
-            await _until(lambda: world.plugin._bridge_status(api)["state"] == "missing_token")
-            calls = {name: len(bot.calls) for name, bot in world.bots.bots.items()}
+            # Hold a request AFTER the production binding check but BEFORE wire arrival.
+            # Clearing forbids new admission, not completion of this already admitted poll.
+            gate['hold'] = True
+            await _until(gate['entered'].is_set)
+            try:
+                _settings_post(monkeypatch, "")
+                await _until(lambda: world.plugin._bridge_status(api)["state"] == "missing_token")
+                calls = list(admitted)
+                bot_b.push(_owner(61, "stale words from the cleared token"))
+            finally:
+                gate['release'].set()
             await world.outbound({"chat_id": 1, "text": "nowhere", "row_address": "row-none"})
             await asyncio.sleep(0.3)
-            assert {name: len(bot.calls) for name, bot in world.bots.bots.items()} == calls
-            assert len(bot_a.methods("getUpdates")) + len(bot_a.methods("getMe")) == asked_a
+            assert admitted == calls
+            assert [call for call in admitted if call[0] == A_ID and call[1] in {'getUpdates', 'getMe'}] == asked_a
+            assert f"tg:{B_ID}:42:61" not in world.ids()
             assert not polling.done()
 
     world.run(scenario)

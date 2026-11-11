@@ -73,9 +73,6 @@ TOP_LEVEL = frozenset({
 # recognizable root expressions, and an alias is a human promise, not a fact
 # the scan re-derives.
 SUBROOT_ALIASES = {
-    # released_subject validates its checkout under state/review_checkouts/<token>/;
-    # its relative .review-drive names belong there (repo or repo.noindex), not at data/.
-    ".review-drive/*/*.txt": "state/review_checkouts/*/*/.review-drive/*/*.txt",
     # _run_go_skill's only caller passes skill_state_dir(drive_root, loaded.name).
     # These are per-skill caches, not directories at the canonical data root.
     "go": "state/skills/*/go",
@@ -187,7 +184,7 @@ def _module_constants(tree: ast.AST, *, exact_strings: bool = False) -> dict[str
     excluding path expressions, partially known f-strings and function locals.
     """
     seen: dict[str, set] = {}
-    for node in (_own_nodes(tree) if exact_strings else ast.walk(tree)):
+    for node in _own_nodes(tree):
         if not isinstance(node, (ast.Assign, ast.AnnAssign)):
             continue
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
@@ -462,11 +459,22 @@ class _PathResolver:
                 local[node.target.id] = f"{rel}/{leaf}"
         return local
 
+    def _scope_constants(self, path: pathlib.Path, scope: ast.AST):
+        consts = dict(self.consts[path])
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            # A truthy unknown masks the repository fallback as well as file constants.
+            consts.update({node.id: "*" for node in self.own_nodes(scope)
+                           if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)})
+            consts.update({node.arg: "*" for node in ast.walk(scope.args) if isinstance(node, ast.arg)})
+            consts.update(_module_constants(scope))
+        return consts
+
     def _scopes(self, path: pathlib.Path):
         consts = self.consts[path]
         for fn in self.functions[path]:
             nodes = self.own_nodes(fn)
-            yield fn, consts, nodes, self._locals(fn, consts, nodes)
+            scoped = self._scope_constants(path, fn)
+            yield fn, scoped, nodes, self._locals(fn, scoped, nodes)
         module_nodes = self.own_nodes(self.trees[path])
         yield (self.trees[path], consts, module_nodes,
                self._locals(self.trees[path], consts, module_nodes))
@@ -484,9 +492,9 @@ class _PathResolver:
             per_file: dict[pathlib.Path, dict[str, set]] = {}
             for path in self.trees:
                 self.current = path
-                consts = self.consts[path]
                 found: dict[str, set] = {}
                 for fn in self.functions[path]:
+                    consts = self._scope_constants(path, fn)
                     nodes = self.own_nodes(fn)
                     local = self._locals(fn, consts, nodes)
                     for node in nodes:
@@ -937,7 +945,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # (``ouroboros/context_view_facts.py``); its own row.
 # Result-review retained material/restored source views and published kept-service declarations
 # share the existing inventory; the combined AST census below pins their union.
-EXPECTED_SCAN_PATHS = 464
+# Function-local isolation: actual inherited465 minus five polluted spellings plus
+# three own-scope/coarser spellings is463; this is not retirement of their writers.
+EXPECTED_SCAN_PATHS = 463
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
@@ -1432,3 +1442,38 @@ def test_live_call_evidence_replaces_unused_probe_artifacts():
     assert ".*-extension-imports.lock" not in paths
     assert "task_results/artifacts/*/conversation-wire.jsonl" in paths
     assert not any("/realtime-wire.jsonl" in path or "/realtime-prepared-" in path for path in paths)
+
+
+def test_function_constants_and_parameters_do_not_rename_other_writers(tmp_path):
+    """The returned census follows each function's own bindings, including nested helpers."""
+    module = tmp_path / 'ouroboros' / 'synthetic_writer.py'
+    module.parent.mkdir(parents=True)
+    module.write_text(
+        "from pathlib import Path\n"
+        "LEAF = 'module.json'\n"
+        "def unrelated(task, digest):\n"
+        "    relative = f'.review-drive/{task}/{digest}.txt'\n"
+        "    LEAF = 'unrelated.json'\n"
+        "def constant(data_dir):\n"
+        "    return Path(data_dir) / 'state' / LEAF\n"
+        "def dynamic(data_dir, relative):\n"
+        "    return Path(data_dir) / 'uploads' / relative\n"
+        "def positional(data_dir, LEAF, /):\n"
+        "    return Path(data_dir) / 'state' / LEAF\n"
+        "def keyword(data_dir, *, LEAF):\n"
+        "    return Path(data_dir) / 'uploads' / LEAF\n"
+        "def local(data_dir):\n"
+        "    relative = 'payload.json'\n"
+        "    return Path(data_dir) / 'state' / relative\n"
+        "def downstream(data_dir):\n"
+        "    return local(data_dir) / 'child.json'\n"
+        "def outer(data_dir):\n"
+        "    LEAF = 'outer.json'\n"
+        "    def inner(data_dir):\n"
+        "        LEAF = 'inner.json'\n"
+        "        return Path(data_dir) / 'state' / LEAF\n"
+        "    return Path(data_dir) / 'state' / LEAF\n",
+        encoding='utf-8')
+    assert scan_data_paths(tmp_path) == frozenset({
+        'state/module.json', 'state/*', 'uploads/*', 'state/payload.json',
+        'state/outer.json', 'state/inner.json', 'state/payload.json/child.json'})
