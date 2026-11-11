@@ -1103,6 +1103,36 @@ def test_unknown_or_unwritable_state_refuses_the_mind_and_the_owners_stop_still_
     assert clock.start(source=AGENT_STOP) == held_stop_text("owner")
 
 
+def test_a_backup_only_failure_says_what_was_saved_and_the_next_tick_agrees(held, monkeypatch):
+    """The primary copy holds the change and only its backup failed (``primary_written``): the reply says it was
+    saved, never "nothing was started" or "this process only", and the clock, then and on its next tick, is what the
+    saved state says; a restart reads the same."""
+    from ouroboros.consciousness import AGENT_STOP, OWNER_STOP
+
+    real = held.state.atomic_write_text
+
+    def no_backup(path, content):
+        if path == held.state.STATE_LAST_GOOD_PATH:
+            raise OSError("backup unwritable")
+        return real(path, content)
+
+    note = " Saved, but the state's backup copy was not written (backup_write_failed)."
+    held.clock.stop(source=AGENT_STOP)
+    clock = BackgroundConsciousness(held.root, held.root, lambda: 7, now=T0)  # a fresh process over the mind's own stop
+    monkeypatch.setattr(held.state, "atomic_write_text", no_backup)
+    said = clock.start(source=AGENT_STOP)
+    assert said.startswith("Background consciousness enabled; next wake-up at ") and said.endswith(note), said
+    assert held.saved() == ((True, True), (True, None)) and clock.enabled is True
+    clock.tick(now=T0)
+    assert clock.enabled is True, "the next tick reads the enable the reply named"
+    said = clock.stop(source=OWNER_STOP)
+    assert note in said and "this process only" not in said, said
+    assert held.saved() == ((True, False), (True, "owner"))
+    clock.tick(now=T0)
+    restarted = BackgroundConsciousness(held.root, held.root, lambda: 7, now=T0)
+    assert clock.enabled is False and restarted.enabled is False, "the stop the reply named is the saved one"
+
+
 def test_a_queued_tool_start_meets_the_stop_the_owner_placed_after_it(held):
     """The tool only queues; the clock decides when the supervisor runs the event, against the stop standing then."""
     from ouroboros.consciousness import OWNER_STOP, held_stop_text

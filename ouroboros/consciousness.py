@@ -144,8 +144,14 @@ def held_stop_text(source: Any) -> str:
             "Only the owner's /bg start (Start in the app or in Telegram) turns it back on.")
 
 
-def _persist_start(source: str) -> str:
-    """Save an enable; the mind's right to it is decided inside the same locked write. "" or why nothing changed."""
+# The primary copy written, its backup not (``StateUnavailable.primary_written``): the change stands and the next tick
+# reads it, so the reply says it was saved and what it lacks, never that nothing changed.
+_BACKUP_UNSAVED = " Saved, but the state's backup copy was not written ({})."
+
+
+def _persist_start(source: str) -> Tuple[str, str]:
+    """Save an enable; the mind's right to it is decided inside the same locked write. ``(refusal, note)``: why
+    nothing changed, or what the saved enable lacks."""
     from supervisor.state import StateUnavailable, control_value, update_state
 
     def enable(live: Dict[str, Any]) -> None:
@@ -159,10 +165,13 @@ def _persist_start(source: str) -> str:
     try:
         update_state(enable, confirm=("bg_consciousness_enabled", STOP_SOURCE_KEY))
     except _StopHolds as held:
-        return held_stop_text(held.args[0])
+        return held_stop_text(held.args[0]), ""
     except StateUnavailable as exc:
-        return f"Background consciousness stayed off: runtime state is unavailable ({exc.reason}); nothing was started."
-    return ""
+        if exc.primary_written:
+            return "", _BACKUP_UNSAVED.format(exc.reason)
+        return (f"Background consciousness stayed off: runtime state is unavailable ({exc.reason}); "
+                "nothing was started."), ""
+    return "", ""
 
 
 def _persist_stop(source: str) -> str:
@@ -186,6 +195,8 @@ def _persist_stop(source: str) -> str:
     try:
         update_state(disable, confirm=("bg_consciousness_enabled", STOP_SOURCE_KEY))
     except StateUnavailable as exc:
+        if exc.primary_written:
+            return _BACKUP_UNSAVED.format(exc.reason)
         return f" Not saved (runtime state unavailable, {exc.reason}): the stop holds in this process only."
     return ""
 
@@ -619,15 +630,16 @@ class BackgroundConsciousness:
                 return "Background consciousness stays disabled while Panic controls await persistence."
             if source != OWNER_STOP and self._stopped and self._stop_source != AGENT_STOP:
                 return held_stop_text(self._stop_source)  # held here even when its own write failed
-            refusal = _persist_start(source)
+            refusal, note = _persist_start(source)
             if refusal:
                 return refusal
             if self._enabled:
-                return "Background consciousness is already enabled."
+                return "Background consciousness is already enabled." + note
             self._stopped, self._enabled, self._stop_source = False, True, ""
             # The clock did not advance while disabled: never announce a wake in the past.
             self._set_next_wake(max(self._next_wake_at, time.time()), appointment=True)
-            return f"Background consciousness enabled; next wake-up at {time.strftime('%H:%M', time.localtime(self._next_wake_at))}."
+            at = time.strftime('%H:%M', time.localtime(self._next_wake_at))
+            return f"Background consciousness enabled; next wake-up at {at}." + note
 
     def stop(self, source: str = "") -> str:
         """Stop this process first, then save the stop with ``source`` (``OWNER_STOP`` or ``AGENT_STOP``); Panic names
