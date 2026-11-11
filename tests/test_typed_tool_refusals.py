@@ -245,6 +245,7 @@ def test_cyber_start_names_the_minds_choice_without_overruling_a_room_owner(conf
     monkeypatch.setattr(config, "get_runtime_mode", lambda: "cyber_pro")
     control_routing._start_task(ctx, "Write", title="Report", model="vendor/fast-one")
     ctx.task_metadata = events[0]["metadata"]
+    assert ctx.task_metadata == {"lead": {"source": "mind", "model": "vendor/fast-one", "use_local": False}}
     route_choice.bind_task_route(ctx, ctx.task_metadata, presence=False)
     assert ctx.task_model_override == "vendor/fast-one" and lead_fact.primary_basis(ctx) == "mind"
     monkeypatch.setattr(control_models, "read_model_choice", lambda *a: {"kind": "model", "model": "owner/choice", "use_local": False})

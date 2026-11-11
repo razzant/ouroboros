@@ -113,7 +113,7 @@ def start_choice(ctx, model: str, basis: dict | None, project_id: str) -> tuple[
         if (room["model"], room["use_local"]) != (choice["model"], choice["use_local"]):
             raise ValueError("Your human's model choice for this room binds. Cite their words to change it for this work.")
         return {"lead": {"source": "room", "model": room["model"], "use_local": room["use_local"]}}, note
-    return {"model_role": "lead", "model": choice["model"], "use_local_model": choice["use_local"]}, note
+    return {"lead": {"source": "mind", "model": choice["model"], "use_local": choice["use_local"]}}, note
 
 
 def request_work_model(ctx, choice: dict) -> tuple[str, bool]:

@@ -202,7 +202,7 @@ def task_processing_preference(task: dict, *, model_role: str = "",
     """Capture the actor's intent; an unconfigured fallback keeps it (a lead uses the default, never Main's)."""
     if override is not None:
         return resolve_processing_preference(override=override)
-    from ouroboros.route_choice import LEAD_ROLE, task_lead
+    from ouroboros.route_choice import LEAD_ROLE
     from ouroboros.supervisor_route import supervisor_binding
 
     cognitive, supervisor_role = supervisor_binding(task)
@@ -217,7 +217,7 @@ def task_processing_preference(task: dict, *, model_role: str = "",
         if authored:
             return resolve_processing_preference(override=str(authored))
         role = supervisor_role or (f"subagent:{actor_id}" if actor_id and (actor.get("route") or {}).get("kind") == "api_model"
-                                  else LEAD_ROLE if task_lead(metadata) or metadata.get("model_role") == LEAD_ROLE else "main")
+                                  else LEAD_ROLE if task_model_binding(task)[0] == LEAD_ROLE else "main")
     if supervisor_role and role == supervisor_role:
         return resolve_processing_preference(override=cognitive["processing_preference"])
     if actor_id and role == f"subagent:{actor_id}":

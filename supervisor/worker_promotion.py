@@ -389,8 +389,7 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
         "promotion_admission_token": admission_token,
     }
     model_metadata = evt.get("metadata") or {}
-    task["metadata"] = {key: model_metadata[key] for key in ("lead", "model", "model_role", "use_local_model")
-                        if key in model_metadata}
+    task["metadata"] = {"lead": model_metadata["lead"]} if "lead" in model_metadata else {}
     origin = consciousness_origin_metadata({"origin_message_ref": evt.get("source_ref"), **evt})
     if origin:
         # A root consciousness started keeps its origin/category/level by value (В9':
@@ -399,8 +398,6 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
             task["actor_id"] = "consciousness"
         task.setdefault("metadata", {}).update(origin)
         apply_consciousness_authority(task)
-    if model_metadata.get("model_role") == "lead":
-        task["metadata"]["model_role"] = "lead"
     inherited_attachment_manifest = _pool()._apply_presence_promotion_authority(
         evt, task, objective=objective, expected_output=expected_output,
     )
@@ -564,9 +561,9 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     if model_metadata:
         from ouroboros.gateway.ui_preferences import record_model_recent
 
-        chosen = task["metadata"].get("lead") or model_metadata
+        chosen = task["metadata"]["lead"]
         try:
-            record_model_recent(_pool().DRIVE_ROOT, chosen["model"], bool(chosen.get("use_local", chosen.get("use_local_model"))))
+            record_model_recent(_pool().DRIVE_ROOT, chosen["model"], chosen["use_local"])
         except Exception:
             log.warning("Promoted model saved; recent suggestion could not be recorded for %s", tid, exc_info=True)
     outcome = _pool()._promoted_scheduled_outcome(task, admitted, tid)

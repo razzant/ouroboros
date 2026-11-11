@@ -297,9 +297,8 @@ def main_model_named_effort(task_metadata: Dict[str, Any]) -> str:
 
     metadata = task_metadata if isinstance(task_metadata, dict) else {}
     carried = task_lead(metadata)
-    explicit = str(metadata.get("model") or "") if metadata.get("model_role") == "lead" else ""
-    override = None if carried or explicit else model_role_slot_override(metadata)
-    model = carried["model"] if carried else explicit or (override[0] if override else str(runtime_setting("OUROBOROS_MODEL", "") or ""))
+    override = None if carried else model_role_slot_override(metadata)
+    model = carried["model"] if carried else (override[0] if override else str(runtime_setting("OUROBOROS_MODEL", "") or ""))
     return api_model_named_effort(model)
 
 

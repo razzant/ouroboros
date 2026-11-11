@@ -42,8 +42,6 @@ def primary_role(row: Mapping) -> str:
     if carrier:
         return "main" if carrier["source"] == "main" else "lead"
     role = str(metadata.get("model_role") or "main")
-    if role == "lead" and metadata.get("model"):
-        return role
     return role if role in route_choice.MODEL_ROLE_SETTINGS and role != "fallback" else "main"
 
 
@@ -53,9 +51,6 @@ def recorded_primary(row: Mapping) -> dict:
     role = primary_role(row)
     if carrier and carrier["source"] != "main":
         model, local = carrier_route(carrier)
-    elif role == "lead":
-        metadata = row["metadata"]
-        model, local = metadata["model"], bool(metadata.get("use_local_model"))
     else:
         model, local = route_choice.following_route(role)
     return {"model": model, "use_local": local, "role": role}
@@ -246,11 +241,9 @@ def apply_current(ctx: Any) -> bool:
         ctx.task_metadata["lead"] = carrier
     else:
         ctx.task_metadata.pop("lead", None)
-        if not following:
-            ctx.task_metadata.update(model=model, use_local_model=local)
     ctx.task_model_override = None if following else model
     ctx.task_use_local_override = None if following else local
-    ctx.task_route_source = None if following else carrier["source"] if carrier else "switch_model"
+    ctx.task_route_source = carrier["source"] if carrier and not following else None
     ctx.primary_route = primary
     ctx._route_binding = None
     if request_id == getattr(ctx, "_owner_model_applied_id", None):

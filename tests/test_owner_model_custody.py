@@ -611,7 +611,7 @@ def test_cited_main_write_discloses_a_failed_recent_suggestion_without_claiming_
 
 @pytest.mark.parametrize("action", ["return", "wait"])
 def test_a_card_returns_an_uncited_cyber_start_to_its_own_primary(host, monkeypatch, action):
-    task = queued(host, metadata={"model_role": "lead", "model": B, "use_local_model": False})
+    task = queued(host, metadata={"lead": {"source": "mind", "model": B, "use_local": False}})
     host[2].PENDING.remove(task)
     host[2].RUNNING["work"] = {"task": task, "attempt": 1, "lead": {
         "model": C, "use_local": False, "basis": "fallback",

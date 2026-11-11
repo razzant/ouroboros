@@ -349,7 +349,7 @@ def test_stored_invalid_room_choice_reads_as_main_with_warning(value, caplog):
     assert "Unreadable model choice" in caplog.text
 
 
-@pytest.mark.parametrize("source", ["room", "owner", "owner_words"])
+@pytest.mark.parametrize("source", ["room", "owner", "owner_words", "mind"])
 def test_lead_sources_are_validated_and_a_stray_root_model_stays_inert(source):
     metadata = {"lead": {**LEAD, "source": source}, "model": OPUS}
     ctx = _ctx(metadata)
@@ -395,17 +395,23 @@ def test_api_room_admission_reads_the_canonical_choice_not_the_fork(room, tmp_pa
     assert task["metadata"].get("lead") == expected
 
 
-def test_api_clients_cannot_mint_a_lead(room, monkeypatch):
+@pytest.mark.parametrize("metadata", [{"lead": LEAD}, {"model_role": "lead", "model": OPUS, "use_local_model": True}])
+def test_api_clients_cannot_mint_a_lead(room, monkeypatch, metadata):
     from ouroboros.gateway.tasks import api_tasks_create
 
-    root, _client = room
+    root, client = room
+    client.post("/api/owner/chat-model", json={**CHOSEN, "project_id": "alpha"})
     app = Starlette(routes=[Route("/api/tasks", api_tasks_create, methods=["POST"])])
     app.state.drive_root, app.state.repo_dir = root, config.REPO_DIR
     monkeypatch.setattr("ouroboros.workspace_admission.bootstrap_process_path", lambda: [])
-    response = TestClient(app).post("/api/tasks", json={"description": "Read", "metadata": {"lead": LEAD}})
+    response = TestClient(app).post("/api/tasks", json={"description": "Read", "project_id": "alpha", "metadata": metadata})
     assert response.status_code == 200, response.text
     from supervisor import queue
-    assert queue.PENDING[-1]["metadata"]["lead"] == {"source": "main"}
+    admitted = queue.PENDING[-1]["metadata"]
+    assert admitted["lead"] == LEAD and admitted.get("model_role") != "lead"
+    ctx = _ctx(admitted)
+    route_choice.bind_task_route(ctx, admitted, presence=False)
+    assert (ctx.task_model_override, ctx.task_use_local_override) == (ASTRA, False)
 
 
 def test_queue_admission_keeps_an_existing_lead_and_restart_never_recaptures(room):
@@ -483,14 +489,22 @@ def test_a_cited_start_keeps_its_lead_through_real_supervisor_admission(room, mo
     assert json.loads((root / 'state/ui_preferences.json').read_text(encoding='utf-8'))['model_recents'][0]['model'] == OPUS
 
 
-def test_an_owner_room_choice_at_admission_still_binds_an_uncited_cyber_start(room):
+def test_a_minds_primary_uses_the_same_carrier_and_cannot_be_recaptured(room):
     from ouroboros.route_choice import capture_lead
 
     root, client = room
     task = {'id': 'cyber-start', 'source': 'promote_chat_to_task', 'project_id': 'alpha',
-            'metadata': {'model_role': 'lead', 'model': OPUS, 'use_local_model': False}}
+            'metadata': {'lead': {'source': 'mind', 'model': OPUS, 'use_local': False}}}
     capture_lead(task, root)
-    assert 'lead' not in task['metadata']
+    assert task['metadata']['lead']['source'] == 'mind'
     client.post('/api/owner/chat-model', json={**CHOSEN, 'project_id': 'alpha'})
     capture_lead(task, root, admitted=True, project=projects.get_project(root, 'alpha'))
-    assert task['metadata']['lead'] == LEAD
+    assert task['metadata']['lead'] == {'source': 'mind', 'model': OPUS, 'use_local': False}
+    ctx = _ctx(task['metadata'])
+    route_choice.bind_task_route(ctx, task['metadata'], presence=False)
+    assert ctx.task_model_override == OPUS and ctx.task_route_source == 'mind'
+    legacy_pair = {'model_role': 'lead', 'model': OPUS, 'use_local_model': False}
+    route_choice.bind_task_route(ctx, legacy_pair, presence=False)
+    assert ctx.task_model_override is None
+    route_choice.bind_task_route(ctx, legacy_pair, presence=True)
+    assert ctx.task_model_override == OPUS and ctx.task_route_source == 'presence'
