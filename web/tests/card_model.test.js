@@ -1,7 +1,7 @@
 // A work's model on its card (card_model.js; DESIGN "A work's model on its card"): the first fact of the card's meta
 // line in a node of its own, said from the server's published fact (CLIENT_CONTRACT §5), pressable only where the server
 // offers the work's `model` control, amber while the work runs on a fallback, and one POST per act (CLIENT_CONTRACT §5).
-// Fixtures are in the contract's shapes; geometry and the real page are the browser lane's.
+// Fixtures are in the contract's shapes; geometry and the real page are covered by the browser tests.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { APPLIED_WORDS, basisWords, causeWords, closeCardModel, leadView, openCardModel, paintCardModel, refusalWords } from '../modules/card_model.js';
@@ -103,8 +103,106 @@ test('a fallback names where it came from, since when and what it left', () => {
     assert.equal(said.cause, 'Waiting for quota', 'the wait card\'s own words for that condition');
     assert.equal(leadView({ ...fell, primary: lead(ASTRA, 'main') }, { since: '02:14' }).why, 'left Main (gpt-6-astra)');
     assert.equal(leadView(fell).name, 'fallback from Settings · claude-opus-5.5', 'no time is said when the fact gives none');
-    assert.equal(leadView({ ...fell, role: 'main' }).name, 'fallback to Main · claude-opus-5.5');
     assert.doesNotMatch(said.name + said.why, /\$|\d+\.\d\d/, 'no money on the amber line');
+});
+
+test('cited words keep their exact text and published clipping fact, including away from the primary', () => {
+    const cited = { text: '  Use GPT-6-astra\nfor <THIS> work 🙂  ', clipped: false };
+    assert.equal(leadView(lead(ASTRA, 'owner_words')).cited, null);
+    assert.deepEqual(leadView(lead(ASTRA, 'owner_words', { cited })).cited, cited);
+    assert.deepEqual(leadView(lead(ASTRA, 'owner_words', { cited: { ...cited, clipped: true } })).cited,
+        { ...cited, clipped: true });
+    assert.deepEqual(leadView(lead(OPUS, 'fallback', { role: 'fallback:0', primary: lead(ASTRA, 'owner_words', { cited }) })).cited, cited);
+});
+
+test('a wait-card move names its unchanged primary in ordinary ink, with no inferred pending route', async () => {
+    const moved = lead(OPUS, 'owner', { primary: lead(ASTRA, 'main'), cause: 'wait_card', since: '2026-11-11T02:14:00Z' });
+    const said = leadView(moved);
+    assert.equal(said.fallback, false);
+    assert.equal(said.name, 'Anthropic · claude-opus-5.5');
+    assert.equal(said.why, 'you chose it · left Main (gpt-6-astra)');
+    assert.equal(said.pending, '');
+    assert.equal(leadView({ ...moved, primary: lead(GLM, 'room') }).why, 'you chose it · left glm-5.3');
+    const c = card();
+    c.paint({ lead: moved });
+    assert.equal(c.part().dataset.basis, 'own');
+    assert.equal(c.fact().classList.contains('model-fallback'), false);
+    assert.equal(c.said('pending'), '');
+    c.fact().click();
+    await flush();
+    assert.equal(c.popup().querySelector('.card-model-pop-words').textContent,
+        'Model for this work · you chose it · left Main (gpt-6-astra)');
+    assert.deepEqual(c.acts(), []);
+    assert.equal(c.rows()[0].text, 'gpt-6-astra Main this work will follow Main');
+    c.paint({ lead: { ...moved, pending: route(GLM) } });
+    assert.equal(c.said('pending'), '→ glm-5.3 at the next step', 'a published pending route is still shown');
+    assert.equal(c.said('why'), 'you chose it · left Main (gpt-6-astra)', 'a different pending route does not hide the primary left');
+    closeCardModel();
+});
+
+test('an accepted cited primary awaiting its first call is named as pending, not as a past departure', async () => {
+    const c = card();
+    const cited = { text: 'Use glm-5.3 next.', clipped: false };
+    const primary = lead(GLM, 'owner_words', { cited });
+    const moving = lead(ASTRA, 'main', { primary, pending: route(GLM) });
+    assert.equal(leadView(moving).awaitingPrimary, true);
+    assert.equal(leadView(moving).why, '');
+    c.paint({ lead: moving });
+    c.fact().click();
+    await flush();
+    assert.equal(c.popup().querySelector('.card-model-pop-words').textContent,
+        'Model for this work · follows Main · → glm-5.3 at the next step · you asked for it');
+    assert.equal(c.popup().querySelector('.card-model-cited').textContent, cited.text);
+    c.paint({ lead: lead(OPUS, 'fallback', { role: 'fallback:0', primary, pending: route(GLM), cause: 'auth_error' }), since: '02:14' });
+    assert.equal(c.said('why'), '');
+    assert.equal(c.popup().querySelector('.card-model-pop-words').textContent,
+        'fallback from Settings · claude-opus-5.5 · since 02:14 · → glm-5.3 at the next step · Sign-in required · you asked for it');
+    assert.equal(c.popup().querySelector('.card-model-cited').textContent, cited.text);
+    closeCardModel();
+});
+
+test('the popover quotes authored words intact, reuses Show all, and labels a published excerpt', async () => {
+    const c = card();
+    const cited = { text: '  Use GPT-6-astra\nfor <THIS> work 🙂  ', clipped: true };
+    const view = { lead: lead(ASTRA, 'owner_words', { cited }) };
+    c.paint(view);
+    c.fact().click();
+    await flush();
+    const quote = c.popup().querySelector('.card-model-cited');
+    const line = c.popup().querySelector('.card-model-pop-line');
+    const toggle = c.popup().querySelector('.chat-clamp-toggle');
+    assert.equal(c.popup().querySelector('.card-model-pop-words').textContent, 'Model for this work · you asked for it');
+    assert.equal(line.children[1].textContent, ' “');
+    assert.equal(line.children.at(-1).textContent, '”');
+    assert.equal(quote.dataset.i18nAuthored, '');
+    assert.equal(quote.textContent, cited.text);
+    assert.equal(quote.children.length, 0, 'the owner\'s angle brackets never become markup');
+    assert.equal(c.popup().querySelector('.card-model-cited-note').textContent, 'Excerpt; the original quotation is longer.');
+    line.scrollHeight = 500;
+    line.clientHeight = 80;
+    toggle.click();
+    assert.equal(line.dataset.expanded, '1');
+    assert.equal(toggle.textContent, 'Show less');
+    c.paint(view);
+    assert.equal(c.popup().querySelector('.card-model-cited'), quote, 'an unchanged read preserves the authored node and expansion');
+    assert.equal(line.dataset.expanded, '1');
+    line.scrollTop = 300;
+    toggle.click();
+    assert.equal(line.dataset.expanded, undefined);
+    assert.equal(line.scrollTop, 0, 'Show less returns to the start of the quotation');
+    assert.equal(toggle.textContent, 'Show all');
+    assert.equal(toggle.hidden, false);
+    assert.equal(quote.textContent, cited.text, 'neither expansion nor collapse rewrites a byte');
+
+    c.paint({ lead: lead(OPUS, 'fallback', { role: 'fallback:0', primary: lead(ASTRA, 'owner_words', { cited: { ...cited, clipped: false } }) }) });
+    assert.equal(c.popup().querySelector('.card-model-pop-words').textContent, 'Left gpt-6-astra · you asked for it');
+    assert.equal(c.popup().querySelector('.card-model-cited').textContent, cited.text);
+    assert.equal(c.popup().querySelector('.card-model-cited-note'), null, 'a whole published span has no excerpt label');
+    assert.equal(c.acts().length, 3);
+    c.paint({ lead: lead(GLM, 'owner') });
+    assert.equal(c.popup().querySelector('.card-model-cited'), null);
+    assert.equal(c.popup().querySelector('.chat-clamp-toggle'), null, 'no empty quotation or toggle without a cite');
+    closeCardModel();
 });
 
 test('a pending route shows both models and when the change lands; the same route shows none', () => {
@@ -203,7 +301,7 @@ test('the popover is the capsule\'s list; its Main row is the one way to follow 
     c.fact().click();
     await flush();
     assert.equal(c.fact().getAttribute('aria-expanded'), 'true');
-    assert.equal(c.popup().querySelector('.card-model-pop-title').textContent, 'Model for this work · you chose it');
+    assert.equal(c.popup().querySelector('.card-model-pop-words').textContent, 'Model for this work · you chose it');
     assert.deepEqual(c.acts(), [], 'no separate action: the list\'s Main row is the way');
     assert.equal(c.popup().querySelector('.card-model-acts').hidden, true);
     assert.deepEqual(c.rows().slice(0, 2).map((row) => [row.key, row.selected]), [[`route|${ASTRA}`, false], [`route|${GLM}`, true]]);
@@ -219,7 +317,7 @@ test('the popover is the capsule\'s list; its Main row is the one way to follow 
     c.fact().click();
     await flush();
     assert.deepEqual(c.acts(), []);
-    assert.equal(c.popup().querySelector('.card-model-pop-title').textContent, 'Model for this work · follows Main');
+    assert.equal(c.popup().querySelector('.card-model-pop-words').textContent, 'Model for this work · follows Main');
     assert.deepEqual([c.rows()[0].selected, c.rows()[0].text], [true, 'gpt-6-astra Main this work follows Main'], 'Main\'s row is its own');
     assert.match(c.list().innerHTML, /Applies when it starts\./, 'a queued work says when its change lands');
     // A follower whose next step is another route has not arrived yet: the row still says what a press does.
@@ -328,7 +426,7 @@ test('a fallback\'s popover offers Return, Wait and Keep, each its own act', asy
         c.paint({ lead: fell, since: '02:14' });
         c.fact().click();
         await flush();
-        assert.equal(c.popup().querySelector('.card-model-pop-title').textContent, 'Left glm-5.3 at 02:14 · Sign-in required');
+        assert.equal(c.popup().querySelector('.card-model-pop-words').textContent, 'Left glm-5.3 at 02:14 · Sign-in required');
         assert.deepEqual(c.acts(), [['return', 'Return to glm-5.3', 'at the next step'],
             ['wait', 'Wait for glm-5.3', 'no paid calls until it answers'], ['keep', 'Keep on claude-opus-5.5', 'your choice from now on']]);
         await c.pressAct(action);

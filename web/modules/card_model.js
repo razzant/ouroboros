@@ -16,6 +16,8 @@
  */
 import { taskModel } from './api_client.js';
 import { renderLiveCardMeta } from './chat_activity.js';
+import { clampWithToggle } from './chat_reply_quote.js';
+import { observeLayout } from './capsule.js';
 import { fmt, tr, translateString } from './i18n.js';
 import { isCoarsePointer } from './layout.js';
 import { modelCatalog } from './model_catalog_store.js';
@@ -116,20 +118,23 @@ export function leadView(lead, { index = null, since = '', queued = false } = {}
     const basis = String(lead.basis || '');
     const fallback = basis === 'fallback';
     const primary = normalizeRoute(lead.primary);
-    // What a fallback left: Main for a work that followed it, else the model that was the work's own.
+    const pending = normalizeRoute(lead.pending);
+    // A newly accepted primary can be published before the acting call changes (CLIENT_CONTRACT §5).
+    const awaitingPrimary = Boolean(primary && pending && sameRoute(primary, pending) && !sameRoute(pending, said.route));
+    // What the acting route left: Main for a work that followed it, else the model that was the work's own.
     const leftMain = primary && lead.primary.basis === 'main';
     const leftName = primary ? (leftMain ? 'Main' : shortName(primary)) : '';
-    // A fallback route is a row of Settings' fallback list; Main itself can be the first stop of a model of its own.
-    const origin = lead.role === 'main' ? tr('model.fallback.to_main', 'fallback to Main')
-        : tr('model.fallback.settings', 'fallback from Settings');
-    const pending = normalizeRoute(lead.pending);
+    const left = primary && !awaitingPrimary ? (leftMain ? fmt('left Main ({model})', { model: shortName(primary) })
+        : fmt('left {model}', { model: leftName })) : '';
+    const origin = tr('model.fallback.settings', 'fallback from Settings');
+    // CLIENT_CONTRACT §5: on the primary the cite rides the lead; away from it, the primary it names.
+    const quote = primary ? lead.primary.cited : lead.cited;
+    const cited = typeof quote?.text === 'string' && quote.text.length ? { text: quote.text, clipped: quote.clipped === true } : null;
     const parts = [fallback ? origin : said.sourceLabel, said.short, fallback && since ? fmt('since {time}', { time: since }) : ''];
     return {
-        said, basis, fallback, primary, leftMain, leftName, since, parts,
+        said, basis, fallback, primary, awaitingPrimary, leftMain, leftName, since, parts, cited,
         name: parts.filter(Boolean).join(' · '),
-        why: fallback ? (primary ? (leftMain ? fmt('left Main ({model})', { model: shortName(primary) })
-            : fmt('left {model}', { model: leftName })) : '')
-            : basis === 'main' ? '' : basisWords(basis),
+        why: fallback ? left : [basis === 'main' ? '' : basisWords(basis), left].filter(Boolean).join(' · '),
         pending: pending && !sameRoute(pending, said.route)
             ? fmt(queued ? '→ {model} when it starts' : '→ {model} at the next step', { model: shortName(pending) }) : '',
         cause: causeWords(lead.cause),
@@ -286,7 +291,7 @@ export function openCardModel(record) {
     const popup = nodeOf(doc, 'div', 'ui-popup card-model-pop');
     popup.setAttribute('role', 'dialog');
     popup.setAttribute('aria-label', 'Model for this work');
-    const title = nodeOf(doc, 'p', 'card-model-pop-title');
+    const title = nodeOf(doc, 'div', 'card-model-pop-title');
     title.dataset.i18nSkip = '';
     const acts = nodeOf(doc, 'div', 'card-model-acts');
     // A refused act, said where it was pressed; `Retry` stands beside it only when the server saved the decision.
@@ -307,6 +312,8 @@ export function openCardModel(record) {
     let busy = false;
     let closed = false;
     let actsKey = null;
+    let headKey = null;
+    let unwatchHead = () => {};
     let position = null;
     let again = null;  // the refused request a 503 may send again, under its own id
     let unsubscribe = () => {};
@@ -358,10 +365,45 @@ export function openCardModel(record) {
     function paintHead() {
         const now = view();
         const said = now.said;
-        write(title, said.fallback
-            ? [said.leftName ? fmt(said.since ? 'Left {model} at {time}' : 'Left {model}', { model: said.leftName, time: said.since })
-                : said.name, said.cause].filter(Boolean).join(' · ')
-            : [tr('model.popover.title', 'Model for this work'), basisWords(said.basis)].filter(Boolean).join(' · '));
+        let heading = said.fallback
+            ? [said.awaitingPrimary ? `${said.name} · ${said.pending}`
+                : said.leftName ? fmt(said.since ? 'Left {model} at {time}' : 'Left {model}', { model: said.leftName, time: said.since })
+                    : said.name, said.cause].filter(Boolean).join(' · ')
+            : [tr('model.popover.title', 'Model for this work'), said.why || basisWords(said.basis),
+                said.awaitingPrimary ? said.pending : ''].filter(Boolean).join(' · ');
+        if (said.cited && said.primary) heading += ` · ${basisWords('owner_words')}`;
+        const nextHead = JSON.stringify([heading, said.cited]);
+        if (nextHead !== headKey) {
+            headKey = nextHead;
+            unwatchHead();
+            unwatchHead = () => {};
+            const words = nodeOf(doc, 'span', 'card-model-pop-words', heading);
+            title.replaceChildren(words);
+            if (said.cited) {
+                const line = nodeOf(doc, 'p', 'card-model-pop-line');
+                const quote = nodeOf(doc, 'span', 'card-model-cited', said.cited.text);
+                quote.dataset.i18nAuthored = '';
+                line.append(words, nodeOf(doc, 'span', '', ' “'), quote, nodeOf(doc, 'span', '', '”'));
+                title.replaceChildren(line);
+                if (said.cited.clipped) title.append(nodeOf(doc, 'span', 'card-model-cited-note',
+                    tr('model.cited.excerpt', 'Excerpt; the original quotation is longer.')));
+                // The published words stay intact, including whitespace and case. Only CSS clips them.
+                const cut = () => line.scrollHeight > line.clientHeight + 1;
+                const toggle = clampWithToggle(line, title, {
+                    fit: (_node, _text, _lines, onFit) => onFit(cut()),
+                    onDomWrite: (write) => {
+                        const changed = write();
+                        if (line.dataset.expanded !== '1') line.scrollTop = 0;
+                        position?.reposition();
+                        return changed;
+                    },
+                });
+                unwatchHead = observeLayout(doc.defaultView, [line], () => {
+                    if (line.dataset.expanded !== '1') toggle.hidden = !cut();
+                    position?.reposition();
+                });
+            }
+        }
         const mainName = now.main ? shortName(now.main) : '';
         // A fallback's three exits; any other work is moved from the list alone (its Main row follows Main).
         const offered = said.fallback ? [
@@ -429,6 +471,7 @@ export function openCardModel(record) {
         acts.removeEventListener('click', onActs);
         retry.removeEventListener('click', onRetry);
         unsubscribe();
+        unwatchHead();
         position?.destroy();
         rows.destroy();
         popup.remove();

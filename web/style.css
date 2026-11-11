@@ -5548,6 +5548,15 @@ button.card-model-fact:focus-visible { outline: 2px solid var(--focus-accent-bor
     font-size: var(--type-meta);
     overflow-wrap: anywhere;
 }
+.card-model-pop-line { margin: 0; }
+.card-model-cited { color: var(--user-sender); white-space: pre-wrap; }
+.card-model-cited-note { display: block; margin-top: var(--space-1); }
+/* An expanded quotation scrolls within the popover, leaving its toggle and model choices reachable. */
+.card-model-pop-line.chat-clamp[data-expanded="1"] {
+    max-height: calc(var(--ui-popup-max-height) / 3);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
 .card-model-refusal {
     display: flex;
     flex: 0 0 auto;

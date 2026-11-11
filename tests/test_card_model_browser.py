@@ -24,6 +24,7 @@ import re
 import pytest
 
 from tests._work_projection_shared import with_work_fields
+from tests.test_design_system_gate_browser import TG_STUB
 from tests.test_effort_range_browser import _launch
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 - pytest fixture import
 
@@ -451,5 +452,139 @@ def test_a_works_model_on_its_card_the_fallback_and_the_main_sheet(direct_server
             browser, page = _launch(pw, engine, **context)
             try:
                 _walk(page, url, shots, f"{engine}-{tag}", transcript)
+            finally:
+                browser.close()
+
+
+_CITATION = """() => {
+    const popup = document.querySelector('.card-model-pop');
+    const quote = popup?.querySelector('.card-model-cited');
+    const line = popup?.querySelector('.card-model-pop-line');
+    const toggle = popup?.querySelector('.chat-clamp-toggle');
+    return {text: quote?.textContent, authored: quote?.hasAttribute('data-i18n-authored'),
+        words: popup?.querySelector('.card-model-pop-words')?.textContent,
+        note: popup?.querySelector('.card-model-cited-note')?.textContent || '',
+        before: quote?.previousSibling?.textContent, after: quote?.nextSibling?.textContent,
+        expanded: line?.dataset.expanded === '1', cut: line?.scrollHeight > line?.clientHeight + 1,
+        toggle: toggle?.textContent, toggleHidden: toggle?.hidden,
+        queryFocused: document.activeElement === popup?.querySelector('.chat-model-query'),
+        lineInside: line && line.getBoundingClientRect().bottom <= popup.getBoundingClientRect().bottom + 0.5};
+}"""
+
+
+def _citation_walk(page, url: str, shots: pathlib.Path, tag: str, transcript: int | None, phone: bool, telegram: bool) -> None:
+    """Owner, 11.11.2026: the model and the exact cited words are visible on the card, also away from its primary."""
+    words = 'Use gpt-6-astra for THIS work.\n  Keep my case & <tags> 🙂'
+    excerpt = ('Use gpt-6-astra for THIS work; keep these exact words and their spacing 🙂.\n  ' * 30)[:1024]
+    stand = Stand()
+    stand.leads['t-own'] = _lead(ASTRA, 'owner_words', cited={'text': words, 'clipped': False})
+    stand.leads['t-fallback']['primary'] = stand.leads['t-own']
+    stand.leads['t-queued'] = _lead(ASTRA, 'owner_words', cited={'text': excerpt, 'clipped': True})
+    stand.leads['t-follow'] = _lead(OPUS, 'owner', primary=_lead(ASTRA, 'main'),
+                                   cause='wait_card', since=stand.leads['t-fallback']['since'])
+    _serve(page, stand)
+    if telegram:
+        # The existing local host fixture, with no external SDK, account or sign-in request.
+        page.add_init_script(TG_STUB)
+    _open(page, url, tag, transcript)
+    if telegram:
+        page.wait_for_function("() => document.documentElement.dataset.telegramFullscreen === 'expanded'")
+
+    def press(selector: str) -> None:
+        if phone:
+            page.tap(selector)
+        else:
+            page.click(selector)
+
+    def open_fact(task: str) -> None:
+        _show(page, task)
+        press(_fact(task))
+        page.wait_for_selector('.card-model-pop')
+        assert page.evaluate(_POPOVER)['inside'], tag
+        if phone:
+            assert not page.evaluate(_CITATION)['queryFocused'], (tag, 'opening by tap raises no keyboard')
+
+    def shoot(number: str, name: str) -> None:
+        for theme in ('dark', 'light'):
+            page.evaluate('(theme) => window.ouroTheme.set(theme)', theme)
+            page.wait_for_function('(theme) => document.documentElement.dataset.theme === theme', arg=theme)
+            page.wait_for_timeout(180)
+            assert page.evaluate(_POPOVER)['inside'], (tag, theme)
+            assert page.evaluate('() => document.documentElement.scrollWidth <= innerWidth'), (tag, theme)
+            page.screenshot(path=str(shots / f'{number}-{name}-{tag}-{theme}.png'), animations='disabled')
+
+    def quoted(expected: str, clipped: bool) -> dict:
+        seen = page.evaluate(_CITATION)
+        assert seen['text'] == expected and seen['authored'], (tag, seen)
+        assert (seen['before'], seen['after']) == (' “', '”'), (tag, seen)
+        assert seen['words'].endswith('you asked for it'), (tag, seen)
+        assert seen['note'] == ('Excerpt; the original quotation is longer.' if clipped else ''), (tag, seen)
+        assert seen['lineInside'], (tag, seen)
+        return seen
+
+    open_fact('t-own')
+    quoted(words, False)
+    shoot('14', 'card-cited-primary')
+    page.keyboard.press('Escape')
+    open_fact('t-fallback')
+    seen = quoted(words, False)
+    assert seen['words'].startswith('Left gpt-6-astra at '), (tag, seen)
+    assert [act[0] for act in page.evaluate(_POPOVER)['acts']] == ['return', 'wait', 'keep']
+    shoot('15', 'card-cited-fallback')
+    page.keyboard.press('Escape')
+    open_fact('t-queued')
+    seen = quoted(excerpt, True)
+    assert seen['cut'] and not seen['toggleHidden'] and seen['toggle'] == 'Show all', (tag, seen)
+    shoot('16', 'card-cited-excerpt')
+    press('.card-model-pop .chat-clamp-toggle')
+    seen = quoted(excerpt, True)
+    assert seen['expanded'] and seen['toggle'] == 'Show less' and not seen['toggleHidden'], (tag, seen)
+    assert seen['cut'], (tag, 'the expanded quotation owns a bounded scroller', seen)
+    page.locator('.card-model-pop-line').evaluate('(line) => { line.scrollTop = line.scrollHeight; }')
+    assert page.locator('.card-model-pop-line').evaluate('(line) => line.scrollTop > 0'), tag
+    shoot('17', 'card-cited-expanded')
+    press('.card-model-pop .chat-clamp-toggle')
+    seen = quoted(excerpt, True)
+    assert not seen['expanded'] and seen['toggle'] == 'Show all', (tag, seen)
+    assert page.locator('.card-model-pop-line').evaluate('(line) => line.scrollTop == 0'), (tag, 'Show less restores the beginning')
+    page.keyboard.press('Escape')
+    open_fact('t-follow')
+    page.wait_for_timeout(180)
+    moved = page.evaluate(_CARDS)['cards']['t-follow']
+    assert not moved['amber'] and moved['basis'] == 'own', (tag, moved)
+    assert moved['why'] == 'you chose it · left Main (gpt-6-astra)' and moved['pending'] == '', (tag, moved)
+    popover = page.evaluate(_POPOVER)
+    assert popover['acts'] == [] and popover['rows'][0][0] == f'route|{ASTRA}', (tag, popover)
+    shoot('18', 'card-wait-owner')
+    page.keyboard.press('Escape')
+    # The cite may already name an accepted primary before the current call has ever used it (CLIENT_CONTRACT §5).
+    next_words = 'Use glm-5.3 next; keep THIS wording 🙂'
+    stand.leads['t-own'] = _lead(ASTRA, 'main', pending=_route(GLM),
+                                primary=_lead(GLM, 'owner_words', cited={'text': next_words, 'clipped': False}))
+    _open(page, url, tag, transcript)
+    open_fact('t-own')
+    seen = quoted(next_words, False)
+    assert seen['words'] == 'Model for this work · follows Main · → glm-5.3 at the next step · you asked for it', (tag, seen)
+    moving = page.evaluate(_CARDS)['cards']['t-own']
+    assert moving['why'] == '' and moving['pending'] == '→ glm-5.3 at the next step', (tag, moving)
+    shoot('19', 'card-cited-pending')
+    page.keyboard.press('Escape')
+    assert stand.writes == [], 'reading, expanding and closing a quotation never changes a model'
+
+
+@pytest.mark.parametrize('engine', ['chromium', 'webkit'])
+def test_exact_model_citations_on_panes_phone_and_telegram_host(direct_server_with_data, engine, tmp_path):  # noqa: F811
+    pytest.importorskip('playwright.sync_api', reason='Playwright is not installed')
+    from playwright.sync_api import sync_playwright
+
+    shots = pathlib.Path(os.environ.get('OUROBOROS_UI_EVIDENCE_DIR', str(tmp_path)))
+    shots.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as pw:
+        for tag, transcript, phone in [*LAYOUTS, ('telegram390', None, True)]:
+            context = ({'viewport': {'width': 390, 'height': 844}, 'is_mobile': True, 'has_touch': True} if phone
+                       else {'viewport': {'width': 1000 if transcript > 400 else 360, 'height': 900}})
+            browser, page = _launch(pw, engine, **context)
+            try:
+                _citation_walk(page, direct_server_with_data['url'], shots, f'{engine}-{tag}', transcript, phone, tag == 'telegram390')
             finally:
                 browser.close()
