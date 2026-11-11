@@ -1193,10 +1193,11 @@ def _return_commit_feedback(ctx: ToolContext, message: str, started: float, befo
                             else "or stop; informed continuation needs received feedback. ")
         left = getattr(ctx, "_left_review_wait", None) or {}
         if left.get("surface") == "commit" and left.get("retry_key") == getattr(ctx, "_current_review_retry_key", ""):
+            from ouroboros.tools.review_change import left_wave_terms
             event = ("A selected outcome or wake time was ready" if any(row.get("reason") in {"helper_result", "review_result", "wake_at"} for row in
                      getattr(ctx, "_review_detached_operations", []) or []) else "An addressed message reached you")
-            note = (event + " while the reviewers ran: this call returned and their paid "
-                    "work continues separately; a [Review settled] notice follows the whole wave. " + note)
+            note = (event + " while the reviewers ran: this call returned and their paid work continues separately; "
+                    + left_wave_terms(commit=True) + " " + note)
     if not pending:
         git_mod._unstage_candidate(ctx)
     from ouroboros.review_continuation import offers_for
