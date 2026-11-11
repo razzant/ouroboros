@@ -656,14 +656,9 @@ def _enforce_task_timeouts_locked(
         newest_descendant = activity.progress.get(str(task_id), 0.0)
         subtree_progressing = bool(newest_descendant) and (now - newest_descendant) < idle_timeout
         own_progress = idle_sec < idle_timeout
-        # B3 external-wait lease: a held delegate_wait window over a live delegated run
-        # is legitimate silence (hard-bounded by events._handle_external_wait_lease);
-        # it spares ONLY this idle rail — ceiling/deadline/budget/cancel never consult it.
-        lease_ts = meta.get("external_wait_lease_until")
         active_llm_call = meta.get("active_llm_call")
         llm_call_in_flight = isinstance(active_llm_call, dict) and active_llm_call.get("task_attempt") == attempt
         progressing = (own_progress or subtree_progressing or str(task_id) in activity.queued
-                       or (isinstance(lease_ts, (int, float)) and float(lease_ts) > now)
                        or llm_call_in_flight
                        or model_waiting(meta) or waiting_on_owner(meta, attempt)
                        or _active_operation_progressing(meta, now))

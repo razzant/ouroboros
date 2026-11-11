@@ -104,7 +104,7 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     # unlike the worker lanes. (Renamed from the singular MODEL_FALLBACK.)
     "OUROBOROS_MODEL_FALLBACKS": OPENROUTER_DEFAULTS["fallback"],
     "OUROBOROS_SERVED_MODEL_REDOS": 2,  # redos of a round another model answered (`llm_substitution.py`)
-    "OUROBOROS_MAX_WORKERS": 10, "OUROBOROS_PRESENCE_MAX_ACTIVE": 2,
+    "OUROBOROS_MAX_WORKERS": "", "OUROBOROS_PRESENCE_MAX_ACTIVE": 2,  # "": no cap, memory admits (settings_scales)
     "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 6,
     "OUROBOROS_MAX_SUBAGENT_DEPTH": 3,
     # Mutative ("acting") subagents master toggle. Empty = follow runtime mode
@@ -327,13 +327,11 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     # Delegated subagents. NARROW key, read ONLY by the subagent scheduler; deliberately absent from
     # provider_models.MODEL_SETTING_KEYS (see ARCHITECTURE "Delegated subagents"). Empty = delegation off AND
     # undecided (Settings' Subagents section offers the connected-subscription default); the literal `off` =
-    # delegation off because the owner said so. Wait keys bound the nanny's QUIET wait only.
+    # delegation off because the owner said so.
     "OUROBOROS_SUBAGENT_HARNESS": "",
     # Optional Delegation account pin (D-U5): a credential-profile id sent as `credentialProfileId`; empty = engine
     # rotation pool (D28; presets never author it). Read ONLY by get_subagent_harness -> DelegationRoute.profile_id.
     "OUROBOROS_SUBAGENT_PROFILE": "",
-    "OUROBOROS_DELEGATE_WAIT_SEC": 120,
-    "OUROBOROS_DELEGATE_WAIT_MAX_SEC": 1800,
 }
 
 
@@ -410,6 +408,8 @@ RETIRED_SETTING_KEYS: tuple[str, ...] = (
     # only by a spent deadline (less the finalization reserve), budget or Stop.
     "OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC",
     "OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC",  # owner 3A; 30 Oct: await waits its ask, silence its window
+    # pool-capacity WP5: delegate_wait is a sleep on runs (the body observes them); no window holds a slot.
+    "OUROBOROS_DELEGATE_WAIT_SEC", "OUROBOROS_DELEGATE_WAIT_MAX_SEC",
 )
 
 
@@ -554,7 +554,7 @@ SETTINGS_KEYS_NOT_EXPORTED_TO_ENV = frozenset({
 # ABSENT key leaves the choice to the environment (a deployment's OUROBOROS_UI_DIR=none). A merged write
 # carries every key the read produced, so it must not author an absent key with the value the environment
 # or the default gave it: one unrelated Settings save would otherwise freeze the operator's choice on disk.
-SAVED_CHOICE_SETTINGS = frozenset({"OUROBOROS_UI_DIR"})
+SAVED_CHOICE_SETTINGS = frozenset({"OUROBOROS_UI_DIR", "OUROBOROS_MAX_WORKERS"})
 
 
 def unauthored_saved_choices(prepared, stored, authored=()) -> frozenset:

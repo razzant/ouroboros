@@ -120,10 +120,11 @@ def test_pending_survives_reconnect_draft_and_restart_request(settings_server, e
             }""", arg=FOLDER, timeout=30_000)
             expect(page.locator(RESTART_ROW)).to_have_count(0)
             row = save_folder(str(folder))
-            # INTEGRATED TREE: the row says when the change applies from the server's effect map (`_meta.effects`); a
-            # server without the map answers no receipt, and the row then says only "Saved".
-            if page.evaluate("async () => Boolean((await (await fetch('/api/settings')).json())._meta.effects)"):
-                expect(row.locator("[data-setting-result]")).to_contain_text("applies after restart")
+            # The server's own answer: its effect map says when the change applies, its receipt carries what the row
+            # replaced, so the line offers Undo, and its restart state says what still runs.
+            expect(row.locator("[data-setting-result]")).to_contain_text("Saved · applies after restart")
+            expect(row.locator("[data-setting-undo]")).to_be_visible()
+            expect(row.locator("[data-setting-meta]")).to_contain_text(f"after restart: {folder}")
             show("")
             expect(page.locator(RESTART_ROW)).to_be_visible(timeout=30_000)
             expect(page.locator(RESTART_ROW + " .ui-row-title")).to_have_text("Restart to apply: Skills folder")
@@ -149,7 +150,15 @@ def test_pending_survives_reconnect_draft_and_restart_request(settings_server, e
             evidence.mkdir(parents=True, exist_ok=True)
             page.screenshot(path=str(evidence / f"settings-card-restart-{engine}.png"))
             # The saved value is the running one again: nothing waits, and the line has left.
-            save_folder("")
+            row = save_folder("")
+            show("")
+            expect(page.locator(RESTART_ROW)).to_have_count(0, timeout=30_000)
+            # A second change of the same row, then its Undo: the old value goes back through the server's per-key
+            # condition (the receipt's token), and with the running value saved again nothing waits.
+            row = save_folder(str(folder))
+            row.locator("[data-setting-undo]").click()
+            expect(page.locator(f"#setting-{FOLDER}")).to_have_value("", timeout=30_000)
+            expect(row.locator("[data-setting-result]")).to_contain_text("Saved", timeout=30_000)
             show("")
             expect(page.locator(RESTART_ROW)).to_have_count(0, timeout=30_000)
 

@@ -546,6 +546,64 @@ test('a Project\'s list opens on its whole name, also with no work, and says whe
     } finally { work?.destroy(); restoreDom(prior); }
 });
 
+// DESIGN "Room work status": the socket's own observation (ws.js serverAnswersWhileDown) is said, never a cause, and
+// ends with the outage.
+test('an open list says the socket is down, and that the server answers once the socket says so', () => {
+    const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
+    let work;
+    try {
+        const { bar, titleRow, page, badge, messages } = projectRoom(mount);
+        let connected = false, answers = false;
+        work = createRoomWork({ page, asPanel: true, statusBadge: badge, messagesDiv: messages,
+            ws: { isConnected: () => connected, serverAnswersWhileDown: () => answers },
+            reading: { cancel() {}, scroll() {} }, works: () => workState(), liveCardRecords: new Map(),
+            pendingSubmissions: new Map() });
+        const note = bar.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0]
+            .querySelector('.rw-note');
+        titleRow.click();
+        assert.deepEqual([note.textContent, note.hidden], ['Reconnecting — showing the last known state.', false]);
+        answers = true;
+        work.update();
+        assert.equal(note.textContent, 'The server answers, but live updates cannot connect. Retrying automatically. If you use a proxy, check WebSocket forwarding and the server log.');
+        connected = true;
+        work.update();
+        assert.equal(note.textContent, 'Nothing running or queued.', 'an open socket ends it, whatever was observed');
+    } finally { work?.destroy(); restoreDom(prior); }
+});
+
+test('Main with no work opens its list for that sentence, and closes it when the socket opens', () => {
+    const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
+    let work;
+    try {
+        const node = (tag, cls, parent) => {
+            const el = document.createElement(tag); el.className = cls; parent.appendChild(el); return el;
+        };
+        const page = node('div', 'page', mount);
+        const header = node('div', 'chat-page-header', page);
+        const titleRow = node('div', 'app-page-title-row', node('div', 'app-page-title-block', header));
+        const badge = node('span', 'status-badge offline', node('div', 'app-page-actions ui-chrome-group', header));
+        let connected = false, answers = false;
+        work = createRoomWork({ page, statusBadge: badge, messagesDiv: node('div', 'chat-messages', page),
+            ws: { isConnected: () => connected, serverAnswersWhileDown: () => answers },
+            reading: { cancel() {}, scroll() {} }, works: () => workState(), liveCardRecords: new Map(),
+            pendingSubmissions: new Map() });
+        const trigger = titleRow.children.find((el) => el.classList.contains('rw-trigger'));
+        work.update();
+        assert.equal(trigger.disabled, true, 'a plain reconnect in an empty Main has nothing to list');
+        answers = true;
+        work.update();
+        assert.equal(trigger.disabled, false);
+        trigger.click();
+        assert.equal(work.isOpen(), true);
+        const note = header.querySelector('.rw-note');
+        assert.deepEqual([note.textContent, note.hidden],
+            ['The server answers, but live updates cannot connect. Retrying automatically. If you use a proxy, check WebSocket forwarding and the server log.', false]);
+        connected = true;
+        work.update();
+        assert.deepEqual([work.isOpen(), trigger.disabled], [false, true], 'the open socket ends the sentence and its list');
+    } finally { work?.destroy(); restoreDom(prior); }
+});
+
 // DESIGN "Room work status": a row goes to its message wherever it lies in the room's history.
 test('an unloaded row reads the page around its task and lands on its card; one with no message says so', async () => {
     const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));

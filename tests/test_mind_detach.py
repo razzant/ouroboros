@@ -155,6 +155,30 @@ def test_boundary_rechecks_pool_and_custody(tmp_path, monkeypatch):
     assert ctx._model_sleep is None and "service late" in limit.messages[-1]["content"]
 
 
+def test_the_final_census_withdraws_a_handoff_awake_where_it_holds_a_sleep(tmp_path, monkeypatch):
+    """Work first found by the final census (``budget_pause._exact_continuation_row``): a background handoff
+    abandons its seed and stays awake; an ordinary cold sleep holds there until that work settles."""
+    from ouroboros import budget_pause, model_sleep
+
+    _install_queue(tmp_path, monkeypatch)
+    ctx, limit, result = _arm(tmp_path, monkeypatch)
+    assert result["ok"]
+    _fast_hold(monkeypatch, budget_pause)
+    _quiet_external(monkeypatch, budget_pause)
+    censuses = []  # the round boundary's census finds nothing; the final one finds a late service
+    monkeypatch.setattr(model_sleep, "cold_blockers", lambda *_a, **_k: [] if censuses.append(1) or len(censuses) == 1
+                        else [{"kind": "service", "name": "late"}])
+    budget_pause.enter_cold_sleep(limit)
+    assert budget_pause.budget_pause_row(tmp_path, "head")["abandon_reason"] == "cold_detach_blocked"
+    assert ctx._model_sleep is None and ctx._budget_pausing is False
+    notice = limit.messages[-1]["content"]
+    assert "background handoff was not taken" in notice and "'service'" in notice and "'late'" in notice
+    ctx._model_sleep = {"sleep_id": "s1", "mode": "cold"}
+    with pytest.raises(budget_pause.ColdSleepWritersUnsettled, match="'late'"):
+        budget_pause._exact_continuation_row(limit, ctx, pause_id="p2", rail=budget_pause.RAIL_MODEL_SLEEP,
+                                             scope="task", reason_text="", root_task_id="head", local={})
+
+
 def test_frozen_profile_survives_carrier_change_but_not_subagent_ceiling():
     from ouroboros.tool_access_roots import active_tool_profile, freeze_tool_profile
 

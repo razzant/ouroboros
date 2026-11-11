@@ -74,7 +74,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates git netbase tzdata \
+    && apt-get install -y --no-install-recommends ca-certificates curl git netbase tzdata \
     && uvx --from "playwright==${PLAYWRIGHT_VERSION}" playwright install-deps chromium webkit \
     && uvx --from "playwright==${PLAYWRIGHT_VERSION}" playwright install webkit
 COPY --from=chromium /ms-playwright/ /ms-playwright/

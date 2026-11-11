@@ -83,8 +83,10 @@ def get_tools() -> list[ToolEntry]:
         "name": "configure_presence",
         "description": "Inspect places and their connector choices; edit state, wakes, notes, folder or model. "
                        "Only your human switches a place to Active, on its sheet or by a word in Main; propose it there. "
-                       "Only an owner-door turn may confirm an owner account. A note is your human's only in such a "
-                       "turn and only when its whole text is their exact words that reached this run; any other note is yours. "
+                       "Only an owner-door turn may confirm an owner account. When your human changes a standing "
+                       "instruction for a place, remove or replace the superseded note in this turn. A note that is "
+                       "their exact words, written in an owner-door turn, is recorded as theirs; your summary is "
+                       "recorded as yours and is no instruction of theirs. "
                        "Circles group places under shared words every place in one inherits beside its own notes: "
                        "create_circle/edit_circle (name, text, model)/delete_circle (its places stay connected and keep "
                        "their notes); set_circle puts place_id in circle_id (empty: none), at most one circle each; "

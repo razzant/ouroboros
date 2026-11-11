@@ -50,11 +50,16 @@ function rolesEditor({ settings, slots, options = {}, adopt = (editor, catalog) 
     const field = (rowId, listId) => {
         const attrs = new Map([['aria-controls', listId]]);
         const listeners = new Map();
-        const list = { id: listId, ownerDocument: doc, hidden: true, parentElement: {}, innerHTML: '', isConnected: false,
-            setAttribute() {}, querySelectorAll: () => [], addEventListener() {}, removeEventListener() {}, contains: () => false,
-            style: { setProperty() {} } };
+        // The list and its non-option footer share the chooser's portalled popup.
+        const footer = { hidden: true, innerHTML: '', contains: () => false, addEventListener() {}, removeEventListener() {} };
+        const owner = { querySelector: (selector) => selector === '[data-model-footer]' ? footer : null,
+            appendChild(node) { node.parentElement = owner; } };
+        const popup = { ownerDocument: doc, parentElement: owner, hidden: true, isConnected: false,
+            addEventListener() {}, removeEventListener() {}, contains: (node) => node === list || node === footer };
+        const list = { id: listId, ownerDocument: doc, parentElement: popup, innerHTML: '', closest: () => popup,
+            setAttribute() {}, querySelectorAll: () => [], addEventListener() {}, removeEventListener() {}, contains: () => false };
         lists.set(listId, list);
-        return { rowId, list, listeners, ownerDocument: doc, value: '', disabled: false,
+        return { rowId, list, listeners, ownerDocument: doc, value: '', disabled: false, dataset: {}, closest: () => null,
             getAttribute: (key) => attrs.get(key) ?? null, setAttribute: (key, value) => attrs.set(key, value),
             removeAttribute: (key) => attrs.delete(key), addEventListener: (type, fn) => listeners.set(type, fn),
             removeEventListener() {}, focus() {}, dispatchEvent() {} };
@@ -100,6 +105,7 @@ function rolesEditor({ settings, slots, options = {}, adopt = (editor, catalog) 
                 made.listeners.get('focus')();
                 out[rowId] = [...made.list.innerHTML.matchAll(/data-model-value="([^"]*)" aria-selected="false">([^<]*)</g)].map(([, value, label]) => [value, label]);
             }
+            editor.destroy();
             return out;
         },
     };

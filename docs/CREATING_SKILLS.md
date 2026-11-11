@@ -985,19 +985,18 @@ contributes:
 
 - `effect` is one fact with three consumers: Advises (autonomy) refuses everything but a declared read; a Silent or
   Paused place refuses all but reads aimed at it; the Safety Supervisor skips declared reads at Light/Full and
-  gives `message` its speech semantics (a flagged message returns to the mind once; an identical re-issue from a
-  later step sends a SUSPICIOUS one, and a DANGEROUS one in Cyber Pro, recorded; elsewhere a DANGEROUS one waits
-  for your human, and with no verdict it waits). A tool that reads or writes depending on its arguments is
-  `write`, unless its `sends:` block declares which calls deliver words: a call whose every `when` selector holds
-  one of its listed values is `message`, attributed by that block's `target`/`conversation`/`thread`; any other call
-  keeps the row's `effect`. A `write` into a conversation (a pin, a bookmark) or a `gesture` is not words by itself.
-  This is the connector's fact: core lists no provider method and never reads speech from argument names. The
-  Supervisor's verdict may still mark a call speech, which then meets the one-author guard where its targets resolve
-  a place; a built-in tool without declarations, such as `github_write`, is speech only by that mark, with the
-  same levels and its exact call on your human's card; in Cyber Pro its hold stays advice. An MCP tool is a
-  declared read when
-  its configured server marks it `readOnlyHint: true`, otherwise `write`; that hint is trusted, so a server lying
-  about a write runs it unchecked, and Advises may call the tools a server marks read-only.
+  reads `message` as words (a flagged call of any tool returns to the mind once; an identical call from a later step
+  lets a SUSPICIOUS one through, and a DANGEROUS one in Cyber Pro, recorded; elsewhere a DANGEROUS one waits for your
+  human's card holding the words and destination, and with no verdict words wait in every mode). A tool that reads
+  or writes depending on its arguments is `write`, unless its `sends:` block declares which calls deliver words: a
+  call whose every `when` selector holds one of its listed values is `message`, attributed by that block's
+  `target`/`conversation`/`thread`; any other call keeps the row's `effect`. A `write` into a conversation (a pin, a
+  bookmark) or a `gesture` is not words by itself. This is the connector's fact: core lists no provider method, never
+  reads speech from argument names, and no verdict marks a call speech. A built-in tool without declarations, such
+  as `github_write`, declares no words (it can carry a comment body): outside Cyber Pro a DANGEROUS call of it waits
+  for its exact call on your human's card, and in Cyber Pro its unread hold stays advice. An MCP tool is a declared
+  read when its configured server marks it `readOnlyHint: true`, otherwise `write`; that hint is trusted, so a server
+  lying about a write runs it unchecked, and Advises may call the tools a server marks read-only.
 - `gesture` adds or removes a reaction-like response on one message, never speech, a pin or an edit. A focus sees its
   door beside the send doors, `message` prefilled only from `event.message.message_id`. With no send door a non-silent
   finish is still posted, so a reaction alone finishes `silent=true`.

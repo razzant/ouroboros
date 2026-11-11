@@ -54,6 +54,12 @@ _ADDED_OWNERS = {
     # keys and the keys the consciousness clock reads at each wake decision.
     "CONSCIOUSNESS_CLOCK_SETTINGS": settings_scales,
     "setting_effect": settings_scales,
+    # The owner's optional cap on acting tasks: its key, legacy value, disk format and its reads (pool-capacity D).
+    "OWNER_CAP_KEY": settings_scales,
+    "OWNER_CAP_LEGACY": settings_scales,
+    "OWNER_CAP_FORMAT_KEY": settings_scales,
+    "owner_cap_document": settings_scales,
+    "document_optional_value": settings_scales,
     # An explicit root starting effort is validated against the effort scale it names.
     "requested_effort": settings_scales,
     # The lane-era global review effort, frozen as the legacy skill-review fingerprint literal.
@@ -246,8 +252,6 @@ _MOVED_OWNERS = {
     "adaptive_quorum": review_model_routes,
     "get_review_enforcement": review_model_routes,
     "resolved_review_model_target": review_model_routes,
-    "DELEGATE_WAIT_CEILING_SEC": runtime_limits,
-    "DELEGATE_WAIT_WINDOW_MAX_SEC": runtime_limits,
     "BODY_MAINTENANCE_INTERVAL_SEC": runtime_limits,
     "MAX_ACTIVE_SUBAGENTS_HARD_CAP": runtime_limits,
     # Upstream reshaped the hard-cap assignment into a tuple that also binds the
@@ -258,8 +262,6 @@ _MOVED_OWNERS = {
     "_clamped_number_setting": runtime_limits,
     # get_acceptance_reserve_pct / get_acceptance_review_est_sec left with the task-acceptance launch
     # floor (the review fold); their two keys are retired in settings_defaults.
-    "get_delegate_wait_max_sec": runtime_limits,
-    "get_delegate_wait_sec": runtime_limits,
     "get_llm_transport_read_timeout_sec": runtime_limits,
     "get_claudexor_quota_refresh_timeout_sec": runtime_limits,
     "get_claudexor_harness_install_timeout_sec": runtime_limits,

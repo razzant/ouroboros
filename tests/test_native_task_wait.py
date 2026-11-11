@@ -83,7 +83,12 @@ def _header(notice):
 # --- the public arguments ----------------------------------------------------------------------
 
 
-def test_omitted_sleep_mode_keeps_the_in_slot_windows_and_mixed_arguments_are_refused(tmp_path, monkeypatch):
+def test_an_unnamed_mode_sleeps_and_a_named_in_slot_keeps_its_windows(tmp_path, monkeypatch):
+    """Owner Q2=A: a wait with no named mode sleeps (``timeout_sec`` its wake time); a named in_slot keeps the
+    legacy windows, a zero window stays one observation in the slot, and a task with no continuation owner,
+    which nothing could release, waits in the slot. Mixed arguments are refused, never reinterpreted."""
+    import datetime
+
     from ouroboros.tools import control_task_results as mod
     from ouroboros.tools.registry import ToolRegistry
 
@@ -93,25 +98,34 @@ def test_omitted_sleep_mode_keeps_the_in_slot_windows_and_mixed_arguments_are_re
         kw["timeout_sec"]) or real(root, ids, **{**kw, "timeout_sec": 0}))
     _child(tmp_path, "kid")
     ctx = _ctx(tmp_path)
-    mod._wait_for_task(ctx, "kid")
-    mod._wait_for_tasks(ctx, ["kid"])
+    mod._wait_for_task(ctx, "kid", sleep_mode="in_slot")
+    mod._wait_for_tasks(ctx, ["kid"], sleep_mode="in_slot")
     mod._wait_for_task(ctx, "kid", timeout_sec=0)
-    assert windows == [180, 600, 0], "omission keeps the legacy windows; zero stays one observation"
+    assert windows == [180, 600, 0], "a named in_slot keeps the legacy windows; zero stays one observation"
     refusals = {
         "timeout": mod._wait_for_task(ctx, "kid", sleep_mode="warm", timeout_sec=60),
-        "in_slot_timer": mod._wait_for_tasks(ctx, ["kid"], wake_after_sec=60),
+        "in_slot_timer": mod._wait_for_tasks(ctx, ["kid"], sleep_mode="in_slot", wake_after_sec=60),
+        "two_times": mod._wait_for_tasks(ctx, ["kid"], timeout_sec=60, wake_after_sec=60),
         "both": mod._wait_for_task(ctx, "kid", sleep_mode="cold", wake_after_sec=5, wake_at="2099-01-01T00:00:00+00:00"),
         "mode": mod._wait_for_task(ctx, "kid", sleep_mode="nap"),
         "view": mod._wait_for_tasks(ctx, ["kid"], view="everything"),
     }
     assert "timeout_sec is the in-slot window" in refusals["timeout"]
     assert "an in-slot wait takes timeout_sec" in refusals["in_slot_timer"]
+    assert "give one of timeout_sec, wake_after_sec, wake_at" in refusals["two_times"]
     assert "not both" in refusals["both"] and "sleep_mode must be in_slot, warm or cold" in refusals["mode"]
     assert "view must be answer, summary, evidence, or full" in refusals["view"]
     assert all(text.startswith("⚠️ TOOL_ARG_ERROR") for text in refusals.values())
     assert not getattr(ctx, "_model_sleep", None) and not getattr(ctx, "_pending_task_wait", None)
-    ctx.owner_wait_callback = None
+    armed = json.loads(mod._wait_for_task(ctx, "kid", timeout_sec=60))  # no mode: a sleep, woken at the latest then
+    assert armed["reason"] == "sleep_armed" and armed["mode"] in {"cold", "warm"} and windows == [180, 600, 0]
+    wake_at = datetime.datetime.fromisoformat(armed["wake_at"])
+    assert 0 < (wake_at - datetime.datetime.now(datetime.timezone.utc)).total_seconds() <= 60
+    assert ctx._pending_task_wait["arguments"] == {"task_id": "kid", "timeout_sec": 60}
+    ctx.owner_wait_callback, ctx._pending_task_wait, ctx._model_sleep, ctx._owner_wait_requested = None, None, None, ""
     assert "no continuation owner" in mod._wait_for_task(ctx, "kid", sleep_mode="warm")
+    mod._wait_for_task(ctx, "kid")
+    assert windows[-1] == 180, "nothing to release: an unnamed mode waits in the slot"
     schemas = {t["function"]["name"]: t["function"]["parameters"]["properties"]
                for t in ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path).schemas()}
     for name in ("wait_task", "wait_tasks"):
@@ -119,6 +133,7 @@ def test_omitted_sleep_mode_keeps_the_in_slot_windows_and_mixed_arguments_are_re
         assert "default" not in props["timeout_sec"], "an omitted window stays distinguishable"
         assert props["sleep_mode"]["enum"] == ["in_slot", "warm", "cold"]
         assert {"wake_after_sec", "wake_at", "view"} <= set(props)
+        assert props["sleep_mode"]["description"].startswith("Omitted: you sleep")
 
 
 def test_a_batch_view_renders_settled_children_and_omission_keeps_the_compact_batch(tmp_path):
@@ -508,12 +523,14 @@ def test_a_send_before_the_cold_park_retires_the_unentered_sleep_and_answers(tmp
     from ouroboros.tools.control_task_results import _wait_for_task
 
     _child(tmp_path, "parent", parent="")
-    _child(tmp_path, "kid-a")  # an own running child refuses a cold sleep (the process would leave it)
+    _child(tmp_path, "kid-a", "failed", launch_handoffs={"op-1": {"tool": "x"}})  # an ended child's open handoff refuses
+    _child(tmp_path, "kid-b")  # a running child does not: its own actor watches it and the tree keeps its lane
     _child(tmp_path, "foreign", parent="foreign-root")
     ctx = _ctx(tmp_path)
-    assert "running_member kid-a" in _wait_for_task(ctx, "foreign", sleep_mode="cold")
+    ctx.task_metadata["project_id"] = "proj"  # a top-level project sleeper: its cold sleep releases the tree's lane
+    assert "member_custody kid-a" in _wait_for_task(ctx, "foreign", sleep_mode="cold")
     assert not getattr(ctx, "_pending_task_wait", None) and not getattr(ctx, "_model_sleep", None)
-    _child(tmp_path, "kid-a", "completed", result="done")
+    _child(tmp_path, "kid-a", "failed", launch_handoffs={})
     assert json.loads(_wait_for_task(ctx, "foreign", sleep_mode="cold"))["reason"] == "sleep_armed"
     assert ctx._model_sleep["mode"] == "cold" and ctx._owner_wait_requested.startswith("sleep:")
     messages = []

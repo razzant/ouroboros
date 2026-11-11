@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import pytest
 
+from tests._run_wait_shared import held_run, publish, scripted_reads
 from tests._stub_delegate_engines import stub_delegate_engines as stub_delegate_engines
 from tests.test_configured_session_restore import InputReached
 
@@ -15,7 +16,6 @@ from tests.test_configured_session_restore import InputReached
 def test_wake_mail_reaches_next_real_model_input_once(tmp_path, monkeypatch, origin, delivery):
     from ouroboros import delegate_supervision as ds, loop, loop_round_limits, working_checkpoint as wc
     from ouroboros.owner_mailbox import drain_owner_entries, write_owner_message, write_task_message
-    from ouroboros.tools import delegate
     from tests.test_delegate_pending_recovery import _pending_handoff
     from tests.test_delegate_recovery import _bound
     from tests.test_loop_transport_wait import _loop_kwargs
@@ -68,14 +68,11 @@ def test_wake_mail_reaches_next_real_model_input_once(tmp_path, monkeypatch, ori
         post_mail()
         return json.dumps({"status": "terminal", "run_id": rid, "state": "succeeded"})
 
-    def wait_entry(ctx, run_id):
-        return ds.supervised_wait(ctx, run_id, wait_once=wait_once)
-
-    # Only the physical observer is replaced. Registry publication, supervision,
-    # result delivery, next-round drain and checkpoint/ACK are production paths.
-    entry = registry._entries["delegate_wait"]
-    monkeypatch.setitem(registry._entries, "delegate_wait", replace(
-        entry, handler=delegate._published_entry(wait_entry)))
+    # Only the one addressed read is replaced. Registry publication, the wait's readiness (the run's terminal the body
+    # recorded), result delivery, next-round drain and checkpoint/ACK are production paths.
+    scripted_reads(monkeypatch, wait_once)
+    if delivery == "live_wait":
+        held_run(tmp_path, run_id, ctx.task_id, ended="succeeded")
     ack = ds.acknowledge_pending_wake
     acknowledged = []
 
@@ -190,7 +187,8 @@ def test_crash_handoff_restores_wake_mail_once_and_keeps_later_correction_latest
         assert write_owner_message(tmp_path, old, task_id, msg_id="old-mail")
         return json.dumps({"status": "no_progress", "run_id": rid})
 
-    wake = ds.supervised_wait(ctx, run_id, wait_once=observe)
+    scripted_reads(monkeypatch, observe)
+    wake = publish(ctx, run_id)
     messages.append({"role": "assistant", "content": "", "tool_calls": [{"id": "wait-call", "type": "function",
                      "function": {"name": "delegate_wait", "arguments": json.dumps({"run_id": run_id})}}]})
     messages.extend(_deliver(ctx, wake.text, monkeypatch, tool="delegate_wait", meta=wake.meta))
@@ -248,17 +246,17 @@ def test_crash_handoff_restores_wake_mail_once_and_keeps_later_correction_latest
 
 
 # --- #2992: a wake the transcript holds only in part ---------------------------------------------------------
-# Production chain, only the observer scripted: the registry's ``delegate_wait`` entry (``supervised_wait``), the
+# Production chain, only the wake's one read scripted: the registry's ``delegate_wait`` entry (``run_wait``), the
 # loop's measured delivery (``process_tool_results``), ``save_ready`` and its deferred ACK, the next wait.
 
 _NANNY, _RUN, _TAIL = "nanny", "run-1", "OWNER-MAIL-TAIL-7c1f"
 
 
-def _nanny(tmp_path, monkeypatch, observe):
+def _nanny(tmp_path, monkeypatch, observe, runs=(_RUN,)):
+    """The nanny's real ``delegate_wait``: its runs ended (the body recorded it), so each wait is ready at once;
+    only the one addressed read is scripted (``observe``)."""
     from ouroboros import delegate_output
-    from ouroboros import delegate_supervision as ds
     from ouroboros.task_results import write_task_result
-    from ouroboros.tools import delegate
     from tests.test_working_checkpoint import _registry
 
     write_task_result(tmp_path, _NANNY, "running")
@@ -267,9 +265,9 @@ def _nanny(tmp_path, monkeypatch, observe):
     ctx.budget_drive_root, ctx.task_metadata = tmp_path, {"root_task_id": _NANNY}
     ctx._loop_mailbox_seen_ids = set()  # the loop's round-top drain and wake exposure share it
     (tmp_path / "logs").mkdir(exist_ok=True)
-    entry = registry._entries["delegate_wait"]
-    monkeypatch.setitem(registry._entries, "delegate_wait", replace(entry, handler=delegate._published_entry(
-        lambda c, run_id: ds.supervised_wait(c, run_id, wait_once=observe))))
+    for run_id in runs:
+        held_run(tmp_path, run_id, _NANNY, ended="succeeded")
+    scripted_reads(monkeypatch, observe)
     monkeypatch.setattr(delegate_output, "_READ_COVERAGE", {})  # a fresh worker's reading ledger
     return registry, ctx
 
@@ -339,9 +337,10 @@ def _page(ref, start, end):
 
 
 @pytest.mark.parametrize("shape", ["outer_cut", "inner_spill"])
-def test_a_cold_continuation_keeps_pending_wake_sources_but_not_read_coverage(tmp_path, monkeypatch, shape):
-    """A resumed worker can complete the original source without first waiting again; old read ranges do not ride.
-    No mailbox entry can hide a missing source map by delivering the obligation through the round-top drain."""
+def test_a_cold_continuation_keeps_pending_wake_sources_and_their_read_coverage(tmp_path, monkeypatch, shape):
+    """A resumed worker completes the original source without waiting again, and the ranges the saved transcript
+    already holds ride with it (E3): the rest of the source completes it. No mailbox entry can hide a missing source
+    map by delivering the obligation through the round-top drain."""
     from ouroboros import owner_wait
 
     polls = []
@@ -366,13 +365,9 @@ def test_a_cold_continuation_keeps_pending_wake_sources_but_not_read_coverage(tm
     owner_wait.restore_continuation_state(fresh, state, messages, trace, {}, set())
     _shown(fresh, _call(fresh, tmp_path, "read-second-half", "read_file", _page(source, half, end)),
            messages, trace, fit)
-    _ready(fresh, messages, trace)
-    assert _wake_state(resumed) == (_wake_id(wake), ""), "earlier-process coverage is not restored"
-    _shown(fresh, _call(fresh, tmp_path, "read-first-half", "read_file", _page(source, 0, half)),
-           messages, trace, fit)
     assert _wake_state(resumed) == (_wake_id(wake), ""), "a complete read still waits for checkpoint"
     _ready(fresh, messages, trace)
-    assert _wake_state(resumed) == ("", _wake_id(wake)), "the original source completes after a cold restore"
+    assert _wake_state(resumed) == ("", _wake_id(wake)), "the restored coverage and the rest of the source complete it"
     assert resumed._wake_sources == {}
     _call(fresh, tmp_path, "wait-after-cold", "delegate_wait", {"run_id": _RUN})
     assert len(polls) == 2, "one fresh poll, no duplicate run"
@@ -721,7 +716,7 @@ def test_every_pending_wake_source_stays_completable_beyond_any_count(tmp_path, 
     """Forty runs each hold a spilled wake (their bulk is the shared coordination context, so no mail is cut); the
     oldest exact source, read whole after the other thirty-nine arrived, still acknowledges its own wake only."""
     polls = []
-    registry, ctx = _nanny(tmp_path, monkeypatch, _observer(tmp_path, polls))
+    registry, ctx = _nanny(tmp_path, monkeypatch, _observer(tmp_path, polls), runs=[f"run-{n}" for n in range(40)])
     ctx.task_contract = {"delegation_budget": {"intent_note": "preserve-complete-intent:" + "y" * 30_000}}
     fit, messages, trace = _wide()
     wakes = [_call(registry, tmp_path, f"wait-{n}", "delegate_wait", {"run_id": f"run-{n}"}) for n in range(40)]
@@ -748,7 +743,6 @@ def _legacy_spilled_wake(tmp_path, monkeypatch, *, annotated=False):
     evidence runs the actual base modules for the same restores (old→new witness)."""
     from types import SimpleNamespace
 
-    from ouroboros import delegate_supervision as ds
     from ouroboros import loop
     from ouroboros.loop_tool_execution import StatefulToolExecutor, execute_tool_batch, process_tool_results
     from ouroboros.owner_mailbox import write_owner_message
@@ -768,9 +762,10 @@ def _legacy_spilled_wake(tmp_path, monkeypatch, *, annotated=False):
         assert write_owner_message(tmp_path, _mail(), _NANNY, msg_id="owner-mail")
         return json.dumps({"status": "no_progress", "run_id": rid})
 
+    scripted_reads(monkeypatch, observe)
     entry = registry._entries["delegate_wait"]
     monkeypatch.setitem(registry._entries, "delegate_wait", replace(entry, handler=delegate._published_entry(
-        lambda c, run_id: ds.supervised_wait(c, run_id, wait_once=observe))))
+        lambda c, run_id: publish(c, run_id))))
     call = {"id": "wait-call", "type": "function",
             "function": {"name": "delegate_wait", "arguments": json.dumps({"run_id": "run-one"})}}
     (tmp_path / "logs").mkdir(exist_ok=True)

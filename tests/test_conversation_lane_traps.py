@@ -165,7 +165,7 @@ def test_a_detach_transfers_its_bound_run_like_any_cold_sleep(monkeypatch, tmp_p
     monkeypatch.setattr("ouroboros.budget_pause.observe_task_runs",
                         lambda root, task_id, **k: {"custody_read": "ok", "runs": [run] if task_id == "t" else []})
     monkeypatch.setattr("ouroboros.delegate_custody.custody_root", lambda ctx: tmp_path)
-    monkeypatch.setattr("ouroboros.sleep_custody.transferable_pairs", lambda root, tid: ([("run-1", "inv-1")], None))
+    monkeypatch.setattr("ouroboros.sleep_custody.transferable_pairs", lambda root, tid: [("run-1", "inv-1")])
     monkeypatch.setattr("ouroboros.tools.services._SERVICES", {})
     monkeypatch.setattr("ouroboros.tools.services._LOCK", threading.Lock())
     monkeypatch.setattr("ouroboros.owner_pause._member_coordinates", lambda ctx: (tmp_path, "t", "t"))

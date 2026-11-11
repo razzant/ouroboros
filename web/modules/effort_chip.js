@@ -6,9 +6,10 @@
 // overlay-translated.
 import { fmt } from './i18n.js';
 import { effortText } from './effort_levels.js';
+import { PIN_BODY } from './page_icons.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
-const PIN_SVG = '<svg class="chat-live-effort-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg>';
+const PIN_SVG = `<svg class="chat-live-effort-pin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${PIN_BODY}</svg>`;
 
 /** `{level, requested, source}` from a chat frame, or null when the frame carries no effort level. */
 export function effortFact(frame) {

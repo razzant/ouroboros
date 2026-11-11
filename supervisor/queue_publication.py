@@ -3,7 +3,9 @@
 Every queue transition marks the publication dirty under Q (``persist_queue_snapshot``: one
 revision bump, no bytes). ONE publisher, the supervisor tick (``publish_queue_changes``),
 captures the rows under Q when the revision moved and serializes and writes them outside
-Q. The capture copies containers only (``_frozen``): strings are shared, so the owner's
+Q. Publication follows revision or pool-census changes, one writer at a time,
+only from a process that initialized the queue; boot without a provider writes
+no snapshot, dispatch or alive document. The capture copies containers only (``_frozen``): strings are shared, so the owner's
 text is never copied under the lock. A large task value that appears in more than one place (the
 owner's message in twenty rows, the task contract twice per row) is published once, by
 content address (``$shared``, the reference ``ouroboros/shared_values.py`` owns), so the document carries the owner's
@@ -383,7 +385,7 @@ def _census() -> str:
                 reported["model_waits"] = {wid: row for wid, row in waits.items()
                                            if isinstance(row, dict) and row.get("state") == "waiting"}
             rows.append((task_id, _row_facts(meta), reported))
-    return machine_json([rows, _pool_counts()])
+    return machine_json([rows, _pool_counts(census=True)])
 
 
 def _custody_key() -> tuple:
@@ -446,36 +448,36 @@ def _capture(reason: str, *, census: Optional[str] = None) -> Optional[Dict[str,
     }
 
 
-def _pool_counts() -> Dict[str, Any]:
+def _pool_counts(*, census: bool = False) -> Dict[str, Any]:
     """The pool's published facts, measured by ``worker_pool_lifecycle.pool_slot_counts`` (its docstring names
-    each count) from the ACTUAL pool, never the configured ceiling, plus the last assignment pass's growth
-    forecast (``project_demand``). A slot mid-reap is not assignable, so no reader is told of a free slot that
-    is not. A failed measurement publishes ``pool_observation_status: "unknown"`` with null counts: never
-    zeros, which would read as an empty pool. The census hashes these facts, so nothing here carries a clock
-    that moves without the facts."""
+    each count) from the ACTUAL pool, plus the last reading of the machine's memory (``memory_admission``:
+    ``pool_admission.facts``, dated by its own ``read_at``). A slot mid-reap is not
+    assignable, so no reader is told of a free slot that is not. A failed measurement publishes
+    ``pool_observation_status: "unknown"`` with null counts: never zeros, which would read as an empty pool. The
+    census hashes only whether starts are admitted and their reason in place of the reading's bytes, so a
+    change of verdict or reason publishes and byte noise does not."""
     try:
-        from supervisor import workers as _workers_mod
-        from supervisor.worker_pool_lifecycle import demand_forecast, pool_slot_counts
+        from supervisor import pool_admission, workers as _workers_mod
+        from supervisor.worker_pool_lifecycle import pool_slot_counts
 
         counts = pool_slot_counts(_workers_mod.WORKERS)
         disabled = _workers_mod._worker_pool_execution_state()["disabled_reason"]
         # Absence is counted above, not an explicit disablement.
         counts["worker_pool_disabled_reason"] = "" if disabled == "no_workers" else disabled
         counts["pool_observation_status"] = "observed"
-        counts["project_demand"] = demand_forecast()
+        memory = pool_admission.facts()
+        counts["memory_admission"] = (bool(memory.get("starts_admitted")), memory.get("reason", "")) if census else memory
         return counts
     except Exception:
         log.debug("Worker pool facts unavailable; published as unknown", exc_info=True)  # every tick: no warning flood
         return {**dict.fromkeys(_POOL_COUNT_KEYS), "worker_pool_disabled_reason": "unknown",
-                "pool_observation_status": "unknown", "pool_observation_error": "introspection_failed",
-                "project_demand": {"status": "unknown", "admissible_pending": None, "reason": "introspection_failed",
-                                   "scope": "last_assignment_pass"}}
+                "pool_observation_status": "unknown", "pool_observation_error": "introspection_failed"}
 
 
 #: The counts ``pool_slot_counts`` measures; an unknown observation publishes each as null.
-_POOL_COUNT_KEYS = ("max_workers", "worker_total", "active_worker_count", "parked_worker_count", "busy_worker_count",
-                    "booting_count", "reaping_count", "retiring_count", "assignable_idle_workers",
-                    "lane_carrier_total", "lane_carrier_idle")
+_POOL_COUNT_KEYS = ("max_workers", "worker_total", "parked_worker_count", "busy_worker_count",
+                    "acting_worker_count", "booting_count", "reaping_count", "retiring_count",
+                    "assignable_idle_workers", "lane_carrier_total", "memory_admission")
 
 
 def _documents(capture: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:

@@ -17,6 +17,7 @@ from ouroboros.tools.tool_result import (
     _compose_execute_result_result,
     _replace_tool_result,
     _structured_failure,
+    safety_refusal,
 )
 
 
@@ -182,7 +183,7 @@ def _dispatch_mcp_tool_result(
         ctx=ctx,
     )
     if not is_safe:
-        return ToolResult(status="blocked", code="SAFETY_VIOLATION", text=safety_msg)
+        return ToolResult(*safety_refusal(safety_msg), text=safety_msg)
     try:
         from ouroboros.mcp_client import _call_mcp_tool_result as _mcp_call
 
@@ -372,7 +373,7 @@ def _dispatch_extension_tool_untagged(
         ext_tool=ext_tool,
     )
     if not _ext_safe:
-        return _extension_result("blocked", "SAFETY_VIOLATION", _ext_safety_msg)
+        return _extension_result(*safety_refusal(_ext_safety_msg), _ext_safety_msg)
 
     from ouroboros.owner_pause import admit_tool_dispatch, run_tool_handler, submit_async_operation, OwnerPauseRefused
     from ouroboros.llm_attempt import PhysicalDispatchInterrupted

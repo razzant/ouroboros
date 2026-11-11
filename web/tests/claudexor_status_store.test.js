@@ -491,6 +491,29 @@ test('concurrent refreshes share ONE http request and ONE snapshot', async () =>
     store.dispose();
 });
 
+test('an event requests models after an older model read; ordinary callers still share it', async () => {
+    let release;
+    let reads = 0;
+    const gate = new Promise(resolve => { release = resolve; });
+    const store = createClaudexorStatusStore({doc: fakeDoc(), fetchImpl: async () => {
+        const ordinal = ++reads;
+        if (ordinal === 1) await gate;
+        return okResponse({...RUNNING, harnesses: [{id: 'future', models: [{id: ordinal === 1 ? 'old' : 'new'}]}]});
+    }});
+    const old = store.refresh({includeModels: true});
+    const plain = store.refresh();
+    assert.equal(reads, 1);
+    const after = store.refresh({includeModels: true, afterCurrent: true});
+    const another = store.refresh({includeModels: true, afterCurrent: true});
+    release();
+    await Promise.all([old, plain, after, another]);
+    assert.equal(reads, 2, 'settled-event callers share one read that starts after the older one');
+    assert.equal(store.snapshot.harnesses[0].models[0].id, 'new');
+    await store.refresh({includeModels: true, afterCurrent: true});
+    assert.equal(reads, 3, 'no extra read when none was in flight');
+    store.dispose();
+});
+
 test('includeModels is sticky-upgrading: no later read downgrades the shared snapshot', async () => {
     const urls = [];
     let release = null;
