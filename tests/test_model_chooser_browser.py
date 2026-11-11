@@ -298,15 +298,23 @@ def vendor_scene(ui, count=1):
     return world
 
 
+def vendor_role_field(page, slot):
+    if slot == "fallback":
+        page.locator("[data-model-add]").click()
+    group = page.locator(f'[data-model-role-group="{slot}"]')
+    local = group.locator('[data-model-local]')
+    if local.count() and local.is_checked():
+        local.uncheck()
+    row = group.locator('.model-role-row').last
+    row.locator("[data-model-role-source]").select_option("subscription:opaque-source")
+    return row.locator("[data-model-role-model]")
+
+
 def vendor_consumer(ui, consumer):
     page = ui["page"]
-    if consumer in ("Models", "Fallback"):
+    if consumer not in ("Reviewer", "Agent"):
         page.get_by_role("tab", name="Models", exact=True).click()
-        if consumer == "Fallback":
-            page.locator("[data-model-add]").click()
-        row = page.locator('[data-model-role="main"]') if consumer == "Models" else page.locator('[data-model-role-group="fallback"] .model-role-row').last
-        row.locator("[data-model-role-source]").select_option("subscription:opaque-source")
-        return row.locator("[data-model-role-model]")
+        return vendor_role_field(page, "main" if consumer == "Models" else consumer.lower())
     page.get_by_role("tab", name="Agents", exact=True).click()
     return page.locator("[data-subagent-row]").nth(0 if consumer == "Reviewer" else 1).locator('[data-subagent-field="model"]')
 
@@ -323,7 +331,7 @@ def test_vendor_footer_every_settings_consumer_at_scale(role_ui, width, account_
     expect(page.locator("[data-subagent-row]")).to_have_count(6)
     expect(page.locator("[data-model-footer]:visible")).to_have_count(0)
     roles.capture(page, f"program-editors-closed-{account_count}-{width}")
-    for consumer in ("Reviewer", "Agent", "Models", "Fallback"):
+    for consumer in ("Reviewer", "Agent", "Models", "Light", "Safety", "Vision", "Consciousness", "Fallback"):
         field = vendor_consumer(ui, consumer)
         field.fill("choice")
         footer = page.locator("[data-model-footer]:visible")
@@ -433,6 +441,14 @@ def test_vendor_footer_in_wizard_models_reviewers_and_place_sheet(role_ui, width
     expect(footer.get_by_role("button", name="Update", exact=True)).to_be_enabled()
     roles.capture(page, f"program-wizard-model-{account_count}-{width}")
     field.press("Escape")
+    for slot in ("light", "safety", "vision", "consciousness", "fallback"):
+        field = vendor_role_field(page, slot)
+        field.fill("choice")
+        expect(footer).to_have_count(1)
+        expect(footer.locator("[data-program]")).to_have_count(1)
+        expect(footer).to_contain_text("List from Codex 2.0.0")
+        expect(footer.get_by_role("button", name="Update", exact=True)).to_be_enabled()
+        field.press("Escape")
     page.locator('[data-collapse="subagents"] > summary').click()
     reviewer = page.locator('[data-subagent-row]').first
     expect(reviewer.locator('[data-subagent-field="review_eligible"]')).to_be_checked()
