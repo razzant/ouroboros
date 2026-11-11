@@ -198,12 +198,14 @@ def continue_unknown_transport(episode: TransportWaitEpisode, *, llm: Any, tools
                                messages: list, accumulated_usage: dict, drive_logs: Any,
                                task_id: str, model: str, emit_progress: Callable) -> bool:
     """Grant one NEW attempt only after upstream recovery, retaining old custody."""
-    from ouroboros.config import get_llm_transport_read_timeout_sec
     from ouroboros.deadline_utils import dispatch_window_remaining_sec
+    from ouroboros.llm import LLMClient
     remaining = dispatch_window_remaining_sec(deadline_ts=task_deadline_epoch(tools), reserve_sec=get_finalization_grace_sec())
     if remaining is not None and remaining <= 0:
         return False
-    timeout = float(get_llm_transport_read_timeout_sec())
+    # Metadata carries no cognitive in-flight lease and may stand in front of the configured routes:
+    # the ordinary connection allowance on every route, never the LLM read window.
+    timeout = float(LLMClient._no_proxy_timeout().connect)
     if remaining is not None:
         timeout = min(timeout, remaining)
     from ouroboros.model_slots import task_model_binding
@@ -261,8 +263,9 @@ def fallback_chain_allowed(
     One lost answer is evidence about an attempt, not its route: an acting primary's
     eligible unknown outcome with no wait open takes its own continuation first (the
     episode's entry step, then ``continue_unknown_transport``; owner decision 2026-11-11).
-    A missed observation or any failure of that new attempt walks from the open episode,
-    and so does every unknown outcome of another acting route. A declared
+    A missed observation walks from the open episode. The new attempt is an ordinary one:
+    its outcome takes that kind's recovery (lost again or undelivered walks at once; a cut
+    reply keeps its ladder), as does another acting route's unknown outcome. A declared
     wait on the primary (``switch_model(primary="wait")``) keeps its refusals and
     outages on the primary's own wait instead of paid alternatives. A context overflow
     reaches the configured routes only after the primary's own recovery ladder
@@ -301,6 +304,7 @@ def reconcile_transport_wait(
     task_id: str,
     model: str,
     emit_progress: Callable[..., None],
+    by_configured_route: bool = False,
 ) -> Optional[TransportWaitEpisode]:
     """Reconcile the episode latch with one dispatch outcome.
 
@@ -325,7 +329,8 @@ def reconcile_transport_wait(
     response ends the episode as ``recovered`` (mandatory owner note), a
     NON-transport failure ends it as evidence the transport is passable again,
     while ``transport_unavailable`` and a pre-dispatch deadline refusal keep the
-    latch for the wait/terminal step.
+    latch for the wait/terminal step. A configured route's answer (``by_configured_route``)
+    ends it as ``configured_route_answered``, no recovery note: the walk says who answered.
     A granted continuation that fails again — unknown after dispatch, or
     released before it — returns to the SAME episode (work-order §B9 "repeated
     unknown creates no burst"), and so does a free redial that crosses dispatch
@@ -345,6 +350,9 @@ def reconcile_transport_wait(
         # pacing, elapsed bound and prior unknown custody; only a real answer ends it.
         episode.wait_cause, episode.continuation_granted = error_kind, False
         return episode
+    if (episode is not None and not episode.continuation_granted and not msg_present and pending and not unknown_again
+            and error_kind == episode.wait_cause == "provider_outcome_unknown"):
+        episode = None  # as the granted case below: an operation that may still finish is only rejoined
     if episode is not None and episode.continuation_granted:
         if (msg_present or error_kind not in ("provider_outcome_unknown", "transport_unavailable")
                 or (error_kind == "provider_outcome_unknown" and pending and not unknown_again)):
@@ -433,6 +441,10 @@ def reconcile_transport_wait(
         )
         return episode
     elapsed = time.monotonic() - episode.started_monotonic
+    if msg_present and by_configured_route:  # the waited route proved nothing
+        emit_network_wait_event(drive_logs, task_id=task_id, phase="ended", elapsed_sec=elapsed,
+                                redials=episode.redials, model=model, detail="configured_route_answered")
+        return None
     if msg_present:
         emit_network_wait_event(
             drive_logs, task_id=task_id, phase="recovered", elapsed_sec=elapsed,

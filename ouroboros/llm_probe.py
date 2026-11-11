@@ -341,10 +341,6 @@ def upstream_transport_reachable(llm: Any, model: str, *, timeout: float,
     from ouroboros.provider_models import parse_claudexor_model, provider_for_model
     from ouroboros.transport_custody import is_loopback_base_url
     try:
-        # Metadata carries no cognitive in-flight lease. Every phase of this read, on every
-        # route, gets the ordinary connection allowance, never the LLM read window.
-        from ouroboros.llm import LLMClient
-        timeout = min(float(timeout), float(LLMClient._no_proxy_timeout(timeout).connect))
         if provider_for_model(model) == "claudexor":
             from ouroboros.llm_claudexor import catalog_admits_model, model_catalog
             from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option
@@ -380,6 +376,9 @@ def upstream_transport_reachable(llm: Any, model: str, *, timeout: float,
         if not url or is_loopback_base_url(url):
             return {}
         import httpx
+        # Metadata carries no cognitive in-flight lease. Reuse the ordinary
+        # connection allowance for every HEAD phase, not the LLM read window.
+        timeout = min(float(timeout), float(llm._no_proxy_timeout(timeout).connect))
         from ouroboros.net_transport import verify_kwargs
         with httpx.Client(trust_env=False, timeout=timeout, follow_redirects=False, **verify_kwargs()) as client:
             response = client.head(url)

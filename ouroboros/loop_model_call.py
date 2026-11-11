@@ -450,10 +450,11 @@ def _recover_failed_round(limit_ctx: Any, tools: ToolRegistry, msg: Any, episode
     usage, ctx = limit_ctx.accumulated_usage, tools._ctx
     model, use_local = limit_ctx.active_model, limit_ctx.active_use_local
 
-    def reconcile(current: Any) -> Any:
+    def reconcile(current: Any, after_walk: bool = False) -> Any:  # past the walk, only a configured route answers
         return _loop()._reconcile_transport_wait(
             current, ctx, msg_present=msg is not None, error_kind=str(usage.get("_last_llm_error_kind") or ""),
-            drive_logs=limit_ctx.drive_logs, task_id=limit_ctx.task_id, model=model, emit_progress=emit_progress)
+            drive_logs=limit_ctx.drive_logs, task_id=limit_ctx.task_id, model=model, emit_progress=emit_progress,
+            by_configured_route=after_walk and msg is not None)
 
     if episode is not None:
         episode = reconcile(episode)
@@ -484,7 +485,7 @@ def _recover_failed_round(limit_ctx: Any, tools: ToolRegistry, msg: Any, episode
             usage["_last_llm_error_kind"] = "provider_outcome_unknown" if outstanding else kind
             if outstanding:
                 usage["_pending_transport_outcome"] = outstanding
-    return msg, model, use_local, context_fit_plan, active_context_mode, reconcile(episode)
+    return msg, model, use_local, context_fit_plan, active_context_mode, reconcile(episode, after_walk=True)
 
 
 def _walk_fenced(tool_ctx: Any, usage: Dict[str, Any]) -> bool:

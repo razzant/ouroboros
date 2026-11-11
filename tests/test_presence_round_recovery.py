@@ -134,7 +134,7 @@ def test_configured_fallback_keeps_completed_tools_pins_and_ceiling(data_root, m
     assert TRANSPORT_DEATHS_KEY not in usage
     assert [row["retry_same_request"] for row in _events(data_root / "logs", "llm_api_error")] == [False]
     assert len(probes) == 1 and [(row["phase"], row.get("detail", "")) for row in _events(data_root / "logs", "network_wait")] == [
-        ("entered", ""), ("waiting", ""), ("continued", "upstream_not_observed"), ("recovered", "")]
+        ("entered", ""), ("waiting", ""), ("continued", "upstream_not_observed"), ("ended", "configured_route_answered")]
 
 
 def test_same_operation_recoverable_never_dials_a_fallback(data_root, monkeypatch):
