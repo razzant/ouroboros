@@ -213,7 +213,7 @@ def test_replaced_words_are_told_once_in_their_own_block_at_every_level(remote_t
         text = conv.render_group(group, gone.get("F6w", set()), gone.get("F7", set()), form)
         if form == 3:
             assert gist["summary"] not in text
-            assert receipt["emergency"]["last gist"]["sources"] >= 1
+            assert receipt["emergency"]["untold and older gists by count"]["sources"] >= 1
         else:
             replaced = any(w["id"] in gone.get("F6w", ()) for w in remote["words"][:2])
             assert text.count(work.first_sentence(gist["summary"])) == int(bool(form or replaced or remote_task))
@@ -427,13 +427,111 @@ def test_final_counts_and_holding_cover_sources_without_counting_swallowed_forms
     assert "room openings" not in counts["emergency"]
     assert counts["emergency"]["room ranges"] == {"lines": 1, "sources": 8}
     held = forms.holding_room(snap, mv.FULL_VIEW)
-    assert {"accounts", "parts", "pages without part", "records without lead", "untold in this room",
+    assert {"accounts", "parts", "pages without part", "untold in this room",
             "owner words in other rooms", "notes", "room records"} <= held["tokens"].keys()
-    assert len(held["largest"]) == 3 and all(reader.startswith("memory_read(") for _tokens, reader in held["largest"])
+    assert "records without lead" not in held["tokens"] and held["without_lead"]
+    assert len(held["largest"]) == 3 and all(": memory_read(" in reader for _tokens, reader in held["largest"])
     facts = mf.view_facts(snap, level, window_tokens=200000, mode="low", allowances={})["floor"]
     assert facts["forms"] == counts and facts["holding"] == forms.holding_room(snap, level)
     note = mf.floor_note(level, window_tokens=200000, mode="low", snapshot=snap)
     assert all(x in note for x in ("my telling", "host facts", "emergency without", "Holding the room"))
+
+
+def test_holding_counts_hidden_untold_words_and_ranks_units_with_readers():
+    remote = syn.conversation(1, words=2, word_chars=50000)
+    for word in remote["rooms"][0]["words"]:
+        word["rank"] = 1
+    owner = syn.conversation(2, words=1, word_chars=20000, owner=True)
+    room = syn.room(lane1=[syn.spoken(1, "ouroboros", 60000)])
+    snap = syn.snapshot(room_facts=room, story=syn.pages(3, 500), conversations=[remote, owner])
+    expected = mf.view_tokens("\n".join(w["line"] for w in remote["rooms"][0]["words"]))
+    for level in (mv.FULL_VIEW, mv.FloorLevel((("F6g", ("all:" + remote["key"],)),)),
+                  mv.FloorLevel((("F6a", (remote["key"],)),))):
+        held = forms.holding_room(snap, level)
+        assert held["tokens"]["untold in other conversations"] == expected
+        assert held["counts"]["untold in other conversations"] == {"conversations": 1, "counted_rows": 2 if level.addressed else 0}
+        assert list(held["tokens"].values()) == sorted(held["tokens"].values(), reverse=True)
+        largest = held["largest"]
+        assert [text.split(", ", 1)[0] for _n, text in largest] == [
+            "untold in other conversations", "untold in this room", "owner words in other rooms"]
+        assert f"{remote['label']}: memory_read(room_id='2001', rows=true)" in largest[0][1]
+        assert f"from='{room['lane1'][0]['address']}'" in largest[1][1]
+        assert f"{owner['label']}: memory_read(room_id='2002', rows=true)" in largest[2][1]
+
+
+@pytest.mark.parametrize("mode,physical", [("low", ""), ("nano", ""), ("low", "F7"), ("low", "F6a")])
+def test_holding_note_keeps_unit_readers_only_above_the_physical_floor(mode, physical):
+    page = syn.pages(1, 4000)[0]
+    remote = syn.conversation(1, words=2, word_chars=5000)
+    for word in remote["rooms"][0]["words"]:
+        word["rank"] = 1
+    room = syn.room(lane1=[syn.spoken(1, "human", 1000)])
+    snap = syn.snapshot(story=[page], room_facts=room, conversations=[remote])
+    cuts = [("F5", (page["id"],))]
+    if physical == "F7":
+        cuts.append(("F7", (room["lane1"][0]["address"],)))
+    elif physical == "F6a":
+        cuts.append(("F6a", (remote["key"],)))
+    note = mf.floor_note(mv.FloorLevel(tuple(cuts)), mode=mode, snapshot=snap,
+                         window_tokens=200000, tool_names=["enable_tools"])
+    holding = note[note.index("Holding the room (tokens):"):].splitlines()
+    assert "untold in other conversations" in holding[0]
+    compact = mode == "nano" or bool(physical)
+    assert any("tokens, " in line and "memory_read(" in line for line in holding) is not compact
+    assert ("(" in holding[0].removeprefix("Holding the room (tokens):")) is not compact
+    if mode == "nano":
+        assert "memory_read is reachable through enable_tools" in note
+
+
+def test_holding_records_have_one_kind_and_one_reader_even_when_present_in_both_blocks():
+    page = syn.pages(1, 4000)[0]
+    room = syn.room(under=1)
+    room["under_parts"] = [dict(page, part="part1", standing=False)]
+    snap = syn.snapshot(story=[page], room_facts=room)
+    held = forms.holding_room(snap, mv.FULL_VIEW)
+    assert "records without lead" not in held["tokens"]
+    assert held["without_lead"] == {"pages without part": 1}
+    assert len(held["largest"]) == 1
+    assert held["largest"][0][0] == held["tokens"]["pages without part"]
+    assert "memory_read(node_id='page-000')" in held["largest"][0][1]
+
+
+def test_holding_includes_whole_remote_replies_until_their_gist_replaces_them():
+    snap, _gist = completed_room()
+    snap.room["lane1"] = []
+    group = snap.conversations[0]
+    whole = forms.holding_room(snap, mv.FULL_VIEW)
+    expected = mf.view_tokens("\n".join(w["line"] for w in group["rooms"][0]["words"]))
+    assert whole["tokens"]["replies of completed works"] == expected
+    line = mv.FloorLevel((("F6g", (group["key"],)),))
+    reduced = forms.holding_room(snap, line)
+    assert "replies of completed works" not in reduced["tokens"]
+    assert reduced["tokens"]["work gists"] > 0
+
+
+def test_holding_note_names_a_sole_task_gist_lost_even_without_another_cut():
+    snap, _gist = completed_room()
+    snap.room["lane1"] = []
+    task = snap.room["lane2"][0]
+    level = mv.FloorLevel((("F1", (task["first"],)),))
+    for chosen in (mv.FULL_VIEW, level):
+        note = mf.floor_note(chosen, snapshot=snap, mode="low", window_tokens=200000)
+        assert ("Holding the room" in note) is bool(chosen.addressed)
+
+
+@pytest.mark.parametrize("cause", ["crowded", "route", "held"])
+def test_holding_note_also_names_memory_lowering_without_any_replacement(cause):
+    from tests.test_memory_low_start import _room
+    snap = syn.snapshot(story=syn.pages(1, 500))
+    text = mf.floor_note(mv.FULL_VIEW, snapshot=snap, window_tokens=1000000, mode="low",
+                         lowered_from="max", max_room=_room(cause))
+    assert ("Holding the room" in text) is (cause == "crowded")
+    assert "Reduced forms" not in text
+    group = syn.conversation(1, words=2)
+    snap = syn.snapshot(conversations=[group])
+    unread = mv.FloorLevel((("F6a", (group["key"], "unread")),))
+    text = mf.floor_note(unread, snapshot=snap, window_tokens=200000, mode="low")
+    assert "Window emergency over unread words" in text and "Holding the room" not in text
 
 
 def test_view_facts_do_not_publish_working_parts_and_keep_the_note_bytes(tmp_path):
@@ -446,10 +544,10 @@ def test_view_facts_do_not_publish_working_parts_and_keep_the_note_bytes(tmp_pat
         "### Physical floor\n"
         "Low cuts for the window (200000 tokens). Reduced forms — my telling: none; host facts: none; "
         "emergency without my telling: story openings: 2 lines/1 sources. Read sources with memory_read.\n"
-        "Holding the room (tokens): pages without part 91, records without lead 91.\n"
-        "31 tokens: memory_read(node_id='page-000')\n"
-        "30 tokens: memory_read(node_id='page-001')\n"
-        "30 tokens: memory_read(node_id='page-002')"
+        "Holding the room (tokens): pages without part 91 (3 records without lead).\n"
+        "31 tokens, pages without part, Main page-000: memory_read(node_id='page-000')\n"
+        "30 tokens, pages without part, Main page-001: memory_read(node_id='page-001')\n"
+        "30 tokens, pages without part, Main page-002: memory_read(node_id='page-002')"
     )
     assert mf.floor_note(level, window_tokens=200000, mode="low", snapshot=snap).encode() == note.encode()
     ctx = SimpleNamespace(drive_root=tmp_path, task_id="receipt", task_attempt=1)

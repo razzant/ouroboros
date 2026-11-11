@@ -82,7 +82,9 @@ def _count_forms(snapshot, level):
     for key, records in legacy.pointer_rooms(snapshot.story).items():
         if key in gone.get("F3", ()):
             add("emergency", "old story ranges", 1, len(records))
-    _remote_counts(snapshot, gone, add)
+    lost = _remote_counts(snapshot, gone, add)
+    snapshot.__dict__.setdefault("_telling_emergency", {})[level.addressed] = bool(
+        lost or counts["emergency"].keys() - {"conversation count"})
     return counts
 
 
@@ -111,6 +113,7 @@ def _remote_counts(snapshot, gone, add):
     add("emergency", "conversation count", int(bool(groups_counted)), lost or groups_counted)
     add("host", "event counts", int(bool(event_arrivals) and not groups_counted), event_arrivals)
     add("window", "unread count", int(bool(global_unread)), global_unread)
+    return lost
 
 
 def _group_counts(group, data, sources, state, aggregate_unread):
@@ -133,7 +136,7 @@ def _group_counts(group, data, sources, state, aggregate_unread):
         add("retold", "work gists", len(shown), len(shown))
         if form >= 2:
             missing = data["untold"] + len(gists) - len(shown) + sum(len(r["notes"]) for r in group["rooms"])
-            add("emergency", "all gists" if form == 2 else "last gist", 1, missing)
+            add("emergency", "untold by count under gists" if form == 2 else "untold and older gists by count", 1, missing)
         no_gist = sum(not t.get("gist") for r in group["rooms"] for t in r["tasks"])
         add("host", "tasks without gist", int(bool(no_gist)), no_gist)
     elif not count and data["gists"]:
@@ -177,57 +180,75 @@ def holding_room(snapshot, level):
 
 
 def _holding_room(snapshot, level):
-    """Prices of the final sources, not of their old full forms; diagnoses may overlap."""
+    """Disjoint source kinds; untold remote words retain their whole-text price under every form."""
     gone = {step: set(ids) for step, ids in level.addressed}
-    totals, ready = {}, []
-    def hold(kind, text, reader="", unmarked=False):
-        tokens = (mv.json_chars(text) + 5) // 4 if text else 0
+    totals, ready, without_lead, counts, seen = {}, {}, {}, {}, set()
+    prices = snapshot.__dict__.setdefault("_holding_text_prices", {})
+    def price(text):
+        if text not in prices:
+            prices[text] = (mv.json_chars(text) + 5) // 4 if text else 0
+        return prices[text]
+    def hold(kind, text, reader, *, label="", unmarked=0, tokens=None):
+        tokens = price(text) if tokens is None else tokens
         if tokens:
             totals[kind] = totals.get(kind, 0) + tokens
             if unmarked:
-                totals["records without lead"] = totals.get("records without lead", 0) + tokens
-            if reader:
-                ready.append([tokens, reader])
+                without_lead[kind] = without_lead.get(kind, 0) + int(unmarked)
+            description = f"{kind}, {label}: {reader}"
+            ready[description] = ready.get(description, 0) + tokens
     pages = [e for e in snapshot.story if not e.get("told_by") and e.get("kind") != "legacy"]
     aggregated = [e for e in pages if e["id"] in gone.get("F5", ())] if gone.get("F5a") else []
     grouped_ids = {e["id"] for e in aggregated}
+    seen.update(grouped_ids)
     if aggregated:
         hold("story lists", "\n".join([mv._story_line(aggregated),
              *(line for e in aggregated for line in mv.page_quote_lines(e, gone.get("F7", ()), short=True))]),
-             unmarked=any("lead_rule" not in e for e in aggregated))
+             "memory_read(story=true, start=0)", label="older pages and parts",
+             unmarked=sum("lead_rule" not in e for e in aggregated))
     for entry in pages:
         ident, kind = entry["id"], entry.get("kind")
         if entry["id"] in grouped_ids:
             continue
+        seen.add(ident)
         text = (mv._page_short(entry, gone.get("F7", ())) if ident in gone.get("F5", ()) else
                 mv._page_short(entry, gone.get("F7", ()), lead=True) if ident in gone.get("F5l", ()) else
                 "\n".join(mv._page_lines(entry, gone.get("F7", ()))))
         hold({"account": "accounts", "part": "parts"}.get(kind, "pages without part"), text,
-             f"memory_read(node_id='{ident}')", unmarked=kind != "account" and "lead_rule" not in entry)
+             f"memory_read(node_id='{ident}')", label=f"{entry.get('label', kind)} {ident}",
+             unmarked=kind != "account" and "lead_rule" not in entry)
     for key, records in legacy.pointer_rooms(snapshot.story).items():
         hold("old story", legacy.room_pointer(records) if key in gone.get("F3", ()) else
-             "\n".join(legacy.retold_record(e) for e in records), f"memory_read(room_id='{key}')", unmarked=True)
+             "\n".join(legacy.retold_record(e) for e in records), f"memory_read(room_id='{key}')",
+             label=records[0].get("label", key), unmarked=len(records))
     room = snapshot.room or {}
+    own_reader, own_label = _rows_reader(room.get("room_id"), room.get("lane1", ())), room.get("label", "this room")
     for entry in [*room.get("legacy", ()), *room.get("under_parts", ())]:
+        if entry["id"] in seen:
+            continue
+        seen.add(entry["id"])
         hold("room records", mv._retold(entry, entry["id"] in gone.get("F4", ()) or entry.get("standing", False)),
-             f"memory_read(node_id='{entry['id']}')", unmarked=not entry.get("standing") and "lead_rule" not in entry)
+             f"memory_read(node_id='{entry['id']}')", label=entry["id"],
+             unmarked=not entry.get("standing") and "lead_rule" not in entry)
     notes = room.get("notes", ())
     aggregate_notes = [e for e in notes if e["id"] in gone.get("F8", ())] if gone.get("F8a") else []
     grouped_notes = {e["id"] for e in aggregate_notes}
     if aggregate_notes:
-        hold("notes", mv._notes_line(aggregate_notes), unmarked=any("lead_rule" not in e for e in aggregate_notes))
+        hold("notes", mv._notes_line(aggregate_notes), f"memory_read(room_id='{room['room_id']}')",
+             label=own_label, unmarked=sum("lead_rule" not in e for e in aggregate_notes))
     for note in notes:
         if note["id"] not in grouped_notes:
             text = mv._note_pointer(note) if note["id"] in gone.get("F8", ()) else "\n".join(mv._note_lines([note]))
-            hold("notes", text, f"memory_read(node_id='{note['id']}')", unmarked="lead_rule" not in note)
+            hold("notes", text, f"memory_read(node_id='{note['id']}')", label=note["id"], unmarked="lead_rule" not in note)
     hidden, work_lines = folded_work_rows(room, gone)
     addressed = hidden | {i.removeprefix("bare:") for step in ("F2", "F7p", "F7") for i in gone.get(step, ())}
     aggregate = [r for r in room.get("lane1", ()) if r["address"] in addressed and not r.get("immune")] if gone.get("F7a") else []
     if aggregate:
-        hold("untold in this room", mv._rows_line(room, aggregate))
+        hold("room ranges", mv._rows_line(room, aggregate), _rows_reader(room["room_id"], aggregate), label=own_label)
     else:
-        for line in work_lines.values():
-            hold("work gists", line)
+        by_address = {r["address"]: (key, rows) for key, rows in works(room) for r in rows}
+        for address, line in work_lines.items():
+            key, rows = by_address[address]
+            hold("work gists", line, _rows_reader(room["room_id"], [r for r in rows if r["address"] in hidden]), label="work " + key)
     folded = {key for key, _rows in works(room) if any("work:" + key + suffix in gone.get("F2", ())
                                                      for suffix in (":progress", ":final"))} if not aggregate else set()
     only_gists = {t["first"] for t in task_gists_before_work_lines(room, gone)}
@@ -235,26 +256,129 @@ def _holding_room(snapshot, level):
         if task.get("gist") and (task["first"] not in gone.get("F1", ()) or task["first"] in only_gists) and task.get("task") not in folded:
             gist = task["gist"]
             hold("task gists", task_gist_line(task) if task["first"] in only_gists else task_line(task), f"memory_read(room_id='{gist['room_id']}', rows=true, "
-                 f"from='{gist['address']}', to='{gist['address']}')")
+                 f"from='{gist['address']}', to='{gist['address']}')", label="work " + task["task"])
     grouped_rows = {r["address"] for r in aggregate}
     for row in room.get("lane1", ()):
-        if row["address"] in grouped_rows or row.get("gist") or row["address"] in hidden:
+        if row["address"] in grouped_rows or row["address"] in hidden:
             continue
         step = "F2" if row["kind"] == "ouroboros" else "F7" if row.get("owner_side", row["kind"] == "human") else "F7p"
         label = "my reply" if step == "F2" else "words"
         text = (mv._row_pointer(row, label) if "bare:" + row["address"] in gone.get(step, ()) or
                 step == "F7" and row["address"] in gone.get(step, ()) else mv._row_opening(row, label)
                 if row["address"] in gone.get(step, ()) else row["line"])
-        hold("untold in this room", text)
-    for item in [*room.get("origins", ()), *(room.get("project_words") or ())]:
-        hold("untold in this room", item.get("short") if item.get("address") in gone.get("F7", ()) else item.get("line", item.get("text", "")))
+        hold("replies of completed works" if row.get("gist") else "untold in this room", text, own_reader, label=own_label)
+    for item in room.get("origins", ()):
+        hold("work origins", item.get("text", ""), "memory_read(owner_words=true)", label=own_label)
+    for item in room.get("project_words") or ():
+        hold("untold in this room", item.get("short") if item.get("address") in gone.get("F7", ()) else item.get("line", ""),
+             _rows_reader(room.get("room_id"), [item]), label=own_label)
+    _hold_conversations(snapshot, gone, hold, price, counts)
+    return {"tokens": dict(sorted(totals.items(), key=lambda pair: (-pair[1], pair[0]))),
+            "without_lead": without_lead, "counts": counts,
+            "largest": [[tokens, description] for description, tokens in sorted(ready.items(), key=lambda p: (-p[1], p[0]))[:3]]}
+
+
+def _rows_reader(room_id, rows):
+    addresses = [r["address"] for r in rows if r.get("address")]
+    span = f", from='{addresses[0]}', to='{addresses[-1]}'" if addresses else ""
+    return f"memory_read(room_id='{room_id}', rows=true{span})"
+
+
+def _hold_conversations(snapshot, gone, hold, price, counts):
+    from ouroboros import memory_view_conversation_forms as conv
+    index = conv.source_index(snapshot)
+    cache = snapshot.__dict__.setdefault("_holding_conversations", {})
     for group in snapshot.conversations:
-        form, counted = conversations.group_form(group, gone), group["key"] in gone.get("F6a", ())
-        for remote in group["rooms"]:
-            for note in remote["notes"] if not counted and form < 2 else ():
-                hold("notes", mv._note_pointer(note) if form else "\n".join(mv._note_lines([note])),
-                     f"memory_read(node_id='{note['id']}')", unmarked="lead_rule" not in note)
-    for _unread, owners, _rest in _conversation_sources(snapshot).values():
-        for word in owners:
-            hold("owner words in other rooms", mv._row_pointer(word, "words") if word["id"] in gone.get("F7", ()) else word["line"])
-    return {"tokens": totals, "largest": sorted(ready, key=lambda entry: (-entry[0], entry[1]))[:3]}
+        data = index[group["key"]]
+        state = conv.local_key(group, gone, data)
+        form, words, owners, _events = state[3:]
+        aggregate_unread = form == 4 and "unread" in gone.get("F6a", ())
+        key = (*state, aggregate_unread)
+        if key not in cache:
+            newest = max(group["rooms"], key=lambda r: (r.get("last", r.get("first", 0)), r["facts"].get("latest", "")))
+            reader = f"memory_read(room_id='{newest['room_id']}', rows=true)"
+            entries = []
+            def add(kind, text, source=reader, label=group["label"], unmarked=0):
+                entries.append((kind, price(text), source, label, unmarked))
+            untold = [w for r in data["rooms"].values() for w in r["untold"]]
+            if untold:
+                add("untold in other conversations", "\n".join(w["line"] for w in untold))
+            if not form:
+                add("replies of completed works", "\n".join(w["line"] for r in data["rooms"].values()
+                    for w in r["told"] if w["id"] not in words))
+            if data["owners"]:
+                add("owner words in other rooms", "\n".join(mv._row_pointer(w, "words") if w["id"] in owners
+                                                            else w["line"] for w in data["owners"]))
+            for remote in group["rooms"]:
+                for note in remote["notes"] if form < 2 else ():
+                    add("notes", mv._note_pointer(note) if form else "\n".join(mv._note_lines([note])),
+                        f"memory_read(node_id='{note['id']}')", note["id"], int("lead_rule" not in note))
+                unread = data["rooms"][remote["room_id"]]["unread"]
+                if not aggregate_unread:
+                    if form and not remote.get("overheard") and unread:
+                        add("unread host facts", conv._unread_line(unread))
+                    elif not form:
+                        whole = [w["line"] for w in unread if w["id"] not in words]
+                        folded = [w for w in unread if w["id"] in words]
+                        add("unread words in other conversations", "\n".join(whole))
+                        if folded:
+                            add("unread host facts", conv._unread_line(folded))
+                if form < 4 and (fold := remote.get("folded")):
+                    add("read and folded", conv._fold_line(remote),
+                        f"memory_read(room_id='{remote['room_id']}', rows=true, from='{fold['from']}', to='{fold['to']}')")
+            if form and not aggregate_unread:
+                add("unread host facts", conv._overheard_line(group, data))
+            if 0 < form < 4:
+                gists = data["gists"][-1:] if form == 3 else data["gists"]
+                add("work gists", "\n".join(conv._gist_lines(group, gists=gists, replies=data["replies"])))
+            elif not form:
+                add("work gists", "\n".join(conv._gist_lines(group, gists=conv._visible_gists(group, data, words))))
+                for remote in group["rooms"]:
+                    for task in remote["tasks"]:
+                        if task.get("gist"):
+                            add("task gists", task_line(task))
+            cache[key] = tuple(entries)
+        for kind, tokens, reader, label, unmarked in cache[key]:
+            hold(kind, "", reader, tokens=tokens, label=label, unmarked=unmarked)
+        if data["untold"]:
+            entry = counts.setdefault("untold in other conversations", {"conversations": 0, "counted_rows": 0})
+            entry["conversations"] += 1
+            entry["counted_rows"] += data["untold"] if form >= 2 else 0
+        if data["owners"]:
+            entry = counts.setdefault("owner words in other rooms", {"conversations": 0})
+            entry["conversations"] += 1
+
+
+def telling_emergency(snapshot, level):
+    """An unread-only or event count stays an emergency form, but owes no telling."""
+    form_counts(snapshot, level)
+    return snapshot.__dict__["_telling_emergency"][level.addressed]
+
+
+def physical_floor(level, mode):
+    """Nano, or a level retaining a stage from remote_count through owner."""
+    return mode == "nano" or any(step in ("F6a", "F5a", "F8a", "F7", "F7a") or any(i.startswith("bare:") for i in ids)
+                                 for step, ids in level.addressed)
+
+
+def holding_lines(held, *, short=False):
+    """Host facts only: kinds, their source counts and the largest addressable units."""
+    kinds = []
+    for kind, tokens in held["tokens"].items():
+        if short:
+            kinds.append(f"{kind} {tokens:,}")
+            continue
+        detail = []
+        if n := held["without_lead"].get(kind):
+            detail.append(f"{n} records without lead")
+        counts = held["counts"].get(kind, {})
+        if "conversations" in counts:
+            detail.append(f"{counts['conversations']} conversations")
+        if "counted_rows" in counts:
+            detail.append(f"{counts['counted_rows']} rows by count")
+        if kind == "owner words in other rooms":
+            detail.append("whole until I close their conversation with a page")
+        kinds.append(f"{kind} {tokens:,}" + (" (" + "; ".join(detail) + ")" if detail else ""))
+    line = "Holding the room (tokens): " + ", ".join(kinds) + "."
+    return [line] if short else [line, *(
+        f"{tokens:,} tokens, {description}" for tokens, description in held["largest"])]

@@ -21,6 +21,7 @@ from ouroboros import memory_view_conversations as conversations
 from ouroboros import memory_view_legacy as legacy
 from ouroboros.memory_forms import (LADDER, list_elements as _list_elements, ordinary_pairs, normalized, swallowed,
                                     form_counts, holding_room, Selection, supersedes, WorkPrices, restore)
+from ouroboros.memory_form_facts import holding_lines, telling_emergency, physical_floor
 from ouroboros.chat_chain import parse_address
 from ouroboros.context_layout import WHOLE_OR_OUTLINE_STEPS
 from ouroboros.section_floor import PROTECTED, relocated_text, retain_section, section_views
@@ -625,7 +626,9 @@ def floor_note(level: mv.FloorLevel, *, window_tokens: Optional[int], mode: str,
     names = None if tool_names is None else tuple(tool_names)
     counts = dict(level.steps)
     asked = set(counts) - set(_COLLAPSING)
-    if not asked and not lowered_from:
+    forms = form_counts(snapshot, level) if snapshot else {}
+    holding = snapshot and (telling_emergency(snapshot, level) or lowered_from and crowded_by_memory(max_room))
+    if not asked and not lowered_from and not holding:
         return ""
     lines, name = ["### Physical floor"], mode.capitalize()
     if asked:
@@ -633,7 +636,6 @@ def floor_note(level: mv.FloorLevel, *, window_tokens: Optional[int], mode: str,
                   if window_tokens is not None else []) + (
             [f"the {(budget_mode or mode).capitalize()} mode budget ({target_tokens} tokens)"] if level.by_budget else [])
         subject = " and ".join(bounds)
-        forms = form_counts(snapshot, level) if snapshot else {}
         def describe(kind):
             return ", ".join(f"{label}: {fact['lines']} lines/{fact['sources']} sources" for label, fact in forms.get(kind, {}).items()) or "none"
         shown = (f"my telling: {describe('retold')}; host facts: {describe('host')}; "
@@ -641,10 +643,8 @@ def floor_note(level: mv.FloorLevel, *, window_tokens: Optional[int], mode: str,
         lines.append(f"{name} cuts for {subject}. Reduced forms — {shown}. Read sources with memory_read.")
         if forms.get("window"):
             lines.append(f"Window emergency over unread words: {describe('window')}; not a failure of my telling.")
-        if snapshot and forms.get("emergency"):
-            held = holding_room(snapshot, level)
-            lines.append("Holding the room (tokens): " + ", ".join(f"{kind} {tokens:,}" for kind, tokens in held['tokens'].items()) + ".")
-            lines.extend(f"{tokens:,} tokens: {reader}" for tokens, reader in held['largest'])
+    if holding:
+        lines.extend(holding_lines(holding_room(snapshot, level), short=physical_floor(level, mode)))
     if lowered_from:
         lines.append(lowered_line(mode, lowered_from, max_room))
     path = memory_read_path(names) if mode == "nano" else ""

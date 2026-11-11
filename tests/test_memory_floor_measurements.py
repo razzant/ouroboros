@@ -262,7 +262,7 @@ def test_each_host_address_walks_its_own_shortest_forms(tmp_path, monkeypatch, w
     settled = _near_even_plan(tmp_path / 'settled', monkeypatch, window, **shape)
     assert _hosts(settled) == hosts
     assert settled.projection(settled.initial_mode).memory_facts['floor']['steps'] == {
-        'F2': 2, 'F5': 2, 'F5a': 1, 'F8': 1, 'F8a': 1}
+        'F2': 2, 'F5': 2, 'F5a': 1}
     walks = {str(forms) for kind, _mode, forms, _room in probes if kind == 'walk'}
     assert [kind for kind, *_ in probes] == (['walk', 're-price', 'walk', 're-price'] if probes_count == 4
                                             else ['walk', 're-price', 're-price'])
