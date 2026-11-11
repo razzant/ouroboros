@@ -220,7 +220,7 @@ def test_an_unavailable_ancestor_read_is_never_memoized(tmp_path, monkeypatch):
     _busy_store(monkeypatch, busy)
     contended = pr.project_chat_for_task_tree(tmp_path, "leaf")
     assert contended in (0, a["chat_id"]), "a best-effort answer while the middle is unreadable"
-    assert not pr.RoomResolver(tmp_path).settled("leaf"), "an incomplete ancestry read is not memoized"
+    assert pr._answer_key("leaf", "", "") not in pr.RoomResolver(tmp_path).answers, "an incomplete ancestry read is not memoized"
     busy["on"] = False
     assert pr.project_chat_for_task_tree(tmp_path, "leaf") == b["chat_id"], "the retried read finds the nearer conversion"
     assert pr.RoomResolver(tmp_path).answers[pr._answer_key("leaf", "", "")] == b["chat_id"], "a complete read is memoized"

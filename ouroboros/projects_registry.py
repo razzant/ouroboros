@@ -676,7 +676,7 @@ class RoomResolver:
     read once per resolver. Strict publication uses fresh bindings and propagates unreadable
     authority instead of pinning a guessed room."""
 
-    __slots__ = ("root", "bindings", "answers", "misses", "_projects", "strict")
+    __slots__ = ("root", "bindings", "answers", "misses", "unsettled", "_projects", "strict")
 
     def __init__(self, drive_root: Any, *, strict: bool = False, projects: Optional[frozenset] = None) -> None:
         self.root, self.strict = drive_root, strict  # ``projects``: the Project rooms its caller read for this rule
@@ -688,7 +688,7 @@ class RoomResolver:
             if not strict:
                 _ROOM_ANSWERS[key] = cached
         self.answers: Dict[tuple, int] = cached[1]
-        self.misses: set = set()
+        self.misses, self.unsettled = set(), set()  # ids the store did not hold; inputs answered here without one
         self._projects: Optional[frozenset] = projects
 
     def _facts(self, task_id: str) -> Optional[Dict[str, Any]]:
@@ -723,9 +723,9 @@ class RoomResolver:
             return 0
 
     def settled(self, task_id: Any, parent_task_id: Any = "", root_task_id: Any = "") -> bool:
-        """Whether this input's answer rests on held facts only (``__call__`` keeps no other); no task rests on none."""
-        key = _answer_key(task_id, parent_task_id, root_task_id)
-        return not key[0] or key in self.answers
+        """Whether this resolver's own answer for this input rested on held facts only (no task rests on none): never
+        read from the answers it shares, where another resolver may have kept one since."""
+        return _answer_key(task_id, parent_task_id, root_task_id) not in self.unsettled
 
     def __call__(self, task_id: Any, parent_task_id: Any = "", root_task_id: Any = "") -> int:
         key = _answer_key(task_id, parent_task_id, root_task_id)
@@ -759,6 +759,8 @@ class RoomResolver:
                 chat = own["chat_id"] if own["chat_id"] in self._projects else 0
         if complete:  # an answer that may move when a task appears or answers is asked again
             self.answers[key] = chat
+        else:
+            self.unsettled.add(key)
         return chat
 
     def warm(self, task_ids: Any) -> bool:

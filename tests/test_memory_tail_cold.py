@@ -1657,6 +1657,47 @@ def test_a_row_whose_parent_the_store_does_not_hold_yet_stays_read(monkeypatch, 
     _same(monkeypatch, tmp_path, rooms)
 
 
+def test_a_row_judged_before_its_task_was_admitted_stays_read_whoever_answers_that_task_next(monkeypatch, tmp_path):
+    """A pass judges a row whose task the store does not hold yet. The task is then admitted in a Project's chat, and
+    another reader of this process answers it and keeps that answer where every resolver shares it, before the pass asks
+    whether its own answer was settled. Its answer rested on a task not held, whatever is shared since: the row stays
+    read and the set the pass composes leaves it out, so a fresh process standing on that set shows it in the Project.
+    A row whose task the store held is still left unread."""
+    rooms = _settled(tmp_path)
+    gamma = int(create_project(tmp_path, "gamma", name="Gamma")["chat_id"])
+    write_task_result(tmp_path, "held", "completed", result="done", chat_id=1)
+    _append(tmp_path, shared.msg(_ts(1), "Ghost row.", direction="out", task_id="ghost"))
+    _append(tmp_path, shared.msg(_ts(2), "Held row.", direction="out", task_id="held"))
+    _append(tmp_path, shared.msg(_ts(3), "Later word.", client_message_id="later"))
+    _fill(tmp_path)
+    ghost, held = _entry(tmp_path, "Ghost row."), _entry(tmp_path, "Held row.")
+    for row in (ghost, held):
+        _seal(tmp_path, row, 1)
+    _forget_process_memos()
+    real, judged = pr.RoomResolver.__call__, []
+
+    def admitted_as_it_is_judged(self, task_id, *lineage):
+        answer = real(self, task_id, *lineage)
+        if task_id == "ghost" and not judged:
+            judged.append(answer)
+
+            def admit() -> None:  # no mark moves: a new task; another reader's answer is kept for every resolver
+                write_task_result(tmp_path, "ghost", "completed", result="done", chat_id=gamma)
+                assert pr.RoomResolver(tmp_path)("ghost") == gamma
+            _in_thread(admit)
+        return answer
+
+    with monkeypatch.context() as patch:
+        patch.setattr(pr.RoomResolver, "__call__", admitted_as_it_is_judged)
+        mi.open_rows_by_room(tmp_path)  # a whole pass that composes
+    assert judged == [0] and _in_use(tmp_path)
+    cold_now = _cold_positions(tmp_path)
+    assert ghost[2] not in cold_now and held[2] in cold_now, (ghost[2], held[2], sorted(cold_now))
+    assert ghost[2] in _open_in(tmp_path, gamma)
+    assert _child(tmp_path, rooms, whole=False) == _child(tmp_path, rooms, whole=True)
+    _same(monkeypatch, tmp_path, rooms)
+
+
 # --- each mark ------------------------------------------------------------------------------------------------
 
 def _sealed_main_row(tmp_path: pathlib.Path, task: str = "late") -> tuple:
