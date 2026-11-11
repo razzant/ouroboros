@@ -82,13 +82,17 @@ def test_each_decision_counts_on_its_work_card_beside_the_event_and_the_counter(
     assert len(latest) <= 300 and latest.endswith("word…") and latest.startswith("word word")
 
 
-def test_a_commit_lands_over_a_decision_only_from_its_call_or_the_attempt_it_continues(tmp_path):
+@pytest.mark.parametrize("split", [False, True])
+def test_a_commit_lands_over_a_decision_only_from_its_call_or_the_attempt_it_continues(tmp_path, split):
     from ouroboros.review_state import load_state, make_repo_key
     from ouroboros.tools.commit_gate import _record_commit_attempt
     from ouroboros.tools.git_review_cycle import _reset_commit_review_state
 
     ctx = _make_ctx(tmp_path)
     ctx.task_id, install = "t1", ctx.drive_root
+    if split:  # a task drive apart from the install's data root, which restart and adoption read
+        install = tmp_path / "install"
+        ctx.budget_drive_root = str(install)
 
     def reviewed(decision=""):  # one call whose review hands its outcome back before Git (Advisory, Cyber Pro)
         _reset_commit_review_state(ctx)
@@ -125,6 +129,12 @@ def test_a_commit_lands_over_a_decision_only_from_its_call_or_the_attempt_it_con
     for index in range(70):
         note_override_landing(ctx, f"{index:040d}")
     assert len(landed()) == 64, "the newest 64 landings are kept"
+    if split:
+        base, sha = _commit(ctx.repo_dir, "base"), _commit(ctx.repo_dir, "over")
+        continues(over)
+        note_override_landing(ctx, sha)
+        assert sha[:12] in landed_line(ctx.repo_dir, install, base=base, target=sha, running=False)
+        assert "landed" not in read_json_dict(ctx.drive_root / COUNTER_REL), "the task drive keeps no landing"
 
 
 @pytest.mark.parametrize("case", ["warm", "restarted", "successor", "clean"])

@@ -10,7 +10,7 @@ app (``web/modules/review_gate_card.js``, live from the event) and in its Telegr
 Advisory and Cyber Pro hand every outcome back before Git, so a commit usually lands from a later call naming the
 reviewed attempt, in this process or another. The decision's reason stays on that durable attempt
 (``review_override_reason``); after Git recorded the commit, ``note_override_landing`` adds it to the counter file's
-``landed`` list (the newest 64) when this call, or the attempt its author
+``landed`` list (the newest 64, under the install's data root) when this call, or the attempt its author
 continuation's validated reference resolved to, met such a decision. ``landed_line`` names those commits in a
 restart's or an adoption's notice, "running" only on an adoption record's word. Nothing here says merged or accepted:
 the gate did not prohibit continuation, which is all it decided.
@@ -115,6 +115,8 @@ def note_override_landing(ctx: Any, commit_sha: str) -> None:
     continuation's validated reference resolved to, met a decision Blocking would have stopped. Git already
     succeeded: nothing here may fail it."""
     try:
+        from ouroboros.tool_access import canonical_data_root
+
         source = getattr(ctx, "_author_commit_source", None)  # the durable attempt, resolved afresh by each call
         reason = getattr(ctx, "_review_override_this_call", "") or getattr(source, "review_override_reason", "")
         if not (reason and commit_sha):
@@ -126,7 +128,7 @@ def note_override_landing(ctx: Any, commit_sha: str) -> None:
             kept = current.get("landed") if isinstance(current.get("landed"), list) else []
             return {**current, "landed": [*kept, row][-LANDED_KEPT:]}
 
-        update_json_locked(ctx.drive_root / COUNTER_REL, land)
+        update_json_locked(canonical_data_root(ctx) / COUNTER_REL, land)  # where restart and adoption read it
     except Exception:
         log.warning("The landing of %s over a review decision was not recorded", commit_sha, exc_info=True)
 
