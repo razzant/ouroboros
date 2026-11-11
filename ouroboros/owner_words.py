@@ -353,6 +353,13 @@ def _held_twin(item: Mapping[str, Any], held: Mapping[str, Any]) -> Mapping[str,
     return {}
 
 
+def _opening(item: Mapping[str, Any], origin_ref: Mapping[str, Any]) -> bool:
+    """The run's first message as the owner door stamped it (``origin_message_ref``): its ``initial_user`` row, or
+    its origin row recorded without an identity of its own."""
+    source = item.get("source")
+    return bool(origin_ref) and (source == "initial_user" or (source == "origin_message" and not row_ref(item)))
+
+
 def _dated_directives(ctx: Any):
     """``(item, time, reference, door-stamped)`` for each owner-sourced item of the run's corpus: the door's stamp
     for its first message, and for its origin row recorded without an identity of its own, under the reference
@@ -370,9 +377,8 @@ def _dated_directives(ctx: Any):
     for item in getattr(ctx, "_owner_directives", None) or []:
         if not isinstance(item, dict) or item.get("source") not in OWNER_SOURCES:
             continue
-        door = item["source"] == "initial_user" and bool(origin_ref)
-        if door or (item["source"] == "origin_message" and origin_ref and not row_ref(item)):
-            yield item, str(origin_ref.get("ts") or ""), reference, door
+        if _opening(item, origin_ref):
+            yield item, str(origin_ref.get("ts") or ""), reference, item["source"] == "initial_user"
             continue
         twin = {} if item.get("chat_id") and item.get("client_message_id") else _held_twin(item, held)
         if twin and not _mapping(item.get("reply_to")).get("address") and (
@@ -851,27 +857,32 @@ def safety_sources(ctx: Any) -> List[Dict[str, Any]]:
     """The rows the Safety check reads for this run's work, shaped as its corpus rows (``source``, ``content``,
     ``msg_id`` = the row's reference, ``reply_to`` = the card or message it answers, ``ts`` = its time where one was
     recorded): the corpus, the field it inherited (a reply target folded into its row), then the rows it holds that
-    reached this work; one row per source (``source_refs``), the first kept. Never a room, context or marked row: a
+    reached this work; one row per source (``source_refs``), the first kept with the card and time a later copy
+    adds, and the opening message dated by its door (``_opening``). Never a room, context or marked row: a
     permission my human gave another work is not this one's. Reads the context's attributes and writes nothing."""
     from ouroboros.owner_relay import owner_text
 
     rows: List[Dict[str, Any]] = []
-    seen: set = set()
+    kept: Dict[str, Dict[str, Any]] = {}  # reference -> the listed row of that source
+    origin = _mapping(_ctx_metadata(ctx).get("origin_message_ref"))
 
-    def add(row: Mapping[str, Any]) -> Any:  # the row, unless its source is already listed
+    def add(row: Mapping[str, Any]) -> Dict[str, Any]:  # the listed copy of this source, gaps filled by a later one
         refs = source_refs(row)
-        if refs & seen:
-            return None
-        seen.update(refs)
-        rows.append(row)
-        return row
+        listed = next((kept[ref] for ref in refs if ref in kept), None)
+        if listed is None:
+            rows.append(listed := dict(row))
+            kept.update(dict.fromkeys(refs, listed))
+        listed.update({key: row[key] for key in ("reply_to", "ts") if row.get(key) and not listed.get(key)})
+        return listed
     for item in getattr(ctx, "_owner_directives", None) or []:
         if isinstance(item, Mapping):
-            add(item)
+            listed = add(item)
+            if _opening(item, origin) and origin.get("ts") and not listed.get("ts"):
+                listed["ts"] = str(origin["ts"])
     last: Dict[str, Any] | None = None  # the field row a following reply target belongs to
     for row in task_governing_words(_ctx_metadata(ctx))[0]:
         if row["source"] == REPLY_TARGET:
-            if last is not None:
+            if last is not None and not last.get("reply_to"):
                 last["reply_to"] = {"address": row["ref"], "author": row.get("author") or "", "text": row["text"]}
             last = None
             continue

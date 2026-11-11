@@ -199,7 +199,8 @@ def test_a_helper_reads_the_words_carried_to_its_work_and_never_a_siblings(check
     """A helper's Supervisor reads my human's later words the host carried to its work, shaped as the corpus rows it
     already reads and with the card they answer; a row held as context because it went to a sibling stays out. A
     helper scheduled after those words arrived holds them only in its inherited field, and its Supervisor reads
-    them from there, with the same card; a quote its corpus already holds is not listed twice."""
+    them from there, with the same card; a quote its corpus already holds is listed once, with the card and time
+    only its other copy carried."""
     import queue
 
     from ouroboros import dialogue_store, safety
@@ -242,6 +243,12 @@ def test_a_helper_reads_the_words_carried_to_its_work_and_never_a_siblings(check
     assert sources == [{"source": "owner_mailbox", "content": "1. Publish it", "msg_id": addresses[""],
                         "reply_to": card_reply, **later_words}]
     assert addresses["sibling"] not in prompt and "March figures" not in prompt
+    corpus = {"source": "owner_mailbox", "content": "1. Publish it", "msg_id": addresses[""], "chat_id": "1",
+              "client_message_id": "owner-answer", "carried": True}
+    helper._owner_directives = [dict(corpus)]  # its corpus copy, without the card and time its held row has
+    assert sources_of(helper)[1] == [{**corpus, "reply_to": card_reply, **later_words}]
+    assert helper._owner_directives == [corpus]
+    helper._owner_directives = []
     # The helper schedules a helper of its own: the answer rides in that helper's field, and its Supervisor reads it.
     later = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, current_task_type="task")
     later.task_id, later._owner_directives = "later", [{"source": "initial_text", "content": "Ship the release notes."}]
@@ -254,9 +261,10 @@ def test_a_helper_reads_the_words_carried_to_its_work_and_never_a_siblings(check
         {"source": "owner_mailbox", "content": "1. Publish it", "msg_id": "chat 1 / owner-answer", "reply_to": card_reply,
          **later_words}]
     assert addresses["sibling"] not in prompt and "March figures" not in prompt
-    later._owner_directives.append({"source": "owner_mailbox", "content": "1. Publish it", "msg_id": addresses[""],
-                                    "chat_id": "1", "client_message_id": "owner-answer", "carried": True})
-    assert [row.get("msg_id") for row in sources_of(later)[1]] == [None, addresses[""]]  # the corpus row, once
+    later._owner_directives.append(dict(corpus))
+    sources = sources_of(later)[1]
+    assert sources[1:] == [{**corpus, "reply_to": card_reply, **later_words}], sources  # the corpus row, once, whole
+    assert later._owner_directives[-1] == corpus  # the context's own row is read, never changed
 
 
 def test_each_source_projection_appears_once_and_the_event_is_typed(focus, monkeypatch, checker):

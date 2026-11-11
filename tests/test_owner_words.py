@@ -144,9 +144,12 @@ def test_main_turn_origin_is_carried_byte_for_byte(tmp_path):
     rows = ow.governing_words_for_schedule(ctx)[ow.FIELD]
     assert rows == [{"text": message, "source": "initial_user", "carrier": "ctx", "task_id": ROOT, "ts": TS,
                      "ref": "chat 1 / msg-1790746905659-12"}]
+    assert ow.safety_sources(ctx) == [{"source": "initial_user", "content": message, "ts": TS}]  # dated by its door
+    assert ctx._owner_directives == [{"source": "initial_user", "content": message}]
     unstamped = _ctx(tmp_path)
     _initialize_owner_directives(unstamped, [{"role": "user", "content": message}])
     assert ow.FIELD not in ow.governing_words_for_schedule(unstamped)
+    assert ow.safety_sources(unstamped) == [{"source": "initial_text", "content": message}]
 
 
 def test_project_first_message_is_never_added_to_the_words(tmp_path):
