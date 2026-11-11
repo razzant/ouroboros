@@ -1,7 +1,7 @@
 import { accountedUpperBound, accountedUpperBoundWithChildren, formatUsd4, isoMicros, plainCauseText, projectMarkdownLines, savedTerminalRowNote } from './utils.js';
 import { cancelCauseClauses, ownerStopEnding } from './cancel_presentation.js';
 import { TASK_CAUSE_PHRASES, UNSTARTED_REASONS, taskReasonPhrase, describedCause, reasonCodesNote, residualToolErrorsPhrase,
-    failedStepHeadline, heldCallPhrase } from './task_reason_words.js';
+    failedStepHeadline, heldCallPhrase, heldCallsLine } from './task_reason_words.js';
 export { taskReasonPhrase, reasonCodesNote } from './task_reason_words.js';
 import { taskCheckpointLabel, taskCheckpointIdentity, checkpointHasProgressRow, waitEpisode } from './task_checkpoints.js';
 export { taskCheckpointLabel } from './task_checkpoints.js';
@@ -574,8 +574,7 @@ export function taskReasonDetail(evt, codes = []) {
     const warnings = [...(Array.isArray(objective?.warnings) ? objective.warnings : []), objective?.warning || ''];
     const named = residualToolErrorsPhrase(execution);  // the failure the record holds, in owner words
     const warningClauses = warnings.filter(w => !excluded.includes(w))
-        .map(w => (w === 'residual_tool_errors_without_review' && named) || taskReasonPhrase(w))
-        .concat(residualToolErrorsPhrase(execution, true));  // a call Safety held, named on Done (never a warning)
+        .map(w => (w === 'residual_tool_errors_without_review' && named) || taskReasonPhrase(w));
     const artifacts = record.artifact_bundle?.status || record.artifact_status || record.outcome_axes?.artifacts?.status;
     if (['failed', 'missing'].includes(artifacts)) warningClauses.push(taskReasonPhrase('artifacts_unavailable'));
     if (decision?.open_obligations?.length) warningClauses.push(taskReasonPhrase('open_obligations'));
@@ -1156,7 +1155,8 @@ export function taskTerminalSummary(evt = {}) {
     const quiet = terminal && evt.quiet_effective === true;
     const presentation = taskPresentation(terminal ? outcome : 'working', quiet);
     const body = quiet ? '' : [taskStoppedWithSummary(evt) ? OWNER_STOP_DETAIL_MARKER : '', taskReasonDetail(evt),
-        reasonCodesNote(taskReasonCodes(evt)), terminal ? savedTerminalRowNote(evt) : ''].filter(Boolean).join('\n');
+        reasonCodesNote(taskReasonCodes(evt)), heldCallsLine(record?.outcome_axes?.execution),  // here alone (owner 11.11, A)
+        terminal ? savedTerminalRowNote(evt) : ''].filter(Boolean).join('\n');
     const cause = terminal && !quiet ? taskReasonDetail(evt) : '';
     return {
         ...chatView({

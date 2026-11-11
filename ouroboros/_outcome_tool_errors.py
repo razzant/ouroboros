@@ -110,8 +110,8 @@ _RECOVERY_TOOL_NAMES = frozenset({
 # (`error`, `*_error`, `non_zero_exit`, `shell_error`, `timeout`) and security-
 # boundary hits (`violation`, an old record's `safety_violation`) are intentionally
 # EXCLUDED and stay real failures. A call Safety returned or could not read
-# (`safety_returned`, `safety_unavailable`) is no failure, but neither is it
-# telemetry: left standing, the card names it (below). `unavailable` moved buckets in v7
+# (`safety_returned`, `safety_unavailable`) is no failure, nor is it
+# telemetry: left standing, the open card names it (below). `unavailable` moved buckets in v7
 # (owner decision, spec §1.15): see its entry below.
 _POLICY_DENIAL_STATUSES = frozenset({
     # v6.90.x (submarine unwind): the three confinement surfaces that leaked past
@@ -298,8 +298,8 @@ def _tool_error_record(item: Dict[str, Any], *, recovered_by: int | None = None)
 # registered — and a command killed by a signal
 # (D7: a kernel, OOM or external kill is the install acting; the 43-SIGKILL incident once hid as "cosmetic"; only a
 # directly spawned POSIX process reports one). A call Safety returned or could not read whose identical call (same
-# tool and target signature) never got past Safety is no error: the card names it on Done, never as a warning
-# (``tool_error_words``).
+# tool and target signature) never got past Safety is no error: only the open Done card names it, never as a
+# warning (owner 11.11, A).
 _UNEXECUTED_STATUSES = frozenset({"argument_error", "unknown_tool"})
 _DETAILS_ONLY_COMMAND_STATUSES = frozenset({"non_zero_exit", "shell_error", "timeout"})
 # What the registry answers before its Safety check (``registry_core``: the guards, argument and target binding, mode

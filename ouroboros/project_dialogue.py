@@ -1293,7 +1293,7 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
         excluded.add("receipt_absent")
     named = residual_tool_errors_phrase(execution)  # the failure the record holds, in owner words
     warning_clauses = [(str(w) == WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW and named) or TASK_CAUSE_PHRASES.get(str(w), str(w))
-                       for w in warnings if str(w) not in excluded] + [residual_tool_errors_phrase(execution, True)]
+                       for w in warnings if str(w) not in excluded]
     record = {**event, **result}
     bundle = record.get("artifact_bundle") if isinstance(record.get("artifact_bundle"), dict) else {}
     artifact_status = bundle.get("status") or record.get("artifact_status") or artifacts.get("status")

@@ -1261,17 +1261,17 @@
       "exact_clause": true
     },
     {
-      "name": "a call Safety returned and nothing replaced is Done and named as returned, not as a warning",
+      "name": "a call Safety returned and nothing replaced is Done, and the sentence both twins share does not name it",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "github_write", "status": "safety_returned", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated"}, "review": {"status": "skipped"}}},
       "phase": "done", "headline": "Done",
-      "acceptance_clause": "A GitHub write was returned by the Safety Supervisor.",
+      "acceptance_clause": "",
       "exact_clause": true
     },
     {
-      "name": "a call Safety could not read and nothing replaced is Done and named as not run, not as a warning",
+      "name": "a call Safety could not read and nothing replaced is Done, and the sentence both twins share does not name it",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "run_command", "status": "safety_unavailable", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated"}, "review": {"status": "skipped"}}},
       "phase": "done", "headline": "Done",
-      "acceptance_clause": "A command was not run: the Safety Supervisor could not read it.",
+      "acceptance_clause": "",
       "exact_clause": true
     },
     {

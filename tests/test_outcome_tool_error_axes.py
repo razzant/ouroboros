@@ -113,17 +113,16 @@ def test_only_a_loud_leftover_warns_without_review(call, loud, flag):
     assert {key for key in ("read_only", "details_only") if error.get(key)} == ({flag} if flag else set())
 
 
-@pytest.mark.parametrize(("call", "clause"), [
-    ({"tool": "github_write", "status": "safety_returned"}, "A GitHub write was returned by the Safety Supervisor."),
-    ({"tool": "run_command", "status": "safety_unavailable"},
-     "A command was not run: the Safety Supervisor could not read it."),
-])
-def test_a_call_safety_held_is_no_failure_and_stays_named_on_done(call, clause):
+@pytest.mark.parametrize("call", [{"tool": "github_write", "status": "safety_returned"},
+                                  {"tool": "run_command", "status": "safety_unavailable"}])
+def test_a_call_safety_held_is_no_failure_and_no_host_sentence_names_it(call):
     """A call Safety returned or could not read counts as no tool failure and alone never makes a task Done with
-    warnings; while its identical call (same tool and target) has not got past Safety, the Done card names it as
-    held. That call replaces it once it got past Safety and then succeeded or failed in its handler, a failure being
-    named as itself; a refusal the registry returns before the Safety check (or a status a handler shares with one)
-    and another call through the tool leave it named, and an old record's ``safety_violation`` stays a loud failure."""
+    warnings, and no host sentence names it, with review details or without: only the open Done card does (owner
+    11.11, A), while a real warning beside it keeps its own sentence. The record keeps it unresolved while its
+    identical call (same tool and target) has not got past Safety. That call replaces it once it got past Safety and
+    then succeeded or failed in its handler, a failure being recorded as itself; a refusal the registry returns before
+    the Safety check (or a status a handler shares with one) and another call through the tool leave it held, and an
+    old record's ``safety_violation`` stays a loud failure."""
     from ouroboros.outcomes import build_verification_ledger
     from ouroboros.project_dialogue import _completion_verdict, outcome_phase
 
@@ -132,38 +131,40 @@ def test_a_call_safety_held_is_no_failure_and_stays_named_on_done(call, clause):
         outcome = derive_loop_outcome("Delivered answer.", {}, trace)
         record = {"status": "completed", "reason_code": "final_message", "outcome_axes": outcome["outcome_axes"]}
         ledger = build_verification_ledger(task={}, loop_outcome=outcome, llm_trace=trace, artifact_bundle={})
-        return outcome_phase(record, {}), _completion_verdict(record, {}), ledger["summary"]["has_failures"], outcome
+        lines = [_completion_verdict(record, {}, include_review_details=details) for details in (True, False)]
+        assert not [line for line in lines if "Safety Supervisor" in line], lines
+        return outcome_phase(record, {}), lines[0], ledger["summary"]["has_failures"], outcome
 
+    def left(outcome):
+        execution = outcome["outcome_axes"]["execution"]
+        return [e["status"] for e in execution["unresolved_tool_errors"] + execution["cosmetic_tool_errors"]]
     held = {**call, "is_error": True}
     phase, line, failed, outcome = card([held])
-    assert (phase, line, failed, outcome["failure"]) == ("done", clause, False, None)
+    assert (phase, line, failed, outcome["failure"], left(outcome)) == ("done", "", False, None, [call["status"]])
     assert not outcome["outcome_axes"]["objective"].get("warning")
+    phase, line, failed, outcome = card([held, {"tool": "write_file", "status": "error", "is_error": True}])
+    assert (phase, line, failed, left(outcome)) == ("warn", "A file write failed.", True, [call["status"], "error"])
     assert card([held, {"tool": call["tool"], "status": "ok"}])[:3] == ("done", "", False)
     phase, line, failed, _ = card([{**held, "status": "safety_violation"}])
     assert phase == "warn" and "returned" not in line and failed
     push = {"tool": "run_command", "args": {"cmd": ["git", "push", "origin", "main"]}}
     command = {**push, "status": call["status"], "is_error": True}
-    named = card([command])[1]
-
-    def left(outcome):
-        execution = outcome["outcome_axes"]["execution"]
-        return [e["status"] for e in execution["unresolved_tool_errors"] + execution["cosmetic_tool_errors"]]
-    assert card([command, {**push, "status": "ok"}])[:2] == ("done", "")  # its identical call got past Safety
+    assert left(card([command, {**push, "status": "ok"}])[3]) == []  # its identical call got past Safety
     assert left(card([command, dict(command)])[3]) == [call["status"]] * 2  # held again: neither got past it
     for failure in ("non_zero_exit", "timeout"):  # and failed in its handler: it ran
         phase, line, failed, outcome = card([command, {**push, "status": failure, "is_error": True}])
         assert (line, failed, left(outcome)) == ("", True, [failure])
     for refused in ("resource_constraint_blocked", "argument_error", "light_mode_blocked", "unavailable", "cwd_blocked",
                     "error"):  # refused before the Safety check, or a status a handler shares with such a refusal
-        line, _, outcome = card([command, {**push, "status": refused, "is_error": True}])[1:]
-        assert line.endswith(named) and left(outcome)[0] == call["status"], refused
+        assert left(card([command, {**push, "status": refused, "is_error": True}])[3])[0] == call["status"], refused
     other = card([command, {"tool": "run_command", "status": "ok", "args": {"cmd": ["git", "status"]}}])
-    assert other[:3] == ("done", named, False) and "Safety Supervisor" in named  # a different command
+    assert other[:3] == ("done", "", False) and left(other[3]) == [call["status"]]  # a different command
 
 
 def test_a_place_paused_after_a_safety_return_keeps_the_return_named(supervisor, published_tool, places, monkeypatch):
     """Safety returns a message to a place, the place is then paused, and the identical call is refused by the place
-    guard, which the registry asks before Safety: the Done card still names the returned call."""
+    guard, which the registry asks before Safety: the record still holds the returned call, which only the open Done
+    card names."""
     from dataclasses import replace
 
     from ouroboros import place_guard, tool_effects
@@ -190,7 +191,9 @@ def test_a_place_paused_after_a_safety_return_keeps_the_return_named(supervisor,
                             for item in (ToolResult(*safety_refusal(words), text=words), refused)]}
     outcome = derive_loop_outcome("Prepared the notes.", {}, trace)
     record = {"status": "completed", "reason_code": "final_message", "outcome_axes": outcome["outcome_axes"]}
-    assert "returned by the Safety Supervisor" in _completion_verdict(record, {})
+    unresolved = outcome["outcome_axes"]["execution"]["unresolved_tool_errors"]
+    assert [e["tool"] for e in unresolved if e["status"] == "safety_returned"] == [name]
+    assert "Safety Supervisor" not in _completion_verdict(record, {})
 
 
 def test_a_record_written_before_the_flags_stays_loud():
