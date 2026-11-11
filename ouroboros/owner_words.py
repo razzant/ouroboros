@@ -496,6 +496,14 @@ def cited_owner_basis(ctx: Any, owner_words: Any) -> Tuple[Dict[str, Any] | None
                 and quote_in(wanted, str(item.get("content") or "")) and not _my_post(ctx, item)):
             return {"source": "place_owner", "content": str(item.get("content") or ""), "cited": wanted, "basis": CITED,
                     "carried": True, **{key: item[key] for key in ("msg_id", "reply_to") if item.get(key)}}, ""
+    # Only the own-call owner-caption branch records live_call directives. Heard speech and
+    # Presence calls do not. The cite creates an owner-corpus copy; the raw caption stays inert.
+    for item in getattr(ctx, "_owner_directives", None) or []:
+        if (isinstance(item, dict) and item.get("source") == "live_call"
+                and quote_in(wanted, str(item.get("content") or ""))):
+            return {"source": "owner_corpus", "content": item["content"], "cited": wanted,
+                    "basis": CITED, "carried": True,
+                    **({"msg_id": item["msg_id"]} if item.get("msg_id") else {})}, ""
     return None, ("owner_words were not found verbatim in any message of your human that reached this run (their "
                   "confirmed account, not forwarded): nothing was started. Copy their exact words, or omit owner_words "
                   "to start the work as your own.")

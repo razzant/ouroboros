@@ -211,3 +211,22 @@ def test_a_root_hands_on_the_words_it_carries_beside_its_own(tmp_path):
     ctx = _owner_root(tmp_path, {FIELD: [carried], "origin_message_ref": {"chat_id": 1, "client_message_id": "o2"}})
     _initialize_owner_directives(ctx, [{"role": "user", "content": "A newer word."}])
     assert [row["text"] for row in governing_words_for_schedule(ctx)[FIELD]] == ["The original ask.", "A newer word."]
+
+
+def test_a_cited_call_row_rides_a_generic_start_whole_and_uncited_captions_do_not(tmp_path, monkeypatch):
+    from ouroboros.tools import control_routing
+
+    ctx = _owner_root(tmp_path)
+    ctx._owner_directives = [{"source": "live_call", "content": LONG, "msg_id": "own-call-item"}]
+    events = []
+    monkeypatch.setattr(control_routing, "_emit_and_wait_for_routing",
+                        lambda _ctx, event: (events.append(event) or "live", {"status": "scheduled"}))
+    monkeypatch.setattr(control_routing, "_promotion_pool_disabled_from_snapshot", lambda ctx: "")
+    control_routing._start_task(ctx, "Prepare the work", title="Report")
+    assert events[-1]["owner_corpus"] == []
+    control_routing._start_task(ctx, "Prepare the work", title="Report", owner_words="Do NOT ship on Friday.")
+    [basis] = events[-1]["owner_corpus"]
+    seeded = SimpleNamespace(task_metadata={"objective_author": events[-1]["objective_author"], "owner_corpus": [basis]})
+    _initialize_owner_directives(seeded, [{"role": "user", "content": "drafted"}])
+    assert basis["content"] == LONG
+    assert [row["text"] for row in governing_words_for_schedule(seeded)[FIELD]] == [LONG]
