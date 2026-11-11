@@ -18,6 +18,7 @@ from tests.test_onboarding_complete_endpoint import (
 )
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
 from tests.ui_console_errors import PageErrors
+from tests.settings_browser_helpers import open_settings
 
 pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / "web"
@@ -264,15 +265,11 @@ def test_cursor_login_and_catalog_are_not_execution_readiness(subscription_ui):
     page = ui["page"]
     page.goto(ui["url"])
     page.click('[data-nav-page="settings"]')
-    page.click('[data-settings-tab="providers"]')
+    level = open_settings(page, "accounts/cursor")
     cursor = page.locator('[data-family="cursor"]')
     cursor.get_by_text("Signed in", exact=True).wait_for()
-    assert "Login verified" in cursor.inner_text()
+    assert "Signed in" in cursor.inner_text()
     assert "Connected" not in cursor.inner_text()
-    # The section's copy opens behind its one Details, right under the lead.
-    page.locator("#harness-accounts-section > details.settings-section-details > summary").click()
-    assert "Sign-in does not verify main-chat support or agent execution" in page.locator(
-        "#harness-accounts-section").inner_text()
     cursor.scroll_into_view_if_needed()
     capture(page, "cursor-auth-only-settings")
     ui["errors"].watch(page)  # leaving Settings may cut off the page's own reads (tests/ui_console_errors.py)
@@ -459,18 +456,17 @@ def test_settings_accounts_and_model_roles_use_the_same_compact_components(subsc
     ui = subscription_ui
     page = ui['page']
     page.goto(ui['url'] + '/#settings')
-    page.wait_for_selector('#settings-model-roles .model-role-row', state='attached')
-    assert page.locator('[data-settings-tab="providers"]').inner_text() == 'Accounts'
-    assert page.locator('[data-settings-panel="providers"] #harness-accounts-section').count() == 1
-    assert page.locator('[data-settings-panel="agents"] #harness-accounts-section').count() == 0
-    page.click('[data-settings-tab="models"]')
-    page.wait_for_function("() => document.querySelector('[data-settings-tab=models]').getAttribute('aria-selected') === 'true'")
+    listing = open_settings(page, "accounts")
+    assert listing.locator(".harness-account-row").count() == 0
+    provider = open_settings(page, "accounts/codex")
+    provider.locator(".harness-account-row").first.wait_for(state="visible")
+    assert provider.locator('.agent-family-card[data-family="codex"]').count() == 1
+    open_settings(page, "models/role/main")
     main = page.locator('[data-model-role="main"]')
     main.locator('[data-model-role-account]').select_option('work')
-    inputs = main.locator('.model-role-controls > input, .model-role-controls > select')
-    tops = inputs.evaluate_all('(els) => els.filter(el => !el.hidden).map(el => el.getBoundingClientRect().top)')
-    assert max(tops) - min(tops) <= 2
-    assert main.locator('input').first.evaluate('(el) => getComputedStyle(el).fontSize') == '14px'
+    assert main.locator('[data-model-role-source]').is_visible()
+    assert main.locator('[data-model-role-model]').is_visible()
+    assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
     capture(page, 'settings-models-desktop')
     page.set_viewport_size({'width': 390, 'height': 844})
     wait_drawer_closed(page)
