@@ -241,7 +241,7 @@ def test_models_does_not_guess_a_credential_family_when_source_mapping_is_unread
     assert account.input_value() == "personal"
     assert account.locator('option[value="work"]').count() == 0
     capture(page, "role-models-unknown-mapping")
-    assert press_editor_save(page) in ("No change", "Saved")
+    assert press_editor_save(page) in ("Nothing to save.", "Saved")
     saved = ui["settings"]["OUROBOROS_MODEL_ACCOUNTS"]
     if isinstance(saved, str):
         saved = json.loads(saved)
@@ -296,6 +296,7 @@ def test_catalog_failure_recovery_and_empty_read_keep_an_agents_form_nodes_and_d
 
 @pytest.mark.parametrize("consumer", ["Models"])
 def test_catalog_failure_recovery_and_empty_read_keep_real_editor_nodes_and_draft(role_ui, consumer):
+    from playwright.sync_api import expect
     ui = role_ui
     configure_mixed(ui)
     ui["settings"]["OUROBOROS_MODEL"] = "claudexor::opaque-source=gpt-test"
@@ -333,9 +334,9 @@ def test_catalog_failure_recovery_and_empty_read_keep_real_editor_nodes_and_draf
         assert row.locator(account_selector).evaluate("e => e === window.catalogAccountNode")
         assert row.locator(account_selector).input_value() == "personal"
         if status == 503:
-            assert "catalog temporarily offline" in page.locator("[data-model-role-status]").text_content()
+            expect(page.locator("[data-model-role-status]")).to_contain_text("catalog temporarily offline")
         else:
-            assert "catalog temporarily offline" not in page.locator("[data-model-role-status]").text_content()
+            expect(page.locator("[data-model-role-status]")).not_to_contain_text("catalog temporarily offline")
     capture(page, f"catalog-recovery-draft-{consumer.lower()}")
     refused = "The model catalog could not be read."
     assert not [error for error in ui['errors'].unexpected() if refused not in error], ui['errors'].report()
