@@ -10,28 +10,39 @@ parse a result (acknowledgements, wake exposure, receipts) read it without the n
 judges nothing and never refuses the call; a room mark meets only the work of the room
 the task is in now.
 
-A mark another task makes, releases or shows differently after my view was captured
-(``MemoryViewSnapshot.chronicle_sequence``, read from the snapshot its marks came from)
+A mark another task makes, releases or shows differently after my view was first captured
 reaches me at my next round, after any fold (``append_mark_changes``, called by
-``loop_round_limits._run_round_compaction``): my room's and the global marks by my view's
-own scope rule (``memory_view.mark_in_view``), never another room's room mark or a
-host-kept late review. One typed host row states each changed mark's latest change: what
-changed, who and when, the mark's own words, its quote while visibility is full, its target
-and a release's or view change's reason. It is not my human's words and registers no
-directive. My own change is never echoed, yet it is its mark's latest change. What was
-stated is read back from the rows in view (journal sequence and mark): a latest change no
-intact row states is stated when it came after my captured view or a row in view names its
-mark, so again after a fold took its row. A cold resume captures the view again and reads
-from the earliest change a restored row states: a change during the pause to a mark a row
-stated is stated, the rest the new view shows. So nothing repeats and no mark a row stated
-is left looking in force after its release. Such a change also drops the anchored-marks
-cache. Each round costs a journal size check; a grown journal, one indexed read of the
-records appended since the last one.
+``loop_round_limits._run_round_compaction``). The capture's journal boundary is read from
+the snapshot its marks came from and rides beside the view, never hashed with it
+(``ContextCore.memory_view_sequence``); my continuation keeps the first one
+(``_mark_changes_since``, ``owner_wait``), so a cold resume, whose new capture shows only
+the marks then in force, reads every change since it again. Scope is my view's own rule
+(``memory_view.mark_in_view``) for the room my task is in now: when my task or an ancestor
+moves to another Project, every change since that boundary is read again for the new room
+and my old room's changes stop. Another room's room mark never travels, even to a focus
+whose start view holds every room's marks: that is the scope rule, not an oversight (the
+next start shows it); nor does a host-kept late review. One typed host row states each
+changed mark's latest change: what changed, who and when, the mark's own words, its quote
+while visibility is full, its target and a release's or view change's reason. It is not my
+human's words and registers no directive. What was stated is read back from the rows in
+view (journal sequence and mark): a latest change no intact row states is stated when it
+came after the capture my block shows, when a row in view names its mark, or when my block
+does not show its mark (released while I was paused); so again after a fold took its row,
+and nothing repeats. My own change is stated only once the memory_mark result that
+reported it is no longer in view, never for a mark I made myself that neither my block nor
+a row shows. Another task's change also drops the anchored-marks cache. Each round costs a
+journal size check and a lookup of the room my task is bound to (the anchored cache's own
+resolver); a grown journal, one indexed read of the records appended since the last one.
+Only foci that run these rounds read them: roots, Main turns, wakes, Presence turns,
+helpers and nannies; not an external session a nanny supervises, and not the realtime live
+conversation, which runs none of the round's tail producers (no roster or skill rows
+either), as before.
 Reading marks is best effort: an unreadable chronicle shows no note and no change.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Any, Dict, Iterator, List
@@ -40,9 +51,10 @@ log = logging.getLogger(__name__)
 
 _CACHE_ATTR = "_anchored_marks"
 _DELIVERED_ATTR = "_anchored_marks_delivered"
-_CHANGES_ATTR = "_mark_changes_read"  # this context's journal size, read position and each in-scope mark's latest change
+_CHANGES_ATTR = "_mark_changes_read"  # this context's room, journal size, read position and each in-scope mark's latest change
+_SINCE_ATTR = "_mark_changes_since"  # my first capture's journal boundary: the continuation keeps it (owner_wait)
 MARK_CHANGES_KIND = "ouroboros_mark_changes"
-_CHANGES_HEADER = ("[Host facts: marks of this room and global ones that other works changed while this work runs — "
+_CHANGES_HEADER = ("[Host facts: marks of this room and global ones changed while this work runs — "
                    "journal sequence, the change, who and when, then the mark's own words]")
 _STATED = re.compile(r"^- #(\d+) mark (\S+): ", re.MULTILINE)  # a change's head line; its words are indented
 # Quoting characters of code and commands; an apostrophe is a letter of names (O'Brien).
@@ -203,45 +215,83 @@ def _change_lines(change: Dict[str, Any], label: Any) -> List[str]:
     return lines
 
 
+def _author_task(record: Dict[str, Any]) -> str:
+    return str((record.get("author") or {}).get("task_id") or "")
+
+
+def _carried(messages: List[Dict[str, Any]]) -> set:
+    """What my memory_mark results in view report (``tools.chronicle``'s reply): a release by its mark id, another
+    change by its journal sequence. While its result is in view, my own change needs no row."""
+    from ouroboros.tool_result_record import logical_tool_result_text
+
+    calls = {call.get("id") for row in messages if row.get("role") == "assistant"
+             for call in row.get("tool_calls") or () if isinstance(call, dict)
+             and (call.get("function") or {}).get("name") == "memory_mark"}
+    carried: set = set()
+    for row in messages:
+        if row.get("role") != "tool" or row.get("tool_call_id") not in calls:
+            continue
+        try:
+            reply = json.loads(logical_tool_result_text(row.get("content")) or "")
+        except ValueError:
+            continue
+        if isinstance(reply, dict):
+            carried.update(str(mark) for mark in reply.get("released_ids") or ())
+            carried.add(reply.get("sequence"))
+    return carried
+
+
 def append_mark_changes(ctx: Any, messages: List[Dict[str, Any]]) -> bool:
-    """Append one host row with the latest change of each of my room's and the global marks that another task changed
-    after my view was captured (or that a row in view already names) and no intact row in view states yet; True when
-    it appended (the module docstring has the contract)."""
+    """Append one host row with the latest change of each mark of the room I am in now and of the global ones that
+    changed after my view was first captured and that neither my captured block nor a row or result in view shows as
+    it now stands; True when it appended (the module docstring has the contract)."""
     if ctx is None:
         return False
     try:
+        import dataclasses
+
         from ouroboros.chronicle_store import ChronicleStore, is_late_review_mark
         from ouroboros.context_budget import bound_host_row
         from ouroboros.context_view_facts import memory_snapshot
         from ouroboros.memory_view import mark_in_view, room_labeler
         from ouroboros.tool_access import canonical_data_root
 
-        snapshot = memory_snapshot(getattr(ctx, "context_fit_plan", None))
-        if snapshot is None or snapshot.chronicle_sequence is None or snapshot.spec.marks == "none":
+        plan = getattr(ctx, "context_fit_plan", None)
+        snapshot, boundary = memory_snapshot(plan), getattr(getattr(plan, "core", None), "memory_view_sequence", None)
+        if snapshot is None or boundary is None or snapshot.spec.marks == "none":
             return False
-        stated = _stated(messages)
+        stated, root = _stated(messages), canonical_data_root(ctx)
+        key = _room_key(ctx, root)
+        room = str(key) if key else snapshot.spec.room_id  # a move of my task or an ancestor takes my scope along
         read = getattr(ctx, _CHANGES_ATTR, None)
-        if read is None:  # a start, or a cold resume whose restored rows say where stating began
-            read = {"size": -1, "after": min(stated, default=snapshot.chronicle_sequence + 1) - 1, "latest": {}}
+        if read is None or read.get("room") != room:  # a start, a new process or a move: read from my first capture
+            if getattr(ctx, _SINCE_ATTR, None) is None:  # a continuation saved without it: where its restored rows began
+                setattr(ctx, _SINCE_ATTR, min(stated, default=boundary + 1) - 1)
+            if read is not None:
+                setattr(ctx, _CACHE_ATTR, None)  # my anchored marks are my new room's from the next call
+            read = {"room": room, "size": -1, "after": getattr(ctx, _SINCE_ATTR), "latest": {}}
             setattr(ctx, _CHANGES_ATTR, read)
-        root = canonical_data_root(ctx)
-        store = ChronicleStore(root)
+        store, task_id = ChronicleStore(root), str(getattr(ctx, "task_id", "") or "")
         size = store.log_path.stat().st_size
         if size != read["size"]:  # the journal only grows: an unchanged size has no new record
             changes, newest = store.mark_changes(read["after"])
-            task_id = str(getattr(ctx, "task_id", "") or "")
+            spec = dataclasses.replace(snapshot.spec, room_id=room)
             for change in changes:
-                if is_late_review_mark(change["mark"]) or not mark_in_view(change["mark"], snapshot.spec, running=True):
+                if is_late_review_mark(change["mark"]) or not mark_in_view(change["mark"], spec, running=True):
                     continue
-                change["own"] = str((change.get("author") or {}).get("task_id") or "") == task_id
-                read["latest"][str(change["mark"].get("id"))] = change  # my own change is its mark's latest, unechoed
+                change["own"] = _author_task(change) == task_id
+                read["latest"][str(change["mark"].get("id"))] = change  # my own change too is its mark's latest
                 if not change["own"]:
                     setattr(ctx, _CACHE_ATTR, None)  # a new anchored mark acts, a released one stops, from the next call
             read.update(size=size, after=newest)
-        # The captured view shows a mark as it stood at capture; a restored row names one it stated before a resume.
-        missing = sorted((change for mark, change in read["latest"].items() if not change["own"]
-                          and change["sequence"] not in stated
-                          and (change["sequence"] > snapshot.chronicle_sequence or mark in stated.values())),
+        # My block shows each mark as at its capture (a released one not at all), a row in view the change it states.
+        shown, named = {str(entry.get("id")) for entry in snapshot.marks}, set(stated.values())
+        news = [(mark, change) for mark, change in read["latest"].items() if change["sequence"] not in stated
+                and (change["sequence"] > boundary or mark in named or mark not in shown)
+                and not (change["own"] and _author_task(change["mark"]) == task_id and mark not in shown | named)]
+        carried = _carried(messages) if any(change["own"] for _mark, change in news) else set()
+        missing = sorted((change for mark, change in news
+                          if not (change["own"] and (change["sequence"] in carried or mark in carried))),
                          key=lambda change: change["sequence"])
         if not missing:
             return False

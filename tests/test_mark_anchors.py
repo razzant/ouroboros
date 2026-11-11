@@ -290,15 +290,18 @@ def test_a_mark_on_an_mcp_tool_meets_its_gateway_call(tmp_path):
     assert "GMAIL_LESSON" not in messages[0]["content"] and "GMAIL_LESSON" in messages[1]["content"]
 
 
-def _running(root: pathlib.Path, task_id: str, chat_id: int = 1) -> ToolContext:
-    """A task already running: its memory view captured at its start, as its context plan holds it."""
+def _running(root: pathlib.Path, task_id: str, chat_id: int = 1, metadata=None) -> ToolContext:
+    """A task already running: its memory view captured at its start, as its context plan holds it (the view and,
+    beside it, the capture's journal boundary)."""
     from types import SimpleNamespace
 
     from ouroboros import memory_view as mv
 
-    ctx, task = ctx_for(root, task_id, chat_id), {"id": task_id, "chat_id": chat_id}
+    ctx, task = ctx_for(root, task_id, chat_id), {"id": task_id, "chat_id": chat_id, **(metadata or {})}
+    ctx.task_metadata = dict(metadata or {})
     view = mv.capture_memory_view(root, task, mv.view_spec_for_task(task, root, ctx=ctx))
-    ctx.context_fit_plan = SimpleNamespace(core=SimpleNamespace(memory_view_json=mv.snapshot_json(view)))
+    ctx.context_fit_plan = SimpleNamespace(core=SimpleNamespace(memory_view_json=mv.snapshot_json(view),
+                                                                memory_view_sequence=view.chronicle_sequence))
     return ctx
 
 
@@ -327,6 +330,44 @@ def test_a_mark_another_work_makes_or_releases_while_i_run_acts_from_my_next_cal
     assert "LATE_LESSON: run the tests after a write." in note and "ROOM_TWO_LESSON" not in note
     assert anchored_note(me, "write_file", {"path": "c.py"}) == ""  # once per task, as before
     assert not append_mark_changes(me, messages)  # nothing new: no second row
+
+
+@pytest.mark.parametrize("moved", ["the task", "its parent"])
+def test_a_moved_work_hears_the_room_it_is_in_now_and_no_longer_the_old_one(tmp_path, moved):
+    """A running work moved to another Project (itself or an ancestor, real binding owner) meets that room's changes
+    from its next round, a change made there before the move included though its reader had already passed it; its
+    old room's changes stop; a mark released in the new room leaves both its tail and its anchored note."""
+    from ouroboros.mark_anchors import append_mark_changes
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    beta = create_project(tmp_path, "beta")
+    main_author, beta_author = ctx_for(tmp_path, "main-author"), ctx_for(tmp_path, "beta-author", beta["chat_id"])
+    assert json.loads(_chronicle_write(main_author, kind="note", text="the chronicle is active"))["ok"]
+    if moved == "its parent":
+        me = _running(tmp_path, "child-task", metadata={"parent_task_id": "parent-task", "root_task_id": "parent-task",
+                                                        "delegation_role": "subagent"})
+    else:
+        me = _running(tmp_path, "mover-task")
+    early = mark(beta_author, "EARLY_BETA_LESSON: read the orchard map.", {"tool": "read_file"})
+    old = mark(main_author, "MAIN_LESSON: keep the old route.", {"tool": "run_command"})
+    rows = []
+    assert append_mark_changes(me, rows) and "MAIN_LESSON" in rows[-1]["content"]
+    assert "EARLY_BETA_LESSON" not in rows[-1]["content"]  # not my room yet; my reader has passed it
+    bind_task_to_project(tmp_path, "parent-task" if moved == "its parent" else me.task_id, "beta",
+                         origin={"absent": "post_hoc_unresolved"})
+    lesson = mark(beta_author, "RELEASED_BETA_LESSON: water the orchard first.", {"tool": "edit_text"})
+    assert json.loads(_memory_mark(main_author, release_ids=[old["mark_id"]], reason="Main changed its route."))["ok"]
+    assert append_mark_changes(me, rows)
+    moved_row = rows[-1]["content"]
+    assert f"mark {early['mark_id']}: marked by root, task beta-author" in moved_row  # not skipped by my cursor
+    assert f"mark {lesson['mark_id']}: marked by root, task beta-author" in moved_row
+    assert "Main changed its route." not in moved_row  # my old room's change no longer reaches me
+    assert anchored_note(me, "write_file", {"path": "notes.md"}) == ""  # my anchored cache holds Beta's marks now
+    assert json.loads(_memory_mark(beta_author, release_ids=[lesson["mark_id"]], reason="The orchard is wet."))["ok"]
+    assert append_mark_changes(me, rows) and "reason: The orchard is wet." in rows[-1]["content"]
+    assert anchored_note(me, "edit_text", {"path": "a.py"}) == ""  # released in my room now: it no longer fires
+    assert "EARLY_BETA_LESSON" in anchored_note(me, "read_file", {"path": "map.md"})  # my new room's mark acts
+    assert not append_mark_changes(me, rows)  # nothing repeats
 
 
 def test_a_running_task_reads_the_journal_only_when_it_grew_and_only_past_its_last_read(tmp_path, monkeypatch):

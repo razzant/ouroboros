@@ -331,7 +331,7 @@ def test_physical_window_replaces_words_with_resolvable_addresses(world):
 # --- the running half: a mark another work changes reaches each running focus of its scope at its next round -------
 
 CHANGES = "ouroboros_mark_changes"
-HEADER = ("[Host facts: marks of this room and global ones that other works changed while this work runs — "
+HEADER = ("[Host facts: marks of this room and global ones changed while this work runs — "
           "journal sequence, the change, who and when, then the mark's own words]")
 
 
@@ -580,3 +580,168 @@ def test_a_host_late_review_and_a_works_own_mark_add_no_row(world, quiet_roster)
     rows = _changes(_round(world, ctx, messages, 3))
     assert len(rows) == 1 and f"- #{other['sequence']} mark {other['mark_id']}: marked by main" in rows[0]
     assert "LATE REVIEW WORDS" not in rows[0] and "ROOT OWN GLOBAL" not in rows[0]
+
+
+def _paused(ctx, messages):
+    """What a pause keeps: the loop's own continuation values, through JSON (``owner_wait.continuation_state``)."""
+    from ouroboros.owner_wait import continuation_state
+
+    return json.loads(json.dumps(continuation_state(ctx, messages, {}, {}, 2, [], set())))
+
+
+def _resumed(world, case, state):
+    """A new process: its view captured again, the saved continuation restored onto it and the system row the new
+    capture's (``owner_wait.restore_continuation_state``, then the row ``rebind_restored_route`` sends)."""
+    from ouroboros.owner_wait import restore_continuation_state
+
+    fresh, _cap, ctx = _request(world, case)
+    messages = []
+    restore_continuation_state(SimpleNamespace(_ctx=ctx), state, messages, {}, {}, set())
+    messages[0] = fresh[0]
+    return messages, ctx
+
+
+def _start_mark(world, text):
+    return {mark["text"]: mark["id"] for mark in ChronicleStore(world.memory.drive_root).active_marks(None)}[text]
+
+
+def test_a_cold_resume_states_what_was_released_while_paused_though_no_change_row_was_saved(world, quiet_roster):
+    """My start view showed a mark and nothing had changed when I paused, so no change row was saved. Meanwhile another
+    work released that mark, and made and released another. My new view no longer shows either: both releases arrive
+    with their reasons, as a warm park states them; a mark made meanwhile that my new view shows is not repeated."""
+    messages, _cap, ctx = _request(world, "root")
+    writer = _context(world, world.tasks["main"])
+    glob = _start_mark(world, "GLOBAL MARK: keep the original measurements.")
+    assert "GLOBAL MARK: keep the original measurements." in _text(messages[:1])
+    messages = _round(world, ctx, messages, 2) + [{"role": "assistant", "content": "I keep the original measurements."}]
+    assert _changes(messages) == []
+    state = _paused(ctx, messages)
+    release = _released(world, writer, glob, "New measurements replace the original ones.")
+    brief = _marked(writer, node_id=world.page, scope="global", text="PAUSE ONLY: hold the bridge for an hour.")
+    gone = _released(world, writer, brief["mark_id"], "The hour passed.")
+    later = _marked(writer, node_id=world.page, scope="global", text="LIVE GLOBAL LATER: report in millimetres.")
+    warm = _changes(_round(world, ctx, copy.deepcopy(messages), 3))  # the same process continues
+    resumed_messages, resumed = _resumed(world, "root", state)
+    assert "GLOBAL MARK: keep the original measurements." not in _text(resumed_messages[:1])
+    assert "LIVE GLOBAL LATER: report in millimetres." in _text(resumed_messages[:1])
+    cold = _round(world, resumed, resumed_messages, 3)
+    for rows, news in ((warm, (release, gone, later)), (_changes(cold), (release, gone))):
+        assert len(rows) == 1 and [f"- #{change['sequence']} " in rows[0] for change in (release, gone, later)] == [
+            change in news for change in (release, gone, later)]
+    [row] = _changes(cold)
+    assert f"- #{release['sequence']} mark {glob}: released by main, task contract-main" in row
+    assert "reason: New measurements replace the original ones." in row and "reason: The hour passed." in row
+    assert _changes(_round(world, resumed, cold, 4)) == [row]  # nothing repeats
+
+
+def _fold(world, ctx, messages, number):
+    """compact_context(keep_unit_ids=[]) as the mind calls it, applied by the next round's own hook."""
+    from ouroboros.tools.compact_context import _compact_context, record_context_view
+
+    record_context_view(ctx, messages, [])
+    reply = _compact_context(ctx, working_note="I keep the compass work and its measurements.", keep_unit_ids=[])
+    assert "requested" in reply, reply
+    messages = [*messages, {"role": "assistant", "tool_calls": [{"id": f"fold-{number}", "type": "function", "function": {
+                    "name": "compact_context", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": f"fold-{number}", "content": reply}]
+    folded = _round(world, ctx, messages, number, tool_schemas=[], fit_candidate=lambda *_args: {"accepted": True})
+    assert ctx._context_view_receipt["status"] == "applied", ctx._context_view_receipt
+    return folded
+
+
+def _own(ctx, number, **arguments):
+    """My own memory_mark call and the result it returned, as the transcript keeps them."""
+    reply = _memory_mark(ctx, **arguments)
+    assert json.loads(reply)["ok"], reply
+    return [{"role": "assistant", "tool_calls": [{"id": f"own-{number}", "type": "function", "function": {
+                "name": "memory_mark", "arguments": json.dumps(arguments)}}]},
+            {"role": "tool", "tool_call_id": f"own-{number}", "content": reply}]
+
+
+def test_a_fold_before_the_pause_took_the_last_change_row_and_a_release_made_meanwhile_still_arrives(
+        world, quiet_roster, monkeypatch):
+    """Before my pause a fold took the last change row (another work had changed a mark I made after my start, and I
+    released it: nothing of it is mine to hear again). Resuming does not hang on such rows: a release made while I
+    was paused of a mark my start view showed arrives once, and nothing of the folded row comes back."""
+    from ouroboros import loop
+
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_args, **_kwargs: None)
+    messages, _cap, ctx = _request(world, "root")
+    writer, glob = _context(world, world.tasks["main"]), _start_mark(world, "GLOBAL MARK: keep the original measurements.")
+    mine = _marked(ctx, node_id=world.page, room_id=str(world.alpha["chat_id"]), text="ROOT OWN: compare every bearing twice.")
+    assert json.loads(_memory_mark(writer, mark_id=mine["mark_id"], visibility="meaning", reason="Its meaning is enough."))["ok"]
+    messages = _round(world, ctx, messages, 2) + [{"role": "assistant", "content": "I compare every bearing twice."}]
+    assert len(_changes(messages)) == 1  # another work's change of my mark reached me
+    messages = _round(world, ctx, messages + _own(ctx, 1, release_ids=[mine["mark_id"]], reason="Compared."), 3)
+    folded = _fold(world, ctx, messages, 4)
+    assert _changes(folded) == []  # the fold took the last change row
+    state = _paused(ctx, folded)
+    release = _released(world, writer, glob, "New measurements replace the original ones.")
+    resumed_messages, resumed = _resumed(world, "root", state)
+    cold = _round(world, resumed, resumed_messages, 5)
+    [row] = _changes(cold)
+    assert f"- #{release['sequence']} mark {glob}: released by main, task contract-main" in row
+    assert "reason: New measurements replace the original ones." in row and "ROOT OWN" not in row
+    assert _changes(_round(world, resumed, cold, 6)) == [row]  # once
+
+
+def test_my_own_change_is_stated_once_the_result_that_carried_it_is_folded_away(world, quiet_roster, monkeypatch):
+    """While the result of my own memory_mark is in view it says what I changed: no row. A fold that takes it would
+    leave my captured block showing a mark I released, or another work's later mark gone from view though in force:
+    the same round states my change once. A mark I made myself after my view was captured never comes back."""
+    from ouroboros import loop
+
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_args, **_kwargs: None)
+    messages, _cap, ctx = _request(world, "root")
+    writer, alpha = _context(world, world.tasks["main"]), _start_mark(world, "ALPHA MARK: compare the compass with the drawing.")
+    later = _marked(writer, node_id=world.page, scope="global", quote="eastern support",
+                    text="LIVE GLOBAL: measure the bridge again.")
+    messages = _round(world, ctx, messages, 2)
+    [stated] = _changes(messages)
+    messages += [*_own(ctx, 1, release_ids=[alpha], reason="The drawing is settled."),
+                 *_own(ctx, 2, mark_id=later["mark_id"], visibility="meaning", reason="Its meaning is enough."),
+                 *_own(ctx, 3, node_id=world.page, scope="global", text="ROOT OWN LATER: keep the drawing upright.")]
+    messages = _round(world, ctx, messages, 3)
+    assert _changes(messages) == [stated]  # my results say it while they are in view
+    folded = _fold(world, ctx, messages, 4)
+    assert "The drawing is settled." not in json.dumps([row for row in folded if row.get("role") == "tool"])
+    store = ChronicleStore(world.memory.drive_root)
+    release, view = store.records(kinds=["mark_release"])[-1], store.records(kinds=["mark_view"])[-1]
+    [row] = _changes(folded)
+    assert f"- #{release['sequence']} mark {alpha}: released by root, task contract-root" in row
+    assert "reason: The drawing is settled." in row
+    assert f"- #{view['sequence']} mark {later['mark_id']}: view changed to meaning by root, task contract-root" in row
+    assert "quote: eastern support" not in row and "ROOT OWN LATER" not in row
+    assert _changes(_round(world, ctx, folded, 5)) == [row]  # once
+
+
+def test_the_capture_boundary_rides_beside_the_view_and_moves_no_hash(world, quiet_roster):
+    """Two captures that differ only by a later journal record no section shows keep the same hashed view; each
+    boundary rides beside it, outside the core hash, and the earlier one still brings a later change to its focus.
+    A mark the view shows changes the view and so the hash. (Two builds' hashes differ anyway: the drive-state
+    section names its build time; hence one core, hashed with each boundary.)"""
+    import dataclasses
+
+    from ouroboros import context_fit
+
+    first, _cap, early = _request(world, "nanny")
+    writer = _context(world, world.tasks["main"])
+    _marked(writer, node_id=world.page, room_id=str(world.beta["chat_id"]), text="BETA ONLY: not the nanny's room.")
+    _second, _cap, late = _request(world, "nanny")
+    before, after = early.context_fit_plan.core, late.context_fit_plan.core
+    assert before.memory_view_sequence < after.memory_view_sequence  # the journal grew between them
+    assert before.memory_view_json == after.memory_view_json
+
+    def core_sha256(core):
+        evidence = SimpleNamespace(route_fp="content-contract", status="asserted", stale=False, window_tokens=1_000_000)
+        return context_fit.build_context_fit_plan(None, core, world.tasks["nanny"], preferred_mode="max", route_resolver=(
+            lambda *_args, **_kwargs: ({"model": "fixture", "provider": "fixture"}, evidence))).core_sha256
+
+    later = dataclasses.replace(before, memory_view_sequence=after.memory_view_sequence)
+    assert core_sha256(before) == core_sha256(later)
+    glob = _marked(writer, node_id=world.page, scope="global", text="LIVE GLOBAL: measure the bridge again.")
+    assert f"mark {glob['mark_id']}: marked by main" in _changes(_round(world, early, first, 2))[-1]
+    _third, _cap, changed = _request(world, "nanny")
+    assert changed.context_fit_plan.core.memory_view_json != after.memory_view_json
+    assert core_sha256(dataclasses.replace(later, memory_view_json=changed.context_fit_plan.core.memory_view_json)) != (
+        core_sha256(later))

@@ -282,8 +282,10 @@ class MemoryViewSnapshot:
     owner_words: str = ""  # the rendered block of the owner's words that caused a helper's work
     waiting: Dict[str, Any] = dataclasses.field(default_factory=dict)
     # The newest chronicle record this capture read (its marks among them); later mark changes reach a running
-    # focus's tail (``mark_anchors.append_mark_changes``). None: the view read no chronicle.
-    chronicle_sequence: Optional[int] = None
+    # focus's tail (``mark_anchors.append_mark_changes``). None: the view read no chronicle. It rides beside the view
+    # (``context_fit.ContextCore.memory_view_sequence``), never in ``snapshot_json``: a record no section shows moves
+    # no hash.
+    chronicle_sequence: Optional[int] = dataclasses.field(default=None, compare=False)
 
     @property
     def active(self) -> bool:
@@ -311,8 +313,11 @@ def json_chars(text: str) -> int:
 
 
 def snapshot_json(snapshot: MemoryViewSnapshot) -> str:
-    """The canonical JSON of a snapshot (sorted keys): the context core keeps it and hashes it."""
-    return json.dumps(dataclasses.asdict(snapshot), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    """The canonical JSON of a snapshot (sorted keys): the context core keeps it and hashes it. The capture's journal
+    boundary is not in it (``chronicle_sequence``)."""
+    data = dataclasses.asdict(snapshot)
+    data.pop("chronicle_sequence")
+    return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def snapshot_from_json(text: str) -> MemoryViewSnapshot:
@@ -844,8 +849,8 @@ def _late_review_entry(mark: Mapping[str, Any], label: Callable[..., str]) -> Di
 
 def mark_in_view(mark: Mapping[str, Any], spec: ViewSpec, *, running: bool = False) -> bool:
     """Whether a role keeps a mark in view by its scope: none, every room's, or this room's and the global ones.
-    A focus already running meets later changes of this room's and the global ones only, whatever its start view
-    holds (``mark_anchors.append_mark_changes``)."""
+    A focus already running meets later changes of its room's (``spec.room_id``: the room it is in now) and the
+    global ones only, whatever its start view holds (``mark_anchors.append_mark_changes``)."""
     if spec.marks == "none":
         return False
     return (spec.marks == "all" and not running) or mark.get("scope") == "global" or str(mark.get("room_id")) == spec.room_id

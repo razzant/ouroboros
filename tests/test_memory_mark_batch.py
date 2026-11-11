@@ -83,21 +83,15 @@ def test_the_mark_tool_text_says_who_sees_a_mark_on_every_route():
     assert "meets me at" not in anchor
 
 
-def test_the_mark_tool_text_says_where_a_marked_row_of_my_human_goes_and_what_my_own_view_shows(tmp_path):
-    """The two facts the description states, read where the code makes them. A mark on a chat row of my human's own
-    words puts that row, verbatim and dated, into the set every helper, session, plan council and reviewer of a work
-    in the mark's room reads (``owner_words.work_words``): a Main mark reaches each work outside the Projects and
-    no Project work, a global mark every work; a mark on a row of mine carries nothing. My own view shows the mark's
+def test_a_marked_row_of_my_human_travels_to_the_work_readers_and_my_own_view_shows_the_mark(tmp_path):
+    """What the description states, read where the code makes it. A mark on a chat row of my human's own words puts
+    that row, verbatim and dated, into the set every helper, session, plan council and reviewer of a work in the
+    mark's room reads (``owner_words.work_words``): a Main mark reaches each work outside the Projects and no
+    Project work, a global mark every work; a mark on a row of mine carries nothing. My own view shows the mark's
     text, its quote while visibility is full, and its target's address (``memory_view._marks_text``)."""
     from ouroboros import chat_chain, dialogue_store as ds, memory_view as mv, owner_words as ow
     from ouroboros.projects_registry import bind_task_to_project, create_project
 
-    description = {entry.name: entry.schema for entry in chronicle_tools()}["memory_mark"]["description"]
-    assert ("each view, mine included, shows the mark's own text, its quote while visibility is full and its "
-            "target's address") in description
-    assert ("A mark on a chat row of my human's own words also carries that row, verbatim and dated, among my human's "
-            "words for the work to every helper, session, plan council and reviewer of each work in the mark's room "
-            "(a Main mark: each work outside the Projects; a global mark: every work).") in description
     ts = "2026-11-10T09:30:00+00:00"
     ds.append(tmp_path, "chat", {"ts": ts, "direction": "in", "chat_id": 1, "text": "Keep the old cookie name",
                                  "client_message_id": "cm-1", "task_id": ""})
