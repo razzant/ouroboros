@@ -505,7 +505,7 @@ def test_promotion_keeps_the_primary_and_only_owner_choices_enter_recents(room, 
     cited = source is not None
     if cited:
         client.post('/api/owner/chat-model', json={**CHOSEN, 'project_id': 'alpha'})
-    monkeypatch.setattr(config, 'get_runtime_mode', lambda: 'cyber_pro')
+    monkeypatch.setenv('OUROBOROS_RUNTIME_MODE', 'cyber_pro')
     monkeypatch.setattr('ouroboros.tools.control_events._wait_for_promotion_admission',
                         lambda *a, **kw: {'status': 'scheduled'})
     events = []

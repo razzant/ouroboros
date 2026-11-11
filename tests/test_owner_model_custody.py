@@ -875,7 +875,7 @@ def test_cited_settings_scopes_use_owner_writers_and_uncited_attempts_refuse(hos
     ctx.project_id = "room"
     ctx._owner_directives = [{"source": source, "content": "Set that model for it."}]
     for mode in ("pro", "cyber_pro"):
-        monkeypatch.setattr(config, "get_runtime_mode", lambda: mode)
+        monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
         refused = _switch_model(ctx, B, scope=scope)
         assert "requires verified owner_words" in refused
         assert read_model_choice(root, "room") == {"kind": "main"}

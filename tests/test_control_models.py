@@ -32,11 +32,10 @@ def test_cited_main_write_distinguishes_refusal_uncertainty_and_success(model_st
 def model_start(tmp_path, monkeypatch):
     from ouroboros.tools.registry import ToolContext
     from ouroboros.tools import control_routing
-    from ouroboros import config
 
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="caller", task_metadata={})
     ctx._owner_directives = [{"source": "initial_user", "content": "Please use the other one, then keep the report complete."}]
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "pro")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
     events = []
     monkeypatch.setattr(control_routing, "_emit_and_wait_for_routing",
                         lambda _ctx, event: (events.append(event) or "live", {"status": "scheduled"}))
@@ -100,11 +99,11 @@ def test_an_unreadable_local_catalog_preserves_the_typed_choice(model_start, mon
 
 
 def test_cyber_start_names_the_minds_choice_without_overruling_a_room_owner(configured_model_start, monkeypatch):
-    from ouroboros import config, route_choice, lead_fact
+    from ouroboros import route_choice, lead_fact
     from ouroboros.tools import control_models, control_routing
 
     ctx, events = configured_model_start
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "cyber_pro")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
     control_routing._start_task(ctx, "Write", title="Report", model="vendor/fast-one")
     ctx.task_metadata = events[0]["metadata"]
     assert ctx.task_metadata == {"lead": {"source": "mind", "model": "vendor/fast-one", "use_local": False}}
@@ -383,12 +382,11 @@ def test_broken_or_undated_catalogue_never_claims_verification(local_model_choic
 
 @pytest.mark.parametrize("scope", ["room", "main"])
 def test_uncited_cyber_scope_hint_names_its_writer_without_claiming_both_are_settings(model_start, monkeypatch, scope):
-    from ouroboros import config
     from ouroboros.tools.control_runtime import _switch_model
     from ouroboros.tools.tool_result import _published_tool_result
 
     ctx, events = model_start
-    monkeypatch.setattr(config, "get_runtime_mode", lambda: "cyber_pro")
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
     text = _switch_model(ctx, model="vendor/fast-one", scope=scope)
     assert not events and _published_tool_result(ctx, None).code == "TOOL_ARG_ERROR"
     assert "through its existing writer" in text and "existing settings writer" not in text
