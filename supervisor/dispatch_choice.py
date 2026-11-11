@@ -419,14 +419,11 @@ def _capacity(queue: Any, reading: Any) -> Tuple[list, int, int]:
     0. Before the pass reads the machine (``reading`` None) a start is one probe row, offered only when no worker is
     idle, to learn whether chosen work needs a new process at all; after the reading ``admissible_starts`` says."""
     from supervisor.pool_admission import PROBE
-    from supervisor.worker_pool_lifecycle import acting_room, admissible_starts, is_project_slot, project_slots, worker_ready
+    from supervisor.worker_pool_lifecycle import acting_room, admissible_starts, idle_project_slots, usable_booting
 
-    idle = [w for w in _pool().WORKERS.values() if is_project_slot(w) and w.busy_task_id is None and worker_ready(w)
-            and getattr(w, "active_capacity", True)]
-    room = acting_room()
+    idle, room = idle_project_slots(), acting_room()
     idle = idle if room is None else idle[:room]
-    booting = sum(1 for w in project_slots() if w.busy_task_id is None and getattr(w, "booting", False)
-                  and not getattr(w, "retiring", False) and not getattr(w, "readiness_exhausted", False))
+    booting = usable_booting()
     starts = admissible_starts(PROBE if reading is None and not idle else reading)
     return idle, booting, booting + starts if starts else 0
 

@@ -137,7 +137,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     })),
     # WP7 (pool-capacity): the assignment pass and its one predicate's store stage left worker_assignment.
     "supervisor/dispatch_choice.py": ("supervisor/workers.py", "_pool", frozenset({
-        "DRIVE_ROOT", "PENDING", "WORKERS", "_cancel_unauthorized_evolution", "_evolution_assignment_error",
+        "DRIVE_ROOT", "PENDING", "_cancel_unauthorized_evolution", "_evolution_assignment_error",
         "_normalize_pending_task_depth", "_terminalize_invalid_pending_depth", "direct_chat_turn",
         "repo_writer_task_allowed",
     })),

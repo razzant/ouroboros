@@ -76,6 +76,19 @@ def lane_slots(pool: Any = None) -> list:
     return [slot for slot in pool.values() if is_lane_slot(slot)]
 
 
+def idle_project_slots(pool: Any = None) -> list:
+    """Ready project slots holding no task and not parked for a wait (``active_capacity``), in slot order."""
+    return [slot for slot in project_slots(pool) if getattr(slot, "busy_task_id", None) is None
+            and worker_ready(slot) and getattr(slot, "active_capacity", True)]
+
+
+def usable_booting() -> int:
+    """Booting project slots that will carry work once ready: no task yet, not retiring, readiness not exhausted."""
+    return sum(1 for slot in project_slots() if getattr(slot, "busy_task_id", None) is None
+               and getattr(slot, "booting", False) and not getattr(slot, "retiring", False)
+               and not getattr(slot, "readiness_exhausted", False))
+
+
 def pool_slot_counts(pool: Any = None, running: Any = None) -> Dict[str, Any]:
     """The one count of the pool's slots, published by ``queue_publication._pool_counts`` and read by admission.
 
@@ -95,11 +108,6 @@ def pool_slot_counts(pool: Any = None, running: Any = None) -> Dict[str, Any]:
     projects, carriers, now = project_slots(slots), lane_slots(slots), time.time()
     busy = [slot for slot in projects if getattr(slot, "busy_task_id", None) is not None]
     waiting = sum(not pool_admission.acting(slot, running.get(slot.busy_task_id), now) for slot in busy)
-
-    def idle(slot: Any) -> bool:
-        return (getattr(slot, "busy_task_id", None) is None and worker_ready(slot)
-                and getattr(slot, "active_capacity", True))
-
     return {
         "max_workers": get_max_workers(),
         "worker_total": len(projects),
@@ -109,7 +117,7 @@ def pool_slot_counts(pool: Any = None, running: Any = None) -> Dict[str, Any]:
         "booting_count": sum(1 for slot in projects if getattr(slot, "booting", False)),
         "reaping_count": sum(1 for slot in projects if getattr(slot, "reaping", False)),
         "retiring_count": sum(1 for slot in projects if getattr(slot, "retiring", False)),
-        "assignable_idle_workers": sum(1 for slot in projects if idle(slot)),
+        "assignable_idle_workers": len(idle_project_slots(slots)),
         "lane_carrier_total": len(carriers),
     }
 
@@ -1049,14 +1057,11 @@ def reconcile_worker_capacity(residual_demand, reading: Any = None) -> None:
         demand = residual_demand()
         if demand is None or (_pool().repo_writer_admission_closed() and not demand):
             return
-        projects = project_slots()
         # The pool's one quiescent spare is the conversation lane's (4A): project
         # growth buys only demand, and a pooled task after idle cold-starts.
         wanted = demand
-        idle = [w for w in projects if w.busy_task_id is None and worker_ready(w) and w.active_capacity]
-        booting = sum(w.busy_task_id is None and w.booting and not w.retiring
-                      and not w.readiness_exhausted for w in projects)
-        missing = min(max(0, wanted - len(idle) - booting), admissible_starts(reading))
+        idle = idle_project_slots()
+        missing = min(max(0, wanted - len(idle) - usable_booting()), admissible_starts(reading))
         # An empty table stops growth: a pool whose lane spare is absent keeps its last
         # idle slot, as it did before the lane existed.
         keep = wanted if len(_pool().WORKERS) > len(idle) else max(1, wanted)
