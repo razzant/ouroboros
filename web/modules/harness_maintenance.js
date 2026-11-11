@@ -208,7 +208,7 @@ export function createHarnessMaintenanceController({
         onChange();
     }
 
-    function accept(harness, operation, fromInventory = false) {
+    function accept(harness, operation, fromInventory = false, settled = onSettled) {
         if (!operation?.id || operation.harness && operation.harness !== harness) throw new Error('No matching operation receipt was returned.');
         const state = record(harness);
         const previous = state.operation;
@@ -223,10 +223,11 @@ export function createHarnessMaintenanceController({
         if (TERMINAL.has(operation.state) && (previous?.id !== operation.id || previous.state !== operation.state
             || previous.termination !== operation.termination)) state.revision += 1;
         if (TERMINAL.has(operation.state) && !maintenanceOperationPending(operation)
+            && (!fromInventory || state.inventorySeen || maintenanceOperationPending(previous))
             && (previous?.id !== operation.id || maintenanceOperationPending(previous))) {
             state.unknownCurrent = operation.mutation !== 'none' && !inspectedAfter;
             if (!fromInventory) void refresh({ harness, fresh: true });
-            if (!disposed) onSettled(harness, operation);
+            if (!disposed) settled(harness, operation);
         }
         return operation;
     }
@@ -270,6 +271,7 @@ export function createHarnessMaintenanceController({
                     if (proved ? claim(slot) : !older(slot) && !state.inspectionNeedsFresh) clearInspectionFailure(state);
                 };
                 settle(WHOLE_INVENTORY);
+                let settlement;
                 for (const entry of inventory.harnesses) {
                     const state = record(entry.harness);
                     if (state.revision !== (revisions.get(entry.harness) || 0)) {
@@ -281,8 +283,11 @@ export function createHarnessMaintenanceController({
                     state.unknownCurrent = (ACTIVE.has(state.operation?.state) && state.operation?.phase === 'installing')
                         || (state.operation?.mutation === 'unknown' && !inspectedAfterOperation(entry, state.operation));
                     if (!state.request && entry.operation?.id && (entry.operation.id !== state.operation?.id
-                        || maintenanceOperationPending(state.operation))) accept(entry.harness, entry.operation, true);
+                        || maintenanceOperationPending(state.operation))) accept(entry.harness, entry.operation, true,
+                            (...args) => { settlement ||= args; });
+                    state.inventorySeen = true;
                 }
+                if (settlement) onSettled(...settlement);
                 if (!disposed) onInventory([...rows.keys()]);
                 return inventory;
             }).catch((error) => {

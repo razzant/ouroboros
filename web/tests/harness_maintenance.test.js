@@ -893,3 +893,31 @@ test('an external settled inventory receipt refreshes catalogs once; unconfirmed
     await controller.refresh(); assert.equal(settles, 1);
     await controller.refresh(); assert.equal(settles, 1);
 });
+
+for (const prior of ['history', 'pending', 'empty', 'different']) {
+    test(`seven programs: ${prior} receipts cause at most one catalog refresh per inventory`, async () => {
+        let stage = 0;
+        const settled = [];
+        const receipt = (harness, n) => operation({harness, id: `retained-${n}`,
+            state: 'succeeded', termination: 'confirmed', mutation: 'applied'});
+        const rows = () => Array.from({length: 7}, (_, n) => {
+            const harness = `program-${n}`;
+            let op = receipt(harness, n);
+            if (!stage && prior === 'pending') op = {...op, state: 'running'};
+            if (!stage && prior === 'empty') op = null;
+            if (!stage && prior === 'different') op = {...op, id: `older-${n}`};
+            return entry({harness, operation: op});
+        });
+        const controller = createHarnessMaintenanceController({intents: new Map(),
+            api: {harnessMaintenanceInventory: async () => ({harnesses: rows()})},
+            onSettled: (...args) => settled.push(args)});
+        await controller.refresh();
+        assert.equal(settled.length, 0, 'first settled receipts are history');
+        stage++;
+        await controller.refresh();
+        assert.equal(settled.length, prior === 'history' ? 0 : 1);
+        await controller.refresh();
+        assert.equal(settled.length, prior === 'history' ? 0 : 1, 'unchanged receipts stay quiet');
+        controller.dispose();
+    });
+}
