@@ -256,6 +256,7 @@ def _start_task(
     context_requires_self_body_docs: bool = False,
     reasoning_effort: Any = None,
     model: str = "",
+    model_as_typed: bool = False,
     context_requires_development: Optional[bool] = None,
     destination: str = "",
     owner_quote: str = "",
@@ -324,7 +325,7 @@ def _start_task(
     from ouroboros.tools.control_models import start_choice, refuse
 
     try:
-        model_metadata, model_note = start_choice(ctx, model, owner_basis, pid)
+        model_metadata, model_note = start_choice(ctx, model, owner_basis, pid, model_as_typed=model_as_typed)
     except ValueError as exc:
         return refuse(ctx, str(exc))
     try:

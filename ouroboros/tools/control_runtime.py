@@ -906,7 +906,7 @@ def _set_next_wakeup(ctx: ToolContext, seconds: int) -> str:
 
 
 def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: str = "",
-                  owner_words: str = "", scope: str = "work", project_id: str = "") -> str:
+                  owner_words: str = "", scope: str = "work", project_id: str = "", model_as_typed: bool = False) -> str:
     """LLM-driven model/effort switch (Constitution P5: LLM-first).
 
     Stored in ToolContext, applied on the next LLM call in the loop. ``primary``
@@ -937,7 +937,8 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: 
     if (owner_words or scope != "work") and primary:
         return refuse(ctx, "primary return/wait acts on this work; omit owner_words, scope and project_id.")
     if owner_words or scope != "work":
-        return cited_switch(ctx, model=model, owner_words=owner_words, scope=scope, project_id=project_id, effort=requested_effort)
+        return cited_switch(ctx, model=model, owner_words=owner_words, scope=scope, project_id=project_id,
+                            effort=requested_effort, model_as_typed=model_as_typed)
     requested_primary = str(primary or "").strip().lower()
     route = getattr(ctx, "primary_route", None)
     if requested_primary and (requested_primary not in ("return", "wait") or model):

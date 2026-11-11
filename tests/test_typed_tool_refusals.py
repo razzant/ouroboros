@@ -295,10 +295,10 @@ def local_model_choices(model_start, monkeypatch, request):
 
     monkeypatch.setattr(control_models, "request_work_model", work_choice)
 
-    def choose(model):
+    def choose(model, **kwargs):
         if request.param == "start_task":
-            return control_routing._start_task(ctx, "Write", title="Report", model=model, owner_words="use the other one")
-        return control_runtime._switch_model(ctx, model=model, owner_words="use the other one")
+            return control_routing._start_task(ctx, "Write", title="Report", model=model, owner_words="use the other one", **kwargs)
+        return control_runtime._switch_model(ctx, model=model, owner_words="use the other one", **kwargs)
 
     yield choose, events, settings, catalog, reads, ctx
     assert not transports
@@ -361,6 +361,29 @@ def test_inexact_model_uses_the_host_catalogue_without_fetching(local_model_choi
     else:
         assert "not verified" in text and "used as typed" in text
         assert events[0]["metadata"]["lead"]["model"] == "kimi"
+
+
+@pytest.mark.parametrize("fragment", [False, True])
+def test_use_as_typed_can_confirm_an_unlisted_id_even_when_a_longer_route_is_known(local_model_choices, monkeypatch, fragment):
+    import uuid
+    from ouroboros.tools import control_models
+    from ouroboros.tools.tool_result import _published_tool_result
+
+    choose, events, _settings, _catalog, _reads, ctx = local_model_choices
+    name = uuid.uuid4().hex
+    exact = "openai::" + name
+    known = exact + "-small"
+    monkeypatch.setattr(control_models, "known_models", lambda: [{"model": known, "use_local": False}])
+    requested = name if fragment else exact
+    text = choose(requested)
+    assert not events and known in text and "model_as_typed=true" in text
+    assert _published_tool_result(ctx, None).status == "error"
+    text = choose(requested, model_as_typed=True)
+    assert events[-1]["metadata"]["lead"]["model"] == requested
+    assert "not verified" in text and "used as typed" in text and known in text
+    events.clear()
+    choose(known)
+    assert events[-1]["metadata"]["lead"]["model"] == known
 
 
 @pytest.mark.parametrize("connection,route", [

@@ -69,13 +69,15 @@ def known_models() -> list[dict]:
     return list(rows.values())
 
 
-def resolve_model(model: str) -> tuple[dict, str]:
-    """Exact ids pass; substring suggestions ask for an exact choice, never guess it.
+def resolve_model(model: str, *, model_as_typed: bool = False) -> tuple[dict, str]:
+    """Known ids pass; suggestions ask for a choice or explicit use of the typed id.
 
     The chooser searches every query word in a row's route/locality text. A dated
     catalogue is a source of suggestions, not an admission or freshness claim.
     """
     model = str(model or "").strip()
+    if not isinstance(model_as_typed, bool):
+        raise ValueError("model_as_typed must be a boolean.")
     choice = normalize_model_choice({"kind": "model", "model": model})
     try:
         rows = known_models()
@@ -95,17 +97,20 @@ def resolve_model(model: str) -> tuple[dict, str]:
         candidates = [row["model"] + (" (local)" if row["use_local"] else "")
                       + f" [{row.get('source', 'local configuration')}]" for row in matches[:12]]
         more = f"\n{len(matches) - 12} more matched; use a more specific name." if len(matches) > 12 else ""
-        raise ValueError("Model id is inexact. Matching known routes:\n- " + "\n- ".join(candidates)
-                         + more + "\nPass an exact route or ask your human. No live catalog check.")
+        suggestions = "Matching known routes:\n- " + "\n- ".join(candidates) + more
+        if model_as_typed:
+            return choice, "Model id not verified: used as typed. " + suggestions + "\nNo live catalog check."
+        raise ValueError("Model id is not verified. " + suggestions
+                         + "\nPass an exact known route or model_as_typed=true to use this id as typed. No live catalog check.")
     return choice, "Model id not verified: used as typed. Local configuration and available host-cached catalogues only; no live catalog check."
 
 
-def start_choice(ctx, model: str, basis: dict | None, project_id: str) -> tuple[dict, str]:
+def start_choice(ctx, model: str, basis: dict | None, project_id: str, *, model_as_typed: bool = False) -> tuple[dict, str]:
     if not model:
         return {}, ""
     if not basis and not cyber_pro(ctx):
         raise ValueError("A model requires your human's verified owner_words. Nothing was started; cite their exact words.")
-    choice, note = resolve_model(model)
+    choice, note = resolve_model(model, model_as_typed=model_as_typed)
     if basis:
         return {"lead": {"source": "owner_words", "model": choice["model"], "use_local": choice["use_local"]}}, note
     room = read_model_choice(canonical_data_root(ctx), project_id)
@@ -156,7 +161,8 @@ def request_work_model(ctx, choice: dict) -> tuple[str, bool]:
         time.sleep(_PROMOTE_CONFIRM_POLL_SEC)
 
 
-def cited_switch(ctx, *, model: str, owner_words: str, scope: str, project_id: str, effort: str = "") -> str:
+def cited_switch(ctx, *, model: str, owner_words: str, scope: str, project_id: str, effort: str = "",
+                 model_as_typed: bool = False) -> str:
     """Only an integrating focus can carry the owner's room or Main choice.
 
     Presence is an integrating focus too: its confirmed place-owner cite may choose
@@ -190,7 +196,7 @@ def cited_switch(ctx, *, model: str, owner_words: str, scope: str, project_id: s
     root = canonical_data_root(ctx)
     try:
         choice, note = (({"kind": "main"}, "") if scope == "room" and str(model).strip() in {"", "main"}
-                        else resolve_model(model))
+                        else resolve_model(model, model_as_typed=model_as_typed))
         if scope == "room":
             project_id = project_id or _inherited_project_scope(ctx)
             if not project_id:
