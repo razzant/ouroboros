@@ -17,6 +17,7 @@ import pathlib
 import pytest
 
 from tests.settings_browser_helpers import commit_row, open_settings, setting_row
+from tests.test_design_system_gate_browser import open_nav
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 
 POLICY = {"version": 1, "access": {"max": "pro"},
@@ -52,13 +53,13 @@ def _legacy_address(level):
     """The OpenAI key's fold: its legacy base address row, opened as the owner opens it."""
     fold = level.locator("details[data-settings-fold]")
     if not fold.evaluate("node => node.open"):
-        fold.locator("summary").click()
+        fold.locator(":scope > summary").click()
     return level.locator('[data-setting-row="OPENAI_BASE_URL"]')
 
 
 def _updates(page):
-    """Dashboard › Updates, once its status read answered."""
-    page.locator('[data-nav-page="dashboard"]').click()
+    """Dashboard › Updates, once its status read answered (on a phone through the drawer)."""
+    open_nav(page, "dashboard")
     page.locator('[data-dashboard-tab="updates"]').click()
     page.wait_for_function("() => !(document.querySelector('#updates-summary')?.textContent || '').startsWith('Loading')")
 
