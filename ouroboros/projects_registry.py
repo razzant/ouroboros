@@ -16,7 +16,7 @@ from contextlib import contextmanager, nullcontext
 from typing import Any, Dict, Iterator, List, Optional
 
 from ouroboros.contracts.chat_id_policy import project_chat_id
-from ouroboros.composer_cognition import ensure_project_cognition, main_cognition, project_cognition
+from ouroboros.composer_cognition import ensure_project_cognition, main_cognition, project_cognition, project_model_choice
 from ouroboros.contracts.schema_versions import with_schema_version
 from ouroboros.project_facts import project_display_name, sanitize_project_id
 from ouroboros.project_closure import apply_closed, select_projects
@@ -1480,6 +1480,7 @@ def projects_summary(drive_root: Any, *, limit: Optional[int] = 50, chat_id: Any
             "chat_id": project.get("chat_id"),
             "working_dir": project.get("working_dir") or "",
             "cognition": project_cognition(project, cognition),
+            "model_choice": project_model_choice(project),
             "provenance": project.get("provenance") or "",
             "last_active_at": project.get("last_active_at") or "",
             **({"last_message_at": project["last_message_at"]} if "last_message_at" in project else {}),
