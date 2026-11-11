@@ -253,7 +253,7 @@ export const ROWS = [
         writer: '', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'consciousness-places', keys: [], page: 'dashboard:consciousness', fold: false,
         name: 'Where it lives', meta: 'Its places, their words and their circles.', more: '',
-        control: { kind: 'door' },
+        control: { kind: 'door', to: 'page:circles' },
         aliases: [],
         writer: '', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'consciousness-evolution', keys: [], page: 'dashboard:consciousness', fold: false,
