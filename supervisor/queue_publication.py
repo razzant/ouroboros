@@ -477,7 +477,7 @@ def _pool_counts(*, census: bool = False) -> Dict[str, Any]:
 #: The counts ``pool_slot_counts`` measures; an unknown observation publishes each as null.
 _POOL_COUNT_KEYS = ("max_workers", "worker_total", "parked_worker_count", "busy_worker_count",
                     "acting_worker_count", "booting_count", "reaping_count", "retiring_count",
-                    "assignable_idle_workers", "lane_carrier_total", "lane_carrier_idle", "memory_admission")
+                    "assignable_idle_workers", "lane_carrier_total", "memory_admission")
 
 
 def _documents(capture: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:

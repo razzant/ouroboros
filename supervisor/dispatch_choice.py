@@ -50,7 +50,6 @@ import json
 import logging
 import os
 import pathlib
-import threading
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -61,10 +60,6 @@ log = logging.getLogger(__name__)
 # The walk; a second only when its rows were refused after it (store gates, a refused claim); one more when the
 # pass's reading of the machine admitted more starts than the one probe row the walk was sized with.
 _ROUNDS = 3
-_COUNT_KEYS = ("passes", "rows_examined", "rows_screened", "store_reads", "chosen", "refused")
-_COUNTS = dict.fromkeys(_COUNT_KEYS, 0)
-_DRAINED = dict(_COUNTS)
-_COUNTS_LOCK = threading.Lock()
 _ADMITTED: Dict[str, Tuple[tuple, str]] = {}  # row id -> (identity, actor): C2 admitted it under this identity
 _CONTROL_KEYS = ("_attempt", "_budget_pause", "_budget_pause_resume", "_resume_selection", "_budget_pause_hold",
                  "_owner_hold", "_owner_wait_resume", "_working_recovery", "_continuation_prepared")
@@ -80,26 +75,6 @@ def _assignment():
     from supervisor import worker_assignment
 
     return worker_assignment
-
-
-def _count(**amounts: int) -> None:
-    with _COUNTS_LOCK:
-        for key, amount in amounts.items():
-            _COUNTS[key] += amount
-
-
-def counts() -> Dict[str, int]:
-    """Every pass's counts since this process started (counts, never a clock)."""
-    with _COUNTS_LOCK:
-        return dict(_COUNTS)
-
-
-def drain() -> Dict[str, int]:
-    """The counts since the last drain: the ``dispatch`` section of ``supervisor_load``."""
-    with _COUNTS_LOCK:
-        window = {key: _COUNTS[key] - _DRAINED[key] for key in _COUNT_KEYS}
-        _DRAINED.update(_COUNTS)
-    return window
 
 
 def _tid(row: Dict[str, Any]) -> str:
@@ -218,7 +193,6 @@ def _own_refusal(queue: Any, row: Dict[str, Any], held: Dict[int, bool]) -> str:
         from supervisor.followup_policy import scheduled_start
         from supervisor.queue_schedules import automatic_acquisitions
 
-        _count(store_reads=1)
         with automatic_acquisitions(), scheduled_start(queue.DRIVE_ROOT, row) as allowed:
             if not allowed:
                 return "schedule_control"
@@ -237,7 +211,6 @@ def _actor_reads(queue: Any, row: Dict[str, Any], drives: Dict[str, Any],
         return root, own
     key = (os.path.abspath(drive), root)
     if actors is None or key not in actors:
-        _count(store_reads=1)
         actor = _validated_single_cancel_target(drive, root)
         if actors is not None:
             actors[key] = actor
@@ -266,7 +239,6 @@ def _screen(queue: Any, rows: List[Dict[str, Any]], undecided: List[Dict[str, An
         except Exception:
             log.debug("Retry lineage of %s unreadable; its selection waits this pass", row.get("id"), exc_info=True)
     for row in rows:
-        _count(rows_screened=1)
         try:
             reason = _own_refusal(queue, row, held)
         except StoreBusy:
@@ -280,7 +252,6 @@ def _screen(queue: Any, rows: List[Dict[str, Any]], undecided: List[Dict[str, An
         requests += [(_drive(queue, row), _root(row)), (_drive(queue, row), _tid(row))]
         open_rows.append(row)
     facts = store_hot_facts.read_ahead(requests) if requests else {}
-    _count(store_reads=len({os.path.abspath(root) for root, _task in requests}))
     with store_hot_facts.serving(facts):
         for row in open_rows:
             source = SimpleNamespace(task_id=_tid(row), root_task_id=row.get("root_task_id"),
@@ -355,7 +326,6 @@ def _collect(queue: Any, remaining: float, invalid_ids: set, limit: int, exclude
                 break
             if resumes_on_lane(row) != (lane == LANE_CONVERSATION):
                 continue  # the other lane's row: its own walk decides and repairs it
-            _count(rows_examined=1)
             if id(row) not in decided and _repairable(row):
                 index = _index(queue) if index is None else index
                 decided.add(id(row))
@@ -409,12 +379,10 @@ def _decide(queue: Any, rows: List[Dict[str, Any]], undecided: List[Dict[str, An
                 continue
             if wa._candidate_ineligible(queue, row, remaining, running, selected=chosen,
                                         unresolved_invalid_id_set=invalid_ids, stat=False):
-                _count(refused=1)
                 continue
             if reason or _carrier(row) and not _kept(queue, row, index, memo):
                 if reason.startswith("evolution_authority:"):
                     stale.append((row, reason))
-                _count(refused=1)
                 continue
             admitted.append(row)
             chosen.add(_tid(row))
@@ -426,7 +394,6 @@ def _decide(queue: Any, rows: List[Dict[str, Any]], undecided: List[Dict[str, An
                 queue.persist_queue_snapshot(reason="evolution_authority_rejected")
         else:
             _repair(queue, row)
-    _count(chosen=len(admitted))
     return admitted
 
 
@@ -482,7 +449,6 @@ def run_pass(queue: Any, remaining: float, invalid_ids: Any) -> Optional[Tuple[C
         if not _pool().PENDING or not idle and not growth_room:
             return (lambda: 0), None  # nothing to reuse and nothing to start: no choice is made and nothing is read
         _forget(_pool().PENDING)
-    _count(passes=1)
     wanted: List[Dict[str, Any]] = []
     excluded: set = set()
     deferred: set = set()

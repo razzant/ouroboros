@@ -111,7 +111,6 @@ def pool_slot_counts(pool: Any = None, running: Any = None) -> Dict[str, Any]:
         "retiring_count": sum(1 for slot in projects if getattr(slot, "retiring", False)),
         "assignable_idle_workers": sum(1 for slot in projects if idle(slot)),
         "lane_carrier_total": len(carriers),
-        "lane_carrier_idle": sum(1 for slot in carriers if idle(slot)),
     }
 
 

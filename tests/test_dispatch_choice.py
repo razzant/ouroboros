@@ -3,7 +3,7 @@
 Counts, never a clock, on the real ``assign_tasks`` with real worker slots (``tests/test_owner_wait_pool.pool``: the
 pool's own ``Worker`` rows with live process doubles) over a real store: store transactions are counted at the store's
 one connection door (``store.connection``) with whether the queue lock was owned and whether the chooser opened it;
-the chooser's own counts are ``dispatch_choice.counts``. Every guard is shown both ways in its test.
+memory-gate calls are spied at the shared predicate. Every guard is shown both ways in its test.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import copy
 import pathlib
 import re
 import traceback
+from unittest.mock import Mock
 
 import pytest
 
@@ -30,6 +31,15 @@ def assigning(pool, monkeypatch):  # noqa: F811 -- the imported fixture is this 
     monkeypatch.setattr(state, "budget_remaining", lambda *a, **kw: 100)
     monkeypatch.setattr(evolution_lifecycle, "evolution_block_reason", lambda: "")
     return pool
+
+
+@pytest.fixture
+def memory_gate(monkeypatch):
+    from supervisor import worker_assignment
+
+    gate = Mock(wraps=worker_assignment._candidate_ineligible)
+    monkeypatch.setattr(worker_assignment, "_candidate_ineligible", gate)
+    return gate
 
 
 def task(tid, **fields):
@@ -72,7 +82,7 @@ def held_prefix(count):
     return rows
 
 
-def test_a_full_pool_chooses_nothing_and_reads_nothing_until_a_slot_frees(assigning, monkeypatch):
+def test_a_full_pool_chooses_nothing_and_reads_nothing_until_a_slot_frees(assigning, monkeypatch, memory_gate):
     """Full pool: no pass, no row looked at, no store transaction by the chooser and none under Q. The tick's
     cancel hygiene keeps its one statuses() SELECT (the disclosed residual), read before Q. Then one slot frees:
     the next tick passes once and launches the first row every gate admits."""
@@ -81,27 +91,23 @@ def test_a_full_pool_chooses_nothing_and_reads_nothing_until_a_slot_frees(assign
     monkeypatch.setattr(config, "get_max_active_subagents_per_root", lambda: 0)  # every carrier child is held
     workers.PENDING.extend([*held_prefix(30), task("runnable")])
     seen = store_transactions(monkeypatch)
-    before = dispatch_choice.counts()
     for _tick in range(3):
         workers.assign_tasks()
-    counted = dispatch_choice.counts()
-    assert (counted["passes"], counted["rows_examined"], counted["rows_screened"]) == (
-        before["passes"], before["rows_examined"], before["rows_screened"])
+    assert memory_gate.call_count == 0
     assert [row for row in seen if row["chooser"] or row["under_q"]] == []
     assert len(seen) == 3, seen  # one hygiene statuses() SELECT a tick, outside Q
     assert "runnable" not in workers.RUNNING
     workers.RUNNING.clear()  # the other direction: the parent's slot frees
     assigning.original.busy_task_id = None
     workers.assign_tasks()
-    after = dispatch_choice.counts()
-    assert after["passes"] == counted["passes"] + 1 and after["rows_examined"] == counted["rows_examined"] + 31
+    assert memory_gate.call_count == 32  # 31 rows walked, then the chosen row revalidated
     assert workers.RUNNING["runnable"]["worker_id"] == 0
 
 
 @pytest.mark.parametrize("prefix", [100, 1000, 10000])
 def test_one_free_slot_walks_a_held_prefix_in_memory_and_reads_only_the_row_it_takes(
-        assigning, monkeypatch, prefix):
-    """k = 1 behind a long held prefix: each pass costs one memory look per row (published as a number). The held
+        assigning, monkeypatch, prefix, memory_gate):
+    """k = 1 behind a long held prefix: each pass costs one memory look per row. The held
     children carrying a selection have C2 decided once, at first sight, with one lineage read for their one root and
     one read-ahead; while that root is unchanged no pass reads for them again. Choosing the eligible row behind them
     costs one read-ahead, the same at every prefix length, and nothing opens the store under Q."""
@@ -117,18 +123,15 @@ def test_one_free_slot_walks_a_held_prefix_in_memory_and_reads_only_the_row_it_t
     assert len(cold) == 2 and not any(row["under_q"] for row in seen), seen  # the root's lineage and one read-ahead
     assert len(dispatch_choice._ADMITTED) == prefix // 3, "each carrier's admission is kept by its identity"
     del seen[:]
-    before = dispatch_choice.counts()
+    memory_gate.reset_mock()
     workers.assign_tasks()  # unchanged: the prefix walked once in memory, nothing read for it
-    first = dispatch_choice.counts()
-    assert first["rows_examined"] - before["rows_examined"] == prefix
-    assert first["rows_screened"] == before["rows_screened"] and first["store_reads"] == before["store_reads"]
+    assert memory_gate.call_count == prefix
     assert [row for row in seen if row["chooser"] or row["under_q"]] == []
+    memory_gate.reset_mock()
     workers.PENDING.append(task("eligible"))
     chosen = dispatch_choice.choose(queue, 100)
-    second = dispatch_choice.counts()
     assert [row["id"] for row in chosen] == ["eligible"]
-    assert second["rows_examined"] - first["rows_examined"] == prefix + 1
-    assert second["rows_screened"] - first["rows_screened"] == 1
+    assert memory_gate.call_count == prefix + 2  # one look per row and the chosen row's revalidation
     assert [row for row in seen if row["chooser"]] == [{"under_q": False, "chooser": True}]
     assert not any(row["under_q"] for row in seen)
     print(f"DISPATCH_PREFIX {{'prefix': {prefix}, 'rows_examined_per_pass': {prefix + 1}, "
@@ -198,19 +201,6 @@ def test_a_pause_or_fence_between_the_chooser_read_and_the_handoff_refuses_the_l
 
 # ---- C2: the in-memory identity decides only whether to read again ---------------------------------------------
 
-def _c2_counted(monkeypatch, verdict=True):
-    from supervisor import events_budget
-
-    calls = []
-
-    def allowed(q, row, *, actor_id=None):
-        calls.append((row["id"], actor_id))
-        return verdict
-
-    monkeypatch.setattr(events_budget, "budget_resume_dispatch_allowed", allowed)
-    return calls
-
-
 def test_every_writer_of_what_the_c2_identity_reads_moves_it(assigning, monkeypatch):
     """R3 item 17: C2's admission is kept while the identity it rested on stands, and every writer of what that
     identity stands for moves it, so the next pass reads again: the root's latch, the owner's hold and a budget hold
@@ -219,13 +209,15 @@ def test_every_writer_of_what_the_c2_identity_reads_moves_it(assigning, monkeypa
     from ouroboros import owner_pause, store_hot_facts
     from ouroboros.budget_pause import set_budget_pause
     from ouroboros.task_results import write_task_result
+    from supervisor import events_budget
     from supervisor.events_budget import HOLD_ROOT_FENCE_LIFTED, _set_root_budget_pause_locked, hold_budget_row
 
     root_row = assigning.meta["task"]  # the running root ("owner"), its own physical actor
     child = task("child", delegation_role="subagent", root_task_id="owner", parent_task_id="owner", depth=1,
                  _resume_selection={"selected_by": "owner", "grant_id": "grant-1"})
     workers.PENDING.append(child)
-    calls = _c2_counted(monkeypatch)
+    allowed = Mock(return_value=True)
+    monkeypatch.setattr(events_budget, "budget_resume_dispatch_allowed", allowed)
 
     def identity():
         with queue._queue_lock:
@@ -234,11 +226,11 @@ def test_every_writer_of_what_the_c2_identity_reads_moves_it(assigning, monkeypa
     def chosen():
         return [row["id"] for row in dispatch_choice.choose(queue, 100)]
 
-    assert chosen() == ["child"] and len(calls) == 1  # a new process: nothing kept, one full read
-    assert chosen() == ["child"] and len(calls) == 1, "unchanged: the kept admission stands, nothing is read"
+    assert chosen() == ["child"] and allowed.call_count == 1  # a new process: nothing kept, one full read
+    assert chosen() == ["child"] and allowed.call_count == 1, "unchanged: the kept admission stands, nothing is read"
     kept = identity()
     write_task_result(assigning.root, "unrelated", "running", result="progress")  # an ordinary write
-    assert identity() == kept and chosen() == ["child"] and len(calls) == 1
+    assert identity() == kept and chosen() == ["child"] and allowed.call_count == 1
 
     writers = {
         "latch": lambda: _set_root_budget_pause_locked("owner", {"fence_id": "money"}),

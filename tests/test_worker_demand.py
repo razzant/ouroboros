@@ -858,9 +858,8 @@ def test_a_forty_ceiling_with_fewer_slots_and_a_held_queue_publishes_what_each_c
                                                          "status": "paused_exact_continuation"}),
                             task("held", _budget_pause={"reason": "owner", "exact_continuation": True,
                                                        "status": "paused_before_dispatch"})])
-    passes = dispatch_choice.counts()["passes"]
     workers.assign_tasks()  # the sole slot is the busy parent: growth buys the three runnable rows only
-    assert len(assigning.created) == 3 and dispatch_choice.counts()["passes"] == passes + 1
+    assert len(assigning.created) == 3
     queue.persist_queue_snapshot("counters")
     document = _published(tmp_path)
     assert (document["max_workers"], document["worker_total"],
@@ -870,12 +869,13 @@ def test_a_forty_ceiling_with_fewer_slots_and_a_held_queue_publishes_what_each_c
     memory = document["memory_admission"]  # the one reading that admitted the three, dated
     assert memory["read_at"] and (memory["starts_admitted"], memory["reason"]) == (39, "memory_room")
     assert "project_demand" not in document and "dispatch_refusals" not in document
-    seen, pending = dispatch_choice.counts(), [dict(row) for row in workers.PENDING]
+    pending = [dict(row) for row in workers.PENDING]
+    monkeypatch.setattr(dispatch_choice, "_collect", lambda *a, **kw: pytest.fail("a reader chose work"))
     # Every reader takes the recorded counts: none chooses, reads the store for a row or touches one.
     fact = _queue_context_fact({"budget_drive_root": str(tmp_path)})
     line = engine_pool_line(tmp_path)
     _pool_counts()
-    assert dispatch_choice.counts() == seen and [dict(row) for row in workers.PENDING] == pending
+    assert [dict(row) for row in workers.PENDING] == pending
     assert all("admitted_dispatch" not in row for row in workers.PENDING)
     assert (fact["recorded_max_workers"], fact["worker_total"], fact["busy_worker_count"], fact["acting_worker_count"],
             fact["pending_count"], fact["pending_paused_or_held_count"], fact["pending_sleeping_count"],
