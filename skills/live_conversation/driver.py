@@ -1186,9 +1186,10 @@ class _Call:
                         # within 30 s of an audio-span renewal. The renewal waits for the next quiet
                         # moment; a provider that closes first is resumed from its handle.
                         self.renewal_deadline = None
-            # Drain every currently due frame before polling renewal or sleeping.
-            # A buffered websocket send need not suspend, so yield explicitly to
-            # the provider and host watcher even while more media is due.
+            # Drain bursts without sleeping per frame, but revisit this call's
+            # own maintenance even when continuous PCM keeps the mixer nonempty.
+            drain_until = time.monotonic() + .01
+            drain_busy = False
             while not (self.hub.closed or self.hub.ended_by_owner or self.provider_closed):
                 event = self.hub.next_event(0)
                 if event is None:
@@ -1235,6 +1236,9 @@ class _Call:
                         await self.host.observe_context(row)
                         self.pending_offers.append({**row, "_canonical": True})
                 await asyncio.sleep(0)
+                if time.monotonic() >= drain_until:
+                    drain_busy = True
+                    break
             if not self.renewing and (self.pending_offers or self.attention.revisit_due()) and self.quiet():
                 if self.attention.revisit_due():
                     self.attention.revisit_at = None  # one shot, even if the offer must await a refit
@@ -1245,7 +1249,7 @@ class _Call:
                 if self.pending_offers and not self.deferred_tool_outputs and not self.pending_context_rows:
                     await self.offer_pending()
             self.track_offer_wait()
-            await asyncio.sleep(.01)
+            await asyncio.sleep(0 if drain_busy else .01)
 
     async def offer_fact(self, text, *, requested_look=False):
         row = {"role": "user", "content": "[Host fact; not owner words]\n" + text, "_canonical": True}
