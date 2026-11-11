@@ -1097,6 +1097,25 @@ test('a tap outside, a tap in another card\'s frame, Escape, leaving and a mouse
     assert.equal(finger.listeners(), 0);
 });
 
+test('Resize selects the live replacement while its previous card retires', async () => {
+    const finger = fingerBoard();
+    const [retiring, live] = finger.cards;
+    retiring.toggleAttribute('data-widget-removed', true);
+    live.dataset.widgetKey = retiring.dataset.widgetKey;
+    finger.widths.relayout();
+    finger.widths.adjust('demo:a');
+    assert.equal(retiring.hasAttribute('data-widget-adjusting'), false);
+    assert.equal(live.hasAttribute('data-widget-adjusting'), true);
+    assert.equal(finger.doc.activeElement, live.heightHandle);
+    live.toggleAttribute('data-widget-removed', true);
+    finger.widths.relayout();
+    finger.widths.adjust('demo:a');
+    assert.deepEqual(finger.adjusting(), [], 'retired nodes alone cannot enter adjustment');
+    await settle();
+    assert.equal(finger.saves.length, 0);
+    finger.widths.dispose();
+});
+
 test('a card adjusted leaves the board: its foot goes; a drag on its grip is cancelled first, saving nothing', async () => {
     const finger = fingerBoard();
     const [a] = finger.cards;

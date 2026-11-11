@@ -789,7 +789,8 @@ export function createWidgetWidths(list, options) {
             return;
         }
         if (!fingerGrip()) return;
-        const card = laid?.items.find((item) => item.dataset.widgetKey === key && item.isConnected);
+        const card = laid?.items.find((item) => item.dataset.widgetKey === key && item.isConnected
+            && !item.hasAttribute('data-widget-removed'));
         if (!card) return;
         if (adjusting?.card !== card) {
             endAdjust();
