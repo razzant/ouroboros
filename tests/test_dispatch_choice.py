@@ -3,7 +3,8 @@
 Counts, never a clock, on the real ``assign_tasks`` with real worker slots (``tests/test_owner_wait_pool.pool``: the
 pool's own ``Worker`` rows with live process doubles) over a real store: store transactions are counted at the store's
 one connection door (``store.connection``) with whether the queue lock was owned and whether the chooser opened it;
-memory-gate calls are spied at the shared predicate. Every guard is shown both ways in its test.
+memory-gate calls are spied at the shared predicate, the chooser's walks at ``_collect``. Every guard is shown both ways
+in its test.
 """
 
 from __future__ import annotations
@@ -90,16 +91,19 @@ def test_a_full_pool_chooses_nothing_and_reads_nothing_until_a_slot_frees(assign
 
     monkeypatch.setattr(config, "get_max_active_subagents_per_root", lambda: 0)  # every carrier child is held
     workers.PENDING.extend([*held_prefix(30), task("runnable")])
+    collect = Mock(wraps=dispatch_choice._collect)
+    monkeypatch.setattr(dispatch_choice, "_collect", collect)
     seen = store_transactions(monkeypatch)
     for _tick in range(3):
         workers.assign_tasks()
-    assert memory_gate.call_count == 0
+    assert collect.call_count == memory_gate.call_count == 0  # no walk, no row looked at
     assert [row for row in seen if row["chooser"] or row["under_q"]] == []
     assert len(seen) == 3, seen  # one hygiene statuses() SELECT a tick, outside Q
     assert "runnable" not in workers.RUNNING
     workers.RUNNING.clear()  # the other direction: the parent's slot frees
     assigning.original.busy_task_id = None
     workers.assign_tasks()
+    assert collect.call_count >= 1
     assert memory_gate.call_count == 32  # 31 rows walked, then the chosen row revalidated
     assert workers.RUNNING["runnable"]["worker_id"] == 0
 
