@@ -232,8 +232,8 @@ function subscriptionDoorHtml({ path, name, meta, value, tone, harness }) {
     const mark = harness ? harnessPresentation(harness) : null;
     const glyph = mark ? `<svg viewBox="${mark.viewBox}" width="1em" height="1em" fill="currentColor" focusable="false"><path d="${mark.path}"></path></svg>` : controlIcon('globe', 16);
     return `<button type="button" class="ui-row settings-row" data-kind="door" data-lead data-costs-account="${escapeHtmlAttr(path)}">`
-        + `<span class="dashboard-settings-glyph" aria-hidden="true">${glyph}</span>`
-        + `<span class="ui-row-title">${escapeHtmlAttr(name)}</span><span class="ui-row-meta">${escapeHtmlAttr(meta)}</span><span class="ui-row-actions">`
+        + `<span class="settings-head-glyph dashboard-settings-glyph" aria-hidden="true">${glyph}</span>`
+        + `<span class="ui-row-title">${escapeHtmlAttr(name)}</span><span class="ui-row-meta"><span>${escapeHtmlAttr(meta)}</span></span><span class="ui-row-actions">`
         + `${value ? `<span class="settings-row-value"${tone ? ` data-tone="${tone}"` : ''}>${escapeHtmlAttr(value)}</span>` : ''}`
         + '<span class="settings-row-chevron" aria-hidden="true">›</span></span></button>';
 }

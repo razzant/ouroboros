@@ -25,6 +25,9 @@ export function settingsPageFor(path) {
     return best;
 }
 
+/** A door that leaves Settings: a Dashboard tab, another page, Main (`dashboard:costs`, `page:skills`, `main:context`). */
+export const isDoorId = (path) => /^(dashboard|page|main):/.test(String(path || ''));
+
 /** The registered prefixes, for search and the tests that walk every page. */
 export function settingsPagePrefixes() {
     return [...PAGES.keys()];

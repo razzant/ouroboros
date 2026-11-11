@@ -9,7 +9,6 @@ import {
 } from './claudexor_status_store.js';
 import { markRecheckRow, recheckFromSettings, saveCheckerSettings } from './consciousness_api.js';
 import { harnessIdentityMarkup } from './harness_presentation.js';
-import { strokeIcon } from './page_icons.js';
 import {
     EFFORT_CHOICES, ROUTE_KIND_AGENT_SESSION, ROUTE_KIND_API_MODEL,
     compoundSessionEffort, compoundSessionEffortConflict, apiConnections, configuredApiProviders, changeRouteChoice, routeModelFields,
@@ -26,7 +25,7 @@ import {
     sessionRouteVerdict,
 } from './subagent_status_primitives.js';
 import { bindRecheckMarks, recheckMarkHtml, syncRecheckState } from './safety_recheck.js';
-import { CODECS, CONFIRMS, bindSettingRows, outcomeLine, setButtonBusy, settingsRow, writeEntry } from './settings_controls.js';
+import { CODECS, CONFIRMS, bindSettingRows, doorSign, outcomeLine, setButtonBusy, settingsRow, writeEntry } from './settings_controls.js';
 import { registerSettingsPage } from './settings_pages.js';
 import { rowById, rowsOf } from './settings_rows.js';
 import { revealNewRow } from './ui_helpers.js';
@@ -480,8 +479,7 @@ function rowDetailsHtml(row, state, rowKey) {
             </details>`;
 }
 
-const CHEVRON = strokeIcon('<path d="m9 18 6-6-6-6"/>', 14);
-const chip = (text, tone = 'neutral') => `<span class="ui-chip agent-chip" data-tone="${tone}">${escapeHtml(text)}</span>`;
+const chip = (text, tone = 'neutral') => `<span class="ui-chip settings-chip agent-chip" data-tone="${tone}">${escapeHtml(text)}</span>`;
 // An on/off that writes at once is the shared switch; one that is a field of a form with its own Save is a checkbox.
 function toggleHtml(field, label, checked, live, recheckId = '') {
     const attrs = `type="checkbox" data-subagent-field="${field}"${recheckId ? ` data-recheck-mark="${escapeHtml(recheckId)}"` : ''} aria-label="${escapeHtml(label)}"${checked ? ' checked' : ''}`;
@@ -509,12 +507,12 @@ function subagentHeadHtml(row, state, index, list = false) {
     const mark = harnessIdentityMarkup(identity.harnessId, { label: identity.label, channel: identity.channel, className: 'available-subagent-route-identity' });
     if (list) {
         const name = agentName(row, state);
-        return `<span class="agent-head-glyph" aria-hidden="true">${mark}</span>
-            <button type="button" class="agent-head-open" data-subagent-field="open">
+        return `<span class="settings-head-glyph" aria-hidden="true">${mark}</span>
+            <button type="button" class="settings-head-open" data-subagent-field="open">
                 <span class="ui-row-title">${escapeHtml(name)}${row.review_eligible === true ? chip('Reviewer') : ''}${status.tone === 'warn' ? chip(status.label, 'warn') : ''}</span>
                 <span class="ui-row-meta">${escapeHtml([identity.label, row.recommended_use.trim()].filter(Boolean).join(' · '))}</span>
             </button>
-            <div class="ui-row-actions">${toggleHtml('enabled', `Available: ${name}`, row.enabled !== false, true)}<span class="agent-head-end" aria-hidden="true">${CHEVRON}</span></div>`;
+            <div class="ui-row-actions">${toggleHtml('enabled', `Available: ${name}`, row.enabled !== false, true)}${doorSign()}</div>`;
     }
     const rowKey = row._uiKey || row.subagent_id;
     const reason = rowStatusReason(status);
@@ -611,13 +609,13 @@ function agentPageHtml(row, state, index, live) {
     const saved = state.loadedItems.find((item) => item.subagent_id === row.subagent_id);
     const recheck = saved?.rechecks_flags === true
         || (saved?.route.kind === ROUTE_KIND_API_MODEL && saved.delivery === 'packet' && saved.enabled !== false);
-    const use = (field, title, meta, checked) => `<div class="ui-row agent-use"><p class="ui-row-title">${title}</p>
-        <p class="ui-row-meta">${escapeHtml(meta)}</p><div class="ui-row-actions">${toggleHtml(field, title, checked, live, field === 'rechecks_flags' ? row.subagent_id : '')}</div></div>`;
-    const card = (title, body, lead = '') => `<section class="ui-card agents-card"><h3 class="agents-card-title">${title}</h3>
-        ${lead ? `<p class="agents-card-lead">${lead}</p>` : ''}${body}</section>`;
-    return `<p class="agents-lead">${escapeHtml(rowIdentity(row, state).label)}</p>
-        <div class="agent-page" data-subagent-row="${escapeHtml(row._uiKey || row.subagent_id)}" data-entry-id="${escapeHtml(row.subagent_id)}">
-            ${card('In use', `<div class="agents-rows">
+    const use = (field, title, meta, checked) => `<div class="ui-row settings-row agent-use" data-kind="switch"><p class="ui-row-title">${title}</p>
+        <p class="ui-row-meta"><span>${escapeHtml(meta)}</span></p><div class="ui-row-actions">${toggleHtml(field, title, checked, live, field === 'rechecks_flags' ? row.subagent_id : '')}</div></div>`;
+    const card = (title, body, lead = '') => `<section class="ui-card settings-card"><h3 class="settings-card-title agents-card-title">${title}</h3>
+        ${lead ? `<p class="settings-card-lead">${lead}</p>` : ''}${body}</section>`;
+    return `<p class="settings-page-lead">${escapeHtml(rowIdentity(row, state).label)}</p>
+        <div class="settings-stack agent-page" data-subagent-row="${escapeHtml(row._uiKey || row.subagent_id)}" data-entry-id="${escapeHtml(row.subagent_id)}">
+            ${card('In use', `<div class="settings-rows">
                 ${use('enabled', 'Available', 'Off keeps the agent and its notes; Ouroboros does not call it.', row.enabled !== false)}
                 ${use('review_eligible', 'Reviewer', state.tickCaption, row.review_eligible === true)}
                 ${live && recheck ? use('rechecks_flags', 'Re-checks flagged actions', 'The second look at a step the Safety Supervisor flags. One agent holds it.', saved.rechecks_flags === true) : ''}
@@ -630,7 +628,7 @@ function agentPageHtml(row, state, index, live) {
             <div class="ui-action-row"><button type="button" class="btn btn-save" data-editor-save>Save</button>
                 ${live ? `<button type="button" class="btn btn-default" data-editor-discard${state.dirty ? '' : ' hidden'}>Discard changes</button>` : ''}
                 <span class="ui-result" data-editor-result role="status" aria-live="polite"></span></div>`)}
-            <div class="ui-action-row agents-foot">${live ? '<button type="button" class="btn btn-default" data-subagent-duplicate>Duplicate</button>' : ''}
+            <div class="ui-action-row settings-foot">${live ? '<button type="button" class="btn btn-default" data-subagent-duplicate>Duplicate</button>' : ''}
                 <button type="button" class="btn ${live ? 'btn-danger' : 'btn-default'}" data-subagent-remove data-editor-remove>${live ? 'Remove' : 'Discard'}</button></div>
         </div>`;
 }
@@ -1089,16 +1087,16 @@ export function createAvailableSubagentsEditor({
         } else if (page) {
             const count = (key) => items.filter((row) => inFilter(row, state, key)).length;
             const heads = items.map((row, index) => (inFilter(row, state, state.filter)
-                ? `<div class="ui-row agent-head" data-subagent-row="${escapeHtml(row._uiKey)}" data-entry-id="${escapeHtml(row.subagent_id)}">${subagentHeadHtml(row, state, index, true)}</div>` : '')).join('');
-            const html = `<section class="ui-card agents-card">
-                <div class="agents-card-head"><h3 class="agents-card-title">${items.length} agent${items.length === 1 ? '' : 's'}</h3>
+                ? `<div class="ui-row settings-head" data-subagent-row="${escapeHtml(row._uiKey)}" data-entry-id="${escapeHtml(row.subagent_id)}">${subagentHeadHtml(row, state, index, true)}</div>` : '')).join('');
+            const html = `<section class="ui-card settings-card">
+                <div class="settings-card-head"><h3 class="settings-card-title agents-card-title">${items.length} agent${items.length === 1 ? '' : 's'}</h3>
                     <span class="ui-result" data-entry-result role="status" aria-live="polite"></span>
                     <div class="ui-section-actions"><button type="button" class="btn btn-default btn-sm" data-subagent-add ${full ? 'disabled' : ''}>Add agent</button></div></div>
                 <div class="agents-filters">${FILTERS.filter(([key]) => key === 'all' || key === state.filter || count(key)).map(([key, label]) =>
                     `<button type="button" class="filter-chip${key === state.filter ? ' active' : ''}" data-agents-filter="${key}" aria-pressed="${key === state.filter}">${label} ${count(key)}</button>`).join('')}</div>
                 ${state.source === 'undecided' || state.automatic ? `<p class="available-subagents-source" data-agents-automatic>Automatic: this list follows your Main model and accounts. Your first change here saves it as yours.</p>` : ''}
                 ${above}
-                <div class="agents-rows">${!state.loaded ? unloaded : heads || `<p class="available-subagents-empty">${items.length ? 'No agent here.'
+                <div class="settings-rows">${!state.loaded ? unloaded : heads || `<p class="available-subagents-empty">${items.length ? 'No agent here.'
                     : 'No agents yet, so the main model is the one agent. Add one to choose others.'}</p>`}</div>
                 ${below}
                 <p class="available-subagents-source">A change applies to new tasks: a task that is already running keeps the reviewers it started with.${
@@ -1422,13 +1420,13 @@ let roots = 0;
 function mountAgents(container, { path, ctx }) {
     const entry = path.split('/')[1] || '';
     const hostId = `agents-root-${++roots}`;
-    const root = `<div id="${hostId}" class="agents-root"></div>`;
-    container.innerHTML = entry ? root : `<p class="agents-lead">Helpers Ouroboros may hand work to, and reviewers whose word counts.</p>
-        <section class="ui-card agents-card">${settingsRow({ ...rowById(KEY), control: { kind: 'switch' } })}</section>
+    const root = `<div id="${hostId}" class="settings-stack agents-root"></div>`;
+    container.innerHTML = entry ? root : `<p class="settings-page-lead">Helpers Ouroboros may hand work to, and reviewers whose word counts.</p>
+        <section class="ui-card settings-card">${settingsRow({ ...rowById(KEY), control: { kind: 'switch' } })}</section>
         ${root}
-        <section class="ui-card agents-card"><details class="ui-disclosure" data-settings-fold>
+        <section class="ui-card settings-card"><details class="ui-disclosure" data-settings-fold>
             <summary>More: limits for helpers and their folders</summary>
-            <div class="agents-rows" data-agents-fold></div>
+            <div class="settings-rows" data-agents-fold></div>
         </details></section>`;
     const unbindRechecks = bindRecheckMarks(container);
     const foldRows = container.querySelector('[data-agents-fold]');

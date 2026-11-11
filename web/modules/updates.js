@@ -639,9 +639,9 @@ export function initUpdates({ mount, state, ws }) {
     mountTabSettings(channelCard, 'updates', { state, cards: [{ label: 'Which updates', solo: true }], onSaved: () => loadStatus({ fetchRemote: false }),
         onPaint: (settings, chosen = String(settings?.OUROBOROS_UPDATE_CHANNEL ?? '')) => channelCard.querySelectorAll('[data-setting-value]')
             .forEach((choice) => choice.setAttribute('aria-pressed', String(choice.dataset.settingValue === chosen))),
-        custom: (row) => `<div class="dashboard-choices" role="group" aria-labelledby="setting-${row.id}-name">${row.control.options.map((option) =>
-            `<button type="button" class="dashboard-choice" data-setting-value="${option.value}" aria-pressed="false"><span class="dashboard-choice-name">${option.label}</span>`
-            + `<span class="dashboard-choice-note">${option.note}</span></button>`).join('')}</div>` });
+        custom: (row) => `<div class="settings-choices" role="group" aria-labelledby="setting-${row.id}-name">${row.control.options.map((option) =>
+            `<button type="button" class="settings-choice dashboard-choice" data-setting-value="${option.value}" aria-pressed="false"><span class="settings-choice-name">${option.label}</span>`
+            + `<span class="settings-choice-note">${option.note}</span></button>`).join('')}</div>` });
 
     const primaryBtn = page.querySelector('#btn-update-primary');
     let restartNeeded = false;  // panel-lifetime restart continuation (no durable marker exists for fence/rollback refusals)

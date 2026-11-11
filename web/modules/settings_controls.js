@@ -1,6 +1,7 @@
 import { APP_SETTINGS_ORIGIN, apiClient, fetchJson } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { saveCheckerSettings, saveSafetyLevel, saveSafetyRules } from './consciousness_api.js';
+import { isDoorId } from './settings_pages.js';
 import { rowById } from './settings_rows.js';
 import { errorWords, escapeHtmlAttr, setResult } from './ui_primitives.js';
 
@@ -663,6 +664,10 @@ function parseTyped(row, text) {
     return { value: number };
 }
 
+/** The sign at the end of a row that leads somewhere, one for every page (settings.css draws it as the home's two
+ *  glyphs): › opens a page of Settings, ↗ (`data-out`) leaves Settings. `to` is a Settings path or a door id. */
+export const doorSign = (to = '') => `<span class="settings-row-chevron" aria-hidden="true"${isDoorId(to) ? ' data-out' : ''}>›</span>`;
+
 function controlHtml(row, control, ctx) {
     const id = rowDomId(row);
     const described = [`${id}-meta`, `${id}-result`, ctx.describedBy?.(row) || ''].filter(Boolean).join(' ');
@@ -690,7 +695,7 @@ function controlHtml(row, control, ctx) {
         `<button type="button" class="settings-choice" role="radio" aria-checked="false" data-setting-value="${escapeHtmlAttr(option.value)}">`
         + `<span class="settings-choice-name">${escapeHtmlAttr(option.label ?? option.value)}<span class="settings-choice-mark" data-setting-mark></span></span>`
         + `<span class="settings-choice-note">${escapeHtmlAttr(option.note || '')}</span></button>`).join('')}</div>`;
-    case 'door': return '<span class="settings-row-chevron" aria-hidden="true">›</span>';
+    case 'door': return doorSign(control.to);
     default: return ctx.custom?.(row) || '';
     }
 }
@@ -702,7 +707,7 @@ export function settingsRow(row, ctx = {}) {
     const id = rowDomId(row);
     const name = escapeHtmlAttr(row.name);
     const meta = `<span id="${id}-meta" data-setting-meta>${escapeHtmlAttr(row.meta || '')}</span>`;
-    const attrs = `class="ui-row settings-row" data-setting-row="${escapeHtmlAttr(row.id)}" data-kind="${escapeHtmlAttr(control.kind || 'custom')}"`;
+    const attrs = `class="ui-row settings-row" data-setting-row="${escapeHtmlAttr(row.id)}" data-kind="${escapeHtmlAttr(control.kind || 'custom')}"${control.noLimit ? ' data-no-limit' : ''}`;
     if (control.kind === 'door') {  // the whole row is the press: phrasing content only
         return `<button type="button" ${attrs} data-setting-door><span class="ui-row-title">${name}</span>`
             + `<span class="ui-row-meta">${meta}</span><span class="ui-row-actions">${controlHtml(row, control, ctx)}</span></button>`;

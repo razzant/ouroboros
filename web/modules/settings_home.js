@@ -25,7 +25,7 @@ import { fmt, translateString } from './i18n.js';
 import { readNotifyPrefs } from './notifications.js';
 import { PAGE_ICONS, SHELL_ICONS, controlIcon, strokeIcon } from './page_icons.js';
 import { readSkills, skillForms } from './settings_extension_forms.js';
-import { settingsPageFor } from './settings_pages.js';
+import { isDoorId, settingsPageFor } from './settings_pages.js';
 import { policyValueLabel } from './settings_policy.js';
 import { HAND_WRITTEN, HOME_ROWS, ROWS, SEARCH_DOORS } from './settings_rows.js';
 import { getSpeech } from './speech_providers.js';
@@ -36,7 +36,7 @@ import { availableSubagentsLoadValue } from './subagents_settings.js';
 import { updateVerdict } from './updates.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
-export const isDoorId = (path) => /^(dashboard|page|main):/.test(String(path || ''));
+export { isDoorId };
 
 /** A page's title for `path`: its module's words, else the home row that opens it, else the path. */
 export function settingsTitle(path) {
