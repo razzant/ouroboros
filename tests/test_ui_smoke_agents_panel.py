@@ -454,7 +454,7 @@ def test_ui_smoke_list_editor_remove_hands_the_caret_on(direct_server_with_data,
                 if next_id:
                     expect(level.locator(f'[data-entry-id="{next_id}"] [data-entry-open]')).to_be_focused()
                 else:
-                    expect(level.locator('[data-server-add]')).to_be_focused()
+                    expect(level.locator('[data-tools-add]')).to_be_focused()
 
             open_settings(page, 'accounts')
             keys = page.locator("[data-custom-secret-row]:not([hidden]) [data-custom-secret-remove]")
