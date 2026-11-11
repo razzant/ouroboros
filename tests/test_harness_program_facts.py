@@ -372,3 +372,17 @@ def test_newest_gap_has_its_own_status_and_date(tmp_path, status):
     assert ("newest unavailable 2026-11-09" in line) == (status == "unavailable")
     assert ("newest not read" in line) == (status == "not_read")
     assert ("newest nightly, order unknown" in line) == (status == "available")
+
+
+@pytest.mark.parametrize("mode", ["recovery_only", "normal"])
+def test_owned_acquisition_spends_ready_only_after_recovery_ends(monkeypatch, mode):
+    from ouroboros import claudexor_daemon as daemon
+    from ouroboros.gateways import claudexor as wire
+    calls = []
+    monkeypatch.setattr(facts, "engine_ready", lambda gateway: calls.append(gateway))
+    monkeypatch.setattr(daemon, "attach_home", lambda: None)
+    monkeypatch.setattr(wire, "discover_daemon_at", lambda _: wire.DaemonEndpoint("127.0.0.1", 9, "fixture-only"))
+    monkeypatch.setattr(wire.ClaudexorGateway, "handshake", lambda self, **_: {"servingMode": mode})
+    monkeypatch.setattr(daemon, "get_owned_daemon", lambda: SimpleNamespace(_remember_stop_targets=lambda _: None))
+    with daemon.read_owned_gateway() as gateway:
+        assert calls == ([] if mode == "recovery_only" else [gateway])
