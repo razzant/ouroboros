@@ -789,9 +789,9 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
         : (skill.lifecycle_kind === 'enable' && lifecyclePending ? true : skill.enabled);
     const toggleLocked = Boolean(lockReason) || lifecyclePending;
     const trayId = `skill-trays-${safeName.replace(/[^A-Za-z0-9_-]/g, '_')}`;
-    const toggle = skill.lifecycle_virtual ? '' : `<label class="skills-switch ${toggleLocked ? 'is-locked' : ''}">
+    const toggle = skill.lifecycle_virtual ? '' : `<label class="ui-switch ${toggleLocked ? 'is-locked' : ''}">
         <input type="checkbox" class="skills-toggle" role="switch" data-skill="${safeName}" ${toggleOn ? 'checked' : ''} ${toggleLocked ? 'disabled' : ''} aria-checked="${toggleOn ? 'true' : 'false'}" aria-label="${escapeHtml(skill.name)}${lifecyclePending ? ` (${escapeHtml(lifecyclePendingLabel(skill.lifecycle_kind))})` : ''}"${model.trays.length ? ` aria-describedby="${trayId}"` : ''}>
-        <span class="skills-switch-track" aria-hidden="true"><span class="skills-switch-thumb"></span></span>
+        <span class="ui-switch-track" aria-hidden="true"><span class="ui-switch-thumb"></span></span>
     </label>`;
     const marks = [
         requiredBy(skill) ? chipHtml('Required by your organization', 'neutral', { attrs: 'data-required-by-organization' })
@@ -880,7 +880,7 @@ export function patchInstalledSkillEnrichment(card, skill, reviewing, repairing,
     if (control && control.dataset.skillPending !== 'true') {
         const source = next.querySelector('.skills-toggle');
         if (source) {
-            attributes(control.closest('.skills-switch'), source.closest('.skills-switch'));
+            attributes(control.closest('.ui-switch'), source.closest('.ui-switch'));
             attributes(control, source);
             control.checked = source.checked;
             control.disabled = source.disabled;

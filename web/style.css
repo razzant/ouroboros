@@ -6901,48 +6901,6 @@ button.skills-mark { cursor: pointer; min-height: 0; }
     .skills-tray-actions { justify-content: flex-start; }
 }
 
-/* The switch: green when on; a switch that cannot be used now loses its colour, never its size. */
-.skills-switch {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    cursor: pointer;
-    -webkit-user-select: none;
-    user-select: none;
-    padding: 11px 4px;
-    margin: -11px -4px;
-}
-.skills-switch input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
-.skills-switch-track {
-    position: relative;
-    display: inline-block;
-    width: 40px;
-    height: 22px;
-    border-radius: var(--pill-radius);
-    background: var(--status-neutral-border);
-    transition: var(--motion-tone);
-}
-.skills-switch-thumb {
-    position: absolute;
-    top: 2px;
-    left: 2px;
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    background: var(--surface-capsule);
-    box-shadow: var(--elev-rest);
-    transition: transform 140ms ease;
-}
-.skills-switch input:checked + .skills-switch-track { background: var(--green); }
-.skills-switch input:checked + .skills-switch-track .skills-switch-thumb { transform: translateX(18px); }
-.skills-switch input:focus-visible + .skills-switch-track { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
-.skills-switch.is-locked,
-.skills-switch input:disabled { cursor: not-allowed; }
-.skills-switch.is-locked .skills-switch-track,
-.skills-switch input:disabled + .skills-switch-track { background: var(--status-neutral-border); }
-.skills-switch.is-locked .skills-switch-thumb,
-.skills-switch input:disabled + .skills-switch-track .skills-switch-thumb { box-shadow: none; }
-
 /* Details (the shared disclosure, right under the head, its rows the card's width): sentence-case labels in the meta
    ink at 500, values in the reading ink (DESIGN §2). */
 .skills-details-body { display: grid; gap: var(--space-1); }

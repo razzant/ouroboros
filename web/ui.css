@@ -1158,6 +1158,54 @@ textarea.ui-control { resize: vertical; }
     accent-color: var(--accent);
 }
 .ui-checkbox:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+/* The switch: a label holding a checkbox with role="switch" and aria-checked, then its track and thumb, for a change
+   that acts at once (a .ui-checkbox belongs to a form with its own Save). Green when on. One that cannot be used now
+   (disabled, or .is-locked) loses its colour, never its size; one whose write is in flight is disabled with
+   aria-busy and keeps the colour of the value it is writing, dimmed, with nothing drawn beside it. The label's
+   padding, cancelled by its margin, is the switch's reach; the input covers the label, so the reach is pressable. */
+.ui-switch {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    cursor: pointer;
+    -webkit-user-select: none;
+    user-select: none;
+    padding: 11px 4px;
+    margin: -11px -4px;
+}
+.ui-switch input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.ui-switch-track {
+    position: relative;
+    display: inline-block;
+    width: 40px;
+    height: 22px;
+    border-radius: var(--pill-radius);
+    background: var(--status-neutral-border);
+    transition: var(--motion-tone);
+}
+.ui-switch-thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--surface-capsule);
+    box-shadow: var(--elev-rest);
+    transition: transform 140ms ease;
+}
+.ui-switch input:checked + .ui-switch-track { background: var(--green); }
+.ui-switch input:checked + .ui-switch-track .ui-switch-thumb { transform: translateX(18px); }
+.ui-switch input:focus-visible + .ui-switch-track { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+.ui-switch.is-locked,
+.ui-switch input:disabled { cursor: not-allowed; }
+.ui-switch.is-locked .ui-switch-track,
+.ui-switch input:disabled + .ui-switch-track { background: var(--status-neutral-border); }
+.ui-switch.is-locked .ui-switch-thumb,
+.ui-switch input:disabled + .ui-switch-track .ui-switch-thumb { box-shadow: none; }
+.ui-switch input[aria-busy="true"] { cursor: progress; }
+.ui-switch input[aria-busy="true"] + .ui-switch-track { opacity: var(--control-disabled-opacity); }
+.ui-switch input[aria-busy="true"]:checked + .ui-switch-track { background: var(--green); }
 .ui-status:empty { display: none; }
 @media (max-width: 640px), (pointer: coarse) {
     .ui-control { font-size: var(--type-section); }

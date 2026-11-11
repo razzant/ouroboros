@@ -248,7 +248,7 @@ test('each rejected update states its cause and keeps the reviewed retry; only f
 test('conflicts lock an off switch with a visible reason but never trap an enabled skill', () => {
     const conflict = { code: 'skill_conflict', skills: ['beta'], omitted: 0 };
     const off = renderInstalledSkillCard(skill({ conflict }));
-    assert.match(off, /class="skills-switch is-locked"/);
+    assert.match(off, /class="ui-switch is-locked"/);
     assert.match(off, /input type="checkbox" class="skills-toggle"[^>]*disabled/);
     assert.match(traysOf(off), /Uses the same tool names as beta\. Turn one of them off to use the other\./);
     assert.match(off, /aria-describedby="skill-trays-demo"/, 'the locked switch points at the visible explanation');
