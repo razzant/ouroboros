@@ -68,7 +68,7 @@ export const listOrder = (a, b) => ((a.pinned === true) !== (b.pinned === true) 
 const placeKey = (row) => `${row?.pinned === true}|${row ? recency(row) : ''}`;
 
 export function createProjectsNav({ section, header, list, toggle, feed, feedOrder, nextOrder, reserved, listableCount, activeId,
-    expanded, isUnread, readList, onListRead, onShown, open, openMenu, pin, messagesRevision = () => null }) {
+    expanded, isUnread, readList, onListRead, onShown, open, openMenu, pin, isPinPending, messagesRevision = () => null }) {
     // `browse`: the ids a browse shows (sorted with the list) and the rows Show more still owes; `found`: the ids a
     // find shows (null: the owner's new words, laid out anew) and how many rows besides the pins it may show.
     const state = { query: '', browse: null, found: null, budget: PAGE, resume: null, collapsed: null, handoff: null };
@@ -365,7 +365,10 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
                 pinControl.dataset.action = action;
                 pinControl.innerHTML = SHELL_ICONS[action];  // the pin, or the slashed pin of Unpin (page_icons.js)
             }
-            const words = pinWords(action === 'unpin');
+            const pending = isPinPending(project.id);
+            const words = pinWords(action === 'unpin', pending);
+            if (pending) pinControl.setAttribute('aria-disabled', 'true');
+            else pinControl.removeAttribute('aria-disabled');
             pinControl.title = fmt(words);
             pinControl.setAttribute('aria-label', fmt(`${words} {name}`, { name: project.name || project.id }));
         }

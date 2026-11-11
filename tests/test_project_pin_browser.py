@@ -430,6 +430,12 @@ def test_menu_opened_during_save_retires_pending_state_at_settlement(pins_ui, su
     control["hold_writes"] = True
     choose(page, "older", "Pin")
     until(page, lambda: len(control["held_writes"]) == 1)
+    glyph = row(page, "older").locator('.nav-project-pin')
+    expect()(glyph).to_have_attribute("title", "Pinning…")
+    expect()(glyph).to_have_attribute("aria-label", f"Pinning… {LONG}")
+    expect()(glyph).to_have_attribute("aria-disabled", "true")
+    glyph.dispatch_event("click")  # both controls share the existing pending-write guard
+    assert len(control["writes"]) == 1
     anchor = open_menu(page, "older")
     expect()(menu(page).locator('[data-prm="pin"]')).to_have_text("Pinning…")
     assert page.evaluate("document.activeElement.dataset.prm") == "rename"
@@ -447,6 +453,8 @@ def test_menu_opened_during_save_retires_pending_state_at_settlement(pins_ui, su
     action = menu(page).locator('[data-prm="pin"]')
     expect()(action).to_have_text("Unpin" if succeeded else "Pin")
     assert action.get_attribute("aria-disabled") is None
+    expect()(glyph).to_have_attribute("title", "Unpin" if succeeded else "Pin")
+    assert glyph.get_attribute("aria-disabled") is None
     assert len(control["writes"]) == 1
     assert registry.get_project(ui["root"], "older")["pinned"] is succeeded
 
