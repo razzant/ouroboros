@@ -8,11 +8,13 @@ import { escapeHtmlAttr as escapeHtml } from './utils.js';
 
 /** Account copies of the same list contribute one fact; distinct producer versions stay explicit. */
 export function catalogPrograms(catalog = {}, { harness = '', label = '', source = '', profile = '', sources = [] } = {}) {
-    const groups = new Map();
+    const groups = new Map(), supplied = new Map();
+    const inScope = (row) => row && (!profile || (row.credentialProfileId || row.credential_profile_id) === profile)
+        && (!source || (row.source_id || row.source) === source);
+    const modelKey = (row) => JSON.stringify([harness ? '' : row.source_id || row.source || '', row.id || row.value]);
     function add(row, owner = harness, name = label) {
-        if (!row || profile && (row.credentialProfileId || row.credential_profile_id) !== profile) return;
+        if (!inScope(row)) return;
         const id = row.source_id || row.source;
-        if (source && id && id !== source) return;
         const descriptor = sources.find((item) => item.id === id);
         owner = owner || row.credentialHarness || descriptor?.credentialHarness;
         const program = row.sourceProgram;
@@ -20,6 +22,12 @@ export function catalogPrograms(catalog = {}, { harness = '', label = '', source
         if (!groups.has(owner)) groups.set(owner, { harness: owner, label: name || harnessPresentation(owner).label, programs: [] });
         const group = groups.get(owner);
         if (!group.programs.some((item) => item.path === program.path && item.version === program.version)) group.programs.push(program);
+        for (const model of row.models || []) {
+            const key = modelKey({...model, source: id});
+            if (!supplied.has(key)) supplied.set(key, new Set());
+            supplied.get(key).add(owner);
+        }
+        return owner;
     }
     const envelope = catalog.model_catalog || catalog;
     if (Array.isArray(envelope.accounts)) for (const account of envelope.accounts) add(account.catalog);
@@ -28,8 +36,13 @@ export function catalogPrograms(catalog = {}, { harness = '', label = '', source
         if (source && list.source !== source) continue;
         for (const account of list.accounts || []) add(account.catalog);
     }
-    for (const item of catalog.items || catalog.models || []) add(item);
-    return [...groups.values()];
+    const choices = (catalog.items || catalog.models || []).filter(inScope).map((item) => {
+        const owner = add(item);
+        return owner ? new Set([owner]) : supplied.get(modelKey(item)) || new Set();
+    });
+    return [...groups.values()].map((group) => ({...group,
+        mixed: groups.size > 1 || choices.some((owners) => !owners.has(group.harness)),
+    }));
 }
 
 export function modelProgramMarkup(program, view = {}) {
@@ -47,7 +60,7 @@ export function modelProgramMarkup(program, view = {}) {
     else if (pending && (view.operationError || operation?.termination === 'unconfirmed')) button = '<button type="button" class="btn btn-default" data-program-action="rejoin">Check operation</button>';
     else if ((needsUpdate && action?.available && !error) || pending) button = `<button type="button" class="btn btn-default" data-program-action="latest"${disabled ? ' disabled' : ''}>${verb}</button>`;
     return `<div class="harness-model-program ui-field-help" data-program="${escapeHtml(program.harness)}">
-        <span>List from ${escapeHtml(program.label)} ${escapeHtml(versions)}</span>
+        <span>${program.mixed ? 'Models supplied by' : 'List from'} ${escapeHtml(program.label)} ${escapeHtml(versions)}</span>
         ${needsUpdate ? `<span>${escapeHtml(maintenanceLatestLine(entry))}</span>` : ''}${button}
         ${needsUpdate && action && !action.available ? `<span>${escapeHtml(action.reason)}</span>` : ''}
         ${operation ? `<span role="status">${escapeHtml(maintenanceOperationLine(operation, {missing: !entry?.selection?.path && !operation.before?.path}))}</span>` : ''}

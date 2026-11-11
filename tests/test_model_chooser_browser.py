@@ -481,9 +481,11 @@ def test_vendor_footer_in_wizard_models_reviewers_and_place_sheet(role_ui, width
     field = page.locator('[data-place-draft="model"]')
     field.fill("choice")
     expect(footer).to_have_count(1)
-    expect(footer).to_contain_text("List from Codex 2.0.0")
+    expect(footer).to_contain_text("Models supplied by Codex 2.0.0")
     expect(footer.locator("[data-program]")).to_have_count(2)
-    expect(footer).to_contain_text("List from Claude Code 2.0.0")
+    expect(footer).to_contain_text("Models supplied by Claude Code 2.0.0")
+    expect(footer).not_to_contain_text("List from")
+    expect(page.locator('[role="listbox"]:visible [data-model-value="openai::choice-api"]')).to_be_visible()
     action = footer.locator('[data-program="codex"]').get_by_role("button", name="Update", exact=True)
     other_action = footer.locator('[data-program="claude"]').get_by_role("button", name="Update", exact=True)
     expect(action).to_be_enabled()
@@ -500,3 +502,29 @@ def test_vendor_footer_in_wizard_models_reviewers_and_place_sheet(role_ui, width
     roles.capture(page, f"program-place-{account_count}-{width}")
     field.press("Escape")
     expect(footer).to_have_count(0)
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+@pytest.mark.parametrize("account_count", [1, 18])
+def test_models_role_names_only_program_supplied_entries_in_a_mixed_source(role_ui, width, account_count):
+    from playwright.sync_api import expect
+
+    ui, page = role_ui, role_ui["page"]
+    vendor_scene(ui, account_count)
+    # A source can also supply hints with no program provenance; same source is
+    # not proof that every suggestion came from its executable.
+    ui["fixture"]["catalog"]["items"].append({"id": "choice-hint", "value": "claudexor::opaque-source=choice-hint",
+        "source_id": "opaque-source", "credential_profile_id": "personal", "sourceProgram": None})
+    page.set_viewport_size({"width": width, "height": 950})
+    roles.open_agents(ui)
+    field = vendor_consumer(ui, "Models")
+    field.fill("choice")
+    footer = page.locator("[data-model-footer]:visible")
+    expect(footer).to_have_count(1)
+    expect(footer.locator("[data-program]")).to_have_count(1)
+    expect(footer).to_contain_text("Models supplied by Codex 2.0.0")
+    expect(footer).not_to_contain_text("List from")
+    expect(page.locator('[role="listbox"]:visible [role="option"]')).to_have_count(2)
+    expect(footer.get_by_role("button", name="Update", exact=True)).to_be_enabled()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    roles.capture(page, f"program-models-mixed-{account_count}-{width}")

@@ -2648,8 +2648,9 @@ operation id. A changed receipt can offer Return to its prior version when suppo
 A nonzero installer exit can still mean Updated: retain the limitation sentence.
 A package-manager updater's advice remains advice, never an automatic command.
 
-Only an opened model list shows its supplying program version: a non-option closing
-row, once per distinct producer, followed by the newest fact and Update when needed.
+Only an opened model list shows a non-option closing row per producer: “List from”
+when it supplies every suggestion, otherwise “Models supplied by” naming its subset,
+followed by the newest fact and Update when needed.
 Models roles/fallbacks, subagents/reviewers, onboarding and Places share it. Closed
 editors stay quiet; API-only lists have no such row. Mouse, touch and keyboard Update
 keep the list open through progress and result, then refresh its suggestions. Typed

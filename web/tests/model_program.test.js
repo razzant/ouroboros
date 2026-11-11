@@ -35,3 +35,33 @@ test('newest verdict, refusal and operation outcome are engine facts, and text i
     assert.match(html, /Clear the override/); assert.match(html, /Nothing was removed/); assert.match(html, /Nothing changed/);
     assert.match(html, /Vendor &lt;says&gt;/); assert.doesNotMatch(html, /<button/);
 });
+
+for (const count of [1, 18]) test(`mixed catalogs name the supplied subset; ${count} accounts do not multiply it`, () => {
+    const items = Array.from({length: count}, (_, index) => ({id: 'vendor-model', value: 'claudexor::transport=vendor-model',
+        source_id: 'transport', credential_profile_id: String(index), sourceProgram: producer}));
+    const sources = [{id: 'transport', credentialHarness: 'codex'}];
+    const api = {id: 'api-model', value: 'openai::api-model'};
+    const pure = catalogPrograms({items, model_sources: sources}, {sources});
+    assert.equal(pure.length, 1);
+    assert.match(modelProgramMarkup(pure[0]), /List from Codex 2.0.0/);
+    for (const extra of [api, {...api, source_id: 'transport', sourceProgram: null}]) {
+        const mixed = catalogPrograms({items: [...items, extra]}, {sources});
+        assert.equal(mixed.length, 1);
+        assert.match(modelProgramMarkup(mixed[0]), /Models supplied by Codex 2.0.0/);
+        assert.doesNotMatch(modelProgramMarkup(mixed[0]), /List from/);
+    }
+    const scoped = catalogPrograms({items: [...items, api]}, {source: 'transport', profile: '0', sources});
+    assert.match(modelProgramMarkup(scoped[0]), /List from Codex 2.0.0/);
+    const two = catalogPrograms({items: [...items, {id: 'second', credentialHarness: 'claude', sourceProgram: producer}]}, {sources});
+    assert.equal(two.length, 2);
+    assert.ok(two.every((group) => group.mixed));
+});
+test('native flat suggestions inherit only the models their supplying catalogs actually list', () => {
+    const catalog = {model_catalog: {sourceProgram: producer, models: [{id: 'known'}]}, models: [{id: 'known'}]};
+    const options = {harness: 'future', label: 'Future'};
+    assert.match(modelProgramMarkup(catalogPrograms(catalog, options)[0]), /List from Future/);
+    catalog.models.push({id: 'hint', sourceProgram: null});
+    assert.match(modelProgramMarkup(catalogPrograms(catalog, options)[0]), /Models supplied by Future/);
+    catalog.model_catalog.models.push({id: 'hint'});
+    assert.match(modelProgramMarkup(catalogPrograms(catalog, options)[0]), /List from Future/);
+});
