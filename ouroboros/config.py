@@ -41,7 +41,7 @@ from ouroboros.settings_defaults import (
 )
 from ouroboros.settings_scales import (
     EFFORT_SCALE, EFFORT_RANGE_KEYS, EFFORT_FORMAT_KEY, normalize_effort_document, OPTIONAL_BOUND_LEGACY, UNLIMITED,  # noqa: F401
-    PROMPT_CACHE_TTL_SCALE, defaults_for_settings_document, optional_bound_value,  # noqa: F401
+    PROMPT_CACHE_TTL_SCALE, defaults_for_settings_document, optional_bound_value, OWNER_CAP_KEY, document_optional_value, owner_cap_document,  # noqa: F401
     REVIEW_POOL_DEFAULT_EFFORT,  # noqa: F401
     VALID_RUNTIME_MODES, VALID_SUBAGENTS_MODES, normalize_subagents_mode,  # noqa: F401
     VALID_SAFETY_MODES,  # noqa: F401
@@ -98,8 +98,7 @@ from ouroboros.runtime_limits import (
     MCP_BROWSER_GUARD_PENDING, MCP_STDIO_STDERR_TAIL_BYTES, MCP_STDIO_STDERR_NOTE_BYTES,  # noqa: F401
     CLAUDEXOR_MODEL_POLL_INTERVAL_SEC, CLAUDEXOR_OPERATOR_STOP_TIMEOUT_SEC,  # noqa: F401
     CLAUDEXOR_STOP_EXIT_WAIT_SEC, BODY_MAINTENANCE_INTERVAL_SEC,  # noqa: F401
-    DELEGATE_WAIT_CEILING_SEC,  # noqa: F401
-    DELEGATE_WAIT_WINDOW_MAX_SEC, IDLE_LEASE_MAX_SEC,  # noqa: F401
+    IDLE_LEASE_MAX_SEC,  # noqa: F401
     MAX_ACTIVE_SUBAGENTS_HARD_CAP, MAX_SUBAGENT_DEPTH_HARD_CAP,  # noqa: F401
     WAKE_DEFAULT_SEC,  # noqa: F401
     _bounded_positive_int_setting,  # noqa: F401
@@ -110,7 +109,6 @@ from ouroboros.runtime_limits import (
     get_consciousness_autonomy,  # noqa: F401
     get_consciousness_daily_usd,  # noqa: F401
     get_consciousness_max_tasks,  # noqa: F401
-    get_delegate_wait_max_sec, get_delegate_wait_sec,  # noqa: F401
     get_finalization_grace_sec,  # noqa: F401
     get_direct_turn_stop_wait_sec,  # noqa: F401
     get_llm_transport_read_timeout_sec,  # noqa: F401
@@ -135,7 +133,7 @@ from ouroboros.update_channels import UPDATE_SETTINGS_DEFAULTS, normalize_update
 
 # Physical safety budgets, not test-value judgments or kernel-enforced quotas.
 TEST_WORKER_PEAK_RSS_BYTES = 1024**3  # Provisional 1 GiB; loaded P0 observed 690 MiB/worker.
-TEST_MEMORY_RESERVE_FRACTION = 0.10  # Keep physical headroom for the OS and other work.
+HOST_MEMORY_RESERVE_FRACTION = 0.10  # Kept out of every physical-memory admission for the OS and other work.
 TEST_PROCESS_SAMPLE_SEC = 1.0  # Poll latency; allocations between samples can outrun the stop.
 TEST_PROCESS_TOKEN_SCAN_SEC = 5.0  # Detached members are found by token this often; the scan reads every environment.
 
@@ -652,8 +650,8 @@ def _coerce_setting_value(key: str, value):
         return normalize_subagents_mode(value)
     if key == "OUROBOROS_CONTEXT_MODE":
         return normalize_context_mode(value)
-    if key in OPTIONAL_BOUND_LEGACY:  # document spelling: "unlimited" or a positive int; a typo is finite
-        return UNLIMITED if (bound := optional_bound_value(key, value)) is None else bound
+    if key in OPTIONAL_BOUND_LEGACY or key == OWNER_CAP_KEY:  # a positive int, else "unlimited" or blank; a typo is finite
+        return document_optional_value(key, value)
     # Trim so whitespace-only config is not treated as a configured skills repo.
     if key == "OUROBOROS_SKILLS_REPO_PATH":
         return str(value or "").strip()
@@ -742,7 +740,7 @@ def normalize_settings_raw(raw: dict) -> dict:
     (``retired_key_sets_seen`` -> ``server_maintenance._startup_retired_settings_notice``)."""
     from ouroboros.retention import LEGACY_RETENTION_KEYS, pick_legacy_retention_seed
 
-    loaded = normalize_consciousness_safety(coerce_settings_raw(raw))
+    loaded = normalize_consciousness_safety(coerce_settings_raw(owner_cap_document(raw)))  # the cap's legacy 10 reads blank
     # Prefer a CUSTOMIZED legacy retention value so a rename never orphans it; an
     # all-defaults file collapses to the unified default.
     if "OUROBOROS_GC_RETENTION_DAYS" not in loaded:

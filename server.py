@@ -56,7 +56,7 @@ from ouroboros.server_process import (  # noqa: F401
     _SignalStopServer, _embedded_uvicorn_server,
     capture_server_source_baseline, server_stop_cause, log, restart_gate_line,
     FAULT_BUS_LOST, FAULT_LOOP_FAILED, bind_fault_exit, end_generation_on_fault, fault_cancel_reason,
-    fault_exit, held_saved_work_count, previous_fault_sentence, end_fault_held_runs,
+    fault_exit, held_saved_work_count, previous_fault_sentence, end_fault_held_runs, raise_open_file_limit,
 )
 from ouroboros.server_routing_context import (  # noqa: F401
     _active_direct_roots,
@@ -623,10 +623,7 @@ def _open_dialogue(settings: dict, *, stop_requested=None):
 
         set_log_sink(make_server_log_sink(bridge, pathlib.Path(DATA_DIR)))
 
-        bus_init(
-            drive_root=DATA_DIR, budget_report_every=10, chat_bridge=bridge,
-            total_budget_limit=float(settings.get("TOTAL_BUDGET", SETTINGS_DEFAULTS["TOTAL_BUDGET"])),
-        )
+        bus_init(drive_root=DATA_DIR, chat_bridge=bridge)
         _dialogue_bridge = bridge
         BOOT.dialogue_ready()
         log.info("Dialogue ready: owner messages are accepted.")
@@ -682,12 +679,10 @@ def _run_supervisor(settings: dict) -> None:
             handle_chat_direct, auto_resume_after_restart, EventBusLost, event_bus_exitcode,
         )
 
-        max_workers = int(settings.get("OUROBOROS_MAX_WORKERS", 10))
-
         # Managed manifest branch defaults must drive worker commit/restart flows too.
         _workers_branch_dev, _workers_branch_stable = _runtime_branch_defaults()
         workers_init(
-            repo_dir=REPO_DIR, drive_root=DATA_DIR, max_workers=max_workers,
+            repo_dir=REPO_DIR, drive_root=DATA_DIR,
             branch_dev=_workers_branch_dev, branch_stable=_workers_branch_stable,
         )
 
@@ -702,8 +697,7 @@ def _run_supervisor(settings: dict) -> None:
         kill_workers(preserve_pending=True)
         spawn_workers()
         from ouroboros.server_process import record_applied_restart_settings
-        record_applied_restart_settings({"OUROBOROS_MAX_WORKERS": max_workers,
-                                        "OUROBOROS_SKILLS_REPO_PATH": settings.get("OUROBOROS_SKILLS_REPO_PATH", "")})
+        record_applied_restart_settings({"OUROBOROS_SKILLS_REPO_PATH": settings.get("OUROBOROS_SKILLS_REPO_PATH", "")})
         persist_queue_snapshot(reason="startup")
         try:
             from ouroboros.delegate_recovery import pre_adopt_planned_handoffs
@@ -765,7 +759,6 @@ def _run_supervisor(settings: dict) -> None:
             DRIVE_ROOT=DATA_DIR, REPO_DIR=REPO_DIR,
             BRANCH_DEV=branch_dev, BRANCH_STABLE=branch_stable,
             bridge=bridge, WORKERS=WORKERS, PENDING=PENDING, RUNNING=RUNNING,
-            MAX_WORKERS=max_workers,
             send_with_budget=send_with_budget, load_state=load_state, save_state=save_state,
             update_state=update_state,
             update_budget_from_usage=update_budget_from_usage, append_jsonl=append_jsonl,
@@ -1450,6 +1443,7 @@ def main() -> int:
             return 2
     # Sole server.log writer; tests on the real default data root retain only the stream handler.
     configure_process_logging(drive_logs=None if _pytest_default_real_data_dir else DATA_DIR / "logs")
+    raise_open_file_limit()  # the body follows each live run on its own transport: hundreds of runs are hundreds of files
     if not _pytest_default_real_data_dir:  # a pending Panic sweep ends and the installation marker is planted before any child (§9)
         process_scope.initialize_installation_scope(DATA_DIR)
     if not automatic_launch_allowed(os.environ.get("OUROBOROS_LAUNCH_INTENT", "owner"), DATA_DIR, log):

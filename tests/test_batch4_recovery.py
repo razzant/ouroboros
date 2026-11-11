@@ -86,5 +86,7 @@ def test_cold_sleep_retains_unknown_child_start_after_result_collection(tmp_path
     assert dc.record_start_requested(tmp_path, task_id="collected-child", root_task_id="sleeper",
                                     invocation_id="uncertain", idempotency_key="key", route="test",
                                     request={"prompt": "work"})
+    sleeper = _ctx(tmp_path)
+    sleeper.task_metadata["project_id"] = "room"  # a top-level project sleeper: its cold sleep releases the lane
     with pytest.raises(ValueError, match="member_custody collected-child"):
-        request_sleep(_ctx(tmp_path), {"tasks": [], "runs": [], "senders": [], "wake_at": ""}, "cold")
+        request_sleep(sleeper, {"tasks": [], "runs": [], "senders": [], "wake_at": ""}, "cold")

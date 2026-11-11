@@ -73,10 +73,10 @@ def test_a_marked_terminal_wake_is_shown_with_its_mark_and_still_acknowledged(tm
 
 
 def test_owner_mail_in_a_marked_wake_reaches_the_next_model_input_once(tmp_path, monkeypatch):
-    from ouroboros import delegate_supervision as ds
     from ouroboros.owner_mailbox import write_owner_message
     from ouroboros.tools import delegate
     from tests.test_loop_transport_wait import _loop_kwargs as transport_loop_kwargs
+    from tests._run_wait_shared import wake_now
     from tests.test_working_checkpoint import _registry as nanny_registry
 
     registry = nanny_registry(tmp_path, monkeypatch, "nanny", 2)
@@ -88,8 +88,8 @@ def test_owner_mail_in_a_marked_wake_reaches_the_next_model_input_once(tmp_path,
         assert write_owner_message(tmp_path, text, ctx.task_id, msg_id=msg_id)
         return json.dumps({"status": "terminal", "run_id": rid, "state": "succeeded"})
 
-    def wait_entry(ctx, run_id):
-        return ds.supervised_wait(ctx, run_id, wait_once=wait_once)
+    def wait_entry(ctx, run_id):  # the wake a ready delegate_wait publishes, its one read scripted
+        return wake_now(ctx, run_id, wait_once=wait_once)
 
     entry = registry._entries["delegate_wait"]
     monkeypatch.setitem(registry._entries, "delegate_wait", replace(

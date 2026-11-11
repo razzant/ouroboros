@@ -188,7 +188,7 @@ def test_owner_wait_preserves_form_and_lends_one_worker(wait_clone, local_form, 
             assert gate.arrived.wait(120), f"B never executed in the lent slot: {oracle.queue_snapshot()}"
             both = oracle.queue_snapshot()
             assert {task_a, task_b} <= oracle.running_ids()
-            assert both["active_worker_count"] == 1 and both["parked_worker_count"] == 1
+            assert both["acting_worker_count"] == 1 and both["parked_worker_count"] == 1
             assert _running(oracle, task_b)["worker_id"] != parked["worker_id"]
             assert len(_rounds(stub, _FORM_TASK)) == 6, "parked A bought an empty round while B ran"
 

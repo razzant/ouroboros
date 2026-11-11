@@ -198,12 +198,21 @@ def _ctx(tmp_path, emitted):
                            emit_progress_fn=lambda text, **meta: emitted.append((text, meta)))
 
 
-def _records(ctx, gateway, through, *, after=0, rows=(), omitted=0, drain=None, emit=None):
-    """Every record of one advance, each committed after ``emit`` (default: accepted)."""
+def _records(ctx, gateway, through, *, after=0, rows=(), omitted=0, emit=None, run_id="run-1"):
+    """One body journal read or timeline window, committed after the fixture's channel accepts it."""
+    from ouroboros.gateways import claudexor_run_events as events
+
     advance = SimpleNamespace(seq=through, events=list(rows), events_omitted=omitted)
+    after = delegate_activity.shown_cursor(ctx, ctx.task_id, run_id, after)
+    if through <= after:
+        frames = delegate_activity.retained_observations(ctx, run_id)
+    elif events.run_events_supported(gateway, timeout_sec=2):
+        read = events.read_run_events(gateway, run_id, after_seq=after, through_seq=None, timeout_sec=2)
+        frames = delegate_activity.stream_observations(ctx, run_id, read, after=after)
+    else:
+        frames = delegate_activity.window_observations(ctx, run_id, advance, after_seq=after)
     out = []
-    for record, commit in delegate_activity.observations(ctx, gateway, "run-1", advance, after_seq=after,
-                                                         read_sec=2.0, drain_sec=drain):
+    for record, commit in frames:
         if emit is not None:
             emit(record)
         commit()
@@ -397,8 +406,7 @@ def test_the_same_event_reaches_the_human_once_and_an_unread_remainder_is_caught
         bounded.setattr(run_events, "read_run_events", short)
         partial_record = _observe(ctx, gateway, 3, after=1)
     assert [p["text"] for p in partial_record["parts"]] == ["second"]
-    assert partial_record["gaps"] == [{"after_seq": 2, "through_seq": 3, "reason": "read_bound:time"}]
-    assert "read at the run's next advance or its end" in delegate_activity.progress_text(partial_record)
+    assert partial_record["source"]["read_through"] == 2 and not partial_record.get("gaps")
     daemon.steps.append([_harness(4, "tool_call", tool={"name": "Read"})])
     daemon.revealed = 3
     caught_up = _observe(ctx, gateway, 4, after=3)
@@ -456,156 +464,7 @@ def test_an_engine_without_the_stream_keeps_a_marked_window_with_its_real_counts
     assert "+4 earlier timeline rows not shown" in delegate_activity.progress_text(record)
 
 
-def test_a_failed_read_is_a_provisional_window_and_the_exact_range_is_read_again(tmp_path):
-    daemon = Daemon([[_harness(1, "message", text="hi")], [_harness(2, "message", text="later")]])
-    gateway = _gateway(daemon)
-    ctx = _ctx(tmp_path, [])
-    daemon.revealed = 1
-    gateway._client = httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(
-        lambda request: httpx.Response(503, json={"code": "busy"}) if request.url.path.endswith("/events")
-        else daemon.handler(request)))
-    record = _observe(ctx, gateway, 1, rows=[{"title": "hi", "textKind": "message"}])
-    assert record["source"] == {"kind": "timeline_window", "reason": "stream_unavailable:busy", "provisional": True, "rows": 1}
-    assert record["gaps"] == [{"after_seq": 0, "through_seq": 1, "reason": "stream_unavailable:busy"}]
-    assert "the exact read failed" in delegate_activity.progress_text(record)
-    gateway._client = httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(daemon.handler))
-    daemon.revealed = 2
-    exact = _observe(ctx, gateway, 2, after=1)
-    assert (exact["after_seq"], [p["seq"] for p in exact["parts"]]) == (0, [1, 2]), \
-        "the failed range was not skipped: the exact read covers it and supersedes the window"
-
-
 # -- the terminal tail ----------------------------------------------------------------------
-
-def test_a_terminal_drain_reads_every_bounded_step_to_the_journals_end(tmp_path, monkeypatch):
-    import ouroboros.gateways.claudexor_run_events as run_events
-
-    events = [_harness(seq, "message", text=f"line {seq} " + "x" * 300) for seq in range(1, 10)]
-    daemon = Daemon([events + [_run_event(10, "run.completed")]])
-    daemon.revealed = 1
-    gateway = _gateway(daemon)
-    real = run_events.read_run_events
-    monkeypatch.setattr(run_events, "read_run_events", lambda *a, **k: real(*a, **{**k, "max_bytes": 1200}))
-    records = _records(_ctx(tmp_path, []), gateway, 10, drain=30)
-    assert len(records) > 2, "the byte bound cut the tail into several reads"
-    assert [r["after_seq"] for r in records] == [0] + [r["source"]["read_through"] for r in records[:-1]], \
-        "each read resumes exactly where the previous one stopped"
-    assert records[-1]["source"]["read_through"] == 10 and records[-1]["source"]["ended"] is True
-    assert not any(r.get("gaps") for r in records), "nothing is left for a next observation that will not come"
-    assert [p["seq"] for r in records for p in r["parts"]] == list(range(1, 10))
-
-
-def test_a_terminal_drain_out_of_time_states_a_final_gap_and_where_the_originals_are(tmp_path, monkeypatch):
-    import ouroboros.gateways.claudexor_run_events as run_events
-
-    events = [_harness(seq, "message", text=f"line {seq} " + "x" * 300) for seq in range(1, 10)]
-    daemon = Daemon([events + [_run_event(10, "run.completed")]])
-    daemon.revealed = 1
-    gateway = _gateway(daemon)
-    ctx = _ctx(tmp_path, [])
-    real = run_events.read_run_events
-    clock = [0.0]
-
-    def spend_allowance(*args, **kwargs):
-        read = real(*args, **{**kwargs, "max_bytes": 1200})
-        clock[0] = 1.0
-        return read
-
-    with monkeypatch.context() as bounded:
-        bounded.setattr(delegate_activity, "time", SimpleNamespace(monotonic=lambda: clock[0]))
-        bounded.setattr(run_events, "read_run_events", spend_allowance)
-        records = _records(ctx, gateway, 10, drain=1)
-    assert len(records) == 1, "only the first read was admitted before the allowance expired"
-    gap, = records[0]["gaps"]
-    assert gap == {"after_seq": records[0]["source"]["read_through"], "through_seq": 10, "reason": "read_bound:time",
-                   "final": True, "where": "run_journal"}
-    assert "another delegate_wait on the run reads them" in delegate_activity.progress_text(records[0])
-    rest = _records(ctx, gateway, 10, after=10, drain=30)
-    assert rest[0]["after_seq"] == gap["after_seq"] and rest[-1]["source"]["ended"] is True, \
-        "a later wait on the ended run reads the remainder from the same journal, without a new run"
-
-
-def test_a_terminal_read_that_keeps_failing_is_a_final_provisional_gap(tmp_path, monkeypatch):
-    daemon = Daemon([[_harness(1, "message", text="hi")]])
-    daemon.revealed = 1
-    gateway = _gateway(daemon)
-    calls = []
-
-    def flaky(request):
-        if request.url.path.endswith("/events"):
-            calls.append(request)
-            return httpx.Response(503, json={"code": "busy"})
-        return daemon.handler(request)
-
-    gateway._client = httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(flaky))
-    clock = [0.0]
-    monkeypatch.setattr(delegate_activity, "time", SimpleNamespace(
-        monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds)))
-    record, = _records(_ctx(tmp_path, []), gateway, 1, drain=2, rows=[{"title": "hi", "textKind": "message"}])
-    assert len(calls) > 1, "the failed terminal read was retried inside its allowance"
-    assert record["source"]["provisional"] is True
-    assert record["gaps"] == [{"after_seq": 0, "through_seq": 1, "reason": "stream_unavailable:busy",
-                               "final": True, "where": "run_journal"}]
-
-
-@pytest.mark.parametrize("served", [2, 0], ids=["partial-then-refused", "refused-at-once"])
-def test_a_journal_retention_reclaimed_is_read_once_and_its_gap_promises_no_later_read(tmp_path, served):
-    engine = LoopbackEngine([_harness(seq, "message", text=f"line {seq}") for seq in range(1, served + 1)],
-                            tail=_refusal("run_expired_by_retention", False))
-    ctx = _ctx(tmp_path, [])
-    with engine.serving() as gateway:
-        record, = _records(ctx, gateway, 5, drain=30)
-        assert record["gaps"] == [{"after_seq": served, "through_seq": 5, "reason": "stream_error:run_expired_by_retention",
-                                   "retryable": False, "final": True}], "the unread range stays explicit"
-        assert [p["text"] for p in record["parts"]] == [f"line {seq}" for seq in range(1, served + 1)]
-        source = record["source"]
-        assert (source["kind"], source.get("read_through"), source.get("retryable")) == (
-            ("run_events", served, False) if served else ("timeline_window", None, False)), "the source ends at what was read"
-        assert engine.stream_reads() == ["0"] and delegate_activity._memo("child", "run-1").shown_through == 5, \
-            "the refused range is passed once its gap is emitted"
-        assert _records(ctx, gateway, 5, drain=30) == [] and engine.stream_reads() == ["0"], \
-            "the same wait again reads nothing: no futile reread"
-    text = delegate_activity.progress_text(record)
-    assert "can no longer be read" in text and "reported separately" in text and "reads them" not in text
-
-
-def test_a_refused_range_whose_frame_failed_is_committed_by_the_local_replay_and_not_read_again(tmp_path):
-    engine = LoopbackEngine([_harness(1, "message", text="one"), _harness(2, "message", text="two")],
-                            tail=_refusal("run_expired_by_retention", False))
-    ctx = _ctx(tmp_path, [])
-
-    def closed(_record):
-        raise RuntimeError("progress channel closed")
-
-    with engine.serving() as gateway:
-        with pytest.raises(RuntimeError):
-            _records(ctx, gateway, 5, drain=30, emit=closed)
-        assert delegate_activity._memo("child", "run-1").shown_through == 0, "a frame not handed over moves no cursor"
-        (replayed, commit), = list(delegate_activity.retained_observations(ctx, "run-1"))
-        commit()
-        assert replayed["gaps"][0]["retryable"] is False and delegate_activity._memo("child", "run-1").shown_through == 5
-        assert _records(ctx, gateway, 5, drain=30) == [] and engine.stream_reads() == ["0"], \
-            "the local replay commits what the live frame would have: the refused range is not read again"
-
-
-def test_a_retryable_refusal_keeps_the_drains_bounded_reconnect_and_is_never_called_retention(tmp_path, monkeypatch):
-    engine = LoopbackEngine([_harness(1, "message", text="one")], tail=_refusal("run_event_not_found", True))
-    clock = [0.0]
-    monkeypatch.setattr(delegate_activity, "time", SimpleNamespace(
-        monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds)))
-    with engine.serving() as gateway:
-        exact, window = _records(_ctx(tmp_path, []), gateway, 4, drain=2)
-    reads = engine.stream_reads()
-    assert reads[0] == "0" and set(reads[1:]) == {"1"} and 2 < len(reads) <= 2 + 2 / delegate_activity._RETRY_SEC, \
-        "the drain reconnects from its last whole frame, within its own allowance"
-    assert [p["text"] for p in exact["parts"]] == ["one"] and not exact.get("gaps")
-    assert window["source"] == {"kind": "timeline_window", "reason": "stream_error:run_event_not_found",
-                                "provisional": True, "rows": 0, "retryable": True}
-    assert window["gaps"] == [{"after_seq": 1, "through_seq": 4, "reason": "stream_error:run_event_not_found",
-                               "retryable": True, "final": True}]
-    text = delegate_activity.progress_text(window)
-    assert "tries again" in text and "retention" not in text and "can no longer" not in text
-
 
 # -- the wait loop, the carrier and replay ------------------------------------------------
 
@@ -631,8 +490,7 @@ def test_serialized_speech_bound_survives_the_real_progress_carrier(tmp_path, un
     daemon.revealed = 1
     ctx = _ctx(tmp_path, [])
     _agent_obj, events = _agent(ctx)
-    delegate_progress.emit(ctx, "run-1", SimpleNamespace(seq=4, events=[], events_omitted=0),
-                           entry=SimpleNamespace(task_id="child", run_id="run-1"), gateway=_gateway(daemon), after_seq=0)
+    _followed(ctx, daemon)
     frame = events.get_nowait()
     activity = frame["progress_meta"].get("delegated_activity")
     assert activity, "emission must not drop a record whose cursor is committed"
@@ -643,53 +501,32 @@ def test_serialized_speech_bound_survives_the_real_progress_carrier(tmp_path, un
     assert activity["parts"] and len(activity["parts"]) + omitted == 4
     ref = activity["source"]["ref"]
     source = tmp_path / "task_results" / "artifacts" / "child" / ref["path"]
-    assert [json.loads(line) for line in source.read_text().splitlines()] == originals
+    assert [json.loads(line) for line in source.read_text(encoding="utf-8").splitlines()] == originals
     assert delegate_activity._memo("child", "run-1").shown_through == 4
 
 
-@pytest.mark.parametrize("drain", [None, 2])
-def test_end_before_the_observed_fence_discloses_a_gap_and_remains_readable(tmp_path, drain):
-    # Conditional inconsistent source: this fixture does not assert the engine
-    # emits an early end in production. End alone cannot prove fence coverage.
-    daemon = Daemon([[_harness(1, "message", text="first")]])
-    daemon.revealed = 1
-    gateway, ctx = _gateway(daemon), _ctx(tmp_path, [])
-    record, = _records(ctx, gateway, 3, drain=drain)
-    assert record["source"]["ended"] and record["source"]["read_through"] == 1
-    assert record.get("gaps") == [{"after_seq": 1, "through_seq": 3, "reason": "stream_end_before_fence",
-                                   **({"final": True, "where": "run_journal"} if drain is not None else {})}]
-    assert delegate_activity._memo("child", "run-1").shown_through == 1
-    assert "coverage unresolved" in delegate_activity.progress_text(record)
-    daemon.steps[0].extend([_harness(2, "message", text="second"), _run_event(3, "run.completed")])
-    resumed, = _records(ctx, gateway, 3, drain=drain)
-    assert resumed["after_seq"] == 1 and resumed["source"]["read_through"] == 3
-    assert not resumed.get("gaps")
-    assert [part["text"] for part in resumed["parts"]] == ["second"]
+def _followed(ctx, daemon):
+    """The body's follow of ``daemon``'s run, one beat per revealed step (``delegate_feed.Feed._beat``): each beat
+    reads the journal from the shown cursor and publishes that read (``delegate_progress.emit_stream``); the cursor
+    moves only once a frame was handed over, so a beat whose frame failed reads the same range again."""
+    gateway = _gateway(daemon)
+    for step in range(1, len(daemon.steps) + 1):
+        daemon.revealed = step
+        after = delegate_activity.shown_cursor(ctx, ctx.task_id, daemon.run_id)
+        read = read_run_events(gateway, daemon.run_id, after_seq=after, through_seq=None, timeout_sec=2.0)
+        delegate_progress.emit_stream(ctx, daemon.run_id, read, after_seq=after)
+    return gateway
 
 
-def test_wait_streams_exact_ranges_drains_the_terminal_tail_and_replays_the_same_parts(tmp_path, monkeypatch):
-    from ouroboros.tools import delegate
-    from tests._delegated_transport_shared import _nanny_ctx
-
+def test_the_follow_streams_exact_ranges_and_delivery_replays_the_same_parts(tmp_path, monkeypatch):
     steps = [
         [_harness(1, "tool_call", tool={"name": "Read"}), _harness(2, "message", text="Reading the consumer.")],
         [_harness(3, "tool_call", tool={"name": "Bash"}), _harness(4, "message", text="Reading the consumer.")],
         [_harness(5, "message", text="All done; summary follows."), _run_event(6, "run.completed")],
     ]
-    daemon = Daemon(steps)
-    gateway = _gateway(daemon)
-    ctx = _nanny_ctx(tmp_path, task_id="child")
-    ctx.task_attempt = 0
+    ctx = _ctx(tmp_path, [])
     _agent_obj, events = _agent(ctx)
-    monkeypatch.setitem(delegate._CUSTODY, "run-1", RunCustody(task_id="child", run_id="run-1", route_id="claude",
-                                                                model="m", access="readonly"))
-    monkeypatch.setattr(delegate, "_capture_terminal_patch", lambda *a, **k: None)
-    clock = SimpleNamespace(now=0.0)
-    with monkeypatch.context() as timing:
-        timing.setattr(delegate.time, "monotonic", lambda: clock.now)
-        timing.setattr(delegate.time, "sleep", lambda seconds: setattr(clock, "now", clock.now + seconds))
-        result = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=60, since_seq=0, gateway=gateway))
-    assert result["status"] == "terminal", result
+    _followed(ctx, Daemon(steps))
     frames = [row for row in (events.get_nowait() for _ in range(events.qsize())) if row["type"] == "send_message"]
     activities = [frame["progress_meta"]["delegated_activity"] for frame in frames]
     assert [(a["after_seq"], a["through_seq"]) for a in activities] == [(0, 2), (2, 4), (4, 6)]
@@ -724,15 +561,13 @@ def test_wait_streams_exact_ranges_drains_the_terminal_tail_and_replays_the_same
 
 
 @pytest.mark.parametrize("restart_memo", [False, True])
-def test_a_later_wait_on_an_ended_run_catches_up_what_no_frame_carried(tmp_path, monkeypatch, restart_memo):
+def test_a_terminal_delivery_catches_up_what_no_follow_frame_carried(tmp_path, monkeypatch, restart_memo):
     from ouroboros.tools import delegate
     from tests._delegated_transport_shared import _nanny_ctx
 
     steps = [[_harness(1, "message", text="Working on it.")],
              [_harness(2, "message", text="Finished."), _run_event(3, "run.completed")]]
     daemon = Daemon(steps)
-    gateway = _gateway(daemon)
-    handshaken = len(daemon.requests)
     ctx = _nanny_ctx(tmp_path, task_id="child")
     ctx.task_attempt = 0
     _agent_obj, events = _agent(ctx)
@@ -748,37 +583,28 @@ def test_a_later_wait_on_an_ended_run_catches_up_what_no_frame_carried(tmp_path,
     monkeypatch.setitem(delegate._CUSTODY, "run-1", RunCustody(task_id="child", run_id="run-1", route_id="claude",
                                                                 model="m", access="readonly"))
     monkeypatch.setattr(delegate, "_capture_terminal_patch", lambda *a, **k: None)
-    clock = SimpleNamespace(now=0.0)
-    with monkeypatch.context() as timing:
-        timing.setattr(delegate.time, "monotonic", lambda: clock.now)
-        timing.setattr(delegate.time, "sleep", lambda seconds: setattr(clock, "now", clock.now + seconds))
-        first = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=60, since_seq=0, gateway=gateway))
-        assert first["status"] == "terminal" and events.empty(), "no frame left, so nothing counts as shown"
-        channel["open"] = True
-        if restart_memo:
-            from ouroboros.delegate_activity import reset_process_memo
-            reset_process_memo()
-        requests_before = list(daemon.requests)
-        second = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=60, gateway=gateway))
-        assert daemon.requests == requests_before, "retained output and activity never wait on remote I/O"
+    gateway = _followed(ctx, daemon)  # every read retained, no frame handed over
+    first = json.loads(delegate._read_run(ctx, "run-1", 0, gateway=gateway))
+    assert first["status"] == "terminal" and events.empty(), "no frame left, so nothing counts as shown"
+    channel["open"] = True
+    if restart_memo:
+        delegate_activity.reset_process_memo()
+    requests_before = list(daemon.requests)
+    second = json.loads(delegate._read_run(ctx, "run-1", gateway=gateway))
+    assert daemon.requests == requests_before, "retained output and activity never wait on remote I/O"
     assert second["status"] == "terminal"
     frames = [row for row in (events.get_nowait() for _ in range(events.qsize())) if row["type"] == "send_message"]
-    activity, = [frame["progress_meta"]["delegated_activity"] for frame in frames]
-    assert (activity["after_seq"], activity["source"]["read_through"]) == (0, 3)
-    if restart_memo:
-        assert "ended" not in activity["source"], "the raw source did not retain the stream's end-frame receipt"
-    else:
-        assert activity["source"]["ended"] is True
-    assert [p["text"] for p in activity["parts"]] == ["Working on it.", "Finished."]
-    assert json.loads(delegate._delegate_wait(ctx, "run-1", gateway=gateway))["status"] == "terminal"
+    activities = [frame["progress_meta"]["delegated_activity"] for frame in frames]
+    assert activities and activities[0]["after_seq"] == 0 and activities[-1]["source"]["read_through"] == 3
+    assert [p["text"] for activity in activities for p in activity["parts"]] == ["Working on it.", "Finished."]
+    assert json.loads(delegate._read_run(ctx, "run-1", gateway=gateway))["status"] == "terminal"
     assert events.empty(), "only the successful frame commits the local activity cursor"
-    assert {method for method, _path, _cursor in daemon.requests[handshaken:]} == {"GET"}, \
-        "catching up reads the ended run's journal: no new run, answer or control request"
 
 
-def test_the_supervised_beat_over_a_reclaimed_journal_reads_detail_and_delivers_the_same_result(tmp_path, monkeypatch):
-    """The beat (``observation_only``) over the real gateway and socket, for one ended run with its
-    journal kept and then reclaimed by retention: only the timeline differs."""
+def test_a_wakes_read_over_a_reclaimed_journal_reads_detail_and_delivers_the_same_result(tmp_path, monkeypatch):
+    """The wake's one read over the real gateway and socket, for one ended run with its journal kept and then
+    reclaimed by retention: the result is the same, read from the detail; the journal is the body's to read
+    (``tests/test_body_feed.py``)."""
     from ouroboros.tools import delegate
     from tests._delegated_transport_shared import _nanny_ctx
 
@@ -787,9 +613,6 @@ def test_the_supervised_beat_over_a_reclaimed_journal_reads_detail_and_delivers_
     attention = {"wakeReason": "attention", "attention": [0],
                  "summaries": [{"status": "succeeded", "pending": False, "token": "a" * 43, "problem": None}]}
     monkeypatch.setattr(delegate, "_capture_terminal_patch", lambda *a, **k: None)
-    clock = [0.0]
-    monkeypatch.setattr(delegate_activity, "time", SimpleNamespace(
-        monotonic=lambda: clock[0], sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds)))
     seen = {}
     for case, journal, tail in (
             ("kept", [_harness(1, "message", text="Working on it."), _run_event(2, "run.completed")], "event: end\ndata: {}\n\n"),
@@ -798,26 +621,18 @@ def test_the_supervised_beat_over_a_reclaimed_journal_reads_detail_and_delivers_
         (tmp_path / case).mkdir()
         ctx = _nanny_ctx(tmp_path / case, task_id="child")
         ctx.task_attempt = 0
-        _agent_obj, events = _agent(ctx)
         monkeypatch.setitem(delegate._CUSTODY, "run-1", RunCustody(task_id="child", run_id="run-1", route_id="claude",
                                                                     model="m", access="readonly"))
         engine = LoopbackEngine(journal, tail=tail, detail=detail, attention=attention)
         with engine.serving() as gateway:
-            result = json.loads(delegate._delegate_wait(ctx, "run-1", wait_sec=3, since_seq=0,
-                                                        observation_only=True, gateway=gateway))
-        frames = [row for row in (events.get_nowait() for _ in range(events.qsize())) if row["type"] == "send_message"]
-        seen[case] = (result, [frame["progress_meta"]["delegated_activity"] for frame in frames], engine)
-    (kept, kept_activity, kept_engine), (reclaimed, activity, engine) = seen["kept"], seen["reclaimed"]
+            result = json.loads(delegate._read_run(ctx, "run-1", 0, gateway=gateway))
+        seen[case] = (result, engine)
+    (kept, kept_engine), (reclaimed, engine) = seen["kept"], seen["reclaimed"]
     assert reclaimed == kept and kept["status"] == "terminal", "a journal the engine reclaimed never changes the result"
-    assert [p["text"] for p in kept_activity[0]["parts"]] == ["Working on it."] and kept_engine.stream_reads() == ["0"]
-    window, = activity
-    assert window["source"]["reason"] == "stream_error:run_expired_by_retention" and not window["parts"]
-    assert window["gaps"] == [{"after_seq": 0, "through_seq": 2, "reason": "stream_error:run_expired_by_retention",
-                               "retryable": False, "final": True}]
-    assert engine.stream_reads() == ["0"], "the beat's read only: a journal refused for good is not read again"
-    assert ("GET", "/v2/runs/run-1", None) in engine.requests, "the refused beat handed the decision to the detail read"
+    assert engine.stream_reads() == [] == kept_engine.stream_reads(), "the wake reads no journal: it is the body's"
+    assert ("GET", "/v2/runs/run-1", None) in engine.requests, "the wake's one read is the detail"
     assert not [body for method, path, body in engine.requests if path == "/v2/runs/wait-many"
-                and body["targets"][0]["runId"] == "run-1"], "no attention was read or acknowledged for the refused beat"
+                and body["targets"][0]["runId"] == "run-1"], "and no attention is read for it"
 
 
 def test_the_binder_delivery_and_replay_drop_a_foreign_or_malformed_record(tmp_path):
@@ -841,13 +656,6 @@ def test_the_binder_delivery_and_replay_drop_a_foreign_or_malformed_record(tmp_p
     response = asyncio.run(make_chat_history_endpoint(tmp_path)(SimpleNamespace(query_params={"limit": "10"})))
     row, = json.loads(response.body)["messages"]
     assert row["text"] == "note" and "delegated_activity" not in row
-
-
-def test_plain_emit_without_the_waits_transport_keeps_the_one_argument_contract():
-    advance = delegate_progress.WindowObservations().record({"timeline": [{"title": "read"}]}, 3, 0)
-    plain = []
-    delegate_progress.emit(SimpleNamespace(emit_progress_fn=plain.append, task_id="child"), "run-1", advance)
-    assert plain == [delegate_progress.live_line("run-1", advance)]
 
 
 def test_telegram_card_leads_with_the_executors_latest_words_and_keeps_its_counts():
@@ -892,45 +700,6 @@ def test_telegram_long_speech_preserves_problems_gaps_and_full_task_reference(re
     if problem_count > 1:
         assert f"{problem_count} problems" in card
     assert "Full ref: task child-full-id" in card
-
-
-def test_a_terminal_drain_yields_to_the_owners_stop_between_reads(tmp_path, monkeypatch):
-    import ouroboros.gateways.claudexor_run_events as run_events
-    from ouroboros import cancel_intents
-
-    events = [_harness(seq, "message", text=f"line {seq} " + "x" * 300) for seq in range(1, 10)]
-    daemon = Daemon([events + [_run_event(10, "run.completed")]])
-    daemon.revealed = 1
-    gateway = _gateway(daemon)
-    real = run_events.read_run_events
-    stopped = [False]
-
-    def stop_in_flight(*args, **kwargs):
-        read = real(*args, **{**kwargs, "max_bytes": 1200})
-        stopped[0] = True
-        return read
-
-    monkeypatch.setattr(run_events, "read_run_events", stop_in_flight)
-    monkeypatch.setattr(cancel_intents, "cancel_pending", lambda root, task_id, **_: stopped[0] and task_id == "child")
-    records = _records(_ctx(tmp_path, []), gateway, 10, drain=30)
-    assert len(records) == 1, "a pending Stop ends the drain after the read in flight"
-    assert records[0]["gaps"][0]["reason"] == "owner_cancelled" and records[0]["gaps"][0]["final"] is True
-    assert records[0]["source"]["ref"], "bytes read before Stop remain retained"
-    assert len([r for r in daemon.requests if r[1].endswith("/events")]) == 1
-    (tmp_path / "state").mkdir(exist_ok=True)
-    from tests._work_stop_helpers import live_restart
-    live_restart(tmp_path, monkeypatch)
-    flaky = _gateway(Daemon([[_harness(1, "message", text="hi")]]))
-    flaky._client = httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(
-        lambda request: httpx.Response(503, json={"code": "busy"}) if request.url.path.endswith("/events")
-        else daemon.handler(request)))
-    monkeypatch.setattr(cancel_intents, "cancel_pending", lambda *_a, **_k: False)
-    delegate_activity.reset_process_memo()
-    before = len(daemon.requests)
-    other = SimpleNamespace(task_id="other", task_attempt=0, drive_root=tmp_path, task_metadata={})
-    record, = _records(other, flaky, 1, drain=30)
-    assert len(daemon.requests) == before, "Restart admits no catalog or stream request"
-    assert record["gaps"][0]["reason"] == "owner_owner_restart"
 
 
 def test_permanent_fallback_replays_all_retained_words_after_repeated_emission_failure(tmp_path):

@@ -253,16 +253,21 @@ def test_a_delegate_wait_and_a_transport_backoff_run_over_a_real_reaction(chain,
     seen = {}
 
     def delegate(ctx, **_arguments):
-        reads = []
+        from ouroboros import model_sleep
+        from tests._run_wait_shared import held_run, wake_now
 
-        def wait_once(_ctx, run_id, *_args, **_kwargs):  # the physical observer, as in test_place_arrival_wake
+        reads, chosen = [], supervision._choice({"runs": ["run-1"]})
+        held_run(ctx.drive_root, "run-1", ctx.task_id)
+        post(world, world.spec.heard)  # a real reaction lands while the run works
+        seen["woke_by_reaction"] = model_sleep.wake_reason(ctx, chosen)
+        held_run(ctx.drive_root, "run-1", ctx.task_id, ended="succeeded")  # the body records the terminal
+
+        def wait_once(_ctx, run_id, *_args, **_kwargs):  # the wake's one read, as in test_place_arrival_wake
             reads.append(run_id)
-            if len(reads) == 1:
-                post(world, world.spec.heard)
-            return json.dumps({"status": "no_progress" if len(reads) == 1 else "terminal", "run_id": run_id,
-                               "last_seq": len(reads), **({"state": "succeeded"} if len(reads) > 1 else {})})
+            return json.dumps({"status": "terminal", "run_id": run_id, "last_seq": 2, "state": "succeeded"})
 
-        seen["wake"] = json.loads(supervision.supervised_wait(ctx, "run-1", wait_once=wait_once).text)
+        seen["wake"] = json.loads(wake_now(ctx, "run-1", wait_once=wait_once,
+                                           woke_by=model_sleep.wake_reason(ctx, chosen)).text)
         seen["reads"] = len(reads)
         return "{}"
 
@@ -284,7 +289,8 @@ def test_a_delegate_wait_and_a_transport_backoff_run_over_a_real_reaction(chain,
     world.h.script = [call(("delegate", {}), ("backoff", {})), after]
     post(world, world.spec.first)
     settled(world)
-    assert seen["reads"] == 2 and seen["wake"]["status"] == "terminal"
+    assert seen["woke_by_reaction"] == "", "a context-only reaction never ends the sleep on the run"
+    assert seen["reads"] == 1 and seen["wake"]["status"] == "terminal"
     assert not [row for row in seen["wake"].get("wake_events") or () if row.get("type") == "addressed_message"]
     assert seen["slept"] >= loop_transport.NETWORK_WAIT_BACKOFF_START_SEC - 0.2, "unread context-only mail cut the backoff short"
     assert seen["reaction"]

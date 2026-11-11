@@ -150,7 +150,7 @@ def _drive_owner_wait(pool) -> None:
     worker_owner_wait.handle_owner_wait(pool.event, workers)
     assert pool.original.in_q.get_nowait()["phase"] == "parked"
     worker_owner_wait.handle_owner_wait({**pool.event, "phase": "resume"}, workers)
-    worker_owner_wait.maintain_owner_wait_capacity()
+    worker_owner_wait.grant_warm_returns()
     assert pool.original.in_q.get_nowait()["phase"] == "resume_granted"
 
 

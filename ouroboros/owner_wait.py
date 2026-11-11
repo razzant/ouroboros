@@ -31,6 +31,7 @@ from dataclasses import asdict
 from typing import Any
 
 from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_bytes
+from ouroboros.delegate_output import read_coverage, restore_read_coverage
 from ouroboros.native_task_wait import cursors_json
 from ouroboros.transcript_prefix import OBSERVER_STATE_ATTRS as _SEND_OBSERVER_KEYS  # a resumed task keeps the send observer's state
 from ouroboros.transcript_prefix import sanction_rewrite
@@ -220,6 +221,7 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         "held_dependencies_order": dict(getattr(ctx, "_held_dependencies_order", None) or {}),
         "held_dependency_sources": dict(getattr(ctx, "_held_dependency_sources", None) or {}),
         "wake_sources": dict(getattr(ctx, "_wake_sources", None) or {}),
+        "read_coverage": read_coverage(str(ctx.task_id)),  # what of those sources was already delivered
         # An armed or woken native task wait owes its result to the next request (``native_task_wait``),
         # read against the beacon cursors the actor was shown.
         "pending_task_wait": getattr(ctx, "_pending_task_wait", None) or None,
@@ -964,11 +966,6 @@ def owner_wait_ended_notice(ctx: Any, checkpoint: dict, reason: str = "timeout",
         f"{stance} — or finish and say what is unresolved.")}
 
 
-def owner_wait_timeout_notice(ctx: Any, checkpoint: dict) -> dict:
-    """The bound's notice under its original name."""
-    return owner_wait_ended_notice(ctx, checkpoint, "timeout")
-
-
 def _wake_description(outcome: str, entries: list[dict]) -> str:
     """What woke the task, for the notice: a hurry is named as what it is."""
     if outcome == "hurry":
@@ -1061,6 +1058,9 @@ def wait_after_tools(ctx: Any, messages: list, trace: dict, usage: dict,
         return  # a stop begun since arming reaches the mind before the park; the same request then sleeps
     checkpoint = checkpoint_owner_wait(ctx, messages, trace, usage, round_idx, tool_schemas, seen,
                                        review_binding=review_binding)
+    from ouroboros.working_checkpoint import flush_content_acks
+
+    flush_content_acks(ctx)  # its stored source holds what they acknowledge, as a cold park's does
     if not callable(callback):
         outcome = review_callback(ctx, checkpoint, messages)
         append_wake_notice(ctx, checkpoint, outcome, messages)
@@ -1175,7 +1175,8 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     ctx._held_dependencies_order = dict(state.get("held_dependencies_order") or {})
     # A shortened hold view's exact source stays readable to completion (``model_sleep.credit_hold_source``).
     ctx._held_dependency_sources = dict(state.get("held_dependency_sources") or {})
-    ctx._wake_sources = dict(state.get("wake_sources") or {})  # refs survive; read coverage is process-local
+    ctx._wake_sources = dict(state.get("wake_sources") or {})  # refs survive, with what of them was delivered
+    restore_read_coverage(str(ctx.task_id), state.get("read_coverage"))
     ctx._pending_task_wait = dict(state.get("pending_task_wait") or {}) or None  # a legacy state owes none
     ctx._wait_attention_cursors = cursors_json(state.get("wait_attention_cursors"))
     ctx._owner_directives = state["owner_directives"]

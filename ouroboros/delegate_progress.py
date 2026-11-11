@@ -1,14 +1,10 @@
-"""What a delegated run did DURING one ``delegate_wait`` window, and how it reaches
-the human while the model is still waiting.
+"""What a delegated run's journal and timeline say, and how it reaches the human.
 
-Extracted from ``ouroboros/tools/delegate.py`` for the same reason ``delegate_output``
-was (size gate), and it is one coherent concern: the wait used to hand control back to
-the model on the FIRST journal advance, so a healthy streaming run woke a full-context
-nanny round every poll interval — measured, 18 rounds and 861k prompt tokens spent
-narrating a run that was doing fine. The fix is the TIMER, not the stream: every
-advance is still observed and still pushed to the live progress surface the instant it
-is seen, but it is RECORDED here instead of returned, and the model is woken once, at
-the window's expiry, carrying the whole sequence.
+Extracted from ``ouroboros/tools/delegate.py`` (size gate). The body follows each held run's
+speech (``delegate_feed``) and publishes it here as typed records; an engine without the run's
+journal keeps the timeline window view (``WindowObservations``, ``emit``). A ``delegate_wait``
+wake reads its run's detail once (``tools/delegate._read_run``) and renders its present state
+(``present_payload``); every read the host makes of a run is bounded (``bounded_poll``).
 """
 
 from __future__ import annotations
@@ -18,9 +14,8 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
-from ouroboros.config import DELEGATE_WAIT_CEILING_SEC
 from ouroboros.utils import truncate_review_artifact
 
 log = logging.getLogger(__name__)
@@ -28,18 +23,6 @@ log = logging.getLogger(__name__)
 _TIMELINE_TAIL = 12
 _TIMELINE_LABEL_CHARS = 300
 _TEXT_KINDS = ("thinking", "message")
-# The closing `note` is appended AFTER the advance list is sized, so its cost is
-# reserved rather than measured; it is a fixed string of this module's own authorship.
-_NOTE_RESERVE_CHARS = 700
-# The floor the advance list ASKS for when the rest of the payload has eaten the budget:
-# one advance plus its marker still tells the model the run is moving. It is a floor on
-# the request, never on the result — a residual too small to hold it drops the list to
-# its marker rather than shipping the floor over the limit (see `window_payload`).
-_MIN_ADVANCE_BUDGET_CHARS = 400
-# Re-measure passes for the fit loop: the first correction is exact for a uniform list,
-# the rest absorb the per-row indent rounding. A payload still over after these is one
-# whose harness-authored parts alone overflow, which only the truncator can answer.
-_BUDGET_FIT_ATTEMPTS = 4
 
 
 def _rows(detail: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -92,54 +75,28 @@ def timeline_tail(detail: Dict[str, Any]) -> List[Dict[str, Any]]:
     return _bounded(_rows(detail))
 
 
-def _omission_marker(through_seq: int, count: int, *, whole: bool = False) -> Dict[str, Any]:
-    """The row that stands where dropped advances were.
-
-    ONE vocabulary for both places a drop can happen — the head shedding inside the list,
-    and the whole list yielding when the rest of the payload leaves no room for even the
-    floor — so a reader learns the same fact from the same keys either way.
-
-    What the note may CLAIM is bounded by what is actually recoverable. It used to say
-    every omitted advance "was streamed live and is in the event log", and both halves
-    were wrong: a batch bigger than the display tail never reached the live line at all
-    (the defect `record` now counts as `events_omitted`), and nothing on this side keeps
-    the rows — Ouroboros persists no timeline anywhere, the daemon's own run directory
-    does. So the note says where they really are.
-    """
-    return {
-        "advances_omitted": count,
-        "omitted_through_seq": through_seq,
-        "note": ("every advance of this window is" if whole else
-                 "older advances of this window are")
-        + " omitted from THIS payload only; the rows live on the RUN, in Claudexor's own "
-          "timeline — poll it again for the standing tail, nothing here keeps a copy",
-    }
-
-
 @dataclass
 class _Advance:
     """One movement of the run's journal cursor, and what arrived with it."""
 
     seq: int
-    at_sec: int
     events: List[Dict[str, Any]]
-    # What the batch published BEYOND the display tail `record` sizes it with. Folded
-    # into the same `events_omitted` the budget shedding writes, so a reader gets ONE
-    # honest number per advance instead of two vocabularies for the same kind of cut.
+    # What the batch published BEYOND the display tail `record` sizes it with, so a
+    # reader is told how many rows the bounded batch does not show.
     events_omitted: int = 0
 
 
 @dataclass
 class WindowObservations:
-    """Every advance seen inside ONE wait window, in order."""
+    """What one run's timeline added between the details read of it (the window view of an
+    engine without the run's journal, ``delegate_feed.Feed.window``)."""
 
-    advances: List[_Advance] = field(default_factory=list)
-    # The last timeline this window actually saw, kept whole: the only thing that can
-    # say which rows of the NEXT one are new. See `_fresh`.
+    # The last timeline actually seen, kept whole: the only thing that can say which rows
+    # of the NEXT one are new. See `_fresh`.
     _prev: List[Dict[str, Any]] = field(default_factory=list)
 
     def observe_baseline(self, detail: Dict[str, Any], seq: int) -> None:
-        """Adopt what was ALREADY on the timeline as history, not as this window's news.
+        """Adopt what was ALREADY on the timeline as history, not as news.
 
         Without it the first real advance re-announced the whole standing tail as "new
         session events" — to the human's live stream and to the model alike — because the
@@ -156,24 +113,19 @@ class WindowObservations:
         if int(seq or 0) >= int(detail.get("lastSeq") or 0):
             self._prev = _rows(detail)
 
-    def record(self, detail: Dict[str, Any], seq: int, at_sec: int) -> _Advance:
+    def record(self, detail: Dict[str, Any], seq: int) -> _Advance:
         """Observe ONE journal advance, and return what arrived with it.
 
-        The batch is still BOUNDED — an unbounded one is not free, a busy daemon can
-        publish hundreds of rows between two three-second polls — but by a bound that
-        COUNTS what it cut. It used to cut in silence, with the display tail written for
-        the standing timeline: measured against a harness emitting sixteen rows per
-        cursor step, the first four of every batch were gone from the live line AND from
-        `advances`, with no `events_omitted` and no other key naming them. The count
-        rides the advance to both surfaces (`rows`, `live_line`).
+        The batch is BOUNDED — a busy daemon can publish hundreds of rows between two
+        reads — by a bound that COUNTS what it cut (``events_omitted``, shown by
+        ``delegate_activity.progress_text``): measured against a harness emitting sixteen rows per cursor step,
+        a silent cut lost the first four of every batch from the live line.
         """
         rows = _rows(detail)
         fresh = self._fresh(rows)
-        advance = _Advance(seq=seq, at_sec=at_sec, events=_bounded(fresh),
-                           events_omitted=max(0, len(fresh) - _TIMELINE_TAIL))
+        advance = _Advance(seq=seq, events=_bounded(fresh), events_omitted=max(0, len(fresh) - _TIMELINE_TAIL))
         if rows:
             self._prev = rows
-        self.advances.append(advance)
         return advance
 
     def _fresh(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -203,210 +155,17 @@ class WindowObservations:
                 return rows[overlap:]
         return rows
 
-    def rows(self, budget: int) -> List[Dict[str, Any]]:
-        """The advance sequence, bounded to ``budget`` chars of JSON.
-
-        A LIST, never a count: there is one row per observed advance carrying its `seq`
-        and `at_sec`, and under pressure rows shed their event LABELS oldest-first with
-        the shedding disclosed ON the row. Only if the bare spine still overflows does
-        the HEAD shed, and it says so — a truncation that pretended the run started later
-        than it did is the one shape forbidden here.
-
-        `events_omitted` is ONE number per row and covers BOTH cuts a row can carry: the
-        labels this payload shed for budget, and the rows the batch itself lost to the
-        display tail when it was observed (`record`). They differ in what a reader can go
-        find — a shed label reached the human's live line at observation time, a batch-cut
-        row never did — and NEITHER is recoverable on this side: no timeline is persisted
-        here, only the run's own timeline in Claudexor's run directory holds the rows. So
-        the count is stated rather than the loss being waved away as immaterial.
-        """
-        out: List[Dict[str, Any]] = []
-        for a in self.advances:
-            row: Dict[str, Any] = {"seq": a.seq, "at_sec": a.at_sec, "events": list(a.events)}
-            if a.events_omitted:
-                row["events_omitted"] = a.events_omitted
-            out.append(row)
-
-        def _size(rows: List[Dict[str, Any]]) -> int:
-            # MEASURED, never estimated, and rendered the way the caller renders it
-            # (indent=2): an estimate that assumed a fixed cost per row overflowed the
-            # tool-result limit on a long busy window, and the generic truncator then
-            # cut the JSON mid-structure — the model got a payload it could not parse
-            # at all, which is worse than any amount of honest shedding.
-            return len(json.dumps(rows, ensure_ascii=False, indent=2))
-
-        # Label shedding, oldest-first. The running total is kept by SUBTRACTING what
-        # each row actually gave up (measured on that row, not assumed), and a real
-        # whole-list measure confirms before returning — the arithmetic only decides
-        # when to stop shedding, never what the payload is.
-        running = _size(out)
-        for row in out:
-            if running <= budget and _size(out) <= budget:
-                return out
-            if not row["events"]:
-                continue
-            before = len(json.dumps(row, ensure_ascii=False, indent=2))
-            # ACCUMULATED, never overwritten: a row whose batch was already cut at
-            # observation would otherwise report only what THIS payload shed and quietly
-            # forget the rest — two cuts, one of them invisible again.
-            row["events_omitted"] = int(row.get("events_omitted") or 0) + len(row["events"])
-            row["events"] = []
-            running -= before - len(json.dumps(row, ensure_ascii=False, indent=2))
-        if _size(out) <= budget:
-            return out
-        # The bare spine still overflows: shed from the HEAD. Shedding one row per
-        # re-measure is O(n²) and cost ~7s of CPU at a full 1800s window (600 advances
-        # at the 3s poll), so the drop count is ESTIMATED from the measured average row
-        # and then corrected by measurement — the estimate only picks where to start,
-        # the loop below still decides on the real rendered size.
-        spine, kept = out, list(out)
-        over = _size(kept) - budget
-        if over > 0 and kept:
-            per_row = max(1, _size(kept) // len(kept))
-            guess = min(len(kept) - 1, max(1, over // per_row + 1))
-            kept = spine[guess:]
-        while kept and _size([_omission_marker(spine[len(spine) - len(kept) - 1]["seq"],
-                                              len(spine) - len(kept))] + kept) > budget:
-            kept = kept[1:]
-        if len(kept) == len(spine):
-            return out
-        dropped = len(spine) - len(kept)
-        if not kept:                      # even one row plus its marker overflows
-            kept, dropped = spine[-1:], len(spine) - 1
-        return [_omission_marker(spine[dropped - 1]["seq"], dropped)] + kept
-
-
-# Typed external-wait lease (poltergeist phase B, B3). While `delegate_wait`
-# holds its bounded window over a live delegated run, the supervisor's IDLE rail
-# is spared — and ONLY the idle rail: the explicit deadline, the absolute
-# ceiling, every budget fence, and cancel are untouched. The lease is pure
-# metadata with a hard expiry (no background thread holds anything): the worker
-# grants it for one window, bounded by min(task deadline, the run's own
-# maxSeconds horizon, this absolute ceiling), and releases it when the wait
-# returns. The ceiling exceeds one hold's bound (DELEGATE_WAIT_CEILING_SEC, 2100s:
-# the 1800s max window plus its teardown) by +300 headroom so a full window never
-# draws silence attention mid-hold; the call's own outer bound is the task lifetime.
-DELEGATE_WAIT_LEASE_GRACE_SEC = 120
-EXTERNAL_WAIT_LEASE_CEILING_SEC = DELEGATE_WAIT_CEILING_SEC + 300
-
-
-def external_wait_lease_until(ctx: Any, window: int,
-                              run_started_at: Any, run_max_seconds: int) -> float:
-    """When the idle-rail lease for ONE wait window must expire (epoch seconds).
-
-    Bounded by construction, never open-ended: the window itself plus a teardown
-    grace, clamped under the task's own explicit deadline, under the run's own
-    ``maxSeconds`` horizon (a run past its cap is not a healthy wait target), and
-    under the absolute lease ceiling. Unknown facts simply do not narrow — they
-    never widen.
-    """
-    import time as _time
-
-    from ouroboros.deadline_utils import parse_deadline_ts
-
-    now = _time.time()
-    grace = float(DELEGATE_WAIT_LEASE_GRACE_SEC)
-    candidates = [now + float(window) + grace,
-                  now + float(EXTERNAL_WAIT_LEASE_CEILING_SEC)]
-    meta = getattr(ctx, "task_metadata", {})
-    meta = meta if isinstance(meta, dict) else {}
-    deadline = parse_deadline_ts(meta.get("deadline_at"))
-    if deadline is not None:
-        candidates.append(deadline.timestamp())
-    if run_started_at is not None and run_max_seconds:
-        candidates.append(run_started_at.timestamp() + float(run_max_seconds) + grace)
-    return min(candidates)
-
-
-def emit_external_wait_lease(ctx: Any, run_id: str, until_ts: float,
-                             lease_id: str = "") -> None:
-    """Grant (``until_ts`` in the future) or release (``0.0``) the idle-rail lease.
-
-    A typed supervisor event, not synthetic progress: the idle enforcer keeps
-    judging REAL progress, and this lease only tells it that a bounded host-side
-    hold over a delegated run is a legitimate silence. It spares nothing else —
-    deadline, absolute ceiling, budget fences, and cancel all cut through it.
-    Best-effort by design: a lost lease costs at worst one idle-timeout episode,
-    never correctness, and no wait may fail because its lease could not be spoken.
-
-    ``lease_id`` is the grant's identity (F5b): each wait window mints one, and
-    its release names the same id, so the supervisor can refuse a release from
-    an abandoned, timed-out wait thread that would otherwise blank a NEWER
-    grant made by the task's next wait.
-    """
-    q = getattr(ctx, "event_queue", None)
-    if q is None:
-        return
-    try:
-        q.put_nowait({
-            "type": "external_wait_lease",
-            "task_id": str(getattr(ctx, "task_id", "") or ""),
-            "run_id": str(run_id or ""),
-            "until_ts": float(until_ts),
-            "lease_id": str(lease_id or ""),
-        })
-    except Exception:
-        log.debug("external-wait lease emission failed", exc_info=True)
-
-
-class HoldLease:
-    """ONE idle-rail lease for a whole supervising hold (``delegate_supervision.supervised_wait``),
-    spoken only when it changes.
-
-    The hold observes its run(s) every three seconds through ``_delegate_wait(observation_only)``,
-    which used to grant, re-grant and release a fresh lease on every beat: three control events
-    per beat per held run (``external_wait_lease`` reached 788 a minute on 01.11), each a bus
-    round trip, a dispatch and a frame, restating a fact that had not changed. The hold now grants
-    one lease (one ``lease_id``) before its first observation, renews it only once less than the
-    teardown grace remains (so a beat bounded by the read window can never outlive it), and
-    releases it once when the hold ends. The bound is the same ``external_wait_lease_until`` over
-    the observed run's own timing (read once per run: a run's start and cap never change); a
-    renewal that would not move the expiry later (a run at its own horizon, a spent deadline)
-    is not spoken.
-    """
-
-    def __init__(self, ctx: Any) -> None:
-        import uuid
-
-        self._ctx, self._lease_id, self._until, self._run_id = ctx, uuid.uuid4().hex, 0.0, ""
-        self._timing: Dict[str, Any] = {}
-
-    def renew(self, run_id: str) -> None:
-        if self._until - time.time() > DELEGATE_WAIT_LEASE_GRACE_SEC:
-            return
-        from ouroboros import delegate_custody as custody
-        from ouroboros.deadline_utils import parse_deadline_ts, window_within_deadline
-        from ouroboros.gateways.claudexor import _READ_TIMEOUT_SEC
-
-        if run_id not in self._timing:
-            started, max_seconds = custody.run_timing(custody.custody_root(self._ctx), run_id)
-            self._timing[run_id] = (parse_deadline_ts(started), max_seconds)
-        until = external_wait_lease_until(
-            self._ctx, window_within_deadline(self._ctx, int(_READ_TIMEOUT_SEC)), *self._timing[run_id])
-        if until > self._until:
-            self._until, self._run_id = until, run_id
-            emit_external_wait_lease(self._ctx, run_id, until, lease_id=self._lease_id)
-
-    def release(self) -> None:
-        if self._until:
-            emit_external_wait_lease(self._ctx, self._run_id, 0.0, lease_id=self._lease_id)
-            self._until = 0.0
-
 
 def poll_bound(seconds_left: float, *, strict: bool = False) -> float:
-    """What one call inside a clamped window may ASK the transport for.
+    """What one call with ``seconds_left`` of its caller's time may ASK the transport for.
 
     NARROWING in both directions, which is the only thing a bound is for. Never more
-    than the window has left — that is the whole point — and never more than the read
-    default the client would have used anyway: floored alone, the arithmetic RAISED the
-    ask above that default whenever the window had over a minute left (measured: 1797.0,
-    1000.0, 61.0), so a hung daemon stopped failing at sixty seconds and held the whole
-    window instead, to be reported afterwards as a wait that simply saw nothing. And
-    never less than the floor a bound is useful at: a nearly spent window that asked for
-    its own 0.2s would turn every daemon into a timeout, and the honest answer there is
-    one short read, then expiry.
-
-    ONE place computes it, for both entry points below, so the two cannot drift.
+    than the caller has left, and never more than the read default the client would have
+    used anyway: floored alone, the arithmetic RAISED the ask above that default whenever
+    over a minute was left (measured: 1797.0, 1000.0, 61.0), so a hung daemon stopped
+    failing at sixty seconds. And never less than the floor a bound is useful at: a
+    nearly spent remainder that asked for its own 0.2s would turn every daemon into a
+    timeout. ONE place computes it, for every caller, so they cannot drift.
     """
     from ouroboros.gateways.claudexor import _READ_TIMEOUT_SEC, SHORT_POLL_TIMEOUT_SEC
 
@@ -463,28 +222,18 @@ def is_transient_git_object_race(exc: Exception) -> bool:
 def bounded_poll(
     gateway: Any, run_id: str, seconds_left: float, *, strict: bool = False,
 ) -> Dict[str, Any]:
-    """One poll that may not ask for longer than the window has left.
+    """One poll that may not ask for longer than its caller has left (``poll_bound``).
 
-    The client's read default is minutes-scale, which is right for a call with all the
-    time it needs and wrong for one inside a clamped window: a poll started a moment
-    before expiry could answer a minute after it, so the clamp bounded the sleeping and
-    not the waiting. Strict review polls add a total wall-clock guard; ordinary
-    delegate waits retain their intentional short-poll floor and phase-local timeout.
+    The client's read default is minutes-scale, which is wrong for a read bounded by a
+    deadline: started a moment before it, the read could answer a minute after it.
+    Strict review polls add a total wall-clock guard; ordinary reads keep the short-poll
+    floor and the phase-local timeout.
 
-    A failure PROPAGATES, as the typed refusal the gateway already raised. There is time
-    left on the window here, so there is no expiry to report and nothing true to say
-    about a daemon that has stopped answering: swallowing it handed the model a
-    completed, uneventful wait of a duration nobody waited (measured — a
-    ``daemon_unreachable`` three seconds into a 1800s window came back as
-    ``status: progress``, ``waited_sec: 1800``, "The run advanced 1 time(s) during the
-    1800s you asked to wait", after 3.0s of wall; before any advance, a 503 came back as
-    ``no_progress`` over a full window with a note inviting a `delegate_cancel` of a live
-    run because the transport had blipped). Only the LAST poll may expire instead.
-
-    One exception to the propagation rule, matched as narrowly as it occurs: the
-    engine's transient Git atomic-object race (see ``is_transient_git_object_race``)
-    gets ONE immediate re-read while the window still has time — it is a lie about a
-    file mid-rename, not a daemon that stopped answering.
+    A failure PROPAGATES, as the typed refusal the gateway already raised: swallowing it
+    once handed the model a completed, uneventful wait nobody waited. One exception,
+    matched as narrowly as it occurs: the engine's transient Git atomic-object race
+    (``is_transient_git_object_race``) gets ONE immediate re-read while time is left —
+    it is a lie about a file mid-rename, not a daemon that stopped answering.
     """
     deadline = time.monotonic() + max(0.0, float(seconds_left))
 
@@ -500,32 +249,6 @@ def bounded_poll(
             log.debug("transient Git object race on poll of %s; one re-read", run_id)
             return poll(remaining)
         raise
-
-
-def expiring_poll(
-    gateway: Any, run_id: str, *, strict: bool = False,
-) -> Optional[Dict[str, Any]]:
-    """The poll of a SPENT window. ``None`` when the daemon did not answer inside it.
-
-    A spent window still takes its poll rather than skipping it. The ordinary path uses
-    the short-poll floor; strict owner-deadline callers use their 1 ms total wall bound.
-    Skipping looked like the cheap trade and cost more, because terminal state and containment
-    breach were then judged on data read BEFORE the last sleep — a run that finished
-    during that sleep came back as ``progress``/``running`` with no settlement, and the
-    model paid another full-context round for a run already done.
-
-    This is the ONE poll whose silence is not a failure, and the reason it is a separate
-    entry point: the window is already over, so a daemon too slow to answer inside the
-    bound is this window's EXPIRY, which the caller knows how to report, and never a
-    transport failure raised out of a tool holding a live overpowered run.
-    """
-    from ouroboros.gateways.claudexor import ClaudexorUnavailable
-
-    try:
-        return bounded_poll(gateway, run_id, 0.0, strict=strict)
-    except ClaudexorUnavailable:
-        log.debug("the last poll of a spent delegate_wait window went unanswered", exc_info=True)
-        return None
 
 
 def waiting_expiry_clause(pending: Optional[List[Dict[str, Any]]], async_only: bool = False) -> str:
@@ -597,54 +320,6 @@ def _fitted_pending(payload: Dict[str, Any], pending: List[Dict[str, Any]],
     )
 
 
-def live_line(run_id: str, advance: _Advance) -> str:
-    parts: List[str] = []
-    keyed: Dict[Any, int] = {}
-    previous_stream = None
-    for row in advance.events:
-        text_kind = row.get("textKind")
-        is_text = text_kind in _TEXT_KINDS and isinstance(row.get("title"), str)
-        text = row["title"] if is_text else str(row.get("title") or row.get("type") or "")
-        if not is_text:
-            actor = "/".join(str(row[key]) for key in ("harnessId", "attemptId") if row.get(key))
-            if actor:
-                text = f"[{actor}] {text}"
-        # One engine-keyed utterance: its fragments join and its complete text replaces them.
-        scope = (row.get("attemptId"), row.get("harnessId"), row.get("speechKey"))
-        if is_text and text_kind == "message" and scope[2] and row.get("speechOp") in ("fragment", "complete") \
-                and not row.get("textFinal"):
-            if scope in keyed:
-                at = keyed[scope]
-                parts[at] = text if row["speechOp"] == "complete" else parts[at] + text
-            elif text:
-                keyed[scope] = len(parts)
-                parts.append(text)
-            previous_stream = None
-            continue
-        stream = (text_kind, row.get("attemptId"), row.get("harnessId")) \
-            if is_text and row.get("textDelta") is True else None
-        if not text:
-            if stream != previous_stream:
-                previous_stream = None
-            continue
-        # Native fragments may split a word or contain only whitespace. Only the
-        # engine's explicit delta fact authorizes concatenation, never the prose.
-        if parts and stream is not None and stream == previous_stream:
-            parts[-1] += text
-        else:
-            parts.append(text)
-        previous_stream = stream
-    titles = " · ".join(parts)
-    # A batch larger than the display tail shows its LAST rows. Saying how many it is not
-    # showing is the difference between an honest subset and a line that reads like the
-    # whole batch — the human's stream is the one surface that had no marker at all. It
-    # says where they are, not that they are somewhere: these rows never reached this
-    # line, and nothing on this side stores them — the run's own timeline does.
-    more = (f" (+{advance.events_omitted} earlier in this batch, on the run's timeline)"
-            if advance.events_omitted else "")
-    return f"🛰 delegated run {run_id} @seq {advance.seq}: {titles or '(new session events)'}{more}"
-
-
 def executor_observation(
     ctx: Any, run_id: str, advance: _Advance, detail: Dict[str, Any], entry: Any,
 ) -> Dict[str, Any]:
@@ -680,85 +355,60 @@ def executor_observation(
     return executor_observation_meta(observation, task_id=task_id, task_attempt=attempt)
 
 
-def emit(ctx: Any, run_id: str, advance: _Advance, *,
-         detail: Optional[Dict[str, Any]] = None, entry: Any = None,
-         gateway: Any = None, after_seq: Optional[int] = None, drain_sec: Optional[float] = None,
-         read_remaining: Optional[Callable[[], float]] = None) -> None:
-    """Push one advance to the LIVE progress surface, from inside the wait.
+def _hand_over(ctx: Any, frames: Any, what: str, meta: Any = dict) -> None:
+    """Hand each frame of ``frames`` (a ``delegate_activity`` reader, not started yet) to the task's progress
+    channel with ``meta()``, committing it only once handed over. Without a channel nothing is read, so retained
+    frames stay pending for a delivery that has one (the body's feed always binds it). A broken channel never
+    aborts the caller or advances the cursor."""
+    from ouroboros import delegate_activity
 
-    `ctx.emit_progress_fn` is immediate (it puts the frame straight on the event queue),
-    unlike `ctx.pending_events`, which is drained only when the task ends — a whole
-    window's narration held until the nanny's turn was over is the collapse this fix
-    exists to avoid. The frame is also what stamps the supervisor's `last_progress_at`,
-    which a silently blocking wait would otherwise starve. A broken progress channel
-    must never abort a wait that is holding a live overpowered run.
-
-    The wait passes its transport and the batch's lower cursor (``after_seq``) for a run
-    it owns; each frame then carries one typed ``delegated_activity`` record read from the
-    run's own journal (``delegate_activity.observations``) and its speech-first text, and
-    the record's range counts as shown only once its frame was handed over. A terminal
-    run passes ``drain_sec`` to drain the journal's tail; ``read_remaining`` bounds all new
-    catalog/stream reads by the wait's remaining operation allowance.
-    Without them, the plain ``live_line`` keeps the historical one-argument contract.
-    """
     fn = getattr(ctx, "emit_progress_fn", None)
     if not callable(fn):
         return
     try:
-        observation = executor_observation(ctx, run_id, advance, detail, entry) if detail is not None else {}
-        metadata: Dict[str, Any] = {"executor_observation": observation} if observation else {}
-        if (gateway is not None and after_seq is not None and getattr(entry, "run_id", None) == run_id
-                and getattr(entry, "task_id", None) == getattr(ctx, "task_id", None)):
-            from ouroboros import delegate_activity
-            from ouroboros.gateways.claudexor import SHORT_POLL_TIMEOUT_SEC
-
-            for activity, commit in delegate_activity.observations(
-                    ctx, gateway, run_id, advance, after_seq=after_seq, read_sec=SHORT_POLL_TIMEOUT_SEC,
-                    drain_sec=drain_sec, read_remaining=read_remaining):
-                fn(delegate_activity.progress_text(activity), **metadata, delegated_activity=activity)
-                commit()
-            return
-        if after_seq is None or advance.seq > after_seq:
-            fn(live_line(run_id, advance), **metadata)
+        metadata = meta()
+        for activity, commit in frames:
+            fn(delegate_activity.progress_text(activity), **metadata, delegated_activity=activity)
+            commit()
     except Exception:
-        log.debug("delegated progress emit failed", exc_info=True)
+        log.debug("delegated %s emit failed", what, exc_info=True)
+
+
+def emit(ctx: Any, run_id: str, advance: _Advance, *,
+         detail: Dict[str, Any], entry: Any, after_seq: int) -> None:
+    """Publish the body's window advance as typed activity and its latest executor fact.
+
+    ``Feed.window`` already selected the fallback for an engine without a readable journal.
+    The activity owner replays unhanded frames before the window.
+    """
+    from ouroboros import delegate_activity
+
+    def observed() -> Dict[str, Any]:
+        observation = executor_observation(ctx, run_id, advance, detail, entry)
+        return {"executor_observation": observation} if observation else {}
+    _hand_over(ctx, delegate_activity.window_observations(ctx, run_id, advance, after_seq=after_seq), "window",
+               observed)
 
 
 def emit_stream(ctx: Any, run_id: str, read: Any, *, after_seq: int) -> None:
-    """Push the events of one journal read the wait made itself (``delegate_observe.step``)
-    to the live progress surface, each frame committed once handed over; a broken channel
-    never aborts the wait."""
-    fn = getattr(ctx, "emit_progress_fn", None)
+    """Push the events of one journal read the body made (``delegate_feed``) to the live progress surface."""
     from ouroboros import delegate_activity
-    try:
-        for activity, commit in delegate_activity.stream_observations(ctx, run_id, read, after=after_seq):
-            if not callable(fn):
-                return  # retained, not delivered; the detail/terminal path can retry the pending frame
-            fn(delegate_activity.progress_text(activity), delegated_activity=activity)
-            commit()
-    except Exception:
-        log.debug("delegated stream emit failed", exc_info=True)
+
+    _hand_over(ctx, delegate_activity.stream_observations(ctx, run_id, read, after=after_seq), "stream")
 
 
 def emit_retained(ctx: Any, run_id: str) -> None:
     """Retry local activity delivery without delaying a ready result on transport."""
-    fn = getattr(ctx, "emit_progress_fn", None)
-    if not callable(fn):
-        return
     from ouroboros import delegate_activity
-    try:
-        for activity, commit in delegate_activity.retained_observations(ctx, run_id):
-            fn(delegate_activity.progress_text(activity), delegated_activity=activity)
-            commit()
-    except Exception:
-        log.debug("retained delegated progress emit failed", exc_info=True)
+
+    _hand_over(ctx, delegate_activity.retained_observations(ctx, run_id), "retained")
 
 
 def paused_note(pending_interactions: Optional[List[Dict[str, Any]]], async_only: bool = False) -> str:
     """The note of a run PAUSED on its own question(s): never "stuck" (owner 7=A /
-    F13). Shared by the per-window payload and the supervising wake, which keeps it
-    when it drops the per-tick keep-watching/cancel note. ``async_only`` (the whole
-    set's fact, judged before any preview) names a run that keeps working instead."""
+    F13). Shared by the per-window payload and the wake, which keeps it when it
+    drops the read's own keep-watching/cancel note. ``async_only`` (the whole set's
+    fact, judged before any preview) names a run that keeps working instead."""
     if async_only:
         return ("The run is alive and KEEPS WORKING; the question(s) it asked are attention "
                 "only and hold nothing (async_questions_only; see pending_interactions). "
@@ -810,43 +460,39 @@ def message_journal_receipt(ctx: Any, result: Any) -> Any:
     return delegate_result(payload, meta=result.meta)
 
 
-def window_payload(
+def present_payload(
     *,
     run_id: str,
     state: str,
     last_seq: int,
-    window: int,
+    moved: bool,
     elapsed_seconds: Optional[int],
     max_seconds: Optional[int],
     waiting_on_user: bool,
     detail: Dict[str, Any],
-    seen: WindowObservations,
     budget: int,
     pending_interactions: Optional[List[Dict[str, Any]]] = None,
     async_questions_only: Optional[bool] = None,
 ) -> Dict[str, Any]:
-    """What the model is handed when the window expires without a terminal state.
+    """A live run's present state, as the one read of a ``delegate_wait`` wake found it.
 
-    ``async_questions_only`` is the fact about the WHOLE pending set; omitted, it is
-    judged on the full ``detail`` (``claudexor_observation.question_attention``), never
-    on ``pending_interactions``, a bounded preview that may shed the only blocking row.
+    ``moved``: its journal went past the wake's cursor, so the run's timeline tail rides
+    along (``progress``); otherwise ``no_progress``. A question the model already saw keeps
+    riding beside ``waiting_on_user`` (``pending_interactions``, the caller's BOUNDED
+    projection), so a nanny that escalated it is re-shown what the run is paused on. It is
+    MEASURED into the payload (``_fitted_pending``): per-field bounds alone left a
+    many-question set at 24k/51k chars against a 15k budget.
 
-    ``pending_interactions`` is the caller's BOUNDED question projection (B4): a
-    known question the model chose not to answer keeps riding every expiry payload
-    beside the ``waiting_on_user`` boolean, so a nanny that escalated up the hierarchy
-    is re-shown what the run is paused on instead of a bare flag. MEASURED into
-    the payload in BOTH branches (F2) — through ``_fitted_pending``'s shed
-    discipline, before the advance list is sized — so it can never push the
-    result past the budget: per-field bounds alone left a many-question set at
-    24k/51k chars against a 15k budget, exactly on the early ``no_progress``
-    return that used to skip measurement entirely.
+    ``async_questions_only`` is the fact about the WHOLE pending set; omitted, it is judged on
+    the full ``detail`` (``claudexor_observation.question_attention``), never on
+    ``pending_interactions``, a bounded preview that may shed the only blocking row. Present,
+    the run keeps working: its questions hold nothing (the wake's note says so, ``paused_note``).
     """
     payload: Dict[str, Any] = {
-        "status": "progress" if seen.advances else "no_progress",
+        "status": "progress" if moved else "no_progress",
         "run_id": run_id,
         "state": state,
         "last_seq": last_seq,
-        "waited_sec": window,
         "elapsed_seconds": elapsed_seconds,
         "max_seconds": max_seconds,
         "waiting_on_user": waiting_on_user,
@@ -855,90 +501,16 @@ def window_payload(
         from ouroboros.gateways.claudexor_observation import question_attention
 
         async_questions_only = waiting_on_user and question_attention(detail)[1]
-    held = waiting_on_user and not async_questions_only
     if waiting_on_user and async_questions_only:
         payload["async_questions_only"] = True  # absent keeps the old meaning: a question holds the run
     if waiting_on_user:
-        # The re-wait of a question the model already saw rides the same flat route
-        # fact as the immediate waiting payload (whose note carries the cost clause;
-        # this payload is measured into a budget its own note already reserves).
+        # The flat route fact of the immediate waiting payload: an answer resumes THIS session.
         from ouroboros.delegate_interactions import SAME_SESSION_CONTINUATION
 
         payload["continuation"] = SAME_SESSION_CONTINUATION["continuation"]
-    if not seen.advances:
-        payload["reason"] = "non_terminal_and_no_new_session_events_within_wait_window"
-        # A run PAUSED on its own question is not "stuck" (owner 7=A / F13): the
-        # generic delegate_cancel hint invited cancelling a run that is simply
-        # waiting to be answered. The waiting state gets its own note.
-        payload["note"] = (
-            paused_note(pending_interactions, async_only=not held) if waiting_on_user else
-            ("The run is alive but silent. Decide: keep waiting (call again), "
-             "or delegate_cancel if it is stuck."))
-        _fitted_pending(payload, list(pending_interactions or []), budget)
-        return payload
-    payload["timeline_tail"] = timeline_tail(detail)
-    # The pending questions are measured in FIRST, against a budget that reserves
-    # the closing note and the advance list's floor marker, so an oversized
-    # question set can never push the rendered result past the limit (F2) — the
-    # advance-fit loop below then sizes itself against what is actually left.
-    _fitted_pending(payload, list(pending_interactions or []),
-                    budget - _NOTE_RESERVE_CHARS - _MIN_ADVANCE_BUDGET_CHARS)
-    # The advance list gets what is LEFT, measured — not a fixed share. A fixed share
-    # bounded only itself: `timeline_tail` carries harness-authored text (three fields,
-    # each capped at 300 chars, twelve rows) and can reach most of the limit on its own,
-    # so the whole result overflowed and the generic truncator cut the JSON mid-structure
-    # — the very failure this list is bounded to avoid, and one the base did not have.
-    # `note` is added after this line, so its own cost is reserved here too. The list is
-    # then sized against the WHOLE rendered payload rather than against itself: nested a
-    # level deeper it costs more than it measures standalone (two spaces of indent per
-    # line, plus its key), so a sub-block that fits its share can still overflow the
-    # result. The loop re-measures what is actually shipped and hands back the overflow.
-    _room = max(_MIN_ADVANCE_BUDGET_CHARS,
-                budget - len(json.dumps(payload, ensure_ascii=False, indent=2))
-                - _NOTE_RESERVE_CHARS)
-    for _ in range(_BUDGET_FIT_ATTEMPTS):
-        payload["advances"] = seen.rows(_room)
-        _over = len(json.dumps(payload, ensure_ascii=False, indent=2)) + _NOTE_RESERVE_CHARS - budget
-        if _over <= 0:
-            break
-        if _room <= _MIN_ADVANCE_BUDGET_CHARS:
-            # The residual cannot hold even the FLOOR, and the floor is what overflowed:
-            # measured, twelve tail rows of three 20 000-char harness fields leave ~400
-            # chars once the `note` is reserved, and a floor-sized list shipped 422 on
-            # top — a 15 018-char result against a 15 000 limit, which the generic
-            # truncator then cut mid-structure. That is the round-1 defect from the other
-            # end, and it is this module's own floor that caused it, not the harness text.
-            # So the floor is an aspiration and the MEASUREMENT is the rule: the list
-            # yields entirely rather than the payload crossing the limit, and it says so
-            # where it stood, in the same vocabulary a head-shed uses.
-            payload["advances"] = [_omission_marker(
-                seen.advances[-1].seq, len(seen.advances), whole=True)]
-            break
-        _room = max(_MIN_ADVANCE_BUDGET_CHARS, _room - _over)
-    payload["quiet_for_sec"] = max(0, window - seen.advances[-1].at_sec)
-    payload["note"] = (
-        f"The run advanced {len(seen.advances)} time(s) during the {window}s you asked to "
-        "wait; each advance was offered to your human's live stream as it happened "
-        "(delivery is best-effort) — this call held the window instead of waking you "
-        "per event. `advances` is that sequence. "
-        "Call delegate_wait again with since_seq=last_seq to keep watching; "
-        "`quiet_for_sec` is how long it has been silent at the end of the window."
-    )
-    if waiting_on_user and not held:
-        payload["note"] += (
-            " The run KEEPS WORKING with question(s) pending that hold nothing: answer "
-            "when useful (delegate_answer; it reaches the agent as its next user message), "
-            "raise one with the escalate verb (parent-first) if it is above your authority, "
-            f"or keep waiting — {waiting_expiry_clause(pending_interactions, True)}."
-        )
-    elif waiting_on_user:
-        # F13: the paused state earns its own instruction here too — never the
-        # generic keep-watching line alone while a question sits unanswered.
-        # The expiry claim is keyed on the rows' own timeout_at (R2-7e).
-        payload["note"] += (
-            " The run is PAUSED on a question: answer it (delegate_answer), "
-            "raise it with the escalate verb (parent-first) if it is above "
-            f"your authority, or keep waiting — "
-            f"{waiting_expiry_clause(pending_interactions)}; do not cancel over it."
-        )
+    if moved:
+        payload["timeline_tail"] = timeline_tail(detail)
+    else:
+        payload["reason"] = "non_terminal_and_no_new_session_events_since_cursor"
+    _fitted_pending(payload, list(pending_interactions or []), budget)
     return payload
