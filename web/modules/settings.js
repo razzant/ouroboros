@@ -3,7 +3,8 @@
  * leaves Settings by its door. Every row saves itself (settings_controls.js): nothing here keeps a draft or a Save.
  *
  * What Settings shows is `state.settingsPath` ('' is the home), in memory only: no URL is written and a reload starts
- * at the home. Pages open in levels. One opened from the home, a search result or outside Settings is the first level;
+ * at the home. An address no page registers (a skill written for the tabs Settings had) never shows an empty page:
+ * the home opens with the address's last word searched, and search says where the thing lives now. Pages open in levels. One opened from the home, a search result or outside Settings is the first level;
  * one opened from a page lies over that page. The first row of every level is Back and names where it leads: the
  * level under it, the home ("Settings"), or the place outside Settings that opened it (`back: { label, go }`).
  *
@@ -75,6 +76,11 @@ export function initSettings(ctx = {}) {
     function go(path = '', { row = '', back = null, fresh = false, opener = null } = {}) {
         const target = String(path || '');
         if (isDoorId(target)) return leave(target, { row });
+        if (target && !settingsPageFor(target)) {
+            closeLevels(0);
+            home.search(target.split(/[^\p{L}\p{N}]+/u).filter(Boolean).pop() || '');
+            return true;
+        }
         const at = back || fresh ? -1 : levels.findIndex((level) => level.path === target);
         if (!target) closeLevels(0);
         else if (at >= 0) closeLevels(at + 1, { row });
@@ -104,8 +110,7 @@ export function initSettings(ctx = {}) {
     }
 
     function mount(level, row) {
-        const found = settingsPageFor(level.path);
-        if (!found) return;  // no page serves this path yet: the chrome with nothing inside
+        const found = settingsPageFor(level.path);  // `go` opens a level only for a path a page registered
         const body = level.el.querySelector('.settings-page-body');
         const failed = (err) => {
             console.error('settings: a page failed to draw', level.path, err);
