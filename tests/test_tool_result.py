@@ -636,15 +636,18 @@ def test_loop_reads_the_guard_code_not_its_denial_text(
         "tool_result_meta": dict(typed.meta),
     }
     # Every one took no effect (``is_error``); a call Safety returned or could not read is still no tool error in
-    # what the task counts and stores, where a guard's denial is one.
+    # what the task counts and stores, its own line marked as held, where a guard's denial is one.
     from ouroboros.outcomes import SAFETY_HELD_STATUSES
     from ouroboros.post_task_synthesis import build_trace_summary, task_tool_metrics
 
     held = legacy_status in SAFETY_HELD_STATUSES
     trace = {"tool_calls": [{"tool": "fixture_guard", "args": {}, "is_error": row["is_error"], **row["result_meta"]}]}
     assert task_tool_metrics(trace)["tool_errors"] == int(not held)
-    head = build_trace_summary(trace).splitlines()[0]
-    assert (head == "## Tool trace (1 calls, 0 errors, 1 held by Safety)") is held, head
+    counts = ("0 errors, 1 held by Safety" if held else "1 errors" if legacy_status == "safety_violation"
+              else "0 errors, 1 policy-denied")
+    assert build_trace_summary(trace) == (f"## Tool trace (1 calls, {counts})\n"
+                                          f"1. fixture_guard() [status={legacy_status}] → "
+                                          + ("HELD BY SAFETY" if held else "ERROR"))
 
 
 @pytest.mark.parametrize(("code", "words"), [

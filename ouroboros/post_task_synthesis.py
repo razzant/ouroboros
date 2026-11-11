@@ -189,7 +189,8 @@ def build_trace_summary(llm_trace: dict) -> str:
             if tc.get("signal"):
                 facts.append(f"signal={tc.get('signal')}")
             fact_suffix = f" [{', '.join(facts)}]" if facts else ""
-            suffix = " → ERROR" if tc.get("is_error") else ""
+            held = status in SAFETY_HELD_STATUSES  # it carries is_error, yet it is no error
+            suffix = " → HELD BY SAFETY" if held else " → ERROR" if tc.get("is_error") else ""
             return f"{index + 1}. {name}({args_str}){fact_suffix}{suffix}"
 
         if n > 30:
