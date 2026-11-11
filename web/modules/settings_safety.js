@@ -23,7 +23,6 @@ export const SAFETY_RULES_KEY = 'OUROBOROS_SAFETY_OWNER_RULES';
 export const SAFETY_MODEL_KEY = 'OUROBOROS_MODEL_SAFETY';
 
 const LEVEL_OPTIONS = SAFETY_LEVELS.map(({ value, label }) => ({ value, label }));
-const LOWERING_TITLE = 'Lowering a level asks for confirmation.';
 
 /** The whole Behavior › Safety Supervisor section (settings_controls.js settingsSection). */
 export function safetySectionHtml() {
@@ -37,13 +36,13 @@ export function safetySectionHtml() {
             <div class="settings-effort-card">
                 <label>${escapeHtml(SAFETY_KINDS.your_work)}</label>
                 <input id="s-safety-mode" type="hidden" value="full">
-                ${renderSegmentedField({ target: 's-safety-mode', title: LOWERING_TITLE, options: LEVEL_OPTIONS })}
+                ${renderSegmentedField({ target: 's-safety-mode', options: LEVEL_OPTIONS })}
                 <div class="settings-inline-note" data-policy-state="supervisor" role="status" aria-live="polite"></div>
             </div>
             <div class="settings-effort-card" data-safety-consciousness-row>
                 <label>${escapeHtml(SAFETY_KINDS.consciousness)}</label>
                 <input id="s-consciousness-safety-mode" type="hidden" value="full">
-                ${renderSegmentedField({ target: 's-consciousness-safety-mode', title: LOWERING_TITLE, options: LEVEL_OPTIONS })}
+                ${renderSegmentedField({ target: 's-consciousness-safety-mode', options: LEVEL_OPTIONS })}
                 <div class="settings-inline-note" data-policy-state="supervisor_consciousness" role="status" aria-live="polite"></div>
                 <p class="safety-line" data-safety-check-fully-line hidden><button type="button" class="consciousness-inline-link ui-hit-area" data-safety-check-fully>Check consciousness fully</button></p>
             </div>

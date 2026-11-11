@@ -397,11 +397,11 @@
     align-items: center;
     gap: 10px;
 }
-/* Rows that wrap on a phone (a toolbar, a secret's buttons, an account's actions and its resources, a segmented scale):
+/* Rows that wrap on a phone (a toolbar, a secret's buttons, an account's actions and its resources):
    under a finger their controls take the touch minimum as their own height through the control tokens (the lock
    writes the box), so no reach covers a neighbour (DESIGN "Touch and containment"). */
 @media (pointer: coarse) {
-    :is(.settings-toolbar, .secret-input-row, .harness-account-actions, .account-resource-panel, .settings-effort-group,
+    :is(.settings-toolbar, .secret-input-row, .harness-account-actions, .account-resource-panel,
         .settings-extension-actions, .harness-maintenance-actions) {
         --control-h: var(--touch-target-min);
         --control-h-sm: var(--touch-target-min);
@@ -793,39 +793,6 @@
     text-transform: none;
     letter-spacing: normal;
 }
-
-/* One equal-width grid for every segmented control. The renderer writes how many
-   choices it drew (`--segment-count`, page_header.js renderSegmentedField): up to
-   four share one row and fill it; a longer scale keeps four equal columns and
-   leaves its last row partly empty rather than stretching a lone choice. Each
-   track is that exact fraction of the row, so no math function sits in the
-   repeat count. */
-.settings-effort-group {
-    --segment-gap: 8px;
-    --segment-columns: min(var(--segment-count, 4), 4);
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(calc((100% - (var(--segment-columns) - 1) * var(--segment-gap)) / var(--segment-columns)), 1fr));
-    gap: var(--segment-gap);
-}
-
-/* A card of 20rem or less stacks two equal columns. Above it today's longest
-   labels ("Development" in three columns, "Advanced" in four) still sit inside
-   their buttons, and the default desktop window keeps its four-column effort
-   scales. */
-@container settingsbox (max-width: 20rem) {
-    .settings-effort-group {
-        --segment-columns: min(var(--segment-count, 4), 2);
-    }
-}
-
-/* Max review cycles: five one-glyph values (1 / 2 / 3 / 5 / ∞) keep one compact
-   row at every width. */
-[data-review-cycles-group].settings-effort-group {
-    --segment-columns: var(--segment-count, 5);
-}
-
-/* The segment itself (.ui-segment, its states) is ui.css's; the group's layout stays here. */
-
 
 /* The local toggle's checkbox and gap: one pair of dimensions for the toggles and for the
    notes that line up with their label text (Startup & background). */
