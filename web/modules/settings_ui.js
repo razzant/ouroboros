@@ -171,10 +171,11 @@ const mountPermissions = rowsPage('permissions', {
 
 // Theme and size are this device's and their own modules write them (theme.js paints and takes the strip's presses,
 // interface_size.js the slider); the language is the install's (settings_language.js). Nothing here is a settings row
-// the helper writes, so the page binds none.
+// the helper writes, so the page binds none. The theme's options stand in theme.js's own order, the one its arrows,
+// Home and End walk.
 function mountAppearance(container) {
     const custom = (row) => (row.id === 'appearance:theme'
-        ? `<div class="ui-segment-group" role="radiogroup" data-theme-control aria-labelledby="setting-${row.id}-name">${[['system', 'System'], ['light', 'Light'], ['dark', 'Dark']]
+        ? `<div class="ui-segment-group" role="radiogroup" data-theme-control aria-labelledby="setting-${row.id}-name">${[['light', 'Light'], ['dark', 'Dark'], ['system', 'System']]
             .map(([value, label]) => `<button type="button" class="ui-segment" role="radio" data-theme-choice="${value}">${label}</button>`).join('')}</div>`
         : `<span class="settings-slider" data-interface-size-row hidden><input type="range" id="interface-size" min="50" max="200" step="5" value="100"
             data-interface-size-input aria-labelledby="setting-${row.id}-name"><output for="interface-size" data-interface-size-value data-i18n-skip>100%</output>
@@ -185,9 +186,8 @@ function mountAppearance(container) {
             + note('data-shell-storage-status role="status" aria-live="polite"') })
         + languageBlockHtml();
     globalThis.ouroTheme?.mount();
-    const disposers = [mountInterfaceSize(container), bindLanguageSettings(container),
-        // The desktop app's own facts (where it keeps this device's choices): the app is not updated with the core.
-        mountDesktopShell(container, (shell) => getNotifier().configure({ shell }))];
+    // The desktop app says where it keeps this device's choices (a fact of the app, which is not updated with the core).
+    const disposers = [mountInterfaceSize(container), bindLanguageSettings(container), mountDesktopShell(container)];
     return { unmount() { disposers.forEach((dispose) => dispose()); } };
 }
 
@@ -442,6 +442,10 @@ registerSettingsPage('voice', { title: 'Voice and calls', mount: mountVoice });
 registerSettingsPage('computer', { title: 'This computer', mount: mountComputer });
 registerSettingsPage('computer/advanced', { title: 'Advanced', mount: mountAdvanced });
 registerSettingsPage('computer/about', { title: 'About', mount: mountAbout });
+
+// The desktop app's own facts (its system notifications, where it keeps this device's choices) reach the notifier when
+// the app starts, not when a page is opened: where an alert goes depends on them long before anyone opens Settings.
+if (globalThis.document) mountDesktopShell(null, (shell) => getNotifier().configure({ shell }));
 
 /* ---- What is left of the old tabs, unmounted, for the editor lanes: Accounts and Secrets (lane E3), Models, tool
    servers and the local model (lane E2). Each lane rebuilds its section as a page and deletes it here. ----------- */
