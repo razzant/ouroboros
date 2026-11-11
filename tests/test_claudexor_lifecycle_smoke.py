@@ -147,10 +147,14 @@ def test_every_runtime_name_the_witness_imports_inside_a_step_exists():
     import importlib.util
 
     tree = ast.parse(Path(smoke.__file__).read_text(encoding='utf-8'))
-    late = [(node.module, alias.name) for step in ast.walk(tree) if isinstance(step, ast.FunctionDef)
+    steps = [node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    late = [(node.module, alias.name) for step in steps
             for node in ast.walk(step) if isinstance(node, ast.ImportFrom) and node.module
             and node.module.split('.')[0] in {'ouroboros', 'scripts', 'supervisor'} for alias in node.names]
-    missing = [f'{module}.{name}' for module, name in late
-               if not hasattr(importlib.import_module(module), name)
-               and importlib.util.find_spec(f'{module}.{name}') is None]
+    def found(module, name):  # an attribute, or a submodule of a package (a plain module has no __path__)
+        parent = importlib.import_module(module)
+        return hasattr(parent, name) or (hasattr(parent, '__path__')
+                                         and importlib.util.find_spec(f'{module}.{name}') is not None)
+
+    missing = [f'{module}.{name}' for module, name in late if not found(module, name)]
     assert late and missing == []
