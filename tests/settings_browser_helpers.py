@@ -76,14 +76,9 @@ def top_path(page) -> str:
 
 
 def go_back(page):
-    """Press the open level's first row, Back, and return the path shown after it. In the wide layout a page opened
-    from the home has no Back (the home stands beside it): there the home is opened, as its row in the rail would."""
+    """Press the open level's first row, Back, and return the path shown after it."""
     before = top_path(page)
-    back = settings_page(page, before).locator("[data-settings-back]")
-    if back.is_visible():
-        back.click()
-    else:
-        page.evaluate("() => window.__ouroSettings.open('')")
+    settings_page(page, before).locator("[data-settings-back]").click()
     page.wait_for_function("before => { const levels = [...document.querySelectorAll('#page-settings "
                            "[data-settings-page]')]; return !levels.some((e) => e.dataset.settingsPage === before); }",
                            arg=before)

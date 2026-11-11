@@ -38,8 +38,7 @@ html[data-layout="stack"] :is(.settings-home, .settings-page) { padding-inline: 
     min-width: 0;
     overflow-wrap: anywhere;
 }
-/* Wide: the home is a rail beside the page. Its card says only who and how many; the count opens the list. A page
-   opened from the rail needs no Back to it, so only a deeper page, or one opened from outside Settings, shows one. */
+/* Wide: the home is a rail beside the page. Its card says only who and how many; the count opens the list. */
 @container settingspage (min-width: 56rem) {
     .settings-shell[data-settings-view="page"] { grid-template-columns: 348px minmax(0, 1fr); }
     .settings-shell[data-settings-view="page"] > .settings-home { display: block; padding-inline-end: var(--space-3); }
@@ -47,7 +46,6 @@ html[data-layout="stack"] :is(.settings-home, .settings-page) { padding-inline: 
     .settings-shell[data-settings-view="page"] .settings-door-answer { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
     .settings-shell[data-settings-view="page"] .settings-needs:not([data-all]) { display: none; }
     .settings-shell[data-settings-view="page"] .settings-being-count { color: var(--text-primary); font-weight: 600; }
-    .settings-shell[data-settings-view="page"] .settings-back-row[data-leads="home"] { display: none; }
 }
 
 /* A page's chrome: Back naming where it leads, then the title. The page module draws only what is under them: one

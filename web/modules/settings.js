@@ -92,7 +92,7 @@ export function initSettings(ctx = {}) {
         level.el.dataset.settingsPage = path;
         level.el.setAttribute('aria-labelledby', `${level.id}-title`);
         const leadsTo = back?.label || (levels.length ? settingsTitle(top().path) : 'Settings');
-        level.el.innerHTML = `<div class="settings-back-row"${back || levels.length ? '' : ' data-leads="home"'}><button type="button" class="settings-back ui-hit-area" data-settings-back
+        level.el.innerHTML = `<div class="settings-back-row"><button type="button" class="settings-back ui-hit-area" data-settings-back
             aria-label="Back to ${escapeHtml(leadsTo)}">${SHELL_ICONS.back}<span>${escapeHtml(leadsTo)}</span></button></div>
             <div class="settings-column"><h2 class="settings-page-title" id="${level.id}-title">${escapeHtml(settingsTitle(path))}</h2>
             <div class="settings-page-body"></div></div>`;

@@ -157,8 +157,9 @@ def test_a_wide_page_box_shows_the_home_beside_the_page_with_no_layer(subscripti
     assert page.locator(HOME).is_visible(), "wide: the home stays beside the page"
     assert page.locator(f'{HOME} [data-settings-open="rules"]').get_attribute("aria-current") == "page"
     assert page.evaluate(SETTINGS_LAYERS) == [], "beside the home a level is no layer"
-    # The home is a rail: its page needs no Back to it, and the card keeps its list behind its count.
-    assert not level.locator("[data-settings-back]").is_visible(), "the home is beside the page: no Back to it"
+    # The home is a rail: its card keeps its list behind its count. The page keeps its first row, Back.
+    back = level.locator("[data-settings-back]")
+    assert back.is_visible() and back.inner_text().strip() == "Settings"
     assert level.locator(".settings-page-title").inner_text().strip() == "Your rules"
     assert not page.locator(f"{HOME} [data-being-needs]").is_visible()
     # Another home row replaces the page.
@@ -168,7 +169,6 @@ def test_a_wide_page_box_shows_the_home_beside_the_page_with_no_layer(subscripti
     assert page.locator(f'{HOME} [data-settings-open="rules"]').get_attribute("aria-current") is None
     # A page opened from a page lies over it and names it: that Back is shown and closes one level.
     first = open_settings(page, "test-shell")
-    assert not first.locator("[data-settings-back]").is_visible()
     first.locator("[data-test-deeper]").click()
     second = settings_page(page, "test-shell/deeper")
     second.wait_for(state="visible")
@@ -181,13 +181,13 @@ def test_a_wide_page_box_shows_the_home_beside_the_page_with_no_layer(subscripti
     assert outside.locator("[data-settings-back]").inner_text().strip() == "Skills"
     outside.locator("[data-settings-back]").click()
     page.wait_for_function("() => window.testWentBack === true")
-    # Narrowed, the same page is alone with its Back to the home; widened again the rail returns.
+    # Back beside the rail returns to the home alone; narrowed, a page is alone and one layer of the shell's stack.
     open_settings(page, "rules")
-    page.set_viewport_size({"width": 1087, "height": 740})
-    narrow = settings_page(page, "rules").locator("[data-settings-back]")
-    narrow.wait_for(state="visible")
-    assert narrow.inner_text().strip() == "Settings" and not page.locator(HOME).is_visible()
-    assert len(page.evaluate(SETTINGS_LAYERS)) == 1
     assert go_back(page) == ""
     assert page.locator(f'{HOME} [aria-current="page"]').count() == 0
+    open_settings(page, "rules")
+    page.set_viewport_size({"width": 1087, "height": 740})
+    page.wait_for_function(SETTINGS_LAYERS.replace("() =>", "() => 1 === (") + ").length")
+    assert not page.locator(HOME).is_visible()
+    assert go_back(page) == ""
     page.close()
