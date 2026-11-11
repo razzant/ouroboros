@@ -1331,7 +1331,6 @@ export function renderSubagentsSection() {
                 <input id="s-allow-mutative-subagents" type="hidden" value="on">
                 ${renderSegmentedField({
                     target: 's-allow-mutative-subagents',
-                    title: 'Applies on the next task; no restart required.',
                     options: [
                         { value: 'off', label: 'Off' },
                         { value: 'auto', label: 'Auto' },

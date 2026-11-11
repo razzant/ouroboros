@@ -31,9 +31,9 @@ export function deploymentNote(deployment, axis) {
 
 /**
  * Offer a segmented choice (`target`, its hidden input) with only the options the deployment allows: drawn again by
- * the one renderer (`render`, so its column count is what it drew) and bound by `bind` on its parent, which holds
- * its input and no other choice. A choice left with one option is no choice: its row is hidden and its policy line
- * says the fixed value. Unmanaged, the full choice stays as drawn.
+ * the one renderer (`render`) and bound by `bind` on its parent, which holds its input and no other choice. A choice
+ * left with one option is no choice: its row is hidden and its policy line says the fixed value. Unmanaged, the full
+ * choice stays as drawn.
  */
 export function offerAllowedChoices(root, { target, options, axis, modifier = '' }, deployment, { render, bind }) {
     const group = root?.querySelector(`[data-effort-target="${target}"]`);
@@ -43,7 +43,7 @@ export function offerAllowedChoices(root, { target, options, axis, modifier = ''
     let current = group;
     if (drawn.join(' ') !== allowed.map(({ value }) => value).join(' ')) {
         const holder = group.parentElement;
-        group.outerHTML = render({ target, options: allowed, modifier, title: group.title });
+        group.outerHTML = render({ target, options: allowed, modifier });
         current = holder.querySelector(`[data-effort-target="${target}"]`);
         bind(holder);
     }

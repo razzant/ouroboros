@@ -59,7 +59,7 @@ def test_skills_shows_native_unix_and_keeps_owner_off(direct_server_with_data, t
             page.screenshot(path=str(evidence / "skills-native-on.png"))
             with page.expect_response(lambda response: response.request.method == "POST" and
                                       response.url.endswith("/api/skills/unix_computer_use/toggle")) as saved:
-                card.locator("label.skills-switch").click()
+                card.locator("label.ui-switch").click()
             assert saved.value.ok and saved.value.json()["enabled"] is False
             assert load_enabled(drive, "unix_computer_use") is False
             # The next startup's built-in pass must not reinterpret OFF as no choice.

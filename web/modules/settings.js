@@ -631,13 +631,6 @@ export function initSettings({ state, setBeforePageLeave, ws, openDashboardTab =
     }
 
     function syncRuntimeModeBridgeState() {
-        const hasBridge = Boolean(window.pywebview?.api?.confirm_runtime_mode_change);
-        const group = document.querySelector('[data-runtime-mode-group]');
-        if (group) {
-            group.title = hasBridge
-                ? 'Runtime mode changes require native launcher confirmation and restart.'
-                : 'Runtime mode changes are saved through the owner endpoint and take effect after restart.';
-        }
         document.querySelectorAll('[data-runtime-mode-group] [data-effort-value]').forEach((button) => {
             button.disabled = false;
         });

@@ -707,10 +707,11 @@
 .filter-chip:not(:disabled):active { filter: var(--press); }
 .filter-chip:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 
-/* A segmented choice (one option of a single-select group, page_header.js renderSegmentedField) is the one capsule
-   control: neutral options standing on the rest shadow, the chosen one in the soft crimson and still standing, no
-   outline. Hover and press change colour, never height. A word longer than its column (a translated label) breaks
-   rather than overflowing, so a segment keeps a minimum height, not a fixed one. A setting's value is never amber. */
+/* A segmented choice: one option of a single-select group. Standing alone (the Evolution page's measures) it is the
+   one capsule control: neutral options on the rest shadow, the chosen one (.active, or aria-checked) in the soft
+   crimson and still standing, no outline. Hover and press change colour, never height. It is never narrower than the
+   touch minimum, and a word longer than its line (a translated label) breaks rather than overflowing, so a segment
+   keeps a minimum height, not a fixed one. A setting's value is never amber. */
 .ui-segment {
     --control-pad-x: var(--space-3);
     display: inline-flex;
@@ -718,6 +719,7 @@
     justify-content: center;
     text-align: center;
     box-sizing: border-box;
+    min-width: var(--touch-target-min);
     min-height: var(--control-h);
     line-height: 1.2;
     border: 1px solid transparent;
@@ -732,11 +734,39 @@
     overflow-wrap: anywhere;
     transition: var(--motion-tone);
 }
-.ui-segment:not(:disabled):not(.active):hover { background: var(--surface-capsule-hover); color: var(--text-primary); }
-.ui-segment.active { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); }
+.ui-segment:not(:disabled):not(.active, [aria-checked="true"]):hover { background: var(--surface-capsule-hover); color: var(--text-primary); }
+.ui-segment:is(.active, [aria-checked="true"]) { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); }
 .ui-segment:not(:disabled):active { filter: var(--press); }
 .ui-segment:disabled { cursor: not-allowed; opacity: var(--control-disabled-opacity); box-shadow: none; }
-.ui-segment:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+/* Raised over its neighbours, so the ring is whole beside a filled one. */
+.ui-segment:focus-visible { z-index: 1; outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+
+/* The strip (.ui-segment-group; page_header.js renderSegmentedField draws it, owner 11.11): the options of one choice
+   in one track, each as wide as its word and only the chosen one filled. Nothing slides, is measured or is written
+   inline: a track wider than its row wraps onto another line inside its own body and an option alone wider than its
+   line breaks its words, so a strip never scrolls sideways. The track is the control's height and its options that
+   height less the inset, their corners concentric with its own. Under a finger the track is the touch minimum: an
+   option's reach ends at the track's edge, and the lines of a wrapped track lie further apart than two reaches. */
+.ui-segment-group {
+    --segment-inset: 3px;
+    --control-h: var(--control-h-sm);
+    box-sizing: border-box;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2) 2px;
+    width: fit-content;
+    max-width: 100%;
+    padding: var(--segment-inset);
+    border-radius: calc(var(--control-h) / 2 + var(--segment-inset));
+    background: var(--surface-capsule);
+    box-shadow: var(--elev-rest);
+}
+.ui-segment-group > .ui-segment { flex: 1 1 auto; box-shadow: none; }
+.ui-segment-group > .ui-segment:not(.active, [aria-checked="true"]) { background: transparent; }
+.ui-segment-group > .ui-segment:not(:disabled):not(.active, [aria-checked="true"]):hover { background: var(--tone-quiet-hover); }
+@media (pointer: coarse) {
+    .ui-segment-group { --control-h: calc(var(--touch-target-min) - 2 * var(--segment-inset)); }
+}
 
 /* An object on the room (DESIGN.md design bible): one flat fill on the rest shadow with the object radius, no edge
    (the transparent 1px border only keeps the box's size). Inside an object a group or row is a tray
@@ -1128,6 +1158,54 @@ textarea.ui-control { resize: vertical; }
     accent-color: var(--accent);
 }
 .ui-checkbox:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+/* The switch: a label holding a checkbox with role="switch" and aria-checked, then its track and thumb, for a change
+   that acts at once (a .ui-checkbox belongs to a form with its own Save). Green when on. One that cannot be used now
+   (disabled, or .is-locked) loses its colour, never its size; one whose write is in flight is disabled with
+   aria-busy and keeps the colour of the value it is writing, dimmed, with nothing drawn beside it. The label's
+   padding, cancelled by its margin, is the switch's reach; the input covers the label, so the reach is pressable. */
+.ui-switch {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    cursor: pointer;
+    -webkit-user-select: none;
+    user-select: none;
+    padding: 11px 4px;
+    margin: -11px -4px;
+}
+.ui-switch input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.ui-switch-track {
+    position: relative;
+    display: inline-block;
+    width: 40px;
+    height: 22px;
+    border-radius: var(--pill-radius);
+    background: var(--status-neutral-border);
+    transition: var(--motion-tone);
+}
+.ui-switch-thumb {
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--surface-capsule);
+    box-shadow: var(--elev-rest);
+    transition: transform 140ms ease;
+}
+.ui-switch input:checked + .ui-switch-track { background: var(--green); }
+.ui-switch input:checked + .ui-switch-track .ui-switch-thumb { transform: translateX(18px); }
+.ui-switch input:focus-visible + .ui-switch-track { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+.ui-switch.is-locked,
+.ui-switch input:disabled { cursor: not-allowed; }
+.ui-switch.is-locked .ui-switch-track,
+.ui-switch input:disabled + .ui-switch-track { background: var(--status-neutral-border); }
+.ui-switch.is-locked .ui-switch-thumb,
+.ui-switch input:disabled + .ui-switch-track .ui-switch-thumb { box-shadow: none; }
+.ui-switch input[aria-busy="true"] { cursor: progress; }
+.ui-switch input[aria-busy="true"] + .ui-switch-track { opacity: var(--control-disabled-opacity); }
+.ui-switch input[aria-busy="true"]:checked + .ui-switch-track { background: var(--green); }
 .ui-status:empty { display: none; }
 @media (max-width: 640px), (pointer: coarse) {
     .ui-control { font-size: var(--type-section); }

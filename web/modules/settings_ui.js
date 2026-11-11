@@ -58,8 +58,8 @@ export const SECRET_KEYS = [
 ];
 
 /** A section's one choice: the hidden value and its segmented row, named by the section title (no tray, no second label). */
-function choice({ id, value, options, modifier = '', title = '' }) {
-    return `<input id="${id}" type="hidden" value="${value}">${renderSegmentedField({ target: id, modifier, title, options })}`;
+function choice({ id, value, options, modifier = '' }) {
+    return `<input id="${id}" type="hidden" value="${value}">${renderSegmentedField({ target: id, modifier, options })}`;
 }
 
 const policyLine = (key) => `<div class="settings-inline-note" data-policy-state="${key}" role="status" aria-live="polite"></div>`;
@@ -233,7 +233,7 @@ function behaviorPanel() {
                 <br><strong>Human controlled:</strong> desktop builds ask the launcher for native confirmation before saving a mode change.
                 Web/Docker sessions save mode changes through the owner endpoint; the new mode takes effect after restart.`,
             body: `${choice({ id: 's-runtime-mode', value: 'advanced', modifier: 'data-runtime-mode-group',
-                title: 'Access changes take effect after restart.', options: RUNTIME_MODE_OPTIONS })}
+                options: RUNTIME_MODE_OPTIONS })}
             ${policyLine('access')}`,
         })}
 
@@ -282,12 +282,11 @@ function behaviorPanel() {
                 <strong>Max</strong>, for ~1M-context models, inlines ARCHITECTURE in full and DEVELOPMENT in full unless the work is known to be about something else: a folder proven not to be Ouroboros, a helper task, or work started through the API, CLI or a schedule gets its chapter map, and work of unknown subject keeps the whole book.
                 <strong>Nano</strong> is the compact owner window. <strong>Low</strong> aims for about 250K tokens; what actually fits depends on the model's window and what this installation holds. Both books become chapter maps (read full sections on demand), and memory compacts sooner. In every mode, a task that itself requires the whole DEVELOPMENT handbook gets it. It governs Ouroboros's own working window: it never changes the model or reasoning effort, and the review panel runs in every mode.
                 <br><strong>Human controlled:</strong> saved via the owner endpoint; saves immediately (no restart), and lowering requires Ouroboros to be idle.`,
-            body: choice({ id: 's-context-mode', value: 'max',
-                title: 'Saves immediately; no restart required. Lowering requires Ouroboros to be idle.', options: [
-                    { value: 'nano', label: 'Nano' },
-                    { value: 'low', label: 'Low' },
-                    { value: 'max', label: 'Max' },
-                ] }),
+            body: choice({ id: 's-context-mode', value: 'max', options: [
+                { value: 'nano', label: 'Nano' },
+                { value: 'low', label: 'Low' },
+                { value: 'max', label: 'Max' },
+            ] }),
         })}
 
         ${settingsSection({
@@ -356,7 +355,7 @@ function behaviorPanel() {
             title: 'Update Channel',
             lead: 'Which released branch Update follows.',
             details: 'Chooses which official branch Update checks. Your local work branch stays <code>ouroboros</code>. <strong>Stable</strong> follows released code on <code>main</code> (default), <strong>QA</strong> follows <code>ouroboros-stable</code>, and <strong>Development</strong> follows <code>ouroboros</code>.',
-            body: choice({ id: 's-update-channel', value: 'stable', title: 'Applies immediately; no restart required.', options: [
+            body: choice({ id: 's-update-channel', value: 'stable', options: [
                 { value: 'stable', label: 'Stable' },
                 { value: 'qa', label: 'QA' },
                 { value: 'development', label: 'Development' },
