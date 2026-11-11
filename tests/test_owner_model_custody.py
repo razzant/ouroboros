@@ -518,29 +518,50 @@ def test_model_control_is_absent_when_the_owner_act_cannot_hold(host, monkeypatc
         registry.unregister("work")
 
 
-def test_cited_work_switch_uses_supervisor_primary_and_returns_there_after_fallback(host, monkeypatch):
+@pytest.mark.parametrize("live", [False, True])
+@pytest.mark.parametrize("long_span", [False, True])
+def test_cited_work_switch_keeps_its_words_through_receipt_resume_fallback_and_continue(host, monkeypatch, live, long_span):
+    from ouroboros.loop_routes import _apply_round_route_overrides
+    from ouroboros.owner_model import restore_current
     from ouroboros.tools.control_runtime import _switch_model
     from supervisor.events_mind_controls import handle_mind_task_control
+    from tests.test_continue_work_identity import _successor
 
-    task = running(host)
+    task = running(host) if live else queued(host)
     tools, ctx = turn(host, monkeypatch)
-    ctx._owner_directives = [{"source": "owner_mailbox", "content": "Use the other route for this work."}]
+    old_checkpoint = json.loads(json.dumps(owner_wait.continuation_state(ctx, [], {}, {}, 3, [], set())))
+    span = "Use the other route" if not long_span else ("Для этой работы выбери эту модель 🙂. " * 40).rstrip()
+    ctx._owner_directives = [{"source": "owner_mailbox", "content": f"Before. {span} After."}]
     class Bus:
         def put_nowait(self, event):
             assert event["type"] == "mind_task_control"
+            assert event["cited"] == span
             handle_mind_task_control(event, SimpleNamespace(DRIVE_ROOT=host[0], bridge=SimpleNamespace(push_log=lambda row: None)))
     ctx.event_queue = Bus()
-    result = _switch_model(ctx, B, owner_words="Use the other route")
+    result = _switch_model(ctx, B, owner_words=span)
     assert '"ok": true' in result
-    assert task["metadata"]["lead"] == {"source": "owner_words", "model": B, "use_local": False}
+    carrier = {"source": "owner_words", "model": B, "use_local": False, "cited": span}
+    assert task["metadata"]["lead"] == load_task_result(host[0], "work")["metadata"]["lead"] == carrier
+    receipt = json.loads(result.splitlines()[0])["lead"]
+    primary = receipt["primary"] if live else receipt
+    assert primary == {"model": B, "use_local": False, "basis": "owner_words", "cited": {
+        "text": span[:lead_fact.MAX_CITED_CHARS], "clipped": long_span}}
     assert ctx.primary_route == {"model": B, "use_local": False, "role": "lead"}
+    restored = turn(host, monkeypatch)[1]
+    restore_current(restored)
+    assert restored.primary_route == ctx.primary_route and restored.task_metadata["lead"] == carrier
+    for checkpoint in [old_checkpoint, json.loads(json.dumps(owner_wait.continuation_state(ctx, [], {}, {}, 3, [], set())))]:
+        fresh_tools, fresh = turn(host, monkeypatch)
+        owner_wait.restore_continuation_state(fresh_tools, checkpoint, [], {}, {}, set())
+        model, local, *_ = _apply_round_route_overrides(fresh, fresh_tools, [],
+            (fresh.active_model, fresh.active_use_local, "medium"), None, "max", "max", [])
+        assert (model, local) == (B, False) and fresh.task_metadata["lead"] == carrier
     ctx.active_model, ctx.route_choice = C, route_choice.explicit("fallback")
+    assert lead_fact.lead_fact(ctx, role="fallback:0")["primary"] == primary
     _switch_model(ctx, primary="return")
     assert ctx.active_model_override == B and ctx.active_role_override == "lead"
-    restored = turn(host, monkeypatch)[1]
-    from ouroboros.owner_model import restore_current
-    restore_current(restored)
-    assert restored.primary_route == ctx.primary_route
+    write_task_result(host[0], "work", "completed", result="Done.")
+    assert _successor(host[0], "work")["metadata"]["lead"] == carrier
 
 
 @pytest.mark.parametrize("scope", ["room", "main"])

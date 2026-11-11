@@ -189,7 +189,7 @@ def route_facts_text(tool_ctx, *, model: str, use_local: bool, role: str, failed
               else (*call_route(own_call, model, use_local), call_account(own_call)))
     from ouroboros.lead_fact import chooser_words, primary_basis
 
-    chooser = chooser_words(primary_basis(tool_ctx))
+    chooser = chooser_words(primary_basis(tool_ctx), (getattr(tool_ctx, "task_metadata", None) or {}).get("lead"))
     return (f"[ROUTE FACTS] This task's primary route is {label(target, primary['role'])}"
             f"{'; ' + chooser if chooser else ''}; "
             f"{label(acting, role)} "

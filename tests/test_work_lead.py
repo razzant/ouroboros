@@ -138,6 +138,32 @@ def test_owner_lead_facts_name_the_chooser_and_keep_the_primary_return_affordanc
     assert child.event_queue.empty() and leads.lead_fact(child) == {}
 
 
+@pytest.mark.parametrize("span", ["Use this route for the whole report.", "Длинная фраза 🙂 " * 100], ids=["whole", "clipped"])
+@pytest.mark.parametrize("source", ["owner_words", "owner", "mind"])
+def test_only_the_cited_primary_publishes_its_bounded_words_and_keeps_them_when_away(span, source):
+    carrier = {"source": source, "model": A, "use_local": False, "cited": span}
+    ctx = context(source, role="lead", metadata={"lead": carrier})
+    citation = {"text": span[:leads.MAX_CITED_CHARS], "clipped": len(span) > leads.MAX_CITED_CHARS}
+    expected = {"cited": citation} if source == "owner_words" else {}
+    fact = leads.lead_fact(ctx)
+    assert fact == {"model": A, "use_local": False, "basis": source, **expected}
+    assert leads.project_lead(task={"metadata": ctx.task_metadata}, queued=True) == fact
+    snapshot = route_choice.lead_snapshot(carrier)
+    assert snapshot.get("cited") == (span if source == "owner_words" else None)
+    words = leads.model_fact_words(ctx, A)
+    assert (f"«{citation['text']}»" in words) is (source == "owner_words")
+    assert ("[quote clipped]" in words) is (source == "owner_words" and citation["clipped"])
+    ctx.active_model, ctx.route_choice = B, route_choice.explicit("fallback")
+    away = leads.lead_fact(ctx, role="fallback:0")
+    assert "cited" not in away and away["primary"] == fact
+    facts_line = route_facts_text(ctx, model=B, use_local=False, role="fallback:0", failed_model=A,
+                                 failure={"failure_code": "quota"}, waiter=None)
+    assert (f"«{citation['text']}»" in facts_line) is (source == "owner_words")
+    ctx.active_model, ctx.route_choice = A, route_choice.opening_choice(ctx)
+    assert leads.lead_fact(ctx) == fact
+    assert ctx.task_metadata["lead"]["cited"] == span  # publication never truncates the record
+
+
 @pytest.mark.parametrize("carrier", ["worker", "lane", "queued"])
 def test_fact_crosses_the_event_census_work_and_manifest_boundaries(tmp_path, monkeypatch, carrier):
     from ouroboros.gateway.state import _chat_activities_snapshot_safe

@@ -282,7 +282,10 @@ def lead_snapshot(value: Any) -> Optional[dict]:
             or not isinstance(value.get("model"), str) or not value["model"].strip()
             or not isinstance(value.get("use_local"), bool)):
         return None
-    return {"source": source, "model": value["model"].strip(), "use_local": value["use_local"]}
+    carrier = {"source": source, "model": value["model"].strip(), "use_local": value["use_local"]}
+    if source == "owner_words" and isinstance(value.get("cited"), str) and value["cited"]:
+        carrier["cited"] = value["cited"]
+    return carrier
 
 
 def task_lead(metadata: Any) -> Optional[dict]:

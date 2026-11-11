@@ -488,7 +488,8 @@ def test_promotion_keeps_the_primary_and_only_owner_choices_enter_recents(room, 
     assert queue.reserve_task_admission(event['task_id'], event['routing_token'], drive_root=root)['status'] == 'reserved'
     assert workers.promote_chat_to_task(event, host)['status'] == 'scheduled'
     task = queue.PENDING[-1]
-    assert task['metadata']['lead'] == {'source': 'owner_words' if cited else 'mind', 'model': OPUS, 'use_local': False}
+    assert task['metadata']['lead'] == {'source': 'owner_words' if cited else 'mind', 'model': OPUS, 'use_local': False,
+                                        **({'cited': 'Use the other route'} if cited else {})}
     prefs = root / 'state/ui_preferences.json'
     if cited:
         assert task['metadata']['owner_corpus'][-1]['content'] == ctx._owner_directives[0]['content']

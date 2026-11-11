@@ -119,7 +119,8 @@ def start_choice(ctx, model: str, basis: dict | None, project_id: str, *, model_
         raise ValueError("A model requires your human's verified owner_words. Nothing was started; cite their exact words.")
     choice, note = resolve_model(model, model_as_typed=model_as_typed)
     if basis:
-        return {"lead": {"source": "owner_words", "model": choice["model"], "use_local": choice["use_local"]}}, note
+        return {"lead": {"source": "owner_words", "model": choice["model"], "use_local": choice["use_local"],
+                         "cited": basis["cited"]}}, note
     room = read_model_choice(canonical_data_root(ctx), project_id)
     if room["kind"] == "model":
         if (room["model"], room["use_local"]) != (choice["model"], choice["use_local"]):
@@ -144,7 +145,8 @@ def request_work_model(ctx, choice: dict) -> tuple[str, bool]:
     nonce = hashlib.sha256(json.dumps([actor, "switch_model", call_id]).encode()).hexdigest()
     event = {"type": "mind_task_control", "action": "switch_model", "task_id": actor,
              "actor_task_id": actor, "action_nonce": nonce, "model": choice["model"],
-             "use_local": choice["use_local"], "reason": "My human's cited words chose this work's primary."}
+             "use_local": choice["use_local"], "cited": choice["cited"],
+             "reason": "My human's cited words chose this work's primary."}
     mode = _emit_control_event(ctx, event)
     if mode == "serialization_failed":
         return refuse(ctx, "Model request was not emitted. The primary has not changed."), False
@@ -211,7 +213,7 @@ def cited_switch(ctx, *, model: str, owner_words: str, scope: str, project_id: s
     except ValueError as exc:
         return refuse(ctx, str(exc))
     if scope == "work":
-        text, accepted = request_work_model(ctx, choice)
+        text, accepted = request_work_model(ctx, {**choice, "cited": basis["cited"]})
         return finished(text + "\n" + note) if accepted else text
     result = None
     try:

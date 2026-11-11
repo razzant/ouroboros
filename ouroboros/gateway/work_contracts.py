@@ -20,8 +20,16 @@ class ChatModelRoute(TypedDict):
     use_local: bool
 
 
+class CitedModelWords(TypedDict):
+    """Up to 1024 Unicode characters of the verified span; clipped says whether more was retained."""
+
+    text: str
+    clipped: bool
+
+
 class WorkPrimaryRoute(ChatModelRoute):
     basis: str
+    cited: NotRequired[CitedModelWords]
 
 
 class WorkLead(WorkPrimaryRoute):

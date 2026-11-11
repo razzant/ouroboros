@@ -334,18 +334,20 @@ Logical global quarantine changes generation visibility while retaining the inde
 Downgrade: old builds keep holds but lose `_resume_selection`; with a released latch children can dispatch without root-generation checks: **not Q9-equivalent**, no reverse export. Old bodies miss the Restart door and restore as after Quit. Old launchers can block auto-start after failed Panic unlink; explicit Start works. Gateway `stop`, `refusal`, `members.states` and model/external tails are optional observations, not authority.
 
 The continuation `route` block also retains one lead departure observation (`_lead_episode`, `_lead_cause`,
-`_lead_role`, `_lead_return_from`): a fixed number of route ids, chooser/cause strings and one timestamp, normally
-under 1 KB, never an event history. `owner_wait.continuation_state` writes it; the next accepted primary reply or
+`_lead_role`, `_lead_return_from`): route ids, chooser/cause strings, one timestamp and an optional bounded cite
+(1,024 Unicode characters, at most 4 KiB UTF-8), normally under 5 KiB, never an event history. `owner_wait.continuation_state` writes it; the next accepted primary reply or
 new departure replaces it, and the enclosing continuation's existing retirement removes it. The live `work_lead`
 frame folds onto one RUNNING/direct activity record and disappears with that record; readers add `pending`
 without persistence.
 
-`owner_model.admit` writes `metadata.lead` and the host-owned task-document `owner_model` under the queue lock;
-the queue row mirrors them. The latter holds the latest `request_id`/`action`, a `recent_recorded` completion bit
+`owner_model.admit` writes `metadata.lead` and task-document `owner_model` under the queue lock and mirrors them
+on the queue row. Recents and their completion patch run outside that lock. An `owner_words` lead retains the
+whole verified span in `cited`; a mind-chosen primary uses source `mind`. `owner_model` holds the latest `request_id`/`action`, a `recent_recorded` completion bit
 for the existing preferences writer, and `receipts` indexed by every accepted request id. A repeat, including an
-older id after a newer act, returns its original receipt and cannot replace the primary. The current decision is
-constant size; receipts grow with distinct owner presses (normally 0.3–2 KB each; ids are at most 128 characters,
-chosen routes at most 400). They live with the task document, including terminal history; no independent remover
+older id after a newer act, returns its original receipt and cannot replace the primary. One current lead keeps
+one full span, sized by its words; each new choice replaces it. Receipts grow with distinct owner presses (normally
+0.3–2 KB each, plus at most 4 KiB UTF-8 for a clipped cite; ids are at most 128 characters, routes at most 400).
+They live with the task document, including terminal history; no independent remover
 or expiry drops idempotency. Existing task-document retention/archiving owns their lifetime.
 
 `KIND_OWNER_MODEL` (`owner_model`) adds a typed mailbox wake with the internal text `owner_model`, no route value

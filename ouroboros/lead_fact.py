@@ -17,6 +17,13 @@ from ouroboros.model_slots import MODEL_ROLE_SETTINGS, route_binding, task_model
 from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
+MAX_CITED_CHARS = 1024  # a published copy; the durable primary keeps the entire verified span
+
+
+def cited_fields(carrier: Any) -> dict:
+    """One bounded provenance shape on the acting primary or the primary it left."""
+    span = (carrier or {}).get("cited") if isinstance(carrier, Mapping) and carrier.get("source") == "owner_words" else None
+    return {"cited": {"text": span[:MAX_CITED_CHARS], "clipped": len(span) > MAX_CITED_CHARS}} if isinstance(span, str) and span else {}
 
 
 def primary_basis(ctx: Any) -> str:
@@ -75,7 +82,9 @@ def lead_fact(ctx: Any, *, model: str | None = None, use_local: bool | None = No
         fact["basis"] = "mind"
     if departed:
         fact["primary"] = {"model": home[0], "use_local": home[1], "basis": basis}
-    if fact["basis"] in {"fallback", "mind"}:
+    if basis == "owner_words" and (departed or fact["basis"] == basis):
+        (fact["primary"] if departed else fact).update(cited_fields((getattr(ctx, "task_metadata", None) or {}).get("lead")))
+    if fact["basis"] in {"fallback", "mind"} and source in {"fallback", "switch_model"}:
         identity = [model, local, fact["basis"], role, list(acting)]
         episode = getattr(ctx, "_lead_episode", None) or {}
         if episode.get("identity") != identity:
@@ -144,7 +153,7 @@ def project_lead(fact: Any = None, task: Mapping | None = None, *, queued: bool 
         if carrier["source"] == "main":
             model, local = route_choice.following_route("main")
             return {"model": model, "use_local": local, "basis": "main"}
-        return {"model": carrier["model"], "use_local": carrier["use_local"], "basis": carrier["source"]}
+        return {"model": carrier["model"], "use_local": carrier["use_local"], "basis": carrier["source"], **cited_fields(carrier)}
     if not isinstance(fact, dict) or not fact.get("model"):
         return {}
     result = copy.deepcopy(fact)
@@ -156,6 +165,14 @@ def project_lead(fact: Any = None, task: Mapping | None = None, *, queued: bool 
 
         primary = recorded_primary(task)
         model, local = primary["model"], primary["use_local"]
+        carrier = (task.get("metadata") or {}).get("lead")
+        if citation := cited_fields(carrier):
+            result.pop("cited", None)
+            if (model, local) == (result["model"], result["use_local"]):
+                result.pop("primary", None)
+                result.update(basis="owner_words", **citation)
+            else:
+                result["primary"] = {"model": model, "use_local": local, "basis": "owner_words", **citation}
     elif basis in MODEL_ROLE_SETTINGS and basis != "fallback":
         model, local = route_choice.following_route(basis)
     else:
@@ -170,11 +187,13 @@ def lead_fields(fact: Any = None, task: Mapping | None = None, *, queued: bool =
     return {"lead": lead} if lead else {}
 
 
-def chooser_words(basis: str) -> str:
-    return {"room": "set by my human for this chat", "owner": "set by my human for this work",
+def chooser_words(basis: str, carrier: Any = None) -> str:
+    words = {"room": "set by my human for this chat", "owner": "set by my human for this work",
             "owner_words": "set by my human's words", "place": "set for this place",
             "circle": "inherited from this circle", "mind": "chosen by me",
             "fallback": "fallback from Settings"}.get(basis, "")
+    cited = cited_fields(carrier).get("cited") if basis == "owner_words" else None
+    return words + (f": «{cited['text']}»" + (" [quote clipped]" if cited["clipped"] else "") if cited else "")
 
 
 def model_fact_words(ctx: Any, model: str) -> str:
@@ -182,5 +201,5 @@ def model_fact_words(ctx: Any, model: str) -> str:
         return f"model {model}"
     source = (getattr(ctx, "route_choice", None) or {}).get("source")
     basis = {"switch_model": "mind", "fallback": "fallback"}.get(source, primary_basis(ctx))
-    words = chooser_words(basis)
+    words = chooser_words(basis, (getattr(ctx, "task_metadata", None) or {}).get("lead"))
     return f"model {model}" + (f" — {words}" if words else "")

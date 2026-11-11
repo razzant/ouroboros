@@ -220,7 +220,8 @@ def test_model_suggestions_never_guess_or_admit_a_route(configured_model_start, 
     if not starts:
         assert "vendor/fast-one" in text and "vendor/fast-two" in text
     else:
-        assert events[0]["metadata"]["lead"] == {"source": "owner_words", "model": model, "use_local": False}
+        assert events[0]["metadata"]["lead"] == {"source": "owner_words", "model": model, "use_local": False,
+                                                   "cited": "use the other one"}
         assert events[0]["owner_corpus"][-1]["content"] == ctx._owner_directives[0]["content"]
         if model == "vendor/unlisted":
             assert "not verified" in text
