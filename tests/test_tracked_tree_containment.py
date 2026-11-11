@@ -243,20 +243,31 @@ def _fake_proc_census(monkeypatch, snapshots):
     return reads
 
 
-@pytest.mark.parametrize("confirmation,expected", [
-    ({"10": ("Z", 10), "11": ("Z", 10), "12": ("S", 10)}, {10: True}),
-    ({"10": ("Z", 10), "11": ("Z", 10), "12": ("Z", 10)}, {}),
-    ({"10": ("Z", 10), "11": ("Z", 10), "12": None}, {}),
-    ({"10": ("Z", 10), "11": None}, {}),
-    ({"10": ("Z", 10)}, {}),
-    ({"10": ("Z", 10), "11": ("Z", 10)}, {10: False}),
+_CHURN = "a vanished row in every bounded reread"
+
+
+@pytest.mark.parametrize("confirmations,expected", [
+    ([{"10": ("Z", 10), "11": ("Z", 10), "12": ("S", 10)}], {10: True}),
+    ([{"10": ("Z", 10), "11": ("Z", 10)}], {10: False}),
+    ([{"10": ("Z", 10), "11": ("Z", 10), "12": ("Z", 10)}] * 2, {10: False}),
+    ([{"10": ("Z", 10), "11": ("Z", 10), "12": None}, {"10": ("Z", 10), "11": ("Z", 10)}], {10: False}),
+    ([{"10": ("Z", 10), "11": ("Z", 10), "12": None}, {"10": ("Z", 10), "11": ("Z", 10), "13": ("S", 10)}],
+     {10: True}),
+    ([{"10": ("Z", 10), "11": None}, {"10": ("Z", 10)}], {10: False}),
+    ([{"10": ("Z", 10)}, {"10": ("Z", 10)}], {10: False}),
+    (_CHURN, {}),
 ])
-def test_maintenance_confirms_quiet_membership(registry, monkeypatch, confirmation, expected):
-    """C forks G after listdir, then goes Z before stat: one scan cannot retire L."""
+def test_maintenance_confirms_quiet_membership(registry, monkeypatch, confirmations, expected):
+    """C forks G after listdir, then goes Z before stat: one scan cannot retire L.
+
+    A changed or incomplete read is reread against the latest one, so a reaped
+    orphan or an unrelated exit settles; churn past the bound stays unknown."""
     from ouroboros import process_containment as pc
 
     first = {"10": ("Z", 10), "11": ("Z", 10)}
-    _fake_proc_census(monkeypatch, [first, confirmation, first, confirmation])
+    if confirmations == _CHURN:  # one listing past the bound would exhaust the fake and fail the test
+        confirmations = [{**first, str(90 + n): None} for n in range(pc._QUIET_REREADS)]
+    _fake_proc_census(monkeypatch, [first, *confirmations, first, *confirmations])
     assert pc.process_groups_have_live_members({10}) == expected
     child = _Child(10, 7)
     child._ouroboros_pgid = child.pid
