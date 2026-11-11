@@ -115,8 +115,12 @@ def test_shared_loop_records_requested_return_separately_from_actual_acceptance(
     monkeypatch.setattr(llm_probe, 'upstream_transport_reachable', lambda *a, **k: {})
     scripts = [_death] + ([] if accepted else [lambda: RuntimeError('HTTP 400 bad request')])
     llm = _RouteLLM(data_root, **{PRIMARY: scripts})
+    import queue
+    events = queue.Queue()
     chat, requested = llm.chat, []
+    published_at_send = []
     def scripted(**kwargs):
+        published_at_send.append([row["lead"] for row in list(events.queue) if row.get("type") == "work_lead"])
         message, usage = chat(**kwargs)
         if not requested:
             requested.append(True)
@@ -124,13 +128,22 @@ def test_shared_loop_records_requested_return_separately_from_actual_acceptance(
                 'function': {'name': 'switch_model', 'arguments': '{"primary":"return"}'}}]}, usage
         return finish('finished'), usage
     llm.chat = scripted
-    _, usage, trace, _ = _run(tmp_path, llm)
+    _, usage, trace, _ = _run(tmp_path, llm, event_queue=events)
     assert len(trace['primary_return_requests']) == 1
     returned = usage['primary_return_results']
     assert len(returned) == 1 and returned[0]['requested_binding'][0] == PRIMARY
     assert returned[0]['status'] == ('accepted_response' if accepted else 'no_accepted_response')
     assert [model for model, _ in llm.sent][:3] == [PRIMARY, 'fb/one', PRIMARY]
     assert llm.sent[-1][0] == (PRIMARY if accepted else 'fb/one')
+
+    facts = [row["lead"] for row in list(events.queue) if row.get("type") == "work_lead"]
+    assert facts[0] == {"model": PRIMARY, "use_local": False, "basis": "main"}
+    assert facts[1]["basis"] == "fallback" and facts[1]["role"] == "fallback:0"
+    assert facts[1]["primary"]["model"] == PRIMARY
+    # Applying a request before the send does not yet claim the primary answered.
+    assert published_at_send[2][-1]["basis"] == "fallback", (
+        [[r["basis"] for r in rows] for rows in published_at_send], [r["basis"] for r in facts])
+    assert [fact["basis"] for fact in facts] == (["main", "fallback", "main"] if accepted else ["main", "fallback"])
 
 
 @pytest.mark.parametrize('elapsed', [1, 4])

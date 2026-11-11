@@ -37,11 +37,11 @@ def _configure_presence(ctx: ToolContext, action: str, place_id: str = "", **par
             result = {"place": place_view(root, connect_declared_place(root, **params))}
         elif action == "create_circle":
             result = {"circle": circle_summary(places.create_circle(root, name=params.get("name"), text=words or "",
-                                                                    author=author))}
+                                                                    model=params.get("model", ""), author=author))}
         elif action == "edit_circle":
             result = {"circle": circle_summary(places.edit_circle(
                 root, params.get("circle_id"), author=author, expected_revision=params.get("expected_revision"),
-                name=params.get("name"), text=words))}
+                name=params.get("name"), text=words, model=params.get("model")))}
         elif action == "delete_circle":
             result = places.delete_circle(root, params.get("circle_id"), expected_revision=params.get("expected_revision"))
         else:
@@ -86,12 +86,13 @@ def get_tools() -> list[ToolEntry]:
                        "Only an owner-door turn may confirm an owner account. A note is your human's only in such a "
                        "turn and only when its whole text is their exact words that reached this run; any other note is yours. "
                        "Circles group places under shared words every place in one inherits beside its own notes: "
-                       "create_circle/edit_circle (name, text)/delete_circle (its places stay connected and keep "
+                       "create_circle/edit_circle (name, text, model)/delete_circle (its places stay connected and keep "
                        "their notes); set_circle puts place_id in circle_id (empty: none), at most one circle each; "
                        "set_description sets its short purpose line (empty clears), never a rule. Circle words "
                        "follow the note rule. Your human's words restrict every place in their circle but consent "
                        "only where they placed it. list shows each circle's words once; inspect shows the "
-                       "words a place inherits; read them before you act in another place. "
+                       "words a place inherits and model_route {value, layer}; read them before you act in another place. "
+                       "A place's empty model inherits its circle's, then consciousness; an empty circle model inherits consciousness. "
                        "A folder is an address, not a fence. "
                        "Use canonical account_id and conversation_id from the connector's tools, connection metadata or event route, "
                        "not display labels; an actor ID is not necessarily a conversation ID. "
