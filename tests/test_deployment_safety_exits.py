@@ -112,9 +112,9 @@ def test_declared_words_a_verdict_returned_leave_only_through_an_open_exit(super
                                                                          monkeypatch, case, mode):
     """A connector's declared send (its real published effect) returned DANGEROUS: an open repeat lets its identical
     call from a later model call through in Cyber Pro; elsewhere my human's matching card does, where that exit is
-    open; closed, the saved verdict answers with no model call, and my human's answer, a later word of theirs, earns
-    one new reading. The step that received the return decides nothing; a new request_id is read again where the
-    mind decides and keeps waiting elsewhere."""
+    open; closed, the saved verdict answers with no model call, and my human's answer, a later message of theirs,
+    earns one new reading. The step that received the return decides nothing; a new request_id is read again where
+    the mind decides and keeps waiting elsewhere."""
     h = supervisor
     opened = exits(case)
     mind = opened[REPEAT] and mode == "cyber_pro"
@@ -311,7 +311,7 @@ def test_a_verdict_larger_than_the_bound_is_kept_and_ends_the_hold_it_answered(
     """Held while the checker was down, then judged DANGEROUS with a verdict larger than the work's record bound: the
     newest call is kept whatever its size, so it returns with that verdict said and audited, never as unjudged or too
     large; the kept verdict answers its next issue without a new model call, and my human's later matching answer to
-    the old hold releases nothing unread: a later word of theirs, it earns one new reading."""
+    the old hold releases nothing unread: a later message of theirs, it earns one new reading."""
     h = supervisor
     exits("release")  # the unjudged release open, the repeat closed
     registry, context, sent = _registry(tmp_path, monkeypatch)

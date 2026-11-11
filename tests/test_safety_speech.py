@@ -10,6 +10,7 @@ MIND = "issuing the identical call in a later step"  # the mind's own exit, name
 GATE_HEAD = "These words to this destination were read DANGEROUS in this work:"  # answered for another call
 WORDS_WAIT = ("Changed words or another destination are read again; the same words there keep waiting, whatever the "
               "tool or request_id.")
+LATER = "A later message of your human in this work (speech in a call is not one) earns it one new reading"
 
 
 @pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
@@ -228,8 +229,9 @@ def test_later_dangerous_words_hold_older_suspicious_retry(supervisor, monkeypat
 @pytest.mark.parametrize("gate", [False, True])
 def test_a_later_word_of_my_human_earns_a_waiting_call_one_new_reading(supervisor, monkeypatch, gate, second):
     """A DANGEROUS call that waits for my human is answered by its kept verdict however often it is issued, until my
-    human writes in this work: then one new reading. SAFE lets it through and the old verdict answers it no more;
-    DANGEROUS waits again, unread, until their next word. The same words under a new request_id meet the same gate."""
+    human writes in this work: then one new reading; their speech in a call is no message and earns none, as the
+    returned text says. SAFE lets it through and the old verdict answers it no more; DANGEROUS waits again, unread,
+    until their next message. The same words under a new request_id meet the same gate."""
     from ouroboros import place_guard
     h = supervisor
     monkeypatch.setattr(place_guard, "call_place_facts", lambda *a, **kw: {
@@ -245,17 +247,20 @@ def test_a_later_word_of_my_human_earns_a_waiting_call_one_new_reading(superviso
     assert not h.module.check_safety("place_reply", reply, ctx=h.ctx)[0]
     for n in (2, 3):
         ok, message = check(n)
-        assert not ok and "A later word of your human in this work earns it one new reading" in message
+        assert not ok and LATER in message
     assert len(h.calls) == 1, "no new word of my human: the kept verdict answers"
-    h.ctx._owner_directives = [word(1)]
+    h.ctx._owner_directives = [{"source": "live_call", "content": "Yes, send it.", "msg_id": "item-1"}]
+    ok, message = check(4)
+    assert not ok and LATER in message and len(h.calls) == 1, "speech in a call is no message, as the text says"
+    h.ctx._owner_directives.append(word(1))
     h.replies.append({"status": second, "reason": "they asked for it" if second == "SAFE" else "still apart"})
-    assert check(4)[0] is (second == "SAFE") and len(h.calls) == 2, "exactly one new reading"
+    assert check(5)[0] is (second == "SAFE") and len(h.calls) == 2, "exactly one new reading"
     h.replies.append({"status": "DANGEROUS", "reason": "read afresh"})
-    assert not check(5)[0] and len(h.calls) == 2 + (second == "SAFE"), "SAFE: the old verdict answers no more"
+    assert not check(6)[0] and len(h.calls) == 2 + (second == "SAFE"), "SAFE: the old verdict answers no more"
     if second == "DANGEROUS":
-        assert not check(6)[0] and len(h.calls) == 2, "waits again until another word"
+        assert not check(7)[0] and len(h.calls) == 2, "waits again until another word"
         h.ctx._owner_directives.append(word(2))
-        assert not check(7)[0] and len(h.calls) == 3
+        assert not check(8)[0] and len(h.calls) == 3
 
 
 def test_an_unchecked_mode_meets_no_flag_wait_or_card(supervisor, monkeypatch):
