@@ -81,8 +81,15 @@ def _overheard_line(group, data):
 def _fold_line(room):
     from ouroboros.memory_view_work import row_range
     fold = room.get("folded")
-    return (f"[{row_range(fold['from'], fold['to'])}] «{fold['sentence']}»: "
-            f"{fold['count']} words read and folded") if fold else ""
+    if not fold:
+        return ""
+    span = row_range(fold["from"], fold["to"])
+    if any(address.partition("@")[0] != "row:" + str(room["room_id"]) for address in (fold["from"], fold["to"])):
+        # Bounds are stream positions; membership belongs to the block's room,
+        # even when its related rows were originally written in other rooms.
+        span = (f"memory_read(room_id='{room['room_id']}', rows=true, "
+                f"from='{fold['from']}', to='{fold['to']}')")
+    return f"[{span}] «{fold['sentence']}»: {fold['count']} words read and folded"
 
 
 def _visible_gists(group, data, gone):
