@@ -90,3 +90,38 @@ def test_onboarding_processing_draft_returns_and_reaches_finish(subscription_ui)
     saved = [body for path, body in ui['posts'] if path == '/api/onboarding/complete'][-1]
     assert saved['OUROBOROS_PROCESSING_PREFERENCE'] == 'fast'
     assert saved['OUROBOROS_MODEL_PROCESSING_PREFERENCES']['main'] == 'standard'
+
+
+def test_agent_processing_save_reopen_and_catalog_refresh(role_ui):
+    ui = role_ui
+    roles.configure_mixed(ui)
+    ui['settings'].update(OUROBOROS_PROCESSING_PREFERENCE='fast',
+                          OUROBOROS_MODEL_PROCESSING_PREFERENCES={'main': 'standard'})
+    actor = roles.open_agent(ui, "native")
+    page = ui["page"]
+    assert 'Fast (from Models)' in actor.locator('[data-processing-summary]').text_content()
+    caret(actor.locator('[data-processing-details] > summary'), -45)
+    actor.locator('[data-processing-details] > summary').click()
+    # The first row is a reviewer: its processing is the processing of its reviews.
+    assert actor.locator('[data-subagent-field="review_eligible"]').is_checked()
+    actor.locator('[data-subagent-field="processing_preference"]').select_option('economy')
+    field = actor.locator('[data-subagent-field="model"]')
+    field.focus()
+    field.evaluate('e => { window.processingModelNode = e; e.setSelectionRange(1, 4); }')
+    page.evaluate("""() => document.dispatchEvent(new CustomEvent('settings-model-catalog:updated',
+        {detail:{read_state:'transport',errors:[{error:'offline'}]}}))""")
+    assert field.evaluate('e => e === window.processingModelNode && document.activeElement === e')
+    assert field.evaluate('e => [e.selectionStart, e.selectionEnd]') == [1, 4]
+    assert actor.locator('[data-processing-details]').evaluate('e => e.open')
+    assert actor.locator('[data-subagent-field="processing_preference"]').input_value() == 'economy'
+    roles.capture(page, 'processing-actor-reference-and-inline')
+    assert press_editor_save(page).startswith('Saved')
+    saved = roles.saved_catalog(ui)
+    assert saved['items'][0]['processing_preference'] == 'economy'
+    assert 'processing_preference' not in saved['items'][1]
+    body = [body['settings'] for path, body in ui['posts'] if path == '/api/owner/safety-model'][-1]
+    assert set(body) == {'OUROBOROS_SUBAGENTS'}
+    reopened = roles.open_agent(ui, 'native')
+    assert reopened.locator('[data-subagent-field="processing_preference"]').input_value() == 'economy'
+    assert ui['settings']['OUROBOROS_PROCESSING_PREFERENCE'] == 'fast'
+    assert ui['settings']['OUROBOROS_MODEL_PROCESSING_PREFERENCES']['main'] == 'standard'
