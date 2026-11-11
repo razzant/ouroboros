@@ -1,9 +1,4 @@
-"""A Settings save states the skill-key rule once, whatever keys it carried (#1122).
-
-A running task keeps its start snapshot; a skill reads the keys it is granted on its
-next read. The save status says so in its next-task sentence, never per key and never
-twice beside the running-task warning. Every value typed here is a synthetic fixture.
-"""
+"""Skill keys commit locally while a running task keeps its start snapshot; synthetic credentials only."""
 
 from __future__ import annotations
 
@@ -14,11 +9,10 @@ import time
 from pathlib import Path
 
 import pytest
+from tests.settings_browser_helpers import open_settings, settings_page, commit_row, press_editor_save
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
 
-SKILL_RULE = "skills pick up granted keys on their next read"
-NEXT_TASK = f"Settings saved. Changes take effect on the next task; {SKILL_RULE}"
 SYNTHETIC_OPENROUTER = "sk-or-synthetic-ui-fixture-" + "0123456789abcdef" * 2
 SYNTHETIC_SKILL_TOKEN = "synthetic-weather-token-" + "0123456789abcdef" * 2
 CUSTOM_KEY = "UI_FIXTURE_CUSTOM_KEY"
@@ -47,7 +41,7 @@ def _held_completion(entered):
 
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
-def test_a_settings_save_states_the_skill_key_rule_once(direct_server_with_data, monkeypatch, engine):
+def test_skill_keys_save_locally_without_echo_or_changing_running_work(direct_server_with_data, monkeypatch, engine):
     from playwright.sync_api import expect, sync_playwright
 
     from tests import fixtures_mock_llm
@@ -75,49 +69,32 @@ def test_a_settings_save_states_the_skill_key_rule_once(direct_server_with_data,
                 page.route("**/api/extensions", lambda route: route.fulfill(json=listing))
                 page.goto(url, wait_until="domcontentloaded")
                 page.wait_for_function("() => window.__testSockets?.some(s => s.readyState === 1)")
-                status = page.locator("#settings-status")
+                listing_page = open_settings(page, "accounts")
+                text = commit_row(page, "GITHUB_REPO", "owner/skill-key-proof")
+                assert text.startswith("Saved")
+                assert saves[-1] == {"GITHUB_REPO": "owner/skill-key-proof"}
 
-                def open_settings(tab):
-                    page.click('[data-nav-page="settings"]')
-                    expect(page.locator("#btn-save-settings")).to_be_enabled(timeout=30_000)
-                    expect(status).to_have_text("Settings refreshed", timeout=30_000)
-                    page.click(f'[data-settings-tab="{tab}"]')
-
-                def save(expected, shot):
-                    page.click("#btn-save-settings")
-                    expect(status).to_contain_text(expected, timeout=20_000)
-                    text = status.inner_text()
-                    page.screenshot(path=str(evidence / f"settings-save-{shot}-{engine}.png"))
-                    return text
-
-                # An immediate-effect key: no next-task sentence and no skill rule.
-                open_settings("advanced")
-                page.locator("#s-gh-repo").fill("owner/skill-key-proof")
-                text = save("Settings saved. Changes took effect immediately", "immediate-key")
-                assert SKILL_RULE not in text and "next task" not in text, text
-
-                # A provider key is read live (route_choice, #2308): it took effect at once, with no skill rule.
-                page.click('[data-settings-tab="providers"]')
-                page.locator("#s-openrouter").fill(SYNTHETIC_OPENROUTER)
-                text = save("Settings saved. Changes took effect immediately", "common-key")
-                assert SKILL_RULE not in text and "An agent task is running" not in text, text
-                assert saves[-1]["OPENROUTER_API_KEY"] == SYNTHETIC_OPENROUTER
+                key_page = open_settings(page, "accounts/key/openrouter")
+                key_page.locator("#s-openrouter").fill(SYNTHETIC_OPENROUTER)
+                assert "Saved" in press_editor_save(page)
+                assert saves[-1] == {"OPENROUTER_API_KEY": SYNTHETIC_OPENROUTER}
                 assert stored()["OPENROUTER_API_KEY"] == SYNTHETIC_OPENROUTER
 
-                # A saved custom key, then its removal: a real change, never "No changes detected".
-                page.click('[data-settings-tab="secrets"]')
-                page.click("#btn-add-custom-secret")
-                row = page.locator("[data-custom-secret-row]").last
-                row.locator("[data-custom-secret-key]").fill(CUSTOM_KEY)
-                row.locator("[data-custom-secret-value]").fill("synthetic-custom-value")
-                save(NEXT_TASK, "custom-key-added")
+                new_key = open_settings(page, "accounts/key/custom")
+                new_key.locator("[data-custom-secret-key]").fill(CUSTOM_KEY)
+                new_key.locator("[data-custom-secret-value]").fill("synthetic-custom-value")
+                new_key.locator("[data-editor-save]").click()
+                saved_row = settings_page(page, "accounts").locator(f'[data-setting-row="{CUSTOM_KEY}"]')
+                expect(saved_row).to_be_visible(timeout=20_000)
                 assert stored()[CUSTOM_KEY] == "synthetic-custom-value"
-                saved_row = page.locator("[data-custom-secret-row]").filter(
-                    has=page.locator(f'[data-custom-secret-key][value="{CUSTOM_KEY}"]'))
-                expect(saved_row).to_have_count(1, timeout=20_000)
-                saved_row.locator("[data-custom-secret-remove]").click()
-                text = save(NEXT_TASK, "custom-key-removed")
-                assert "No changes detected" not in text and saves[-1].get(CUSTOM_KEY) == ""
+                saved_row.locator("[data-secret-open]").click()
+                saved_row.locator("[data-secret-remove]").click()
+                page.locator("[data-confirm-cancel]").click()
+                assert stored()[CUSTOM_KEY] == "synthetic-custom-value"
+                saved_row.locator("[data-secret-remove]").click()
+                page.locator("[data-confirm-ok]").click()
+                expect(saved_row).to_have_count(0)
+                assert saves[-1] == {CUSTOM_KEY: ""}
                 assert not stored().get(CUSTOM_KEY)
 
                 # A skill's key saved while a direct turn genuinely runs: the rule once,
@@ -131,14 +108,16 @@ def test_a_settings_save_states_the_skill_key_rule_once(direct_server_with_data,
                         page.request.get(url + "/api/state").json().get("active_chat_activities", []))):
                     page.wait_for_timeout(100)
                 assert entered.is_set()
-                open_settings("secrets")
-                field = page.locator('#skill-requested-secrets [data-secret-setting="WEATHER_TOKEN"]')
-                expect(field).to_have_count(1, timeout=20_000)
-                field.fill(SYNTHETIC_SKILL_TOKEN)
-                text = save("keeps the reviewers, subagents, context and effort it started with", "skill-key-running-task")
-                assert text.startswith(NEXT_TASK) and text.count(SKILL_RULE) == 1, text
-                assert "The saved changes apply from the next task" not in text, text
+                listing_page = open_settings(page, "accounts")
+                row = listing_page.locator('[data-setting-row="WEATHER_TOKEN"]')
+                row.locator("[data-secret-open]").click()
+                text = commit_row(page, "WEATHER_TOKEN", SYNTHETIC_SKILL_TOKEN)
+                assert "Saved" in text and "applies to new tasks" in text
+                assert "was" not in text and "Undo" not in text and SYNTHETIC_SKILL_TOKEN not in text
+                expect(row.locator("[data-setting-control]")).to_have_value("")
                 assert stored()["WEATHER_TOKEN"] == SYNTHETIC_SKILL_TOKEN
+                assert saves[-1] == {"WEATHER_TOKEN": SYNTHETIC_SKILL_TOKEN}
+                page.screenshot(path=str(evidence / f"skill-key-running-task-{engine}.png"), animations="disabled")
             finally:
                 browser.close()
     finally:
