@@ -386,6 +386,43 @@ def test_use_as_typed_can_confirm_an_unlisted_id_even_when_a_longer_route_is_kno
     assert events[-1]["metadata"]["lead"]["model"] == known
 
 
+@pytest.mark.parametrize("role", ["main", "light"])
+def test_role_words_are_refused_as_ids_but_their_routes_remain_usable(local_model_choices, monkeypatch, role):
+    from ouroboros.tools.control_runtime import _switch_model
+    from ouroboros.tools.tool_result import _published_tool_result
+
+    choose, events, _settings, _catalog, _reads, ctx = local_model_choices
+    routes = {"main": ("openai::current-main", False), "light": ("local-light", True)}
+    monkeypatch.setattr("ouroboros.route_choice.following_route", lambda role: routes.get(role, routes["main"]))
+    text = choose(role, model_as_typed=True)
+    assert not events and _published_tool_result(ctx, None).status == "error"
+    assert "Main: openai::current-main" in text and "Light: local-light (local)" in text
+    assert "needs no cite" in text
+    choose(routes[role][0])
+    assert events[-1]["metadata"]["lead"]["model"] == routes[role][0]
+    monkeypatch.setattr("ouroboros.llm.LLMClient.available_models", lambda _self: [r[0] for r in routes.values()])
+    _switch_model(ctx, model=routes[role][0])
+    assert ctx.active_model_override == routes[role][0]
+
+
+def test_main_role_cannot_be_saved_as_a_route_but_room_follow_main_remains(configured_model_start, monkeypatch):
+    from ouroboros.tools.control_runtime import _switch_model
+
+    ctx, _events = configured_model_start
+    writes = []
+    monkeypatch.setattr("ouroboros.gateway.owner_effort._write_main_route",
+                        lambda _request, choice, **kw: writes.append(choice) or {"ok": True})
+    monkeypatch.setattr("ouroboros.composer_cognition.update_project_model_choice",
+                        lambda root, pid, choice: writes.append(choice) or ({"kind": "main"}, choice))
+    monkeypatch.setattr("ouroboros.gateway.ui_preferences.record_model_recent", lambda *a: None)
+    text = _switch_model(ctx, model="main", scope="main", owner_words="use the other one")
+    assert "roles, not model ids" in text and not writes
+    _switch_model(ctx, model="vendor/fast-one", scope="main", owner_words="use the other one")
+    assert writes.pop()["model"] == "vendor/fast-one"
+    _switch_model(ctx, model="main", scope="room", project_id="alpha", owner_words="use the other one")
+    assert writes == [{"kind": "main"}]
+
+
 @pytest.mark.parametrize("connection,route", [
     ("missing", ""), ("disabled", ""), ("builtin", "moonshotai/kimi-k3"),
     ("named", "openrouter@research::moonshotai/kimi-k3"),
