@@ -185,12 +185,70 @@ def test_pending_survives_reconnect_draft_and_restart_request(settings_server, e
             browser.close()
 
 
-# The scenes below were the second half of the test above: Models › Local model ("Stop, then Start") and the Agents
-# list (a delegation's history), driven through the tab frame Settings had. They belong to those pages' lanes (E2,
-# E1) and stand here unchanged until each is rewritten on its page.
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine,width", [("chromium", 1400), ("webkit", 390)])
-def test_local_model_stop_then_start_and_agent_history_on_their_old_tabs(settings_server, engine, width, free_tcp_port):
+def test_a_saved_local_model_setting_waits_for_the_local_models_own_stop_then_start(settings_server, engine, width, free_tcp_port):
+    """Settings › Models › Local model against the real server and a tiny local-model child: a setting saved while
+    the model runs says it applies when the local model is restarted, the page and Ouroboros's card say the saved
+    settings wait for Stop, then Start, no restart of Ouroboros is offered, and Stop, then Start applies them."""
+    from playwright.sync_api import expect, sync_playwright
+
+    from tests.settings_browser_helpers import HOME, commit_row, open_settings
+
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch(headless=True)
+        page = browser.new_page(viewport={"width": width, "height": 1000})
+        errors = PageErrors(page, engine)
+        try:
+            page.goto(settings_server["url"], wait_until="domcontentloaded")
+            level = open_settings(page, "models/local", timeout=30_000)
+            level.locator('[data-setting-row="LOCAL_MODEL_SOURCE"]').wait_for(state="visible")
+            assert commit_row(page, "LOCAL_MODEL_SOURCE", "fixture/model", timeout=30_000).startswith("Saved")
+            assert commit_row(page, "LOCAL_MODEL_FILENAME", "fixture.gguf", timeout=30_000).startswith("Saved")
+            level.locator("details[data-settings-fold] > summary").click()
+            assert commit_row(page, "LOCAL_MODEL_PORT", free_tcp_port, timeout=30_000).startswith("Saved")
+            level.locator("#btn-local-start").click()
+            status = level.locator("#local-model-status")
+            expect(status).to_contain_text("Ready", timeout=30_000)
+            pending = level.locator("[data-local-model-pending]")
+            expect(pending).to_be_hidden()
+            # A change while it runs: the row says when it applies, in the local model's own terms.
+            line = commit_row(page, "LOCAL_MODEL_CONTEXT_LENGTH", 8192, timeout=30_000)
+            assert line.startswith("Saved · applies when the local model is restarted"), line
+            assert "Ouroboros" not in line and "after restart" not in line
+            expect(pending).to_contain_text("Stop, then Start", timeout=30_000)
+            assert "Restart" not in level.inner_text()
+            evidence = pathlib.Path(os.environ.get('OUROBOROS_UI_EVIDENCE_DIR', str(settings_server['data_dir'].parent)))
+            evidence.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(evidence / f'local-model-pending-{engine}.png'))
+            # Ouroboros's card names the local model's own action, and no restart of Ouroboros waits.
+            open_settings(page, "")
+            card = page.locator(f"{HOME} [data-settings-card]")
+            expect(card.locator('[data-needs="local-model"]')).to_contain_text("Stop, then Start", timeout=30_000)
+            assert card.locator('[data-needs="restart"]').count() == 0
+            level = open_settings(page, "models/local")
+            level.locator("#btn-local-stop").click()
+            expect(level.locator("#local-model-status")).to_contain_text("Offline", timeout=30_000)
+            level.locator("#btn-local-start").click()
+            expect(level.locator("#local-model-status")).to_contain_text("Ready", timeout=30_000)
+            expect(level.locator("[data-local-model-pending]")).to_be_hidden(timeout=30_000)
+            page.screenshot(path=str(evidence / f'local-model-applied-{engine}.png'))
+            assert errors.unexpected() == [], errors
+        except Exception:
+            evidence = pathlib.Path(os.environ.get('OUROBOROS_UI_EVIDENCE_DIR', str(settings_server['data_dir'].parent)))
+            evidence.mkdir(parents=True, exist_ok=True)
+            page.screenshot(path=str(evidence / f'local-model-failure-{engine}.png'))
+            print(page.locator('body').inner_text()[-4000:])
+            raise
+        finally:
+            browser.close()
+
+
+# The scene below was the last part of the first test: the Agents list (a delegation's history), driven through the
+# tab frame Settings had. It belongs to the Agents page's lane (E1) and stands here until it is rewritten on that page.
+@pytest.mark.ui_browser
+@pytest.mark.parametrize("engine,width", [("chromium", 1400), ("webkit", 390)])
+def test_agent_history_on_its_old_tab(settings_server, engine, width):
     from playwright.sync_api import expect, sync_playwright
 
     with sync_playwright() as pw:
@@ -230,29 +288,6 @@ def test_local_model_stop_then_start_and_agent_history_on_their_old_tabs(setting
                 page.evaluate("window.__testSockets[0].close()")
                 page.wait_for_function("window.__testSockets.some(socket => socket.readyState === WebSocket.OPEN)")
 
-            open_settings()
-            fill_value('#s-local-source', 'fixture/model')
-            fill_value('#s-local-filename', 'fixture.gguf')
-            fill_value('#s-local-port', free_tcp_port)
-            fill_value('#s-local-ctx', 0)
-            save()
-            page.locator('[data-settings-tab="advanced"]').click()
-            page.locator('#btn-local-start').click()
-            expect(page.locator('#local-model-status')).to_contain_text('Ready', timeout=30_000)
-            fill_value('#s-local-ctx', 8192)
-            save()
-            expect(page.locator('#settings-restart-status')).to_contain_text('Stop, then Start')
-            expect(page.locator('#btn-restart-now')).to_be_hidden()
-            evidence = pathlib.Path(os.environ.get('OUROBOROS_UI_EVIDENCE_DIR', str(settings_server['data_dir'].parent)))
-            evidence.mkdir(parents=True, exist_ok=True)
-            page.locator('#settings-restart-status').scroll_into_view_if_needed()
-            page.screenshot(path=str(evidence / f'settings-applied-pending-{engine}.png'))
-            page.locator('#btn-local-stop').click()
-            expect(page.locator('#local-model-status')).to_contain_text('Offline', timeout=30_000)
-            page.locator('#btn-local-start').click()
-            expect(page.locator('#local-model-status')).to_contain_text('Ready', timeout=30_000)
-            expect(page.locator('#settings-restart-status')).to_be_hidden(timeout=30_000)
-            page.screenshot(path=str(evidence / f'settings-applied-ready-{engine}.png'))
             # The same actual receipt consumer on the owner-facing Agents card.
             actor = {"subagent_id": "fixture-helper", "recommended_use": "Fixture helper",
                      "route": {"kind": "api_model", "target_id": "openai-compatible::mock-model"},

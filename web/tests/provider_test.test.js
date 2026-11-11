@@ -10,11 +10,9 @@ import {
 } from '../modules/settings_connections.js';
 import { cyberReviewNote } from '../modules/settings_policy.js';
 import { PROVIDER_CARDS, providerSettingsCard } from '../modules/settings_provider_cards.js';
-import { advancedPanel, modelsPanel } from '../modules/settings_ui.js';
 
-// Setup's provider cards (every key as a row with its form), and the old tabs' sections settings_ui.js still holds
-// for the editor lanes, unmounted until their pages are rebuilt.
-const renderSettingsPage = () => [PROVIDER_CARDS.map(providerSettingsCard).join(''), modelsPanel(), advancedPanel()].join('');
+// Setup retains the shared provider cards, each with its keys and forms.
+const renderSettingsPage = () => PROVIDER_CARDS.map(providerSettingsCard).join('');
 
 test('provider test status uses only the controlled compact vocabulary', () => {
     assert.equal(providerTestStatusText({ ok: true }), 'Works');

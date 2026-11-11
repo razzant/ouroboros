@@ -14,12 +14,10 @@ import { modelSourceGroups, sourceChoice, sourceFromChoice } from '../modules/mo
 import { adoptConnectionLabels, connectionLabel, routeConnectionId } from '../modules/connection_labels.js';
 import { PROVIDER_CARDS, PROVIDER_SECRET_KEYS, connectionRowHtml, providerSettingsCard } from '../modules/settings_provider_cards.js';
 import { otherKeyRows } from '../modules/settings_accounts.js';
-import { advancedPanel, modelsPanel } from '../modules/settings_ui.js';
 import { rowById } from '../modules/settings_rows.js';
 
-// Setup's provider cards (every key as a row with its form), and the old tabs' sections still unmounted in
-// settings_ui.js until their pages are rebuilt.
-const renderSettingsPage = () => [PROVIDER_CARDS.map(providerSettingsCard).join(''), modelsPanel(), advancedPanel()].join('');
+// Setup retains the shared provider cards, each with its keys and forms.
+const renderSettingsPage = () => PROVIDER_CARDS.map(providerSettingsCard).join('');
 import {
     cacheHintsNote, connectionNameFor, connectionReferencesText, connectionRowFacts, connectionRows, connectionUsage,
 } from '../modules/settings_connections.js';
