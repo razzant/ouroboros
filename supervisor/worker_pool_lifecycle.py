@@ -16,8 +16,6 @@ Assignment and free counts need a live current PID/birth-bound ``worker_ready``:
 (``_record_worker_processes``). SHA equality proves neither loaded code nor review.
 ``worker_starting`` grants one bounded extension (``runtime_limits``); watcher
 errors use bounded replace/park. Readiness finiteness is ``pool_admission``'s rule.
-Surplus retirement reserves the quiescent slot for the off-loop reaper; capacity
-and its claims are released only on confirmed death, keeping services.
 
 The lifecycle serializer lives here too: it is a decorator, so it is applied at
 import time and cannot be reached through a call-time handle. It is a primitive,

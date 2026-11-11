@@ -7,10 +7,7 @@ them, and the two uvicorn shapes that decide who owns the process signals
 hosted inside its loop). These live below the composition root so a leaf can read
 them without importing ``server`` back.
 
-At server start, ``raise_open_file_limit`` raises POSIX ``RLIMIT_NOFILE`` soft
-toward hard (macOS: at most 10,240) for per-run transports. Infinite soft stays;
-failures and the resulting limit are logged without blocking startup. Windows
-is unchanged.
+At server start ``raise_open_file_limit`` raises the open-file limit (platform rules and failures: its docstring).
 """
 
 from __future__ import annotations
@@ -124,9 +121,10 @@ def record_applied_restart_settings(values: dict, *, server_host_source: str | N
 
 
 def raise_open_file_limit() -> None:
-    """At startup the soft limit of open files rises to the hard one (POSIX; macOS takes ``min(OPEN_MAX, hard)``, as
-    its setrlimit(2) asks): the body follows each live run on its own transport, and a GUI-launched macOS process
-    starts at 256. The result is logged; there is no setting."""
+    """At startup the soft limit of open files (``RLIMIT_NOFILE``) rises to the hard one (POSIX; macOS takes
+    ``min(OPEN_MAX, hard)``, 10,240, as its setrlimit(2) asks): the body follows each live run on its own
+    transport, and a GUI-launched macOS process starts at 256. An infinite soft limit stays; Windows is
+    unchanged. A failure and the resulting limit are logged without blocking startup; there is no setting."""
     try:
         import resource
     except ImportError:
