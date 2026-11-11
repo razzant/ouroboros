@@ -1528,7 +1528,7 @@ def chronicle_tools() -> List[ToolEntry]:
         "source_ref": source,
         "quote": {"type": "string", "description": "Optional exact substring of the target, kept beside the mark."},
         "room_id": room,
-        "scope": {"type": "string", "enum": ["room", "global"]},
+        "scope": {"type": "string", "enum": ["room", "global"], "description": "Default room."},
         "mark_id": {"type": "string", "description": "Change an active mark's visible detail with visibility and reason."},
         "visibility": {"type": "string", "enum": ["full", "meaning"]},
         "release_ids": {"type": "array", "items": string, "minItems": 1, "uniqueItems": True,

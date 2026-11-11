@@ -1,5 +1,6 @@
 """memory_mark: batch release has one reason and accounts for every id, including partial failures; the tool's
 own text names who sees a mark."""
+import inspect
 import json
 
 import pytest
@@ -81,6 +82,9 @@ def test_the_mark_tool_text_says_who_sees_a_mark_on_every_route():
     anchor = schema["parameters"]["properties"]["anchor"]["description"]
     assert anchor.startswith("Optional action whose first result in a task also carries this mark's words:")
     assert "meets me at" not in anchor
+    # The reach differs by scope, so the schema names the scope a mark gets when none is given: the handler's own.
+    default = inspect.signature(_memory_mark).parameters["scope"].default
+    assert schema["parameters"]["properties"]["scope"]["description"] == f"Default {default}." == "Default room."
 
 
 def test_a_marked_row_of_my_human_travels_to_the_work_readers_and_my_own_view_shows_the_mark(tmp_path):
