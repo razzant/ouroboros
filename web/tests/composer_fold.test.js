@@ -299,6 +299,13 @@ test('a short keyboard room folds the row, the field keeping the focus; the keyb
     r.doc.activeElement = r.input;
     r.resize(r.feed);
     assert.equal(r.fold.folded(), false, 'an open capsule is never folded away');
+    // Model's Search: its field inside the row holds the focus under the keyboard, its list floating outside the
+    // composer. The row is being worked, so it stays for as long as the capsule is open.
+    r.doc.activeElement = r.swarm;
+    r.resize(r.feed);
+    r.listeners.get('feed:scroll')?.();
+    assert.equal(r.fold.folded(), false, 'a search typed in the row never loses the row under the keyboard');
+    r.doc.activeElement = r.input;
     r.row.open = false;  // closed by a press on the field, which keeps its focus: no focus, scroll or resize follows
     r.fold.sync();       // the capsules' owner asks once the capsule has settled closed
     assert.equal(r.fold.folded(), true, 'a capsule settled closed folds the short room\'s row again');

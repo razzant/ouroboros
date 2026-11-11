@@ -199,7 +199,7 @@ def test_the_selected_child_loses_its_stop_and_the_same_id_dispatches_with_its_s
 
     tree.workers.WORKERS[1] = affirm_ready(SimpleNamespace(
         wid=1, busy_task_id=None, reaping=False, in_q=SimpleNamespace(put=lambda t: tree.sent.append(dict(t)))))
-    monkeypatch.setattr(tree.workers, "MAX_WORKERS", 2)
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", str(2))
     tree.workers.assign_tasks()
     assert [row["id"] for row in tree.sent] == ["root-1", "child-run"], "the same id, and never its sibling"
     handoff = tree.workers.RUNNING["child-run"]["task"]["_budget_pause_resume"]

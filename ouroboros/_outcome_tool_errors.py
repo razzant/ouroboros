@@ -16,6 +16,7 @@ import json
 import pathlib
 from typing import Any, Dict, List
 
+SAFETY_HELD_STATUSES = frozenset({"safety_returned", "safety_unavailable"})  # a call Safety returned or could not read
 _BLOCKING_TOOL_STATUSES = frozenset({
     # T1: the statuses below the blank line were produced but partitioned nowhere,
     # so a call could be an honest error while every bucket of the honest breakdown
@@ -77,7 +78,7 @@ _BLOCKING_TOOL_STATUSES = frozenset({
     "resource_blocked",
     "root_required",
     "safety_error",
-})
+}) | SAFETY_HELD_STATUSES
 # Buckets deliberately left OUT of every partition, each with its reason. The
 # totality assertion in tests/test_tool_classification_differential.py fails if a
 # new code acquires a bucket that appears in neither a partition nor this set, so
@@ -107,9 +108,11 @@ _RECOVERY_TOOL_NAMES = frozenset({
 # LIST_FILES policy → degraded/tool_failure over a shipped site). A structural
 # status partition (Bible P5 — never content matching). Genuine tool/exec failures
 # (`error`, `*_error`, `non_zero_exit`, `shell_error`, `timeout`) and security-
-# boundary hits (`safety_violation`, `violation`) are intentionally EXCLUDED and
-# stay real failures. `unavailable` moved buckets in v7 (owner decision, spec
-# §1.15): see its entry below.
+# boundary hits (`violation`, an old record's `safety_violation`) are intentionally
+# EXCLUDED and stay real failures. A call Safety returned or could not read
+# (`safety_returned`, `safety_unavailable`) is no failure, nor is it
+# telemetry: left standing, the open card names it (below). `unavailable` moved buckets in v7
+# (owner decision, spec §1.15): see its entry below.
 _POLICY_DENIAL_STATUSES = frozenset({
     # v6.90.x (submarine unwind): the three confinement surfaces that leaked past
     # the partition as generic errors are now typed — the user_files path block on
@@ -290,13 +293,24 @@ def _tool_error_record(item: Dict[str, Any], *, recovered_by: int | None = None)
 # `details_only` and stay in the card's details: a call the tool refused for its arguments or because it named no
 # tool (the mind saw the refusal at once; what it did next is its answer's to say), and a command that ran and
 # failed or timed out without being redone, which the host cannot tell from one the task went past. Loud, as
-# before: every other unrecovered error — an effect that did not land, a send or command Safety stopped, a tool of
-# unknown kind that ran and failed (MCP and extension tools included), a declared output that never registered —
-# and a command killed by a signal
+# before: every other unrecovered error — an effect that did not land, an old record's send or command Safety
+# stopped, a tool of unknown kind that ran and failed (MCP and extension tools included), a declared output that never
+# registered — and a command killed by a signal
 # (D7: a kernel, OOM or external kill is the install acting; the 43-SIGKILL incident once hid as "cosmetic"; only a
-# directly spawned POSIX process reports one).
+# directly spawned POSIX process reports one). A call Safety returned or could not read whose identical call (same
+# tool and target signature) never got past Safety is no error: only the open Done card names it, never as a
+# warning (owner 11.11, A).
 _UNEXECUTED_STATUSES = frozenset({"argument_error", "unknown_tool"})
 _DETAILS_ONLY_COMMAND_STATUSES = frozenset({"non_zero_exit", "shell_error", "timeout"})
+# What the registry answers before its Safety check (``registry_core``: the guards, argument and target binding, mode
+# and protection gates and the shell guard ahead of ``check_safety``; the MCP name lookup; an extension found not
+# live; a launch refused at hand-off): such a call never got past Safety and leaves a held call named. A status a
+# handler can return as well stays here, since naming a held call too long is the safe side.
+_BEFORE_SAFETY_STATUSES = _UNEXECUTED_STATUSES | frozenset({
+    "blocked", "cwd_blocked", "edit_ops_blocked", "edit_text_blocked", "error", "git_error", "git_via_shell_blocked",
+    "light_mode_blocked", "protected_blocked", "resource_constraint_blocked", "resource_policy_blocked",
+    "root_required_active_workspace", "root_required_user_files", "skill_payload_blocked", "unavailable",
+    "user_files_path_blocked", "workspace_blocked", "write_file_blocked"})
 
 
 def _is_details_only_leftover(record: Dict[str, Any]) -> bool:
@@ -312,9 +326,10 @@ def warns_without_review(*bundles: Any) -> bool:
     """Owner 06.11 («A — изменения и команды») revised 09.11 («Q1: A»): with no review of the result, a leftover
     tool error turns Done into Done with warnings only when it is loud — neither a known pure read (``read_only``)
     nor a details-only leftover (``details_only``: a command that ran and failed or timed out, a call refused before
-    running). A record written before the flags existed stays loud; the twin of this predicate for the card's words
-    is ``tool_error_words``."""
-    return any(isinstance(error, dict) and not (error.get("read_only") or error.get("details_only"))
+    running), nor a call Safety held. A record written before the flags existed stays loud; the twin of this
+    predicate for the card's words is ``tool_error_words``."""
+    return any(isinstance(error, dict) and not (error.get("read_only") or error.get("details_only")
+                                                or error.get("status") in SAFETY_HELD_STATUSES)
                for errors in bundles for error in errors or [])
 
 
@@ -386,12 +401,12 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
         args = item.get("args") if isinstance(item.get("args"), dict) else {}
         target_key, target_paths = _call_target_signature(args)
         recovered_by: int | None = None
+        held = status in SAFETY_HELD_STATUSES  # its identical call got past Safety, then succeeded or failed
         for later_idx, later in enumerate(calls[idx + 1:], start=idx + 2):
-            if later.get("is_error"):
-                continue
             later_tool = str(later.get("tool") or "")
             later_status = str(later.get("status") or "ok")
-            if later_status not in _OK_TOOL_STATUSES:
+            if (later_status in SAFETY_HELD_STATUSES | _BEFORE_SAFETY_STATUSES if held
+                    else later.get("is_error") or later_status not in _OK_TOOL_STATUSES):
                 continue
             later_args = later.get("args") if isinstance(later.get("args"), dict) else {}
             later_key, later_paths = _call_target_signature(later_args)
@@ -404,6 +419,8 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
             artifact_registered = bool(later.get("artifact_registered"))
             if status in ("artifact_output_error", "artifact_output_undeclared"):
                 recovered = artifact_registered and (same_path or not target_paths)
+            elif held:
+                recovered = same_target
             else:
                 recovered = same_target or (artifact_registered and same_path)
             if recovered:

@@ -50,7 +50,6 @@ def retry_terminal_result(ctx: ToolContext, run_id: str, *, gateway: Any = None)
     from ouroboros.deadline_utils import window_within_deadline
     from ouroboros.delegate_shared import _fail, _owned_run, delegate_result, retry_result_status
     from ouroboros.gateways.claudexor import ClaudexorUnavailable, _READ_TIMEOUT_SEC
-    from ouroboros.subagents import DelegatedRunShape
 
     drive = custody.custody_root(ctx)
     status, entry, predecessor = retry_result_status(ctx, drive, run_id)
@@ -78,12 +77,9 @@ def retry_terminal_result(ctx: ToolContext, run_id: str, *, gateway: Any = None)
         if (status != custody.OWNED or entry is None or current_owner != predecessor
                 or entry.terminal_state != state):
             return _fail("delegate_wait", "run_not_owned", "Retry result authority changed.", run_id=run_id)
-        from ouroboros.delegate_registration_policy import INVESTIGATION_AUTHORITY
+        from ouroboros.delegate_containment import granted_shape
 
-        authority = DelegatedRunShape(access=entry.access, mode=entry.mode,
-                                      isolation=entry.isolation, delegated=entry.delegated,
-                                      investigation=entry.authority_source == INVESTIGATION_AUTHORITY)
-        payload = collect_and_deliver_terminal(ctx, run_id, detail, authority, entry, gateway)
+        payload = collect_and_deliver_terminal(ctx, run_id, detail, granted_shape(entry), entry, gateway)
         return delegate_result({**payload, "owner_task_id": predecessor,
                                 "result_reader_task_id": str(getattr(ctx, "task_id", "") or ""),
                                 "terminal_result_only": True})

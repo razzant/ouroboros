@@ -29,11 +29,18 @@ observations) on which custody projection and redaction are no-ops is a blob of
 the observability CAS (the same part a request view stores,
 ``shared_values``), listed once per attempt by the manifest
 ``observability/calls/<task>/working-a<attempt>.json`` (``call_type``
-``working_parts``: the packer keeps and retires them with the task); the file
+``working_parts``: the packer keeps and retires them with the task); this union
+of every part the attempt named is written before the checkpoint that names it.
+Crashing between a part write and its manifest leaves an orphan of one element,
+the same class of orphan as a whole observability blob.
+Each part holds its ``_json_bytes`` and is named by ``{"$shared": <sha256>}``; the file
 is the wrapper ``{"format": "working_shared_v1", "state": <skeleton>}``, which
-an older body refuses as an identity mismatch (fail closed). Elements that are
-not plain JSON or not public-safe stay inline. ``read_working`` expands the
-state; the frozen recovery source is always the expanded whole. It is deleted only once the
+an older body refuses as an identity mismatch, keeping its original-prompt path
+(fail closed). Elements that are not plain JSON or not public-safe stay inline;
+a state carrying a token-shaped dict is written whole. ``read_working`` expands
+the state (a part nothing holds is typed ``SharedValueMissing``); the frozen
+recovery source and any pause completed from it are always the expanded whole.
+It is deleted only once the
 attempt's result, owed final or exact pause is durable, or once the attempt
 that continues it loaded the frozen copy (never at the freeze itself, whose
 locator is not durable yet); storage stays one state per live attempt.
@@ -41,6 +48,9 @@ Only a real recovery FREEZES its exact bytes into the existing immutable
 continuation-source store, so a retry or a restart restores a verified
 source, never the mutable file. A live park (owner wait, exact pause, sleep)
 keeps its own newer source: recovery never prefers this file over it.
+The recovery locator carries clock facts to assignment and agent startup,
+independently of fresh idle timestamps; legacy sources without an origin keep
+fresh-start timing without old exclusions.
 
 Recovery restores cognition only. A tool call of the interrupted batch with no
 recorded result is closed as UNKNOWN and never re-executed; content mail

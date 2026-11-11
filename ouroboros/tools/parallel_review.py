@@ -492,7 +492,7 @@ def aggregate_review_verdict(review_err, coupling_result, block_reason, advisory
 
     cyber = not review_enforcement_blocks("blocking")
     if cyber or (get_review_enforcement() == "advisory" and block_reason == "fixed_overflow"):
-        from ouroboros.tools.review import _record_advisory_override
+        from ouroboros.review_overrides import record_override
 
         disclosure = (
             ("Cyber Pro: independent review does not prohibit action " if cyber else
@@ -501,7 +501,7 @@ def aggregate_review_verdict(review_err, coupling_result, block_reason, advisory
             + combined_msg
         )
         ctx._last_review_block_reason = block_reason
-        _record_advisory_override(ctx, disclosure)
+        record_override(ctx, disclosure)
         ctx._review_advisory.append(disclosure)
         ctx._review_degraded_reasons = list(getattr(ctx, "_review_degraded_reasons", []) or []) + [
             "review_cyber_authority" if cyber else "review_technical_failure_advisory"]

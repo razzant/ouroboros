@@ -19,6 +19,7 @@
 /** @typedef {Omit<ContextAttemptFact, 'previous'>} ContextAttemptObservation */
 /**
  * @typedef {Object} ActiveDirectTurn
+ * @property {import('./work_types.js').WorkLead=} lead  // the model it runs on and whose choice that is
  * @property {Object=} model_activity  // exact-call transport observation; no request/account content
  * @property {ContextAttemptFact=} context_attempt  // its task attempt's latest sent attempt, kept past the call
  * @property {Object.<string,Object>=} model_waits
@@ -37,6 +38,7 @@
 /** Shared census facts from the gateway; phase and outcome are independent. */
 /**
  * @typedef {Object} ActiveChatActivity
+ * @property {import('./work_types.js').WorkLead=} lead  // the model it runs on and whose choice that is
  * @property {string=} executor  // where the turn runs: worker, inline_call or inline_degraded
  * @property {string=} carrier  // a lane row: awaiting (no carrier holds it yet) or worker
  * @property {string=} last_line Visible model narration; empty when not recorded.

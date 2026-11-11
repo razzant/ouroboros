@@ -109,7 +109,7 @@ def test_pool_timeout_does_not_charge_pause_and_duplicate_park_cannot_widen_it(p
     assert reaps.empty(), "Paused authors must survive beyond their remaining active lifetime"
     assert execution_elapsed_seconds(pool.meta, clock[0]) == 80
     worker_owner_wait.handle_owner_wait({**event, "phase": "resume", "resume_reason": "control:owner_resume"}, workers)
-    worker_owner_wait.maintain_owner_wait_capacity()
+    worker_owner_wait.grant_warm_returns()
     assert pool.original.in_q.get_nowait()["phase"] == "resume_granted"
     assert pool.meta["budget_paused_sec"] == 220
     assert "sleep_parked_at" not in pool.meta
@@ -128,7 +128,7 @@ def test_pool_timeout_does_not_charge_pause_and_duplicate_park_cannot_widen_it(p
     queue._enforce_task_timeouts_locked(workers, clock[0], 0, {})
     assert reaps.empty()
     worker_owner_wait.handle_owner_wait({**event, "phase": "resume", "resume_reason": "control:owner_resume"}, workers)
-    worker_owner_wait.maintain_owner_wait_capacity()
+    worker_owner_wait.grant_warm_returns()
     assert pool.original.in_q.get_nowait()["phase"] == "resume_granted"
     assert pool.meta["budget_paused_sec"] == 420
     assert execution_elapsed_seconds(pool.meta, clock[0]) == 85
@@ -161,7 +161,7 @@ def test_a_failed_publication_neither_refuses_a_warm_pause_park_nor_withholds_it
     worker_owner_wait.handle_owner_wait({**event, "phase": "resume"}, workers)
     with monkeypatch.context() as failed:
         failed.setattr(queue, "persist_queue_snapshot", lambda **_kw: False)
-        worker_owner_wait.maintain_owner_wait_capacity()
+        worker_owner_wait.grant_warm_returns()
     assert pool.original.in_q.get_nowait()["phase"] == "resume_granted"
     assert pool.original.active_capacity and pool.meta["budget_paused_sec"] == 220
     assert "sleep_parked_at" not in pool.meta

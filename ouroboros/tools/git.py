@@ -8,11 +8,9 @@ from ouroboros.tools.tool_result import (
 
 import copy
 import json
-import hashlib  # noqa: F401
 import logging
 import os
 import pathlib
-import re  # noqa: F401
 import subprocess  # noqa: F401
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -59,6 +57,7 @@ from ouroboros.tools.commit_gate import (
     resolve_root_task_id,
 )
 from ouroboros.review_cycles import REASON_REVIEW_CYCLES_EXHAUSTED, emit_review_cycles_exhausted
+from ouroboros.review_overrides import note_override_landing
 from ouroboros.tools.release_sync import is_development_marker
 from ouroboros.tools.review_revalidation import handle_revalidation_failure  # noqa: F401
 from ouroboros.utils import utc_now_iso, write_text, safe_relpath, run_cmd  # noqa: F401
@@ -1417,6 +1416,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                 log.warning("mutation baseline advance failed after commit", exc_info=True)
         if not _managed_tx:  # a managed merge records its success after its post-commit phase
             record_bound_commit_success(ctx, commit_message, _commit_start, pre_fingerprint, post_fingerprint, commit_sha)
+            note_override_landing(ctx, commit_sha)  # landed over a decision Blocking would have stopped?
             ctx._coupling_review_history = {}  # the subject's coupling rounds end with its commit (the attempt rows keep them)
     finally:
         _release_git_lock(lock)

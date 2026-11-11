@@ -117,12 +117,7 @@ def init(drive_root: pathlib.Path) -> None:
 
 
 def refresh_timeouts_from_settings(settings: dict) -> None:
-    """Hot-reload the active liveness settings.
-
-    The flat wall-clock pair this once also had to absorb (soft/hard) is retired
-    in 7.0: load_settings strips the keys, so there is no stored value left to
-    accept, warn about, or lie about honoring.
-    """
+    """Hot-reload the active liveness settings."""
     global FINALIZATION_GRACE_SEC
     FINALIZATION_GRACE_SEC = get_finalization_grace_sec(settings)
 
@@ -297,6 +292,7 @@ def enqueue_task(
     t = dict(task)
     from ouroboros.consciousness_authority import work_kind
     from ouroboros.server_restart import agent_restart_pending
+    from ouroboros.route_choice import capture_lead
     metadata = t.get("metadata") if isinstance(t.get("metadata"), dict) else {}
     metadata["work_kind"] = work_kind({"origin_message_ref": t.get("origin_message_ref"), **metadata})
     t["metadata"] = metadata
@@ -499,6 +495,8 @@ def enqueue_task(
                     if subagents_settings is not None:
                         from ouroboros.settings_integrity import record_subagents_admission
                         record_subagents_admission(t, DRIVE_ROOT, settings=subagents_settings, project=project)
+                    if not restoring_snapshot:
+                        capture_lead(t, DRIVE_ROOT, project=project, admitted=True)
                     PENDING.append(t)
         except (OSError, ValueError, TypeError, RuntimeError) as exc:
             from supervisor.schedule_occurrence import contention

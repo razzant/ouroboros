@@ -338,7 +338,8 @@ def _completion_text(row: Dict[str, Any], tid: str, lang: str, parts=()) -> str:
     key += "_details" if notice is not None and notice["neutral"] else ""
     message = _NOTIFY[lang].format(key, label=label, icon=icon, id=tid[:8], word=word, tail=tail)
     reason = notice["detail"] if notice is not None else str(row.get("reason_detail") or "")
-    return "\n".join(part for part in (message, reason, str((notice or {}).get("salvage") or "")) if part)
+    gate = str((notice or {}).get("review_gate") or "")  # the work card's review-gate field, no message of its own
+    return "\n".join(part for part in (message, reason, gate, str((notice or {}).get("salvage") or "")) if part)
 
 
 async def _check_tasks_notify(

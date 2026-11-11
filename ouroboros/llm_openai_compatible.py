@@ -418,6 +418,8 @@ class _OpenAICompatibleLaneMixin:
             ]
             note_provider_metadata_drop_fields(unsupported)
         apply_processing_preference(target, kwargs)
+        if allow_message_cache and cache_model.startswith("anthropic/"):
+            self._cache_declared_system_context(messages, kwargs)
         return kwargs
 
     def _normalize_remote_response(

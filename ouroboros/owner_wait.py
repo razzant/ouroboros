@@ -31,6 +31,7 @@ from dataclasses import asdict
 from typing import Any
 
 from ouroboros.artifacts import read_actor_source_bytes, store_actor_source_bytes
+from ouroboros.delegate_output import read_coverage, restore_read_coverage
 from ouroboros.native_task_wait import cursors_json
 from ouroboros.transcript_prefix import OBSERVER_STATE_ATTRS as _SEND_OBSERVER_KEYS  # a resumed task keeps the send observer's state
 from ouroboros.transcript_prefix import sanction_rewrite
@@ -61,7 +62,7 @@ def classify_wake(entries: list[dict], quiz_id: str) -> str:
     """
     from ouroboros.owner_mailbox import (
         KIND_CARD_INPUT, KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_PAUSE, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER,
-        KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE, place_arrival_wake,
+        KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE, KIND_OWNER_MODEL, place_arrival_wake,
     )
 
     kinds = [str(row.get("kind") or KIND_OWNER_TEXT) for row in entries]
@@ -81,6 +82,8 @@ def classify_wake(entries: list[dict], quiz_id: str) -> str:
         return "owner_text"
     if KIND_HURRY in kinds:
         return "hurry"
+    if KIND_OWNER_MODEL in kinds:
+        return "model"
     for kind, row in zip(kinds, entries):
         if kind == KIND_TASK_MESSAGE and place_arrival_wake(row) is not False:  # the first waking mail
             source = str(row.get("source_task_id") or "").strip()
@@ -218,6 +221,7 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         "held_dependencies_order": dict(getattr(ctx, "_held_dependencies_order", None) or {}),
         "held_dependency_sources": dict(getattr(ctx, "_held_dependency_sources", None) or {}),
         "wake_sources": dict(getattr(ctx, "_wake_sources", None) or {}),
+        "read_coverage": read_coverage(str(ctx.task_id)),  # what of those sources was already delivered
         # An armed or woken native task wait owes its result to the next request (``native_task_wait``),
         # read against the beacon cursors the actor was shown.
         "pending_task_wait": getattr(ctx, "_pending_task_wait", None) or None,
@@ -236,6 +240,8 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
             "active_model_override", "active_effort_override", "active_use_local_override",
             "active_role_override", "route_wait_on_primary", "primary_route", "_route_facts_pending",
             "route_choice",  # following its role, or the task's own (route_choice)
+            "_lead_episode", "_lead_cause", "_lead_return_from", "_lead_role",  # one departure fact, including an unaccepted return
+            "_owner_model_applied_id",  # only a completed handover survives a checkpoint
         )},
         "delivery_candidate": asdict(candidate) if candidate is not None else None,
         "delivery": {key: getattr(ctx, key, None) for key in (
@@ -960,15 +966,12 @@ def owner_wait_ended_notice(ctx: Any, checkpoint: dict, reason: str = "timeout",
         f"{stance} — or finish and say what is unresolved.")}
 
 
-def owner_wait_timeout_notice(ctx: Any, checkpoint: dict) -> dict:
-    """The bound's notice under its original name."""
-    return owner_wait_ended_notice(ctx, checkpoint, "timeout")
-
-
 def _wake_description(outcome: str, entries: list[dict]) -> str:
     """What woke the task, for the notice: a hurry is named as what it is."""
     if outcome == "hurry":
         return "an owner hurry request (a request to finish sooner, not an answer)"
+    if outcome == "model":
+        return "my human's change of this work's primary route"
     sources = sorted({str(row.get("source_task_id") or row.get("kind") or "mail") for row in entries})
     return f"task mail from {', '.join(sources)}" if sources else "unconfirmed input"
 
@@ -979,9 +982,9 @@ def _rendered_owner_authority(entries: list[dict]) -> bool:
     the wake by itself. A hurry is owner authority too, but it is applied
     structurally and never rendered — the notice must name it."""
     from ouroboros.loop_messages import owner_authority_kinds
-    from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, KIND_HURRY
+    from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_MODEL
 
-    return any(kind not in {KIND_FINALIZE_NOW, KIND_HURRY} for kind in owner_authority_kinds(entries))
+    return any(kind not in {KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_MODEL} for kind in owner_authority_kinds(entries))
 
 
 def append_wake_notice(ctx: Any, checkpoint: dict, outcome: Any, messages: list) -> None:
@@ -1055,6 +1058,9 @@ def wait_after_tools(ctx: Any, messages: list, trace: dict, usage: dict,
         return  # a stop begun since arming reaches the mind before the park; the same request then sleeps
     checkpoint = checkpoint_owner_wait(ctx, messages, trace, usage, round_idx, tool_schemas, seen,
                                        review_binding=review_binding)
+    from ouroboros.working_checkpoint import flush_content_acks
+
+    flush_content_acks(ctx)  # its stored source holds what they acknowledge, as a cold park's does
     if not callable(callback):
         outcome = review_callback(ctx, checkpoint, messages)
         append_wake_notice(ctx, checkpoint, outcome, messages)
@@ -1169,7 +1175,8 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     ctx._held_dependencies_order = dict(state.get("held_dependencies_order") or {})
     # A shortened hold view's exact source stays readable to completion (``model_sleep.credit_hold_source``).
     ctx._held_dependency_sources = dict(state.get("held_dependency_sources") or {})
-    ctx._wake_sources = dict(state.get("wake_sources") or {})  # refs survive; read coverage is process-local
+    ctx._wake_sources = dict(state.get("wake_sources") or {})  # refs survive, with what of them was delivered
+    restore_read_coverage(str(ctx.task_id), state.get("read_coverage"))
     ctx._pending_task_wait = dict(state.get("pending_task_wait") or {}) or None  # a legacy state owes none
     ctx._wait_attention_cursors = cursors_json(state.get("wait_attention_cursors"))
     ctx._owner_directives = state["owner_directives"]
@@ -1201,6 +1208,9 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
 
     ctx.route_choice = restored_choice(ctx, state)  # a saved choice, else the legacy classification (D5)
     ctx._route_binding = None  # the first round compares to the restored acting route (route_choice.round_route)
+    from ouroboros.owner_model import restore_current
+
+    restore_current(ctx, messages)
     candidate = state.get("delivery_candidate")
     ctx._delivery_candidate = DeliveryCandidate(**{key: value for key, value in candidate.items()
         if key != "repair_attempted"}) if candidate else None
@@ -1226,7 +1236,7 @@ def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
     ctx.context_fit_plan = restored_start(ctx.context_fit_plan, state.get("context_start"))  # before every rebind
     model_wait = getattr(ctx, "model_wait_context", None)
     role, account = task_model_binding(
-        {"model_role": state.get("context_model_role"), "task_metadata": ctx.task_metadata},
+        {"model_role": getattr(ctx, "active_role_override", None) or state.get("context_model_role"), "task_metadata": ctx.task_metadata},
         context_fit_plan=ctx.context_fit_plan,
         overrides=model_wait.overrides if model_wait is not None else None,
     )

@@ -17,8 +17,9 @@ function providerCredentials(settings = {}) {
 }
 
 export function modelWaitRoleLabel(role = '') {
+    // `lead` is a work on a model of its own (its room's, or one the owner gave it): no Settings slot (CLIENT_CONTRACT §5).
     const labels = { main: 'Main', light: 'Light', vision: 'Vision', consciousness: 'Consciousness',
-        safety: 'Safety Supervisor', deep_review: 'Deep self-review', websearch: 'Web search' };
+        safety: 'Safety Supervisor', deep_review: 'Deep self-review', websearch: 'Web search', lead: 'This work\'s model' };
     if (labels[role]) return labels[role];
     const [kind, ...identity] = String(role).split(':');
     const suffix = identity.join(':');
@@ -26,6 +27,14 @@ export function modelWaitRoleLabel(role = '') {
     if (kind === 'reviewer') return `Reviewer · ${suffix}`;
     if (kind === 'subagent') return `Subagent · ${suffix}`;
     return String(role || 'Model');
+}
+
+/** A wait's reason as its row names it; `observesAccess` false: the host cannot watch that route's access return.
+ *  A work's card says a fallback's cause in the same words (card_model.js). */
+export function modelWaitReasonLabel(reason, observesAccess = true) {
+    return reason === 'connection_unavailable' ? 'Key unavailable' : !observesAccess ? 'Waiting for provider access'
+        : reason === 'auth_quota' ? 'Waiting for access' : reason === 'unavailable' ? 'Waiting for an account'
+            : reason === 'auth' ? 'Sign-in required' : 'Waiting for quota';
 }
 
 /** Host wait reasons: `unavailable` is an engine-dated pool refusal, neither quota nor sign-in;
@@ -159,8 +168,7 @@ export function createModelWaitController({ getRecord, onDomWrite = (fn) => fn()
         const observesAccess = row.availability_observation !== 'unavailable';
         const timed = (quota || pool) && observesAccess;
         node.querySelector('[data-wait-role]').textContent = modelWaitRoleLabel(row.role);
-        node.querySelector('[data-wait-reason]').textContent = keyOff ? 'Key unavailable' : !observesAccess ? 'Waiting for provider access'
-            : mixed ? 'Waiting for access' : pool ? 'Waiting for an account' : row.reason === 'auth' ? 'Sign-in required' : 'Waiting for quota';
+        node.querySelector('[data-wait-reason]').textContent = modelWaitReasonLabel(row.reason, observesAccess);
         // Amber only while the wait needs the owner (the host's revision-bound fact); a wait that goes on by itself is a
         // quiet tray with a neutral sentence (docs/DESIGN.md "Status marks").
         const owner = row.requires_owner_action === true;
@@ -210,10 +218,14 @@ export function createModelWaitController({ getRecord, onDomWrite = (fn) => fn()
         node.querySelector('[data-wait-apply]').disabled = pending || !view.editor;
         const taskOnlyLocal = view.editor && row.role.startsWith('fallback:')
             && view.editor.collect().USE_LOCAL_MAIN !== view.sharedFallbackLocal;
+        // A work's own model is no role of Settings: saving it there is not offered (owner 10.11).
+        const ownModel = row.role === 'lead';
         const persist = node.querySelector('[data-wait-persist]');
-        persist.disabled = pending || taskOnlyLocal;
-        if (taskOnlyLocal) persist.checked = false;
-        node.querySelector('[data-wait-scope]').textContent = taskOnlyLocal
+        node.querySelector('[data-wait-persist-offer]').hidden = ownModel;
+        persist.disabled = pending || taskOnlyLocal || ownModel;
+        if (taskOnlyLocal || ownModel) persist.checked = false;
+        node.querySelector('[data-wait-scope]').textContent = ownModel
+            ? 'This changes this work\'s model only; a room\'s own model is set in its composer.' : taskOnlyLocal
             ? 'Local applies to all fallbacks in Settings. This change is task-only; edit Models for a permanent change.'
             : row.review_operation ? 'This role changes for this review operation.' : 'This role changes until the task ends.';
     }
@@ -376,7 +388,7 @@ export function createModelWaitController({ getRecord, onDomWrite = (fn) => fn()
                 <button class="btn btn-default" type="button" data-wait-retry>Try again</button>
                 <button class="btn btn-default" type="button" data-wait-settings>Settings</button></div>
             <div class="model-wait-picker" data-wait-picker hidden>${modelRolesHost(editorId)}
-                <label class="model-wait-auto"><input class="ui-checkbox" type="checkbox" data-wait-persist> Also save this role in Settings</label>
+                <label class="model-wait-auto" data-wait-persist-offer><input class="ui-checkbox" type="checkbox" data-wait-persist> Also save this role in Settings</label>
                 <div class="model-wait-actions"><button class="btn btn-default" type="button" data-wait-apply disabled>Apply to this task</button>
                     <span class="model-wait-meta" data-wait-scope></span></div></div>
             <div class="model-wait-notice ui-status" data-wait-notice role="status" aria-live="polite"></div>

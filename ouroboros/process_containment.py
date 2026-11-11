@@ -193,12 +193,16 @@ def _linux_group_members(pgids: "set[int]") -> "tuple[dict[int, dict[str, bytes]
     return members, complete
 
 
+_QUIET_REREADS = 4  # bounded confirming reads; churn past them stays unknown
+
+
 def process_groups_have_live_members(pgids: "set[int]") -> Optional[dict[int, bool]]:
     """Read Linux groups without spawning; confirm only apparent-quiet groups.
 
     A single listing can miss a child forked before its parent's stat becomes Z.
-    Quiet requires the same nonempty zombie membership in two reads, with no
-    vanished row in the confirming read. Churn/unknown defers retirement to a
+    Quiet requires the same zombie membership in two consecutive reads, the
+    later with no vanished row. A reaped orphan or an unrelated exit gets a few
+    bounded rereads; still unsettled stays unknown and defers retirement to a
     later spawn, never command admission. No result survives this call.
     macOS and Windows keep their owner/idle/stop retirement paths.
     """
@@ -208,17 +212,23 @@ def process_groups_have_live_members(pgids: "set[int]") -> Optional[dict[int, bo
     if _pl.IS_WINDOWS or not os.path.isdir("/proc"):
         return None
     try:
-        first, _ = _linux_group_members(wanted)
-        result = {pgid: True for pgid, rows in first.items()
+        previous, _ = _linux_group_members(wanted)
+        result = {pgid: True for pgid, rows in previous.items()
                   if any(state != b"Z" for state in rows.values())}
-        quiet = {pgid for pgid, rows in first.items() if rows and pgid not in result}
-        if quiet:
-            second, complete = _linux_group_members(quiet)
-            for pgid, rows in second.items():
+        quiet = {pgid for pgid, rows in previous.items() if rows and pgid not in result}
+        for reread in range(_QUIET_REREADS):
+            if not quiet:
+                break
+            if reread:
+                time.sleep(0.002)  # a just-killed tree's orphans are still being reaped
+            current, complete = _linux_group_members(quiet)
+            for pgid, rows in current.items():
                 if any(state != b"Z" for state in rows.values()):
                     result[pgid] = True
-                elif complete and rows == first[pgid]:
+                elif complete and rows == previous[pgid]:
                     result[pgid] = False
+            quiet = {pgid for pgid in quiet if pgid not in result}
+            previous = current
         return result
     except (OSError, ValueError):
         return None  # unreadable is never an empty tree; no ps fallback here

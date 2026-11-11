@@ -1,4 +1,5 @@
 import { tr, fmt } from './i18n.js';
+import { shortName } from './chat_model_routes.js';
 import { taskPresentation } from './log_events.js';
 import { taskCostMeta } from './chat_activity.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
@@ -66,7 +67,7 @@ export const AUTHOR_WORDS = Object.freeze({
 export const CHECK_CHIPS = Object.freeze({
     checked: { label: 'checked', tone: 'neutral' },
     warned: { label: 'warned', tone: 'warn' },
-    sent_despite: { label: 'sent despite the check', tone: 'warn' },
+    sent_despite: { label: 'let through despite the check', tone: 'warn' },
     held: { label: 'held', tone: 'warn' },
     not_checked: { label: 'not checked', tone: 'neutral' },
 });
@@ -117,6 +118,24 @@ const TITLE_SEP = ' · ';
 export const sameWords = (a, b) => String(a || '').toLowerCase().replace(/\s+/g, '') === String(b || '').toLowerCase().replace(/\s+/g, '');
 /** The service a place is on, as its row and its sheet name it quietly. */
 export const placeService = (place) => String(place.serviceLabel || place.provider || '');
+
+// A model a place or a circle is given, as a row says it: the two aliases by their role's name, a route by the
+// model's own short name (`z-ai/glm-5.3` reads `glm-5.3`).
+const MODEL_ALIASES = Object.freeze({ main: ['places.model.main', 'Main'], light: ['places.model.light', 'Light'] });
+export const isModelAlias = (value) => Object.hasOwn(MODEL_ALIASES, String(value || ''));
+export const placeModelWord = (value) => (isModelAlias(value) ? tr(...MODEL_ALIASES[value]) : shortName({ model: String(value || '') }));
+/** What an empty Model field of a place uses, from its `model_route` and its circle as last read (a circle's model
+ *  edit does not revise its places' rows): `{circle, model}`, `circle` empty for the consciousness model and `model`
+ *  empty when this read does not say which one that is. */
+export function inheritedModel(place, circle = null) {
+    const route = place.modelRoute;
+    if (circle?.model) {
+        // An alias is named by what it resolves to now, which only a place that inherits it carries.
+        const resolved = isModelAlias(circle.model) && route?.layer === 'circle' && route.value ? route.value : circle.model;
+        return { circle: circle.name, model: placeModelWord(resolved) };
+    }
+    return { circle: '', model: route?.layer === 'consciousness' && route.value ? placeModelWord(route.value) : '' };
+}
 /** One title for a place's row and its sheet: its label without the service it is on and without its circle's own
  *  name; a whole-account place with nothing left takes the account's name from its connector's status; the service
  *  itself is the last resort. */
@@ -268,8 +287,8 @@ export function wakeFactsText(wake) {
 export function wakeCheckText(check) {
     const words = {
         checked: 'Safety Supervisor checked {tool}', warned: 'Safety Supervisor warned about {tool}',
-        held: 'Safety Supervisor held {tool}', sent_despite: '{tool} sent despite the check',
-        not_checked: 'not checked ({tool})',
+        held: 'Safety Supervisor held {tool}', not_checked: 'not checked ({tool})',
+        sent_despite: check.tool === 'place_reply' ? '{tool} sent despite the check' : '{tool} let through despite the check',
     };
     if (check.chip === 'not_checked' && !check.tool) return tr('consciousness.check.not_checked', 'Not checked');
     const named = { place_reply: tr('consciousness.tool.reply', 'the reply'), send_user_message: tr('consciousness.tool.message', 'the message') }[check.tool];
@@ -283,7 +302,7 @@ export function wakeCheckText(check) {
 export function wakeCheckChip(check) {
     if (!check.tool || ['place_reply', 'send_user_message'].includes(check.tool)) return wakeCheckText(check);
     const words = { checked: 'Safety Supervisor checked a step', warned: 'Safety Supervisor warned about a step',
-        held: 'Safety Supervisor held a step', sent_despite: 'A step was sent despite the check', not_checked: 'Not checked' };
+        held: 'Safety Supervisor held a step', sent_despite: 'A step was let through despite the check', not_checked: 'Not checked' };
     return words[check.chip] ? tr(`consciousness.chip.${check.chip}`, words[check.chip]) : '';
 }
 

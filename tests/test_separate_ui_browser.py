@@ -620,6 +620,9 @@ def test_settings_save_reports_the_restart_the_core_requires(stack):
 
     core = stack.core
     settings_path = core.data_dir / "settings.json"
+    # A restart-required setting with its own field: the skills repository path (the worker cap is read live).
+    skills = core.data_dir.parent / "skills-restart-fixture"
+    skills.mkdir(exist_ok=True)
     with sync_playwright() as playwright:
         session = _session(playwright, stack, "chromium")
         page = session.page
@@ -631,10 +634,11 @@ def test_settings_save_reports_the_restart_the_core_requires(stack):
                 expect(page.locator("#btn-save-settings")).to_be_enabled(timeout=30_000)
 
             open_settings()
-            wait_until(lambda: "OUROBOROS_MAX_WORKERS" not in session.api("GET", "/api/settings", None)["json"]
-                       ["_meta"]["restart_state"]["unknown_keys"], 30, "worker count never applied")
-            page.locator("#s-workers").evaluate(
-                "(node) => {node.value='2'; node.dispatchEvent(new Event('input', {bubbles: true}));}")
+            wait_until(lambda: "OUROBOROS_SKILLS_REPO_PATH" not in session.api("GET", "/api/settings", None)["json"]
+                       ["_meta"]["restart_state"]["unknown_keys"], 30, "skills path never applied")
+            page.locator("#s-skills-repo-path").evaluate(
+                "(node, value) => {node.value=value; node.dispatchEvent(new Event('input', {bubbles: true}));}",
+                str(skills))
             with page.expect_response(lambda r: r.url.endswith("/api/settings") and r.request.method == "POST") as saved:
                 page.locator("#btn-save-settings").click()
                 if page.locator("[data-confirm-ok]").is_visible():
@@ -666,11 +670,11 @@ def test_settings_save_reports_the_restart_the_core_requires(stack):
             session.close()
     stack.extra["settings"] = {"save_request": save_request, "restart_state": state,
                                "refused": refused, "file_unchanged": unchanged, "after_restart": after}
-    assert written["OUROBOROS_MAX_WORKERS"] in (2, "2")
+    assert written["OUROBOROS_SKILLS_REPO_PATH"] == str(skills)
     assert "OUROBOROS_UI_DIR" not in written, "a save never authors the operator's interface choice"
-    assert "OUROBOROS_MAX_WORKERS" in state["restart_keys"] and state["restart_required"] is True
+    assert "OUROBOROS_SKILLS_REPO_PATH" in state["restart_keys"] and state["restart_required"] is True
     assert refused["status"] == 400 and unchanged, refused
-    assert after["restart_required"] is False and "OUROBOROS_MAX_WORKERS" not in after["restart_keys"]
+    assert after["restart_required"] is False and "OUROBOROS_SKILLS_REPO_PATH" not in after["restart_keys"]
 
 
 @pytest.mark.parametrize("browser_name", BROWSERS)

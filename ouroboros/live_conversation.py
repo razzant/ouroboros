@@ -615,7 +615,6 @@ class ConversationHost:
 
     async def session(self, consume, options: LiveOptions):
         from ouroboros.live_connections import PreparedConnection
-        self.hub.pause_input()
         while True:
             lease = PreparedConnection(self, options)
             try:

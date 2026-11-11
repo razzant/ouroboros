@@ -37,13 +37,13 @@ def recorded(run_tests, monkeypatch):
 @pytest.fixture
 def standalone_budget(monkeypatch, tmp_path):
     """A standalone owner on a quiet host; returns its private ledger directory."""
-    from ouroboros import test_parallelism
+    from ouroboros import host_memory, test_parallelism
 
     # These command-shape cases model the standalone operator entrypoint.
     # Real nested runners retain their inherited one-slot allocation.
     monkeypatch.delenv(test_parallelism.NESTED_WORKERS_ENV, raising=False)
     monkeypatch.setattr(test_parallelism, "physical_memory", lambda:
-                        test_parallelism.MemorySnapshot(100 * 1024**3, 100 * 1024**3))
+                        host_memory.MemorySnapshot(100 * 1024**3, 100 * 1024**3))
     monkeypatch.setattr(test_parallelism, "other_runs", lambda: test_parallelism.HostRuns())
     monkeypatch.setattr(test_parallelism, "_ledger_dir", lambda: tmp_path / "slots")
     return tmp_path / "slots"

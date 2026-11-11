@@ -31,19 +31,17 @@ def test_outer_wake_spill_preserves_continuation(tmp_path, monkeypatch, budget):
     assert "continuation_note" not in out
 
 
-@pytest.mark.parametrize("advanced", [False, True])
-def test_rewait_window_preserves_same_session_fact(advanced):
-    from ouroboros.delegate_progress import WindowObservations, window_payload
+@pytest.mark.parametrize("moved", [False, True])
+def test_a_rewaits_read_preserves_the_same_session_fact(moved):
+    """A wake's read of a run still paused on a question it already showed (``present_payload``), quiet or moved,
+    keeps the flat route fact; a run not paused carries none."""
+    from ouroboros.delegate_progress import present_payload
 
-    seen = WindowObservations()
-    if advanced:
-        seen.record({}, seq=1, at_sec=0)
-    kwargs = dict(run_id="run-peer", state="running", last_seq=1, window=2,
-                  elapsed_seconds=2, max_seconds=30, detail={}, seen=seen, budget=15000,
-                  pending_interactions=[])
-    out = window_payload(waiting_on_user=True, **kwargs)
+    kwargs = dict(run_id="run-peer", state="running", last_seq=1, moved=moved,
+                  elapsed_seconds=2, max_seconds=30, detail={}, budget=15000, pending_interactions=[])
+    out = present_payload(waiting_on_user=True, **kwargs)
     assert out["continuation"] == SAME_SESSION_CONTINUATION["continuation"] == "same_session"
-    out = window_payload(waiting_on_user=False, **kwargs)
+    out = present_payload(waiting_on_user=False, **kwargs)
     assert "continuation" not in out and "continuation_note" not in out
 
 

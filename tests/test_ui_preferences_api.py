@@ -35,6 +35,7 @@ def test_ui_preferences_round_trip_and_normalization(tmp_path):
             "main_seen_revision": None,
             "read_ahead_revisions": {},
             "welcome": {"mode": "default", "text": ""},
+            "model_recents": [],
         }
 
         create_project(tmp_path, "racer", name="Racer")
@@ -433,3 +434,30 @@ def test_widget_board_bounds_have_one_value_in_python_and_the_browser():
     assert js("WIDGET_SIZE_MAX_ITEMS") == prefs._MAX_WIDGET_SIZE_ITEMS
     assert js("WIDGET_HEIGHT_MIN") == prefs.WIDGET_HEIGHT_MIN
     assert js("WIDGET_HEIGHT_MAX") == prefs.WIDGET_HEIGHT_MAX
+
+
+def test_model_recents_are_bounded_deduplicated_and_server_written(tmp_path):
+    from starlette.testclient import TestClient
+    from ouroboros.gateway.ui_preferences import record_model_recent
+
+    app = Starlette(routes=collect_routes(data_dir=tmp_path))
+    app.state.drive_root = tmp_path
+    client = TestClient(app)
+    assert client.post("/api/ui/preferences", json={"sidebar_width": 250}).status_code == 200
+    for index in range(6):
+        record_model_recent(tmp_path, f"vendor/model-{index}")
+    expected = [{"model": f"vendor/model-{index}", "use_local": False} for index in (5, 4, 3, 2)]
+    assert client.get("/api/ui/preferences").json()["model_recents"] == expected
+    record_model_recent(tmp_path, "vendor/model-3")
+    expected = [expected[2], expected[0], expected[1], expected[3]]
+    assert client.get("/api/ui/preferences").json()["model_recents"] == expected
+    # Locality is part of route identity; both choices stay visible.
+    record_model_recent(tmp_path, "vendor/model-3", True)
+    expected = [{"model": "vendor/model-3", "use_local": True}, *expected[:3]]
+    before = (tmp_path / "state/ui_preferences.json").read_bytes()
+    for value in ([], expected, "invalid"):
+        assert client.post("/api/ui/preferences", json={"model_recents": value}).status_code == 400
+        assert (tmp_path / "state/ui_preferences.json").read_bytes() == before
+    assert client.post("/api/ui/preferences", json={"nested_subagents_expanded": True}).status_code == 200
+    result = client.get("/api/ui/preferences").json()
+    assert result["model_recents"] == expected and result["sidebar_width"] == 250

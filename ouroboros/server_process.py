@@ -6,6 +6,8 @@ them, and the two uvicorn shapes that decide who owns the process signals
 (``_SignalStopServer`` for the main server, ``_embedded_uvicorn_server`` for a server
 hosted inside its loop). These live below the composition root so a leaf can read
 them without importing ``server`` back.
+
+At server start ``raise_open_file_limit`` raises the open-file limit (platform rules and failures: its docstring).
 """
 
 from __future__ import annotations
@@ -97,6 +99,15 @@ def server_source_baseline() -> str:
         return _source_baseline or ""
 
 
+def restart_gate_line(repo_dir: Any, data_dir: Any) -> str:
+    """A restart notice's own line: the commits since this body started that Git recorded over a review Blocking would
+    have stopped, deployment unconfirmed (``review_overrides.landed_line``); "" when there is none."""
+    from ouroboros.review_overrides import landed_line
+
+    line = landed_line(repo_dir, data_dir, base=server_source_baseline(), target="HEAD", running=False)
+    return f"\n{line}" if line else ""
+
+
 def record_applied_restart_settings(values: dict, *, server_host_source: str | None = None) -> None:
     """Publish only known startup inputs, after their component starts."""
     from ouroboros.settings_scales import RESTART_REQUIRED_SETTINGS
@@ -107,6 +118,26 @@ def record_applied_restart_settings(values: dict, *, server_host_source: str | N
                                          if key in RESTART_REQUIRED_SETTINGS})
         if "OUROBOROS_SERVER_HOST" in values:
             _applied_server_host_source = server_host_source or "unknown"
+
+
+def raise_open_file_limit() -> None:
+    """At startup the soft limit of open files (``RLIMIT_NOFILE``) rises to the hard one (POSIX; macOS takes
+    ``min(OPEN_MAX, hard)``, 10,240, as its setrlimit(2) asks): the body follows each live run on its own
+    transport, and a GUI-launched macOS process starts at 256. An infinite soft limit stays; Windows is
+    unchanged. A failure and the resulting limit are logged without blocking startup; there is no setting."""
+    try:
+        import resource
+    except ImportError:
+        return  # Windows: no POSIX file limit
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    target = min(hard, 10240) if sys.platform == "darwin" else hard
+    if soft != resource.RLIM_INFINITY and (target == resource.RLIM_INFINITY or target > soft):
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+            soft = target
+        except (ValueError, OSError) as exc:
+            log.info("Open-file limit not raised to %s: %s", target, exc)
+    log.info("Open-file limit %s (hard %s)", soft, hard)
 
 
 def applied_restart_settings() -> dict:

@@ -1095,14 +1095,42 @@ def fast(monkeypatch, world):
     return token_mod
 
 
-def test_both_owner_saves_reach_every_consumer_through_the_strict_grant_reader(core_settings, world, fast, monkeypatch):
+def test_both_owner_saves_reach_every_consumer_through_the_strict_grant_reader(core_settings, world, fast, monkeypatch,
+                                                                               caplog):
     """No token: the poller waits (no request, no failure); the secret form's Save starts it on bot A,
     the Settings Save of B moves polling, outbound and the notifier to B, and clearing stops them all."""
+    import logging
+
+    import httpx
+
     api = _core(world)
     form_save = _secret_form(world, monkeypatch)
     notifier = sys.modules[world.plugin.__package__ + ".lib.telegram_notifier"]
+    post, admitted, gate = httpx.AsyncClient.post, [], {}
+    unset = fast._WAITING_FOR["missing"][1]
+    caplog.set_level(logging.INFO)
+
+    def waits() -> int:
+        """How often the poller has said it waits for a token: it says so on entering that wait."""
+        return sum(unset in record.getMessage() for record in caplog.records)
+
+    async def observed_post(client, url, **kwargs):
+        path = httpx.URL(url).path
+        if path.startswith('/bot'):
+            token, method = path[4:].split('/', 1)
+            admitted.append((token.split(':', 1)[0], method))
+            if gate.get('hold') and token == B and method == 'getUpdates':
+                gate['hold'] = False  # exactly one poll is held
+                gate['entered'].set()
+                await gate['release'].wait()
+                response = await post(client, url, **kwargs)
+                gate['answer'] = [update.get("message", {}).get("message_id") for update in response.json()["result"]]
+                return response
+        return await post(client, url, **kwargs)
+    monkeypatch.setattr(httpx.AsyncClient, 'post', observed_post)
 
     async def scenario():
+        gate.update(entered=asyncio.Event(), release=asyncio.Event())
         poller = world.plugin._make_poller(api)
         async with _running(world, poller, fast.make_token_observer(api)) as (polling, _observer):
             await asyncio.sleep(0.4)
@@ -1120,20 +1148,32 @@ def test_both_owner_saves_reach_every_consumer_through_the_strict_grant_reader(c
             _settings_post(monkeypatch, B)
             bot_b = world.bots.bot(B)
             await _until(lambda: len(bot_b.methods("getUpdates")) >= 2)
-            asked_a = len(bot_a.methods("getUpdates")) + len(bot_a.methods("getMe"))
+            asked_a = [call for call in admitted if call[0] == A_ID and call[1] in {'getUpdates', 'getMe'}]
             bot_b.push(_owner(60, "to the second bot"))
             await _until(lambda: f"tg:{B_ID}:42:60" in world.ids())
             await world.outbound({"chat_id": 1, "text": "answer two", "row_address": "row-b"})
             assert await notifier._push_notification(api, 42, "done") == ("sent", None)
             assert [form["text"] for form in bot_b.methods("sendMessage")] == ["answer two", "done"]
 
-            _settings_post(monkeypatch, "")
-            await _until(lambda: world.plugin._bridge_status(api)["state"] == "missing_token")
-            calls = {name: len(bot.calls) for name, bot in world.bots.bots.items()}
+            # Hold a request AFTER the production binding check but BEFORE wire arrival.
+            # Clearing forbids new admission, not completion of this already admitted poll.
+            gate['hold'] = True
+            await _until(gate['entered'].is_set)
+            try:
+                _settings_post(monkeypatch, "")
+                await _until(lambda: world.plugin._bridge_status(api)["state"] == "missing_token")
+                calls, waited = list(admitted), waits()
+                bot_b.push(_owner(61, "stale words from the cleared token"))
+            finally:
+                gate['release'].set()
+            # Judged only once that poll is over: its answer reached the poller, which then says again that it
+            # waits for a token. Only the poller says so, after it is done with the answer, kept or dropped.
+            await _until(lambda: 'answer' in gate and waits() > waited)
+            assert gate['answer'] == [61], "the held poll must hand the stale words to the poller"
             await world.outbound({"chat_id": 1, "text": "nowhere", "row_address": "row-none"})
-            await asyncio.sleep(0.3)
-            assert {name: len(bot.calls) for name, bot in world.bots.bots.items()} == calls
-            assert len(bot_a.methods("getUpdates")) + len(bot_a.methods("getMe")) == asked_a
+            assert admitted == calls
+            assert [call for call in admitted if call[0] == A_ID and call[1] in {'getUpdates', 'getMe'}] == asked_a
+            assert f"tg:{B_ID}:42:61" not in world.ids()
             assert not polling.done()
 
     world.run(scenario)

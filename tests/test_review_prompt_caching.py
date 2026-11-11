@@ -819,6 +819,8 @@ def test_safety_supervisor_prompt_text_is_unchanged_by_the_cache_block_shape(mon
     hardcoded copy of SAFETY.md."""
     from ouroboros import safety
 
+    # One clock for both builds: the bundle's `work.now` would otherwise tell the sent prompt from the rebuilt one.
+    monkeypatch.setattr(safety, "utc_now_iso", lambda timespec="auto": "2026-11-11T06:56:52+00:00")
     calls, verdict = _capture_safety_messages(
         monkeypatch, "bash", {"command": "ls -la"}
     )

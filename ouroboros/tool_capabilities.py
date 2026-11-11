@@ -91,8 +91,8 @@ MCP_GATEWAY_TOOL_NAME: str = "call_mcp_tool"
 
 # An actor's own working form: which model thinks (switch_model) and how its own
 # transcript is folded under its own note, exact sources kept (compact_context).
-# Both change cognitive power or the view of what the actor already holds, never
-# authority over anything else, so every restricted actor profile below carries
+# For these actors both change only their own cognitive power or held view; the
+# switch_model handler refuses room/Main writes, so every restricted actor profile below carries
 # them in every context mode: a child that finds the work harder raises itself
 # instead of failing, and one whose window fills folds instead of dying of
 # overflow (BIBLE P1, P5).

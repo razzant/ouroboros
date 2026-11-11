@@ -178,7 +178,7 @@ base, stage, source, crash_point = pathlib.Path(sys.argv[1]), *sys.argv[2:]
 root, repo, folder = base / "data", base / "repo", base / "folder"
 root.mkdir(exist_ok=True); repo.mkdir(exist_ok=True)
 state.init(root)
-workers.init(repo, root, 1)
+workers.init(repo, root)
 config.get_bg_wakeup_min_sec = lambda: 0
 q = SimpleNamespace(queue=queue, pending=workers.PENDING, root=root)
 assert not hasattr(queue, "REPO_DIR")

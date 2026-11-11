@@ -78,7 +78,7 @@ def test_one_confirmation_counts_in_every_room_of_its_bot_or_app_and_nowhere_els
         event = PresenceTurnEvent("ev-1", "chat", account, "ops", "", f"chat:{account}:ops:0",
                                   {"platform_actor_id": "anton"}, {}, {"message_id": "ev-1"}, "Ship it")
         admission = SimpleNamespace(place=places.get_place(tmp_path, target.place_id), binding_id=target.place_id,
-                                    allowance={})
+                                    allowance={}, circle=None)
         return focus_metadata(admission, event, "presence-1", 7, tmp_path)["focus"]["actor"]["owner_confirmed"]
 
     assert admitted(sibling, "qa") is True and admitted(other_account, "other") is False
@@ -128,7 +128,7 @@ def test_my_post_through_my_humans_account_is_never_their_words_and_their_same_w
         event = PresenceTurnEvent(message_id, "chat", "qa", "design", "", "chat:qa:design:0",
                                   {"platform_actor_id": "anton"}, {}, {"message_id": message_id}, words)
         admission = SimpleNamespace(place=places.get_place(tmp_path, place.place_id), binding_id=place.place_id,
-                                    allowance={})
+                                    allowance={}, circle=None)
         return focus_metadata(admission, event, "presence-1", 7, tmp_path)["focus"]["actor"]["owner_confirmed"]
 
     assert admitted("1793991732.265319") is False and admitted("1793991800.000100") is True
@@ -200,7 +200,7 @@ def test_a_forward_from_my_humans_account_stays_theirs_as_an_account_and_never_a
     assert _row_kind(row, accounts) == "correspondent_message" and _row_kind(_place_row(place.place_id), accounts) == "owner_message"
     event = PresenceTurnEvent("ev-1", "chat", "qa", "design", "", "chat:qa:design:0",
                               {"platform_actor_id": "anton"}, {}, message, row["text"])
-    admission = SimpleNamespace(place=places.get_place(tmp_path, place.place_id), binding_id=place.place_id, allowance={})
+    admission = SimpleNamespace(place=places.get_place(tmp_path, place.place_id), binding_id=place.place_id, allowance={}, circle=None)
     metadata = focus_metadata(admission, event, "presence-1", 7, tmp_path)
     assert metadata["focus"]["actor"]["owner_confirmed"] is True
     turn = SimpleNamespace(drive_root=tmp_path, task_metadata={**metadata, "presence": {"event": {
