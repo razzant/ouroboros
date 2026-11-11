@@ -418,7 +418,7 @@ Disclosed isolation residuals: a non-owner orphan's verdict stays with its dispo
 
 ### Vendor program maintenance
 
-`harness_maintenance.py` serves Accounts and the native tools; `gateways/claudexor_maintenance.py` passes engine inventory and receipts through. The engine owns vendor selection, newest-version reads, actions and installation. Inspection is passive; explicit Update submits directly. No runtime preparation, host version ordering, auth changes, automatic replay or host job ledger. Authority/Pause apply. A pre-submit refusal covers this attempt only; earlier unknown POSTs retain their key/body. Runtime delivery still selects immutable exact Node generations for the engine and its CLI; it never replaces a live tree.
+`harness_maintenance.py` serves Accounts, Connect and native tools; `gateways/claudexor_maintenance.py` passes engine inventory and receipts through. The engine owns vendor selection, newest-version reads, actions and installation. Inspection is passive; explicit Update submits directly. Connect waits within its ceiling, requires a selected version answer and retries login once. No runtime preparation, host version ordering, auth changes, automatic replay or host job ledger. Authority/Pause apply. A pre-submit refusal covers this attempt only; earlier unknown POSTs retain their key/body. Runtime delivery still selects immutable exact Node generations for the engine and its CLI; it never replaces a live tree.
 
 ### Own-body candidates
 

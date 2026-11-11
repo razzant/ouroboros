@@ -488,3 +488,110 @@ def test_an_engine_refusal_of_create_is_never_reclassified(http, real_wire, tmp_
     monkeypatch.setattr(service, "ensure_owned_gateway", service.read_owned_gateway)
     reply = http.post("/api/claudexor/maintenance/operations", json=REQUEST, headers={"Idempotency-Key": "same-key"})
     assert reply.status_code == 500 and reply.json()["error"] == spawn_failure_body(gone)
+
+
+@pytest.fixture
+def connect_clock(monkeypatch):
+    from ouroboros import config
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(service, "time", SimpleNamespace(
+        monotonic=lambda: clock.now, sleep=lambda delay: setattr(clock, "now", clock.now + delay)))
+    monkeypatch.setattr(config, "get_claudexor_harness_install_timeout_sec", lambda: 3)
+    return clock
+
+
+def connected_program(**changes):
+    return {**deepcopy(OPERATION), "harness": "future-program", "state": "succeeded", "phase": "settled",
+            "termination": "confirmed", "outcome": "changed", "after": deepcopy(PROGRAM), **changes}
+
+
+def test_connect_waits_on_the_same_operation_without_inventory_or_recreation(owned, connect_clock):
+    accepted = connected_program(state="queued", phase="accepted", after=None, termination="not_applicable")
+    reads = iter([connected_program(state="running", phase="installing", after=None), connected_program()])
+    submitted, observed = [], []
+    owned.gateway.maintenance_create = lambda body, key: submitted.append((body, key)) or accepted
+    owned.gateway.maintenance_harnesses = lambda *_a, **_kw: pytest.fail("no latest-read or install preflight")
+    owned.gateway.maintenance_operation = lambda identity, **kw: observed.append((identity, kw)) or next(reads)
+    receipt = service.install_for_connect("future-program")
+    assert receipt == connected_program()
+    assert len(submitted) == 1
+    assert submitted[0][0] == {"harness": "future-program", "target": {"kind": "latest"}}
+    assert submitted[0][1]
+    assert observed == [(accepted["id"], {"timeout_sec": 2.0}), (accepted["id"], {"timeout_sec": 1.0})]
+    assert connect_clock.now == 2 and not owned.calls
+
+
+@pytest.mark.parametrize("changes", [
+    {"state": "failed"}, {"state": "cancelled"}, {"state": "interrupted"}, {"harness": "another-program"},
+    {"after": None}, {"after": {**PROGRAM, "path": None}}, {"after": {**PROGRAM, "version": None}},
+    {"after": {**PROGRAM, "versionOutput": None}}, {"after": {**PROGRAM, "version": "  "}},
+])
+def test_connect_rejects_a_settled_receipt_without_selected_version_evidence(owned, connect_clock, changes):
+    receipt = connected_program(**changes)
+    owned.gateway.maintenance_create = lambda *_a: receipt
+    with pytest.raises(ClaudexorUnavailable) as failure:
+        service.install_for_connect("future-program")
+    assert failure.value.code == "harness_install_unverified"
+    assert failure.value.problem["context"]["operation"] == receipt
+    assert receipt["id"] in str(failure.value)
+    assert not owned.calls and connect_clock.now == 0
+
+
+@pytest.mark.parametrize("outcome", ["changed", "not_changed"])
+def test_connect_accepts_a_selected_program_that_answers_version_without_ordering(owned, connect_clock, outcome):
+    receipt = connected_program(outcome=outcome, after={**PROGRAM, "version": "vendor-build", "versionOutput": "vendor-build"})
+    owned.gateway.maintenance_create = lambda *_a: receipt
+    assert service.install_for_connect("future-program") == receipt
+    assert not owned.calls and connect_clock.now == 0
+
+
+@pytest.mark.parametrize("cancel_lost", [False, True])
+def test_connect_timeout_keeps_unconfirmed_custody_and_never_claims_cancelled(owned, connect_clock, cancel_lost):
+    receipt = connected_program(state="cancelled", termination="unconfirmed", after=None)
+    cancels, reads = [], []
+    owned.gateway.maintenance_create = lambda *_a: receipt
+    owned.gateway.maintenance_operation = lambda identity, **kw: reads.append(identity) or receipt
+
+    def cancel(identity, **kwargs):
+        cancels.append((identity, kwargs))
+        if cancel_lost:
+            raise ClaudexorUnavailable("daemon_unreachable", "cancel reply lost")
+        return receipt
+
+    owned.gateway.maintenance_cancel = cancel
+    with pytest.raises(ClaudexorUnavailable) as failure:
+        service.install_for_connect("future-program")
+    assert failure.value.code == "harness_install_timeout"
+    assert failure.value.problem["context"]["operation"]["termination"] == "unconfirmed"
+    assert cancels == [(receipt["id"], {"timeout_sec": 5})]
+    assert len(reads) == 2 and connect_clock.now == 3
+
+
+@pytest.mark.parametrize("failure_at", ["create", "read"])
+def test_connect_does_not_repeat_an_unanswered_submission_or_observation(owned, connect_clock, failure_at):
+    calls = []
+    receipt = connected_program(state="running", phase="installing", after=None)
+
+    def create(body, key):
+        calls.append(("create", body, key))
+        if failure_at == "create":
+            error = ClaudexorUnavailable("daemon_unreachable", "lost POST")
+            error.problem = {"code": error.code, "context": {"requestId": key, "acceptance": "unknown"}}
+            raise error
+        return receipt
+
+    def read(identity, **_kw):
+        calls.append(("read", identity))
+        raise ClaudexorUnavailable("daemon_unreachable", "lost read")
+
+    owned.gateway.maintenance_create, owned.gateway.maintenance_operation = create, read
+    with pytest.raises(ClaudexorUnavailable) as failure:
+        service.install_for_connect("future-program")
+    facts = failure.value.problem["context"]
+    assert facts["requestId"] == calls[0][2]
+    assert [call[0] for call in calls] == (["create"] if failure_at == "create" else ["create", "read"])
+    if failure_at == "create":
+        assert facts["acceptance"] == "unknown"
+    else:
+        assert facts["operationId"] == receipt["id"]
+    assert not owned.calls

@@ -698,6 +698,16 @@ def _login_job_response(job: Dict[str, Any], **metadata: Any) -> Dict[str, Any]:
 
 
 
+def _is_immediate_missing_cli_job(job: Dict[str, Any], harness: str) -> bool:
+    """The engine's synchronous pre-command missing-program result, never prose matching."""
+    return (isinstance(job, dict) and isinstance(job.get("jobId"), str) and bool(job["jobId"])
+            and job.get("harness") == harness and job.get("action") == "login"
+            and job.get("state") == "not_supported" and job.get("phase") == "completed"
+            and isinstance(job.get("outcome"), dict) and job["outcome"].get("reason") == "not_supported"
+            and "command" in job and job["command"] is None
+            and job.get("authorization") is None and job.get("nativeCommand") is None)
+
+
 def _login_create(body: Dict[str, Any]) -> Dict[str, Any]:
     from ouroboros.claudexor_daemon import (
         attach_login_command,
@@ -818,17 +828,12 @@ def _login_create(body: Dict[str, Any]) -> Dict[str, Any]:
                 raise
 
         job = _create()
-        # Connect is the owner's consent. If the exact pinned engine answers
-        # this FIRST create with its structural pre-command missing-binary
-        # terminal job, install that vendor CLI once and create the job once
-        # more; a second refusal is returned, never looped.
-        from ouroboros.claudexor_harness_install import (
-            install_missing_harness_cli,
-            is_immediate_missing_cli_job,
-        )
+        # Only the first structural pre-command refusal can install, once.
+        # A second refusal is returned; Connect never repairs a failed login.
+        from ouroboros.harness_maintenance import install_for_connect
 
-        if is_immediate_missing_cli_job(job, harness, gateway):
-            install_missing_harness_cli(harness)
+        if _is_immediate_missing_cli_job(job, harness):
+            install_for_connect(harness)
             job = _create()
     job_id = str(job.get("id") or job.get("jobId") or "")
     metadata: Dict[str, Any] = {

@@ -34,16 +34,16 @@ def _selected_program(value):
 class ClaudexorMaintenanceGateway:
     """No daemon lifecycle, installer, cache or retry policy lives in transport."""
 
-    def _maintenance_require(self, operation: str) -> None:
+    def _maintenance_require(self, operation: str, *, timeout_sec=None) -> None:
         from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
-        if not any(row.get("id") == operation for row in self.operations()):
+        if not any(row.get("id") == operation for row in self.operations(**({"timeout_sec": timeout_sec} if timeout_sec is not None else {}))):
             raise ClaudexorUnavailable("maintenance_unavailable",
                                       "This engine does not provide the requested CLI maintenance operation",
                                       status_code=503)
 
     def _maintenance_request(self, operation: str, method: str, path: str, **kwargs):
-        self._maintenance_require(operation)
+        self._maintenance_require(operation, timeout_sec=kwargs.get("timeout_sec"))
         return self._request(method, path, **kwargs)
 
     def maintenance_harnesses(self, harnesses=(), *, fresh=False, check_latest=False) -> dict:
@@ -120,15 +120,15 @@ class ClaudexorMaintenanceGateway:
             raise ClaudexorUnavailable("malformed_response", "Claudexor retention record is missing")
         return body
 
-    def maintenance_operation(self, operation_id: str) -> dict:
+    def maintenance_operation(self, operation_id: str, *, timeout_sec=None) -> dict:
         return self._maintenance_operation(self._maintenance_request(
             "get:maintenance.operations.id", "GET",
-            "/v2/maintenance/operations/" + quote(operation_id, safe="")), operation_id)
+            "/v2/maintenance/operations/" + quote(operation_id, safe=""), timeout_sec=timeout_sec), operation_id)
 
-    def maintenance_cancel(self, operation_id: str) -> dict:
+    def maintenance_cancel(self, operation_id: str, *, timeout_sec=None) -> dict:
         return self._maintenance_operation(self._maintenance_request(
             "post:maintenance.operations.id.cancel", "POST",
-            "/v2/maintenance/operations/" + quote(operation_id, safe="") + "/cancel"), operation_id)
+            "/v2/maintenance/operations/" + quote(operation_id, safe="") + "/cancel", timeout_sec=timeout_sec), operation_id)
 
     @staticmethod
     def _maintenance_operation(value, operation_id=None) -> dict:

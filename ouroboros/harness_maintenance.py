@@ -9,6 +9,8 @@ from __future__ import annotations
 import copy
 import os
 import re
+import time
+import uuid
 from contextlib import ExitStack
 
 from ouroboros.claudexor_daemon import ensure_owned_gateway, read_owned_gateway
@@ -101,11 +103,11 @@ def inspect_harnesses(harnesses=(), *, fresh=False, check_latest=False, ctx=None
             raise
 
 
-def inspect_operation(operation_id: str, *, ctx=None) -> dict:
+def inspect_operation(operation_id: str, *, ctx=None, timeout_sec=None) -> dict:
     _authority(ctx)
     _operation_id(operation_id)
     with read_owned_gateway() as gateway:
-        return gateway.maintenance_operation(operation_id)
+        return gateway.maintenance_operation(operation_id, **({"timeout_sec": timeout_sec} if timeout_sec is not None else {}))
 
 
 def _operation_id(value):
@@ -140,15 +142,63 @@ def start_maintenance(request: dict, request_id: str, *, ctx=None) -> dict:
     return run_operation(ctx, submit)
 
 
-def cancel_maintenance(operation_id: str, *, ctx=None) -> dict:
+def cancel_maintenance(operation_id: str, *, ctx=None, timeout_sec=None) -> dict:
     _authority(ctx, mutate=True)
     _operation_id(operation_id)
 
     def cancel():
         with read_owned_gateway() as gateway:  # Never wake an engine just to cancel.
-            return gateway.maintenance_cancel(operation_id)
+            return gateway.maintenance_cancel(operation_id, **({"timeout_sec": timeout_sec} if timeout_sec is not None else {}))
 
     if ctx is None:
         return cancel()
     from ouroboros.owner_pause import run_operation
     return run_operation(ctx, cancel)
+
+
+def install_for_connect(harness: str) -> dict:
+    """One explicit Connect install, bounded by the existing installer wait ceiling.
+
+    The engine keeps process custody and the receipt. No retry of creation, login,
+    or a failed observation happens here. A timeout requests cancellation but does
+    not claim termination; Accounts can still recover the retained operation.
+    """
+    from ouroboros.config import get_claudexor_harness_install_timeout_sec
+
+    request_id = str(uuid.uuid4())
+    operation = start_maintenance({"harness": harness, "target": {"kind": "latest"}}, request_id)
+    identity = operation["id"]
+    deadline = time.monotonic() + get_claudexor_harness_install_timeout_sec()
+    while operation["state"] in {"queued", "running"} or operation["termination"] == "unconfirmed":
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            try:
+                operation = cancel_maintenance(identity, timeout_sec=5)
+            except ClaudexorUnavailable:
+                pass  # The last receipt remains evidence; a lost cancel proves nothing.
+            raise _connect_install_problem(operation, request_id, "harness_install_timeout",
+                                           "Program installation did not settle within the Connect wait")
+        time.sleep(min(1, remaining))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            continue
+        try:
+            operation = inspect_operation(identity, timeout_sec=min(5, remaining))
+        except ClaudexorUnavailable as exc:
+            raise _connect_install_problem(operation, request_id, exc.code, str(exc)) from exc
+    selected = operation.get("after") or {}
+    if (operation["harness"] != harness or operation["state"] != "succeeded"
+            or not all(isinstance(selected.get(field), str) and selected[field].strip()
+                       for field in ("path", "version", "versionOutput"))):
+        problem = operation.get("problem") or {}
+        raise _connect_install_problem(operation, request_id, problem.get("code") or "harness_install_unverified",
+                                       problem.get("message") or "The selected program did not answer its version")
+    return operation
+
+
+def _connect_install_problem(operation, request_id, code, message):
+    identity = operation["id"]
+    error = ClaudexorUnavailable(code, f"{message}. Inspect operation {identity} in Accounts", status_code=503)
+    error.problem = {"code": code, "message": str(error), "context": {
+        "operationId": identity, "requestId": request_id, "operation": copy.deepcopy(operation)}}
+    return error

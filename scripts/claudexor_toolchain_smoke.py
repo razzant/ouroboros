@@ -14,27 +14,20 @@ prefix, whose entry point it runs. A fresh manager selects the same command
 without re-promoting, and a deleted npm entrypoint is repaired from the verified
 archive cache.
 
-DOES NOT PROVE — by default, that any vendor harness installs, logs in or runs:
-``harness install`` is never invoked, a vendor package download is not a toolchain
-fact, and no account exists in CI. This is the Ouroboros half of that path — the
-managed toolchain ``claudexor_harness_install.install_missing_harness_cli`` hands to the
-engine — and nothing more.
+DOES NOT PROVE — by default, that any vendor program installs, logs in or runs.
+The offline npm witness covers engine CLI runtime delivery only; vendor program
+maintenance does not use that npm toolchain.
 
-``--harness-install codex`` (the Windows consumer lane) then goes one step further,
-on the same isolated toolchain: the engine's side-effect-free ``--dry-run`` disclosure
-must be admitted (an unsupported platform refuses it typed), the
-production ``install_missing_harness_cli`` performs the real install of the exact
-version the engine selects from the npm registry into the engine's HOME-anchored
-toolchain under the disposable home, and the idempotent re-install's receipt must
-name that version and an executable there — on Windows a native image or the
-package-declared Node entry, never an npm shell shim. It must answer ``--version``
-with that version, using the managed Node for a Node entry. The production-started owned daemon's harness rows and ``claudexor
-doctor`` must launch the bare harness through the engine's resolver and identify
-that same entry and version; that daemon is always stopped. It
-still proves no login, OAuth, account or model task.
+``--harness-install HARNESS`` additionally starts the isolated owned engine and
+uses the same maintenance service as Connect, Settings and native tools. The
+program must initially be absent, installation must settle with selected-version
+evidence, and that selected executable must live beneath the disposable HOME.
+It must answer --version directly and the engine's doctor must resolve the same
+path/version. The owned daemon is stopped on every exit. No login, OAuth,
+account or model task is attempted.
 
 Usage:
-    python -I scripts/claudexor_toolchain_smoke.py [--root EMPTY_DIR] [--harness-install codex]
+    python -I scripts/claudexor_toolchain_smoke.py [--root EMPTY_DIR] [--harness-install HARNESS]
 """
 
 from __future__ import annotations
@@ -65,10 +58,6 @@ WITNESS_PACKAGE = "ouroboros-toolchain-witness"
 WITNESS_TOKEN = "managed-npm-install-ok"
 NPM_QUIET = ("--offline", "--ignore-scripts", "--no-audit", "--no-fund",
              "--no-update-notifier", "--loglevel=error")
-INSTALLABLE_HARNESSES = ("codex",)
-# Claudexor core's `managedNodeRoot(HOME)`: a local harness install lands in this
-# HOME-anchored toolchain, never beneath CLAUDEXOR_CONFIG_DIR.
-ENGINE_TOOLCHAIN = (".claudexor", "node")
 
 
 class WitnessFailure(RuntimeError):
@@ -259,67 +248,27 @@ def _contained_run(argv: Sequence[Any], code: str, env: Dict[str, str],
     return stdout.strip()
 
 
-def _declared_node_entry(binary: pathlib.Path, harness: str, toolchain: pathlib.Path,
-                         version: str) -> bool:
-    """The Codex-only consumer's npm bin, not an arbitrary script or shell shim."""
-    if harness != "codex" or binary.suffix.lower() in {".cmd", ".bat", ".ps1"}:
-        return False
-    package_root = toolchain / "node_modules" / "@openai" / "codex"
-    manifest = package_root / "package.json"
-    try:
-        metadata = json.loads(manifest.read_text(encoding="utf-8"))
-        declared = metadata.get("bin")
-        if isinstance(declared, dict):
-            declared = declared.get(harness)
-        if (metadata.get("name") != "@openai/codex" or metadata.get("version") != version
-                or not isinstance(declared, str) or not declared
-                or package_root.resolve() not in manifest.resolve().parents
-                or package_root.resolve() not in binary.resolve().parents
-                or (package_root / declared).resolve() != binary.resolve()):
-            return False
-        with binary.open("rb") as source:
-            return source.readline(4096).strip() == b"#!/usr/bin/env node"
-    except (OSError, ValueError, AttributeError, RuntimeError):
-        return False
-
-
 def _reports_version(text: str, version: str) -> bool:
     return re.search(r"(?<![0-9A-Za-z.+-])" + re.escape(version) + r"(?![0-9A-Za-z.+-])", text) is not None
 
 
-def verify_install_receipt(receipt: Dict[str, Any], harness: str, toolchain: pathlib.Path, *,
+def verify_install_receipt(receipt: Dict[str, Any], harness: str, home: pathlib.Path, *,
                            windows: bool = os.name == "nt") -> pathlib.Path:
-    """The installed executable, once the receipt meets the embedding contract and more."""
-    from ouroboros.claudexor_harness_install import _valid_install_success
-
-    if not _valid_install_success(receipt, harness):
-        raise WitnessFailure("harness_receipt_invalid", f"not the embedding-host receipt: {receipt}")
-    binary = pathlib.Path(receipt["installedBinary"])
-    # Lexical containment is not enough: a symlink (or junction) on the way can make the
-    # executable that actually runs live anywhere, the owner's home included.
+    """Verify selected-version evidence and real containment in the disposable HOME."""
+    selected = receipt.get("after") or {}
+    if (receipt.get("harness") != harness or receipt.get("state") != "succeeded"
+            or receipt.get("termination") == "unconfirmed"
+            or not all(isinstance(selected.get(key), str) and selected[key].strip()
+                       for key in ("path", "version", "versionOutput"))):
+        raise WitnessFailure("harness_receipt_invalid", f"no selected program version: {receipt}")
+    binary = pathlib.Path(selected["path"])
     try:
-        escapes = toolchain.resolve() not in binary.resolve().parents
-    except (OSError, RuntimeError):  # a loop, or a path the OS will not resolve
-        escapes = True
-    # Either npm evidence class passes, as in production: ``release_verified`` at the
-    # engine's release-tested baseline, ``deterministic_only`` for the newer exact npm
-    # release a fresh managed Codex install selects since Claudexor 4.4.0. The summary
-    # reports which one; a version-less script class fails the version check below.
-    problems = [
-        problem for problem, broken in (
-            ("installedVersion differs from pinnedVersion",
-             receipt["installedVersion"] != receipt["pinnedVersion"]),
-            (f"it is not beneath the disposable engine toolchain {toolchain}",
-             toolchain not in binary.parents),
-            (f"it resolves outside the disposable engine toolchain {toolchain}", escapes),
-            ("it is not an existing file", not binary.is_file()),
-            (f"it is neither the native {harness}.exe image nor the package-declared Node entry",
-             windows and binary.name.lower() != f"{harness}.exe"
-             and not _declared_node_entry(binary, harness, toolchain, receipt["pinnedVersion"])),
-        ) if broken
-    ]
-    if problems:
-        raise WitnessFailure("harness_receipt_invalid", f"{binary}: {'; '.join(problems)}")
+        contained = home.resolve() in binary.resolve().parents
+    except (OSError, RuntimeError):
+        contained = False
+    if (not binary.is_absolute() or not binary.is_file() or not contained
+            or windows and binary.suffix.lower() in {".cmd", ".bat", ".ps1"}):
+        raise WitnessFailure("harness_receipt_invalid", f"{binary} is not a direct executable within {home}")
     return binary
 
 
@@ -396,42 +345,41 @@ def doctor_witness(harness: str, command: List[str], env: Dict[str, str], binary
 
 def harness_install_witness(harness: str, node: pathlib.Path, command: List[str],
                             cli_env: Dict[str, str], *, windows: bool = os.name == "nt") -> Dict[str, Any]:
-    """Install the pinned vendor CLI through the production seam and prove what resolves."""
-    toolchain = pathlib.Path(os.environ["HOME"]).joinpath(*ENGINE_TOOLCHAIN)
-    if toolchain.exists():
-        raise WitnessFailure("harness_preinstalled", f"{toolchain} exists before any install")
-    from ouroboros.claudexor_harness_install import install_missing_harness_cli
-    from ouroboros.config import get_claudexor_harness_install_timeout_sec
+    """Exercise the shared vendor maintenance service, with no legacy installer route."""
+    from ouroboros import harness_maintenance as maintenance
+    from ouroboros.claudexor_daemon import ensure_owned_gateway, get_owned_daemon
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
-    install = [*command, "harness", "install", harness, "--target", "local"]
-    # Side-effect free: an engine without a supported install recipe refuses typed here.
-    disclosure = _cli_json([*install, "--dry-run", "--json"], "harness_install_refused", cli_env)
+    daemon = get_owned_daemon()
     try:
-        install_missing_harness_cli(harness)
+        gateway = ensure_owned_gateway()
+        try:
+            inventory = gateway.maintenance_harnesses([harness], fresh=True)
+        finally:
+            gateway.close()
+        row = next((row for row in inventory["harnesses"] if row["harness"] == harness), None)
+        if row is None or row["selection"]["path"] is not None:
+            raise WitnessFailure("harness_preinstalled", "The requested program must initially be absent")
+        if not row["actions"]["install"]["available"]:
+            raise WitnessFailure("harness_install_refused", row["actions"]["install"]["reason"])
+        receipt = maintenance.install_for_connect(harness)
+        binary = verify_install_receipt(receipt, harness, pathlib.Path(os.environ["HOME"]), windows=windows)
+        version = receipt["after"]["version"]
+        harness_env = dict(cli_env, PATH=os.pathsep.join(
+            [str(node.parent), str(binary.parent), cli_env.get("PATH", "")]))
+        invocation = [node, binary] if windows and binary.suffix.lower() in {".js", ".cjs", ".mjs"} else [binary]
+        direct = _contained_run([*invocation, "--version"], "harness_direct_failed", harness_env)
+        if not _reports_version(direct, version):
+            raise WitnessFailure("harness_direct_failed", f"{binary} --version printed {direct!r}")
+        return {"harness": harness, "selected_version": version, "selected_binary": str(binary),
+                "operation": receipt, "direct_version": direct, "by_name_probe": "engine_doctor",
+                "doctor": doctor_witness(harness, command, cli_env, binary, version)}
     except ClaudexorUnavailable as exc:
-        raise WitnessFailure(exc.code, f"production install_missing_harness_cli: {exc}") from exc
-    receipt = _cli_json([*install, "--yes", "--json"], "harness_recheck_failed", cli_env,
-                        get_claudexor_harness_install_timeout_sec())
-    binary = verify_install_receipt(receipt, harness, toolchain, windows=windows)
-    version = str(receipt["pinnedVersion"])
-    if disclosure.get("pinnedVersion") != version:
-        raise WitnessFailure("harness_pin_drift",
-                             f"disclosed {disclosure.get('pinnedVersion')!r}, installed {version!r}")
-    # Direct execution retains process custody. The engine's own doctor below
-    # proves bare-name resolution, including npm's Node interpreter transport.
-    harness_env = dict(cli_env, PATH=os.pathsep.join(
-        [str(node.parent), str(binary.parent), cli_env.get("PATH", "")]))
-    invocation = [node, binary] if windows and binary.name.lower() != f"{harness}.exe" else [binary]
-    direct = _contained_run([*invocation, "--version"], "harness_direct_failed", harness_env)
-    if not _reports_version(direct, version):
-        raise WitnessFailure("harness_direct_failed", f"{binary} --version printed {direct!r}")
-    return {
-        "harness": harness, "pinned_version": version, "installed_binary": str(binary),
-        "verification": receipt["verification"], "install_location": receipt["installLocation"],
-        "direct_version": direct, "by_name_probe": "engine_doctor",
-        "doctor": doctor_witness(harness, command, cli_env, binary, version),
-    }
+        raise WitnessFailure(exc.code, f"production maintenance service: {exc}") from exc
+    finally:
+        stopped = _stop_owned_daemon(daemon)
+        if stopped not in ("stopped", "nothing_to_stop"):
+            raise WitnessFailure("maintenance_daemon_not_stopped", f"owned daemon stop outcome: {stopped}")
 
 
 def run_witness(root: pathlib.Path, dropped_path: List[str],
@@ -487,7 +435,7 @@ def run_witness(root: pathlib.Path, dropped_path: List[str],
     node_version = _run([node, "--version"], "managed_node_failed")
     if node_version != f"v{pin.node_version}":
         raise WitnessFailure("managed_node_failed", f"managed Node reports {node_version!r}")
-    # The same data-plane binding install_missing_harness_cli gives the CLI.
+    # The CLI observes the same owned data plane as the daemon.
     cli_env = dict(os.environ, CLAUDEXOR_CONFIG_DIR=str(owned_config_dir()))
     cli_version = _run([node, cli, "--version"], "managed_cli_failed", env=cli_env)
     if pin.version not in cli_version:
@@ -517,27 +465,17 @@ def run_witness(root: pathlib.Path, dropped_path: List[str],
 
 
 LIMITS = (
-    "### What this check does NOT cover",
-    "",
-    "- **No vendor harness was installed, logged in or run.** `harness install --target "
-    "local` is not invoked. A green row says the managed Node/npm toolchain works here, "
-    "not that Codex or Claude does.",
+    "### What this check does NOT cover", "",
+    "- **No vendor harness was installed, logged in or run.** A green row proves engine CLI runtime delivery.",
     "- No daemon, model, account or credential was involved.",
-    "- npm was proven on an offline local-tarball install; registry access is not tested.",
+    "- npm was proven on an offline local-tarball install; vendor maintenance does not use it.",
 )
 HARNESS_LIMITS = (
-    "### What this check does NOT cover",
-    "",
-    "- **No login, OAuth, account or model task was attempted.** A green row says the "
-    "pinned `{harness}` installed through Ouroboros's production installer seam and "
-    "launches directly (with managed Node for a Node entry), and the engine's doctor "
-    "launches the bare name and identifies that same entry and version — not that it "
-    "can authenticate or run a task here.",
-    "- The doctor's overall `{harness}` status is reported, not asserted: with no "
-    "credentials it is expected to be not ready; only its `installed` check is required.",
-    "- The receipt's `verification` is reported, not asserted: `deterministic_only` means "
-    "the engine selected a release newer than the one it was verified against.",
-    "- Only `{harness}` was installed; Claude and every other vendor were not attempted.",
+    "### What this check does NOT cover", "",
+    "- **No login, OAuth, account or model task was attempted.** `{harness}` installed through the shared "
+    "maintenance service and its selected executable answered its version directly and through doctor.",
+    "- The doctor's overall status is reported; only its installed check must pass without credentials.",
+    "- Only `{harness}` was installed; no other vendor program was attempted.",
 )
 
 
@@ -574,8 +512,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--root", type=pathlib.Path, default=None,
                         help="empty or absent disposable directory (default: a new temp dir)")
-    parser.add_argument("--harness-install", choices=INSTALLABLE_HARNESSES, default=None,
-                        help="then install this pinned harness for real (registry network) "
+    parser.add_argument("--harness-install", metavar="HARNESS", default=None,
+                        help="then install this vendor program through maintenance (vendor network) "
                              "and prove its resolution and doctor; no login or model task")
     args = parser.parse_args(argv)
     harness = args.harness_install
@@ -599,7 +537,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     detail = ("the pinned managed Node/npm toolchain was installed from official archives and "
               "exercised with no ambient Node or npm")
     if harness:
-        detail += f"; the pinned `{harness}` installed locally, resolves and passes doctor's install check"
+        detail += f"; the vendor `{harness}` installed through maintenance, resolves and passes doctor's install check"
     emit_summary(facts, "PASSED", detail, harness)
     return 0
 

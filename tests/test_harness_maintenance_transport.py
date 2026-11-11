@@ -190,3 +190,12 @@ def test_invalid_key_never_contacts_engine(client, key):
     with pytest.raises(ValueError):
         gateway.maintenance_create(REQUEST, key)
     assert not seen
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_connect_receipt_reads_bound_catalog_and_operation_calls(client, cancel):
+    gateway, seen = client(lambda _request: httpx.Response(200, json=OPERATION))
+    call = gateway.maintenance_cancel if cancel else gateway.maintenance_operation
+    assert call(OPERATION["id"], timeout_sec=0.75) == OPERATION
+    assert all(request.extensions["timeout"] == dict(connect=0.75, read=0.75, write=0.75, pool=0.75)
+               for request in seen)
