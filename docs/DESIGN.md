@@ -411,8 +411,8 @@ keeps saved secrets masked. Pending reads and failures are shown at the field.
 
 A choice among a few short words is one strip: one track, each option as wide as its word and at
 least a touch target, only the chosen one filled; it wraps and never scrolls sideways. A choice
-that needs a line per option is a list of choices (Access), and one of many or long labels a
-native select, clipped at its own edge with the full label in the platform's popup: a control
+that needs a line per option is a list of choices (Access), and a choice of many or long labels
+is a native select, clipped at its own edge with the full label in the platform's popup: a control
 never widens its column. The composer's capsules are the same control with a sliding thumb. An
 empty inherit choice is as real as any other, and the focused choice wears the one focus ring. A
 choice the running Access suspends (Blocking under Cyber Pro) stays chosen; its row says what
@@ -689,7 +689,7 @@ The problem, needed restart or unconfirmed outcome stays in its authoritative vi
 in-feed history edge) until it changes or the owner resolves it. Dismissing a notice hides it per browser,
 never its record (the Update indicator, owner 1B, 25.10). A plain acknowledgement in
 place may end by itself, but where the line is its fact's only home (a setting's row) an error, a warning or a
-needed restart stays until the row's next result, an edit of it or leaving its page. A current fact ends with its fact; unread ends when the message
+needed restart stays until the row's next result, an edit or leaving its page. A current fact ends with its fact; unread ends when the message
 is shown; a retained record (Updates, history, `Input saved`) lives with its record, with
 no timer. Toasts and statuses older than this rule are checked against it when touched.
 
@@ -2853,8 +2853,8 @@ stops clear of them.
 
 ### Settings
 
-**A row is a question with its current answer, and a setting has one row** (§6); the result of a change shares
-its one line of meaning, and a paragraph waits behind `More`. The home is Ouroboros's card, search and six groups
+**A row is a question with its current answer, and a setting has one row** (§6); its one line says what it
+means and what a change did, and a paragraph waits behind `More`. The home is Ouroboros's card, search and six groups
 of rows; a wide window keeps it beside the open page, whose first row is Back. A row opens its page or is a door:
 what lives elsewhere (a Dashboard tab beside its live state, Main's composer) shows its value here and leads
 there, and a tab opened from here leads back. A list of entries (agents, tool servers, keys, fallbacks) is heads:
