@@ -24,7 +24,7 @@ from tests.test_harness_maintenance_transport import ENTRY, OPERATION, PROGRAM, 
 
 @pytest.fixture
 def owned(monkeypatch):
-    calls, opened = [], []
+    calls, opened, budgets = [], [], []
     inventory = {"observedAt": "2026-10-09T00:00:00Z", "harnesses": [{**deepcopy(ENTRY), "harness": "agy"}]}
     gateway = SimpleNamespace(
         maintenance_harnesses=lambda names, **kw: calls.append(("inspect", names, kw)) or deepcopy(inventory),
@@ -41,9 +41,9 @@ def owned(monkeypatch):
         finally:
             opened.append("closed")
 
-    monkeypatch.setattr(service, "read_owned_gateway", lambda: connection("read"))
+    monkeypatch.setattr(service, "read_owned_gateway", lambda **kw: budgets.append(kw) or connection("read"))
     monkeypatch.setattr(service, "ensure_owned_gateway", lambda: connection("ensure"))
-    return SimpleNamespace(calls=calls, opened=opened, inventory=inventory, gateway=gateway)
+    return SimpleNamespace(calls=calls, opened=opened, inventory=inventory, gateway=gateway, budgets=budgets)
 
 
 @pytest.fixture
@@ -521,6 +521,7 @@ def test_connect_waits_on_the_same_operation_without_inventory_or_recreation(own
     assert submitted[0][1]
     assert observed == [(accepted["id"], {"timeout_sec": 2.0}), (accepted["id"], {"timeout_sec": 1.0})]
     assert connect_clock.now == 2 and not owned.calls
+    assert owned.budgets == [{"timeout_sec": 2.0}, {"timeout_sec": 1.0}]
 
 
 @pytest.mark.parametrize("changes", [
@@ -567,6 +568,7 @@ def test_connect_timeout_keeps_unconfirmed_custody_and_never_claims_cancelled(ow
     assert failure.value.problem["context"]["operation"]["termination"] == "unconfirmed"
     assert cancels == [(receipt["id"], {"timeout_sec": 5})]
     assert len(reads) == 2 and connect_clock.now == 3
+    assert owned.budgets == [{"timeout_sec": 2.0}, {"timeout_sec": 1.0}, {"timeout_sec": 5}]
 
 
 @pytest.mark.parametrize("failure_at", ["create", "read"])

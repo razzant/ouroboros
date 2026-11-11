@@ -106,8 +106,9 @@ def inspect_harnesses(harnesses=(), *, fresh=False, check_latest=False, ctx=None
 def inspect_operation(operation_id: str, *, ctx=None, timeout_sec=None) -> dict:
     _authority(ctx)
     _operation_id(operation_id)
-    with read_owned_gateway() as gateway:
-        return gateway.maintenance_operation(operation_id, **({"timeout_sec": timeout_sec} if timeout_sec is not None else {}))
+    options = {"timeout_sec": timeout_sec} if timeout_sec is not None else {}
+    with read_owned_gateway(**options) as gateway:
+        return gateway.maintenance_operation(operation_id, **options)
 
 
 def _operation_id(value):
@@ -147,8 +148,9 @@ def cancel_maintenance(operation_id: str, *, ctx=None, timeout_sec=None) -> dict
     _operation_id(operation_id)
 
     def cancel():
-        with read_owned_gateway() as gateway:  # Never wake an engine just to cancel.
-            return gateway.maintenance_cancel(operation_id, **({"timeout_sec": timeout_sec} if timeout_sec is not None else {}))
+        options = {"timeout_sec": timeout_sec} if timeout_sec is not None else {}
+        with read_owned_gateway(**options) as gateway:  # Never wake an engine just to cancel.
+            return gateway.maintenance_cancel(operation_id, **options)
 
     if ctx is None:
         return cancel()
