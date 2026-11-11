@@ -112,11 +112,9 @@ test('the headline card says the money of the last 24 hours alone; where it went
     assert.equal(spendDetails(snapshot).unpriced, true);
     assert.deepEqual(spendDetails({ ...snapshot, spendByCause: [{ cause: 'own', label: '', usd: 0, unmeteredCalls: 0 }] }),
         { rows: [], unpriced: false }, 'a zero is not listed');
-    // Where the places live is a pointer, no list; the allowance, its own tasks and its conversations are the settings
-    // card's rows (dashboard_settings.test.js), so no line here leads to Costs or Settings.
-    assert.match(strip(html), /The places it lives in, their words and their circles: Circles ›/);
-    assert.match(html, /data-cx-act="circles"/);
-    assert.doesNotMatch(html, /data-cx-act="(costs|settings)"|Costs ›|Settings ›/);
+    // The allowance, its own tasks, its conversations, its model and its places are rows of the settings cards
+    // (dashboard_settings.test.js), so no line here leads to Costs, Settings or Circles.
+    assert.doesNotMatch(html, /data-cx-act="(costs|settings|circles)"|Costs ›|Settings ›|Circles ›/);
     assert.match(strip(main), /Stop also ends a wake that is running now\./, 'stopping is said to end a running wake');
     assert.doesNotMatch(summaryHtml({ ...snapshot, enabled: false }), /Stop also ends/, 'said only while there is a Stop');
     assert.match(details, /^<details class="ui-disclosure consciousness-details"><summary>Details<\/summary>/);
@@ -266,7 +264,7 @@ test('the Dashboard lists no places: no card and no place read at mount, show, p
     window.dispatchEvent(new Event('ouro:skill-lifecycle')); await settled();
     assert.equal(reads, 0, 'the places are listed on Circles; a wake\'s door reads them when pressed');
     assert.equal(mount.regions.has('[data-cx-places]'), false, 'no Places card region');
-    assert.match(mount.regions.get('[data-cx-summary]').innerHTML, /data-cx-act="circles"/);
+    assert.match(mount.regions.get('[data-cx-summary]').innerHTML, /class="dashboard-hero"/);
     controller.destroy();
 });
 
@@ -277,7 +275,7 @@ function fakeMount() {
         regions,
         querySelector(selector) {
             if (!regions.has(selector)) regions.set(selector, { innerHTML: '', textContent: '', dataset: {}, querySelector: () => null, querySelectorAll: () => [], closest: () => null,
-                addEventListener() {}, removeEventListener() {} });
+                children: [], addEventListener() {}, removeEventListener() {} });
             return regions.get(selector);
         },
         addEventListener() {}, removeEventListener() {},

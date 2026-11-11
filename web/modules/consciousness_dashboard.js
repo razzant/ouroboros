@@ -11,6 +11,7 @@ import { controlIcon } from './page_icons.js';
 import { chipHtml } from './skill_presentation.js';
 import { tr, fmt } from './i18n.js';
 import { failureText, readConsciousness, readConsciousnessFromState, readPlaces } from './consciousness_api.js';
+import { autonomyOf } from './consciousness_autonomy.js';
 import { CHECK_CHIPS, allowanceText, clockText, consciousnessMark, splitWakes, durationText, sendsAsHtml, usdText, wakePhaseText, wakeFactsText, wakeCheckChip, wakeCheckText, wakeCostText } from './consciousness_words.js';
 import { mountChatMarkdown, enhanceChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
 import { confirmAndSendRestart, costPresentationDetail } from './chat_activity.js';
@@ -30,10 +31,10 @@ const OWN_GLYPH = controlIcon('brain', 14);
 // Work running now: the house status mark's moving dots, in the surface's own ink.
 const dots = () => statusMarkHtml('consciousness-mark', { shape: 'moving', hue: 'ink' });
 
-// The wake range is refused before anything is sent when its first number is above its second: the server would take
-// it and quietly wake at the first.
+// The wake range is refused before anything is sent when its shortest wait is above its longest: the server would take
+// it and wake at the shortest (runtime_limits.get_bg_wakeup_max_sec).
 WRITERS.wakeRange = (row, value, options) => (Number(value?.[0]) > Number(value?.[1])
-    ? { state: 'refused', effect: 'next_wake', withheld: '', message: 'The first number is above the second.', code: 'invalid_value' }
+    ? { state: 'refused', effect: '', withheld: '', message: 'The shortest wait is above the longest.', code: 'invalid_value' }
     : WRITERS.generic(row, value, options));
 
 /** Seconds as the words a person reads: minutes below an hour, hours from there. */
@@ -44,14 +45,19 @@ export function waitWords(seconds) {
     return `${amount} ${unit}${amount === 1 ? '' : 's'}`;
 }
 
-/** What the settings card says besides its rows: the wake range in minutes or hours, and its two doors' values. */
+/** What the settings cards say from the last settings read besides their rows (dashboard.js `words`): the chosen level
+ *  in its own sentence, the wake range in minutes or hours, and the values behind the allowance and the model doors. */
 export function cardWords(settings) {
-    if (!settings) return { range: '', allowance: '', model: '' };
     const [min, max] = [waitWords(settings.OUROBOROS_BG_WAKEUP_MIN), waitWords(settings.OUROBOROS_BG_WAKEUP_MAX)];
     const model = String(settings.OUROBOROS_MODEL_CONSCIOUSNESS ?? '').trim();
-    const allowance = Number(settings.OUROBOROS_CONSCIOUSNESS_DAILY_USD);
-    return { range: min && max ? `${min} to ${max}` : '', allowance: Number.isFinite(allowance) ? usdText(allowance) : '',
-        model: model ? parseModelSource(model).model || model : 'Main model' };
+    const stored = settings.OUROBOROS_CONSCIOUSNESS_DAILY_USD;
+    const allowance = stored === undefined || stored === null || stored === '' ? NaN : Number(stored);
+    return {
+        OUROBOROS_CONSCIOUSNESS_AUTONOMY: { caption: autonomyOf(settings.OUROBOROS_CONSCIOUSNESS_AUTONOMY)?.note || '' },
+        OUROBOROS_BG_WAKEUP: { caption: !min || !max ? '' : min === max ? `It wakes every ${min}.` : `It picks a moment between ${min} and ${max}.` },
+        'consciousness-allowance': { value: Number.isFinite(allowance) ? `${Number.isInteger(allowance) ? `$${allowance}` : usdText(allowance)} a day` : '' },
+        'consciousness-model': { value: model ? parseModelSource(model).model || model : 'Main model' },
+    };
 }
 
 /** Active rows are explicitly marked by the producer; their phase may still be waiting. */
@@ -95,7 +101,7 @@ export function countedRootsText(snapshot) {
 /** The tab's headline card on the Dashboard tab body: the state in the host's words with its one status mark, the money
  *  of the last 24 hours and the own-task count as its meta, Start/Stop (and Restart when it cannot wake) beside them,
  *  and while it is on, that Stop also ends a running wake; where the money went, the unpriced caveat and the own tasks'
- *  names are the card's Details. Its door: Circles (the allowance and the rest are the settings card's rows).
+ *  names are the card's Details. Its doors (Costs, Models, Circles) are rows of the settings cards under it.
  *  `toggling` is the command just sent (its button says so until the next read). */
 export function summaryHtml(snapshot, { hasSocket = true, toggling = '', detailsOpen = false } = {}) {
     const headline = headlineView(snapshot);
@@ -124,8 +130,7 @@ export function summaryHtml(snapshot, { hasSocket = true, toggling = '', details
             ${snapshot.enabled ? '<p class="dashboard-hero-meta">Stop also ends a wake that is running now.</p>' : ''}
             ${toggle || restart ? `<div class="dashboard-hero-actions">${restart}${toggle}</div>` : ''}
         </div>
-        ${details ? `<details class="ui-disclosure consciousness-details"${detailsOpen ? ' open' : ''}><summary>Details</summary>${details}</details>` : ''}
-        <p class="consciousness-foot consciousness-door-line">${escapeHtml(tr('consciousness.places.circles', 'The places it lives in, their words and their circles:'))} <button type="button" class="consciousness-inline-link ui-hit-area" data-cx-act="circles">${escapeHtml(tr('circles.link', 'Circles ›'))}</button></p>`;
+        ${details ? `<details class="ui-disclosure consciousness-details"${detailsOpen ? ' open' : ''}><summary>Details</summary>${details}</details>` : ''}`;
 }
 
 /** One view of the card: authored line, whole note on request, factual phase and cost. */
@@ -229,39 +234,30 @@ export function paintWakeRows(region, wakes, coverage, opened, put, release = de
     keepPosition();
 }
 
-/** The tab's settings card: what it does on its own as rows that save themselves, "to" between the wake range's two
- *  numbers and the range in minutes or hours beside them, and the values behind its two doors. The allowance door opens
- *  its row in Costs; the model door opens its role in Models, which leads back here. */
-function mountSettingsCard(host, { state, openSettings, openDashboardTab }) {
+/** The tab's settings (dashboard.js mountTabSettings): the card "On its own" with what it does as rows that save
+ *  themselves and its fold, then the doors of "Around it". The allowance door opens its row in Costs; the model door
+ *  opens its role in Models, which leads back here; its places are the Circles page. */
+function mountSettingsCards(host, { state, openSettings, openDashboardTab }) {
     if (!host) return { dispose() {} };
-    const extras = new Map();
-    const card = mountTabSettings(host, 'consciousness', {
-        state, title: 'On its own', fold: 'More: conversations at once',
-        openDoor: (row) => (row.id === 'consciousness-allowance'
-            ? openDashboardTab?.('costs', { row: 'OUROBOROS_CONSCIOUSNESS_DAILY_USD' })
-            : openSettings?.('models/role/consciousness', { back: { label: 'Consciousness', go: () => openDashboardTab?.('consciousness') } })),
-        onPaint: (settings) => {
-            const words = cardWords(settings);
-            for (const [key, node] of extras) if (node.textContent !== words[key]) node.textContent = words[key];
-        },
-    });
-    const rowNode = (id) => Array.from(host.querySelectorAll('[data-setting-row]')).find((node) => node.dataset.settingRow === id);
-    const span = (key, className, text = '') => {
-        const node = host.ownerDocument.createElement('span');
-        node.className = className;
-        node.textContent = text;
-        if (key) extras.set(key, node);
-        return node;
+    const back = { label: 'Consciousness', go: () => openDashboardTab?.('consciousness') };
+    const doors = {
+        'consciousness-allowance': () => openDashboardTab?.('costs', { row: 'OUROBOROS_CONSCIOUSNESS_DAILY_USD' }),
+        'consciousness-model': () => openSettings?.('models/role/consciousness', { back }),
+        'consciousness-places': () => openCircles(),
     };
-    const range = rowNode('OUROBOROS_BG_WAKEUP');
-    const second = range?.querySelectorAll('[data-setting-control]')[1];
-    second?.parentElement.insertBefore(span('', 'settings-row-unit', 'to'), second);
-    range?.querySelector('.ui-row-meta').insertBefore(span('range', 'settings-row-value'), range.querySelector('[data-setting-result]'));
-    for (const [id, key] of [['consciousness-allowance', 'allowance'], ['consciousness-model', 'model']]) {
-        const actions = rowNode(id)?.querySelector('.ui-row-actions');
-        actions?.insertBefore(span(key, 'settings-row-value'), actions.firstChild);
+    const cards = mountTabSettings(host, 'consciousness', { state, words: cardWords, openDoor: (row) => doors[row.id]?.(),
+        cards: [{ title: 'On its own', fold: 'More: conversations at once' },
+            { title: 'Around it', rows: ['consciousness-model', 'consciousness-places'] }] });
+    // The range reads "[shortest] to [longest] s".
+    const range = Array.from(host.querySelectorAll('[data-setting-row]')).find((node) => node.dataset.settingRow === 'OUROBOROS_BG_WAKEUP');
+    const longest = range?.querySelectorAll('[data-setting-control]')[1];
+    if (longest) {
+        const to = host.ownerDocument.createElement('span');
+        to.className = 'settings-row-unit';
+        to.textContent = 'to';
+        longest.parentElement.insertBefore(to, longest);
     }
-    return card;
+    return cards;
 }
 
 /** Mount the tab into its Dashboard panel. */
@@ -269,19 +265,19 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettings, ope
     readFallback = readConsciousnessFromState, readPlacesFn = readPlaces, openSheet = openPlaceSheet,
     markdown = { mount: mountChatMarkdown, enhance: enhanceChatMarkdown, destroy: destroyChatMarkdown } } = {}) {
     if (!mount) return { refresh: () => {}, destroy() {} };
-    // The tab's one root and scroller (style.css "The Dashboard tab body"); the settings card is drawn once and no
-    // repaint of the tab touches it.
+    // The tab's one root and scroller (style.css "The Dashboard tab body"); the settings cards are drawn once and no
+    // repaint of the tab touches them.
     mount.innerHTML = `<div class="dashboard-body scroll-fade-y consciousness-root">
             <p class="ui-status consciousness-read-status" role="status" data-cx-status></p>
             <section class="ui-card" aria-label="Consciousness" data-cx-summary><p class="consciousness-copy">Reading…</p></section>
-            <section class="ui-card dashboard-settings" aria-label="On its own" data-cx-settings></section>
+            <div class="dashboard-settings-cards" data-cx-settings></div>
             <section class="ui-card consciousness-card" aria-label="Recent wakes" data-cx-wakes></section>
         </div>`;
     const regions = {
         status: mount.querySelector('[data-cx-status]'), summary: mount.querySelector('[data-cx-summary]'),
         wakes: mount.querySelector('[data-cx-wakes]'),
     };
-    const card = mountSettingsCard(mount.querySelector('[data-cx-settings]'), { state, openSettings, openDashboardTab });
+    const cards = mountSettingsCards(mount.querySelector('[data-cx-settings]'), { state, openSettings, openDashboardTab });
     // The page binds every `.scroll-fade-y` scroller once, after the panels mount (app.js).
     let snapshot = null;
     let generation = 0;
@@ -396,7 +392,6 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettings, ope
         const button = event.target.closest('[data-cx-act]');
         if (!button || button.disabled) return;
         const act = button.dataset.cxAct;
-        if (act === 'circles') { openCircles(); return; }
         if (act === 'restart') {
             // The house Restart (the chat header's): it confirms first and names the work it would interrupt.
             await confirmAndSendRestart({ openConfirmDialog, ws });
@@ -429,7 +424,7 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettings, ope
         refresh,
         destroy() {
             destroyed = true;
-            card.dispose();
+            cards.dispose();
             releaseNotes(mount);
             clearTimeout(timer);
             mount.removeEventListener('click', onClick);
