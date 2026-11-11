@@ -290,6 +290,8 @@ class ContextCore:
     # The captured memory view (``memory_view.snapshot_json``); each projection renders
     # it for its own mode and window. Empty: no memory view was captured.
     memory_view_json: str = ""
+    # That capture's journal boundary (``MemoryViewSnapshot.chronicle_sequence``), beside the view and not hashed.
+    memory_view_sequence: Optional[int] = None
     # Captured source rows follow the assignment, outside the immutable system view.
     supplementary_messages_json: str = "[]"
     semi_stable_sections: Tuple[HostSection, ...] = ()
@@ -544,12 +546,14 @@ def _context_route(task: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]
     from ouroboros.capability_evidence import model_account_options
     from ouroboros.config import runtime_settings
     from ouroboros.gateway.settings import _active_main_route
+    from ouroboros.route_choice import task_lead
     from ouroboros.server_runtime import apply_runtime_provider_defaults
 
     settings, _changed, _keys = apply_runtime_provider_defaults(runtime_settings())
-    local_override = task.get("use_local_model")
+    carried = None if task.get("model") else task_lead(task.get("task_metadata", task.get("metadata")))  # sized from its first plan
+    local_override = carried["use_local"] if carried else task.get("use_local_model")
     route = _active_main_route(
-        settings, model_override=str(task.get("model") or "").strip(),
+        settings, model_override=str((carried or task).get("model") or "").strip(),
         use_local_override=(
             bool(local_override) if local_override is not None else None
         ),

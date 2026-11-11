@@ -112,10 +112,13 @@ test('the headline card says the money of the last 24 hours alone; where it went
     assert.equal(spendDetails(snapshot).unpriced, true);
     assert.deepEqual(spendDetails({ ...snapshot, spendByCause: [{ cause: 'own', label: '', usd: 0, unmeteredCalls: 0 }] }),
         { rows: [], unpriced: false }, 'a zero is not listed');
-    // Where the places live and where the allowance is set: two pointers, no list.
+    // Where the places live, where the allowance is set (Costs, its one editor) and where the rest is: pointers, no list.
     assert.match(strip(html), /The places it lives in, their words and their circles: Circles ›/);
     assert.match(html, /data-cx-act="circles"/);
-    assert.match(strip(html), /Allowance, own tasks and concurrent conversations: Settings ›/);
+    assert.match(strip(html), /Its spending limit over 24 hours and what it spent: Costs ›/);
+    assert.match(html, /data-cx-act="costs">Costs ›</);
+    assert.match(strip(html), /Its own tasks and concurrent conversations: Settings ›/);
+    assert.doesNotMatch(strip(html), /Allowance, own tasks/, 'Settings no longer holds the allowance');
     assert.match(details, /^<details class="ui-disclosure consciousness-details"><summary>Details<\/summary>/);
     assert.match(strip(details), /Own time\s*\$0\.62.*Some calls have no price\..*Release notes draft \(Slack · Acme\)/);
     assert.equal(countedRootsText(snapshot), 'Its own tasks: 1 of 2 · Release notes draft (Slack · Acme)');
@@ -141,6 +144,25 @@ test('a state that cannot wake wears its failure mark and offers Restart; starti
     assert.deepEqual(consciousnessMark({ ...stopped, status: 'allowance_exhausted' }), { shape: 'dot', hue: 'owner' });
     assert.deepEqual(consciousnessMark({ ...stopped, status: 'thinking' }), { shape: 'moving', hue: 'ink' });
     assert.deepEqual(consciousnessMark({ ...stopped, enabled: false }), { shape: 'none', hue: 'ink' });
+    // A held wake keeps the word `wake_paused`; only a proven allowance hold is the owner's move (amber), every other
+    // or unproven cause keeps the pause bars.
+    const held = normalizeConsciousness({ enabled: true, status: 'wake_paused', live_wake_task_id: 'w1', live_wake_held: true,
+        detail: 'Wake-up w1 stopped at the allowance it had left when it started ($2.99).', live_wake_hold: { cause: 'allowance', ceiling_usd: 2.99 } });
+    for (const cause of ['allowance', 'allowance_and_cap']) {
+        assert.deepEqual(consciousnessMark({ ...held, holdCause: cause }), { shape: 'dot', hue: 'owner' }, cause);
+    }
+    for (const cause of ['per_task_cap', 'launch_ceiling', 'per_task_fence', 'total_budget', 'owner', 'sleep', 'technical', '']) {
+        assert.deepEqual(consciousnessMark({ ...held, holdCause: cause }), { shape: 'pause', hue: 'ink' }, cause);
+    }
+    assert.deepEqual(consciousnessMark({ ...held, enabled: false }), { shape: 'none', hue: 'ink' }, 'Off wins');
+    assert.deepEqual(consciousnessMark({ ...held, liveWakeHeld: false }), { shape: 'pause', hue: 'ink' }, 'a hold needs the held wake');
+    assert.match(summaryHtml(held), /consciousness-headline">Wake-up w1 stopped at the allowance.*data-hue="owner"/);
+    // What follows from the hold is said beneath the headline, quieter; no other state has a note.
+    const noted = normalizeConsciousness({ ...held, detail_note: 'Resume keeps that limit.' });
+    assert.match(summaryHtml(noted), /<p class="dashboard-hero-meta consciousness-headline-note">Resume keeps that limit\.<\/p>/);
+    assert.doesNotMatch(summaryHtml(held), /consciousness-headline-note/);
+    assert.equal(headlineView(noted).note, 'Resume keeps that limit.');
+    assert.ok(!('note' in headlineView(held)), 'a state without a note keeps the headline shape it had');
     // A Start/Stop on its way says so and waits; nothing else on the card changes.
     assert.match(summaryHtml(fromState(), { toggling: 'stop' }), /data-cx-act="toggle" data-enabled="1" disabled>Stopping…</);
     assert.match(summaryHtml({ ...fromState(), enabled: false }, { toggling: 'start' }), /disabled>Starting…</);

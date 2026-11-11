@@ -48,12 +48,25 @@ test('an error toast plays the error haptic; a notice the owner did not cause an
 
 test('a widget picked up by its handle plays one medium tap', (t) => {
     const { doc, el, played } = telegram(t);
+    globalThis.requestAnimationFrame = () => 1;
+    globalThis.cancelAnimationFrame = () => {};
+    t.after(() => { delete globalThis.requestAnimationFrame; delete globalThis.cancelAnimationFrame; });
     const handle = el('button', { attrs: { 'data-widget-reorder-handle': '' } });
     const card = el('div', { className: 'widgets-card', dataset: { widgetKey: 'a' } }, handle);
-    const list = el('div', {}, card, el('div', { className: 'widgets-card', dataset: { widgetKey: 'b' } }));
+    const other = el('div', { className: 'widgets-card', dataset: { widgetKey: 'b' } });
+    const list = el('div', {}, card, other);
     doc.body.append(list);
-    bindWidgetCardReorder(list, () => ['a', 'b'], () => {});
-    handle.emit('dragstart', { dataTransfer: { setData() {} } });
+    const plan = { placements: [{ left: 0, top: 0, width: 100, span: 1 }, { left: 114, top: 0, width: 100, span: 1 }] };
+    const board = { laid: () => ({ plan, items: [card, other], planOrder: () => plan }), carry() {}, announce() {} };
+    bindWidgetCardReorder(list, () => ['a', 'b'], () => {}, board);
+    // The pointer carry (no HTML5 drag): a press on the grip picks the card up once it has moved far enough.
+    handle.emit('pointerdown', { button: 0, pointerId: 1, pointerType: 'touch', clientX: 10, clientY: 10 });
+    handle.emit('pointermove', { pointerId: 1, clientX: 12, clientY: 11 });
+    assert.deepEqual(played, [], 'a press that has not travelled yet picks nothing up');
+    handle.emit('pointermove', { pointerId: 1, clientX: 20, clientY: 10 });
     assert.deepEqual(played, ['medium']);
-    assert.ok(card.classList.contains('dragging'));
+    assert.ok(card.hasAttribute('data-widget-lifted'));
+    handle.emit('pointermove', { pointerId: 1, clientX: 40, clientY: 12 });
+    handle.emit('pointerup', { pointerId: 1, clientX: 40, clientY: 12 });
+    assert.deepEqual(played, ['medium'], 'carrying and dropping it are silent');
 });

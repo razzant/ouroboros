@@ -161,4 +161,3 @@ def test_dynamic_marker_returns_do_not_grow() -> None:
     )
     for path, (_count, why) in ALLOWED_DYNAMIC.items():
         assert why.strip(), f"ALLOWED_DYNAMIC[{path!r}] needs a written reason"
-

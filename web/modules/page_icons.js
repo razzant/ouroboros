@@ -34,6 +34,7 @@ const CONTROL_BODIES = {
     check: '<path d="M20 6 9 17l-5-5"/>',
     book: '<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/>',
     stop: '<rect width="12" height="12" x="6" y="6" rx="2"/>',
+    share: '<path d="M12 2v13"/><path d="m16 6-4-4-4 4"/><path d="M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8"/>',
     // Consciousness, its own time: the header's chip and the Dashboard's wakes.
     brain: '<path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/>',
     close: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
@@ -66,8 +67,8 @@ export function renderSkillIcon(spec, { size = 16, className = '' } = {}) {
 }
 
 // The shell's control glyphs, each once: the menu (☰), back (‹), the one close (×), the one more (⋯), the
-// chevron and the magnifier of Find a project. Same stroke family as the page icons; a control's accessible name
-// says what the glyph does.
+// chevron, the magnifier of Find a project and the move grip (⠿) of a Widgets card. Same stroke family as the page
+// icons; a control's accessible name says what the glyph does.
 export const SHELL_ICONS = {
     search: strokeIcon('<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>', 18),
     menu: strokeIcon('<path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/>'),
@@ -76,4 +77,5 @@ export const SHELL_ICONS = {
     more: strokeIcon('<circle cx="5" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.6" fill="currentColor" stroke="none"/>'),
     chevron: strokeIcon('<path d="m9 18 6-6-6-6"/>', 16),
     plus: strokeIcon('<path d="M12 5v14M5 12h14"/>', 16),
+    grip: strokeIcon('<circle cx="9" cy="5" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="19" r="1"/><circle cx="15" cy="5" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="19" r="1"/>', 16),
 };

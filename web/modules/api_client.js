@@ -342,6 +342,23 @@ export function hurryTask(taskId, requestId) {
 }
 
 /**
+ * One act on a work's model: `set` a model for it, `follow` Main again, or leave a fallback by `return`, `wait` or
+ * `keep`. The answer says when it applies (`applied`) and carries the work's fact (`lead`); a refusal rejects with
+ * the server's `reason_code` and status on the error (card_model.js says it in the owner's words).
+ * @param {string} taskId
+ * @param {string} requestId  // a retry of the same act carries the same id
+ * @param {Omit<import('./work_types.js').TaskModelRequest, 'request_id'>} act
+ * @returns {Promise<import('./work_types.js').TaskModelResponse>}
+ */
+export function taskModel(taskId, requestId, act) {
+    return jsonPost(
+        `/api/tasks/${encodeURIComponent(taskId)}/model`,
+        { request_id: String(requestId || ''), ...act },
+        { rejectOkFalse: true },
+    );
+}
+
+/**
  * Owner Pause of a whole task tree (Batch4): the body is the stable request_id
  * (the same id on retry is idempotent) and this client's declaration that the
  * owner pressed it (`actor: "owner"`, no text), which the card words as "You
@@ -605,6 +622,9 @@ export const apiClient = {
     /** @param {import('./client_contract_types.js').OwnerSubagentsModeRequest} choice
      * @returns {Promise<import('./api_types.js').OwnerSubagentsModeResponse>} */
     ownerSubagentsMode: (choice) => jsonPost('/api/owner/subagents-mode', choice),
+    /** The room's model for new owner work. @param {import('./client_contract_types.js').OwnerChatModelRequest} choice
+     * @returns {Promise<import('./client_contract_types.js').OwnerChatModelResponse>} */
+    ownerChatModel: (choice) => jsonPost('/api/owner/chat-model', choice),
     /** @returns {Promise<import('./api_types.js').OwnerSafetyModeResponse>} */
     ownerSafetyMode: (mode) => jsonPost('/api/owner/safety-mode', { mode }),
     /** A log's newest rows; `view` 'compact' bounds each row and keeps its `ts` and `type` (ouroboros/gateway/logs.py). */

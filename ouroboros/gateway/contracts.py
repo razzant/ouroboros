@@ -28,7 +28,7 @@ from ouroboros.gateway.claudexor_contracts import (  # noqa: F401 -- public re-e
     ClaudexorReadState, ClaudexorStatusReads, ClaudexorPassiveReadError, ClaudexorQuotaResponse,
     ClaudexorStatusResponse,
 )
-from ouroboros.gateway.work_contracts import WorkStateFields
+from ouroboros.gateway.work_contracts import WorkLeadFields, WorkStateFields
 from ouroboros.gateway.history_contracts import ChatHistoryResponse, PresenceContact  # noqa: F401 -- public re-exports
 from ouroboros.gateway.health_contracts import BootDocument, BootJob, BootStep, HealthResponse  # noqa: F401 -- public re-exports
 from ouroboros.gateway.attachment_contracts import (  # noqa: F401 -- public re-exports
@@ -55,10 +55,7 @@ from ouroboros.gateway.management_contracts import (  # noqa: F401 -- public re-
     McpStatusResponse, ModelCatalogResponse, SkillLifecycleQueueResponse,
 )
 from ouroboros.gateway.schedule_contracts import (  # noqa: F401 -- public re-exports
-    ScheduleActionResponse,
-    ScheduledTasksResponse,
-    ScheduleDeleteResponse,
-    ScheduleUpsertResponse,
+    ScheduleActionResponse, ScheduledTasksResponse, ScheduleDeleteResponse, ScheduleUpsertResponse,
 )
 
 try:  # Python 3.11+
@@ -611,6 +608,7 @@ class ProjectEntry(TypedDict, total=False):
     working_dir: str
     pinned: bool  # absent on legacy rows means unpinned; no routing/activity effect
     cognition: ProjectCognition
+    model_choice: ChatModelChoice  # the room's own model for new owner work; never copied from Main
     provenance: str
     clone_url: str
     trusted_at: str
@@ -702,7 +700,7 @@ class EvolutionStateSnapshot(TypedDict):
     campaign: NotRequired[Dict[str, Any]]
 
 
-class ActiveDirectTurn(TypedDict):
+class ActiveDirectTurn(WorkLeadFields):
     """An active owner turn: a conversation-lane row or an inline executor's actor.
 
     Rows of ``StateResponse.active_direct_turns`` (``conversation_lane.lane_turn_rows`` and
@@ -807,6 +805,7 @@ class StateResponse(WorkStateFields):
     subagents_availability: Literal["available", "disabled", "unsaved"]
     context_mode_auto_low: bool  # frozen compatibility field, always False (persistent auto-Low is retired)
     effort_range: EffortRange  # the owner's effort range (POST /api/owner/effort-range), the tolerant read
+    main_route: ChatModelRoute  # Main itself, written by POST /api/owner/chat-model without project_id
     safety_mode: str
     skills_repo_configured: bool
     github_token_configured: bool
@@ -1487,7 +1486,9 @@ class OnboardingPresetFailureResponse(TypedDict):
 
 # Human/test-visible contract index; routers own executable Route objects.
 from ouroboros.gateway.endpoint_index import HTTP_ENDPOINTS
-from ouroboros.gateway.client_contracts import FileBrowserListResponse, ServedUiState, SettingsPolicyState  # noqa: E402,F401
+from ouroboros.gateway.client_contracts import (  # noqa: E402,F401
+    ChatModelChoice, ChatModelRoute, FileBrowserListResponse, ServedUiState, SettingsPolicyState,
+)
 
 WS_MESSAGE_TYPES: tuple[str, ...] = (
     "conversation_finished", "chat", "command",

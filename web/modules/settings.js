@@ -65,7 +65,7 @@ const INPUT_FIELDS = [
     ['s-local-source', 'LOCAL_MODEL_SOURCE'], ['s-local-filename', 'LOCAL_MODEL_FILENAME'], ['s-local-chat-format', 'LOCAL_MODEL_CHAT_FORMAT'],
     ['s-subagent-worktree-root', 'OUROBOROS_SUBAGENT_WORKTREE_ROOT'], ['s-subagent-projects-root', 'OUROBOROS_SUBAGENT_PROJECTS_ROOT'],
     ['s-evo-budget', 'OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD', '0'],
-    ['s-consciousness-daily-usd', 'OUROBOROS_CONSCIOUSNESS_DAILY_USD', '20'],  // float: NUMBER_FIELDS would truncate 20.5 to 20
+    // The consciousness allowance has no row: Costs is its one editor (costs.js), so no Settings save posts it.
     ['s-evo-objective', 'OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE', ''],
     // Optional task bounds: a positive integer or "unlimited" (SSOT: ouroboros/settings_scales.py); a blank is refused by the server.
     ['s-max-rounds', 'OUROBOROS_MAX_ROUNDS', 'unlimited'], ['s-task-lifetime', 'OUROBOROS_TASK_ABS_CEILING_SEC', 'unlimited'],
@@ -101,8 +101,8 @@ function byId(id) {
 }
 
 // A stored 0 is a value, not an absence: `fallback && !value` rendered a saved
-// 0 (e.g. OUROBOROS_CONSCIOUSNESS_DAILY_USD) as its fallback, and the next save
-// of ANY tab wrote the fallback back. Only a missing value takes the fallback.
+// 0 (once the consciousness allowance's, edited here then) as its fallback, and the next
+// save of ANY tab wrote the fallback back. Only a missing value takes the fallback.
 export function storedOrFallback(value, fallback) {
     return fallback && (value === undefined || value === null || value === '') ? fallback : value;
 }
@@ -513,7 +513,7 @@ export function settingsSaveEffectText(data = {}) {
 // Panic flow); this page re-exports it and its click handler only injects deps.
 export { confirmAndSendRestart };
 
-export function initSettings({ state, setBeforePageLeave, ws } = {}) {
+export function initSettings({ state, setBeforePageLeave, ws, openDashboardTab = null } = {}) {
     const page = document.createElement('div');
     page.id = 'page-settings';
     page.className = 'page app-page-glass';
@@ -585,7 +585,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         ),
     });
     initHarnessAccounts();
-    const disposeOwnerSections = [bindSafetySettings(page), bindConsciousnessSettings(page)];
+    const disposeOwnerSections = [bindSafetySettings(page), bindConsciousnessSettings(page, { openDashboardTab })];
 
     function syncProcessingPreference(settings) {
         setSubagentsProcessingPreference(settings[PROCESSING_PREFERENCE_KEY]);

@@ -82,7 +82,7 @@ textarea.ui-control.consciousness-owner-words {
 .cx-head-words { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .cx-kicker, .cx-wakes-title { margin: 0; font-size: var(--type-meta); line-height: var(--line-meta); color: var(--text-meta); }
 .cx-state { margin: 0; font-size: var(--type-section); line-height: var(--line-title); font-weight: 600; color: var(--text-primary); }
-.cx-money, .cx-wakes-note, .cx-wakes-coverage { margin: 0; font-size: var(--type-body); line-height: var(--line-body); color: var(--text-secondary); }
+.cx-money, .cx-state-note, .cx-wakes-note, .cx-wakes-coverage { margin: 0; font-size: var(--type-body); line-height: var(--line-body); color: var(--text-secondary); }
 .cx-wakes-title { margin-top: var(--space-2); }
 .cx-wakes { display: flex; flex-direction: column; gap: var(--space-1); margin: 0; padding: 0; list-style: none; }
 .cx-wake {
@@ -109,7 +109,7 @@ textarea.ui-control.consciousness-owner-words {
 }
 .cx-door:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 @media (hover: hover) { .cx-door:hover { text-decoration: underline; text-underline-offset: 3px; } }
-:is(.cx-money, .cx-toggle, .cx-wakes, .cx-wakes-note, .cx-wakes-coverage, .cx-door)[hidden] { display: none; }
+:is(.cx-money, .cx-state-note, .cx-toggle, .cx-wakes, .cx-wakes-note, .cx-wakes-coverage, .cx-door)[hidden] { display: none; }
 
 /* ---- Settings › Behavior › Consciousness ------------------------------------------------------------------------ */
 .consciousness-levels { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
@@ -217,13 +217,16 @@ textarea.ui-control.consciousness-owner-words {
 .circles-directory > .circle-fold:first-child { padding-top: 0; }
 .circles-directory > .circle-fold:last-child { padding-bottom: 0; }
 /* The head: the name, under it its words in one line in the reading ink, the count at the end of the name's line (the
-   caret too); open, the line gives way to the words whole below. */
-.circle-fold.ui-disclosure > summary.circle-head { align-items: flex-start; }
+   caret too); open, the line gives way to the words whole below. A count the name's line cannot hold beside the
+   name (a long model name, a long circle name) goes under it, still at the line's end, and wraps there: nothing in
+   the head is ever wider than the head. */
+.circle-fold.ui-disclosure > summary.circle-head { align-items: flex-start; flex-wrap: wrap; }
 .circle-fold.ui-disclosure > summary.circle-head::before { margin-block-start: calc((var(--type-section) * var(--line-title) - 7.5px) / 2); }
-.circle-head-main { flex: 1 1 auto; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.circle-head-main { flex: 1 1 8em; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.circle-head-name { overflow-wrap: anywhere; }
 .circle-head-line { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); font-weight: 400; }
 .circle-fold[open] > summary .circle-head-line { display: none; }
-.circle-head-count { flex: 0 0 auto; white-space: nowrap; line-height: calc(var(--type-section) * var(--line-title)); }
+.circle-head-count { flex: 0 1 auto; max-width: 100%; margin-inline-start: auto; overflow-wrap: anywhere; line-height: calc(var(--type-section) * var(--line-title)); }
 /* The body starts where the head's name starts: past the caret (6px and its 1.5px border), its margins and the gap. */
 .circle-body { display: flex; flex-direction: column; gap: var(--space-3); padding-inline-start: calc(7.5px + 2px + var(--space-1) + var(--space-2)); }
 .circle-words { display: flex; flex-direction: column; gap: var(--space-2); }
@@ -261,7 +264,7 @@ textarea.ui-control.consciousness-owner-words {
 @container dashboard (max-width: 560px) {
     .place-row-main { display: grid; grid-template-columns: auto minmax(0, 1fr); }
     .place-row-main > :not(.place-glyph) { grid-column: 2; }
-    .place-row-main > .consciousness-place-facts { margin-inline-start: 0; text-align: start; white-space: normal; }
+    .place-row-main > .consciousness-place-facts { margin-inline-start: 0; text-align: start; white-space: normal; overflow-wrap: anywhere; }
 }
 
 /* ---- the place sheet and the Connect flow: the document reader's dialog geometry ------------------------------- */

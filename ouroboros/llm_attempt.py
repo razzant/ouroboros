@@ -741,7 +741,7 @@ def _candidate_before_dispatch(candidate: Dict[str, Any], request: AttemptReques
             raise PhysicalAttemptPreparationFailed(
                 "physical candidate changed before dispatch", attempt_id=reservation.attempt_id,
             )
-        from ouroboros.llm_observability import host_step
+        from ouroboros.context_timing import host_step
         from ouroboros.observability import persist_physical_candidate
 
         scope = current_usage_scope()

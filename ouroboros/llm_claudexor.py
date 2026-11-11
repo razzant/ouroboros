@@ -34,8 +34,7 @@ from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option
 from ouroboros.model_wait import (ModelWaitInterrupted, accepted_operation_scope, current_model_wait,
                                   dispatch_deadline_remaining_sec, prepared_call_scope)
 from ouroboros.observability import persist_call, update_call_manifest_metadata
-from ouroboros.context_timing import timed
-from ouroboros.llm_observability import host_step
+from ouroboros.context_timing import host_step, timed
 from ouroboros.owner_pause import launch_admission, OwnerPauseRefused, model_handed_off
 from ouroboros.transport_custody import ProviderNotDispatched
 from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY

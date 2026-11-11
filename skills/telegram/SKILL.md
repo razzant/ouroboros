@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.8
+version: 1.4.9
 type: extension
 entry: plugin.py
 plugin_api: "2.4"
@@ -167,6 +167,14 @@ menu button. While it is on, a token saved, replaced or cleared applies within
 seconds without Disable/Enable: nothing new goes out with the old token, a long send stops
 after the parts already taken, and the Mini App restarts once the old process dies. No
 token is a quiet wait, never a crash; unreadable settings keep the last token.
+
+Share… on a saved Ouroboros message (DESIGN "Replies") passes its Text through Telegram's own chat
+picker in the Mini App: the page posts only the words it shows (up to 4096 characters) to `miniapp/prepare-share`,
+which answers only what the sidecar forwards for the owner's session, and the bridge's own client (its token, proxy
+and server) saves them as one prepared message for the owner (`savePreparedInlineMessage`: plain text, no link
+preview, for a person, a group or a channel). Telegram's `shareMessage` then lets the owner pick a chat and send it, or
+not; the bot sends nothing itself and logs no words. A client without Mini App API 8.0 has no picker: the sheet says so,
+and Copy stays.
 
 Delegated task cards lead with the executor's latest words (marked earlier
 when retained), followed by problems and compact activity counts. These are

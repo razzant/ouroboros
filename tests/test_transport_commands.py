@@ -335,3 +335,20 @@ def test_command_voice_survives_live_delivery_and_history(tmp_path, monkeypatch)
         assert all(r["role"] == "system" and r["system_type"] == "command_reply"
                    and not r.get("markdown") for r in collection)
     assert [r["content"] for r in rows] == [r["text"] for r in replay]
+
+
+@pytest.mark.parametrize("note", ["", "Resume keeps that limit, so it pauses again while its known spend is at it."])
+def test_bg_status_says_what_follows_from_a_held_wake_after_its_state(monkeypatch, note):
+    """The chat command speaks the host sentence the Consciousness tab shows, and its note when one follows from it."""
+    import server
+    import supervisor.message_bus as message_bus
+
+    detail = "Wake-up w1 stopped at the allowance it had left when it started ($2.99)."
+    described = {"status": "wake_paused", "detail": detail, **({"detail_note": note} if note else {})}
+    ctx = Ctx({"owner_id": 1, "owner_chat_id": 1, "bg_consciousness_enabled": True})
+    monkeypatch.setattr(message_bus, "log_chat", lambda *args, **kwargs: None)
+    monkeypatch.setattr(server, "_describe_bg_consciousness_state", lambda _enabled: described)
+    server._process_bridge_updates(Bridge([{"chat": {"id": 1}, "from": {"id": 1}, "text": "/bg status",
+                                             "source": "web"}]), 0, ctx)
+    said = f"🧠 Background consciousness: wake_paused — {detail}"
+    assert ctx.sent == [(1, f"{said} {note}" if note else said)]

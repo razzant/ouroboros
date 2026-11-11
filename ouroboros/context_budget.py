@@ -23,7 +23,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, Literal, Optional, Tuple
+from typing import Any, Dict, Literal, Mapping, Optional, Tuple
 
 # Canonical host-row classification; physical requests omit this top-level metadata.
 HOST_CONTEXT_KIND_KEY = "_host_context_kind"
@@ -304,6 +304,17 @@ class ContextReclaimRequest:
     keep_unit_ids: Optional[Tuple[str, ...]] = None
     restore_unit_refs: Tuple[Dict[str, Any], ...] = ()
     schema_names: Optional[Tuple[str, ...]] = None
+    # Earlier notes (capsule units) the mind names to fold into its new note; every other note stays.
+    replace_note_ids: Tuple[str, ...] = ()
+
+
+def authored_view_fields(pending: Mapping[str, Any]) -> Dict[str, Any]:
+    """A queued ``compact_context`` request's authored-view fields, as both of its executors pass them
+    (Main's ``loop_round_limits`` and the native review episode). A request queued before
+    ``replace_note_ids`` existed, such as one restored after a pause, names no note to replace."""
+    return {**{key: pending[key] for key in ("working_note", "expected_view_revision", "keep_unit_ids",
+                                             "restore_unit_refs", "schema_names")},
+            "replace_note_ids": tuple(pending.get("replace_note_ids") or ())}
 
 
 @dataclass(frozen=True)
@@ -324,6 +335,8 @@ class ContextReclaimReceipt:
     source_refs: Tuple[Dict[str, Any], ...] = ()
     schema_names: Optional[Tuple[str, ...]] = None
     fit: Optional[Dict[str, Any]] = None
+    # An applied fold's replaced notes: ``{"checkpoint_ref", "notes": [{unit_id, raw_sha256, first_line}]}``.
+    replaced_notes: Optional[Dict[str, Any]] = None
 
 
 class SummarizerContextOverflow(RuntimeError):

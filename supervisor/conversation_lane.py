@@ -638,6 +638,9 @@ def lane_turn_rows() -> List[Dict[str, Any]]:
                 row["model_activity"] = dict(active["model_activity"])
             if isinstance(sent := meta.get("context_attempt"), dict) and sent.get("task_attempt") == attempt:
                 row["context_attempt"] = dict(sent)
+            from ouroboros.lead_fact import lead_fields
+
+            row.update(lead_fields(meta.get("lead"), {**task, "_lead_request_id": meta.get("_lead_request_id")}))
             rows.append(row)
     return rows
 

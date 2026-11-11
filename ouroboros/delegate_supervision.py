@@ -21,7 +21,7 @@ from ouroboros import delegate_custody as custody
 from ouroboros.delegate_shared import _fail, delegate_result, refusal_host_code
 from ouroboros.delegate_feed import _TICK_SEC
 from ouroboros.owner_mailbox import (
-    KIND_FINALIZE_NOW, KIND_HURRY, KIND_TASK_MESSAGE, drain_owner_entries, place_arrival_wake,
+    KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_MODEL, KIND_TASK_MESSAGE, drain_owner_entries, place_arrival_wake,
 )
 from ouroboros.tools.tool_result import ToolResult
 from ouroboros.utils import utc_now_iso
@@ -29,7 +29,7 @@ from ouroboros import delegate_supervision_state as checkpoints
 
 log = logging.getLogger(__name__)
 _QUIET_STATUSES = {"progress", "no_progress", "observation_pending"}
-_LOOP_CONTROL_KINDS = {KIND_FINALIZE_NOW, KIND_HURRY}
+_LOOP_CONTROL_KINDS = {KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_MODEL}
 _MAX_COORDINATION_SEEN = 256
 # An in-slot wait's mark outlives one beat, then renews.
 _HOLD_MARK_SEC = 120.0

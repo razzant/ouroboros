@@ -16,13 +16,15 @@ def _types(value):
 def test_schema_cost_and_all_typed_bindings():
     schema = get_tools()[0].schema
     digest = hashlib.sha256(json.dumps(_types(schema), sort_keys=True).encode()).hexdigest()
-    assert digest == '79d0df7bfb9bfa55549cd972eb12068166814026e7098dc1e8a03e7fc5eb02c2'
+    assert digest == 'd85d0df2301a603f7e053621d1743b1c50978428051307feb436db596cfebed9'
     raw = json.dumps(schema, ensure_ascii=False)
     # 4,271 after the nano pass, plus the two owner-approved phrases the compaction test pins and the four
     # working_note phrases test_main_authored_context pins (future reader, within those sources, unaffected
     # branches, invent no detail), which the nano pass had dropped. +~110 for the C2 consensus correction
-    # (06.11.2026): the route-qualified price of a rewrite and keep_last_n keeping earlier notes.
-    assert 3800 <= len(raw) <= 4470
+    # (06.11.2026): the route-qualified price of a rewrite and keep_last_n keeping earlier notes. +~330 for the
+    # owner decision of 11.11.2026 (#3107): a fold keeps notes unless replace_note_ids names them (the new
+    # argument and one sentence; what inspect shows of a note is said in its result, not here).
+    assert 3800 <= len(raw) <= 4803
     print(json.dumps({'before_chars': 5978, 'after_chars': len(raw), 'before_chars_div_4': 1494.5,
                       'after_chars_div_4': len(raw) / 4, 'before_server_tokens': 1495,
                       'after_server_tokens': estimate_tokens(raw)}, sort_keys=True))

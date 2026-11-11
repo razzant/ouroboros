@@ -1230,6 +1230,9 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             "unknown_unmetered": None,
         })
         existing = load_task_result(env.drive_root, str(task.get("id") or "")) or {}
+        from ouroboros.owner_model import preserve_carrier
+
+        task = preserve_carrier(existing, task)
         if loop_outcome is None:
             loop_outcome = _derive_host_bound_loop_outcome(env, task, text, usage, llm_trace)
             # Apply FR3 before normalization so the persisted axes and ledger agree.

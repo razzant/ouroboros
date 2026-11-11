@@ -3,11 +3,13 @@
 import contextlib
 from datetime import datetime
 import json
+import logging
 import time
 from typing import Any
 
 from ouroboros.usage_origin import cause_label
 
+log = logging.getLogger(__name__)
 RECENT_WAKE_LIMIT = 50
 _DISPLAY_ZONE = None  # the server's local zone; the browser fixture generator pins one
 
@@ -56,6 +58,7 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None,
     from ouroboros.deadline_utils import parse_deadline_ts
 
     outcome = str(snapshot.get("last_wake_outcome") or "")
+    note = ""  # what follows from the state, said beneath it (``detail_note``); only a proven allowance hold has one
     next_at = _when(snapshot.get("next_wake_at"))
     deadline = parse_deadline_ts(str(snapshot.get("next_wake_at") or ""))
     wake = snapshot.get("live_wake_task_id")
@@ -71,8 +74,7 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None,
     elif not snapshot:
         status, detail = "starting", "Waits for Ouroboros to finish starting."
     elif wake and snapshot.get("live_wake_held"):
-        status, detail = "wake_paused", (f"Wake-up {wake} is paused or waiting in the queue; its card shows why. "
-                                         "The next wake-up follows it.")
+        status, (detail, note) = "wake_paused", held_sentence(wake, snapshot.get("live_wake_hold"))
     elif wake:
         status, detail = "thinking", f"Wake-up {wake} is running."
     elif outcome == "skipped:waiting_for_first_conversation":
@@ -85,8 +87,11 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None,
         # Checked at the reset, or sooner once a changed daily limit moved the next attempt (``consciousness._due_at``).
         reset = parse_deadline_ts(str(snapshot.get("allowance_resets_at") or ""))
         sooner = deadline is not None and reset is not None and time.time() < deadline.timestamp() < reset.timestamp()
-        detail = (f"Daily allowance spent ({at_least}${float(spent or 0):.2f} of ${float(daily or 0):.2f} in the last 24 h{degraded}); "
-                  f"next check {_when(snapshot.get('allowance_resets_at')) if snapshot.get('allowance_resets_at') and not sooner else next_at}.")
+        check = _when(snapshot.get("allowance_resets_at")) if snapshot.get("allowance_resets_at") and not sooner else next_at
+        # A later window read that failed leaves the amount unknown now, never $0; the skip stays what happened.
+        counted = (f"({at_least}${float(spent):.2f} of ${float(daily or 0):.2f} in the last 24 h{degraded})"
+                   if type(spent) in (int, float) else "at its last check; what it spent in the last 24 h is unknown now")
+        detail = f"Daily allowance spent {counted}; next check {check}."
     elif outcome == "skipped:allowance_unknown":
         status, detail = "allowance_unknown", f"The usage ledger could not be read ({snapshot.get('last_error') or 'unknown error'}); retry {next_at}."
     elif outcome.startswith("rejected:"):
@@ -105,11 +110,113 @@ def describe_consciousness_state(snapshot: dict, requested_enabled: bool | None,
         status, detail = "due", f"Due{since}; the wake-up has not started yet."
     else:
         status, detail = "sleeping", f"Sleeping until {_clock_of(snapshot.get('next_wake_at'))}."
-    return {**snapshot, "enabled": requested_enabled, "status": status, "detail": detail}
+    return {**{key: value for key, value in snapshot.items() if key != "detail_note"},
+            "enabled": requested_enabled, "status": status, "detail": detail, **({"detail_note": note} if note else {})}
 
 
 def _hearing(n: int) -> str:
     return f"{n} place only hears" if n == 1 else f"{n} places only hear"
+
+
+# A held wake the allowance it started with stopped: the owner's move (DESIGN "Status marks"), said in Costs too.
+ALLOWANCE_HOLDS = frozenset({"allowance", "allowance_and_cap"})
+_STAMPED_CAUSES = {"allowance": "allowance", "both": "allowance_and_cap", "per_task_cap": "per_task_cap"}
+
+
+def held_sentence(wake: str, hold: Any) -> tuple:
+    """``(detail, note)`` of a held own wake: its proven cause (``hold_cause``) or the card's word for it, and what
+    follows from an allowance hold (``""`` otherwise). No clock: when room returns is Costs' forecast, in one zone."""
+    hold = hold if isinstance(hold, dict) else {}
+    cause, ceiling = hold.get("cause"), hold.get("ceiling_usd")
+    if cause == "owner":
+        return f"Wake-up {wake} is on an explicit pause; its card shows who paused it and how to continue.", ""
+    if cause in ALLOWANCE_HOLDS:
+        facts = [f"${float(ceiling):.2f}"] if type(ceiling) in (int, float) else []
+        facts += ["the per-task cap too"] if cause == "allowance_and_cap" else []
+        said = f" ({', '.join(facts)})" if facts else ""
+        return (f"Wake-up {wake} stopped at the allowance it had left when it started{said}.",
+                "Resume keeps that limit, so it pauses again while its known spend is at it, and a higher allowance "
+                "does not raise it. Stop now on its card ends it and frees the clock for its next check.")
+    # The limit it launched with, as far as its stamp names it (an older record names none).
+    limit = {"per_task_cap": "the per-task cost cap", "launch_ceiling": "the spending limit"}.get(cause)
+    said = f"paused at {limit} it started with" if limit else "paused or waiting in the queue"
+    return f"Wake-up {wake} is {said}; its card shows why. The next wake-up follows it.", ""
+
+
+def _at_launch_ceiling(pause: dict, ceiling, basis: str) -> bool:
+    """A live budget pause at the graceful ceiling the wake launched with: its saved ceiling is that number under the
+    producer's own basis (a member's inherited one), or, on a row older than the saved ceiling, the rail alone."""
+    import math
+    from ouroboros.budget_pause import RAIL_GRACEFUL_CEILING, STATE_PAUSED, STATE_PAUSING
+
+    if (pause.get("state") not in (STATE_PAUSED, STATE_PAUSING) or pause.get("reason") != "budget"
+            or pause.get("rail") != RAIL_GRACEFUL_CEILING or ceiling is None):
+        return False
+    saved = pause.get("cost_ceiling")
+    if not isinstance(saved, dict):
+        return True
+    number = saved.get("ceiling_usd")
+    return (saved.get("basis") == basis and type(number) in (int, float)
+            and math.isclose(float(number), ceiling, rel_tol=0.0, abs_tol=1e-9))
+
+
+def hold_cause(metadata: dict, own: dict, members=()) -> dict:
+    """``{"cause", "ceiling_usd"}``: what holds my own held wake, only as far as its records prove it (pure).
+
+    ``own`` is the wake's pause row, ``members`` the pause rows of its paused tree members. The wake paused at the
+    ceiling it launched with (``root_cost_ceiling_usd``), or, child first, its tree's latch refused it while a member
+    holding that inherited number paused at it: the launch stamp (``consciousness_wake.wake_task_metadata``) names
+    ``allowance``, ``allowance_and_cap`` or ``per_task_cap``, and a record from before the stamp is only
+    ``launch_ceiling``. Otherwise the pause's own reason or rail: ``owner``, ``sleep``, ``technical``,
+    ``total_budget``, ``per_task_fence``. ``""`` proves nothing: no live pause, a Resume granted, a lifted allowance."""
+    from ouroboros.budget_pause import (RAIL_DISPATCH_REFUSED, RAIL_GLOBAL_EXHAUSTED, REASON_AUTHORITY, REASON_OWNER,
+                                        REASON_SLEEP, STATE_PAUSED, STATE_PAUSING)
+    from ouroboros.task_pacing import recorded_producer_ceiling
+
+    metadata = metadata if isinstance(metadata, dict) else {}
+    own = own if isinstance(own, dict) else {}
+    unproven = {"cause": "", "ceiling_usd": None}
+    if own.get("state") not in (STATE_PAUSED, STATE_PAUSING):
+        return unproven
+    reason, rail = own.get("reason"), own.get("rail")
+    other = {REASON_OWNER: "owner", REASON_SLEEP: "sleep", REASON_AUTHORITY: "technical"}.get(reason)
+    if other or reason != "budget":
+        return {"cause": other or "", "ceiling_usd": None}
+    lifted = isinstance(metadata.get("producer_allowance_lifted"), dict)
+    ceiling = None if lifted else recorded_producer_ceiling({"metadata": metadata})
+    refused_root = rail == RAIL_DISPATCH_REFUSED and own.get("scope") == "root"
+    tree = refused_root and any(_at_launch_ceiling(member, ceiling, "root_resolved_ceiling")
+                                for member in members if isinstance(member, dict))
+    if _at_launch_ceiling(own, ceiling, "producer_allowance") or tree:
+        return {"cause": _STAMPED_CAUSES.get(metadata.get("root_cost_ceiling_source"), "launch_ceiling"),
+                "ceiling_usd": ceiling}
+    if rail == RAIL_GLOBAL_EXHAUSTED or rail == RAIL_DISPATCH_REFUSED and not refused_root:
+        return {"cause": "total_budget", "ceiling_usd": None}
+    return {"cause": "per_task_fence" if refused_root else "", "ceiling_usd": None}
+
+
+def held_wake_cause(drive_root, task_id: str) -> dict:
+    """``hold_cause`` of my held own wake from its records: its pool row's metadata (memory), its pause row and, only
+    when its tree's latch refused it, its paused members' rows (one compact hot-facts read each, no task body). An
+    unreadable record proves nothing."""
+    from ouroboros.budget_pause import RAIL_DISPATCH_REFUSED, budget_pause_row
+    from ouroboros.owner_pause import fence_closed
+    from ouroboros.store_hot_facts import controls
+    from supervisor.consciousness_carriers import live_task_rows, paused_tree_members
+
+    try:
+        metadata = (live_task_rows([task_id]).get(task_id) or {}).get("metadata") or {}
+        facts = controls(drive_root, task_id)
+        fence = facts.get("owner_pause") or {}
+        if fence_closed(fence) and task_id not in (fence.get("selected_members") or {}):
+            return {"cause": "owner", "ceiling_usd": None}
+        own = facts.get("budget_pause") or {}
+        members = ([budget_pause_row(root or drive_root, member) for member, root in paused_tree_members(task_id)]
+                   if own.get("rail") == RAIL_DISPATCH_REFUSED and own.get("scope") == "root" else [])
+    except Exception:
+        log.debug("The pause of held wake %s is unreadable; its cause stays unknown", task_id, exc_info=True)
+        return {"cause": "", "ceiling_usd": None}
+    return hold_cause(metadata, own, members)
 
 
 def off_sentence(places) -> str:

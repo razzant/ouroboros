@@ -660,6 +660,162 @@ test('Costs numeric inputs have visible associated names and one line of owner h
     const note = mount.querySelector('.costs-budget').querySelector('.ui-disclosure').querySelector('#costs-budget-help');
     assert.ok(note);
     assert.match(note.textContent, /root task tree/);
+    // The third limit, the consciousness allowance, has its own help, spend and state lines and its own disclosure: the
+    // shared note speaks of the total and per-task limits alone, and its summary says so.
+    const allowance = mount.querySelector('#s-consciousness-allowance');
+    assert.equal(mount.querySelector('[for="s-consciousness-allowance"]').textContent, 'Consciousness per 24 hours ($)');
+    assert.equal(allowance.getAttribute('min'), '0');
+    assert.deepEqual(allowance.getAttribute('aria-describedby').split(' '),
+        ['costs-allowance-note', 'costs-allowance-spend', 'costs-allowance-state', 'costs-allowance-help']);
+    assert.match(mount.querySelector('#costs-allowance-note').textContent, /wake-ups, replies in places and the work they start/);
+    const summaries = mount.querySelector('.costs-budget').querySelectorAll('summary').map((summary) => summary.textContent);
+    assert.deepEqual(summaries, ['How the total and per-task limits count', 'How the consciousness limit counts']);
+    const own = mount.querySelector('#costs-allowance-help').textContent;
+    assert.match(own, /A higher limit does not raise what it was given and Resume keeps it, so a wake-up whose known spend is still at it pauses again\. Stop now on its card ends it/);
+    assert.match(own, /At \$0 consciousness may not spend\./);
+    assert.doesNotMatch(own, /root task tree/);
+});
+
+test('Costs reads the allowance from the consciousness snapshot, /api/state when that fails, and opens its doors', async (t) => {
+    const { mount, routes, window } = setup(t);
+    const tabs = [];
+    initCosts({ mount, state: { activePage: 'dashboard' }, openDashboardTab: async (tab) => { tabs.push(tab); } });
+    routes.set('/api/cost-breakdown', response({}, 503));
+    routes.set('/api/settings', response({ TOTAL_BUDGET: 200, OUROBOROS_PER_TASK_COST_USD: 50, OUROBOROS_CONSCIOUSNESS_DAILY_USD: 390 }));
+    routes.set('/api/consciousness', response({ error: 'busy' }, 503));
+    routes.set('/api/state', response({ bg_consciousness_enabled: true, bg_consciousness_state: { status: 'wake_paused',
+        live_wake_task_id: 'wake-1', live_wake_held: true, spent_24h_usd: 301.2, daily_usd: 390, allowance_status: 'available',
+        live_wake_hold: { cause: 'allowance', ceiling_usd: 2.99 } } }));
+    window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: 'costs' } }));
+    await settle(); await settle(); await settle();
+    const field = mount.querySelector('#s-consciousness-allowance');
+    assert.equal(field.value, '390');
+    assert.equal(field.dataset.loaded, '390', 'what Save compares an edit with');
+    assert.match(mount.querySelector('#costs-allowance-spend').textContent, /^\$301\.20 of \$390\.00 in the last 24 hours\u00a0· Consciousness ›$/,
+        'the separator keeps to the word before it');
+    const state = mount.querySelector('#costs-allowance-state');
+    // The fixture reads a node's own text before its children's: the order in the page is the browser lane's.
+    assert.match(state.textContent, /The consciousness wake-up is paused at the allowance it had left when it started \(\$2\.99\)\./);
+    assert.match(state.querySelector('.costs-allowance-note').textContent, /^Resume keeps that limit, so it pauses again/,
+        'what follows from the fact is quieter than the fact');
+    const door = state.querySelector('[data-open-task]');
+    assert.equal(door.dataset.openTask, 'wake-1', 'the held wake\'s card in Main');
+    const opened = [];
+    window.addEventListener('ouro:open-task', (event) => opened.push(event.detail));
+    const card = mount.querySelector('.costs-budget');
+    await card.fire('click', { target: door });
+    assert.deepEqual(opened, [{ task_id: 'wake-1', chat_id: 1 }]);
+    await card.fire('click', { target: mount.querySelector('[data-costs-consciousness]') });
+    assert.deepEqual(tabs, ['consciousness']);
+});
+
+test('Costs reads the window once more when the room time it gave passes, and only then', async (t) => {
+    const { mount, routes, window } = setup(t);
+    initCosts({ mount, state: { activePage: 'dashboard' } });
+    let reads = 0;
+    routes.set('/api/cost-breakdown', response({}, 503));
+    routes.set('/api/settings', response({ TOTAL_BUDGET: 200, OUROBOROS_PER_TASK_COST_USD: 50, OUROBOROS_CONSCIOUSNESS_DAILY_USD: 10 }));
+    routes.set('/api/consciousness', () => {
+        reads += 1;
+        return reads === 1
+            ? response({ enabled: true, spent_24h_usd: 12.4, daily_usd: 10, allowance_status: 'exhausted',
+                allowance_room_after: new Date(Date.now() + 50).toISOString() })
+            : response({ enabled: true, spent_24h_usd: 4, daily_usd: 10, allowance_status: 'available' });
+    });
+    window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: 'costs' } }));
+    await settle(); await settle(); await settle();
+    assert.equal(reads, 1);
+    assert.match(mount.querySelector('#costs-allowance-state').textContent, /Consciousness limit reached/);
+    await new Promise((resolve) => setTimeout(resolve, 1300));
+    await settle(); await settle(); await settle();
+    assert.equal(reads, 2, 'one read when the time it gave passed');
+    assert.doesNotMatch(mount.querySelector('#costs-allowance-state').textContent, /limit reached/, 'the old time does not stand');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(reads, 2, 'no polling after it');
+});
+
+test('Costs keeps what was typed while a save travelled, even typed back to the old value', async (t) => {
+    const { mount, routes, window } = setup(t);
+    initCosts({ mount, state: { activePage: 'dashboard' } });
+    const key = 'OUROBOROS_CONSCIOUSNESS_DAILY_USD';
+    const saved = { TOTAL_BUDGET: 200, OUROBOROS_PER_TASK_COST_USD: 50, [key]: 20 };
+    let answer = null;
+    routes.set('/api/cost-breakdown', response({}, 503));
+    routes.set('/api/consciousness', response({ enabled: true, spent_24h_usd: 1, daily_usd: 20 }));
+    routes.set('/api/settings', (_url, init = {}) => {
+        if (init.method !== 'POST') return response({ ...saved });
+        Object.assign(saved, JSON.parse(init.body));  // the server commits before its answer arrives
+        return new Promise((resolve) => { answer = () => resolve(response({ ok: true, next_task_changed: true })); });
+    });
+    const refresh = async () => {
+        window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: 'costs' } }));
+        await settle(); await settle();
+    };
+    const card = mount.querySelector('.costs-budget');
+    const field = mount.querySelector('#s-consciousness-allowance');
+    const button = mount.querySelector('#btn-save-budget');
+    const edit = async (value) => { field.value = value; await card.fire('input', { target: field }); };
+    await refresh();
+    await edit('30');
+    const saving = button.fire('click', { currentTarget: button });
+    await settle();
+    await edit('20');  // back to the old value while 30 travels
+    await refresh();   // a read of the committed 30 arrives first
+    assert.equal(field.value, '20', 'the newer draft stays');
+    answer();
+    await saving; await settle();
+    assert.equal(field.dataset.loaded, '30');
+    assert.equal(field.dataset.edited, 'true', 'still a draft against what is now saved');
+    await refresh();
+    assert.equal(field.value, '20', 'a later read keeps it too');
+});
+
+test('Costs keeps a draft across reads and saves only an actual edit when Settings was unreadable', async (t) => {
+    const { mount, routes, window } = setup(t);
+    initCosts({ mount, state: { activePage: 'dashboard' } });
+    const key = 'OUROBOROS_CONSCIOUSNESS_DAILY_USD';
+    const saved = { TOTAL_BUDGET: 200, OUROBOROS_PER_TASK_COST_USD: 50, [key]: 20 };
+    const posts = [];
+    let readable = false;
+    routes.set('/api/cost-breakdown', response({}, 503));
+    routes.set('/api/consciousness', response({ enabled: true, spent_24h_usd: 1, daily_usd: 20 }));
+    routes.set('/api/settings', (_url, init = {}) => {
+        if (init.method === 'POST') {
+            const body = JSON.parse(init.body);
+            posts.push(body); Object.assign(saved, body);
+            return response({ ok: true, next_task_changed: true });
+        }
+        return readable ? response({ ...saved }) : response({ error: 'busy' }, 503);
+    });
+    const refresh = async () => {
+        window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: 'costs' } }));
+        await settle(); await settle();
+    };
+    const card = mount.querySelector('.costs-budget');
+    const field = mount.querySelector('#s-consciousness-allowance');
+    const button = mount.querySelector('#btn-save-budget');
+    const edit = async (value) => { field.value = value; await card.fire('input', { target: field }); };
+    await refresh();
+    await edit('12.75');
+    await button.fire('click', { currentTarget: button });
+    assert.deepEqual(posts, [{ [key]: 12.75 }], 'unread initial values are never silently posted');
+    readable = true;
+    await refresh();
+    await edit('15.25');
+    saved[key] = 30; saved.TOTAL_BUDGET = 400;  // another window changed settings
+    await refresh();
+    assert.equal(field.value, '15.25', 'returning to Costs keeps the draft');
+    assert.equal(mount.querySelector('#s-budget').value, '400', 'unedited fields do refresh');
+    await button.fire('click', { currentTarget: button });
+    assert.deepEqual(posts.at(-1), { [key]: 15.25 });
+    await refresh();
+    assert.equal(field.value, '15.25');
+    await edit('');
+    await refresh();
+    assert.equal(field.value, '', 'a deliberately empty draft is not replaced by a default');
+    await button.fire('click', { currentTarget: button });
+    assert.equal(posts.length, 2);
+    assert.match(mount.querySelector('#budget-save-status').textContent, /must be a number/);
 });
 
 test('Dashboard binds stored, keyboard and programmatic selection to the same named panels', async (t) => {

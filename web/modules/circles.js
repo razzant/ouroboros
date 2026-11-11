@@ -3,19 +3,24 @@
 // body is one .ui-card directory: each circle is a row that opens (details.ui-disclosure, the Dashboard's Details
 // recipe), its head the circle's name, its words in one ellipsized line and the factual count of its places; one
 // circle is open at a time. Open, a circle shows its words whole in the voice of whoever wrote them (Edit swaps them
-// for its name and words with Save, Cancel and Delete; the words themselves are not a control), Add a place and its
-// place rows; the last row holds the places in no circle, open at once while there is no circle to choose. placeRowHtml
-// is the app's one place row: the place's own name, the service as a quiet label, the state word, readiness only when
-// it is not simply on, the time of its last captured event, and under them its optional one-line description; a
-// press opens the place sheet. No wake list, spend, summary or feed here: Main is where attention goes.
+// for its name, words and model with Save, Cancel and Delete; the words themselves are not a control), Add a place and
+// its place rows; the last row holds the places in no circle, open at once while there is no circle to choose. A
+// circle may have a model: its places think with it unless one has its own, and the default is the consciousness
+// model (owner 10.11); the head names the circle's model only when it has one, and the open circle says how many of
+// its places keep their own. placeRowHtml is the app's one place row: the place's own name, the service as a quiet
+// label, the state word, readiness only when it is not simply on, the time of its last captured event, its model only
+// when the place overrides, and under them its optional one-line description; a press opens the place sheet. No wake
+// list, spend, summary or feed here: Main is where attention goes.
 import { bindPageHeader, renderPageHeader } from './page_header.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
 import { tr, fmt } from './i18n.js';
 import { chipHtml, relativeAge, skillIconHtml } from './skill_presentation.js';
 import { PLACES_CHANGED_EVENT, createCircle, deleteCircle, failureText, readPlaceConnector, readPlaces, updateCircle } from './consciousness_api.js';
-import { placeInstance, placeService, placeStateWord, placeTitle, sameWords, writtenByWord } from './consciousness_words.js';
+import { placeInstance, placeModelWord, placeService, placeStateWord, placeTitle, sameWords, writtenByWord } from './consciousness_words.js';
 import { getContributions } from './contributions.js';
-import { openPlaceSheet, statusLine } from './place_sheet.js';
+import { bindModelChoosers, modelChooserHtml, updateModelChooser } from './model_chooser.js';
+import { modelCatalog } from './model_catalog_store.js';
+import { modelSuggestions, openPlaceSheet, statusLine } from './place_sheet.js';
 import { openConnectPlace, ownerWordsFieldHtml } from './place_connect.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 
@@ -25,6 +30,11 @@ const OWNER_VOICE = new Set(['owner', 'migration']);
 // The state word's tone: a live place is the ok dot, a silent or paused one the muted dot, and so is a place that only
 // hears because consciousness is off (the host's `only_hears`).
 const STATE_TONE = { active: 'ok', silent: 'muted', paused: 'muted' };
+
+/** «model glm-5.3»: a model named as a fact of a row or a head. The words name a model, so the overlay leaves them. */
+const modelFactHtml = (model) => `<span data-i18n-fmt="model {model}">${escapeHtml(fmt('model {model}', { model: placeModelWord(model) }))}</span>`;
+/** A place that thinks with a model of its own, not its circle's or the consciousness model. */
+const overrides = (place) => place.modelRoute?.layer === 'place';
 
 /** «2 h ago» from the last captured event; a place without one says so (never «no activity»). */
 export const lastEventText = (place) => (place.lastActivityAt
@@ -45,10 +55,14 @@ export function placeRowHtml(place, { title = '', source = '' } = {}) {
     const where = sameWords(name, service) ? '' : service;
     const description = place.description?.text || '';
     const tone = place.onlyHears ? 'muted' : STATE_TONE[place.state] || 'muted';
+    // Its model is a fact of the row only when the place overrides: an inheriting place says nothing.
+    const own = overrides(place) ? place.model || place.modelRoute.value : '';
     const facts = `<span class="ui-status" data-tone="${tone}">${escapeHtml(state)}</span>${readiness
-        ? `${SEP}<span data-tone="${escapeHtml(place.readiness.tone)}">${escapeHtml(readiness)}</span>` : ''}${SEP}${escapeHtml(when)}`;
+        ? `${SEP}<span data-tone="${escapeHtml(place.readiness.tone)}">${escapeHtml(readiness)}</span>` : ''}${SEP}${escapeHtml(when)}${own
+        ? `${SEP}${modelFactHtml(own)}` : ''}`;
     const label = fmt(where ? 'Open {place} ({where}): {facts}' : 'Open {place}: {facts}', { place: name, where,
-        facts: [state, readiness, fmt('last event {when}', { when })].filter(Boolean).join('; ') });
+        facts: [state, readiness, fmt('last event {when}', { when }), own ? fmt('model {model}', { model: placeModelWord(own) }) : '']
+            .filter(Boolean).join('; ') });
     return `<li><button type="button" class="place-row" data-place-open="${escapeHtml(place.id)}" data-state="${escapeHtml(place.state || '')}" aria-label="${escapeHtml(label)}">
         <span class="place-row-main"><span class="place-glyph" aria-hidden="true">${skillIconHtml(place.icon, 18)}</span><span class="consciousness-place-name" data-i18n-authored>${escapeHtml(name)}</span>${where
             ? `<span class="place-row-source" data-i18n-authored>${escapeHtml(where)}</span>` : ''}<span class="consciousness-place-facts">${facts}</span></span>
@@ -87,6 +101,18 @@ export function placeCountText(places) {
     return parts.join(SEP);
 }
 
+/** «2 places here keep a model of their own and do not follow the circle's.»: the member places that override, said
+ *  in the open circle because the circle's model does not reach them; '' when none does. */
+export function ownModelsText(circle, places) {
+    const n = places.filter(overrides).length;
+    if (!n) return '';
+    if (circle.model) {
+        return fmt(n === 1 ? '{n} place here keeps a model of its own and does not follow the circle\'s.'
+            : '{n} places here keep a model of their own and do not follow the circle\'s.', { n });
+    }
+    return fmt(n === 1 ? '{n} place here uses a model of its own.' : '{n} places here use a model of their own.', { n });
+}
+
 /** A circle's words in the voice of whoever wrote them: my human's in the owner's tint, Ouroboros's neutral and named. */
 export function circleWordsHtml(circle) {
     if (!circle.text) return `<p class="consciousness-copy">${tr('circles.words.empty', 'No words yet. Edit says who is here and what Ouroboros is here for.')}</p>`;
@@ -100,13 +126,19 @@ const rowsHtml = (places, options) => (places.length
     : `<p class="consciousness-copy">${tr('circles.empty', 'No place here yet.')}</p>`);
 const actButton = (act, label, attrs = '', tone = 'btn-default') => `<button type="button" class="btn ${tone} btn-sm" data-circles-act="${act}" ${attrs}>${escapeHtml(label)}</button>`;
 
-/** The name and words of a circle being made or edited: the owner's voice in its field; Delete only for a saved one. */
-function circleEditorHtml(key, { name = '', text = '' }, { saved = false, busy = false } = {}) {
+/** The name, words and model of a circle being made or edited: the owner's voice in its field; Delete only for a
+ *  saved one. The model is the place sheet's own chooser: suggestions assist typing, and an empty field inherits. */
+function circleEditorHtml(key, { name = '', text = '', model = '' }, { saved = false, busy = false, models = null, modelsFailed = false, own = '' } = {}) {
     const id = escapeHtml(key);
     const disabled = busy ? ' disabled' : '';
+    const help = [tr('circles.model.help', 'The model its places think with when they wake; empty uses the Consciousness model in Models. A place may keep its own.'),
+        own, modelsFailed ? tr('places.models.unavailable', 'Model suggestions could not be read; your model is kept.') : ''].filter(Boolean).join(' ');
     return `<div class="circle-words circle-editor">
         <label class="ui-field">${tr('circles.name', 'Name')}<input class="ui-control" data-circles-draft="${id}:name" data-i18n-authored value="${escapeHtml(name)}" autocomplete="off" spellcheck="false"></label>
         <label class="ui-field">${tr('circles.words', 'Its words: who is here and what Ouroboros is here for')}${ownerWordsFieldHtml(`data-circles-draft="${id}:text"`, text, 4)}</label>
+        <label class="ui-field">${tr('circles.model', 'Model')}${modelChooserHtml(`data-circles-draft="${id}:model" aria-label="${escapeHtml(tr('circles.model', 'Model'))}" aria-describedby="circle-model-help-${id}"`,
+            model, `circle-model-options-${id}`, models || [], { placeholder: tr('circles.model.empty', 'Empty uses the consciousness model') })}</label>
+        <div class="ui-field-help" id="circle-model-help-${id}" data-i18n-fmt="circles.model.help">${escapeHtml(help)}</div>
         <div class="place-sheet-actions">${actButton(saved ? 'save' : 'create', tr('circles.save', 'Save'), `data-circle="${id}"${disabled}`)}${actButton(saved ? 'cancel' : 'cancel-new', tr('circles.cancel', 'Cancel'), `data-circle="${id}"${disabled}`, 'btn-ghost')}${saved
             ? `<span class="circle-editor-end">${actButton('delete', tr('circles.delete', 'Delete circle'), `data-circle="${id}"${disabled}`, 'btn-ghost place-danger')}</span>` : ''}</div>
     </div>`;
@@ -119,17 +151,19 @@ export function circleFoldHtml(circle, places, ui = {}, statuses = {}) {
     const open = ui.open === circle.id;
     const drafts = ui.drafts || {};
     const editing = open && ui.editing === circle.id;
+    const own = ownModelsText(circle, places);
     const words = editing
-        ? circleEditorHtml(circle.id, { name: drafts[`${circle.id}:name`] ?? circle.name, text: drafts[`${circle.id}:text`] ?? circle.text },
-            { saved: true, busy: ui.busy })
-        : `<div class="circle-words">${circleWordsHtml(circle)}
+        ? circleEditorHtml(circle.id, { name: drafts[`${circle.id}:name`] ?? circle.name, text: drafts[`${circle.id}:text`] ?? circle.text,
+            model: drafts[`${circle.id}:model`] ?? circle.model }, { saved: true, busy: ui.busy, models: ui.models, modelsFailed: ui.modelsFailed, own })
+        : `<div class="circle-words">${circleWordsHtml(circle)}${own ? `<p class="consciousness-copy" data-circle-own-models>${escapeHtml(own)}</p>` : ''}
             <div class="place-sheet-actions">${actButton('edit', tr('circles.edit', 'Edit'), `data-circle="${id}"`, 'btn-ghost')}${actButton('add-place', tr('circles.add_place', 'Add a place'), `data-circle="${id}"`)}</div>
         </div>`;
     const line = circle.text.split('\n')[0];
+    // The head names the circle's model only when it has one: without one its places follow the consciousness model.
     return `<details class="ui-disclosure circle-fold" data-circle="${id}"${open ? ' open' : ''}>
         <summary class="circle-head">
             <span class="circle-head-main"><span class="dashboard-card-title circle-head-name" data-i18n-authored>${escapeHtml(circle.name)}</span><span class="circle-head-line"${line ? ' data-i18n-authored' : ''}>${escapeHtml(line)}</span></span>
-            <span class="consciousness-place-facts circle-head-count">${escapeHtml(placeCountText(places))}</span>
+            <span class="consciousness-place-facts circle-head-count">${escapeHtml(placeCountText(places))}${circle.model ? `${SEP}${modelFactHtml(circle.model)}` : ''}</span>
         </summary>
         <div class="circle-body">${words}${statusLine(ui.status?.[circle.id])}${rowsHtml(places, { circle, statuses })}</div>
     </details>`;
@@ -159,7 +193,8 @@ export function newCircleCardHtml(ui = {}) {
     const drafts = ui.drafts || {};
     return `<section class="ui-card consciousness-card" aria-label="${escapeHtml(tr('circles.new', 'New circle'))}" data-circle-new>
         <div class="consciousness-card-head"><h3 class="dashboard-card-title">${tr('circles.new', 'New circle')}</h3></div>
-        ${circleEditorHtml('new', { name: drafts['new:name'] || '', text: drafts['new:text'] || '' }, { busy: ui.busy })}
+        ${circleEditorHtml('new', { name: drafts['new:name'] || '', text: drafts['new:text'] || '', model: drafts['new:model'] || '' },
+            { busy: ui.busy, models: ui.models, modelsFailed: ui.modelsFailed })}
         ${statusLine(ui.status?.new)}
     </section>`;
 }
@@ -172,9 +207,17 @@ export function groupPlaces(circles, places) {
     return { groups, unassigned };
 }
 
+// The window's one catalog read (model_catalog_store.js) as the Model field's suggestions; a read that failed with
+// nothing listed earlier rejects, so the field says its suggestions could not be read.
+async function readCatalog() {
+    await modelCatalog.read();
+    if (modelCatalog.status().failed && !modelCatalog.catalog()?.items?.length) throw new Error('The model catalog could not be read.');
+    return modelCatalog.catalog();
+}
+
 /** Mount the page: its shell now, its data when it is shown. */
 export function initCircles({ state, showPage, openSettingsTab, read = readPlaces, readStatus = readPlaceConnector,
-    openSheet = openPlaceSheet, openConnect = openConnectPlace, askConfirm = openConfirmDialog,
+    openSheet = openPlaceSheet, openConnect = openConnectPlace, askConfirm = openConfirmDialog, readModels = readCatalog,
     writes = { createCircle, updateCircle, deleteCircle }, contributions = getContributions() } = {}) {
     const page = document.createElement('div');
     page.id = 'page-circles';
@@ -189,8 +232,9 @@ export function initCircles({ state, showPage, openSettingsTab, read = readPlace
     const disposeBar = bindPageHeader(page.querySelector('.app-page-header'));
     const body = page.querySelector('[data-circles-body]');
     // One circle open at a time; the first one opens on the first visit.
-    const ui = { open: '', opened: false, editing: '', drafts: {}, creating: false, status: {}, busy: false };
+    const ui = { open: '', opened: false, editing: '', drafts: {}, creating: false, status: {}, busy: false, models: null, modelsFailed: false };
     let view = null, readError = '', generation = 0, behind = false;
+    let disposeChoosers = () => {}, modelsAsked = false, destroyed = false;
     // The connectors' status (the account's own name for a whole-account place), read once per declared route: each
     // connector's read is {url, data}, data null while it is out. A failed read leaves nothing, so the next refresh asks
     // again; a connector gone or declaring another route forgets its read, and an answer for that read is dropped.
@@ -222,13 +266,32 @@ export function initCircles({ state, showPage, openSettingsTab, read = readPlace
         const active = document.activeElement;
         const key = body.contains(active) ? focusKeyOf(active) : '';
         const selection = active?.selectionStart == null ? null : [active.selectionStart, active.selectionEnd, active.selectionDirection];
+        disposeChoosers();
         body.innerHTML = html();
+        disposeChoosers = bindModelChoosers(body);
         for (const fold of body.querySelectorAll('.circle-fold')) if (fold.hasAttribute('open')) paintedOpen.add(fold);
         body.scrollTop = scroll;
         if (!key) return;
         const node = body.querySelector(key);
         node?.focus({ preventScroll: true });
         if (selection && node?.setSelectionRange) node.setSelectionRange(...selection);
+    }
+
+    // The Model field's suggestions, read once when an editor first shows; the field works without them (any id can be
+    // typed), and they reach the open field without a repaint, so the caret stays where it is.
+    async function readSuggestions() {
+        if (modelsAsked) return;
+        modelsAsked = true;
+        try {
+            ui.models = modelSuggestions(await readModels());
+            if (destroyed) return;
+            for (const field of body.querySelectorAll('[data-model-chooser]')) updateModelChooser(field, ui.models);
+        } catch {
+            if (destroyed) return;
+            modelsAsked = false;  // asked again by the next editor
+            ui.modelsFailed = true;
+            paint();
+        }
     }
 
     // One read in flight at a time; the newest answer paints. Places and circles come from one read; the connectors'
@@ -306,7 +369,7 @@ export function initCircles({ state, showPage, openSettingsTab, read = readPlace
     // that write made. True when such words stay.
     function keepNewer(from, circle, sent) {
         let kept = false;
-        for (const field of ['name', 'text']) {
+        for (const field of ['name', 'text', 'model']) {
             const draft = ui.drafts[`${from}:${field}`];
             delete ui.drafts[`${from}:${field}`];
             if (draft !== undefined && draft !== sent[field]) { ui.drafts[`${circle.id}:${field}`] = draft; kept = true; }
@@ -349,18 +412,20 @@ export function initCircles({ state, showPage, openSettingsTab, read = readPlace
         const act = button.dataset.circlesAct;
         const circle = circleById(button.dataset.circle);
         if (act === 'new') {
-            ui.creating = true; ui.status = {}; paint();
+            ui.creating = true; ui.status = {}; ui.modelsFailed = false; paint();
+            void readSuggestions();
             body.scrollTop = 0;
             body.querySelector('[data-circles-draft="new:name"]')?.focus();
             return;
         }
-        if (act === 'cancel-new') { ui.creating = false; delete ui.drafts['new:name']; delete ui.drafts['new:text']; ui.status = {}; paint(); return; }
+        if (act === 'cancel-new') { ui.creating = false; ['name', 'text', 'model'].forEach((field) => delete ui.drafts[`new:${field}`]); ui.status = {}; paint(); return; }
         if (act === 'create') {
             const name = String(ui.drafts['new:name'] || '').trim();
             if (!name) { ui.status = { new: { text: tr('circles.name.first', 'Name the circle first.'), tone: 'muted' } }; paint(); body.querySelector('[data-circles-draft="new:name"]')?.focus(); return; }
-            const sent = { name: ui.drafts['new:name'], text: ui.drafts['new:text'] };
+            const sent = { name: ui.drafts['new:name'], text: ui.drafts['new:text'], model: ui.drafts['new:model'] };
             let made = null;
-            if (!await write('new', async () => { made = await writes.createCircle({ name, text: String(sent.text || '').trim() }); })) return;
+            const model = String(sent.model || '').trim();  // a circle made without one sends none
+            if (!await write('new', async () => { made = await writes.createCircle({ name, text: String(sent.text || '').trim(), ...(model ? { model } : {}) }); })) return;
             // Made once: words typed after the press open as its edit (the caret where it was), never a second New circle.
             const active = document.activeElement, typing = active?.dataset?.circlesDraft || '';
             const caret = active?.selectionStart == null ? null : [active.selectionStart, active.selectionEnd, active.selectionDirection];
@@ -378,25 +443,29 @@ export function initCircles({ state, showPage, openSettingsTab, read = readPlace
         if (act === 'add-place') { addPlace(circle); return; }
         if (!circle) return;
         if (act === 'edit') {
-            ui.open = circle.id; ui.editing = circle.id; ui.status = {}; paint();
+            ui.open = circle.id; ui.editing = circle.id; ui.status = {}; ui.modelsFailed = false; paint();
+            void readSuggestions();
             const field = body.querySelector(`[data-circles-draft="${CSS.escape(circle.id)}:text"]`);
             field?.focus({ preventScroll: true }); field?.setSelectionRange?.(field.value.length, field.value.length);
             return;
         }
         const editAgain = () => body.querySelector(`[data-circle="${CSS.escape(circle.id)}"] [data-circles-act="edit"]`)?.focus();
         if (act === 'cancel') {
-            ui.editing = ''; ['name', 'text', 'revision'].forEach((field) => delete ui.drafts[`${circle.id}:${field}`]); ui.status = {}; paint(); editAgain();
+            ui.editing = ''; ['name', 'text', 'model', 'revision'].forEach((field) => delete ui.drafts[`${circle.id}:${field}`]); ui.status = {}; paint(); editAgain();
             return;
         }
         if (act === 'save') {
             const name = String(ui.drafts[`${circle.id}:name`] ?? circle.name).trim();
             const words = String(ui.drafts[`${circle.id}:text`] ?? circle.text).trim();
+            // An emptied Model field clears the circle's model: its places follow the consciousness model again.
+            const model = String(ui.drafts[`${circle.id}:model`] ?? circle.model).trim();
             if (!name) { ui.status = { [circle.id]: { text: tr('circles.name.first', 'Name the circle first.'), tone: 'muted' } }; paint(); return; }
-            const change = { ...(name !== circle.name ? { name } : {}), ...(words !== circle.text ? { text: words } : {}) };
+            const change = { ...(name !== circle.name ? { name } : {}), ...(words !== circle.text ? { text: words } : {}),
+                ...(model !== circle.model ? { model } : {}) };
             if (!Object.keys(change).length) { ui.editing = ''; ui.status = { [circle.id]: { text: tr('circles.unchanged', 'Nothing to save.'), tone: 'muted' } }; paint(); editAgain(); return; }
             // Sent on the draft's own revision: a newer read never turns another client's edit into ours to overwrite.
             // A conflict re-bases the draft on the circle as it stands, so only a second Save writes over it.
-            const sent = { name: ui.drafts[`${circle.id}:name`], text: ui.drafts[`${circle.id}:text`] };
+            const sent = { name: ui.drafts[`${circle.id}:name`], text: ui.drafts[`${circle.id}:text`], model: ui.drafts[`${circle.id}:model`] };
             let saved = null;
             if (!await write(circle.id, async () => { saved = await writes.updateCircle(circle.id, change, ui.drafts[`${circle.id}:revision`] ?? circle.revision); },
                 (now) => { if (Number.isSafeInteger(now?.revision)) ui.drafts[`${circle.id}:revision`] = now.revision; else delete ui.drafts[`${circle.id}:revision`]; })) return;
@@ -441,7 +510,7 @@ export function initCircles({ state, showPage, openSettingsTab, read = readPlace
         if (!await showPage?.('circles')) return;
         if (!circle) return;
         ui.open = circle; ui.opened = true;
-        if (edit) ui.editing = circle;
+        if (edit) { ui.editing = circle; void readSuggestions(); }
         const land = () => {
             const fold = body.querySelector(`[data-circle="${CSS.escape(circle)}"]`);
             if (!fold) return false;
@@ -467,6 +536,8 @@ export function initCircles({ state, showPage, openSettingsTab, read = readPlace
         refresh,
         destroy() {
             generation += 1;
+            destroyed = true;
+            disposeChoosers();
             statusReads.clear();  // a late status answer finds no read of this page
             offLifecycle();
             disposeBar();
