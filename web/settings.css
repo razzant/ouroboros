@@ -1236,3 +1236,21 @@
 .about-credits { display: flex; flex-direction: column; gap: var(--space-2); font-size: var(--type-body); }
 .about-links { display: flex; gap: var(--space-4); justify-content: center; margin-top: var(--space-1); }
 .about-links a { color: var(--accent); text-decoration: none; }
+
+/* settings rows */
+/* A row that saves itself (settings_controls.js settingsRow) stands on the shared .ui-row: its name, one meta line
+   with the row's result after it, its control at the end. The result is words in the meta line, so an empty one
+   takes no line, and Undo is a link in that sentence. A typed value sits in a short field with its unit beside it; a
+   bound that may be unlimited has "No limit" next to the number. Width is the row's own (ui.css makes .ui-row its
+   container), never the viewport's. */
+.settings-row > .ui-row-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-2); }
+.settings-row-result { min-height: 0; }
+.settings-row-result:empty { display: none; }
+.settings-row > .ui-row-actions > .ui-control { width: 14rem; max-width: 100%; }
+.settings-row-field { display: inline-flex; align-items: center; gap: var(--space-1); min-width: 0; }
+.settings-row-field > .ui-control { width: 7rem; text-align: end; font-variant-numeric: tabular-nums; }
+.settings-row-unit { color: var(--text-secondary); font-size: var(--type-body); line-height: var(--line-body); }
+.settings-row > .settings-row-more { grid-column: 1 / -1; }
+.settings-row-copy { margin: 0; max-width: 72ch; color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+.settings-row [aria-busy="true"] { cursor: progress; }
+button.settings-row { width: 100%; color: inherit; font: inherit; text-align: start; cursor: pointer; }
