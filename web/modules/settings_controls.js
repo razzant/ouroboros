@@ -435,7 +435,9 @@ function valueWords(row, value) {
     if (Array.isArray(value)) return value.map((part) => valueWords(row, part)).join(' to ');
     const control = controlOf(row);
     if (control.noLimit && isUnlimited(value)) return 'no limit';
-    return (control.options || []).find((option) => String(option.value) === String(value))?.label ?? String(value ?? '');
+    const words = (control.options || []).find((option) => String(option.value) === String(value))?.label ?? String(value ?? '');
+    // An empty value is said in a word, the row's own (`control.empty`) where it has one: "was none", never "was ".
+    return words === '' ? control.empty || 'empty' : words;
 }
 
 /** The changes that ask first. Each answers whether to go on; a change that needs no question answers true at once. */

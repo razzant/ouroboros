@@ -196,13 +196,13 @@ export const ROWS = [
             + 'refreshes itself and only reconnects. To return to the built-in interface, clear this field (from any interface, or in '
             + 'settings.json while Ouroboros is stopped), restart, and open the Ouroboros address again. An OUROBOROS_UI_DIR environment '
             + 'value shows here until a choice is saved; a saved choice, empty included, wins.',
-        control: { kind: 'text' }, aliases: ['Interface directory', 'Main Interface', 'OUROBOROS_UI_DIR', 'Serving now'],
+        control: { kind: 'text', empty: 'the built-in interface' }, aliases: ['Interface directory', 'Main Interface', 'OUROBOROS_UI_DIR', 'Serving now'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'OUROBOROS_EXTRA_CA_BUNDLE', keys: ['OUROBOROS_EXTRA_CA_BUNDLE'], page: 'computer/advanced', fold: false,
         name: 'Extra certificate bundle', meta: 'A PEM file on this computer, for a network with its own authority.',
         more: 'Only for a network whose certificates the default bundle does not trust: a proxy that inspects TLS, or an endpoint '
             + 'behind a national authority. Leave empty unless a provider fails with a certificate error.',
-        control: { kind: 'text' }, aliases: ['Extra CA bundle', 'Extra CA Certificates', 'PEM', 'certificate'],
+        control: { kind: 'text', empty: 'none' }, aliases: ['Extra CA bundle', 'Extra CA Certificates', 'PEM', 'certificate'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'computer:reset', keys: [], page: 'computer/about', fold: true, name: 'Reset all data',
         meta: 'Deletes state, memory, logs and settings, then restarts. The code stays.', more: '',

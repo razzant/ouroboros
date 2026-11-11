@@ -20,11 +20,12 @@ const response = (data, status = 200) => ({ ok: status < 400, status, json: asyn
 const settle = async (rounds = 10) => { for (let i = 0; i < rounds; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
 const EFFECTS = { OUROBOROS_RUNTIME_MODE: 'restart', OUROBOROS_SERVER_HOST: 'restart', OUROBOROS_SAFETY_MODE: 'next_task',
     OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: 'next_task', OUROBOROS_REVIEW_ENFORCEMENT: 'next_task', OUROBOROS_NETWORK_PASSWORD: 'now',
-    OUROBOROS_SAFETY_OWNER_RULES: 'next_task', OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS: 'now' };
+    OUROBOROS_SAFETY_OWNER_RULES: 'next_task', OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS: 'now', OUROBOROS_UI_DIR: 'restart',
+    OUROBOROS_MAX_WORKERS: 'restart', OUROBOROS_EXTRA_CA_BUNDLE: 'next_task' };
 
 /** A settings server: the document, the owner endpoints with their receipts, and what a read derives from them. */
 function fakeServer(routes, values = {}) {
-    const server = { posts: [], refuse: new Map(), running: { OUROBOROS_RUNTIME_MODE: 'pro', OUROBOROS_SERVER_HOST: '127.0.0.1' },
+    const server = { posts: [], refuse: new Map(), running: { OUROBOROS_RUNTIME_MODE: 'pro', OUROBOROS_SERVER_HOST: '127.0.0.1', OUROBOROS_UI_DIR: '' },
         values: { OUROBOROS_RUNTIME_MODE: 'pro', OUROBOROS_SAFETY_MODE: 'full', OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: 'light',
             OUROBOROS_SAFETY_OWNER_RULES: 'Ask before paying.', OUROBOROS_REVIEW_ENFORCEMENT: 'advisory', OUROBOROS_TASK_REVIEW_MODE: 'auto',
             OUROBOROS_REVIEW_MAX_CYCLES: '2', OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS: 'false', OUROBOROS_SERVER_HOST: '127.0.0.1',
@@ -418,6 +419,19 @@ test('Advanced holds what an installation rarely changes, and About the reset in
     await advanced.shown();
     assert.deepEqual([served.textContent, served.dataset.tone],
         ["Serving now: the built-in interface. OUROBOROS_UI_DIR '/srv/ui' was not applied: no index.html", 'warn']);
+    // An empty value is said in the row's own word, in the line that says what it replaced and in the two-value meta.
+    const type = async (id, text) => {
+        const field = advanced.row(id).querySelector('[data-setting-control]');
+        field.value = text;
+        await advanced.container.fire('input', { target: field });
+        await advanced.container.fire('change', { target: field });
+        await settle();
+    };
+    await type('OUROBOROS_EXTRA_CA_BUNDLE', '/etc/ssl/extra.pem');
+    assert.equal(advanced.line('OUROBOROS_EXTRA_CA_BUNDLE'), 'Saved · applies to new tasks · was none');
+    await type('OUROBOROS_UI_DIR', '/srv/ui');
+    assert.equal(advanced.line('OUROBOROS_UI_DIR'), 'Saved · applies after restart');
+    assert.equal(advanced.meta('OUROBOROS_UI_DIR'), 'Running: the built-in interface · after restart: /srv/ui');
     const about = await open(t, 'computer/about');
     assert.ok(about.container.querySelector('#about-version'));
     const fold = about.container.querySelector('details[data-settings-fold]');
