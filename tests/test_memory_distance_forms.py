@@ -115,6 +115,31 @@ def completed_room():
     return syn.snapshot(room_facts=room, conversations=[group]), gist
 
 
+@pytest.mark.parametrize("replies", [False, True])
+def test_remote_gist_addresses_its_replies_here_or_its_telling_when_none(replies):
+    from ouroboros import memory_view_conversation_forms as conv
+    snap, gist = completed_room()
+    group = snap.conversations[0]
+    remote = group["rooms"][0]
+    words = remote["words"]
+    address = work.row_range(words[0]["address"], words[-1]["address"]) if replies else gist["address"]
+    if not replies:
+        remote["words"] = []
+    for form in (1, 2, 3):
+        text = conv.render_group(group, set(), set(), form)
+        assert f"[{address}] «{work.first_sentence(gist['summary'])}»" in text
+        if replies:
+            assert gist["address"] not in text
+    whole = conv.render_group(group, set(), set(), 0)
+    assert remote["tasks"][0]["line"] in whole
+    assert all(word["line"] in whole for word in remote["words"])
+    # A relay's telling belongs to the delivery mark, never to its sender's terminal.
+    word = dict(words[0], relay_summary="I sent the public outcome.")
+    remote.update(words=[word], tasks=[])
+    work.bind(None, [group], {"done": gist})
+    assert f"[{word['address']}] «I sent the public outcome.»" in conv.render_group(group, set(), set(), 1)
+
+
 def test_one_work_telling_per_block_and_progress_before_final():
     snap, gist = completed_room()
     rows = snap.room["lane1"]
@@ -164,7 +189,8 @@ def test_replaced_words_are_told_once_in_their_own_block_at_every_level(remote_t
             replaced = any(w["id"] in gone.get("F6w", ()) for w in remote["words"][:2])
             assert text.count(work.first_sentence(gist["summary"])) == int(bool(form or replaced or remote_task))
             if form or replaced and not remote_task:
-                assert f"[{gist['address']}]" in text
+                address = work.row_range(remote["words"][0]["address"], remote["words"][1]["address"]) if form else gist["address"]
+                assert f"[{address}]" in text
 
 
 def test_room_range_is_physical_and_returns_surviving_task_tellings():

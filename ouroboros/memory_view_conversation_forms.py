@@ -37,9 +37,9 @@ def _gist_records(group):
     return tuple(sorted(found.items(), key=lambda pair: (pair[1].get("ts", ""), pair[0])))
 
 
-def _gist_lines(group, excluded=(), *, gists=None):
+def _gist_lines(group, excluded=(), *, gists=None, replies=None):
     from ouroboros.memory_view_work import first_sentence
-    return [f"[{gist['address']}] «{first_sentence(gist['summary'])}»"
+    return [f"[{(replies or {}).get(key, gist['address'])}] «{first_sentence(gist['summary'])}»"
             for key, gist in (_gist_records(group) if gists is None else gists) if key not in excluded]
 
 
@@ -122,7 +122,9 @@ def source_index(snapshot):
 
 
 def _sources(group):
+    from ouroboros.memory_view_work import row_range
     words, kinds, rooms, owners, ids = [], {}, {}, [], set()
+    replies = {}
     untold = 0
     overheard_rooms, overheard_words = 0, []
     for room in group["rooms"]:
@@ -139,6 +141,11 @@ def _sources(group):
             parts[kind].append(word)
             words.append(word)
             ids.add(ident)
+            key = word.get("work_id") or word.get("task_id")
+            if word.get("kind") == "ouroboros" and key and word.get("gist"):
+                first, last = replies.get(key, (word, word))
+                replies[key] = (word if word["pos"] < first["pos"] else first,
+                                word if word["pos"] > last["pos"] else last)
             if kind == "owner":
                 owners.append(word)
             elif kind == "untold":
@@ -148,6 +155,7 @@ def _sources(group):
             overheard_rooms += 1
             overheard_words.extend(parts["unread"])
     return {"words": words, "kinds": kinds, "rooms": rooms,
+            "replies": {key: row_range(first["address"], last["address"]) for key, (first, last) in replies.items()},
             "overheard": (overheard_rooms, overheard_words),
             "owners": owners, "ids": ids, "gists": _gist_records(group), "untold": untold,
             "ordinary": not untold and all(
@@ -215,7 +223,7 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
     owner = data["owners"]
     held = [_row_pointer(word, "words") if word["id"] in owners_gone else word["line"] for word in owner]
     if as_line:
-        gists = _gist_lines(group, gists=data["gists"])
+        gists = _gist_lines(group, gists=data["gists"], replies=data["replies"])
         lines = [identity_line(group), *(gists[-1:] if as_line == 3 else gists)]
         if event_line := events.count_line(group):
             lines.append(event_line)
