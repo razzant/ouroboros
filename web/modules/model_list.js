@@ -70,7 +70,7 @@ export function createModelList({ el, input, id, store, main, current, recents, 
             parts.push(rowMarkup(said, { selected: sameRoute(route, chosen), ...options, extra: unavailable }));
         };
         const note = (words) => parts.push(`<p class="chat-model-note" role="presentation">${esc(words)}</p>`);
-        const section = (words) => parts.push(`<p class="chat-model-section" role="presentation">${esc(words)}</p>`);
+        const section = (words, literal = false) => parts.push(`<p class="chat-model-section" role="presentation"${literal ? ' data-i18n-skip' : ''}>${esc(words)}</p>`);
         const listRows = (found) => {
             found.slice(0, LIST_ROWS).forEach((entry) => add(entry.route, { tag: sameRoute(entry.route, mainRoute) ? 'Main' : '' }));
             if (found.length > LIST_ROWS) section(fmt('{n} more · keep typing', { n: found.length - LIST_ROWS }));
@@ -89,7 +89,7 @@ export function createModelList({ el, input, id, store, main, current, recents, 
                     + '<span class="chat-model-row-id">Add a subscription or a key in Settings › Accounts</span></div>');
             } else if (index.sources.length === 1) {
                 // One source: its models at once, no source step.
-                section(index.sources[0].label);
+                section(index.sources[0].label, true);
                 listRows(mainRow && mainRoute ? others : index.rows);
             } else {
                 section('Sources');
