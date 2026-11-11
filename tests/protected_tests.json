@@ -2541,9 +2541,6 @@
   "tests/test_merge_receipt_qualification.py::test_proven_rejection_survives_unavailable_readback": [
    2455
   ],
-  "tests/test_message_bus.py::test_budget_line_replays_unresolved_attempt_not_stale_state": [
-   1487
-  ],
   "tests/test_mind_detach.py::test_raise_after_saved_pause_is_no_error_terminal_and_death_returns_to_the_pause": [
    1196
   ],
