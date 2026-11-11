@@ -137,7 +137,7 @@ export class CallSession {
             const resume = context.resume();
             resume.catch(() => {});
             this.resuming = resume;
-            // This client's chosen microphone and cleaning (Settings → Live calls), else the system's own.
+            // This client's chosen microphone and cleaning (Settings → Voice and calls), else the system's own.
             const prefs = loadDevicePrefs(this.env);
             const pending = acquire({ owner: this, label: 'Live Conversation', keepWhenHidden: true,
                 constraints: microphoneConstraints(prefs).audio });

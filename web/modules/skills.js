@@ -821,6 +821,7 @@ export function initSkills(ctx = {}) {
         if (action === 'open_detail') { openInstalledSheet(name, options.node); return false; }
         if (action === 'open_widgets') { document.querySelector('[data-nav-page="widgets"]')?.click(); return false; }
         if (action === 'open_secrets') { void ctx.openSettings?.('accounts', { back: skillsBack }); return false; }
+        if (action === 'open_settings') { void ctx.openSettings?.(`skill/${encodeURIComponent(name)}`, { back: skillsBack }); return false; }
         if (action === 'read_findings') { openFindings(name); return false; }
         if (action === 'find_in_browse') { selectTab('browse'); browse?.searchFor(name); return false; }
         if (action === 'review' || action === 'rereview') {

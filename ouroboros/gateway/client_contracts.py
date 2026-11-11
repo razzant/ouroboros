@@ -193,21 +193,56 @@ class OnboardingBootstrapResponse(TypedDict):
     bootstrap: SetupBootstrap
 
 
+class SettingsSaveRequest(TypedDict, total=False):
+    """Open partial settings document; the two control fields are never stored."""
+    if_unchanged: Dict[str, str]
+    unset: List[str]
+
+
+class SettingsChange(TypedDict, total=False):
+    """Sanitized commit facts. A secret has no token; a withheld value has no inverse."""
+    old: Any
+    new: Any
+    old_absent: bool
+    token: str
+    withheld: Literal["secret", "structure"]
+
+
+class SettingsReceipt(TypedDict, total=False):
+    changes: Dict[str, SettingsChange]
+    receipt: Literal["unavailable"]
+
+
+class SettingsTiming(TypedDict):
+    effects: Dict[str, Literal["now", "next_call", "next_wake", "next_task", "restart", "local_model"]]
+    tokens: Dict[str, str]
+
+
+class SettingsRestartState(TypedDict, total=False):
+    restart_required: bool
+    restart_keys: List[str]
+    restart_source_unknown_keys: List[str]
+    unknown_keys: List[str]
+    local_model: Dict[str, Any]
+    summary: str
+    running: Dict[str, Any]
+
+
 class SettingsReadResponse(TypedDict, total=False):
     """``GET /api/settings``: every effective setting key with its value (secrets masked: a
     password-class key reads as the configured placeholder, others as a short prefix plus
     ``...``) and ``_meta``. Sending a masked value back means "unchanged"; ``""`` clears."""
 
-    _meta: SettingsMeta
+    _meta: _contracts.SettingsMeta
 
 
 class SettingsPolicyState(TypedDict):
     """``_meta.policy_state`` of ``GET /api/settings``: configured versus effective Access, Supervisor and
     Review (``gateway.settings._build_policy_state``), plus what a managed deployment's policy fixes."""
 
-    access: SettingsPolicyAxis
-    supervisor: SettingsPolicyAxis
-    review: SettingsPolicyAxis
+    access: _contracts.SettingsPolicyAxis
+    supervisor: _contracts.SettingsPolicyAxis
+    review: _contracts.SettingsPolicyAxis
     running_task_snapshot: bool
     deployment: NotRequired[SettingsDeploymentPolicy]  # absent outside a managed deployment
 
@@ -401,16 +436,17 @@ class OwnerSafetyRulesRequest(TypedDict):
     rules: str
 
 
-class OwnerSafetyRulesResponse(TypedDict):
+class OwnerSafetyRulesResponse(SettingsReceipt):
     ok: bool
     rules: str
 
 
 class OwnerSafetyModelRequest(TypedDict):
     settings: Dict[str, Any]
+    if_unchanged: NotRequired[Dict[str, str]]
 
 
-class OwnerSafetyModelResponse(TypedDict):
+class OwnerSafetyModelResponse(SettingsReceipt):
     ok: bool
 
 
@@ -920,15 +956,16 @@ class TaskResumeResponse(TypedDict, total=False):
     message: str
 
 
-# Last, not first: ``contracts.py`` imports ServedUiState from this module, so the shared
-# SettingsMeta is bound after this module's own envelopes exist, whichever module loads first.
-from ouroboros.gateway.contracts import ProjectEntry, SettingsMeta, SettingsPolicyAxis  # noqa: E402
+# Resolve shared shapes after either module has finished loading.
+from ouroboros.gateway import contracts as _contracts  # noqa: E402
+from ouroboros.gateway.contracts import ProjectEntry  # noqa: E402
 
 __all__ = [
     "ServedUiState",
     "SetupStep", "SetupProviderField", "SetupProviderProfile", "SetupModelSlot", "SetupModeChoice",
     "SetupLocalRoutingMode", "SetupBudgetField", "SetupSubscriptionField", "SetupContract",
     "SetupLocalPreset", "SetupInitialState", "SetupConsciousnessOffer", "SetupBootstrap", "OnboardingBootstrapResponse",
+    "SettingsSaveRequest", "SettingsChange", "SettingsReceipt", "SettingsTiming", "SettingsRestartState",
     "SettingsReadResponse", "SettingsPolicyState", "SettingsDeploymentChecker", "SettingsDeploymentRequirement", "SettingsDeploymentExtensions",
     "SettingsDeploymentPolicy", "SettingsWriteRefusal",
     "AuthLoginRequest", "AuthLoginResponse",

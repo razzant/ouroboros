@@ -1,4 +1,4 @@
-"""Settings → Advanced: an extension form whose stored values nobody can read (#1552), in real engines.
+"""A skill's page in Settings: an extension form whose stored values nobody can read (#1552), in real engines.
 
 A real server (``direct_server_with_data``: a candidate checkout over an isolated data root)
 hosts four reviewed extensions whose settings route answers the hydration GET the way
@@ -125,16 +125,37 @@ def test_unread_extension_values_stay_locked_until_edit_anyway_in_chromium_and_w
                             for name in SKILLS:
                                 _enable(page, name)
                             enabled = True
-                        page.wait_for_selector('[data-nav-page="settings"]', state="attached", timeout=30_000)
-                        # On a phone the sidebar is a closed drawer; the page, not the drawer, is under test.
-                        page.locator('[data-nav-page="settings"]').evaluate("el => el.click()")
-                        page.locator('[data-settings-tab="advanced"]').click()
-                        legacy = _form(page, "legacy_reminders")
-                        legacy.wait_for(state="visible", timeout=60_000)
-                        for name in SKILLS:
-                            _form(page, name).wait_for(state="visible", timeout=60_000)
+                        # Each skill's form stands on that skill's own Settings page: one host, re-filled per skill.
+                        page.wait_for_function("() => Boolean(window.__ouroSettings)", timeout=30_000)
+
+                        def show(name):
+                            assert page.evaluate("name => window.__ouroSettings.open(`skill/${name}`)", name) is not False
+                            form = _form(page, name)
+                            form.wait_for(state="visible", timeout=60_000)
+                            assert page.locator("#extension-settings-sections").count() == 1
+                            assert page.locator("[data-extension-settings-form]").count() == 1, "only the opened skill's form"
+                            return form
+
+                        # `{}` is a real empty document; stored values hydrate. Both save normally.
+                        fresh = show("fresh_reminders")
+                        expect(fresh.locator('[name="collection"]')).to_have_value("Default collection")
+                        expect(fresh.locator('button[type="submit"]')).to_be_enabled()
+                        assert fresh.locator("[data-extension-settings-edit-anyway], [data-extension-settings-read]").count() == 0
+                        stored = show("stored_reminders")
+                        expect(stored.locator('[name="collection"]')).to_have_value(STORED["collection"])
+                        expect(stored.locator('button[type="submit"]')).to_be_enabled()
+                        assert stored.locator("[data-extension-settings-edit-anyway], [data-extension-settings-read]").count() == 0
+
+                        # A failed read stays blocked with no way around it.
+                        offline = show("offline_reminders")
+                        expect(offline.locator("[data-extension-settings-status]")).to_have_text(UNREADABLE)
+                        expect(offline.locator('button[type="submit"]')).to_be_disabled()
+                        assert offline.locator("[data-extension-settings-edit-anyway], [data-extension-settings-read]").count() == 0
+                        offline.locator("xpath=ancestor::article[1]").screenshot(
+                            path=str(evidence / f"1552-{engine}-{theme}-{width}-failed.png"))
 
                         # 405: the defaults are shown locked under the warning; only Edit anyway is live.
+                        legacy = show("legacy_reminders")
                         expect(legacy.locator("[data-extension-settings-read]")).to_have_text(UNAVAILABLE)
                         for field in ("collection", "hour", "token", "description"):
                             expect(legacy.locator(f'[name="{field}"]')).to_be_disabled()
@@ -142,21 +163,8 @@ def test_unread_extension_values_stay_locked_until_edit_anyway_in_chromium_and_w
                         expect(legacy.locator('button[type="submit"]')).to_be_disabled()
                         expect(legacy.locator("[data-extension-settings-edit-anyway]")).to_be_enabled()
 
-                        # A failed read stays blocked with no way around it.
-                        offline = _form(page, "offline_reminders")
-                        expect(offline.locator("[data-extension-settings-status]")).to_have_text(UNREADABLE)
-                        expect(offline.locator('button[type="submit"]')).to_be_disabled()
-                        assert offline.locator("[data-extension-settings-edit-anyway], [data-extension-settings-read]").count() == 0
-                        # `{}` is a real empty document; stored values hydrate. Both save normally.
-                        fresh, stored = _form(page, "fresh_reminders"), _form(page, "stored_reminders")
-                        expect(fresh.locator('[name="collection"]')).to_have_value("Default collection")
-                        expect(stored.locator('[name="collection"]')).to_have_value(STORED["collection"])
-                        for ready in (fresh, stored):
-                            expect(ready.locator('button[type="submit"]')).to_be_enabled()
-                            assert ready.locator("[data-extension-settings-edit-anyway], [data-extension-settings-read]").count() == 0
-
                         geometry = page.evaluate("""() => {
-                            const scroller = document.querySelector('.settings-scroll');
+                            const scroller = document.querySelector('#page-settings .settings-page:not([hidden])');
                             const legacy = document.querySelector('[data-skill="legacy_reminders"]');
                             const [save, anyway] = legacy.querySelectorAll('.settings-extension-actions .btn');
                             const a = save.getBoundingClientRect(), b = anyway.getBoundingClientRect();
@@ -170,8 +178,6 @@ def test_unread_extension_values_stay_locked_until_edit_anyway_in_chromium_and_w
                         legacy.locator("xpath=ancestor::article[1]").scroll_into_view_if_needed()
                         page.wait_for_timeout(200)
                         page.screenshot(path=str(evidence / f"1552-{engine}-{theme}-{width}-unknown.png"))
-                        offline.locator("xpath=ancestor::article[1]").screenshot(
-                            path=str(evidence / f"1552-{engine}-{theme}-{width}-failed.png"))
 
                         if (theme, width) == ("light", 1100):
                             legacy.locator("[data-extension-settings-edit-anyway]").click()

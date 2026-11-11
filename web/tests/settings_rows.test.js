@@ -112,6 +112,30 @@ test('a typed value commits on change, never on input, once; it says what it was
     assert.equal(view.line(TOTAL), 'Saved · was 250 · Undo');
 });
 
+test('Undo restores absence with unset, and restores a previously stored value with an assignment', async (t) => {
+    for (const oldAbsent of [true, false]) await t.test(oldAbsent ? 'absent' : 'stored', async (t) => {
+        const { server, view } = await start(t, [TOTAL]);
+        server.answers.push(async (body) => {
+            const receipt = await server.save(body).json();
+            if (oldAbsent) receipt.changes.TOTAL_BUDGET.old_absent = true;
+            return response(receipt);
+        });
+        const outcome = await commitSetting(TOTAL, 250);
+        assert.equal(outcome.oldAbsent, oldAbsent);
+        assert.equal(view.line(TOTAL), 'Saved · was 200 · Undo');
+        // The real server resolves the omitted key to its effective default in the receipt.
+        if (oldAbsent) server.answers.push(() => server.save({ TOTAL_BUDGET: 200 }));
+        await view.press(view.undo());
+        assert.deepEqual(server.posts[1], {
+            ...(oldAbsent ? { unset: ['TOTAL_BUDGET'] } : { TOTAL_BUDGET: 200 }),
+            if_unchanged: { TOTAL_BUDGET: 'TOTAL_BUDGET@1' },
+        });
+        assert.equal(server.posts.length, 2);
+        assert.equal(view.field(TOTAL).value, '200');
+        assert.equal(view.line(TOTAL), 'Saved · was 250 · Undo');
+    });
+});
+
 test('Undo of a value changed on another device says so, shows the current value and writes nothing more', async (t) => {
     const { server, view } = await start(t, [TOTAL]);
     await view.type(TOTAL, '250');

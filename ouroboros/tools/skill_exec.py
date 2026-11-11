@@ -609,8 +609,8 @@ def _skill_tool_preflight(
         return None
     return (
         "⚠️ SKILLS_UNAVAILABLE: No skills are discoverable. Point "
-        "OUROBOROS_SKILLS_REPO_PATH at a local checkout in Settings → "
-        "Behavior → External Skills Repo, or install skills into the data plane."
+        "OUROBOROS_SKILLS_REPO_PATH at a local checkout in Skills → "
+        "Sources, or install skills into the data plane."
     )
 
 

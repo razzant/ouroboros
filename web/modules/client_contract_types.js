@@ -1291,17 +1291,22 @@
 
 /**
  * @typedef {Object} OwnerSafetyRulesResponse
+ * @property {Object<string, SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
  * @property {boolean} ok
  * @property {string} rules
  */
 
 /**
  * @typedef {Object} OwnerSafetyModelRequest
+ * @property {Object<string, string>=} if_unchanged
  * @property {Object} settings
  */
 
 /**
  * @typedef {Object} OwnerSafetyModelResponse
+ * @property {Object<string, SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
  * @property {boolean} ok
  */
 
@@ -1342,4 +1347,45 @@
  * @property {number} model_calls
  * @property {number} sessions
  * @property {?number} tokens
+ */
+
+/** @typedef {Object} SettingsChange
+ * @property {*=} old
+ * @property {*=} new
+ * @property {boolean=} old_absent
+ * @property {string=} token
+ * @property {'secret'|'structure'=} withheld
+ */
+/** @typedef {Object} SettingsReceipt
+ * @property {Object<string, SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
+ */
+/** @typedef {Object} SettingsTiming
+ * @property {Object<string, 'now'|'next_call'|'next_wake'|'next_task'|'restart'|'local_model'>} effects
+ * @property {Object<string, string>} tokens
+ */
+/** @typedef {Object} SettingsRestartState
+ * @property {boolean=} restart_required
+ * @property {string[]=} restart_keys
+ * @property {string[]=} restart_source_unknown_keys
+ * @property {string[]=} unknown_keys
+ * @property {Object=} local_model
+ * @property {string=} summary
+ * @property {Object<string, *>=} running
+ */
+
+/**
+ * 500 AFTER settings landed: retry the named later step, never re-save (settings/onboarding writes).
+ * @typedef {Object} SettingsPostCommitFailureResponse
+ * @property {Object<string, SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
+ * @property {string} error
+ * @property {string} status  // saved_with_post_commit_error
+ * @property {boolean} saved  // always true
+ * @property {string} post_commit_failed
+ */
+
+/** @typedef {Object} SettingsSaveRequest Open partial document of setting keys.
+ * @property {Object<string, string>=} if_unchanged
+ * @property {string[]=} unset
  */

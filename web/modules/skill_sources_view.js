@@ -119,6 +119,7 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
             <div class="skills-sources-foot">
                 <p>Skills made on this computer${host.installedSkills() ? ` (${madeHere})` : ''} don’t come from a source. <button type="button" class="skills-link-quiet ui-hit-area" data-source-action="made_here">Publish one to share it ›</button></p>
                 <p>Automatic keys for skills that may run: <button type="button" class="skills-link-quiet ui-hit-area" data-source-action="auto_grant">Permissions and checks ›</button></p>
+                <p>The skills folder on this computer and the ClawHub address: <button type="button" class="skills-link-quiet ui-hit-area" data-source-action="skill_sources">Skill sources ›</button></p>
             </div>`;
     }
 
@@ -219,6 +220,7 @@ export function createSkillSources({ pane, host, api = skillSourcesApi }) {
             } else if (action === 'first_start') await confirmFirstStart();
             else if (action === 'made_here') host.showMadeHere();
             else if (action === 'auto_grant') host.openSettings('permissions', { row: 'OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS' });
+            else if (action === 'skill_sources') host.openSettings('skill-sources');
             else if (source) await run(action, source);
         } catch (err) {
             host.toast(err?.message || String(err), 'danger');

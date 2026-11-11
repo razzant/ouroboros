@@ -21,7 +21,7 @@ def route_ui(role_ui, tmp_path, monkeypatch):
     ui['settings'].update(OPENROUTER_API_KEY='fixture-key', OUROBOROS_WEBSEARCH_BACKEND='auto',
                           OUROBOROS_WEBSEARCH_MODEL='gpt-5.2', OUROBOROS_MODEL='openai-compatible::future',
                           OPENAI_COMPATIBLE_BASE_URL='https://compatible.invalid/v1', OPENAI_COMPATIBLE_API_KEY='fixture-key')
-    monkeypatch.setattr(gateway, 'load_settings', lambda: ui['settings'])
+    monkeypatch.setattr(gateway, 'settings_read_view', lambda: (ui['settings'], {}))
     monkeypatch.setattr(gateway, 'request_drive_root', lambda _request: tmp_path)
     monkeypatch.setattr(gateway, '_owner_audit', lambda *a: None)
     app = Starlette(routes=[Route('/api/settings', gateway.api_settings_get),

@@ -2,7 +2,7 @@
 
 Settings have one home and default; the table projects `config.SETTINGS_DEFAULTS`, never a second authority.
 
-`ouroboros/config.py` re-exports paths, settings/env readers and writers, normalization, runtime mode, skills location and PID lock; leaves own defaults/vocabularies (§10.3). `settings_scales.IMMEDIATE_SETTINGS` applies live, `RESTART_REQUIRED_SETTINGS` after restart, other keys next task and route keys next model call. `update_channels.py` owns update defaults.
+`ouroboros/config.py` re-exports paths, settings/env readers and writers, normalization, runtime mode, skills location and PID lock; leaves own defaults/vocabularies (§10.3). `settings_scales.setting_effect` owns the six presentation timings (§3), independently of actor snapshot policy. `update_channels.py` owns update defaults.
 
 Paths use `OUROBOROS_*` overrides or `launch_roots`' pre-import `APP_ROOT` (`~/Ouroboros`). A direct server defaults `REPO_DIR` to its checkout; with only `APP_ROOT` it refuses if `~/Ouroboros/data` may contain memory. `resolve_port_file` moves only the hosting root's port file. Unset work roots follow witness basis: older data uses `~/Ouroboros`, otherwise `APP_ROOT`; unknown refuses. `settings.json` under the data root requires its lock for writes. `secret_masking.py` repairs only disk-recognized placeholders before env precedence, never masking real env credentials. With `OUROBOROS_SETTINGS_SHA256`, `settings_integrity.py` treats the isolated child's seeded snapshot as an owner-authored trust root: reads verify every byte without a sibling lock; all writers refuse.
 
@@ -18,7 +18,11 @@ Optional bounds: `OUROBOROS_MAX_ROUNDS`/`OUROBOROS_TASK_ABS_CEILING_SEC` use `pa
 
 Five writers serialize exact bytes via `serialize_settings()`. `config.save_settings`, `owner_settings._owner_update_settings`, `packaged_cli._save_settings` use `prepare_settings_for_persist`: deployment policy, disk-authored silence, context/Safety ratchets. Only the raw compat pair bypasses this through `context_mode_compat.normalize_and_persist_context_mode_compat`; `colab_bootstrap.write_colab_settings` bypasses for foreign roots (own: `_owner_write_settings`). All persist `review_pool_receipts.persist_write_receipts` before replacement. `tests/_shared.py::settings_writers` rejects a sixth writer.
 
-Owner endpoints change one decision in a document they do not own: `_owner_update_settings` reads, changes and writes under one lock (no change writes nothing; a digest mismatch, `settings_document_digest()`, refuses first, never reverting a concurrent change under "saved"). The generic save, Safety endpoints and a wait card's model save record old → new per key and declared origin (`record_settings_change`; Main row: DESIGN); incidental writers (launcher, `set_tool_timeout`) land one field (`fields_on_saved_document`).
+`owner_settings._owner_update_settings` checks preconditions, persists canonical settings and captures that commit's receipt and per-key tokens under one file lock. In-process writers also hold `settings_document_mutation` through projection. The generic save binds its prepared document to its read digest, re-reads and re-merges the original body once on a miss, then refuses a second miss with 409 `settings_precondition_failed`. Incidental writers (launcher, a worker's `set_tool_timeout`, resolved GitHub repository) use `fields_on_saved_document`, preserving unrelated fields.
+
+GET values and `_meta.tokens` share one source read. Tokens hash canonical stored values including presence, never scalar secrets. Generic POST accepts `if_unchanged: {KEY: token}`; Safety's checker endpoint accepts it beside `settings`. The locked per-key mismatch writes nothing: 409, `saved:false`, `settings_changed_elsewhere`. Unrelated keys do not invalidate the condition. Ordinary scalar writes remain last-writer-wins; structure edits and Undo use tokens.
+
+Generic and owner responses expose `changes`: effective scalar `old`/`new` plus the installed token; secrets and structures are withheld by the audit's shared projection (`record_settings_change`, declared origin; Main row: DESIGN). No receipt after saving yields `receipt:"unavailable"` without `changes`. `old_absent:true` records omission; ordinary non-owner, non-secret keys accept `unset:[KEY]` with a token to restore it. Generic saves can leave scalar choices absent (UI directory and model proposals); reposting a default would pin them. Project Context reports its own scoped old/new without a settings token. Owner-only generic keys name their endpoints in `ignored_keys` outside Cyber Pro. Refusal (`saved:false`), a failed after-step (`saved:true`, `post_commit_failed`, receipt if available), and timeout (`saved:null`, worker still running) remain distinct.
 
 ### LLM output token budgets
 
@@ -87,7 +91,7 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_MODEL_CONSCIOUSNESS | "" | Background-consciousness model (empty inherits) |
 | OUROBOROS_MODEL_FALLBACKS | openai/gpt-5.6-luna | Cross-model fallback chain, Safety's too on outage (not owner-guarded; `fallback_cooldown.py`); blank = none |
 | OUROBOROS_SERVED_MODEL_REDOS | 2 | Redos of a round another model answered, each a new operation (clamped 0-5) |
-| OUROBOROS_MODEL_MAX_CONCURRENCY | 3 | Physical calls in flight per model and provider route (credential, endpoint), installation-wide, one fair queue, owner-awaited turns first; ≤0 = off (Settings › Runtime Limits; live); Claudexor-served routes are the engine's (`model_concurrency.py`) |
+| OUROBOROS_MODEL_MAX_CONCURRENCY | 3 | Physical calls in flight per model and provider route (credential, endpoint), installation-wide, one fair queue, owner-awaited turns first; ≤0 = off (Settings › Models › More; live); Claudexor-served routes are the engine's (`model_concurrency.py`) |
 | OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC | 180 | Concurrency-slot wait bound; then refused unsent |
 | OUROBOROS_PROJECT_NAMING_TIMEOUT_SEC | 60 | Project-naming operation ceiling |
 | OUROBOROS_PROJECT_NAMING_ASYNC_TIMEOUT_SEC | 8 | Inline naming bound when a card becomes a project (`gateway/projects.py`) |

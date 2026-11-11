@@ -1138,6 +1138,9 @@ function manualTimers(t) {
 function openStorage(t) {
     const fixture = setup(t);
     const timers = manualTimers(t);
+    // The retention row's own settings read is dashboard_settings.test.js's; these flows count Storage's reads.
+    const fetchStorage = globalThis.fetch;
+    globalThis.fetch = async (url, init) => (url === '/api/settings' ? response({ OUROBOROS_GC_RETENTION_DAYS: 7 }) : fetchStorage(url, init));
     const state = { activePage: 'dashboard', dashboardActiveSubtab: 'storage' };
     const show = (tab) => {
         state.dashboardActiveSubtab = tab;

@@ -472,13 +472,13 @@
     --message-pending-opacity: .78;
 }
 
-/* The dark voices' materials (DESIGN principle 2 and the seed table). Inside the Ouroboros voice (its answers and its
-   work cards, finished ones too) trays and capsules are opaque lighter steps of that voice under opaque readable ink,
+/* The dark voices' materials (DESIGN principle 2 and the seed table). Inside the Ouroboros voice (its answers, its
+   work cards, finished ones too, and its own card in Settings) trays and capsules are opaque lighter steps of that voice under opaque readable ink,
    and the tones and status bodies take those steps, so a word keeps its contrast at rest, hover and press. A custom
    property resolves where it is declared, so the aliases :root computed (the legacy muted ink, the card bodies, the
    crimson word, the failure word) are restated here. Inside the owner's voice its links, focus and quiet words take
    the owner's readable blue. A light document keeps every inherited value. */
-:root:not([data-theme="light"]) :is(.chat-bubble.assistant, .chat-live-card) {
+:root:not([data-theme="light"]) :is(.chat-bubble.assistant, .chat-live-card, .settings-voice) {
     --text-primary: #fcf9f9;
     --assistant-text: var(--text-primary);
     --text-secondary: #ebd9da;
