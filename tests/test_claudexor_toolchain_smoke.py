@@ -187,9 +187,13 @@ def test_platform_gate_runs_the_real_codex_install_on_windows_without_credential
     assert not [step for step in steps if step.get("env")]
     commands = "\n".join(str(step["run"]) for step in steps if "run" in step)
     assert commands == (
-        'python -I scripts/claudexor_toolchain_smoke.py --root "$RUNNER_TEMP/cx-consumer" '
+        'python -I scripts/claudexor_toolchain_smoke.py --root "$env:RUNNER_TEMP/cx-consumer" '
         "--harness-install codex"
     )
+    # The vendor installer resolves a bare `tar`: the witness starts from PowerShell, where
+    # Windows's own tools come first, and not from the workflow's default Git Bash.
+    assert workflow["defaults"]["run"]["shell"] == "bash"
+    assert [step["shell"] for step in steps if "run" in step] == ["pwsh"]
     assert "secrets." not in str(job)
 
 

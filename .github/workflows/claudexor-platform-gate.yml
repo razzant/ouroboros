@@ -268,7 +268,11 @@ jobs:
       - uses: ./.github/actions/setup-python-env
       - name: Install the pinned toolchain, then Codex through the shared maintenance service
         # Same isolated start as the toolchain job; no setup-node, no npm, no harness override.
-        run: python -I scripts/claudexor_toolchain_smoke.py --root "$RUNNER_TEMP/cx-consumer" --harness-install codex
+        # PowerShell, the way a desktop install starts: Git Bash puts its own Unix tools ahead
+        # of Windows's on PATH, and the vendor installer's bare `tar` then cannot open a
+        # drive-letter path (razzant/claudexor#680).
+        shell: pwsh
+        run: python -I scripts/claudexor_toolchain_smoke.py --root "$env:RUNNER_TEMP/cx-consumer" --harness-install codex
 
   # ────────────────────────────────────────────────────────────────────────────
   # Live lane — real harness, explicit API key, one README edit. Costs money.
