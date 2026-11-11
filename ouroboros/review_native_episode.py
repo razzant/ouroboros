@@ -494,6 +494,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
     def _apply_working_view(self, messages: list, schemas: list, round_idx: int) -> bool:
         from ouroboros.context_budget import ContextReclaimRequest, authored_view_fields
         from ouroboros.context_compaction import compact_tool_history_llm, context_reclaim_transcript_sha256
+        from ouroboros.tools.compact_context import residue_by_kind
 
         pending = getattr(self._inspection_ctx, "_pending_compaction", None)
         if pending is None:
@@ -531,6 +532,7 @@ class NativeToolRoundReviewExecutor(ReviewSlotExecutor):
         if receipt.status != "no_op":
             notice = {"role": "user", "content": json.dumps({"context_view_status": receipt.status,
                        "receipt_source": ref, "reclaimed_tokens": receipt.reclaimed_tokens,
+                       **({"residue": residue_by_kind(messages), "basis": "host estimates"} if receipt.status == "applied" else {}),
                        **({"replaced_notes": receipt.replaced_notes} if receipt.replaced_notes else {})},
                        ensure_ascii=False)}
             messages.append(notice)

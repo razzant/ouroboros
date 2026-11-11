@@ -260,6 +260,60 @@ def test_an_empty_keep_selection_folds_tool_units_but_keeps_every_earlier_note(t
         "[Actor-authored working view; exact source retained by checkpoint]\nThe read confirms the goal.")
 
 
+@pytest.mark.parametrize("source_kind", ["restored", "emergency_body", "emergency_host_rows"])
+def test_keep_selection_folds_host_sources_but_only_named_notes(tmp_path, source_kind):
+    from ouroboros.context_budget import bound_host_row, authored_view_fields
+    from ouroboros.context_source_view import emergency_address_view
+    from ouroboros.tools.compact_context import _compact_context, record_context_view
+
+    source = _large_unit("original")
+    goal, receipt = _fold(source, _authored(source, note="Goal: keep the exact decision."), tmp_path)
+    original = cc.context_units(source)[0]
+    if source_kind == "restored":
+        ref = {"checkpoint_ref": receipt.checkpoint_ref, "unit_id": original.unit_id,
+               "raw_sha256": original.raw_sha256}
+        copies, receipt = _fold(goal, replace(_authored(goal, note=""), keep_unit_ids=None,
+                                             restore_unit_refs=(ref,)), tmp_path)
+        host = copies[-1]
+        assert "-result-tail-original" in host["content"][0]["text"]
+    else:
+        if source_kind == "emergency_host_rows":
+            source = [{"role": "user", "content": "Owner assignment"},
+                      bound_host_row("ouroboros_context_facts", "Old facts. " * 2000),
+                      bound_host_row("ouroboros_context_facts", "Current facts.")]
+        copies, receipt = emergency_address_view(
+            source, _request(source), drive_root=tmp_path, task_id="compaction",
+            rung="host_copies" if source_kind == "emergency_host_rows" else "unseen_bodies")
+        host = next(row for row in copies if cc._capsule_metadata(row)[1])
+    assert receipt.status == "applied"
+    assert cc._capsule_metadata(host)[1]["retention"] == "source_view"
+    helper = _note(tmp_path, "A helper's account remains a note.", "helper")
+    helper["content"][0]["_context_capsule"]["authorship"] = "helper"
+    unknown = _unattributed(_note(tmp_path, "Unrecorded authorship remains protected.", "legacy"))
+    unmarked = _note(tmp_path, "Host authorship alone is not an exact source marker.", "unmarked")
+    unmarked["content"][0]["_context_capsule"]["authorship"] = "host"
+    notes = [*goal, helper, unknown, unmarked]
+    view = [*notes, host, *_large_unit("read-b"), *_unit("recent-1"), *_unit("recent-2")]
+    units = cc.context_units(view, scope="dialogue")
+    host_id = units[len(notes)].unit_id
+
+    kept, receipt = _fold(view, _authored(view, keep=(host_id,)), tmp_path)
+    assert receipt.status == "applied" and host in kept and all(note in kept for note in notes)
+    ctx = SimpleNamespace(active_context_mode="low")
+    record_context_view(ctx, view, [])
+    _compact_context(ctx, working_note="The older read is understood.", keep_last_n=2)
+    counted, receipt = _fold(view, replace(_request(view), **authored_view_fields(ctx._pending_compaction)), tmp_path)
+    assert receipt.status == "applied" and host in counted and all(note in counted for note in notes)
+    assert [row["tool_call_id"] for row in counted if row.get("role") == "tool"] == ["recent-1", "recent-2"]
+
+    folded, receipt = _fold(view, _authored(view, note="The new evidence agrees."), tmp_path)
+    assert receipt.status == "applied" and receipt.replaced_notes is None
+    assert host not in folded and all(note in folded for note in notes)
+    assert receipt.selected_unit_ids == tuple(unit.unit_id for unit in units[len(notes):])
+    assert folded[:len(notes)] == notes and len(folded) == len(notes) + 1
+    assert "-result-tail-original" not in json.dumps(folded)
+
+
 def test_named_notes_merge_into_a_new_note_that_keeps_their_restorable_addresses(tmp_path):
     """Explicit replacement: only the named note leaves; the new note and the receipt name it, and the
     address the new note carries restores the replaced note's exact text."""

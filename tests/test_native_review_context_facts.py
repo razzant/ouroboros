@@ -420,6 +420,12 @@ def test_main_and_native_review_apply_one_request_to_the_same_notes(tmp_path, mo
         assert list(main_receipt[key]) == list(native_receipt[key])
     main_notice = json.loads(main[-1]["content"].split("\n", 1)[1])
     native_notice = json.loads(reviewed[-1]["content"])
+    from ouroboros.tools.compact_context import residue_by_kind
+    for rows, notice in ((main, main_notice), (reviewed, native_notice)):
+        assert notice.get("residue") == residue_by_kind(rows[:-1])
+        assert notice["residue"]["capsule"]["units"] == (2 if named else 3)
+        assert "tool" not in notice["residue"]
+        assert notice["basis"] == "host estimates"
     named_notes = [(source.get("replaced_notes") or {}).get("notes")
                    for source in (main_receipt, native_receipt, main_notice, native_notice)]
     expected = ([{"unit_id": first.unit_id, "raw_sha256": first.raw_sha256,

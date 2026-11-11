@@ -740,7 +740,8 @@ def _authored_view(
     """Materialize one actor's selection through the existing unit/checkpoint/capsule engine
     over the dialogue scope (tool units, capsules, the actor's own completed replies, host
     prose). Rows typed as people's words (``owner_protected_unit_ids``) stay whole; earlier
-    notes stay unless ``replace_note_ids`` names them."""
+    notes stay unless ``replace_note_ids`` names them. Host exact-source views (restores
+    and emergency records, stamped ``retention=source_view``) follow the keep selection."""
     restore_refs = []
     for ref in request.restore_unit_refs:
         checkpoint = ref.get("checkpoint_ref") if isinstance(ref, Mapping) else None
@@ -768,15 +769,17 @@ def _authored_view(
                                   fit={"accepted": False, "reason": "fit_callback_missing"}, **facts)
     units = context_units(observed, scope="dialogue", trace_refs_by_tool_call_id=trace_refs,
                           measurement_density=request.measurement_density)
-    # Earlier notes (capsule units, whatever their authorship) stay unless the mind names them for
-    # replacement: no keep selection, explicit or derived, replaces one, nor may an explicit keep name one too.
+    # Only the host's source_view marker makes a capsule foldable by keep selection.
+    # Every other capsule remains a note, including helper and unrecorded authorship.
     notes = {u.unit_id for u in units if unit_kind(observed, u) == "capsule"}
+    source_views = {u.unit_id for u in units
+                    if (_capsule_metadata(observed[u.start])[1] or {}).get("retention") == "source_view"}
     named = set(request.replace_note_ids)
     keep = set(request.keep_unit_ids) if request.keep_unit_ids is not None else {u.unit_id for u in units}
     if (not keep <= {u.unit_id for u in units} or not named <= notes
             or request.keep_unit_ids is not None and keep & named):
         return messages, _receipt("binding_mismatch", before_sha=before_sha, **facts)
-    keep = (keep | notes) - named
+    keep = (keep | (notes - source_views)) - named
     protected = owner_protected_unit_ids(observed, units)
     authored = [u for u in units if (_capsule_metadata(observed[u.start])[1] or {}).get("authorship") == "actor"]
     removed = [u for u in units if u.unit_id not in keep and u.unit_id not in protected]

@@ -281,6 +281,31 @@ def test_keep_last_n_keeps_unnamed_notes_and_never_re_protects_a_named_one(tmp_p
     assert [row["unit_id"] for row in receipt["replaced_notes"]["notes"]] == [note_id]
 
 
+def test_inspect_identifies_capsule_authorship_and_first_line_for_a_named_merge(tmp_path, monkeypatch):
+    ctx = SimpleNamespace(active_context_mode="low")
+    source = _source()
+    record_context_view(ctx, source, [])
+    _compact_context(ctx, working_note="Goal: keep the original wording.\nDetails stay in the note.", keep_unit_ids=[])
+    folded = _run_round_compaction(source, _context(tmp_path, ctx, [], monkeypatch))
+    note = folded[2]
+    helper = copy.deepcopy(note)
+    helper["content"][0]["_context_capsule"]["authorship"] = "helper"
+    legacy = copy.deepcopy(note)
+    del legacy["content"][0]["_context_capsule"]["authorship"]
+    messages = [*source[:2], note, helper, legacy, *_read("next")]
+    record_context_view(ctx, messages, [])
+    seen = json.loads(_compact_context(ctx, inspect=True))
+    capsules = [row for row in seen["units"] if row["kind"] == "capsule"]
+    assert [row.get("authorship") for row in capsules] == ["actor", "helper", "unrecorded"]
+    assert [row["first_line"] for row in capsules] == ["Goal: keep the original wording."] * 3
+    assert all("first_line" not in row and "authorship" not in row
+               for row in seen["units"] if row["kind"] != "capsule")
+    _compact_context(ctx, working_note="The helper's account is incorporated.", keep_unit_ids=[],
+                     replace_note_ids=[capsules[1]["unit_id"]])
+    merged = _run_round_compaction(messages, _context(tmp_path, ctx, [], monkeypatch))
+    assert helper not in merged and note in merged and legacy in merged
+
+
 def test_keeping_and_replacing_one_note_or_naming_a_non_note_is_an_argument_error(tmp_path, monkeypatch):
     from tests.test_compaction import _note
 
