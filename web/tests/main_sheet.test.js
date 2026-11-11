@@ -45,11 +45,12 @@ const PREVIOUS = { ...describeRoute(null, route(ASTRA)) };
 async function sheet({ lists = census(), act = () => {}, confirm = true } = {}) {
     const doc = { createElement: (tag) => new ElementStub(tag, doc), byId: new Map() };
     const content = doc.createElement('section');
-    const button = doc.createElement('button');
-    content.parentElement = { closest: (selector) => (selector === '.confirm-dialog' ? { querySelector: () => button } : null) };
+    // The shared dialog's seam (confirm_dialog.test.js): what the sheet asks the confirming button to say.
+    const labels = [];
+    const seam = { setConfirmLabel: (words, params = null) => labels.push(params ? words.replace('{n}', params.n) : words) };
     const dialog = async (options) => {
-        options.content.mount(content);
-        await act({ content, button, fire: () => (content.listeners.get('change') || []).forEach((fn) => fn({})) });
+        options.content.mount(content, seam);
+        await act({ content, labels, fire: () => (content.listeners.get('change') || []).forEach((fn) => fn({})) });
         return confirm;
     };
     const answer = await confirmMainChange({ next: NEXT, previous: PREVIOUS, census: lists, dialog, doc });
@@ -58,7 +59,7 @@ async function sheet({ lists = census(), act = () => {}, confirm = true } = {}) 
     const words = (row) => [row.children.find((node) => node.classList.contains('chat-model-off-name')).textContent,
         row.querySelector('.chat-model-off-meta').children.map((node) => node.textContent).join('')];
     const boxes = content.querySelectorAll('.ui-checkbox');
-    return { answer, content, button, count, rows, words, boxes };
+    return { answer, content, labels, count, rows, words, boxes };
 }
 
 test('the count is a number when the census is complete and unknown when it is not, never zero by default', () => {
@@ -113,16 +114,16 @@ test('every movable row has its own tick and nothing is ticked beforehand; a wor
 });
 
 test('the ticked rows are what the sheet answers with, the button says how many, and Cancel answers nothing', async () => {
-    const labels = [];
-    const s = await sheet({ act: ({ content, button, fire }) => {
+    const s = await sheet({ act: ({ content, fire }) => {
         const boxes = content.querySelectorAll('.ui-checkbox');
-        boxes[0].checked = true; fire(); labels.push(button.textContent);
-        boxes[2].checked = true; fire(); labels.push(button.textContent);
-        boxes[0].checked = false; fire(); labels.push(button.textContent);
-        boxes[2].checked = false; fire(); labels.push(button.textContent);
+        boxes[0].checked = true; fire();
+        boxes[2].checked = true; fire();
+        boxes[0].checked = false; fire();
+        boxes[2].checked = false; fire();
         boxes[1].checked = true; boxes[2].checked = true; fire();
     } });
-    assert.deepEqual(labels, ['Change Main and move 1 more', 'Change Main and move 2 more', 'Change Main and move 1 more', 'Change Main']);
+    assert.deepEqual(s.labels, ['Change Main and move 1 more', 'Change Main and move 2 more', 'Change Main and move 1 more', 'Change Main',
+        'Change Main and move 2 more'], 'said through the dialog\'s own seam, on every tick');
     assert.deepEqual(s.answer.moves.map((move) => [move.kind, move.id]), [['work', 't4'], ['room', 'p7']]);
     const cancelled = await sheet({ confirm: false, act: ({ content }) => { content.querySelectorAll('.ui-checkbox')[0].checked = true; } });
     assert.equal(cancelled.answer, false);

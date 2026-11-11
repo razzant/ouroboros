@@ -148,7 +148,7 @@ export async function confirmMainChange({ next, previous, census = null, dialog 
         title: 'Change Main',
         body: resets,
         confirmLabel: 'Change Main',
-        content: { label: 'Main model', mount(container) {
+        content: { label: 'Main model', mount(container, sheet) {
             const line = (text) => {
                 const made = doc.createElement('p');
                 made.className = 'chat-model-sheet-fact';
@@ -183,11 +183,9 @@ export async function confirmMainChange({ next, previous, census = null, dialog 
             container.append(line('A ticked work follows Main from its next step; a ticked room starts new work on Main.'));
             // The confirming button says how many more it moves, as the ticks change.
             const onTick = () => {
-                const button = container.closest?.('.confirm-dialog')?.querySelector?.('[data-confirm-ok]');
                 const n = ticks.filter((made) => made.input.checked).length;
-                if (!button) return;
-                if (n) fmtInto(button, 'Change Main and move {n} more', { n });
-                else { button.textContent = 'Change Main'; delete button.dataset.i18nFmt; }
+                if (n) sheet?.setConfirmLabel('Change Main and move {n} more', { n });
+                else sheet?.setConfirmLabel('Change Main');
             };
             container.addEventListener('change', onTick);
             return () => container.removeEventListener('change', onTick);
