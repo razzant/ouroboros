@@ -18,7 +18,7 @@ from ouroboros.config import (
     SETTINGS_DEFAULTS, defaults_for_settings_document, normalize_settings_raw, serialize_settings,
 )
 from ouroboros.settings_scales import (
-    EFFORT_FORMAT_KEY, OWNER_CAP_FORMAT_KEY, OWNER_CAP_KEY, normalize_effort_document, owner_cap_value,
+    EFFORT_FORMAT_KEY, OWNER_CAP_FORMAT_KEY, OWNER_CAP_KEY, normalize_effort_document, optional_bound_value,
 )
 from ouroboros.update_channels import get_managed_update_fetch_timeout_sec, normalize_update_channel
 from ouroboros.utils import atomic_write_json, write_text_atomic
@@ -180,7 +180,7 @@ def build_colab_settings(
     # sentinel keys stay out of the document.
     loaded = {k: v for k, v in normalize_settings_raw(document).items()
               if not str(k).startswith("_") or k in (EFFORT_FORMAT_KEY, OWNER_CAP_FORMAT_KEY)} if document else {}
-    if OWNER_CAP_FORMAT_KEY not in document and owner_cap_value(document.get(OWNER_CAP_KEY)) == 1:
+    if OWNER_CAP_FORMAT_KEY not in document and optional_bound_value(OWNER_CAP_KEY, document.get(OWNER_CAP_KEY)) == 1:
         loaded[OWNER_CAP_KEY] = ""  # Colab's own first-launch 1, read once as blank (migration A)
     settings.update(normalize_effort_document(loaded))
     if github_repo:

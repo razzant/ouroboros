@@ -17,7 +17,7 @@ from ouroboros.settings_defaults import (
     SUPERVISOR_LIVENESS_DEADLINE_DEFAULT_SEC,
 )
 from ouroboros.settings_integrity import runtime_setting
-from ouroboros.settings_scales import optional_bound_value, owner_cap_value
+from ouroboros.settings_scales import optional_bound_value
 
 # Local model-operation status polling; not a provider deadline or quota timer.
 CLAUDEXOR_MODEL_POLL_INTERVAL_SEC = 0.25
@@ -150,8 +150,8 @@ def _bounded_positive_int_setting(key: str, *, default: int, hard_max: int, min_
 
 def get_max_workers() -> Optional[int]:
     """The owner's optional cap on acting project tasks, read live on every pass: None is no number (the machine's
-    memory is the limit); a typo reads finite, never as no cap (``settings_scales.owner_cap_value``)."""
-    return owner_cap_value(runtime_setting("OUROBOROS_MAX_WORKERS"))
+    memory is the limit); a typo reads finite, never as no cap (``settings_scales.optional_bound_value``)."""
+    return optional_bound_value("OUROBOROS_MAX_WORKERS", runtime_setting("OUROBOROS_MAX_WORKERS"))
 
 
 def get_task_idle_timeout_sec() -> int:

@@ -336,21 +336,25 @@ _WARNED_OPTIONAL_BOUNDS: set = set()
 
 
 def optional_bound_value(key: str, raw: Any) -> Optional[int]:
-    """One read of an ``OPTIONAL_BOUND_LEGACY`` key: ``None`` = no bound, else a positive int.
+    """One read of an optional bound or the owner cap: ``None`` = no bound, else a positive int.
 
-    An integral float is its integer (a harness may write ``10800.0``). Whatever the strict
-    parser refuses — blank, null, zero, negative, a fraction, a word — is a typo, never "no
-    bound": it takes the key's finite legacy value, reported once per process and value."""
+    An integral float is its integer (a harness may write ``10800.0``). Blank or null means
+    no cap only for the owner cap. Everything else the strict parser refuses — including
+    blank/null for other bounds — is a typo, never "no bound": it takes the key's finite
+    legacy value, reported once per process and value."""
+    owner_cap = key == OWNER_CAP_KEY
+    if owner_cap and (raw is None or isinstance(raw, str) and not raw.strip()):
+        return None
     value = int(raw) if isinstance(raw, float) and raw.is_integer() else raw
     try:
         return parse_positive_or_unlimited(value)
     except (TypeError, ValueError):
-        fallback = OPTIONAL_BOUND_LEGACY[key]
+        fallback = OWNER_CAP_LEGACY if owner_cap else OPTIONAL_BOUND_LEGACY[key]
         if (key, repr(raw)) not in _WARNED_OPTIONAL_BOUNDS:
             _WARNED_OPTIONAL_BOUNDS.add((key, repr(raw)))
             logging.getLogger(__name__).warning(
-                "%s=%r is not a positive integer or %r; using the finite fallback %s",
-                key, raw, UNLIMITED, fallback)
+                "%s=%r is not a positive integer or %s; using the finite fallback %s",
+                key, raw, "blank" if owner_cap else repr(UNLIMITED), fallback)
         return fallback
 
 
@@ -377,20 +381,6 @@ OWNER_CAP_LEGACY = 10
 OWNER_CAP_FORMAT_KEY = "_owner_cap_format"  # disk format, never an environment setting or owner knob
 
 
-def owner_cap_value(raw: Any) -> Optional[int]:
-    """One read of the owner cap: None = no number, else a positive int; a typo reads as ``OWNER_CAP_LEGACY``."""
-    if raw is None or isinstance(raw, str) and not raw.strip():
-        return None
-    try:
-        return parse_positive_or_unlimited(int(raw) if isinstance(raw, float) and raw.is_integer() else raw)
-    except (TypeError, ValueError):
-        if (OWNER_CAP_KEY, repr(raw)) not in _WARNED_OPTIONAL_BOUNDS:
-            _WARNED_OPTIONAL_BOUNDS.add((OWNER_CAP_KEY, repr(raw)))
-            logging.getLogger(__name__).warning("%s=%r is not a positive integer or blank; using the finite "
-                                                "fallback %s", OWNER_CAP_KEY, raw, OWNER_CAP_LEGACY)
-        return OWNER_CAP_LEGACY
-
-
 def owner_cap_document(raw: Any) -> Any:
     """The read seam's migration of a document from before the optional cap (no format marker): its saved 10 reads
     as blank. A read stays a read; every view carries the marker (``defaults_for_settings_document``), so the next
@@ -404,6 +394,7 @@ def owner_cap_document(raw: Any) -> Any:
 def document_optional_value(key: str, value: Any) -> Any:
     """The document spelling of an optional bound or the owner cap: a positive int, else "unlimited" (a bound) or
     blank (the cap); a typo reads finite."""
-    if key == OWNER_CAP_KEY:
-        return "" if (cap := owner_cap_value(value)) is None else cap
-    return UNLIMITED if (bound := optional_bound_value(key, value)) is None else bound
+    bound = optional_bound_value(key, value)
+    if bound is not None:
+        return bound
+    return "" if key == OWNER_CAP_KEY else UNLIMITED

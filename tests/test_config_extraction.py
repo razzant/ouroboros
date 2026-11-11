@@ -54,7 +54,6 @@ _ADDED_OWNERS = {
     "OWNER_CAP_KEY": settings_scales,
     "OWNER_CAP_LEGACY": settings_scales,
     "OWNER_CAP_FORMAT_KEY": settings_scales,
-    "owner_cap_value": settings_scales,
     "owner_cap_document": settings_scales,
     "document_optional_value": settings_scales,
     # An explicit root starting effort is validated against the effort scale it names.
