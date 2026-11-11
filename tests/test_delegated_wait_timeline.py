@@ -41,14 +41,16 @@ def test_a_verbose_timeline_tail_fits_a_wakes_payload_whole():
     assert len(payload.get("pending_interactions") or []) + payload["interactions_omitted"] == 8
 
 
-def test_a_batch_bigger_than_the_display_tail_says_how_much_it_is_not_showing():
+def test_a_batch_bigger_than_the_display_tail_says_how_much_it_is_not_showing(tmp_path):
     """`record` sizes each batch with the display tail written for the standing timeline —
     the last twelve rows. Reproduced against a harness emitting sixteen rows per cursor
     step: 48 rows published, 36 delivered, and E17-E20 / E33-E36 / E49-E52 gone from the
     live stream with nothing naming them. A batch may still be bounded — a busy daemon can
     publish hundreds of rows between two reads; what it may not do is cut without saying
     so: each advance counts what it does not show, and the live line says it."""
-    from ouroboros.delegate_progress import WindowObservations, live_line
+    from ouroboros.delegate_progress import WindowObservations
+    from ouroboros.delegate_activity import window_observations, progress_text
+    from types import SimpleNamespace
 
     seen = WindowObservations()
     timeline, per_step = [], 16
@@ -59,7 +61,10 @@ def test_a_batch_bigger_than_the_display_tail_says_how_much_it_is_not_showing():
         assert len(advance.events) + advance.events_omitted == per_step, advance
         assert advance.events_omitted == per_step - 12, advance
         # The human's stream is the surface that had no marker whatsoever.
-        assert "+4 earlier in this batch" in live_line("run-1", advance)
+        ctx = SimpleNamespace(task_id="child", drive_root=tmp_path)
+        (record, commit), = window_observations(ctx, "run-1", advance, after_seq=step - 1)
+        assert "+4 earlier timeline rows not shown" in progress_text(record)
+        commit()
 
 
 def _timeline(*titles):

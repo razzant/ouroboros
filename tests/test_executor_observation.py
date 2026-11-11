@@ -110,22 +110,19 @@ def test_observation_projection_preserves_zero_and_unknown_without_mutating_inpu
     assert "model" not in projected and "model_source" not in projected
 
 
-def test_plain_emit_stays_positional_and_metadata_errors_are_not_retried():
+def test_metadata_errors_are_not_retried(tmp_path):
     detail = _detail()
     advance = progress.WindowObservations().record(detail, 5)
-    plain = []
-    progress.emit(SimpleNamespace(emit_progress_fn=plain.append), "run-1", advance)
-    assert plain == [progress.live_line("run-1", advance)]
     calls = []
 
     def broken(text, **metadata):
         calls.append((text, metadata))
         raise TypeError("an internal callback bug")
 
-    ctx = SimpleNamespace(task_id="child", task_attempt=0, emit_progress_fn=broken)
-    progress.emit(ctx, "run-1", advance, detail=detail, entry=_entry())
+    ctx = SimpleNamespace(task_id="child", task_attempt=0, drive_root=tmp_path, emit_progress_fn=broken)
+    progress.emit(ctx, "run-1", advance, detail=detail, entry=_entry(), after_seq=0)
     assert len(calls) == 1
-    assert calls[0][1] == {"executor_observation": _observation()}
+    assert calls[0][1]["executor_observation"] == _observation()
 
 
 def _agent(tool_ctx):

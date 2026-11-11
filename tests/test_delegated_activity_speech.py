@@ -273,7 +273,6 @@ def test_window_rows_carry_the_key_whole_and_fold_one_utterance(tmp_path):
     advance = delegate_progress.WindowObservations().record(detail, 5)
     assert [row.get("speechKey") for row in advance.events] == [key, key, key, "claude:x:2:0", None]
     assert advance.events[-1]["textFinal"] is True and "textFinal" not in advance.events[0]
-    assert delegate_progress.live_line("run-1", advance).endswith(": Checking. · [claude/a01] status · Checking.")
     daemon = Daemon([[_harness(1, "message", text="x")]], stream=False)
     daemon.revealed = 1
     record, = _records(_ctx(tmp_path, []), _gateway(daemon), 5, rows=advance.events)
@@ -386,7 +385,7 @@ LATER_KEYS = [*_stream(7, ["Last", " one."], K3, complete="Last one, revised."),
               *_stream(10, ["Done", "."], K4, complete="Done, revised.")]
 
 
-@pytest.mark.parametrize("coverage", ["missing", "unreadable", "provisional"])
+@pytest.mark.parametrize("coverage", ["missing", "unreadable", "window"])
 def test_no_key_of_a_record_without_exact_coverage_is_proven_either_way(tmp_path, coverage):
     """Every comparison needs the gap-free exact range, not only the record's first key: an earlier block of the
     same actor proves nothing about a later block whose fragment never passed here whole, or that a bounded window
@@ -395,31 +394,22 @@ def test_no_key_of_a_record_without_exact_coverage_is_proven_either_way(tmp_path
 
     lossy = coverage in ("missing", "unreadable")
     daemon = (Lossy([TWO_KEYS, LATER_KEYS], **{coverage: [5]}) if lossy
-              else Daemon([TWO_KEYS, LATER_KEYS], stream=coverage == "provisional"))
+              else Daemon([TWO_KEYS, LATER_KEYS], stream=False))
     gateway, ctx = _gateway(daemon), _ctx(tmp_path, [])
     daemon.revealed = 1
-    if coverage == "provisional":                        # the exact read fails: the window stands in, the cursor stays
-        gateway._client = httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(
-            lambda request: httpx.Response(503, json={"code": "busy"}) if request.url.path.endswith("/events")
-            else daemon.handler(request)))
     first, = _records(ctx, gateway, 6, rows=[] if lossy else TWO_KEY_ROWS)
-    assert first["source"].get("provisional", False) is (coverage == "provisional")
+    assert first["source"]["kind"] == ("run_events" if lossy else "timeline_window")
     assert [(p["speech"], p["text"]) for p in first["parts"]] == [
         ({"key": K1, "op": "complete"}, "Checking the file."), ({"key": K2, "op": "complete"}, "Next block.")]
     assert not any({"updated", "carried"} & part.keys() for part in first["parts"]), \
         "neither key's draft passed here whole: unknown, never a difference"
     assert _speech_lines(first)[-1] == "claude · a01: Next block.", "its words stay whole for text readers"
-    if coverage == "provisional":
-        gateway._client = httpx.Client(base_url="http://127.0.0.1:1", transport=httpx.MockTransport(daemon.handler))
-        exact, = _records(ctx, gateway, 6)
-        assert exact["after_seq"] == 0 and not any("updated" in part for part in exact["parts"]), \
-            "the exact re-read of the same range saw both drafts whole: equal, not updated"
-    elif coverage == "window":
+    if coverage == "window":
         daemon.stream = True
         claudexor_run_events._SUPPORT.clear()
     later, = _read(ctx, daemon, gateway, 2, 12, after=6)
     third, fourth = later["parts"]
-    assert ("updated" in third) is (coverage == "provisional"), \
+    assert "updated" not in third, \
         "after a record that moved the cursor without exact coverage, a block's beginning is unknown again"
     assert fourth["updated"] is True, "a later block begun behind one seen whole is proven again"
 
@@ -681,15 +671,6 @@ class Verbatim(Daemon):
         return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body + end)
 
 
-def _observed(ctx, gateway, run_id, advance, after):
-    """The records of one wait advance, each committed as its emitter would after handing it over."""
-    out = []
-    for record, commit in delegate_activity.observations(ctx, gateway, run_id, advance, after_seq=after, read_sec=2.0):
-        commit()
-        out.append(record)
-    return out
-
-
 def _splits(count, *, most=None):
     """No cut, every single cut, and a cut every third event (each part at most ``most`` long)."""
     cuts = [(), *((k,) for k in range(1, count)), tuple(range(3, count, 3))]
@@ -766,7 +747,7 @@ def test_the_engines_journals_read_as_one_utterance_per_key_however_the_polls_cu
         gateway, ctx, records, after = _gateway(daemon), _ctx(root, []), [], 0
         for step, bound in enumerate(daemon.bounds, start=1):
             daemon.revealed = step
-            records += _observed(ctx, gateway, daemon.run_id, SimpleNamespace(seq=bound, events=[], events_omitted=0), after)
+            records += _records(ctx, gateway, bound, after=after, run_id=daemon.run_id)
             after = bound
         assert [(r["after_seq"], r["source"]["read_through"]) for r in records] == list(zip((0, *cuts), daemon.bounds))
         assert all(delegated_activity_meta(record, task_id="child") == record for record in records)
@@ -781,7 +762,6 @@ def test_the_engines_timeline_rows_fold_the_same_way_in_the_window_view(subtests
         with subtests.test(name=name):
             journal = engine_journal(name)
             rows = journal.timeline
-            keys, _abandoned_keys, _unkeyed = _speech_facts(journal)
             for cuts in _splits(len(rows), most=12):        # a window batch shows its last 12 rows
                 delegate_activity.reset_process_memo()
                 daemon = Daemon([[_harness(1, "message", text="x")]], stream=False, run_id=journal.events[0]["run_id"])
@@ -791,13 +771,7 @@ def test_the_engines_timeline_rows_fold_the_same_way_in_the_window_view(subtests
                 for index, bound in enumerate((*cuts, len(rows))):
                     advance = seen.record({"timeline": rows[:bound], "lastSeq": bound}, bound)
                     assert not advance.events_omitted
-                    line = delegate_progress.live_line(daemon.run_id, advance)
-                    for key, facts in keys.items():
-                        batch = [row for row in advance.events if row.get("speechKey") == key]
-                        if facts["complete"] not in (None, journal.answer["text"]) and {"fragment", "complete"} <= {
-                                row["speechOp"] for row in batch}:
-                            assert line.count(facts["complete"]) == 1, (line, key)
-                    records += _observed(ctx, gateway, daemon.run_id, advance, 0)
+                    records += _records(ctx, gateway, bound, rows=advance.events, run_id=daemon.run_id)
                 assert all(record["source"]["kind"] == "timeline_window" for record in records)
                 _one_utterance_per_key(journal, records, exact=False)
 

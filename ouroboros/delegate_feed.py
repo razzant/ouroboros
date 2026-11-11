@@ -337,7 +337,7 @@ class Feed:
     def window(self, entry: Any, gateway: Any, detail: Dict[str, Any]) -> None:
         """An engine without the run's journal, or a journal it refused for good: the new timeline rows of a
         detail the body read are the record, with the run's latest typed actor (the window view the wait
-        published); words an unhanded frame left go first (``delegate_activity.observations``)."""
+        published); words an unhanded frame left go first (``delegate_activity.window_observations``)."""
         from ouroboros import delegate_activity, delegate_progress
 
         seq, target = detail.get("lastSeq"), self.live.get(entry.task_id)
@@ -354,7 +354,7 @@ class Feed:
             state.window.observe_baseline(detail, state.seq)
         if seq > state.seq:
             delegate_progress.emit(ctx, entry.run_id, state.window.record(detail, seq), detail=detail,
-                                   entry=entry, gateway=gateway, after_seq=state.seq)
+                                   entry=entry, after_seq=state.seq)
             if handed:
                 state.seq = seq
 

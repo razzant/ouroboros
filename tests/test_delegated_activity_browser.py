@@ -1,7 +1,7 @@
 """Qualify #1350 in the served SPA without a model call.
 
 A root and a child task each observe a delegated run through the real reader
-(``delegate_activity.observations`` over the engine's event stream, served by a fixture
+(``delegate_activity.stream_observations`` over the engine's event stream, served by a fixture
 daemon), the real progress transport (``agent._emit_progress`` →
 ``events_chat_delivery`` → ``message_bus``) and the real history endpoint. The page receives
 the live frames over its WebSocket, then reconnects and reloads; every retained original is
@@ -110,14 +110,20 @@ class Producer:
         return self._deliver(events)
 
     def observe(self, worker, gateway, run_id, through, *, after, drain=None):
-        """One advance through the activity reader (``delegate_activity.observations``; ``drain`` reads an ended
-        run's tail within that allowance), each record emitted and committed as the progress seam does."""
-        from ouroboros.gateways.claudexor import SHORT_POLL_TIMEOUT_SEC
+        """Publish one read through the current stream producer. An explicit legacy fence also exercises
+        rendering of saved pre-feed records: their final gaps must remain readable in live/replayed views."""
+        from ouroboros.gateways.claudexor_run_events import read_run_events
 
         ctx, events = worker
-        advance = SimpleNamespace(seq=through, events=[], events_omitted=0)
-        for activity, commit in delegate_activity.observations(ctx, gateway, run_id, advance, after_seq=after,
-                                                               read_sec=SHORT_POLL_TIMEOUT_SEC, drain_sec=drain):
+        after = delegate_activity.shown_cursor(ctx, ctx.task_id, run_id, after)
+        read = read_run_events(gateway, run_id, after_seq=after, through_seq=None, timeout_sec=2)
+        problem = read.problem
+        reason = f"stream_error:{problem['code']}" if problem else "read_bound:time"
+        gaps = [{"after_seq": read.through_seq, "through_seq": through, "reason": reason,
+                 **({"retryable": problem["retryable"]} if problem else {}),
+                 **({"final": True} if drain is not None else {})}] if read.through_seq < through else []
+        for activity, commit in delegate_activity.stream_observations(
+                ctx, run_id, read, after=after, through=through, gaps=gaps):
             ctx.emit_progress_fn(delegate_activity.progress_text(activity), delegated_activity=activity)
             commit()
         return self._deliver(events)
@@ -213,20 +219,17 @@ def test_delegated_rows_live_reconnect_reload_root_child_source_and_final_gap(en
         cursor = through
     root_daemon.revealed = 1
     push(producer.observe(root_worker, root_gateway, "run-root", 3, after=0))
-    # The worker restarts and the run ends: its drain resumes at the last retained range,
-    # and its read allowance is spent after a byte bound cuts the first tail read.
+    # A restarted reader resumes at the last retained range. This fixture retains a pre-feed
+    # final gap after the byte bound, verifying old records still render and replay.
     delegate_activity.reset_process_memo()
     child_daemon.revealed = 5
     real_read = run_events.read_run_events
-    clock = SimpleNamespace(now=0.0)
 
     def bounded_read(*args, **kwargs):
         read = real_read(*args, **{**kwargs, "max_bytes": 1800})
-        clock.now += 1.0
         return read
 
     with monkeypatch.context() as bounded:
-        bounded.setattr(delegate_activity.time, "monotonic", lambda: clock.now)
         bounded.setattr(run_events, "read_run_events", bounded_read)
         push(producer.observe(kid_worker, child_gateway, "run-kid", 19, after=19, drain=1))
 

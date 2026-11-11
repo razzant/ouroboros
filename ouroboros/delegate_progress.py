@@ -118,7 +118,7 @@ class WindowObservations:
 
         The batch is BOUNDED — a busy daemon can publish hundreds of rows between two
         reads — by a bound that COUNTS what it cut (``events_omitted``, shown by
-        ``live_line``): measured against a harness emitting sixteen rows per cursor step,
+        ``delegate_activity.progress_text``): measured against a harness emitting sixteen rows per cursor step,
         a silent cut lost the first four of every batch from the live line.
         """
         rows = _rows(detail)
@@ -320,54 +320,6 @@ def _fitted_pending(payload: Dict[str, Any], pending: List[Dict[str, Any]],
     )
 
 
-def live_line(run_id: str, advance: _Advance) -> str:
-    parts: List[str] = []
-    keyed: Dict[Any, int] = {}
-    previous_stream = None
-    for row in advance.events:
-        text_kind = row.get("textKind")
-        is_text = text_kind in _TEXT_KINDS and isinstance(row.get("title"), str)
-        text = row["title"] if is_text else str(row.get("title") or row.get("type") or "")
-        if not is_text:
-            actor = "/".join(str(row[key]) for key in ("harnessId", "attemptId") if row.get(key))
-            if actor:
-                text = f"[{actor}] {text}"
-        # One engine-keyed utterance: its fragments join and its complete text replaces them.
-        scope = (row.get("attemptId"), row.get("harnessId"), row.get("speechKey"))
-        if is_text and text_kind == "message" and scope[2] and row.get("speechOp") in ("fragment", "complete") \
-                and not row.get("textFinal"):
-            if scope in keyed:
-                at = keyed[scope]
-                parts[at] = text if row["speechOp"] == "complete" else parts[at] + text
-            elif text:
-                keyed[scope] = len(parts)
-                parts.append(text)
-            previous_stream = None
-            continue
-        stream = (text_kind, row.get("attemptId"), row.get("harnessId")) \
-            if is_text and row.get("textDelta") is True else None
-        if not text:
-            if stream != previous_stream:
-                previous_stream = None
-            continue
-        # Native fragments may split a word or contain only whitespace. Only the
-        # engine's explicit delta fact authorizes concatenation, never the prose.
-        if parts and stream is not None and stream == previous_stream:
-            parts[-1] += text
-        else:
-            parts.append(text)
-        previous_stream = stream
-    titles = " · ".join(parts)
-    # A batch larger than the display tail shows its LAST rows. Saying how many it is not
-    # showing is the difference between an honest subset and a line that reads like the
-    # whole batch — the human's stream is the one surface that had no marker at all. It
-    # says where they are, not that they are somewhere: these rows never reached this
-    # line, and nothing on this side stores them — the run's own timeline does.
-    more = (f" (+{advance.events_omitted} earlier in this batch, on the run's timeline)"
-            if advance.events_omitted else "")
-    return f"🛰 delegated run {run_id} @seq {advance.seq}: {titles or '(new session events)'}{more}"
-
-
 def executor_observation(
     ctx: Any, run_id: str, advance: _Advance, detail: Dict[str, Any], entry: Any,
 ) -> Dict[str, Any]:
@@ -404,35 +356,24 @@ def executor_observation(
 
 
 def emit(ctx: Any, run_id: str, advance: _Advance, *,
-         detail: Optional[Dict[str, Any]] = None, entry: Any = None,
-         gateway: Any = None, after_seq: Optional[int] = None) -> None:
-    """Push one advance to the LIVE progress surface at once (``ctx.emit_progress_fn`` puts
-    the frame straight on the event queue). A broken progress channel aborts nothing.
+         detail: Dict[str, Any], entry: Any, after_seq: int) -> None:
+    """Publish the body's window advance as typed activity and its latest executor fact.
 
-    The body's window view (``delegate_feed.Feed.window``) passes its transport and the
-    batch's lower cursor (``after_seq``) for the run it holds; each frame then carries one
-    typed ``delegated_activity`` record (``delegate_activity.observations``) and its
-    speech-first text, and the record's range counts as shown only once its frame was
-    handed over. Without them, the plain ``live_line`` keeps the one-argument contract.
+    ``Feed.window`` already selected the fallback for an engine without a readable journal.
+    The activity owner replays unhanded frames before the window and commits each only after
+    this channel accepts it. A broken channel never aborts the body or advances its cursor.
     """
+    from ouroboros import delegate_activity
+
     fn = getattr(ctx, "emit_progress_fn", None)
     if not callable(fn):
         return
     try:
-        observation = executor_observation(ctx, run_id, advance, detail, entry) if detail is not None else {}
+        observation = executor_observation(ctx, run_id, advance, detail, entry)
         metadata: Dict[str, Any] = {"executor_observation": observation} if observation else {}
-        if (gateway is not None and after_seq is not None and getattr(entry, "run_id", None) == run_id
-                and getattr(entry, "task_id", None) == getattr(ctx, "task_id", None)):
-            from ouroboros import delegate_activity
-            from ouroboros.gateways.claudexor import SHORT_POLL_TIMEOUT_SEC
-
-            for activity, commit in delegate_activity.observations(
-                    ctx, gateway, run_id, advance, after_seq=after_seq, read_sec=SHORT_POLL_TIMEOUT_SEC):
-                fn(delegate_activity.progress_text(activity), **metadata, delegated_activity=activity)
-                commit()
-            return
-        if after_seq is None or advance.seq > after_seq:
-            fn(live_line(run_id, advance), **metadata)
+        for activity, commit in delegate_activity.window_observations(ctx, run_id, advance, after_seq=after_seq):
+            fn(delegate_activity.progress_text(activity), **metadata, delegated_activity=activity)
+            commit()
     except Exception:
         log.debug("delegated progress emit failed", exc_info=True)
 

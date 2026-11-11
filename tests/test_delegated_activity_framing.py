@@ -189,8 +189,9 @@ def test_the_live_frame_and_its_retained_source_keep_the_executors_exact_words(t
     daemon.revealed = 1
     ctx = _ctx(tmp_path, [])
     _agent_obj, frames = _agent(ctx)
-    delegate_progress.emit(ctx, "run-1", SimpleNamespace(seq=3, events=[], events_omitted=0),
-                           entry=SimpleNamespace(task_id="child", run_id="run-1"), gateway=_gateway(daemon), after_seq=0)
+    from tests.test_delegated_activity import _followed
+
+    _followed(ctx, daemon)
     activity = frames.get_nowait()["progress_meta"]["delegated_activity"]
     assert delegated_activity_meta(activity, task_id="child") == activity
     assert [part["text"] for part in activity["parts"]] == words and "technical" not in activity
