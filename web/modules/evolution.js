@@ -4,7 +4,7 @@
  * Three independent reads. `/api/state` paints the campaign object (Start and Pause through `/api/command`, consciousness
  * as one status sentence); it is read through the page's one state clock when there is one, whose every answer (its
  * periodic read included) reaches this page too, so a command the runtime applies late shows up without a poll of its
- * own. The cycles' settings card reads `/api/settings` (dashboard.js). `/api/evolution-data` answers at once with the
+ * own. The cycles' settings cards read `/api/settings` (dashboard.js). `/api/evolution-data` answers at once with the
  * saved version history and says whether a newer copy is being measured, which this module polls only while that runs.
  * One measure is drawn at a time. A milestone (a MAJOR or MINOR release, or a version its release author named) is a dot
  * on the line, labelled where there is room; every version is a tick under it, and the chosen version's own release row
@@ -109,15 +109,11 @@ export function campaignView(runtime, now = new Date()) {
  */
 export async function promptCampaignObjective({ dialogImpl = openConfirmDialog, running = false } = {}) {
     const answer = await dialogImpl(running ? {
-        title: 'New campaign objective',
+        title: 'New campaign objective', input: true, confirmLabel: 'Set objective',
         body: 'The running campaign continues with this objective. Leave it empty to keep the current one.',
-        input: true,
-        confirmLabel: 'Set objective',
     } : {
-        title: 'Start evolution campaign',
+        title: 'Start evolution campaign', input: true, confirmLabel: 'Start campaign',
         body: 'Evolution campaign objective (optional). Leave empty to let Ouroboros pick its own autonomous objective.',
-        input: true,
-        confirmLabel: 'Start campaign',
     });
     if (!answer?.confirmed) return { confirmed: false, objective: '', entered: '' };
     // `entered` keeps the owner's words byte for byte; `objective` is the command's trimmed form.
@@ -142,10 +138,7 @@ const KIND_WORDS = { feat: 'Feature', fix: 'Fix', chore: 'Maintenance', refactor
     tests: 'Tests', perf: 'Performance', ci: 'Build', build: 'Build', release: 'Release', rc: 'Pre-release', 'pre-release': 'Pre-release',
     constitution: 'Constitution', repo: 'Repository' };
 
-const formatter = (options) => {
-    const format = new Intl.DateTimeFormat('en-GB', options);
-    return (time) => format.format(new Date(time));
-};
+const formatter = (options, format = new Intl.DateTimeFormat('en-GB', options)) => (time) => format.format(new Date(time));
 const fullDate = formatter({ day: 'numeric', month: 'short', year: 'numeric' });
 const dayMonth = formatter({ day: 'numeric', month: 'short' });
 const monthShort = formatter({ month: 'short' });
@@ -490,7 +483,6 @@ function caption(model, key) {
 }
 
 // ---- When a cycle may follow your tasks: one row over two keys (settings_rows.js) ----------------------------------
-
 const CADENCE = /^(off|llm|every_n:[1-9]\d*)$/;
 const isOn = (value) => /^(1|true|yes|on)$/i.test(String(value ?? '').trim());
 /** The choice a stored pair [enabled, cadence] stands for: off, llm (after each task) or every_n. */
@@ -501,13 +493,19 @@ CODECS.evolutionWhen = {
         (settings ? [isOn(settings.OUROBOROS_POST_TASK_EVOLUTION), CADENCE.test(cadence) ? cadence : 'llm'] : undefined),
     body: ([on, cadence]) => ({ OUROBOROS_POST_TASK_EVOLUTION: Boolean(on), OUROBOROS_POST_TASK_EVOLUTION_CADENCE: cadence }),
 };
+const everyWords = (value, n = Number(String(value?.[1]).slice(8))) => (n === 1 ? 'every task' : `every ${n} tasks`);
 WRITERS.evolutionWhen = async (row, value, options) => {
     if (!CADENCE.test(String(value?.[1]))) return { state: 'refused', effect: '', withheld: '', message: 'Enter a whole number of tasks, 1 or more.', code: 'invalid_value' };
     const outcome = await WRITERS.generic(row, value, options);
-    const n = Number(String(outcome.old?.[1]).slice(8));
     return outcome.old === undefined ? outcome
-        : { ...outcome, old: { off: 'Off', llm: 'After each task', every_n: n === 1 ? 'Every task' : `Every ${n} tasks` }[whenMode(outcome.old)] };
+        : { ...outcome, old: { off: 'Off', llm: 'After each task', every_n: capital(everyWords(outcome.old)) }[whenMode(outcome.old)] };
 };
+/** The choice in its own sentence (dashboard.js `words`): "every N" says only when it asks itself (post_task_evolution.py). */
+export function whenWords(settings, value = CODECS.evolutionWhen.read(settings)) {
+    const decides = 'it decides whether one improvement is worth a cycle.';
+    return { OUROBOROS_POST_TASK_EVOLUTION: { caption: !value ? '' : { off: 'It starts no cycle by itself.',
+        llm: `After each task ${decides}`, every_n: `After ${everyWords(value)}, chats included, ${decides}` }[whenMode(value)] } };
+}
 
 // ---- The page ------------------------------------------------------------------------------------------------------
 
@@ -581,14 +579,16 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
     // nothing to select by arrows). On a narrow card they wrap onto a second line, so none hides past the edge (U125).
     const body = element('div', 'evo-story-body');
     story.append(storyHead, body);
-    // The cycles' settings (settings_rows.js), drawn once: no repaint of the campaign or the history touches them.
-    const cycles = element('section', 'ui-card dashboard-settings', { 'aria-label': 'Cycles' });
+    // The cycles' settings (settings_rows.js), drawn once: no repaint touches them. The direction is a card of its own.
+    const cycles = element('div', 'dashboard-settings-cards', { 'data-evo-settings': '' });
     page.append(campaign, cycles, story);
     mount.appendChild(page);
-    const settings = mountTabSettings(cycles, 'evolution', { state, title: 'Cycles', onPaint: paintWhen,
+    const settings = mountTabSettings(cycles, 'evolution', { state, words: whenWords, onPaint: paintWhen,
+        cards: [{ label: 'Cycles after your tasks' }, { label: 'What to work on', solo: true, rows: ['OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE'] }],
         custom: (row) => `<div class="ui-segment-group" role="group" aria-labelledby="setting-${row.id}-name">${row.control.options.map((option) =>
             `<button type="button" class="ui-segment" data-setting-control data-evo-when="${option.value}" aria-pressed="false">${option.label}</button>`).join('')}</div>`
-            + '<span class="settings-row-field" data-evo-every hidden><input class="ui-control" data-evo-n value="3" inputmode="numeric" autocomplete="off" aria-label="Every how many tasks"><span class="settings-row-unit">tasks</span></span>' });
+            + '<span class="settings-row-field" data-evo-every hidden><span class="settings-row-unit">N</span><input class="ui-control" data-evo-n value="3" inputmode="numeric" autocomplete="off" aria-label="Every how many tasks"></span>' });
+    cycles.querySelector('#setting-OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE')?.setAttribute('placeholder', 'For example: faster start, fewer repeated questions');
     function paintWhen(read) {
         const value = CODECS.evolutionWhen.read(read), count = cycles.querySelector('[data-evo-n]');
         if (!value || !count) return;
@@ -604,8 +604,7 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
         if (mode) void commitSetting(rowById('OUROBOROS_POST_TASK_EVOLUTION'), mode === 'off' ? [false, 'llm']
             : [true, mode === 'llm' ? 'llm' : `every_n:${cycles.querySelector('[data-evo-n]').value.trim()}`]);
     };
-    cycles.addEventListener('click', onWhen);
-    cycles.addEventListener('change', onWhen);
+    for (const type of ['click', 'change']) cycles.addEventListener(type, onWhen);
 
     const view = { key: 'code_lines', version: null, full: false };
     let model = null;
