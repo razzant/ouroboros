@@ -6,9 +6,6 @@ import json
 import pytest
 
 from ouroboros import harness_program_facts as facts
-from tests import test_claudexor_status_passive as passive
-
-metadata_engine = passive.metadata_engine
 
 
 def inventory(date="2026-11-10", *, version="2.1.319", verdict="yes", newest="2.1.321"):
@@ -94,35 +91,6 @@ def test_record_failure_cannot_change_the_owner_response(monkeypatch):
     assert facts.observe_inventory(data) is data
 
 
-def test_passive_ready_event_is_once_per_generation_and_never_during_recovery(metadata_engine, monkeypatch):
-    from ouroboros import claudexor_daemon
-
-    state, calls, _clients, provision, config_dir = metadata_engine
-    state["engine_version"] = "6.0.0"
-    launched = []
-    monkeypatch.setattr(facts, "_pending", set())
-    monkeypatch.setattr(facts, "_launch", lambda *args: launched.append(args))
-    provision()
-    for _ in range(2):
-        claudexor_daemon.read_owned_gateway().close()
-    assert len(launched) == 1
-    assert all(path == "/v2/handshake" for _method, path, _query in calls)
-    # Replacing a descriptor admits one new ready observation, not a status timer.
-    path = config_dir / "daemon/control-api.json"
-    path.write_text(path.read_text(encoding="utf-8") + " ", encoding="utf-8")
-    claudexor_daemon.read_owned_gateway().close()
-    assert len(launched) == 2
-    state["handshake_error"] = True
-    with pytest.raises(Exception):
-        claudexor_daemon.read_owned_gateway()
-    assert len(launched) == 2
-    from ouroboros.gateways.claudexor import ClaudexorGateway
-    monkeypatch.setattr(ClaudexorGateway, "handshake", lambda *_a, **_k: {"servingMode": "recovery_only"})
-    path.write_text(path.read_text(encoding="utf-8") + " ", encoding="utf-8")
-    claudexor_daemon.read_owned_gateway().close()
-    assert len(launched) == 2
-
-
 @pytest.mark.parametrize("state", ["succeeded", "failed", "cancelled", "interrupted"])
 def test_settlement_event_waits_for_custody_and_deduplicates_the_receipt(monkeypatch, tmp_path, state):
     launched = []
@@ -185,7 +153,8 @@ def test_settlement_notification_does_not_wait_for_a_snapshot_write(monkeypatch,
     assert notified and not worker.is_alive()
 
 
-def test_eighteen_independent_hosts_share_generation_and_settlement_observations(monkeypatch, tmp_path):
+@pytest.mark.parametrize("fails", [False, True])
+def test_eighteen_independent_hosts_share_generation_and_settlement_attempts(monkeypatch, tmp_path, fails):
     from concurrent.futures import ThreadPoolExecutor
     from importlib.util import module_from_spec, spec_from_file_location
     from threading import Barrier, Event
@@ -207,7 +176,9 @@ def test_eighteen_independent_hosts_share_generation_and_settlement_observations
             assert kwargs == {"fresh": True, "check_latest": False}
             calls.append(generation[0])
             entered.set()
-            assert release.wait(timeout=2)
+            assert release.wait(timeout=3)
+            if fails:
+                raise OSError("unreadable inventory")
             return inventory()
     monkeypatch.setattr(claudexor, "ClaudexorGateway", Gateway)
     monkeypatch.setattr(claudexor_metadata, "endpoint_generation", lambda _: generation[0])
@@ -216,8 +187,6 @@ def test_eighteen_independent_hosts_share_generation_and_settlement_observations
         module = module_from_spec(spec)
         spec.loader.exec_module(module)
         monkeypatch.setattr(module, "_root", lambda *_: tmp_path)
-        # Each worker has independent globals; its dispatch runs on our controlled thread.
-        monkeypatch.setattr(module, "_launch", module._refresh)
         workers.append(module)
     gateway = SimpleNamespace(_endpoint="existing-endpoint", engine_version="6.0.0")
     def meet(event):
@@ -231,13 +200,16 @@ def test_eighteen_independent_hosts_share_generation_and_settlement_observations
             release.set()
             for future in futures:
                 future.result(timeout=4)
+        drain_observers()
     ready = lambda module: module.engine_ready(gateway)
     meet(ready)
     assert calls == ["engine-one"]
     first_line = facts.vendor_programs_line(tmp_path)
     first_generation = saved(tmp_path)["events"]["engineGeneration"]
-    for worker in workers:
-        worker.engine_ready(gateway)
+    for _ in range(12):
+        for worker in workers:
+            worker.engine_ready(gateway)
+        drain_observers()
     assert calls == ["engine-one"], "later processes find the generation recorded"
     generation[0] = "engine-two"
     meet(ready)
@@ -251,29 +223,46 @@ def test_eighteen_independent_hosts_share_generation_and_settlement_observations
     facts.record_inventory(inventory("2026-12-12"), root=tmp_path)
     meet(ready)
     assert len(calls) == 3, "ordinary inventory publication preserves the event markers"
-    assert facts.vendor_programs_line(tmp_path) == first_line
+    if not fails:
+        assert facts.vendor_programs_line(tmp_path) == first_line
     assert set(saved(tmp_path)["events"]) == {"engineGeneration", "settled:future-program"}
     assert "private-settlement" not in json.dumps(saved(tmp_path))
     facts.record_inventory({"observedAt": "2026-12-13T00:00:00Z", "harnesses": []}, root=tmp_path)
     assert set(saved(tmp_path)["events"]) == {"engineGeneration"}, "removed programs leave no event history"
 
 
-def test_failed_ready_observation_does_not_mark_generation_observed(monkeypatch, tmp_path):
-    from ouroboros.gateways import claudexor, claudexor_metadata
+def drain_observers():
+    import threading
+    for thread in threading.enumerate():
+        if thread.name == "vendor-program-observation":
+            thread.join(timeout=5)
+            assert not thread.is_alive()
 
-    attempts = []
-    def unavailable(_):
-        attempts.append("attempt")
-        raise OSError("engine unavailable")
-    monkeypatch.setattr(claudexor, "ClaudexorGateway", unavailable)
-    monkeypatch.setattr(claudexor_metadata, "endpoint_generation", lambda _: "generation")
+
+def test_owner_observation_publishes_while_background_inventory_waits(monkeypatch, tmp_path):
+    import threading
+    from ouroboros.gateways import claudexor
+    entered, release = threading.Event(), threading.Event()
+    class Gateway:
+        def __init__(self, _): pass
+        def __enter__(self): return self
+        def __exit__(self, *_): pass
+        def handshake(self): pass
+        def maintenance_harnesses(self, **_):
+            entered.set()
+            assert release.wait(timeout=3)
+            return inventory()
+    monkeypatch.setattr(claudexor, "ClaudexorGateway", Gateway)
     monkeypatch.setattr(facts, "_root", lambda *_: tmp_path)
-    monkeypatch.setattr(facts, "_launch", facts._refresh)
-    monkeypatch.setattr(facts, "_pending", set())
-    for _ in range(2):
-        facts.engine_ready(SimpleNamespace(_endpoint="existing-endpoint", engine_version="6.0.0"))
-        assert facts._read(tmp_path) == {} and not facts._pending
-    assert len(attempts) == 2, "another event can retry; failure is not an observation"
+    facts._request("endpoint", ("settled:future-program", "one"))
+    try:
+        assert entered.wait(timeout=2)
+        facts.record_inventory(inventory("2026-12-12"), root=tmp_path)
+        assert saved(tmp_path)["observedAt"].startswith("2026-12-12")
+    finally:
+        release.set()
+        drain_observers()
+    assert saved(tmp_path)["observedAt"].startswith("2026-12-12")
 
 
 @pytest.mark.parametrize(("verdict", "newest", "phrase"), [

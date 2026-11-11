@@ -66,8 +66,8 @@ def _observation_lock(root):
             release_exclusive_file_lock(lock_path, fd)
 
 
-def _record_inventory(inventory, complete, root, event=None):
-    """Caller owns the observation lock across acquisition, merge and event publication."""
+def _record_inventory(inventory, complete, root):
+    """Caller owns the lock for local file work only."""
     from ouroboros.utils import atomic_write_json
 
     if not isinstance(inventory, dict) or not isinstance(inventory.get("harnesses"), list):
@@ -101,8 +101,6 @@ def _record_inventory(inventory, complete, root, event=None):
     if stamp >= _stamp(saved.get("observedAt")):
         saved["observedAt"] = observed
     events = saved.get("events", {})
-    if event:
-        events[event[0]] = event[1]
     if events:
         saved["events"] = {key: value for key, value in events.items()
                            if key == "engineGeneration" or key.removeprefix("settled:") in programs}
@@ -129,7 +127,7 @@ def observe_inventory(inventory, *, complete=True):
 def vendor_programs_line(root=None):
     """Local file read only: no gateway imports, subprocess, network, clock or wake."""
     saved = _read(_root(root))
-    if not saved:
+    if not saved.get("observedAt"):
         return "Harness programs: not observed."
     parts, absent = [], []
     for name, row in sorted(saved["programs"].items()):
@@ -159,19 +157,24 @@ def _generation(endpoint):
 
 
 def _refresh(endpoint, root, event):
-    """The shared lock deduplicates acquisition too, not just publication."""
+    """Spend an event before I/O; failed reads wait for the next real event."""
     from ouroboros.gateways.claudexor import ClaudexorGateway
+    from ouroboros.utils import atomic_write_json
 
     try:
         with _observation_lock(root) as acquired:
-            if not acquired or _read(root).get("events", {}).get(event[0]) == event[1]:
+            saved = _read(root)
+            if not acquired or saved.get("events", {}).get(event[0]) == event[1]:
                 return
             if event[0] == "engineGeneration" and _generation(endpoint) != event[1]:
                 return
-            with ClaudexorGateway(endpoint) as gateway:
-                gateway.handshake()
-                inventory = gateway.maintenance_harnesses(fresh=True, check_latest=False)
-            _record_inventory(inventory, True, root, event)
+            saved.setdefault("programs", {})
+            saved.setdefault("events", {})[event[0]] = event[1]
+            atomic_write_json(root / OBSERVATION_FILE, saved)
+        with ClaudexorGateway(endpoint) as gateway:
+            gateway.handshake()
+            inventory = gateway.maintenance_harnesses(fresh=True, check_latest=False)
+        record_inventory(inventory, root=root)
     except Exception:
         log.debug("Vendor program event observation unavailable", exc_info=True)
     finally:
