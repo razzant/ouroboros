@@ -5437,6 +5437,116 @@ html[data-layout="stack"] .ui-popup.chat-model-list { width: var(--ui-popup-anch
 .chat-model-sheet-row b { flex: 1 1 auto; min-width: 0; overflow: hidden; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .chat-model-sheet-row span { flex: 0 0 auto; color: var(--text-meta); font-size: var(--type-meta); }
 .chat-model-sheet-fact { margin: 0 0 2px; color: var(--text-secondary); font-size: var(--type-meta); }
+/* A work's model on its card (card_model.js; DESIGN "A work's model on its card"): the first fact of the meta line,
+   in a node of its own before the rest of the line, whose parts stay items of the line itself. Where the server
+   offers the control it is a quiet capsule in the line's own ink, stronger for a model of the work's own; the words
+   beside it say why this model. On a narrow card what leads (the source) gives way before the model's name. */
+.card-model-rest { display: contents; }
+.chat-live-meta-part.card-model {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 5px 6px;
+    max-width: 100%;
+}
+.card-model-fact {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+    max-width: 100%;
+    color: var(--text-secondary);
+    font: inherit;
+    letter-spacing: inherit;
+}
+button.card-model-fact {
+    min-height: 22px;
+    margin-block: -3px;
+    padding: 0 7px;
+    border: 0;
+    border-radius: var(--radius-inner);
+    background: rgba(var(--neutral-rgb), 0.08);
+    cursor: pointer;
+    text-align: start;
+    transition: var(--motion-tone);
+}
+button.card-model-fact[aria-expanded="true"] { background: rgba(var(--neutral-rgb), 0.16); }
+@media (hover: hover) {
+    button.card-model-fact:hover { background: rgba(var(--neutral-rgb), 0.16); }
+}
+button.card-model-fact:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 1px; }
+.card-model[data-basis="own"] .card-model-fact { color: var(--text-primary); font-weight: 600; }
+.card-model[data-basis="fallback"] .card-model-fact { font-weight: 600; }
+/* Amber for a work that went to a fallback by itself, until that is resolved (owner 10.11, «4. A»): the card's fact,
+   and the same work's word in the Main sheet's list. Its end is the server's fact, never a timer here. */
+.model-fallback { color: var(--status-warn-fg); }
+.card-model-mark { display: inline-flex; flex: 0 0 auto; }
+.card-model-mark .model-source-mark { width: 13px; height: 13px; }
+.card-model-name { display: flex; min-width: 0; white-space: nowrap; }
+.card-model-lead { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.card-model-id { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.card-model-tail { flex: 0 0 auto; }
+/* A fallback's line is read whole: it wraps instead of giving way. */
+.card-model[data-basis="fallback"] .card-model-name { flex-wrap: wrap; }
+.card-model[data-basis="fallback"] .card-model-lead { flex-shrink: 0; }
+.card-model-caret { display: inline-flex; flex: 0 0 auto; color: var(--text-meta); }
+.card-model-pending { color: var(--text-primary); }
+/* Its popover, on the popups' floating material and anchored to the fact, so nothing in the transcript moves: whose
+   model this is, this work's own acts, then the capsule's field and list of models. */
+.ui-popup.card-model-pop {
+    display: flex;
+    flex-direction: column;
+    width: min(400px, var(--ui-popup-max-width));
+    max-height: min(480px, var(--ui-popup-max-height));
+    padding: var(--space-1);
+    overflow: hidden;
+}
+.card-model-pop[aria-busy="true"] { pointer-events: none; opacity: 0.6; }
+.card-model-pop-title {
+    flex: 0 0 auto;
+    margin: 0;
+    padding: var(--space-2) var(--space-3) var(--space-1);
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    overflow-wrap: anywhere;
+}
+.card-model-acts { display: flex; flex: 0 0 auto; flex-direction: column; }
+.card-model-act {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0 var(--space-2);
+    min-height: 34px;
+    padding: 5px var(--space-3);
+    border: 0;
+    border-radius: var(--radius-inner);
+    background: transparent;
+    color: var(--text-primary);
+    font: inherit;
+    font-size: var(--type-body);
+    line-height: var(--line-body);
+    text-align: start;
+    cursor: pointer;
+}
+@media (hover: hover) {
+    .card-model-act:hover { background: var(--menu-item-hover); }
+}
+@media (pointer: coarse) {
+    .card-model-act { min-height: var(--touch-target-min); align-content: center; }
+}
+.card-model-act:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: -2px; }
+.card-model-act-label { flex: 0 0 auto; font-weight: 500; }
+/* What the act does goes under its name where the line cannot hold both. */
+.card-model-act-sub { flex: 1 1 14ch; min-width: 0; color: var(--text-meta); font-size: var(--type-meta); overflow-wrap: anywhere; }
+.card-model-pop > .chat-model-search {
+    flex: 0 0 auto;
+    height: 34px;
+    margin: var(--space-1) 0;
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
+}
+.card-model-pop > .chat-model-search:focus-within { box-shadow: inset 0 0 0 1px var(--focus-accent-border); }
+.card-model-list { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
 
 
 /* Trays (DESIGN.md design bible; an object is ui.css .ui-card, which every card takes in its markup). Inside an object

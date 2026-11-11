@@ -918,11 +918,13 @@ status sentence's or a composer chip's dot is its tone, §4).
   changes before an update, an Evolution chip, the consciousness chip or a Consciousness sentence that needs the owner
   or was stopped by the spending limit; (2) a warning worth reading — warn toasts and sentences,
   Settings and onboarding notes, warnings inside task timelines, reviews and Logs
-  events, account quota; (3) the System voice (a pale tint in the light theme, its name
+  events, account quota, and a work that went to a fallback route by itself, until that is resolved (owner 10.11,
+  «4. A»: its card's model fact and the same word in the Main sheet); (3) the System voice (a pale tint in the light theme, its name
   in the dark one), a voice, not a status; (4) a few data categories that are not statuses (Logs and Storage
   categories, the fourth default chart series). What goes on by itself or what someone chose — queued, waiting,
   paused, pausing, stopped, unconfirmed, work in flight, a mode, a level, a setting
-  value — is never amber.
+  value — is never amber; the fallback above is the one thing that happens by itself and is, by the owner's
+  decision, because a work then runs on a model nobody chose for it.
 
 In a Project row the mark owns one reserved trailing column, so it sits at one x
 across rows whatever the name length and, with a fine pointer, while the ⋯ is
@@ -2369,8 +2371,34 @@ and convert with it. Attention-only blocks and workless non-Done endings have
 status and wait controls but no title or conversion until the first work row
 adds one.
 
+**A work's model on its card.** A root card's meta line begins with the model the work runs on, said from the
+server's published fact (`works[].lead`; a direct turn's from its activity row), and it is pressable (owner 10.11:
+the model stands first in the card's bottom line; a running work is moved to another model or returned to
+following Main there, a queued one is changed before it starts). It is the mark of its source and `Source · model`
+in a node of its own before the rest of the line, so a repaint of the line never re-creates it. Beside it, words
+say why the work is on that model when it does not simply follow Main: `this room's model`, `you chose it`,
+`you asked for it`, `Ouroboros switched to it`, or the role it follows (`follows Light`); a follower says nothing
+more there, and its popover's first line says `follows Main`. When the next step will run on another route the
+fact shows both, `gpt-6-astra → glm-5.3 at the next step` (`when it starts` for a queued work), so a change of
+Main never looks failed while a call in flight finishes. Where the server offers the work's `model` control the
+fact is a quiet capsule in the line's own ink (stronger for a model of the work's own) that opens a popover
+anchored to it, so nothing in the transcript moves: whose model this is, **Follow Main** when the work has a
+model of its own, then the Model capsule's own field and list — Main, the recent models, Search. A pick is one
+act, and its answer says when it applies: «Switches at the next step; the running call finishes.» or, for a
+queued work, «Applies when it starts.» Without the offered control the fact is plain text: a control is the
+server's decision and is never guessed. A card whose work publishes no such fact (an older record, a child, a
+portal) keeps the line below. On a narrow card the source gives way before the model's name.
+
+**A work on a fallback is amber until that is resolved** (owner 10.11, «4. A»; 11.11, «Все A», 2): its fact reads
+`fallback from Settings · claude-opus-5.5 · since 02:14`, then what it left (`left gpt-6-astra`), wrapping rather
+than cut, and its popover says when and why it left and offers the three exits: **Return** (back to the model it
+left, at the next step), **Wait** (wait for that model, no paid calls until it answers) and **Keep** (the
+fallback becomes the work's own choice). Amber ends when the server's fact says so, never on a timer here;
+nothing about it is written to the Main chat; the amber line carries no money figure (one money line per card;
+per-route spend is in Details, as he was told 11.11).
+
 The compact meta line names executor/model (roots: observed solve model, else
-agent model; a Claudexor route by its model), duration, cost, exceptions (tool
+agent model; a Claudexor route by its model; the model is the fact above when the work publishes one), duration, cost, exceptions (tool
 errors only under a chip that warns or fails; under Done the block's own rows
 name them) and running narration's `updated` (in a root's head).
 One positive task-local tool-call count joins that line and remains after Done
@@ -2473,8 +2501,10 @@ claiming quota exhaustion or guaranteed availability. It never offers sign-in.
 Only confirmed quota pauses the execution clock; authentication and unconfirmed
 availability waits consume it. Calendar deadlines remain fixed. Configured
 fallback routes are tried before a wait card is shown. Work continuing on a
-fallback is not a wait: nothing claims the primary recovered, the model alone
-asks to return, and only the primary's own accepted reply counts as a return.
+fallback is not a wait: nothing claims the primary recovered, the mind or the
+owner returns it (the owner from the card's amber model fact: Return, Wait or
+Keep; owner 11.11, «Все A», 2), and only the primary's own accepted reply
+counts as a return.
 
 A submitted action is shown as pending until the task reports its application; a
 saved Settings change and a still-pending task change are disclosed separately.

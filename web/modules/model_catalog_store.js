@@ -109,6 +109,7 @@ export function createModelCatalogStore({ readCatalog = fetchCatalog, readPrefer
 
 export const modelCatalog = createModelCatalogStore();
 
-if (typeof document !== 'undefined') {
+// A page that can be listened to: the module is also loaded where there is none (a reader of the work state).
+if (typeof globalThis.document?.addEventListener === 'function') {
     document.addEventListener('settings-model-catalog:updated', (event) => modelCatalog.adopt(event?.detail));
 }

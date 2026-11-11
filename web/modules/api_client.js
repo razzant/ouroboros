@@ -342,6 +342,22 @@ export function hurryTask(taskId, requestId) {
 }
 
 /**
+ * One act on a work's model (CONTRACT §6): `set` a model for it, `follow` Main again, or leave a fallback by
+ * `return`, `wait` or `keep`. The answer says when it applies (`applied`) and carries the work's fact (`lead`); a
+ * refusal rejects with the server's own words.
+ * @param {string} taskId
+ * @param {string} requestId
+ * @param {{action: string, model?: string, use_local?: boolean}} act
+ */
+export function taskModel(taskId, requestId, act) {
+    return jsonPost(
+        `/api/tasks/${encodeURIComponent(taskId)}/model`,
+        { request_id: String(requestId || ''), ...act },
+        { rejectOkFalse: true },
+    );
+}
+
+/**
  * Owner Pause of a whole task tree (Batch4): the body is the stable request_id
  * (the same id on retry is idempotent) and this client's declaration that the
  * owner pressed it (`actor: "owner"`, no text), which the card words as "You
