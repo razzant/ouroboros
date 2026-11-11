@@ -868,7 +868,10 @@ async def api_claudexor_login(request: Request) -> JSONResponse:
             from ouroboros.harness_maintenance import maintenance_problem
             status, payload = maintenance_problem(exc)
             problem = payload["error"]
-            return json_error(problem.pop("message", str(exc)), status, **problem)
+            extra = {key: problem[key] for key in ("code", "context", "retryable") if key in problem}
+            if exc.required_actions:
+                extra["required_actions"] = list(exc.required_actions)
+            return json_error(problem.get("message", str(exc)), status, **extra)
         status = int(getattr(exc, "status_code", 0) or 0)
         profile_verdict = bool(getattr(exc, "login_profile_verdict", False))
         create_verdict = bool(getattr(exc, "login_create_verdict", False))

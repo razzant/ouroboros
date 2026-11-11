@@ -1474,3 +1474,15 @@ test('normalizeProfileName enforces the engine slug contract ^[a-z0-9][a-z0-9_-]
     assert.equal(submitted.profile, '', 'an unslugifiable name never starts a login');
     assert.ok(submitted.note.includes('starts with a lowercase letter or digit'));
 });
+
+for (const actions of [[], ['Read the program in Accounts']]) test(`Connect problems show ${actions.length} engine actions through the existing card reader`, async () => {
+    const host = fakeHost();
+    const ctl = createLoginCardController({host, store: {refresh: async () => null},
+        fetchImpl: async () => json(403, {error: 'The receipt cannot be read.', code: 'refused',
+            context: {operationId: 'accepted-operation'}, retryable: false, required_actions: actions})});
+    await ctl.start('codex', '');
+    assert.match(host.innerHTML, /The receipt cannot be read/);
+    assert.equal(host.innerHTML.includes('Read the program in Accounts'), actions.length > 0);
+    assert.doesNotMatch(host.innerHTML, /accepted-operation/);
+    await ctl.dispose();
+});

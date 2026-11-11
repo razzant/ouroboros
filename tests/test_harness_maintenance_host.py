@@ -723,7 +723,8 @@ def connect_socket(monkeypatch):
                 if state["mode"] in {"refused", "not_found", "retryable_forever"} or (state["mode"] == "retryable" and state["calls"][path] == 1):
                     status = 403 if state["mode"] == "refused" else 404 if state["mode"] == "not_found" else 503
                     body = {"code": "fixture_refusal", "message": "The receipt cannot be read.",
-                            "retryable": state["mode"].startswith("retryable"), "context": {"fixture": True}}
+                            "retryable": state["mode"].startswith("retryable"), "context": {"fixture": True},
+                            "requiredActions": ["Read the program in Accounts"], "fieldErrors": {"extra": "hidden"}, "evidenceRefs": ["engine-only"]}
                 state["installed"] = body.get("state") == "succeeded"
             else:
                 status, body = 500, {"code": "unexpected_request", "message": path}
@@ -839,6 +840,8 @@ def test_connect_real_socket_refusals_and_lost_contact(connect_socket, mode):
         assert body["code"] == "fixture_refusal" and body["retryable"] is False
         assert body["error"] == "The receipt cannot be read."
         assert body["context"]["fixture"] is True
+        assert body["required_actions"] == ["Read the program in Accounts"]
+        assert not {"requiredActions", "fieldErrors", "evidenceRefs"} & body.keys()
         assert body["context"]["operationId"] == "maintenance-one"
         assert reads == 1 and elapsed < 2.5
     elif mode == "retryable":

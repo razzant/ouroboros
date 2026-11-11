@@ -481,6 +481,10 @@ export function loginCardHtml(active, nowMs = Date.now(), { mode = LOGIN_CARD_FU
         `<h4>Connect ${harnessAccountIdentityMarkup(active.harness, { label: active.familyLabel, profile: active.profile })}</h4>`];
     if (face === 'error') {
         bits.push(`<div class="settings-inline-note" data-tone="error">${escapeHtml(active.error)}</div>`);
+        for (const action of active.requiredActions || []) {
+            if (!['use_external_terminal', 'retry_setup_login', 'add_named_account'].includes(action))
+                bits.push(`<div class="settings-inline-note" data-login-required-action>${escapeHtml(action)}</div>`);
+        }
         if (loginRetryAvailable(active)) {
             bits.push('<button type="button" class="btn btn-primary" data-login-retry>Try again</button>');
         }
