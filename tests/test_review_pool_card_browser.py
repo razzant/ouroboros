@@ -2,9 +2,9 @@
 
 A ledger record made by the real builder, carrying the facts the strictness-keyed composer
 records, reaches the task card through the real projection; the card's Reviews detail says
-them in words. Settings → Agents says what a Reviewer tick means under the SAVED strictness:
-a drafted Blocking changes nothing until Save, and the saved choice repaints the line. Every
-fact asserted is visible text, nothing depends on hover, and neither width scrolls sideways.
+them in words. Settings › Agents says, on an agent's page, what the Reviewer mark means under the
+SAVED strictness: the saved choice repaints the line the next time the page is shown. Every fact
+asserted is visible text, nothing depends on hover, and neither width scrolls sideways.
 """
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ import pytest
 from ouroboros import review_ledger as rl
 from ouroboros.agent_task_pipeline import _store_task_result
 from ouroboros.post_task_synthesis import _record_task_facts
+from tests.settings_browser_helpers import open_settings
 from tests.test_review_record_card_projection import _pool_record
 from tests.test_ui_smoke_playwright import _browser_missing, _open_review_checkpoint
 from tests.ui_chat_viewport_smoke import wait_drawer_closed
@@ -64,12 +65,13 @@ def _go(page, place: str) -> None:
         wait_drawer_closed(page, timeout=10_000)
 
 
-def _open_agents(page, url: str):
-    page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-    _go(page, "settings")
-    page.wait_for_function("() => document.querySelector('#btn-save-settings')?.disabled === false", timeout=30_000)
-    page.click('[data-settings-tab="agents"]')
-    caption = page.locator("#subagents-section [data-reviewer-tick-caption]")
+def _reviewer_caption(page, url: str | None = None):
+    """The Reviewer row of an agent's page (a new agent's: it needs no roster), where the mark's meaning is said."""
+    if url:
+        page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+        _go(page, "settings")
+    level = open_settings(page, "agents/new", timeout=30_000)
+    caption = level.locator('.agent-use:has([data-subagent-field="review_eligible"]) .ui-row-meta')
     caption.wait_for(state="visible", timeout=30_000)
     return caption
 
@@ -122,30 +124,28 @@ def test_review_pool_card_and_reviewer_caption_at_phone_and_desktop_widths(direc
                     card.screenshot(path=str(evidence / f"review-pool-card-{name}.png"))
                     page.close()
 
-                # Desktop: the saved Advisory, a drafted Blocking that changes nothing, then the saved Blocking.
+                # Desktop: the saved Advisory, then the saved Blocking. (LANE C2: on the integrated tree the
+                # strictness is chosen on Permissions and checks; here the saved value is written directly.)
                 page = browser.new_page(viewport=WIDTHS["desktop"])
-                caption = _open_agents(page, url)
+                caption = _reviewer_caption(page, url)
                 assert caption.inner_text() == TICK["advisory"]
-                page.click('[data-settings-tab="behavior"]')
-                page.click('[data-effort-target="s-review-enforcement"] [data-effort-value="blocking"]')
-                page.click('[data-settings-tab="agents"]')
-                assert caption.inner_text() == TICK["advisory"], "a draft is not the saved strictness"
-                with page.expect_response(lambda r: r.url.endswith("/api/settings") and r.request.method == "POST",
-                                          timeout=30_000) as answer:
-                    page.click("#btn-save-settings")
-                assert answer.value.request.post_data_json["OUROBOROS_REVIEW_ENFORCEMENT"] == "blocking"
-                page.wait_for_function("t => document.querySelector('#subagents-section [data-reviewer-tick-caption]')"
-                                       "?.textContent === t", arg=TICK["blocking"], timeout=30_000)
+                assert page.evaluate("""async () => (await fetch('/api/settings', { method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ OUROBOROS_REVIEW_ENFORCEMENT: 'blocking' }) })).status""") == 200
+                open_settings(page, "agents")
+                caption = _reviewer_caption(page)
+                page.wait_for_function("""t => [...document.querySelectorAll('#page-settings .agent-use .ui-row-meta')]
+                    .some((el) => el.getClientRects().length && el.textContent === t)""", arg=TICK["blocking"], timeout=30_000)
                 _assert_contained(page, caption, WIDTHS["desktop"]["width"])
                 caption.scroll_into_view_if_needed()
                 page.screenshot(path=str(evidence / "reviewer-caption-desktop.png"))
                 page.close()
 
-                # Phone: a fresh page reads the saved Blocking and the line wraps inside the column.
+                # Phone: a fresh page reads the saved Blocking and the line wraps inside the row.
                 page = browser.new_page(viewport=WIDTHS["phone"])
-                caption = _open_agents(page, url)
+                caption = _reviewer_caption(page, url)
                 assert caption.inner_text() == TICK["blocking"]
-                assert "each of them reviews every change" not in page.locator("#subagents-section").inner_text()
+                assert "each of them reviews every change" not in page.locator("#page-settings").inner_text()
                 _assert_contained(page, caption, WIDTHS["phone"]["width"])
                 caption.scroll_into_view_if_needed()
                 page.screenshot(path=str(evidence / "reviewer-caption-phone.png"))

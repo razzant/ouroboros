@@ -10,6 +10,8 @@ import json
 
 import pytest
 
+from tests.settings_browser_helpers import open_entry, open_settings, settings_page
+
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
 
 
@@ -25,78 +27,75 @@ _AGENTS_PANEL_ROSTER = {
     ],
 }
 
-_AGENTS_PANEL_VISIBLE_ROWS_JS = """
-    (selector) => {
-        // One pixel of slack: the list's own border sits on the scroll edge.
-        const box = document.querySelector('.settings-scroll').getBoundingClientRect();
-        return [...document.querySelectorAll(selector)]
-            .map((row) => row.getBoundingClientRect())
-            .filter((r) => r.top >= box.top - 1 && r.bottom <= box.bottom + 1).length;
-    }
-"""
-
-
-def _open_agents_tab(page, url: str) -> None:
+def _open_agents(page, url: str):
+    """Settings › Agents on the real server: the list, once its heads are drawn."""
     page.goto(url, wait_until="domcontentloaded")
     page.wait_for_selector("#page-chat", timeout=30_000)
     page.click('[data-nav-page="settings"]')
     page.wait_for_selector(".settings-shell", timeout=15_000)
-    page.click('[data-settings-tab="agents"]')
-    page.wait_for_selector("#available-subagents-editor .available-subagent-row", timeout=20_000)
-    # The list at the top of the scroll body: "two open cards fit a laptop-height body" is a
-    # claim about the cards, not about the section's heading and copy above them.
-    page.evaluate("() => document.querySelector('.available-subagents-list').scrollIntoView({block: 'start'})")
+    level = open_settings(page, "agents", timeout=20_000)
+    level.locator("[data-entry-id]").first.wait_for(state="visible", timeout=20_000)
+    return level
 
 
-def _agents_panel_add_reveals_the_new_card(page) -> None:
-    """The shared add-and-reveal contract, run on whichever engine the caller launched."""
-    page.click("[data-subagent-add]")
-    page.wait_for_function(
-        "() => document.querySelectorAll('.available-subagent-row').length === 4", timeout=5_000)
-    # The appended card is fully inside the scroll body and its Description holds the caret;
-    # the section-level error line stays hidden and no card is tinted before a save attempt.
+def _confirm(page, words: str) -> None:
+    """Answer Yes in the shared confirm dialog, which must say `words`."""
+    dialog = page.locator(".confirm-dialog")
+    dialog.wait_for(state="visible", timeout=10_000)
+    assert words in dialog.inner_text(), dialog.inner_text()
+    dialog.locator("[data-confirm-ok]").click()
+    page.wait_for_function("() => !document.querySelector('.confirm-dialog')", timeout=10_000)
+
+
+def _agents_add_saves_and_the_list_reveals_it(page) -> str:
+    """The add-and-reveal contract, run on whichever engine the caller launched: Add opens an unsaved agent's
+    page, which invites and shows no error; a Save attempt names what is missing on the page and sends nothing;
+    the fix clears it; saved, the list shows the new agent in view and gives it the caret."""
+    level = settings_page(page, "agents")
+    before = level.locator("[data-entry-id]").count()
+    level.locator("[data-subagent-add]").click()
+    editor = settings_page(page, "agents/new")
+    form = editor.locator("[data-subagent-row]")
+    form.wait_for(state="visible", timeout=10_000)
+    assert editor.locator(".settings-page-title").inner_text().strip() == "New agent"
+    line = form.locator("[data-subagents-validation]")
+    assert line.is_hidden() and form.get_attribute("data-invalid") is None
+    assert "Choose how this subagent runs" in form.locator("[data-subagent-meta]").inner_text()
+
+    form.locator("[data-editor-save]").click()
+    page.wait_for_function("() => !document.querySelector('#page-settings [data-settings-page=\"agents/new\"] "
+                           "[data-subagents-validation]').hidden", timeout=5_000)
+    assert line.inner_text().startswith("New agent needs a model or agent-session route.")
+    assert form.get_attribute("data-invalid") is not None
+    assert form.locator('[data-subagent-meta][data-tone="error"]').inner_text().startswith("New agent needs")
+
+    form.locator('[data-subagent-field="model"]').fill("openai/gpt-5.6-sol-high")
+    page.wait_for_function("() => document.querySelector('#page-settings [data-settings-page=\"agents/new\"] "
+                           "[data-subagents-validation]').hidden", timeout=5_000)
+    assert form.get_attribute("data-invalid") is None
+    form.locator("[data-editor-save]").click()
+    # This roster marks no Reviewer: the server judges the changed roster and the page asks first.
+    _confirm(page, "No agent marked Reviewer would be on")
+    level.locator("[data-entry-id]").nth(before).wait_for(state="visible", timeout=15_000)
+    assert level.locator("[data-entry-id]").count() == before + 1
     page.wait_for_function(
         """() => {
-            const rows = [...document.querySelectorAll('.available-subagent-row')];
-            const last = rows[rows.length - 1];
-            const box = document.querySelector('.settings-scroll').getBoundingClientRect();
+            const heads = [...document.querySelectorAll('#page-settings [data-settings-page="agents"] [data-entry-id]')];
+            const last = heads.at(-1), box = last.closest('[data-settings-page]').getBoundingClientRect();
             const r = last.getBoundingClientRect();
-            return r.top >= box.top - 1 && r.bottom <= box.bottom + 1
-                && document.activeElement === last.querySelector('[data-subagent-field="recommended_use"]');
+            return r.top >= box.top - 1 && r.bottom <= box.bottom + 1 && last.contains(document.activeElement);
         }""",
-        timeout=5_000,
+        timeout=10_000,
     )
-    assert page.evaluate("() => document.querySelector('[data-subagents-validation]').hidden") is True
-    assert page.locator(".available-subagent-row[data-invalid]").count() == 0
-    hint = page.locator(".available-subagent-row").last.locator("[data-subagent-meta]")
-    assert "Choose how this subagent runs" in hint.inner_text()
-
-
-def _agents_panel_typing_reads_draft(page) -> None:
-    """A keystroke into a SAVED card (no structural repaint) turns the ONE editor intent to
-    Unsaved changes, patched in place — the caret stays in the field being typed into."""
-    field = page.locator('.available-subagent-row [data-subagent-field="recommended_use"]').first
-    field.click()
-    page.keyboard.type(" ")
-    page.wait_for_function(
-        """() => [...document.querySelectorAll('[data-subagent-status]')]
-            .every((el) => !el.textContent.includes('·'))
-            && document.querySelector('[data-subagents-intent]')?.textContent === ''
-            && document.querySelector('.settings-footer')?.dataset.draft === 'dirty'
-            && document.activeElement === document.querySelector(
-                '.available-subagent-row [data-subagent-field="recommended_use"]')""",
-        timeout=5_000,
-    )
+    return level.locator("[data-entry-id]").nth(before).get_attribute("data-entry-id")
 
 
 @pytest.mark.ui_browser
 def test_ui_smoke_agents_panel_list_editor(direct_server_with_data):
-    """Settings → Agents: two open subagent cards fit a laptop-height body; typing turns
-    the editor intent to Unsaved changes in place; Add reveals the appended card with the caret in it and
-    no error; only a Save attempt (whichever validation aborts it) turns the empty route into
-    a section-level line plus a tinted, self-naming card, and the fix typed into the card
-    clears line, tint and footer together; a later Add is an invitation again; a card's
-    Reviewer box joins the review pool in place (docs/DESIGN.md "List editors")."""
+    """Settings › Agents on the real server: the list holds one head per agent; Add opens an unsaved agent's
+    page that invites; only a Save attempt turns the empty route into a line on the page and a tint, and the fix
+    clears both; the save asks about the empty review pool because the server refuses it, then the list reveals
+    the new agent; a Reviewer switch on an agent's page joins the pool at once (docs/DESIGN.md "List editors")."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
@@ -108,95 +107,39 @@ def test_ui_smoke_agents_panel_list_editor(direct_server_with_data):
     direct_server_with_data["restart_server"]()
     url = direct_server_with_data["url"]
 
+    def stored():
+        return json.loads(json.loads(settings_path.read_text(encoding="utf-8"))["OUROBOROS_SUBAGENTS"])["items"]
+
     try:
         with sync_playwright() as pw:
             browser = pw.chromium.launch()
             try:
                 page = browser.new_page(viewport={"width": 1440, "height": 900})
-                _open_agents_tab(page, url)
-                # Open editors, not a compact list (owner's choice): every field stays in view.
-                assert page.evaluate(_AGENTS_PANEL_VISIBLE_ROWS_JS, ".available-subagent-row") >= 2
-                # This roster marks no Reviewer; the owner's explicit choice keeps the empty
-                # pool out of the validation this test is about (it is decided per load).
-                page.check('[data-review-pool-allow-empty]')
-                _agents_panel_typing_reads_draft(page)
-                _agents_panel_add_reveals_the_new_card(page)
+                level = _open_agents(page, url)
+                # A list of heads, not open forms: every agent is one row, and none holds a field.
+                assert [row.get_attribute("data-entry-id") for row in level.locator("[data-entry-id]").all()] == [
+                    row["subagent_id"] for row in _AGENTS_PANEL_ROSTER["items"]]
+                assert level.locator("[data-entry-id] textarea, [data-entry-id] select").count() == 0
+                assert level.locator("[data-review-pool-empty]").is_visible(), "no Reviewer is marked: the list says so"
 
-                # Every Save click is an attempt, even one that another field's validation
-                # aborts: with a malformed Every-N cadence the roster is still judged (line +
-                # tint) while the footer names the cadence error. The segmented control's
-                # hidden inputs are poked directly — the cadence row is not the point here.
-                def set_cadence(mode, n):
-                    page.evaluate(
-                        "([mode, n]) => { document.getElementById('s-post-task-evolution-mode').value = mode;"
-                        " document.getElementById('s-evo-cadence-n').value = n; }", [mode, n])
+                added = _agents_add_saves_and_the_list_reveals_it(page)
+                assert [row["subagent_id"] for row in stored()][-1] == added
+                assert stored()[-1]["route"] == {"kind": "api_model", "target_id": "openai/gpt-5.6-sol-high"}
 
-                def save_expecting(footer_prefix):
-                    page.click("#btn-save-settings")
-                    page.wait_for_function(
-                        "(p) => document.getElementById('settings-status').textContent.startsWith(p)",
-                        arg=footer_prefix, timeout=5_000)
-
-                mode_before = page.evaluate("() => document.getElementById('s-post-task-evolution-mode').value")
-                set_cadence("every_n", "x")
-                save_expecting("Every-N cadence")
-                assert not page.evaluate("() => document.querySelector('[data-subagents-validation]').hidden")
-                assert page.locator(".available-subagent-row[data-invalid]").count() == 1
-                set_cadence(mode_before, "")
-                # With the cadence valid again, Save names the roster error in the footer too.
-                save_expecting("Available subagents:")
-                line = page.locator("[data-subagents-validation]").inner_text()
-                assert line.startswith("Subagent 4 needs a model or agent-session route.")
-                tinted = page.locator(".available-subagent-row[data-invalid]")
-                assert tinted.count() == 1
-                assert tinted.locator('[data-subagent-meta][data-tone="error"]').inner_text().startswith(
-                    "Subagent 4 needs")
-
-                # The NEXT added entry is still an invitation: the attempt judged the rows
-                # that existed then, not every row forever — row 4 stays judged beside it.
-                page.click("[data-subagent-add]")
+                # A Reviewer switch on an agent's page joins the pool at once: the list's count and the empty-pool
+                # line follow, and with a reviewer in the pool nothing is asked.
+                form = open_entry(page, "codex_reviewer").locator("[data-subagent-row]")
+                form.locator('.agent-use:has([data-subagent-field="review_eligible"]) .ui-switch').click()
                 page.wait_for_function(
-                    "() => document.querySelectorAll('.available-subagent-row').length === 5", timeout=5_000)
-                fresh = page.locator(".available-subagent-row").last
-                assert not fresh.evaluate("(el) => el.hasAttribute('data-invalid')")
-                assert "Choose how this subagent runs" in fresh.locator("[data-subagent-meta]").inner_text()
-                assert page.locator(".available-subagent-row[data-invalid]").count() == 1
-
-                # A fix typed into the judged card clears the section line, the tint AND the
-                # roster-owned footer message together; the unjudged fresh row keeps none of
-                # them alive.
-                tinted.locator('[data-subagent-field="model"]').fill("openai/gpt-5.6-luna")
+                    """() => { const input = document.querySelector(
+                            '#page-settings [data-settings-page="agents/codex_reviewer"] [data-subagent-field="review_eligible"]');
+                        return input && input.checked && input.getAttribute('aria-busy') !== 'true'; }""", timeout=15_000)
+                assert page.locator(".confirm-dialog").count() == 0
+                assert [row.get("review_eligible") for row in stored()] == [None, True, None, None]
+                level = open_settings(page, "agents")
                 page.wait_for_function(
-                    "() => document.querySelector('[data-subagents-validation]').hidden"
-                    " && !document.querySelector('.available-subagent-row[data-invalid]')"
-                    " && !document.getElementById('settings-status').textContent.startsWith('Available subagents:')",
-                    timeout=5_000,
-                )
-
-                # A newer, unrelated footer message is not the roster's to clear: the cadence
-                # error written by the next Save survives the roster fix that follows it.
-                set_cadence("every_n", "x")
-                save_expecting("Every-N cadence")
-                assert page.locator(".available-subagent-row[data-invalid]").count() == 1
-                fresh.locator('[data-subagent-field="model"]').fill("openai/gpt-5.6-sol-high")
-                page.wait_for_function(
-                    "() => document.querySelector('[data-subagents-validation]').hidden"
-                    " && !document.querySelector('.available-subagent-row[data-invalid]')", timeout=5_000)
-                assert page.locator("#settings-status").inner_text().startswith("Every-N cadence")
-                set_cadence(mode_before, "")
-
-                # A card's Reviewer box joins the pool in place: the count and the empty-pool
-                # warning follow at once, and the box keeps the focus through the repaint.
-                page.locator('[data-subagent-field="review_eligible"]').nth(1).check()
-                page.wait_for_function(
-                    """() => {
-                        const boxes = document.querySelectorAll('[data-subagent-field="review_eligible"]');
-                        return document.querySelector('[data-review-pool-count]').textContent === 'Reviewers: 1'
-                            && document.querySelector('[data-review-pool-empty]').hidden
-                            && boxes[1].checked && document.activeElement === boxes[1];
-                    }""",
-                    timeout=5_000,
-                )
+                    """() => document.querySelector('#page-settings [data-agents-filter="reviewers"]')?.textContent.trim() === 'Reviewers 1'
+                        && document.querySelector('#page-settings [data-review-pool-empty]').hidden""", timeout=15_000)
             finally:
                 browser.close()
 
@@ -211,8 +154,17 @@ def test_ui_smoke_agents_panel_list_editor(direct_server_with_data):
             if webkit is not None:
                 try:
                     page = webkit.new_page(viewport={"width": 1440, "height": 900})
-                    _open_agents_tab(page, url)
-                    _agents_panel_add_reveals_the_new_card(page)
+                    _open_agents(page, url)
+                    level = settings_page(page, "agents")
+                    before = level.locator("[data-entry-id]").count()
+                    level.locator("[data-subagent-add]").click()
+                    form = settings_page(page, "agents/new").locator("[data-subagent-row]")
+                    form.locator('[data-subagent-field="model"]').fill("openai/gpt-5.6-terra")
+                    form.locator("[data-editor-save]").click()
+                    level.locator("[data-entry-id]").nth(before).wait_for(state="visible", timeout=15_000)
+                    page.wait_for_function(
+                        """() => [...document.querySelectorAll('#page-settings [data-settings-page="agents"] [data-entry-id]')]
+                            .at(-1).contains(document.activeElement)""", timeout=10_000)
                 finally:
                     webkit.close()
     except PlaywrightError as exc:
@@ -295,7 +247,9 @@ def test_ui_smoke_agents_panel_wizard_finish_judges_the_roster(direct_server_wit
     for key in ("OUROBOROS_MODEL", "OUROBOROS_MODEL_HEAVY", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_FALLBACKS"):
         saved.pop(key, None)
     saved["OPENROUTER_API_KEY"] = "sk-or-v1-smoke-placeholder-not-real"
-    saved["OUROBOROS_SUBAGENTS"] = json.dumps(_AGENTS_PANEL_ROSTER)
+    roster = json.loads(json.dumps(_AGENTS_PANEL_ROSTER))
+    roster['items'][0]['review_eligible'] = True  # the first Finish tests the missing route, then the empty pool
+    saved["OUROBOROS_SUBAGENTS"] = json.dumps(roster)
     settings_path.write_text(json.dumps(saved), encoding="utf-8")
     direct_server_with_data["restart_server"]()
     url = direct_server_with_data["url"]
@@ -335,17 +289,16 @@ def test_ui_smoke_agents_panel_wizard_finish_judges_the_roster(direct_server_wit
                 tinted.scroll_into_view_if_needed()
                 capture(page, "wizard-roster-invalid")
 
-                # A model the generated roster does not run yet: its own Auto actor rows (no effort)
-                # would make the same model on another Auto row their twin.
-                tinted.locator('[data-subagent-field="model"]').fill("openai/gpt-5.6-sol")
+                # A distinct fixture model fixes the missing route without creating a twin of another row.
+                tinted.locator('[data-subagent-field="model"]').fill("owner/roster-validation-fixture")
                 page.wait_for_function(
                     "() => document.querySelector('#onboarding-available-subagents [data-subagents-validation]').hidden"
                     " && !document.querySelector('#onboarding-available-subagents .available-subagent-row[data-invalid]')",
                     timeout=5_000)
                 capture(page, "wizard-roster-repaired")
 
-                # With every Reviewer box cleared (the generated roster marks the factory
-                # reviewers), Finish names the empty pool until the owner says Save without reviewers.
+                # With every Reviewer box cleared, Finish names the empty pool until the owner
+                # says Save without reviewers.
                 boxes = page.locator('#onboarding-available-subagents [data-subagent-field="review_eligible"]')
                 for index in range(boxes.count()):
                     boxes.nth(index).set_checked(False)
@@ -394,17 +347,19 @@ _LIST_EDITOR_ENTRIES = {
 
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
-def test_ui_smoke_list_editor_remove_hands_the_caret_on(direct_server_with_data, engine):
-    """A keyboard Remove in every Settings list editor hands the caret to the entry now in
-    that place (the next, else the previous) and, once the list is empty, to the group's Add:
-    never to the page (docs/DESIGN.md "List editors")."""
+def test_ui_smoke_agents_remove_asks_first_and_hands_the_caret_on(direct_server_with_data, engine):
+    """A keyboard Remove on an agent's page asks first, removes at once and returns to the list with the caret on
+    the agent now in that place (the next, else the previous) and, once the list is empty, on Add: never on the
+    page (docs/DESIGN.md "List editors")."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import expect, sync_playwright
     from tests.test_subscription_setup_browser import capture
 
     settings_path = direct_server_with_data["data_dir"] / "settings.json"
     saved = json.loads(settings_path.read_text(encoding="utf-8"))
-    saved.update(_LIST_EDITOR_ENTRIES, OUROBOROS_SUBAGENTS=json.dumps(_AGENTS_PANEL_ROSTER))
+    roster = json.loads(json.dumps(_AGENTS_PANEL_ROSTER))
+    roster["items"][0]["review_eligible"] = True  # a reviewer stays until the list is empty: the pool is not the subject
+    saved["OUROBOROS_SUBAGENTS"] = json.dumps(roster)
     settings_path.write_text(json.dumps(saved), encoding="utf-8")
     direct_server_with_data["restart_server"]()
 
@@ -412,7 +367,62 @@ def test_ui_smoke_list_editor_remove_hands_the_caret_on(direct_server_with_data,
         browser = getattr(pw, engine).launch()
         try:
             page = browser.new_page(viewport={"width": 1280, "height": 900})
-            _open_agents_tab(page, direct_server_with_data["url"])
+            level = _open_agents(page, direct_server_with_data["url"])
+
+            def remove(agent_id, name):
+                editor = open_entry(page, agent_id)
+                editor.locator("[data-editor-remove]").focus()
+                page.keyboard.press("Enter")
+                dialog = page.locator(".confirm-dialog")
+                dialog.wait_for(state="visible", timeout=10_000)
+                assert f"Remove {name}?" in dialog.inner_text()
+                dialog.locator("[data-confirm-ok]").click()
+                level.wait_for(state="visible", timeout=15_000)
+                expect(level.locator(f'[data-entry-id="{agent_id}"]')).to_have_count(0, timeout=15_000)
+
+            def focused_agent():
+                return page.evaluate("() => document.activeElement?.closest('[data-entry-id]')?.dataset.entryId || ''")
+
+            remove("codex_reviewer", "gpt-5.6-sol-high")
+            page.wait_for_function("() => document.activeElement?.closest('[data-entry-id]')?.dataset.entryId === 'api_scout'")
+            remove("api_scout", "gpt-5.6-luna/high")
+            page.wait_for_function("() => document.activeElement?.closest('[data-entry-id]')?.dataset.entryId === 'claude_builder'")
+            assert focused_agent() == "claude_builder"
+            remove("claude_builder", "claude-opus-5/medium")
+            expect(level.locator("[data-subagent-add]:focus")).to_have_count(1, timeout=15_000)
+            assert json.loads(json.loads(settings_path.read_text(encoding="utf-8"))["OUROBOROS_SUBAGENTS"])["items"] == []
+            capture(page, f"agents-remove-focus-{engine}")
+        finally:
+            browser.close()
+
+
+@pytest.mark.ui_browser
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+def test_ui_smoke_list_editor_remove_hands_the_caret_on(direct_server_with_data, engine):
+    """A keyboard Remove in the other Settings list editors (fallbacks, tool servers and their headers, custom keys)
+    hands the caret to the entry now in that place (the next, else the previous) and, once the list is empty, to
+    the group's Add: never to the page (docs/DESIGN.md "List editors").
+
+    LANES E2 and E3: these editors still walk the retired tabs here; their lanes move them to their pages. The
+    agents' own Remove is the test above."""
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import expect, sync_playwright
+    from tests.test_subscription_setup_browser import capture
+
+    settings_path = direct_server_with_data["data_dir"] / "settings.json"
+    saved = json.loads(settings_path.read_text(encoding="utf-8"))
+    saved.update(_LIST_EDITOR_ENTRIES)
+    settings_path.write_text(json.dumps(saved), encoding="utf-8")
+    direct_server_with_data["restart_server"]()
+
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch()
+        try:
+            page = browser.new_page(viewport={"width": 1280, "height": 900})
+            page.goto(direct_server_with_data["url"], wait_until="domcontentloaded")
+            page.wait_for_selector("#page-chat", timeout=30_000)
+            page.click('[data-nav-page="settings"]')
+            page.wait_for_selector(".settings-shell", timeout=15_000)
 
             def remove(buttons, index, target, value=None):
                 buttons.nth(index).focus()
@@ -420,12 +430,6 @@ def test_ui_smoke_list_editor_remove_hands_the_caret_on(direct_server_with_data,
                 expect(page.locator(f"{target}:focus")).to_have_count(1)
                 if value is not None:
                     expect(page.locator(":focus")).to_have_value(value)
-
-            subagents = page.locator("[data-subagent-remove]")
-            description = '[data-subagent-field="recommended_use"]'
-            remove(subagents, 1, description, "Fast independent research.")
-            remove(subagents, 1, description, "Main workhorse for code and design.")
-            remove(subagents, 0, "[data-subagent-add]")
 
             page.click('[data-settings-tab="models"]')
             fallbacks = page.locator("[data-model-remove]")
