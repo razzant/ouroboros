@@ -57,12 +57,12 @@ function card({ recents = [route(GLM)], answer = null } = {}) {
     };
     const paint = (view) => paintCardModel(record, view && { target: 't1', main: route(ASTRA), since: '', queued: false, ...view }, deps);
     const part = () => meta.children.find((node) => node.classList.contains('card-model')) || null;
-    const fact = () => part()?.children.find((node) => node.classList.contains('card-model-fact')) || null;
+    const fact = () => part()?.querySelector('.card-model-fact') || null;
     // A part's words as a reader gets them; the name is its three spans, joined by their own (no-break) separators.
     const said = (name) => {
         const node = part().querySelector(`.card-model-${name}`);
         if (node.hidden) return '';
-        return (name === 'name' ? node.children.map((child) => child.textContent).join('') : node.textContent).replaceAll('\u00a0', ' ');
+        return (name === 'name' ? node.children.map((child) => child.textContent).join('') : node.querySelector('.card-model-words').textContent).replaceAll('\u00a0', ' ');
     };
     const popup = () => doc.body.children.find((node) => node.classList.contains('card-model-pop')) || null;
     const fire = (node, type, event) => Promise.all((node.listeners.get(type) || []).map((fn) => fn(event)));
@@ -135,6 +135,22 @@ test('the fact is the first node of the line and a repaint of the line never tou
     c.record.metaEl.innerHTML = '';
     c.paint({ lead: lead(ASTRA, 'main') });
     assert.equal(c.part().querySelector('.chat-live-meta-sep').hidden, true, 'none when the fact stands alone');
+});
+
+test('the meta separator stays with the last visible model fact across repaints', () => {
+    const c = card();
+    const separator = () => c.part().querySelector('.chat-live-meta-sep');
+    c.paint({ lead: lead(ASTRA, 'main') });
+    assert.equal(separator().parentNode, c.fact().parentNode, 'the model and dot share a group');
+    c.paint({ lead: lead(GLM, 'owner') });
+    assert.equal(separator().parentNode, c.part().querySelector('.card-model-why'));
+    c.paint({ lead: lead(GLM, 'owner', { pending: route(ASTRA) }) });
+    assert.equal(separator().parentNode, c.part().querySelector('.card-model-pending'));
+    const words = c.part().querySelector('.card-model-pending').children[0];
+    c.paint({ lead: lead(GLM, 'owner', { pending: route(ASTRA) }) });
+    assert.equal(c.part().querySelector('.card-model-pending').children[0], words, 'unchanged words stay mounted');
+    c.paint({ lead: lead(ASTRA, 'main') });
+    assert.equal(separator().parentNode, c.fact().parentNode);
 });
 
 test('the fact is a button where the server offers the model control and plain text where it does not', () => {

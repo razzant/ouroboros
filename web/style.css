@@ -5412,7 +5412,15 @@ html[data-layout="stack"] .ui-popup.chat-model-list { width: var(--ui-popup-anch
 /* The name never leaves its mark's line: it is at most the line less the mark, so only the facts ever wrap. */
 .chat-model-row-id { flex: 1 1 auto; min-width: 0; max-width: calc(100% - 14px - var(--space-2)); overflow: hidden; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .chat-model-row-facts, .chat-model-row-tag { flex: 0 0 auto; color: var(--text-meta); font-size: var(--type-meta); white-space: nowrap; }
-.chat-model-row-facts { margin-inline-start: auto; }
+.chat-model-row-facts {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 100%;
+    margin-inline-start: auto;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    text-align: end;
+}
 :is(.chat-model-typed, .chat-model-door) .chat-model-row-id { color: var(--text-secondary); }
 .chat-model-section, .chat-model-note, .chat-model-rule {
     margin: 0;
@@ -5431,6 +5439,7 @@ html[data-layout="stack"] .ui-popup.chat-model-list { width: var(--ui-popup-anch
 /* The Main chat's confirming sheet (the shared confirm dialog's content): what Main becomes, and its facts. */
 .chat-model-sheet-row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--space-2);
     margin: 0 0 var(--space-2);
@@ -5439,9 +5448,9 @@ html[data-layout="stack"] .ui-popup.chat-model-list { width: var(--ui-popup-anch
     background: var(--surface-tray);
     font-size: var(--type-body);
 }
-.chat-model-sheet-row .model-source-mark { width: 14px; height: 14px; color: var(--text-meta); }
-.chat-model-sheet-row b { flex: 1 1 auto; min-width: 0; overflow: hidden; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
-.chat-model-sheet-row span { flex: 0 0 auto; color: var(--text-meta); font-size: var(--type-meta); }
+.chat-model-sheet-row .model-source-mark { flex: 0 0 auto; width: 14px; height: 14px; color: var(--text-meta); }
+.chat-model-sheet-row b { flex: 1 1 12ch; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.chat-model-sheet-row span { flex: 0 1 auto; max-width: 100%; color: var(--text-meta); font-size: var(--type-meta); overflow-wrap: anywhere; }
 .chat-model-sheet-fact { margin: 0 0 2px; color: var(--text-secondary); font-size: var(--type-meta); }
 /* The sheet's lists (owner 10.11, «5. A», «6. A»): what is not on Main now, each row a name over its facts with
    its own tick; nothing is ticked until the owner ticks it. After the change the same rows say each one's result. */
@@ -5476,6 +5485,8 @@ label.chat-model-off { cursor: pointer; }
     gap: 5px 6px;
     max-width: 100%;
 }
+.card-model-fact-group { display: inline-flex; align-items: center; gap: var(--space-1); min-width: 0; max-width: 100%; }
+.card-model-fact-group > .chat-live-meta-sep { flex: 0 0 auto; }
 .card-model-fact {
     display: inline-flex;
     align-items: center;
@@ -5510,8 +5521,8 @@ button.card-model-fact:focus-visible { outline: 2px solid var(--focus-accent-bor
 .card-model-mark { display: inline-flex; flex: 0 0 auto; }
 .card-model-mark .model-source-mark { width: 13px; height: 13px; }
 .card-model-name { display: flex; min-width: 0; white-space: nowrap; }
-.card-model-lead { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.card-model-id { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.card-model-lead { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.card-model-id { flex: 0 0 auto; min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 .card-model-tail { flex: 0 0 auto; }
 /* A fallback's line is read whole: it wraps instead of giving way. */
 .card-model[data-basis="fallback"] .card-model-name { flex-wrap: wrap; }

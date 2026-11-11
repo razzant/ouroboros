@@ -247,7 +247,7 @@ test('the confirming sheet says what Main becomes, what running work does, and i
     assert.equal(sheet.body, 'If Main\'s account is pinned it becomes Auto, and a context window set by hand for Main is cleared.');
     const content = doc.createElement('section');
     sheet.content.mount(content);
-    assert.match(content.children[0].innerHTML, />OpenRouter · z-ai\/glm-5\.3<\/b><span data-i18n-skip>was gpt-6-astra<\/span>$/);
+    assert.match(content.children[0].innerHTML, />z-ai\/glm-5\.3<\/b><span data-i18n-skip>was gpt-6-astra<\/span>$/);
     assert.deepEqual(content.children.slice(1).map((node) => node.textContent),
         ['OpenRouter · paid by key · 1M window.', `${MAIN_RULE} ${MAIN_FOLLOW_NOTE}`,
             'How many running works follow Main is unknown right now: the list of running work is incomplete.']);

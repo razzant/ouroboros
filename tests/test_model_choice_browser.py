@@ -73,6 +73,9 @@ def _quiet(page) -> None:
 
 
 _WIDE = "() => document.documentElement.scrollWidth - window.innerWidth"
+_FACTS_OVER = """() => [...document.querySelectorAll('.chat-model-row-facts')]
+    .filter((node) => node.getClientRects().length && node.scrollWidth > node.clientWidth + 0.5)
+    .map((node) => node.textContent)"""
 
 # ---------------------------------------------------------------------------------------------------------------------
 # 1. The capsule on a large catalog
@@ -118,6 +121,8 @@ _ROW = """() => {
         wide: document.documentElement.scrollWidth - window.innerWidth,
         out: [...row.querySelectorAll('.chat-capsule')].filter((el) => el.getClientRects().length && el.getBoundingClientRect().right > window.innerWidth + 0.5).map((el) => el.className),
         rows: list ? list.querySelectorAll('.chat-model-row').length : 0,
+        factsOver: list ? [...list.querySelectorAll('.chat-model-row-facts')]
+            .filter((node) => node.scrollWidth > node.clientWidth + 0.5).map((node) => node.textContent) : [],
         listInside: listBox ? listBox.left >= -0.5 && listBox.right <= window.innerWidth + 0.5 && listBox.top >= -0.5 && listBox.bottom <= window.innerHeight + 0.5 : null,
         listOverRow: listBox ? listBox.bottom <= row.getBoundingClientRect().top + 1 : null,
     };
@@ -128,7 +133,7 @@ def _capsule_walk(page, tag: str) -> None:
     def still(now: dict, was: dict, what: str) -> None:
         assert now["area"] == was["area"] and now["field"] == was["field"] and now["messages"] == was["messages"], \
             (tag, what, "the composer and the transcript stay where they were", was, now)
-        assert now["wide"] <= 0 and not now["out"], (tag, what, now)
+        assert now["wide"] <= 0 and not now["out"] and not now["factsOver"], (tag, what, now)
         assert now["value"] == "gpt-6-astra", (tag, what, "the capsule still holds Main's model", now)
 
     closed = page.evaluate(_ROW)
@@ -284,10 +289,13 @@ def test_model_choice_on_the_real_server(direct_server_with_data, monkeypatch, t
         pages = [(tag, desk, transcript) for tag, transcript in DESK] + [("phone", phone, None)]
 
         def picture(page, number: str, name: str, tag: str) -> None:
+            _quiet(page)
+            page.wait_for_timeout(350)  # a transient hover hint has left before the frame
             for theme in ("dark", "light"):
                 _theme(page, theme)
                 page.screenshot(path=str(shots / f"{number}-{name}-{tag}-{theme}.png"), animations="disabled")
                 assert page.evaluate(_WIDE) <= 0, (number, name, tag, "nothing is wider than the screen")
+                assert page.evaluate(_FACTS_OVER) == [], (number, name, tag, "the route's facts fit inside its row")
             _theme(page, "dark")
 
         def everywhere(number: str, name: str, stage, leave=lambda page: None) -> None:
@@ -336,6 +344,11 @@ def test_model_choice_on_the_real_server(direct_server_with_data, monkeypatch, t
             page.click(row)
             page.wait_for_selector(".confirm-dialog [data-main-followers]", timeout=20_000)
             page.wait_for_timeout(300)
+            proposed = page.evaluate("""() => {
+                const model = document.querySelector('.chat-model-sheet-row b');
+                return { text: model.textContent, whole: model.scrollWidth <= model.clientWidth };
+            }""")
+            assert proposed == {"text": route.split("::", 1)[-1], "whole": True}, proposed
 
         def cancel_sheet(page) -> None:
             page.click(".confirm-dialog [data-confirm-cancel]")
@@ -423,14 +436,20 @@ def test_model_choice_on_the_real_server(direct_server_with_data, monkeypatch, t
                 page.wait_for_function("(sel) => Boolean(document.querySelector(sel + ' .card-model-fact'))", arg=_card(task), timeout=60_000)
                 return page.evaluate(_CARD, _card(task))
 
-            in_room(site, "07", "card-running", lambda page: _show(page, follower))
+            def short_card(page, task: str) -> None:
+                _show(page, task)
+                fact = fact_of(page, task)
+                assert fact["modelWhole"], ("the source gives way before the short model name", fact)
+                assert fact["separatorAttached"], ("the separator stays with the model or its pending route", fact)
+
+            in_room(site, "07", "card-running", lambda page: short_card(page, follower))
             _fit_room(desk, site, 581)
             running = fact_of(desk, follower)
             seen["running"] = running
             assert (running["chip"], running["tag"], running["why"], running["basis"]) == ("Working", "BUTTON", "", "main"), running
             assert running["fact"].endswith("· mock-main"), running
             _close_project(desk)
-            in_room(logs, "08", "card-queued", lambda page: _show(page, queued))
+            in_room(logs, "08", "card-queued", lambda page: short_card(page, queued))
             _fit_room(desk, logs, 581)
             waiting = fact_of(desk, queued)
             seen["queued"] = waiting
@@ -520,7 +539,7 @@ def test_model_choice_on_the_real_server(direct_server_with_data, monkeypatch, t
             def arrow(page) -> None:
                 page.wait_for_function("(sel) => document.querySelector(sel + ' .card-model-pending')?.innerText.includes('mock-other')",
                                        arg=_card(follower), timeout=60_000)
-                _show(page, follower)
+                short_card(page, follower)
 
             _quiet(desk)
             in_room(site, "11", "card-pending", arrow)

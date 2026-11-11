@@ -132,13 +132,27 @@ _CAPSULE = """(sel) => {
 }"""
 
 _CARD = """(sel) => {
+    const attached = (part, fact) => {
+        const sep = part?.querySelector('.chat-live-meta-sep');
+        if (!sep || sep.hidden) return true;
+        const words = sep.parentElement.querySelector('.card-model-words');
+        const range = document.createRange();
+        if (words) range.selectNodeContents(words);
+        const last = words ? [...range.getClientRects()].at(-1) : fact.getBoundingClientRect();
+        const box = sep.getBoundingClientRect(), middle = (box.top + box.bottom) / 2;
+        return Boolean(last) && middle >= last.top - 0.5 && middle <= last.bottom + 0.5;
+    };
     const text = (node) => (node ? node.innerText.replace(/\\s+/g, ' ').trim() : null);
     const card = document.querySelector(sel);
     if (!card) return null;
     const part = card.querySelector('.card-model');
     const fact = part?.querySelector('.card-model-fact');
-    return { task: card.dataset.taskId, chip: text(card.querySelector('[data-live-phase]')), fact: text(fact), tag: fact?.tagName || null,
-        why: text(part?.querySelector('.card-model-why')), pending: text(part?.querySelector('.card-model-pending')),
+    const model = part?.querySelector('.card-model-id');
+    const words = document.createRange();
+    if (model) words.selectNodeContents(model);
+    const modelWhole = Boolean(model) && words.getBoundingClientRect().width <= model.getBoundingClientRect().width + 0.01;
+    return { modelWhole, separatorAttached: attached(part, fact), task: card.dataset.taskId, chip: text(card.querySelector('[data-live-phase]')), fact: text(fact), tag: fact?.tagName || null,
+        why: text(part?.querySelector('.card-model-why .card-model-words')), pending: text(part?.querySelector('.card-model-pending .card-model-words')),
         basis: part?.dataset.basis || null, meta: text(card.querySelector('[data-live-meta]')), finished: card.dataset.finished };
 }"""
 

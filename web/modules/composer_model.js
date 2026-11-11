@@ -157,7 +157,7 @@ export async function confirmMainChange({ next, previous, census = null, dialog 
             };
             const row = doc.createElement('p');
             row.className = 'chat-model-sheet-row';
-            row.innerHTML = `${sourceMark(next)}<b data-i18n-skip>${esc(`${next.sourceLabel} · ${next.id}`)}</b>`
+            row.innerHTML = `${sourceMark(next)}<b data-i18n-skip>${esc(next.id)}</b>`
                 + (previous ? `<span data-i18n-skip>${esc(fmt('was {model}', { model: previous.short }))}</span>` : '');
             const facts = line(`${routeFacts(next)}.`);
             facts.dataset.i18nSkip = '';

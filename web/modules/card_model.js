@@ -145,16 +145,20 @@ function buildFact(record, deps) {
     part.dataset.cardModel = '';
     const why = nodeOf(doc, 'span', 'chat-live-meta-text card-model-why');
     why.dataset.i18nSkip = '';  // said through tr()/fmt() here: it may name a model
+    const whyWords = nodeOf(doc, 'span', 'card-model-words');
+    why.append(whyWords);
     const pending = nodeOf(doc, 'span', 'chat-live-meta-text card-model-pending');
     pending.dataset.i18nSkip = '';
+    const pendingWords = nodeOf(doc, 'span', 'card-model-words');
+    pending.append(pendingWords);
     const sep = nodeOf(doc, 'span', 'chat-live-meta-sep');
     sep.innerHTML = '&nbsp;· ';
     // The rest of the line, as chat_activity.js writes it: its parts stay items of the line itself (style.css).
     const rest = nodeOf(doc, 'span', 'card-model-rest');
     rest.append(...[...meta.children]);
     meta.append(part, rest);
-    const state = { meta, part, fact: null, mark: null, name: null, why, pending, sep, rest, doc, deps, view: null,
-        input: null, markKey: null, pressable: null, watch: null };
+    const state = { meta, part, fact: null, factGroup: null, mark: null, name: null, why, whyWords, pending,
+        pendingWords, sep, rest, doc, deps, view: null, input: null, markKey: null, pressable: null, watch: null };
     record.cardModel = state;
     record.metaEl = rest;
     // The separator is real text (a copied line keeps it), so it is shown only while something follows the fact.
@@ -169,6 +173,9 @@ function buildFact(record, deps) {
 function syncSeparator(state) {
     const alone = !state.rest.children.length;
     if (state.sep.hidden !== alone) state.sep.hidden = alone;
+    // Like chat_activity's other meta parts, the dot stays with the last fact, never on a line of its own.
+    const last = !state.pending.hidden ? state.pending : !state.why.hidden ? state.why : state.factGroup;
+    if (state.sep.parentNode !== last) last.append(state.sep);
 }
 
 // The fact as a button (the server offers the control) or as text (it does not); swapped only when that changes.
@@ -202,9 +209,11 @@ function shapeFact(record, state, pressable) {
         caret.innerHTML = controlIcon('chevron', 11);
         fact.append(caret);
     }
+    const factGroup = nodeOf(doc, 'span', 'card-model-fact-group');
+    factGroup.append(fact);
     state.fact?.remove();
-    Object.assign(state, { fact, mark, name, markKey: null });
-    state.part.replaceChildren(fact, state.why, state.pending, state.sep);
+    Object.assign(state, { fact, factGroup, mark, name, markKey: null });
+    state.part.replaceChildren(factGroup, state.why, state.pending);
 }
 
 function removeFact(record) {
@@ -244,11 +253,11 @@ export function paintCardModel(record, view, deps = {}) {
     if (mark !== state.markKey) { state.markKey = mark; state.mark.innerHTML = sourceMark(said.said); }
     const [leads, id, tail] = state.name.children;
     // A separator rides at the end of the span before it, so a wrapped line never starts with one.
-    write(leads, `${said.parts[0]}\u00a0·\u00a0`);
-    write(id, said.parts[2] ? `${said.parts[1]}\u00a0·\u00a0` : said.parts[1]);
+    write(leads, `${said.parts[0]}\u00a0·`);
+    write(id, `\u00a0${said.parts[1]}${said.parts[2] ? '\u00a0·\u00a0' : ''}`);
     write(tail, said.parts[2]);
-    write(state.why, said.why);
-    write(state.pending, said.pending);
+    write(state.whyWords, said.why);
+    write(state.pendingWords, said.pending);
     state.why.hidden = !said.why;
     state.pending.hidden = !said.pending;
     // Whose model this is rides the node as its look: the default is quiet, a choice stronger, a fallback amber.

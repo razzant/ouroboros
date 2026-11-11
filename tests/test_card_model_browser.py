@@ -171,6 +171,16 @@ def _serve(page, stand: Stand) -> None:
 
 
 _CARDS = """() => {
+    const attached = (part, fact) => {
+        const sep = part?.querySelector('.chat-live-meta-sep');
+        if (!sep || sep.hidden) return true;
+        const words = sep.parentElement.querySelector('.card-model-words');
+        const range = document.createRange();
+        if (words) range.selectNodeContents(words);
+        const last = words ? [...range.getClientRects()].at(-1) : fact.getBoundingClientRect();
+        const box = sep.getBoundingClientRect(), middle = (box.top + box.bottom) / 2;
+        return Boolean(last) && middle >= last.top - 0.5 && middle <= last.bottom + 0.5;
+    };
     const text = (node) => (node ? node.innerText.replace(/\\s+/g, ' ').trim() : null);
     const probe = document.createElement('span');
     probe.style.color = 'var(--status-warn-fg)';
@@ -183,8 +193,11 @@ _CARDS = """() => {
         const fact = part?.querySelector('.card-model-fact');
         const box = card.getBoundingClientRect();
         cards[card.dataset.taskId] = {
-            fact: text(fact), tag: fact?.tagName || null, basis: part?.dataset.basis || null,
-            why: text(part?.querySelector('.card-model-why')), pending: text(part?.querySelector('.card-model-pending')),
+            // The source gives way before a long model. WebKit omits that zero-width text from innerText;
+            // the retained wording and the button's accessible name still name both.
+            separatorAttached: attached(part, fact), fact: fact?.textContent.replace(/\\s+/g, ' ').trim() || null,
+            label: fact?.getAttribute('aria-label'), tag: fact?.tagName || null, basis: part?.dataset.basis || null,
+            why: text(part?.querySelector('.card-model-why .card-model-words')), pending: text(part?.querySelector('.card-model-pending .card-model-words')),
             amber: Boolean(fact) && getComputedStyle(fact).color === warn,
             first: Boolean(part) && card.querySelector('[data-live-meta]').firstElementChild === part,
             meta: text(card.querySelector('[data-live-meta]')),
@@ -294,6 +307,7 @@ def _walk(page, url: str, shots: pathlib.Path, tag: str, transcript: int | None)
 
     def held(seen: dict) -> None:
         assert seen["wide"] <= 0, (tag, seen["wide"])
+        assert all(card["separatorAttached"] for card in seen["cards"].values()), (tag, "a separator stays with its last fact", seen)
         assert not any(card["over"] for card in seen["cards"].values()), (tag, {k: v["over"] for k, v in seen["cards"].items()})
 
     # 1. The cards: a follower, a model of the owner's choice, a queued work, a fallback in amber, a fact the server
@@ -306,6 +320,7 @@ def _walk(page, url: str, shots: pathlib.Path, tag: str, transcript: int | None)
         ("Codex · gpt-6-astra", "BUTTON", "", "main"), cards["t-follow"]
     assert (cards["t-own"]["fact"], cards["t-own"]["why"], cards["t-own"]["basis"]) == \
         ("OpenRouter · kimi-k3-thinking-preview", "you chose it", "own"), cards["t-own"]
+    assert cards["t-own"]["label"] == "This work's model: kimi-k3-thinking-preview, OpenRouter, you chose it", cards["t-own"]
     assert cards["t-queued"]["tag"] == "BUTTON" and cards["t-queued"]["fact"] == "Codex · gpt-6-astra", cards["t-queued"]
     fell = cards["t-fallback"]
     assert fell["fact"].startswith("fallback from Settings · claude-opus-5.5 · since 02:14"), fell
@@ -342,7 +357,7 @@ def _walk(page, url: str, shots: pathlib.Path, tag: str, transcript: int | None)
     _said(page, NEXT_STEP)
     page.wait_for_function("() => !document.querySelector('.card-model-pop')")
     assert stand.writes[-1] == ("task", "t-own", {"action": "follow"}), stand.writes
-    page.wait_for_function(f"""() => document.querySelector('{_fact("t-own")}').closest('.card-model').querySelector('.card-model-pending').innerText.includes('gpt-6-astra')""")
+    page.wait_for_function(f"""() => document.querySelector('{_fact("t-own")}').closest('.card-model').querySelector('.card-model-pending .card-model-words').innerText.includes('gpt-6-astra')""")
     moved = page.evaluate(_CARDS)["cards"]["t-own"]
     assert (moved["pending"], moved["why"], moved["basis"]) == ("→ gpt-6-astra at the next step", "", "main"), moved
 
@@ -411,7 +426,7 @@ def _walk(page, url: str, shots: pathlib.Path, tag: str, transcript: int | None)
     page.click(".confirm-dialog [data-confirm-ok]")
 
     # 6. The arrow after a Main change: a follower's call in flight finishes on the model it has.
-    page.wait_for_function(f"""() => document.querySelector('{_fact("t-follow")}').closest('.card-model').querySelector('.card-model-pending').innerText.includes('glm-5.3')""",
+    page.wait_for_function(f"""() => document.querySelector('{_fact("t-follow")}').closest('.card-model').querySelector('.card-model-pending .card-model-words').innerText.includes('glm-5.3')""",
                            timeout=15_000)
     seen = page.evaluate(_CARDS)
     held(seen)
