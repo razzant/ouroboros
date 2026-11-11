@@ -76,11 +76,11 @@ def test_owner_and_tool_reads_feed_the_same_local_fact_without_changing_the_repl
 
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     assert http.get("/api/claudexor/maintenance/harnesses").json() == owned.inventory
-    assert "agy 1.2.3 (cannot_tell)" in harness_program_facts.vendor_programs_line(tmp_path)
+    assert "agy 1.2.3 (newest not read)" in harness_program_facts.vendor_programs_line(tmp_path)
     owned.inventory["harnesses"][0]["selection"]["version"] = "vendor-build-z"
     owned.inventory["observedAt"] = "2026-12-12T00:00:00Z"
     assert json.loads(tools._inspect_harness(context(tmp_path), harnesses=["agy"])) == owned.inventory
-    assert "agy vendor-build-z (cannot_tell)" in harness_program_facts.vendor_programs_line(tmp_path)
+    assert "agy vendor-build-z (newest not read)" in harness_program_facts.vendor_programs_line(tmp_path)
     assert owned.opened == ["read", "closed", "read", "closed"]
 
 
@@ -90,7 +90,7 @@ def test_settled_service_receipts_request_an_observation_only_after_custody_sett
     from ouroboros import harness_program_facts
 
     calls = []
-    monkeypatch.setattr(harness_program_facts, "_settled", {})
+    monkeypatch.setattr(harness_program_facts, "_pending", set())
     monkeypatch.setattr(harness_program_facts, "_launch", lambda *args: calls.append(args))
     owned.gateway._endpoint = object()
     receipt = {**deepcopy(OPERATION), "state": "succeeded", "termination": termination,
