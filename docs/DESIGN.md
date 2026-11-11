@@ -486,7 +486,7 @@ it is a subscription or paid by key, its window when known (an unknown window is
 account can serve it now; where a line cannot hold both, the facts go under the model's name, which keeps its line,
 and wrapped facts read from the same start on each line. Search spans the sources, a model once per provider; a key that cannot send keeps
 Settings' "(no key)", "(off)", "(removed)"; where only Main can lead, the list says so and leads to Settings ›
-Accounts. The catalog suggests and never admits: any id can be used as typed. It is read when the capsule opens,
+Accounts and keys. The catalog suggests and never admits: any id can be used as typed. It is read when the capsule opens,
 never polled. Under a finger opening raises no keyboard: the field takes focus on its own press. Escape clears the
 field, then leaves the search, then closes. A room's pick posts at once; Send waits for it, Panic never does.
 
@@ -1795,7 +1795,7 @@ granted in Skills`; an enabled reader missing its grant explains that it cannot 
 are granted), and `Close` / `Save`. A set key makes the action `Replace` with one warning sentence naming
 the enabled readers: they may use the new value at their next call, some keep the old one until disabled and
 re-enabled. Skills › Installed shows an enabled skill's unset (or unreadable) declared secret as one
-neutral tray with `Open Secrets`; an unset one also lists it under Needs you. The form reads status when it opens and saves with the state it showed: a key set or cleared since is
+neutral tray with `Open Accounts and keys`; an unset one also lists it under Needs you. The form reads status when it opens and saves with the state it showed: a key set or cleared since is
 refused, the form re-renders as Replace or Save and keeps the draft and focus. Close, Escape and a click outside hide
 the form, but wait for a save in flight, whose reply settles it (both Close buttons and `Enter secret…` are
 disabled while a save or cancel is in flight, for at most 15 s as on a quiz card: a save with no reply or no readable body by then is shown as unconfirmed (Save blocked, `Check status` offered, Close available, nothing resent), a stalled cancel frees the card's actions and a stalled status read offers `Check status`; the call itself is never abandoned, and its late reply still settles the request but never rewrites a form it was not made for); only the card's `Cancel request` cancels. A finished task's card keeps both actions and says that saving
@@ -2117,8 +2117,8 @@ Money keeps card scope: confirmed zero is `$0.00`, an unavailable amount is
 “spend unknown”; known parts retain “Tracked:” and “up to”.
 Open accounting keeps “so far”; it is no final total.
 The allowance's “Some calls have no price” and “next check at” promise no admission.
-Visible and accessible words agree. The allowance is edited only in Costs › Budget, behind a door line;
-own tasks and conversations stay in Settings. A wake held at the allowance it started with says so without a
+Visible and accessible words agree. The allowance is edited only in Costs › Budget, behind a door row; its other
+settings are rows of this tab. A wake held at the allowance it started with says so without a
 clock; beneath it, quieter: Resume keeps that limit, a higher allowance does not raise it, Stop now frees the clock.
 
 “Open in Main ↗” lands on the card Main draws, else finds it through around-history; a focus door
@@ -2718,7 +2718,7 @@ instead, and let the status text carry the claim.
 
 ## 7. Onboarding density
 
-Accounts is the common connection surface for subscriptions and API keys. An API key is a row of its provider's card (the built-in Default, then the keys added with the card's Add key) in the account-row anatomy: name and status, a meta line naming the roles that use it, Test, Disable/Enable and Remove (on Default it clears the key). A role names the key it uses; keys never rotate. Open sign-in link hands off to the current desktop, browser or Telegram host while retaining the wizard; Copy is separate. An unavailable host opener reports a retryable failure; a copy fallback says it copied, never an open.
+Accounts is the common connection surface for subscriptions and API keys. An API key is a row of its provider (the built-in Default, then the keys added with Add key) in the account-row anatomy: name and status, a meta line naming the roles that use it, Test, its on/off and Remove (on Default it clears the key). A role names the key it uses; keys never rotate. Open sign-in link hands off to the current desktop, browser or Telegram host while retaining the wizard; Copy is separate. An unavailable host opener reports a retryable failure; a copy fallback says it copied, never an open.
 Models and Agents edit assignments; a new connection adds choices without
 replacing them. A model role uses one compact
 Source / Model / Account row. Under Main, Settings (not the wizard or a wait
@@ -2879,7 +2879,7 @@ engineering rules; no second policy list may exist.
 never *look, I am still working*. It exists so the owner can leave the window
 and still be reached by a question or a finished task.
 
-**Startup & background.** Behavior owns host lifecycle choices; Appearance is client-local. Sign-in startup is opt-in and names the host computer, also in remote clients. OS registration is truth, never a saved-settings guess: another copy, OS-disabled entry and unavailable build remain visible. Automatic startup preserves Panic and saved pauses; an explicit owner start releases Panic. *Keep Ouroboros running in the background when the window is closed* is also opt-in, stored on the host. First close asks once whether to keep tasks, schedules and Telegram running; its answer sets the checkbox, dismissal quits. macOS uses Keep running/Quit; Windows uses standard OK/Cancel and explains which keeps running. Closing with background on hides only behind a live indicator, so a hidden process always has a visible way back; otherwise it quits. Windows keeps one icon even with background/notifications off: after runtime and PID-lock/automatic-start checks, before Git/bootstrap. macOS shows its menu-bar item and Dock while background is on. The menu names starting, confirmed work, errors, unconfirmed activity or no answer; it offers Open, Panic and Quit. Early Panic stops installation work, including the retained daemon, and persists the stop marker; failed stops/writes are disclosed. Quit, Cmd+Q and sign-out quit unasked. Automatic start hides only with both checkboxes on and a live indicator; opening during boot shows the window. There is no separate start-minimized setting. Linux says background is unavailable and closes to quit. Android retains automatic boot by default with Panic preservation. This card is last on Behavior; browser/Docker hosts explain it without offering unsupported controls. Unavailable controls explain why in meta ink, without a warning dot; duplicate reasons appear once after both. Changeable states (another copy, OS-disabled entry) use warning; failed reads/writes use error. Notes align with checkbox text, status dots hang beneath the checkbox.
+**Startup & background.** Sign-in startup is opt-in and names the host computer, also in remote clients. OS registration is truth, never a saved-settings guess: another copy, OS-disabled entry and unavailable build remain visible. Automatic startup preserves Panic and saved pauses; an explicit owner start releases Panic. *Keep running when the window is closed* is also opt-in, stored on the host. First close asks once whether to keep tasks, schedules and Telegram running; its answer sets the switch, dismissal quits. macOS uses Keep running/Quit; Windows uses standard OK/Cancel and explains which keeps running. Closing with background on hides only behind a live indicator, so a hidden process always has a visible way back; otherwise it quits. Windows keeps one icon even with background/notifications off: after runtime and PID-lock/automatic-start checks, before Git/bootstrap. macOS shows its menu-bar item and Dock while background is on. The menu names starting, confirmed work, errors, unconfirmed activity or no answer; it offers Open, Panic and Quit. Early Panic stops installation work, including the retained daemon, and persists the stop marker; failed stops/writes are disclosed. Quit, Cmd+Q and sign-out quit unasked. Automatic start hides only with both switches on and a live indicator; opening during boot shows the window. There is no separate start-minimized setting. Linux says background is unavailable and closes to quit. Android retains automatic boot by default with Panic preservation. This card leads This computer; browser/Docker hosts explain it without offering unsupported controls. Unavailable controls explain why in meta ink, without a warning dot; duplicate reasons appear once after both. Changeable states use warning; failed reads/writes use error.
 
 Panic sends immediately, without confirmation or an ordinary chat bubble. Acceptance clears only unchanged sent command text; unknown/refused delivery keeps it. Newer edits, reply and attachments stay. Desktop uses its independent stop bridge, also while the socket reconnects: no veil covers the app or its Panic. Browser uses its captured socket, never a queue/reconnect. Missing acceptance says “Panic was not confirmed”, pointing desktop to its tray/menu bar and browser to the host computer.
 
@@ -3045,15 +3045,13 @@ browser click cannot unhide the window. A visible window keeps the browser banne
 Attention cues prove no system delivery; unsupported and legacy launchers fall
 back as described above.
 
-**Settings.** The controls live on **Settings → Appearance**, under the theme
-block, and are stored per address: the desktop window and each browser keep their
+**Settings.** The controls are **Settings → Notifications**, stored per address: the desktop window and each browser keep their
 own, another port starts from the defaults, and nothing reaches the server. Under Sound,
 **App tone volume** controls only the app tone, never system volume. Automatic
 fallback requires a client that can report positive system permission and sound
 settings (currently macOS); elsewhere the control affects Preview only. Moving
 it is silent; **Preview tone** explicitly plays the chosen tone, even without
-notification permission, but not with Sound or notifications off. Both use the
-existing controls and button styles, not another panel. A test
+notification permission, but not with Sound or notifications off. A test
 button is the honest way to see what this system actually does with a
 notification, including a denied permission, and in the desktop app it is the
 gesture that lets the system ask. The status line names the surface this client
@@ -3364,7 +3362,7 @@ System appearance, and respects Telegram's safe areas on all four sides
 (`web/modules/host_telegram.js`). Everything else is the same page.
 
 Enforcement: `tests/test_design_system_gate_browser.py` visits every registered
-page and every Settings tab in WebKit and Chromium at 360, 390, a Telegram-like
+page and Settings' home and pages in WebKit and Chromium at 320, 360, 390, a Telegram-like
 390 × 780, 719, 720, 721, 1280 and short windows (no page scrolls sideways, coarse
 targets reach 44 px, default-width bars stay one row, one scroller per sidebar, Projects
 scroll by touch); `tests/test_shell_layout_static.py`,
