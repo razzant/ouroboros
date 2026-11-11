@@ -71,6 +71,40 @@ def test_owner_aliases_are_exact_engine_envelopes_and_passive_reads_never_ensure
     assert owned.opened.count("ensure") == 1
 
 
+def test_owner_and_tool_reads_feed_the_same_local_fact_without_changing_the_reply(http, owned, tmp_path, monkeypatch):
+    from ouroboros import config, harness_program_facts
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    assert http.get("/api/claudexor/maintenance/harnesses").json() == owned.inventory
+    assert "agy 1.2.3 (cannot_tell)" in harness_program_facts.vendor_programs_line(tmp_path)
+    owned.inventory["harnesses"][0]["selection"]["version"] = "vendor-build-z"
+    owned.inventory["observedAt"] = "2026-12-12T00:00:00Z"
+    assert json.loads(tools._inspect_harness(context(tmp_path), harnesses=["agy"])) == owned.inventory
+    assert "agy vendor-build-z (cannot_tell)" in harness_program_facts.vendor_programs_line(tmp_path)
+    assert owned.opened == ["read", "closed", "read", "closed"]
+
+
+@pytest.mark.parametrize("action", ["status", "create", "cancel"])
+@pytest.mark.parametrize("termination", ["confirmed", "unconfirmed"])
+def test_settled_service_receipts_request_an_observation_only_after_custody_settles(owned, monkeypatch, action, termination):
+    from ouroboros import harness_program_facts
+
+    calls = []
+    monkeypatch.setattr(harness_program_facts, "_settled", {})
+    monkeypatch.setattr(harness_program_facts, "_launch", lambda *args: calls.append(args))
+    owned.gateway._endpoint = object()
+    receipt = {**deepcopy(OPERATION), "state": "succeeded", "termination": termination,
+               "finishedAt": "2026-11-10T12:00:00Z"}
+    owned.gateway.maintenance_operation = lambda *_: receipt
+    owned.gateway.maintenance_create = lambda *_: receipt
+    owned.gateway.maintenance_cancel = lambda *_: receipt
+    result = {"status": lambda: service.inspect_operation("one"),
+              "create": lambda: service.start_maintenance(REQUEST, "key"),
+              "cancel": lambda: service.cancel_maintenance("one")}[action]()
+    assert result is receipt
+    assert len(calls) == (1 if termination == "confirmed" else 0)
+
+
 def test_invalid_owner_input_refuses_before_engine_acquisition(http, owned):
     assert http.post("/api/claudexor/maintenance/operations", json=REQUEST).status_code == 400
     assert http.post("/api/claudexor/maintenance/operations", content="{").status_code == 400

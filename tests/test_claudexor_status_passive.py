@@ -28,6 +28,8 @@ def metadata_engine(monkeypatch, tmp_path):
     config_dir = tmp_path / "claudexor"
     monkeypatch.setattr(owned, "owned_config_dir", lambda: config_dir)
     calls = []
+    # Ready-event acquisition is covered in test_harness_program_facts; this home measures the status/catalog request.
+    monkeypatch.setattr("ouroboros.harness_program_facts._launch", lambda *_: None)
 
     def forbidden(*_args, **_kwargs):
         pytest.fail("metadata must not start, install, reconcile or use the operator engine")

@@ -16,6 +16,7 @@ from contextlib import ExitStack
 from ouroboros.claudexor_daemon import ensure_owned_gateway, read_owned_gateway
 from ouroboros.gateways.claudexor import ClaudexorUnavailable
 from ouroboros.gateways.claudexor_maintenance import maintenance_request_id
+from ouroboros.harness_program_facts import observe_inventory, operation_observed
 from ouroboros.utils import utc_now_iso
 
 _REPORTED_SPAWN_MISSING = re.compile(r"spawn (.+) ENOENT")
@@ -97,7 +98,8 @@ def inspect_harnesses(harnesses=(), *, fresh=False, check_latest=False, ctx=None
         raise ValueError("harnesses must be names and fresh/check_latest must be booleans")
     with read_owned_gateway() as gateway:
         try:
-            return gateway.maintenance_harnesses(harnesses, fresh=fresh, check_latest=check_latest)
+            return observe_inventory(gateway.maintenance_harnesses(harnesses, fresh=fresh, check_latest=check_latest),
+                                     complete=not harnesses)
         except ClaudexorUnavailable as exc:
             _explain_missing_executable(exc, gateway)
             raise
@@ -108,7 +110,7 @@ def inspect_operation(operation_id: str, *, ctx=None, timeout_sec=None) -> dict:
     _operation_id(operation_id)
     options = {"timeout_sec": timeout_sec} if timeout_sec is not None else {}
     with read_owned_gateway(**options) as gateway:
-        return gateway.maintenance_operation(operation_id, **options)
+        return operation_observed(gateway, gateway.maintenance_operation(operation_id, **options))
 
 
 def _operation_id(value):
@@ -135,7 +137,7 @@ def start_maintenance(request: dict, request_id: str, *, ctx=None) -> dict:
                                       "acceptance": "not_submitted", "scope": "this_attempt"}
                 error.problem = problem
                 raise error from (exc if exc is not error else None)
-            return gateway.maintenance_create(request, request_id)
+            return operation_observed(gateway, gateway.maintenance_create(request, request_id))
 
     if ctx is None:
         return submit()
@@ -150,7 +152,7 @@ def cancel_maintenance(operation_id: str, *, ctx=None, timeout_sec=None) -> dict
     def cancel():
         options = {"timeout_sec": timeout_sec} if timeout_sec is not None else {}
         with read_owned_gateway(**options) as gateway:  # Never wake an engine just to cancel.
-            return gateway.maintenance_cancel(operation_id, **options)
+            return operation_observed(gateway, gateway.maintenance_cancel(operation_id, **options))
 
     if ctx is None:
         return cancel()

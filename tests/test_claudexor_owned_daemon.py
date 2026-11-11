@@ -3627,6 +3627,8 @@ def test_ensure_owned_gateway_reconciles_rotation_on_every_ensure(monkeypatch):
     ensure_owned_gateway, so the reconcile riding it covers both — including
     the attach paths the old spawn-only patch never reached."""
     from ouroboros.gateways import claudexor as gateway_mod
+    observed_ready = []
+    monkeypatch.setattr("ouroboros.harness_program_facts.engine_ready", lambda gateway: observed_ready.append(gateway.handshakes))
 
     endpoint = gateway_mod.DaemonEndpoint(host="127.0.0.1", port=45699, token="tok")
 
@@ -3662,6 +3664,7 @@ def test_ensure_owned_gateway_reconciles_rotation_on_every_ensure(monkeypatch):
     # Reconcile ran, ONCE, against the very gateway the caller receives —
     # and only AFTER the authenticated handshake (identity before writes).
     assert manager.reconciled == [gateway]
+    assert observed_ready == [1], "a successful ready event follows the authenticated handshake"
 
 
 def test_reconcile_is_best_effort_and_never_breaks_the_ensure(monkeypatch, tmp_path):
