@@ -301,7 +301,17 @@ def vendor_scene(ui, count=1):
     return world
 
 
-def vendor_role_field(page, slot):
+def vendor_role_field(page, slot, *, wizard=False):
+    if wizard:
+        if slot == 'fallback':
+            page.locator('[data-model-add]').click()
+        group = page.locator(f'[data-model-role-group="{slot}"]')
+        local = group.locator('[data-model-local]')
+        if local.count() and local.is_checked():
+            local.uncheck()
+        row = group.locator('.model-role-row').last
+        row.locator('[data-model-role-source]').select_option('subscription:opaque-source')
+        return row.locator('[data-model-role-model]')
     open_settings(page, 'models/role/' + ('fallback/1' if slot == 'fallback' else slot))
     row = page.locator('[data-model-role]')
     row.locator('[data-model-role-source]').select_option('subscription:opaque-source')
@@ -555,7 +565,7 @@ def test_vendor_footer_in_wizard_models_reviewers_and_place_sheet(role_ui, width
     roles.capture(page, f"program-wizard-model-{account_count}-{width}")
     field.press("Escape")
     for slot in ("light", "safety", "vision", "consciousness", "fallback"):
-        field = vendor_role_field(page, slot)
+        field = vendor_role_field(page, slot, wizard=True)
         field.fill("choice")
         expect(footer).to_have_count(1)
         expect(footer.locator("[data-program]")).to_have_count(1)
