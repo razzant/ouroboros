@@ -29,20 +29,21 @@ def test_nothing_read_or_unreadable_is_explicitly_unobserved(tmp_path, content):
     assert facts.vendor_programs_line(tmp_path) == "Harness programs: not observed."
 
 
-def test_unchanged_facts_keep_their_date_across_reads_and_only_current_facts_are_saved(tmp_path):
+def test_line_dates_program_observation_and_retained_newest_read(tmp_path):
     first = inventory()
     facts.record_inventory(first, root=tmp_path)
     line = facts.vendor_programs_line(tmp_path)
-    assert line == "Harness programs (facts unchanged since 2026-11-10): future-program 2.1.319 (2.1.321 available)."
+    assert line == "Harness programs (observed 2026-11-10; newest read 2026-11-10): future-program 2.1.319 (2.1.321 available)."
     later = inventory("2026-12-12")
     facts.record_inventory(later, root=tmp_path)
-    assert facts.vendor_programs_line(tmp_path) == line
+    assert facts.vendor_programs_line(tmp_path) == line.replace("observed 2026-11-10", "observed 2026-12-12")
     state = saved(tmp_path)
     assert state["observedAt"] == later["observedAt"]
+    assert "factsSince" not in state and "completeAt" not in state
     assert state["programs"]["future-program"]["newestObservedAt"] == "2026-11-10T11:00:00Z"
     assert "private-receipt" not in json.dumps(state) and "before" not in json.dumps(state)
     facts.record_inventory(inventory("2026-12-13", version="2.1.321", verdict="no"), root=tmp_path)
-    assert facts.vendor_programs_line(tmp_path) == "Harness programs (facts unchanged since 2026-12-13): future-program 2.1.321 (up to date)."
+    assert facts.vendor_programs_line(tmp_path) == "Harness programs (observed 2026-12-13; newest read 2026-11-10): future-program 2.1.321 (up to date)."
 
 
 def test_absent_unknown_and_empty_inventories_are_distinct_and_sorted(tmp_path):
@@ -59,8 +60,6 @@ def test_partial_reads_merge_and_late_full_reads_cannot_erase_newer_facts(tmp_pa
     facts.record_inventory(inventory(), root=tmp_path)
     newer = inventory("2026-11-12", version="opaque-vendor-build", verdict="cannot_tell")
     newer["harnesses"][0]["harness"] = "another"
-    # Program file did not change; the inventory's newer read still owns this row.
-    newer["harnesses"][0]["observedAt"] = "2026-11-09T00:00:00Z"
     facts.record_inventory(newer, complete=False, root=tmp_path)
     facts.record_inventory(inventory("2026-11-11"), root=tmp_path)
     assert set(saved(tmp_path)["programs"]) == {"future-program", "another"}
@@ -74,13 +73,19 @@ def test_partial_reads_merge_and_late_full_reads_cannot_erase_newer_facts(tmp_pa
     assert set(saved(tmp_path)["programs"]) == {"future-program"}, "old partial reads cannot resurrect removed programs"
 
 
-def test_old_selection_observations_do_not_replace_newer_ones(tmp_path):
-    facts.record_inventory(inventory("2026-11-12"), root=tmp_path)
-    older = inventory("2026-11-13", version="stale")
-    older["harnesses"][0]["observedAt"] = "2026-11-11T00:00:00Z"
-    facts.record_inventory(older, root=tmp_path)
-    assert saved(tmp_path)["programs"]["future-program"]["version"] == "2.1.319"
-    assert saved(tmp_path)["factsSince"] == "2026-11-12"
+def test_differing_observation_dates_are_explicit_per_program(tmp_path):
+    data = inventory(verdict="no")
+    other = inventory("2026-12-02", verdict="cannot_tell")["harnesses"][0]
+    other["harness"] = "other"
+    other["newest"]["observedAt"] = "2026-12-01T00:00:00Z"
+    data["harnesses"].append(other)
+    facts.record_inventory(data, root=tmp_path)
+    line = facts.vendor_programs_line(tmp_path)
+    assert "up to date, newest read 2026-11-10, observed 2026-11-10" in line
+    assert "order unknown, newest read 2026-12-01, observed 2026-12-02" in line
+    other["newest"].pop("observedAt")
+    facts.record_inventory(data, root=tmp_path)
+    assert "newest read date unknown" in facts.vendor_programs_line(tmp_path)
 
 
 def test_record_failure_cannot_change_the_owner_response(monkeypatch):
@@ -224,7 +229,7 @@ def test_eighteen_independent_hosts_share_generation_and_settlement_attempts(mon
     meet(ready)
     assert len(calls) == 3, "ordinary inventory publication preserves the event markers"
     if not fails:
-        assert facts.vendor_programs_line(tmp_path) == first_line
+        assert facts.vendor_programs_line(tmp_path) == first_line.replace("observed 2026-11-10", "observed 2026-12-12")
     assert set(saved(tmp_path)["events"]) == {"engineGeneration", "settled:future-program"}
     assert "private-settlement" not in json.dumps(saved(tmp_path))
     facts.record_inventory({"observedAt": "2026-12-13T00:00:00Z", "harnesses": []}, root=tmp_path)
@@ -278,9 +283,9 @@ def test_line_names_the_fact_and_groups_absent_programs_once(tmp_path, verdict, 
                          for name in ("z-absent", "a-absent")]
     facts.record_inventory(data, root=tmp_path)
     line = facts.vendor_programs_line(tmp_path)
-    assert line == ("Harness programs (facts unchanged since 2026-11-10): "
+    age = "observed 2026-11-10" + ("; newest read 2026-11-10" if newest else "")
+    assert line == (f"Harness programs ({age}): "
                     f"future-program 2.1.319 ({phrase}); not installed: a-absent, z-absent.")
     assert "\n" not in line and "cannot_tell" not in line and "123" not in line
-    data["observedAt"] = "2026-12-12T00:00:00Z"
     facts.record_inventory(data, root=tmp_path)
     assert facts.vendor_programs_line(tmp_path) == line

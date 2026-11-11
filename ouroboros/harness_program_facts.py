@@ -1,7 +1,7 @@
 """Event-fed vendor program observation. Context reads one local snapshot only.
 
 An observation is replaceable evidence, not an operation ledger or an updater.
-Identical semantic facts keep their original date, including across host restarts.
+Dates describe the observations, including newest reads retained by the engine.
 """
 from __future__ import annotations
 
@@ -45,11 +45,6 @@ def _stamp(value):
         return 0
 
 
-def _facts(programs):
-    return {name: {key: row.get(key) for key in ("path", "version", "updateAvailable", "newestVersion")}
-            for name, row in programs.items()}
-
-
 @contextmanager
 def _observation_lock(root):
     from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
@@ -73,33 +68,17 @@ def _record_inventory(inventory, complete, root):
     if not isinstance(inventory, dict) or not isinstance(inventory.get("harnesses"), list):
         return
     saved = _read(root)
-    programs = dict(saved.get("programs", {}))
     observed = inventory.get("observedAt") or ""
-    stamp = _stamp(observed)
-    complete_at = _stamp(saved.get("completeAt"))
-    full = complete and stamp >= complete_at
-    incoming = {row["harness"]: row for row in inventory["harnesses"] if isinstance(row, dict) and row.get("harness")}
-    if full:
-        programs = {name: row for name, row in programs.items()
-                    if name in incoming or max(_stamp(row.get("observedAt")), _stamp(row.get("readAt"))) > stamp}
-        saved["completeAt"] = observed
-    for name, row in incoming.items():
-        seen = row.get("observedAt") or observed
-        previous = programs.get(name, {})
-        if (_stamp(seen) < _stamp(previous.get("observedAt"))
-                or stamp < _stamp(previous.get("readAt"))
-                or not full and name not in programs and stamp < complete_at):
-            continue
+    if _stamp(observed) < _stamp(saved.get("observedAt")):
+        return
+    programs = {} if complete else dict(saved.get("programs", {}))
+    for row in inventory["harnesses"]:
         selected, newest = row.get("selection") or {}, row.get("newest") or {}
-        programs[name] = {"path": selected.get("path"), "version": selected.get("version"),
+        programs[row["harness"]] = {"path": selected.get("path"), "version": selected.get("version"),
             "updateAvailable": row.get("updateAvailable", "cannot_tell"),
             "newestVersion": newest.get("version") if newest.get("status") == "available" else None,
-            "newestObservedAt": newest.get("observedAt"), "observedAt": seen, "readAt": observed}
-    if _facts(programs) != _facts(saved.get("programs", {})) or "factsSince" not in saved:
-        saved["factsSince"] = observed[:10] or "date unknown"
-    saved["programs"] = programs
-    if stamp >= _stamp(saved.get("observedAt")):
-        saved["observedAt"] = observed
+            "newestObservedAt": newest.get("observedAt"), "observedAt": row.get("observedAt") or observed}
+    saved = {"programs": programs, "observedAt": observed, "events": saved.get("events", {})}
     events = saved.get("events", {})
     if events:
         saved["events"] = {key: value for key, value in events.items()
@@ -129,20 +108,33 @@ def vendor_programs_line(root=None):
     saved = _read(_root(root))
     if not saved.get("observedAt"):
         return "Harness programs: not observed."
+    date = lambda value: str(value)[:10] if _stamp(value) else "date unknown"
+    programs = saved["programs"]
+    observed_dates = {date(row.get("observedAt")) for row in programs.values()}
+    newest_dates = {date(row.get("newestObservedAt")) for row in programs.values()
+                    if row.get("path") and (row.get("newestVersion") or row.get("updateAvailable") == "no")}
+    shared_observed = len(observed_dates) <= 1
+    shared_newest = len(newest_dates) == 1
+    age = "observed " + next(iter(observed_dates), date(saved["observedAt"])) if shared_observed else "observations dated below"
+    if shared_newest:
+        age += "; newest read " + next(iter(newest_dates))
     parts, absent = [], []
-    for name, row in sorted(saved["programs"].items()):
+    for name, row in sorted(programs.items()):
+        seen = "" if shared_observed else ", observed " + date(row.get("observedAt"))
         if not row.get("path"):
-            absent.append(name)
+            absent.append(name if shared_observed else name + " observed " + date(row.get("observedAt")))
             continue
         installed = row.get("version") or "version unknown"
         newest, verdict = row.get("newestVersion"), row.get("updateAvailable")
         fact = (f"{newest} available" if verdict == "yes" and newest else
                 "up to date" if verdict == "no" else
                 f"newest {newest}, order unknown" if newest else "newest not read")
-        parts.append(f"{name} {installed} ({fact})")
+        if not shared_newest and (newest or verdict == "no"):
+            fact += ", newest read " + date(row.get("newestObservedAt"))
+        parts.append(f"{name} {installed} ({fact}{seen})")
     if absent:
         parts.append("not installed: " + ", ".join(absent))
-    return f"Harness programs (facts unchanged since {saved.get('factsSince', 'date unknown')}): " + ("; ".join(parts) or "none listed") + "."
+    return f"Harness programs ({age}): " + ("; ".join(parts) or "none listed") + "."
 
 
 def _fingerprint(value):

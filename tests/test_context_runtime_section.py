@@ -867,7 +867,7 @@ class TestVitalsFact:
             assert word not in json.dumps(vitals), word
         assert "## Supervisor" not in section
 
-    def test_program_facts_in_real_context_use_only_the_saved_observation_and_keep_the_same_text(self, tmp_path, monkeypatch):
+    def test_program_facts_in_real_context_use_only_the_saved_observation_and_date_both_reads(self, tmp_path, monkeypatch):
         from ouroboros.harness_program_facts import record_inventory
         from ouroboros.context_runtime_facts import vitals_line
         from tests.test_harness_program_facts import inventory
@@ -896,7 +896,8 @@ class TestVitalsFact:
             line = data["vitals"]["vendor_programs"]
             assert line in vitals_line(data["vitals"])
             lines.append(line)
-        assert lines[0] == lines[1] == "Harness programs (facts unchanged since 2026-11-10): future-program 2.1.319 (2.1.321 available)."
+        assert lines[0] == "Harness programs (observed 2026-11-10; newest read 2026-11-10): future-program 2.1.319 (2.1.321 available)."
+        assert lines[1] == lines[0].replace("observed 2026-11-10", "observed 2026-12-12")
         assert not called
 
     def test_absent_sources_omit_their_keys_and_a_pooled_worker_reads_the_journals_receipts(self, tmp_path, monkeypatch):
