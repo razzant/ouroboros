@@ -1254,6 +1254,13 @@
       "exact_clause": true
     },
     {
+      "name": "a failed reply to a place is named as a reply, not as a tool step",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "place_reply", "status": "error", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
+      "phase": "warn", "headline": "Done with warnings",
+      "acceptance_clause": "A reply failed.",
+      "exact_clause": true
+    },
+    {
       "name": "a send Safety stopped is loud and names the step",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "github_write", "status": "safety_violation", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated", "warning": "residual_tool_errors_without_review"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",

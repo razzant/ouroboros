@@ -734,6 +734,9 @@ test('a call Safety held is named only in the open card, on a line of its own wi
     assert.equal(summary.activityPreview, 'A file write failed.', 'a real warning keeps its sentence on the line');
     assert.equal(summary.body, `A file write failed.\n${RETURNED}.`, 'and the held line stays in the body');
     assert.equal(notice(warned), 'Done with warnings: A file write failed.');
+    const reply = { type: 'task_done', ...heldEnding('held', 0) };
+    reply.outcome_axes.execution.unresolved_tool_errors = [{ tool: 'place_reply', status: 'safety_returned' }];
+    assert.equal(taskTerminalSummary(reply).body, 'A reply was returned by the Safety Supervisor.', 'a reply has its own noun');
 });
 
 test('an ending whose only remark is a held call keeps the collapsed line of no cause, for a root and a child', async () => {

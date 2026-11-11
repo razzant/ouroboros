@@ -145,6 +145,7 @@ const TOOL_NOUNS = {
     apply_patch: 'A file edit',
     github_write: 'A GitHub write',
     send_user_message: 'A message send',
+    place_reply: 'A reply',
     schedule_subagent: 'A helper start',
     commit_reviewed: 'A commit',
     vcs_commit_reviewed: 'A commit',
