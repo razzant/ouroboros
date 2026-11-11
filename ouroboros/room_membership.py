@@ -87,7 +87,8 @@ def _saved_target(rooms: Any, ref: Mapping[str, Any]) -> tuple:
     """``(home, task, chat)`` of a Reply target saved before ``target_home``, read from the target row
     itself at its exact address (chat, then progress, as ``chat_references.resolve_reply`` does), as
     that address answers now: no link is kept apart from it, so a target whose text was revised is
-    not found until its text is back (owner decision 2026-11-11: such a Reply stays Main's alone).
+    not found until its text is back, and its Reply is shown only where it was written (owner decision
+    2026-11-11).
     One proven absent is ``TARGET_ABSENT``; one whose bytes cannot be read (a recorded unreadable
     interval, an ambiguous address, another row of its chat and time beside unreadable lines, as
     ``chat_references.resolve_history_row`` holds) is ``TARGET_UNKNOWN``: both with the saved

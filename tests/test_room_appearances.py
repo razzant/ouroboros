@@ -737,9 +737,9 @@ class TestSavedTargetRecovery:
     def test_a_revised_target_is_decided_at_its_exact_address_now_by_a_running_and_a_new_process(self, tmp_path):
         """Owner decision 2026-11-11: a Reply whose room its target row decides (one saved without
         ``target_home``, or with a private contact's old "none") is shown where that exact address answers now.
-        A target whose text was revised answers another address, so its Reply is Main's alone; one whose text is
-        back puts it in its Project again; a target no one revised keeps it there. This process decided every
-        target before the revisions and answers as an interpreter started after them."""
+        A target whose text was revised answers another address, so its Reply stays only where it was written
+        (Main here); one whose text is back puts it in its Project again; a target no one revised keeps it there.
+        This process decided every target before the revisions and answers as an interpreter started after them."""
         from ouroboros import memory_inventory as mi, room_appearances
         from ouroboros.chat_references import reference_from_row
 
