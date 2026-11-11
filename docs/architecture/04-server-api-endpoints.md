@@ -103,6 +103,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/owner/context-mode` | |
 | POST | `/api/owner/effort-range` | |
 | POST | `/api/owner/subagents-mode` | `{mode, project_id?}` → `{ok, project_id, subagents_mode, cognition}` (§7) |
+| POST | `/api/owner/chat-model` | |
 | POST | `/api/owner/safety-mode` | |
 | POST | `/api/owner/safety-model` | |
 | POST | `/api/owner/safety-rules` | |
@@ -143,6 +144,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | GET | `/api/tasks/{task_id}/artifacts/{name}` | own stores: POSIX no-follow/Windows NT relative handles; admission before child-store metadata; SVG `sandbox` CSP + `nosniff` (`gateway/task_archive.py`) |
 | POST | `/api/tasks/{task_id}/cancel` | (§5 Stop policy and hurry) |
 | POST | `/api/tasks/{task_id}/hurry` | (§5 Stop policy and hurry) |
+| POST | `/api/tasks/{task_id}/model` | `ouroboros/gateway/task_model.py`: durable root primary; set/follow/return/wait/keep |
 | POST | `/api/tasks/{task_id}/pause` | (§6 Owner Pause of a whole tree) |
 | POST | `/api/tasks/{task_id}/owner-keep` | `OwnerKeepRequest`; keep or release exactly this task's materials |
 | POST | `/api/tasks/{task_id}/continue` | (§6 Continue after interruption or an unfinished author stop) |

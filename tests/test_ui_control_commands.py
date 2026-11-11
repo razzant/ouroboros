@@ -33,7 +33,8 @@ def host(tmp_path, monkeypatch):
     ctx = Ctx({"owner_id": 1, "owner_chat_id": 1, "owner_external_id": 17, "owner_external_chat_id": 23,
                "bg_consciousness_enabled": False})
     ctx.consciousness = SimpleNamespace(start=lambda: "Background consciousness enabled",
-                                        stop=lambda: "Background consciousness disabled")
+                                        stop=lambda source="": ctx.stops.append(source) or "Background consciousness disabled")
+    ctx.stops = []  # the door each stop named: every owner surface sends /bg, the owner's door
     ctx.send_with_budget = message_bus.send_with_budget
     ctx.WORKERS, ctx.PENDING, ctx.RUNNING = {}, [], {}
     monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
@@ -43,7 +44,6 @@ def host(tmp_path, monkeypatch):
     monkeypatch.setattr(message_bus, "get_bridge", lambda: bridge)
     monkeypatch.setattr(message_bus, "try_get_bridge", lambda: bridge)
     monkeypatch.setattr(state, "status_text", lambda *args: "Runtime status")
-    monkeypatch.setattr("supervisor.events_runtime_controls.persist_consciousness_choice", lambda _on: "")
     return SimpleNamespace(root=tmp_path, bridge=bridge, ctx=ctx, live=live)
 
 
@@ -79,6 +79,7 @@ def test_an_http_press_leaves_only_its_receipt_and_a_typed_command_stays_words(h
     receipts = [row for row in rows if row.get("system_type") == "command_reply"]
     assert [row["text"] for row in receipts] == ["🧠 Background consciousness enabled", "🧠 Background consciousness disabled"]
     assert all(row["role"] == "system" for row in receipts), "one existing System receipt per command, no click journal"
+    assert host.ctx.stops == ["owner"], "/bg stop is the owner's stop: only the owner's start lifts it"
 
 
 def test_a_ws_press_writes_no_owner_row_while_the_composer_s_slash_text_does(host):

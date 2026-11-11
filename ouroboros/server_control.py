@@ -538,13 +538,13 @@ def _persist_panic_controls(data_dir: pathlib.Path) -> None:
 
 
 def _panic_controls(st: dict) -> None:
-    st.update(evolution_mode_enabled=False, bg_consciousness_enabled=False,
+    st.update(evolution_mode_enabled=False, bg_consciousness_enabled=False, bg_consciousness_stop_source="panic",
               evolution_owner_stopped=True, post_task_autostop=False)
     st.pop("evolution_stop_source", None)  # an owner stop: no agent source may un-stick it
 
 
-PANIC_CONTROL_KEYS = ("evolution_mode_enabled", "bg_consciousness_enabled", "evolution_owner_stopped",
-                      "evolution_stop_source", "post_task_autostop")
+PANIC_CONTROL_KEYS = ("evolution_mode_enabled", "bg_consciousness_enabled", "bg_consciousness_stop_source",
+                      "evolution_owner_stopped", "evolution_stop_source", "post_task_autostop")
 
 
 def _record_unconfirmed_daemon_stop(data_dir: pathlib.Path, exc: BaseException) -> None:

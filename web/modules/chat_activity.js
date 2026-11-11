@@ -363,10 +363,6 @@ export function documentMessageKey(msg) {
     ].join('|');
 }
 
-export function pendingAttachmentBytes(items = []) {
-    return items.reduce((total, item) => total + Number(item.file?.size || 0), 0);
-}
-
 export function isFileDrag(event) {
     return Array.from(event.dataTransfer?.types || []).includes('Files');
 }
@@ -1497,16 +1493,18 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
     const html = portal ? metaLineHtml([
         record.historicalUnavailable ? 'Outcome unavailable' : (record.historicalUnconfirmed ? 'Activity unconfirmed' : ''),
         !record.finished && record.projectHoldDetail || '',
+        record.reviewGateLine || '',  // review_gate_card.js: changes what the owner may trust, so the portal keeps it
         // A settled portal needs no activity clock: its chip states how the work ended and the author's
         // final (with its own end time) arrives as a message.
         toolCalls, ...cost, clock,
     ].filter(Boolean).map(text)) : metaLineHtml([
-        chip ? executorIdentityMarkup(chip, { model }) : (lineModel ? text(key ? `${lineModel} · ${key}` : lineModel) : ''),
+        chip ? executorIdentityMarkup(chip, { model }) : (lineModel && !record.lead ? text(key ? `${lineModel} · ${key}` : lineModel) : ''),
         effortChipMarkup(record.effort),
         ...[
             record.historicalUnavailable ? 'Outcome unavailable' : (record.historicalUnconfirmed ? 'Activity unconfirmed' : ''),
             !record.finished && record.projectHoldDetail || '',
             record.historyRetentionProblem || '',
+            record.reviewGateLine || '',
             // Under a Done chip the block's own rows name the errors; this line does not repeat them (DESIGN principle 7).
             record.toolErrors > 0 && !(record.finished && record.phaseEl?.dataset?.phase === 'done')
                 ? `${record.toolErrors} error${record.toolErrors === 1 ? '' : 's'}` : '',

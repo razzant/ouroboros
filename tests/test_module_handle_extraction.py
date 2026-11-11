@@ -170,7 +170,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "_acquire_git_lock", "_format_commit_result", "_managed_commit_gate_failure",
         "_managed_post_commit_tests_gate", "_post_commit_result", "_publish_post_commit_test_fact",
         "_record_commit_attempt", "_release_git_lock", "_verify_reviewed_commit_binding",
-        "record_bound_commit_success", "run_cmd",
+        "note_override_landing", "record_bound_commit_success", "run_cmd",
     })),
     "ouroboros/tools/git_plumbing.py": ("ouroboros/tools/git.py", "_git", frozenset({
         "_BINARY_EXTENSIONS", "acquire_exclusive_file_lock", "format_protected_paths",
@@ -383,12 +383,15 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     })),
     "ouroboros/loop_model_call.py": ("ouroboros/loop.py", "_loop", frozenset({
         "_RoundModelCallContext", "_append_or_merge_user_message",
-        "_apply_runtime_overrides", "_call_round_model", "_fallback_chain_allowed",
+        "_call_round_model", "_fallback_chain_allowed",
         "_reconcile_transport_wait", "_run_cross_model_fallback_chain",
         "_context_overflow_retries", "_dispatch_round_model", "_emit_checkpoint_event",
         "_measure_round_main_fit", "_output_exhausted_notice", "_rebind_context_fit_plan",
         "_retire_main_reasoning", "_server_web_allowed_by_task", "_task_deadline_epoch", "call_llm_with_retry",
         "last_physical_attempt_capture", "seal_task_transcript",
+    })),
+    "ouroboros/loop_routes.py": ("ouroboros/loop.py", "_loop", frozenset({
+        "_apply_runtime_overrides", "_rebind_context_fit_plan",
     })),
     "ouroboros/loop_nudges.py": ("ouroboros/loop.py", "_loop", frozenset({
         "_TREE_ACCOUNTING_MAX_STALE_SEC", "_append_or_merge_user_message",

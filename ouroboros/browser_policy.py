@@ -195,7 +195,7 @@ def browser_request_block_reason(
     if any(predicate(request) for predicate in (
         _is_context_mode_owner_post, _is_effort_range_owner_post, _is_review_enforcement_post,
         _is_safety_mode_owner_post, _is_owner_skill_attest_post, _is_owner_settings_self_elevation_post,
-        _is_model_wait_owner_post,
+        _is_model_wait_owner_post, _is_model_owner_post,
     )) and runtime_service_kind(request.url, ctx):
         return "BROWSER_OWNER_CONTROL_BLOCKED: this operation belongs to the owner"
     return ""
@@ -276,6 +276,15 @@ def _readable_body(request: Any) -> Any:
     present = getattr(request, "body_present", None) is True or bool(buffered)
     return "" if text is None and not present else None
 
+
+
+def _is_model_owner_post(request: Any) -> bool:
+    import urllib.parse
+
+    path = urllib.parse.unquote(urllib.parse.unquote(urlparse(str(request.url or "")).path)).rstrip("/")
+    parts = path.split("/")
+    return str(request.method or "").upper() == "POST" and (path == "/api/owner/chat-model" or (
+        len(parts) == 5 and parts[1:3] == ["api", "tasks"] and bool(parts[3]) and parts[4] == "model"))
 
 
 def _is_context_mode_owner_post(request: Any) -> bool:

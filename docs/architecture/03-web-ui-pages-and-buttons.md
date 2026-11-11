@@ -45,7 +45,7 @@ Iframes inherit no host tokens or choice; `render.appearance` declares their pol
 - `toast.js`, `masonry.js`, `widget_frame.js`, `widget_job.js` ← toasts (DESIGN §4), layout, framed-widget bootstrap/lifecycle, bounded widget request/job policy.
 - `result_files.js` ← Files and validated question materials via canonical artifacts, the reader and explicit downloads.
 - `history_retention.js` ← history-transfer details and storage problems for Chat and Logs; routine transfer alters no task outcome.
-- `settled_card.js` ← `syncSettledItems`: the settled card's Files row and Continue action follow one detail.
+- `settled_card.js` ← `syncSettledItems`: the settled card's Files row and Continue action follow one detail; `review_gate_card.js`, every detail's review-gate field.
 - `task_continue.js` ← Continue projects the host's `continuation_offer` (who may: §6 Continue); `hard_limit_reached` is one neutral reason that buys no model call; one stored nonce per task makes a retry return the same admission.
 - `task_control_menu.js` ← Chat and Activity share Wrap up, Hurry up, Pause, Stop earlier attempt and Stop now with the same endpoints, stop policy, request-id retry and verbatim refusals, offering a work only the controls it lists; Pause is root-only and its `request_id` survives uncertain or `latch_pending` replies until a confirmed Pause or Resume retires it.
 
@@ -55,7 +55,7 @@ Iframes inherit no host tokens or choice; `render.appearance` declares their pol
 
 #### Timeline ownership and ordering
 
-`chat.js` owns timelines/cards/routing, runtime/budget, subscriptions/threads/unread/reconnect and focus. Media/paste/drop/transient sheets: `chat_media.js` (living cards: `chat_cards.js`); staged/owner files: `chat_attachments.js`; field height: `chat_input_sizing.js`. ACKs update only the owner's `client_message_id` sidecar. Share: `message_actions.js` → `message_share.js` (answer or card → Text, PNG, `message_share_file.js` page; Telegram: its skill).
+`chat.js` owns timelines/cards/routing, runtime/budget, subscriptions/threads/unread/reconnect and focus. Text: `chat_text_bubble.js`; media/paste/drop/transient sheets: `chat_media.js` (living cards: `chat_cards.js`); staged/owner files: `chat_attachments.js`; field height: `chat_input_sizing.js`. ACKs update only the owner's `client_message_id` sidecar. Share: `message_actions.js` → `message_share.js` (`message_share_file.js` page; Telegram: its skill).
 
 Rows order by time then arrival (DESIGN). Keyed replay preserves nodes, disclosure, focus, selection and child lifecycle; current results win. Bounds: `LIVE_CARD_CAP` live cards; `chat_history.js` pages; `chat_preview.js` unread saved text without actions/coverage/receipts. `historyCoverage` proves bytes, not EOF/IDs/time. Anchors: `chat_reading_position.js`; newest arrival: `showLatest({arrive})`/`project_read_state.js`. `createHistoryControls` puts gaps at the feed edge, not notices over newest rows. Floating headers reserve measured height. Origins: `project_dialogue.project_origin_identity`.
 
@@ -91,7 +91,9 @@ Owner-source resolution, routing-picker origin reads, `owner_words`, the legacy 
 
 Speech helpers share one audio lease, bound uploads to provider limits and offer Insert/Copy when a draft changes during transcription; bundled recognition is opt-in, device voices prefer localService.
 
-`composer.js` owns attachments, Send and the Subagents, Context and Effort capsules (§7), opening inline (`capsule_fit.js`); Subagents and Context save at once, Effort on gesture end, via owner writers with `project_id`; Send awaits pending writes. Main state and project `cognition` hold the choices (even past the sidebar list); Settings-off shows Off, keeps the choice. Closed Context reads census `context_attempt` (`context_observation.js`). Accepted Swarm messages carry a quiet label; sending creates no project or plan; routing and `move_to_project` apply (§6). `composer_fold.js` folds the phone row. Room bars lack a More menu; phone Restart/budget sit in the status Shade. Derived Low alters no owner choice or review authority.
+`composer.js` owns attachments, Send and four capsules: Model first (`composer_model.js`), then Subagents, Context and Effort (§7), opening inline (`capsule_fit.js`). Main state and the project row hold the choices (even past the sidebar list). Closed Context reads census `context_attempt` (`context_observation.js`). Accepted Swarm messages carry a quiet label; sending creates no project or plan; routing and `move_to_project` apply (§6). `composer_fold.js` folds the phone row. Room bars lack a More menu; phone Restart/budget sit in the status Shade. Derived Low alters no owner choice or review authority.
+
+Module contracts: `capsule.js`, `model_list.js`, `model_catalog_store.js`, `model_source_mark.js` headers. Appearance and interaction: DESIGN "Composer owner controls".
 
 Attach file/paste/drop stage attachments without count/size rejection; Send uploads, offline behavior follows §4. In the ingress critical section the canonical writer claims uploads and stores measured refs; response/echo/history share `chat_uploads.attachment_view` (DESIGN "Chat attachments"). Documents keep immutable task-owned bytes, verified `file_ref` and canonical download URL; history rebuilds without base64, and files over `core_artifacts._MAX_DOCUMENT_FILE_BYTES` stay file-backed. Photo/video base64 is live-only; canonical task artifacts and content-addressed URLs restore replay. `links` rows allow at most `MAX_LINK_ACTIONS` revalidated HTTP(S) buttons. Supervisor transport owns durable copies; persistence failure yields an honest caption, never terminalizes a card. `chat_media.js` reloads an errored source only on deliberate Play/Repeat, in that gesture; failures stay visible and retired play promises stay silent.
 
@@ -122,6 +124,8 @@ Owner rows/routing annotations stay in the bounded local journal until history c
 History (`gateway/history.py`) keeps lineage beyond recency while the child runs/finalizes or its parent is represented/alive; keeps/drops nested swarms whole; strips other finals' lineage so replay cannot mint unfinishable parents. Fresh complete census absence admits root detail; complete work membership admits child detail before the root ends, independent of queue holds. Missing detail uses retained terminal truth or inert `Outcome unavailable`. Failed/nonterminal reads retry on refresh; a child's 404 waits for new evidence or revisit/reconnect. New observations invalidate late reads. Root termination reconciles each child's own outcome.
 
 #### Task cards, errors and reason lines
+
+`card_model.js` header; DESIGN "A work's model on its card".
 
 `log_events.js` shares Chat/Logs card reduction. Only authoritative task truth sets terminal status; nonterminal failures stay in details, unknown Chat names gain no keyword severity. `task_checkpoints.js` owns labels and `taskCheckpointIdentity`: crossings differ by bound/threshold, historical labels stay. Crossings persist in Events/Logs, not Chat replay. Checkpoints and `context_reclaim` appear in expanded cards, never titles, narration or toasts. Replayed tools keep typed `ok`/`level`; a start is no liveness proof. Keyword fallback is only for untyped Logs events and never expands them. `swarm_fanout` with `role="delegated_run"` names a run, not a child. Child failure stays local; cards navigate results; only `task_incident` raises urgent toasts.
 

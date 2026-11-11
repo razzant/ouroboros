@@ -344,8 +344,8 @@ def _run_cross_model_fallback_chain(
                 tools._ctx, model=active_model, use_local=active_use_local, role=fallback_role,
                 failed_model=entry_model, failure=entry_failure, waiter=waiter, usage=accumulated_usage,
                 round_idx=round_idx, answered=msg is not None, own_call=own_call)
-            from ouroboros.route_choice import after_fallback
-            tools._ctx.route_choice = after_fallback(tools._ctx, is_primary)  # a chain entry is the task's own route
+            from ouroboros.lead_fact import adopt_fallback
+            adopt_fallback(tools._ctx, is_primary, entry_failure, fallback_role)
             if not is_primary:
                 tools._ctx.route_wait_on_primary = False  # a declared wait belonged to the primary route
             adopted = True
@@ -493,48 +493,7 @@ def _walk_fenced(tool_ctx: Any, usage: Dict[str, Any]) -> bool:
         kind == "provider_outcome_unknown" and not new_generation_after_unknown(tool_ctx, usage))
 
 
-def _apply_round_route_overrides(ctx: Any, tools: ToolRegistry, messages: List[Dict[str, Any]], route: tuple,
-                                 context_fit_plan: Any, active_context_mode: str, preferred_mode: str,
-                                 tool_schemas: List[Dict[str, Any]], llm: Any = None) -> tuple:
-    """Apply the round boundary's route: a following route's current role binding, then one-shot
-    ``switch_model`` choices.
-
-    ``route`` is ``(model, use_local, effort)``. A symbolic primary return also names
-    the primary's role, so the rebound fit plan, account and processing binding are the
-    primary's own (Auto stays Auto: no observed account becomes a pin); effort intent is
-    untouched. Returns ``(model, use_local, effort, plan, mode)``.
-    """
-    from ouroboros import route_choice
-
-    selected = getattr(tools._ctx, "_authored_memory_plan", None)
-    if selected is not None and selected.core_sha256 == getattr(context_fit_plan, "core_sha256", None):
-        context_fit_plan, tools._ctx._authored_memory_plan = selected, None
-    previous = route[:2]
-    current = route_choice.round_route(ctx, llm, previous)  # a Settings change reaches a following route here
-    if current is not None:
-        ctx.active_model_override, ctx.active_use_local_override = current
-        if not getattr(ctx, "active_role_override", None):  # the mind's own return says why; this is the host's
-            route_choice.note_settings_change(ctx, previous[0], current[0], route_choice.follows(ctx.route_choice))
-            trace = getattr(ctx, "_execution_trace", None)
-            _record_authoring_handover(ctx, from_model=previous[0], to_model=current[0], reason="settings_change",
-                                       tool_calls_at_handover=len((trace or {}).get("tool_calls") or []) if isinstance(trace, dict) else 0)
-    model, use_local, effort = _loop()._apply_runtime_overrides(ctx, *route)
-    role, ctx.active_role_override = getattr(ctx, "active_role_override", None), None
-    if role and getattr(ctx, "primary_route", None):
-        from ouroboros.primary_route_observation import record_primary_return_request
-        record_primary_return_request(ctx, model, use_local, role)
-    if (model, use_local) != previous or role:
-        context_fit_plan, active_context_mode = _loop()._rebind_context_fit_plan(
-            context_fit_plan, tools, messages, model=model, use_local=use_local, preferred_mode=preferred_mode,
-            start_mode=active_context_mode, tool_schemas=tool_schemas,
-            **({"model_role": role, "model_route": {}} if role else {}))
-    if model != previous[0]:
-        # Cross-FAMILY switch: discard provider-private reasoning
-        # signatures before the new route sees them (same family is a no-op).
-        sanitized = LLMClient.sanitize_reasoning_on_model_switch(messages, previous[0], model)
-        if sanitized is not messages:
-            messages[:] = sanitized
-    return model, use_local, effort, context_fit_plan, active_context_mode
+from ouroboros.loop_routes import _apply_round_route_overrides  # noqa: E402, F401 -- loop facade
 
 
 def _rebind_context_fit_plan(
@@ -924,7 +883,7 @@ def _dispatch_round_model(
             resource_reason = (lambda error: {"auth_error": "auth", "quota_exhausted": "quota"}.get(
                 classify_llm_exception(error).kind, "")) if getattr(ctx.tools._ctx, "route_wait_on_primary", False) else None
             binding.enter_context(waiter.register_reprepare(
-                role, lambda kwargs: _reprepare_waiting_main(ctx, kwargs), resource_reason=resource_reason))
+                role, lambda kwargs: _reprepare_waiting_main(ctx, kwargs), resource_reason=resource_reason, owner_model_wake=True))
             if ((not waiter.waits_allowed or _fallback_route_follows(ctx)) if primary else ctx.defer_resource_wait):
                 deferral = binding.enter_context(waiter.defer_resource_wait(role))
         result = _loop().call_llm_with_retry(

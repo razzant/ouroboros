@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from ouroboros.delegate_custody_usage import CostCustody
 from ouroboros.cost_projection import CostPresentation
+from ouroboros.gateway.work_contracts import ChatModelRoute
 
 try:  # Python 3.11+
     from typing import Literal, NotRequired, Required, TypedDict  # type: ignore[attr-defined]
@@ -364,6 +365,34 @@ class OwnerSubagentsModeRequest(TypedDict):
     project_id: NotRequired[str]
 
 
+class OwnerChatModelRequest(TypedDict):
+    """A Project follows Main or chooses a model; without project_id this writes Main itself."""
+
+    kind: Literal["main", "model"]
+    model: NotRequired[str]  # kind ``model`` only: the raw route, its source included
+    use_local: NotRequired[bool]  # kind ``model`` only
+    project_id: NotRequired[str]
+
+
+class ChatModelChoice(TypedDict):
+    """A room follows Main or chooses a route; a reference is never the same model pinned."""
+
+    kind: Literal["main", "model"]
+    model: NotRequired[str]  # kind ``model`` only: the raw route, its source included
+    use_local: NotRequired[bool]  # kind ``model`` only
+
+
+class OwnerChatModelResponse(TypedDict):
+    ok: bool
+    project_id: str
+    model_choice: NotRequired[ChatModelChoice]  # Project response
+    previous_model_choice: NotRequired[ChatModelChoice]
+    main_route: NotRequired[ChatModelRoute]  # Main response
+    previous_main_route: NotRequired[ChatModelRoute]
+    account: NotRequired[Literal["kept", "auto", "none"]]
+    window_reset: NotRequired[bool]
+
+
 class OwnerSafetyModeRequest(TypedDict):
     kind: NotRequired[Literal["your_work", "consciousness"]]
     mode: Literal["full", "light", "off"]
@@ -477,7 +506,7 @@ class PlaceDescription(TypedDict):
 
 
 class CircleSummary(TypedDict):
-    """One circle, named once per list: its whole words and who wrote them."""
+    """One circle's words, authorship and model; an empty model inherits consciousness."""
 
     circle_id: str
     name: str
@@ -485,6 +514,7 @@ class CircleSummary(TypedDict):
     text_author: str
     text_at: str
     revision: int
+    model: str
 
 
 class CircleCreateRequest(TypedDict):
@@ -492,13 +522,15 @@ class CircleCreateRequest(TypedDict):
 
     name: str
     text: NotRequired[str]
+    model: NotRequired[str]
 
 
 class CircleUpdateRequest(TypedDict, total=False):
-    """Rename or reword; expected_revision compares the circle's revision before writing."""
+    """Change name, words or model; expected_revision compares the circle's revision before writing."""
 
     name: str
     text: str
+    model: str
     expected_revision: int
 
 
@@ -519,6 +551,13 @@ class PlaceReadiness(TypedDict):
     tone: str
 
 
+class PlaceModelRoute(TypedDict):
+    """The model a place thinks with now, and the scope that chose it."""
+
+    value: str
+    layer: Literal["place", "circle", "consciousness"]
+
+
 class PlaceSummary(TypedDict):
     """One projection for list, write/conflict responses and the model's place map."""
 
@@ -535,6 +574,7 @@ class PlaceSummary(TypedDict):
     owner_accounts: List[Dict[str, str]]
     working_folder: str
     model: str
+    model_route: PlaceModelRoute
     context_topics: List[str]
     legacy_binding_ids: List[str]
     revision: int
@@ -894,9 +934,9 @@ __all__ = [
     "SettingsDeploymentPolicy", "SettingsWriteRefusal",
     "AuthLoginRequest", "AuthLoginResponse",
     "ContractBody", "ContractHttpEntry", "ContractWsEntry", "ContractWs", "GatewayContractResponse",
-    "OwnerRuntimeModeRequest", "OwnerContextModeRequest", "OwnerEffortRangeRequest", "OwnerSubagentsModeRequest", "OwnerSafetyModeRequest", "OwnerSafetyRulesRequest", "OwnerSafetyRulesResponse", "OwnerSafetyModelRequest", "OwnerSafetyModelResponse", "OwnerEnabledRequest",
+    "OwnerRuntimeModeRequest", "OwnerContextModeRequest", "OwnerEffortRangeRequest", "OwnerSubagentsModeRequest", "OwnerChatModelRequest", "ChatModelChoice", "ChatModelRoute", "OwnerChatModelResponse", "OwnerSafetyModeRequest", "OwnerSafetyRulesRequest", "OwnerSafetyRulesResponse", "OwnerSafetyModelRequest", "OwnerSafetyModelResponse", "OwnerEnabledRequest",
     "RecentWake", "RecentWakeCheck", "RecentWakesView",
-    "PlaceConnectRequest", "PlaceIcon", "PlaceReadiness", "PlaceSummary", "PlaceDisconnectRequest",
+    "PlaceConnectRequest", "PlaceIcon", "PlaceReadiness", "PlaceModelRoute", "PlaceSummary", "PlaceDisconnectRequest",
     "PlaceOwnerAccountRequest", "PlaceUpdateRequest", "PlaceCircleChoice", "PlaceDescription",
     "CircleSummary", "CircleCreateRequest", "CircleUpdateRequest", "CircleDeleteRequest",
     "SettingsSecretRequest", "SettingsSecretResponse", "ChatUploadDeleteRequest", "ChatUploadDeleteResponse",

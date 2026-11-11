@@ -44,6 +44,25 @@ def _catalog_path(drive_root: Any) -> pathlib.Path:
     return pathlib.Path(drive_root) / "state" / "openrouter_models.json"
 
 
+def recorded_openrouter_catalog() -> tuple[dict, str]:
+    """Read the host's dated catalogue without fetching or asserting freshness.
+
+    Suggestions can name old observations; capability adoption still checks its TTL.
+    Both readers share this parser and the canonical installation root.
+    """
+    from ouroboros.capability_evidence import canonical_evidence_root
+    from ouroboros.utils import json_snapshot
+
+    try:
+        record = json_snapshot(_catalog_path(canonical_evidence_root())) or {}
+        models, observed = record.get("models"), str(record.get("observed_at") or "")
+        if isinstance(models, dict):
+            return {str(mid): row for mid, row in models.items() if isinstance(row, dict)}, observed
+    except Exception:
+        log.debug("The recorded OpenRouter catalogue is unreadable", exc_info=True)
+    return {}, ""
+
+
 def model_catalog(source: str, credential_profile_id: str | None = None, *,
                   requested_model: str | None = None, timeout_sec: float | None = None) -> dict:
     """Metadata-only transport under one connect, negotiation and read budget; the capability
@@ -210,18 +229,15 @@ class _CapabilityPolicyMixin:
     def _adopt_recorded_catalog(cls) -> bool:
         """Adopt the catalogue a process recorded while it is within the confirmed-evidence TTL:
         the caches, date and success its fetch left, without a GET. A model it lacks stays unknown."""
-        from ouroboros.capability_evidence import _CONFIRMED_TTL_SEC, _age_seconds, canonical_evidence_root
-        from ouroboros.utils import json_snapshot
+        from ouroboros.capability_evidence import _CONFIRMED_TTL_SEC, _age_seconds
 
         try:
-            record = json_snapshot(_catalog_path(canonical_evidence_root())) or {}
-            models, observed = record.get("models"), str(record.get("observed_at") or "")
-            if not isinstance(models, dict) or not observed or _age_seconds(observed) > _CONFIRMED_TTL_SEC:
+            models, observed = recorded_openrouter_catalog()
+            if not observed or _age_seconds(observed) > _CONFIRMED_TTL_SEC:
                 return False
-            rows = [(str(mid), row) for mid, row in models.items() if isinstance(row, dict)]
-            params = {mid: {str(name) for name in row["supported_parameters"]} for mid, row in rows
+            params = {mid: {str(name) for name in row["supported_parameters"]} for mid, row in models.items()
                       if isinstance(row.get("supported_parameters"), list) and row["supported_parameters"]}
-            lengths = {mid: row["context_length"] for mid, row in rows
+            lengths = {mid: row["context_length"] for mid, row in models.items()
                        if type(row.get("context_length")) is int and row["context_length"] > 0}
         except Exception:
             log.debug("The recorded OpenRouter catalogue is unreadable", exc_info=True)
