@@ -580,7 +580,7 @@ def _pin_lane_groups(items, config) -> None:
     groups, files = {}, {}
     for item in items:
         resource = serial_resource(item)
-        group = f"serial:{resource}" if resource else item.nodeid.rsplit("::", 1)[0]
+        group = f"serial:{resource}" if resource else item.parent.nodeid
         item.stash[_LANE_GROUP] = group
         groups[item.nodeid] = group
         files.setdefault(group, set()).add(item.nodeid.split("::", 1)[0])
