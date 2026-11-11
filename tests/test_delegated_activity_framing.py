@@ -213,6 +213,8 @@ def test_a_new_process_replays_retained_separated_ranges_in_order_and_once(tmp_p
     first = [_harness(seq, "message", text=_forged(sep)) for seq, sep in enumerate(SEPARATORS, 1)]
     _retain(ctx, first)
     _retain(ctx, [_harness(4, "tool_call", tool={"name": "Read"}), _harness(5, "message", text="plain words")])
+    delegate_progress.emit_retained(SimpleNamespace(task_id="child", drive_root=tmp_path), "run-1")
+    assert delegate_activity._memo("child", "run-1").pending is None, "a delivery without a channel reads nothing"
     delegate_progress.emit_retained(ctx, "run-1")  # a fresh memo: only the retained sources remain
     activities = [meta["delegated_activity"] for _text, meta in emitted]
     assert [(a["after_seq"], a["through_seq"]) for a in activities] == [(0, 3), (3, 5)], \
