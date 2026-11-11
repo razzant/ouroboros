@@ -1392,6 +1392,43 @@ def test_an_underived_tasks_rewrite_moves_the_mark_whatever_its_body_says(monkey
     _same(monkeypatch, tmp_path, rooms)
 
 
+# A start's own records as the producers write them (``lanes/impl-t1/turn3`` census of 341 start-flow tests: these
+# first records, and no lineage write after them but the promotion's and the host-admitted root's): the first one, then
+# the record its run writes (``agent._persist_running_record``: the task's parent, root, role and chat).
+_STARTS = {
+    "owner turn": ({"root_task_id": "start", "chat_id": 1}, {}, True),  # agent's fresh-turn record
+    "place turn": ({"root_task_id": "start", "chat_id": 1}, {}, True),  # presence_runner._run_current
+    "scheduled run": ({"root_task_id": "start", "delegation_role": "root", "chat_id": 1}, {"delegation_role": "root"},
+                      True),  # schedule_occurrence, continuation_admission, gateway: one receipt
+    "delegated child": ({"parent_task_id": "late", "root_task_id": "late", "delegation_role": "subagent", "chat_id": 1},
+                        {"parent_task_id": "late", "root_task_id": "late", "delegation_role": "subagent"}, True),
+    "host-admitted root": ({"root_task_id": "start", "chat_id": 1}, {"delegation_role": "root"}, False),  # its role comes later
+}
+
+
+@pytest.mark.parametrize("name", [*_STARTS, "promoted chat turn"])
+def test_a_start_stands_on_the_set_unless_its_own_records_write_its_lineage_later(monkeypatch, tmp_path, name):
+    """A new task's own records move the mark only where a later one writes lineage its first lacked: a promoted chat
+    turn (its role at admission, its chat at its start) and a host-admitted root (its role at its start)."""
+    from ouroboros.promotion_intent import prepare_promotion_intent
+    from ouroboros.store_hot_facts import LINEAGE_COLUMNS
+
+    rooms, _row = _sealed_main_row(tmp_path)
+    task = {"id": "start", "chat_id": 1, "root_task_id": "start", "delegation_role": "root"}
+    if name == "promoted chat turn":  # the intent, then routing's scheduled record (events_project_routing)
+        prepare_promotion_intent(tmp_path, {"task_id": "start", "routing_token": "token", "objective": "Do it."})
+        write_task_result(tmp_path, "start", "scheduled", root_task_id="start", delegation_role="root")
+        stands = False
+    else:
+        first, carried, stands = _STARTS[name]
+        write_task_result(tmp_path, "start", "scheduled", **first)
+        task = {"id": "start", "chat_id": 1, "root_task_id": "start", **carried}
+    write_task_result(tmp_path, "start", "running", **{key: task.get(key) for key in LINEAGE_COLUMNS})
+    write_task_result(tmp_path, "start", "completed", result="done")
+    assert _in_use(tmp_path) is stands
+    _same(monkeypatch, tmp_path, rooms)
+
+
 def test_a_write_that_keeps_every_tasks_lineage_keeps_the_set(monkeypatch, tmp_path):
     rooms, _row = _sealed_main_row(tmp_path)
     write_task_result(tmp_path, "late", "failed", result="again")  # the same parent, root, role and chat
