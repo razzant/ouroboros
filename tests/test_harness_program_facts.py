@@ -40,7 +40,7 @@ def test_line_dates_program_observation_and_retained_newest_read(tmp_path):
     facts.record_inventory(later, root=tmp_path)
     assert facts.vendor_programs_line(tmp_path) == line.replace("observed 2026-11-10", "observed 2026-12-12")
     state = saved(tmp_path)
-    assert state["observedAt"] == later["observedAt"]
+    assert state["completeObservedAt"] == later["observedAt"]
     assert "factsSince" not in state and "completeAt" not in state
     assert state["programs"]["future-program"]["newestObservedAt"] == "2026-11-10T11:00:00Z"
     assert "private-receipt" not in json.dumps(state) and "before" not in json.dumps(state)
@@ -265,11 +265,11 @@ def test_owner_observation_publishes_while_background_inventory_waits(monkeypatc
     try:
         assert entered.wait(timeout=2)
         facts.record_inventory(inventory("2026-12-12"), root=tmp_path)
-        assert saved(tmp_path)["observedAt"].startswith("2026-12-12")
+        assert saved(tmp_path)["completeObservedAt"].startswith("2026-12-12")
     finally:
         release.set()
         drain_observers()
-    assert saved(tmp_path)["observedAt"].startswith("2026-12-12")
+    assert saved(tmp_path)["completeObservedAt"].startswith("2026-12-12")
 
 
 @pytest.mark.parametrize(("verdict", "newest", "phrase"), [
@@ -291,3 +291,64 @@ def test_line_names_the_fact_and_groups_absent_programs_once(tmp_path, verdict, 
     assert "\n" not in line and "cannot_tell" not in line and "123" not in line
     facts.record_inventory(data, root=tmp_path)
     assert facts.vendor_programs_line(tmp_path) == line
+
+
+def crossing_inventory(answer, row_time, names, version):
+    data = inventory(answer, version=version)
+    row = data["harnesses"][0]
+    row["observedAt"] = row_time + "T12:00:00Z"
+    data["harnesses"] = [{**deepcopy(row), "harness": name} for name in names]
+    return data
+
+
+@pytest.mark.parametrize("answer", ["2026-11-11", "2026-11-14"])
+def test_complete_answers_merge_each_rows_time_not_the_envelope(tmp_path, answer):
+    names = [f"program-{n}" for n in range(7)]
+    facts.record_inventory(crossing_inventory("2026-11-12", "2026-11-12", names[:1], "2"), complete=False, root=tmp_path)
+    facts.record_inventory(crossing_inventory(answer, "2026-11-10", names, "1"), root=tmp_path)
+    rows = saved(tmp_path)["programs"]
+    assert set(rows) == set(names)
+    assert rows[names[0]]["version"] == "2"
+    assert all(rows[name]["version"] == "1" for name in names[1:])
+    facts.record_inventory(crossing_inventory("2026-11-16", "2026-11-15", names, "3"), root=tmp_path)
+    assert all(row["version"] == "3" for row in saved(tmp_path)["programs"].values())
+    facts.record_inventory(crossing_inventory("2026-11-19", "2026-11-18", names[:1], "4"), root=tmp_path)
+    facts.record_inventory(crossing_inventory("2026-11-20", "2026-11-17", names[1:], "stale"), complete=False, root=tmp_path)
+    assert set(saved(tmp_path)["programs"]) == {names[0]}, "a later envelope cannot resurrect older removed rows"
+    no_row_time = crossing_inventory("2026-11-21", "2026-11-10", names[1:2], "5")
+    no_row_time["harnesses"][0].pop("observedAt")
+    facts.record_inventory(no_row_time, complete=False, root=tmp_path)
+    assert saved(tmp_path)["programs"][names[1]]["observedAt"] == no_row_time["observedAt"]
+
+
+def _process_observation(root, data, complete, wait, notify):
+    if wait is not None:
+        assert wait.wait(15)
+    facts.record_inventory(data, complete=complete, root=root)
+    if notify is not None:
+        notify.set()
+
+
+def test_two_process_writers_keep_all_programs_and_newer_selection(tmp_path):
+    import multiprocessing
+    ctx = multiprocessing.get_context("spawn")
+    published = ctx.Event()
+    names = [f"program-{n}" for n in range(7)]
+    children = [
+        ctx.Process(target=_process_observation, args=(tmp_path, crossing_inventory("2026-11-12", "2026-11-12", names[:1], "2"), False, None, published)),
+        ctx.Process(target=_process_observation, args=(tmp_path, crossing_inventory("2026-11-11", "2026-11-10", names, "1"), True, published, None)),
+    ]
+    try:
+        for child in children:
+            child.start()
+        for child in children:
+            child.join(20)
+            assert child.exitcode == 0
+    finally:
+        for child in children:
+            if child.is_alive():
+                child.terminate()
+                child.join(5)
+    rows = saved(tmp_path)["programs"]
+    assert set(rows) == set(names) and rows[names[0]]["version"] == "2"
+    assert not (tmp_path / facts.OBSERVATION_FILE).with_suffix(".lock").exists()

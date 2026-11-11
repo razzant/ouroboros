@@ -69,16 +69,25 @@ def _record_inventory(inventory, complete, root):
         return
     saved = _read(root)
     observed = inventory.get("observedAt") or ""
-    if _stamp(observed) < _stamp(saved.get("observedAt")):
-        return
-    programs = {} if complete else dict(saved.get("programs", {}))
+    boundary = saved.get("completeObservedAt")
+    programs = dict(saved.get("programs", {}))
     for row in inventory["harnesses"]:
+        at = row.get("observedAt") or observed
+        previous = programs.get(row["harness"])
+        if _stamp(previous.get("observedAt") if previous else boundary) > _stamp(at):
+            continue
         selected, newest = row.get("selection") or {}, row.get("newest") or {}
         programs[row["harness"]] = {"path": selected.get("path"), "version": selected.get("version"),
             "updateAvailable": row.get("updateAvailable", "cannot_tell"),
             "newestVersion": newest.get("version") if newest.get("status") == "available" else None,
-            "newestObservedAt": newest.get("observedAt"), "observedAt": row.get("observedAt") or observed}
-    saved = {"programs": programs, "observedAt": observed, "events": saved.get("events", {})}
+            "newestObservedAt": newest.get("observedAt"), "observedAt": at}
+    if complete:
+        named = {row["harness"] for row in inventory["harnesses"]}
+        programs = {name: row for name, row in programs.items()
+                    if name in named or _stamp(row.get("observedAt")) >= _stamp(observed)}
+        if _stamp(observed) >= _stamp(boundary):
+            boundary = observed
+    saved = {"programs": programs, "completeObservedAt": boundary, "events": saved.get("events", {})}
     events = saved.get("events", {})
     if events:
         saved["events"] = {key: value for key, value in events.items()
@@ -106,7 +115,7 @@ def observe_inventory(inventory, *, complete=True):
 def vendor_programs_line(root=None):
     """Local file read only: no gateway imports, subprocess, network, clock or wake."""
     saved = _read(_root(root))
-    if not saved.get("observedAt"):
+    if not saved.get("programs") and not saved.get("completeObservedAt"):
         return "Harness programs: not observed."
     date = lambda value: str(value)[:10] if _stamp(value) else "date unknown"
     programs = saved["programs"]
@@ -115,7 +124,7 @@ def vendor_programs_line(root=None):
                     if row.get("path") and (row.get("newestVersion") or row.get("updateAvailable") == "no")}
     shared_observed = len(observed_dates) <= 1
     shared_newest = len(newest_dates) == 1
-    age = "observed " + next(iter(observed_dates), date(saved["observedAt"])) if shared_observed else "observations dated below"
+    age = "observed " + next(iter(observed_dates), date(saved.get("completeObservedAt"))) if shared_observed else "observations dated below"
     if shared_newest:
         age += "; newest read " + next(iter(newest_dates))
     parts, absent = [], []
