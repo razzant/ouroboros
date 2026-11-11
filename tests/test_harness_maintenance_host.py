@@ -86,6 +86,7 @@ def test_owner_and_tool_reads_feed_the_same_local_fact_without_changing_the_repl
 
 @pytest.mark.parametrize("action", ["status", "create", "cancel"])
 @pytest.mark.parametrize("termination", ["confirmed", "unconfirmed"])
+@pytest.mark.program_observations
 def test_settled_service_receipts_request_an_observation_only_after_custody_settles(owned, monkeypatch, action, termination):
     from ouroboros import harness_program_facts
 
@@ -648,6 +649,7 @@ def test_mind_targets_preserve_the_requested_selector_and_pause(tmp_path, monkey
 
 
 @pytest.mark.parametrize("surface", ["connect", "tool", "row", "background"])
+@pytest.mark.program_observations
 def test_old_engine_cannot_receive_any_vendor_contract_request(client, monkeypatch, tmp_path, surface):  # noqa: F811 (wire fixture)
     from ouroboros import harness_program_facts as facts
     gateway, seen = client(lambda _: pytest.fail("No contract request to an old engine"), version="5.1.0")

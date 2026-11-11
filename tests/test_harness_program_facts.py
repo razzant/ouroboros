@@ -7,6 +7,8 @@ import pytest
 
 from ouroboros import harness_program_facts as facts
 
+pytestmark = pytest.mark.program_observations
+
 
 def inventory(date="2026-11-10", *, version="2.1.319", verdict="yes", newest="2.1.321"):
     at = date + "T12:00:00Z"
