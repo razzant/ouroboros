@@ -4,8 +4,10 @@ Each element keeps an existing rung and source identity. Stages order those
 elements; the clean-start guard walks only ordinary forms. Event counts reserve
 their place without changing a silent room into an event.
 """
+from collections import defaultdict
+
 from ouroboros import memory_view as mv, memory_view_conversations as conversations, memory_view_legacy as legacy
-from ouroboros.memory_view_work import works, work_line
+from ouroboros.memory_view_work import works, work_line, task_gist_line
 from ouroboros.memory_form_facts import form_counts as form_counts, holding_room as holding_room
 
 LADDER = ("F1", "F6w", "F6g", "F3", "F2", "F4", "F7p", "F5l", "F5", "F5a", "F7", "F7a", "F8", "F8a", "F6a")
@@ -13,7 +15,7 @@ LADDER = ("F1", "F6w", "F6g", "F3", "F2", "F4", "F7p", "F5l", "F5", "F5a", "F7",
 STAGES = ("remote_events", "remote_told", "remote_unread", "remote_gists", "task_facts", "work_progress",
           "remote_mine", "remote_people", "remote_all", "work_final", "remote_last", "story_ordinary",
           "story_openings", "room_emergency", "task_only", "protected_replies", "remote_count", "story_count",
-          "unread_count", "physical_rows", "owner")
+          "unread_count", "physical_rows", "room_ranges", "owner")
 
 
 def _catalogue(snapshot):
@@ -28,7 +30,10 @@ def _catalogue(snapshot):
         progress["work:" + key + ":progress"] = rows
         finals["work:" + key + ":final"] = rows
     parents = {w["id"]: g["key"] for g in snapshot.conversations for r in g["rooms"] for w in r["words"]}
-    return room, words, own, tasks, records, progress, finals, parents
+    kinds = {ident: kind for data in conversations.source_index(snapshot).values() for ident, kind in data["kinds"].items()}
+    return dict(room=room, words=words, own=own, tasks=tasks, records=records, progress=progress,
+                finals=finals, parents=parents, kinds=kinds, answered={w.get("task_id") for w in own.values()},
+                standing={r["id"] for r in room.get("under_parts", ()) if r.get("standing")})
 
 
 def stage_of(snapshot, step, ident):
@@ -36,33 +41,34 @@ def stage_of(snapshot, step, ident):
     if cached is None:
         cached = _catalogue(snapshot)
         object.__setattr__(snapshot, "_form_catalogue", cached)
-    room, words, own, tasks, records, progress, finals, _parents = cached
     if ident.startswith("bare:") and step in ("F2", "F6w", "F7p"):
         return "physical_rows"
     if step == "F1":
-        task = tasks[ident]
-        return "task_facts" if not task.get("gist") or any(
-            w.get("task_id") == task.get("task") for w in own.values()) else "task_only"
+        task = cached["tasks"][ident]
+        return "task_facts" if not task.get("gist") or task.get("task") in cached["answered"] else "task_only"
     if step == "F2":
-        if ident in progress:
+        if ident in cached["progress"]:
             return "work_progress"
-        if ident in finals:
-            return "protected_replies" if any(w.get("protected_reply") for w in finals[ident]) else "work_final"
-        return "protected_replies" if own[ident].get("protected_reply") else "room_emergency"
+        if ident in cached["finals"]:
+            return "protected_replies" if any(w.get("protected_reply") for w in cached["finals"][ident]) else "work_final"
+        return "protected_replies" if cached["own"][ident].get("protected_reply") else "room_emergency"
     if step == "F6w":
-        word = words[ident]
-        return ("remote_told" if conversations._told(word) else "remote_unread" if conversations._unread(word)
-                else "remote_mine" if word["kind"] == "ouroboros" else "remote_people")
+        kind = cached["kinds"][ident]
+        return ("remote_told" if kind == "told" else "remote_unread" if kind == "unread"
+                else "remote_mine" if cached["words"][ident]["kind"] == "ouroboros" else "remote_people")
     if step == "F6g":
         return "remote_all" if ident.startswith("all:") else "remote_last" if ident.startswith("last:") else "remote_gists"
     if step == "F6a":
         return "unread_count" if ident == "unread" else "remote_count"
     if step in ("F5l", "F8"):
-        return "story_ordinary" if "lead_rule" in records[ident] and records[ident].get("text", "").strip() else "story_openings"
-    if step == "F4" and any(r["id"] == ident and r.get("standing") for r in room.get("under_parts", ())):
+        record = cached["records"][ident]
+        return "story_ordinary" if "lead_rule" in record and record.get("text", "").strip() else "story_openings"
+    if step == "F4" and ident in cached["standing"]:
         return "story_ordinary"
     if step in ("F5a", "F8a"):
         return "story_count"
+    if step == "F7a":
+        return "room_ranges"
     if step == "F5":
         return "story_openings"
     return "owner" if step == "F7" else "room_emergency"
@@ -74,37 +80,107 @@ def ordinary_pairs(snapshot, elements=None):
         return cached[1]
     ordinary = {"remote_events", "remote_told", "remote_unread", "remote_gists", "task_facts", "work_progress",
                 "work_final", "story_ordinary"}
-    pairs = {(step, ident) for step, ident, *_ in (list_elements(snapshot) if elements is None else elements) if stage_of(snapshot, step, ident) in ordinary}
+    listed = list_elements(snapshot) if elements is None else elements
+    stages = snapshot.__dict__.get("_form_stages", {})
+    pairs = {(step, ident) for step, ident, *_ in listed if stages[step, ident] in ordinary}
     if elements is not None:
         object.__setattr__(snapshot, "_ordinary_forms", (elements, pairs))
     return pairs
 
 
+def supersedes(step, ident):
+    if step in ("F2", "F6w", "F7p") and ident.startswith("bare:"):
+        return ((step, ident[5:]),)
+    if step == "F5":
+        return (("F5l", ident),)
+    if step == "F2" and ident.startswith("work:") and ident.endswith(":final"):
+        return ((step, ident.removesuffix(":final") + ":progress"),)
+    if step == "F6g" and ident.startswith(("all:", "last:")):
+        key = ident.split(":", 1)[1]
+        return ((step, key), (step, "all:" + key)) if ident.startswith("last:") else ((step, key),)
+    return ()
+
+
 def normalized(selected):
     """Superseded forms do not acquire a second receipt or a different price key."""
     chosen = set(selected)
-    for step, ident in selected:
-        if step == "F6w" and not ident.startswith("bare:"):
-            continue
-        if ident.startswith("bare:") and step in ("F2", "F6w", "F7p"):
-            chosen.discard((step, ident[5:]))
-        if step == "F5":
-            chosen.discard(("F5l", ident))
-        if step == "F2" and ident.startswith("work:") and ident.endswith(":final"):
-            chosen.discard((step, ident.removesuffix(":final") + ":progress"))
-        if step == "F6g" and ident.startswith(("all:", "last:")):
-            key = ident.split(":", 1)[1]
-            chosen.discard((step, key))
-            if ident.startswith("last:"):
-                chosen.discard((step, "all:" + key))
+    for pair in selected:
+        chosen.difference_update(supersedes(*pair))
     return chosen
+
+
+class Selection:
+    """A reversible walk's choices, with visible ids and ordered tuples maintained per rung.
+
+    Taking a coarser form hides its predecessor; returning it reveals that choice
+    again. Only the changed rungs need ordering when the next price asks for a level.
+    """
+    def __init__(self, table, pairs=(), *, old=(), aggregates=None):
+        self.table, self.old, self.aggregates = table, old, aggregates or {}
+        self.pairs = {(s, i) for s, i in pairs if i in table.positions.get(s, ())}
+        self.by_step, self.ordered = defaultdict(set), {}
+        self.upper, self.lower = table.replacements
+        visible = self.pairs.copy()
+        for upper, lower in self.upper.items():
+            if upper in self.pairs:
+                visible.difference_update(lower)
+        for step, ident in visible:
+            self.by_step[step].add(ident)
+        self.new_count = len(visible.difference(old))
+
+    def __contains__(self, pair):
+        return pair in self.pairs
+
+    def _visible(self, pair, shown):
+        step, ident = pair
+        ids = self.by_step[step]
+        if (ident in ids) != shown:
+            if shown:
+                ids.add(ident)
+            else:
+                ids.discard(ident)
+            self.new_count += (1 if shown else -1) * (pair not in self.old)
+            self.ordered.pop(step, None)
+
+    def add(self, pair):
+        if pair in self.pairs:
+            return
+        self.pairs.add(pair)
+        for lower in self.upper.get(pair, ()):
+            self._visible(lower, False)
+        if not any(p in self.pairs for p in self.lower.get(pair, ())):
+            self._visible(pair, True)
+
+    def discard(self, pair):
+        self.pairs.discard(pair)
+        self._visible(pair, False)
+        for lower in self.upper.get(pair, ()):
+            if lower in self.pairs and not any(p in self.pairs for p in self.lower.get(lower, ())):
+                self._visible(lower, True)
+
+    def level(self, ladder, by_budget=0, budget=False):
+        addressed, new = [], self.new_count
+        for step in ladder:
+            ids = self.by_step.get(step)
+            if not ids:
+                continue
+            if step in self.aggregates and not any(self.by_step.get(s) for s in self.aggregates[step]):
+                new -= sum((step, i) not in self.old for i in ids)
+                continue
+            if step not in self.ordered:
+                whole = self.table.ids[step]
+                self.ordered[step] = whole if len(ids) == len(whole) else tuple(sorted(ids, key=self.table.positions[step].__getitem__))
+            addressed.append((step, self.ordered[step]))
+        return mv.FloorLevel(tuple(addressed), by_budget=by_budget + (new if budget else 0))
 
 
 def swallowed(snapshot, step, ident, selected):
     """A grouped conversation owns its inner forms until it is returned to full text."""
     if step not in ("F6w", "F6g"):
         return False
-    key = (snapshot.__dict__["_form_catalogue"][-1].get(ident.removeprefix("bare:")) if step == "F6w" else
+    if not (selected.by_step.get("F6g") or selected.by_step.get("F6a")):
+        return False
+    key = (snapshot.__dict__["_form_catalogue"]["parents"].get(ident.removeprefix("bare:")) if step == "F6w" else
            ident.split(":", 1)[1] if ident.startswith(("all:", "last:")) else ident)
     return (("F6a", key) in selected or step == "F6w" and any(
         ("F6g", name) in selected for name in (key, "all:" + key, "last:" + key))
@@ -126,8 +202,10 @@ def list_elements(snapshot):
             work.append(("work:" + key + ":progress", "\n".join(r["line"] for r in partial), work_line(room, partial)))
         work.append(("work:" + key + ":final", "\n".join(r["line"] for r in rows), work_line(room, rows)))
     story = sorted(snapshot.story, key=lambda r: tuple(r.get("floor_order", (0, 0))))
+    work_keys = {key for key, _rows in works(room)}
     steps = {
-        "F1": [(r["first"], r["line"], "" if n else mv._facts_line(room, [r])) for n, r in enumerate(lane2)],
+        "F1": [(r["first"], r["line"], ("" if n else mv._facts_line(room, [r]))
+                + (task_gist_line(r) if r.get("gist") and r.get("task") in work_keys else "")) for n, r in enumerate(lane2)],
         **{step: block[step] for step in ("F6w", "F6g", "F6a")},
         "F2": work + [(r["address"], r["line"], mv._row_opening(r, "my reply")) for r in mine]
               + [("bare:" + r["address"], mv._row_opening(r, "my reply"), mv._row_pointer(r, "my reply")) for r in mine],
@@ -152,4 +230,7 @@ def list_elements(snapshot):
     }
     listed = [(step, ident, whole, short) for step in LADDER for ident, whole, short in steps[step]
               if step in ("F1", "F5a", "F7a", "F8", "F8a", "F6a") or len(short) < len(whole)]
-    return sorted(listed, key=lambda e: STAGES.index(stage_of(snapshot, e[0], e[1])))
+    stages = {(step, ident): stage_of(snapshot, step, ident) for step, ident, *_ in listed}
+    object.__setattr__(snapshot, "_form_stages", stages)
+    order = {stage: n for n, stage in enumerate(STAGES)}
+    return sorted(listed, key=lambda e: order[stages[e[0], e[1]]])

@@ -588,7 +588,8 @@ def _typed_fact(meta: Mapping[str, Any]) -> str:
     return name
 
 
-def _task_line(root_id: str, group: List[Tuple[Entry, Dict[str, Any]]], texts: Mapping[str, Dict[str, Any]]) -> str:
+def _task_line(root_id: str, group: List[Tuple[Entry, Dict[str, Any]]], texts: Mapping[str, Dict[str, Any]],
+               summaries: Mapping[str, Any]) -> Dict[str, str]:
     """One line for a task's lane-2 rows: the host's status, never a child's report or a retelling."""
     def summary(kinds: frozenset, task: str, kind: str = "task_summary") -> Optional[Entry]:
         return next((entry for entry, _cls in reversed(group) if entry[1].get("type") == kind
@@ -600,8 +601,6 @@ def _task_line(root_id: str, group: List[Tuple[Entry, Dict[str, Any]]], texts: M
               or summary(_HOST_FACTS, root_id))
     if chosen is not None:
         status = _indented(render_row_text(texts.get(chosen[0]["row_sha256"]) or chosen[1])).lstrip()
-        if chosen[1].get("wake_summary"):  # the root's own closing sentence, beside the host's status
-            status += f" — summary: «{chosen[1]['wake_summary']}»"
     else:
         (address, meta, _pos), cls = group[-1]
         status = (f"running or unreported; last row {meta.get('type') or meta.get('direction') or 'row'} by "
@@ -626,7 +625,11 @@ def _task_line(root_id: str, group: List[Tuple[Entry, Dict[str, Any]]], texts: M
               f"{chat_chain.format_address(first[0])}..{chat_chain.format_address(last[0])}"]
     parts += [f"{name}: {chat_chain.format_address(entry[0])}" for entry, _cls in group
               if (name := _typed_fact(entry[1]))]
-    return f"[{first[1].get('ts') or 'time not recorded'}; host; task {root_id}] " + "; ".join(parts)
+    head = f"[{first[1].get('ts') or 'time not recorded'}; host; task {root_id}] "
+    without = head + "; ".join(parts)
+    if gist := summaries.get(root_id):
+        parts[0] += f" — summary: «{gist['summary']}»"
+    return {"line": head + "; ".join(parts), "line_without_gist": without}
 
 
 def _loose_line(entry: Entry, cls: Mapping[str, Any], texts: Mapping[str, Dict[str, Any]]) -> str:
@@ -641,7 +644,7 @@ def _loose_line(entry: Entry, cls: Mapping[str, Any], texts: Mapping[str, Dict[s
     return f"{head} {meta.get('type') or meta.get('direction') or 'row'}, {meta.get('text_chars', 0)} chars, read by address"
 
 
-def _lanes(root: pathlib.Path, entries: List[Entry], lineage: Mapping[str, Any]) -> Tuple[List[Dict[str, Any]],
+def _lanes(root: pathlib.Path, entries: List[Entry], lineage: Mapping[str, Any], summaries: Mapping[str, Any]) -> Tuple[List[Dict[str, Any]],
                                                                                             List[Dict[str, Any]]]:
     """Lane 1 verbatim (people and my words to them) and lane 2 as one line per root task."""
     classed = [(entry, row_class(entry[1], pos=entry[2], **lineage)) for entry in entries]
@@ -668,8 +671,8 @@ def _lanes(root: pathlib.Path, entries: List[Entry], lineage: Mapping[str, Any])
     lane2 = []
     for pos, task, loose in order:
         rows = groups[task] if task else [loose]
-        line = _task_line(task, rows, texts) if task else _loose_line(loose[0], loose[1], texts)
-        lane2.append({"line": line, "task": task, "ts": rows[0][0][1].get("ts"), "pos": pos,
+        lines = _task_line(task, rows, texts, summaries) if task else {"line": _loose_line(loose[0], loose[1], texts)}
+        lane2.append({**lines, "task": task, "ts": rows[0][0][1].get("ts"), "pos": pos,
                       "first": chat_chain.format_address(rows[0][0][0]), "last_ts": rows[-1][0][1].get("ts"),
                       "last": chat_chain.format_address(rows[-1][0][0]), "last_pos": rows[-1][0][2]})
     return lane1, lane2
@@ -709,7 +712,7 @@ def _origins(root: pathlib.Path, room: str, lane_rows: List[Entry]) -> List[Dict
 def _capture_room(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, label: Callable[..., str],
                   entries: List[Entry], notes: Mapping[str, List[Dict[str, Any]]],
                   lineage: Mapping[str, Any], story: List[Dict[str, Any]] = (),
-                  gaps: Optional[Mapping[str, set]] = None) -> Dict[str, Any]:
+                  gaps: Optional[Mapping[str, set]] = None, *, summaries: Mapping[str, Any]) -> Dict[str, Any]:
     """The current room: its head and standing facts, page (retold records, pages under parts, notes), origin words, lanes.
 
     Retold records already whole in my story are not repeated. A selected account carries its records, a part
@@ -779,7 +782,7 @@ def _capture_room(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
         facts["origins"] = _origins(root, room, entries if spec.room_lanes else [])
     if spec.room_lanes and entries:
         facts["since"] = _minute(facts["facts"]["earliest"])  # the rows' first stored time, not the first row read
-        facts["lane1"], facts["lane2"] = _lanes(root, entries, lineage)
+        facts["lane1"], facts["lane2"] = _lanes(root, entries, lineage, summaries)
     if sealed and project:  # never Main: my human's project rows that left the open conversation, whole and dated
         from ouroboros.owner_words import project_words
 
@@ -874,7 +877,9 @@ def _capture_live(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
     # The authors of rows written before the lineage epoch, read at once for every room (not one task at a time).
     warm_lineage(lineage, ((meta, pos) for entries in by_room.values() for _address, meta, pos in entries))
     warm_lineage(lineage, ((meta, pos) for entries in quiet.values() for _address, meta, pos in entries))
-    room = (_capture_room(store, root, spec, label, by_room.get(spec.room_id, []), notes, lineage, story, gaps)
+    from ouroboros.memory_view_work import bind, gists
+    summaries = gists(by_room, chat_chain.format_address, quiet, sealed)
+    room = (_capture_room(store, root, spec, label, by_room.get(spec.room_id, []), notes, lineage, story, gaps, summaries=summaries)
             if spec.room_id is not None else None)
     marks = store.active_marks(None) if spec.marks != "none" or integrating else None
     waiting, projects = {}, None
@@ -889,11 +894,8 @@ def _capture_live(store: ChronicleStore, root: pathlib.Path, spec: ViewSpec, lab
             log.warning("memory view: project waiting facts unavailable (%s)", type(exc).__name__)
             projects = None
     groups = (conversations.capture(store, root, spec, label, by_room, notes, lineage, quiet=quiet, sealed=sealed,
-                                    gaps=gaps, projects=projects or []) if spec.other_conversations else [])
-    from ouroboros.memory_view_work import bind, gists
-    read = {rid: [*sealed.get(rid, ()), *quiet.get(rid, ()), *by_room.get(rid, ())]
-            for rid in set(by_room) | set(sealed) | set(quiet)}
-    bind(room, groups, gists(read, chat_chain.format_address))
+                                    gaps=gaps, projects=projects or [], summaries=summaries) if spec.other_conversations else [])
+    bind(room, groups, summaries)
     if integrating:
         from ouroboros.memory_waiting import measure
 
@@ -1307,7 +1309,7 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]]) -> str:
     rows of its human (``project_words``; folded by F7 into dated addresses), notes, two lanes, and last the
     standing facts that change with every row (so the room's earlier bytes stay a reusable prefix)."""
     from ouroboros.owner_words import _FRAMES, _HEADINGS
-    from ouroboros.memory_view_work import folded_work_rows, task_line, works
+    from ouroboros.memory_view_work import folded_work_rows, task_line, works, task_gist_line, task_gists_before_work_lines
 
     retold, mine, people, facts = (set(gone.get(step, ())) for step in ("F4", "F2", "F7", "F1"))
     people |= set(gone.get("F7p", ()))
@@ -1355,7 +1357,9 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]]) -> str:
         lines += ["", "### Task facts of this conversation (host; one line per task; a row:… address reads with "
                       f"memory_read(room_id='{room['room_id']}', rows=true, from=<address>, to=<address>))"]
         lines += ([_facts_line(room, early)] if early else []) + [
-            task_line(item, folded=item.get("task") in folded) for item in room["lane2"] if item["first"] not in facts]
+            task_gist_line(t) for t in task_gists_before_work_lines(room, gone)] + [
+            task_line(item, folded=not gone.get("F7a") and item.get("task") in folded)
+            for item in room["lane2"] if item["first"] not in facts]
     if len(lines) == 1:
         lines += ["", "Nothing open, retold or noted in this room."]
     lines += ["", "### This room now", _facts_text(room["facts"])]

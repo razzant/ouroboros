@@ -20,7 +20,7 @@ from ouroboros import memory_view as mv
 from ouroboros import memory_view_conversations as conversations
 from ouroboros import memory_view_legacy as legacy
 from ouroboros.memory_forms import (LADDER, list_elements as _list_elements, ordinary_pairs, normalized, swallowed,
-                                    form_counts, holding_room)
+                                    form_counts, holding_room, Selection, supersedes)
 from ouroboros.chat_chain import parse_address
 from ouroboros.context_layout import WHOLE_OR_OUTLINE_STEPS
 from ouroboros.section_floor import PROTECTED, relocated_text, retain_section, section_views
@@ -91,11 +91,28 @@ class _Elements:
     """One snapshot's floor elements, listed once (``_elements``): each step's ids in ladder order and the
     ``step:id`` addresses, so a level is one pass over its own steps; their token prices on first need."""
 
-    def __init__(self, listed: List[Tuple[str, str, str, str]]):
-        self.listed, self.ids = tuple(listed), {}
+    def __init__(self, listed: List[Tuple[str, str, str, str]], stages):
+        self.listed, self.ids, self.stages = tuple(listed), {}, stages
         for step, ident, _whole, _short in self.listed:
             self.ids.setdefault(step, []).append(ident)
-        self.eligible = {f"{step}:{ident}": (step, ident) for step, ident, *_ in self.listed}
+        self.ids = {s: tuple(ids) for s, ids in self.ids.items()}
+
+    @cached_property
+    def eligible(self):
+        return {f"{step}:{ident}": (step, ident) for step, ident, *_ in self.listed}
+
+    @cached_property
+    def positions(self):
+        return {s: {i: n for n, i in enumerate(ids)} for s, ids in self.ids.items()}
+
+    @cached_property
+    def replacements(self):
+        upper = {(s, i): below for s, ids in self.ids.items() for i in ids if (below := supersedes(s, i))}
+        lower = {}
+        for p, below in upper.items():
+            for b in below:
+                lower.setdefault(b, []).append(p)
+        return upper, lower
 
     @cached_property
     def priced(self) -> Tuple[Tuple[str, str, int, int], ...]:
@@ -130,7 +147,8 @@ def _elements(snapshot: mv.MemoryViewSnapshot) -> _Elements:
     different ``LADDER`` (the steps a table lists) lists anew rather than reading a table it never built."""
     ladder, table = snapshot.__dict__.get("_floor_elements") or ((), None)
     if ladder != LADDER:
-        table = _Elements([element for element in _list_elements(snapshot) if element[0] in LADDER])
+        listed = [element for element in _list_elements(snapshot) if element[0] in LADDER]
+        table = _Elements(listed, snapshot.__dict__.get("_form_stages", {}))
         object.__setattr__(snapshot, "_floor_elements", (LADDER, table))
     return table
 
@@ -335,7 +353,7 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
     labels = {ident: short for step, ident, _whole, short in elements if step == 'F5l'}
     group_prices = {ident: short for step, ident, _whole, short in elements if step == 'F6g'}
     old = {(step, ident) for step, ids in kept.addressed for ident in ids}
-    taken = set(old)
+    taken = Selection(table, old, old=old, aggregates=_LIST_FORMS)
     measure = measure or (lambda level: tokens_of(mv.story_chars(snapshot, level)) + tokens_of(mv.room_chars(snapshot, level)))
     current = measure(kept)
     bounds = [b for b in (allowances.get("margin"), allowances.get("budget"), allowances.get("physical")) if b is not None]
@@ -344,19 +362,15 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
     budget = allowances.get("budget") is not None and allowances.get("budget") == bound
 
     def level(selected):
-        chosen = normalized(selected)
-        steps = {step for step, _ident in chosen}
-        chosen -= {(s, i) for s, priors in _LIST_FORMS.items()
-                   if steps.isdisjoint(priors) for i in table.ids.get(s, ())}
-        return table.level(chosen, kept.by_budget + (len(chosen - old) if budget else 0))
+        return selected.level(LADDER, kept.by_budget, budget)
 
     ordinary = ordinary_pairs(snapshot, table.listed)
     # The same minimum ordinary view prices the clean-start guard and both Max decisions.
-    clean = target is None or measure(level(old | ordinary)) <= target
+    clean = target is None or measure(level(Selection(table, old | ordinary, old=old, aggregates=_LIST_FORMS))) <= target
     uncovered = uncovered_owner_rows(snapshot, elements)
     last = {(step, ident) for step, ident, *_ in uncovered}
     added = []
-    counted_groups = {i for s, i in taken if s == "F6a" and i != "unread"}
+    counted_groups = {i for s, i in old if s == "F6a" and i != "unread"}
     for step, ident, whole, short in elements:
         if target is not None and current <= target:
             current = measure(level(taken))
@@ -367,15 +381,17 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
             continue
         if (step in (*_LIST_FORMS, "F8") or step == "F2" and ident.startswith("work:")
                 or step == "F6a" and (ident == "unread" or not counted_groups)):
-            trial = taken | {pair}
-            if step == "F8a":
-                trial.update(("F8", i) for i in table.ids.get("F8", ()))
-            before, actual = measure(level(taken)), measure(level(trial))
+            extra = [pair] + ([("F8", i) for i in table.ids.get("F8", ()) if ("F8", i) not in taken] if step == "F8a" else [])
+            before = measure(level(taken))
+            for added_pair in extra:
+                taken.add(added_pair)
+            actual = measure(level(taken))
             # The first counted group pays the shared header; later groups amortize it.
-            if actual >= before and step != "F6a":
+            if actual >= before and not (step == "F6a" and ident != "unread" and not counted_groups):
+                for added_pair in reversed(extra):
+                    taken.discard(added_pair)
                 continue
             delta, current = before - actual, actual
-            taken = trial
         else:
             if step == "F6g" or step == "F6a":
                 key = ident.split(":", 1)[1] if ident.startswith(("all:", "last:")) else ident
@@ -395,15 +411,18 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
     # A coarse form may leave room for finer ones. Already grouped sources are not independently restored.
     blocked = set()
     for (step, ident), delta in reversed(added):
-        if step in blocked or swallowed(snapshot, step, ident, taken):
+        stage = table.stages[step, ident]
+        if stage in blocked or swallowed(snapshot, step, ident, taken):
             continue
         if target is not None and current + delta <= target:
-            trial = taken - {(step, ident)}
-            actual = measure(level(trial))
+            taken.discard((step, ident))
+            actual = measure(level(taken))
             if actual <= target:
-                taken, current = trial, actual
-        if step in {"F2", "F5l", "F5", "F6a"} and (step, ident) in taken:
-            blocked.add(step)
+                current = actual
+            else:
+                taken.add((step, ident))
+        if (step, ident) in taken:
+            blocked.add(stage)
     physical = allowances.get("physical")
     for step, ident, _whole, _short in uncovered:
         if physical is None or current <= physical:
@@ -413,10 +432,15 @@ def fit_memory_view(snapshot: mv.MemoryViewSnapshot, allowances: Mapping[str, Op
             current = measure(level(taken))
             if current > physical:
                 form = ("F7a", str((snapshot.room or {})['room_id']))
-                after = measure(level(taken | {form}))
+                if form[1] not in table.ids.get("F7a", ()):
+                    continue
+                had_form = form in taken
+                taken.add(form)
+                after = measure(level(taken))
                 if after < current:
-                    taken.add(form)
                     current = after
+                elif not had_form:
+                    taken.discard(form)
     return level(taken)
 
 
@@ -627,7 +651,7 @@ def floor_note(level: mv.FloorLevel, *, window_tokens: Optional[int], mode: str,
         if snapshot and forms.get("emergency"):
             held = holding_room(snapshot, level)
             lines.append("Holding the room (tokens): " + ", ".join(f"{kind} {tokens:,}" for kind, tokens in held['tokens'].items()) + ".")
-            lines.extend(f"{unit['tokens']:,} tokens: {unit['reader']}" for unit in held['largest'])
+            lines.extend(f"{tokens:,} tokens: {reader}" for tokens, reader in held['largest'])
     if lowered_from:
         lines.append(lowered_line(mode, lowered_from, max_room))
     path = memory_read_path(names) if mode == "nano" else ""

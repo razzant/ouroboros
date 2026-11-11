@@ -109,7 +109,8 @@ def spoken(i: int, kind: str, chars: int, room: str = "1") -> Dict[str, Any]:
 def task_line(i: int, room: str = "1", chars: int = 400) -> Dict[str, Any]:
     ts, last_ts = _ts(69, 2 * i), _ts(69, 2 * i + 1)
     first, last = _address(room, ts, 60_000 + 2 * i), _address(room, last_ts, 60_001 + 2 * i)
-    return {"line": f"[{ts}; host; task t{i:03d}] completed: " + prose(chars, "mine"), "task": f"t{i:03d}", "ts": ts,
+    line = f"[{ts}; host; task t{i:03d}] completed: " + prose(chars, "mine")
+    return {"line": line, "line_without_gist": line, "task": f"t{i:03d}", "ts": ts,
             "pos": 25_000 + 2 * i, "first": first, "last_ts": last_ts, "last": last, "last_pos": 25_001 + 2 * i}
 
 

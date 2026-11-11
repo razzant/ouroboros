@@ -24,7 +24,9 @@ def completed_room():
     task = syn.task_line(0)
     task.update(task="done", line=task["line"] + " — summary: «" + gist["summary"] + "»")
     group = syn.conversation(1, words=2, word_chars=3000)
-    group["rooms"][0]["tasks"] = [deepcopy(task)]
+    remote_task = deepcopy(task)
+    remote_task["line"] = task["line"].replace(gist["summary"], work.first_sentence(gist["summary"]))
+    group["rooms"][0]["tasks"] = [remote_task]
     for word in group["rooms"][0]["words"]:
         word.update(kind="ouroboros", task_id="done")
     room["lane2"] = [task]
@@ -32,7 +34,7 @@ def completed_room():
     return syn.snapshot(room_facts=room, conversations=[group]), gist
 
 
-def test_one_work_telling_across_rooms_and_progress_before_final():
+def test_one_work_telling_per_block_and_progress_before_final():
     snap, gist = completed_room()
     rows = snap.room["lane1"]
     assert mv.render_room(snap).count(gist["summary"]) == 1
@@ -46,6 +48,128 @@ def test_one_work_telling_across_rooms_and_progress_before_final():
     assert text.count(gist["summary"]) == 1 and not any(r["line"] in text for r in rows)
     assert "3 replies, 9000 chars" in text and dict(final.addressed)["F2"] == ("work:done:final",)
     assert mf.view_facts(snap, final, window_tokens=200000, mode="max", allowances={})["floor"]["newest_addressed_row"]
+
+
+@pytest.mark.parametrize("remote_task", [False, True])
+def test_replaced_words_are_told_once_in_their_own_block_at_every_level(remote_task):
+    from ouroboros import memory_view_conversations as conv
+
+    snap, gist = completed_room()
+    group = snap.conversations[0]
+    remote = group["rooms"][0]
+    if not remote_task:
+        remote["tasks"] = []
+    else:
+        group["rooms"].append({**deepcopy(remote), "room_id": "other-thread", "words": []})
+    other = deepcopy(remote["words"][-1])
+    other.update(id="other-work", task_id="later", work_id="later", gist=dict(
+        gist, summary="A later work finished.", ts="2027-01-01"))
+    remote["words"].append(other)
+    order = [f"{s}:{i}" for s, i, *_ in mf.floor_elements(snap)]
+    levels = [mf.level_with(snap, mv.FULL_VIEW, order[:i]) for i in range(len(order) + 1)]
+    for level in [*levels, *reversed(levels)]:
+        gone = {s: set(ids) for s, ids in level.addressed}
+        form = conv.group_form(group, gone)
+        counted = group["key"] in gone.get("F6a", ())
+        receipt = forms.form_counts(snap, level)
+        if counted:
+            assert receipt["emergency"]["conversation count"]["sources"] >= len(remote["words"])
+            continue
+        text = conv.render_group(group, gone.get("F6w", set()), gone.get("F7", set()), form)
+        if form == 3:
+            assert gist["summary"] not in text
+            assert receipt["emergency"]["last gist"]["sources"] >= 1
+        else:
+            replaced = any(w["id"] in gone.get("F6w", ()) for w in remote["words"][:2])
+            assert text.count(work.first_sentence(gist["summary"])) == int(bool(form or replaced or remote_task))
+            if form or replaced and not remote_task:
+                assert f"from='{gist['address']}'" in text
+
+
+def test_room_range_is_physical_and_returns_surviving_task_tellings():
+    snap, gist = completed_room()
+    assert forms.stage_of(snap, "F7a", snap.room["room_id"]) == "room_ranges"
+    assert forms.STAGES.index("physical_rows") < forms.STAGES.index("room_ranges") < forms.STAGES.index("owner")
+    final = mf.level_with(snap, mv.FULL_VIEW, ["F2:work:done:final"])
+    aggregate = mf.level_with(snap, final, ["F7a:" + snap.room["room_id"]])
+    task_count = mf.level_with(snap, mv.FULL_VIEW, ["F1:" + snap.room["lane2"][0]["first"]])
+    for level in (task_count, final, aggregate, final, task_count, mv.FULL_VIEW):
+        text = mv._room_text(snap.room, dict(level.addressed))
+        assert text.count(gist["summary"]) == 1
+        assert ("work done]" in text) is (level == final)
+    counts = forms.form_counts(snap, aggregate)
+    assert counts["retold"]["task gists"] == {"lines": 1, "sources": 1}
+    assert "works" not in counts["retold"]
+    assert forms.holding_room(snap, aggregate)["tokens"]["task gists"] > 0
+    facts = mf.view_facts(snap, aggregate, window_tokens=200000, mode="low", allowances={})["floor"]
+    assert facts["forms"] == counts
+    assert "task gists" in mf.floor_note(aggregate, window_tokens=200000, mode="low", snapshot=snap)
+    counted = mf.level_with(snap, aggregate, ["F1:" + snap.room["lane2"][0]["first"]])
+    assert gist["summary"] not in mv._room_text(snap.room, dict(counted.addressed))
+
+
+@pytest.mark.parametrize("remote", [False, True], ids=["two-terminals", "fold-read"])
+def test_task_telling_is_built_from_the_same_gist_and_omitted_structurally(tmp_path, remote):
+    from tests import _memory_inventory_shared as shared
+
+    rooms = shared.world(tmp_path)
+    chat = rooms["beta"] if remote else 1
+    old, latest = "An earlier outcome.", "The final outcome holds. Its detail stays here."
+    rows = [shared.msg("2026-10-20T01:00:00+00:00", "A substantial reply. " * 150,
+                       chat_id=chat, direction="out", task_id="done"),
+            shared.msg("2026-10-20T01:01:00+00:00", "Completed.", chat_id=chat, direction="system",
+                       task_id="done", type="task_summary", summary_kind="terminal_root_projection", wake_summary=old),
+            shared.msg("2026-10-20T01:02:00+00:00", "Completed again.", chat_id=chat, direction="system",
+                       task_id="done", type="task_summary" if remote else "project_completion_summary",
+                       summary_kind="terminal_root_projection", wake_summary=latest, fold_read=remote)]
+    shared.append(tmp_path / "logs" / "chat.jsonl", *rows)
+    task = {"id": "next-turn", "chat_id": 1, "_is_direct_chat": True}
+    snap = mv.capture_memory_view(tmp_path, task, mv.view_spec_for_task(task, tmp_path))
+    if remote:
+        group = next(g for g in snap.conversations if any(r["room_id"] == str(chat) for r in g["rooms"]))
+        from ouroboros import memory_view_conversations as conv
+        text = conv.render_group(group, set(), set(), 0)
+        assert any(r["folded"] for r in group["rooms"]), [(r["room_id"], r["folded"]) for r in group["rooms"]]
+        assert text.count(work.first_sentence(latest)) == 1
+        projection = next(t for r in group["rooms"] for t in r["tasks"] if t["task"] == "done")
+    else:
+        level = mf.level_with(snap, mv.FULL_VIEW, ["F2:work:done:final"])
+        text = mv._room_text(snap.room, dict(level.addressed))
+        assert old not in text and text.count(latest) == 1
+        projection = next(t for t in snap.room["lane2"] if t["task"] == "done")
+        assert latest in projection["line"]
+    assert "get_task_result(task_id='done')" in projection["line_without_gist"]
+    assert work.first_sentence(latest) not in projection["line_without_gist"]
+
+
+@pytest.mark.parametrize("fixed", ["repeat", "place_fact"])
+def test_repeat_and_place_fact_lines_have_no_individual_concession(fixed):
+    from ouroboros import memory_view_conversations as conv
+
+    group = syn.conversation(1, words=1)
+    word = group["rooms"][0]["words"][0]
+    word.update(line="A fixed fact of this place.", text="A fixed fact of this place.")
+    word.update({"again": "row:earlier"} if fixed == "repeat" else {"kind": "place_fact"})
+    snap = syn.snapshot(conversations=[group])
+    assert not any(s == "F6w" for s, _i, *_rest in mf.floor_elements(snap))
+    assert word["line"] in conv.render_group(group, set(), set(), 0)
+    for form in (1, 2, 3):
+        assert word["line"] not in conv.render_group(group, set(), set(), form)
+    counted = mv.FloorLevel((("F6a", (group["key"],)),))
+    assert word["line"] not in mv.render_room(snap, counted)
+    assert "place facts" not in forms.form_counts(snap, counted)["host"]
+
+
+def test_emergency_conversation_line_names_omitted_notes_only_when_present():
+    from ouroboros import memory_view_conversations as conv
+
+    for notes in (0, 2):
+        group = syn.conversation(1, notes=notes)
+        for form in (2, 3):
+            text = conv.render_group(group, set(), set(), form)
+            emergency = next(line for line in text.splitlines() if line.startswith("Emergency:"))
+            assert ("2 notes by count" in emergency) is bool(notes)
+            assert "0 notes" not in emergency
 
 
 @pytest.mark.parametrize("swap", [False, True], ids=["P-A", "P-B"])
@@ -92,6 +216,33 @@ def test_return_keeps_an_oldest_prefix_of_counted_conversations():
         level = mf.fit_memory_view(snap, frame(bound))
         chosen = [i for i, g in enumerate(groups) if g["key"] in dict(level.addressed).get("F6a", ())]
         assert chosen == list(range(len(chosen)))
+
+
+def test_unread_summary_does_not_block_return_of_nearest_conversations():
+    groups = [syn.conversation(i, words=5, word_chars=1000) for i in range(10)]
+    snap = syn.snapshot(conversations=groups)
+    keys = tuple(g["key"] for g in groups)
+    restored = mv.FloorLevel((("F6g", keys), ("F6a", (*keys[:-1], "unread"))))
+    bound = size(snap, restored) + 60
+    level = mf.fit_memory_view(snap, frame(bound))
+    chosen = dict(level.addressed).get("F6a", ())
+    assert "unread" in chosen
+    counted = [i for i, key in enumerate(keys) if key in chosen]
+    assert 0 < len(counted) < len(keys)
+    assert counted == list(range(len(counted)))
+    assert size(snap, level) <= bound
+
+
+def test_unread_summary_is_not_taken_without_a_saving():
+    group = syn.conversation(1, words=1, word_chars=1000)
+    group["rooms"][0]["words"][0].update(address="row:a", author="Ann", text="Hello.")
+    snap = syn.snapshot(conversations=[group])
+    counted = mv.FloorLevel((("F6a", (group["key"],)),))
+    global_line = mv.FloorLevel((("F6a", (group["key"], "unread")),))
+    assert size(snap, global_line) >= size(snap, counted)
+    level = mf.fit_memory_view(snap, frame(0))
+    assert group["key"] in dict(level.addressed)["F6a"]
+    assert "unread" not in dict(level.addressed)["F6a"]
 
 
 def test_two_protected_replies_yield_after_room_emergencies_before_counts():
@@ -141,11 +292,38 @@ def test_final_counts_and_holding_cover_sources_without_counting_swallowed_forms
     held = forms.holding_room(snap, mv.FULL_VIEW)
     assert {"accounts", "parts", "pages without part", "records without lead", "untold in this room",
             "owner words in other rooms", "notes", "room records"} <= held["tokens"].keys()
-    assert len(held["largest"]) == 3 and all(e["reader"].startswith("memory_read(") for e in held["largest"])
+    assert len(held["largest"]) == 3 and all(reader.startswith("memory_read(") for _tokens, reader in held["largest"])
     facts = mf.view_facts(snap, level, window_tokens=200000, mode="low", allowances={})["floor"]
     assert facts["forms"] == counts and facts["holding"] == forms.holding_room(snap, level)
     note = mf.floor_note(level, window_tokens=200000, mode="low", snapshot=snap)
     assert all(x in note for x in ("my telling", "host facts", "emergency without", "Holding the room"))
+
+
+def test_view_facts_do_not_publish_working_parts_and_keep_the_note_bytes(tmp_path):
+    from types import SimpleNamespace
+    from ouroboros import observability, working_checkpoint
+
+    snap = syn.snapshot(story=syn.pages(3, 40))
+    level = mv.FloorLevel((("F5l", ("page-000",)),))
+    note = (
+        "### Physical floor\n"
+        "Low cuts for the window (200000 tokens). Reduced forms — my telling: none; host facts: none; "
+        "emergency without my telling: story openings: 2 lines/1 sources. Read sources with memory_read.\n"
+        "Holding the room (tokens): pages without part 91, records without lead 91.\n"
+        "31 tokens: memory_read(node_id='page-000')\n"
+        "30 tokens: memory_read(node_id='page-001')\n"
+        "30 tokens: memory_read(node_id='page-002')"
+    )
+    assert mf.floor_note(level, window_tokens=200000, mode="low", snapshot=snap).encode() == note.encode()
+    ctx = SimpleNamespace(drive_root=tmp_path, task_id="receipt", task_attempt=1)
+    state = {"messages": [{"role": "user", "content": "Frozen working message"}], "trace": {}}
+    encode = observability._json_bytes
+    assert working_checkpoint._encode_working(ctx, state, encode)[2] == 1
+    for candidate in (mv.FULL_VIEW, level, mf.fit_memory_view(snap, frame(0))):
+        facts = mf.view_facts(snap, candidate, window_tokens=200000, mode="low", allowances={})
+        state["trace"]["memory_view"] = facts
+        _data, _whole, written = working_checkpoint._encode_working(ctx, state, encode)
+        assert written == 0, "view facts (including forms, holding and counts) must stay inline"
 
 
 @pytest.mark.parametrize("row,author,task", [
@@ -153,7 +331,8 @@ def test_final_counts_and_holding_cover_sources_without_counting_swallowed_forms
     ({"transport": {"origin": {"task_id": "origin"}}}, {}, "origin"),
     ({"type": "relay_entry", "task_id": "recipient", "relay": {"sender": {"task_id": "sender"}}}, {}, "sender"),
     ({"type": "relay_entry", "task_id": "recipient"}, {}, ""),
-    ({"task_id": "publisher"}, {"via": "own_account"}, ""),
+    ({"task_id": "arrival-turn"}, {"via": "own_account"}, ""),
+    ({"type": "presence_delivery", "direction": "out", "transport": {"origin": {"task_id": "sender"}}}, {}, "sender"),
 ])
 def test_work_key_is_the_author_not_a_relay_recipient(row, author, task):
     assert work.speech_facts(row, author)["task_id"] == task
@@ -229,9 +408,9 @@ def test_report_counts_a_work_telling_and_fold_read_once_in_each_visible_form():
     remote['folded'] = dict(task='earlier', sentence='An earlier reading settled.', ts='2026-10-01',
                             count=3, **{'from': 'row:old-first', 'to': 'row:old-last'})
     whole = view_counts(snap, mv.FULL_VIEW)['retellings']
-    assert whole == {'task summary': 1, 'fold_read': 1}
+    assert whole == {'task summary': 2, 'fold_read': 1}
     for suffix in ('progress', 'final'):
         level = mf.level_with(snap, mv.FULL_VIEW, ['F2:work:done:' + suffix])
-        assert view_counts(snap, level)['retellings'] == {'works': 1, 'fold_read': 1}
+        assert view_counts(snap, level)['retellings'] == {'task summary': 1, 'works': 1, 'fold_read': 1}
     counted = mv.FloorLevel((('F6a', (snap.conversations[0]['key'],)),))
     assert view_counts(snap, counted)['retellings'] == {'task summary': 1}

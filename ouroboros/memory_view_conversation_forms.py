@@ -15,7 +15,7 @@ _INTRO = ("One group per conversation, my rooms there oldest first: where my hum
 # --- the floor's elements and the rendering --------------------------------------------------------
 
 def _unread(word):
-    return word.get("rank") == 2 and word.get("kind") == "human" and not _whole_owner(word)
+    return word.get("rank") == 2 and word.get("kind") == "human" and not word.get("again") and not _whole_owner(word)
 
 
 def _told(word):
@@ -28,7 +28,7 @@ def _gist_records(group):
     for room in group["rooms"]:
         for item in [*room["tasks"], *room["words"]]:
             gist = item.get("gist")
-            if gist and item.get("telling_here", True):
+            if gist:
                 key = item.get("work_id") or item.get("task_id") or item.get("task") or gist["address"]
                 if key not in folded:
                     found[key] = gist
@@ -79,13 +79,14 @@ def source_index(snapshot):
 
 def _sources(group):
     words = [w for r in group["rooms"] for w in r["words"]]
-    kinds = {w["id"]: "owner" if _whole_owner(w) else "unread" if _unread(w) else
+    kinds = {w["id"]: "fixed" if w.get("again") or w.get("kind") == "place_fact" else
+             "owner" if _whole_owner(w) else "unread" if _unread(w) else
              "told" if _told(w) else "untold" for w in words}
     rooms = {r["room_id"]: {kind: [w for w in r["words"] if kinds[w["id"]] == kind]
-                            for kind in ("owner", "unread", "told", "untold")} for r in group["rooms"]}
+                            for kind in ("owner", "unread", "told", "untold", "fixed")} for r in group["rooms"]}
     return {"words": words, "kinds": kinds, "rooms": rooms,
             "owners": [w for w in words if kinds[w["id"]] == "owner"],
-            "ids": {i for w in words for i in (w["id"], "bare:" + w["id"])},
+            "ids": {i for w in words for i in ((w["id"], "bare:" + w["id"]) if kinds[w["id"]] == "untold" else (w["id"],))},
             "gists": _gist_records(group), "untold": sum(k == "untold" for k in kinds.values()),
             "ordinary": all(k != "untold" for k in kinds.values()) and all(
                 "lead_rule" in n and n.get("text", "").strip() for r in group["rooms"] for n in r["notes"])}
@@ -96,9 +97,9 @@ def floor_steps(groups: Iterable[Mapping[str, Any]], *, index=None) -> Dict[str,
     from ouroboros.memory_view import _row_opening, _row_pointer
     groups = sorted(groups, key=lambda group: (group["latest"], group["key"]))
     index = index if index is not None else {g["key"]: _sources(g) for g in groups}
-    words = [(word, group) for group in groups for room in group["rooms"] for word in room["words"]]
-    others = sorted((pair for pair in words if not _whole_owner(pair[0])), key=lambda p: (p[0]["rank"], p[0]["pos"]))
-    owner = sorted((pair for pair in words if _whole_owner(pair[0])), key=lambda p: p[0]["pos"])
+    words = [(w, index[g["key"]]["kinds"][w["id"]]) for g in groups for w in index[g["key"]]["words"]]
+    others = sorted((pair for pair in words if pair[1] not in ("owner", "fixed")), key=lambda p: (p[0]["rank"], p[0]["pos"]))
+    owner = sorted((pair for pair in words if pair[1] == "owner"), key=lambda p: p[0]["pos"])
     lines, counts = [], []
     for group in groups:
         data = index[group["key"]]
@@ -114,13 +115,13 @@ def floor_steps(groups: Iterable[Mapping[str, Any]], *, index=None) -> Dict[str,
         # only these rows; the walk measures the actual combined header at bounds.
         retained = _counted_text([group], set(), False, index=index).partition("\n")[2]
         counts.append((group["key"], whole, retained))
-    return {"F6w": [(word["id"], word["line"], "" if _told(word) or _unread(word) else _row_opening(word, "words"))
-                     for word, _group in others]
+    return {"F6w": [(word["id"], word["line"], "" if kind != "untold" else _row_opening(word, "words"))
+                     for word, kind in others]
                     + [("bare:" + w["id"], _row_opening(w, "words"), _row_pointer(w, "words"))
-                       for w, _group in others if not (_told(w) or _unread(w))],
+                       for w, kind in others if kind == "untold"],
             "F6g": lines, "F7": [(word["id"], word["line"], _row_pointer(word, "words")) for word, _group in owner],
             "F6a": counts
-                    + ([("unread", "", "")] if any(_unread(w) for w, _group in others) else [])}
+                    + ([("unread", "", "")] if any(kind == "unread" for _w, kind in others) else [])}
 
 
 def identity_line(group: Mapping[str, Any]) -> str:
@@ -140,7 +141,7 @@ def identity_line(group: Mapping[str, Any]) -> str:
 def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str], as_line: int, *, data=None) -> str:
     """Whole, every gist, every gist with untold counts, or last gist with counts; owner words survive each."""
     from ouroboros.memory_view import _facts_text, _note_lines, _note_pointer, _row_opening, _row_pointer
-    from ouroboros.memory_view_work import task_line
+    from ouroboros.memory_view_work import conversation_task_lines
     data = data if data is not None else _sources(group)
     bare = {ident[5:] for ident in gone if ident.startswith("bare:")}
     gone = gone | bare
@@ -151,7 +152,9 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
         lines = [identity_line(group), *(gists[-1:] if as_line == 3 else gists)]
         if as_line >= 2:
             untold = data["untold"]
-            lines.append(f"Emergency: {untold} untold rows; {len(gists)} works, "
+            notes = sum(len(room["notes"]) for room in group["rooms"])
+            lines.append(f"Emergency: {untold} untold rows" + (f"; {notes} notes by count" if notes else "")
+                         + f"; {len(gists)} works, "
                          + ("only the last gist shown." if as_line == 3 else "every gist shown."))
         for room in group["rooms"]:
             if room.get("silent"):
@@ -167,6 +170,7 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
         return "\n".join([*lines, *held])
     running = "".join(f"; running {work}" for work in group["running"])
     lines = [f"### {group['label']}{running}"]
+    tasks = conversation_task_lines(group)
     for room in group["rooms"]:
         if not room["engaged"]:
             lines.append(f"- {room['label']}; {room['silent']}")
@@ -189,7 +193,7 @@ def render_group(group: Mapping[str, Any], gone: Set[str], owners_gone: Set[str]
                 lines.append(render(word, "my reply" if word["kind"] == "ouroboros" else "words"))
             elif word.get("again") or word["kind"] == "place_fact":
                 lines.append(word["line"])
-        lines += [task_line(task, folded=task.get("task") == (room.get("folded") or {}).get("task")) for task in room["tasks"]]
+        lines += tasks[room["room_id"]]
     if data["gists"]:
         task_gists = {task.get("task") for room in group["rooms"] for task in room["tasks"] if task.get("gist")}
         folded_words = {w.get("work_id") or w.get("task_id") for r in group["rooms"] for w in r["words"] if w["id"] in gone}
@@ -225,13 +229,22 @@ def _counted_text(groups, owners, aggregate_unread, *, index=None):
     return "\n".join(lines)
 
 
+def local_key(group, gone, data):
+    """The local choices read by both a conversation's price and its numeric receipt."""
+    form = 4 if group["key"] in gone.get("F6a", ()) else group_form(group, gone)
+    ids = data["ids"]
+    return ("conversations", "group", group["key"], form,
+            frozenset() if form else frozenset(ids & gone.get("F6w", set())),
+            frozenset(ids & gone.get("F7", set())))
+
+
 def pieces(groups: List[Mapping[str, Any]], gone: Mapping[str, Iterable[str]],
             piece: Callable[[Any, Callable[[], str]], Any], *, index=None) -> List[Any]:
     """Local form keys name every state their renderer reads; pricing never draws a complete view."""
     index = index if index is not None else {g["key"]: _sources(g) for g in groups}
     words, owners = set(gone.get("F6w", ())), set(gone.get("F7", ()))
     counts = set(gone.get("F6a", ()))
-    group_choices = {"F6g": set(gone.get("F6g", ()))}
+    choices = {"F6w": words, "F7": owners, "F6a": counts, "F6g": set(gone.get("F6g", ()))}
     counted = [group for group in groups if group["key"] in counts]
     parts = [piece(("conversations", "head"), lambda: "\n".join(["## Other conversations", "", f"{AUTHORITY} {AUDIENCE}", _INTRO]))]
     if counted:
@@ -241,11 +254,9 @@ def pieces(groups: List[Mapping[str, Any]], gone: Mapping[str, Iterable[str]],
     for group in groups:
         if group["key"] in counts:
             continue
-        form = group_form(group, group_choices)
-        ids = index[group["key"]]["ids"]
-        local_words, local_owners = ids & words, ids & owners
-        parts.append(piece(("conversations", "group", group["key"], form,
-                            frozenset() if form else frozenset(local_words), frozenset(local_owners)),
+        key = local_key(group, choices, index[group["key"]])
+        form, local_words, local_owners = key[3:]
+        parts.append(piece(key,
                            lambda group=group, form=form, words=local_words, owners=local_owners:
                            render_group(group, words, owners, form, data=index[group["key"]])))
     def foot():
@@ -287,5 +298,5 @@ def owner_items(groups: Iterable[Mapping[str, Any]]) -> Dict[str, Mapping[str, A
 
 def _whole_owner(word: Mapping[str, Any]) -> bool:
     """My human's words whole in this block: the one instance ``_once`` keeps, which F6 never takes and only F7
-    turns into its address; a line naming where the same row stands (``again``) folds as any other word (F6w)."""
+    turns into its address; a repeated row's fixed address line stays until the whole group yields."""
     return bool(word["owner_side"]) and not word.get("again")

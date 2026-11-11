@@ -398,14 +398,15 @@ def test_new_forms_do_not_inflate_a_short_notes_minimum_bound(monkeypatch):
 
 
 def test_retold_words_fold_before_considered_ones_and_other_rooms_owner_words_before_this_rooms():
-    """F6w folds by rank, oldest first in each: retold, considered, then the words nobody considered; F7 takes my
+    """F6w folds told work, unread facts, then considered words; F7 takes my
     human's words of my other conversations before this room's; both only as physics demands."""
     group = syn.conversation(0, words=3)
     words = group["rooms"][0]["words"]
     for word, rank in zip(words, (2, 0, 1)):  # the oldest nobody considered, the middle retold, the newest considered
         word["rank"] = rank
         if rank == 0:
-            word["again"] = True
+            word.update(kind="ouroboros", task_id="told", gist={"summary": "The reply settled it.",
+                "room_id": group["rooms"][0]["room_id"], "address": word["address"], "ts": word["ts"]})
     owner = syn.conversation(1, words=2, owner=True)
     room = syn.room(lane1=[syn.spoken(0, "human", 300), syn.spoken(1, "ouroboros", 300)])
     snapshot = syn.snapshot(room_facts=room, conversations=[group, owner])

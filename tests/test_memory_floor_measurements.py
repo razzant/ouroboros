@@ -149,7 +149,7 @@ def _hosts(plan):
     (4765, {}, [('runtime', False), ('installed_skills', False)], 4, 1),
     (5002, {}, [('runtime', False), ('installed_skills', True)], 3, 1),
     (4045, {'tail': 63, 'owner': 1600, 'pad': 0, 'shift': 0},
-     [('runtime', False), ('installed_skills', False)], 4, 2),
+     [('runtime', False), ('installed_skills', False)], 4, 1),
 ])
 def test_each_host_address_walks_its_own_shortest_forms(tmp_path, monkeypatch, window, shape, hosts, probes_count, walk_forms):
     """A real start, near the label's break-even: which forms are shortest changes between one frame's host steps. The
@@ -170,11 +170,11 @@ def test_each_host_address_walks_its_own_shortest_forms(tmp_path, monkeypatch, w
     settled = _near_even_plan(tmp_path / 'settled', monkeypatch, window, **shape)
     assert _hosts(settled) == hosts
     assert settled.projection(settled.initial_mode).memory_facts['floor']['steps'] == {
-        'F2': 2, 'F5': 2, 'F5a': 1, 'F7a': 1, 'F8': 1, 'F8a': 1}
+        'F2': 2, 'F5': 2, 'F5a': 1, 'F8': 1, 'F8a': 1}
     walks = {str(forms) for kind, _mode, forms, _room in probes if kind == 'walk'}
     assert [kind for kind, *_ in probes] == (['walk', 're-price', 'walk', 're-price'] if probes_count == 4
                                             else ['walk', 're-price', 're-price'])
-    assert len(walks) == walk_forms  # the walk after the missed re-price chose other forms
+    assert len(walks) == walk_forms  # each repeated walk prices its own host frame
     chosen, probes[:] = list(probes), []
     _drawn_prices(monkeypatch)  # the control: every level priced by drawing it
     measured = _near_even_plan(tmp_path / 'measured', monkeypatch, window, **shape)

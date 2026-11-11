@@ -17,16 +17,18 @@ def speech_facts(row, author):
     task = ((relay.get("sender") or {}).get("task_id") if row.get("type") == "relay_entry" else
             row.get("task_id") or ((row.get("transport") or {}).get("origin") or {}).get("task_id"))
     if author.get("via") == "own_account":
+        # An inbound account event carries the arrival's turn id, not a sender
+        # (presence_runner.capture_presence_event). Confirmed deliveries are outward.
         task = ""
     return {"task_id": str(task or ""), "via": author.get("via", ""),
             "text": str(row.get("text") or ""), "reply_to": (row.get("reply_to") or {}).get("address", ""),
             "author": author.get("label", ""), "relay_summary": str(relay.get("summary") or "")}
 
 
-def gists(by_room, format_address):
+def gists(by_room, format_address, *other_sources):
     """A terminal's own gist, keyed by its work, across the rows this capture already read."""
     found = {}
-    for room, entries in by_room.items():
+    for room, entries in (pair for source in (by_room, *other_sources) for pair in source.items()):
         for address, meta, pos in entries:
             task = str(meta.get("task_id") or "")
             if task and meta.get("wake_summary") and pos >= found.get(task, {}).get("pos", -1):
@@ -54,28 +56,40 @@ def bind(room, groups, summaries):
         for task in item.get("lane2", item.get("tasks", ())):
             if gist := summaries.get(task.get("task")):
                 task["gist"] = dict(gist)
-    # One telling site per work. Current replies represent their work here;
-    # otherwise prefer the room holding the terminal, then its first projection.
-    sites = {}
-    for item in rooms:
-        for row in [*item.get("lane1", item.get("words", ())), *item.get("lane2", item.get("tasks", ()))]:
-            if row.get("gist"):
-                key = row.get("work_id") or row.get("task_id") or row.get("task")
-                priority = (0 if item is room else 1 if item["room_id"] == row["gist"]["room_id"] else 2)
-                if key not in sites or priority < sites[key][0]:
-                    sites[key] = priority, item["room_id"]
-    for item in rooms:
-        for row in [*item.get("lane1", item.get("words", ())), *item.get("lane2", item.get("tasks", ()))]:
-            if row.get("gist"):
-                key = row.get("work_id") or row.get("task_id") or row.get("task")
-                row["telling_here"] = sites[key][1] == item["room_id"]
 
 
 def task_line(task, *, folded=False):
     """Keep the host's status and readers when this work's telling stands elsewhere."""
-    if task.get("gist") and (folded or not task.get("telling_here", True)):
-        return task["line"].replace(" — summary: «" + task["gist"]["summary"] + "»", "", 1)
-    return task["line"]
+    return task.get("line_without_gist", task["line"]) if folded else task["line"]
+
+
+def task_gist_line(task):
+    gist = task["gist"]
+    return (f"[{gist.get('ts', '')}; task {task['task']}] — summary: «{gist['summary']}»; "
+            f"memory_read(room_id='{gist['room_id']}', rows=true, from='{gist['address']}', to='{gist['address']}')")
+
+
+def task_gists_before_work_lines(room, gone):
+    """F1 counts host facts; a work's telling stays here until its work line takes it."""
+    if gone.get("F7a"):
+        return []
+    waiting = {key for key, _rows in works(room) if not any("work:" + key + suffix in gone.get("F2", ())
+                                                          for suffix in (":progress", ":final"))}
+    return [t for t in room.get("lane2", ()) if t.get("gist") and t.get("task") in waiting
+            and t["first"] in gone.get("F1", ())]
+
+
+def conversation_task_lines(group):
+    """Each work's task telling once within this conversation, beside all its host facts."""
+    told = {(room.get("folded") or {}).get("task") for room in group["rooms"]}
+    lines = {}
+    for room in group["rooms"]:
+        lines[room["room_id"]] = []
+        for task in room["tasks"]:
+            lines[room["room_id"]].append(task_line(task, folded=task.get("task") in told))
+            if task.get("gist"):
+                told.add(task.get("task"))
+    return lines
 
 
 def works(room):

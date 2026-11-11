@@ -68,10 +68,11 @@ def conversation_of(room: str, entries: List[Entry], notes: List[Dict[str, Any]]
     return (key.rsplit(":", 1)[0], {}) if key.count(":") >= 3 else (f"room:{room}", {})
 
 
-def _task_line(root_id: str, group: List[Tuple[Entry, Dict[str, Any]]]) -> Dict[str, Any]:
+def _task_line(root_id: str, group: List[Tuple[Entry, Dict[str, Any]]], summaries: Mapping[str, Any]) -> Dict[str, Any]:
     """One line for a task's lane-2 rows in another conversation: the host's status from its stored facts, the
     root's closing sentence and its reader; children by count, never their words."""
     from ouroboros.memory_view import _HOST_FACTS, _KINDLESS, _TERMINAL, _minute
+    from ouroboros.memory_view_work import first_sentence
 
     def chosen(kinds: frozenset, kind: str = "task_summary") -> Optional[Entry]:  # ``memory_view._task_line``'s order
         return next((entry for entry, _cls in reversed(group) if entry[1].get("type") == kind
@@ -80,26 +81,30 @@ def _task_line(root_id: str, group: List[Tuple[Entry, Dict[str, Any]]]) -> Dict[
     terminal = chosen(_TERMINAL) or chosen(_KINDLESS, "project_completion_summary") or chosen(_HOST_FACTS)
     status = (str(terminal[1].get("status") or "status not recorded") if terminal is not None
               else "running or unreported")
-    sentence = next((str(entry[1]["wake_summary"]) for entry, _cls in reversed(group) if entry[1].get("wake_summary")), "")
+    sentence = first_sentence((summaries.get(root_id) or {}).get("summary", ""))
     children = {str(entry[1].get("task_id")) for entry, _cls in group
                 if entry[1].get("task_id") and str(entry[1].get("task_id")) != root_id}
     first, last = group[0][0], group[-1][0]
-    parts = [status] + ([f"«{sentence}»"] if sentence else []) + ([f"children {len(children)}"] if children else [])
-    return {"task": root_id, "line": f"[{_minute(first[1].get('ts') or '?')}; host; task {root_id}] " + "; ".join(
-                parts + [f"rows {len(group)}", f"get_task_result(task_id='{root_id}')"]),
+    parts = ([f"children {len(children)}"] if children else []) + [f"rows {len(group)}", f"get_task_result(task_id='{root_id}')"]
+    head = f"[{_minute(first[1].get('ts') or '?')}; host; task {root_id}] "
+    return {"task": root_id, "line": head + "; ".join([status, *([f"«{sentence}»"] if sentence else []), *parts]),
+            "line_without_gist": head + "; ".join([status, *parts]),
             "pos": first[2], "last_pos": last[2], "chars": sum(int(e[1].get("text_chars") or 0) for e, _c in group)}
 
 
 @timed_section("memory_view.conversations")
 def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room: Mapping[str, List[Entry]],
             notes: Mapping[str, List[Dict[str, Any]]], lineage: Mapping[str, Any], *, quiet: Mapping[str, List[Entry]],
-            sealed: Mapping[str, List[Entry]], gaps: Mapping[str, set], projects: Any) -> List[Dict[str, Any]]:
+            sealed: Mapping[str, List[Entry]], gaps: Mapping[str, set], projects: Any,
+            summaries: Optional[Mapping[str, Any]] = None) -> List[Dict[str, Any]]:
     """The groups of my other conversations, by key: every room with open rows, a note or running work but the
     focus's own (``spec.room_id``), from the rows ``memory_inventory.open_rows_by_room`` read for this capture."""
     from ouroboros import memory_view as mv
     from ouroboros.memory_room_activity import considered_through, running_by_room
     from ouroboros.memory_sealing import linked_rows
+    from ouroboros.memory_view_work import gists
 
+    summaries = gists(by_room, chat_chain.format_address, quiet, sealed) if summaries is None else summaries
     membership = memory_inventory.membership_facts(root)
     running = running_by_room(root, by_room, notes, membership.bindings, projects or [])
     rooms = sorted((set(by_room) | set(notes) | {room for room, kinds in gaps.items() if kinds}
@@ -189,7 +194,7 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
             task = str(entry[1].get("root_task_id") or entry[1].get("task_id") or "")
             if cls["lane"] == 2 and task:
                 tasks.setdefault(task, []).append((entry, cls))
-        item["tasks"] = sorted((_task_line(task, rows) for task, rows in tasks.items()), key=lambda line: line["pos"])
+        item["tasks"] = sorted((_task_line(task, rows, summaries) for task, rows in tasks.items()), key=lambda line: line["pos"])
     focus = _running_focus(root, {task for group in groups.values() for task in group["running"]})
     for group in groups.values():
         group["running"] = [f"get_task_result(task_id='{task}')" + (f": {focus[task]}" if task in focus else "")

@@ -1,5 +1,6 @@
 """Both Max gates admit ordinary tellings, while chosen Nano keeps its own 85K target."""
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -32,6 +33,24 @@ def test_both_max_gates_use_ordinary_forms_not_whole_story(tmp_path, monkeypatch
         assert not shown.memory_facts['floor']['forms']['emergency']
     else:
         assert shown.memory_facts['max_room']['need'] > 100000
+    if marked and not late_gate:
+        for ratio in (0.83, 1.003, 1.17):
+            window = 100000
+            monkeypatch.setattr(scale.cf, '_route_calibration_ratio', lambda *a, **kw: ratio)
+            for _ in range(12):
+                evidence = SimpleNamespace(window_tokens=window, status='confirmed', stale=False,
+                    route_fp='', source='boundary', response_limit={},
+                    route_facts={'working_reserve_tokens': 10000, 'basis': 'provider'})
+                tight = scale.cf.build_context_fit_plan(SimpleNamespace(drive_root=tmp_path), plan.core,
+                    {'id': 'boundary', 'chat_id': 1, '_is_direct_chat': True}, preferred_mode='max',
+                    tool_schemas=scale.tools(), route_resolver=lambda *a, **kw: ({'provider': 'fixture', 'model': 'fixture'}, evidence))
+                facts = tight.projection(tight.initial_mode).memory_facts
+                need = facts['max_room']['need']
+                if need == window:
+                    break
+                window = need
+            assert need == facts['max_room']['window'] == window and tight.initial_mode == 'max'
+            assert not facts['floor']['ordinary_unfit'] and not facts['floor']['forms']['emergency']
 
 
 def test_owner_selected_nano_keeps_85000_target_and_requested_work_room(tmp_path, monkeypatch):
