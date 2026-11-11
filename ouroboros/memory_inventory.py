@@ -581,11 +581,10 @@ class _PlaceReads:
         return entry
 
     def _known(self, room: str) -> Tuple[List[Entry], List[int]]:
-        if room not in self.known:
+        if room not in self.known:  # the pass read none of the set's rows (``_UNREAD``): no position is in both
             entries, refs = self.found.held[room]
-            by_position = {**self.unread.get(room, {}), **{entry[2]: entry for entry in entries}}
-            rows = sorted((entry for entry in by_position.values() if entry[0]["row_sha256"] in refs),
-                          key=lambda entry: entry[2])
+            rows = sorted((entry for entry in (*entries, *self.unread.get(room, {}).values())
+                           if entry[0]["row_sha256"] in refs), key=lambda entry: entry[2])
             self.known[room] = rows, [entry[2] for entry in rows]
         return self.known[room]
 

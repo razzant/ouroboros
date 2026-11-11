@@ -496,8 +496,8 @@ class Chain:
 
 
 # Together the seeds take every change in STEPS, a place page's acceptance (24) and rejection (29); a place's walks read
-# its first page of unread rows two at a time there (``memory_inventory._PlaceReads._NEWEST``), so every read past it,
-# every earlier copy below it and every return to the dialogue store happens on these short chains too.
+# its first page of unread rows two at a time there (``memory_inventory._PlaceReads._NEWEST``), so every read past it
+# and every earlier copy below it happens on these short chains too.
 @pytest.mark.parametrize("seed,page", [(1, 2), (2, 2), (5, 2), (24, 2), (29, 2), (1, None), (2, None)])
 def test_after_every_change_the_normal_path_equals_the_whole_tail_warm_and_fresh(monkeypatch, tmp_path, seed, page):
     if page is not None and hasattr(mi, "_PlaceReads"):
