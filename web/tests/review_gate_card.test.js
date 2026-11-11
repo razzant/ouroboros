@@ -79,25 +79,27 @@ test('a live decision marks the work card, never a row or a child card, and Deta
     } finally { instance?.destroy(); restoreDom(prior); }
 });
 
-test('a cold card reads the field from its task detail', async () => {
-    const id = 'cold-work';
-    const rows = [
+test('a page load shows the field from its history row, before Details and without a detail read', async () => {
+    // The history endpoint carries the work's fact on its summary row (gateway/history.py); a work without one shows
+    // nothing. Opening the card is not needed, and no card fetches its detail for it.
+    const rows = ['cold-work', 'plain-work'].flatMap((id) => [
         { task_id: id, chat_id: 1, role: 'system', is_progress: true, content: 'Changed my body', ts: '2026-11-11T09:00:00Z' },
         { task_id: id, chat_id: 1, role: 'system', system_type: 'task_summary', content: 'Finished.',
-            task_terminal_status: 'completed', ts: '2026-11-11T09:10:00Z' },
-    ];
-    const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () =>
-        String(url).startsWith(`/api/tasks/${id}`) ? { task_id: id, status: 'completed', review_overrides: fact(3) }
-            : String(url).startsWith('/api/chat/history') ? { messages: rows } : { active_direct_turns: [] } }));
+            task_terminal_status: 'completed', ts: '2026-11-11T09:10:00Z',
+            ...(id === 'cold-work' ? { review_overrides: fact(3) } : {}) },
+    ]);
+    const reads = [];
+    const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () => {
+        if (String(url).startsWith('/api/tasks/')) reads.push(String(url));
+        return String(url).startsWith('/api/chat/history') ? { messages: rows } : { active_direct_turns: [] };
+    } }));
     let instance;
     try {
         instance = chat(mount, { on() { return () => {}; }, isConnected: () => true, send() {} });
         await instance.refreshHistory({ revision: 1 });
-        const card = walkCard(globalThis.document.byId.get('chat-messages'), id);
-        assert.doesNotMatch(card.querySelector('[data-live-meta]').innerHTML, /continued where Blocking/);
-        const toggle = () => card.querySelector('[data-live-disclosure]').listeners.get('click')[0]({ detail: 0 });
-        if (card.dataset.expanded !== '1') toggle();
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        assert.match(card.querySelector('[data-live-meta]').innerHTML, /Review: 3× continued where Blocking would have stopped/);
+        const meta = (id) => walkCard(globalThis.document.byId.get('chat-messages'), id).querySelector('[data-live-meta]').innerHTML;
+        assert.match(meta('cold-work'), /Review: 3× continued where Blocking would have stopped · latest: critical findings/);
+        assert.doesNotMatch(meta('plain-work'), /continued where Blocking/, 'a row without the fact shows no field');
+        assert.deepEqual(reads, [], 'no per-card detail read');
     } finally { instance?.destroy(); restoreDom(prior); }
 });

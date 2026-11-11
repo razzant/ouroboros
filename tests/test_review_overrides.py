@@ -206,3 +206,79 @@ def test_a_failing_join_or_store_never_fails_the_gate_the_commit_or_the_notice(t
     note_override_landing(ctx, "a" * 40)  # Git already succeeded: the join's failure is logged, never raised
     assert "landed" not in read_json_dict(ctx.drive_root / COUNTER_REL)
     assert landed_line(ctx.repo_dir, None, base="a", target="b", running=False) == "", "an unreadable counter names nothing"
+
+
+_CARD_ON_LOAD = """
+import { installDom, restoreDom, walkCard } from '%(fixture)s';
+import { createChatInstance } from '%(chat)s';
+let input = ''; for await (const chunk of process.stdin) input += chunk;
+const messages = JSON.parse(input);
+const reads = [];
+const { prior, mount } = installDom(async (url) => ({ ok: true, json: async () => {
+    if (String(url).startsWith('/api/tasks/')) reads.push(String(url));
+    return String(url).startsWith('/api/chat/history') ? { messages } : { active_direct_turns: [] };
+} }));
+const instance = createChatInstance({ ws: { on() { return () => {}; }, isConnected: () => true, send() {} },
+    state: { activePage: 'chat', projectChatIds: new Set(), unreadCount: 0 }, updateUnreadBadge() {},
+    stateSnapshots: { begin: () => ({ generation: 1, requestedAt: Date.now() }),
+        gate() { return Promise.resolve(this.begin()); }, isCurrent: () => true, apply() {} },
+    chatId: 1, idPrefix: 'chat', mountEl: mount });
+await instance.refreshHistory({ revision: 1 });
+const card = (id) => walkCard(globalThis.document.byId.get('chat-messages'), id);
+const meta = (id) => card(id)?.querySelector('[data-live-meta]')?.innerHTML ?? null;
+const painted = { gate: meta('gate-work'), plain: meta('plain-work'), reads,
+    finished: ['gate-work', 'plain-work'].map((id) => card(id)?.dataset.finished === '1') };
+instance.destroy(); restoreDom(prior);
+process.stdout.write(JSON.stringify(painted));
+"""
+
+
+def test_a_page_load_shows_a_finished_works_field_from_the_history_endpoint(tmp_path):
+    """The real history endpoint carries the work's fact on its summary row and the real card paints it before Details,
+    with no detail read; a finished work without decisions shows nothing. Without the overlay the line is absent."""
+    import asyncio
+    import shutil
+    from pathlib import Path
+
+    from ouroboros import dialogue_store
+    from ouroboros.agent_task_pipeline import _store_task_result
+    from ouroboros.gateway.history import make_chat_history_endpoint
+    from ouroboros.post_task_checkpoint import set_root_post_task_checkpoint
+    from ouroboros.post_task_synthesis import _record_task_facts
+    from ouroboros.task_results import STATUS_SCHEDULED, write_task_result
+    from ouroboros.utils import utc_now_iso
+
+    ctx = _make_ctx(tmp_path)
+    root = ctx.drive_root
+    env = SimpleNamespace(drive_root=root, repo_dir=ctx.repo_dir)
+    for task_id in ("gate-work", "plain-work"):
+        task = {"id": task_id, "type": "task", "chat_id": 1}
+        write_task_result(root, task_id, STATUS_SCHEDULED, chat_id=1, root_task_id=task_id,
+                          result="Task accepted and scheduled.")
+        # The work's progress row, as the message bus stores it: the card the page load draws.
+        dialogue_store.append(root, "progress", {"ts": utc_now_iso(), "type": "send_message", "task_id": task_id,
+                                                 "is_progress": True, "direction": "out", "chat_id": 1,
+                                                 "text": "Changing my body", "content": "Changing my body",
+                                                 "role": "assistant", "system_type": ""})
+        if task_id == "gate-work":
+            ctx.task_id = task_id
+            _decide(ctx, "critical_findings", "[CRITICAL] tests_affected: the new refusal path has no test")
+        _store_task_result(env, task, "Done.", {"rounds": 1, "cost": 0}, {"tool_calls": []})
+        _record_task_facts(env, task, {"rounds": 1}, {"tool_calls": []}, root / "logs")
+        set_root_post_task_checkpoint(env, task, "completed")  # post-task synthesis settled: the work is finished
+    response = asyncio.run(make_chat_history_endpoint(root)(SimpleNamespace(query_params={"chat_id": "1"})))
+    messages = json.loads(response.body)["messages"]
+    node = shutil.which("node")
+    assert node, "Node is required for the Python-to-web page-load witness"
+    web = Path(__file__).resolve().parents[1] / "web"
+    script = _CARD_ON_LOAD % {"fixture": (web / "tests" / "chat_dom_fixture.js").as_uri(),
+                              "chat": (web / "modules" / "chat.js").as_uri()}
+    probe = subprocess.run([node, "--input-type=module", "-e", script], input=json.dumps(messages), encoding="utf-8",
+                           capture_output=True, timeout=60, check=True)
+    painted = json.loads(probe.stdout)
+    assert "Review: 1× continued where Blocking would have stopped · latest: critical findings" in painted["gate"], painted
+    assert painted["plain"] is not None and "continued where Blocking" not in painted["plain"], painted
+    assert painted["reads"] == [], "the page load needs no per-card detail read"
+    assert painted["finished"] == [True, True], "both are finished works' cards"
+    carried = {(m["task_id"], m["review_overrides"]["count"]) for m in messages if "review_overrides" in m}
+    assert carried == {("gate-work", 1)}, "only the work with a decision carries its fact, on its history row"

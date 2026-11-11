@@ -460,7 +460,7 @@ def _annotate_terminal_task_truth(
                     "outcome_axes": normalize_outcome_axes(result), "_is_direct_chat": bool(result.get("_is_direct_chat")),
                     "outcome_phase": outcome_phase(result, {}), "outcome_final": task_id not in finalizing_tasks,
                     **initiator_meta(result)}  # + the origin label, from the persisted metadata
-                for key in ("model_execution", "cancel_origin", "review_projection"):
+                for key in ("model_execution", "cancel_origin", "review_projection", "review_overrides"):
                     if isinstance(result.get(key), dict):
                         terminal_truth[key] = dict(result[key])
                 if isinstance(result.get("body_adoptions"), list):  # its settled adoptions, read beside its Reviews

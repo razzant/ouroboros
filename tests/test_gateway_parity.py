@@ -581,6 +581,8 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
     assert re.search(r"@property \{boolean=\} worker_saturation_warning\b", text), "ChatOutbound missing worker_saturation_warning"
     assert "review_projection" in get_type_hints(ChatOutbound, include_extras=True)
     assert re.search(r"@property \{Object=\} review_projection\b", text)
+    assert "review_overrides" in get_type_hints(ChatOutbound, include_extras=True)  # the work's card field, on page load
+    assert re.search(r"@property \{Object=\} review_overrides\b", text)
     assert "setup_contract" in text
     assert re.search(r"@property \{string=\} error\b", text), "SkillDeleteResponse missing optional error"
     assert {"chat", "command", "photo", "video", "links", "quiz", "quiz_state", "typing", "log", "heartbeat", "extension_lifecycle"} <= set(WS_MESSAGE_TYPES)
