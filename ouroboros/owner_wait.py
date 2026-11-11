@@ -966,11 +966,6 @@ def owner_wait_ended_notice(ctx: Any, checkpoint: dict, reason: str = "timeout",
         f"{stance} — or finish and say what is unresolved.")}
 
 
-def owner_wait_timeout_notice(ctx: Any, checkpoint: dict) -> dict:
-    """The bound's notice under its original name."""
-    return owner_wait_ended_notice(ctx, checkpoint, "timeout")
-
-
 def _wake_description(outcome: str, entries: list[dict]) -> str:
     """What woke the task, for the notice: a hurry is named as what it is."""
     if outcome == "hurry":
