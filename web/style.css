@@ -5001,11 +5001,17 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     max-width: var(--capsule-value-cap);
     text-overflow: ellipsis;
 }
-.chat-toolbar-row[data-owner-glyphs="true"] .chat-capsule:not(.chat-model-mode):not([data-open="true"]) :is(.chat-capsule-value, .chat-subagents-lock) {
+.chat-toolbar-row[data-owner-glyphs="true"] .chat-capsule:not(.chat-model-mode):not([data-open="true"]) .chat-subagents-lock {
     display: none;
 }
-.chat-toolbar-row[data-owner-glyphs="true"] .chat-capsule:not(.chat-model-mode):not([data-open="true"]) .chat-capsule-glyph {
-    width: var(--composer-control-height);
+/* A folded value is not drawn, and stays in the button: it is the button's accessible name (no hover-only title). */
+.chat-toolbar-row[data-owner-glyphs="true"] .chat-capsule:not(.chat-model-mode):not([data-open="true"]) .chat-capsule-value {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
 }
 /* While a drag runs, and when the layout itself changes (opening, a resize, a new padding),
    the marks land with the words at once, so a pill never trails behind the word it names. */

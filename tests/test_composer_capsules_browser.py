@@ -192,10 +192,10 @@ SHOWN = """mode => {
     };
 }"""
 # A right-to-left install (its language profile says `rtl`; the words are the test's own, longer
-# than the English): both strips scroll on a 320 px phone.
+# than the English): both strips scroll on a 320 px phone, even in WebKit's narrower Arabic font.
 RTL = {"language": "ar", "english": False, "revision": 1, "profile": {"direction": "rtl"}, "entries": {
     english: {"text": text, "provenance": "imported"}
-    for english, text in (("Context", "السياق"), ("Nano", "السياق المصغّر"), ("Low", "السياق المنخفض"), ("Max", "السياق الكامل"))}}
+    for english, text in (("Context", "السياق"), ("Nano", "السياق المصغّر للرسائل"), ("Low", "السياق المنخفض للرسائل"), ("Max", "السياق الكامل للرسائل"))}}
 # Effort's marks against its strip and its shell: boxes as [left, right], whole = inside the strip.
 MARKS = """() => {
     const el = document.querySelector('#page-chat .chat-effort-range');
@@ -295,7 +295,7 @@ def test_context_capsule_chooses_one_of_three_modes_and_reads_back(direct_server
             closed = _row(page)
             # No request of this room was seen: a dash, while the strip keeps the saved Max.
             assert closed["ctx"]["head"] == "Context—" and closed["ctx"]["checked"] == ["max"], closed
-            assert closed["ctx"]["tabbable"] == [] and closed["oneLine"] and closed["namesShown"] == [True, True, True], closed
+            assert closed["ctx"]["tabbable"] == [] and closed["oneLine"] and closed["namesShown"] == [True, True, True, True], closed
             _shot(page, tmp_path, f"capsules-closed-{engine}-light")
             posts = []
             page.on("request", lambda r: posts.append(json.loads(r.post_data)) if r.url.endswith("/api/owner/context-mode") else None)
@@ -544,7 +544,9 @@ def test_opening_and_closing_never_wrap_the_row_on_any_frame(direct_server_with_
             # The value gives way while the strip grows, and comes back while it collapses: across
             # the widths where a strip opens beside the others, the capsule never stands wider than
             # closed or open (all the fit measures), so no frame takes a second line.
-            for width in range(700, 1250, 50):
+            # With the Model capsule in the row a strip opens beside the others from a wider line on: the sweep
+            # goes as far above that width as it did before.
+            for width in range(700, 1450, 50):
                 page.set_viewport_size({"width": width, "height": 900})
                 _until(page, "r.oneLine && r.ctx.open === 'false' && r.eff.open === 'false'")
                 page.wait_for_timeout(250)
@@ -712,7 +714,7 @@ def test_right_to_left_strips_that_scroll_keep_the_moved_mode_and_bracket_in_vie
             _install(page, RTL)
             _open_chat(page, url, width=320, height=860)
             page.wait_for_function(f"""() => document.documentElement.dir === 'rtl'
-                && document.querySelector('{CONTEXT} .chat-seg[data-mode="max"]')?.textContent === 'السياق الكامل'""", timeout=30_000)
+                && document.querySelector('{CONTEXT} .chat-seg[data-mode="max"]')?.textContent === 'السياق الكامل للرسائل'""", timeout=30_000)
             # Context: the chosen mode, Max, is the strip's last word, on its left; opening scrolls
             # leftwards (a negative scrollLeft) until it is whole, and the fade is on the right,
             # where Nano hides.
@@ -817,20 +819,25 @@ def test_long_closed_values_on_a_320px_phone_give_way_on_one_line(direct_server_
             _open_chat(page, url, width=320, height=860)
             page.wait_for_function(f"""() => document.querySelector('{CONTEXT} .chat-capsule-value')?.textContent === '{context_word}'
                 && document.querySelector('{EFFORT} .chat-capsule-value')?.textContent === '{effort_word}'""", timeout=30_000)
-            # Closed: without the names the values still take two lines, so the longest give way to
-            # one measured width; the row keeps one line and every control stays inside it.
+            # Closed: without the names the values still take two lines, so Subagents, Context and Effort fold to
+            # their glyphs and Model keeps its value (owner 10.11, «10. A»); the row keeps one line and every
+            # control stays inside it.
             _until(page, "r.compact !== ''")  # the settled, closed row decided its fit
             page.wait_for_timeout(200)
             seen["closed"] = closed = _row(page)
             seen["capped"] = capped = page.evaluate(CAPPED)
             _shot(page, tmp_path, f"capsules-long-values-closed-{engine}-{direction}-320")
             assert closed["oneLine"] and closed["rowHeight"] < 40 and capped["contained"] and not closed["docScroll"], seen
-            assert closed["compact"] == "values" and closed["namesShown"] == [False, False, False], seen
+            assert closed["compact"] == "true" and closed["namesShown"] == [False, False, False, False], seen
+            assert page.evaluate("() => document.querySelector('#page-chat .chat-toolbar-row').dataset.ownerGlyphs") == "true", seen
             assert closed["subShown"] and closed["ctx"]["shown"] and closed["eff"]["shown"], seen
-            subagents, context, effort = capped["capsules"]
-            assert context["word"] == context_word and context["cut"], seen
-            for capsule in (subagents, context, effort):  # a value, cut or whole, keeps clear of both ends of its shell
-                assert capsule["value"][0] >= capsule["shell"][0] + 1 and capsule["value"][1] <= capsule["shell"][1] - 1, seen
+            model, subagents, context, effort = capped["capsules"]
+            assert context["word"] == context_word, seen
+            for capsule in (subagents, context, effort):  # folded: the glyph alone, a round capsule, its value not drawn
+                assert capsule["value"][1] - capsule["value"][0] <= 1.5, seen
+                assert abs((capsule["shell"][1] - capsule["shell"][0]) - 30) <= 1, ("32 px round with its border", seen)
+            # Model's value stands whole, clear of both ends of its shell.
+            assert not model["cut"] and model["value"][0] >= model["shell"][0] + 1 and model["value"][1] <= model["shell"][1] - 1, seen
             # The whole word stays the button's: its accessible name and the open strip (no hover-only title).
             assert context_word in page.locator(f"{CONTEXT} .chat-capsule-head").aria_snapshot(), seen
             assert effort_word in effort["label"] and not effort["title"], seen
@@ -840,12 +847,15 @@ def test_long_closed_values_on_a_320px_phone_give_way_on_one_line(direct_server_
             seen["open"] = page.evaluate(SHOWN, "max")
             assert seen["open"]["word"] == context_word and seen["open"]["whole"] and not seen["open"]["docScroll"], seen
             page.keyboard.press("Escape")
-            _until(page, "r.ctx.open === 'false' && r.compact === 'values' && r.oneLine")
-            # A wider line takes the cut back: the values show whole again.
+            _until(page, "r.ctx.open === 'false' && r.compact === 'true' && r.oneLine")
+            assert page.evaluate("() => document.querySelector('#page-chat .chat-toolbar-row').dataset.ownerGlyphs") == "true", seen
+            # A wider line takes the fold back: the values show again, whole.
             page.set_viewport_size({"width": 600, "height": 860})
+            page.wait_for_function("() => !document.querySelector('#page-chat .chat-toolbar-row').dataset.ownerGlyphs", timeout=5_000)
             _until(page, "r.compact !== 'values' && r.oneLine")
             seen["wide"] = page.evaluate(CAPPED)
             assert not any(capsule["cut"] for capsule in seen["wide"]["capsules"]), seen
+            assert all(capsule["value"][1] - capsule["value"][0] > 2 for capsule in seen["wide"]["capsules"]), seen
         finally:
             _record(tmp_path, f"capsules-long-values-{engine}-{direction}-320", seen)
             browser.close()
@@ -867,7 +877,7 @@ def test_long_values_open_and_close_without_a_wrapping_frame(direct_server_with_
             _open_chat(page, url, width=320)
             page.wait_for_function(f"""() => document.querySelector('{CONTEXT} .chat-capsule-value')?.textContent === '{context_word}'
                 && document.querySelector('{EFFORT} .chat-capsule-value')?.textContent === '{effort_word}'""", timeout=30_000)
-            # From the narrowest phone, where the closed values are cut, through names that give way
+            # From the narrowest phone, where the closed neighbours fold to their glyphs, through names that give way
             # and strips that stand alone, to strips that open beside the others: every frame.
             for width in (320, 360, 400, 480, 560, 640, 720, 800):
                 page.set_viewport_size({"width": width, "height": 900})
@@ -880,6 +890,7 @@ def test_long_values_open_and_close_without_a_wrapping_frame(direct_server_with_
                     run["settled"] = page.evaluate(SETTLED, selector)
                     run["values"] = [[capsule["cut"] for capsule in before["capsules"]],
                                      [capsule["cut"] for capsule in page.evaluate(CAPPED)["capsules"]]]
+                    run["folded"] = [capsule["value"][1] - capsule["value"][0] <= 1.5 for capsule in before["capsules"]]
                     runs[f"{name}-{width}"] = run
         finally:
             _record(tmp_path, f"capsules-long-values-frames-{engine}-{direction}", runs)
@@ -887,8 +898,10 @@ def test_long_values_open_and_close_without_a_wrapping_frame(direct_server_with_
     wrapped = {key: [round(frame["height"]) for frame in [run["closed"]] + run["opening"] + run["closing"] if frame["spread"] >= 2]
                for key, run in runs.items()}
     assert not any(wrapped.values()), {key: heights for key, heights in wrapped.items() if heights}
-    # The narrowest phone is the case under test: there the closed values are cut.
-    assert runs["context-320"]["opening"][0]["compact"] == "values" and any(runs["context-320"]["values"][0]), runs["context-320"]
+    # The narrowest phone is the case under test: there Subagents, Context and Effort stand folded to their glyphs
+    # and Model keeps its value whole (owner 10.11, «10. A»).
+    assert runs["context-320"]["opening"][0]["compact"] == "true" and runs["context-320"]["folded"] == [False, True, True, True], runs["context-320"]
+    assert not runs["context-320"]["values"][0][0], ("Model's value is not cut", runs["context-320"])
     for key, run in runs.items():
         ends = (run["closed"]["width"], run["opening"][-1]["width"])
         peak = max(frame["width"] for frame in run["opening"] + run["closing"])
