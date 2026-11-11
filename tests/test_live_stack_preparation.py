@@ -6,6 +6,7 @@ import pytest
 
 from tests._extension_loader_shared import _clear_loader_state  # noqa: F401
 from tests._live_stack import Stack, stack
+from tests._live_stack_page import Page
 from tests._live_stack_wire import NativeWire
 from tests._live_world import host_world as host_world
 from tests._cases import chosen_rows
@@ -70,6 +71,75 @@ def test_successor_opens_while_owner_speaks_and_catches_up_before_answer(host_wo
             assert timing['prepared_ready_at'] <= timing['quiet_at'] <= timing['switched_at']
         assert run.result[1]['execution_status'] == 'ok', run.result
         assert all(w.closed for w in run.provider.connections)
+    asyncio.run(scenario())
+
+
+class ExactPage(Page):
+    """A 24 kHz microphone whose every 20 ms frame is distinct, so a 24 kHz engine's wire compares byte for byte.
+    It never pauses, as frames already in flight do not: what the hub is handed while a connection changes is
+    the subject here, not the page's own capture rule."""
+
+    def __init__(self):
+        super().__init__(24000)
+        self.recording = True
+
+    def capturing(self):
+        return self.recording
+
+    def microphone(self):
+        return (self.seq % 60000 + 1).to_bytes(2, 'little') * self.chunk
+
+
+@pytest.mark.parametrize('engine', ['openai', 'grok'])
+def test_accepted_microphone_bytes_cross_a_prepared_handoff_exactly(host_world, monkeypatch, engine):
+    """Host, driver, gateway and native adapter over a loopback wire; the page and the provider are Python doubles.
+    Both engines take 24 kHz PCM, so every accepted sample must be on one provider socket, in order: the old one,
+    or its successor once that declared Ready."""
+    from ouroboros.call_peers import LiveCallHub
+    from ouroboros.live_connections import PreparedConnection
+    from tests import _live_stack
+    accepted = bytearray()
+    receive, adopt = LiveCallHub.receive_audio, PreparedConnection._adopt
+
+    def accepting(hub, peer_id, frame):
+        taken = receive(hub, peer_id, frame)
+        if taken:
+            accepted.extend(frame.pcm)
+        return taken
+
+    def buffered(hub):
+        with hub._condition:
+            return sum(len(track.samples) for peer in hub._audio_peers() for track in peer.tracks.values())
+
+    async def adopt_behind_a_backlog(lease):
+        if lease.ahead:  # more than one mixed chunk waits in the hub when the successor is adopted
+            async def backlog():
+                while buffered(lease.host.hub) < 3 * 480:
+                    await asyncio.sleep(.005)
+            await asyncio.wait_for(backlog(), 60)
+        return await adopt(lease)
+
+    monkeypatch.setattr(LiveCallHub, 'receive_audio', accepting)
+    monkeypatch.setattr(PreparedConnection, '_adopt', adopt_behind_a_backlog)
+    monkeypatch.setattr(_live_stack, 'Page', ExactPage)
+
+    async def scenario():
+        async with stack(host_world, monkeypatch, engine) as run:
+            first = run.wire
+            await run.wait(lambda: len(first.audio) >= 9600)
+            await request(run)
+            await run.wait(lambda: run.host.connection_number == 2 and run.call.connected.is_set())
+            second = run.wire
+            await run.wait(lambda: len(second.audio) >= 9600)
+            run.page.recording = False
+            await run.wait(lambda: bytes(second.audio[-960:]) == bytes(accepted[-960:]))
+            assert first is not second and len(run.provider.connections) == 2
+            delivered = bytes(first.audio) + bytes(second.audio)
+            assert delivered == bytes(accepted), (
+                f'{len(delivered)} of {len(accepted)} accepted bytes reached a provider socket')
+            assert run.host.hub.input_audio_evidence()['dropped_samples'] == 0
+            assert not any('may not have been heard' in str(row) for row in run.host.messages)
+        assert run.result[1]['execution_status'] == 'ok', run.result
     asyncio.run(scenario())
 
 

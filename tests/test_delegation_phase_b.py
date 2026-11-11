@@ -104,11 +104,12 @@ def test_acting_preamble_states_the_boundary_without_the_native_imperative():
                          "write_root": "/tmp/wt"},
     )
     assert "[WRITE SURFACE]" in text
-    assert "All changes land inside the write root only." in text
-    # The retired imperative framed the child as the native executor of the work.
-    assert "Make all changes" not in text
+    assert "Your changes to the project are captured from the write root: that is where this work's result" in text
+    # The retired imperatives framed the child as the native executor, or sent it only to the write root.
+    assert "Make all changes" not in text and "All changes land inside the write root only." not in text
+    assert "keep them out of it, wherever your tools let you write." in text
     # The rest of the frozen block is intact.
-    assert "Do NOT commit" in text
+    assert "are the parent's steps, not yours." in text
     assert "workspace.patch" in text
 
 

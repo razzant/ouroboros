@@ -22,7 +22,7 @@ web/ — Web UI, a SPA of ES modules; chapter 3 owns the pages and the modules n
     project_answer.js — Main's Project lifecycle rows and folded mirrored answers (§3 Main rows)
     work_portal.js, task_episodes.js, project_handoff.js — one Main card per work: the portal and its binding sources, Continue episodes, the binding receipt's words (§3 Project handoff receipts)
     chat_reply.js, chat_reply_quote.js, chat_relay_deck.js, chat_row_menu.js, row_menu_gesture.js, message_actions.js, routing_receipt.js, text_fit.js — replies and host-derived quotes, note decks, row menus, saved-row actions, an owner message's routing receipt, word-cut fitting (§3 Chat and Projects; DESIGN "Replies")
-    composer.js, composer_subagents.js, capsule_fit.js, swarm_presentation.js — the composer: "+" menu, slots, Send, Subagents; Swarm's label and receipt (§3)
+    composer.js, composer_model.js, chat_model_routes.js, composer_subagents.js, capsule_fit.js, swarm_presentation.js — the composer: "+" menu, slots, Send; four capsules, Model first; Swarm's label and receipt (§3)
     chat_cards.js, card_components.js, card_frames.js — living cards in the feed and kept on Widgets; the sandboxed app frame (CLIENT_CONTRACT §5)
     contributions.js, composer_plus.js, composer_chips.js, host_modules.js, holds.js — the contributions store and verbs; skills' "+" items and capsule-row chips; trusted page modules; the start ledger (CLIENT_CONTRACT §11; DESIGN "Skills in the page")
     project_reference.js, task_reference.js — the one Project and Main task doors (DESIGN "References and actions")
@@ -46,7 +46,7 @@ supervisor/ — background thread inside server.py (§5)
   message_bus.py — local message bus for the Web UI and transport skills; re-exports the ingress names
   message_ingress.py — one accepted row per message id, its dispatch a durable obligation (§4 WebSocket chat)
   workers.py — worker pool: forkserver on Linux, spawn elsewhere, never fork (why: its comment)
-  worker_assignment.py, worker_chat_lane.py, worker_health.py, worker_pool_lifecycle.py, worker_process.py, worker_promotion.py — pool leaves, one concern each as named (§5; §6 Owner routing verbs)
+  worker_assignment.py, dispatch_choice.py, worker_chat_lane.py, worker_health.py, worker_pool_lifecycle.py, worker_process.py, worker_promotion.py — pool leaves, one concern each as named (§5; §6 Owner routing verbs)
   worker_owner_wait.py — a required owner wait lends its active slot; the task stays RUNNING, custodied (§5)
   conversation_lane.py, inline_carrier.py — the lane's slots, admission, spare and census; the two inline executors (§5 Conversation lane)
   state.py, state_initialization.py — `state/state.json` updates with typed read quality; init witness
@@ -135,7 +135,7 @@ ouroboros/ — agent core and shared runtime (§6)
   transcript_prefix.py — shared prefix digests/comparison, change counts by origin and signed-reasoning retirement; reporting/round facts cross the loop boundary only at call time (§6 Task lifecycle)
   loop_transport.py — transport-outage waits and provider-failure text (§6 Context fitting)
   loop_output_exhaustion.py — typed reply recovery (§6)
-  loop_delivery.py, loop_budget.py, loop_forced_finalization.py, loop_messages.py, loop_model_call.py, primary_route_observation.py, loop_nudges.py, loop_round_limits.py — delivery candidates and the delivery-control protocol; leaves of `loop.py`, one rail each as named; `loop_forced_finalization` is the one forced model call (§6 Task lifecycle)
+  loop_delivery.py, loop_budget.py, loop_forced_finalization.py, loop_messages.py, loop_model_call.py, primary_route_observation.py, loop_nudges.py, loop_round_limits.py, loop_routes.py — delivery candidates and the delivery-control protocol; leaves of `loop.py`, one rail each as named; `loop_forced_finalization` is the one forced model call (§6 Task lifecycle)
   task_pacing.py — threshold facts, shared round-money reading, finalization reserve, `CostCeiling` and main-loop wire options (§6 Budget tracking)
   vision_routing.py, vision_image_limits.py, image_preparation.py — owner-mode image routing for Main, explicit VLM/caption sends, route limits and byte preparation (§6 Vision and local image evidence)
   fallback_cooldown.py — per-process 429-aware cooldown for the `OUROBOROS_MODEL_FALLBACKS` chain; advisory
@@ -193,6 +193,7 @@ ouroboros/ — agent core and shared runtime (§6)
   send_clock.py — Main preparation clocks and physical-candidate binding
   net_transport.py — shared httpx transport: TCP keepalive and the owner's extra-CA bundle every first-party client trusts (§7 `OUROBOROS_EXTRA_CA_BUNDLE`)
   model_wait.py — quota/auth waits bound to the task or phase owner (§6 Quota and auth waits)
+  owner_model.py, lead_fact.py — the owner's durable work-local primary and its wake; a work's published lead (§6)
   transport_custody.py — typed transport facts for the physical-attempt custody seam
   openrouter_attribution.py — canonical OpenRouter application attribution, centralized so forks do not compete under one identity (§7)
   openai_chat_custom.py, openai_chat_dispatch.py — direct-OpenAI Chat function→custom codec and its dispatch policy: custom first, exact-dialect fallback, task-local `none` last
@@ -207,9 +208,9 @@ ouroboros/ — agent core and shared runtime (§6)
   mcp_schema.py — literal-safe schema/metadata; mcp_catalog.py — published catalogs; mcp_oauth.py — sign-in
   mcp_headers.py, mcp_import.py — header validation/masks/restoration, origin guard; draft-only import preview (§6 MCP)
   mcp_task_session.py, mcp_browser_guard.py — stdio session per live task loop; browser-policy callback (§6 MCP)
-  safety.py — Safety Supervisor call (typed outcomes: §6 Safety Supervisor outcomes)
+  safety.py — Safety Supervisor call (§6 Safety Supervisor outcomes)
   safety_config.py — independent coverage per kind (your work, consciousness), the resolved checker and the one-time settings migration
-  safety_records.py, safety_evidence.py — Safety verdict parsing/accounting; the bundle's evidence diet
+  safety_records.py, safety_evidence.py — Safety verdict parsing/accounting; the bundle's evidence diet and who wrote each row
   ouroboros/gateway/safety_settings.py — owner Safety level, rules and checker endpoints
   consciousness.py, consciousness_wake.py — the background alarm admitting an ordinary Main turn through the supervisor tick; the wake input and `wake_task_metadata` envelope (§6 Background consciousness)
   consciousness_authority.py, consciousness_allowance.py — dispatch-bound autonomy ceilings and the rolling 24-hour allowance (§6 Background consciousness and Evolution)
@@ -227,7 +228,7 @@ ouroboros/ — agent core and shared runtime (§6)
   project_dialogue.py — read-only chat lens; append-only `logs/chat_annotations.jsonl` (`ROUTING_RECEIPT_FIELDS`) routes only `needs_manual_target` cards; `routing_refusal_cause` (§3 Chat and Projects)
   room_membership.py, room_appearances.py, room_messages.py — stored-row membership and its derived facts (§3)
   owner_words.py — a work's owner words, one dated verbatim set; schedule text as provenance; by value for roots, helpers, sessions, reviewers
-  project_lease.py — one-writer-per-project lease in `assign_tasks`; same-project swarms exempt (§6 Project registry and lease)
+  project_lease.py — one-writer-per-project lease in `assign_tasks`, held per tree (§6 Project registry and lease)
   context.py, context_timing.py — Main context, timing, subagent catalog (§6)
   context_input_selection.py — declared inputs, historical author views (not criteria), first-build overflow rescue (§6 Selected first-input sources; Context fitting)
   main_context_authority.py — Main's authority view and helpers' idempotent predecessor briefs (§6)
@@ -251,16 +252,16 @@ ouroboros/ — agent core and shared runtime (§6)
   workspace_copies.py — git-copy source/baseline identity and own-body policy (§6 Delegated subagents)
   coop_checkpoint.py — quiescent checkpoint commits of cooperative trees from a mutative child's `write_root`; a root mid merge/rebase/cherry-pick/revert is skipped (§5)
   delegate_output.py, delegate_directory.py, workspace_file_outputs.py — retained terminal JSON with physical-task reads; directory apply/discard and ordinary-folder results with exact before/after identities (§6 Terminal products)
-  delegate_activity.py, delegate_observe.py — typed executor activity JSONL with an emission-committed cursor; the supervised wait's beat (§6 Delegated activity)
+  delegate_activity.py, delegate_feed.py — typed activity, emission-committed cursor; the body's feed (§6 Delegated activity)
   delegate_containment.py — engine-derived isolation facts (§6 Access disclosure)
-  delegate_progress.py — poll-bound transport retry and event-local executor observations (§6 Delegated subagents)
+  delegate_progress.py — current run views and body-streamed activity (§6 Delegated subagents)
   nanny_pacing.py — round/cost anchors; no reset on coordination (§6 Supervision)
   delegate_interactions.py, delegate_shared.py — nanny input into a live session: typed `waiting_on_user`, validated `_delegate_answer`, capability-gated `_delegate_message`; `_owned_run` keeps live control with the starter, confirmed successors can read and dispose of settled products (§6 Delegated subagents)
   route_spec.py — neutral route primitive: kind/target/pin normalization and effort validation
   configured_subagents.py, subagent_runtime.py — the canonical `OUROBOROS_SUBAGENTS` parser/serializer; immutable task-start snapshots and exact `subagent_id` selection (§6 Delegated subagents)
   subagent_route_health.py, claudexor_observations.py, subagent_inspection.py — manifest route health, shared passive evidence and exact configured-actor inspection (§6 Route health)
   subagent_work_order.py, subagent_bootstrap.py, delegate_start_instructions.py — owner-word-preserving work orders, host pre-start, stable instructions with a separately hashed coordination appendix (§6 Delegated subagents)
-  delegate_supervision.py — event-only sleeping-nanny loop (§6 Supervision, activity and recovery)
+  delegate_supervision.py — sleep on runs and owed wake delivery (§6 Supervision, activity and recovery)
   delegate_recovery.py, delegate_continuation.py, delegate_pending.py — exact-leaf recovery, `continue_from` after any stop, pending-invocation replay with the original key (§6 Delegated subagents)
   delegate_registration_policy.py, delegate_result_taken.py, historical_retirement.py, delegate_readonly_inputs.py, delegate_documents.py — registration/taken/history, STARTED fields, lineage/selected files and documents (§6)
   delegate_terminal.py, owner_stop_receipt.py — terminal reconciliation, audit-only custody persistence, typed custody card rows, Wrap up's saved-work receipt (§6 Delegated subagents)
@@ -331,7 +332,7 @@ ouroboros/ — agent core and shared runtime (§6)
   post_task_evolution.py — Worker's durable promotion signal for the supervisor idle tick (§6 Background consciousness and Evolution)
   repo_remotes.py — Fetch URLs as Git resolves them; `managed` is the read/update-only official source, `origin` the token's personal target
   review_evidence.py — Same-execution commit-review evidence (§6 Commit review evidence) and the durable commit/advisory review record of a task or checkout; execution facts are visibility only
-  review_status_projection.py — Commit-review status projection over `review_state` records; re-exported by review_evidence.py
+  review_status_projection.py, review_overrides.py — Commit-review status projection over `review_state` records, re-exported by review_evidence.py; the owner-visible trace of review decisions Blocking would have stopped (§6 Own-body candidates)
   semantic_dedup.py — LLM-first semantic dedup, fail-open None; consumed by review_state
   betterleaks_runtime.py — Pinned Betterleaks runtime resolver (six platform artifacts, packaged resource first)
   skill_loader.py, skill_catalogue.py — Discovers data buckets and connected folders (`OUROBOROS_SKILLS_REPO_PATH` is My folder), state in `data/state/skills/<name>/`; paged skill records, named diagnostics and manifest addresses, the delegate skill index (§13)
@@ -508,7 +509,7 @@ ouroboros/ — agent core and shared runtime (§6)
     compact_context.py — the mind's own context view (§6 Context fitting)
     control.py — control tools: restart, timeout settings, scheduling, review, chat history, model switching, the `schedule_subagent` contract (§6 Delegated subagents)
     control_delegation.py — Delegation-budget affordances and `move_to_project` (§6 Project placement)
-    control_events.py, control_mind.py, control_relay.py, control_routing.py, control_runtime.py, control_scheduling.py, control_storage.py, control_subagent_spec.py, control_task_results.py, control_ui_translation.py, control_update_description.py, task_result_views.py — the control tools' leaves: events and their durable outcomes, the mind's lifecycle controls, `tell_task` relays, routing, runtime self-control, scheduling, Storage Free, the `schedule_subagent` parameter surface, absorbing a child's result and retained redacted call sources, owner wording pins (§3)
+    control_events.py, control_mind.py, control_models.py, control_relay.py, control_routing.py, control_runtime.py, control_scheduling.py, control_storage.py, control_subagent_spec.py, control_task_results.py, control_ui_translation.py, control_update_description.py, task_result_views.py — the control tools' leaves: events and their durable outcomes, the mind's lifecycle controls and cited model choices, `tell_task` relays, routing, runtime self-control, scheduling, Storage Free, the `schedule_subagent` parameter surface, absorbing a child's result and retained redacted call sources, owner wording pins (§3)
     tool_discovery.py — List/enable owner: callable catalog by namespace in every mode; grants nothing
     tool_result.py, tool_catalog.py, tool_resolution.py — the typed internal tool result and its text adapter, intrinsic tool descriptors, argument normalization with physical target binding
     arg_feedback.py — What a tool says about an argument it did not obey: the one-line ignored disclosure and the typed refusal naming field, value and repair (DEVELOPMENT "LLM-first affordances")
@@ -578,14 +579,14 @@ ouroboros/ — agent core and shared runtime (§6)
     subagent_integration.py — integrate_subagent_patch (sha256, 3-way --index, protected-path gated, genesis refused), external-workspace audited verdict, compare_subagent_patches
     patch_verdict.py, patch_staging.py — both patch pipelines' verdict writer (`run_<rid>` subjects; artifact plus typed `delegate_run_patch_verdict` custody row) and index staging
   delegate_start_claims.py — Serializes custody recheck and `START_REQUESTED`; transport/run waits are outside locks. Unsent retries may hold actor/payload locks, never root/store locks
-  process_containment.py, process_lifeline.py, process_overload.py — Token/Job custody, POSIX owner-death guardian and pressure stop; unconfirmed cleanup blocks; not a quota (DEVELOPMENT §9)
+  process_containment.py, process_lifeline.py, process_overload.py — Token/Job custody, POSIX owner-death guardian and pressure stop (DEVELOPMENT §9)
   process_scope.py, process_census.py — work scopes (membership, records, task-end/Panic reap, engine index); kernel-state readers (§9)
   process_custody.py, launch_custody.py — `spawn_supervised`, ledger, `retained_purposes`, kept-service list/Stop; measured identity/exit (§9)
   obligations.py — Atomic current sets (incl. `owner_questions`); owning transitions publish before work and retire after discharge
   startup_migrations.py, startup_task_files.py — Explicit inherited-state import/repair and addressed file recovery
   delegate_custody_current.py — Custody on the store: run rows, pending invocations, outbox, importer's fold
   owned_shutdown.py — the ownership set, the one bounded exit stop with its next-start retry and entry `state/shutdown_entry.json` (§9)
-  platform_layer.py, platform_win32_abi.py, platform_darwin_abi.py, platform_process_target.py, process_identity.py — OS locks/processes, native ABI, held targets and birth tokens (Platform substrate below)
+  platform_layer.py, platform_win32_abi.py, platform_darwin_abi.py, platform_process_target.py, process_identity.py, host_memory.py — OS locks/processes/memory, native ABI, held targets and birth tokens (Platform substrate below)
   verified_download.py — exact-size/digest-verified atomic cached downloads
   node_runtime.py — Execution-probed Node runtime health (`node_runtime_health`; a missing binary is never cached), `select_skill_node_runtime`, `skill_node_emergency_path_dir`
 

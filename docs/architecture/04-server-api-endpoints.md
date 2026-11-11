@@ -103,6 +103,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/owner/context-mode` | |
 | POST | `/api/owner/effort-range` | |
 | POST | `/api/owner/subagents-mode` | `{mode, project_id?}` → `{ok, project_id, subagents_mode, cognition}` (§7) |
+| POST | `/api/owner/chat-model` | |
 | POST | `/api/owner/safety-mode` | |
 | POST | `/api/owner/safety-model` | |
 | POST | `/api/owner/safety-rules` | |
@@ -143,6 +144,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | GET | `/api/tasks/{task_id}/artifacts/{name}` | own stores: POSIX no-follow/Windows NT relative handles; admission before child-store metadata; SVG `sandbox` CSP + `nosniff` (`gateway/task_archive.py`) |
 | POST | `/api/tasks/{task_id}/cancel` | (§5 Stop policy and hurry) |
 | POST | `/api/tasks/{task_id}/hurry` | (§5 Stop policy and hurry) |
+| POST | `/api/tasks/{task_id}/model` | `ouroboros/gateway/task_model.py`: durable root primary; set/follow/return/wait/keep |
 | POST | `/api/tasks/{task_id}/pause` | (§6 Owner Pause of a whole tree) |
 | POST | `/api/tasks/{task_id}/owner-keep` | `OwnerKeepRequest`; keep or release exactly this task's materials |
 | POST | `/api/tasks/{task_id}/continue` | (§6 Continue after interruption or an unfinished author stop) |
@@ -259,6 +261,6 @@ Each socket has one writer and outbox (`ws._Connection`), so a slow or half-open
 
 #### Reconnect and recovery
 
-The browser reconnects with bounded exponential delay; a watchdog closes a silent seemingly-open connection. One served-page decision (`ws.js decideServedPage`) governs the post-open state read and the socket-down probe, so a transient drop cannot destroy in-page state. The core attests only pages it serves: without `served_ui` (an older core), or for its marked page while it serves builtin, `decide()` reloads on a changed or unprovable SHA (a restarted server must not keep old JS/CSS alive in PyWebView), and an unchanged one keeps the page and its queued frames (an unversioned `/api/state` with no remembered SHA keeps it too, accepting possibly stale assets); the marked page reloads once after a restart applied a directory or `none`, and an unmarked page owns its refresh and only reconnects. A failed/non-OK state read never reloads (a seconds-old server can answer 500); `ws.js` forces at most one reload per disconnect episode.
+The browser reconnects with bounded exponential delay; a watchdog closes a silent seemingly-open socket. One served-page decision (`ws.js decideServedPage`) governs the post-open read and the socket-down probe, so a transient drop keeps in-page state. The core attests only pages it serves: without `served_ui` (an older core), or for its marked page while it serves builtin, `decide()` reloads on a changed or unprovable SHA and keeps the page and its queued frames on an unchanged one or an unversioned `/api/state` with no remembered SHA (possibly stale assets); the marked page reloads once after a restart applied a directory or `none`; an unmarked page owns its refresh and only reconnects. A failed/non-OK read never reloads (a seconds-old server can answer 500). Four healthy probes reload only a page that connected, once per disconnect episode; an attempt failing after one is `serverAnswersWhileDown`: an observation, not a cause.
 
 Each Chat instance handles `open` by resynchronizing durable history (a reconnect adds no feed row) and `close` by withdrawing online and accounting presentation; deduplication covers the overlap between live frames and REST replay, and large history parsing runs off the server event loop. Not every transient frame is persisted: durable chat rows, task results, queue snapshots, Project revisions, review/cost ledgers and lifecycle state remain the recovery authorities.

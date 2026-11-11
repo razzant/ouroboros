@@ -668,6 +668,8 @@ def prepare_conversation_task(agent: Any, task: Dict[str, Any], drive_root: Any,
     apply_consciousness_authority(task)
     from ouroboros.settings_integrity import record_subagents_admission
     record_subagents_admission(task, root)
+    from ouroboros.route_choice import capture_lead  # the admitted primary (route_choice)
+    capture_lead(task, root)
     attach_task_contract(task)
     from ouroboros.tool_access_roots import freeze_tool_profile
     freeze_tool_profile(task)
@@ -872,10 +874,6 @@ class CarrierTurn:
                 )
 
     def observe(self, kind: str, data: Dict[str, Any]) -> None:
-        if kind == "task_heartbeat":  # this carrier's own size rides its turn's beat (the lane's vitals)
-            from supervisor.conversation_lane import carrier_rss
-
-            data["_carrier_rss"] = carrier_rss()
         self._phases.observe(kind, data)
 
     def hooks(self) -> Dict[str, Any]:

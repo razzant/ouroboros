@@ -6,11 +6,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createChatInstance } from '../modules/chat.js';
 import { composerMarkup, createPlusMenu } from '../modules/composer.js';
-import { installDom, restoreDom } from './chat_dom_fixture.js';
+import { ElementStub, installDom, restoreDom } from './chat_dom_fixture.js';
 import { installDomDouble } from './dom_double.js';
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
-const SUFFIXES = ['input-area', 'attachment-preview', 'subagents-mode', 'context-mode', 'plus', 'file-input',
+const SUFFIXES = ['input-area', 'attachment-preview', 'model-mode', 'subagents-mode', 'context-mode', 'plus', 'file-input',
     'input', 'send'];
 
 function fetchStub(history = []) {
@@ -66,13 +66,74 @@ test('"+" stands where the paperclip stood; the voice and chips slots are empty,
     assert.doesNotMatch(markup, /chat-attach-btn|id="chat-attach"/, 'no paperclip beside it');
     assert.match(markup, /<span class="chat-voice-slot" data-composer-voice hidden><\/span>/);
     assert.match(markup, /<span class="chat-composer-chips" data-composer-chips hidden><\/span>/);
-    // Text row: "+", the file input, the field, the voice slot, Send. Capsule row: Subagents, Context, then the chips
-    // slot (Effort mounts between them; Main's questions pill joins after). No one-shot Swarm pill anywhere.
+    // Text row: "+", the file input, the field, the voice slot, Send. Capsule row: Model, Subagents, Context, then the
+    // chips slot (Effort mounts between them; Main's questions pill joins after). No one-shot Swarm pill anywhere, and
+    // no model control but the capsule.
+    assert.doesNotMatch(markup, /chat-model-picker|chat-model-trigger/);
     assert.doesNotMatch(markup, /chat-swarm|chat-composer-pills|data-armed/);
     const order = (names) => names.map((name) => markup.indexOf(name));
     const rising = (list) => list.every((value, i) => value >= 0 && (i === 0 || value > list[i - 1]));
     assert.ok(rising(order(['chat-plus-btn', 'chat-file-input', 'id="chat-input"', 'data-composer-voice', 'chat-send-group'])));
-    assert.ok(rising(order(['chat-subagents-mode', 'chat-context-mode', 'data-composer-chips', 'chat-text-row'])));
+    assert.ok(rising(order(['chat-model-mode', 'chat-subagents-mode', 'chat-context-mode', 'data-composer-chips', 'chat-text-row'])));
+});
+
+test('Send waits for the room\'s model to be saved, Panic never does; a refused save keeps the draft', async () => {
+    const SOL = 'claudexor::codex=gpt-6.1-sol';
+    const ASTRA = 'claudexor::codex=gpt-6-astra';
+    const saves = [];
+    const env = installDom(async (url, init = {}) => {
+        if (String(url) === '/api/owner/chat-model') return new Promise((resolve) => saves.push({ body: JSON.parse(init.body), resolve }));
+        return fetchStub()(url);
+    });
+    const frames = [];
+    const instance = mount(env, { ...PROJECT, frames });
+    try {
+        const own = { kind: 'model', model: ASTRA, use_local: false };
+        const state = (choice) => ({ main_route: { model: SOL, use_local: false }, projects: [{ id: 'p7', chat_id: 7, model_choice: choice,
+            cognition: { context_mode: 'max', subagents_mode: 'auto', effort_range: { min: 'low', recommended: 'high', max: 'max' } } }] });
+        instance.hydrateStateSnapshot(state(own));
+        const capsule = node(instance, 'pchat-p7-model-mode');
+        const value = () => capsule.querySelector('.chat-capsule-value').textContent;
+        const strip = capsule.querySelector('.chat-model-strip');
+        const seg = (words) => strip.children.find((made) => made.classList.contains('chat-seg') && made.children[0]?.textContent === words);
+        const choose = (words) => { for (const fn of strip.listeners.get('click')) fn({ target: { closest: () => seg(words) } }); };
+        const input = node(instance, 'pchat-p7-input');
+        const send = node(instance, 'pchat-p7-send');
+        const press = (text) => {
+            input.value = text;
+            const event = { key: 'Enter', target: input, preventDefault() { event.defaultPrevented = true; } };
+            for (const listener of input.listeners.get('keydown')) listener(event);
+        };
+        const reply = (index, body, ok = true, status = 200) => saves[index].resolve({ ok, status, json: async () => body });
+        assert.equal(value(), 'gpt-6-astra', 'the room\'s own model, from the room\'s own row');
+        choose('Main');
+        assert.deepEqual(saves.map((save) => save.body), [{ kind: 'main', project_id: 'p7' }]);
+        instance.hydrateStateSnapshot(state(own));
+        press('/panic');
+        assert.deepEqual(frames.map((frame) => frame.content), ['/panic'], 'Panic is delivered before the save answers');
+        frames.length = 0;
+        press('start on Main');
+        await tick();
+        assert.deepEqual([frames.length, send.textContent, send.disabled], [0, 'Saving', true], 'Send waits for the save');
+        reply(0, { ok: true, project_id: 'p7', model_choice: { kind: 'main' }, previous_model_choice: own });
+        await tick(); await tick();
+        assert.deepEqual(frames.map((frame) => frame.content), ['start on Main'], 'then the message goes');
+        assert.equal(value(), 'gpt-6.1-sol', 'and the capsule follows Main');
+
+        document.body = new ElementStub('body', document);  // the toast stack's host
+        instance.hydrateStateSnapshot(state(own));  // the room holds its own model again
+        choose('Main');
+        press('still here');
+        await tick();
+        reply(1, { error: 'The project is not available', saved: false, code: 'project_unavailable' }, false, 404);
+        await tick(); await tick();
+        assert.equal(frames.length, 1, 'a refused save sends nothing');
+        assert.equal(input.value, 'still here', 'and keeps the draft');
+        assert.equal(value(), 'gpt-6-astra', 'the saved choice again');
+        press('next');
+        await tick();
+        assert.deepEqual(frames.map((frame) => frame.content), ['start on Main', 'next'], 'an earlier refusal never blocks later sends');
+    } finally { instance.destroy(); restoreDom(env.prior); }
 });
 
 test('a room keeps its own draft: setDraft and insertAtCursor keep it, a reopened room restores it, Send clears it', async () => {

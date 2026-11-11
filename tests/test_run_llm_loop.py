@@ -189,6 +189,8 @@ def test_budget_rail_after_dispatch_is_terminal_without_provider_fallback(tmp_pa
     assert usage["resource_limit"] == trace["resource_limit"]
     assert usage["resource_limit"]["status"] == "resource_limited"
     assert usage["resource_limit"]["resume_policy"] == "cancel_or_new_run"
+    lead = events.get_nowait()
+    assert lead["type"] == "work_lead" and lead["lead"]["model"] == "test-model"
     checkpoint = events.get_nowait()["data"]
     assert checkpoint["checkpoint_kind"] == "budget_scope_paused"
     assert checkpoint["scope"] == "root"

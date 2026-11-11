@@ -1,11 +1,12 @@
 """memory_mark: batch release has one reason and accounts for every id, including partial failures; the tool's
 own text names who sees a mark."""
+import inspect
 import json
 
 import pytest
 
 from ouroboros.chronicle_store import ChronicleStore
-from ouroboros.tools.chronicle import _memory_mark, chronicle_tools
+from ouroboros.tools.chronicle import _chronicle_write, _memory_mark, chronicle_tools
 from ouroboros.tools.registry import ToolContext
 
 
@@ -72,8 +73,8 @@ def test_the_mark_tool_text_says_who_sees_a_mark_on_every_route():
     from ouroboros.memory_view import ROLE_DEFAULTS
 
     schema = {entry.name: entry.schema for entry in chronicle_tools()}["memory_mark"]
-    reach = ("A room mark is in view of every integrating focus and of that room's helpers and session starts, "
-             "a global one of every focus, helper and session start: ")
+    reach = ("A room mark (the default scope) is in view of every integrating focus and of that room's helpers and "
+             "session starts, a global one of every focus, helper and session start: ")
     assert reach in schema["description"] and "; a mark adds nothing to my human's chat." in schema["description"]
     integrating = {role for role, spec in ROLE_DEFAULTS.items() if spec.marks == "all"}
     helpers = {role for role, spec in ROLE_DEFAULTS.items() if spec.marks == "room_and_global"}
@@ -81,6 +82,24 @@ def test_the_mark_tool_text_says_who_sees_a_mark_on_every_route():
     anchor = schema["parameters"]["properties"]["anchor"]["description"]
     assert anchor.startswith("Optional action whose first result in a task also carries this mark's words:")
     assert "meets me at" not in anchor
+    # The reach differs by scope, so the description names the scope a mark gets when none is given (`reach`
+    # above), and that scope is the handler's own default.
+    assert inspect.signature(_memory_mark).parameters["scope"].default == "room"
+
+
+def test_a_mark_lands_where_its_schema_says_when_no_room_is_named(tmp_path):
+    """The mark schema's room default is the handler's on both paths: a record's mark lands in that record's room,
+    any other target's in this task's room; either is a room mark when no scope is given."""
+    here = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="root0001", current_chat_id=1)
+    other = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="root0002", current_chat_id=7)
+    note = json.loads(_chronicle_write(other, kind="note", text="a note of room seven"))
+    by_record = json.loads(_memory_mark(here, node_id=note["node_id"], text="keep"))
+    by_task = json.loads(_memory_mark(here, task_id="task0001", text="keep"))
+    assert (by_record["room_id"], by_task["room_id"]) == ("7", "1")
+    assert by_record["scope"] == by_task["scope"] == "room"
+    schema = {entry.name: entry.schema for entry in chronicle_tools()}["memory_mark"]
+    room = schema["parameters"]["properties"]["room_id"]["description"]
+    assert room.endswith("Default: the record's room for a node_id target, else this task's own room.")
 
 
 def test_a_marked_row_of_my_human_travels_to_the_work_readers_and_my_own_view_shows_the_mark(tmp_path):

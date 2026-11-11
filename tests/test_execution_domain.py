@@ -626,7 +626,7 @@ def test_panic_settlement_reports_only_what_docker_answered(env, tmp_path, monke
     answers[("inspect", "-f", "{{.Id}} {{.State.Running}}", "ouro-work")] = (0, "id-new true\n", "")
     settled = domain.panic_settle(tmp_path)
     assert "recreated" in settled["unconfirmed"]["ouro-work"] and "ouro-work" not in settled["stopped"]
-    row = json.loads((tmp_path / "logs" / "supervisor.jsonl").read_text().splitlines()[-1])
+    row = json.loads((tmp_path / "logs" / "supervisor.jsonl").read_text(encoding="utf-8").splitlines()[-1])
     assert row["type"] == "process_stop_unconfirmed" and row["purpose"] == "execution_domain"
 
 
@@ -707,7 +707,7 @@ def test_the_body_observes_a_work_run_through_its_own_engine(env, tmp_path, monk
     def runtime(root, factory):  # a stopped body runtime: its observation methods, no loop
         stop = threading.Event()
         stop.set()
-        result = body.BodyRuntime(root, stop_event=stop, gateway_factory=factory, max_workers=2)
+        result = body.BodyRuntime(root, stop_event=stop, gateway_factory=factory)
         result.thread.join(10)
         assert not result.thread.is_alive()
         return result
@@ -791,29 +791,31 @@ def test_a_taken_decision_reaches_the_engine_that_holds_the_result(env, tmp_path
     assert told == ["run-1"] and owned_told == [] and read_document(root, task)[taken.RECORDS]["run-1"]["state"] == "taken"
 
 
-def test_supervision_reopens_its_transport_for_each_runs_engine(env, tmp_path, monkeypatch):
+def test_supervision_uses_the_runs_recorded_engine(env, tmp_path, monkeypatch):
     from ouroboros import delegate_supervision as supervision
+    from tests._run_wait_shared import publish, scripted_reads
 
-    ctx = _delegate_ctx(tmp_path, monkeypatch)
     started(tmp_path, "run-w", engine_ref=work_ref(env), store=STORE)
+    started(tmp_path, "run-u", engine_ref=work_ref(env), store=STORE)
     started(tmp_path, "run-s", store="store-s")
-    closed = []
-    work = SimpleNamespace(store_identity=STORE, engine_ref=work_ref(env), close=lambda: closed.append("work"))
-    owned = SimpleNamespace(store_identity="store-s", engine_ref=None, close=lambda: closed.append("owned"))
+    work, owned = object(), object()
     monkeypatch.setattr(domain, "work_gateway", lambda r, **_kw: work)
-    monkeypatch.setattr(supervision, "_loop_gateway", lambda entry=None: work if entry is not None else owned)
-    first = supervision._run_transport(ctx, "run-s", None)
-    assert first is owned and supervision._run_transport(ctx, "run-s", first) is owned and not closed
-    assert supervision._run_transport(ctx, "run-w", first) is work and closed == ["owned"]
-    assert supervision._run_transport(ctx, "run-s", work) is owned and closed == ["owned", "work"]
-
-    def unreadable(*_args):
-        raise OSError("custody temporarily unreadable")
-
-    monkeypatch.setattr(custody, "lookup", unreadable)
-    monkeypatch.setattr(supervision, "_loop_gateway", lambda *_args: pytest.fail("unknown custody chose an engine"))
-    assert supervision._run_transport(ctx, "run-w", work) is None
-    assert closed == ["owned", "work", "work"]  # the per-call reader owns the retry; no guessed fallback
+    monkeypatch.setattr(wire, "ClaudexorGateway", lambda: owned)
+    assert supervision._loop_gateway(current.run(tmp_path, "run-w")) is work
+    assert supervision._loop_gateway(current.run(tmp_path, "run-s")) is owned
+    # A wake's one read goes through the engine its own run's custody names (``_publish``).
+    ctx, reads = _delegate_ctx(tmp_path, monkeypatch), []
+    scripted_reads(monkeypatch, lambda _ctx, rid, *_a, gateway=None: reads.append((rid, gateway)) or json.dumps(
+        {"status": "no_progress", "run_id": rid}))
+    publish(ctx, "run-w")
+    publish(ctx, "run-s")
+    monkeypatch.setattr(domain, "work_gateway", lambda *_a, **_kw: (_ for _ in ()).throw(
+        ClaudexorUnavailable("daemon_unreachable", "down")))
+    assert supervision._loop_gateway(current.run(tmp_path, "run-w")) is None
+    monkeypatch.setattr(custody, "lookup", lambda *_a: (_ for _ in ()).throw(OSError("custody temporarily unreadable")))
+    monkeypatch.setattr(supervision, "_loop_gateway", lambda *_a: pytest.fail("unreadable custody chose an engine"))
+    publish(ctx, "run-u")  # the per-call reader recovers custody itself; no guessed engine
+    assert reads == [("run-w", work), ("run-s", owned), ("run-u", None)]
 
 
 # --- attached launches: stdio MCP servers, skill scripts and dependency builds run in the pinned executor ----------
@@ -896,7 +898,7 @@ def fake_docker(env, monkeypatch, network="bridge"):
     monkeypatch.setattr(domain, "_data_root", lambda: data)
     assert shutil.which("docker") == str(cli)
     return SimpleNamespace(
-        tmp=container_tmp, calls=lambda: [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else [],
+        tmp=container_tmp, calls=lambda: [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()] if log.exists() else [],
         records=lambda: list((data / "state" / "workspace_executor_processes").glob("*.json")),
         network=lambda value: mode.write_text(value, encoding="utf-8"))
 
@@ -969,7 +971,7 @@ for line in sys.stdin:
     manager.reconfigure({**settings, "MCP_SERVERS": [raw]})
     refreshed = manager.refresh_server("probe")
     assert refreshed["ok"] and refreshed["tool_count"] == 1, refreshed
-    rows = [json.loads(line) for line in witness.read_text().splitlines()]
+    rows = [json.loads(line) for line in witness.read_text(encoding="utf-8").splitlines()]
     assert rows and all(row["cwd"] == str(workdir) and row["token"] == "synthetic-token" for row in rows)
     starts = [call for call in docker.calls() if call[:2] == ["exec", "-i"]]
     assert starts and all(call[call.index("--workdir") + 1] == str(workdir) and "ouro-work" in call for call in starts)
@@ -1005,7 +1007,7 @@ def test_skill_scripts_and_dependency_builds_run_in_the_pinned_executor_or_not_a
     build_env = isolated_deps._installer_env(skill / ".deps", ecosystem="python")  # the builds' own environment
     result = isolated_deps._run(["sh", "-c", 'echo "$HOME" > build.txt'], cwd=skill, env=build_env, timeout_sec=20)
     assert result == {"cmd": ["sh", "-c", "..."], "returncode": 0}  # the build's own argv, never the CLI's
-    assert (skill / "build.txt").read_text().strip() == str(skill / ".deps" / "home")
+    assert (skill / "build.txt").read_text(encoding="utf-8").strip() == str(skill / ".deps" / "home")
     starts = [call[-1] for call in docker.calls() if call[:2] == ["exec", "-i"]]
     # the script and the build, each once; the build's own folders (tmp, home, cache) are made there as the work
     assert sum('printf "%s|%s"' in shell for shell in starts) == 1 and sum("build.txt" in shell for shell in starts) == 1
@@ -1059,7 +1061,7 @@ def test_a_reviewed_skill_keeps_its_state_in_the_work_domain_across_runs(env, mo
     ctx, drive = _reviewed_skill(env, monkeypatch, "counter", (
         "import os, pathlib\n"
         "state = pathlib.Path(os.environ['OUROBOROS_SKILL_STATE_DIR']) / 'count'\n"
-        "count = int(state.read_text()) + 1 if state.exists() else 1\n"
+        "count = int(state.read_text(encoding='utf-8')) + 1 if state.exists() else 1\n"
         "state.write_text(str(count))\n"
         "print(count, state.parent, os.environ.get('IN_FAKE_CONTAINER'))\n"))
     root = env.work / "skill-state"
@@ -1069,7 +1071,7 @@ def test_a_reviewed_skill_keeps_its_state_in_the_work_domain_across_runs(env, mo
             for _ in range(2)]
     assert [(run["exit_code"], run["stdout"].split()) for run in runs] == [
         (0, ["1", str(root / "counter"), "1"]), (0, ["2", str(root / "counter"), "1"])]  # ran in the container
-    assert (root / "counter" / "count").read_text() == "2"
+    assert (root / "counter" / "count").read_text(encoding="utf-8") == "2"
     assert not (drive / "state" / "skills" / "counter" / "count").exists()  # the service's records: untouched
     made = [call for call in docker.calls() if call[2:4] == ["mkdir", "-p"]]
     assert made == [["exec", "ouro-work", "mkdir", "-p", "--", str(root / "counter")]] * 2  # made there, as its user
@@ -1308,16 +1310,16 @@ def test_a_work_repo_file_write_lands_as_the_work_domain_with_bytes_on_stdin(env
     registry = _registry(env, env.work)
     secret = "print('to stdin, never argv')\n"
     text = registry.execute("write_file", {"root": "active_workspace", "path": "pkg/app.py", "content": secret})
-    assert (env.work / "pkg" / "app.py").read_text() == secret, text
+    assert (env.work / "pkg" / "app.py").read_text(encoding="utf-8") == secret, text
     writes = attached(docker, "mv -f")
     assert len(writes) == 1 and "mkdir -p" in writes[0][-1]  # one container overwrite, its folder made there
     assert secret.strip() not in " ".join(writes[0])  # the employee's content rode stdin, never the shell argv
     registry.execute("edit_text", {"root": "active_workspace", "path": "pkg/app.py",
                                     "old_str": "to stdin, never argv", "new_str": "edited in the work domain"})
-    assert "edited in the work domain" in (env.work / "pkg" / "app.py").read_text()
+    assert "edited in the work domain" in (env.work / "pkg" / "app.py").read_text(encoding="utf-8")
     registry.execute("write_file", {"root": "active_workspace", "path": "pkg/app.py",
                                     "content": "# tail\n", "mode": "append"})
-    assert (env.work / "pkg" / "app.py").read_text().endswith("# tail\n")
+    assert (env.work / "pkg" / "app.py").read_text(encoding="utf-8").endswith("# tail\n")
     assert attached(docker, "cat >>")  # the append grew it there
 
 
@@ -1333,7 +1335,7 @@ def test_a_work_tree_status_and_diff_run_their_filters_in_the_work_container(env
     binding = git_vcs_ops._git()._vcs_binding(registry._ctx, None, root="active_workspace", path=".")
     diff = git_vcs_ops._git_diff(registry._ctx, _resolved_binding=binding)
     assert "two" in diff  # the worktree change is seen
-    assert witness.exists() and set(witness.read_text().split()) == {"1"}  # the filter ran, and only in the container
+    assert witness.exists() and set(witness.read_text(encoding="utf-8").split()) == {"1"}  # the filter ran, and only in the container
     ran = attached(docker, "git diff")
     assert ran and all(str(repo) in call[-1] for call in ran)  # entered by the container, in the repository
     # status reports M from the stat cache without cleaning, but it too runs in the container, so any filter it
@@ -1348,7 +1350,7 @@ def test_unmanaged_work_file_write_stays_on_the_service(env, monkeypatch):
     docker = fake_docker(env, monkeypatch)  # a CLI is on PATH, but nothing here should call it
     registry = _registry(env, env.work)
     registry.execute("write_file", {"root": "active_workspace", "path": "a.py", "content": "x = 1\n"})
-    assert (env.work / "a.py").read_text() == "x = 1\n"
+    assert (env.work / "a.py").read_text(encoding="utf-8") == "x = 1\n"
     assert not [call for call in docker.calls() if call[:1] == ["exec"]]  # the service wrote it, no work container
 
 
@@ -1365,7 +1367,7 @@ def test_apply_patch_writes_and_deletes_run_as_the_work_domain(env, monkeypatch)
              "*** Delete File: old.py\n"
              "*** End Patch\n")
     text = registry.execute("apply_patch", {"patch": patch})
-    assert (env.work / "pkg" / "created.py").read_text() == "print('added as the work domain')\n", text
+    assert (env.work / "pkg" / "created.py").read_text(encoding="utf-8") == "print('added as the work domain')\n", text
     assert not (env.work / "old.py").exists(), text
     assert attached(docker, "mv -f")  # the add landed in the container
     assert [call for call in attached(docker, "rm -f") if "old.py" in call[-1]]  # and the delete ran there

@@ -89,7 +89,8 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
     only hears, and its view says so as ``only_hears`` (derived on every read, never stored)."""
     from ouroboros.consciousness_allowance import allowance_window
     from ouroboros.place_arrivals import account_candidates
-    from ouroboros.places import place_room_index
+    from ouroboros.places import place_model_route, place_room_index
+    from ouroboros.route_choice import following_route
     if allowance is None and not brief:
         allowance = allowance_window(root, allow_stale=True)
     records = place_records(root) if records is None else records
@@ -100,6 +101,14 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
     result["notes"] = [{**n, "note_id": note_identity(place.place_id, i, place.notes[i])}
                        for i, n in enumerate(result["notes"])]
     circle = records.circle_context(place.place_id)
+    model, layer = place_model_route(place, circle)
+    if not model:
+        model = following_route("consciousness")[0]
+    elif model in ("main", "light"):
+        from ouroboros.config import get_light_model
+        from ouroboros.model_slots import _main_model
+        model = get_light_model() if model == "light" else _main_model()
+    result["model_route"] = {"value": model, "layer": layer}
     result["circle"] = circle if brief or circle is None else {
         key: circle[key] for key in ("circle_id", "placed_by", "placed_at")}
     result["description"] = records.description(place.place_id)
@@ -148,7 +157,8 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
 
 def circle_summary(circle) -> dict[str, Any]:
     """A circle once, with its whole words and who wrote them; its places name it by ``circle.circle_id``."""
-    return {key: circle[key] for key in ("circle_id", "name", "text", "text_author", "text_at", "revision")}
+    return {**{key: circle[key] for key in ("circle_id", "name", "text", "text_author", "text_at", "revision")},
+            "model": circle.get("model", "")}
 
 
 def places_view(root) -> dict:

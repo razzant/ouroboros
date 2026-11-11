@@ -45,7 +45,7 @@ _APPARATUS = frozenset({
     "ouroboros/preflight_qualification.py", "scripts/run_tests.py", "scripts/safe_test.py",
     "ouroboros/test_environment.py", ".github/workflows/ci.yml",
     "ouroboros/process_containment.py", "ouroboros/process_lifeline.py",
-    "ouroboros/process_overload.py", "ouroboros/test_parallelism.py",
+    "ouroboros/process_overload.py", "ouroboros/test_parallelism.py", "ouroboros/host_memory.py",
     "tests/default_lane.py", "tests/browser_lane.py", "tests/ci_evidence.py", "tests/ci_verdicts.py",
     "tests/ci_accepted.py", "tests/stack_samples.py", "tests/_test_folders.py",
 })

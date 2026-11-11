@@ -460,15 +460,44 @@ Enter as a line break.
 
 ### Composer owner controls
 
-Each composer saves its room's **Subagents**, **Context** and **Effort** through the owner endpoints,
-in that order after ☰. Main supplies a one-time copy to new Projects; later changes stay in their room.
+Each composer saves its room's **Model**, **Subagents**, **Context** and **Effort** through the owner endpoints,
+in that order after ☰, with Model first. Main supplies a one-time copy of the last three to new Projects;
+later changes stay in their room. A room's Model is never copied: it follows Main until the room chooses,
+and says so (name `Main`, value Main's model); a choice stays with its room.
 Readback comes from Main state or the named Project, never another room. Saves apply
 to new participants; running work retains its choices through Resume. A refusal
 keeps the saved value and says why. No scope selector or extra settings row.
 
-Each is a neutral **capsule** of the pills' height — ring, name, value: `Subagents Auto`, `Context Max`,
-`Effort X-High`; the name in secondary ink at 500, the value in meta ink at 600,
-and only the ring's lit arc coloured (crimson; Low neutral ink, Nano the Project's): a level is never amber.
+**Model is the model new work here starts on.** Its glyph is the mark of the source that model is reached through
+(a source without a mark of its own shows its initial, never an invented logo), lit only while the room chose its
+own; then the name is that source. Closed, it always shows the room's choice, never a running work's model, and
+wears no mark for one; open, its hint adds one fact line when works here run on other
+models, over `Applies to new work here; running work keeps its model.` In the Main chat the capsule is Main itself:
+a pick asks first in the shared confirm dialog (what Main becomes and was, the route's facts,
+`model_roles.MAIN_FOLLOW_NOTE`, and in one line the pinned account and manual window it resets), then writes Main.
+**The sheet also says what the change does not move**: how many running works follow Main (said as unknown, never as zero, while the list
+of works is incomplete), then what is not on Main now — running and queued works on other models, each with why
+(`you chose it`, `its room's model`, `Ouroboros switched to it`, `fallback since 02:14` in amber) and its room, and
+rooms that start new work on their own model — each with its own tick to move it too. Nothing is ticked
+beforehand; a work on a fallback is listed as one and never counted among those that will switch; a work the
+server offers no model control for has no tick. Each tick is one act after the Main write (a work follows Main
+again; a room's own model is cleared), there is no batch, and a second sheet says each one's own result. Its strip is `Main · the two most recent models · Search` (one recent in the stack layout)
+under a neutral thumb; a press chooses, arrows only move. **Search is a field in the row; its suggestions float
+above the row like the hint and never move the composer**: Main, the recents, then the sources
+that can lead a work (those Settings offers the Main role, never agent sessions). With one source, its models stand
+under its own name without a source step; when Main has a row above, its model is omitted from this section.
+A recent may also appear under its source. A row is one model through one source, however many accounts list it, never an account: the source, whether
+it is a subscription or paid by key, its window when known (an unknown window is omitted), `Unavailable` when no
+account can serve it now; where a line cannot hold both, the facts go under the model's name, which keeps its line,
+and wrapped facts read from the same start on each line. Search spans the sources, a model once per provider; a key that cannot send keeps
+Settings' "(no key)", "(off)", "(removed)"; where only Main can lead, the list says so and leads to Settings ›
+Accounts. The catalog suggests and never admits: any id can be used as typed. It is read when the capsule opens,
+never polled. Under a finger opening raises no keyboard: the field takes focus on its own press. Escape clears the
+field, then leaves the search, then closes. A room's pick posts at once; Send waits for it, Panic never does.
+
+Each is a neutral **capsule** of the pills' height — glyph, name, value: `Main gpt-6-astra`, `Subagents Auto`,
+`Context Max`, `Effort X-High`; the name in secondary ink at 500, the value in meta ink at 600,
+and only the ring's lit arc or Model's mark coloured (crimson; Low neutral ink, Nano the Project's): a level is never amber.
 Subagents is no exception: closed, Off is muted and Auto and Swarm read like the others' values; its lit network
 tells them apart, and Swarm never fills the capsule (owner 28.10).
 Until the room's values arrive the ring stays unlit and the value secondary,
@@ -502,8 +531,9 @@ scrolling and dragging.
 (padding down to `--space-1`), else alone while they step aside (down to 3 px, the
 pill's corners tightening; the name and divider yield first), last scrolling inside
 itself, faded where levels hide. A closed line too narrow drops the names, then
-ellipsizes the longest values, never rings. All is measured, so no breakpoint
-(`web/modules/capsule_fit.js`).
+ellipsizes the longest values; before that cut reaches Model's value, Subagents, Context and Effort
+fold to their glyphs, which still say their values, and
+only then is Model's value cut. All is measured, so no breakpoint (`web/modules/capsule_fit.js`).
 
 **It opens in place.** Beside the others the strip grows by its width. Alone, its
 glass grows from the closed capsule to the whole line in 300 ms on the iOS sheet
@@ -899,11 +929,12 @@ status sentence's or a composer chip's dot is its tone, §4).
   or was stopped by the spending limit (new starts refused, or its wake proven held at the allowance it started
   with); (2) a warning worth reading — warn toasts and sentences,
   Settings and onboarding notes, warnings inside task timelines, reviews and Logs
-  events, account quota; (3) the System voice (a pale tint in the light theme, its name
+  events, account quota, and a work that went to a fallback route by itself, until that is resolved
+  (its card's model fact and the same word in the Main sheet); (3) the System voice (a pale tint in the light theme, its name
   in the dark one), a voice, not a status; (4) a few data categories that are not statuses (Logs and Storage
   categories, the fourth default chart series). What goes on by itself or what someone chose — queued, waiting,
   paused, pausing, stopped, unconfirmed, work in flight, a mode, a level, a setting
-  value — is never amber.
+  value — is never amber; the fallback above is amber because the work then runs on a model nobody chose for it.
 
 In a Project row the mark owns one reserved trailing column, so it sits at one x
 across rows whatever the name length and, with a fine pointer, while the ⋯ is
@@ -1456,7 +1487,8 @@ something that ends by itself, two bars while paused, a faint ring when
 unconfirmed. While something waits for the owner the amber dot replaces that shape
 beside the room's word; a Pause is not the owner's turn. At rest `Online` keeps its
 green dot, a status sentence's own. Only what the client alone knows lies over the
-server's mark: `Reconnecting…` (a ring), `Updating…` (a ring) while a room shown again or
+server's mark: `Reconnecting…` (a ring; `· server answers` once the core answered and a later
+attempt still failed: an observation, never a cause), `Updating…` (a ring) while a room shown again or
 reconnected still reads what it missed after 300 ms, the owner's own unconfirmed send and the
 owner's own Stop press (moving), and `Starting…` with the boot phases that refine it
 (no mark). The transcript's typing bubble shows only while the room's work moves and
@@ -1600,6 +1632,17 @@ reviews create child tasks or prove execution.
   codes stay in the receipt, the PR body and the merging agent's result.
   A later FAIL of that record appears below with one retained report link when
   available; it creates no Main row.
+- A work the review gate let continue where Blocking enforcement would have
+  stopped it carries one quiet phrase on its card's line, `Review: N× continued
+  where Blocking would have stopped · latest: <reason>`, live as each decision
+  lands and on a page load before Details open, a running work's too (a Project
+  work's portal in Main shows it live and once its Details open), and one
+  Details row, `Review gate did not prohibit
+  continuation`, holding the stored head of the latest reason (300 characters,
+  an ellipsis when cut; `review_gate_card.js`): a count, never a row per
+  decision; no Main row and no Telegram message of its own, its Telegram
+  completion carrying the same phrase. It never says committed, merged or
+  running; a child's decision counts on its root's card, naming the child.
 - Read opens the selected saved answer in the document reader (Markdown, Source
   exact; a failure note as plain text) and never regenerates a review or
   switches sources after an update; limits, Download, timeout and focus follow
@@ -2107,12 +2150,18 @@ position until closure. Host words use `tr`/`fmt`; summaries, notes and names us
 Circles (first tool) is the one home of places; Dashboard, Settings and a connector's Skills sheet
 point to it. One card: circles in the owner's order, one open, then “Not in a circle” (open while
 no circle exists). An open circle shows its words whole in their author's voice (owner tint for
-the owner's only), Edit (name, words, Delete), Add a place and its rows; Delete names how many
+the owner's only), Edit (name, words, model, Delete), Add a place and its rows; Delete names how many
 places keep their connection and lose its words. No feed, summary or wake list: Main holds attention.
+A circle may have a model, in the place sheet's own chooser: its places think with it unless one has
+its own, and without one they use the consciousness model; the head names it only when it has one
+(“model glm-5.3”), and the open circle says how many of its places keep a model of their own. A count the
+name's line cannot hold (a long model name, a long circle name) goes under the name, at the line's end, and
+wraps there; a row's facts wrap the same way, and nothing is ever wider than the head or the row.
 
 A row: mark, the place's own name, service, state word (with “· consciousness off” and the muted dot while Off
 leaves a place that is not Paused only hearing), readiness only when not simply on, the
-last captured event (“no captured event”, never “no activity”) and the optional description,
+last captured event (“no captured event”, never “no activity”), its model only when the place
+overrides, and the optional description,
 ellipsized: its own field, empty until written, never a note's first line; purpose, not a rule.
 
 Add asks “What is this place, and what am I here for?” (its first note) and the optional
@@ -2139,7 +2188,9 @@ Title: the row's name; meta: service and state. First the context: the circle as
 change moves the place), “Edit in circle ›”, its words in two lines with who wrote them and who
 placed the place (an Ouroboros placement offers “Keep it in {circle}”), the place's own notes in
 brief in their authors' voices and the description; then “Open conversation”, three recent rows,
-“All N ›”.
+“All N ›”. More › Model holds only the place's own model: empty, its placeholder and help say what
+it uses, “Uses {circle}'s model: {model}” or “Uses the consciousness model: {model}”, and clearing
+the field returns the place to that.
 
 “Your accounts here” uses status: “It writes here as {label}
 · reads as {labels}”. Only users match confirmed accounts: unconfirmed senders
@@ -2342,8 +2393,44 @@ and convert with it. Attention-only blocks and workless non-Done endings have
 status and wait controls but no title or conversion until the first work row
 adds one.
 
+**A work's model on its card.** A root card's meta line begins with the model the work runs on, said from the
+server's published fact (`works[].lead`; a direct turn's from its activity row). It is the mark of its source and `Source · model`
+in a node of its own before the rest of the line, so a repaint of the line never re-creates it. Beside it, words
+say why the work is on that model when it does not simply follow Main: `this room's model`, `you chose it`,
+`you asked for it`, `Ouroboros switched to it`, or the role it follows (`follows Light`); a follower says nothing
+more there, and its popover's first line says `follows Main`. When the published fact includes the owner's words
+that chose a model, the popover's first line quotes them after `you asked for it`, including the primary's words
+while the work runs elsewhere; a primary awaiting application is identified by its pending arrow, without claiming
+the work already left it, and authored text keeps its exact case and whitespace and is never translated.
+CSS alone clips a long quotation, the shared `Show all` / `Show less` control exposes the complete published span
+by press or tap, and an excerpt marked by the server is labelled as an excerpt. When the next step will run on another route the
+fact shows both, `gpt-6-astra → glm-5.3 at the next step` (`when it starts` for a queued work), so a change of
+Main never looks failed while a call in flight finishes. Where the server offers the work's `model` control the
+fact is a quiet capsule in the line's own ink (stronger for a model of the work's own) that opens a popover
+anchored to it, so nothing in the transcript moves: whose model this is, then the Model capsule's own field and
+list — Main, the recent models, Search. The list's Main row is the one way to follow Main, as `Main` is in the
+capsule's strip, and its facts say so (`this work will follow Main`; `this work follows Main` on a follower).
+A pick is one act, and its answer says when it applies: `Switches at the next step; the running call
+finishes.` or, for a queued work, `Applies when it starts.` A refused act is said in the popover in the owner's
+words, by the server's reason; when the server saved the decision and only its delivery failed, `Retry` sends
+the same request again. Without the offered control the fact is plain text: a control is the
+server's decision and is never guessed. A card whose work publishes no such fact (an older record, a child, a
+portal) keeps the line below. On a narrow card the source gives way before the model's name.
+An owner move on a wait card uses ordinary ink, names the unchanged primary it left, and offers the ordinary model
+list; a pending line appears only when the published fact carries one.
+
+**A work on a fallback is amber until that is resolved**: its fact reads
+`fallback from Settings · claude-opus-5.5 · since 02:14`, then what it left (`left gpt-6-astra`), wrapping rather
+than cut, and its popover says when it left and why — in the wait card's own words where it has them for that
+condition (`Sign-in required`, `Waiting for quota`, `Key unavailable`), else the server's code as it is, never a
+sentence of the page's own — and offers the three exits: **Return** (back to the model it
+left, at the next step), **Wait** (wait for that model, no paid calls until it answers) and **Keep** (the
+fallback becomes the work's own choice). Amber ends when the server's fact says so, never on a timer here;
+nothing about it is written to the Main chat; the amber line carries no money figure (one money line per card;
+per-route spend is in Details).
+
 The compact meta line names executor/model (roots: observed solve model, else
-agent model; a Claudexor route by its model), duration, cost, exceptions (tool
+agent model; a Claudexor route by its model; the model is the fact above when the work publishes one), duration, cost, exceptions (tool
 errors only under a chip that warns or fails; under Done the block's own rows
 name them) and running narration's `updated` (in a root's head).
 One positive task-local tool-call count joins that line and remains after Done
@@ -2436,6 +2523,9 @@ changing Local for one waiting fallback makes the replacement task-only, its
 persistence checkbox cleared and disabled with an explanation while Apply
 remains available. Model and account changes can still be saved when the shared
 Local value is unchanged; permanent group-wide Local changes remain in Models.
+A work on a model of its own (its room's, or one the owner gave it) waits on no
+role of Settings: its row is named `This work's model` and offers no "Also save
+this role in Settings".
 
 A pool confirmed to contain both accounts requiring sign-in and accounts waiting
 for quota says "Waiting for access" and names both causes. It keeps automatic
@@ -2446,8 +2536,10 @@ claiming quota exhaustion or guaranteed availability. It never offers sign-in.
 Only confirmed quota pauses the execution clock; authentication and unconfirmed
 availability waits consume it. Calendar deadlines remain fixed. Configured
 fallback routes are tried before a wait card is shown. Work continuing on a
-fallback is not a wait: nothing claims the primary recovered, the model alone
-asks to return, and only the primary's own accepted reply counts as a return.
+fallback is not a wait: nothing claims the primary recovered, the mind or the
+owner returns it (the owner from the card's amber model fact: Return, Wait or
+Keep), and only the primary's own accepted reply
+counts as a return.
 
 A submitted action is shown as pending until the task reports its application; a
 saved Settings change and a still-pending task change are disclosed separately.
@@ -2648,7 +2740,8 @@ Accounts is the common connection surface for subscriptions and API keys. An API
 Models and Agents edit assignments; a new connection adds choices without
 replacing them. A model role uses one compact
 Source / Model / Account row. Under Main, Settings (not the wizard or a wait
-picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save; it forecasts no tokens
+picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save; its second host is the Main chat's Model capsule, whose
+confirming sheet says it before it writes Main; it forecasts no tokens
 or cost. The account is a property of that role: Auto
 rotates compatible accounts and an explicit pin stays pinned. A model inherited
 from Main remains visibly inherited while its account can be pinned
@@ -2677,7 +2770,8 @@ each enabled key holding its credential, named "OpenRouter" or "OpenRouter ·
 Claude credits", then one disabled pointer to Accounts; a saved choice that
 cannot send stays selectable as "(no key)", "(off)" or "(removed)"), Agents · sessions where a session
 is possible. The model chooser lists only the chosen source's catalog, so a
-suggestion's transport is the selected source; any id can still be typed. The
+suggestion's transport is the selected source; any id can still be typed. The composer's
+Model capsule alone searches across sources, each row naming its own. The
 stored spellings (`provider::model`, `claudexor::source=model`,
 `harness=model`) are serialization authored by the editor: never required from
 the owner, never a field placeholder or help-text instruction, never the
@@ -3043,10 +3137,11 @@ the safe area (owner 22.10). Free room lies between the tools and the foot,
 never between the list and the tools (owner 18.10); a wrapping update grows the
 foot upward. Main's row carries its room's status mark at the Project rows' x. A Project's
 menu opens from its ⋯ (a fine pointer), a right-click, Shift+F10 or a long press; it
-first says the row's state as its mark and words, then offers Pin or Unpin; pinning
-neither opens nor reads it. Pins lead the one list, one `--space-2` of air before the next shown row their only
-boundary: no caption, glyph, tint, rule or column, so nothing reads as one more Project; their tooltip and
-accessible name say Pinned. Within each group the newest message leads: what Unread (§4) counts,
+first says the row's state as its mark and words, then offers Pin or Unpin, as the row's glyph left of its name
+does for a hovering pointer or the keyboard; pinning neither opens nor reads it. Pins lead the one list, one
+`--space-2` of air before the next shown row their only boundary: no caption, tint, rule or column, and no glyph at
+rest, so nothing reads as one more Project; their tooltip and accessible name say Pinned. Within each group the
+newest message leads: what Unread (§4) counts,
 the owner's own, of System rows only a work's end or a reminder; unread only marks. The column's places follow
 §5. The list rests on the pins and the fifty newest others, the rest a step away (owner's choice A1):
 Find a project under the header, Show more at its end. The field, a capsule a row high in the header
@@ -3094,7 +3189,7 @@ scrolls sideways keep their own finger. Dragging it back closes it
 veil follow the same finger. A menu or dialog that opens under the finger, a long
 press's row menu included, ends the drag before it starts. Every gesture has a
 visible control, except a Project row's menu on touch: phone rows have no room
-for ⋯, so there a long press opens it, and the ⋯ stays in the row for the keyboard
+for ⋯, so there a long press opens it, and the ⋯ and Pin stay in the row for the keyboard
 and screen readers, appearing when focused (`web/modules/row_menu_gesture.js`;
 a feed row keeps its own press, which sinks and lifts it).
 

@@ -144,9 +144,12 @@ def test_main_turn_origin_is_carried_byte_for_byte(tmp_path):
     rows = ow.governing_words_for_schedule(ctx)[ow.FIELD]
     assert rows == [{"text": message, "source": "initial_user", "carrier": "ctx", "task_id": ROOT, "ts": TS,
                      "ref": "chat 1 / msg-1790746905659-12"}]
+    assert ow.safety_sources(ctx) == [{"source": "initial_user", "content": message, "ts": TS}]  # dated by its door
+    assert ctx._owner_directives == [{"source": "initial_user", "content": message}]
     unstamped = _ctx(tmp_path)
     _initialize_owner_directives(unstamped, [{"role": "user", "content": message}])
     assert ow.FIELD not in ow.governing_words_for_schedule(unstamped)
+    assert ow.safety_sources(unstamped) == [{"source": "initial_text", "content": message}]
 
 
 def test_project_first_message_is_never_added_to_the_words(tmp_path):
@@ -561,3 +564,28 @@ def test_module_imports_no_model_client():
     assert _llm_imports(source) == []
     assert _llm_imports("def f():\n    from ouroboros.llm import LLMClient\nimport ouroboros.llm_openai_compatible\n") == [
         "ouroboros.llm", "ouroboros.llm_openai_compatible"]
+
+
+def test_live_speech_is_citable_but_not_an_owner_source(tmp_path):
+    from ouroboros.owner_continue import CORPUS_INITIAL_SOURCES, CORPUS_OWNER_SOURCES
+    from ouroboros.loop_messages import owner_reply_owed
+    from ouroboros.safety import _owner_yes
+
+    ctx = _ctx(tmp_path, directives=[{"source": "live_call", "content": "Keep all these words. Choose the other model.", "msg_id": "spoken"}])
+    before = [dict(row) for row in ctx._owner_directives]
+    assert ow.cited_owner_basis(ctx, "Choose the other model.")[0] is None
+    basis, error = ow.cited_owner_basis(ctx, "Choose the other model.", call_speech=True)
+    assert not error and basis == {"source": "live_call", "cited": "Choose the other model.", "msg_id": "spoken"}
+    assert ctx._owner_directives == before
+    assert "live_call" not in ow.OWNER_SOURCES | CORPUS_INITIAL_SOURCES | CORPUS_OWNER_SOURCES
+    assert ow.carried_owner_corpus(ctx) == [] and ow.directive_owner_rows(ctx) == []
+    assert not owner_reply_owed(ctx)
+    assert _owner_yes(ctx, lambda: pytest.fail("a caption never supplies an answered approval card")) == ""
+    assert ow.cited_owner_basis(ctx, "invented", call_speech=True)[0] is None
+    # Even a caption alongside a card is not the answered-card approval channel.
+    ctx._owner_directives[0]["reply_to"] = {"address": "quiz q1", "text": "Publish these words.\nroom-a"}
+    subject = lambda: ("Publish these words.", ["room-a"], False, [])
+    assert _owner_yes(ctx, subject) == ""
+    ctx._owner_directives[0]["source"] = "owner_mailbox"
+    assert _owner_yes(ctx, subject) == "spoken"
+    assert owner_reply_owed(ctx)

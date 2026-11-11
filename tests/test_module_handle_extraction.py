@@ -76,7 +76,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     "supervisor/worker_pool_lifecycle.py": ("supervisor/workers.py", "_pool", frozenset({
         # Runtime676: execution reader/disable moved from the facade; RUNNING
         # and patched sibling calls must remain late-bound through that facade.
-        "DRIVE_ROOT", "MAX_WORKERS", "REPO_DIR", "RUNNING", "WORKERS", "Worker",
+        "DRIVE_ROOT", "REPO_DIR", "RUNNING", "WORKERS", "Worker",
         "_WORKER_POOL_DISABLED_REASON", "_worker_pool_execution_state", "disable_exhausted_worker_pool",
         "_get_ctx",
         "_verify_worker_sha_after_spawn", "get_event_q", "kill_workers", "load_state",
@@ -91,7 +91,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "_stage_promoted_initial_attachments",
     })),
     "supervisor/worker_owner_wait.py": ("supervisor/workers.py", "_pool", frozenset({
-        "DRIVE_ROOT", "MAX_WORKERS", "RUNNING", "WORKERS", "repo_writer_task_allowed", "time",
+        "DRIVE_ROOT", "RUNNING", "WORKERS", "repo_writer_task_allowed", "time",
     })),
     # F2.2 lane rows (4fffefb1), pinned here by the ADOPTION truth wave: the four
     # queue/worker leaves the F2.2 cancel-organ train landed proof-green but never
@@ -121,19 +121,25 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     })),
     "supervisor/worker_assignment.py": ("supervisor/workers.py", "_pool", frozenset({
         "DRIVE_ROOT", "PENDING", "RUNNING", "WORKERS",
-        "_assignment_depth_reservation_admits", "_cancel_unauthorized_evolution",
+        "_assignment_depth_reservation_admits",
         "_drop_assignable_evolution_tasks", "_drop_cancelled_pending",
-        "_emit_task_done_terminal", "_evolution_assignment_error",
-        "_invalid_depth_deferred", "_normalize_pending_task_depth",
+        "_emit_task_done_terminal",
+        "_invalid_depth_deferred",
         "_quarantine_invalid_pending_depths",
-        "_retry_terminalization_pending_for_assignment", "_running_subagent_count",
-        "_terminalize_invalid_pending_depth", "append_jsonl", "load_state",
+        "_retry_terminalization_pending_for_assignment",
+        "append_jsonl", "load_state",
         "reconstruct_task_cost", "repo_writer_task_allowed", "send_with_budget",
         "utc_now_iso",
-        # The bounded residual forecast and a disabled pool's frozen membership.
-        "MAX_WORKERS", "_WORKER_POOL_DISABLED_REASON",
+        # A disabled pool's frozen membership.
+        "_WORKER_POOL_DISABLED_REASON",
         # A moved work's placement readmission validates its new room folder at launch.
         "REPO_DIR",
+    })),
+    # WP7 (pool-capacity): the assignment pass and its one predicate's store stage left worker_assignment.
+    "supervisor/dispatch_choice.py": ("supervisor/workers.py", "_pool", frozenset({
+        "DRIVE_ROOT", "PENDING", "_cancel_unauthorized_evolution", "_evolution_assignment_error",
+        "_normalize_pending_task_depth", "_terminalize_invalid_pending_depth", "direct_chat_turn",
+        "repo_writer_task_allowed",
     })),
     "supervisor/worker_health.py": ("supervisor/workers.py", "_pool", frozenset({
         # Runtime707: health hands off recovery; the reaper owns the respawn.
@@ -170,7 +176,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "_acquire_git_lock", "_format_commit_result", "_managed_commit_gate_failure",
         "_managed_post_commit_tests_gate", "_post_commit_result", "_publish_post_commit_test_fact",
         "_record_commit_attempt", "_release_git_lock", "_verify_reviewed_commit_binding",
-        "record_bound_commit_success", "run_cmd",
+        "note_override_landing", "record_bound_commit_success", "run_cmd",
     })),
     "ouroboros/tools/git_plumbing.py": ("ouroboros/tools/git.py", "_git", frozenset({
         "_BINARY_EXTENSIONS", "acquire_exclusive_file_lock", "format_protected_paths",
@@ -383,12 +389,15 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
     })),
     "ouroboros/loop_model_call.py": ("ouroboros/loop.py", "_loop", frozenset({
         "_RoundModelCallContext", "_append_or_merge_user_message",
-        "_apply_runtime_overrides", "_call_round_model", "_fallback_chain_allowed",
+        "_call_round_model", "_fallback_chain_allowed",
         "_reconcile_transport_wait", "_run_cross_model_fallback_chain",
         "_context_overflow_retries", "_dispatch_round_model", "_emit_checkpoint_event",
         "_measure_round_main_fit", "_output_exhausted_notice", "_rebind_context_fit_plan",
         "_retire_main_reasoning", "_server_web_allowed_by_task", "_task_deadline_epoch", "call_llm_with_retry",
         "last_physical_attempt_capture", "seal_task_transcript",
+    })),
+    "ouroboros/loop_routes.py": ("ouroboros/loop.py", "_loop", frozenset({
+        "_apply_runtime_overrides", "_rebind_context_fit_plan",
     })),
     "ouroboros/loop_nudges.py": ("ouroboros/loop.py", "_loop", frozenset({
         "_TREE_ACCOUNTING_MAX_STALE_SEC", "_append_or_merge_user_message",

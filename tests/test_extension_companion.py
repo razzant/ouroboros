@@ -1336,9 +1336,9 @@ _REFRESH_FRONTMATTER = (
 )
 
 
-def _refreshable_skill(tmp_path, monkeypatch, token: str, plugin_api: str = _PLUGIN_API_24):
+def _refreshable_skill(tmp_path, monkeypatch, token: str, plugin_api: str = _PLUGIN_API_24, payload=None):
     """A granted extension (declaring ``plugin_api``, 2.4 by default) whose companion runs in a real supervisor,
-    settings in a real document."""
+    settings in a real document; ``payload`` adds or replaces skill files (relative path -> text)."""
     import ouroboros.config as config_mod
     from ouroboros.skill_loader import save_skill_grants
 
@@ -1351,6 +1351,8 @@ def _refreshable_skill(tmp_path, monkeypatch, token: str, plugin_api: str = _PLU
     (skill_dir / "scripts").mkdir(parents=True)
     drive_root.mkdir()
     (skill_dir / "scripts" / "daemon.py").write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+    for relative, text in (payload or {}).items():
+        (skill_dir / relative).write_text(text, encoding="utf-8")
     (skill_dir / "plugin.py").write_text("def register(api):\n    api.register_companion_process('daemon')\n",
                                          encoding="utf-8")
     (skill_dir / "SKILL.md").write_text(
@@ -1377,28 +1379,73 @@ def _refreshable_skill(tmp_path, monkeypatch, token: str, plugin_api: str = _PLU
     return api, supervisor, settings_path, drive_root, loaded
 
 
-def test_companion_starts_from_a_deep_staged_import_directory(tmp_path, monkeypatch):
-    """The actual companion launch consumes the short identity as its cwd."""
+_MAX_PATH = 260  # Win32: UTF-16 code units, the terminating NUL included
+_DEEP_DAEMON = """\
+import json, os, sys, time
+sys.dont_write_bytecode = True  # no __pycache__ path to fit, nor one under an inherited PYTHONPYCACHEPREFIX
+import near
+with open("ready.txt", encoding="utf-8") as resource:
+    print("READY " + json.dumps({"cwd": os.getcwd(), "near": [near.VALUE, near.__file__],
+                                 "resource": resource.read()}), flush=True)
+print("\\n" * 4096, end="", flush=True)  # the supervisor's drainer hands over whole 4096-byte reads (or EOF)
+time.sleep(60)
+"""
+
+
+def _utf16(path) -> int:
+    return len(str(path).encode("utf-16-le")) // 2
+
+
+def test_companion_starts_from_a_deep_staged_import_directory(tmp_path_factory, monkeypatch):
+    """Where the two-digest leaf would put the working directory past MAX_PATH while every path the launch reads
+    fits, the real companion imports its neighbour and reads a cwd-relative file, then says READY through that
+    runtime's own pipe without a restart (the printer's pid is not compared: a Windows venv launcher runs the script
+    in a child); unload stops it and releases the tree."""
     import os
     import uuid
-    from ouroboros.skill_loader import skill_state_dir
 
-    root = pathlib.Path(os.environ.get("OUROBOROS_TEST_TEMP_ROOT", str(tmp_path)))
-    base = root / ("launch-" + uuid.uuid4().hex[:8])
-    padding = max(0, 120 - len(str(base)) - 1)
-    if padding:
-        base /= "d" * padding
-    base.mkdir(parents=True)
+    from ouroboros.skill_loader import skill_state_dir_path
+
+    leaf = "sha256-" + "0" * 64  # one full SHA-256, whatever its digits
+    earlier = len(f"{leaf}-{'0' * 64}") - len(leaf)  # what the two-digest leaf added
+
+    def staged_cwd(base, name=leaf):
+        return skill_state_dir_path(base / "drive", "tgdemo") / "__extension_imports" / name / "skill"
+
+    reads = (("scripts", "daemon.py"), ("scripts", "near.py"), ("ready.txt",))
+    longest = max(_utf16(pathlib.Path("x", *parts)) - 1 for parts in reads)  # with its separator
+    root = tmp_path_factory.mktemp("deep").resolve()
+    below = _utf16(staged_cwd(root / "x")) - _utf16(root / "x")
+    low, high = _MAX_PATH + 1 - earlier, _MAX_PATH - 1 - longest  # the earlier leaf overflows / every read fits
+    depth = max((low + high) // 2, _utf16(root) + 2 + below)  # the middle, or as shallow as this root allows
+    assert depth <= high, f"no depth below {root} where the earlier leaf overflows and every read fits"
+    base = root / ("d" * (depth - below - _utf16(root) - 1))
+    base.mkdir()
+    nonce = uuid.uuid4().hex
     supervisor = None
     try:
-        _, supervisor, _, drive, loaded = _refreshable_skill(base, monkeypatch, "synthetic")
+        _, supervisor, _, _, loaded = _refreshable_skill(base, monkeypatch, "synthetic", payload={
+            "scripts/daemon.py": _DEEP_DAEMON, "scripts/near.py": f"VALUE = 'near:{nonce}'\n",
+            "ready.txt": f"resource:{nonce}"})
         runtime = supervisor._runtimes["tgdemo:daemon"]
-        assert runtime.process.poll() is None
-        cwd = runtime.descriptor.cwd
-        assert cwd.is_relative_to(skill_state_dir(drive, loaded.name) / "__extension_imports")
-        assert len(str(cwd)) < 260
-        assert len(cwd.parent.name) == 71
-        assert (cwd / "scripts" / "daemon.py").is_file()
+        pid, cwd = runtime.process.pid, runtime.descriptor.cwd
+        assert cwd == staged_cwd(base, extension_loader.extension_import_identity(loaded)) and _utf16(cwd) == depth
+        assert max(_utf16(cwd.joinpath(*parts)) for parts in reads) < _MAX_PATH < _utf16(cwd) + earlier
+        deadline = time.monotonic() + 60
+        while b"\n" not in runtime.stdout and runtime.process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.05)
+        out = bytes(runtime.stdout)  # the supervisor's drainer owns the pipe
+        line = out.split(b"\n", 1)[0]
+        assert b"\n" in out and line.startswith(b"READY "), (out[:512], bytes(runtime.stderr))
+        ready = json.loads(line[len(b"READY "):])
+        assert (ready["near"][0], ready["resource"]) == (f"near:{nonce}", f"resource:{nonce}")
+        assert os.path.samefile(ready["cwd"], cwd) and _utf16(ready["cwd"]) == depth
+        assert os.path.samefile(ready["near"][1], cwd / "scripts" / "near.py")
+        assert supervisor._runtimes["tgdemo:daemon"] is runtime and supervisor.snapshot()["tgdemo:daemon"]["pid"] == pid
+        assert runtime.process.poll() is None and not supervisor._restart_history
+        extension_loader.unload_extension("tgdemo")
+        assert runtime.process.poll() is not None and supervisor.snapshot() == {}
+        assert not (cwd.parent / "owners" / str(os.getpid())).exists()
     finally:
         extension_loader.unload_extension("tgdemo")
         if supervisor is not None:

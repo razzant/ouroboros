@@ -56,3 +56,19 @@ test('historical starts are unknown and event aliases retain their actual phase'
     noteToolCall(record, summarizeChatLiveEvent({ type: 'tool_call', task_id: 't', invocation_id: 'i' }).toolCall);
     assert.doesNotMatch(toolEvidenceView(record.toolFold).headline, /unknown|error/);
 });
+
+test('a call Safety held reads as held outside the error phase, and the block counts no error for it', () => {
+    const frame = (status, invocation_id) => summarizeChatLiveEvent({ type: 'tool_call_finished', task_id: 't',
+        tool: 'run_command', invocation_id, is_error: true, status });
+    const views = [frame('safety_returned', 'i1'), frame('safety_unavailable', 'i2'), frame('error', 'i3')];
+    assert.deepEqual(views.map((view) => [view.phase, view.headline]), [
+        ['warn', 'A command was returned by the Safety Supervisor'],
+        ['warn', 'A command was not run: the Safety Supervisor could not read it'],
+        ['error', 'One of the steps failed · run_command']]);
+    const record = {};
+    for (const view of views) noteToolCall(record, view.toolCall);
+    assert.deepEqual([...record.toolFold.calls.values()].map((call) => call.status), ['held', 'held', 'error']);
+    assert.deepEqual([toolEvidenceView(record.toolFold).calls, toolEvidenceView(record.toolFold).errors], [3, 1]);
+    const logged = summarizeLogEvent({ type: 'tool_call', tool: 'run_command', is_error: true, status: 'safety_unavailable' });
+    assert.deepEqual([logged.phase, logged.headline], ['warn', 'A command was not run: the Safety Supervisor could not read it']);
+});

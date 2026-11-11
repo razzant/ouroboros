@@ -129,7 +129,7 @@ export function createSubagentsChoice({ doc = globalThis.document, onChoose = ()
 
 /**
  * The capsule in its room's composer row. `capsule(options)` is the family's open/fit machine
- * (composer_owner_controls.js), `save({ mode })` the room's owner write (it answers the room's cognition),
+ * (capsule.js), `save({ mode })` the room's owner write (it answers the room's cognition),
  * `openSettings()` Settings › Agents. Returns `{ el, capsule, syncState(values, availability), hasPendingSave,
  * pendingSave, destroy }`.
  */

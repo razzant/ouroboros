@@ -301,7 +301,7 @@ def _drive_state_section(env: Any) -> str:
     authority. P1: disclosed omission — keys NAMED, full file one read away."""
     keys = ("session_id", "current_branch", "current_sha", "evolution_mode_enabled",
             "evolution_owner_stopped", "evolution_cycle", "evolution_consecutive_failures",
-            "last_evolution_task_at", "bg_consciousness_enabled", "post_task_autostop",
+            "last_evolution_task_at", "bg_consciousness_enabled", "bg_consciousness_stop_source", "post_task_autostop",
             "budget_drift_pct", "budget_drift_alert", "last_owner_message_at")
     from supervisor.state import CONTROL_KEYS, RECOVERY_KEY, control_value, read_state
 

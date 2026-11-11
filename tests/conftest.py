@@ -580,7 +580,7 @@ def _pin_lane_groups(items, config) -> None:
     groups, files = {}, {}
     for item in items:
         resource = serial_resource(item)
-        group = f"serial:{resource}" if resource else item.nodeid.rsplit("::", 1)[0]
+        group = f"serial:{resource}" if resource else item.parent.nodeid
         item.stash[_LANE_GROUP] = group
         groups[item.nodeid] = group
         files.setdefault(group, set()).add(item.nodeid.split("::", 1)[0])
@@ -858,7 +858,7 @@ def _isolate_restart_generation(monkeypatch):
     """Panic and parent observation belong to one process generation, not later tests;
     so do a returning stop's named queue and the launch/schedule process memory."""
     from ouroboros import delegate_recovery, launcher_bootstrap, server_control
-    from supervisor import queue, schedule_occurrence, worker_assignment, worker_pool_lifecycle
+    from supervisor import dispatch_choice, pool_admission, queue, schedule_occurrence, worker_assignment
 
     monkeypatch.setattr(server_control, "_restart_successors", [])
     monkeypatch.setattr(server_control, "_restart_stop_requested", False)
@@ -867,7 +867,9 @@ def _isolate_restart_generation(monkeypatch):
     monkeypatch.setattr(queue, "RETURNS_NAMED", {})
     monkeypatch.setattr(schedule_occurrence, "_DEFERRED", {})
     monkeypatch.setattr(worker_assignment, "_COMMITTED_UNSENT", {})
-    monkeypatch.setattr(worker_pool_lifecycle, "_DEMAND_FORECAST", worker_pool_lifecycle._initial_forecast())
+    monkeypatch.setattr(dispatch_choice, "_ADMITTED", {})
+    monkeypatch.setattr(pool_admission, "_READY", {"seq": 0, "generation": None, "rss_bytes": None})
+    monkeypatch.setattr(pool_admission, "_FACTS", {})  # the last reading and the last fresh size: this test's own
 
 
 @pytest.fixture(autouse=True)

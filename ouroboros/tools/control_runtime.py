@@ -807,6 +807,7 @@ def _consciousness_status_facts(ctx: ToolContext) -> str:
         LAST_SKIP_STATE_KEY,
         LAST_WAKE_STATE_KEY,
         NEXT_WAKE_STATE_KEY,
+        STOP_SOURCE_KEY,
         _iso,
         panic_blocks_wake,
     )
@@ -832,9 +833,9 @@ def _consciousness_status_facts(ctx: ToolContext) -> str:
             stored = loaded if isinstance(loaded, dict) else None
             gap = "" if stored is not None else "corrupt: the file is not a JSON object"
     facts = {"source": str(path), "observed_at": utc_now_iso()}
-    fields = (("enabled", "bg_consciousness_enabled"), ("stored_next_wake_at", NEXT_WAKE_STATE_KEY),
-              ("last_wake_ended_at", LAST_WAKE_STATE_KEY), ("chosen_interval_sec", INTERVAL_STATE_KEY),
-              ("last_skip", LAST_SKIP_STATE_KEY))
+    fields = (("enabled", "bg_consciousness_enabled"), ("stopped_by", STOP_SOURCE_KEY),  # owner, panic or agent_tool
+              ("stored_next_wake_at", NEXT_WAKE_STATE_KEY), ("last_wake_ended_at", LAST_WAKE_STATE_KEY),
+              ("chosen_interval_sec", INTERVAL_STATE_KEY), ("last_skip", LAST_SKIP_STATE_KEY))
     if stored is None:
         facts.update(read_gap=gap, not_read=[name for name, _key in fields])
     else:
@@ -849,10 +850,11 @@ def _consciousness_status_facts(ctx: ToolContext) -> str:
                     facts[name] = _iso(value)
                 except (OverflowError, OSError, ValueError):
                     pass
-        unproven = authority_reason(path.parent.parent, str(stored.get("initialization_id") or "")) or (
-            "" if control_value(stored, "bg_consciousness_enabled")[0] else "unconfirmed after a state recovery")
-        if "enabled" in facts and unproven:
-            facts["enabled"] = {"status": "unknown", "reason": unproven}
+        authority = authority_reason(path.parent.parent, str(stored.get("initialization_id") or ""))
+        for name, key in fields[:2]:  # the two controls: shown only as a copy that proves them
+            unproven = authority or ("" if control_value(stored, key)[0] else "unconfirmed after a state recovery")
+            if name in facts and unproven:
+                facts[name] = {"status": "unknown", "reason": unproven}
     if panic_blocks_wake(path.parent.parent):
         facts["panic_flag_kept"] = "state/panic_stop.flag is unreceived or unreadable: no wake starts until it is received"
     facts["configured_bounds_sec"] = {"min": get_bg_wakeup_min_sec(), "max": get_bg_wakeup_max_sec(),
@@ -905,7 +907,8 @@ def _set_next_wakeup(ctx: ToolContext, seconds: int) -> str:
             "next wake-up (a wake-up already pending keeps its time; a wake-up calling this sets its own next one).")
 
 
-def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: str = "") -> str:
+def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: str = "",
+                  owner_words: str = "", scope: str = "work", project_id: str = "", model_as_typed: bool = False) -> str:
     """LLM-driven model/effort switch (Constitution P5: LLM-first).
 
     Stored in ToolContext, applied on the next LLM call in the loop. ``primary``
@@ -929,6 +932,15 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: 
     requested_effort = str(effort or "").strip().lower()
     if requested_effort and requested_effort not in EFFORT_SCALE:
         return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(f"⚠️ Unknown effort: {effort}. Valid: {', '.join(EFFORT_SCALE)}")))
+    from ouroboros.tools.control_models import cited_switch, refuse
+
+    if scope not in {"work", "room", "main"} or (project_id and scope != "room"):
+        return refuse(ctx, "scope must be work, room or main; project_id belongs to room only.")
+    if (owner_words or scope != "work") and primary:
+        return refuse(ctx, "primary return/wait acts on this work; omit owner_words, scope and project_id.")
+    if owner_words or scope != "work":
+        return cited_switch(ctx, model=model, owner_words=owner_words, scope=scope, project_id=project_id,
+                            effort=requested_effort, model_as_typed=model_as_typed)
     requested_primary = str(primary or "").strip().lower()
     route = getattr(ctx, "primary_route", None)
     if requested_primary and (requested_primary not in ("return", "wait") or model):
@@ -940,17 +952,9 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: 
 
     from ouroboros import route_choice
     if requested_primary:
-        waiter = getattr(ctx, "model_wait_context", None)
-        chosen = ((getattr(waiter, "overrides", None) or {}).get(route["role"]) or {})
-        ctx.active_model_override = str(chosen.get("model") or route["model"])
-        ctx.active_use_local_override = bool(chosen.get("use_local", route["use_local"]))
-        ctx.active_role_override = route["role"]
-        ctx.route_wait_on_primary = requested_primary == "wait"
-        # The primary's own choice again: a following primary is re-read at the round boundary (the CURRENT one).
-        ctx.route_choice = route_choice.explicit("wait_card") if chosen else route_choice.opening_choice(ctx)
-        changes.append(f"primary route {ctx.active_model_override}{' (local)' if ctx.active_use_local_override else ''}"
-                       f" (role {route['role']}; if it refuses: "
-                       f"{'wait for it' if requested_primary == 'wait' else 'configured routes again'})")
+        from ouroboros.owner_model import primary_action
+
+        changes.append(primary_action(ctx, requested_primary))
     elif model:
         if model not in available:
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(f"⚠️ Unknown model: {model}. Available: {', '.join(available)}")))
@@ -968,6 +972,7 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: 
         ctx.active_model_override = model
         ctx.active_use_local_override = use_local
         ctx.route_wait_on_primary, ctx.active_role_override = False, None  # an explicit route ends a declared wait
+        ctx._lead_return_from = None  # it also cancels the requested return's held fallback fact
         ctx.route_choice = route_choice.explicit("switch_model")  # the mind's own route: Settings no longer move it
         changes.append(f"model={model}{' (local)' if use_local else ''}")
 

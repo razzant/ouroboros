@@ -54,11 +54,10 @@ CONTEXT_ONLY_TASK_PROVENANCES = frozenset({
     "system", "descendant_task", PROVENANCE_INDEPENDENT_TASK, PROVENANCE_PEER_TASK, "place_event",
 })
 KIND_FINALIZE_NOW = "finalize_now"
-# Owner "hurry" control (HQ1, 2026-08-15): a task-local typed acceleration
-# directive — NEVER owner dialogue and NEVER revoked after drain (restart
-# re-drain must restore the attempt latch; only terminal cleanup removes it).
-# Its ``text`` is the parser-required internal reason ("owner_hurry"), not prose.
+# Hurry's internal reason is not dialogue; retained until terminal cleanup so a
+# restart's drain restores its attempt latch. Model mail only wakes a durable read.
 KIND_HURRY = "hurry"
+KIND_OWNER_MODEL = "owner_model"
 # Owner's verbatim quiz answer (#Q-2b): a typed control whose ``text`` is the
 # chosen option label (plus an optional owner comment) — delivered inside a
 # structural frame, never as forged free-form owner dialogue.

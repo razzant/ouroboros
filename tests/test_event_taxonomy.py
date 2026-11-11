@@ -68,7 +68,7 @@ def test_every_row_declares_a_lane_and_telemetry_is_exactly_the_three_streams():
         "send_message", "send_photo", "send_document", "send_links", "send_quiz", "send_video",
         "typing_start", "task_done", "task_metrics", "schedule_subagent", "cancel_task", "owner_wait",
         "task_model_wait", "worker_quiescent", "restart_request", "cognitive_operation",
-        "main_llm_call_state", "external_wait_lease", "acceptance_fence", "budget_pause",
+        "main_llm_call_state", "work_lead", "acceptance_fence", "budget_pause",
         "budget_root_fence", "task_dispatch_resolved", "promote_chat_to_task", "steer_task",
         *_tier(TELEMETRY_ONLY),
     ):
