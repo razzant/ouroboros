@@ -566,10 +566,8 @@ export function bindAppVersionRender({ getStatus, render }) {
 export function initUpdates({ mount, state, ws }) {
     // The tab's one root and scroller (style.css "The Dashboard tab body"): the state of the channel leads as the
     // tab's headline with its facts and one next action; the last attempt, the record's facts, the description and
-    // Recovery follow, each behind its own disclosure. The channel itself is the settings card's row below.
-    const page = document.createElement('div');
-    page.id = 'page-updates';
-    page.className = 'dashboard-body scroll-fade-y';
+    // Recovery follow, each behind its own disclosure. The channel itself is chosen in the card below.
+    const page = Object.assign(document.createElement('div'), { id: 'page-updates', className: 'dashboard-body scroll-fade-y' });
     page.innerHTML = `
             <section class="ui-card updates-card" id="updates-status-card">
                 <div class="dashboard-hero">
@@ -633,12 +631,17 @@ export function initUpdates({ mount, state, ws }) {
                     <div id="updates-official-tags" class="updates-restore-list"></div>
                 </details>
             </section>
-            <section class="ui-card dashboard-settings" aria-label="Which updates" data-updates-settings></section>
+            <div class="dashboard-settings-cards" data-updates-settings></div>
     `;
     mount.appendChild(page);
-    // Drawn once, out of every repaint below; a saved channel reads the status again.
-    mountTabSettings(page.querySelector('[data-updates-settings]'), 'updates',
-        { state, title: 'Which updates', onSaved: () => loadStatus({ fetchRemote: false }) });
+    // The channel: a card of choices drawn once, out of every repaint below. Each settings read marks the chosen one.
+    const channelCard = page.querySelector('[data-updates-settings]');
+    mountTabSettings(channelCard, 'updates', { state, cards: [{ label: 'Which updates', solo: true }], onSaved: () => loadStatus({ fetchRemote: false }),
+        onPaint: (settings, chosen = String(settings?.OUROBOROS_UPDATE_CHANNEL ?? '')) => channelCard.querySelectorAll('[data-setting-value]')
+            .forEach((choice) => choice.setAttribute('aria-pressed', String(choice.dataset.settingValue === chosen))),
+        custom: (row) => `<div class="dashboard-choices" role="group" aria-labelledby="setting-${row.id}-name">${row.control.options.map((option) =>
+            `<button type="button" class="dashboard-choice" data-setting-value="${option.value}" aria-pressed="false"><span class="dashboard-choice-name">${option.label}</span>`
+            + `<span class="dashboard-choice-note">${option.note}</span></button>`).join('')}</div>` });
 
     const primaryBtn = page.querySelector('#btn-update-primary');
     let restartNeeded = false;  // panel-lifetime restart continuation (no durable marker exists for fence/rollback refusals)
@@ -681,8 +684,7 @@ export function initUpdates({ mount, state, ws }) {
     let letterRefreshError = null;
     let letterRequesting = false;
     let letterRequestError = null;
-    let letterDisposer = null;
-    let letterKey = null;
+    let letterDisposer = null, letterKey = null;
     // "Read all" offers the rest only when the clamped body hides some. A body in a hidden tab or page measures 0 x 0,
     // which says nothing, so that measure stays owed until the body has a height (its tab or the Dashboard shown, or
     // the next render). A new width refolds a folded text, so it owes the measure again.
