@@ -244,7 +244,7 @@ test('disabling excludes rotation without erasing a passed login', () => {
     assert.deepEqual(familyStatus(allOffNotRun, { accountsRead: 'failed' }),
         { tone: 'muted', label: '2 accounts · all disabled — last known' });
     // …and the metadata line states the exclusion in words on the row itself.
-    assert.match(accountMetaLine(allOff[0], payload()), /^disabled — excluded from rotation/);
+    assert.match(accountMetaLine(allOff[0], payload()), /^Out of rotation/);
 });
 
 test('a disabled account with a failed verification does not redden the family header', () => {
