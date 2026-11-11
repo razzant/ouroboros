@@ -505,3 +505,41 @@ def test_unread_host_counts_do_not_create_page_debt_or_restore_it_at_the_window_
     # A considered word is still an untold source, even beside unread host facts.
     others[0]["words"][0]["rank"] = 1
     assert forms.folded_rooms([group], {"F6a": [group["key"], "unread"]}) == [others[0]["room_id"]]
+
+
+@pytest.mark.parametrize("own_text", ["", "Their own first line.\nTheir later text."])
+def test_unread_openings_quote_only_the_rows_own_text(own_text):
+    from ouroboros import memory_view_conversation_forms as forms
+    from tests import _memory_view_synthetic as syn
+    group = syn.conversation(1, words=1)
+    group["catalogue_start"] = 12
+    room = group["rooms"][0]
+    room["overheard"] = True
+    word = room["words"][0]
+    host = "What the connector reports about this message (host facts, not their words):"
+    word.update(text=own_text, line=word["head"] + " " + (own_text or host), author="Ann")
+    expected = "«Their own first line." if own_text else "no text of their own"
+    for text in (forms._unread_line([word]), forms.render_group(group, set(), set(), 1),
+                 forms._counted_text([group], set(), True)):
+        assert expected in text and host not in text
+        assert "«no text of their own»" not in text
+    assert word["line"] in forms.render_group(group, set(), set(), 0)
+
+
+@pytest.mark.parametrize("author", ["own", "unknown"])
+@pytest.mark.parametrize("length", [40, 500])
+def test_event_openings_are_bounded_and_an_empty_room_names_its_last_fact(tmp_path, author, length):
+    from ouroboros import dialogue_store as ds, memory_view_events as events
+    shared.world(tmp_path)
+    row = _event_row("harbor", "one", 1, direction="system", type="task_summary", task_id="done")
+    ds.append(tmp_path, "chat", row)
+    room = _event_group(view(tmp_path))["rooms"][0]
+    empty = events.room_line(room)
+    assert "; no arrivals; last 2026-09-09 00:01; memory_read(" in empty
+    assert "author not recorded" not in empty
+    first = "A" * length
+    ds.append(tmp_path, "chat", _event_row("harbor", "one", 2, author, text=first + "\nLater paragraph."))
+    room = _event_group(view(tmp_path))["rooms"][0]
+    event = room["events"]
+    assert event["first"]["opening"] == first[:160]
+    assert "Event: 1 arrivals" in events.room_line(room) and "no arrivals" not in events.room_line(room)

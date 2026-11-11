@@ -51,8 +51,7 @@ def finish_capture(event, texts):
             label += " (account not confirmed as my human's)"
         event[name] = {"address": chat_chain.format_address(entry[0]), "pos": entry[2],
                        "ts": str(entry[1].get("ts") or ""), "author": label,
-                       "opening": " ".join(text[:160].split()) if name == "unknown_first" or author.get("unattributed")
-                       else " ".join(text.splitlines()[:1])}
+                       "opening": " ".join(text.splitlines()[:1])[:160]}
 
 
 def _sample(sample, *, opening=False):
@@ -71,7 +70,11 @@ def _unknown(event):
 
 
 def room_line(room):
+    from ouroboros.memory_view import _minute
     event = room["events"]
+    if not event["count"]:
+        last = f"; last {_minute(latest)}" if (latest := room["facts"].get("latest")) else ""
+        return f"- {room['label']}; no arrivals{last}; memory_read(room_id='{room['room_id']}', rows=true)"
     return (f"- {room['label']}; Event: {event['count']} arrivals; first {_sample(event['first'], opening=True)}; "
             f"last {_sample(event['last'])}{_unknown(event)}; memory_read(room_id='{room['room_id']}', rows=true)")
 

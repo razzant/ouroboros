@@ -43,11 +43,12 @@ def _gist_lines(group, excluded=(), *, gists=None):
             for key, gist in (_gist_records(group) if gists is None else gists) if key not in excluded]
 
 
-def _latest_unread(words):
+def _latest_unread(words, *, first_line=True):
     latest = max(words, key=lambda word: word["pos"])
-    opening = str(latest.get("text") or latest["line"].removeprefix(latest["head"])).strip().splitlines()[0:1]
+    text = str(latest.get("text") or "").strip()
+    opening = (' '.join(text.splitlines()[:1]) if first_line else text)[:160]
     author = latest.get("author") or latest["head"].split(";", 2)[1].strip()
-    return latest, author, ' '.join(opening)[:160]
+    return latest, author, f"«{opening}»" if opening else "no text of their own"
 
 
 def _unread_line(words):
@@ -55,7 +56,7 @@ def _unread_line(words):
     latest, author, opening = _latest_unread(words)
     first = min(words, key=lambda word: word["pos"])
     return (f"No recorded consideration: {len(words)} words; [{row_range(first['address'], latest['address'])}; "
-            f"latest by {author}] «{opening}»")
+            f"latest by {author}] {opening}")
 
 
 def _overheard_line(group, data):
@@ -68,7 +69,7 @@ def _overheard_line(group, data):
     return (f"No recorded consideration: {len(words)} words from {people} {'person' if people == 1 else 'people'}, "
             f"{min(days)} → {max(days)}, in {rooms} room{'' if rooms == 1 else 's'} "
             "with no recorded word of my human or reply of mine; "
-            f"[{latest['address']}; latest by {author}] «{opening}»; "
+            f"[{latest['address']}; latest by {author}] {opening}; "
             f"memory_read(room_id='*', start={group['catalogue_start']})")
 
 
@@ -286,13 +287,12 @@ def _counted_text(groups, owners, aggregate_unread, *, index=None):
              + (f"; {folds} read-and-folded rows by count" if folds else "")]
     unread = [(room, word) for room in rooms for word in sources[room["room_id"]]["unread"]]
     if unread and aggregate_unread:
-        latest_room, latest = max(unread, key=lambda pair: pair[1]["pos"])
+        latest, author, opening = _latest_unread([word for _room, word in unread], first_line=False)
         authors = {word.get("author") or word["head"] for _room, word in unread}
         days = sorted(str(word["ts"])[:10] for _room, word in unread)
-        opening = str(latest.get("text") or latest["line"].removeprefix(latest["head"])).strip()[:160]
         lines.append(f"Emergency window form: {len(unread)} words without recorded consideration, {len(authors)} authors, "
             f"{len({room['room_id'] for room, _word in unread})} rooms, {days[0]} → {days[-1]}; "
-            f"latest by {latest.get('author') or latest['head']} at {latest['ts']}: «{opening}»; memory_read(room_id='*')")
+            f"latest by {author} at {latest['ts']}: {opening}; memory_read(room_id='*')")
     elif unread:
         for group in groups:
             lines += [_unread_line(words) for room in group["rooms"] if not room.get("overheard")
