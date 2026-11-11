@@ -123,8 +123,7 @@ Under Blocking nothing replaces the counted PASS.
 An API model row is an ordinary recursive Ouroboros child. Its request says what
 it starts with: always my human's words for the work, verbatim and dated, the
 marks in force and the knowledge outline; the rest of my memory is one read away.
-It may publish chronicle pages and parts as drafts in its own name, which the integrating mind
-accepts or rejects. A nanny and the session it supervises start with the same
+A nanny and the session it supervises start with the same
 floor, the session inside its work order.
 An Agent session row makes me a nanny. For fresh work the host starts the
 exact leaf before my first round; restored work follows its continuation

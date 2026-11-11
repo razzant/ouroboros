@@ -126,8 +126,8 @@ on every restart, but one personality that remembers its path.
     source registry likewise, whole or as its headings; and my sealed story
     stays resident at its top level.
     The work always has room; a chosen read is cut only by a fact.
-    A step changes granularity, never coverage; a reduction the owner did
-    not choose is recorded as the window's, never as the owner's choice.
+    A reduction the owner did not choose is recorded as the window's,
+    never as the owner's choice.
   - ARCHITECTURE stays resident in owner-max while the books, my story in its retold forms and the work's room fit; otherwise that task runs as Low with chapter maps:
     a disclosed fact of the route's window when removing what carries no
     meaning and folding my memory could not make room, and in every other
