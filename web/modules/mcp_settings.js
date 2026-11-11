@@ -841,7 +841,7 @@ function mountList(container, { path, ctx }) {
     const rows = (fold) => rowsOf('tools', { fold }).filter((row) => !row.id.startsWith('tools:door:')).map((row) => settingsRow(row, { custom })).join('');
     container.innerHTML = `<p class="settings-page-lead">Outside services Ouroboros can call.</p>
         <section class="ui-card settings-card"><div class="settings-rows">${rows(false)}</div></section>
-        <section class="ui-card settings-card">
+        <section class="ui-card settings-card" data-setting-row="${KEY}">
             <div class="settings-card-head"><h3 class="settings-card-title">Tool servers</h3>
                 <span class="ui-result" data-entry-result role="status" aria-live="polite"></span>
                 <div class="ui-section-actions"><button type="button" class="btn btn-default btn-sm" data-tools-add>Add server</button></div></div>

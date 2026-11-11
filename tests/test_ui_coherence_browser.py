@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
+from tests.settings_browser_helpers import open_settings
 from tests._shared import answer_projects
 
 subscription_ui = setup_browser.subscription_ui
@@ -303,46 +304,50 @@ def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_their_tables_ins
 
 
 def test_mcp_transport_fields_use_named_shared_controls_without_changing_drafts(subscription_ui):
-    from playwright.sync_api import expect
-
-    page = open_app(subscription_ui, '/#settings')
-    page.locator('[data-settings-tab="advanced"]').click()
+    """A tool server's page (Settings › Tools › a server): every field is the shared control under its own label, an
+    edit changes that field alone, and the environment's JSON is judged by the form before any Save."""
     servers = [dict(id='web', name='HTTP server', transport='streamable_http', url='https://example.test/mcp',
                     auth_token='***', auth_header='Authorization', custom_option='retained'),
                dict(id='local', name='Local server', transport='stdio', command='npx', args=['-y','server'],
                     env={'PORT':'8080'}, env_from_settings={'TOKEN':'TOKEN_KEY'})]
-    page.evaluate('''async servers=>{
-        const mcp=await import('/static/modules/mcp_settings.js');
-        mcp.applyMcpSettings({MCP_ENABLED:true,MCP_SERVERS:servers,MCP_TOOL_TIMEOUT_SEC:60});
-        window.mcpProof=mcp;
-    }''', servers)
-    cards=page.locator('[data-mcp-card]')
-    assert cards.count()==2
-    for control in cards.locator('[data-mcp-field]:not([type="checkbox"])').all():
-        assert 'ui-control' in control.get_attribute('class')
-        assert control.get_attribute('aria-label').startswith('MCP server ')
-        assert control.evaluate('el=>Array.from(el.labels||[]).length') == 1
-    for edit in cards.locator('[data-mcp-edit]').all():  # a saved server is a row; its form opens behind Edit
-        assert not edit.evaluate('details=>details.open')
-        edit.locator(':scope > summary').click()
-        expect(edit).to_have_attribute('open', '')
-    page.get_by_label('MCP server 1: Server URL', exact=True).fill('https://edited.test/mcp')
-    draft=page.evaluate('mcpProof.collectMcpSettings()')
+    subscription_ui['settings']['MCP_SERVERS'] = servers
+    page = open_app(subscription_ui, '/#settings')
+    module = "(await import('/static/modules/mcp_settings.js'))"
+
+    def server_page(entry):
+        level = open_settings(page, f'tools/{entry}')
+        card = level.locator('[data-mcp-card]')
+        card.locator('[data-editor-save]').wait_for(state='visible')
+        card.locator('[data-mcp-more] > summary').click()
+        controls = card.locator('[data-mcp-field]:not([type="checkbox"])').all()
+        assert len(controls) >= 5, entry
+        for control in controls:
+            assert 'ui-control' in control.get_attribute('class')
+            assert control.evaluate('el=>Array.from(el.labels||[]).length') == 1
+        return level
+
+    level = server_page('web')
+    level.get_by_label('Address', exact=True).fill('https://edited.test/mcp')
+    draft=page.evaluate(f'async () => {module}.collectMcpSettings()')
     assert draft['MCP_SERVERS'][0]['url']=='https://edited.test/mcp'
     assert draft['MCP_SERVERS'][0]['auth_token']=='***'
     assert draft['MCP_SERVERS'][0]['custom_option']=='retained'
     assert draft['MCP_SERVERS'][1]['args']==['-y','server']
     assert draft['MCP_SERVERS'][1]['env_from_settings']=={'TOKEN':'TOKEN_KEY'}
-    assert page.evaluate('mcpProof.validateMcpSettings().length') == 0
-    field = page.get_by_label('MCP server 2: Environment (JSON, optional)', exact=True)
+    refused = f'async () => {module}.validateMcpSettings().map(e=>e.input.dataset.mcpField)'
+    assert page.evaluate(refused) == []
+    level = server_page('local')
+    cards = level.locator('[data-mcp-card]')
+    field = level.get_by_label('Environment (JSON)', exact=True)
     for invalid in ['{unfinished', '[]', '5', '{"PORT":8080}', '{"":"value"}']:
         field.fill(invalid)
-        assert page.evaluate('mcpProof.validateMcpSettings().map(e=>e.input.dataset.mcpField)') == ['env']
+        assert page.evaluate(refused) == ['env']
         assert field.input_value() == invalid
     field.fill('null')
-    assert page.evaluate('mcpProof.validateMcpSettings().length') == 0  # backend accepts omitted maps
+    assert page.evaluate(refused) == []  # backend accepts omitted maps
     field.fill('{"PORT":"8080"}')
-    assert page.evaluate('mcpProof.validateMcpSettings().length') == 0
+    assert page.evaluate(refused) == []
+    assert not [path for path, _body in subscription_ui['posts'] if path == '/api/settings'], 'no edit saves by itself'
     capture = setup_browser.capture
     cards.first.scroll_into_view_if_needed()
     capture(page,'shell-mcp-shared-fields')
