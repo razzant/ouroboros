@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { readExtensionFormValues, renderExtensionSettingsSections } from '../modules/settings.js';
+import { readExtensionFormValues, renderExtensionSettingsSections } from '../modules/settings_extension_forms.js';
 
 const UNREADABLE_NOTE = 'Current values could not be read; Save is disabled so it does not overwrite them. '
     + 'Use Reload to retry.';

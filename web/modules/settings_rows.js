@@ -32,31 +32,44 @@ export const ROWS = [
         control: { kind: 'number', unit: 's', noLimit: true },
         aliases: ['Task Lifetime Limit (s)', 'longest task'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
+
+    // Skill sources (settings_extension_forms.js), opened from the Skills page's sources view and from search.
+    { id: 'OUROBOROS_SKILLS_REPO_PATH', keys: ['OUROBOROS_SKILLS_REPO_PATH'], page: 'skill-sources', fold: false,
+        name: 'Skills folder', meta: 'One more folder of skills on this computer. Ouroboros reads it and never clones or pulls it.', more: '',
+        control: { kind: 'text' },
+        aliases: ['External Skills Repo', 'Skills Repo Path', 'skills repository'],
+        writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
+    { id: 'OUROBOROS_CLAWHUB_REGISTRY_URL', keys: ['OUROBOROS_CLAWHUB_REGISTRY_URL'], page: 'skill-sources', fold: false,
+        name: 'ClawHub address', meta: 'Change it only for a mirror of your own. The host must be clawhub.ai or localhost.', more: '',
+        control: { kind: 'text' },
+        aliases: ['ClawHub Marketplace', 'Registry URL', 'ClawHub Registry URL'],
+        writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
 ];
 
 /** Rows drawn by their page's own code: `{ id, keys, page }`, read by search and by the "one key, one control" test. */
 export const HAND_WRITTEN = [];
 
 // The home of Settings (settings_home.js): its six groups in this order, each row a door to a Settings page or out of
-// Settings (`to`: a path or a door id). Old tab names are aliases, so search still finds them.
+// Settings (`to`: a path or a door id). `glyph` names its picture; the tabs Settings had are aliases, so search still
+// finds them.
 export const HOME_ROWS = [
     { id: 'home:models', group: 'Mind', name: 'Models', to: 'models', glyph: 'sparkle', aliases: ['Model', 'Main model'] },
     { id: 'home:agents', group: 'Mind', name: 'Agents', to: 'agents', glyph: 'bot', aliases: ['Subagents', 'Helpers'] },
     { id: 'home:consciousness', group: 'Life', name: 'Consciousness', to: 'dashboard:consciousness', glyph: 'brain', aliases: ['Background consciousness'] },
-    { id: 'home:evolution', group: 'Life', name: 'Evolution', to: 'dashboard:evolution', glyph: 'projects', aliases: ['Self-evolution'] },
+    { id: 'home:evolution', group: 'Life', name: 'Evolution', to: 'dashboard:evolution', glyph: 'growth', aliases: ['Self-evolution', 'Post-Task Self-Evolution'] },
     { id: 'home:circles', group: 'Life', name: 'Circles', to: 'page:circles', glyph: 'circles', aliases: ['Places'] },
-    { id: 'home:rules', group: 'Limits', name: 'Your rules', to: 'rules', glyph: 'book', aliases: ['Rules'] },
-    { id: 'home:permissions', group: 'Limits', name: 'Permissions and checks', to: 'permissions', glyph: 'check', aliases: ['Behavior', 'Access', 'Safety'] },
+    { id: 'home:rules', group: 'Limits', name: 'Your rules', to: 'rules', glyph: 'rules', aliases: ['Rules', 'Safety rules'] },
+    { id: 'home:permissions', group: 'Limits', name: 'Permissions and checks', to: 'permissions', glyph: 'check', aliases: ['Behavior', 'Access', 'Safety', 'Review'] },
     { id: 'home:costs', group: 'Limits', name: 'Costs', to: 'dashboard:costs', glyph: 'gauge', aliases: ['Budget', 'Spending'] },
-    { id: 'home:accounts', group: 'Connections', name: 'Accounts and keys', to: 'accounts', glyph: 'globe', aliases: ['Providers', 'Accounts', 'Secrets', 'API keys'] },
+    { id: 'home:accounts', group: 'Connections', name: 'Accounts and keys', to: 'accounts', glyph: 'key', aliases: ['Providers', 'Accounts', 'Secrets', 'API keys'] },
     { id: 'home:tools', group: 'Connections', name: 'Tools', to: 'tools', glyph: 'plug', aliases: ['MCP servers', 'Tool servers'] },
     { id: 'home:skills', group: 'Connections', name: 'Skills', to: 'page:skills', glyph: 'skills', aliases: ['Extensions'] },
-    { id: 'home:appearance', group: 'Interface', name: 'Appearance', to: 'appearance', glyph: 'template', aliases: ['Theme', 'Language'] },
-    { id: 'home:notifications', group: 'Interface', name: 'Notifications', to: 'notifications', glyph: 'inbox', aliases: [] },
+    { id: 'home:appearance', group: 'Interface', name: 'Appearance', to: 'appearance', glyph: 'moon', aliases: ['Theme', 'Language', 'Interface size'] },
+    { id: 'home:notifications', group: 'Interface', name: 'Notifications', to: 'notifications', glyph: 'bell', aliases: ['Sound'] },
     { id: 'home:voice', group: 'Interface', name: 'Voice and calls', to: 'voice', glyph: 'mic', aliases: ['Calls', 'Dictation'] },
-    { id: 'home:updates', group: 'System', name: 'Updates', to: 'dashboard:updates', glyph: 'share', aliases: ['Update channel'] },
-    { id: 'home:storage', group: 'System', name: 'Storage', to: 'dashboard:storage', glyph: 'files', aliases: ['Cleanup'] },
-    { id: 'home:computer', group: 'System', name: 'This computer', to: 'computer', glyph: 'settings', aliases: ['Advanced', 'About', 'Network'] },
+    { id: 'home:updates', group: 'System', name: 'Updates', to: 'dashboard:updates', glyph: 'refresh', aliases: ['Update channel'] },
+    { id: 'home:storage', group: 'System', name: 'Storage', to: 'dashboard:storage', glyph: 'drive', aliases: ['Cleanup', 'GC Retention'] },
+    { id: 'home:computer', group: 'System', name: 'This computer', to: 'computer', glyph: 'monitor', aliases: ['Advanced', 'About', 'Network', 'Startup'] },
 ];
 
 /** A page's rows in order; `fold` true or false keeps only the rows behind (or before) the page's fold. */
