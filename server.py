@@ -623,10 +623,7 @@ def _open_dialogue(settings: dict, *, stop_requested=None):
 
         set_log_sink(make_server_log_sink(bridge, pathlib.Path(DATA_DIR)))
 
-        bus_init(
-            drive_root=DATA_DIR, budget_report_every=10, chat_bridge=bridge,
-            total_budget_limit=float(settings.get("TOTAL_BUDGET", SETTINGS_DEFAULTS["TOTAL_BUDGET"])),
-        )
+        bus_init(drive_root=DATA_DIR, chat_bridge=bridge)
         _dialogue_bridge = bridge
         BOOT.dialogue_ready()
         log.info("Dialogue ready: owner messages are accepted.")

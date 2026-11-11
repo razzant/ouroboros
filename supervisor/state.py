@@ -137,7 +137,6 @@ def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
     st.setdefault("current_sha", None)
     st.setdefault("last_owner_message_at", "")
     st.setdefault("last_evolution_task_at", "")
-    st.setdefault("budget_messages_since_report", 0)
     st.setdefault("evolution_mode_enabled", False)
     # Durable owner-stop sentinel: set True by the owner-stop sites, cleared by an
     # owner-authorized start (/evolve start or the owner-directed toggle_evolution(True)

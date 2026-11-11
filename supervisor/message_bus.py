@@ -38,8 +38,6 @@ log = logging.getLogger(__name__)
 
 
 DATA_DIR = None  # pathlib.Path
-TOTAL_BUDGET_LIMIT: float = 0.0
-BUDGET_REPORT_EVERY_MESSAGES: int = 10
 _BRIDGE: Optional["LocalChatBridge"] = None
 
 
@@ -134,16 +132,9 @@ def notification_chat_route(*candidates: Any) -> Optional[int]:
     return None
 
 
-def init(
-    drive_root,
-    total_budget_limit: float,
-    budget_report_every: int,
-    chat_bridge: "LocalChatBridge",
-) -> None:
-    global DATA_DIR, TOTAL_BUDGET_LIMIT, BUDGET_REPORT_EVERY_MESSAGES, _BRIDGE
+def init(drive_root, chat_bridge: "LocalChatBridge") -> None:
+    global DATA_DIR, _BRIDGE
     DATA_DIR = drive_root
-    TOTAL_BUDGET_LIMIT = total_budget_limit
-    BUDGET_REPORT_EVERY_MESSAGES = budget_report_every
     _BRIDGE = chat_bridge
     if drive_root is not None:
         try:  # the dispatches a crash left owed: handed over once, through the bus that opens now
@@ -160,15 +151,6 @@ def get_bridge() -> "LocalChatBridge":
 def try_get_bridge() -> "Optional[LocalChatBridge]":
     """Return initialized bridge, if any."""
     return _BRIDGE
-
-
-def refresh_budget_limit(new_limit: Optional[float]) -> None:
-    """Hot-reload budget limit for status messages."""
-    global TOTAL_BUDGET_LIMIT
-    try:
-        TOTAL_BUDGET_LIMIT = float(new_limit) if new_limit is not None else 0.0
-    except (TypeError, ValueError):
-        pass
 
 
 class LocalChatBridge:
