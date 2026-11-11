@@ -43,10 +43,17 @@ STANDS, GATE, HELD = "tail_cold", "tail_cold_gate", "tail_cold_held"  # a captur
 MEMO = (STANDS, GATE, HELD)
 MARKS = "tail_cold"  # the set's marks, in the index's ``state``
 _SINCE = "SELECT body FROM records WHERE sequence>? AND kind IN ('decision','page') ORDER BY sequence"
-# One page of the set's rows in some chats (``rows_of``), stored facts as ``chronicle_store._tail_rows`` reads them.
-_ROWS_OF = ("SELECT json_group_array(json_array(t.pos,t.seq,t.row_sha256,json(t.legacy),json(t.meta),t.terminal)), "
-            "max(c.pos) FROM (SELECT pos FROM tail_cold WHERE chat IN (SELECT value FROM json_each(?)) AND pos>? "
-            "ORDER BY pos LIMIT ?) c JOIN tail_rows t ON t.pos=c.pos")
+# One page of the set's rows a selection of positions names (its parameters first), stored facts as
+# ``chronicle_store._tail_rows`` reads them; the selections: every row of some chats, the newest few of each, the rows
+# of one chat older than a position, the rows of some chats with given words.
+_FACTS = ("SELECT json_group_array(json_array(t.pos,t.seq,t.row_sha256,json(t.legacy),json(t.meta),t.terminal)), "
+          "max(c.pos) FROM (SELECT pos FROM ({}) WHERE pos>? ORDER BY pos LIMIT ?) c JOIN tail_rows t ON t.pos=c.pos")
+_IN_CHATS = "SELECT pos FROM tail_cold WHERE chat IN (SELECT value FROM json_each(?))"
+_NEWEST = ("SELECT pos FROM (SELECT pos, row_number() OVER (PARTITION BY chat ORDER BY pos DESC) AS n FROM tail_cold "
+           "WHERE chat IN (SELECT value FROM json_each(?))) WHERE n<=?")
+_OLDER = "SELECT pos FROM tail_cold WHERE chat=? AND pos<?"
+_COPIES = ("SELECT pos FROM tail_cold WHERE (chat, digest) IN "
+           "(SELECT json_extract(value,'$[0]'), json_extract(value,'$[1]') FROM json_each(?))")
 _PAGE = 2_000
 
 
@@ -138,22 +145,39 @@ def standing(derived: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
     return derived[HELD] if derived and derived.get(STANDS) else None
 
 
-def rows_of(store: Any, held: Mapping[str, Any], chats: Iterable[int]) -> Optional[list]:
+def rows_of(store: Any, held: Mapping[str, Any], chats: Iterable[int], newest: Optional[int] = None) -> Optional[list]:
     """The stored facts of the rows the set leaves unread in these chats (the room key stored with each, ``_compose``),
-    by position, read in one transaction where the set and the stored tail are still the ones a capture stood on
-    (``held``, its marks); ``None`` where they are not or cannot be read: the reader takes those chats' rows from the
-    dialogue store instead (``memory_inventory._unread_place_rows``)."""
+    by position; with ``newest``, only that many of each chat, its newest."""
+    keys = json.dumps(sorted(set(chats)))
+    return _read(store, held, _IN_CHATS, (keys,)) if newest is None else _read(store, held, _NEWEST, (keys, newest))
+
+
+def older_of(store: Any, held: Mapping[str, Any], chat: int, before: int) -> Optional[list]:
+    """The stored facts of the set's rows in one chat before a position, by position."""
+    return _read(store, held, _OLDER, (chat, before))
+
+
+def copies_of(store: Any, held: Mapping[str, Any], words: Iterable[tuple]) -> Optional[list]:
+    """The stored facts of the set's rows with given words in given chats (``(chat, text_sha256)`` pairs, the digest
+    stored with each row that has words), by position."""
+    return _read(store, held, _COPIES, (json.dumps(sorted(set(words))),))
+
+
+def _read(store: Any, held: Mapping[str, Any], positions: str, parameters: tuple) -> Optional[list]:
+    """The stored facts of the set's rows ``positions`` selects, read in one transaction where the set and the stored
+    tail are still the ones a capture stood on (``held``, its marks); ``None`` where they are not or cannot be read: the
+    reader then takes those chats' rows from the dialogue store (``memory_inventory.PlaceRows``)."""
     import sqlite3
 
     from ouroboros.chronicle_store import ChronicleStore
 
-    keys, rows, after = json.dumps(sorted(set(chats))), [], -(1 << 63)
+    rows, after, sql = [], -(1 << 63), _FACTS.format(positions)
     try:
         with store._index() as db:
             if ChronicleStore._state(db, MARKS) != held or (ChronicleStore._state(db, "tail") or {}).get("source") != held.get("source"):
                 return None
             while True:
-                text, last = db.execute(_ROWS_OF, (keys, after, _PAGE)).fetchone()
+                text, last = db.execute(sql, (*parameters, after, _PAGE)).fetchone()
                 if last is None:
                     return rows
                 rows.extend(sorted(json.loads(text)))  # SQLite promises no aggregate order; the pages are in order
@@ -205,11 +229,14 @@ def _compose(store: Any, snapshot: Any, gate_: Gate, tail: Any, found: Any) -> N
     import sqlite3
 
     from ouroboros.chat_chain import _row_chat_id
+    from ouroboros.memory_inventory import words_of
 
     writers = _writers(snapshot)
     # A terminal row's task is kept with it: a page its task writes later links it (``stands``); every row its room key,
-    # the chat the room rule reads (``memory_inventory.rooms_of_row``), by the same function: ``rows_of`` reads by it.
-    cold = [[pos, (meta.get("task_id") or None) if terminal is not None else None, _row_chat_id(meta)]
+    # the chat the room rule reads (``memory_inventory.rooms_of_row``), by the same function: ``rows_of`` reads by it;
+    # a row with words their digest as ``memory_view_conversations._repeats`` compares them (``copies_of``).
+    cold = [[pos, (meta.get("task_id") or None) if terminal is not None else None, _row_chat_id(meta),
+             words_of(meta) or None]
             for pos, _address, meta, terminal in tail.rows if pos not in found.kept and not _kept(meta, terminal, writers)]
     source, projects = (snapshot.state("tail") or {}).get("source"), {str(chat) for chat in gate_.facts.project_chat_ids}
     marks = {"marks": gate_.marks, "source": source, "sequence": snapshot.records[-1][0] if snapshot.records else 0,
@@ -221,7 +248,7 @@ def _compose(store: Any, snapshot: Any, gate_: Gate, tail: Any, found: Any) -> N
                 return
             db.execute("DELETE FROM tail_cold")
             db.execute("INSERT INTO tail_cold SELECT json_extract(value,'$[0]'), json_extract(value,'$[1]'), "
-                       "json_extract(value,'$[2]') FROM json_each(?)", (json.dumps(cold),))
+                       "json_extract(value,'$[2]'), json_extract(value,'$[3]') FROM json_each(?)", (json.dumps(cold),))
             store._set_state(db, MARKS, marks)
             db.commit()
     except (TimeoutError, sqlite3.Error):

@@ -29,8 +29,9 @@ sizes come from stored ``text_chars``.
 from __future__ import annotations
 
 import datetime
+import itertools
 from collections import Counter
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Set, Tuple
 
 from ouroboros import chat_chain, memory_inventory
 from ouroboros.context_timing import timed_section
@@ -111,20 +112,22 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
     running = running_by_room(root, by_room, notes, membership.bindings, projects or [])
     rooms = sorted((set(by_room) | set(notes) | {room for room, kinds in gaps.items() if kinds}
                     | {room for room, tasks in running.items() if tasks}) - {str(spec.room_id)})
-    sealed = sealed.rows(rooms)  # a place none of these rooms is stays unread
+    # Each shown place's sealed rows, newest first as far as a walk below goes, and the earlier copies of its open words.
+    sealed = sealed.rooms(rooms, {room: {memory_inventory.words_of(meta) for _a, meta, _p in by_room.get(room, ())}
+                                  for room in rooms},
+                          warm=lambda entries: warm_lineage(lineage, ((meta, pos) for _a, meta, pos in entries)))
     linked = linked_rows(root, store, by_room, projects or ())
     here = {entry[0]["row_sha256"] for entry in by_room.get(str(spec.room_id), ())} if spec.room_lanes else set()
     # Labels come from the rows in hand (open and sealed): a room's newest row that came over a transport, whose tail
     # metadata 7 keeps its conversation's name and audience. Only rooms none of whose rows carries them, and their
     # conversations, read the newest inbound row's transport, all in one read (``warm``), never a row per room.
-    in_hand = {room: [*sealed.get(room, ()), *by_room.get(room, ())] for room in rooms}
+    in_hand = {room: _InHand(sealed.get(room), by_room.get(room, [])) for room in rooms}
     samples = {room: next((meta for _address, meta, _pos in reversed(rows) if meta.get("transport")
                            or meta.get("presence_provenance")), None) for room, rows in in_hand.items()}
     unnamed = [room for room, meta in samples.items() if _scalars([meta] if meta else []) is None]
     places = (conversation_of(room, in_hand[room], notes.get(room, []), membership.project_chat_ids)[1]
               for room in unnamed)
     getattr(label, "warm", lambda _rooms: None)([*unnamed, *(_conversation_chat(place) for place in places if place)])
-    warm_lineage(lineage, ((meta, pos) for entries in sealed.values() for _address, meta, pos in entries))
     groups: Dict[str, Dict[str, Any]] = {}
     shown: List[Tuple[Dict[str, Any], Entry, Dict[str, Any], Any]] = []  # (room, row, author, earlier copy or None)
     for room in rooms:
@@ -157,7 +160,7 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
         sample = samples[room]
         group = groups.setdefault(key, {"key": key, "rooms": [], "running": [], "latest": "", "place": bool(place)})
         if place and "label" not in group:  # a conversation; its rooms carry their own ids
-            group["label"] = conversation_label(label, place, [meta for _a, meta, _p in in_hand[room]])
+            group["label"] = conversation_label(label, place, _InHand(sealed.get(room), by_room.get(room, []), facts=True))
         facts = memory_inventory.room_facts(store, room, entries, lineage, len(notes.get(room, ())),
                                             classes=[cls for _entry, cls in classed])
         latest = str(facts.get("latest") or "")
@@ -179,7 +182,8 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
                 f"memory_read(room_id='{room}', rows=true)") if part)
             continue
         item["notes"] = list(notes.get(room, ()))
-        again = _repeats(sorted((*sealed.get(room, ()), *held), key=lambda entry: entry[2]))
+        # The earlier copies of this room's words: only rows with the same words decide a word's (``_repeats``).
+        again = _repeats(sorted((*(sealed[room].copies() if room in sealed else ()), *held), key=lambda entry: entry[2]))
         for entry, cls in (pair for pair in spoken if pair[0][0]["row_sha256"] not in here):  # once, in this room
             if fold and entry[2] <= fold[0] and not owner_speech(entry[1], cls["author"]):  # my human's stay whole
                 folded = item["folded"] or {"sentence": str(fold[1]["wake_summary"]), "ts": str(fold[1].get("ts") or ""),
@@ -213,6 +217,18 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
                         f"memory_read(room_id='{where}', rows=true, from='{first}', to='{first}')")
         item["words"].append({**word, "id": f"{item['room_id']}:{word['address']}", "rank": author["rank"]})
     return [groups[key] for key in sorted(groups)]
+
+
+class _InHand:
+    """A shown room's rows as ``reversed`` walks them for its labels: its open rows from the last, then its sealed rows
+    newest first (a place's, read only as far as the walk goes, ``memory_inventory.PlaceRoom``); ``facts``: their facts."""
+
+    def __init__(self, sealed: Any, held: List[Entry], facts: bool = False) -> None:
+        self.sealed, self.held, self.facts = sealed, held, facts
+
+    def __reversed__(self) -> Iterator[Any]:
+        for entry in itertools.chain(reversed(self.held), reversed(self.sealed) if self.sealed is not None else ()):
+            yield entry[1] if self.facts else entry
 
 
 def _once(shown: List[Tuple[Dict[str, Any], Entry, Dict[str, Any], Any]],
@@ -274,7 +290,7 @@ def _repeats(rows: List[Entry]) -> Dict[str, Dict[str, Any]]:
     first: Dict[Tuple[str, str, str], Dict[str, Any]] = {}  # (words, speaker or "" for any, facts) -> earliest copy
     found: Dict[str, Dict[str, Any]] = {}
     for address, meta, _pos in rows:
-        digest = meta.get("text_sha256") if int(meta.get("text_chars") or 0) else ""
+        digest = memory_inventory.words_of(meta)
         if digest:
             speaker, facts = recorded_speaker(meta), str(meta.get("message_facts_sha256") or "")
             earlier = first.get((digest, speaker, facts))
