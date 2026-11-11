@@ -82,7 +82,7 @@ textarea.ui-control.consciousness-owner-words {
 .cx-head-words { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .cx-kicker, .cx-wakes-title { margin: 0; font-size: var(--type-meta); line-height: var(--line-meta); color: var(--text-meta); }
 .cx-state { margin: 0; font-size: var(--type-section); line-height: var(--line-title); font-weight: 600; color: var(--text-primary); }
-.cx-money, .cx-wakes-note, .cx-wakes-coverage { margin: 0; font-size: var(--type-body); line-height: var(--line-body); color: var(--text-secondary); }
+.cx-money, .cx-state-note, .cx-wakes-note, .cx-wakes-coverage { margin: 0; font-size: var(--type-body); line-height: var(--line-body); color: var(--text-secondary); }
 .cx-wakes-title { margin-top: var(--space-2); }
 .cx-wakes { display: flex; flex-direction: column; gap: var(--space-1); margin: 0; padding: 0; list-style: none; }
 .cx-wake {
@@ -109,7 +109,7 @@ textarea.ui-control.consciousness-owner-words {
 }
 .cx-door:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 @media (hover: hover) { .cx-door:hover { text-decoration: underline; text-underline-offset: 3px; } }
-:is(.cx-money, .cx-toggle, .cx-wakes, .cx-wakes-note, .cx-wakes-coverage, .cx-door)[hidden] { display: none; }
+:is(.cx-money, .cx-state-note, .cx-toggle, .cx-wakes, .cx-wakes-note, .cx-wakes-coverage, .cx-door)[hidden] { display: none; }
 
 /* ---- Settings › Behavior › Consciousness ------------------------------------------------------------------------ */
 .consciousness-levels { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }

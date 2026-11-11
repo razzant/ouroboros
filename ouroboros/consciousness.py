@@ -179,7 +179,7 @@ class BackgroundConsciousness:
         except (TypeError, ValueError):
             bootstrap = persisted_last_wake or self._booted_at
         self._observation_bootstrap_since = bootstrap
-        self._backoff, self._allowance = 1, (0.0, {})
+        self._backoff, self._allowance = 1, (0.0, {}, False)
         self._skip_basis = _money_skip_basis(state.get(LAST_SKIP_STATE_KEY), persisted)  # memory only
         self._in_flight = ""  # the id this process is binding, until its admission answers
         self._archive_legacy_inbox()
@@ -384,8 +384,11 @@ class BackgroundConsciousness:
         # fence narrowed below that refused every wake of a nearly spent day before its
         # first call.
         ceiling = min(per_task_cap, remaining) if per_task_cap > 0 else remaining
+        # Which of the two set it, observed for the views that explain a pause (never read by a stop or a Resume).
+        source = ("allowance" if per_task_cap <= 0 or remaining < per_task_cap
+                  else "per_task_cap" if per_task_cap < remaining else "both")
         metadata = {**self._routing_facts(chat_id),
-                    **wake_task_metadata(level, reason, root_cost_ceiling_usd=ceiling)}
+                    **wake_task_metadata(level, reason, root_cost_ceiling_usd=ceiling, root_cost_ceiling_source=source)}
         # Everything since the last ACCEPTED observation — chain positions and transition
         # identities, not this alarm's finish time. Before a verified boundary,
         # the bootstrap survives source failure, completion and restart.
@@ -459,7 +462,7 @@ class BackgroundConsciousness:
         # this clock with the wake's terminal (``_settle_wake``), so the next wake starts after it.
         # A wake that dies before its terminal replays the same window (at-least-once, never a silent skip).
         self._record("consciousness_wake_started", task_id=self._last_wake_task_id, wake_reason=reason,
-                     level=level, root_cost_ceiling_usd=ceiling)
+                     level=level, root_cost_ceiling_usd=ceiling, root_cost_ceiling_source=source)
         return "launched"
 
     def _wake_finished(self, task_id: str, ok: bool, *, metadata=None, pooled: bool = False) -> None:
@@ -626,8 +629,15 @@ class BackgroundConsciousness:
                   int(window.get("unknown_unmetered") or 0), bool(window.get("integrity_degraded")))
         places = context.pop("places")
         # Held: its own wake waits in the pool (paused, held or not yet dispatched), not running.
+        held = bool(wake) and wake in queued_wakes(held_only=True)
+        from ouroboros.consciousness_view import held_wake_cause
         return {**dict(zip(SNAPSHOT_KEYS, values)), **context, "appointment_at": _iso(self._appointment_at),
-                "live_wake_held": bool(wake) and wake in queued_wakes(held_only=True),
+                "live_wake_held": held,
+                # What holds it, proven from its records; the current window's own verdict stays beside it.
+                "live_wake_hold": held_wake_cause(self._drive_root, wake) if held else None,
+                "allowance_status": str(window.get("status") or ""),
+                "allowance_open_rows": window.get("accounting_open_rows"),
+                "allowance_room_after": str(window.get("room_after") or ""),
                 "places_brief": [{key: place.get(key) for key in ("place_id", "label", "state", "unanswered")}
                                  for place in places] if places is not None else None}
 
@@ -668,14 +678,20 @@ class BackgroundConsciousness:
                 "counted_roots": root_views(live_consciousness_roots(), places), "places": places}
 
     def _allowance_view(self, now: float, *, fresh: bool = False) -> Dict[str, Any]:
-        cached_at, cached = self._allowance
-        if not fresh and cached and now - cached_at < ALLOWANCE_VIEW_TTL_SEC:
+        """The status view's window (with its display forecast) or a wake's exact admission read (without one).
+        A view reuses a cached window only while it is still this window: a display read, under the same limit,
+        before its first counted row leaves and inside the TTL; a wake's forecast-less read never stands in."""
+        cached_at, cached, shown = self._allowance
+        changes_at = cached.get("window_changes_at") if cached else None
+        if (not fresh and shown and cached and now - cached_at < ALLOWANCE_VIEW_TTL_SEC
+                and cached.get("limit_usd") == float(get_consciousness_daily_usd())
+                and (changes_at is None or now <= changes_at)):
             return cached
-        try:
-            window = allowance_window(self._drive_root, now=now, allow_stale=not fresh)  # status shows; a wake admits
+        try:  # status shows; a wake admits
+            window = allowance_window(self._drive_root, now=now, allow_stale=not fresh, **({} if fresh else {"forecast": True}))
         except Exception as exc:  # the reader types every failure; this is the last net
             window = {"status": STATUS_UNKNOWN, "error": f"{type(exc).__name__}: {exc}"}
-        self._allowance = (now, window)
+        self._allowance = (now, window, not fresh)
         return window
 
     def _routing_facts(self, chat_id: int) -> Dict[str, Any]:

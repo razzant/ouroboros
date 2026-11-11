@@ -47,6 +47,20 @@ def live_task_rows(task_ids) -> dict[str, dict]:
                 for task in tasks if str(task.get("id") or "") in wanted}
 
 
+def paused_tree_members(root_task_id: str) -> list[tuple[str, str]]:
+    """``(task_id, budget_drive_root)`` of the members of this root's tree the pool holds parked at the graceful
+    ceiling (their ``_budget_pause`` marker), from memory: the members whose pause rows can say a child paused first."""
+    from ouroboros.budget_pause import RAIL_GRACEFUL_CEILING
+    from supervisor import queue as q
+
+    root = str(root_task_id or "")
+    with q._queue_lock:
+        return [(str(task["id"]), str(task.get("budget_drive_root") or "")) for task in q.PENDING
+                if task.get("id") and str(task["id"]) != root and isinstance(task.get("_budget_pause"), dict)
+                and str(task["_budget_pause"].get("root_task_id") or task.get("root_task_id") or "") == root
+                and task["_budget_pause"].get("rail") == RAIL_GRACEFUL_CEILING]
+
+
 def _cited_quote(corpus) -> str:
     """The span a run cited from my human's place words (``cited``; older rows hold only the span as ``content``)."""
     return next((str(row.get("cited") or row.get("content") or "") for row in corpus or []
