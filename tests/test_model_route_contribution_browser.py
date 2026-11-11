@@ -7,6 +7,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from tests import test_subscription_role_routes_browser as roles
+from tests.settings_browser_helpers import open_settings, press_editor_save
 
 pytestmark = [pytest.mark.ui_browser]
 subscription_ui = roles.subscription_ui
@@ -40,13 +41,15 @@ def route_ui(role_ui, tmp_path, monkeypatch):
 def test_settings_search_and_exact_response_maximum(route_ui):
     page = route_ui['page']
     page.goto(route_ui['url'] + '/#settings')
-    page.locator('[data-settings-tab="models"]').click()
-    page.wait_for_function("document.querySelector('#s-websearch-preview').textContent.includes('OpenRouter')")
+    open_settings(page, 'models/role/websearch')
+    page.wait_for_function("document.querySelector('[data-websearch-preview]').textContent.includes('OpenRouter')")
     assert page.locator('#s-websearch-model').input_value() == 'gpt-5.2'
     page.locator('#s-websearch-source').select_option('openrouter')
     page.locator('#s-websearch-model').fill('vendor/future-search')
     page.locator('#s-websearch-model').blur()
-    page.wait_for_function("document.querySelector('#s-websearch-preview').textContent.includes('vendor/future-search')")
+    page.wait_for_function("document.querySelector('[data-websearch-preview]').textContent.includes('vendor/future-search')")
+    assert press_editor_save(page).startswith('Saved')
+    open_settings(page, 'models/role/main')
     main = page.locator('[data-model-role="main"]')
     main.locator('summary').click()
     maximum = main.locator('[data-response-limit]')
@@ -69,15 +72,12 @@ def test_settings_search_and_exact_response_maximum(route_ui):
     page.wait_for_function("document.querySelector('[data-model-role=main] [data-response-note]').textContent.includes('unknown')")
     assert maximum.input_value() == ''
     page.set_viewport_size({'width': 390, 'height': 844})
+    open_settings(page, 'models/role/websearch')
     page.locator('#s-websearch-model').scroll_into_view_if_needed()
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     roles.capture(page, 'model-routes-search-mobile')
-    page.locator('#btn-save-settings').click()
-    page.wait_for_function("() => !document.querySelector('#btn-save-settings').disabled")
-    writes = [body for path, body in route_ui['posts'] if path == '/api/settings']
-    assert writes[-1]['OUROBOROS_WEBSEARCH_BACKEND'] == 'openrouter'
-    assert writes[-1]['OUROBOROS_WEBSEARCH_MODEL'] == 'vendor/future-search'
-    page.locator('#btn-reload-settings').click()
+    assert route_ui['settings']['OUROBOROS_WEBSEARCH_BACKEND'] == 'openrouter'
+    assert route_ui['settings']['OUROBOROS_WEBSEARCH_MODEL'] == 'vendor/future-search'
     assert page.locator('#s-websearch-model').input_value() == 'vendor/future-search'
     assert not route_ui['errors']
 
@@ -93,7 +93,7 @@ def test_settings_window_history_disagreement_and_clear(route_ui, tmp_path, reti
         400000, 'confirmed', 'provider_metadata', ack['route_fp'], ts=ce.utc_now_iso()).to_json())
     page = route_ui['page']
     page.goto(route_ui['url'] + '/#settings')
-    page.locator('[data-settings-tab="models"]').click()
+    open_settings(page, 'models/role/main')
     main = page.locator('[data-model-role="main"]')
     main.locator('summary').click()
     page.wait_for_function("() => !document.querySelector('[data-model-role=main] [data-window-clear]').hidden")
@@ -121,7 +121,7 @@ def test_response_maximum_preview_keeps_owner_draft(route_ui, edit_order):
 
     page = route_ui['page']
     page.goto(route_ui['url'] + '/#settings')
-    page.locator('[data-settings-tab="models"]').click()
+    open_settings(page, 'models/role/main')
     main = page.locator('[data-model-role="main"]')
     maximum = main.locator('[data-response-limit]')
     note = main.locator('[data-response-note]')
@@ -166,7 +166,7 @@ def test_response_maximum_preview_keeps_owner_draft(route_ui, edit_order):
     route_ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
     # A fresh, untouched control still reads the persisted owner maximum.
     page.reload()
-    page.locator('[data-settings-tab="models"]').click()
+    open_settings(page, 'models/role/main')
     main.locator('summary').click()
     expect(maximum).to_have_value('4096')
     expect(note).to_contain_text('4,096 tokens · your maximum')
@@ -196,7 +196,7 @@ def test_response_maximum_deferred_toggle_cannot_cancel_apply(route_ui):
 
     page = route_ui['page']
     page.goto(route_ui['url'] + '/#settings')
-    page.locator('[data-settings-tab="models"]').click()
+    open_settings(page, 'models/role/main')
     main = page.locator('[data-model-role="main"]')
     with page.expect_response('**/api/owner/capability-ack', timeout=5000) as saved:
         main.evaluate("""row => {
@@ -231,54 +231,42 @@ def test_claude_variant_agent_and_reviewer_rows_keep_exact_selection(route_ui):
                                                  'credential_profile_id': 'personal'})
     items.append({'subagent_id': 'claude-agent', 'recommended_use': 'Long-context agent.', 'effort': 'max',
                   'route': {'kind': 'agent_session', 'target_id': target}})
-    page = roles.open_agents(ui)
-    rows = page.locator('[data-subagent-row]')
-    listed_by_base = ("() => [...document.querySelectorAll('[data-subagent-row]')]"
-                      ".filter(x => x.textContent.includes('Base model listed')).length === 2")
-    page.wait_for_function(listed_by_base)
-    # No measured window yet: the exact echo and the engine's verdict alone prove nothing, so each row says Not checked
-    # (neither Available nor Unavailable) and keeps its catalog qualifier, the exact selection and its Reviewer mark.
-    for index, reviews in ((2, True), (3, False)):
-        row = rows.nth(index)
-        assert row.locator('[data-subagent-status]').inner_text() == 'Not checked', row.inner_text()
-        assert 'Available' not in row.inner_text() and 'Unavailable' not in row.inner_text()
+    page = ui['page']
+    # Each saved actor now has its own page. The same exact selection is checked on both pages.
+    for agent_id, reviews in (('agent', True), ('claude-agent', False)):
+        row = roles.open_agent(ui, agent_id)
+        page.wait_for_function("() => document.querySelector('[data-subagent-meta]')?.textContent.includes('Base model listed')")
+        status = row.locator('[data-subagent-status]')
+        assert status.get_attribute('data-tone') == 'neutral', status.inner_text()
+        assert 'available now' not in status.inner_text() and 'currently unavailable' not in status.inner_text()
         assert row.locator('[data-subagent-field="model"]').input_value() == 'claude-future[1M]'
         assert row.locator('[data-subagent-field="review_eligible"]').is_checked() is reviews
-    rows.nth(2).scroll_into_view_if_needed()
     roles.capture(page, 'model-routes-claude-not-proven')
     # One measured window beside the engine's own verdict makes it Available.
     quota['constraints'] = [{'id': 'primary', 'used_ratio': 0.2}]
-    ui['errors'].watch(page)  # the reload may cut off the page's own reads (tests/ui_console_errors.py)
-    page.reload()
-    page = roles.open_agents(ui)
-    page.wait_for_function(listed_by_base)
-    for index, reviews in ((2, True), (3, False)):
-        row = rows.nth(index)
+    ui['errors'].watch(page)
+    for agent_id, reviews in (('agent', True), ('claude-agent', False)):
+        row = roles.open_agent(ui, agent_id)
+        page.wait_for_function("() => document.querySelector('[data-subagent-status]')?.dataset.tone === 'ok'")
         assert row.locator('[data-subagent-field="model"]').input_value() == 'claude-future[1M]'
         assert row.locator('[data-subagent-field="review_eligible"]').is_checked() is reviews
-        assert row.locator('[data-subagent-status]').inner_text() == 'Available', row.inner_text()
-        assert 'Unavailable' not in row.inner_text()
-    rows.nth(2).scroll_into_view_if_needed()
+        assert 'available now' in row.locator('[data-subagent-status]').inner_text()
     roles.capture(page, 'model-routes-claude-reviewer-row')
     page.set_viewport_size({'width': 390, 'height': 844})
-    rows.nth(3).scroll_into_view_if_needed()
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-    # The conditional availability stays readable on a phone: natural height, nothing clipped.
-    meta = rows.nth(3).locator('[data-subagent-meta]')
+    meta = row.locator('[data-subagent-meta]')
     assert meta.get_attribute('data-availability-qualifier') is not None
     assert 'checked by the engine at session start' in meta.inner_text()
     assert meta.evaluate('el => el.scrollWidth <= el.clientWidth && el.scrollHeight <= el.clientHeight')
     assert meta.evaluate('el => el.getBoundingClientRect().height > 1.5 * parseFloat(getComputedStyle(el).lineHeight)')
-    assert rows.nth(1).locator('[data-subagent-meta]').get_attribute('data-availability-qualifier') is None
     roles.capture(page, 'model-routes-claude-agent-mobile')
-    # An unrelated edit saves the catalog; neither selected spelling is rewritten.
-    rows.nth(3).locator('[data-subagent-field="recommended_use"]').fill('Long-context agent, edited.')
-    page.locator('#btn-save-settings').click()
-    page.wait_for_function("() => !document.querySelector('#btn-save-settings').disabled")
+    row.locator('[data-subagent-field="recommended_use"]').fill('Long-context agent, edited.')
+    assert press_editor_save(page).startswith('Saved')
     saved = roles.saved_catalog(ui)['items']
-    assert [row['route']['target_id'] for row in saved[2:]] == [target, target]
+    assert [item['route']['target_id'] for item in saved[2:]] == [target, target]
     assert saved[2]['review_eligible'] is True and 'review_eligible' not in saved[3]
-    # The reviewer's account pin survives the save, and the unpinned agent stays on automatic rotation.
     assert saved[2]['route'].get('credential_profile_id') == 'personal'
     assert not saved[3]['route'].get('credential_profile_id')
+    plain = roles.open_agent(ui, 'direct', fresh=False)
+    assert plain.locator('[data-subagent-meta]').get_attribute('data-availability-qualifier') is None
     assert not ui['errors']
