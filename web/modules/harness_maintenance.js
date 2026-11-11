@@ -12,6 +12,7 @@ const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'interrupted']);
 // Survives Settings remounts, including a lost POST reply. A full page reload
 // recovers accepted operation handles from the engine's inventory instead.
 const sessionIntents = new Map();
+const viewListeners = new WeakMap();
 // The whole-inventory read's slot among them: its failure survives a remount like a row's.
 const WHOLE_INVENTORY = '*';
 
@@ -143,7 +144,10 @@ export function createHarnessMaintenanceController({
     newKey = () => globalThis.crypto?.randomUUID?.()
         || `maintenance-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
 } = {}) {
-    const rows = new Map([...intents].filter(([, state]) => state.entry).map(([id, state]) => [id, state.entry]));
+    if (!viewListeners.has(intents)) viewListeners.set(intents, new Set());
+    const listeners = viewListeners.get(intents);
+    listeners.add(onChange);
+    const harnesses = () => [...intents].filter(([, state]) => state.entry).map(([id]) => id);
     const reads = new Map();
     let disposed = false;
     // Answers can cross: the later-asked read stands, whichever answers last. `observed` keeps, per slot,
@@ -190,7 +194,7 @@ export function createHarnessMaintenanceController({
             const focused = active && element.contains?.(active)
                 ? (active.dataset?.maintenanceAction ? `[data-maintenance-action="${active.dataset.maintenanceAction}"]`
                     : active.hasAttribute?.('data-maintenance-details') ? '[data-maintenance-details]' : '') : '';
-            element.innerHTML = harnessMaintenanceMarkup(rows.get(harness), {
+            element.innerHTML = harnessMaintenanceMarkup(record(harness).entry, {
                 ...state, harness, inspectionProblem: problem,
                 inspectionError: state.inspectionError || whole.inspectionError || problem?.message || '',
                 inspectionPending: inspectionPending(harness),
@@ -207,7 +211,7 @@ export function createHarnessMaintenanceController({
             });
             element.querySelectorAll('[data-skill-external]').forEach((control) => control.addEventListener('click', routeExternalLink));
         });
-        onChange();
+        for (const changed of listeners) changed();
     }
 
     function accept(harness, operation, fromInventory = false, settled = onSettled) {
@@ -220,7 +224,7 @@ export function createHarnessMaintenanceController({
         if (!ACTIVE.has(operation.state)) state.cancelling = false;
         // A later version probe answers what is installed now, independently
         // of a historical operation's effect or process-termination evidence.
-        const inspectedAfter = inspectedAfterOperation(rows.get(harness), operation);
+        const inspectedAfter = inspectedAfterOperation(record(harness).entry, operation);
         if (operation.phase === 'installing' || operation.mutation === 'unknown') state.unknownCurrent = !inspectedAfter;
         if (TERMINAL.has(operation.state) && (previous?.id !== operation.id || previous.state !== operation.state
             || previous.termination !== operation.termination)) state.revision += 1;
@@ -280,7 +284,6 @@ export function createHarnessMaintenanceController({
                         superseded = true;
                         continue;
                     }
-                    rows.set(entry.harness, entry);
                     state.entry = entry;
                     settle(entry.harness);
                     state.unknownCurrent = (ACTIVE.has(state.operation?.state) && state.operation?.phase === 'installing')
@@ -291,7 +294,7 @@ export function createHarnessMaintenanceController({
                     state.inventorySeen = true;
                 }
                 if (settlement) onSettled(...settlement);
-                if (!disposed) onInventory([...rows.keys()]);
+                if (!disposed) onInventory(harnesses());
                 return inventory;
             }).catch((error) => {
                 // A late answer to a released view cannot overwrite what its successor has since read.
@@ -379,7 +382,7 @@ export function createHarnessMaintenanceController({
         if (state.busy) return state.busy;
         if (state.request) return submit(harness);
         if (maintenanceOperationPending(state.operation)) return readOperation(harness);
-        const entry = rows.get(harness);
+        const entry = record(harness).entry;
         if (!(target.kind === 'latest' ? offeredAction(entry) : target.kind === 'version' ? entry?.actions?.exactVersion : null)?.available) return Promise.resolve(null);
         state.operation = null;
         state.revision += 1;
@@ -409,7 +412,7 @@ export function createHarnessMaintenanceController({
         if (action === 'rejoin') return record(harness).request ? submit(harness) : readOperation(harness);
         if (action === 'cancel') return cancel(harness);
         if (action === 'return') {
-            const version = returnVersion(rows.get(harness), record(harness).operation || rows.get(harness)?.operation);
+            const version = returnVersion(record(harness).entry, record(harness).operation || record(harness).entry?.operation);
             return version ? start(harness, { kind: 'version', version }) : null;
         }
         return start(harness, { kind: action });
@@ -417,10 +420,10 @@ export function createHarnessMaintenanceController({
 
     return {
         refresh, render, start, cancel, act, readOperation,
-        get harnesses() { return [...rows.keys()]; },
+        get harnesses() { return harnesses(); },
         get inspectionProblem() { return inspectionProblem(); },
         view(harness) {
-            return { ...record(harness), entry: rows.get(harness), inspectionPending: inspectionPending(harness),
+            return { ...record(harness), entry: record(harness).entry, inspectionPending: inspectionPending(harness),
                 inventoryError: record(WHOLE_INVENTORY).inspectionError || '' };
         },
         poll() {
@@ -429,6 +432,6 @@ export function createHarnessMaintenanceController({
                 if (maintenanceOperationPending(state.operation) && !state.operationError && !state.busy) void readOperation(harness);
             }
         },
-        dispose() { disposed = true; },
+        dispose() { disposed = true; listeners.delete(onChange); },
     };
 }

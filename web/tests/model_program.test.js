@@ -118,3 +118,26 @@ test('opening renews a changed producer once; status subscription exists only fo
     assert.equal(releases, 1); assert.equal(raw, 3);
     binding.dispose();
 });
+
+test('an already-open footer sees Accounts observations immediately, before its own read answers', async (t) => {
+    const {bindModelProgramFooter} = await import('../modules/model_program.js');
+    const {createHarnessMaintenanceController} = await import('../modules/harness_maintenance.js');
+    const harness = 'shared-observation';
+    let version = '3.0.0', release;
+    const row = () => ({harness, selection: {...producer, version}, updateAvailable: version === '3.0.0' ? 'yes' : 'no',
+        newest: {status: 'available', version: '4.0.0'}, actions: {update: {available: true}}});
+    const accounts = createHarnessMaintenanceController({api: {harnessMaintenanceInventory: async () => ({harnesses: [row()]})}});
+    const input = {dataset: {}, ownerDocument: {activeElement: null}};
+    const footer = {contains: () => false, addEventListener() {}, removeEventListener() {}};
+    const binding = bindModelProgramFooter(input, footer, () => {});
+    t.mock.method(globalThis, 'fetch', () => new Promise(resolve => { release = resolve; }));
+    const flush = async () => { for (let n = 0; n < 60; n++) await Promise.resolve(); };
+    await accounts.refresh();
+    binding.update([{harness, label: 'Future', programs: [producer]}]); binding.open(); await flush();
+    assert.match(footer.innerHTML, /4.0.0 available/);
+    version = '4.0.0'; await accounts.refresh({fresh: true});
+    assert.doesNotMatch(footer.innerHTML, /4.0.0 available|>Update</);
+    assert.match(footer.innerHTML, /List from Future 2.0.0/, 'inventory never relabels the old list');
+    binding.dispose(); accounts.dispose();
+    release({ok: false, json: async () => ({error: 'Fixture read closed'})}); await flush();
+});
