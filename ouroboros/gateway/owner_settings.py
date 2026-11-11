@@ -116,6 +116,10 @@ class SettingsPreconditionFailed(RuntimeError):
     """A locked-in precondition refused the write; nothing was persisted."""
 
 
+class SettingsChangedElsewhere(SettingsPreconditionFailed):
+    """A per-key condition no longer describes the stored value."""
+
+
 class SettingsDocumentUnreadable(SettingsPreconditionFailed, SettingsDocumentUnknown):
     """The settings document exists but does not read as a JSON object (an open the OS refuses, broken
     JSON, another JSON type). Only an absent document is new: this one is never merged into or written
@@ -147,6 +151,7 @@ class CommitBoundary:
     def __init__(self) -> None:
         self.committed = False
         self.stage = ""
+        self.receipt: dict = {"receipt": "unavailable"}
 
     def commit(self) -> None:
         self.committed = True
@@ -182,9 +187,27 @@ def post_commit_failure_response(exc: BaseException, boundary: CommitBoundary) -
             "status": "saved_with_post_commit_error",
             "saved": True,
             "post_commit_failed": stage,
+            **boundary.receipt,
         },
         status_code=500,
     )
+
+
+def settings_write_refusal(exc: Exception) -> JSONResponse | None:
+    """The same typed pre-commit refusals on generic and dedicated owner writers."""
+    from ouroboros.deployment_policy import DeploymentPolicyRefusal
+
+    for error, status, code in (
+        (DeploymentPolicyRefusal, 403, MANAGED_BY_DEPLOYMENT),
+        (SettingsLockUnavailable, 503, "settings_locked"),
+        (SettingsDocumentBusy, 503, "settings_busy"),
+        (SettingsDocumentUnreadable, 409, "settings_unreadable"),
+        (SettingsChangedElsewhere, 409, "settings_changed_elsewhere"),
+        (SettingsPreconditionFailed, 409, "settings_precondition_failed"),
+    ):
+        if isinstance(exc, error):
+            return unsaved_error(str(exc), status, code=code)
+    return None
 
 
 def owner_write_guard(endpoint: Callable) -> Callable:
@@ -202,20 +225,12 @@ def owner_write_guard(endpoint: Callable) -> Callable:
 
     @functools.wraps(endpoint)
     async def _guarded(request: Request) -> JSONResponse:
-        from ouroboros.deployment_policy import DeploymentPolicyRefusal
-
         try:
             return await endpoint(request)
-        except DeploymentPolicyRefusal as exc:
-            return unsaved_error(str(exc), 403, code=MANAGED_BY_DEPLOYMENT)
-        except SettingsLockUnavailable as exc:
-            return unsaved_error(str(exc), 503, code="settings_locked")
-        except SettingsDocumentBusy as exc:
-            return unsaved_error(str(exc), 503, code="settings_busy")
-        except SettingsDocumentUnreadable as exc:
-            return unsaved_error(str(exc), 409, code="settings_unreadable")
-        except SettingsPreconditionFailed as exc:
-            return unsaved_error(str(exc), 409, code="settings_precondition_failed")
+        except Exception as exc:
+            if refusal := settings_write_refusal(exc):
+                return refusal
+            raise
 
     return _guarded
 
@@ -320,12 +335,42 @@ def settings_change_text(changes: Dict[str, Dict[str, Any]], origin: Dict[str, s
     return " ".join(parts) + " " + _ROW_ACTORS.get(str(origin.get("actor") or ""), "Changed outside the app.")
 
 
-def record_settings_change(request: Request | None, changes: Dict[str, Dict[str, Any]], *,
+def project_settings_changes(changes: dict, *, tokens: bool = False) -> dict:
+    """The audit and HTTP share this whitelist; raw receipts can contain credentials."""
+    projected = {}
+    for key, change in changes.items():
+        reason = _withheld(key, {side: change[side] for side in ("old", "new") if side in change})
+        row = {"withheld": reason} if reason else {side: change[side] for side in ("old", "new") if side in change}
+        if tokens and reason != "secret":
+            row.update({field: change[field] for field in (("token",) if reason else ("token", "old_absent")) if field in change})
+        projected[key] = row
+    return projected
+
+
+def settings_receipt(changes: dict | None) -> dict:
+    """No receipt is different from a receipt of no change. Projection cannot unsave bytes."""
+    try:
+        if changes is not None:
+            return {"changes": project_settings_changes(changes, tokens=True)}
+    except Exception:
+        log.warning("Settings saved; public receipt unavailable", exc_info=True)
+    return {"receipt": "unavailable"}
+
+
+def merged_changes(changes: dict | None, followup: dict | None) -> dict | None:
+    """One receipt for a save and its own follow-up write: the save's old side, the follow-up's new side."""
+    if changes is None or followup is None:
+        return None
+    return {**changes, **{key: {**change, **{side: changes[key][side] for side in ("old", "old_absent")
+                                            if side in changes.get(key, ())}} for key, change in followup.items()}}
+
+
+def record_settings_change(request: Request | None, changes: Optional[Dict[str, Dict[str, Any]]], *,
                            origin: Dict[str, str] | None = None) -> None:
     """Record one committed settings write: the writer's receipt, never a second reading of the file.
 
     One ``owner_api_action`` (``action="settings_changed"``) names every changed key: a scalar with its
-    old/new (a side its document did not set is omitted), a secret or a structure as
+    effective old/new, a secret or a structure as
     ``{"withheld": "secret"|"structure"}``, plus the declared origin. A write the app did not declare also
     puts one quiet System row (``settings_changed``) in Main; the app's own Save already says what it
     saved. Neither step can undo or fail the save."""
@@ -333,8 +378,7 @@ def record_settings_change(request: Request | None, changes: Dict[str, Dict[str,
         return
     try:
         origin = origin or declared_settings_origin(request)
-        projected = {key: {"withheld": reason} if (reason := _withheld(key, change)) else dict(change)
-                     for key, change in changes.items()}
+        projected = project_settings_changes(changes)
         owner_audit(request, "settings_changed", {**origin, "changes": projected})
         if origin["surface"] == APP_SURFACE:
             return
@@ -347,6 +391,94 @@ def record_settings_change(request: Request | None, changes: Dict[str, Dict[str,
                                          role="system", system_type="settings_changed")
     except Exception:
         log.warning("Settings saved; their change record or Main row failed", exc_info=True)
+
+
+OWNER_SETTING_WRITERS = {
+    "OUROBOROS_CONTEXT_MODE": "POST /api/owner/context-mode",
+    "OUROBOROS_RUNTIME_MODE": "POST /api/owner/runtime-mode",
+    "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "POST /api/owner/auto-grant",
+    "OUROBOROS_SAFETY_MODE": "POST /api/owner/safety-mode",
+    "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "POST /api/owner/safety-mode",
+    "OUROBOROS_MODEL_SAFETY": "POST /api/owner/safety-model",
+    "OUROBOROS_SAFETY_OWNER_RULES": "POST /api/owner/safety-rules",
+}
+
+
+def setting_tokens(document: dict, keys: Sequence[str]) -> dict[str, str]:
+    """Hash canonical stored values, including presence. Never hash a scalar secret."""
+    from hashlib import sha256
+    from ouroboros.config import normalize_settings_raw
+
+    canonical = normalize_settings_raw(document)
+    return {key: sha256(json.dumps([key in canonical, canonical.get(key)], sort_keys=True,
+                                  ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()[:24]
+            for key in keys if _withheld(key, {}) != "secret"}
+
+
+def check_setting_tokens(document: dict, condition: Any) -> None:
+    if condition is None:
+        return
+    if not isinstance(condition, dict) or any(not isinstance(k, str) or not isinstance(v, str) for k, v in condition.items()):
+        raise ValueError("'if_unchanged' must map setting keys to tokens")
+    actual = setting_tokens(document, tuple(condition))
+    if set(condition) - set(actual):
+        raise ValueError("Secret settings cannot have an 'if_unchanged' token")
+    if any(actual[key] != token for key, token in condition.items()):
+        raise SettingsChangedElsewhere("Changed on another device. Reload the current value before saving.")
+
+
+def settings_read_view() -> tuple[dict, dict]:
+    """GET values and tokens share one source read, including the loader's compatibility rules."""
+    from ouroboros import config
+
+    raw = read_settings_json_verified(config.SETTINGS_PATH, behind_writer=True)
+    present = raw is not None or config.SETTINGS_PATH.exists()
+    raw = normalize_context_mode_compat(raw, settings_path=config.SETTINGS_PATH, warn_ambiguous=True) if isinstance(raw, dict) else {}
+    return config.settings_of_document(raw, present=present), config.normalize_settings_raw(raw)
+
+
+def settings_in_place_of(document: dict) -> dict:
+    """What the loader reads for ``document`` once the values this tree mirrored into the environment no longer
+    stand in for a key it leaves unset (``skill_environ``); an operator's own variable still does."""
+    from ouroboros import config
+    from ouroboros.settings_integrity import settings_read_environ, skill_environ
+
+    with settings_read_environ(skill_environ()):
+        return config.settings_of_document(document)
+
+
+def settings_roster_error(raw: Any, stored: dict, body: dict) -> str:
+    """A switch-only edit is judged on the rows it switches: a stored twin pair never blocks another
+    row's switch or the roster's own, while switching a twin keeps that twin. Other edits are judged whole."""
+    from ouroboros.configured_subagents import (
+        SUBAGENTS_SETTING, configured_subagents_dict, parse_configured_subagents, roster_save_error, subagent_handle,
+    )
+
+    try:
+        before, after = (parse_configured_subagents(value) for value in (stored.get(SUBAGENTS_SETTING), raw))
+    except (TypeError, ValueError):
+        return roster_save_error(raw, stored, body)  # the authoritative parser and judge answer
+    def seats(catalog, facts):
+        return [({k: v for k, v in row.items() if k != "enabled"}, item.route.kind, subagent_handle(item, facts))
+                for row, item in zip(configured_subagents_dict(catalog)["items"], catalog.items)]
+    old, new = seats(before, stored), seats(after, {**stored, **body})
+    engines = [seat[1:] for seat in new]
+    switched = [seat[1:] for seat, a, b in zip(new, before.items, after.items) if a.enabled != b.enabled]
+    if old != new or any(engines.count(engine) > 1 for engine in switched):
+        return roster_save_error(raw, stored, body)
+    return ""
+
+
+def settings_unset_keys(body: dict) -> tuple[str, ...]:
+    """Undo may restore omission only for ordinary, non-secret settings; never owner controls."""
+    from ouroboros.config import SETTINGS_DEFAULTS, ENDPOINT_AUTHORED_SETTINGS, ENDPOINT_WRITTEN_SETTINGS
+
+    keys = body.get("unset", [])
+    forbidden = set(OWNER_SETTING_WRITERS) | ENDPOINT_AUTHORED_SETTINGS | ENDPOINT_WRITTEN_SETTINGS | set(_CONTEXT_MODE_KEYS)
+    if (not isinstance(keys, list) or any(not isinstance(key, str) or key not in SETTINGS_DEFAULTS
+            or key in forbidden or key in body or _withheld(key, {}) == "secret" for key in keys)):
+        raise ValueError("'unset' must list ordinary non-secret settings, without also assigning them")
+    return tuple(keys)
 
 
 def settings_document_digest() -> str:
@@ -487,7 +619,10 @@ def _owner_write_settings(
     allow_safety_lowering: bool = False,
     precondition: Optional[Callable[[], str]] = None,
     boundary: Optional[CommitBoundary] = None,
-) -> Dict[str, Dict[str, Any]]:
+    expected_digest: str = "",
+    if_unchanged: Optional[dict] = None,
+    unset: Sequence[str] = (),
+) -> Optional[Dict[str, Dict[str, Any]]]:
     """Write owner-controlled settings without applying the runtime-mode ratchet; returns the receipt.
 
     Skipping that ONE ratchet is the whole reason this writer exists; everything else comes from
@@ -512,7 +647,7 @@ def _owner_write_settings(
         allow_safety_lowering=allow_safety_lowering,
         precondition=precondition,
         boundary=boundary,
-        whole_document=True,
+        whole_document=True, expected_digest=expected_digest, if_unchanged=if_unchanged, unset=unset,
     )
 
 
@@ -532,7 +667,9 @@ def _owner_update_settings(
     precondition: Optional[Callable[[], str]] = None,
     boundary: Optional[CommitBoundary] = None,
     whole_document: bool = False,
-) -> Dict[str, Dict[str, Any]]:
+    if_unchanged: Optional[dict] = None,
+    unset: Sequence[str] = (),
+) -> Optional[Dict[str, Dict[str, Any]]]:
     """Read, change and persist ONE settings document inside ONE settings lock.
 
     An owner endpoint changes a single decision inside a document it does not otherwise
@@ -580,15 +717,17 @@ def _owner_update_settings(
             "nothing was saved. Retry in a moment."
         )
     try:
-        if expected_digest and settings_document_digest() != expected_digest:
-            raise SettingsPreconditionFailed(STALE_SETTINGS_READ_REFUSAL)
         if precondition is not None:
             refusal = str(precondition() or "")
             if refusal:
                 raise SettingsPreconditionFailed(refusal)
         document: Dict[str, Any] = {}
         current = _owner_read_settings_raw(document_out=document, strict=True)
+        if expected_digest and settings_document_digest() != expected_digest:
+            raise SettingsPreconditionFailed(STALE_SETTINGS_READ_REFUSAL)
+        check_setting_tokens(document, if_unchanged)
         shown = dict(current)
+        effective_before = _config.settings_of_document(document, present=_settings_document_present())
         proposed = transform(dict(document) if isinstance(transform, _SavedDocumentFields) else current)
         if proposed is None:
             return {}
@@ -602,32 +741,52 @@ def _owner_update_settings(
             to_write, authored_keys=authored_keys,
             allow_context_lowering=allow_context_lowering,
             allow_safety_lowering=allow_safety_lowering)
+        for key in unset:
+            to_write.pop(key, None)
         write_text_atomic(_config.SETTINGS_PATH, _config.serialize_settings(to_write))
         if boundary is not None:
             boundary.commit()
         try:
-            return _committed_changes(document, shown, to_write)
+            changes = _committed_changes(document, shown, to_write, effective_before)
+            if boundary is not None:
+                boundary.receipt = settings_receipt(changes)
+            return changes
         except Exception:  # the bytes are saved; a receipt that cannot be taken never unsaves them
             log.warning("Settings saved; their change receipt could not be taken", exc_info=True)
-            return {}
+            return None
     finally:
         _config._release_settings_lock(fd)
 
 
-def _committed_changes(document: Dict[str, Any], shown: Dict[str, Any], written: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """Each key one commit changed: ``{"old": …, "new": …}``, a side omitted where its document does not set it.
+def _committed_changes(document: dict, shown: dict, written: dict, effective_before: dict | None = None) -> dict:
+    """Each key one commit changed, with the token it installed, taken under the file lock.
 
-    The change is judged as the reader sees both documents (authored values over the same defaults, every
-    known key typed as its default declares, so 150 and "150" are one value): a default that a
-    whole-document save writes out is no change. The recorded sides are the authored values."""
-    from ouroboros import config as _config
+    A key changed when its document entry did (judged over the same defaults and types, so writing a
+    default out is no change) and the value in force moved. ``old`` is that value immediately before:
+    the environment, proposals and provider spelling the owner was shown. ``new`` is the written value
+    or, for a key the commit removed, what the loader reads in its place once the values this tree
+    mirrored into the environment no longer stand in (``skill_environ``)."""
+    from ouroboros import config
+    from ouroboros.server_runtime import apply_runtime_provider_defaults
     from ouroboros.settings_scales import normalize_effort_document
 
-    before = _config.coerce_settings_raw(shown)
-    after = _config.coerce_settings_raw({**_defaults_for_settings_document(True), **normalize_effort_document(written)})
-    old, new = _config.coerce_settings_raw(document), _config.coerce_settings_raw(written)
-    return {key: {side: values[key] for side, values in (("old", old), ("new", new)) if key in values}
-            for key in sorted(set(before) | set(after)) if before.get(key, _ABSENT) != after.get(key, _ABSENT)}
+    before = config.coerce_settings_raw(shown)
+    after = config.coerce_settings_raw({**_defaults_for_settings_document(True), **normalize_effort_document(written)})
+    in_force = config.coerce_settings_raw(apply_runtime_provider_defaults(dict(effective_before or shown))[0])
+    removed = {key for key in document if key not in written}
+    in_place = config.coerce_settings_raw(settings_in_place_of(written)) if removed else {}
+    changes = {}
+    for key in sorted(set(before) | set(after)):
+        if before.get(key, _ABSENT) == after.get(key, _ABSENT) and key not in removed:
+            continue
+        sides = {"old": in_force.get(key, before.get(key, _ABSENT)),
+                 "new": (in_place if key in removed else after).get(key, _ABSENT)}
+        if sides["old"] != sides["new"]:
+            changes[key] = {**{side: value for side, value in sides.items() if value is not _ABSENT},
+                            **({"old_absent": True} if key not in document else {})}
+    for key, token in setting_tokens(written, tuple(changes)).items():
+        changes[key]["token"] = token
+    return changes
 
 
 _ABSENT = object()
@@ -639,7 +798,9 @@ __all__ = [
     "STALE_SETTINGS_READ_REFUSAL",
     "SettingsDocumentUnreadable",
     "SettingsLockUnavailable",
-    "SettingsPreconditionFailed",
+    "SettingsPreconditionFailed", "SettingsChangedElsewhere",
+    "OWNER_SETTING_WRITERS", "setting_tokens", "settings_receipt", "merged_changes", "settings_read_view", "settings_in_place_of",
+    "project_settings_changes", "settings_unset_keys", "settings_roster_error", "settings_write_refusal",
     "UNREADABLE_SETTINGS_REFUSAL",
     "settings_document_mutation",
     "_CONTEXT_MODE_KEYS",

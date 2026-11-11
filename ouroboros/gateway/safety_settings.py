@@ -9,7 +9,7 @@ from ouroboros.deployment_policy import choice_refusal
 from ouroboros.gateway._helpers import request_json_or
 from ouroboros.gateway.owner_settings import (
     MANAGED_BY_DEPLOYMENT, _owner_audit, _owner_update_settings, owner_write_guard, record_settings_change,
-    settings_document_digest, settings_document_mutation, unsaved_error,
+    settings_document_mutation, unsaved_error, CommitBoundary, settings_receipt, post_commit_failure_response, settings_roster_error,
 )
 
 # Models inherits Light then Main. The same owner transaction can edit that
@@ -59,8 +59,8 @@ def _api_owner_safety_mode_sync(request: Request, body: Any) -> JSONResponse:
     key = "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE" if kind == "consciousness" else "OUROBOROS_SAFETY_MODE"
     if refusal := choice_refusal(key, mode):  # even when the document already says so
         return unsaved_error(refusal, 403, code=MANAGED_BY_DEPLOYMENT)
-    _persist(request, {key: mode}, "safety_mode", {"kind": kind, "safety_mode": mode})
-    return JSONResponse({"ok": True, "safety_mode": mode})
+    return _persist(request, {key: mode}, "safety_mode", {"kind": kind, "safety_mode": mode},
+                    response={"safety_mode": mode})
 
 
 @owner_write_guard
@@ -72,8 +72,8 @@ def _api_owner_safety_rules_sync(request: Request, body: Any) -> JSONResponse:
     rules = body.get("rules") if isinstance(body, dict) else None
     if not isinstance(rules, str) or len(rules.encode("utf-8")) > 64_000:
         return unsaved_error("'rules' must be text of at most 64,000 UTF-8 bytes", 400)
-    _persist(request, {"OUROBOROS_SAFETY_OWNER_RULES": rules}, "safety_rules", {"rules_bytes": len(rules.encode("utf-8"))})
-    return JSONResponse({"ok": True, "rules": rules})
+    return _persist(request, {"OUROBOROS_SAFETY_OWNER_RULES": rules}, "safety_rules",
+                    {"rules_bytes": len(rules.encode("utf-8"))}, response={"rules": rules})
 
 
 @owner_write_guard
@@ -87,9 +87,9 @@ def _api_owner_safety_model_sync(request: Request, body: Any) -> JSONResponse:
         return unsaved_error("'settings' must contain Safety Supervisor model or catalog settings only", 400)
     if refusal := next(filter(None, (choice_refusal(key, value) for key, value in settings.items())), ""):
         return unsaved_error(refusal, 403, code=MANAGED_BY_DEPLOYMENT)  # role maps and the catalog: the write's own judge
-    from ouroboros.configured_subagents import normalize_configured_subagents, roster_save_error
-    from ouroboros.config import load_settings, safety_configuration
-    from ouroboros.gateway.settings import ALLOW_EMPTY_REVIEW_POOL, review_pool_save_judgement
+    from ouroboros.configured_subagents import normalize_configured_subagents
+    from ouroboros.config import safety_configuration
+    from ouroboros.gateway.settings import ALLOW_EMPTY_REVIEW_POOL
 
     settings = dict(settings)
     try:
@@ -100,22 +100,16 @@ def _api_owner_safety_model_sync(request: Request, body: Any) -> JSONResponse:
                 raise ValueError(f"{key} must be a boolean")
         if "OUROBOROS_SUBAGENTS" in settings:
             canonical = normalize_configured_subagents(settings["OUROBOROS_SUBAGENTS"])[1]
-            stored = load_settings()
-            roster_error = roster_save_error(canonical, stored, settings)
-            if roster_error:
-                return unsaved_error(roster_error, 400)
-            pool_error = review_pool_save_judgement(canonical, stored, allow_empty=body.get(ALLOW_EMPTY_REVIEW_POOL) is True)
-            if pool_error:
-                return unsaved_error(pool_error, 400, code="empty_review_pool")
             settings["OUROBOROS_SUBAGENTS"] = canonical
         safety_configuration(settings)
-        _persist(request, settings, "safety_model", {"changed_settings": sorted(settings)})
+        return _persist(request, settings, "safety_model", {"changed_settings": sorted(settings)},
+                        if_unchanged=body.get("if_unchanged"), allow_empty=body.get(ALLOW_EMPTY_REVIEW_POOL) is True)
     except (TypeError, ValueError) as exc:
         return unsaved_error(str(exc), 400)
-    return JSONResponse({"ok": True})
 
 
-def _persist(request: Request, changes: dict, action: str, audit: dict) -> None:
+def _persist(request: Request, changes: dict, action: str, audit: dict, *, response: dict | None = None,
+             if_unchanged: dict | None = None, allow_empty: bool = False) -> JSONResponse:
     """One Safety owner write; its committed old → new is the shared settings record, and the
     endpoint's own action keeps only what was asked."""
     from ouroboros.config import apply_settings_to_env
@@ -124,7 +118,7 @@ def _persist(request: Request, changes: dict, action: str, audit: dict) -> None:
         proposed = {**current, **changes}
         if action == "safety_model":
             from ouroboros.config import load_settings_lock_held
-            from ouroboros.gateway.settings import REVIEW_LANES_KEY
+            from ouroboros.gateway.settings import REVIEW_LANES_KEY, review_pool_save_judgement
             from ouroboros.server_runtime import has_startup_ready_provider
 
             # Provider access can come from the operator environment.
@@ -132,14 +126,32 @@ def _persist(request: Request, changes: dict, action: str, audit: dict) -> None:
             if str(effective.get("LOCAL_MODEL_SOURCE", "") or "").strip() and not has_startup_ready_provider(effective):
                 raise ValueError("Local-only setups must route at least one model to the local runtime.")
             if changes.get("OUROBOROS_SUBAGENTS") not in (None, ""):
+                stored = load_settings_lock_held()
+                if error := settings_roster_error(changes["OUROBOROS_SUBAGENTS"], stored, changes):
+                    raise ValueError(error)
+                if error := review_pool_save_judgement(changes["OUROBOROS_SUBAGENTS"], stored, allow_empty=allow_empty):
+                    raise _EmptyReviewPool(error)
                 proposed.pop(REVIEW_LANES_KEY, None)
         return proposed
 
-    with settings_document_mutation():
-        digest = settings_document_digest()
-        record_settings_change(request, _owner_update_settings(
-            merge, digest, authored_keys=tuple(changes), allow_safety_lowering=True))
-        # Projection only; the owner writer has already released its file lock.
-        from ouroboros.config import load_settings
-        apply_settings_to_env(load_settings())
-    _owner_audit(request, action, audit)
+    boundary = CommitBoundary()
+    try:
+        with settings_document_mutation():
+            receipt = _owner_update_settings(merge, authored_keys=tuple(changes), allow_safety_lowering=True,
+                                             if_unchanged=if_unchanged, boundary=boundary)
+            record_settings_change(request, receipt)
+            boundary.at("environment projection")
+            from ouroboros.config import load_settings
+            apply_settings_to_env(load_settings())
+        _owner_audit(request, action, audit)
+        return JSONResponse({"ok": True, **(response or {}), **settings_receipt(receipt)})
+    except Exception as exc:
+        if boundary.committed:
+            return post_commit_failure_response(exc, boundary)
+        if isinstance(exc, _EmptyReviewPool):
+            return unsaved_error(str(exc), 400, code="empty_review_pool")
+        raise
+
+
+class _EmptyReviewPool(ValueError):
+    """This exact locked roster needs the owner's empty-pool confirmation."""

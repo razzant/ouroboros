@@ -106,7 +106,7 @@ profile per volume set; never point two containers at one data volume.
 | | Immutable image (`ouroboros-web`) | Managed body (`ouroboros-managed`) |
 |---|---|---|
 | Code and packages | the image's `/app` | a checkout and runtime venv on a volume |
-| Update | build and deploy a new image | Settings → Update, as on the desktop |
+| Update | build and deploy a new image | Dashboard → Updates, as on the desktop |
 | Entry | `python server.py` | the common launcher, `--no-ui` |
 | Volumes | data, work, `HOME` | one parent volume, or body/data/work/home |
 
@@ -115,7 +115,7 @@ CPython 3.10.22 and SQLite 3.53.1, the same assets
 `scripts/download_python_standalone.sh` and `scripts/download_python_standalone.ps1`
 pin for the desktop packages. It is not Debian's `python:3.10-slim` (SQLite 3.46.1).
 Desktop installs receive that interpreter only by installing the app again.
-Settings → Update replaces the repository and its packages; it does not replace
+Dashboard → Updates replaces the repository and its packages; it does not replace
 the bundled interpreter. A managed container keeps its runtime venv on a volume.
 A venv whose interpreter no longer matches this image is left untouched, and the
 log names the recovery step: stop, move that directory aside, start again. Code
@@ -228,7 +228,7 @@ directory with its own `index.html`, laid out like `web/`. It applies when the
 server starts, so a saved change waits for a restart. A saved value, an empty one
 included, beats the environment variable; the environment counts only while the
 setting was never saved, and Ouroboros never copies it into `settings.json`. To
-return to the builtin interface, clear the setting (in Settings → Advanced, or in
+return to the builtin interface, clear the setting (in Settings → This computer → Advanced, or in
 `settings.json` while Ouroboros is stopped), restart and reopen the address.
 `GET /api/state` reports what is actually served as `served_ui`.
 
@@ -310,7 +310,7 @@ docker run --rm -p 127.0.0.1:8765:8765 \
   ouroboros-web
 ```
 
-On a desktop install the same key lives in Settings → Advanced. It covers the
+On a desktop install the same key lives in Settings → This computer → Advanced. It covers the
 provider calls: model requests, model catalogs, Provider Test, pricing and
 capability probes. Everything else keeps its own trust store: `git`, `uv`,
 `pip`, the Claudexor engine and its runtime downloads, the Telegram skill, MCP

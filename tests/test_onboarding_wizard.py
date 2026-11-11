@@ -725,6 +725,7 @@ def test_api_settings_exposes_setup_contract_without_secrets(tmp_path):
         patch.object(srv, "load_settings", return_value={"OPENROUTER_API_KEY": secret}),
         patch.object(srv, "apply_runtime_provider_defaults", lambda settings: (dict(settings), False, [])),
         patch.object(gw_settings, "load_settings", return_value={"OPENROUTER_API_KEY": secret}),
+        patch.object(gw_settings, "settings_read_view", return_value=({"OPENROUTER_API_KEY": secret}, {})),
         patch.object(gw_settings, "apply_runtime_provider_defaults", lambda settings: (dict(settings), False, [])),
         patch("ouroboros.server_auth.get_configured_network_password", return_value=""),
     ]

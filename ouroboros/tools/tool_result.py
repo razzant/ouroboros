@@ -465,7 +465,7 @@ TOOL_CODE_SPECS: Mapping[str, ToolCodeSpec] = MappingProxyType(
             "unavailable",
             "unavailable",
             "warning",
-            "the owner signs in (Settings → MCP, or a link from remote_mcp_sign_in)",
+            "the owner signs in (Settings → Tools, or a link from remote_mcp_sign_in)",
         ),
         "EXTENSION_UNAVAILABLE": _code_spec(
             "unavailable",
