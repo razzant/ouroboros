@@ -359,7 +359,7 @@ An unknown or repeated field or a wrong type refuses the whole file. Safety is m
 full coverage, on the organization's checker only when the file names all three of
 `access.max` at most `pro`, `safety.min_coverage: full` and `safety.checker`: without the cap an
 employee may still choose Cyber Pro, where Safety findings are advice; without the floor
-coverage may be lowered to Light or Off; without `safety.checker` the employee's own
+coverage may be lowered to Outgoing or Off; without `safety.checker` the employee's own
 Supervisor route checks.
 
 - `access.max` (`light`, `advanced` or `pro`) caps effective Access, keeping Cyber Pro out of reach.

@@ -984,7 +984,7 @@ contributes:
 ```
 
 - `effect` is one fact with three consumers: Advises (autonomy) refuses everything but a declared read; a Silent or
-  Paused place refuses all but reads aimed at it; the Safety Supervisor skips declared reads at Light/Full and
+  Paused place refuses all but reads aimed at it; the Safety Supervisor skips declared reads at Outgoing and + Commands and
   reads `message` as words (a flagged call of any tool returns to the mind once; an identical call from a later step
   lets a SUSPICIOUS one through, and a DANGEROUS one in Cyber Pro, recorded; elsewhere a DANGEROUS one waits for your
   human's card holding the words and destination, and with no verdict words wait in every mode). A tool that reads
@@ -1916,7 +1916,8 @@ def register(api):
         },
     )
 
-    # Settings sub-section on the Settings page.
+    # A settings section: its own page, opened from the skill's card and listed
+    # in Settings as "Skill settings".
     # Settings sections use a narrow declarative subset: form/action for
     # configuration writes and markdown/json for explanatory diagnostics.
     # Rich widget-only components (media, stream, map, kanban, module JS)
