@@ -30,6 +30,12 @@ def test_import_tree_reused_and_invalidated_by_code_and_dependencies(tmp_path, m
 
     first = reload()
     assert len(copies) == 1
+    assert first.name.startswith("sha256-") and len(first.name) == 71
+    # An empty trusted domain still requires the checked-byte identity variant.
+    from ouroboros import deployment_policy
+    with monkeypatch.context() as trusted:
+        trusted.setattr(deployment_policy, "trusted_extensions", lambda: {})
+        assert staging.extension_import_identity(skill) != first.name
     loader.unload_extension("reuse")  # a fresh process starts with empty registries too
     copies.clear()
     assert reload() == first

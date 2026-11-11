@@ -40,7 +40,7 @@ Composition/`PRODUCER_RESULT_SOURCE_JSON` vs `FULL_RESULT_SOURCE_JSON`: `tools/t
 
 ### Extension import and isolation
 
-`extension_import_staging._stage_extension_import_tree` shares complete `__extension_imports/` trees by content/runtime/dependency identity. PID references last until teardown; reclamation requires no references and dead owners. Review/grants stay bound to code. Local delete unloads and removes payload and the entire state directory under the lifecycle lock, without a tombstone or deferred cleanup. Same-name installs across sources preserve shared state/grants.
+`extension_import_staging._stage_extension_import_tree` shares complete `__extension_imports/` by one full content/runtime/dependency digest (short Windows cwd). PID references end at teardown; reclamation needs no references and dead owners. Review/grants stay bound to code. Local delete unloads and removes payload and all state under the lifecycle lock, without tombstones or deferred cleanup. Same-name installs across sources preserve shared state/grants.
 
 Per-call children reuse the loader/scrubbed env, proxying tools/routes/WS/UI/settings/companion descriptors; persistent tasks: in-process or companions. `extension-loop` (`EventBus.start_loop`): Host Service start, teardown `finally`; blocking stays off HTTP/Stop/Pause; async route/WS: HTTP loop; sync subscribers: publisher thread; WS disclosure off-loop. Capability matrix, not platforms. `extension_catalog.json`: every server load runs the catalog child and replaces the record; workers reuse it per source identity (`catalog_identity`; hashed, values unstored); failures never recorded. In-process: namespacing, permissions, per-skill tracking, atomic unload.
 

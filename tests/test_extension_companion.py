@@ -1377,6 +1377,34 @@ def _refreshable_skill(tmp_path, monkeypatch, token: str, plugin_api: str = _PLU
     return api, supervisor, settings_path, drive_root, loaded
 
 
+def test_companion_starts_from_a_deep_staged_import_directory(tmp_path, monkeypatch):
+    """The actual companion launch consumes the short identity as its cwd."""
+    import os
+    import uuid
+    from ouroboros.skill_loader import skill_state_dir
+
+    root = pathlib.Path(os.environ.get("OUROBOROS_TEST_TEMP_ROOT", str(tmp_path)))
+    base = root / ("launch-" + uuid.uuid4().hex[:8])
+    padding = max(0, 120 - len(str(base)) - 1)
+    if padding:
+        base /= "d" * padding
+    base.mkdir(parents=True)
+    supervisor = None
+    try:
+        _, supervisor, _, drive, loaded = _refreshable_skill(base, monkeypatch, "synthetic")
+        runtime = supervisor._runtimes["tgdemo:daemon"]
+        assert runtime.process.poll() is None
+        cwd = runtime.descriptor.cwd
+        assert cwd.is_relative_to(skill_state_dir(drive, loaded.name) / "__extension_imports")
+        assert len(str(cwd)) < 260
+        assert len(cwd.parent.name) == 71
+        assert (cwd / "scripts" / "daemon.py").is_file()
+    finally:
+        extension_loader.unload_extension("tgdemo")
+        if supervisor is not None:
+            supervisor.stop_all(timeout_sec=1)
+
+
 def test_plugin_api_refresh_applies_a_saved_token_through_the_same_api_and_controls_win(tmp_path, monkeypatch):
     """Save, replace and clear reach the companion through ``refresh_companion_process``; a second refresh
     through the same API still works; an unreadable document keeps the process; disable and unload win."""
