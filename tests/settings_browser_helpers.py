@@ -30,6 +30,43 @@ def open_settings(page, path: str = "", row: str = "", *, timeout: float = 10_00
     return level
 
 
+# Settings has no tab strip: what it shows is its home, the pages a home row opens or a module registered, and, where a
+# page lists entries, the editor of one. A skill's page needs a skill: the caller names one that registered a form.
+SETTINGS_PATHS = """async (skill) => {
+    const { settingsPagePrefixes } = await import('/static/modules/settings_pages.js');
+    const { HOME_ROWS } = await import('/static/modules/settings_rows.js');
+    const home = HOME_ROWS.map((row) => row.to).filter((to) => !/^(dashboard|page|main):/.test(to));
+    return [...new Set([...home, ...settingsPagePrefixes()])].filter((path) => path !== 'skill' || skill)
+        .map((path) => (path === 'skill' ? `skill/${skill}` : path));
+}"""
+SETTLED = "() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))"
+
+
+def walk_settings(page, measure, *, skill: str = "", settle=None):
+    """Show every Settings view in turn and call ``measure(name)`` at each: the home, every page, and one editor of
+    a page that lists entries. Ends at the home, where it started, and returns the paths it walked."""
+    settle = settle or (lambda: page.evaluate(SETTLED))
+    open_settings(page, "")
+    page.locator(f"{HOME} [data-settings-card]").wait_for(state="visible")
+    settle()
+    measure("home")
+    paths = page.evaluate(SETTINGS_PATHS, skill)
+    for path in paths:
+        level = open_settings(page, path)
+        if path.startswith("skill/"):
+            level.locator("[data-extension-settings-form]").wait_for(state="visible")
+        settle()
+        measure(path)
+        head = level.locator("[data-entry-id]").first
+        if head.count():
+            open_entry(page, head.get_attribute("data-entry-id"))
+            settle()
+            measure(top_path(page))
+    open_settings(page, "")
+    settle()
+    return paths
+
+
 def top_path(page) -> str:
     """The path Settings shows now ('' is the home): the visible level, else the home."""
     return page.evaluate("""() => {

@@ -137,6 +137,11 @@ test('a row answers its fact, says when it was not read, and marks the owner\'s 
         assert.equal(failed[to].text, 'Not checked', to);
     }
     assert.equal(homeAnswers({ settings, accounts: accounts([account('codex', 'a', 'passed')], 'not_read') }).accounts.text, 'Accounts not checked, 2 API keys');
+    // A sign-in is the owner's move on the row too, only over what was read.
+    const signIn = (read) => homeAnswers({ settings, accounts: accounts([account('codex', 'a', 'failed')], read) }).accounts.owner;
+    assert.deepEqual([signIn('ok'), signIn('not_read'), answers.accounts.owner], [true, false, false]);
+    const needy = { enabled: true, servers: [{ enabled: true, tool_count: 1, sign_in: { state: 'needed' } }] };
+    assert.deepEqual([homeAnswers({ tools: needy }).tools.owner, answers.tools.owner], [true, false]);
     assert.equal(homeAnswers({ settings: { _meta: {} } }).permissions.text, 'Not reported');
 });
 

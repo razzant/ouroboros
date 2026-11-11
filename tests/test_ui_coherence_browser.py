@@ -205,38 +205,31 @@ def test_photo_menu_escapes_gallery_crop_downloads_and_cleans_up(subscription_ui
     page.wait_for_function("!document.querySelector('body > .chat-photo-menu')", timeout=5_000)
 
 
-def test_settings_footer_controls_are_reachable_at_content_breakpoints(subscription_ui):
+def test_settings_card_actions_are_reachable_at_content_breakpoints(subscription_ui):
+    # What the footer's Restart was is a line of Ouroboros's card on the Settings home, with its one action.
+    subscription_ui["settings"]["_meta"]["restart_state"] = {
+        "restart_required": True, "restart_keys": ["OUROBOROS_SKILLS_REPO_PATH"], "restart_source_unknown_keys": [],
+        "local_model": {"pending_keys": ["LOCAL_MODEL_PORT"]}}
     page = open_app(subscription_ui, "/#settings")
-    page.wait_for_selector("#btn-save-settings")
-    # Exercise the existing footer's geometry in each meaningful controller state.
-    # Domain save/validation transitions belong to the forms track's separate flows.
-    states = [
-        ("clean", "", False, False), ("dirty", "Unsaved changes", False, False),
-        ("saving", "Saving…", True, False),
-        ("error", "Error: Could not save your settings. Your edits are still available.", False, False),
-        ("restart", "Saved. Restart required before the new runtime settings take effect.", False, True),
-    ]
+    card = page.locator("#page-settings [data-settings-card]")
+    card.locator('[data-needs="restart"]').wait_for(state="visible")
     for width in [640, 641, 760, 768, 980, 981]:
         page.set_viewport_size({"width": width, "height": 600})
         if width <= 640:
             setup_browser.wait_drawer_closed(page)
         for sidebar in [220, 280]:
             page.evaluate("value => document.documentElement.style.setProperty('--sidebar-width',value+'px')", sidebar)
-            for name, message, busy, restart in states:
-                page.evaluate("""s => {
-                    document.querySelector('#settings-status').textContent=s.message;
-                    document.querySelector('.settings-footer').dataset.draft=s.name==='dirty'?'dirty':'clean';
-                    document.querySelector('#btn-save-settings').disabled=s.busy;
-                    document.querySelector('#btn-restart-now').hidden=!s.restart;
-                }""", {"name": name, "message": message, "busy": busy, "restart": restart})
-                for selector in ["#btn-reload-settings", "#btn-save-settings"] + (["#btn-restart-now"] if restart else []):
-                    box = hit_box(page.locator(selector))
-                    valid = box["reachable"] and box["x"] >= 0 and box["right"] <= width + 1 and box["bottom"] <= 600
-                    if not valid:
-                        setup_browser.capture(page, f"shell-footer-failure-{width}-{sidebar}-{name}")
-                    assert valid, json.dumps([width, sidebar, name, selector, box])
-                if sidebar == 280 and name in {"dirty", "restart"}:
-                    setup_browser.capture(page, f"shell-footer-{width}-{name}")
+            # Every line the card lists is on screen with its action: the unread accounts, the restart, the local model.
+            actions = card.locator("[data-needs]:visible [data-need-action]")
+            assert actions.count() >= 2, [width, sidebar, actions.count()]
+            for index in range(actions.count()):
+                box = hit_box(actions.nth(index))
+                valid = box["reachable"] and box["x"] >= 0 and box["right"] <= width + 1 and box["bottom"] <= 600
+                if not valid:
+                    setup_browser.capture(page, f"shell-card-failure-{width}-{sidebar}-{index}")
+                assert valid, json.dumps([width, sidebar, index, box])
+            if sidebar == 280:
+                setup_browser.capture(page, f"shell-card-{width}")
 
 
 def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_their_tables_inside(subscription_ui):

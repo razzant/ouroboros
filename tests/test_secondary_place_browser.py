@@ -2,7 +2,7 @@
 2026-11-03; DESIGN §10 "Moving between places", "History edges"; ARCHITECTURE §3 "Dashboard").
 
 Real server and real page. Main left reading an older passage returns to it, left at its end follows it. Settings keeps
-its tab, unsaved draft and scroll across other pages. Logs takes a burst while hidden: no node, no history read; shown,
+its page, a value being typed and its place across other pages. Logs takes a burst while hidden: no node, no history read; shown,
 it draws the newest entries at once and the rest in chunks, keeps its filters, Raw is written when opened, and a live
 event for the card holding the selection and the focus leaves them where they were. A live event for the open card the
 owner reads inside, already the newest entry, keeps them on the row they were reading.
@@ -122,7 +122,7 @@ def test_main_returns_to_the_passage_it_was_left_at_and_follows_when_left_at_its
 
 
 @pytest.mark.parametrize("engine", ENGINES)
-def test_settings_keeps_its_tab_unsaved_draft_and_place_across_other_pages(direct_server_with_data, engine):
+def test_settings_keeps_its_page_a_typed_value_and_its_place_across_other_pages(direct_server_with_data, engine):
     from playwright.sync_api import expect, sync_playwright
 
     with sync_playwright() as pw:
@@ -130,40 +130,37 @@ def test_settings_keeps_its_tab_unsaved_draft_and_place_across_other_pages(direc
         try:
             page, _logs, errors = _page(browser, direct_server_with_data["url"])
             _nav(page, "settings")
-            page.click('[data-settings-tab="advanced"]')
-            field = page.locator("#s-gh-repo")
-            expect(field).to_be_enabled()
-            field.fill("owner/kept-draft")
-            expect(page.locator(".settings-footer")).to_have_attribute("data-draft", "dirty")
-            field.evaluate("input => { window.__draftNode = input; }")
-            scroller = page.locator(".settings-scroll")
-            scroller.evaluate("box => { box.scrollTop = Math.min(320, box.scrollHeight - box.clientHeight); }")
+            # The home: scrolled down its list, left, shown again at the same place.
+            home = page.locator("#page-settings [data-settings-home]")
+            expect(home.locator("[data-settings-card]")).to_be_visible()
+            home.evaluate("box => { box.scrollTop = Math.min(320, box.scrollHeight - box.clientHeight); }")
             page.wait_for_timeout(200)
-            place = scroller.evaluate("box => box.scrollTop")
+            place = home.evaluate("box => box.scrollTop")
             assert place > 0
+            _nav(page, "dashboard")
+            _nav(page, "settings")
+            assert abs(home.evaluate("box => box.scrollTop") - place) <= 1, "the home's place"
 
+            # A page with a value being typed: leaving asks nothing, and the same page with the same field comes back.
+            page.locator('#page-settings [data-settings-open="computer"]').scroll_into_view_if_needed()
+            assert page.evaluate("() => window.__ouroSettings.open('skill-sources')") is not False
+            level = page.locator('#page-settings [data-settings-page="skill-sources"]')
+            field = level.locator("#setting-OUROBOROS_CLAWHUB_REGISTRY_URL")
+            expect(field).to_be_visible()
+            stored = field.input_value()
+            field.fill("https://clawhub.ai/api/kept-while-away")
+            field.evaluate("input => { window.__typedNode = input; }")
             _nav(page, "dashboard")
             assert page.get_by_role("button", name="Stay", exact=True).count() == 0, "leaving asks nothing"
             _nav(page, "chat")
             _nav(page, "settings")
-            expect(page.locator('[data-settings-tab="advanced"]')).to_have_attribute("aria-selected", "true")
-            expect(field).to_have_value("owner/kept-draft")
-            assert field.evaluate("input => input === window.__draftNode"), "the same field"
-            expect(page.locator(".settings-footer")).to_have_attribute("data-draft", "dirty")
-            assert abs(scroller.evaluate("box => box.scrollTop") - place) <= 1, "its place"
-            # Reload replaces the draft, so it still asks.
-            page.click("#btn-reload-settings")
-            expect(page.get_by_role("button", name="Stay", exact=True)).to_be_visible()
-            page.get_by_role("button", name="Stay", exact=True).click()
-            expect(field).to_have_value("owner/kept-draft")
-            page.click('[data-settings-tab="secrets"]')
-            secret = page.locator('#s-secret-github-token')
-            secret.fill('synthetic-unsaved-secret')
-            secret.locator('..').locator('.secret-toggle').click()
-            expect(secret.locator('..').locator('.settings-secret-value')).to_have_text('synthetic-unsaved-secret')
-            _nav(page, 'chat'); _nav(page, 'settings')
-            expect(secret.locator('..').locator('.settings-secret-value')).to_be_hidden()
-            expect(secret).to_have_value('synthetic-unsaved-secret')
+            expect(level).to_be_visible()
+            expect(field).to_have_value("https://clawhub.ai/api/kept-while-away")
+            assert field.evaluate("input => input === window.__typedNode"), "the same field"
+            # The read made when Settings is shown again does not rewrite a field that holds typed text.
+            page.wait_for_timeout(400)
+            expect(field).to_have_value("https://clawhub.ai/api/kept-while-away")
+            field.fill(stored)
             assert not errors, errors
         finally:
             browser.close()

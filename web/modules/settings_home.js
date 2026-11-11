@@ -134,8 +134,10 @@ function accountsWords(accounts, settings) {
     const keys = Array.isArray(settings?._meta?.connections) ? settings._meta.connections.filter((row) => row?.configured).length : null;
     const keyWords = keys === null ? '' : count(keys, '{n} API key', '{n} API keys');
     if (!accounts && keys === null) return undefined;
-    const known = accounts?.read === READ_OK ? count(accounts.rows.length, '{n} account', '{n} accounts') : fmt('Accounts not checked');
-    return [known, keyWords].filter(Boolean).join(', ');
+    const read = accounts?.read === READ_OK;
+    const known = read ? count(accounts.rows.length, '{n} account', '{n} accounts') : fmt('Accounts not checked');
+    // An account that needs sign-in again is the owner's move, as its line of the card says.
+    return { text: [known, keyWords].filter(Boolean).join(', '), owner: read && accounts.rows.some(needsSignIn) };
 }
 
 function toolsWords(tools) {
@@ -144,7 +146,8 @@ function toolsWords(tools) {
     if (!servers.length) return fmt('No tool servers');
     // A server whose configuration could not be loaded is listed without its runtime facts: it is not on.
     const on = servers.filter((server) => server?.enabled === true && Object.hasOwn(server, 'tool_count')).length;
-    return fmt(servers.length === 1 ? '{on} of {n} server on' : '{on} of {n} servers on', { on, n: servers.length });
+    return { text: fmt(servers.length === 1 ? '{on} of {n} server on' : '{on} of {n} servers on', { on, n: servers.length }),
+        owner: servers.some(toolNeedsSignIn) };
 }
 
 function updateWords(update) {
@@ -157,7 +160,7 @@ const START_WORDS = { on: 'Starts at sign-in', off: 'Starts by hand', other_copy
 
 /**
  * The current answer of every home row, keyed by what the row opens: `{ text, owner }`, `owner` when the next move
- * is the owner's (a stop by the spending limit, a held consciousness, an update that waits). A row whose fact is not
+ * is the owner's (a stop by the spending limit, a held consciousness, an update that waits, a sign-in). A row whose fact is not
  * read yet has no entry and keeps what it shows; one whose read failed says "Not checked".
  */
 export function homeAnswers(facts = {}) {
@@ -183,7 +186,7 @@ export function homeAnswers(facts = {}) {
         return { text: budget.state === 'available' ? String(budget.label).replace(' / ', ' of ') : budget.label, owner: budget.attention === true };
     });
     const accountsAnswer = accountsWords(accounts, settings);
-    if (accountsAnswer !== undefined) out.accounts = { text: accountsAnswer, owner: false };
+    if (accountsAnswer !== undefined) out.accounts = accountsAnswer;
     say('tools', tools, toolsWords);
     say('page:skills', skills, (s) => (Array.isArray(s.skills) ? fmt('{n} installed', { n: s.skills.length }) : fmt(NOT_CHECKED)));
     say('appearance', device.theme, (theme) => (['system', 'light', 'dark'].includes(theme) ? fmt({ system: 'System', light: 'Light', dark: 'Dark' }[theme]) : undefined));

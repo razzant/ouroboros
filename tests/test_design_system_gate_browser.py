@@ -15,7 +15,7 @@ import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
 from tests._shared import answer_projects
-from tests.settings_browser_helpers import HOME, open_settings, top_path
+from tests.settings_browser_helpers import HOME, walk_settings
 
 subscription_ui = setup_browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser]
@@ -182,44 +182,6 @@ def rest(page, timeout=5000):
     settle(page)
 
 
-# Settings has no tab strip (settings.js): what it shows is its home, the pages a home row opens or a module
-# registered, and, where a page lists entries, the editor of one. A skill's page takes the fixture skill.
-SETTINGS_PATHS = """async () => {
-    const { settingsPagePrefixes } = await import('/static/modules/settings_pages.js');
-    const { HOME_ROWS } = await import('/static/modules/settings_rows.js');
-    const home = HOME_ROWS.map((row) => row.to).filter((to) => !/^(dashboard|page|main):/.test(to));
-    return [...new Set([...home, ...settingsPagePrefixes()])].map((path) => (path === 'skill' ? 'skill/gate_skill' : path));
-}"""
-
-
-def walk_settings(page, measure):
-    """Show every Settings view in turn and call ``measure(name)`` at each: the home, every page, one editor per
-    family that lists entries. Ends at the home, where it started."""
-    open_settings(page, '')
-    page.locator(f'{HOME} [data-settings-card]').wait_for(state='visible')
-    rest(page)
-    measure('home')
-    paths = page.evaluate(SETTINGS_PATHS)
-    assert 'skill-sources' in paths and 'skill/gate_skill' in paths and len(paths) >= 12, paths
-    for path in paths:
-        level = open_settings(page, path)
-        if path == 'skill/gate_skill':
-            level.locator('[data-extension-settings-form]').wait_for(state='visible')
-        rest(page)
-        measure(path)
-        head = level.locator('[data-entry-id]').first
-        if head.count():
-            head.click()
-            page.wait_for_function("before => { const levels = [...document.querySelectorAll('#page-settings "
-                                   "[data-settings-page]')].filter((e) => !e.hidden); return levels.length && "
-                                   "levels.at(-1).dataset.settingsPage !== before; }", arg=path)
-            rest(page)
-            measure(top_path(page))
-    open_settings(page, '')
-    rest(page)
-    return paths
-
-
 def nav_pages(page):
     # The one registry of places (web/modules/pages.js): a new page is gated here with no further edit.
     ids = page.evaluate("async () => (await import('/static/modules/pages.js')).PAGES.map(p => p.id)")
@@ -296,7 +258,11 @@ def test_every_page_and_settings_tab_meets_shell_contract(gate_ui, tmp_path, wid
                     # The way to the other places stays on every Settings view: ☰ in the header on a phone.
                     if width < 720 and not page.locator(root + ' .app-page-header [data-mobile-nav-toggle]').is_visible():
                         failures[key + '/menu'] = 'the menu button left the header'
-                facts['settings-views'] = walk_settings(page, measure_settings)
+                # The home, every page a home row opens or a module registered (the fixture skill's form among
+                # them), and one editor of a page that lists entries.
+                views = walk_settings(page, measure_settings, skill='gate_skill', settle=lambda: rest(page))
+                assert 'skill-sources' in views and 'skill/gate_skill' in views and len(views) >= 12, views
+                facts['settings-views'] = views
                 continue
             if name == 'skills':
                 page.wait_for_selector('.skills-card')
@@ -441,7 +407,8 @@ def test_content_regions_fit_with_touch_controls_and_local_table_scroll(gate_ui)
                 assert cell.evaluate('e => e.scrollWidth > e.clientWidth'), 'the fixture name is longer than its cell'
                 assert cell.evaluate('e => getComputedStyle(e).textOverflow') == 'ellipsis'
             if name == 'settings':
-                walk_settings(page, lambda view: results.__setitem__('settings/' + view, page.evaluate(MEASURE, scope)))
+                walk_settings(page, lambda view: results.__setitem__('settings/' + view, page.evaluate(MEASURE, scope)),
+                              skill='gate_skill', settle=lambda: rest(page))
                 for row in page.locator(f'{HOME} [data-settings-open]').all():
                     assert row.bounding_box()['height'] >= 44, row.get_attribute('data-settings-open')
             else:
