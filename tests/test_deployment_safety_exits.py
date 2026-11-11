@@ -2,9 +2,9 @@
 
 Three exits stay distinct: an agent's DANGEROUS repeat in Cyber Pro, a human's answered card after DANGEROUS,
 and a human's card without a verdict. Explicit lists do not inherit another exit. No-policy behavior stays
-upstream; the organization's own checker releases nothing unjudged by default. A changed argument,
-request_id included, is a new call: Cyber Pro checks it again, an ordinary mode keeps declared words to the same
-destination waiting; actions that are no words keep their mode's rule.
+upstream; the organization's own checker releases nothing unjudged by default. Every flagged call returns once,
+words or not. A changed argument, request_id included, is a new call and is read again, except declared words to
+the same destination, which keep waiting wherever a DANGEROUS reading waits for my human.
 """
 
 from __future__ import annotations
@@ -28,8 +28,9 @@ CASES = {  # the organization's checker named, and the file's allowed_exits (Non
     "release": (True, [RELEASE]), "both": (True, [RELEASE, REPEAT]),
     "human": (True, [HUMAN]), "all": (True, [REPEAT, HUMAN, RELEASE]),
 }
-SAID = {REPEAT: "repeat the identical call", RELEASE: "ask your human privately"}
-CLOSED = {REPEAT: "lets no repeat send it", RELEASE: "lets no answer of your human release a call unjudged"}
+SAID = {REPEAT: "issuing the identical call in a later step", HUMAN: "waits for your human",
+        RELEASE: "ask your human privately"}
+CLOSED = "lets neither a repeat nor a card release it"
 
 
 @pytest.fixture
@@ -107,15 +108,16 @@ def test_the_file_names_the_exits_that_stay_open_and_settings_shows_exactly_them
 
 @pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
 @pytest.mark.parametrize("case", sorted(CASES))
-def test_declared_words_a_verdict_refused_repeat_only_through_an_open_exit(supervisor, exits, published_tool,
-                                                                          monkeypatch, case, mode):
-    """A connector's declared send (its real published effect) refused DANGEROUS: an open exit sends its identical
-    re-issue from a later model call in Cyber Pro and on my human's matching card in an ordinary mode; a closed one
-    refuses it from the saved verdict with no model call, card or not, in every mode. The same model call
-    re-presenting it decides nothing; a new request_id is checked again in Cyber Pro and keeps waiting elsewhere."""
+def test_declared_words_a_verdict_returned_leave_only_through_an_open_exit(supervisor, exits, published_tool,
+                                                                         monkeypatch, case, mode):
+    """A connector's declared send (its real published effect) returned DANGEROUS: an open repeat lets its identical
+    call from a later model call through in Cyber Pro; elsewhere my human's matching card does, where that exit is
+    open; closed, the saved verdict answers with no model call, card or not. The step that received the return
+    decides nothing; a new request_id is read again where the mind decides and keeps waiting elsewhere."""
     h = supervisor
     opened = exits(case)
-    mind, card = opened[REPEAT] and mode == "cyber_pro", opened[HUMAN]
+    mind = opened[REPEAT] and mode == "cyber_pro"
+    card = opened[HUMAN] and not mind
     closed = not (mind or card)
     monkeypatch.setattr(h.module, "get_runtime_mode", lambda: mode)
     monkeypatch.setattr(_tool_effects, "effect_of", REAL_EFFECT_OF)
@@ -124,45 +126,47 @@ def test_declared_words_a_verdict_refused_repeat_only_through_an_open_exit(super
     args = {"path": "chat.postMessage", "body": {"channel": "C1", "text": "Ship it on Friday."}, "request_id": "r-1"}
     h.replies.append({"status": "DANGEROUS", "reason": "the place note asks for a quiz first"})
     ok, message = h.module.check_safety(name, args, ctx=h.ctx)
-    assert not ok and "Message not sent" in message and "the place note asks for a quiz first" in message
-    assert (SAID[REPEAT] in message, "ask your human privately" in message, CLOSED[REPEAT] in message) == (
-        mind, card, closed)
-    assert not h.module.check_safety(name, args, ctx=h.ctx)[0], "the same model call decides nothing"
+    assert not ok and message.startswith("⚠️ SAFETY_RETURNED: not run;")
+    assert "the place note asks for a quiz first" in message
+    assert (SAID[REPEAT] in message, SAID[HUMAN] in message, CLOSED in message) == (mind, card, closed)
+    ok, message = h.module.check_safety(name, args, ctx=h.ctx)
+    assert not ok and "returned earlier in this same step" in message, "the same model call decides nothing"
     h.later()
     ok, message = h.module.check_safety(name, dict(reversed(list(args.items()))), ctx=h.ctx)
     assert ok is mind and len(h.calls) == 1, "no second model roll, open or closed"
     assert [event["type"] for event in h.events].count("safety_sent_despite_check") == int(mind)
-    assert not closed or ("refused before" in message and SAID[REPEAT] not in message and CLOSED[REPEAT] in message)
-    if not mind:  # my human's matching card: an open exit sends it in any mode, a closed one sends nothing
+    assert not closed or (CLOSED in message and SAID[REPEAT] not in message)
+    if not mind:  # my human's matching card: an open exit lets it through in any mode, a closed one nothing
         _answered(h, "q3", name, args)
         h.later()
         ok, message = h.module.check_safety(name, args, ctx=h.ctx)
         assert ok is card and ("(q3)" in message) is card and len(h.calls) == 1
         h.ctx._owner_directives = []
-    rechecked = mode == "cyber_pro" or _subject(h, name, args)[2]  # an exact-call card keys no words to a destination
+    rechecked = mind or _subject(h, name, args)[2]  # an exact-call card keys no words to a destination
     ok, message = h.module.check_safety(name, {**args, "request_id": "r-2"}, ctx=h.ctx)
     assert ok is bool(rechecked) and len(h.calls) == 1 + bool(rechecked)
 
 
 @pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
 @pytest.mark.parametrize("case", sorted(CASES))
-def test_words_only_the_verdict_saw_keep_their_mode_rule_and_a_closed_exit_keeps_them_refused(
-        supervisor, exits, monkeypatch, case, mode):
-    """A built-in without declarations whose verdict marks speech: an open exit repeats it in Cyber Pro and sends it
-    on my human's exact-call card in an ordinary mode; a closed exit refuses its identical re-issue in both modes,
-    card or not. No issue is judged twice."""
+def test_an_action_a_verdict_returned_leaves_only_through_an_open_exit(supervisor, exits, monkeypatch, case, mode):
+    """A built-in without declarations returned DANGEROUS (a ``speech`` key in its verdict changes nothing): an open
+    repeat lets its identical call from a later model call through in Cyber Pro; elsewhere it waits for my human's
+    card on the exact call, which releases it where that exit is open; closed, it stays returned, card or not. No
+    issue is read twice."""
     h = supervisor
     opened = exits(case)
-    mind, card = opened[REPEAT] and mode == "cyber_pro", opened[HUMAN]
-    closed = not (mind or card)
+    mind = opened[REPEAT] and mode == "cyber_pro"
+    card = opened[HUMAN] and not mind
     monkeypatch.setattr(h.module, "get_runtime_mode", lambda: mode)
     comment = {"method": "comment", "repo": "razzant/ouroboros", "number": 2805, "body": "Taking it up."}
     h.replies.extend([{"status": "DANGEROUS", "reason": "the place note asks for a quiz first", "speech": True,
                        "quote": "Taking it up."}] * 2)
     ok, message = h.module.check_safety("github_write", comment, ctx=h.ctx)
     assert not ok and '"Taking it up."' in message
-    assert (SAID[REPEAT] in message, "ask your human privately" in message, CLOSED[REPEAT] in message) == (
-        mind, card, closed)
+    assert (SAID[REPEAT] in message, SAID[HUMAN] in message, CLOSED in message) == (mind, card, not (mind or card))
+    exact = h.module._exact_call("github_write", comment)
+    assert (f"a card holding this exact call on its own line: {exact}." in message) is card
     h.later()
     ok, message = h.module.check_safety("github_write", comment, ctx=h.ctx)
     assert ok is mind and len(h.calls) == 1
@@ -175,17 +179,30 @@ def test_words_only_the_verdict_saw_keep_their_mode_rule_and_a_closed_exit_keeps
 
 @pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
 @pytest.mark.parametrize("case", ["unmanaged", "none", "both"])
-def test_a_refused_action_that_is_no_words_keeps_its_mode_rule(supervisor, exits, monkeypatch, case, mode):
+def test_a_dangerous_command_waits_for_the_card_where_the_mind_does_not_decide(supervisor, exits, monkeypatch, case, mode):
+    """A command read DANGEROUS returns once in every mode. Its identical call from a later model call is let through
+    without a new reading only where the mind decides (Cyber Pro, the repeat open); elsewhere it waits for my human's
+    card on the exact call, which releases it where that exit is open. No issue is read twice."""
     h = supervisor
-    exits(case)
+    opened = exits(case)
+    mind = opened[REPEAT] and mode == "cyber_pro"
+    card = opened[HUMAN] and not mind
     monkeypatch.setattr(h.module, "get_runtime_mode", lambda: mode)
-    for _ in range(2):
-        h.replies.append({"status": "DANGEROUS", "reason": "deletes the home directory", "speech": False})
-        ok, message = h.module.check_safety("run_command", {"cmd": "rm -rf ~"}, ctx=h.ctx)
-        assert ok is (mode == "cyber_pro") and ("Cyber Pro leaves the decision" in message) is (mode == "cyber_pro")
-        assert not any(text in message for text in (*SAID.values(), *CLOSED.values()))
+    command = {"cmd": "rm -rf ~"}
+    h.replies.append({"status": "DANGEROUS", "reason": "deletes the home directory"})
+    ok, message = h.module.check_safety("run_command", command, ctx=h.ctx)
+    assert not ok and message.startswith("⚠️ SAFETY_RETURNED: not run;") and "deletes the home directory" in message
+    assert (SAID[REPEAT] in message, SAID[HUMAN] in message, CLOSED in message) == (mind, card, not (mind or card))
+    h.later()
+    ok, message = h.module.check_safety("run_command", command, ctx=h.ctx)
+    assert ok is mind and len(h.calls) == 1
+    assert not mind or message.startswith("⚠️ SAFETY_NOTE: let through on your later identical call")
+    if not mind:
+        _answered(h, "q2", "run_command", command)
         h.later()
-    assert len(h.calls) == 2, "each issue is checked again"
+        ok, message = h.module.check_safety("run_command", command, ctx=h.ctx)
+        assert ok is card and len(h.calls) == 1
+        assert not card or message.startswith("⚠️ SAFETY_NOTE: let through on your human's answer (q2)")
 
 
 @pytest.mark.parametrize("case", sorted(CASES))
@@ -204,8 +221,8 @@ def test_my_humans_answer_releases_held_words_only_through_an_open_exit(supervis
     reply = {"place_id": "p", "text": text, "destination": {"conversation_id": "-100"}}
     h.replies.append(RuntimeError("provider_failed: the checker is down"))
     ok, message = h.module.check_safety("place_reply", reply, ctx=h.ctx)
-    assert not ok and "SAFETY_UNAVAILABLE" in message
-    assert (SAID[RELEASE] in message, CLOSED[RELEASE] in message) == (open_, not open_)
+    assert not ok and message.startswith("⚠️ SAFETY_UNAVAILABLE: not run.")
+    assert (SAID[RELEASE] in message) is open_
     _answered(h, "q9", "place_reply", reply)
     assert h.module.check_safety("read_file", {"path": "notes.txt"}, ctx=h.ctx) == (True, "")
     h.later()
@@ -214,7 +231,7 @@ def test_my_humans_answer_releases_held_words_only_through_an_open_exit(supervis
     assert ok is open_ and len(h.calls) == (1 if open_ else 2), "closed: the same call is checked again"
     assert [e["quiz_id"] for e in h.events if e["type"] == "safety_sent_without_assessment"] == (["q9"] if open_ else [])
     if not open_:
-        assert "SAFETY_UNAVAILABLE" in message and CLOSED[RELEASE] in message
+        assert message.startswith("⚠️ SAFETY_UNAVAILABLE: not run.") and SAID[RELEASE] not in message
         h.later()  # the checker answers again: the call is judged and sends on its verdict
         assert h.module.check_safety("place_reply", reply, ctx=h.ctx) == (True, "") and len(h.calls) == 3
 
@@ -232,7 +249,7 @@ def test_my_humans_answer_runs_a_held_mcp_call_only_through_an_open_exit(supervi
     exact = h.module._exact_call(name, call)
     h.replies.append(RuntimeError("provider_failed"))
     ok, message = h.module.check_safety(name, call, ctx=h.ctx)
-    assert not ok and (f"on its own line of the card: {exact}\n" in message, CLOSED[RELEASE] in message) == (open_, not open_)
+    assert not ok and (f"a card holding this exact call on its own line: {exact}: their answer" in message) is open_
     _answered(h, "q7", name, call)
     h.later()
     h.replies.append(RuntimeError("provider_failed"))
@@ -243,15 +260,15 @@ def test_my_humans_answer_runs_a_held_mcp_call_only_through_an_open_exit(supervi
 @pytest.mark.parametrize("exit_", [REPEAT, RELEASE])
 @pytest.mark.parametrize("case", ["unmanaged", "none"])
 def test_the_registry_runs_the_tool_only_once_an_open_exit_lets_it(supervisor, exits, monkeypatch, tmp_path, case, exit_):
-    """At the real first-party dispatch the handler never runs before its exit's conditions hold: refused or held,
-    then re-issued from a later model call (after my human's matching answer, for a hold; a closed repeat refuses
-    even that answer)."""
+    """At the real first-party dispatch the handler never runs before its exit's conditions hold: returned or held,
+    then re-issued from a later model call after my human's matching answer (a closed file releases nothing)."""
     h = supervisor
     open_ = exits(case)[exit_]
     registry, context, sent = _registry(tmp_path, monkeypatch)
     h.replies.append({"status": "DANGEROUS", "reason": "not delegated"} if exit_ == REPEAT else RuntimeError("down"))
     first = registry.execute_result("fixture_send", {"text": "hello"})
-    assert (first.status, first.code, sent) == ("blocked", "SAFETY_VIOLATION", [])
+    assert (first.status, first.code, sent) == (
+        ("blocked", "SAFETY_RETURNED", []) if exit_ == REPEAT else ("unavailable", "SAFETY_UNAVAILABLE", []))
     if exit_ == RELEASE:
         _answered(h, "q1", "fixture_send", {"text": "hello"}, context)
         h.replies.append(RuntimeError("still down"))
@@ -263,21 +280,21 @@ def test_the_registry_runs_the_tool_only_once_an_open_exit_lets_it(supervisor, e
     assert len(h.calls) == (1 if open_ else 1 + (exit_ == RELEASE)), "a closed repeat asks no model; a hold, the checker"
 
 
-def test_a_refusal_kept_under_an_open_repeat_is_answered_by_its_verdict_once_the_exit_reads_closed(
+def test_a_return_kept_under_an_open_card_is_answered_by_its_verdict_once_the_exit_reads_closed(
         supervisor, exits, monkeypatch, tmp_path):
-    """Words only the verdict saw, refused in an ordinary mode while the exit was open (each issue would be checked
-    again), meet a closed exit at their next issue: the saved verdict answers, no second model roll runs the sink."""
+    """An action returned in an ordinary mode while the card exit was open (it waits for my human) meets a closed
+    exit at its next issue: the saved verdict answers, no second model roll runs the sink."""
     h = supervisor
     exits("all")
     registry, context, sent = _registry(tmp_path, monkeypatch, declared=False)
     h.replies.extend([{"status": "DANGEROUS", "reason": "not delegated", "speech": True},
                       {"status": "SAFE", "reason": "a second roll"}])
     first = registry.execute_result("fixture_send", {"text": "hello"})
-    assert first.status == "blocked" and not any(phrase in first.text for phrase in (SAID[REPEAT], CLOSED[REPEAT]))
+    assert first.status == "blocked" and SAID[HUMAN] in first.text and CLOSED not in first.text
     exits("none")
     context._current_llm_call_meta = {"llm_call_id": "llm-round-2"}
     second = registry.execute_result("fixture_send", {"text": "hello"})
-    assert (second.status, "refused before" in second.text, len(h.calls), sent) == ("blocked", True, 1, [])
+    assert (second.status, CLOSED in second.text, len(h.calls), sent) == ("blocked", True, 1, [])
 
 
 def test_a_verdict_larger_than_the_bound_is_kept_and_ends_the_hold_it_answered(
@@ -290,7 +307,7 @@ def test_a_verdict_larger_than_the_bound_is_kept_and_ends_the_hold_it_answered(
     exits("release")  # the unjudged release open, the repeat closed
     registry, context, sent = _registry(tmp_path, monkeypatch)
     h.replies.append(RuntimeError("provider_failed: down"))
-    assert registry.execute_result("fixture_send", {"text": "hello"}).status == "blocked"
+    assert registry.execute_result("fixture_send", {"text": "hello"}).status == "unavailable"
     monkeypatch.setattr(h.module, "_SAFETY_PRIOR_BYTE_BUDGET", 2000)
     context._current_llm_call_meta = {"llm_call_id": "llm-round-2"}
     h.replies.append({"status": "DANGEROUS", "reason": "Not delegated. " * 300})
@@ -336,10 +353,9 @@ def test_a_preanswered_card_after_a_required_check_uses_only_the_dangerous_relea
     _answered(h, "before-send", name, args)
     h.replies.append({"status": "DANGEROUS", "reason": "Ask first", "speech": True})
     ok, _ = h.module.check_safety(name, args, ctx=h.ctx)
-    if declared:  # the declared message returns its first verdict; the existing exact card then releases it
-        assert not ok
-        h.later()
-        ok, _ = h.module.check_safety(name, args, ctx=h.ctx)
+    assert not ok, "every flagged call returns once, a card answered before it included"
+    h.later()
+    ok, _ = h.module.check_safety(name, args, ctx=h.ctx)
     assert ok and len(h.calls) == 1, "the card is not an unchecked release; a real verdict was obtained"
     assert not [e for e in h.events if e["type"] == "safety_sent_without_assessment"]
 
@@ -356,7 +372,7 @@ def test_no_exit_is_offered_where_nothing_was_kept(supervisor, exits, monkeypatc
         "places": [{"place_id": "p", "place_label": "Telegram · Team"}]})
     rootless = SimpleNamespace(task_metadata={"work_kind": "owner"}, drive_root=h.ctx.drive_root,
                                _current_llm_call_meta={"llm_call_id": "llm-round-1"})
-    named = (*SAID.values(), *CLOSED.values())
+    named = (*SAID.values(), CLOSED)
     h.replies.extend([{"status": "DANGEROUS", "reason": "not delegated"}, RuntimeError("provider_failed")])
     for text in ("refused", "held"):
         ok, message = h.module.check_safety("place_reply", {"place_id": "p", "text": text}, ctx=rootless)
@@ -373,10 +389,10 @@ def test_no_exit_is_offered_where_nothing_was_kept(supervisor, exits, monkeypatc
 
 
 def test_a_kept_refusal_is_read_as_its_exit_stands_now(supervisor, exits, monkeypatch):
-    """The exit is read where it acts: a refusal kept while it was open answers its identical re-issue from the saved
-    verdict once a file closes it, and one kept while it was closed never repeats words only the verdict saw in an
-    ordinary mode once a file opens it: they wait for my human, unjudged again. A root's end forgets the refusal: the
-    call is then checked again."""
+    """The exit is read where it acts: a return kept while it was open answers its identical re-issue from the saved
+    verdict once a file closes it, and one kept while it was closed is never let through by repetition in an ordinary
+    mode once a file opens it: it waits for my human, never read twice. A root's end forgets the return: the call is
+    then read again."""
     h = supervisor
     exits("unmanaged")
     monkeypatch.setattr(_tool_effects, "effect_of", lambda *a, **kw: _tool_effects.ToolEffect("message", declared=True))
@@ -386,7 +402,7 @@ def test_a_kept_refusal_is_read_as_its_exit_stands_now(supervisor, exits, monkey
     exits("none")
     h.later()
     ok, message = h.module.check_safety("connector_send", args, ctx=h.ctx)
-    assert not ok and "refused before" in message and len(h.calls) == 1
+    assert not ok and CLOSED in message and len(h.calls) == 1
     monkeypatch.setattr(_tool_effects, "effect_of", lambda *a, **kw: _tool_effects.BUILTIN)
     comment = {"method": "comment", "repo": "razzant/ouroboros", "number": 1, "body": "Done."}
     h.replies.append({"status": "DANGEROUS", "reason": "quiz first", "speech": True})
@@ -394,10 +410,52 @@ def test_a_kept_refusal_is_read_as_its_exit_stands_now(supervisor, exits, monkey
     exits("all")
     h.later()
     ok, message = h.module.check_safety("github_write", comment, ctx=h.ctx)
-    assert not ok and "despite" not in message and "wait for your human" in message and len(h.calls) == 2, (
-        "never sent by repetition, never judged twice")
+    assert not ok and SAID[HUMAN] in message and len(h.calls) == 2, "never let through by repetition, never read twice"
     exits("none")
     h.module.clear_safety_work("work")
     monkeypatch.setattr(_tool_effects, "effect_of", lambda *a, **kw: _tool_effects.ToolEffect("message", declared=True))
     h.later()
     assert h.module.check_safety("connector_send", args, ctx=h.ctx) == (True, "") and len(h.calls) == 3
+
+
+def test_no_safety_string_claims_an_effect(supervisor, exits, monkeypatch):
+    """Every result a check gives says what did not happen, or that the call is let through and the tool's own result
+    says what happened: a returned or held call is "not run", and no string says it ran, was sent or was blocked."""
+    import re
+
+    from ouroboros import place_guard
+
+    h = supervisor
+    said = []
+
+    def check(mode, name, args, reply=None):
+        monkeypatch.setattr(h.module, "get_runtime_mode", lambda: mode)
+        h.replies.extend([] if reply is None else [reply])
+        said.append(h.module.check_safety(name, args, ctx=h.ctx))
+        return said[-1][0]
+
+    exits("unmanaged")
+    rm, opened = {"cmd": "rm -rf ~"}, {"cmd": "chmod -R 777 ~"}
+    assert not check("advanced", "run_command", rm, {"status": "DANGEROUS", "reason": "deletes the home directory"})
+    assert not check("advanced", "run_command", rm)  # the step that received the return
+    _answered(h, "q1", "run_command", rm)
+    h.later()
+    assert check("advanced", "run_command", rm)  # my human's card
+    h.ctx._owner_directives = []
+    assert not check("cyber_pro", "run_command", opened, {"status": "SUSPICIOUS", "reason": "opens the home directory"})
+    h.later()
+    assert check("cyber_pro", "run_command", opened)  # the mind's later identical call
+    assert not check("advanced", "run_command", {"cmd": "rm -rf /tmp/x"}, RuntimeError("provider_failed: down"))
+    assert check("cyber_pro", "run_command", {"cmd": "rm -rf /tmp/y"}, RuntimeError("provider_failed: down"))
+    monkeypatch.setattr(place_guard, "call_place_facts", lambda *a, **kw: {
+        "places": [{"place_id": "p", "place_label": "Telegram · Team"}], "targets": {"chat_id": ["-100"]}})
+    reply = {"place_id": "p", "text": "Ship it.", "destination": {"conversation_id": "-100"}}
+    assert not check("cyber_pro", "place_reply", reply, RuntimeError("provider_failed: down"))  # words wait
+    exits("none")
+    assert not check("advanced", "run_command", {"cmd": "rm -rf /"}, {"status": "DANGEROUS", "reason": "wipes it"})
+    said.append((False, h.module._unread("the complete mandatory evidence bundle is too large", "TOO_LARGE")))
+    assert len(said) == 10 and CLOSED in said[-2][1] and "A smaller call may fit" in said[-1][1]
+    for ok, message in said:
+        assert message.startswith("⚠️ SAFETY_NOTE: let through" if ok else (
+            "⚠️ SAFETY_RETURNED: not run", "⚠️ SAFETY_UNAVAILABLE: not run")), message
+        assert not re.search(r"\b(ran|sent|blocked)\b", message.replace("nothing was sent", ""), re.I), message

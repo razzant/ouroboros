@@ -445,10 +445,10 @@ def _speaker_call(tmp_path, monkeypatch, *, replacement="message", then=None, ou
 
 
 @pytest.mark.parametrize("runtime,verdict,refusal", [  # a flag at either level returns words unsent (the final assessment)
-    ("advanced", "SUSPICIOUS", "Message not sent"),
-    ("advanced", "DANGEROUS", "Message not sent"),
-    ("cyber_pro", "DANGEROUS", "Message not sent"),
-    ("cyber_pro", RuntimeError("checker route down"), "SAFETY_UNAVAILABLE"),
+    ("advanced", "SUSPICIOUS", "⚠️ SAFETY_RETURNED: not run;"),
+    ("advanced", "DANGEROUS", "⚠️ SAFETY_RETURNED: not run;"),
+    ("cyber_pro", "DANGEROUS", "⚠️ SAFETY_RETURNED: not run;"),
+    ("cyber_pro", RuntimeError("checker route down"), "⚠️ SAFETY_UNAVAILABLE: not run."),
 ])
 @pytest.mark.parametrize("replacement", ["message", "read", None])
 def test_a_bound_message_handler_keeps_its_speech_refusal_across_a_replacement(

@@ -274,6 +274,8 @@ _LEDGER_NON_FAILURE_STATUSES = (
     # tool_reported_failure: the tool RAN and answered honestly ({"ok": false} — a
     # diagnostic reporting what it was called to find). A finding, not a failure.
     | frozenset({"tool_reported_failure"}) | _NON_EFFECT_OBSERVATION_STATUSES
+    # A call Safety returned or could not read is no failure; its execution-axis record keeps it visible.
+    | frozenset({"safety_returned", "safety_unavailable"})
 )
 
 

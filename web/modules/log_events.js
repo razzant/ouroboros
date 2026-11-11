@@ -532,7 +532,7 @@ export function taskReasonDetail(evt, codes = []) {
         ?? record.review_status?.acceptance_decision;
     const severity = taskOutcomeSeverity(evt);
     const decisionCause = String(decision?.reason || '');
-    const objective = record.outcome_axes?.objective;
+    const { objective, execution } = record.outcome_axes || {};
     const completion = record.task_completion ?? record.outcome_axes?.execution?.task_completion;
     const [storedReason, custody] = custodyDebtReason(record);
     const typedReason = String(record.outcome_axes?.execution?.reason_code || '');
@@ -571,9 +571,9 @@ export function taskReasonDetail(evt, codes = []) {
     if (reviewCause && (reason === reviewCause || bypass[reason] === reviewCause)) clause = '';
     const excluded = ['', 'delegated_custody_unreconciled', 'terminal_delivery_unknown', 'terminal_delivery_exhausted'];
     const warnings = [...(Array.isArray(objective?.warnings) ? objective.warnings : []), objective?.warning || ''];
-    const named = residualToolErrorsPhrase(record.outcome_axes?.execution);  // the failure the record holds, in owner words
+    const named = residualToolErrorsPhrase(execution);  // the failure the record holds, in owner words
     const warningClauses = warnings.filter(w => !excluded.includes(w))
-        .map(w => (w === 'residual_tool_errors_without_review' && named) || taskReasonPhrase(w));
+        .map(w => (w === 'residual_tool_errors_without_review' && named) || taskReasonPhrase(w)).concat(residualToolErrorsPhrase(execution, true));
     const artifacts = record.artifact_bundle?.status || record.artifact_status || record.outcome_axes?.artifacts?.status;
     if (['failed', 'missing'].includes(artifacts)) warningClauses.push(taskReasonPhrase('artifacts_unavailable'));
     if (decision?.open_obligations?.length) warningClauses.push(taskReasonPhrase('open_obligations'));

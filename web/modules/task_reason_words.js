@@ -155,11 +155,13 @@ const LISTED = 20;  // outcomes keeps at most this many errors per list
 /** The residual-warning clause naming the first recorded LOUD tool error in plain words (never a tool name, its
  *  result text or a path), or '' when the record names none. A failed read (`read_only`, owner 06.11 A) and a
  *  details-only leftover (`details_only`, owner 09.11 A: a command that ran and failed, a call refused before running)
- *  stay in the details. Twin of tool_error_words.residual_tool_errors_phrase / _outcome_tool_errors.warns_without_review. */
-export function residualToolErrorsPhrase(execution = {}) {
+ *  stay in the details; with `held`, the first call Safety returned or could not read that nothing replaced (named on
+ *  Done, never a warning). Twin of tool_error_words.residual_tool_errors_phrase / _outcome_tool_errors.warns_without_review. */
+export function residualToolErrorsPhrase(execution = {}, held = false) {
     const list = (key) => (Array.isArray(execution?.[key]) ? execution[key].filter((item) => item && typeof item === 'object') : []);
     const listed = [list('unresolved_tool_errors'), list('cosmetic_tool_errors')];
-    const [unresolved, cosmetic] = listed.map((errors) => errors.filter((item) => !(item.read_only || item.details_only)));
+    const [unresolved, cosmetic] = listed.map((errors) => errors.filter((item) => !(item.read_only || item.details_only)
+        && ['safety_returned', 'safety_unavailable'].includes(item.status) === held));
     const first = (unresolved.length ? unresolved : cosmetic)[0];
     if (!first) return '';
     const noun = tr(`task.tool_noun.${Object.hasOwn(TOOL_NOUNS, first.tool) ? first.tool : 'other'}`, TOOL_NOUNS[first.tool] || 'A tool step');
@@ -171,12 +173,15 @@ export function residualToolErrorsPhrase(execution = {}) {
                 : fmt('{noun} returned a non-zero exit code', { noun }))
                 : status.endsWith('timeout') ? fmt('{noun} timed out', { noun })
                     : status === 'argument_error' ? fmt('{noun} was called with invalid arguments', { noun })
-                        : fmt('{noun} failed', { noun });
+                        : status === 'safety_returned' ? fmt('{noun} was returned by the Safety Supervisor', { noun })
+                            : status === 'safety_unavailable'
+                                ? fmt('{noun} was not run: the Safety Supervisor could not read it', { noun })
+                                : fmt('{noun} failed', { noun });
     const more = unresolved.length + cosmetic.length - 1;
     // "More" only when a capped list is loud through and through; otherwise the retained loud errors are counted exactly.
     const capped = (listed[0].length >= LISTED && unresolved.length === listed[0].length)
         || (listed[1].length >= LISTED && cosmetic.length === listed[1].length);
-    const tail = capped ? tr('task.tool_error.more_capped', ', plus more tool errors')
+    const tail = held ? '' : capped ? tr('task.tool_error.more_capped', ', plus more tool errors')
         : more === 1 ? tr('task.tool_error.more_one', ', plus 1 more tool error')
             : more ? fmt(', plus {n} more tool errors', { n: more }) : '';
     return fmt('{subject}{tail}.', { subject, tail });

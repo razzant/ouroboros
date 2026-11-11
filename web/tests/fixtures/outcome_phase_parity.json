@@ -1261,6 +1261,20 @@
       "exact_clause": true
     },
     {
+      "name": "a call Safety returned and nothing replaced is Done and named as returned, not as a warning",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "github_write", "status": "safety_returned", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated"}, "review": {"status": "skipped"}}},
+      "phase": "done", "headline": "Done",
+      "acceptance_clause": "A GitHub write was returned by the Safety Supervisor.",
+      "exact_clause": true
+    },
+    {
+      "name": "a call Safety could not read and nothing replaced is Done and named as not run, not as a warning",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message", "unresolved_tool_errors": [{"tool": "run_command", "status": "safety_unavailable", "exit_code": null, "signal": null, "result": ""}], "cosmetic_tool_errors": []}, "objective": {"status": "not_evaluated"}, "review": {"status": "skipped"}}},
+      "phase": "done", "headline": "Done",
+      "acceptance_clause": "A command was not run: the Safety Supervisor could not read it.",
+      "exact_clause": true
+    },
+    {
       "name": "a helper set to run as a coding session that finished without one says so in words",
       "record": {"status": "completed", "reason_code": "configured_actor_incomplete", "outcome_axes": {"execution": {"status": "degraded", "reason_code": "configured_actor_incomplete"}, "objective": {"status": "degraded", "source": "configured_actor_terminal", "actor_status": "incomplete"}, "review": {"status": "skipped"}}},
       "phase": "warn", "headline": "Done with warnings",

@@ -30,7 +30,7 @@ def test_mark_validation_and_default_off():
     assert not normalize_configured_subagents(unmarked)[0].items[0].rechecks_flags
 
 
-@pytest.mark.parametrize("second,allowed", [("SAFE", True), ("SUSPICIOUS", True), ("DANGEROUS", False)])
+@pytest.mark.parametrize("second,allowed", [("SAFE", True), ("SUSPICIOUS", False), ("DANGEROUS", False)])
 def test_second_verdict_final_for_write(supervisor, second, allowed):
     h = supervisor
     h.values["OUROBOROS_SUBAGENTS"] = json.dumps(catalog())
@@ -54,9 +54,9 @@ def test_second_verdict_final_for_write(supervisor, second, allowed):
 
 
 @pytest.mark.parametrize("second,sent", [("SAFE", True), ("DANGEROUS", False)])
-def test_speech_follows_the_second_stage_and_keeps_both_opinions(supervisor, second, sent):
-    """The final assessment decides speech: a second stage that overturns the flag sends it; one that keeps it
-    returns it unsent with both reasons. Both stage opinions stay in the durable verdict either way."""
+def test_words_follow_the_second_stage_and_keep_both_opinions(supervisor, second, sent):
+    """The final assessment decides words as any call: a second stage that overturns the flag lets them through; one
+    that keeps it returns them with both reasons. Both stage opinions stay in the durable verdict either way."""
     h = supervisor
     h.values["OUROBOROS_SUBAGENTS"] = catalog()
     h.replies.extend([{"status": "DANGEROUS", "reason": "first reason"}, {"status": second, "reason": "second reason"}])
@@ -65,28 +65,8 @@ def test_speech_follows_the_second_stage_and_keeps_both_opinions(supervisor, sec
     verdict = next(event for event in h.events if event["type"] == "safety_verdict")
     assert [(v["stage"], v["status"], v["reason"]) for v in verdict["verdicts"]] == [
         ("first", "DANGEROUS", "first reason"), ("second", second, "second reason")]
-    assert sent or ("first reason" in msg and "second reason" in msg and "Message not sent" in msg)
-
-
-def test_the_speech_mark_follows_the_final_stage(supervisor, monkeypatch):
-    """Words only a verdict saw follow its final stage: a first stage's mark the second drops leaves a Cyber Pro write
-    as advice; a mark only the second stage gives refuses it once and sends the later identical re-issue."""
-    h = supervisor
-    monkeypatch.setattr(h.module, "get_runtime_mode", lambda: "cyber_pro")
-    h.values["OUROBOROS_SUBAGENTS"] = catalog()
-    dropped = {"cmd": "post the status"}
-    h.replies.extend([{"status": "DANGEROUS", "reason": "first", "speech": True},
-                      {"status": "DANGEROUS", "reason": "second", "speech": False}])
-    ok, message = h.module.check_safety("write_remote", dropped, ctx=h.ctx)
-    assert ok and "Cyber Pro leaves the decision to Ouroboros" in message
-    kept = {"cmd": "post the other status"}
-    h.replies.extend([{"status": "DANGEROUS", "reason": "first", "speech": False},
-                      {"status": "DANGEROUS", "reason": "second", "speech": True}])
-    ok, message = h.module.check_safety("write_remote", kept, ctx=h.ctx)
-    assert not ok and "Message not sent" in message
-    h.later()
-    ok, message = h.module.check_safety("write_remote", kept, ctx=h.ctx)
-    assert ok and "despite the check" in message and len(h.calls) == 4
+    assert sent or (msg.startswith("⚠️ SAFETY_RETURNED: not run;") and "first: DANGEROUS — first reason" in msg
+                    and "second: DANGEROUS — second reason" in msg)
 
 
 @pytest.mark.parametrize("second,allowed", [("SAFE", True), ("DANGEROUS", False)])
@@ -100,35 +80,53 @@ def test_second_check_reads_an_answer_envelope(supervisor, second, allowed):
     assert msg == "" if allowed else "second: DANGEROUS — second reason" in msg
 
 
-@pytest.mark.parametrize("bad", ["broken JSON", {"status": "SAFE", "reason": ""}, RuntimeError("offline")])
-def test_second_unavailable_is_a_hold_without_an_extra_attempt(supervisor, bad):
+@pytest.mark.parametrize("bad", ["broken JSON", {"status": "SAFE", "reason": ""}, RuntimeError("offline"), "too large"])
+def test_a_failed_second_check_keeps_the_first_verdict(supervisor, monkeypatch, bad):
+    """A second check that answers nothing (unparseable, a SAFE without a reason, an error, a bundle too large for it)
+    leaves the first verdict standing: the call returns with the first reading, never as unread, in one attempt."""
     h = supervisor
     h.values["OUROBOROS_SUBAGENTS"] = catalog()
-    h.replies.extend([{"status": "DANGEROUS", "reason": "flag"}, bad])
-    ok, msg = h.module.check_safety("place_reply", {}, ctx=h.ctx)
-    assert not ok and "UNAVAILABLE" in msg and len(h.calls) == 2
-    assert not any(row.get("speech_refused") for row in h.module._PRIOR_VERDICTS.get("work", {}).values())
+    h.replies.extend([{"status": "DANGEROUS", "reason": "first flag"}] + ([] if bad == "too large" else [bad]))
+    if bad == "too large":  # the first bundle fits; the second, which carries it, does not
+        first = h.module._safety_model_call
+        def shrink(**kwargs):
+            monkeypatch.setattr(h.module, "_SAFETY_BUNDLE_BYTE_BUDGET", len(kwargs["user_prompt"].encode("utf-8")) + 1)
+            return first(**kwargs)
+        monkeypatch.setattr(h.module, "_safety_model_call", shrink)
+    ok, msg = h.module.check_safety("place_reply", {"text": "hi"}, ctx=h.ctx)
+    assert not ok and msg.startswith("⚠️ SAFETY_RETURNED: not run;") and "first: DANGEROUS — first flag" in msg
+    assert "SAFETY_UNAVAILABLE" not in msg and len(h.calls) == (1 if bad == "too large" else 2)
+    failed = [event for event in h.events if event["type"] == "safety_second_check_failed"]
+    assert len(failed) == 1 and failed[0]["error"]
+    verdict = next(event for event in h.events if event["type"] == "safety_verdict")
+    assert [v["stage"] for v in verdict["verdicts"]] == ["first"]
 
 
 def test_unmarked_or_disabled_never_second_checks(supervisor):
     h = supervisor
-    for value in [catalog(rechecks_flags=False), catalog(enabled=False), {**catalog(), "enabled": False}]:
+    for n, value in enumerate([catalog(rechecks_flags=False), catalog(enabled=False), {**catalog(), "enabled": False}]):
         h.values["OUROBOROS_SUBAGENTS"] = value
         h.replies.append({"status": "DANGEROUS", "reason": "flag"})
-        assert not h.module.check_safety("write_remote", {}, ctx=h.ctx)[0]
+        assert not h.module.check_safety("write_remote", {"n": n}, ctx=h.ctx)[0]
     assert len(h.calls) == 3
 
 
-def test_invalid_roster_holds_only_a_flag_and_grants_no_speech_retry(supervisor):
+def test_an_invalid_roster_keeps_the_first_verdict(supervisor):
+    """An unreadable roster is a failed second check: a SAFE first verdict stands as SAFE, a flag as the first
+    reading; its later identical issue waits for my human (DANGEROUS words) and buys no new reading."""
     h = supervisor
     h.values["OUROBOROS_SUBAGENTS"] = {"enabled": True, "items": [{"unknown_key": 1}]}
     h.replies.append({"status": "SAFE", "reason": "First checker cleared it"})
     assert h.module.check_safety("place_reply", {"text": "clear"}, ctx=h.ctx)[0]
-    for _ in range(2):
-        h.replies.append({"status": "DANGEROUS", "reason": "First checker flagged it"})
-        ok, message = h.module.check_safety("place_reply", {"text": "flagged"}, ctx=h.ctx)
-        assert not ok and "UNAVAILABLE" in message and "Second-check roster" in message
-    assert len(h.calls) == 3  # holds never earn deliberate-reissue authority
+    h.replies.append({"status": "DANGEROUS", "reason": "First checker flagged it"})
+    ok, message = h.module.check_safety("place_reply", {"text": "flagged"}, ctx=h.ctx)
+    assert not ok and message.startswith("⚠️ SAFETY_RETURNED: not run;") and "First checker flagged it" in message
+    failed = [event for event in h.events if event["type"] == "safety_second_check_failed"]
+    assert failed and "its roster is unreadable" in failed[-1]["error"]
+    h.later()
+    ok, message = h.module.check_safety("place_reply", {"text": "flagged"}, ctx=h.ctx)
+    assert not ok and message.startswith("⚠️ SAFETY_RETURNED: not run;") and "waits for your human" in message
+    assert len(h.calls) == 2
 
 
 def test_each_checker_accounts_its_physical_usage(supervisor, monkeypatch):
