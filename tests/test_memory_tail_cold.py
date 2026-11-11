@@ -4,8 +4,10 @@ A start reads the stored facts of every chat row after the frontier to find the 
 no reader of a capture uses while every input of their rooms stands still; any mark that moved makes that start read
 the whole tail, as before, and compose the set anew. The oracle: after every change that can move a row's rooms, seals
 or use (a new row, a binding, a project, a task changed, removed or admitted late, a restored Reply target, a page
-published, accepted, rejected or corrected, a chat or progress text revised, the tail filled again, the index rebuilt),
-the views of the normal path equal, byte for byte, the views of a whole-tail pass of the same process state: in the
+published, accepted, rejected or corrected, a chat or progress text revised, the tail filled again, the index rebuilt;
+and in places: a room that becomes one, a delivery of the same words as an earlier sealed row, a place's page accepted or
+rejected, my human's account confirmed or withdrawn), the views of the normal path equal, byte for byte, the views of a
+whole-tail pass of the same process state: in the
 process that lived through the changes (warm), in one without its memos (fresh), and in a real interpreter at the end
 of each chain. A warm and a fresh process may still differ from each other where the base code does (a revised Reply
 target); that is not this set's to decide. The four changes that refuted the first design are named tests, and every
@@ -27,7 +29,7 @@ import sys
 import pytest
 
 from ouroboros import chat_chain as cc, chronicle_store as cs, dialogue_store as ds, memory_inventory as mi
-from ouroboros import memory_view as mv, projects_registry as pr, room_membership as rm, store, task_store
+from ouroboros import memory_view as mv, places, projects_registry as pr, room_membership as rm, store, task_store
 from ouroboros.chat_references import reference_from_row
 from ouroboros.chronicle_store import ChronicleStore
 from ouroboros.context_timing import measured_sections, section_spans
@@ -44,10 +46,13 @@ except ImportError:
 LIGHT = {"kind": "helper", "route": "configured-light"}
 TASK = {"id": "turn0001", "chat_id": 1}
 PLACE = 777
+PLACE2 = 778  # a room that becomes a place along the chain
 _START = datetime.datetime(2026, 11, 10, tzinfo=datetime.timezone.utc)
 _PROVENANCE = {"binding_id": "p1", "place_id": "p1", "conversation_key": "k", "provider": "slack"}
 _TRANSPORT = {"provider": "slack", "account_id": "A", "conversation_id": "C7", "thread_id": "",
               "conversation": {"title": "general"}, "actor": {"display_name": "Ann", "platform_actor_id": "U7"}}
+_TRANSPORT2 = {**_TRANSPORT, "conversation_id": "C8", "conversation": {"title": "random"},
+               "actor": {"display_name": "Bob", "platform_actor_id": "U8"}}
 
 
 def _ts(minute: int) -> str:
@@ -88,8 +93,11 @@ def _views(root: pathlib.Path, rooms: dict) -> dict:
     for name, (role, room) in _specs(rooms).items():
         view = mv.capture_memory_view(root, TASK, dataclasses.replace(mv.ROLE_DEFAULTS[role], room_id=room))
         out[name] = [mv.snapshot_json(view), mv.render_story(view), mv.render_room(view)]
-    gaps, quiet, sealed = {}, {}, {}
+    gaps, quiet = {}, {}
+    sealed = mi.PlaceRows() if hasattr(mi, "PlaceRows") else {}
     opened = mi.open_rows_by_room(root, gaps=gaps, quiet=quiet, sealed=sealed)
+    if not isinstance(sealed, dict):  # step 3a: a place's sealed rows are read for the rooms a reader asks
+        sealed = sealed.rows(sorted({*opened, str(PLACE), str(PLACE2), *(str(chat) for chat in rooms.values())}))
     out["open"] = json.loads(json.dumps([opened, {room: sorted(kinds) for room, kinds in gaps.items()}, quiet, sealed]))
     return out
 
@@ -204,6 +212,12 @@ def _texts(views: dict) -> str:
     return json.dumps(views, ensure_ascii=False)
 
 
+def _cold_positions(root: pathlib.Path) -> set:
+    """The positions the stored set leaves unread."""
+    with sqlite3.connect(str(ChronicleStore(root).index_path)) as db:
+        return {pos for (pos,) in db.execute("SELECT pos FROM tail_cold")}
+
+
 # --- the chain of changes ---------------------------------------------------------------------------------
 
 class Chain:
@@ -220,7 +234,10 @@ class Chain:
         store.update_task(root, "kid1", lambda doc: {**doc, "parent_task_id": "free1", "root_task_id": "free1"})
         self.unknown, self.unbound = ["ghost1", "ghost2"], ["free1", "free2", "kid1", "free3", "writer2"]
         self.drafts, self.candidates, self.pages, self.targets, self.owners = [], [], [], [], []
+        places.connect_place(root, connector="bridge", provider="slack", account_id="A", place_id="p1", label="Team")
+        self.confirmed = False  # whether my human's account (Ann's) is confirmed in that place
         self._seed_targets()
+        self._seed_second_room()
         for _ in range(14):
             self.row()
         _fill(root)
@@ -244,10 +261,18 @@ class Chain:
             _append(self.root, shared.msg(self.ts(), "an old reply", reply_to=reference, client_message_id=f"reply-{task}"))
             self.targets.append(target)
 
+    def _seed_second_room(self) -> None:
+        """A room that is no place yet: arrivals over a transport and a word of mine, sealed with the rest below;
+        ``become_place`` makes it one, and its earlier rows then say who of ours spoke there and what came again."""
+        for n in range(3):
+            _append(self.root, shared.msg(self.ts(), f"second word {n % 2}", chat_id=PLACE2, transport=_TRANSPORT2,
+                                          client_message_id=f"s{n}"))
+        _append(self.root, shared.msg(self.ts(), "my word there", chat_id=PLACE2, direction="out", task_id="free2"))
+
     def row(self) -> None:
         kind = self.rng.choice(("main_in", "main_out", "alpha_in", "alpha_out", "beta_in", "place_in", "place_out",
                                 "transport_in", "quiet", "terminal", "kid", "kid_bare", "ghost", "reply_new",
-                                "place_summary"))
+                                "place_summary", "second_in"))
         ts, n, task = self.ts(), self.minute, self.rng.choice(sorted(self.tasks))
         if kind == "main_in":
             row = shared.msg(ts, f"owner word {n}", client_message_id=f"m{n}")
@@ -266,6 +291,8 @@ class Chain:
             row = self._place_row("out", task_id=task)
         elif kind == "transport_in":  # an arrival with no place stamp: the room stops being a place while it is last
             row = shared.msg(ts, f"place word {n % 3}", chat_id=PLACE, transport=_TRANSPORT, client_message_id=f"t{n}")
+        elif kind == "second_in":  # the same in the second room
+            row = shared.msg(ts, f"second word {n % 2}", chat_id=PLACE2, transport=_TRANSPORT2, client_message_id=f"s{n}")
         elif kind == "quiet":
             row = shared.msg(ts, "", direction="out", type="task_summary", task_id=self.rng.choice(("q1", task)),
                              chat_id=self.rng.choice((1, PLACE)), status="completed", wake_silent=True,
@@ -406,6 +433,33 @@ class Chain:
     def fill(self) -> None:
         mi.fill_tail(self.root, lambda: False)
 
+    def become_place(self) -> None:
+        """A place's word in the second room: its newest row is a place's now, so its earlier rows count."""
+        _append(self.root, shared.msg(self.ts(), f"second word {self.minute % 2}", chat_id=PLACE2, source="presence:slack",
+                                      transport=_TRANSPORT2, presence_provenance=_PROVENANCE,
+                                      client_message_id=f"bp{self.minute}"))
+
+    def place_repeat(self) -> None:
+        """A place delivers again the words of its room's earliest arrival (most likely sealed, and left unread)."""
+        room = self.rng.choice((PLACE, PLACE2))
+        rows = [entry.row for entry in self._entries() if entry.row.get("chat_id") == room
+                and entry.row.get("direction") == "in" and entry.row.get("text")]
+        if rows:
+            _append(self.root, {**rows[0], "ts": self.ts(), "client_message_id": f"again{self.minute}",
+                                "source": "presence:slack", "presence_provenance": _PROVENANCE})
+
+    def seal_place(self) -> None:
+        """A draft or a candidate page over a place's open rows: a later ``reject`` or ``accept`` decides it."""
+        room = self.rng.choice((str(PLACE), str(PLACE2)))
+        rows = sorted(mi.open_rows_by_room(self.root).get(room, ()), key=lambda entry: entry[2])
+        self._publish(room, rows[:self.rng.randint(1, max(1, len(rows)))], self.rng.choice(("draft", "candidate")))
+
+    def owner_account(self) -> None:
+        """My human's account in the place confirmed, or that confirmation withdrawn: whose words its rows are now."""
+        action = "revoke_owner_account" if self.confirmed else "confirm_owner_account"
+        places.edit_place(self.root, "p1", action, author="owner", platform_actor_id="U7", account_id="A")
+        self.confirmed = not self.confirmed
+
     def rebuild(self) -> None:
         chronicle = ChronicleStore(self.root)
         chronicle.index_path.unlink()
@@ -414,7 +468,8 @@ class Chain:
 
     STEPS = ("row", "row", "row", "row", "bind", "bind_origin", "new_project", "relineage", "direct_write", "remove_task",
              "admit", "restore_target", "seal", "seal", "seal", "reject", "accept", "correct", "revise_chat",
-             "revise_progress", "fill", "fill", "rebuild")
+             "revise_progress", "fill", "fill", "rebuild", "become_place", "place_repeat", "seal_place", "seal_place",
+             "owner_account")
 
     def step(self) -> str:
         name = self.rng.choice(self.STEPS)
@@ -422,7 +477,7 @@ class Chain:
         return name
 
 
-@pytest.mark.parametrize("seed", [1, 5, 8, 29])  # together they take every change in STEPS
+@pytest.mark.parametrize("seed", [1, 5, 24, 29])  # together they take every change in STEPS, a place page's acceptance (24) and rejection (29)
 def test_after_every_change_the_normal_path_equals_the_whole_tail_warm_and_fresh(monkeypatch, tmp_path, seed):
     chain = Chain(tmp_path, seed)
     _same(monkeypatch, tmp_path, chain.rooms)
@@ -484,6 +539,8 @@ def test_case3_a_room_that_becomes_a_place_reads_its_earlier_sealed_rows(monkeyp
     _append(tmp_path, shared.msg(_ts(4), "Same words.", chat_id=PLACE, type="presence_delivery",
                                  presence_provenance={"provider": "slack"}))  # the room's newest row is a place's now
     assert _in_use(tmp_path)
+    work = _work(tmp_path, rooms)  # its earlier sealed rows are read by its chat when the block asks, not the whole tail
+    assert work.get("tail_whole", 0) == 0 and work.get("rows_asked", 0) > 0, work
     views = _same(monkeypatch, tmp_path, rooms)
     assert "delivered again" in _texts(views), "the place's later delivery no longer names its earlier sealed copy"
 
@@ -588,7 +645,7 @@ def test_a_rooms_newest_row_stays_read_so_a_standing_set_needs_no_second_pass(mo
     _same(monkeypatch, tmp_path, rooms)
 
 
-def test_a_places_sealed_rows_stay_read_for_its_repeats(monkeypatch, tmp_path):
+def test_a_places_sealed_rows_are_read_by_its_room_for_its_repeats(monkeypatch, tmp_path):
     rooms = _settled(tmp_path)
     for minute, text, direction in ((1, "Again words.", "in"), (2, "Again words.", "in"), (3, "Mine there.", "out")):
         _append(tmp_path, shared.msg(_ts(minute), text, chat_id=PLACE, direction=direction, source="presence:slack",
@@ -598,7 +655,121 @@ def test_a_places_sealed_rows_stay_read_for_its_repeats(monkeypatch, tmp_path):
     _fill(tmp_path)
     _seal(tmp_path, _entry(tmp_path, "Again words."), PLACE)  # the earlier copy only
     _compose(tmp_path)
-    assert _in_use(tmp_path)
+    assert _in_use(tmp_path) and _entry(tmp_path, "Again words.")[2] in _cold_positions(tmp_path)
+    work = _work(tmp_path, rooms)
+    assert work.get("tail_whole", 0) == 0 and work.get("rows_asked", 0) > 0, work
+    views = _same(monkeypatch, tmp_path, rooms)
+    assert "delivered again" in _texts(views)
+
+
+def _quiet_place(tmp_path: pathlib.Path, room: int, texts: tuple) -> None:
+    place = {"source": "presence:slack", "transport": _TRANSPORT, "presence_provenance": _PROVENANCE}
+    for n, words in enumerate(texts):
+        _append(tmp_path, shared.msg(_ts(10 + n), words, chat_id=room, client_message_id=f"{room}-{n}", **place))
+
+
+def test_a_place_no_view_shows_leaves_its_sealed_rows_unread(monkeypatch, tmp_path):
+    rooms = _settled(tmp_path)
+    _quiet_place(tmp_path, PLACE2, ("Unshown one.", "Unshown two.", "Unshown three."))
+    _append(tmp_path, shared.msg(_ts(20), "Latest main.", client_message_id="latest"))
+    _fill(tmp_path)
+    for words in ("Unshown one.", "Unshown two.", "Unshown three."):  # no open row, note or work: no view shows it
+        _seal(tmp_path, _entry(tmp_path, words), PLACE2)
+    _compose(tmp_path)
+    assert {_entry(tmp_path, words)[2] for words in ("Unshown one.", "Unshown two.")} <= _cold_positions(tmp_path)
+    asked, real = [], cold.rows_of
+    monkeypatch.setattr(cold, "rows_of", lambda store_, held, chats: asked.append(sorted(chats)) or real(store_, held, chats))
+    for name in ("main", "wake", "presence", "project"):
+        work = _work(tmp_path, rooms, name)
+        assert work.get("tail_whole", 0) == 0 and "rows_cold" in work, (name, work)
+    assert all(PLACE2 not in chats for chats in asked), asked
+    _same(monkeypatch, tmp_path, rooms)
+
+
+def test_a_place_row_whose_chat_id_sqlite_would_read_otherwise_is_read_by_its_room(monkeypatch, tmp_path):
+    """``int("7_77")`` is 777, as the room rule reads it (``chat_chain._row_chat_id``); ``CAST`` in SQLite says 7."""
+    rooms = _settled(tmp_path)
+    place = {"source": "presence:slack", "transport": _TRANSPORT, "presence_provenance": _PROVENANCE}
+    _append(tmp_path, shared.msg(_ts(1), "Odd key words.", chat_id="7_77", client_message_id="odd", **place))
+    _append(tmp_path, shared.msg(_ts(2), "Mine there.", chat_id=PLACE, direction="out", task_id="free1"))
+    _append(tmp_path, shared.msg(_ts(3), "Latest main.", client_message_id="latest"))
+    _fill(tmp_path)
+    for words in ("Odd key words.", "Mine there."):
+        for room in (PLACE, 1):  # wherever the rule puts it: left unread only when no room holds it open
+            _seal(tmp_path, _entry(tmp_path, words), room)
+    _compose(tmp_path)
+    assert _entry(tmp_path, "Odd key words.")[2] in _cold_positions(tmp_path)
+    _append(tmp_path, shared.msg(_ts(4), "Odd key words.", chat_id=PLACE, client_message_id="again", **place))
+    work = _work(tmp_path, rooms)
+    assert work.get("tail_whole", 0) == 0 and work.get("rows_asked", 0) >= 1, work  # "Mine there." is the room's newest
+    views = _same(monkeypatch, tmp_path, rooms)
+    assert "delivered again" in _texts(views), "the earlier copy under the odd key was not read with its room"
+
+
+def test_a_set_composed_anew_after_a_capture_read_it_answers_that_capture_from_the_dialogue_store(monkeypatch, tmp_path):
+    _settled(tmp_path)
+    _quiet_place(tmp_path, PLACE, ("Early place.", "Middle place.", "Open place."))
+    _append(tmp_path, shared.msg(_ts(20), "Latest main.", client_message_id="latest"))
+    _fill(tmp_path)
+    for words in ("Early place.", "Middle place."):
+        _seal(tmp_path, _entry(tmp_path, words), PLACE)
+    _compose(tmp_path)
+    with monkeypatch.context() as patch:
+        patch.setattr(cold, "gate", lambda _store: None)
+        reference = mi.PlaceRows()
+        mi.open_rows_by_room(tmp_path, sealed=reference)
+        want = reference.rows([PLACE])
+    assert [entry[2] for entry in want[str(PLACE)]] == [_entry(tmp_path, w)[2] for w in ("Early place.", "Middle place.")]
+    with cs.capture(tmp_path, tail="all") as derived:
+        assert derived.get("tail_cold")
+        sealed = mi.PlaceRows()
+        mi.open_rows_by_room(tmp_path, sealed=sealed)
+        with sqlite3.connect(str(ChronicleStore(tmp_path).index_path)) as db:  # another process composed it anew
+            marks = json.loads(db.execute("SELECT value FROM state WHERE key='tail_cold'").fetchone()[0])
+            db.execute("UPDATE state SET value=? WHERE key='tail_cold'", (json.dumps({**marks, "sequence": -1}),))
+        got = sealed.rows([PLACE])
+    assert json.loads(json.dumps(got)) == json.loads(json.dumps(want))
+
+
+def _project_place(tmp_path: pathlib.Path, rooms: dict) -> None:
+    """Project alpha holds the same words twice, the first sealed, and then the Done row of work a place started there,
+    its newest row: a Project that is a place, whose rows come from many chats."""
+    alpha = rooms["alpha"]
+    write_task_result(tmp_path, "placed", "completed", result="done", chat_id=alpha)
+    bind_task_to_project(tmp_path, "placed", "alpha", origin={"absent": "post_hoc_unresolved"})
+    _append(tmp_path, shared.msg(_ts(1), "Alpha twice.", chat_id=alpha, client_message_id="a-1"))
+    _append(tmp_path, shared.msg(_ts(2), "Alpha twice.", chat_id=alpha, client_message_id="a-2"))
+    _append(tmp_path, shared.msg(_ts(3), "Latest main.", client_message_id="latest"))
+
+
+def _done_in_place(tmp_path: pathlib.Path, minute: int) -> None:
+    _append(tmp_path, shared.msg(_ts(minute), "", chat_id=PLACE, direction="system", type="task_summary", task_id="placed",
+                                 status="completed", source="presence:slack", presence_provenance=_PROVENANCE,
+                                 result_ref={"reader": "get_task_result", "task_id": "placed"}))
+
+
+def test_a_project_whose_newest_row_is_a_places_keeps_its_rows_read(monkeypatch, tmp_path):
+    rooms = _settled(tmp_path)
+    _project_place(tmp_path, rooms)
+    _done_in_place(tmp_path, 4)
+    _fill(tmp_path)
+    _seal(tmp_path, _entry(tmp_path, "Alpha twice."), rooms["alpha"])
+    _compose(tmp_path)
+    assert _entry(tmp_path, "Alpha twice.")[2] not in _cold_positions(tmp_path)
+    views = _same(monkeypatch, tmp_path, rooms)
+    assert "delivered again" in _texts(views)
+
+
+def test_a_project_that_becomes_a_place_reads_the_whole_tail(monkeypatch, tmp_path):
+    rooms = _settled(tmp_path)
+    _project_place(tmp_path, rooms)
+    _fill(tmp_path)
+    _seal(tmp_path, _entry(tmp_path, "Alpha twice."), rooms["alpha"])
+    _compose(tmp_path)  # alpha is no place yet: its sealed row is left unread
+    assert _entry(tmp_path, "Alpha twice.")[2] in _cold_positions(tmp_path)
+    _done_in_place(tmp_path, 4)
+    work = _work(tmp_path, rooms)
+    assert work.get("tail_whole") == 1, work
     views = _same(monkeypatch, tmp_path, rooms)
     assert "delivered again" in _texts(views)
 
@@ -848,7 +1019,7 @@ def test_a_build_receipt_says_whether_the_set_acted_and_what_it_left_unread(tmp_
     acting = _work(tmp_path, rooms)
     assert whole.get("tail_whole") == 1 and "rows_cold" not in whole, whole
     assert acting.get("tail_whole", 0) == 0 and acting.get("rows_cold", 0) > 0, acting
-    assert acting["rows_read"] + acting["rows_cold"] == whole["rows_read"]
+    assert acting["rows_read"] + acting["rows_cold"] == whole["rows_read"] + acting.get("rows_asked", 0)
     assert acting["rows_read"] == acting["rows_open"] + acting["rows_kept"], acting  # law L7d: open, kept by a rule, new
     _append(tmp_path, shared.msg(_ts(5), "New and sealed.", client_message_id="new-sealed"))  # sealed before a read
     _append(tmp_path, shared.msg(_ts(6), "Newest and open.", client_message_id="new-open"))  # the room's newest
