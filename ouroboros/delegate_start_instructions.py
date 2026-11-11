@@ -237,7 +237,8 @@ def execution_binding_text(execution_root: str, authority_root: str,
 
     The contract's stable authority/project root remains the integration identity.
     A private snapshot is the child's write surface, so this separate typed fact
-    names both explicitly without rewriting the canonical work order.
+    names both explicitly without rewriting the canonical work order. It is appended after
+    that order, so an owner-facing absolute path cannot win by omission or by appearing earlier.
     ``evidence_root`` defaults to the copy's retained evidence folder; "" (a skill
     payload copy, whose every file is payload) says no folder is retained.
     ``granted_scratch`` is the scratch the run's request grants, the place it names.
