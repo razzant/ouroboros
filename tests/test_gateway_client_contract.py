@@ -88,7 +88,7 @@ def test_shapes_bind_only_indexed_routes_with_valid_bodies_that_resolve():
         assert shape.responses, token
         for group in shape.responses.split():
             statuses, _, body = group.partition(":")
-            assert body and all(re.fullmatch(r"[1-5]\d\d", s) for s in statuses.split(",")), (token, group)
+            assert body and all(re.fullmatch(r"(?:[1-5]\d\d|[45]xx)", s) for s in statuses.split(",")), (token, group)
             for name in _body_names(body):
                 assert contract_typed_dict(name), (token, name)
         for name in _body_names(shape.request) if shape.request else []:
@@ -261,6 +261,11 @@ def test_the_contract_is_served_derived_and_self_consistent(tmp_path):
     assert all(entry["typed"] for entry in document["http"]), "every indexed route publishes its shapes"
     assert by_token["POST /api/reset"]["responses"]["200"]["schemas"] == ["ResetResponse"]
     assert by_token["POST /api/claudexor/account-resets"]["headers"] == ["Idempotency-Key!"]
+    login = by_token["POST /api/claudexor/login"]["responses"]
+    assert login["200"]["schemas"] == ["ClaudexorLoginJobResponse"]
+    for status in ("400", "409", "503", "4xx", "5xx"):
+        assert set(login[status]["schemas"]) == {"ClaudexorLoginJobProblem", "ErrorResponse"}
+    assert "2xx" not in login, "only refused maintenance statuses pass through"
     assert "served_ui" in document["schemas"]["StateResponse"]["properties"]
     history = document["schemas"]["ChatHistoryResponse"]["properties"]["messages"]["items"]
     assert {"text", "role", "ts", "is_progress", "system_type", "task_id"} <= set(history["required"])

@@ -611,6 +611,7 @@ def pytest_configure(config):
                                        "the tests that run alone in the one-process pass after the xdist pass")
     config.addinivalue_line("markers", "starter_skills: the test runs the real starter-skill installer "
                                        "(conftest `_starter_skills_stay_off`); its skill sources are local fixtures")
+    config.addinivalue_line("markers", "program_observations: explicitly exercise and join vendor-program observation work")
     evidence = os.environ.get("OUROBOROS_TEST_EVIDENCE_ROOT")
     if evidence and _PYTEST_ROOT is not None and not getattr(config.option, "ci_evidence_dir", None):
         config.option.ci_evidence_dir = str(pathlib.Path(evidence) / ("pytest-" + _PYTEST_ROOT.name))
@@ -1289,6 +1290,21 @@ def _hide_bundled_skills(monkeypatch):
             "ouroboros.skill_loader._resolve_data_skills_dir",
             _hermetic_resolver,
         )
+
+
+@pytest.fixture(autouse=True)
+def _program_observations_stay_off(request, monkeypatch, _os_environ_isolation):
+    """Fake engine acquisitions do not implicitly start process-wide observation work."""
+    from ouroboros import harness_program_facts
+
+    if not request.node.get_closest_marker("program_observations"):
+        monkeypatch.setattr(harness_program_facts, "_request", lambda *_: None)
+    yield
+    if request.node.get_closest_marker("program_observations"):
+        for thread in threading.enumerate():
+            if thread.name == "vendor-program-observation":
+                thread.join(timeout=5)
+                assert not thread.is_alive(), "the observation's test must finish its owned work"
 
 
 @pytest.fixture(autouse=True)

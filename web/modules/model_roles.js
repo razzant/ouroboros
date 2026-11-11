@@ -11,6 +11,7 @@ import { PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, PROCESSING
     processingSelectHtml, processingIntentLabel, processingCapabilityNote, catalogModelOptions } from './route_editor_primitives.js';
 import { revealNewRow } from './ui_helpers.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
+import { catalogPrograms } from './model_program.js';
 import { modelChooserHtml, bindModelChoosers, updateModelChooser } from './model_chooser.js';
 
 export const MODEL_ACCOUNTS_KEY = 'OUROBOROS_MODEL_ACCOUNTS';
@@ -216,6 +217,9 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         const keys = row.slot.slot === 'main' ? mainChoice.map((id) => connections.find((entry) => entry.id === id)?.label || id) : [];
         return keys.length > 1 ? `Main is not set yet. Choose the key it uses: ${keys.slice(0, -1).join(', ')} or ${keys.at(-1)}.` : '';
     }
+    const onMaintenanceSettled = () => {
+        for (const row of new Map(rows.map(row => [catalogKey(row), row])).values()) void refreshRow(row, {force: true});
+    };
     function itemsFor(row) {
         return sourceId(row) ? (catalogs.get(catalogKey(row))?.items || [])
             : catalog.items.filter((item) => parseModelSource(item.value || item.id).source === row.source);
@@ -339,7 +343,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             if (account.innerHTML !== accountOptions) account.innerHTML = accountOptions;
             updateModelChooser(node.querySelector('[data-model-role-model]'), catalogModelOptions(itemsFor(row).map((item) => ({
                 ...item, value: parseModelSource(item.value || item.id).model,
-            }))));
+            }))), row.local ? [] : catalogPrograms(catalogs.get(catalogKey(row)), {source: sourceId(row), profile: row.account, sources: catalog.model_sources}));
             if (showContext) node.querySelector('[data-model-context-note]').textContent = modelContextNote(row.windowPreview);
             if (showContext) node.querySelector('[data-processing-summary]').textContent = processingIntentLabel(row.processing_preference, processingPreference);
             if (showContext) node.querySelector('[data-processing-capability]').textContent = processingCapabilityNote(row.processing_preference || processingPreference, currentItem(row)?.processing,
@@ -372,7 +376,11 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     async function refreshRow(row, { force = false } = {}) {
         if (!sourceId(row) || destroyed) return;
         const key = catalogKey(row);
-        if (requests.has(key) || (!force && catalogs.has(key))) return requests.get(key)?.promise;
+        if (requests.has(key)) {
+            if (force) requests.get(key).again = true;
+            return requests.get(key).promise;
+        }
+        if (!force && catalogs.has(key)) return;
         const query = new URLSearchParams({ source_id: sourceId(row) });
         if (row.account) query.set('credential_profile_id', row.account);
         const controller = new AbortController();
@@ -386,7 +394,10 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             .catch((error) => { if (!destroyed) catalogs.set(key, mergeModelCatalog(catalogs.get(key), {
                 read_state: 'transport', errors: [{ error: error.message || String(error) }],
             })); })
-            .finally(() => { clearTimeout(timer); requests.delete(key); updateCatalogViews(); });
+            .finally(() => {
+                clearTimeout(timer); const again = requests.get(key)?.again; requests.delete(key); updateCatalogViews();
+                if (again && !destroyed) void refreshRow(row, {force: true});
+            });
         requests.set(key, { promise, controller });
         return promise;
     }
@@ -540,6 +551,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             loaded = true; render();
         },
         mount() {
+            getDoc()?.addEventListener?.('harness-maintenance:settled', onMaintenanceSettled);
             if (!disposeStatus) disposeStatus = bindStatusSurface(store, { elementId: hostId, doc: getDoc,
                 listener: updateCatalogViews });
             render();
@@ -559,6 +571,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             return validateAll()[0] || '';
         },
         destroy() {
+            getDoc()?.removeEventListener?.('harness-maintenance:settled', onMaintenanceSettled);
             destroyed = true; disposeStatus?.(); disposeStatus = null;
             disposeChoosers();
             for (const request of requests.values()) request.controller.abort();

@@ -984,7 +984,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # 464 -> 465 (#3127): ``observability._blob_directory`` returns the CAS directory it prepares once
 # per publication, so the scan names ``observability/blobs`` itself (the observability row). The
 # directory always existed as each blob's parent; no writer spelling was added or removed.
-EXPECTED_SCAN_PATHS = 465
+# 465 -> 466: the vendor program observation adds one named singleton,
+# ``state/harness_programs.json`` (``ouroboros/harness_program_facts.py``); its own row.
+EXPECTED_SCAN_PATHS = 466
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts
@@ -1008,6 +1010,7 @@ SENTINELS = frozenset({
     "uploads",
     # stage-2: names that live in constants, helper returns or f-strings
     "state/claudexor_rotation_provisioning.json",
+    "state/harness_programs.json",
     "state/extension_generation.json",
     "state/post_task_evolution_counter.json",
     "state/post_task_evolution_request.json",
@@ -1284,6 +1287,7 @@ def test_constant_named_durable_files_are_visible_to_the_scan():
     paths = scan_data_paths()
     hidden = sorted(p for p in (
         "state/claudexor_rotation_provisioning.json",
+        "state/harness_programs.json",
         "state/extension_generation.json",
         "state/post_task_evolution_counter.json",
         "state/post_task_evolution_request.json",

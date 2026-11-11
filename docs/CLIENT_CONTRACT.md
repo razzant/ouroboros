@@ -2,7 +2,7 @@
 
 A complete client needs this contract, [`WIDGET_HOST_PROTOCOL.md`](WIDGET_HOST_PROTOCOL.md) for widgets, and the core's HTTP/WebSocket endpoints; no source imports are needed.
 
-`GET /api/contract` publishes routes, parameters, headers, statuses, WebSocket types and named JSON Schemas from the running core. The live API is authoritative about shapes; this document is authoritative about meaning: ordering, outcomes, identities and safe retries. Fetch that core's contract; versions differ. Report disagreements as defects. Tests cover structural completeness and selected producer/consumer behavior; §17 lists gaps.
+`GET /api/contract` publishes routes, parameters, headers, statuses (exact codes, then `4xx`/`5xx` fallbacks), WebSocket types and named JSON Schemas from the running core. The live API is authoritative about shapes; this document is authoritative about meaning: ordering, outcomes, identities and safe retries. Fetch that core's contract; versions differ. Report disagreements as defects. Tests cover structural completeness and selected producer/consumer behavior; §17 lists gaps.
 
 ## 1. Compatibility rules
 
@@ -814,7 +814,7 @@ The retired hub catalog/preview/install/update/uninstall/publication-clear route
 
 ## 13. Agent accounts
 
-Connected coding subscriptions use Claudexor. Its API v2 objects (`job`, maintenance operation, reset receipt, quota snapshots) pass through; Node/npm preparation is host-owned. Pin: `ouroboros/claudexor_runtime_pin.json`; source: https://github.com/razzant/claudexor. Read published shape keys; treat the rest as data.
+Connected coding subscriptions use Claudexor. Its API v2 objects (`job`, maintenance operation, reset receipt, quota snapshots) pass through; the engine owns vendor maintenance. Pin: `ouroboros/claudexor_runtime_pin.json`; source: https://github.com/razzant/claudexor. Read published shape keys; treat the rest as data.
 
 **Status:**
 - `GET /api/claudexor/status` (`ClaudexorStatusResponse`) is passive: it never starts the engine. `reads.catalog`, `reads.accounts` and `reads.quota` are each `ok` (authoritative, even when empty), `not_read` (never asked) or `failed`. A facet that was not read freshly serves its last value with `facets.<name>.stale: true`. Never read an empty list without `ok` as "no accounts".
@@ -842,16 +842,22 @@ Connected coding subscriptions use Claudexor. Its API v2 objects (`job`, mainten
 - After a lost answer the outcome is unknown: send the same key and body again, or read the receipt by id.
 
 **Agent tool maintenance:**
-- `GET /api/claudexor/maintenance/harnesses` passively lists installed, tested and available tools and current operations (rejoin after reload).
-- `POST /api/claudexor/maintenance/operations` (`{harness, target}`, `Idempotency-Key` header) installs, updates or rolls back a tool: `202` returns its operation. It can start the engine and prepare Node/npm. `409 maintenance_restart_required` asks for Restart Claudexor (above), then repeat Update; `409/503 maintenance_preparation_failed` reports failure. Optional inspection failure still permits POST.
-- `409 maintenance_already_active`: follow `context.operationId`. Poll `GET .../operations/{id}` while `state` is `queued`/`running` or `termination` is `unconfirmed`. `POST .../operations/{id}/cancel` requests cancellation, without proving termination.
-- `ClaudexorMaintenanceProblem.error` holds engine or host `{code, message, context}`. Preparation's `context.acceptance=not_submitted, scope=this_attempt` cannot resolve an earlier `503 acceptance=unknown`: keep and resend that same key/body.
+- Inventory, operation reads and mutations require handshake engine version 6.0.0 or newer. Older engines receive no requests of this contract; inspection says unavailable and Connect asks for an app/engine update. Inventory failure on a supported engine does not prevent Update.
+- `GET /api/claudexor/maintenance/harnesses` passively returns `selection`, `newest`, `actions`, engine `updateAvailable` (`yes`, `no`, `cannot_tell`) and full receipts. Every inventory read re-observes selection; `fresh=true` is accepted. `checkLatest=true` asks vendor HTTPS; a failed newest read retains an earlier success with its original time. No host version ordering or legacy-contract fallback.
+- `POST /api/claudexor/maintenance/operations` (`{harness, target}`, `Idempotency-Key`) can start the engine. `target` is `{kind:"latest"}` or `{kind:"version",version:"<exact>"}`; latest invokes the selected updater or vendor installer when absent. Unavailable actions refuse with the inventory's sentence. `202` is a durable handle, not completion.
+- `409 maintenance_already_active`: follow `context.operationId`. Read `GET .../operations/{id}` while queued/running or termination is unconfirmed. `POST .../operations/{id}/cancel` requests cancellation, not proof of termination. Receipts retain actual commands, script URL/size/hash, before/after selection, progress, outcome, mutation, termination and limitations. A replacement can succeed with nonzero installer exit status: show its limitation, not a fabricated failure.
+- `ClaudexorMaintenanceProblem.error` retains `{code, message, context}`. After `acceptance=unknown`, resend the same key/body; a later `not_submitted` covers only that attempt.
+- Connect repeats unanswered or explicitly retryable receipt reads within one deadline; a definite refusal returns its problem and handle. Expiry cancels nothing: the answer distinguishes a last-confirmed running install from lost contact, retains the last failure, and points to Settings, Accounts. Login errors retain read refusals and failed-install problems, including actions and retryability; only maintenance actions appear as sentences on the card; another Connect joins the active operation returned by the engine, then retries login once after selected-version evidence.
+
+Accounts opening, chooser opening, Check latest and explicit tool inspection request newest; status polls do not. A replacement behind an unchanged wrapper is discovered on opening Accounts/a chooser; a native run also discovers it when the program reports its version at startup. A settlement seen pending or after an earlier inventory view refreshes model catalogs, once per inventory answer; retained receipts first met settled are history. Nothing updates itself. Return uses only a changed receipt's `before.version`, when `actions.exactVersion.available`; no stored version history.
+
+A package-manager copy may only advise: display the vendor sentence, never run its suggested command automatically. Cursor cannot launch on Windows ([#667](https://github.com/razzant/claudexor/issues/667)); OpenCode uses 1.x with no unattended Windows installer ([#668](https://github.com/razzant/claudexor/issues/668)). `copilot update` can hit GitHub's unauthenticated rate limit; show its refusal without retry or workaround.
 
 **The review pool.** `GET /api/review-pool` lists the agent rows that may review work and what one review costs on each. A broken configuration answers a non-empty `config_error` with an empty pool. A readable catalog with no row marked Reviewer also answers an empty pool: the Main model then reviews alone.
 
 ## 14. Models, local model and MCP
 
-**The model catalog.** `GET /api/model-catalog` (`ModelCatalogResponse`) lists selectable models: every configured provider's, or with `source_id` one agent account's. `value` is what a model setting stores. A provider that failed is an `errors` row and the read is still 200: missing models are unknown, not proof of none. `model_sources` and `account_catalogs` are the engine's objects, passed through.
+**The model catalog.** `GET /api/model-catalog` (`ModelCatalogResponse`) lists selectable models: every configured provider's, or with `source_id` one agent account's. `value` is what a model setting stores. A provider that failed is an `errors` row and the read is still 200: missing models are unknown, not proof of none. `model_sources` and `account_catalogs` pass through. A catalog's `sourceProgram: {path, version} | null` names its actual producer; account catalog and source envelopes carry provenance once, rather than copying it into each model. Null means no proven program producer, never a guessed inventory version. The opened chooser's non-option closing group shows that provenance and any engine-offered Update; keyboard/touch actions keep the list open, show progress/result and refresh suggestions without replacing typed IDs. API-only lists have no program row. Opening compares selected path/version strings with the producer and refreshes mismatched catalogs once; unchanged selections add no catalog read. Choosers subscribe to status only while an operation is pending.
 
 **The local model:**
 - `POST /api/local-model/start` (`LocalModelStartRequest`) answers `{status: "starting"}` after the model is downloaded; the request stays open meanwhile. It is not idempotent. Then poll `GET /api/local-model/status` until `status` is `ready` or `error` (`offline`, `downloading` and `loading` come before).
