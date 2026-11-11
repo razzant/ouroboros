@@ -690,8 +690,9 @@ def test_a_place_no_view_shows_leaves_its_sealed_rows_unread(monkeypatch, tmp_pa
         _seal(tmp_path, _entry(tmp_path, words), PLACE2)
     _compose(tmp_path)
     assert {_entry(tmp_path, words)[2] for words in ("Unshown one.", "Unshown two.")} <= _cold_positions(tmp_path)
-    asked, real = [], cold.rows_of
-    monkeypatch.setattr(cold, "rows_of", lambda store_, held, chats, *more: asked.append(sorted(chats)) or real(store_, held, chats, *more))
+    asked, real = [], cold.older_of
+    monkeypatch.setattr(cold, "older_of", lambda store_, held, pages: asked.append(sorted(chat for chat, *_ in pages))
+                        or real(store_, held, pages))
     for name in ("main", "wake", "presence", "project"):
         work = _work(tmp_path, rooms, name)
         assert work.get("tail_whole", 0) == 0 and "rows_cold" in work, (name, work)
@@ -769,22 +770,22 @@ def test_a_row_of_a_places_chat_whose_work_joined_a_project_is_not_read_as_the_p
     _same(monkeypatch, tmp_path, rooms)
 
 
-def _long_place(tmp_path: pathlib.Path, mine_at) -> tuple:
-    """Forty arrivals of a person in a place of its own (no other row of its chat), all sealed, with a delivery of mine
-    at ``mine_at`` (from the oldest; None: none), then an open arrival with the oldest one's words: its room shows, and
-    asks for its sealed rows; who of ours spoke there is walked down to that open row."""
+def _long_place(tmp_path: pathlib.Path, mine_at, size: int = 40, again: bool = True) -> tuple:
+    """``size`` arrivals of a person in a place of its own (no other row of its chat), all sealed, with a delivery of
+    mine at ``mine_at`` (from the oldest; None: none), then an open arrival with the oldest one's words (``again``; else
+    with none): its room shows, and asks for its sealed rows; who of ours spoke there is walked down to that open row."""
     rooms = _settled(tmp_path)
     place = {"source": "presence:slack", "transport": _TRANSPORT, "presence_provenance": _PROVENANCE}
-    for n in range(40):
+    for n in range(size):
         if n == mine_at:
             _append(tmp_path, shared.msg(_ts(n + 1), "My word there.", chat_id=LONG, direction="out", task_id="free1",
                                          type="presence_delivery", **place))
         else:
             _append(tmp_path, shared.msg(_ts(n + 1), f"Words {n}.", chat_id=LONG, client_message_id=f"w{n}", **place))
-    _append(tmp_path, shared.msg(_ts(50), "Words 0." if mine_at != 0 else "Words 1.", chat_id=LONG,
-                                 client_message_id="again", **place))
+    _append(tmp_path, shared.msg(_ts(size + 10), ("Words 0." if mine_at != 0 else "Words 1.") if again else "",
+                                 chat_id=LONG, client_message_id="again", **place))
     _fill(tmp_path)
-    sealed = [_entry(tmp_path, "My word there." if n == mine_at else f"Words {n}.") for n in range(40)]  # no capture yet
+    sealed = [_entry(tmp_path, "My word there." if n == mine_at else f"Words {n}.") for n in range(size)]  # no capture yet
     result = ChronicleStore(tmp_path).publish_page(room_id=str(LONG), text="A page.", author=shared.MIND, covers={
         "rows": [entry[0]["row_sha256"] for entry in sealed], "stream_span": [sealed[0][2], sealed[-1][2]]})
     assert result.ok, result.reason
@@ -817,6 +818,49 @@ def test_a_walk_past_a_places_first_page_reads_every_row_between_not_only_the_co
     work = _work(tmp_path, rooms)
     assert work.get("tail_whole", 0) == 0 and work.get("rows_asked", 0) >= sealed, (work, sealed)
     _same(monkeypatch, tmp_path, rooms)
+
+
+def _index_steps(monkeypatch, read) -> list:
+    """The SQLite instructions of each read of the cold set (``memory_tail_cold._read``) while ``read`` runs."""
+    import contextlib
+
+    steps, real_read, real_index = [], cold._read, ChronicleStore._index
+
+    @contextlib.contextmanager
+    def counting(self):
+        with real_index(self) as db:
+            db.set_progress_handler(lambda: steps.__setitem__(-1, steps[-1] + 1), 1)
+            try:
+                yield db
+            finally:
+                db.set_progress_handler(None, 1)
+
+    def counted(*args):
+        steps.append(0)
+        with monkeypatch.context() as patch:
+            patch.setattr(ChronicleStore, "_index", counting)
+            return real_read(*args)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(cold, "_read", counted)
+        read()
+    return steps
+
+
+def test_a_shown_places_first_page_costs_the_same_whatever_its_history(monkeypatch, tmp_path):
+    """The first page reads each shown place's newest unread rows by a bounded read of its chat's index, in one
+    transaction for every place: no statement ranks a place's whole history (and none needs a window function)."""
+    first = []
+    for size in (24, 96):
+        root = tmp_path / str(size)
+        root.mkdir()
+        monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
+        _forget_process_memos()
+        rooms, _sealed = _long_place(root, mine_at=size - 1, size=size, again=False)  # mine is its newest row
+        steps = _index_steps(monkeypatch, lambda: _work(root, rooms))
+        assert len(steps) == 1, steps  # the first page answered every walk; no copy was asked for
+        first.append(steps[0])
+    assert first[0] == first[1], first
 
 
 def test_a_place_where_none_of_us_spoke_reads_every_sealed_row(monkeypatch, tmp_path):

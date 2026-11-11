@@ -499,7 +499,7 @@ class _PlaceReads:
         for room in fresh:
             self.unread[room], self.words[room] = {}, set()
         if fresh:
-            newest = memory_tail_cold.rows_of(self.store, self.held, [int(room) for room in fresh], self._NEWEST)
+            newest = memory_tail_cold.older_of(self.store, self.held, [(int(room), None, self._NEWEST) for room in fresh])
             if newest is None:
                 self._live(fresh)
             else:
@@ -551,7 +551,7 @@ class _PlaceReads:
 
     def _older(self, room: str) -> None:
         count = self.page.get(room, 2 * self._NEWEST)
-        older = memory_tail_cold.older_of(self.store, self.held, int(room), self.edge[room], count)
+        older = memory_tail_cold.older_of(self.store, self.held, [(int(room), self.edge[room], count)])
         if older is None:
             self._live([room])
             return

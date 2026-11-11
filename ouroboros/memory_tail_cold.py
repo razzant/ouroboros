@@ -25,7 +25,7 @@ it); an owner's Reply (its target may appear or move, ``room_membership.reply_ta
 wrote a page record; a row whose answer rested on a task the store did not hold or could not read
 (``RoomResolver.settled``). A row the set does not name, appended or inserted since, is read. The sealed rows of any
 other place room (its earlier deliveries of the same words, who of ours spoke there) are read for the rooms a reader
-shows, when it asks (``rows_of``): the set keeps each row's room key, the chat ``chat_chain._row_chat_id`` reads, as
+shows, when it asks (``older_of``): the set keeps each row's room key, the chat ``chat_chain._row_chat_id`` reads, as
 the room rule reads it, and no other room holds a row of that chat. A Project that became a place since the set was
 composed makes the capture read the whole tail (``short``).
 
@@ -44,13 +44,12 @@ MEMO = (STANDS, GATE, HELD)
 MARKS = "tail_cold"  # the set's marks, in the index's ``state``
 _SINCE = "SELECT body FROM records WHERE sequence>? AND kind IN ('decision','page') ORDER BY sequence"
 # One page of the set's rows a selection of positions names (its parameters first), stored facts as
-# ``chronicle_store._tail_rows`` reads them; the selections: the newest few of some chats, the rows of one chat older
-# than a position, the rows of some chats with given words.
+# ``chronicle_store._tail_rows`` reads them; the selections: the newest rows of one chat before a position (a bounded
+# read of its index, whatever its history), the rows of some chats with given words.
 _FACTS = ("SELECT json_group_array(json_array(t.pos,t.seq,t.row_sha256,json(t.legacy),json(t.meta),t.terminal)), "
           "max(c.pos) FROM (SELECT pos FROM ({}) WHERE pos>? ORDER BY pos LIMIT ?) c JOIN tail_rows t ON t.pos=c.pos")
-_NEWEST = ("SELECT pos FROM (SELECT pos, row_number() OVER (PARTITION BY chat ORDER BY pos DESC) AS n FROM tail_cold "
-           "WHERE chat IN (SELECT value FROM json_each(?))) WHERE n<=?")
 _OLDER = "SELECT pos FROM (SELECT pos FROM tail_cold WHERE chat=? AND pos<? ORDER BY pos DESC LIMIT ?)"
+_END = 1 << 62  # past every position: a chat's newest rows
 _COPIES = ("SELECT pos FROM tail_cold WHERE (chat, digest) IN "
            "(SELECT json_extract(value,'$[0]'), json_extract(value,'$[1]') FROM json_each(?))")
 _PAGE = 2_000
@@ -144,44 +143,42 @@ def standing(derived: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
     return derived[HELD] if derived and derived.get(STANDS) else None
 
 
-def rows_of(store: Any, held: Mapping[str, Any], chats: Iterable[int], newest: int) -> Optional[list]:
-    """The stored facts of the ``newest`` rows the set leaves unread in each of these chats (the room key stored with
-    each, ``_compose``), by position."""
-    return _read(store, held, _NEWEST, (json.dumps(sorted(set(chats))), newest))
-
-
-def older_of(store: Any, held: Mapping[str, Any], chat: int, before: int, count: int) -> Optional[list]:
-    """The stored facts of the set's rows in one chat before a position, the ``count`` newest of them, by position."""
-    return _read(store, held, _OLDER, (chat, before, count))
+def older_of(store: Any, held: Mapping[str, Any], pages: Iterable[tuple]) -> Optional[list]:
+    """The stored facts of the set's rows of each ``(chat, before, count)``: the ``count`` newest of that chat's rows
+    before a position (``None``: its newest), the room key stored with each (``_compose``); a chat's in position order."""
+    return _read(store, held, [(_OLDER, (chat, _END if before is None else before, count)) for chat, before, count in pages])
 
 
 def copies_of(store: Any, held: Mapping[str, Any], words: Iterable[tuple]) -> Optional[list]:
     """The stored facts of the set's rows with given words in given chats (``(chat, text_sha256)`` pairs, the digest
     stored with each row that has words), by position."""
-    return _read(store, held, _COPIES, (json.dumps(sorted(set(words))),))
+    return _read(store, held, [(_COPIES, (json.dumps(sorted(set(words))),))])
 
 
-def _read(store: Any, held: Mapping[str, Any], positions: str, parameters: tuple) -> Optional[list]:
-    """The stored facts of the set's rows ``positions`` selects, read in one transaction where the set and the stored
-    tail are still the ones a capture stood on (``held``, its marks); ``None`` where they are not or cannot be read: the
-    reader then takes those chats' rows from the dialogue store (``memory_inventory.PlaceRows``)."""
+def _read(store: Any, held: Mapping[str, Any], asks: Iterable[tuple]) -> Optional[list]:
+    """The stored facts of the set's rows each ``(selection, parameters)`` names, all in one transaction where the set
+    and the stored tail are still the ones a capture stood on (``held``, its marks); ``None`` where they are not or
+    cannot be read: the reader then takes those chats' rows from the dialogue store (``memory_inventory.PlaceRows``)."""
     import sqlite3
 
     from ouroboros.chronicle_store import ChronicleStore
 
-    rows, after, sql = [], -(1 << 63), _FACTS.format(positions)
+    rows: list = []
     try:
         with store._index() as db:
             if ChronicleStore._state(db, MARKS) != held or (ChronicleStore._state(db, "tail") or {}).get("source") != held.get("source"):
                 return None
-            while True:
-                text, last = db.execute(sql, (*parameters, after, _PAGE)).fetchone()
-                if last is None:
-                    return rows
-                rows.extend(sorted(json.loads(text)))  # SQLite promises no aggregate order; the pages are in order
-                after = last
+            for positions, parameters in asks:
+                sql, after = _FACTS.format(positions), -(1 << 63)
+                while True:
+                    text, last = db.execute(sql, (*parameters, after, _PAGE)).fetchone()
+                    if last is None:
+                        break
+                    rows.extend(sorted(json.loads(text)))  # SQLite promises no aggregate order; the pages are in order
+                    after = last
     except (TimeoutError, sqlite3.Error):
         return None
+    return rows
 
 
 def settle(store: Any, derived: Optional[Mapping[str, Any]], tail: Any, found: Any) -> None:
@@ -231,7 +228,7 @@ def _compose(store: Any, snapshot: Any, gate_: Gate, tail: Any, found: Any) -> N
 
     writers = _writers(snapshot)
     # A terminal row's task is kept with it: a page its task writes later links it (``stands``); every row its room key,
-    # the chat the room rule reads (``memory_inventory.rooms_of_row``), by the same function: ``rows_of`` reads by it;
+    # the chat the room rule reads (``memory_inventory.rooms_of_row``), by the same function: ``older_of`` reads by it;
     # a row with words their digest as ``memory_view_conversations._repeats`` compares them (``copies_of``).
     cold = [[pos, (meta.get("task_id") or None) if terminal is not None else None, _row_chat_id(meta),
              words_of(meta) or None]
