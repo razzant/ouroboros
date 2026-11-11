@@ -545,18 +545,21 @@ Private Presence contacts carry `presence_contact` source facts separately from 
 
 **Reading.** `GET /api/settings` (`SettingsReadResponse`) returns all settings and `_meta` (`SettingsMeta`):
 - **Network facts:** `bind_host` and `recommended_url`.
-- **`restart_state`:** saved settings awaiting restart.
+- **`restart_state`:** saved settings awaiting restart; `running` holds each pending key's value still in force.
+- **`effects`:** when a saved key is consumed: `now`, `next_call`, `next_wake`, `next_task`, `restart` or `local_model` (the local model's own Stop, then Start).
+- **`tokens`:** one per key that is not a secret, covering its stored value and whether it is stored, for a conditional write.
 - **`setup_contract`:** the same vocabulary as setup.
 - **Other facts:** policy and agent roster.
 
 Secrets are masked: password types use the configured placeholder; others a short prefix plus `...`.
 
-**Saving.** `POST /api/settings` takes changed keys only (plain `json`):
+**Saving.** `POST /api/settings` takes changed keys only (`SettingsSaveRequest`):
 - **Masked values:** mean "unchanged"; `""` clears.
+- **Conditions:** `if_unchanged: {KEY: token}` writes only while each named key still holds the value its token was read with; other keys never matter. A mismatch answers `409 settings_changed_elsewhere` (`saved: false`, nothing written). An ordinary scalar write sends none (the last writer wins); an edit of a list and an Undo do. `unset: [KEY]` removes an ordinary non-secret key that the same body does not assign (Undo sends it with that key's token), so a choice that was never stored returns to unstored instead of pinning its default. `409 settings_precondition_failed` means the document kept changing under the save itself; nothing is written.
 - **Settings with their own writer:**
   - Language uses only `POST /api/ui/i18n/language`; settings saves report it in `ignored_keys`.
   - The access, context and safety controls go through `POST /api/owner/*`.
-- **Success:** `SettingsSaveResponse`; `restart_state.restart_keys` lists settings awaiting restart, including `OUROBOROS_UI_DIR`.
+- **Success:** `SettingsSaveResponse`; `changes` holds for each changed key its effective `old` and `new` value and the installed `token` (`old_absent: true` when the key was not stored), or `withheld: secret|structure` in their place; `receipt: "unavailable"` stands in when the settings are saved and the receipt could not be taken. `restart_state.restart_keys` lists settings awaiting restart, including `OUROBOROS_UI_DIR`.
 
 All settings writers (Settings, setup, owner controls, language, desktop background) report `SettingsWriteRefusal` failures; `saved` records the effect:
 
@@ -570,9 +573,9 @@ Only an absent settings document is new: one that exists but cannot be read as a
 
 **Declared settings origin.** `POST /api/settings`, the Safety owner writes (`/api/owner/safety-model`, `-mode`, `-rules`) and a `model_wait` decision that saves its model in Settings (`POST /api/decisions`, the card sends `app`) read optional `X-Ouroboros-Surface` (a lowercase token; the app's own pages send `app`), `X-Ouroboros-Actor` (`owner` or `ouroboros`, as for Pause) and `X-Ouroboros-Task-Id`. A declaration grants nothing; a missing or malformed part reads `api` / `not declared`, never refusing the save, and the client address is never an actor. A save that changed something is recorded once (old → new; secrets and structures by name); one not declared `app` also adds one quiet System row in Main.
 
-`ignored_keys` optionally maps skipped keys to their writers (object, not array). Unknown ordinary keys may be ignored. `immediate_changed` and `next_task_changed` optionally flag any change in that bucket (`true`, not lists). `setup_contract.budgetFields` owns budget names, types and minimums. No public request is intended to induce a post-commit failure or unknown save outcome.
+`ignored_keys` optionally maps skipped keys to their writers (object, not array), the owner-only keys a save outside Cyber Pro skipped included. Unknown ordinary keys may be ignored. `immediate_changed` and `next_task_changed` optionally flag any change in that bucket (`true`, not lists). `setup_contract.budgetFields` owns budget names, types and minimums. No public request is intended to induce a post-commit failure or unknown save outcome.
 
-**Owner controls.** Each saves through the same writer; room controls default to Main when `project_id` is omitted:
+**Owner controls.** Each saves through the same writer and answers the same `changes` (`POST /api/owner/safety-model` also takes `if_unchanged`; a room's Context reports its own old and new without a token); room controls default to Main when `project_id` is omitted:
 - `POST /api/owner/runtime-mode` `{mode}`: `light`, `advanced`, `pro` or `cyber_pro`; applies when the core next starts.
 - `POST /api/owner/context-mode` `{mode, project_id?}`: `nano`, `low` or `max`; applies to new participants in that room, including while others run.
 - `POST /api/owner/safety-mode` `{mode}`: `full`, `light` or `off`.
