@@ -767,5 +767,7 @@ def test_two_chooser_openings_share_producer_refresh_at_44_accounts(role_ui, wid
                      and "source_id" not in parse_qs(urlparse(url).query)]
     native_catalogs = [url for url in requests if urlparse(url).path == "/api/claudexor/status"
                        and parse_qs(urlparse(url).query).get("include") == ["models"]]
-    assert len(full_catalogs) == len(native_catalogs) == 1
+    # The wizard independently refreshes its setup catalogue when connected accounts are published
+    # (onboarding_wizard.js refreshModelSources); the chooser coordinator adds one shared read.
+    assert len(full_catalogs) == 2 and len(native_catalogs) == 1
     assert not world["posts"] and page.evaluate("document.documentElement.scrollWidth <= innerWidth")
