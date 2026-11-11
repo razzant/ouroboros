@@ -255,12 +255,10 @@ def test_unauthenticated_same_id_is_a_person_and_a_marked_mail_bot_is_an_event(t
 
 
 @pytest.mark.parametrize("provider", ["harbor", "mailbox"])
-@pytest.mark.parametrize("count_unknown", [True, False])
-def test_unattributed_arrivals_have_one_owner_choice_and_keep_their_reader(tmp_path, monkeypatch, provider, count_unknown):
-    from ouroboros import dialogue_store as ds, memory_view_events as events
+def test_unattributed_arrivals_stand_in_events_and_stay_words_in_a_live_conversation(tmp_path, provider):
+    from ouroboros import dialogue_store as ds
     from ouroboros import memory_view_conversations as conv
     shared.world(tmp_path)
-    monkeypatch.setattr(events, "count_unattributed", lambda: count_unknown)
     text = "Unknown opening. " + "unconfirmed words " * 30
     ds.append(tmp_path, "chat", _event_row(provider, "one", 1, "unknown", text=text))
     snapshot = view(tmp_path)
@@ -270,12 +268,8 @@ def test_unattributed_arrivals_have_one_owner_choice_and_keep_their_reader(tmp_p
     assert not room["engaged"] and not conv.owed([group])
     assert f"author not recorded: 1 arrivals, {len(text)} chars" in shown
     assert "last 2026-09-09T00:01:00+00:00" in shown
-    assert (text in shown) is not count_unknown
+    assert text not in shown
     assert text in _memory_read(_ctx(tmp_path, "root0001"), room_id=room["room_id"], rows=True)
-    if not count_unknown:
-        word = room["words"][0]
-        opened = conv.render_group(group, {word["id"]}, set(), 0)
-        assert text not in opened and "Unknown opening." in opened and "opening, no retelling" in opened
     ds.append(tmp_path, "chat", _event_row(provider, "one", 2, "Ann"))
     live = _event_group(view(tmp_path), provider)["rooms"][0]
     assert live["engaged"] and live["words"][0]["text"] == text

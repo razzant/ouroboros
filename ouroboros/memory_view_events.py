@@ -13,13 +13,8 @@ def starts_conversation(author):
             author.get("kind") == "ouroboros" and author.get("via") != "own_account")
 
 
-def count_unattributed():
-    """Pending owner choice A. False keeps unknown arrivals as words beside the event."""
-    return True
-
-
 def capture(spoken):
-    """Select the first text and last recorded arrival from metadata already in hand."""
+    """Select event samples; arrivals without a recorded author are counted here too (owner choice A)."""
     arrivals = [(entry, cls["author"]) for entry, cls in spoken if cls["lane"] == 1 and entry[1].get("direction") == "in"]
     known = [(e, a) for e, a in arrivals if recorded_speaker(e[1])]
     unknown = [(e, a) for e, a in arrivals if not recorded_speaker(e[1])]

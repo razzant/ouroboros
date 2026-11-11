@@ -14,7 +14,7 @@ running work, and each of its rooms that has open rows, a note of mine or runnin
   words too; children never travel as reports;
 - arrivals from bots or my own unconfirmed account alone are **events**: the host names their first text,
   last recorded author, counts and reader. A tighter ordinary form counts such rooms per conversation.
-  Unknown authors use the single pending choice in ``memory_view_events.count_unattributed``. Notes remain mine
+  Arrivals without a recorded author are counted in the event line (owner choice A). Notes remain mine
   and stay whole even beside events; running work remains named in the group. These host forms owe no telling.
 
 A writer's terminal rows its page links below it (``memory_sealing.linked_rows``) are that page's, never open
@@ -180,7 +180,6 @@ def capture(store: Any, root: Any, spec: Any, label: Callable[..., str], by_room
         again = _repeats(sorted((*sealed.get(room, ()), *held), key=lambda entry: entry[2]))
         for entry, cls in (pair for pair in spoken if pair[0][0]["row_sha256"] not in here):  # once, in this room
             if room == str(spec.room_id) or not engaged and not (
-                cls["author"].get("unattributed") and not events.count_unattributed() or
                 cls["author"]["kind"] == "place_fact" and entry[1].get("direction") == "out"
             ):
                 continue
