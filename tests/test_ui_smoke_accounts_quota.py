@@ -70,7 +70,7 @@ def test_accounts_partial_quota_cards(direct_server_with_data, surface):
             page.click('[data-nav-page="settings"]')
             page.wait_for_selector(".settings-shell")
             if surface == "accounts":
-                open_settings(page, "accounts")
+                open_settings(page, "accounts/codex")
                 account = page.locator('.harness-account-row[data-profile="missing-reset"]')
                 account.wait_for(state="visible")
                 assert "100% used · availability not proven" in account.inner_text()
