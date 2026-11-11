@@ -94,6 +94,7 @@ def _remote_counts(snapshot, gone, add):
     sources, index = _conversation_sources(snapshot), conversations.source_index(snapshot)
     cache = snapshot.__dict__.setdefault("_conversation_form_counts", {})
     lost = groups_counted = global_unread = event_arrivals = 0
+    telling_lost = False
     for group in snapshot.conversations:
         data = index[group["key"]]
         state = local_key(group, gone, data)
@@ -102,10 +103,11 @@ def _remote_counts(snapshot, gone, add):
         key = (*state, aggregate_unread)
         if key not in cache:
             cache[key] = _group_counts(group, data, sources, state, aggregate_unread)
-        facts, missing, unread = cache[key]
+        facts, missing, unread, telling = cache[key]
         for kind, name, lines, n in facts:
             add(kind, name, lines, n)
         lost += missing
+        telling_lost |= telling
         if count:
             event_arrivals += totals(group["rooms"])[1]
         groups_counted += count
@@ -113,7 +115,7 @@ def _remote_counts(snapshot, gone, add):
     add("emergency", "conversation count", int(bool(groups_counted)), lost or groups_counted)
     add("host", "event counts", int(bool(event_arrivals) and not groups_counted), event_arrivals)
     add("window", "unread count", int(bool(global_unread)), global_unread)
-    return lost
+    return telling_lost
 
 
 def _group_counts(group, data, sources, state, aggregate_unread):
@@ -123,6 +125,7 @@ def _group_counts(group, data, sources, state, aggregate_unread):
     form, words, owners, event_count = state[3:]
     count = form == 4
     facts, lost, global_unread = [], 0, 0
+    telling_lost = False
     def add(kind, name, lines, n):
         if n:
             facts.append((kind, name, lines, n))
@@ -147,6 +150,9 @@ def _group_counts(group, data, sources, state, aggregate_unread):
         if count:
             lost += len(rest) + len(remote["notes"]) + len(remote["tasks"]) + int((remote.get("folded") or {}).get("count", 0))
             lost += int(not remote["engaged"] and not remote.get("events"))
+            kinds = data["rooms"][remote["room_id"]]
+            telling_lost |= bool(kinds["untold"] or kinds["told"] or remote["notes"] or remote.get("folded")
+                                 or any(t.get("gist") for t in remote["tasks"]))
         elif form:
             if form == 1:
                 add("retold", "note leads", len(remote["notes"]), len(remote["notes"]))
@@ -169,7 +175,7 @@ def _group_counts(group, data, sources, state, aggregate_unread):
     if form and not aggregate_unread:
         add("host", "unread in rooms without my human's word or my reply",
             int(bool(data["overheard"][1])), len(data["overheard"][1]))
-    return tuple(facts), lost, global_unread
+    return tuple(facts), lost, global_unread, telling_lost
 
 
 def holding_room(snapshot, level):

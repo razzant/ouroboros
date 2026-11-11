@@ -534,6 +534,23 @@ def test_holding_note_also_names_memory_lowering_without_any_replacement(cause):
     assert "Window emergency over unread words" in text and "Holding the room" not in text
 
 
+@pytest.mark.parametrize("source,needs_telling", [("unread", False), ("repeat", False), ("place_fact", False), ("considered", True)])
+def test_a_conversation_count_keeps_its_category_but_only_telling_loss_names_holding(source, needs_telling):
+    group = syn.conversation(1, words=2)
+    for word in group["rooms"][0]["words"]:
+        if source == "repeat":
+            word["again"] = True
+        elif source == "place_fact":
+            word["kind"] = "place_fact"
+        elif source == "considered":
+            word["rank"] = 1
+    snap = syn.snapshot(conversations=[group])
+    level = mv.FloorLevel((("F6a", (group["key"],)),))
+    assert "conversation count" in forms.form_counts(snap, level)["emergency"]
+    note = mf.floor_note(level, snapshot=snap, mode="low", window_tokens=200000)
+    assert ("Holding the room" in note) is needs_telling
+
+
 def test_view_facts_do_not_publish_working_parts_and_keep_the_note_bytes(tmp_path):
     from types import SimpleNamespace
     from ouroboros import observability, working_checkpoint
