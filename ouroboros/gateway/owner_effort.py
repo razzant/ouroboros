@@ -7,6 +7,7 @@ from typing import Any, Dict
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from starlette.routing import Route
 
 from ouroboros.composer_cognition import (
     main_cognition, normalize_model_choice,
@@ -26,6 +27,22 @@ from ouroboros.settings_scales import EFFORT_FORMAT_KEY, EFFORT_RANGE_KEYS, EFFO
 
 # The body's fields, in the order of ``EFFORT_RANGE_KEYS`` (min, recommended = TASK, max).
 RANGE_FIELDS = ("min", "recommended", "max")
+
+
+def owner_composer_routes() -> list[Route]:
+    """The four composer capsules' owner writes, for Main or the named room.
+
+    Their paths and handlers stay together here; the gateway mounts the family.
+    Context's writer retains its settings/capability authority in ``settings``.
+    """
+    from ouroboros.gateway.settings import api_owner_context_mode
+
+    return [
+        Route("/api/owner/context-mode", endpoint=api_owner_context_mode, methods=["POST"]),
+        Route("/api/owner/effort-range", endpoint=api_owner_effort_range, methods=["POST"]),
+        Route("/api/owner/subagents-mode", endpoint=api_owner_subagents_mode, methods=["POST"]),
+        Route("/api/owner/chat-model", endpoint=api_owner_chat_model, methods=["POST"]),
+    ]
 
 
 def effort_range_refusal(body: Any) -> str:

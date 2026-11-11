@@ -179,13 +179,12 @@ def collect_routes(
     )
     from ouroboros.gateway import desktop_autostart as desktop_host
     from ouroboros.gateway.onboarding_host import api_onboarding_attempt, api_onboarding_bootstrap, onboarding_page
-    from ouroboros.gateway.owner_effort import api_owner_chat_model, api_owner_effort_range, api_owner_subagents_mode
+    from ouroboros.gateway.owner_effort import owner_composer_routes
     from ouroboros.gateway.safety_settings import api_owner_safety_rules, api_owner_safety_model, api_owner_safety_mode
     from ouroboros.gateway.settings import (
         api_acknowledge_capability,
         api_onboarding,
         api_owner_auto_grant,
-        api_owner_context_mode,
         api_owner_runtime_mode,
         api_settings_get,
         api_settings_post,
@@ -268,10 +267,7 @@ def collect_routes(
         Route("/api/desktop/background", endpoint=desktop_host.api_desktop_background_post, methods=["POST"]),
         Route("/api/owner/runtime-mode", endpoint=api_owner_runtime_mode, methods=["POST"]),
         Route("/api/owner/auto-grant", endpoint=api_owner_auto_grant, methods=["POST"]),
-        Route("/api/owner/context-mode", endpoint=api_owner_context_mode, methods=["POST"]),
-        Route("/api/owner/effort-range", endpoint=api_owner_effort_range, methods=["POST"]),
-        Route("/api/owner/subagents-mode", endpoint=api_owner_subagents_mode, methods=["POST"]),
-        Route("/api/owner/chat-model", endpoint=api_owner_chat_model, methods=["POST"]),
+        *owner_composer_routes(),
         Route("/api/owner/safety-mode", endpoint=api_owner_safety_mode, methods=["POST"]),
         Route("/api/owner/safety-rules", endpoint=api_owner_safety_rules, methods=["POST"]),
         Route("/api/owner/safety-model", endpoint=api_owner_safety_model, methods=["POST"]),
