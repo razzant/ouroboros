@@ -33,7 +33,7 @@ export const ROWS = [
         aliases: ['Task Lifetime Limit (s)', 'longest task'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
 
-    // Dashboard › Consciousness: the card "On its own" (the first four, then its fold), then the doors of "Around it".
+    // Dashboard › Consciousness: the card "On its own" (the first four, then its fold), then the four doors of "Around it".
     // The strip's labels are AUTONOMY_LEVELS (consciousness_autonomy.js); a test keeps the two equal. A row without a
     // meta says its value in its own words on the tab (the chosen level, the range in minutes or hours).
     { id: 'OUROBOROS_CONSCIOUSNESS_AUTONOMY', keys: ['OUROBOROS_CONSCIOUSNESS_AUTONOMY'], page: 'dashboard:consciousness', fold: false,
@@ -67,8 +67,18 @@ export const ROWS = [
         control: { kind: 'door' },
         aliases: [],
         writer: '', codec: '', confirm: '', hiddenWhen: '' },
+    { id: 'consciousness-safety', keys: [], page: 'dashboard:consciousness', fold: false,
+        name: 'Its actions are checked', meta: '', more: '',
+        control: { kind: 'door' },
+        aliases: [],
+        writer: '', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'consciousness-places', keys: [], page: 'dashboard:consciousness', fold: false,
         name: 'Where it lives', meta: 'Its places, their words and their circles.', more: '',
+        control: { kind: 'door' },
+        aliases: [],
+        writer: '', codec: '', confirm: '', hiddenWhen: '' },
+    { id: 'consciousness-evolution', keys: [], page: 'dashboard:consciousness', fold: false,
+        name: 'Improving itself', meta: '', more: '',
         control: { kind: 'door' },
         aliases: [],
         writer: '', codec: '', confirm: '', hiddenWhen: '' },
