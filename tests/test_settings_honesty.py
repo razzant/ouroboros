@@ -32,7 +32,7 @@ def isolated_settings(tmp_path, monkeypatch):
     from ouroboros import server_process
     monkeypatch.setattr(server_process, "_applied_restart_settings", {
         key: cfg.SETTINGS_DEFAULTS[key] for key in (
-            "OUROBOROS_MAX_WORKERS", "OUROBOROS_SERVER_HOST", "OUROBOROS_HOST_SERVICE_PORT",
+            "OUROBOROS_SERVER_HOST", "OUROBOROS_HOST_SERVICE_PORT", "OUROBOROS_UI_DIR",
             "OUROBOROS_SKILLS_REPO_PATH")})
     yield settings_path
     cfg.reset_runtime_mode_baseline_for_tests()
@@ -346,11 +346,12 @@ def test_every_default_has_one_effect_without_changing_actor_snapshot_policy():
     from ouroboros.settings_integrity import _next_task_setting
     from ouroboros.settings_scales import setting_effect
 
-    # Frozen pre-change snapshot exclusions, independent of the new presentation function.
+    # Target snapshot exclusions, independent of the presentation function (including the live worker cap).
     original_live = {"TOTAL_BUDGET", "OUROBOROS_SUBAGENTS_MODE", "OUROBOROS_UI_LANGUAGE",
-                     "OUROBOROS_TOOL_TIMEOUT_SEC", "OUROBOROS_MODEL_MAX_CONCURRENCY", "GITHUB_TOKEN", "GITHUB_REPO",
+                     "OUROBOROS_TOOL_TIMEOUT_SEC", "OUROBOROS_MODEL_MAX_CONCURRENCY", "OUROBOROS_MAX_WORKERS",
+                     "GITHUB_TOKEN", "GITHUB_REPO",
                      "OUROBOROS_UPDATE_CHANNEL", "MCP_ENABLED", "MCP_SERVERS", "MCP_TOOL_TIMEOUT_SEC"}
-    original_restart = {"OUROBOROS_MAX_WORKERS", "OUROBOROS_SERVER_HOST", "OUROBOROS_HOST_SERVICE_PORT",
+    original_restart = {"OUROBOROS_SERVER_HOST", "OUROBOROS_HOST_SERVICE_PORT",
                         "OUROBOROS_UI_DIR", "OUROBOROS_SKILLS_REPO_PATH", "LOCAL_MODEL_SOURCE", "LOCAL_MODEL_FILENAME",
                         "LOCAL_MODEL_PORT", "LOCAL_MODEL_N_GPU_LAYERS", "LOCAL_MODEL_CONTEXT_LENGTH", "LOCAL_MODEL_CHAT_FORMAT"}
     classes = {"now", "next_call", "next_wake", "next_task", "restart", "local_model"}
@@ -380,7 +381,7 @@ def test_effects_at_the_reader_boundary_keep_running_actor_facts(clock, isolated
     initial = {"OPENROUTER_API_KEY": "fixture", "OUROBOROS_MODEL": "openai/old", "OUROBOROS_MODEL_SAFETY": "openai/checker",
                "OUROBOROS_CONSCIOUSNESS_DAILY_USD": 20, "OUROBOROS_CONSCIOUSNESS_AUTONOMY": "act",
                "OUROBOROS_CONSCIOUSNESS_MAX_TASKS": 2, "OUROBOROS_BG_WAKEUP_MIN": 900, "OUROBOROS_BG_WAKEUP_MAX": 14400,
-               "LOCAL_MODEL_CONTEXT_LENGTH": 16384, "OUROBOROS_MAX_WORKERS": 10}
+               "LOCAL_MODEL_CONTEXT_LENGTH": 16384, "OUROBOROS_HOST_SERVICE_PORT": 8767}
     isolated_settings.write_text(json.dumps(initial), encoding="utf-8")
     for key in config.SETTINGS_DEFAULTS:
         monkeypatch.setenv(key, os.environ.get(key, ""))  # restore environment projection at fixture teardown
@@ -431,13 +432,13 @@ def test_effects_at_the_reader_boundary_keep_running_actor_facts(clock, isolated
         monkeypatch.setattr(local_model, "get_manager", lambda: manager)
         monkeypatch.setattr(manager, "get_status", lambda: "ready")
         manager._applied_settings = local_model.local_model_settings(initial)
-        key, value = ("OUROBOROS_MAX_WORKERS", 12) if case == "restart" else ("LOCAL_MODEL_CONTEXT_LENGTH", 32768)
+        key, value = ("OUROBOROS_HOST_SERVICE_PORT", 8768) if case == "restart" else ("LOCAL_MODEL_CONTEXT_LENGTH", 32768)
         assert setting_effect(key) == case
         response = client.post("/api/settings", json={key: value})
         assert response.status_code == 200, response.text
         pending = response.json()["restart_state"]
         if case == "restart":
-            assert pending["running"][key] == 10 and key in pending["restart_keys"]
+            assert pending["running"][key] == initial[key] and key in pending["restart_keys"]
         else:
             assert key in pending["local_model"]["pending_keys"] and key not in pending["restart_keys"]
             assert manager._applied_settings[key] == 16384
@@ -445,6 +446,60 @@ def test_effects_at_the_reader_boundary_keep_running_actor_facts(clock, isolated
         back = client.post("/api/settings", json={key: initial[key]}).json()["restart_state"]
         assert back["running"] == {} and not back["local_model"]["pending_keys"]
         assert snapshot.settings[key] == initial[key]
+
+
+def test_worker_cap_applies_now_to_the_pool_without_changing_actor_snapshot_policy(isolated_settings, monkeypatch):
+    import os
+    from ouroboros import config
+    from ouroboros.gateway import settings
+    from ouroboros.settings_integrity import _next_task_setting, task_settings_scope, task_settings_snapshot
+    from ouroboros.settings_scales import OWNER_CAP_KEY, OWNER_CAP_FORMAT_KEY, setting_effect
+    from supervisor.worker_pool_lifecycle import acting_room
+
+    isolated_settings.write_text(json.dumps({OWNER_CAP_KEY: 2, OWNER_CAP_FORMAT_KEY: 1}), encoding="utf-8")
+    for key in config.SETTINGS_DEFAULTS:
+        monkeypatch.setenv(key, os.environ.get(key, ""))
+    monkeypatch.setenv(OWNER_CAP_KEY, "2")
+    snapshot = task_settings_snapshot({OWNER_CAP_KEY: 2}, {OWNER_CAP_KEY: "2"})
+    client = TestClient(_settings_app(monkeypatch, isolated_settings))
+    monkeypatch.setattr(settings, "_apply_settings_to_env", config.apply_settings_to_env)
+    assert setting_effect(OWNER_CAP_KEY) == "now"
+    assert _next_task_setting(OWNER_CAP_KEY) is False
+    with task_settings_scope(snapshot):
+        assert acting_room({}, {}) == 2
+        for value, room in ((5, 5), ("", None), (2, 2)):
+            response = client.post("/api/settings", json={OWNER_CAP_KEY: value})
+            assert response.status_code == 200, response.text
+            assert response.json()["immediate_changed"] is True
+            assert not response.json().get("next_task_changed") and not response.json().get("restart_required")
+            assert acting_room({}, {}) == room  # real pool reader follows the save, even inside an old actor scope
+            assert snapshot.settings[OWNER_CAP_KEY] == 2 and snapshot.environ[OWNER_CAP_KEY] == "2"
+
+
+def test_metadata_covers_added_settings_but_never_tokens_a_new_secret(isolated_settings, monkeypatch):
+    from ouroboros import config
+    from ouroboros.gateway import settings
+    from ouroboros.settings_setup_contract import SECRET_SETTING_KEYS
+    from ouroboros.settings_scales import OWNER_CAP_KEY, setting_effect
+
+    # A future ordinary key and a new custom secret must not need a second metadata inventory.
+    added, secret = "OUROBOROS_TEST_SETTING", "NEW_SERVICE_API_KEY"
+    monkeypatch.setitem(config.SETTINGS_DEFAULTS, added, 7)
+    isolated_settings.write_text(json.dumps({secret: "private-test-key"}), encoding="utf-8")
+    app = _settings_app(monkeypatch, isolated_settings)
+    app.routes.append(Route("/api/settings", settings.api_settings_get, methods=["GET"]))
+    response = TestClient(app).get("/api/settings")
+    assert response.status_code == 200, response.text
+    shown = response.json()
+    meta = shown.pop("_meta")
+    assert set(config.SETTINGS_DEFAULTS) <= shown.keys()
+    assert meta["effects"] == {key: setting_effect(key) for key in shown}
+    assert set(meta["tokens"]) == shown.keys() - set(SECRET_SETTING_KEYS) - {secret}
+    assert shown[added] == 7 and meta["effects"][added] == "next_task" and meta["tokens"][added]
+    assert meta["effects"][OWNER_CAP_KEY] == "now" and meta["tokens"][OWNER_CAP_KEY]
+    assert secret in meta["effects"] and secret not in meta["tokens"]
+    assert "private-test-key" not in response.text
+    assert not {"OUROBOROS_DELEGATE_WAIT_SEC", "OUROBOROS_DELEGATE_WAIT_MAX_SEC"} & shown.keys()
 
 
 @pytest.mark.parametrize("key,old,new", [
