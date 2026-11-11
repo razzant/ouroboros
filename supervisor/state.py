@@ -179,10 +179,10 @@ RECOVERY_KEY = "_recovery"
 STATE_READ_KEY = "_state_read"  # projection-only read quality; never persisted
 CONTROL_KEYS = (
     "evolution_mode_enabled", "evolution_owner_stopped", "evolution_stop_source",
-    "post_task_autostop", "bg_consciousness_enabled",
+    "post_task_autostop", "bg_consciousness_enabled", "bg_consciousness_stop_source",
     "owner_id", "owner_chat_id", "owner_external_id", "owner_external_chat_id",
 )
-OPTIONAL_CONTROL_KEYS = frozenset({"evolution_stop_source", "post_task_autostop"})
+OPTIONAL_CONTROL_KEYS = frozenset({"evolution_stop_source", "post_task_autostop", "bg_consciousness_stop_source"})
 CURRENT_QUALITIES = frozenset({"current", "recovered"})
 
 

@@ -480,6 +480,7 @@
  *   16 and `commit_landings_omitted` counts the older ones its record (`source_ref`) keeps. Absent means no
  *   landing was recorded, never that nothing landed or nobody reviewed.
  * @property {Object[]=} body_adoptions The task's settled adoptions (TaskDetailResponse), on its summary rows.
+ * @property {Object=} review_overrides The work's review-gate field (TaskDetailResponse), on its summary rows.
  * @property {boolean=} worker_saturation_warning
  * @property {string=} source
  * @property {string=} sender_label
@@ -752,7 +753,6 @@
  */
 
 /** @typedef {import('./client_contract_types.js').ProjectMirrorHistoryFields} ProjectMirrorHistoryFields */
-/** @typedef {import('./management_contract_types.js').SkillReviewHistoryDetailResponse} SkillReviewHistoryDetailResponse */
 
 /** Additive /api/chat/history terminality projection.
  * @typedef {Object} TaskOutcomeHistoryFields
@@ -954,12 +954,6 @@
  * @property {string} safety_mode  // full | light | off (v6.54.3)
  */
 
-/** @typedef {import('./management_contract_types.js').InstalledSkill} InstalledSkill */
-
-/** @typedef {import('./management_contract_types.js').SkillToggleResponse} SkillToggleResponse */
-
-/** @typedef {import('./management_contract_types.js').SkillReconcileResponse} SkillReconcileResponse */
-
 /**
  * One Widgets card from `GET /api/widgets` (`gateway/widgets.py::WidgetTab`).
  * `revision` is the owning skill's live payload content hash — a change
@@ -1044,8 +1038,6 @@
  * @property {string} summary
  * @property {string} repair_hint
  */
-
-/** @typedef {import('./management_contract_types.js').SkillReviewResponse} SkillReviewResponse */
 
 /**
  * `POST /api/skills/{skill}/grants`; refusals use `SkillActionRefusal`, slow setup {ok, pending: true, job_id, message}.
@@ -1233,6 +1225,7 @@
  * @property {Array<{adoption_id:string, outcome:'adopted'|'not_applied'|'superseded'|'unconfirmed', commit_sha:string, previous_sha:string, branch:string, note:string, settled_at:string, revision:number, commits?:string[], commits_complete?:boolean, commits_omitted?:number}>=} body_adoptions
  *   Every adoption this task authorized, as boot settled them; `commits` (previous..candidate, newest first, bounded;
  *   a cut range counts the rest in `commits_omitted`) only when adopted.
+ * @property {{count:number, latest:{at:string, reason:string, task_id:string, text:string}}=} review_overrides  // a root's decisions Blocking would have stopped (review_overrides.py)
  * @property {string=} error
  * @property {ContinuationOffer=} continuation_offer
  */

@@ -2048,8 +2048,8 @@ export function createChatInstance({
     function updateLiveCardFromLogEvent(evt) {
         if (!evt) return false;
         const eventType = evt.type || evt.event || '';
-        if (eventType === 'history_retention') {
-            return withStableViewport(() => noteTaskDetails(liveCardRecords.get(taskKey(evt.task_id)), evt));
+        if (eventType === 'history_retention' || evt.review_overrides) {
+            return withStableViewport(() => noteTaskDetails(liveCardRecords.get(taskKey(evt.work_task_id || evt.task_id)), evt));
         }
         const reference = admitCardMetadata(evt);
         if (reference !== undefined) return reference;
@@ -2304,7 +2304,7 @@ export function createChatInstance({
                         cardRowsAttached.add(msg);
                         continue;
                     }
-                    // Placement precedes progress; later real rows may create the card.
+                    // Placement precedes progress; later rows may create the card.
                     if (isPlacedCardRow(msg)) continue;
                     const taskId = msg.task_id || '';
                     if (!taskId) continue;
@@ -2312,6 +2312,7 @@ export function createChatInstance({
                         if (msg.suggested_name) applySuggestedName(taskId, msg.suggested_name);
                         updateLiveCardFromProgressMessage(msg, { grantCancelAuthority: msg.project_mirror !== true });
                         const historyCard = liveCardRecords.get(taskId);
+                        if (msg.review_overrides) noteTaskDetails(historyCard, msg);
                         if (historyCard && !historyCard.isSubagent && !activeDirectActivities.has(taskId)
                                 && !msg.task_terminal_status && msg.task_phase !== 'finalizing'
                                 && setHistoricalUnconfirmed(historyCard)) {
