@@ -292,6 +292,8 @@ function savedOutcome(row, value, data = {}) {
     if (receipt && !outcome.withheld) {
         const side = (name) => entries.map((entry, i) => (entry ? entry[name] : value?.[i]));
         [outcome.old, outcome.new] = row.keys.length > 1 ? [side('old'), side('new')] : [entries[0].old, entries[0].new];
+        const absent = entries.map((entry) => entry?.old_absent === true);
+        outcome.oldAbsent = row.keys.length > 1 ? absent : absent[0];
     }
     const tokens = Object.fromEntries(row.keys.map((key, i) => [key, entries[i]?.token]).filter(([, token]) => token));
     if (Object.keys(tokens).length) outcome.token = row.keys.length > 1 ? tokens : tokens[row.keys[0]];
@@ -385,9 +387,13 @@ const preconditionOf = (row, token) => (!token ? null : typeof token === 'string
 
 /** Every way a row is written. Each answers an Outcome and never throws. */
 export const WRITERS = {
-    generic(row, value, { ifUnchanged = '' } = {}) {
+    generic(row, value, { ifUnchanged = '', unset = [] } = {}) {
         const precondition = preconditionOf(row, ifUnchanged);
         const body = { ...bodyOf(row, value), ...(precondition ? { if_unchanged: precondition } : {}) };
+        if (unset.length) {
+            unset.forEach((key) => { delete body[key]; });
+            body.unset = unset;
+        }
         return attempt(row, value, () => apiClient.saveSettings(body, { headers: APP_SETTINGS_ORIGIN }));
     },
     // Every key of SAFETY_MODEL_KEYS: the owner's checker transaction. A change that leaves no reviewer asks first,
@@ -548,14 +554,14 @@ function enqueue(row, job) {
  * it, alone. `confirmed` skips the row's question (Undo); `ifUnchanged` is the token Undo sends as its precondition;
  * `ask` stands in for the shared confirm dialog.
  */
-export async function commitSetting(row, value, { confirmed = false, ifUnchanged = '', ask = openConfirmDialog } = {}) {
+export async function commitSetting(row, value, { confirmed = false, ifUnchanged = '', unset = [], ask = openConfirmDialog } = {}) {
     if (!lastSettings) await ensureRead();  // effects, tokens and a contract field's bounds
     const confirm = CONFIRMS[row.confirm];
     if (confirm && !confirmed && !(await confirm(row, value, currentValue(row), ask))) {
         repaintRow(row.id);
         return unchanged(row);
     }
-    return enqueue(row, { value, options: { ifUnchanged, ask } });
+    return enqueue(row, { value, options: { ifUnchanged, unset, ask } });
 }
 
 function entryList(document) {
@@ -859,9 +865,10 @@ export function bindSettingRows(container, ctx = {}) {
         const state = rowState(row);
         const hit = (selector) => event.target.closest?.(selector);
         if (hit('[data-setting-undo]')) {
-            const { old, token } = state.outcome || {};
+            const { old, oldAbsent, token } = state.outcome || {};
+            const unset = row.keys.filter((key, i) => (Array.isArray(oldAbsent) ? oldAbsent[i] : oldAbsent));
             state.typed = null;
-            if (old !== undefined && token) void commitSetting(row, old, { confirmed: true, ifUnchanged: token, ask: ctx.ask });
+            if (old !== undefined && token) void commitSetting(row, old, { confirmed: true, ifUnchanged: token, unset, ask: ctx.ask });
         } else if (hit('[data-setting-no-limit]')) {
             state.typed = null;
             node.querySelectorAll('[data-setting-control]').forEach((input) => { delete input.dataset.settingDirty; });
