@@ -208,7 +208,8 @@ def test_floor_fact_records_index_runs_against_its_element_order():
         trace = {VIEW_TRACE_KEY: mf.trace_facts(mf.view_receipt(many, "", "", mf.view_facts(
             many, level, window_tokens=92_000, mode="max", allowances={})))}
         text = json.dumps(trace)
-        assert shortage_from_trace(trace).room_id == "2000" and many.conversations[0]["rooms"][0]["words"][0]["id"] not in text
+        assert shortage_from_trace(trace) is None  # the global unread count is a window fact, not a retelling debt
+        assert many.conversations[0]["rooms"][0]["words"][0]["id"] not in text
         sizes.append(len(text))
     assert sizes[1] < 1.2 * sizes[0], f"floor fact bytes at 150 and 15,000 words: {sizes}"
 
