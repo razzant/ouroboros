@@ -591,15 +591,10 @@ def run_llm_loop(
                 round_idx += 1
 
             ctx = tools._ctx
-            if not pending_tool_budget:
-                (active_model, active_use_local, active_effort, context_fit_plan,
-                 active_context_mode) = _apply_round_route_overrides(
-                    ctx, tools, messages, (active_model, active_use_local, active_effort), context_fit_plan,
-                    active_context_mode, _preferred_context_mode, tool_schemas, llm=llm)
-            ctx.active_context_mode = active_context_mode
-            ctx.active_model, ctx.active_effort, ctx.active_use_local = active_model, active_effort, active_use_local
-            if not pending_tool_budget:
-                publish_lead(ctx)
+            (active_model, active_use_local, active_effort, context_fit_plan,
+             active_context_mode) = bind_round_route(
+                tools, messages, (active_model, active_use_local, active_effort), context_fit_plan,
+                active_context_mode, _preferred_context_mode, tool_schemas, llm=llm, pending_tool_budget=pending_tool_budget)
 
             # One context per round, shared by budget, round-limit and finalize_now rails.
             limit_ctx = _RoundLimitContext(
@@ -630,11 +625,8 @@ def run_llm_loop(
             _controls = _drain_incoming_messages(
                 messages, incoming_messages, drive_root, task_id, event_queue,
                 _owner_msg_seen, owner_ctx=ctx, defer_content_ack=True, place_live_runs=True)
-            if _controls.get("owner_model"):
-                from ouroboros.owner_model import after_mail
-
-                active_model, active_use_local, active_effort, context_fit_plan, active_context_mode = after_mail(
-                    limit_ctx, context_fit_plan, active_context_mode, _preferred_context_mode)
+            active_model, active_use_local, active_effort, context_fit_plan, active_context_mode = after_mail(
+                limit_ctx, context_fit_plan, active_context_mode, _preferred_context_mode, _controls)
             if _delegate_hold_step(
                     tools, controls=_controls, messages=messages, drive_logs=drive_logs,
                     task_id=task_id, emit_progress=emit_progress,
@@ -988,5 +980,5 @@ from ouroboros.loop_forced_finalization import (  # noqa: E402, F401 -- intentio
     _prepare_forced_prompt,
 )
 
-from ouroboros.lead_fact import publish_lead
+from ouroboros.loop_routes import bind_round_route, after_mail
 from ouroboros.route_choice import initial_round_route as _initial_round_route

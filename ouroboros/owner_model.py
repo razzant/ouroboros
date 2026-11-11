@@ -275,19 +275,3 @@ def restore_current(ctx: Any) -> None:
     """A saved route never outranks a primary written since that checkpoint."""
     if apply_current(ctx):
         ctx.active_model, ctx.active_use_local = ctx.active_model_override, ctx.active_use_local_override
-
-
-def after_mail(limit: Any, plan: Any, mode: str, preferred: str) -> tuple:
-    """Reapply a drained owner act before this very call, using the normal fit handover."""
-    from ouroboros.loop_routes import _apply_round_route_overrides
-    from ouroboros.lead_fact import publish_lead
-
-    ctx = limit.tools._ctx
-    model, local, effort, plan, mode = _apply_round_route_overrides(
-        ctx, limit.tools, limit.messages, (limit.active_model, limit.active_use_local, limit.active_effort),
-        plan, mode, preferred, limit.tool_schemas, llm=limit.llm)
-    limit.active_model, limit.active_use_local, limit.active_effort = model, local, effort
-    ctx.active_model, ctx.active_use_local, ctx.active_effort = model, local, effort
-    ctx.context_fit_plan, ctx.active_context_mode = plan, mode
-    publish_lead(ctx)
-    return model, local, effort, plan, mode

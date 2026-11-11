@@ -144,13 +144,39 @@ def drain_and_apply(host, tools, ctx, seen=None):
     messages = []
     controls = loop._drain_incoming_messages(messages, queue.Queue(), host[0], "work", ctx.event_queue,
                                             set() if seen is None else seen, owner_ctx=ctx)
-    from ouroboros.owner_model import after_mail
+    from ouroboros.loop_routes import after_mail
     limit = SimpleNamespace(tools=tools, messages=messages, active_model=ctx.active_model,
         active_use_local=ctx.active_use_local, active_effort=ctx.active_effort, tool_schemas=[], llm=None)
-    if controls.get("owner_model"):
-        after_mail(limit, None, "max", "max")
+    after_mail(limit, None, "max", "max", controls)
     assert not messages  # typed control never enters the owner's words or a dialogue row
     return controls
+
+
+def test_tool_tail_and_mail_without_an_act_keep_the_pending_route_until_a_fresh_round(host, monkeypatch):
+    from ouroboros.loop_routes import after_mail, bind_round_route
+
+    tools, ctx = turn(host, monkeypatch)
+    ctx.active_model_override = B
+    ctx.active_use_local_override = True
+    ctx.active_effort_override = "high"
+    plan = SimpleNamespace(model_role="lead")
+    monkeypatch.setattr(loop, "_rebind_context_fit_plan", lambda *_args, **_kwargs: (plan, "low"))
+    old_route = (A, False, "medium")
+    assert bind_round_route(tools, [], old_route, None, "max", "max", [], pending_tool_budget=True) == (
+        *old_route, None, "max")
+    limit = SimpleNamespace(tools=tools, active_model=ctx.active_model,
+                            active_use_local=ctx.active_use_local, active_effort=ctx.active_effort)
+    assert after_mail(limit, None, "max", "max", {}) == (*old_route, None, "max")
+    assert ctx.active_model_override == B and ctx.active_effort_override == "high"
+    assert ctx.event_queue.empty()
+
+    assert bind_round_route(tools, [], old_route, None, "max", "max", []) == (B, True, "high", plan, "low")
+    assert (ctx.active_model, ctx.active_use_local, ctx.active_effort) == (B, True, "high")
+    assert ctx.context_fit_plan is plan and ctx.active_context_mode == "low"
+    assert ctx.active_model_override is None and ctx.active_effort_override is None
+    events = list(ctx.event_queue.queue)
+    assert len(events) == 1 and events[0]["type"] == "work_lead"
+    assert events[0]["lead"]["model"] == B and events[0]["lead"]["use_local"] is True
 
 
 def test_reversed_mail_applies_the_later_durable_decision_once(host, monkeypatch):

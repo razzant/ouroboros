@@ -1,6 +1,9 @@
 """The round boundary's route handover: live roles and explicit primary choices.
 
 Owns the shared sanitize/fit rebind for a normal round and a post-mail owner act.
+Binding and lead publication use the same boundary at both points. A tool-budget
+tail binds the retained route without consuming overrides or publishing a fresh lead;
+a drained owner act reapplies the durable primary before this round's call.
 Call dispatch and fallback attempts remain in loop_model_call.
 """
 from __future__ import annotations
@@ -16,6 +19,41 @@ def _loop():
     from ouroboros import loop
 
     return loop
+
+
+def bind_round_route(tools: ToolRegistry, messages: List[Dict[str, Any]], route: tuple,
+                     plan: Any, mode: str, preferred: str, tool_schemas: List[Dict[str, Any]], *,
+                     llm: Any = None, pending_tool_budget: bool = False) -> tuple:
+    """Bind the round's model/locality/effort and context mode; publish only a fresh route.
+
+    Both round entry and owner mail use this boundary. Tool tails keep their route
+    and pending tool overrides until a new call, unless owner mail explicitly moves it.
+    """
+    from ouroboros.lead_fact import publish_lead
+
+    ctx = tools._ctx
+    if not pending_tool_budget:
+        model, local, effort, plan, mode = _apply_round_route_overrides(
+            ctx, tools, messages, route, plan, mode, preferred, tool_schemas, llm=llm)
+    else:
+        model, local, effort = route
+    ctx.active_model, ctx.active_use_local, ctx.active_effort = model, local, effort
+    ctx.active_context_mode = mode
+    if not pending_tool_budget:
+        ctx.context_fit_plan = plan
+        publish_lead(ctx)
+    return model, local, effort, plan, mode
+
+
+def after_mail(limit: Any, plan: Any, mode: str, preferred: str, controls: dict) -> tuple:
+    """Reapply a drained owner act before this very call, using the normal fit handover."""
+    route = limit.active_model, limit.active_use_local, limit.active_effort
+    if not controls.get("owner_model"):
+        return *route, plan, mode
+    model, local, effort, plan, mode = bind_round_route(
+        limit.tools, limit.messages, route, plan, mode, preferred, limit.tool_schemas, llm=limit.llm)
+    limit.active_model, limit.active_use_local, limit.active_effort = model, local, effort
+    return model, local, effort, plan, mode
 
 
 def _apply_round_route_overrides(ctx: Any, tools: ToolRegistry, messages: List[Dict[str, Any]], route: tuple,
