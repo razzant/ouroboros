@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import {
-    createWidgetWidths, mergeWidgetOrder, moveWidgetKey, normalizeWidgetOrder, sortTabsByWidgetOrder,
+    bindWidgetCardReorder, cancelWidgetCardCarry, createWidgetWidths, mergeWidgetOrder, moveWidgetKey, normalizeWidgetOrder,
+    sortTabsByWidgetOrder,
 } from '../modules/widget_reorder.js';
 import { requestWidgetListPayload } from '../modules/widget_list.js';
+import { installDomDouble } from './dom_double.js';
 
 // Widgets lifecycle phase 3: a reorder is a pure move in the KEY order; the
 // handles never move an <article> (a moved <iframe> reloads). The card widths
@@ -83,11 +85,11 @@ test('a widget that appears joins the end, even when its key sorts before the ca
 
 test('the reorder module moves keys only: no node insertion or move API; the masonry places the cards', () => {
     const source = readFileSync(new URL('../modules/widget_reorder.js', import.meta.url), 'utf8');
-    assert.match(source, /applyMasonry\(list, \{ order: options\.tabs\(\)\.map\(widgetKey\), spans, onLayout \}\)/);
+    assert.match(source, /applyMasonry\(list, \{ order: preview \|\| options\.tabs\(\)\.map\(widgetKey\), spans, held, onLayout \}\)/);
     for (const forbidden of ['.before(', '.after(', '.prepend(', '.append(', 'insertBefore', 'appendChild', 'replaceWith']) {
         assert.equal(source.includes(forbidden), false, `widget_reorder.js must not use ${forbidden}`);
     }
-    assert.match(source, /export function bindWidgetCardReorder\(list, currentOrder, onOrderChange\)/);
+    assert.match(source, /export function bindWidgetCardReorder\(list, currentOrder, onOrderChange, board = null\)/);
 });
 
 // --- card widths -------------------------------------------------------------
@@ -117,7 +119,7 @@ function styleOf(props) {
     };
 }
 
-function board(keys = ['demo:a', 'demo:b'], { width = 1200, spans = {} } = {}) {
+function board(keys = ['demo:a', 'demo:b'], { width = 1200, spans = {}, heightInfo = null, resized = null } = {}) {
     globalThis.requestAnimationFrame = (callback) => { callback(); return 1; };
     globalThis.cancelAnimationFrame = () => {};
     globalThis.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
@@ -136,14 +138,18 @@ function board(keys = ['demo:a', 'demo:b'], { width = 1200, spans = {} } = {}) {
             hasAttribute: (name) => attrs.has(name),
             toggleAttribute: (name, on) => (on ? attrs.add(name) : attrs.delete(name), on),
         };
-        card.handle = {
+        const edge = (attribute) => ({
             ...listener(),
             captured: null,
             closest: (selector) => (selector === '[data-widget-key]' ? card : null),
+            hasAttribute: (name) => name === attribute,
             setPointerCapture(id) { this.captured = id; },
             hasPointerCapture(id) { return this.captured === id; },
             releasePointerCapture() { this.captured = null; },
-        };
+        });
+        card.handle = edge('data-widget-resize-handle');
+        // The bottom edge, offered when the board knows the cards' heights (`heightInfo`).
+        card.heightHandle = edge('data-widget-height-handle');
         return card;
     };
     const cards = keys.map(cardOf);
@@ -154,7 +160,12 @@ function board(keys = ['demo:a', 'demo:b'], { width = 1200, spans = {} } = {}) {
         clientWidth: width,
         ownerDocument: doc,
         parentElement: { querySelector: (selector) => (selector === '[data-widget-arrange-status]' ? status : null) },
-        querySelectorAll: (selector) => (selector === '[data-widget-resize-handle]' ? cards.map((card) => card.handle) : cards),
+        querySelectorAll: (selector) => {
+            if (selector === '[data-widget-resize-handle]') return cards.map((card) => card.handle);
+            if (selector === '[data-widget-height-handle]') return heightInfo ? cards.map((card) => card.heightHandle) : [];
+            if (selector === '[data-widget-corner-handle]') return [];
+            return cards;
+        },
         contains: (item) => cards.includes(item),
         style: styleOf(new Map()),
     };
@@ -171,6 +182,8 @@ function board(keys = ['demo:a', 'demo:b'], { width = 1200, spans = {} } = {}) {
             saves.push({ payload, ...settle });
             return done;
         },
+        ...(heightInfo ? { heightInfo } : {}),
+        ...(resized ? { resized } : {}),
     });
     widths.relayout();
     return {
@@ -314,7 +327,51 @@ test('a width picked from the card menu is named in the live region like a key o
     widths.setWidth('demo:a', 2);
     assert.deepEqual([status.textContent, status.dataset.tone], ['Width: 2 columns', 'neutral']);
     widths.setWidth('demo:a', null);
-    assert.equal(status.textContent, 'Width: 1 column', 'Reset size names the author default');
+    assert.equal(status.textContent, 'Size reset: 1 column, natural height', 'Reset size names the author default and the natural height');
+});
+
+test('a height keeps the width, a width keeps the height, Reset clears both, Show all is never saved', async () => {
+    const { saves, status, widths, prefs, cards } = board(['demo:a', 'demo:b']);
+    widths.setHeight('demo:a', 432);
+    assert.deepEqual(prefs().widget_size, { 'demo:a': { w: 0, h: 432 } }, 'a height alone pins no width');
+    assert.equal(status.textContent, 'Height: 432 px');
+    assert.equal(widths.widthOf('demo:a'), 1, "the author's width still decides");
+    assert.equal(cards[0].props.get('--masonry-w'), cards[1].props.get('--masonry-w'), 'the board did not widen or narrow it');
+    widths.setWidth('demo:a', 3);
+    assert.deepEqual(prefs().widget_size['demo:a'], { w: 3, h: 432 });
+    widths.setHeight('demo:a', 0);
+    assert.deepEqual(prefs().widget_size['demo:a'], { w: 3, h: 0 }, 'Natural height resets h alone');
+    widths.setHeight('demo:a', 560);
+    widths.setExpanded('demo:a', true);
+    assert.equal(widths.isExpanded('demo:a'), true);
+    assert.equal(widths.heightOf('demo:a'), 560, 'Show all keeps the stored height');
+    assert.equal(status.textContent, 'Showing all of it');
+    widths.setExpanded('demo:a', false);
+    assert.equal(status.textContent, 'Back to 560 px');
+    widths.resetSize('demo:a');
+    assert.equal(prefs().widget_size['demo:a'], undefined);
+    // Every write carried only sizes; Show all and Back wrote nothing.
+    saves.forEach((save) => save.resolve());
+    await settle();
+    saves.forEach((save) => save.resolve());
+    await settle();
+    const written = saves.map((save) => save.payload.widget_size['demo:a']);
+    assert.deepEqual(written[0], { w: 0, h: 432 });
+    assert.ok(written.every((size) => size === null || (Number.isInteger(size.w) && Number.isInteger(size.h))));
+    assert.deepEqual(written[written.length - 1], null, 'Reset size deletes the key');
+});
+
+test('a list read that began before a height write keeps the new height on the card', async () => {
+    const { saves, widths } = board(['demo:a', 'demo:b']);
+    const read = widths.beginRead();
+    widths.setHeight('demo:a', 480);
+    await settle();
+    saves[0].resolve();
+    await settle();
+    // The reply of the read that was out meanwhile still holds no height for the card.
+    assert.deepEqual(read({ 'demo:b': { w: 2, h: 0 } }), { 'demo:a': { w: 0, h: 480 }, 'demo:b': { w: 2, h: 0 } });
+    // A read begun after the write is the stored truth.
+    assert.deepEqual(widths.beginRead()({ 'demo:a': { w: 0, h: 480 } }), { 'demo:a': { w: 0, h: 480 } });
 });
 
 test('the edge handle keys step through 1, 2, 3 columns and Full width and announce it; other keys pass through', async () => {
@@ -457,5 +514,464 @@ test('the only card on a wide board has no edge to drag; the menu still sizes it
         assert.equal(other.hasAttribute('data-widget-width-fixed'), false);
         solo.handle.fire('pointerdown', { button: 0, pointerId: 5, clientX: 500, currentTarget: solo.handle, preventDefault() {} });
         assert.equal(list.classList.contains('resizing'), true);
+    }
+});
+
+// --- the bottom edge over a card showing all ------------------------------------
+// A self-sizing card whose content is 1500 px with the owner's 400 px saved: what the card shows comes from the
+// controller (Show all, the saved height, a height being dragged), and every fit is recorded as shown.
+function tallCard({ natural = 1500, fixed = 0 } = {}) {
+    const shown = [];
+    let api = null;
+    const display = (key) => {
+        if (fixed) return api.widths.heightOf(key) && !api.widths.isExpanded(key) ? api.widths.heightOf(key) : fixed;
+        return api.widths.isExpanded(key) ? natural : api.widths.heightOf(key) || natural;
+    };
+    api = board(['demo:a', 'demo:b'], {
+        heightInfo: (key) => ({ content: display(key), natural: fixed ? 0 : natural }),
+        resized: (key) => { if (api) shown.push(display(key)); },
+    });
+    const press = (pointerId, clientY) => api.cards[0].heightHandle.fire('pointerdown',
+        { button: 0, pointerId, clientX: 0, clientY, currentTarget: api.cards[0].heightHandle, preventDefault() {} });
+    const move = (pointerId, clientY, clientX = 0) => api.cards[0].heightHandle.fire('pointermove', { pointerId, clientX, clientY });
+    const release = (pointerId) => api.cards[0].heightHandle.fire('pointerup', { pointerId });
+    return { ...api, shown, display: () => display('demo:a'), press, move, release };
+}
+
+async function savedAt(card, h) {
+    card.widths.setHeight('demo:a', h);
+    await settle();
+    card.saves.forEach((save) => save.resolve());
+    await settle();
+}
+
+test('a height key under Show all steps from the height on screen and ends Show all, even at the saved height', async () => {
+    const card = tallCard();
+    await savedAt(card, 400);
+    card.widths.setExpanded('demo:a', true);
+    card.cards[0].heightHandle.fire('keydown', key('ArrowUp'));
+    assert.equal(card.widths.isExpanded('demo:a'), false, 'Show all ended');
+    const stepped = card.widths.heightOf('demo:a');
+    assert.ok(stepped > 1400 && stepped < 1500, `from the 1500 px on screen, not the saved 400: ${stepped}`);
+    await savedAt(card, 120);
+    card.widths.setExpanded('demo:a', true);
+    card.cards[0].heightHandle.fire('keydown', key('Home'));
+    assert.equal(card.widths.isExpanded('demo:a'), false, 'the least height again is still a choice');
+    assert.equal(card.widths.heightOf('demo:a'), 120);
+});
+
+test('a drag whose card leaves the board ends there, and the other edges answer again', () => {
+    const { list, cards, widths } = board(['demo:a', 'demo:b'], { heightInfo: () => ({ content: 400, natural: 0 }) });
+    const press = (card, pointerId) => card.heightHandle.fire('pointerdown',
+        { button: 0, pointerId, clientX: 0, clientY: 500, currentTarget: card.heightHandle, preventDefault() {} });
+    press(cards[0], 1);
+    assert.equal(list.classList.contains('resizing'), true);
+    cards[0].isConnected = false;
+    widths.relayout();
+    assert.equal(list.classList.contains('resizing'), false, 'the drag ended with its card');
+    press(cards[1], 2);
+    assert.equal(list.classList.contains('resizing'), true, 'another edge starts');
+});
+
+test('a height dragged from Show all back onto the saved height collapses there, and writes nothing', async () => {
+    const card = tallCard();
+    await savedAt(card, 400);
+    card.widths.setExpanded('demo:a', true);
+    assert.equal(card.display(), 1500);
+    card.press(3, 1500);
+    card.move(3, 400);
+    assert.equal(card.display(), 400, 'the preview shows the saved height');
+    card.release(3);
+    assert.equal(card.widths.isExpanded('demo:a'), false, 'Show all ended with the drop');
+    assert.equal(card.display(), 400, 'the card rests at the saved height, not back at 1500');
+    assert.equal(card.status.textContent, 'Height: 400 px');
+    await settle();
+    assert.equal(card.saves.length, 1, 'the saved height is not written again');
+    assert.deepEqual(card.prefs().widget_size['demo:a'], { w: 0, h: 400 });
+});
+
+test('a press on the bottom edge of a card showing all that hardly moves keeps Show all and the saved height', async () => {
+    const card = tallCard();
+    await savedAt(card, 400);
+    card.widths.setExpanded('demo:a', true);
+    card.shown.length = 0;
+    card.press(4, 1500);
+    card.move(4, 1500);
+    card.move(4, 1497, 6);
+    card.move(4, 1490);
+    assert.equal(card.display(), 1500, 'no preview: under the travel that counts, or the height it already shows');
+    card.release(4);
+    assert.equal(card.widths.isExpanded('demo:a'), true);
+    assert.deepEqual(card.prefs().widget_size['demo:a'], { w: 0, h: 400 }, 'the saved cap stays');
+    assert.ok(card.shown.every((height) => height === 1500), `it never showed less meanwhile: ${card.shown}`);
+    await settle();
+    assert.equal(card.saves.length, 1, 'nothing written');
+});
+
+test('from Show all a real drag sets a new height, and Escape puts Show all and the saved height back', async () => {
+    const card = tallCard();
+    await savedAt(card, 400);
+    card.widths.setExpanded('demo:a', true);
+    card.press(5, 1500);
+    card.move(5, 600);
+    assert.equal(card.display(), 600);
+    card.list.ownerDocument.fire('keydown', { key: 'Escape', preventDefault() {}, stopPropagation() {} });
+    assert.equal(card.widths.isExpanded('demo:a'), true, 'Escape: Show all again');
+    assert.equal(card.display(), 1500);
+    card.release(5);
+    card.press(6, 1500);
+    card.move(6, 800);
+    card.release(6);
+    assert.equal(card.widths.isExpanded('demo:a'), false);
+    assert.equal(card.display(), 800);
+    await settle();
+    assert.deepEqual(card.saves.at(-1).payload, { widget_size: { 'demo:a': { w: 0, h: 800 } } });
+});
+
+test('a press on a fixed frame\'s bottom edge that does not travel pins no height', async () => {
+    // A fixed 320 px frame with no owner height: its content height is unknown, so the drag starts from 320.
+    const card = tallCard({ fixed: 320 });
+    card.press(7, 320);
+    card.move(7, 320);
+    card.move(7, 322);
+    card.release(7);
+    await settle();
+    assert.equal(card.saves.length, 0);
+    assert.equal(card.prefs().widget_size['demo:a'], undefined);
+    // A real drag still sizes it.
+    card.press(8, 320);
+    card.move(8, 420);
+    card.release(8);
+    await settle();
+    assert.deepEqual(card.saves.at(-1).payload, { widget_size: { 'demo:a': { w: 0, h: 424 } } });
+});
+
+test('under a coarse pointer the bottom edge is the finger\'s grip: up and down the height, sideways the width', async () => {
+    // A mouse on the bottom edge sets the height alone, whatever its sideways travel (the corner is its two axes).
+    const mouse = tallCard();
+    mouse.press(1, 1500);
+    mouse.move(1, 700, 607);
+    mouse.release(1);
+    await settle();
+    assert.deepEqual(mouse.saves.at(-1).payload, { widget_size: { 'demo:a': { w: 0, h: 704 } } });
+    // A finger (theme.js paints the primary input coarse: style.css puts the grip in the card's own foot) on a
+    // two-column board: the same travel sets both, saved as one size, and named in one sentence.
+    const finger = tallCard();
+    finger.list.ownerDocument.documentElement = { dataset: { pointer: 'coarse' } };
+    finger.press(2, 1500);
+    finger.move(2, 700, 607);
+    finger.release(2);
+    await settle();
+    assert.deepEqual(finger.saves.at(-1).payload, { widget_size: { 'demo:a': { w: 12, h: 704 } } });
+    assert.equal(finger.status.textContent, 'Width: full width · Height: 704 px');
+    // On a stack (a phone) widths do not apply: the grip sets the height alone.
+    const phone = board(['demo:a', 'demo:b'], { width: 500, heightInfo: () => ({ content: 1500, natural: 1500 }) });
+    phone.list.ownerDocument.documentElement = finger.list.ownerDocument.documentElement;
+    const grip = phone.cards[0].heightHandle;
+    grip.fire('pointerdown', { button: 0, pointerId: 3, clientX: 0, clientY: 1500, currentTarget: grip, preventDefault() {} });
+    grip.fire('pointermove', { pointerId: 3, clientX: 300, clientY: 700 });
+    grip.fire('pointerup', { pointerId: 3 });
+    await settle();
+    assert.deepEqual(phone.saves.at(-1).payload, { widget_size: { 'demo:a': { w: 0, h: 704 } } });
+});
+
+test('Natural height and Reset size tell the fit whether an owner height was taken off', () => {
+    const calls = [];
+    const { widths } = board(['demo:a', 'demo:b'], { resized: (key, picked) => { calls.push([key, picked]); } });
+    calls.length = 0;
+    widths.setHeight('demo:a', 360);
+    assert.deepEqual(calls, [['demo:a', null]], 'a height is a plain fit');
+    calls.length = 0;
+    widths.setHeight('demo:a', 0);
+    assert.deepEqual(calls, [['demo:a', { hadHeight: true }]], 'Natural height on an owner height starts the fit over');
+    calls.length = 0;
+    widths.setHeight('demo:a', 0);
+    assert.deepEqual(calls, [['demo:a', { hadHeight: false }]], 'already natural');
+    calls.length = 0;
+    widths.setHeight('demo:b', 360);
+    calls.length = 0;
+    widths.resetSize('demo:b');
+    assert.deepEqual(calls, [['demo:b', { hadHeight: true }]], 'Reset size counts as the same choice');
+});
+
+test('a card the board places at a new width is fitted again; a relayout that keeps its width is not', () => {
+    const fitted = [];
+    const { list, widths } = board(['demo:a', 'demo:b'], { resized: (key) => fitted.push(key) });
+    assert.deepEqual(fitted.sort(), ['demo:a', 'demo:b'], 'each card is fitted at its first width');
+    fitted.length = 0;
+    widths.relayout();
+    assert.deepEqual(fitted, [], 'the same widths: nothing to fit');
+    // The window narrows: one column, both cards placed wider. Their content rewraps under any owner height.
+    list.clientWidth = 500;
+    widths.relayout();
+    assert.deepEqual(fitted.sort(), ['demo:a', 'demo:b']);
+    fitted.length = 0;
+    list.clientWidth = 1200;
+    widths.relayout();
+    fitted.length = 0;
+    // A card's own width changes the board's columns here (593 + 593 px become 895 + 289 px): both are fitted.
+    widths.setWidth('demo:a', 3);
+    assert.deepEqual([...new Set(fitted)].sort(), ['demo:a', 'demo:b']);
+});
+
+test('leaving the page puts a carried card back and saves nothing; so does the card leaving the board', (t) => {
+    const env = installDomDouble();
+    const ticks = [];
+    globalThis.requestAnimationFrame = (callback) => { ticks.push(callback); return ticks.length; };
+    globalThis.cancelAnimationFrame = () => {};
+    t.after(() => env.restore());
+    const { doc, el } = env;
+    const carried = () => {
+        const handle = el('button', { attrs: { 'data-widget-reorder-handle': '' } });
+        const card = el('div', { className: 'widgets-card', dataset: { widgetKey: 'a' } }, handle);
+        const other = el('div', { className: 'widgets-card', dataset: { widgetKey: 'b' } });
+        const list = el('div', {}, card, other);
+        list.clientWidth = 600;
+        list.rect = { left: 0, top: 0, right: 600, bottom: 400, width: 600, height: 400 };
+        card.rect = { left: 0, top: 0, right: 200, bottom: 100, width: 200, height: 100 };
+        doc.body.append(list);
+        const plan = { placements: [{ left: 0, top: 0, width: 200, span: 1 }, { left: 214, top: 0, width: 200, span: 1 }] };
+        const changes = [];
+        const shown = [];
+        bindWidgetCardReorder(list, () => ['a', 'b'], (order) => changes.push(order), {
+            laid: () => ({ plan, items: [card, other], planOrder: () => plan }),
+            carry: (key, order) => shown.push([key, order]), announce() {},
+        });
+        handle.emit('pointerdown', { button: 0, pointerId: 1, pointerType: 'mouse', clientX: 100, clientY: 10 });
+        handle.emit('pointermove', { pointerId: 1, clientX: 400, clientY: 30 });
+        assert.equal(card.hasAttribute('data-widget-lifted'), true);
+        return { handle, card, list, changes, shown };
+    };
+    // Another page is shown while the card is held: it goes back, the board shows the order as it was, and the
+    // release on that page saves nothing; the document hears nothing more and the scroll loop stops.
+    const captured = () => [...doc.captures.values()].reduce((count, set) => count + set.size, 0);
+    const left = carried();
+    assert.ok(captured() > 0, 'a carry listens on the document');
+    cancelWidgetCardCarry(left.list);
+    assert.equal(left.card.hasAttribute('data-widget-lifted'), false);
+    assert.deepEqual(left.shown.at(-1), ['', null]);
+    assert.equal(captured(), 0, 'its document listeners are gone');
+    left.handle.emit('pointermove', { pointerId: 1, clientX: 500, clientY: 30 });
+    left.handle.emit('pointerup', { pointerId: 1, clientX: 500, clientY: 30 });
+    ticks.splice(0).forEach((tick) => tick());
+    assert.deepEqual(left.changes, []);
+    assert.equal(ticks.length, 0, 'no scroll frame asked for after the carry ended');
+    // The carried card leaves the board (its skill turned off elsewhere): its next move, or frame, ends the carry.
+    const gone = carried();
+    gone.card.remove();
+    gone.handle.emit('pointermove', { pointerId: 1, clientX: 500, clientY: 30 });
+    assert.equal(gone.card.hasAttribute('data-widget-lifted'), false);
+    gone.handle.emit('pointerup', { pointerId: 1, clientX: 500, clientY: 30 });
+    assert.deepEqual(gone.changes, []);
+});
+
+test('a press holds its pointer from the moment it lands and lets it go however it ends; a release it missed saves nothing', (t) => {
+    const env = installDomDouble();
+    globalThis.requestAnimationFrame = () => 1;
+    globalThis.cancelAnimationFrame = () => {};
+    t.after(() => env.restore());
+    const { doc, el } = env;
+    const listening = () => [...doc.captures.values()].reduce((count, set) => count + set.size, 0);
+    const pressed = () => {
+        const grip = el('button', { attrs: { 'data-widget-reorder-handle': '' } });
+        const head = el('div', { className: 'widgets-card-head' }, grip);
+        const card = el('div', { className: 'widgets-card', dataset: { widgetKey: 'a' } }, head);
+        const other = el('div', { className: 'widgets-card', dataset: { widgetKey: 'b' } });
+        const list = el('div', {}, card, other);
+        list.clientWidth = 600;
+        list.rect = { left: 0, top: 0, right: 600, bottom: 400, width: 600, height: 400 };
+        card.rect = { left: 0, top: 0, right: 200, bottom: 100, width: 200, height: 100 };
+        doc.body.append(list);
+        // The engine's pointer capture on the head and the grip.
+        const holder = new Map();
+        for (const node of [grip, head]) {
+            Object.assign(node, {
+                setPointerCapture(id) { holder.set(id, node); },
+                hasPointerCapture(id) { return holder.get(id) === node; },
+                releasePointerCapture(id) { if (holder.get(id) === node) holder.delete(id); },
+            });
+        }
+        const plan = { placements: [{ left: 0, top: 0, width: 200, span: 1 }, { left: 214, top: 0, width: 200, span: 1 }] };
+        const changes = [];
+        bindWidgetCardReorder(list, () => ['a', 'b'], (order) => changes.push(order),
+            { laid: () => ({ plan, items: [card, other], planOrder: () => plan }), carry() {}, announce() {} });
+        return { grip, head, card, list, holder, changes };
+    };
+    // A mouse press on the head holds the pointer before any move, so its moves and its release over the card's own
+    // frame reach the board.
+    const head = pressed();
+    head.head.emit('pointerdown', { button: 0, pointerId: 1, pointerType: 'mouse', buttons: 1, clientX: 100, clientY: 10 });
+    assert.equal(head.holder.get(1), head.head);
+    assert.equal(head.list.hasAttribute('data-widget-pressed'), true, 'the frames ignore the pointer from the press on');
+    // Its release went where the board did not hear it: the next move reports no button. The press ends there; a
+    // later move far away carries nothing, and nothing is saved.
+    head.head.emit('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 0, clientX: 400, clientY: 30 });
+    assert.equal(head.holder.has(1), false, 'the pointer is let go');
+    assert.equal(head.list.hasAttribute('data-widget-pressed'), false, 'and the frames hear it again');
+    assert.equal(listening(), 0, 'the document hears nothing more');
+    head.head.emit('pointermove', { pointerId: 1, pointerType: 'mouse', buttons: 0, clientX: 420, clientY: 30 });
+    assert.equal(head.card.hasAttribute('data-widget-lifted'), false);
+    assert.deepEqual(head.changes, []);
+    // A plain click on the head (no travel) lets its pointer go too.
+    head.head.emit('pointerdown', { button: 0, pointerId: 2, pointerType: 'mouse', buttons: 1, clientX: 100, clientY: 10 });
+    head.head.emit('pointerup', { pointerId: 2, pointerType: 'mouse', buttons: 0, clientX: 100, clientY: 10 });
+    assert.equal(head.holder.has(2), false);
+    assert.equal(head.list.hasAttribute('data-widget-pressed'), false);
+    assert.equal(listening(), 0);
+    // A carry from the grip whose release was missed goes back where it was, unsaved, its pointer let go.
+    const grip = pressed();
+    grip.grip.emit('pointerdown', { button: 0, pointerId: 3, pointerType: 'mouse', buttons: 1, clientX: 190, clientY: 10 });
+    grip.grip.emit('pointermove', { pointerId: 3, pointerType: 'mouse', buttons: 1, clientX: 400, clientY: 30 });
+    assert.equal(grip.card.hasAttribute('data-widget-lifted'), true);
+    grip.grip.emit('pointermove', { pointerId: 3, pointerType: 'mouse', buttons: 0, clientX: 420, clientY: 30 });
+    assert.equal(grip.card.hasAttribute('data-widget-lifted'), false);
+    assert.equal(grip.holder.has(3), false);
+    assert.equal(grip.list.hasAttribute('data-widget-pressed'), false);
+    assert.equal(listening(), 0);
+    assert.deepEqual(grip.changes, []);
+    // Paired: a held carry released over another place saves the new order, and lets its pointer go.
+    const held = pressed();
+    held.grip.emit('pointerdown', { button: 0, pointerId: 4, pointerType: 'mouse', buttons: 1, clientX: 190, clientY: 10 });
+    held.grip.emit('pointermove', { pointerId: 4, pointerType: 'mouse', buttons: 1, clientX: 400, clientY: 30 });
+    held.grip.emit('pointerup', { pointerId: 4, pointerType: 'mouse', buttons: 0, clientX: 400, clientY: 30 });
+    assert.deepEqual(held.changes, [['b', 'a']]);
+    assert.equal(held.holder.has(4), false);
+    assert.equal(held.list.hasAttribute('data-widget-pressed'), false);
+    // A finger on the grip is held the same way and carries; a cancel puts the card back.
+    const finger = pressed();
+    finger.grip.emit('pointerdown', { button: 0, pointerId: 5, pointerType: 'touch', clientX: 190, clientY: 10 });
+    assert.equal(finger.holder.get(5), finger.grip);
+    finger.grip.emit('pointermove', { pointerId: 5, pointerType: 'touch', clientX: 400, clientY: 30 });
+    assert.equal(finger.card.hasAttribute('data-widget-lifted'), true);
+    finger.grip.emit('pointercancel', { pointerId: 5, pointerType: 'touch', clientX: 400, clientY: 30 });
+    assert.deepEqual(finger.changes, [], 'a cancelled carry saves nothing');
+    assert.equal(finger.holder.has(5), false);
+    assert.equal(finger.list.hasAttribute('data-widget-pressed'), false);
+    // Leaving the page while a press waits to become a carry ends it the same way.
+    const left = pressed();
+    left.head.emit('pointerdown', { button: 0, pointerId: 6, pointerType: 'mouse', buttons: 1, clientX: 100, clientY: 10 });
+    cancelWidgetCardCarry(left.list);
+    assert.deepEqual([left.holder.has(6), left.list.hasAttribute('data-widget-pressed'), listening()], [false, false, 0]);
+    // So does Escape: the key is the press's while it lasts, and a later move carries nothing.
+    const escaped = pressed();
+    escaped.head.emit('pointerdown', { button: 0, pointerId: 7, pointerType: 'mouse', buttons: 1, clientX: 100, clientY: 10 });
+    assert.equal(escaped.head.emit('keydown', { key: 'Escape' }).defaultPrevented, true);
+    assert.deepEqual([escaped.holder.has(7), escaped.list.hasAttribute('data-widget-pressed'), listening()], [false, false, 0]);
+    escaped.head.emit('pointermove', { pointerId: 7, pointerType: 'mouse', buttons: 1, clientX: 400, clientY: 30 });
+    assert.equal(escaped.card.hasAttribute('data-widget-lifted'), false);
+    // Any other key leaves the press alone.
+    const typed = pressed();
+    typed.head.emit('pointerdown', { button: 0, pointerId: 8, pointerType: 'mouse', buttons: 1, clientX: 100, clientY: 10 });
+    assert.notEqual(typed.head.emit('keydown', { key: 'a' }).defaultPrevented, true);
+    typed.head.emit('pointerup', { pointerId: 8, pointerType: 'mouse', buttons: 0, clientX: 100, clientY: 10 });
+    // The card leaves the board while the press waits: its next move, however short, ends the press.
+    const gone = pressed();
+    gone.head.emit('pointerdown', { button: 0, pointerId: 9, pointerType: 'mouse', buttons: 1, clientX: 100, clientY: 10 });
+    gone.card.remove();
+    gone.head.emit('pointermove', { pointerId: 9, pointerType: 'mouse', buttons: 1, clientX: 101, clientY: 10 });
+    assert.deepEqual([gone.holder.has(9), gone.list.hasAttribute('data-widget-pressed'), listening()], [false, false, 0]);
+    assert.deepEqual(gone.changes, []);
+});
+
+test('a carried card stays over the board: not past its left or right edge, nor above its top', (t) => {
+    const env = installDomDouble();
+    globalThis.requestAnimationFrame = () => 1;
+    globalThis.cancelAnimationFrame = () => {};
+    t.after(() => env.restore());
+    const { doc, el } = env;
+    const handle = el('button', { attrs: { 'data-widget-reorder-handle': '' } });
+    const card = el('div', { className: 'widgets-card', dataset: { widgetKey: 'a' } }, handle);
+    const other = el('div', { className: 'widgets-card', dataset: { widgetKey: 'b' } });
+    const list = el('div', {}, card, other);
+    list.clientWidth = 600;
+    list.rect = { left: 0, top: 0, right: 600, bottom: 400, width: 600, height: 400 };
+    card.rect = { left: 0, top: 0, right: 200, bottom: 100, width: 200, height: 100 };
+    doc.body.append(list);
+    const plan = { placements: [{ left: 0, top: 0, width: 200, span: 1 }, { left: 214, top: 0, width: 200, span: 1 }] };
+    bindWidgetCardReorder(list, () => ['a', 'b'], () => {},
+        { laid: () => ({ plan, items: [card, other], planOrder: () => plan }), carry() {}, announce() {} });
+    // Taken by its grip at the head's right end, then pulled far left and above the board.
+    handle.emit('pointerdown', { button: 0, pointerId: 1, pointerType: 'mouse', clientX: 190, clientY: 10 });
+    handle.emit('pointermove', { pointerId: 1, clientX: 20, clientY: -50 });
+    assert.deepEqual([card.css.get('--masonry-x'), card.css.get('--masonry-y')], ['0px', '0px']);
+    // Far right: its right edge stops at the board's.
+    handle.emit('pointermove', { pointerId: 1, clientX: 900, clientY: 300 });
+    assert.deepEqual([card.css.get('--masonry-x'), card.css.get('--masonry-y')], ['400px', '290px']);
+    handle.emit('pointerup', { pointerId: 1, clientX: 900, clientY: 300 });
+});
+
+test('a carried card goes on over the cards shown now when another window takes one off the board', () => {
+    const env = installDomDouble();
+    const names = ['requestAnimationFrame', 'cancelAnimationFrame', 'ResizeObserver', 'MutationObserver'];
+    const before = Object.fromEntries(names.map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+    const frames = new Map();
+    let frameId = 0;
+    globalThis.requestAnimationFrame = (callback) => { frames.set(++frameId, callback); return frameId; };
+    globalThis.cancelAnimationFrame = (id) => frames.delete(id);
+    globalThis.ResizeObserver = class { observe() {} unobserve() {} disconnect() {} };
+    globalThis.MutationObserver = class { observe() {} disconnect() {} };
+    const frame = () => { for (const [id, callback] of [...frames.entries()]) { frames.delete(id); callback(); } };
+    try {
+        const { doc, el } = env;
+        const handles = {};
+        const cards = Object.fromEntries(['a', 'b', 'c'].map((key) => {
+            handles[key] = el('button', { attrs: { 'data-widget-reorder-handle': '' } });
+            const card = el('article', { className: 'widgets-card', dataset: { widgetKey: key } }, handles[key]);
+            card.rect = { left: 0, top: 0, right: 500, bottom: 100, width: 500, height: 100 };
+            card.toggleAttribute = (name, on) => { if (on) card.setAttribute(name, ''); else card.removeAttribute(name); };
+            return [key, card];
+        }));
+        const list = el('div', {}, ...Object.values(cards));
+        list.clientWidth = 500;
+        list.rect = { left: 0, top: 0, right: 500, bottom: 328, width: 500, height: 328 };
+        const scroller = el('div', { className: 'widgets-scroll' }, list);
+        scroller.scrollTop = 0;
+        scroller.rect = { left: 0, top: 0, right: 500, bottom: 1000, width: 500, height: 1000 };
+        doc.body.append(scroller);
+        let keys = ['a', 'b', 'c'];
+        const prefs = { widget_size: {} };
+        const saves = [];
+        const widths = createWidgetWidths(list, { tabs: () => keys.map((key) => ({ key })), prefs: () => prefs,
+            adopt: (sizes) => { prefs.widget_size = sizes; }, save: () => Promise.resolve() });
+        widths.relayout();
+        frame();
+        bindWidgetCardReorder(list, () => keys, (order) => saves.push(order), widths);
+        const press = (type, y) => handles.c.emit(type, { button: 0, buttons: type === 'pointerup' ? 0 : 1, pointerId: 1,
+            pointerType: 'mouse', clientX: 10, clientY: y });
+        press('pointerdown', 238);
+        press('pointermove', 244);
+        frame();
+        assert.equal(cards.c.hasAttribute('data-widget-lifted'), true);
+        // Another window takes A off the board while C is carried here; the page binds the board again, as after a sync.
+        keys = ['b', 'c'];
+        cards.a.remove();
+        bindWidgetCardReorder(list, () => keys, (order) => saves.push(order), widths);
+        widths.relayout();
+        frame();
+        // Held over the second of the two places left, C stays there: the preview and the drop agree, nothing is saved.
+        const second = widths.laid().plan.placements[1].top;
+        press('pointermove', second + 10);
+        frame();
+        assert.deepEqual(widths.laid().items.map((card) => card.dataset.widgetKey), ['b', 'c']);
+        press('pointerup', second + 10);
+        frame();
+        assert.deepEqual(saves, [], 'no order with a card that is gone');
+        // Carried again to the first place, the order saved holds only the cards still there.
+        press('pointerdown', second + 10);
+        press('pointermove', second + 16);
+        frame();
+        press('pointermove', widths.laid().plan.placements[0].top + 10);
+        frame();
+        press('pointerup', widths.laid().plan.placements[0].top + 10);
+        frame();
+        assert.deepEqual(saves, [['c', 'b']]);
+        cancelWidgetCardCarry(list);
+        widths.dispose();
+    } finally {
+        for (const name of names) {
+            if (before[name]) Object.defineProperty(globalThis, name, before[name]);
+            else delete globalThis[name];
+        }
+        env.restore();
     }
 });

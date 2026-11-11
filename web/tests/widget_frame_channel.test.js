@@ -102,6 +102,60 @@ test('a module frame that loads a second document is retired at once and revokes
     }
 });
 
+test('a board frame takes no report from before its latest fresh fit, and every report after it', async () => {
+    const dom = installCardDom();
+    const server = serve();
+    try {
+        const card = document.createElement('div');
+        card.setAttribute('data-widget-key', TAB.key);
+        card.innerHTML = '<div data-widget-status hidden></div><div data-widget-mount></div>';
+        const mount = card.querySelector('[data-widget-mount]');
+        // The board's policy for a self-sizing card: as tall as its last report, the 320 px loading height before one.
+        let natural = 0;
+        const measured = [];
+        let refit = null;
+        const board = {
+            starting() {},
+            geometry: () => ({ auto: true, height: natural || 320, ceiling: 8192, floor: 0, hidden: 0, expandable: false }),
+            held: () => 0,
+            measured(height) { measured.push(height); natural = height; },
+            attach(next) { refit = next; return () => {}; },
+        };
+        const dispose = await mountModuleWidget(mount, TAB, { kind: 'module', entry: 'widget.js' }, null, new Set(), null, board);
+        const frame = mount.querySelector('iframe');
+        frame.contentWindow = { postMessage() { throw new Error('nothing is posted to the frame window'); } };
+        const own = joinFrame(frame, (event) => window.emit('message', event));
+        const height = () => frame.style.getPropertyValue('--widget-frame-height');
+        own.send({ type: 'ouro-widget-resize', height: 197 });
+        assert.deepEqual([measured, height()], [[197], '197px']);
+        // Natural height: the fit starts over at the loading height, fresh fit number 1.
+        const fresh = (number) => {
+            natural = 0;
+            refit({ fresh: true });
+            assert.deepEqual(own.replies.at(-1),
+                { type: 'ouro-widget-viewport', floor: 0, ceiling: 8192, frame: 320, fit: number, nonce: own.nonce });
+        };
+        fresh(1);
+        // A report measured in the old window and still on its way is not the fit: the frame stays where it was set.
+        own.send({ type: 'ouro-widget-resize', height: 196 });
+        assert.deepEqual([measured, height()], [[197], '320px']);
+        own.send({ type: 'ouro-widget-resize', height: 198, fit: 1 });
+        assert.deepEqual([measured, height()], [[197, 198], '198px']);
+        // The next fresh fit is number 2: a report carrying 1 is now the old one.
+        fresh(2);
+        own.send({ type: 'ouro-widget-resize', height: 199, fit: 1 });
+        assert.deepEqual([measured, height()], [[197, 198], '320px']);
+        own.send({ type: 'ouro-widget-resize', height: 199, fit: 2 });
+        assert.deepEqual([measured, height()], [[197, 198, 199], '199px']);
+        const stopped = dispose();
+        own.send({ type: 'ouro-widget-disposed' });
+        await stopped;
+    } finally {
+        server.restore();
+        dom.restore();
+    }
+});
+
 async function routeFrame() {
     const card = document.createElement('div');
     card.setAttribute('data-widget-key', TAB.key);
