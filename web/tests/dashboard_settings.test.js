@@ -1,7 +1,7 @@
 // The Dashboard tabs' own settings (dashboard.js mountTabSettings): rows of settings_rows.js that save themselves, drawn
 // once outside every region a tab repaints, in the cards the approved picture gives them; the way back to Settings
-// (settingsReturn); Costs' subscriptions from the passive quota read. INTEGRATED marks what needs lane A's half: the
-// server's save receipt and `_meta.effects`. The fake server below answers it until that lands; the lane report says so.
+// (settingsReturn); Costs' subscriptions from the passive quota read. The fake server below answers as the server does:
+// the receipt (`changes`), `_meta.effects`, a token per key, a refused `if_unchanged` and `unset`.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
@@ -11,8 +11,9 @@ import { AUTONOMY_LEVELS } from '../modules/consciousness_autonomy.js';
 import { cardWords, initConsciousnessDashboard, waitWords } from '../modules/consciousness_dashboard.js';
 import { initCosts, subscriptionDoors } from '../modules/costs.js';
 import { focusSettingRow, initDashboard, mountTabSettings, settingsReturn } from '../modules/dashboard.js';
-import { initEvolution, whenMode, whenWords } from '../modules/evolution.js';
-import { CODECS, HIDDEN_WHEN, commitSetting, forgetSettingRows, outcomeLine, readSettings } from '../modules/settings_controls.js';
+import { SAFETY_LEVELS } from '../modules/consciousness_words.js';
+import { initEvolution, whenMode, whenName, whenWords } from '../modules/evolution.js';
+import { CODECS, GUARDED_WRITERS, HIDDEN_WHEN, bindSettingRows, commitSetting, forgetSettingRows, outcomeLine, readSettings, settingsRow } from '../modules/settings_controls.js';
 import { ROWS, rowById, rowsOf } from '../modules/settings_rows.js';
 import { initStorage } from '../modules/storage.js';
 import { NodeStub, setup } from './dashboard_dom_fixture.js';
@@ -25,25 +26,35 @@ const shown = (window, tab) => window.dispatchEvent(new CustomEvent('ouro:dashbo
 const rowNode = (root, id) => root.querySelectorAll('[data-setting-row]').find((node) => node.dataset.settingRow === id);
 const result = (root, id) => rowNode(root, id).querySelector('[data-setting-result]').textContent;
 
-// INTEGRATED (lane A): when a key's change applies, as GET /api/settings `_meta.effects` says it.
+// When a key's change applies, as GET /api/settings `_meta.effects` says it (settings_scales.setting_effect).
 const EFFECTS = { OUROBOROS_BG_WAKEUP_MIN: 'next_wake', OUROBOROS_BG_WAKEUP_MAX: 'next_wake', OUROBOROS_CONSCIOUSNESS_MAX_TASKS: 'next_wake' };
 
-/** /api/settings over `stored`: a read answers it with `_meta.effects`; a save stores its body and answers the receipt
- *  (INTEGRATED, lane A: `changes`; today's server answers none, and a row then says only "Saved"). */
+/** /api/settings over `stored`, answering as the server does: a read gives the values with `_meta.effects` and a token
+ *  per key; a save stores its body and answers the receipt (`changes`: old, new and the installed value's token). A
+ *  save that carries `if_unchanged` is refused whole with 409 when a token is no longer the key's, and writes nothing;
+ *  `unset` removes its keys. */
 function settingsServer(t, values = {}) {
     forgetSettingRows();
     const env = setup(t);
     const stored = { ...values };
     const posts = [];
+    const tokens = Object.fromEntries(Object.keys(stored).map((key) => [key, `${key}@0`]));
+    let version = 0;
     env.routes.set('/api/settings', (_url, init = {}) => {
-        if (init.method !== 'POST') return response({ ...stored, _meta: { effects: EFFECTS } });
-        const body = JSON.parse(init.body);
-        posts.push(body);
-        const changes = Object.fromEntries(Object.entries(body).map(([key, value]) => [key, { old: stored[key], new: value, token: `${key}@1` }]));
-        Object.assign(stored, body);
+        if (init.method !== 'POST') return response({ ...stored, _meta: { effects: EFFECTS, tokens: { ...tokens } } });
+        const { if_unchanged: expected = {}, unset = [], ...body } = JSON.parse(init.body);
+        posts.push(JSON.parse(init.body));
+        const stale = Object.keys(expected).find((key) => tokens[key] !== expected[key]);
+        if (stale) return response({ error: `${stale} changed since it was read.`, saved: false, code: 'settings_changed_elsewhere' }, 409);
+        const changes = {};
+        for (const key of [...Object.keys(body), ...unset]) {
+            tokens[key] = `${key}@${version += 1}`;
+            changes[key] = { old: stored[key], new: body[key], token: tokens[key], ...(key in stored ? {} : { old_absent: true }) };
+            if (unset.includes(key)) delete stored[key]; else stored[key] = body[key];
+        }
         return response({ status: 'saved', changes });
     });
-    return { ...env, stored, posts };
+    return { ...env, stored, posts, tokens };
 }
 
 const MOVED = {
@@ -62,9 +73,10 @@ test('each moved key is written by exactly one row, on its own tab; the doors wr
     }
     assert.deepEqual(rowById('OUROBOROS_BG_WAKEUP').keys, ['OUROBOROS_BG_WAKEUP_MIN', 'OUROBOROS_BG_WAKEUP_MAX'], 'the wake range is one row');
     assert.deepEqual(rowsOf('dashboard:consciousness').map((row) => row.id), ['OUROBOROS_CONSCIOUSNESS_AUTONOMY', 'OUROBOROS_BG_WAKEUP',
-        'OUROBOROS_CONSCIOUSNESS_MAX_TASKS', 'consciousness-allowance', 'OUROBOROS_PRESENCE_MAX_ACTIVE', 'consciousness-model', 'consciousness-places']);
+        'OUROBOROS_CONSCIOUSNESS_MAX_TASKS', 'consciousness-allowance', 'OUROBOROS_PRESENCE_MAX_ACTIVE', 'consciousness-model', 'consciousness-safety',
+        'consciousness-places', 'consciousness-evolution']);
     assert.deepEqual(rowsOf('dashboard:consciousness', { fold: true }).map((row) => row.id), ['OUROBOROS_PRESENCE_MAX_ACTIVE']);
-    for (const id of ['consciousness-allowance', 'consciousness-model', 'consciousness-places']) {
+    for (const id of ['consciousness-allowance', 'consciousness-model', 'consciousness-safety', 'consciousness-places', 'consciousness-evolution']) {
         const door = rowById(id);
         assert.deepEqual([door.control.kind, door.keys, door.aliases], ['door', [], []], `${id}: search finds its setting in its own home`);
     }
@@ -90,7 +102,7 @@ test('the evolution choice is one row over two keys: one body carries both, and 
     assert.deepEqual(CODECS.evolutionWhen.read(await readSettings(), row), [false, 'llm']);
     const saved = await commitSetting(row, [true, 'every_n:5']);
     assert.deepEqual(server.posts, [{ OUROBOROS_POST_TASK_EVOLUTION: true, OUROBOROS_POST_TASK_EVOLUTION_CADENCE: 'every_n:5' }]);
-    assert.equal(outcomeLine(row, saved).text, 'Saved · applies to new tasks · was Off', 'it names the choice it replaced');  // INTEGRATED (lane A)
+    assert.equal(outcomeLine(row, saved).text, 'Saved · applies to new tasks · was Off', 'it names the choice it replaced');
     assert.deepEqual(CODECS.evolutionWhen.read(await readSettings(), row), [true, 'every_n:5']);
     assert.equal(outcomeLine(row, await commitSetting(row, [false, 'llm'])).text, 'Saved · applies to new tasks · was Every 5 tasks');
     assert.deepEqual(server.posts.at(-1), { OUROBOROS_POST_TASK_EVOLUTION: false, OUROBOROS_POST_TASK_EVOLUTION_CADENCE: 'llm' });
@@ -126,7 +138,7 @@ test('the wake range is one row of two numbers; a first number above the second 
     assert.equal(server.posts.length, 0);
     const saved = await commitSetting(row, [600, 3600]);
     assert.deepEqual(server.posts, [{ OUROBOROS_BG_WAKEUP_MIN: 600, OUROBOROS_BG_WAKEUP_MAX: 3600 }], 'both numbers in one body');
-    assert.equal(outcomeLine(row, saved).text, 'Saved · applies from the next wake · was 300 to 7200');  // INTEGRATED (lane A)
+    assert.equal(outcomeLine(row, saved).text, 'Saved · applies from the next wake · was 300 to 7200');
     await commitSetting(row, [900, 900]);
     assert.deepEqual(server.posts.at(-1), { OUROBOROS_BG_WAKEUP_MIN: 900, OUROBOROS_BG_WAKEUP_MAX: 900 }, 'one fixed wait is a range too');
     // The caption says the seconds in minutes or hours; the doors say their values.
@@ -134,20 +146,29 @@ test('the wake range is one row of two numbers; a first number above the second 
         ['1 minute', '5 minutes', '1.5 minutes', '1 hour', '1.5 hours', '24 hours', '', '', '']);
     const words = (settings) => Object.fromEntries(Object.entries(cardWords(settings)).map(([id, said]) => [id, said.caption ?? said.value]));
     assert.deepEqual(words({ OUROBOROS_CONSCIOUSNESS_AUTONOMY: 'act', OUROBOROS_BG_WAKEUP_MIN: 300, OUROBOROS_BG_WAKEUP_MAX: 7200,
-        OUROBOROS_CONSCIOUSNESS_DAILY_USD: 20, OUROBOROS_MODEL_CONSCIOUSNESS: '' }), {
+        OUROBOROS_CONSCIOUSNESS_DAILY_USD: 20, OUROBOROS_MODEL_CONSCIOUSNESS: '', OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: 'light',
+        OUROBOROS_POST_TASK_EVOLUTION: 'true', OUROBOROS_POST_TASK_EVOLUTION_CADENCE: 'every_n:3' }), {
         OUROBOROS_CONSCIOUSNESS_AUTONOMY: AUTONOMY_LEVELS[1].note, OUROBOROS_BG_WAKEUP: 'It picks a moment between 5 minutes and 2 hours.',
-        'consciousness-allowance': '$20 a day', 'consciousness-model': 'Main model' });
+        'consciousness-allowance': '$20 a day', 'consciousness-model': 'Main model',
+        'consciousness-safety': SAFETY_LEVELS.find((level) => level.value === 'light').label, 'consciousness-evolution': 'Every 3 tasks' });
     assert.deepEqual(words({ OUROBOROS_BG_WAKEUP_MIN: 900, OUROBOROS_BG_WAKEUP_MAX: 900, OUROBOROS_CONSCIOUSNESS_DAILY_USD: '12.5',
-        OUROBOROS_MODEL_CONSCIOUSNESS: 'anthropic::claude-test' }), {
+        OUROBOROS_MODEL_CONSCIOUSNESS: 'anthropic::claude-test', OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: 'off',
+        OUROBOROS_POST_TASK_EVOLUTION: false, OUROBOROS_POST_TASK_EVOLUTION_CADENCE: 'every_n:3' }), {
         OUROBOROS_CONSCIOUSNESS_AUTONOMY: '', OUROBOROS_BG_WAKEUP: 'It wakes every 15 minutes.',
-        'consciousness-allowance': '$12.50 a day', 'consciousness-model': 'claude-test' });
+        'consciousness-allowance': '$12.50 a day', 'consciousness-model': 'claude-test', 'consciousness-safety': 'Off', 'consciousness-evolution': 'Off' });
     assert.deepEqual(words({}), { OUROBOROS_CONSCIOUSNESS_AUTONOMY: '', OUROBOROS_BG_WAKEUP: '', 'consciousness-allowance': '',
-        'consciousness-model': 'Main model' }, 'a value that was not read is not said: no "$0 a day"');
+        'consciousness-model': 'Main model', 'consciousness-safety': '', 'consciousness-evolution': '' },
+    'a value that was not read is not said: no "$0 a day", no level and no "Off" the document did not carry');
+    // The Safety door speaks the scale's one list, whatever its words are, and the evolution door the choice's own names.
+    for (const level of SAFETY_LEVELS) assert.equal(words({ OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: level.value })['consciousness-safety'], level.label);
+    assert.deepEqual([[true, 'llm'], ['1', 'every_n:1'], [true, 'every_n:12'], ['false', 'llm']].map(whenName),
+        ['After each task', 'Every task', 'Every 12 tasks', 'Off']);
 });
 
 test('Consciousness: its cards are drawn once beside the summary; a refresh leaves them and a typed field alone', async (t) => {
     const server = settingsServer(t, { OUROBOROS_CONSCIOUSNESS_AUTONOMY: 'act', OUROBOROS_BG_WAKEUP_MIN: 300, OUROBOROS_BG_WAKEUP_MAX: 7200,
-        OUROBOROS_CONSCIOUSNESS_MAX_TASKS: 2, OUROBOROS_PRESENCE_MAX_ACTIVE: 3, OUROBOROS_CONSCIOUSNESS_DAILY_USD: 20, OUROBOROS_MODEL_CONSCIOUSNESS: '' });
+        OUROBOROS_CONSCIOUSNESS_MAX_TASKS: 2, OUROBOROS_PRESENCE_MAX_ACTIVE: 3, OUROBOROS_CONSCIOUSNESS_DAILY_USD: 20, OUROBOROS_MODEL_CONSCIOUSNESS: '',
+        OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: 'full', OUROBOROS_POST_TASK_EVOLUTION: 'true', OUROBOROS_POST_TASK_EVOLUTION_CADENCE: 'llm' });
     const opened = [];
     const controller = initConsciousnessDashboard({
         mount: server.mount, state: { activePage: 'dashboard', dashboardActiveSubtab: 'consciousness' },
@@ -166,7 +187,8 @@ test('Consciousness: its cards are drawn once beside the summary; a refresh leav
     assert.deepEqual(sections.map((section) => [section.getAttribute('aria-label'), section.querySelector('.dashboard-card-title').textContent]),
         [['On its own', 'On its own'], ['Around it', 'Around it']]);
     assert.deepEqual(sections.map(ids), [['OUROBOROS_CONSCIOUSNESS_AUTONOMY', 'OUROBOROS_BG_WAKEUP', 'OUROBOROS_CONSCIOUSNESS_MAX_TASKS',
-        'consciousness-allowance', 'OUROBOROS_PRESENCE_MAX_ACTIVE'], ['consciousness-model', 'consciousness-places']]);
+        'consciousness-allowance', 'OUROBOROS_PRESENCE_MAX_ACTIVE'],
+    ['consciousness-model', 'consciousness-safety', 'consciousness-places', 'consciousness-evolution']], 'the doors in the picture\'s order');
     assert.deepEqual(ids(card).sort(), rowsOf('dashboard:consciousness').map((row) => row.id).sort(), 'every row of the tab is drawn once');
     const fold = card.querySelector('[data-settings-fold]');
     assert.equal(fold.querySelector('summary').textContent, 'More: conversations at once');
@@ -183,6 +205,9 @@ test('Consciousness: its cards are drawn once beside the summary; a refresh leav
     assert.equal(rowNode(card, 'consciousness-allowance').querySelector('[data-row-value]').textContent, '$20 a day');
     assert.equal(rowNode(card, 'consciousness-model').querySelector('[data-row-value]').textContent, 'Main model');
     assert.equal(rowNode(card, 'consciousness-places').querySelector('[data-row-value]'), null, 'a door with nothing to say says nothing');
+    assert.deepEqual(['consciousness-safety', 'consciousness-evolution'].map((id) => [rowNode(card, id).querySelector('.ui-row-title').textContent,
+        rowNode(card, id).querySelector('[data-row-value]').textContent]),
+    [['Its actions are checked', SAFETY_LEVELS.find((level) => level.value === 'full').label], ['Improving itself', 'After each task']]);
     // The summary's refresh (every 20 s) and a save elsewhere repaint around the card: its nodes and a typed draft stay.
     const tasks = rowNode(card, 'OUROBOROS_CONSCIOUSNESS_MAX_TASKS').querySelector('[data-setting-control]');
     tasks.focus();
@@ -198,7 +223,7 @@ test('Consciousness: its cards are drawn once beside the summary; a refresh leav
     await card.fire('change', { target: tasks });
     await settle();
     assert.deepEqual(server.posts, [{ OUROBOROS_CONSCIOUSNESS_MAX_TASKS: 4 }]);
-    assert.equal(result(card, 'OUROBOROS_CONSCIOUSNESS_MAX_TASKS'), 'Saved · applies from the next wake · was 5 · Undo');  // INTEGRATED (lane A)
+    assert.equal(result(card, 'OUROBOROS_CONSCIOUSNESS_MAX_TASKS'), 'Saved · applies from the next wake · was 5 · Undo');
     // A range upside down is refused in its row; nothing is sent.
     const [shortest, longest] = range.querySelectorAll('[data-setting-control]');
     shortest.value = '7200';
@@ -228,7 +253,85 @@ test('Consciousness: its cards are drawn once beside the summary; a refresh leav
     assert.deepEqual([opened.length, circles], [2, 1], 'the places door leaves through Circles alone');
     back.go();
     assert.deepEqual(opened[2], ['tab', 'consciousness', undefined]);
+    // The Safety door opens its row in Permissions and checks, which leads back here; the evolution door opens its row on
+    // the Evolution tab (a door inside the Dashboard asks for no Back).
+    await card.fire('click', { target: rowNode(card, 'consciousness-safety') });
+    await card.fire('click', { target: rowNode(card, 'consciousness-evolution') });
+    const [, safetyPath, safetyOptions] = opened[3];
+    assert.deepEqual([safetyPath, safetyOptions.row, safetyOptions.back.label], ['permissions', 'OUROBOROS_CONSCIOUSNESS_SAFETY_MODE', 'Consciousness']);
+    assert.deepEqual(opened[4], ['tab', 'evolution', { row: 'OUROBOROS_POST_TASK_EVOLUTION' }]);
     controller.destroy();
+});
+
+test('Undo on the wake range and the evolution choice sends the old values back with their tokens; a stale token writes nothing', async (t) => {
+    const [MIN, MAX, ON, CADENCE] = ['OUROBOROS_BG_WAKEUP_MIN', 'OUROBOROS_BG_WAKEUP_MAX', 'OUROBOROS_POST_TASK_EVOLUTION', 'OUROBOROS_POST_TASK_EVOLUTION_CADENCE'];
+    const server = settingsServer(t, { [MIN]: 300, [MAX]: 7200, [ON]: 'false', [CADENCE]: 'every_n:4' });
+    // Both writers hand the precondition and the unset keys to the generic write, so they are in the guarded set.
+    assert.deepEqual(['wakeRange', 'evolutionWhen'].map((name) => GUARDED_WRITERS.has(name)), [true, true]);
+    const host = new NodeStub();
+    server.mount.appendChild(host);
+    const [range, when] = [rowById('OUROBOROS_BG_WAKEUP'), rowById('OUROBOROS_POST_TASK_EVOLUTION')];
+    host.innerHTML = settingsRow(range) + settingsRow(when);
+    const rows = bindSettingRows(host);
+    await readSettings();
+    rows.paint();
+    const undo = (id) => rowNode(host, id).querySelector('[data-setting-undo]');
+    const press = async (id) => { await host.fire('click', { target: undo(id) }); await settle(); };
+    // The range: both old numbers go back in one body, each key under the token its own save installed.
+    const [shortest, longest] = rowNode(host, range.id).querySelectorAll('[data-setting-control]');
+    const type = async (a, b) => { shortest.value = a; longest.value = b; await host.fire('change', { target: longest }); await settle(); };
+    await type('600', '3600');
+    assert.equal(result(host, range.id), 'Saved · applies from the next wake · was 300 to 7200 · Undo');
+    const installed = { [MIN]: server.tokens[MIN], [MAX]: server.tokens[MAX] };
+    await press(range.id);
+    assert.deepEqual(server.posts.at(-1), { [MIN]: 300, [MAX]: 7200, if_unchanged: installed });
+    assert.deepEqual([server.stored[MIN], server.stored[MAX]], [300, 7200]);
+    assert.deepEqual([shortest.value, longest.value], ['300', '7200'], 'the fields show what Undo put back');
+    // A stale token: another device changed the shortest wait meanwhile. Undo is refused whole and writes nothing.
+    await type('900', '1800');
+    Object.assign(server.stored, { [MIN]: 1200 });
+    Object.assign(server.tokens, { [MIN]: 'elsewhere' });
+    const before = server.posts.length;
+    await press(range.id);
+    assert.deepEqual([server.posts.length, Object.keys(server.posts.at(-1).if_unchanged)], [before + 1, [MIN, MAX]]);
+    assert.deepEqual([server.stored[MIN], server.stored[MAX]], [1200, 1800], 'neither number was written');
+    assert.equal(result(host, range.id), 'Changed on another device. This is the current value.');
+    assert.equal(undo(range.id), null, 'no Undo is offered over a value this page did not install');
+    // The evolution choice: "was" names the old choice, and Undo sends the stored pair itself back, the word 'false' as off.
+    await commitSetting(when, [true, 'llm']);
+    await settle();
+    assert.equal(result(host, when.id), 'Saved · applies to new tasks · was Off · Undo');
+    const pair = { [ON]: server.tokens[ON], [CADENCE]: server.tokens[CADENCE] };
+    await press(when.id);
+    assert.deepEqual(server.posts.at(-1), { [ON]: false, [CADENCE]: 'every_n:4', if_unchanged: pair }, 'the count it had comes back with it');
+    assert.equal(result(host, when.id), 'Saved · applies to new tasks · was After each task · Undo', 'and that Undo can be undone');
+    await commitSetting(when, [true, 'every_n:2']);
+    await settle();
+    Object.assign(server.tokens, { [CADENCE]: 'elsewhere' });
+    const stored = { ...server.stored };
+    await press(when.id);
+    assert.deepEqual(server.stored, stored, 'a stale token on one key of the pair writes neither');
+    assert.equal(result(host, when.id), 'Changed on another device. This is the current value.');
+    rows.dispose();
+});
+
+test('Undo of the evolution choice restores a key that was absent by unsetting it', async (t) => {
+    const [ON, CADENCE] = ['OUROBOROS_POST_TASK_EVOLUTION', 'OUROBOROS_POST_TASK_EVOLUTION_CADENCE'];
+    const server = settingsServer(t, { [ON]: false });
+    const host = new NodeStub();
+    server.mount.appendChild(host);
+    const when = rowById(ON);
+    host.innerHTML = settingsRow(when);
+    const rows = bindSettingRows(host);
+    await readSettings();
+    await commitSetting(when, [true, 'every_n:2']);
+    await settle();
+    const installed = { [ON]: server.tokens[ON], [CADENCE]: server.tokens[CADENCE] };
+    await host.fire('click', { target: rowNode(host, ON).querySelector('[data-setting-undo]') });
+    await settle();
+    assert.deepEqual(server.posts.at(-1), { [ON]: false, unset: [CADENCE], if_unchanged: installed });
+    assert.deepEqual(server.stored, { [ON]: false }, 'the cadence is absent again, not stored as a word');
+    rows.dispose();
 });
 
 test('Evolution: the cycles card presses one choice; "Every N tasks" shows its count, and both keys go in one body', async (t) => {
@@ -272,7 +375,7 @@ test('Evolution: the cycles card presses one choice; "Every N tasks" shows its c
     assert.equal(count.parentElement.hidden, false);
     assert.equal(count.parentElement.querySelector('.settings-row-unit').textContent, 'N', 'the count is the N of its choice');
     assert.equal(caption(), 'After every 3 tasks, chats included, it decides whether one improvement is worth a cycle.');
-    assert.equal(result(card, 'OUROBOROS_POST_TASK_EVOLUTION'), 'Saved · applies to new tasks · was Off');  // INTEGRATED (lane A)
+    assert.equal(result(card, 'OUROBOROS_POST_TASK_EVOLUTION'), 'Saved · applies to new tasks · was Off · Undo');
     count.value = '7';
     await leave(count);
     await settle();

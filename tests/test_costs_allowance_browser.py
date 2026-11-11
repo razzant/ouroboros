@@ -1,8 +1,8 @@
 """The consciousness allowance in Costs › Budget, through the real candidate server (owner, 10 Nov 2026).
 
 Costs is the allowance's one editor, a setting row that saves when its field is left: a typed 0 and decimals save
-and read back after a reload, the posted body is that one limit, and an unrelated Settings save keeps it (Settings has
-no field for it, only a door to Costs).
+and read back after a reload, the posted body is that one limit, and an unrelated row written elsewhere keeps it: a
+row posts its own key and nothing else. Settings has no control for it, only the home's door to Costs.
 Under the field stands the clock's own 24-hour window, from spend seeded through the ledger itself: what it leaves
 out, a reached limit with its conditional room time in the viewer's named zone. A wake held at the allowance it started
 with, the Off switch and an unreadable ledger are said apart; the held state's snapshot is the consciousness
@@ -25,6 +25,7 @@ pytestmark = [pytest.mark.ui_browser]
 HOUR = 3600.0
 KEY = "OUROBOROS_CONSCIOUSNESS_DAILY_USD"
 FIELD = f"#setting-{KEY}"  # the allowance's setting row (settings_controls.js settingsRow)
+UNRELATED = "OUROBOROS_GC_RETENTION_DAYS"  # another tab's row: how long finished work is kept (Storage › Cleanup)
 ZONE = "Europe/Moscow"  # the viewer's zone: the room time must name it
 COMBOS = [(1440, 900, "light"), (1440, 900, "dark"), (390, 844, "light"), (390, 844, "dark")]
 
@@ -43,11 +44,12 @@ def _settings(data_dir: Path) -> dict:
 
 
 def _page(browser, engine, *, width=1440, height=900, theme="light"):
-    """A page in the viewer's zone; its uncaught errors in ``page.errors`` (``tests/ui_console_errors.PageErrors``:
-    only WebKit's own-origin fetch a navigation cancelled is set aside, #1468)."""
+    """A page in the viewer's zone and in English (the page writes a date in the browser's locale, and WebKit takes
+    the host's unless told: "12 нояб." where ``_room_words`` says "Nov 12"); its uncaught errors in ``page.errors``
+    (``tests/ui_console_errors.PageErrors``: only WebKit's own-origin fetch a navigation cancelled is set aside, #1468)."""
     from tests.ui_console_errors import PageErrors
 
-    context = browser.new_context(viewport={"width": width, "height": height}, color_scheme=theme,
+    context = browser.new_context(viewport={"width": width, "height": height}, color_scheme=theme, locale="en-US",
                                   timezone_id=ZONE, has_touch=width < 720, device_scale_factor=2)
     page = context.new_page()
     page.add_init_script(f"localStorage.setItem('ouroboros.theme', {json.dumps(theme)})")
@@ -80,6 +82,24 @@ def _saving(page):
     """The settings write a row sends when its field is left, awaited to its answer."""
     return page.expect_response(lambda response: response.request.method == "POST"
                                 and response.url.endswith("/api/settings"), timeout=30_000)
+
+
+def _write_unrelated(page, data_dir: Path, posts: list, days: int) -> dict:
+    """Type and leave another tab's row (Storage's retention): its save carries that key alone. Returns what is stored."""
+    from playwright.sync_api import expect
+
+    page.click('[data-dashboard-tab="storage"]')
+    field = page.locator(f"#setting-{UNRELATED}")
+    expect(field).to_be_visible(timeout=30_000)
+    page.wait_for_function(f"document.getElementById('setting-{UNRELATED}').value !== ''", timeout=30_000)
+    with _saving(page):
+        field.fill(str(days))
+        field.press("Tab")
+    expect(page.locator(f"#setting-{UNRELATED}-result")).to_contain_text("Saved", timeout=30_000)
+    assert posts[-1] == {UNRELATED: days}, f"a row's save carries its own key and never the allowance: {posts[-1]}"
+    stored = _settings(data_dir)
+    assert int(stored[UNRELATED]) == days, stored
+    return stored
 
 
 def _switch(page, url: str, on: bool) -> None:
@@ -117,7 +137,7 @@ def _shoot(page, name: str) -> None:
 
 
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
-def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_settings_save(direct_server_with_data, engine):
+def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_row_written_elsewhere(direct_server_with_data, engine):
     from playwright.sync_api import expect, sync_playwright
 
     url, data_dir = direct_server_with_data["url"], direct_server_with_data["data_dir"]
@@ -153,18 +173,10 @@ def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_settin
             _shoot(page, f"{engine}-zero-saved")
             _costs(page, url)  # a full reload reads the saved 0 back
             expect(allowance).to_have_value("0")
-            # A saved 0 is a value: an unrelated Settings save keeps it (it once wrote the field's '20' back), since
-            # Settings has no field for it and its save never posts it.
-            _nav(page, "settings")
-            expect(page.locator("#btn-save-settings")).to_be_enabled(timeout=30_000)
-            assert page.locator("#s-consciousness-daily-usd").count() == 0
-            page.click('[data-settings-tab="advanced"]')
-            page.locator("#s-gh-repo").fill("owner/unrelated-edit")
-            page.click("#btn-save-settings")
-            expect(page.locator("#settings-status")).to_contain_text("Settings saved", timeout=30_000)
-            assert KEY not in posts[-1], "a Settings save never carries the allowance"
-            stored = _settings(data_dir)
-            assert stored["GITHUB_REPO"] == "owner/unrelated-edit" and float(stored[KEY]) == 0, stored
+            # A saved 0 is a value: an unrelated row written elsewhere keeps it (the page-wide Save of the old Settings
+            # once wrote the field's '20' back). A row posts its own key and nothing else.
+            stored = _write_unrelated(page, data_dir, posts, 9)
+            assert float(stored[KEY]) == 0, stored
             _costs(page, url)
             expect(allowance).to_have_value("0")
             allowance.fill("12.75")
@@ -177,25 +189,24 @@ def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_settin
             _costs(page, url)
             expect(allowance).to_have_value("12.75")
             expect(page.locator("#costs-allowance-spend")).to_contain_text("of $12.75 in the last 24 hours")
-            # Another unrelated Settings save keeps the decimal too.
+            # Another unrelated row keeps the decimal too.
+            stored = _write_unrelated(page, data_dir, posts, 11)
+            assert float(stored[KEY]) == 12.75, stored
+            # It is edited in Costs alone: the page holds one control for it, Settings none, and the home's Costs row is
+            # the door to it, which leads back.
+            assert page.locator(f'[data-setting-row="{KEY}"]').count() == 1
             _nav(page, "settings")
-            expect(page.locator("#btn-save-settings")).to_be_enabled(timeout=30_000)
-            page.click('[data-settings-tab="advanced"]')
-            page.locator("#s-gh-repo").fill("owner/second-edit")
-            page.click("#btn-save-settings")
-            expect(page.locator("#settings-status")).to_contain_text("Settings saved", timeout=30_000)
-            assert KEY not in posts[-1], "a Settings save never carries the allowance"
-            stored = _settings(data_dir)
-            assert stored["GITHUB_REPO"] == "owner/second-edit" and float(stored[KEY]) == 12.75, stored
-            # Its door in Behavior opens Costs.
-            page.click('[data-settings-tab="behavior"]')
-            door = page.locator("[data-costs-open]")
+            home = page.locator("#page-settings [data-settings-home]")
+            expect(home).to_be_visible(timeout=30_000)
+            assert page.locator(f'#page-settings [data-setting-row="{KEY}"], #page-settings #setting-{KEY}').count() == 0
+            door = home.locator('[data-settings-open="dashboard:costs"]')
             door.scroll_into_view_if_needed()
             if (shot := _evidence(f"{engine}-settings-door.png")) is not None:
-                page.locator("#settings-consciousness").screenshot(path=str(shot))
+                door.screenshot(path=str(shot))
             door.click()
             expect(page.locator(FIELD)).to_be_visible(timeout=30_000)
             expect(allowance).to_have_value("12.75")
+            expect(page.locator("#dashboard-panel-costs > .dashboard-back")).to_have_text("Settings")
             assert page.errors.unexpected() == [], page.errors.report()
         finally:
             browser.close()

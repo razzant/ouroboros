@@ -24,7 +24,7 @@ const PENDING_PAGES = {
     models: 'lane E2', agents: 'lane E1', rules: 'lane C2', permissions: 'lane C2', accounts: 'lane E3', tools: 'lane E2',
     appearance: 'lane C2', notifications: 'lane C2', voice: 'lane C2', computer: 'lane C2',
 };
-const PENDING_ROWS = { OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS: 'lane C2' };
+const PENDING_ROWS = { OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS: 'lane C2', OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: 'lane C2' };
 
 /** Why `path` is no address ('' when it is one): the home, a door, or a page that a home row opens or a module serves. */
 function deadPath(path, { registered = (target) => Boolean(settingsPageFor(target)) } = {}) {
