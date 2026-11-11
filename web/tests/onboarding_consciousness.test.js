@@ -42,7 +42,7 @@ test('the offer: an older bootstrap offers nothing; values keep unknown as unkno
         { offered: true, enabled: null, autonomy: 'act', dailyUsd: null, maxTasks: null });
 });
 
-test('the row names the effective limits in Settings words, unticked', () => {
+test('the row names the effective limits in Settings and Costs words, unticked, and where each is changed', () => {
     const html = offerRowHtml(normalizeOffer(DEFAULTS));
     assert.match(html, /<input type="checkbox" class="ui-checkbox" data-consciousness-start>/);
     assert.doesNotMatch(html, /checked/);
@@ -50,7 +50,8 @@ test('the row names the effective limits in Settings words, unticked', () => {
         + 'Between your requests it continues topics that interest it and you, notices opportunities and brings you suggestions. '
         + 'Autonomy: Acts. Also acts on its own: starts work, runs commands, speaks and acts in places. It does not change itself. '
         + 'Up to $20.00 a day in recorded spending. Subscription quota is separate. At most 2 of its own tasks at once. '
-        + 'Change these in Settings › Behavior › Consciousness. Stop or start it any time in Dashboard › Consciousness.');
+        + 'Change the allowance in Dashboard › Costs and the rest in Settings › Behavior › Consciousness. '
+        + 'Stop or start it any time in Dashboard › Consciousness.');
     assert.deepEqual(limitPhrases(normalizeOffer({ ...DEFAULTS, autonomy: 'observe', dailyUsd: 5, maxTasks: 0 })), [
         'Autonomy: Advises. On its own it studies, keeps its memory and tells you; it changes nothing outside.',
         'Up to $5.00 a day in recorded spending. Subscription quota is separate.', 'It starts no tasks of its own.']);

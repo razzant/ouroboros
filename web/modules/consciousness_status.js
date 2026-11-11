@@ -8,15 +8,16 @@
  *
  * Pressing the chip opens the Shade and switches nothing: the host's state line (consciousness_dashboard.headlineView),
  * Start or Stop (the `/bg` command the Dashboard sends), the money of the last 24 hours, three own wakes and three wakes
- * in places in the Dashboard's phase words (one `GET /api/consciousness` per opening), `Dashboard ›` and, while
- * evolving, `Evolution ›`. A wake in a place is a door to that place's sheet (its Active · Silent · Paused one press
+ * in places in the Dashboard's phase words (one `GET /api/consciousness` per opening), `Dashboard ›`, `Costs ›` while
+ * the allowance is the next step (new starts refused by it, or its wake held at the allowance it started with) and,
+ * while evolving, `Evolution ›`. A wake in a place is a door to that place's sheet (its Active · Silent · Paused one press
  * away), read from `/api/places` at the press. The Shade is the room's work list material and gestures (room_work.js):
  * it hangs under the bar's capsules; an outside press, Escape or focus leaving it close it. The facts are the
  * `/api/state` snapshot the room already reads.
  */
 import { headlineView } from './consciousness_dashboard.js';
 import { failureText, normalizeConsciousness, readConsciousness, readPlaces } from './consciousness_api.js';
-import { allowanceText, clockText, consciousnessMark, deadlineWords, splitWakes, wakePhaseText } from './consciousness_words.js';
+import { allowanceMove, allowanceText, clockText, consciousnessMark, deadlineWords, splitWakes, wakePhaseText } from './consciousness_words.js';
 import { fmt, tr } from './i18n.js';
 import { openPlaceSheet } from './place_sheet.js';
 import { controlIcon } from './page_icons.js';
@@ -112,8 +113,9 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
     const headWords = element('div', 'cx-head-words');
     const kicker = element('p', 'cx-kicker', 'Consciousness');
     const stateLine = element('p', 'cx-state');
+    const stateNote = element('p', 'cx-state-note');
     const money = element('p', 'cx-money');
-    headWords.append(kicker, stateLine, money);
+    headWords.append(kicker, stateLine, stateNote, money);
     const toggle = element('button', 'btn btn-default btn-sm cx-toggle');
     toggle.type = 'button';
     head.append(headWords, toggle);
@@ -139,8 +141,9 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         return button;
     };
     const dashboardDoor = door('Dashboard ›', 'consciousness');
+    const costsDoor = door('Costs ›', 'costs');
     const evolutionDoor = door('Evolution ›', 'evolution');
-    doors.append(dashboardDoor, evolutionDoor);
+    doors.append(dashboardDoor, costsDoor, evolutionDoor);
     body.append(head, coverageNote, ...groups.flatMap((group) => [group.heading, group.wakes, group.note]), doors);
     shade.append(body);
     anchor.append(shade);
@@ -172,6 +175,8 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         if (!view) return;
         const { snapshot, headline } = view;
         stateLine.textContent = headline.text;
+        stateNote.textContent = headline.note;
+        stateNote.hidden = !headline.note;
         const allowance = allowanceText(snapshot);
         money.textContent = allowance;
         money.hidden = !allowance;
@@ -179,6 +184,7 @@ export function createConsciousnessStatus({ bar, ws = null, openDashboardTab = n
         toggle.hidden = snapshot.enabled === null;
         toggle.textContent = on ? 'Stop' : 'Start';
         toggle.disabled = Boolean(pending) || !ws?.send || !connected();
+        costsDoor.hidden = !allowanceMove(snapshot);
         evolutionDoor.hidden = !view.evolving;
     }
 

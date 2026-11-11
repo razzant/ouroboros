@@ -189,6 +189,8 @@ export function normalizeConsciousness(raw, { enabled } = {}) {
         enabled: known,
         status: text(bg.status),
         detail: text(bg.detail),
+        // What follows from that state, said beneath it (a held wake's allowance: what Resume keeps, what ends it).
+        detailNote: text(bg.detail_note),
         coverage: bg.recent_wakes === undefined ? '' : text(bg.recent_wakes_coverage),
         level: text(bg.level),
         nextWakeAt: text(bg.next_wake_at),
@@ -197,11 +199,19 @@ export function normalizeConsciousness(raw, { enabled } = {}) {
         lastWakeOutcome: text(bg.last_wake_outcome),
         liveWakeTaskId: text(bg.live_wake_task_id),
         liveWakeHeld: bg.live_wake_held === true,
+        // What holds that wake, as far as its records prove it (consciousness_view.hold_cause; '' proves nothing).
+        holdCause: text(object(bg.live_wake_hold)?.cause),
+        holdCeilingUsd: amount(object(bg.live_wake_hold)?.ceiling_usd),
         spentUsd: amount(bg.spent_24h_usd),
         dailyUsd: amount(bg.daily_usd),
         unknownUnmetered: count(bg.unknown_unmetered) || 0,
         integrityDegraded: bg.integrity_degraded === true,
         allowanceResetsAt: text(bg.allowance_resets_at),
+        // The current window's own verdict, its rows that can still settle, and when room returns if nothing more
+        // is charged (a display forecast; '' when withheld).
+        allowanceStatus: text(bg.allowance_status),
+        allowanceOpenRows: count(bg.allowance_open_rows),
+        allowanceRoomAfter: text(bg.allowance_room_after),
         tasksRunning: count(bg.tasks_running),
         maxTasks: count(bg.max_tasks),
         spendByCause: list(bg.spend_by_cause).map((row) => ({

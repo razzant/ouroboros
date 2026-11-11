@@ -298,7 +298,10 @@ caps with `text-transform`.
 **A secondary page orders by meaning, not paint** (audit №9, owner
 2026-10-28T22:09Z). Costs leads with the known spend and, in the same card,
 whether it is final, its unresolved upper bound and what is unknown; the
-composition, the hold and technical counts follow, quieter. Activity names a
+composition, the hold and technical counts follow, quieter. Budget edits three limits; the consciousness
+field shows its 24-hour spend (pending, unpriced). Below the fields, a full-width row names that limit with
+“If its charges stay as they are, there is room again by HH:MM ZONE” (rounded up, zone named, else unknown) and a
+wake held at it with its card's door. Save posts edited limits only. Activity names a
 work whole in primary ink above its facts; a duration reads in seconds below a
 minute, then in minutes or hours, and one the row lacks is absent, never `0s`. A narrow temporary-space tray puts
 a qualified size under its group's name. A widget card's ⋮ menu and move handle
@@ -893,7 +896,8 @@ status sentence's or a composer chip's dot is its tone, §4).
   question, or what only the owner can do: sign in, a spending limit, Resume after a
   restart, crash or Panic, grant access, a skill review that must run first, local
   changes before an update, an Evolution chip, the consciousness chip or a Consciousness sentence that needs the owner
-  or was stopped by the spending limit; (2) a warning worth reading — warn toasts and sentences,
+  or was stopped by the spending limit (new starts refused, or its wake proven held at the allowance it started
+  with); (2) a warning worth reading — warn toasts and sentences,
   Settings and onboarding notes, warnings inside task timelines, reviews and Logs
   events, account quota; (3) the System voice (a pale tint in the light theme, its name
   in the dark one), a voice, not a status; (4) a few data categories that are not statuses (Logs and Storage
@@ -2088,7 +2092,9 @@ Money keeps card scope: confirmed zero is `$0.00`, an unavailable amount is
 “spend unknown”; known parts retain “Tracked:” and “up to”.
 Open accounting keeps “so far”; it is no final total.
 The allowance's “Some calls have no price” and “next check at” promise no admission.
-Visible and accessible words agree.
+Visible and accessible words agree. The allowance is edited only in Costs › Budget, behind a door line;
+own tasks and conversations stay in Settings. A wake held at the allowance it started with says so without a
+clock; beneath it, quieter: Resume keeps that limit, a higher allowance does not raise it, Stop now frees the clock.
 
 “Open in Main ↗” lands on the card Main draws, else finds it through around-history; a focus door
 opens its captured conversation in the sheet, Back returns. An unowned room disables
@@ -3177,7 +3183,7 @@ or `since HH:MM` only for `due` (appointment, `due` if unknown), with the `still
 Its word uses the viewer's zone and a short date when not today; passed explained
 outcomes and passed allowance resets show no time.
 `Evolving` replaces the word during a campaign, even when off; Off is grey.
-Running shows moving dots, never a breathing glyph; held shows pause bars without time; unknown a ring,
+Running shows moving dots, never a breathing glyph; held shows pause bars without time (the amber dot when held at its allowance); unknown a ring,
 failure a red dot, amber only the owner's move (§4). The word stays visible at every width, except where the room covers Main (a phone, a
 finger's docked column) while a Project's one-line name is still cut, where the chip keeps its brain and mark (above).
 Its accessible name and the Shade state use the host sentence without adding a clock.
@@ -3185,7 +3191,7 @@ A press opens its own sheet of the work list's material (the Shade), hung under 
 capsules, and switches nothing: state, Start/Stop, `$X of $Y in the last 24 hours`, “Its own wakes” then
 “Wakes in places” (three rows each, Dashboard's empty sentences, one coverage or failure above both; a place's row is a
 door to that place's sheet (Active · Silent · Paused there), read from the places at the press: a
-failed read says so on that line, a place gone since disables its row), `Dashboard ›`
+failed read says so on that line, a place gone since disables its row), `Dashboard ›`, `Costs ›` while the allowance is the next step
 and, during a campaign, `Evolution ›`
 (`web/modules/consciousness_status.js`). Evolve and Review live in Dashboard › Evolution (`Run review…` opens
 `/review`'s picker). In Main and Project, the bar has no continuous backing strip:
