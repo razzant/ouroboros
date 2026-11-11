@@ -144,6 +144,35 @@ def test_old_engine_explains_missing_capability(subscription_ui):
     assert not ui["posts"]
 
 
+@pytest.mark.parametrize("width", [1440, 390])
+@pytest.mark.parametrize("maintenance", [False, True])
+def test_connect_card_shows_only_maintenance_problem_actions(subscription_ui, width, maintenance):
+    from playwright.sync_api import expect
+
+    ui, page = subscription_ui, subscription_ui["page"]
+    page.set_viewport_size({"width": width, "height": 950})
+    message = "The vendor installer could not write its program." if maintenance else "Disable another profile before connecting."
+    action = "Read the vendor log in Settings, Accounts" if maintenance else "disable_extra_profiles"
+    page.route("**/api/claudexor/login", lambda route: route.fulfill(status=503 if maintenance else 409, json={
+        "error": message, "code": "installer_failed" if maintenance else "credential_profile_limit",
+        "required_actions": [action], "retryable": False,
+        "context": {"operationId": "accepted-install"} if maintenance else {},
+    }))
+    page.goto(ui["url"] + "/#settings")
+    page.locator('[data-settings-tab="providers"]').click()
+    family = page.locator('.agent-family-card[data-family="codex"]')
+    family.locator('[data-harness-login]').first.click()
+    card = family.locator('[data-login-card]')
+    expect(card).to_contain_text(message)
+    expect(card.locator('[data-login-required-action]')).to_have_count(int(maintenance))
+    if maintenance:
+        expect(card.locator('[data-login-required-action]')).to_have_text(action)
+    else:
+        expect(card).not_to_contain_text(action)
+    expect(card).not_to_contain_text("accepted-install")
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+
+
 @pytest.mark.parametrize("termination", ["confirmed", "unconfirmed"])
 def test_historical_unknown_effect_preserves_newer_version(subscription_ui, termination):
     from playwright.sync_api import expect
