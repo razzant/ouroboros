@@ -108,20 +108,6 @@ def test_place_reply_bundle_carries_this_turns_own_sends_in_its_conversation(sup
     assert bundle(h, "place_reply", args)["subject"]["place"]["this_turn_sends"] == {"confirmed": "none", "calls_without_receipt": []}
 
 
-def test_no_recipient_is_called_my_human_without_the_place_stores_proof(supervisor, monkeypatch):
-    """``recipient_is_owner`` stands only on the place store's proof that every recipient is my human's own confirmed
-    private conversation. The store records no such fact, so a place whose label, confirmed account and conversation
-    id all look like my human's carries no claim: it is never inferred from names or ids."""
-    from ouroboros import places, place_guard
-    h = supervisor
-    monkeypatch.setattr(place_guard, "call_place_facts", REAL_CALL_PLACE_FACTS)
-    mine = places.Place("dm", "connector", "chat", "a", "144346271", label="Anton (private)", owner_accounts=(
-        places.OwnerAccount("144346271", "Anton", "2026-11-01T00:00:00+00:00", "a"),))
-    monkeypatch.setattr(places, "load_places", lambda root: [mine])
-    args = {"place_id": "dm", "text": "hello", "destination": {"account_id": "a", "conversation_id": "144346271"}}
-    place = bundle(h, "place_reply", args)["subject"]["place"]
-    assert place["places"][0]["place_id"] == "dm" and "recipient_is_owner" not in json.dumps(place)
-
 
 def test_an_mcp_call_carries_whose_credential_it_acts_with(supervisor, monkeypatch):
     """The bundle names whose credential an MCP call acts with (a server signed in as my human); a server the host

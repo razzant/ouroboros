@@ -129,6 +129,8 @@ def test_declared_words_a_verdict_returned_leave_only_through_an_open_exit(super
     assert not ok and message.startswith("⚠️ SAFETY_RETURNED: not run;")
     assert "the place note asks for a quiz first" in message
     assert (SAID[REPEAT] in message, SAID[HUMAN] in message, CLOSED in message) == (mind, card, closed)
+    assert ("In this mode a DANGEROUS" in message, "deployment policy a DANGEROUS" in message) == (
+        card and mode != "cyber_pro", card and mode == "cyber_pro"), "whose rule makes it wait: the mode's or the policy's"
     ok, message = h.module.check_safety(name, args, ctx=h.ctx)
     assert not ok and "returned earlier in this same step" in message, "the same model call decides nothing"
     h.later()

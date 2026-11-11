@@ -148,8 +148,8 @@ def test_an_owner_answer_reaches_the_supervisor_with_the_card_it_answers(focus, 
     root, _place, _admission, _event = focus
     _ctx, bundle, _prompt = _reply_bundle(root, monkeypatch, checker, extra_rows=tuple(drained._owner_directives))
     [shown] = [source for source in bundle["occasion"]["sources"] if source.get("quiz_id") == "q7"]
-    assert shown == {**answer, "author": "the owner: his answer to the card quoted in reply_to (the card's text was "
-                                         "written by Ouroboros)"}  # the answer and its card, whole
+    assert shown == {**answer, "author": "the owner: the owner's answer to the card quoted in reply_to (the card's text "
+                                         "was written by Ouroboros)"}  # the answer and its card, whole
     assert shown["content"] == "1. Publish it" and shown["reply_to"]["text"].startswith(card["question"])
 
 

@@ -65,7 +65,7 @@ def test_flag_retry_and_changed_subject(supervisor, monkeypatch, mode, status, n
     assert (h.events[-1]["flagged_in"], h.events[-1]["sent_by"]) == ("llm-round-1", "llm-round-2")
     assert h.module.check_safety(name, {**args, "text": "changed"}, ctx=h.ctx) == (True, "")
     assert len(h.calls) == 2
-    # request_id is part of the call's identity: the same words under a new id are read again (Joi/Eva, 05.11).
+    # request_id is part of the call's identity: the same words under a new id are read again.
     h.replies.append({"status": status, "reason": "owner has not delegated this"})
     assert h.module.check_safety(name, {**args, "request_id": "r-2"}, ctx=h.ctx)[0] is False
     assert len(h.calls) == 3
