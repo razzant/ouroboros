@@ -183,8 +183,10 @@ def _knows_the_journal(runtime, factory):
 
 @pytest.mark.parametrize("outcome", ["prepared", "delivery_unknown"])
 def test_fresh_body_reconstructs_pending_owner_frame_retry(world, monkeypatch, outcome):
+    import hashlib
+
     from ouroboros import delegate_message_store as frames
-    from tests.test_delegate_message import _Stub, _install
+    from tests.test_delegate_message import _Stub, _install, _receipts
     from tests.test_owner_words_at_receipt import _open_run
 
     entry = _open_run(world.root, "run-live", task_id="t-nanny", root_task_id="t-nanny")
@@ -207,6 +209,8 @@ def test_fresh_body_reconstructs_pending_owner_frame_retry(world, monkeypatch, o
         tick()
         assert [(post["key"], post["text"]) for post in stub.posts] == [(message_id, wire)]
         assert frames.pending_frames(ctx, entry.run_id) == []
+        [receipt] = [r for r in _receipts(world.root) if r["message_id"] == message_id]  # digest and size, no read
+        assert receipt["text_sha256"] == hashlib.sha256(row["text"].encode("utf-8")).hexdigest() and stub.reads == []
 
 
 def test_an_answered_run_without_pending_frames_costs_only_one_followed_set_read(world, monkeypatch):

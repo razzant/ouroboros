@@ -200,30 +200,17 @@ def pending_runs(root: Any, run_ids: Any) -> set:
 
 def replay_frames(root: Any, run: Any) -> bool:
     """The body's send of my human's frames still pending for one run it observes: each replayed under its id
-    and bytes (``delegate_interactions._post_live_message``), its outcome recorded as the starter's round-top
-    catch-up records it, idempotent with it. True when none stays pending. Never raises."""
+    and bytes in the placement's own session (``delegate_interactions._place_into_run``, with no capability read),
+    its outcome recorded as the starter's round-top catch-up records it, idempotent with it. True when none stays
+    pending. Never raises."""
     import logging
-    import time
 
-    from ouroboros.delegate_interactions import (_ANSWER_HANDSHAKE_MAX_SEC, _MESSAGE_DEADLINE_SEC, _message_result,
-                                                 _post_live_message)
-    from ouroboros.delegate_progress import poll_bound
-    from ouroboros.execution_domain import run_gateway
-    from ouroboros.gateways.claudexor import ClaudexorGateway
+    from ouroboros.delegate_interactions import _place_into_run
 
     try:
         ctx = starter(root, run)
         if pending := pending_frames(ctx, run.run_id):
-            bound = poll_bound(min(_MESSAGE_DEADLINE_SEC, _ANSWER_HANDSHAKE_MAX_SEC))
-            deadline, gateway = time.monotonic() + _MESSAGE_DEADLINE_SEC, run_gateway(run, ClaudexorGateway, timeout_sec=bound)
-            try:
-                gateway.handshake(timeout_sec=bound)
-                for row in pending:
-                    verdict, _body = _post_live_message(gateway, run.run_id, row, lambda: deadline - time.monotonic())
-                    _message_result(ctx, {"run_id": run.run_id, "message_id": row["frame"]["message_id"],
-                                          "text_chars": len(row["text"]), "frame": row["frame"]}, **verdict)
-            finally:
-                gateway.close()
+            _place_into_run(ctx, run, [], replays=pending)
         return not pending_frames(ctx, run.run_id)
     except Exception:  # noqa: BLE001 — what it could not send waits for its next answered pass or the round top
         logging.getLogger(__name__).warning("owner words replay into run %s waits", run.run_id, exc_info=True)

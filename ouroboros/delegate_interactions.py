@@ -1174,15 +1174,17 @@ def _placement_text(quote: Dict[str, Any], address: str, went: str) -> Tuple[str
     return text, {"address": address, "chat_id": quote["source"]["chat_id"], "ts": quote["source"]["ts"]}
 
 
-def _place_into_run(ctx: Any, run: Any, owed: List[Tuple[str, Dict[str, Any], str]], *,
-                    host: bool = False) -> List[Tuple[str, Dict[str, Any], str, Dict[str, Any]]]:
-    """One session's placement of owed rows ``(address, quote, went)`` under the message deadline: one handshake and
-    one capability read, then each row framed as the starter's and chosen with any other placer's frames in one
-    transaction (``delegate_message_store.place_frame``: a row reaches a run once) and sent on the typed outcome
-    path (``_message_result``). A replay (prior ``prepared``/``delivery_unknown``) always reaches the engine, its
-    recorded bytes under its id; a new frame on a route with no live input, or an engine without the operation,
+def _place_into_run(ctx: Any, run: Any, owed: List[Tuple[str, Dict[str, Any], str]], *, host: bool = False,
+                    replays: Any = ()) -> List[Tuple[str, Dict[str, Any], str, Dict[str, Any]]]:
+    """One session of my human's frames into ``run`` under the message deadline, one handshake: the pending frame
+    rows a caller already chose (``replays``: the body's, ``delegate_message_store.replay_frames``), then the owed
+    rows ``(address, quote, went)``, each framed as the starter's and chosen with any other placer's frames in one
+    transaction (``delegate_message_store.place_frame``: a row reaches a run once); every frame is sent on the
+    typed outcome path (``_message_result``: digest and size). A replay (prior ``prepared``/``delivery_unknown``)
+    always reaches the engine, its recorded bytes under its id. Only owed rows, which may take a new frame, read the
+    route's capability first: a new frame on a route with no live input, or an engine without the operation,
     records ``unsupported`` with no POST. An engine that cannot be discovered or reached, or a read that fails,
-    sends nothing; the host's frames then wait ``prepared`` for the body (``delegate_message_store.replay_frames``).
+    sends nothing; the host's frames then wait ``prepared`` for the body, which replays them with no read.
     ``(address, verdict, prior outcome, frame row)`` per frame sent."""
     from ouroboros.delegate_message_store import PLACEMENT_REPLAYS, place_frame
     from ouroboros.delegate_progress import poll_bound
@@ -1207,18 +1209,14 @@ def _place_into_run(ctx: Any, run: Any, owed: List[Tuple[str, Dict[str, Any], st
             gateway.handshake(timeout_sec=poll_bound(min(_MESSAGE_DEADLINE_SEC, _ANSWER_HANDSHAKE_MAX_SEC)))
         except ClaudexorUnavailable:
             return waits("engine handshake failed")
-        reason, detail, live_input = _live_input_unsupported(
-            gateway, str(run.route_id or ""), lambda: deadline - time.monotonic())
-        if reason in ("capability_read_failed", "deadline_exhausted"):
-            return waits(f"{reason} ({detail})")
-        for address, quote, went in owed:
-            try:  # the frame is the write-ahead record: no frame, no POST
-                record, prior = place_frame(ctx, run, *_placement_text(quote, address, went), host=host)
-            except Exception:  # noqa: BLE001
-                log.warning("owner words frame for %s into run %s unwritten", address, run.run_id, exc_info=True)
-                continue
-            if record is None:  # another placer's frame ended the row for this run
-                continue
+        reason = detail = live_input = ""
+        if owed:
+            reason, detail, live_input = _live_input_unsupported(
+                gateway, str(run.route_id or ""), lambda: deadline - time.monotonic())
+            if reason in ("capability_read_failed", "deadline_exhausted"):
+                return waits(f"{reason} ({detail})")
+
+        def send(address: str, record: Dict[str, Any], prior: str) -> None:
             facts = {"run_id": run.run_id, "message_id": record["frame"]["message_id"], "text_chars": len(record["text"]),
                      "text_sha256": hashlib.sha256(record["text"].encode("utf-8", "replace")).hexdigest(),
                      "frame": record["frame"]}
@@ -1230,6 +1228,16 @@ def _place_into_run(ctx: Any, run: Any, owed: List[Tuple[str, Dict[str, Any], st
                                                     live_input)
             _message_result(ctx, facts, **verdict)
             sent.append((address, verdict, prior, record))
+        for row in replays:
+            send(str(row["frame"]["owner_words"].get("address") or ""), row, str(row.get("outcome") or ""))
+        for address, quote, went in owed:
+            try:  # the frame is the write-ahead record: no frame, no POST
+                record, prior = place_frame(ctx, run, *_placement_text(quote, address, went), host=host)
+            except Exception:  # noqa: BLE001
+                log.warning("owner words frame for %s into run %s unwritten", address, run.run_id, exc_info=True)
+                continue
+            if record is not None:  # None: another placer's frame ended the row for this run
+                send(address, record, prior)
     finally:
         gateway.close()
     return sent
