@@ -148,8 +148,8 @@ def test_an_owner_answer_reaches_the_supervisor_with_the_card_it_answers(focus, 
     root, _place, _admission, _event = focus
     _ctx, bundle, _prompt = _reply_bundle(root, monkeypatch, checker, extra_rows=tuple(drained._owner_directives))
     [shown] = [source for source in bundle["occasion"]["sources"] if source.get("quiz_id") == "q7"]
-    assert shown == {**answer, "author": "the owner: the owner's answer to the card quoted in reply_to (the card's text "
-                                         "was written by Ouroboros)"}  # the answer and its card, whole
+    assert shown == {**answer, "author": "the owner: the owner's answer to the card quoted in reply_to "
+                                         "(the card's text was written by Ouroboros)"}  # the answer and its card
     assert shown["content"] == "1. Publish it" and shown["reply_to"]["text"].startswith(card["question"])
 
 
@@ -160,15 +160,18 @@ def test_every_source_names_its_author_from_the_one_table(checker, tmp_path):
     from ouroboros.safety_evidence import SOURCE_AUTHORS, UNATTRIBUTED
 
     rows = [*({"source": label, "content": f"words {n}", "msg_id": f"m{n}"} for n, label in enumerate(SOURCE_AUTHORS)),
-            {"source": "initial_text", "content": "Opening frame"}, {"source": "made_up", "content": "x", "msg_id": "q"},
-            {"content": "no label", "msg_id": "r"}]
+            {"source": "initial_text", "content": "Opening frame"},
+            {"source": "made_up", "content": "x", "msg_id": "q"}, {"content": "no label", "msg_id": "r"}]
     ctx = SimpleNamespace(task_id="t", task_metadata={}, drive_root=tmp_path, _owner_directives=rows)
     shown = _sources(ctx)["occasion"]["sources"]
     assert [row["author"] for row in shown] == [*SOURCE_AUTHORS.values(), OPENING, UNATTRIBUTED, UNATTRIBUTED]
-    helper = SimpleNamespace(task_id="t", drive_root=tmp_path, _owner_directives=[{"source": "initial_text", "content": "Do X"}],
-                             task_metadata={"delegation_role": "subagent", "root_task_id": "root", "parent_task_id": "root"})
+    helper = SimpleNamespace(task_id="t", drive_root=tmp_path,
+                             _owner_directives=[{"source": "initial_text", "content": "Do X"}],
+                             task_metadata={"delegation_role": "subagent", "root_task_id": "root",
+                                            "parent_task_id": "root"})
     assert _sources(helper)["occasion"]["sources"][0]["author"] == (
-        "this task's brief: written by its parent task (Ouroboros) with blocks added by the host; not the owner's words")
+        "this task's brief: written by its parent task (Ouroboros) with blocks added by the host; "
+        "not the owner's words")
     raw = SimpleNamespace(task_id="t", task_metadata={}, drive_root=tmp_path)
     assert _sources(raw, [{"role": "user", "content": "raw words"}, {"role": "assistant", "content": "mine"}])[
         "occasion"]["sources"] == [{"role": "user", "content": "raw words", "author": UNATTRIBUTED}]
@@ -256,10 +259,11 @@ def test_a_helper_reads_the_words_carried_to_its_work_and_never_a_siblings(check
                            **governing_words_for_schedule(helper)}
     assert [row["ref"] for row in later.task_metadata[FIELD]] == ["chat 1 / owner-answer", "quiz q7 of task asker"]
     prompt, sources = sources_of(later)
-    assert sources == [{"source": "initial_text", "content": "Ship the release notes.", "author": (
-        "this task's brief: written by its parent task (Ouroboros) with blocks added by the host; not the owner's words")},
-        {"source": "owner_mailbox", "content": "1. Publish it", "msg_id": "chat 1 / owner-answer", "reply_to": card_reply,
-         **later_words}]
+    brief = ("this task's brief: written by its parent task (Ouroboros) with blocks added by the host; "
+             "not the owner's words")
+    assert sources == [{"source": "initial_text", "content": "Ship the release notes.", "author": brief},
+                       {"source": "owner_mailbox", "content": "1. Publish it", "msg_id": "chat 1 / owner-answer",
+                        "reply_to": card_reply, **later_words}]
     assert addresses["sibling"] not in prompt and "March figures" not in prompt
     later._owner_directives.append(dict(corpus))
     sources = sources_of(later)[1]
@@ -277,7 +281,8 @@ def test_each_source_projection_appears_once_and_the_event_is_typed(focus, monke
     assert retained["source"] == "initial_text" and "counted_roots" in retained["content"]
     source = bundle["occasion"]["sources"][0]
     assert source["message_text"] == "hello there" and source["event"]["conversation_key"] == "chat:a:r:0"
-    assert source["author"] == "a chat event that woke this turn: event.actor wrote message_text; the other keys are host facts"
+    assert source["author"] == ("a chat event that woke this turn: event.actor wrote message_text; "
+                                "the other keys are host facts")
     assert source["work_here"] == "Already started: task1" and "content" not in source
     assert "notes_at_event" not in source  # the same note versions are read now
     for text in ("OWNER NOTE", "MIND NOTE", RULES.splitlines()[0], "hello there"):

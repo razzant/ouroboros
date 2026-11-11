@@ -248,7 +248,7 @@ def paused_places_sentence(drive_root: Any) -> str:
     except (PlaceError, OSError, ValueError):
         return "Paused places: unknown (place records could not be read)."
     labels = [row.get("label") or key for key, row in sorted(rows.items()) if row.get("state") == STATE_PAUSED]
-    sentence = "Paused places (you do not write there; tasks are not affected): " + ", ".join(labels) + "." if labels else ""
+    sentence = "Paused places (no writing there; tasks are not affected): " + ", ".join(labels) + "." if labels else ""
     if migration_pending and current.get("migration", {}).get("problems"):
         sentence += " Paused legacy places: unknown (some old connections could not be read)."
     return sentence.strip()

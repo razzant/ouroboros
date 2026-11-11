@@ -55,7 +55,8 @@ def _int(value: Any) -> Any:
 
 def _loud(errors: List[Dict[str, Any]], held: bool) -> List[Dict[str, Any]]:
     """The errors the main view names: a failed read (owner 06.11, A) and a details-only leftover (owner 09.11, A)
-    stay in the details; a call Safety held is named apart (``held``). Twin of ``_outcome_tool_errors.warns_without_review``."""
+    stay in the details; a call Safety held is named apart (``held``). Twin of
+    ``_outcome_tool_errors.warns_without_review``."""
     return [error for error in errors if not (error.get("read_only") or error.get("details_only"))
             and (error.get("status") in SAFETY_HELD_STATUSES) is held]
 

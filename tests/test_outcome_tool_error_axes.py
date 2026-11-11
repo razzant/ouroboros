@@ -89,7 +89,8 @@ def test_advisory_review_cannot_clear_unreviewed_tool_error_warning():
     pytest.param({"tool": "mcp_gitlab__get_commit", "status": "mcp_error"}, True, "", id="unknown-kind"),
     pytest.param({"tool": "skill_exec", "status": "error"}, True, "", id="unknown-builtin-kind-that-ran"),
     pytest.param({"tool": "github_write", "status": "safety_returned"}, False, "", id="write-safety-returned"),
-    pytest.param({"tool": "run_command", "status": "safety_unavailable"}, False, "", id="command-safety-could-not-read"),
+    pytest.param({"tool": "run_command", "status": "safety_unavailable"}, False, "",
+                 id="command-safety-could-not-read"),
 ])
 def test_only_a_loud_leftover_warns_without_review(call, loud, flag):
     """Owner 06.11 («A — изменения и команды») revised 09.11 («Q1: A»): with no review, Done turns into Done with

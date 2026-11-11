@@ -993,10 +993,10 @@ contributes:
   `target`/`conversation`/`thread`; any other call keeps the row's `effect`. A `write` into a conversation (a pin, a
   bookmark) or a `gesture` is not words by itself. This is the connector's fact: core lists no provider method, never
   reads speech from argument names, and no verdict marks a call speech. A built-in tool without declarations, such
-  as `github_write`, carries no words: outside Cyber Pro a DANGEROUS call of it waits for its exact call on your
-  human's card, and in Cyber Pro its unread hold stays advice. An MCP tool is a declared read when its configured
-  server marks it `readOnlyHint: true`, otherwise `write`; that hint is trusted, so a server lying about a write runs
-  it unchecked, and Advises may call the tools a server marks read-only.
+  as `github_write`, declares no words (it can carry a comment body): outside Cyber Pro a DANGEROUS call of it waits
+  for its exact call on your human's card, and in Cyber Pro its unread hold stays advice. An MCP tool is a declared
+  read when its configured server marks it `readOnlyHint: true`, otherwise `write`; that hint is trusted, so a server
+  lying about a write runs it unchecked, and Advises may call the tools a server marks read-only.
 - `gesture` adds or removes a reaction-like response on one message, never speech, a pin or an edit. A focus sees its
   door beside the send doors, `message` prefilled only from `event.message.message_id`. With no send door a non-silent
   finish is still posted, so a reaction alone finishes `silent=true`.

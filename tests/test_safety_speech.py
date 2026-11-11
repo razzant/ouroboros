@@ -56,7 +56,8 @@ def test_flag_retry_and_changed_subject(supervisor, monkeypatch, mode, status, n
     assert len(h.calls) == 1
     # The same model call re-presenting the bytes (the host republishing a held reply) decides nothing new.
     ok, message = h.module.check_safety(name, dict(reversed(list(args.items()))), ctx=h.ctx)
-    assert not ok and message.startswith("⚠️ SAFETY_RETURNED: not run. This exact call was returned earlier in this same step")
+    assert not ok
+    assert message.startswith("⚠️ SAFETY_RETURNED: not run. This exact call was returned earlier in this same step")
     assert MIND in message and len(h.calls) == 1
     assert all(event["type"] != "safety_sent_despite_check" for event in h.events)
     h.later()

@@ -24,7 +24,7 @@ def paused_inventory(root, kind):
     if kind == "empty":
         rows = {}
     path.write_text(json.dumps({"schema_version": 1, "revision": 4, "places": rows}), encoding="utf-8")
-    return "Paused places (you do not write there; tasks are not affected): Research room, b." if rows else ""
+    return "Paused places (no writing there; tasks are not affected): Research room, b." if rows else ""
 
 
 @pytest.mark.parametrize("kind", ["paused", "empty", "unreadable"])
@@ -117,7 +117,8 @@ def test_migration_exact_sources_and_idempotence(tmp_path, monkeypatch, enabled)
                               PresenceEndpoint("slack", "team", "elsewhere"), enabled)
     save_presence_binding(root, binding)
     source = (root / "state" / "presence_bindings.json").read_bytes()
-    assert p.paused_places_sentence(root) == ("" if enabled else "Paused places (you do not write there; tasks are not affected): slack.")
+    assert p.paused_places_sentence(root) == (
+        "" if enabled else "Paused places (no writing there; tasks are not affected): slack.")
     assert not p.places_path(root).exists()
     assert (root / "state" / "presence_bindings.json").read_bytes() == source
     place, = p.load_places(root)

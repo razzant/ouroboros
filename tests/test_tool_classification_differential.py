@@ -97,7 +97,8 @@ APPROVED_DELTAS: Mapping[str, Delta] = MappingProxyType({
     # `_UNAVAILABLE` marker keeps its own status instead of the coarse error).
     "REVIEW_BINDING_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
     "REVIEW_STATE_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
-    "SAFETY_UNAVAILABLE": Delta(True, "error", True, "safety_unavailable", "A.18", "a missing Safety reading gets its own status name: no failure, named on the card"),
+    "SAFETY_UNAVAILABLE": Delta(True, "error", True, "safety_unavailable", "A.18",
+                                "a missing Safety reading gets its own status name: no failure, named on the card"),
     "SUBAGENT_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
     "EXTRACT_VIDEO_FRAMES_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
     "GH_TARGET_UNAVAILABLE": Delta(True, "error", True, "unavailable", "A.18", "unavailability gets its own status name; the report bucket is unchanged"),
@@ -484,7 +485,6 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     "OWNER_OPERATION_REFUSED": (True, "blocked"),
     "TOOL_ADMISSION_UNAVAILABLE": (True, "unavailable"),
     "STOP_ACTION_CONFLICT": (True, "blocked"),
-    "SAFETY_ADVICE": (False, "ok"),
     "LIGHT_MODE_REPO_CHANGED": (False, "ok"),
     "BROWSER_ACTION_OUTCOME_UNKNOWN": (True, "error"),
     # tools/vision.py `_no_image_route`: no configured model could take the image at all,

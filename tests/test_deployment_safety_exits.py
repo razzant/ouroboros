@@ -131,7 +131,8 @@ def test_declared_words_a_verdict_returned_leave_only_through_an_open_exit(super
     assert "the place note asks for a quiz first" in message
     assert (SAID[REPEAT] in message, SAID[HUMAN] in message, CLOSED in message) == (mind, card, closed)
     assert ("In this mode a DANGEROUS" in message, "deployment policy a DANGEROUS" in message) == (
-        card and mode != "cyber_pro", card and mode == "cyber_pro"), "whose rule makes it wait: the mode's or the policy's"
+        card and mode != "cyber_pro", card and mode == "cyber_pro"
+    ), "whose rule makes it wait: the mode's or the policy's"
     ok, message = h.module.check_safety(name, args, ctx=h.ctx)
     assert not ok and "returned earlier in this same step" in message, "the same model call decides nothing"
     h.later()
@@ -184,7 +185,8 @@ def test_an_action_a_verdict_returned_leaves_only_through_an_open_exit(superviso
 
 @pytest.mark.parametrize("mode", ["advanced", "cyber_pro"])
 @pytest.mark.parametrize("case", ["unmanaged", "none", "both"])
-def test_a_dangerous_command_waits_for_the_card_where_the_mind_does_not_decide(supervisor, exits, monkeypatch, case, mode):
+def test_a_dangerous_command_waits_for_the_card_where_the_mind_does_not_decide(
+        supervisor, exits, monkeypatch, case, mode):
     """A command read DANGEROUS returns once in every mode. Its identical call from a later model call is let through
     without a new reading only where the mind decides (Cyber Pro, the repeat open); elsewhere it waits for my human's
     card on the exact call, which releases it where that exit is open; closed, their answer earns one new reading."""
@@ -320,7 +322,8 @@ def test_a_verdict_larger_than_the_bound_is_kept_and_ends_the_hold_it_answered(
     h.replies.append({"status": "DANGEROUS", "reason": "Not delegated. " * 300})
     judged = registry.execute_result("fixture_send", {"text": "hello"}).text
     assert "first: DANGEROUS — Not delegated." in judged
-    assert not any(phrase in judged for phrase in ("TOO_LARGE", "not checked", "no verdict", "wait until a check", SAID[RELEASE]))
+    assert not any(phrase in judged
+                   for phrase in ("TOO_LARGE", "not checked", "no verdict", "wait until a check", SAID[RELEASE]))
     assert [event["verdicts"][0]["status"] for event in h.events if event["type"] == "safety_verdict"] == ["DANGEROUS"]
     context._current_llm_call_meta = {"llm_call_id": "llm-round-3"}
     third = registry.execute_result("fixture_send", {"text": "hello"})

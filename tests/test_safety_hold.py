@@ -50,7 +50,8 @@ def test_held_words_wait_in_cyber_pro_whatever_tool_carries_them(supervisor, mon
     else:
         monkeypatch.setattr(h.module, "_SAFETY_BUNDLE_BYTE_BUDGET", 10)
     held = "Issue the identical call again in a later step" if cause == "outage" else "A smaller call may fit"
-    reason = "its check failed: RuntimeError" if cause == "outage" else "the complete mandatory evidence bundle is too large"
+    reason = ("its check failed: RuntimeError" if cause == "outage"
+              else "the complete mandatory evidence bundle is too large")
     for words in ((name, {"path": "chat.postMessage", "body": {"channel": "C1", "text": "hi"}}),
                   ("mcp_slack__conversations_add_message", {"channel_id": "C1", "payload": "hi"})):
         ok, message = h.module.check_safety(*words, ctx=h.ctx)
