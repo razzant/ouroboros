@@ -9,7 +9,6 @@ import { apiClient, apiFetch } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { getContributions } from './contributions.js';
 import { mountDesktopShell } from './desktop_shell.js';
-import { renderAgentAccountsSection } from './harness_accounts.js';
 import { mountInterfaceSize } from './interface_size.js';
 import { modelRolesHost } from './model_roles.js';
 import { getNotifier } from './notifications.js';
@@ -19,7 +18,6 @@ import { readSkills, skillFormTitle, skillForms } from './settings_extension_for
 import { bindLanguageSettings, languageBlockHtml } from './settings_language.js';
 import { registerSettingsPage } from './settings_pages.js';
 import { applyPolicyToRows } from './settings_policy.js';
-import { PROVIDER_CARDS, providerSettingsCard } from './settings_provider_cards.js';
 import { rowById, rowsOf } from './settings_rows.js';
 import { mountRulesPage, refreshSafetySkipCounter, safetyFacts } from './settings_safety.js';
 import { getSpeech } from './speech_providers.js';
@@ -472,92 +470,8 @@ registerSettingsPage('computer/about', { title: 'About', mount: mountAbout });
 // the app starts, not when a page is opened: where an alert goes depends on them long before anyone opens Settings.
 if (globalThis.document) mountDesktopShell(null, (shell) => getNotifier().configure({ shell }));
 
-/* ---- What is left of the old tabs, unmounted, for the editor lanes: Accounts and Secrets (lane E3), Models, tool
-   servers and the local model (lane E2). Each lane rebuilds its section as a page and deletes it here. ----------- */
-
-function secretField({ id, settingKey, label, placeholder }) {
-    return `
-        <div class="form-field ui-field">
-            <label for="${id}">${label}</label>
-            <div class="secret-input-row">
-                <input id="${id}" name="${settingKey}" data-secret-setting="${settingKey}" class="secret-input ui-control" type="password" placeholder="${placeholder}">
-                <button type="button" class="btn btn-default secret-toggle" data-target="${id}">Show</button>
-                <button type="button" class="btn btn-default secret-clear" data-target="${id}">Clear</button>
-            </div>
-        </div>
-    `;
-}
-
-// Provider API keys have one input each, in Accounts; this tab keeps the other stored secrets.
-export const SECRET_KEYS = [
-    ['GITHUB_TOKEN', 'GitHub Token', 'ghp_...'],
-];
-
-export function secretSettingsSection() {
-    return `
-        ${settingsSection({
-            title: 'Stored Secrets',
-            lead: 'Tokens Ouroboros itself signs in with. Provider API keys are in Accounts.',
-            details: 'Tokens and the secrets skills request. Skills only receive grant-only keys after explicit human approval.',
-            body: `<div class="form-grid two">
-                ${SECRET_KEYS.map(([key, label, placeholder]) => secretField({
-                    id: `s-secret-${key.toLowerCase().replace(/_/g, '-')}`,
-                    settingKey: key,
-                    label,
-                    placeholder,
-                })).join('')}
-            </div>`,
-        })}
-        ${settingsSection({
-            title: 'Requested By Skills',
-            lead: 'Keys installed skills asked for, each under the skill that needs it.',
-            details: 'Secrets requested by installed skills appear here only when a skill asks for them.',
-            body: `<div id="skill-requested-secrets" class="settings-secret-list">
-                <div class="muted">No skill-requested secrets.</div>
-            </div>`,
-        })}
-        ${settingsSection({
-            title: 'Custom Keys',
-            lead: 'Keys of your own that skills may read.',
-            details: 'Optional key/value storage for future skills. Use uppercase names such as <code>SLACK_WEBHOOK_URL</code>.',
-            actions: '<button type="button" class="btn btn-default" id="btn-add-custom-secret">Add custom key</button>',
-            body: '<div id="custom-secrets-list" class="settings-secret-list settings-custom-secret-list"></div>',
-        })}
-    `;
-}
-
-export function accountsPanel() {
-    const moreHint = PROVIDER_CARDS.filter((card) => card.advanced).map((card) => card.title).join(', ');
-    return `
-        ${renderAgentAccountsSection()}
-        ${settingsSection({
-            title: 'API keys',
-            lead: 'Each role names the key it uses; keys never rotate. For a second key of the same model, add it as a fallback.',
-            body: `${PROVIDER_CARDS.filter((card) => !card.advanced).map(providerSettingsCard).join('')}
-            <details class="settings-more-providers ui-disclosure" id="settings-more-providers">
-                <summary>
-                    <span class="settings-provider-title"><span>More providers</span></span>
-                    <span class="settings-provider-hint">${moreHint}</span>
-                </summary>
-                <div class="settings-more-providers-body">
-                    ${PROVIDER_CARDS.filter((card) => card.advanced).map(providerSettingsCard).join('')}
-                </div>
-            </details>`,
-        })}
-        ${settingsSection({
-            title: 'Legacy Compatibility',
-            lead: 'An older OpenAI-style endpoint, for installs that still use one.',
-            details: 'Backward-compatibility escape hatch for older installs. For new custom providers, use the dedicated <strong>OpenAI Compatible</strong> card instead.',
-            body: `<div class="form-row">
-                <div class="form-field ui-field">
-                    <label for="s-openai-base-url">Legacy OpenAI Base URL</label>
-                    <input id="s-openai-base-url" placeholder="https://api.openai.com/v1 or compatible endpoint" class="ui-control" name="s-openai-base-url" type="text">
-                    <div class="settings-inline-note" data-legacy-base-url-fixed hidden></div>
-                </div>
-            </div>`,
-        })}
-    `;
-}
+/* ---- What is left of the old tabs, unmounted, for the editor lane that takes it: Models, tool servers and the local
+   model (lane E2). It rebuilds each section as a page and deletes it here. ------------------------------------------- */
 
 export function modelsPanel() {
     return `
@@ -596,7 +510,7 @@ export function modelsPanel() {
     `;
 }
 
-// Tool servers, the repository and the local model, as the Advanced tab drew them.
+// Tool servers and the local model, as the Advanced tab drew them.
 export function advancedPanel() {
     return `
         ${settingsSection({
@@ -618,18 +532,6 @@ export function advancedPanel() {
             </div>
             <div id="mcp-global-status" class="settings-inline-status">Checking MCP status…</div>
             <div id="mcp-servers-list" class="mcp-servers-list"></div>`,
-        })}
-
-        ${settingsSection({
-            title: 'Source Control',
-            lead: 'The GitHub repository Ouroboros works in.',
-            details: 'Repository metadata for GitHub integration. Tokens live in Secrets; this is not secret.',
-            body: `<div class="form-row">
-                <div class="form-field ui-field">
-                    <label for="s-gh-repo">GitHub Repo</label>
-                    <input id="s-gh-repo" placeholder="owner/repo-name" class="ui-control" name="s-gh-repo" type="text">
-                </div>
-            </div>`,
         })}
 
         ${settingsSection({

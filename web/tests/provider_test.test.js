@@ -9,10 +9,12 @@ import {
     reachesAnotherPair,
 } from '../modules/settings_connections.js';
 import { cyberReviewNote } from '../modules/settings_policy.js';
-import { accountsPanel, advancedPanel, modelsPanel, secretSettingsSection } from '../modules/settings_ui.js';
+import { PROVIDER_CARDS, providerSettingsCard } from '../modules/settings_provider_cards.js';
+import { advancedPanel, modelsPanel } from '../modules/settings_ui.js';
 
-// The old tabs' sections settings_ui.js still holds for the editor lanes, unmounted until their pages are rebuilt.
-const renderSettingsPage = () => [accountsPanel(), secretSettingsSection(), modelsPanel(), advancedPanel()].join('');
+// Setup's provider cards (every key as a row with its form), and the old tabs' sections settings_ui.js still holds
+// for the editor lanes, unmounted until their pages are rebuilt.
+const renderSettingsPage = () => [PROVIDER_CARDS.map(providerSettingsCard).join(''), modelsPanel(), advancedPanel()].join('');
 
 test('provider test status uses only the controlled compact vocabulary', () => {
     assert.equal(providerTestStatusText({ ok: true }), 'Works');
