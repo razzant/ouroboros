@@ -532,6 +532,7 @@ def connect_clock(monkeypatch):
     clock = SimpleNamespace(now=0.0)
     monkeypatch.setattr(service, "time", SimpleNamespace(
         monotonic=lambda: clock.now, sleep=lambda delay: setattr(clock, "now", clock.now + delay)))
+    monkeypatch.setattr("ouroboros.gateways.claudexor_maintenance.time", service.time)
     monkeypatch.setattr(config, "get_claudexor_harness_install_timeout_sec", lambda: 3)
     return clock
 
@@ -553,7 +554,7 @@ def test_connect_waits_on_the_same_operation_without_inventory_or_recreation(own
     assert len(submitted) == 1
     assert submitted[0][0] == {"harness": "future-program", "target": {"kind": "latest"}}
     assert submitted[0][1]
-    assert observed == [(accepted["id"], {"timeout_sec": 2.0}), (accepted["id"], {"timeout_sec": 1.0})]
+    assert observed == [(accepted["id"], {"deadline": 3.0}), (accepted["id"], {"deadline": 3.0})]
     assert connect_clock.now == 2 and not owned.calls
     assert owned.budgets == [{"timeout_sec": 2.0}, {"timeout_sec": 1.0}]
 
@@ -570,7 +571,8 @@ def test_connect_rejects_a_settled_receipt_without_selected_version_evidence(own
         service.install_for_connect("future-program")
     assert failure.value.code == "harness_install_unverified"
     assert failure.value.problem["context"]["operation"] == receipt
-    assert receipt["id"] in str(failure.value)
+    assert receipt["id"] not in str(failure.value)
+    assert f"{receipt['harness']} in Settings, Accounts" in str(failure.value)
     assert not owned.calls and connect_clock.now == 0
 
 
@@ -582,31 +584,25 @@ def test_connect_accepts_a_selected_program_that_answers_version_without_orderin
     assert not owned.calls and connect_clock.now == 0
 
 
-@pytest.mark.parametrize("cancel_lost", [False, True])
-def test_connect_timeout_keeps_unconfirmed_custody_and_never_claims_cancelled(owned, connect_clock, cancel_lost):
-    receipt = connected_program(state="cancelled", termination="unconfirmed", after=None)
-    cancels, reads = [], []
+@pytest.mark.parametrize("termination", ["confirmed", "unconfirmed"])
+def test_connect_deadline_preserves_the_durable_install_without_cancel(owned, connect_clock, termination):
+    receipt = connected_program(state="running", termination=termination, after=None)
+    reads = []
     owned.gateway.maintenance_create = lambda *_a: receipt
     owned.gateway.maintenance_operation = lambda identity, **kw: reads.append(identity) or receipt
-
-    def cancel(identity, **kwargs):
-        cancels.append((identity, kwargs))
-        if cancel_lost:
-            raise ClaudexorUnavailable("daemon_unreachable", "cancel reply lost")
-        return receipt
-
-    owned.gateway.maintenance_cancel = cancel
+    owned.gateway.maintenance_cancel = lambda *_a, **_kw: pytest.fail("Connect expiry cannot cancel")
     with pytest.raises(ClaudexorUnavailable) as failure:
         service.install_for_connect("future-program")
     assert failure.value.code == "harness_install_timeout"
-    assert failure.value.problem["context"]["operation"]["termination"] == "unconfirmed"
-    assert cancels == [(receipt["id"], {"timeout_sec": 5})]
+    assert failure.value.problem["context"]["operation"] == receipt
+    assert "installation is still pending" in str(failure.value)
+    assert receipt["id"] not in str(failure.value)
     assert len(reads) == 2 and connect_clock.now == 3
-    assert owned.budgets == [{"timeout_sec": 2.0}, {"timeout_sec": 1.0}, {"timeout_sec": 5}]
+    assert owned.budgets == [{"timeout_sec": 2.0}, {"timeout_sec": 1.0}]
 
 
 @pytest.mark.parametrize("failure_at", ["create", "read"])
-def test_connect_does_not_repeat_an_unanswered_submission_or_observation(owned, connect_clock, failure_at):
+def test_connect_repeats_only_unanswered_reads_until_the_deadline(owned, connect_clock, failure_at):
     calls = []
     receipt = connected_program(state="running", phase="installing", after=None)
 
@@ -627,7 +623,7 @@ def test_connect_does_not_repeat_an_unanswered_submission_or_observation(owned, 
         service.install_for_connect("future-program")
     facts = failure.value.problem["context"]
     assert facts["requestId"] == calls[0][2]
-    assert [call[0] for call in calls] == (["create"] if failure_at == "create" else ["create", "read"])
+    assert [call[0] for call in calls] == (["create"] if failure_at == "create" else ["create", "read", "read"])
     if failure_at == "create":
         assert facts["acceptance"] == "unknown"
     else:
@@ -666,3 +662,139 @@ def test_old_engine_cannot_receive_any_vendor_contract_request(client, monkeypat
         with pytest.raises(ClaudexorUnavailable, match="Program inspection unavailable"):
             service.install_for_connect("agy") if surface == "connect" else service.inspect_harnesses()
     assert seen == []
+
+
+@pytest.fixture
+def connect_socket(monkeypatch):
+    """Private HTTP server, real gateway/clock/login route; no engine or vendor process."""
+    from collections import Counter
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+    import time
+    from ouroboros import config, claudexor_daemon, harness_program_facts
+    from ouroboros.gateway import claudexor_accounts
+    from ouroboros.gateways import claudexor as wire
+    from tests.test_harness_maintenance_transport import OPERATIONS
+
+    state = dict(mode="success", installed=False, version="6.0.0", keys=[], calls=Counter())
+    receipt = connected_program(state="running", after=None, termination="not_applicable")
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_): pass
+        def respond(self):
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            path = self.path.split("?", 1)[0]
+            state["calls"][path] += 1
+            status = 200
+            if state["mode"] == "slow_phases" and path != "/v2/maintenance/operations" and state["keys"]:
+                time.sleep(0.8)  # Each phase fits the old allowance, their sum does not.
+            if path == "/v2/handshake":
+                body = {"compatible": True, "protocolMajor": wire.CLAUDEXOR_PROTOCOL_MAJOR,
+                        "engine": {"version": state["version"]}}
+            elif path == "/v2/operations":
+                body = {"operations": [{"id": value} for value in OPERATIONS]}
+            elif path == "/v2/agent-capabilities":
+                body = {"harnesses": [{"id": "future-program", "setupLogin": None}]}
+            elif path == "/v2/setup/jobs":
+                body = {"jobId": "setup-fixture", "harness": "future-program", "action": "login",
+                        "state": "queued" if state["installed"] else "not_supported", "phase": "completed",
+                        "outcome": {"reason": "not_supported"}, "command": None}
+            elif path == "/v2/maintenance/operations":
+                state["keys"].append(self.headers["Idempotency-Key"])
+                if state["mode"] == "lost_create":
+                    if len(state["keys"]) == 1:
+                        self.close_connection = True
+                        return  # Accepted, but the response never arrives.
+                    status, body = 409, {"code": "maintenance_already_active", "message": "Already installing",
+                                        "context": {"operationId": receipt["id"]}}
+                else:
+                    body = receipt
+            elif path == "/v2/maintenance/operations/" + receipt["id"]:
+                if state["mode"] == "slow_read":
+                    time.sleep(4)
+                if state["mode"] == "lost_read" and state["calls"][path] == 1:
+                    self.close_connection = True
+                    return
+                body = receipt if state["mode"] in {"slow_read", "slow_phases", "running"} else connected_program()
+                state["installed"] = body["state"] == "succeeded"
+            else:
+                status, body = 500, {"code": "unexpected_request", "message": path}
+            raw = json.dumps(body).encode()
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        do_GET = do_POST = respond
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = False
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    endpoint = wire.DaemonEndpoint("127.0.0.1", server.server_port, "fixture-only-token")
+    def acquire(**kwargs):
+        gateway = wire.ClaudexorGateway(endpoint)
+        try:
+            gateway.handshake(**kwargs)
+            return gateway
+        except Exception:
+            gateway.close()
+            raise
+    monkeypatch.setattr(service, "ensure_owned_gateway", acquire)
+    monkeypatch.setattr(service, "read_owned_gateway", acquire)
+    monkeypatch.setattr(claudexor_daemon, "ensure_owned_gateway", acquire)
+    monkeypatch.setattr(config, "get_claudexor_harness_install_timeout_sec", lambda: 3)
+    monkeypatch.setattr(harness_program_facts, "_request", lambda *_: None)
+    try:
+        with TestClient(Starlette(routes=[Route("/api/claudexor/login", claudexor_accounts.api_claudexor_login, methods=["POST"])])) as client:
+            yield state, client
+    finally:
+        server.shutdown(); server.server_close(); thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
+@pytest.mark.parametrize("mode", ["slow_read", "slow_phases", "running", "success", "lost_read"])
+def test_connect_real_socket_deadline_and_read_recovery(connect_socket, mode):
+    import time
+    state, client = connect_socket
+    state["mode"] = mode
+    started = time.monotonic()
+    response = client.post("/api/claudexor/login", json={"harness": "future-program"})
+    elapsed = time.monotonic() - started
+    assert not any(path.endswith("/cancel") for path in state["calls"])
+    assert len(state["keys"]) == 1
+    if mode in {"success", "lost_read"}:
+        assert response.status_code == 200, response.json()
+        assert state["calls"]["/v2/setup/jobs"] == 2
+        assert state["calls"]["/v2/maintenance/operations/maintenance-one"] == (2 if mode == "lost_read" else 1)
+    else:
+        assert response.status_code == 503, response.json()
+        assert response.json()["code"] == "harness_install_timeout"
+        assert "future-program in Settings, Accounts" in response.json()["error"]
+        assert "maintenance-one" not in response.json()["error"]
+        assert state["calls"]["/v2/setup/jobs"] == 1
+        assert 3 <= elapsed < 3.6, elapsed
+
+
+def test_login_keeps_lost_acceptance_then_joins_the_active_operation_on_next_connect(connect_socket):
+    state, client = connect_socket
+    state["mode"] = "lost_create"
+    first = client.post("/api/claudexor/login", json={"harness": "future-program"})
+    assert first.status_code == 503
+    assert first.json()["context"]["acceptance"] == "unknown"
+    assert first.json()["context"]["requestId"] == state["keys"][0]
+    second = client.post("/api/claudexor/login", json={"harness": "future-program"})
+    assert second.status_code == 200, second.json()
+    assert len(set(state["keys"])) == 2
+    assert state["calls"]["/v2/maintenance/operations/maintenance-one"] == 1
+    assert state["calls"]["/v2/setup/jobs"] == 3
+
+
+def test_real_login_on_old_engine_sends_no_vendor_maintenance_requests(connect_socket):
+    state, client = connect_socket
+    state["version"] = "5.1.0"
+    response = client.post("/api/claudexor/login", json={"harness": "future-program"})
+    assert response.status_code == 503 and response.json()["code"] == "maintenance_unavailable"
+    assert "Update the app" in response.json()["error"]
+    assert not any(path.startswith("/v2/maintenance") for path in state["calls"])

@@ -204,5 +204,5 @@ def test_connect_receipt_reads_bound_catalog_and_operation_calls(client, cancel)
     gateway, seen = client(lambda _request: httpx.Response(200, json=OPERATION))
     call = gateway.maintenance_cancel if cancel else gateway.maintenance_operation
     assert call(OPERATION["id"], timeout_sec=0.75) == OPERATION
-    assert all(request.extensions["timeout"] == dict(connect=0.75, read=0.75, write=0.75, pool=0.75)
-               for request in seen)
+    assert all(0 < value <= 0.75 for request in seen for value in request.extensions["timeout"].values())
+    assert seen[-1].extensions["timeout"]["read"] < seen[0].extensions["timeout"]["read"]

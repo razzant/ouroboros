@@ -418,7 +418,7 @@ Disclosed isolation residuals: a non-owner orphan's verdict stays with its dispo
 
 ### Vendor program maintenance
 
-`harness_maintenance.py` serves Accounts, Connect and tools; `gateways/claudexor_maintenance.py` passes engine selection/actions/receipts. Authority/Pause apply; no automatic update, version ordering or job ledger. Connect needs selected-version evidence before one login retry. Unknown POST keeps key/body; later refusal covers only that attempt.
+`harness_maintenance.py` serves Accounts, Connect and tools through the engine-6.0.0 transport floor. Authority/Pause apply; no automatic update, version ordering or job ledger. Connect joins active installs, shares one read deadline, cancels nothing at expiry and requires selected-version evidence before one login retry. Unknown POSTs retain key/body/context.
 
 `harness_program_facts.py` saves inventory in `state/harness_programs.json`. Shared claims spend one attempt per engine generation or settlement, even on failure; locks cover only file work. No timer. Context reads only this file: “not observed”, or installed/newest facts with selection and newest-read dates, shared when equal. PERSISTENCE owns lifetime.
 

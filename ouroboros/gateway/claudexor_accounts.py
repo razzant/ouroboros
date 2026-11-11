@@ -833,7 +833,11 @@ def _login_create(body: Dict[str, Any]) -> Dict[str, Any]:
         from ouroboros.harness_maintenance import install_for_connect
 
         if _is_immediate_missing_cli_job(job, harness):
-            install_for_connect(harness)
+            try:
+                install_for_connect(harness)
+            except ClaudexorUnavailable as exc:
+                exc.maintenance_verdict = True
+                raise
             job = _create()
     job_id = str(job.get("id") or job.get("jobId") or "")
     metadata: Dict[str, Any] = {
@@ -860,6 +864,11 @@ async def api_claudexor_login(request: Request) -> JSONResponse:
     except ValueError as exc:
         return json_error(str(exc), 400)
     except ClaudexorUnavailable as exc:
+        if getattr(exc, "maintenance_verdict", False):
+            from ouroboros.harness_maintenance import maintenance_problem
+            status, payload = maintenance_problem(exc)
+            problem = payload["error"]
+            return json_error(problem.pop("message", str(exc)), status, **problem)
         status = int(getattr(exc, "status_code", 0) or 0)
         profile_verdict = bool(getattr(exc, "login_profile_verdict", False))
         create_verdict = bool(getattr(exc, "login_create_verdict", False))

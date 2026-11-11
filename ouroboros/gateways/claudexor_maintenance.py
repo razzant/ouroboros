@@ -7,6 +7,7 @@ the retention record's read is a fifth, read-only route, and the project list's 
 """
 from __future__ import annotations
 
+import time
 from urllib.parse import quote, urlencode
 
 
@@ -14,6 +15,17 @@ def supports_program_maintenance(gateway) -> bool:
     from ouroboros.gateways.claudexor import engine_at_least
 
     return engine_at_least(str(getattr(gateway, "engine_version", "") or ""), "6.0.0")
+
+
+def maintenance_remaining(deadline):
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    if deadline is None:
+        return None
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ClaudexorUnavailable("observation_timeout", "The maintenance observation deadline expired")
+    return remaining
 
 
 def maintenance_request_id(value: str) -> str:
@@ -53,7 +65,13 @@ class ClaudexorMaintenanceGateway:
                                       status_code=503)
 
     def _maintenance_request(self, operation: str, method: str, path: str, **kwargs):
-        self._maintenance_require(operation, timeout_sec=kwargs.get("timeout_sec"))
+        timeout = kwargs.pop("timeout_sec", None)
+        deadline = kwargs.pop("deadline", None)
+        if deadline is None and timeout is not None:
+            deadline = time.monotonic() + timeout
+        self._maintenance_require(operation, timeout_sec=maintenance_remaining(deadline))
+        if deadline is not None:
+            kwargs["timeout_sec"] = maintenance_remaining(deadline)
         return self._request(method, path, **kwargs)
 
     def maintenance_harnesses(self, harnesses=(), *, fresh=False, check_latest=False) -> dict:
@@ -130,10 +148,10 @@ class ClaudexorMaintenanceGateway:
             raise ClaudexorUnavailable("malformed_response", "Claudexor retention record is missing")
         return body
 
-    def maintenance_operation(self, operation_id: str, *, timeout_sec=None) -> dict:
+    def maintenance_operation(self, operation_id: str, *, timeout_sec=None, deadline=None) -> dict:
         return self._maintenance_operation(self._maintenance_request(
             "get:maintenance.operations.id", "GET",
-            "/v2/maintenance/operations/" + quote(operation_id, safe=""), timeout_sec=timeout_sec), operation_id)
+            "/v2/maintenance/operations/" + quote(operation_id, safe=""), timeout_sec=timeout_sec, deadline=deadline), operation_id)
 
     def maintenance_cancel(self, operation_id: str, *, timeout_sec=None) -> dict:
         return self._maintenance_operation(self._maintenance_request(

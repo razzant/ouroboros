@@ -15,7 +15,7 @@ from contextlib import ExitStack
 
 from ouroboros.claudexor_daemon import ensure_owned_gateway, read_owned_gateway
 from ouroboros.gateways.claudexor import ClaudexorUnavailable
-from ouroboros.gateways.claudexor_maintenance import maintenance_request_id
+from ouroboros.gateways.claudexor_maintenance import maintenance_request_id, maintenance_remaining
 from ouroboros.harness_program_facts import observe_inventory, operation_observed
 from ouroboros.utils import utc_now_iso
 
@@ -105,12 +105,15 @@ def inspect_harnesses(harnesses=(), *, fresh=False, check_latest=False, ctx=None
             raise
 
 
-def inspect_operation(operation_id: str, *, ctx=None, timeout_sec=None) -> dict:
+def inspect_operation(operation_id: str, *, ctx=None, timeout_sec=None, deadline=None) -> dict:
     _authority(ctx)
     _operation_id(operation_id)
-    options = {"timeout_sec": timeout_sec} if timeout_sec is not None else {}
+    if deadline is None and timeout_sec is not None:
+        deadline = time.monotonic() + timeout_sec
+    options = {"timeout_sec": maintenance_remaining(deadline)} if deadline is not None else {}
     with read_owned_gateway(**options) as gateway:
-        return operation_observed(gateway, gateway.maintenance_operation(operation_id, **options))
+        return operation_observed(gateway, gateway.maintenance_operation(
+            operation_id, **({"deadline": deadline} if deadline is not None else {})))
 
 
 def _operation_id(value):
@@ -163,33 +166,34 @@ def cancel_maintenance(operation_id: str, *, ctx=None, timeout_sec=None) -> dict
 def install_for_connect(harness: str) -> dict:
     """One explicit Connect install, bounded by the existing installer wait ceiling.
 
-    The engine keeps process custody and the receipt. No retry of creation, login,
-    or a failed observation happens here. A timeout requests cancellation but does
-    not claim termination; Accounts can still recover the retained operation.
+    Repeat only unanswered reads; another explicit Connect joins an active install.
+    The engine keeps custody after this observer's deadline; expiry cancels nothing.
     """
     from ouroboros.config import get_claudexor_harness_install_timeout_sec
 
     request_id = str(uuid.uuid4())
-    operation = start_maintenance({"harness": harness, "target": {"kind": "latest"}}, request_id)
+    try:
+        operation = start_maintenance({"harness": harness, "target": {"kind": "latest"}}, request_id)
+    except ClaudexorUnavailable as exc:
+        identity = ((getattr(exc, "problem", None) or {}).get("context") or {}).get("operationId")
+        if exc.code != "maintenance_already_active" or not isinstance(identity, str) or not identity:
+            raise
+        operation = {"id": identity, "harness": harness, "state": "queued", "termination": "not_applicable"}
     identity = operation["id"]
     deadline = time.monotonic() + get_claudexor_harness_install_timeout_sec()
     while operation["state"] in {"queued", "running"} or operation["termination"] == "unconfirmed":
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            try:
-                operation = cancel_maintenance(identity, timeout_sec=5)
-            except ClaudexorUnavailable:
-                pass  # The last receipt remains evidence; a lost cancel proves nothing.
             raise _connect_install_problem(operation, request_id, "harness_install_timeout",
-                                           "Program installation did not settle within the Connect wait")
+                                           f"{harness} installation is still pending")
         time.sleep(min(1, remaining))
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             continue
         try:
-            operation = inspect_operation(identity, timeout_sec=min(5, remaining))
-        except ClaudexorUnavailable as exc:
-            raise _connect_install_problem(operation, request_id, exc.code, str(exc)) from exc
+            operation = inspect_operation(identity, deadline=min(deadline, time.monotonic() + 5))
+        except ClaudexorUnavailable:
+            continue  # A repeated GET cannot create or cancel an operation.
     selected = operation.get("after") or {}
     if (operation["harness"] != harness or operation["state"] != "succeeded"
             or not all(isinstance(selected.get(field), str) and selected[field].strip()
@@ -202,7 +206,7 @@ def install_for_connect(harness: str) -> dict:
 
 def _connect_install_problem(operation, request_id, code, message):
     identity = operation["id"]
-    error = ClaudexorUnavailable(code, f"{message}. Inspect operation {identity} in Accounts", status_code=503)
+    error = ClaudexorUnavailable(code, f"{message}. See {operation['harness']} in Settings, Accounts", status_code=503)
     error.problem = {"code": code, "message": str(error), "context": {
         "operationId": identity, "requestId": request_id, "operation": copy.deepcopy(operation)}}
     return error
