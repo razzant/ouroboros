@@ -228,8 +228,21 @@ On a failed or unknown save, retain the form and read the attempt back as above;
 A fallback names its chain row in `role` (`fallback:<index>`); equal models on different accounts remain distinct.
 `primary` appears only away from the primary; `since` and `cause` date only fallback/mind departures.
 A requested return stays fallback until the primary answers. Queued roots use their admitted carrier;
-a recorded follow reads Main now. `pending` names a follower's next route after Settings moved it,
+a recorded follow reads Main now. `pending` names an accepted owner act awaiting application or a follower's next route after Settings moved it,
 without changing the acting model. Missing facts remain unknown; there is no cost field.
+
+Running and queued roots with a durable record offer `{action: "model", target: "<task_id>"}` in `works[].controls`.
+`POST /api/tasks/{task_id}/model` accepts `{request_id, action: "set"|"follow"|"return"|"wait"|"keep", model?, use_local?}`;
+only `set` takes model/locality. The response is `200 {ok: true, task_id, applied: "next_step"|"at_start", lead}`.
+Set/keep make an owner primary and record a recent model; follow returns to Main. Return/wait/keep require a fallback.
+The durable record wins over mail order and saved routes; retry the same `request_id` for the same acknowledgement,
+including after another press. Unknown/finished work (`task_not_live`), children (`not_a_root_task`), Presence
+(`presence_model_unsupported`), absent durable records (`model_control_unavailable`), invalid requests/models
+(`task_model_invalid`), missing ids (`request_id_required`) and incompatible state (`model_action_state`) are typed refusals.
+A failed wake/queue publication or recent-model write answers 503 with `model_wake_failed`,
+`model_queue_publish_failed` or `model_recents_pending`; the primary may already be saved, so reuse the request id.
+Direct turns without a durable record, Presence and portals offer no model control. The agent browser cannot press
+this endpoint or `/api/owner/chat-model` outside unrestricted agency.
 
 - **Projects:** `projects` (a capped feed; all: `GET /api/projects?all=1`), `project_messages_revision` (opaque token of listable Project dates, not Main/place-only messages; `null` while undated), `project_listable_count` (listable active/deleting rows; `null` when unreadable) and `project_chat_ids` (every reservation, tombstones too, for room isolation).
 - **Task bindings:** `task_bindings` (bound task → its project) and its opaque `task_bindings_revision` (`""` after a failed read: hold nothing). `?bindings_since=<revision>` answers `task_bindings: null` and `task_bindings_unchanged: true` while that revision stands; without it the map always comes whole.

@@ -133,7 +133,8 @@ def test_the_next_real_input_names_both_bindings_the_failure_and_the_answering_c
             "engine billing unknown; tariff unknown.") in facts
     for absent in ("$12.5", "included", "$0.00", "subscription", "metered", "free", "No catalog check"):
         assert absent not in facts, absent
-    assert "No timer returns this task" in facts and 'switch_model(primary="wait")' in facts
+    assert "No timer returns this task" in facts
+    assert "switch_model(" not in facts  # the switch reports facts, without telling the mind what to do
     assert quiet_primary == []  # no catalog fetch for the facts, and no estimate was needed
 
 

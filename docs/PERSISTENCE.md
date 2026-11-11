@@ -340,6 +340,23 @@ new departure replaces it, and the enclosing continuation's existing retirement 
 frame folds onto one RUNNING/direct activity record and disappears with that record; readers add `pending`
 without persistence.
 
+`owner_model.admit` writes `metadata.lead` and the host-owned task-document `owner_model` under the queue lock;
+the queue row mirrors them. The latter holds the latest `request_id`/`action`, a `recent_recorded` completion bit
+for the existing preferences writer, and `receipts` indexed by every accepted request id. A repeat, including an
+older id after a newer act, returns its original receipt and cannot replace the primary. The current decision is
+constant size; receipts grow with distinct owner presses (normally 0.3–2 KB each; ids are at most 128 characters,
+chosen routes at most 400). They live with the task document, including terminal history; no independent remover
+or expiry drops idempotency. Existing task-document retention/archiving owns their lifetime.
+
+`KIND_OWNER_MODEL` (`owner_model`) adds a typed mailbox wake with the internal text `owner_model`, no route value
+or owner prose. Each append is normally under 300 bytes, plus its acknowledgement; exact retries may append the
+same id and the drain deduplicates it. The existing `task_custody.settle_task_mailbox` retirement above removes
+these rows with the task's settled mail. A wake reads the current durable decision before applying it. The route
+checkpoint adds only `_owner_model_applied_id` (at most 128 characters), removed with that checkpoint. Even after
+the mail ACK and before a new checkpoint, restore rereads the document. Terminal worker merges preserve the
+carrier and decision; Continue copies the carrier. The live `work_lead.lead_request_id` acknowledgement retires
+the computed pending route and is discarded with RUNNING; it is not a public lead field or a second authority.
+
 ## Reset ladder (summary)
 
 Recreated caches: `state/pycache.noindex`, `state/code_intel`,

@@ -8,7 +8,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 
 | domain | name | modules | proposed |
 |---|---|---:|---:|
-| D01 | Agent core & main loop | 65 | 0 |
+| D01 | Agent core & main loop | 67 | 0 |
 | D02 | LLM client, routing & providers | 48 | 0 |
 | D03 | Context assembly, fit & compaction | 34 | 0 |
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
@@ -18,7 +18,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D08 | Supervisor: queue, workers, events & runtime control | 76 | 0 |
 | D09 | Cancellation, owner control & process custody | 27 | 0 |
 | D10 | Git, update & release machinery | 40 | 0 |
-| D11 | Gateway, server & Web UI | 116 | 0 |
+| D11 | Gateway, server & Web UI | 117 | 0 |
 | D12 | Settings & configuration | 28 | 0 |
 | D13 | Safety, guards & runtime mode | 12 | 0 |
 | D14 | Skills & extensions | 73 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 40 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 26 | 0 |
-| **total** | | **1018** | **0** |
+| **total** | | **1021** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -65,7 +65,7 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
 
 ## Hidden coupling (classified out of the strict graph)
 
-- lazy-only cross-domain pairs: **128**
+- lazy-only cross-domain pairs: **129**
   - D01->D08
   - D01->D10
   - D01->D11
@@ -132,6 +132,7 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
   - D10->D11
   - D10->D14
   - D10->D15
+  - D12->D01
   - D12->D05
   - D12->D06
   - D12->D09
@@ -238,6 +239,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/loop_nudges.py`
 - `ouroboros/loop_output_exhaustion.py`
 - `ouroboros/loop_round_limits.py`
+- `ouroboros/loop_routes.py`
 - `ouroboros/loop_tool_execution.py`
 - `ouroboros/loop_transport.py`
 - `ouroboros/model_detach.py`
@@ -248,6 +250,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/outcomes.py`
 - `ouroboros/owner_continue.py`
 - `ouroboros/owner_mailbox.py`
+- `ouroboros/owner_model.py`
 - `ouroboros/owner_pause.py`
 - `ouroboros/owner_relay.py`
 - `ouroboros/owner_wait.py`
@@ -892,6 +895,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/gateway/task_decision.py`
 - `ouroboros/gateway/task_events.py`
 - `ouroboros/gateway/task_hurry.py`
+- `ouroboros/gateway/task_model.py`
 - `ouroboros/gateway/task_model_wait.py`
 - `ouroboros/gateway/task_owner_keep.py`
 - `ouroboros/gateway/task_pause.py`

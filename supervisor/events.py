@@ -158,6 +158,7 @@ def _handle_work_lead(evt: Dict[str, Any], ctx: Any) -> None:
         direct.lead = dict(fact)
     else:
         meta["lead"] = dict(fact)
+        meta["_lead_request_id"] = evt.get("lead_request_id")
 
 
 def _handle_main_llm_call_state(evt: Dict[str, Any], ctx: Any) -> None:

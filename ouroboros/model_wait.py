@@ -978,8 +978,10 @@ class TaskModelWait:
         try:
             self._publish(row)
             while True:
+                from ouroboros.owner_model import waiting_wake
+
                 control = ("caller_cancelled" if caller_cancel is not None and caller_cancel.is_set()
-                           else self.control_reason() or self.pre_dispatch_pause())
+                           else self.control_reason() or self.pre_dispatch_pause() or waiting_wake(self))
                 callback = kwargs.get("model_poll_control")
                 if not control and callback is not None:
                     control = callback()

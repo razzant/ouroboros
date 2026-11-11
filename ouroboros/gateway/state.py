@@ -668,6 +668,7 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
                     or (meta.get("task") or {}).get("_attempt") or 1),
                     "model_activity": (meta.get("active_llm_call") or {}).get("model_activity"),
                     "context_attempt": meta.get("context_attempt"), "lead": meta.get("lead"),
+                    "_lead_request_id": meta.get("_lead_request_id"),
                     "turn_phase": meta.get("turn_phase"), "_census_carrier": "worker" if meta.get(
                         "worker_id") is not None else "",
                     "owner_wait": dict(meta.get("owner_wait") or {}),

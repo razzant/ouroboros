@@ -245,9 +245,9 @@ Caller-owned `llm_claudexor.ModelTurnState` carries the opaque live-turn token t
 
 #### Configured routes and primary return
 
-`model_slots.route_binding` names model/locality/account or Auto. `route_choice.initial_round_route` records the primary. `following(role)` rereads its live binding each round through sanitize/fit handover; `explicit(source)` stays. The continuation `route` block retains that choice; `classify_legacy` names the policy for older checkpoints. The primary survives failed fallbacks; `model_lane_attempt` means trying, ordinary progress adoption or last attempt.
+`model_slots.route_binding` names model/locality/account or Auto. `route_choice.initial_round_route` records the primary. `following(role)` rereads its live binding each round through sanitize/fit handover; `explicit(source)` stays. The primary survives failed fallbacks; `model_lane_attempt` means trying, ordinary progress adoption or last attempt.
 
-`lead_fact.py` builds and change-publishes `work_lead`: acting route, chooser, departed primary, and a fallback/mind departure's date/cause. The census, works, routing manifest and round facts share it; projection adds a moved follower's pending route. A requested return stays on fallback until the primary's own reply is accepted. Delegated actors publish no new fact.
+`lead_fact.py` publishes `work_lead` (CLIENT_CONTRACT §5). `owner_model.py`/`loop_routes.py` apply durable owner primaries before dispatch (PERSISTENCE).
 
 `primary_route_observation.py` renders one `[ROUTE FACTS]` per host switch, naming the primary's chooser. Changed, dated, non-generating metadata (quota too) shares 3 s. Cognition chooses stay, `switch_model(primary="return")` (CURRENT primary; request and outcome separate) or `primary="wait"`. Return resumes `held_primary_view`; after ordinary 429/503 retries `loop_transport` waits on primary. Only its answer ends waiting; clocks/metadata prove no generation. API auth/billing waits offer Retry/Switch/Stop, no subscription observer.
 

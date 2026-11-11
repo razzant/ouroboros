@@ -5,7 +5,7 @@ Descriptive, not runtime validation. The browser twin is ``web/modules/work_type
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal
 
 try:  # Python 3.11+
     from typing import NotRequired, TypedDict  # type: ignore[attr-defined]
@@ -36,6 +36,20 @@ class WorkLead(WorkPrimaryRoute):
 
 class WorkLeadFields(TypedDict):
     lead: NotRequired[WorkLead]
+
+
+class TaskModelRequest(TypedDict):
+    request_id: str
+    action: Literal["set", "follow", "return", "wait", "keep"]
+    model: NotRequired[str]
+    use_local: NotRequired[bool]
+
+
+class TaskModelResponse(TypedDict):
+    ok: Literal[True]
+    task_id: str
+    applied: Literal["next_step", "at_start"]
+    lead: WorkLead
 
 
 class WorkReason(TypedDict):

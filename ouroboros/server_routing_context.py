@@ -155,7 +155,7 @@ def addressable_roots(ctx: Any) -> RootSnapshot:
         from ouroboros.task_store import task_drive_status
 
         queued = [*((tid, {**(row.get("task") if isinstance(row.get("task"), dict) else row),
-                          "lead": row.get("lead")}, "running",
+                          "lead": row.get("lead"), "_lead_request_id": row.get("_lead_request_id")}, "running",
                      row.get("started_at")) for tid, row in list(getattr(ctx, "RUNNING", {}).items())
                     if isinstance(row, dict)),
                   *((row.get("id"), row, "pending", row.get("queued_at"))

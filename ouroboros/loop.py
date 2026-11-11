@@ -442,6 +442,8 @@ def _reset_turn_state(ctx: Any) -> None:
     ctx._primary_route_observation, ctx._accepted_route_binding, ctx._primary_return_requested = None, None, None
     ctx._lead_last_sent = ctx._lead_episode = ctx._lead_return_from = None
     ctx._lead_cause, ctx._lead_role = "", None
+    ctx._owner_model_applied_id = ctx._owner_model_request_id = None
+    ctx._owner_model_primary_changed = False
     ctx._primary_view = None  # a return resumes only the view this turn left (primary_route_observation.held_primary_view)
     ctx._accepted_model_route = ctx._left_review_wait = None  # a new turn waits on no left review
     ctx._pending_task_wait = None  # nor owes an earlier turn's native task wait (``native_task_wait``)
@@ -628,6 +630,11 @@ def run_llm_loop(
             _controls = _drain_incoming_messages(
                 messages, incoming_messages, drive_root, task_id, event_queue,
                 _owner_msg_seen, owner_ctx=ctx, defer_content_ack=True, place_live_runs=True)
+            if _controls.get("owner_model"):
+                from ouroboros.owner_model import after_mail
+
+                active_model, active_use_local, active_effort, context_fit_plan, active_context_mode = after_mail(
+                    limit_ctx, context_fit_plan, active_context_mode, _preferred_context_mode)
             if _delegate_hold_step(
                     tools, controls=_controls, messages=messages, drive_logs=drive_logs,
                     task_id=task_id, emit_progress=emit_progress,

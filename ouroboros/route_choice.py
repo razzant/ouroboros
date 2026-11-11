@@ -495,4 +495,7 @@ def initial_round_route(ctx: Any, llm: Any, initial_effort: str) -> tuple:
     model, use_local, ctx.route_choice = open_route(ctx, llm)
     ctx.primary_route = {"model": model, "use_local": use_local, "role": task_model_binding(
         {"task_metadata": getattr(ctx, "task_metadata", {})}, context_fit_plan=context_fit_plan)[0]}
+    from ouroboros.owner_model import apply_current
+
+    apply_current(ctx)  # the durable primary also repairs a saved queue predating its owner act
     return model, initial_effort, use_local, preferred_mode, active_context_mode, context_fit_plan

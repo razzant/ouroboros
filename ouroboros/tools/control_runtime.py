@@ -940,17 +940,9 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: 
 
     from ouroboros import route_choice
     if requested_primary:
-        waiter = getattr(ctx, "model_wait_context", None)
-        chosen = ((getattr(waiter, "overrides", None) or {}).get(route["role"]) or {})
-        ctx.active_model_override = str(chosen.get("model") or route["model"])
-        ctx.active_use_local_override = bool(chosen.get("use_local", route["use_local"]))
-        ctx.active_role_override = route["role"]
-        ctx.route_wait_on_primary = requested_primary == "wait"
-        # The primary's own choice again: a following primary is re-read at the round boundary (the CURRENT one).
-        ctx.route_choice = route_choice.explicit("wait_card") if chosen else route_choice.opening_choice(ctx)
-        changes.append(f"primary route {ctx.active_model_override}{' (local)' if ctx.active_use_local_override else ''}"
-                       f" (role {route['role']}; if it refuses: "
-                       f"{'wait for it' if requested_primary == 'wait' else 'configured routes again'})")
+        from ouroboros.owner_model import primary_action
+
+        changes.append(primary_action(ctx, requested_primary))
     elif model:
         if model not in available:
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(f"⚠️ Unknown model: {model}. Available: {', '.join(available)}")))

@@ -89,18 +89,22 @@ def lead_fact(ctx: Any, *, model: str | None = None, use_local: bool | None = No
 def publish_lead(ctx: Any, **route: Any) -> None:
     """One text-free frame on each change; a failed enqueue stays owed next round."""
     fact = lead_fact(ctx, **route)
-    if not fact or fact == getattr(ctx, "_lead_last_sent", None):
+    request_id = getattr(ctx, "_owner_model_applied_id", None)
+    if not fact or (fact == getattr(ctx, "_lead_last_sent", None)
+                    and request_id == getattr(ctx, "_lead_last_request_id", None)):
         return
     bus = getattr(ctx, "event_queue", None)
     if bus is None:
         return
     try:
         bus.put({"type": "work_lead", "task_id": str(ctx.task_id),
-                 "task_attempt": int(getattr(ctx, "task_attempt", 1) or 1), "lead": fact})
+                 "task_attempt": int(getattr(ctx, "task_attempt", 1) or 1), "lead": fact,
+                 "lead_request_id": request_id})
     except Exception:
         log.warning("Could not publish the work's lead", exc_info=True)
         return
     ctx._lead_last_sent = copy.deepcopy(fact)
+    ctx._lead_last_request_id = request_id  # an applied act retires the host projection's pending route
 
 
 def adopt_fallback(ctx: Any, is_primary: bool, failure: Mapping, role: str) -> None:
@@ -143,10 +147,18 @@ def project_lead(fact: Any = None, task: Mapping | None = None, *, queued: bool 
     result = copy.deepcopy(fact)
     result.pop("pending", None)
     basis = result.get("basis")
-    if basis in MODEL_ROLE_SETTINGS and basis != "fallback":
+    control = task.get("owner_model") or {}
+    if control.get("request_id") and control["request_id"] != task.get("_lead_request_id"):
+        from ouroboros.owner_model import recorded_primary
+
+        primary = recorded_primary(task)
+        model, local = primary["model"], primary["use_local"]
+    elif basis in MODEL_ROLE_SETTINGS and basis != "fallback":
         model, local = route_choice.following_route(basis)
-        if (model, local) != (result["model"], result["use_local"]):
-            result["pending"] = {"model": model, "use_local": local}
+    else:
+        return result
+    if (model, local) != (result["model"], result["use_local"]):
+        result["pending"] = {"model": model, "use_local": local}
     return result
 
 
