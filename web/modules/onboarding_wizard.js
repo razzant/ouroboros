@@ -221,6 +221,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
         modelSources = (modelCatalog.model_sources || []).filter((source) => state.agentsConnected.includes(source.credentialHarness));
         clearFreshSubscriptionDefaults();
         modelRoles.adoptCatalog({ ...modelCatalog, model_sources: modelSources }, { connectionCatalogs: compatibleCatalogs });
+        agentsStep?.adoptCatalog({ ...modelCatalog, model_sources: modelSources });
     }
 
     function trim(value) {

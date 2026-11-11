@@ -16,7 +16,7 @@ from supervisor.event_taxonomy import EVENT_DISPOSITIONS
 
 
 @pytest.mark.parametrize("kind", [
-    "main_llm_call_state", "external_wait_lease",
+    "main_llm_call_state",
     "budget_resume_child",
 ])
 def test_idle_input_kinds_are_declared_by_the_event_registry(kind):

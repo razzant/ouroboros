@@ -2,9 +2,10 @@
 
 D. A wait_task that returns BEFORE its child settled (timeout, mailbox interrupt,
 beacon) carries the compact per-child projection wait_tasks already owns, plus the
-child's own open delegated runs as dated observation facts read once from its
-supervision record. A settled child, or a caller whose known hash no longer
-matches, still gets the full single-child handoff.
+child's own open delegated runs: what the host's one observer of runs (the body) last
+recorded of each (``delegate_feed.read_observation``) and the child's own wake cursor
+(its supervision record), each read once. A settled child, or a caller whose known
+hash no longer matches, still gets the full single-child handoff.
 
 E. wait_task, wait_tasks and await_messages share ``_wait_window``: under a deadline or
 an explicit execution budget the window stops a margin inside the executor's emit window
@@ -24,6 +25,7 @@ import pytest
 
 import ouroboros.delegate_custody as dc
 import ouroboros.task_pacing as pacing
+from ouroboros import delegate_feed
 from ouroboros.deadline_utils import utc_now
 from ouroboros.task_results import STATUS_COMPLETED, STATUS_RUNNING, write_task_result
 from ouroboros.tools import control_task_results as mod
@@ -43,7 +45,7 @@ def _seed_child(drive, *, status=STATUS_RUNNING, record=None, runs=("run-a",)):
                       trace_summary="step " * 50, parent_task_id="parent")
     for run_id in runs:
         dc.record_started(drive, dc.RunCustody(
-            run_id=run_id, task_id=CHILD, route_id="codex", ledger_root=str(drive)),
+            run_id=run_id, task_id=CHILD, invocation_id="inv-" + run_id, route_id="codex", ledger_root=str(drive)),
             shape={"max_seconds": 1800})
     # A review panel's run on the same task is its panel's, never this child's leaf.
     dc.record_started(drive, dc.RunCustody(
@@ -55,16 +57,15 @@ def _seed_child(drive, *, status=STATUS_RUNNING, record=None, runs=("run-a",)):
         path.write_text(record if isinstance(record, str) else json.dumps(record), encoding="utf-8")
 
 
-def _live_record(**extra):
-    record = {
-        "schema": 1, "run_id": "run-a", "journal_cursor": 7, "status": "sleeping",
-        "sleep_entry": {"run_id": "run-a", "entered_at": _iso(600)},
-        "observation": {"at": _iso(3), "answered": True, "status": "progress", "run_state": "running",
-                        "reason": ""},
-        "last_answered_observation_at": _iso(3),
-    }
-    record.update(extra)
-    return record
+def _cursor_record(**extra):
+    return {"schema": 1, "run_id": "run-a", "journal_cursor": 7, "status": "wake_pending", **extra}
+
+
+def _observed(drive, run_id="run-a", *, state="running", error=None):
+    """What the body's own writer records of one read of ``run_id`` (``delegate_feed.Feed.record``)."""
+    entry = SimpleNamespace(run_id=run_id, task_id=CHILD, invocation_id="inv-" + run_id)
+    delegate_feed.Feed(drive).record(entry, {"run_state": state, "waiting_on_user": False,
+                                             "answered": error is None}, error)
 
 
 def _projection(text: str) -> dict:
@@ -85,7 +86,8 @@ def _ctx(drive, **extra):
     {"reason": "child_attention_beacon", "beacons": [], "beacons_remaining": 0},
 ])
 def test_an_unsettled_return_is_compact_with_dated_leaf_rows(tmp_path, monkeypatch, early):
-    _seed_child(tmp_path, record=_live_record())
+    _seed_child(tmp_path, record=_cursor_record())
+    _observed(tmp_path)
     real_wait = mod.wait_for_effective_tasks
 
     def _wait(root, ids, **kw):
@@ -105,13 +107,14 @@ def test_an_unsettled_return_is_compact_with_dated_leaf_rows(tmp_path, monkeypat
     rows = projection["delegated_runs"]
     assert [row["run_id"] for row in rows] == ["run-a"], "review-owned runs are the panel's"
     assert rows[0]["max_seconds"] == 1800 and rows[0]["started_at"] != "unknown"
-    supervision = rows[0]["supervision"]
-    assert supervision["observed_run_state"] == "running" and supervision["observation_failure"] == ""
-    assert supervision["journal_cursor"] == 7 and supervision["hold_entered_at"] != "unknown"
-    assert 0 <= supervision["observation_age_sec"] < 60
+    observation = rows[0]["observation"]
+    assert observation["observed_run_state"] == "running" and observation["observation_failure"] == ""
+    assert observation["observed_since"] == observation["last_answered_observation_at"] != "unknown"
+    assert observation["observed_waiting_on_user"] is False and 0 <= observation["observation_age_sec"] < 60
+    assert rows[0]["supervision"] == {"journal_cursor": 7}
     # Dated facts only: no written-at stamp and no liveness verdict of any spelling.
     flat = json.dumps(projection)
-    for word in ("state_written_at", "alive", "liveness", "stale", "updated_at"):
+    for word in ("state_written_at", "alive", "liveness", "stale", "updated_at", "hold_entered_at"):
         assert word not in flat
 
 
@@ -123,54 +126,63 @@ def test_an_unsettled_return_is_compact_with_dated_leaf_rows(tmp_path, monkeypat
 def test_a_missing_or_unreadable_record_is_the_fact_unknown(tmp_path, record, reason):
     _seed_child(tmp_path, record=record)
 
+    [row] = _projection(mod._wait_for_task(_ctx(tmp_path), CHILD, timeout_sec=0))["delegated_runs"]
+
+    assert row["supervision"] == {"state": "unknown", "reason": reason}
+    assert row["observation"] == {"state": "unknown", "reason": "no_observation_record"}, \
+        "a run the body never recorded is unknown, never fresh"
+    path = delegate_feed.observation_path(tmp_path, "run-a")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(record or "[]", encoding="utf-8")
+    [row] = _projection(mod._wait_for_task(_ctx(tmp_path), CHILD, timeout_sec=0))["delegated_runs"]
+    assert row["observation"] == {"state": "unknown", "reason": "unreadable"}
+
+
+def test_record_facts_attach_only_to_the_run_and_invocation_they_name(tmp_path):
+    _seed_child(tmp_path, record=_cursor_record(), runs=("run-a", "run-b"))
+    _observed(tmp_path, "run-a")
+    other = delegate_feed.observation_path(tmp_path, "run-b")
+    other.write_text(json.dumps({"run_id": "run-b", "invocation_id": "an-earlier-start", "run_state": "running",
+                                 "answered": True, "since": _iso(5)}), encoding="utf-8")
+
     rows = _projection(mod._wait_for_task(_ctx(tmp_path), CHILD, timeout_sec=0))["delegated_runs"]
 
-    assert rows[0]["supervision"] == {"state": "unknown", "reason": reason}
+    by_run = {row["run_id"]: row for row in rows}
+    assert by_run["run-b"]["supervision"] == {"state": "unknown", "reason": "record_names_another_run"}
+    assert by_run["run-b"]["observation"] == {"state": "unknown", "reason": "record_names_another_invocation"}
+    assert by_run["run-a"]["observation"]["observed_run_state"] == "running"
 
 
-def test_record_facts_attach_only_to_the_run_they_name(tmp_path):
-    _seed_child(tmp_path, record=_live_record(), runs=("run-a", "run-b"))
+def test_an_unreachable_engine_is_named_and_the_last_answer_keeps_its_date(tmp_path, monkeypatch):
+    """The body's record while the engine stopped answering keeps the last state it read and the time of that read;
+    ``observed_since`` is when the engine stopped answering."""
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
-    rows = _projection(mod._wait_for_task(_ctx(tmp_path), CHILD, timeout_sec=0))["delegated_runs"]
+    clock = [time.time() - 900]
+    monkeypatch.setattr(delegate_feed, "time", SimpleNamespace(
+        time=lambda: clock[0], strftime=time.strftime, gmtime=time.gmtime, monotonic=time.monotonic))
+    _seed_child(tmp_path, record=_cursor_record())
+    feed = delegate_feed.Feed(tmp_path)
+    entry = SimpleNamespace(run_id="run-a", task_id=CHILD, invocation_id="inv-run-a")
+    feed.record(entry, {"run_state": "running", "waiting_on_user": False, "answered": True})
+    clock[0] += 300
+    feed.record(entry, {"run_state": "", "waiting_on_user": False, "answered": False}, ClaudexorUnavailable(
+        "daemon_unreachable", "nothing answered", observation_timeout=True, observation_reason="daemon_unreachable"))
 
-    by_run = {row["run_id"]: row["supervision"] for row in rows}
-    assert by_run["run-b"] == {"state": "unknown", "reason": "record_names_another_run"}
-    assert by_run["run-a"]["observed_run_state"] == "running"
+    observation = _projection(mod._wait_for_task(_ctx(tmp_path), CHILD, timeout_sec=0))[
+        "delegated_runs"][0]["observation"]
 
-
-def test_a_failed_observation_is_named_and_the_last_answer_keeps_its_date(tmp_path):
-    answered_at = _iso(900)
-    _seed_child(tmp_path, record=_live_record(
-        observation={"at": _iso(2), "answered": False, "status": "observation_pending",
-                     "reason": "daemon_unreachable"},
-        last_answered_observation_at=answered_at))
-
-    supervision = _projection(mod._wait_for_task(_ctx(tmp_path), CHILD, timeout_sec=0))[
-        "delegated_runs"][0]["supervision"]
-
-    assert supervision["observation_failure"] == "daemon_unreachable"
-    assert supervision["last_answered_observation_at"] == answered_at
-    assert supervision["observation_age_sec"] >= 899
-
-
-def test_a_record_without_observation_facts_says_unknown_not_fresh(tmp_path):
-    """The supervisor rewrites its record on every quiet renewal, failed reads
-    included, so the record's own freshness proves nothing about the leaf."""
-    _seed_child(tmp_path, record={"schema": 1, "run_id": "run-a", "journal_cursor": 3,
-                                  "status": "sleeping", "updated_at": _iso(1)})
-
-    supervision = _projection(mod._wait_for_task(_ctx(tmp_path), CHILD, timeout_sec=0))[
-        "delegated_runs"][0]["supervision"]
-
-    assert supervision["last_answered_observation_at"] == "unknown"
-    assert supervision["observation_failure"] == "unknown"
-    assert supervision["observed_run_state"] == "unknown" and supervision["observation_age_sec"] is None
+    assert observation["observation_failure"] == "daemon_unreachable"
+    assert observation["observed_run_state"] == "running", "the last state the engine answered"
+    assert observation["last_answered_observation_at"] < observation["observed_since"]
+    assert observation["observation_age_sec"] >= 899
 
 
-def test_the_record_is_read_once_after_the_wait_without_retrying(tmp_path, monkeypatch):
-    """Windows: a racing os.replace makes the read fail; that is a fact, not a
+def test_the_records_are_read_once_after_the_wait_without_retrying(tmp_path, monkeypatch):
+    """Windows: a racing os.replace makes a read fail; that is a fact, not a
     loop, and no handle is open while the wait sleeps."""
-    _seed_child(tmp_path, record=_live_record())
+    _seed_child(tmp_path, record=_cursor_record())
+    _observed(tmp_path)
     order = []
     real_wait, real_read = mod.wait_for_effective_tasks, pathlib.Path.read_text
 
@@ -179,8 +191,8 @@ def test_the_record_is_read_once_after_the_wait_without_retrying(tmp_path, monke
         return real_wait(*args, **kw)
 
     def _read(self, *args, **kw):
-        if self.name == f"{CHILD}.json" and self.parent.name == "delegate_supervision":
-            order.append("read")
+        if self.parent.name in ("delegate_supervision", "delegate_observation"):
+            order.append(self.parent.name)
             raise PermissionError("sharing violation")
         return real_read(self, *args, **kw)
 
@@ -189,12 +201,13 @@ def test_the_record_is_read_once_after_the_wait_without_retrying(tmp_path, monke
 
     rows = _projection(mod._wait_for_task(_ctx(tmp_path), CHILD, timeout_sec=0))["delegated_runs"]
 
-    assert order == ["wait", "read"]
+    assert order == ["wait", "delegate_supervision", "delegate_observation"]
     assert rows[0]["supervision"] == {"state": "unknown", "reason": "unreadable"}
+    assert rows[0]["observation"] == {"state": "unknown", "reason": "unreadable"}
 
 
 def test_a_settled_child_keeps_the_full_handoff(tmp_path):
-    _seed_child(tmp_path, status=STATUS_COMPLETED, record=_live_record())
+    _seed_child(tmp_path, status=STATUS_COMPLETED, record=_cursor_record())
 
     text = mod._wait_for_task(_ctx(tmp_path), CHILD, timeout_sec=0)
 
@@ -203,7 +216,7 @@ def test_a_settled_child_keeps_the_full_handoff(tmp_path):
 
 
 def test_a_changed_known_hash_returns_the_full_body_and_a_match_stays_compact(tmp_path):
-    _seed_child(tmp_path, record=_live_record())
+    _seed_child(tmp_path, record=_cursor_record())
     ctx = _ctx(tmp_path)
     sha = mod._wait_for_task(ctx, CHILD, timeout_sec=0).split("child_result_sha256=", 1)[1].split("\n", 1)[0]
 
@@ -216,7 +229,7 @@ def test_a_changed_known_hash_returns_the_full_body_and_a_match_stays_compact(tm
 
 
 def test_the_batch_and_the_single_wait_share_one_projection(tmp_path, monkeypatch):
-    _seed_child(tmp_path, record=_live_record())
+    _seed_child(tmp_path, record=_cursor_record())
     calls = []
     real = mod._compact_child_projection
     monkeypatch.setattr(mod, "_compact_child_projection",

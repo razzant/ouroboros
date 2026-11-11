@@ -690,12 +690,12 @@ class TestDockerfile:
     def test_runtime_stage_keeps_the_python_base_packages(self):
         """debian:trixie-slim lacks what python:3.10-slim installed: without CA
         certificates git and OpenSSL cannot verify HTTPS (Update fetches), and
-        tzdata/netbase back zoneinfo and service lookups."""
+        tzdata/netbase back zoneinfo and service lookups; vendor installers need curl."""
         src = _read("Dockerfile")
         runtime = src[src.index("FROM debian:trixie-slim AS runtime"):]
         install = re.search(r"apt-get install -y --no-install-recommends ([^\\\n]+)", runtime)
         assert install is not None
-        assert {"ca-certificates", "git", "netbase", "tzdata"} <= set(install.group(1).split())
+        assert {"ca-certificates", "curl", "git", "netbase", "tzdata"} <= set(install.group(1).split())
         assert "LANG=C.UTF-8" in runtime
 
     def test_playwright_pin_matches_lock(self):

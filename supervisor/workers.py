@@ -31,7 +31,6 @@ from ouroboros.utils import utc_now_iso
 
 REPO_DIR: pathlib.Path = pathlib.Path(CONFIG_REPO_DIR)
 DRIVE_ROOT: pathlib.Path = pathlib.Path(DATA_DIR)
-MAX_WORKERS: int = 10
 HEARTBEAT_STALE_SEC: int = 120
 QUEUE_MAX_RETRIES: int = 1
 BRANCH_DEV: str = "ouroboros"
@@ -66,12 +65,11 @@ def _get_ctx():
     return _CTX
 
 
-def init(repo_dir: pathlib.Path, drive_root: pathlib.Path, max_workers: int,
+def init(repo_dir: pathlib.Path, drive_root: pathlib.Path,
          branch_dev: str = "ouroboros", branch_stable: str = "ouroboros-stable") -> None:
-    global REPO_DIR, DRIVE_ROOT, MAX_WORKERS, BRANCH_DEV, BRANCH_STABLE
+    global REPO_DIR, DRIVE_ROOT, BRANCH_DEV, BRANCH_STABLE
     REPO_DIR = repo_dir
     DRIVE_ROOT = drive_root
-    MAX_WORKERS = max_workers
     BRANCH_DEV = branch_dev
     BRANCH_STABLE = branch_stable
 
@@ -99,9 +97,8 @@ class Worker:
     quiescence_token: str = ""
     quiescence_confirmed: bool = False
     retiring: bool = False  # intentional, charged until observed dead; never crash recovery
-    resume_hold: str = ""  # this tick's authorized warm Resume: held idle slot, or the parked author
-    # The pool slots this worker serves: ``project`` (queued work, counted against MAX_WORKERS,
-    # fenced by readiness exhaustion) or ``conversation`` (the lane that carries
+    # The pool slots this worker serves: ``project`` (queued work, admitted by memory and the owner's
+    # cap, fenced by readiness exhaustion) or ``conversation`` (the lane that carries
     # owner turns, wakes and Presence bodies; outside every project fence and count).
     lane: str = LANE_PROJECT
     # ``worker``: a custodied child process. The disclosed inline executors (``inline_degraded``,
@@ -272,9 +269,7 @@ from supervisor.queue import _queue_lock
 
 def worker_pool_admission_state(ctx: Any = None) -> Dict[str, Any]:
     """Busy/booting pools and live owner waits can queue work; exhausted pools cannot."""
-    state = _worker_pool_execution_state(
-        getattr(ctx, "WORKERS", None), running=getattr(ctx, "RUNNING", None),
-    )
+    state = _worker_pool_execution_state(getattr(ctx, "WORKERS", None))
     update_reason = repo_writer_admission_closed()
     available = state["available"] and not update_reason
     return {
@@ -1233,10 +1228,6 @@ def spawn_workers(n: int = 0) -> None:
                 "spawn_workers requires an empty pool; stop the current workers "
                 "or use respawn_worker for one slot"
             )
-    from supervisor.worker_pool_lifecycle import record_demand_forecast
-
-    # A new generation: no pass of it has computed demand yet (an in-process restart keeps the module).
-    record_demand_forecast(None, reason="new_pool_generation", assignment_pass=False)
     # Never hold the queue's process-local threading.RLock across fork: a child
     # would inherit it owned by a vanished thread.  The dedicated lifecycle lock
     # is not used by worker code and serializes competing full-pool starts/kills.
@@ -1310,17 +1301,12 @@ def _partition_slots_for_stop(lanes: Optional[frozenset]) -> List[Worker]:
     """Under the lifecycle serializer, then Q (``kill_workers``' order): the slots a stop owns, marked ``reaping``.
 
     ``lanes`` None owns every slot and ends the generation (no carrier grows behind the stop).
-    A stop owning the project slots also leaves the growth forecast unknown: it described them.
     """
     doomed = [w for w in WORKERS.values() if lanes is None or getattr(w, "lane", LANE_PROJECT) in lanes]
     if lanes is None:
         from supervisor import conversation_lane
 
         conversation_lane.arm(None)
-    if lanes is None or LANE_PROJECT in lanes:
-        from supervisor.worker_pool_lifecycle import record_demand_forecast
-
-        record_demand_forecast(None, reason="pool_stopped", assignment_pass=False)
     for w in doomed:
         # The timeout reaper's ownership mark: assignment, the health check
         # and the crash detector skip the slot while it is torn down.
@@ -2322,21 +2308,6 @@ def _drop_assignable_evolution_tasks(deferred_ids: set[str]) -> list[str]:
             kept.append(task)
     PENDING[:] = kept
     return blocked_ids
-
-
-def _running_subagent_count(root_task_id: str, running=None) -> int:
-    if not root_task_id:
-        return 0
-    count = 0
-    for meta in RUNNING.values() if running is None else running:
-        task = meta.get("task") if isinstance(meta, dict) else None
-        if (
-            isinstance(task, dict)
-            and str(task.get("delegation_role") or "") == "subagent"
-            and str(task.get("root_task_id") or "") == root_task_id
-        ):
-            count += 1
-    return count
 
 
 def _assignment_depth_reservation_admits(candidate: dict, running=None) -> bool:

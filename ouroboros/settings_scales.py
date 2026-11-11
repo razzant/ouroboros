@@ -260,6 +260,8 @@ IMMEDIATE_SETTINGS = frozenset({
     # model_concurrency._cap() reads the settings document at every physical call in every
     # process, so a saved cap reaches running work at its next call, not at the next task.
     "OUROBOROS_MODEL_MAX_CONCURRENCY",
+    # The owner's cap on acting tasks: the supervisor reads it on every assignment pass.
+    "OUROBOROS_MAX_WORKERS",
     "GITHUB_TOKEN",
     "GITHUB_REPO",
     "OUROBOROS_UPDATE_CHANNEL",
@@ -273,7 +275,6 @@ IMMEDIATE_SETTINGS = frozenset({
 })
 
 RESTART_REQUIRED_SETTINGS = frozenset({
-    "OUROBOROS_MAX_WORKERS",
     "OUROBOROS_SERVER_HOST",
     # The host-service port is bound once at server startup.
     "OUROBOROS_HOST_SERVICE_PORT",
@@ -365,21 +366,25 @@ _WARNED_OPTIONAL_BOUNDS: set = set()
 
 
 def optional_bound_value(key: str, raw: Any) -> Optional[int]:
-    """One read of an ``OPTIONAL_BOUND_LEGACY`` key: ``None`` = no bound, else a positive int.
+    """One read of an optional bound or the owner cap: ``None`` = no bound, else a positive int.
 
-    An integral float is its integer (a harness may write ``10800.0``). Whatever the strict
-    parser refuses — blank, null, zero, negative, a fraction, a word — is a typo, never "no
-    bound": it takes the key's finite legacy value, reported once per process and value."""
+    An integral float is its integer (a harness may write ``10800.0``). Blank or null means
+    no cap only for the owner cap. Everything else the strict parser refuses — including
+    blank/null for other bounds — is a typo, never "no bound": it takes the key's finite
+    legacy value, reported once per process and value."""
+    owner_cap = key == OWNER_CAP_KEY
+    if owner_cap and (raw is None or isinstance(raw, str) and not raw.strip()):
+        return None
     value = int(raw) if isinstance(raw, float) and raw.is_integer() else raw
     try:
         return parse_positive_or_unlimited(value)
     except (TypeError, ValueError):
-        fallback = OPTIONAL_BOUND_LEGACY[key]
+        fallback = OWNER_CAP_LEGACY if owner_cap else OPTIONAL_BOUND_LEGACY[key]
         if (key, repr(raw)) not in _WARNED_OPTIONAL_BOUNDS:
             _WARNED_OPTIONAL_BOUNDS.add((key, repr(raw)))
             logging.getLogger(__name__).warning(
-                "%s=%r is not a positive integer or %r; using the finite fallback %s",
-                key, raw, UNLIMITED, fallback)
+                "%s=%r is not a positive integer or %s; using the finite fallback %s",
+                key, raw, "blank" if owner_cap else repr(UNLIMITED), fallback)
         return fallback
 
 
@@ -388,8 +393,38 @@ def defaults_for_settings_document(document_present: bool) -> dict:
     optional bound's finite legacy value while a document exists (``OPTIONAL_BOUND_LEGACY``).
     Every writer that creates a document persists a defaults-merged one (the context-mode
     compatibility pass only rewrites an existing document), so only a document an earlier
-    release or a harness wrote without the key falls to the legacy value."""
-    defaults = dict(SETTINGS_DEFAULTS)
+    release or a harness wrote without the key falls to the legacy value. Every view carries
+    the owner cap's format marker, so the first save of a fresh install keeps a cap it sets."""
+    defaults = {**SETTINGS_DEFAULTS, OWNER_CAP_FORMAT_KEY: 1}
     if document_present:
         defaults.update(OPTIONAL_BOUND_LEGACY)
     return defaults
+
+
+# The owner's optional cap on acting project tasks (pool-capacity Q1 = D): blank, the shipped default, is no number
+# (the machine's memory is the limit, ``supervisor.pool_admission``), a positive integer the cap ("unlimited" reads
+# blank), anything else a typo that reads finite, never "no cap" (the ``OPTIONAL_BOUND_LEGACY`` rule). A document
+# without the format marker was written while the settings form saved 10 on every save: its 10 reads once as blank
+# (owner decision 09.11, migration A; Colab's first-launch 1 likewise, ``colab_bootstrap``); 40, say, stays the cap.
+OWNER_CAP_KEY = "OUROBOROS_MAX_WORKERS"
+OWNER_CAP_LEGACY = 10
+OWNER_CAP_FORMAT_KEY = "_owner_cap_format"  # disk format, never an environment setting or owner knob
+
+
+def owner_cap_document(raw: Any) -> Any:
+    """The read seam's migration of a document from before the optional cap (no format marker): its saved 10 reads
+    as blank. A read stays a read; every view carries the marker (``defaults_for_settings_document``), so the next
+    whole-document save ends the migration, and a partial save writes the blank the migration read."""
+    if (not isinstance(raw, Mapping) or raw.get(OWNER_CAP_FORMAT_KEY) == 1
+            or raw.get(OWNER_CAP_KEY) not in (OWNER_CAP_LEGACY, str(OWNER_CAP_LEGACY))):
+        return raw
+    return {**raw, OWNER_CAP_KEY: ""}
+
+
+def document_optional_value(key: str, value: Any) -> Any:
+    """The document spelling of an optional bound or the owner cap: a positive int, else "unlimited" (a bound) or
+    blank (the cap); a typo reads finite."""
+    bound = optional_bound_value(key, value)
+    if bound is not None:
+        return bound
+    return "" if key == OWNER_CAP_KEY else UNLIMITED

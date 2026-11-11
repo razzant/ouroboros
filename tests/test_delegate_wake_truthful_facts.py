@@ -1,6 +1,7 @@
-"""Truthful supervising-wait facts: the task-scoped child cursor across run ids and
-recovery, whole-sleep facts at the single wake-publication point, dated observation
-facts, and the leaf route's declared live-input capability."""
+"""Truthful wake facts: the task-scoped child cursor across run ids and recovery, whole-sleep facts at the
+single wake-publication point (when the wait was armed, how long it slept, in which mode, what woke it),
+and the leaf route's declared live-input capability. A run's dated observation facts are the body's
+(``test_body_feed``)."""
 
 from __future__ import annotations
 
@@ -11,8 +12,9 @@ import pytest
 
 import ouroboros.delegate_supervision as supervision
 from ouroboros import task_tree_ledger
-from ouroboros.delegate_supervision import acknowledge_pending_wake, supervised_wait
+from ouroboros.delegate_supervision import acknowledge_pending_wake
 from ouroboros.task_results import STATUS_COMPLETED, STATUS_RUNNING, write_task_result
+from tests._run_wait_shared import wake_now
 
 
 def _ctx(tmp_path, task_id="parent"):
@@ -64,7 +66,7 @@ def test_acked_child_events_are_not_reannounced_under_a_new_run_id(tmp_path, mon
         "root", "blocker", "done needs input", task_id="done", data_root=tmp_path,
     ).startswith("OK:")
     ctx = _ctx(tmp_path)
-    first = json.loads(supervised_wait(ctx, "run-1", wait_once=_settled("run-1")).text)
+    first = json.loads(wake_now(ctx, "run-1", wait_once=_settled("run-1")).text)
     assert [e["child_task_id"] for e in _child_events(first)] == ["done"]
     assert len(_child_events(first, "child_attention_beacon")) == 1
     assert acknowledge_pending_wake(ctx, first)
@@ -73,7 +75,7 @@ def test_acked_child_events_are_not_reannounced_under_a_new_run_id(tmp_path, mon
         write_task_result(tmp_path, "late", STATUS_COMPLETED, result="late result")
         return json.dumps({"status": "completed", "run_id": "run-2", "last_seq": 1})
 
-    second = json.loads(supervised_wait(ctx, "run-2", wait_once=_late_settles).text)
+    second = json.loads(wake_now(ctx, "run-2", wait_once=_late_settles).text)
     announced = [e["child_task_id"] for e in _child_events(second)]
     if carry:
         assert announced == ["late"]
@@ -82,20 +84,20 @@ def test_acked_child_events_are_not_reannounced_under_a_new_run_id(tmp_path, mon
         assert "done" in announced  # the defect the carry repairs
     assert acknowledge_pending_wake(ctx, second)
     if carry:
-        third = json.loads(supervised_wait(ctx, "run-3", wait_once=_settled("run-3")).text)
+        third = json.loads(wake_now(ctx, "run-3", wait_once=_settled("run-3")).text)
         assert _child_events(third) == [] and _child_events(third, "child_attention_beacon") == []
 
 
 def test_an_unacked_child_terminal_survives_the_run_switch_and_emits_once(tmp_path):
     _child(tmp_path, "done", status=STATUS_COMPLETED)
     ctx = _ctx(tmp_path)
-    first = json.loads(supervised_wait(ctx, "run-1", wait_once=_settled("run-1")).text)
+    first = json.loads(wake_now(ctx, "run-1", wait_once=_settled("run-1")).text)
     assert [e["child_task_id"] for e in _child_events(first)] == ["done"]
     # Never acknowledged: its cursor never committed, so the new run re-detects it once.
-    second = json.loads(supervised_wait(ctx, "run-2", wait_once=_settled("run-2")).text)
+    second = json.loads(wake_now(ctx, "run-2", wait_once=_settled("run-2")).text)
     assert [e["child_task_id"] for e in _child_events(second)] == ["done"]
     assert acknowledge_pending_wake(ctx, second)
-    third = json.loads(supervised_wait(ctx, "run-3", wait_once=_settled("run-3")).text)
+    third = json.loads(wake_now(ctx, "run-3", wait_once=_settled("run-3")).text)
     assert _child_events(third) == []
 
 
@@ -151,28 +153,22 @@ def _fake_time(monkeypatch, clock):
 
 
 def test_every_wake_measures_the_whole_sleep_and_replays_it_exactly(tmp_path, monkeypatch):
+    """The wake's sleep facts are the wait's own: armed then, slept this long in this mode, woken by this; the
+    tick's quiet-renewal counters are gone. A replay repeats the recorded facts, nothing added since."""
     clock = _Clock()
     _fake_time(monkeypatch, clock)
-    ticks = []
-
-    def wait_once(_ctx, run_id, _window, _cursor, **_k):
-        ticks.append(1)
-        clock.now += 3.0
-        if len(ticks) <= 4:
-            return json.dumps({"status": "no_progress", "run_id": run_id, "last_seq": len(ticks),
-                               "waited_sec": 3, "note": "or delegate_cancel if it is stuck"})
-        return json.dumps({"status": "completed", "run_id": run_id, "last_seq": 7})
-
+    monkeypatch.setattr("ouroboros.tools.delegate._read_run", lambda _ctx, run_id, _seq, gateway=None: json.dumps(
+        {"status": "completed", "run_id": run_id, "last_seq": 7}))
     ctx = _ctx(tmp_path)
-    wake = json.loads(supervised_wait(ctx, "run-1", since_seq=2, wait_once=wait_once).text)
-    sleep = wake["sleep"]
-    assert sleep["slept_sec"] == 15.0          # the whole call, not the last 3 s tick
-    assert sleep["quiet_renewals"] == 4
-    assert sleep["journal_advances"] == 5       # cursor 2 at entry -> 7 at the wake
-    assert "opened_after" not in sleep
+    armed = {"tool": "delegate_wait", "runs": ["run-1"], "armed_at": "2026-11-09T00:00:00+00:00",
+             "armed_epoch": clock.now, "mode": "cold", "since_seq": 2}
+    clock.now += 15.0
+    wake = json.loads(supervision._publish(ctx, armed, "run:run-1").text)
+    assert wake["sleep"] == {"entered_at": "2026-11-09T00:00:00+00:00", "slept_sec": 15.0, "mode": "cold",
+                             "woke_by": "run:run-1"}
+    assert wake["last_seq"] == 7 and supervision._load_state(ctx, "run-1")["journal_cursor"] == 7
     clock.now += 500.0
-    replay = json.loads(supervised_wait(ctx, "run-1", wait_once=lambda *_a, **_k: (_ for _ in ()).throw(
-        AssertionError("a pending wake replays before any new observation"))).text)
+    replay = json.loads(wake_now(ctx, "run-1").text)  # replayed before any new read
     assert replay.pop("replay_of")["fresh_observation"] is False  # labelled as a replay (#2992)
     assert replay == wake                        # recorded facts, nothing added since
 
@@ -180,26 +176,23 @@ def test_every_wake_measures_the_whole_sleep_and_replays_it_exactly(tmp_path, mo
 def test_a_quiet_status_wake_drops_the_tick_advice_but_keeps_the_paused_note(tmp_path, monkeypatch):
     from ouroboros.delegate_progress import paused_note
 
-    calls: list = []
-    monkeypatch.setattr(supervision, "_control_wakes", lambda _ctx: calls.append(1) or (
-        [{"type": "deadline"}] if len(calls) > 1 else []))
+    monkeypatch.setattr(supervision, "_control_wakes", lambda _ctx: [{"type": "deadline"}])
     tick = {"status": "no_progress", "run_id": "run-q", "last_seq": 1, "waited_sec": 3,
             "quiet_for_sec": 3, "reason": "non_terminal", "note": "or delegate_cancel if it is stuck"}
-    quiet = json.loads(supervised_wait(_ctx(tmp_path, "t-quiet"), "run-q",
-                                       wait_once=lambda *_a, **_k: json.dumps(tick)).text)
+    quiet = json.loads(wake_now(_ctx(tmp_path, "t-quiet"), "run-q",
+                                wait_once=lambda *_a, **_k: json.dumps(tick)).text)
     assert quiet["wake_events"] == [{"type": "deadline"}]
     assert not {"waited_sec", "quiet_for_sec", "note"} & set(quiet)
-    assert quiet["sleep"]["quiet_renewals"] == 0
+    assert quiet["sleep"]["mode"] == "answered_at_call"
+    monkeypatch.setattr(supervision, "_control_wakes", lambda _ctx: [])
 
     pending = [{"interaction_id": "i1", "timeout_at": None}]
-    calls.clear()
-    paused = json.loads(supervised_wait(_ctx(tmp_path, "t-paused"), "run-q", wait_once=lambda *_a, **_k: json.dumps({
+    paused = json.loads(wake_now(_ctx(tmp_path, "t-paused"), "run-q", wait_once=lambda *_a, **_k: json.dumps({
         **tick, "waiting_on_user": True, "pending_interactions": pending})).text)
     assert paused["note"] == paused_note(pending)
     assert "delegate_cancel" not in paused["note"] and "waited_sec" not in paused
     # A terminal wake is not quiet: its own fields stay, and it carries the sleep too.
-    calls.clear()
-    terminal = json.loads(supervised_wait(_ctx(tmp_path, "t-term"), "run-q", wait_once=lambda *_a, **_k: json.dumps({
+    terminal = json.loads(wake_now(_ctx(tmp_path, "t-term"), "run-q", wait_once=lambda *_a, **_k: json.dumps({
         "status": "completed", "run_id": "run-q", "last_seq": 1, "note": "terminal note"})).text)
     assert terminal["note"] == "terminal note" and "sleep" in terminal
 
@@ -211,24 +204,21 @@ def test_an_old_pending_wake_without_sleep_replays_unchanged(tmp_path):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"schema": 1, "run_id": "run-1", "pending_wake": {
         "wake_id": "w-old", "attempt_key": "1", "payload": stored}}), encoding="utf-8")
-    replay = json.loads(supervised_wait(ctx, "run-1", wait_once=_settled("run-1")).text)
+    replay = json.loads(wake_now(ctx, "run-1", wait_once=_settled("run-1")).text)
     assert "published_at" not in replay.pop("replay_of")  # a replay label without an invented time (#2992)
     assert replay == stored                       # nothing invented for an old record
 
 
-@pytest.mark.parametrize("prior,label", [
-    ("adopted", "worker_loss_adoption"), ("sleeping", "interrupted_sleep"), ("awake", None),
-])
-def test_a_new_call_opens_a_new_sleep_labelled_by_the_prior_status(tmp_path, prior, label):
+def test_a_retired_ticks_sleep_entry_never_leaks_into_a_new_wake(tmp_path):
+    """A state the retired tick left (its ``sleep_entry``, a ``sleeping`` status) labels nothing now: the wake's
+    sleep facts are the new wait's own, never carried over from the old entry."""
     ctx = _ctx(tmp_path)
     path = supervision._state_path(ctx)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"schema": 1, "run_id": "run-1", "status": prior, "sleep_entry": {
+    path.write_text(json.dumps({"schema": 1, "run_id": "run-1", "status": "sleeping", "sleep_entry": {
         "entered_at": "2026-09-26T00:00:00+00:00", "entered_at_unix": 1.0}}), encoding="utf-8")
-    wake = json.loads(supervised_wait(ctx, "run-1", wait_once=_settled("run-1")).text)
-    assert wake["sleep"].get("opened_after") == label
-    assert wake["sleep"]["slept_sec"] < 60        # never carried over from the old entry
-    assert ("previous_entered_at" in wake["sleep"]) is (prior == "sleeping")
+    wake = json.loads(wake_now(ctx, "run-1", wait_once=_settled("run-1")).text)
+    assert wake["sleep"]["slept_sec"] < 60 and not {"opened_after", "previous_entered_at"} & set(wake["sleep"])
 
 
 def test_a_spilled_wake_keeps_the_sleep_and_live_input_facts(tmp_path, monkeypatch):
@@ -237,39 +227,9 @@ def test_a_spilled_wake_keeps_the_sleep_and_live_input_facts(tmp_path, monkeypat
     monkeypatch.setattr(capabilities, "tool_result_limit", lambda _name: 900)
     ctx = _ctx(tmp_path)
     ctx.task_contract = {"delegation_budget": {"intent_note": "x" * 5000}}
-    wake = json.loads(supervised_wait(ctx, "run-s", wait_once=_settled("run-s")).text)
+    wake = json.loads(wake_now(ctx, "run-s", wait_once=_settled("run-s")).text)
     assert wake["wake_delivery"]["complete"] is False
-    assert wake["sleep"]["quiet_renewals"] == 0 and wake["leaf_live_input"] == "unknown"
-
-
-# -- D1: dated observation facts (freshness is never the file's mtime) ---------
-
-
-def test_observation_facts_separate_answered_reads_from_failures(tmp_path, monkeypatch):
-    _fake_time(monkeypatch, _Clock())
-    replies = iter([
-        {"status": "no_progress", "run_id": "run-o", "state": "running", "last_seq": 1},
-        {"status": "observation_pending", "run_id": "run-o", "reason": "daemon_unreachable"},
-    ])
-    seen = []
-
-    def wait_once(ctx, *_a, **_k):
-        try:
-            return json.dumps(next(replies))
-        except StopIteration:
-            seen.append(_state(ctx))
-            return json.dumps({"status": "completed", "run_id": "run-o", "last_seq": 2})
-
-    ctx = _ctx(tmp_path)
-    supervised_wait(ctx, "run-o", wait_once=wait_once)
-    before_wake = seen[0]
-    assert before_wake["observation_failure"] == "daemon_unreachable"
-    assert before_wake["observation"]["answered"] is False
-    answered_at = before_wake["last_answered_observation_at"]
-    assert answered_at                          # the earlier ANSWERED read, not advanced
-    assert "state_written_at" not in before_wake
-    after = _state(ctx)
-    assert after["observation_failure"] == "" and after["last_answered_observation_at"] >= answered_at
+    assert wake["sleep"]["mode"] == "answered_at_call" and wake["leaf_live_input"] == "unknown"
 
 
 # -- leaf_live_input: read once at entry, stamped on every wake ----------------
@@ -301,33 +261,29 @@ def _owned(tmp_path, monkeypatch, run_id="run-l", route="fixture"):
     ([{"id": "fixture"}], False, "none"),                 # an engine without the field
     ([], True, "unknown"),                                # failure is a fact, never a refusal
 ])
-def test_leaf_live_input_is_read_once_at_entry_and_stamped_on_every_wake(
+def test_leaf_live_input_is_read_once_per_publication_and_replayed_as_recorded(
     tmp_path, monkeypatch, rows, fail, expected,
 ):
     _owned(tmp_path, monkeypatch)
     catalog = _Catalog(rows, fail)
-    monkeypatch.setattr(supervision, "_loop_gateway", lambda: catalog)
-    monkeypatch.setattr(supervision.time, "sleep", lambda _s: None)
-    ticks = []
+    monkeypatch.setattr(supervision, "_loop_gateway", lambda _entry: catalog)
 
     def wait_once(_ctx, run_id, *_a, **_k):
-        ticks.append(1)
-        status = "no_progress" if len(ticks) < 4 else "completed"
-        return json.dumps({"status": status, "run_id": run_id, "last_seq": len(ticks)})
+        return json.dumps({"status": "completed", "run_id": run_id, "last_seq": 4})
 
     ctx = _ctx(tmp_path)
-    wake = json.loads(supervised_wait(ctx, "run-l", wait_once=wait_once).text)
+    wake = json.loads(wake_now(ctx, "run-l", wait_once=wait_once).text)
     assert wake["leaf_live_input"] == expected
-    assert catalog.reads == [supervision._TICK_SEC]    # once per call, never per tick
-    assert catalog.closed                               # the one-read transport is dropped
-    replay = json.loads(supervised_wait(ctx, "run-l", wait_once=wait_once).text)
+    assert catalog.reads == [supervision._TICK_SEC]    # once per publication
+    assert catalog.closed                               # the publication's transport is dropped
+    replay = json.loads(wake_now(ctx, "run-l").text)
     assert replay["leaf_live_input"] == expected and catalog.reads == [supervision._TICK_SEC]
 
 
 def test_an_unowned_run_reads_no_catalog(tmp_path, monkeypatch):
-    monkeypatch.setattr(supervision, "_loop_gateway", lambda: (_ for _ in ()).throw(
+    monkeypatch.setattr(supervision, "_loop_gateway", lambda _entry: (_ for _ in ()).throw(
         AssertionError("no route, no catalog read")))
-    wake = json.loads(supervised_wait(_ctx(tmp_path), "run-x", wait_once=_settled("run-x")).text)
+    wake = json.loads(wake_now(_ctx(tmp_path), "run-x", wait_once=_settled("run-x")).text)
     assert wake["leaf_live_input"] == "unknown"
 
 
@@ -343,42 +299,29 @@ def _quiet_question_tick(**extra):
 
 @pytest.mark.parametrize("whole_set_async", [True, False], ids=["whole-set-async", "fitted-rows-only"])
 def test_a_quiet_wake_keeps_the_whole_sets_meaning_never_its_fitted_rows(tmp_path, monkeypatch, whole_set_async):
-    """The payload's ``async_questions_only`` (judged before any preview) decides the note and
-    the recorded work; rows that merely look async in a fitted preview never re-decide it."""
+    """The payload's ``async_questions_only`` (judged before any preview) decides the note, and a run's recorded
+    work (``run_activity``) reads the body's same fact; rows that merely look async in a fitted preview never
+    re-decide it."""
     from ouroboros.delegate_progress import paused_note
+    from ouroboros.delegate_feed import run_activity
 
-    calls: list = []
-    monkeypatch.setattr(supervision, "_control_wakes", lambda _ctx: calls.append(1) or (
-        [{"type": "deadline"}] if len(calls) > 1 else []))
+    monkeypatch.setattr(supervision, "_control_wakes", lambda _ctx: [])
     pending, tick = _quiet_question_tick(**({"async_questions_only": True} if whole_set_async else {}))
     ctx = _ctx(tmp_path, f"t-{whole_set_async}")
-    wake = json.loads(supervised_wait(ctx, "run-a", wait_once=lambda *_a, **_k: json.dumps(tick)).text)
+    wake = json.loads(wake_now(ctx, "run-a", wait_once=lambda *_a, **_k: json.dumps(tick)).text)
     assert wake["note"] == paused_note(pending, async_only=whole_set_async)
     assert ("PAUSED" in wake["note"]) is not whole_set_async
-    observation = supervision._load_state(ctx, "run-a")["observation"]
-    assert observation["waiting_on_user"] is True and observation["async_questions_only"] is whole_set_async
-    assert supervision.run_activity(observation) is whole_set_async
-
-
-def test_the_immediate_question_wake_is_recorded_as_waiting(tmp_path, monkeypatch):
-    monkeypatch.setattr(supervision, "_control_wakes", lambda _ctx: [])
-    ctx = _ctx(tmp_path, "t-asked")
-    asked = {"status": "waiting_on_user", "run_id": "run-a", "state": "running", "last_seq": 1,
-             "pending_interactions": [{"interaction_id": "i1"}]}
-    supervised_wait(ctx, "run-a", wait_once=lambda *_a, **_k: json.dumps(asked))
-    observation = supervision._load_state(ctx, "run-a")["observation"]
-    assert observation["waiting_on_user"] is True and supervision.run_activity(observation) is False
+    assert run_activity({"answered": True, "run_state": "running", "waiting_on_user": True,
+                         "async_questions_only": whole_set_async}) is whole_set_async
 
 
 @pytest.mark.parametrize("async_only", [True, False])
 def test_a_compact_question_wake_does_not_invent_a_null_expiry(tmp_path, monkeypatch, async_only):
     """A compact observation retains attention but has no rows from which to claim expiry."""
-    calls = []
-    monkeypatch.setattr(supervision, "_control_wakes", lambda _ctx: calls.append(1) or (
-        [{"type": "addressed", "msg_id": "notice"}] if len(calls) > 1 else []))
+    monkeypatch.setattr(supervision, "_control_wakes", lambda _ctx: [])
     _pending, tick = _quiet_question_tick(async_questions_only=async_only)
     tick.pop("pending_interactions")
-    wake = json.loads(supervised_wait(_ctx(tmp_path), "run-a", wait_once=lambda *_a, **_k: json.dumps(tick)).text)
+    wake = json.loads(wake_now(_ctx(tmp_path), "run-a", wait_once=lambda *_a, **_k: json.dumps(tick)).text)
     assert "expiry details are unavailable" in wake["note"]
     assert "timeout_at is null" not in wake["note"] and "NO automatic expiry" not in wake["note"]
     assert ("PAUSED" in wake["note"]) is not async_only

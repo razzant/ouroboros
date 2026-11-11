@@ -7,7 +7,25 @@ the retention record's read is a fifth, read-only route, and the project list's 
 """
 from __future__ import annotations
 
+import time
 from urllib.parse import quote, urlencode
+
+
+def supports_program_maintenance(gateway) -> bool:
+    from ouroboros.gateways.claudexor import engine_at_least
+
+    return engine_at_least(str(getattr(gateway, "engine_version", "") or ""), "6.0.0")
+
+
+def maintenance_remaining(deadline):
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    if deadline is None:
+        return None
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise ClaudexorUnavailable("observation_timeout", "The maintenance observation deadline expired")
+    return remaining
 
 
 def maintenance_request_id(value: str) -> str:
@@ -25,19 +43,35 @@ def _object(value):
     return value
 
 
+def _selected_program(value):
+    fields = {"path", "realPath", "version", "versionOutput", "overrideEnv", "overrideValue"}
+    return (isinstance(value, dict) and fields <= value.keys()
+            and all(value[key] is None or isinstance(value[key], str) for key in fields))
+
+
 class ClaudexorMaintenanceGateway:
     """No daemon lifecycle, installer, cache or retry policy lives in transport."""
 
-    def _maintenance_require(self, operation: str) -> None:
+    def _maintenance_require(self, operation: str, *, timeout_sec=None) -> None:
         from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
-        if not any(row.get("id") == operation for row in self.operations()):
+        if not supports_program_maintenance(self):
+            raise ClaudexorUnavailable("maintenance_unavailable",
+                                      "Update the app or connect an engine "
+                                      "at version 6.0.0 or newer to install or update harness programs.", status_code=503)
+        if not any(row.get("id") == operation for row in self.operations(**({"timeout_sec": timeout_sec} if timeout_sec is not None else {}))):
             raise ClaudexorUnavailable("maintenance_unavailable",
                                       "This engine does not provide the requested CLI maintenance operation",
                                       status_code=503)
 
     def _maintenance_request(self, operation: str, method: str, path: str, **kwargs):
-        self._maintenance_require(operation)
+        timeout = kwargs.pop("timeout_sec", None)
+        deadline = kwargs.pop("deadline", None)
+        if deadline is None and timeout is not None:
+            deadline = time.monotonic() + timeout
+        self._maintenance_require(operation, timeout_sec=maintenance_remaining(deadline))
+        if deadline is not None:
+            kwargs["timeout_sec"] = maintenance_remaining(deadline)
         return self._request(method, path, **kwargs)
 
     def maintenance_harnesses(self, harnesses=(), *, fresh=False, check_latest=False) -> dict:
@@ -47,9 +81,37 @@ class ClaudexorMaintenanceGateway:
         query.extend((("fresh", str(fresh).lower()), ("checkLatest", str(check_latest).lower())))
         body = _object(self._maintenance_request("get:maintenance.harnesses", "GET",
                        "/v2/maintenance/harnesses?" + urlencode(query)))
-        if not isinstance(body.get("harnesses"), list):
+        if not isinstance(body.get("observedAt"), str) or not isinstance(body.get("harnesses"), list):
             raise ClaudexorUnavailable("malformed_response", "Claudexor maintenance inventory is missing")
+        for row in body["harnesses"]:
+            if not self._maintenance_entry(row):
+                raise ClaudexorUnavailable("maintenance_unavailable",
+                                          "This engine does not provide the vendor program maintenance contract",
+                                          status_code=503)
+            if row["operation"] is not None:
+                self._maintenance_operation(row["operation"])
         return body
+
+    @staticmethod
+    def _maintenance_entry(row) -> bool:
+        """Recognize the supported wire shape, never translate legacy ownership/targets."""
+        if not isinstance(row, dict) or not {
+                "harness", "selection", "newest", "actions", "updateAvailable",
+                "releaseNotesUrl", "operation", "observedAt"} <= row.keys():
+            return False
+        newest, actions = row["newest"], row["actions"]
+        if (not isinstance(row["harness"], str) or not _selected_program(row["selection"])
+                or row["updateAvailable"] not in ("yes", "no", "cannot_tell")
+                or not isinstance(newest, dict) or not isinstance(actions, dict)):
+            return False
+        fields = {"not_read": {"source"}, "available": {"source", "version", "observedAt"},
+                  "unavailable": {"source", "observedAt", "problem"}}.get(str(newest.get("status")))
+        return (fields is not None and fields <= newest.keys()
+                and all(isinstance(actions.get(name), dict)
+                        and type(actions[name].get("available")) is bool
+                        and "reason" in actions[name]
+                        and isinstance(actions[name].get("commands"), list)
+                        for name in ("install", "update", "exactVersion")))
 
     def maintenance_create(self, request: dict, request_id: str) -> dict:
         from ouroboros.gateways.claudexor import ClaudexorUnavailable
@@ -86,15 +148,15 @@ class ClaudexorMaintenanceGateway:
             raise ClaudexorUnavailable("malformed_response", "Claudexor retention record is missing")
         return body
 
-    def maintenance_operation(self, operation_id: str) -> dict:
+    def maintenance_operation(self, operation_id: str, *, timeout_sec=None, deadline=None) -> dict:
         return self._maintenance_operation(self._maintenance_request(
             "get:maintenance.operations.id", "GET",
-            "/v2/maintenance/operations/" + quote(operation_id, safe="")), operation_id)
+            "/v2/maintenance/operations/" + quote(operation_id, safe=""), timeout_sec=timeout_sec, deadline=deadline), operation_id)
 
-    def maintenance_cancel(self, operation_id: str) -> dict:
+    def maintenance_cancel(self, operation_id: str, *, timeout_sec=None) -> dict:
         return self._maintenance_operation(self._maintenance_request(
             "post:maintenance.operations.id.cancel", "POST",
-            "/v2/maintenance/operations/" + quote(operation_id, safe="") + "/cancel"), operation_id)
+            "/v2/maintenance/operations/" + quote(operation_id, safe="") + "/cancel", timeout_sec=timeout_sec), operation_id)
 
     @staticmethod
     def _maintenance_operation(value, operation_id=None) -> dict:
@@ -105,6 +167,14 @@ class ClaudexorMaintenanceGateway:
                 or not isinstance(body.get("state"), str)
                 or (operation_id is not None and body["id"] != operation_id)):
             raise ClaudexorUnavailable("malformed_response", "Claudexor maintenance operation identity is invalid")
+        if (not {"harness", "phase", "target", "requester", "installationHome", "commands",
+                 "before", "after", "elsewhere", "activeRunsAtStart", "exitCode", "outcome",
+                 "mutation", "termination", "limitations", "progress", "problem",
+                 "createdAt", "startedAt", "finishedAt"} <= body.keys()
+                or body["outcome"] not in ("changed", "not_changed", "changed_elsewhere", "unknown")
+                or not isinstance(body["commands"], list)
+                or any(body[key] is not None and not _selected_program(body[key]) for key in ("before", "after"))):
+            raise ClaudexorUnavailable("malformed_response", "Claudexor vendor program receipt is unavailable")
         return body
 
     def project_registrations(self) -> list:

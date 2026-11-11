@@ -393,37 +393,20 @@ def test_assignment_answers_under_a_held_writer_when_money_is_there(data_root, m
     assert elapsed < _MAX_READ_SEC and pending == [] and list(workers.RUNNING) == ["evo-1"]
 
 
-def _display_readers(data_root, state):
-    """Every DISPLAY reader, as the real callable."""
-    from ouroboros.consciousness_allowance import allowance_window
-    from ouroboros.gateway.cost_breakdown import _task_cost_breakdown_view
-    from supervisor import message_bus, queue
-
-    return {
-        "status_text": lambda: state.status_text({}, [], {}),
-        "budget_breakdown": lambda: state.budget_breakdown({}),
-        "model_breakdown": lambda: state.model_breakdown({}),
-        "budget_line": lambda: message_bus._format_budget_line({}),
-        "evolution_status": lambda: queue.get_evolution_status_snapshot(),
-        "task_cost_view": lambda: _task_cost_breakdown_view(data_root, {"task_id": "task", "root_task_id": "task"}),
-        "consciousness_status": lambda: allowance_window(data_root, allow_stale=True),
-    }
-
-
 @pytest.mark.parametrize("reader", [
-    "status_text", "budget_line",
+    "status_text",
     "consciousness_status",
 ])
 def test_every_display_reader_answers_under_a_held_monetary_lock(data_root, supervisor_state, monkeypatch, reader):
     """The wiring, caller by caller: a silent return to the exact read would park the
     supervisor loop (or a gateway worker) for the 45-second monetary timeout again."""
-    from supervisor import message_bus, queue
+    from ouroboros.consciousness_allowance import allowance_window
 
-    for module in (message_bus, queue):
-        monkeypatch.setattr(module, "DRIVE_ROOT", data_root, raising=False)
-    monkeypatch.setattr(message_bus, "TOTAL_BUDGET_LIMIT", 1_000_000.0, raising=False)
     _spend(data_root, 0.40)
-    read = _display_readers(data_root, supervisor_state)[reader]
+    read = {
+        "status_text": lambda: supervisor_state.status_text({}, [], {}),
+        "consciousness_status": lambda: allowance_window(data_root, allow_stale=True),
+    }[reader]
     read()
     with _held_ledger_lock(data_root):
         _, elapsed = _timed(read)

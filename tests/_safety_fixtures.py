@@ -5,6 +5,14 @@ from types import SimpleNamespace
 import pytest
 
 
+def reset_safety_stores():
+    """Forget every work's returned, held and judged calls and its pending readings, in place."""
+    from ouroboros import safety_records
+    with safety_records._PRIOR_LOCK:
+        for store in (safety_records._PRIOR_VERDICTS, safety_records._RETURNED, safety_records._JUDGED):
+            store.clear()
+
+
 @pytest.fixture
 def supervisor(monkeypatch, tmp_path):
     from ouroboros import safety
@@ -22,7 +30,7 @@ def supervisor(monkeypatch, tmp_path):
         """The mind's next model call: the loop's authoring-call fact a re-issue's decision is read from."""
         rounds[0] += 1
         ctx._current_llm_call_meta = {"llm_call_id": f"llm-round-{rounds[0]}"}
-    safety._PRIOR_VERDICTS.clear()
+    reset_safety_stores()
     monkeypatch.setattr(safety, "_SAFETY_STORM_UNTIL", 0)
     monkeypatch.setattr(safety, "_CHAIN_STORMS", {})
     monkeypatch.setattr(safety, "runtime_setting", lambda key, default=None: values.get(key, default))
@@ -43,7 +51,7 @@ def supervisor(monkeypatch, tmp_path):
     monkeypatch.setattr(safety, "_safety_model_call", call)
     yield SimpleNamespace(module=safety, ctx=ctx, calls=calls, events=events, replies=replies, values=values, modes=modes,
                           later=later)
-    safety._PRIOR_VERDICTS.clear()
+    reset_safety_stores()
 
 
 def disable_safety(monkeypatch):

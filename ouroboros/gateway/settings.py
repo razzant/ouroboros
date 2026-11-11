@@ -1003,13 +1003,6 @@ def _apply_settings_save_side_effects(
         refresh_timeouts_from_settings(current)
     except Exception:
         pass
-    try:
-        from supervisor.message_bus import refresh_budget_limit
-        raw_budget = current.get("TOTAL_BUDGET")
-        new_budget = float(raw_budget) if raw_budget is not None else 0.0
-        refresh_budget_limit(new_budget)
-    except Exception:
-        pass
     return side_effect_warnings
 
 

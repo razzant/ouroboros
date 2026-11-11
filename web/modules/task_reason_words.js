@@ -145,24 +145,55 @@ const TOOL_NOUNS = {
     apply_patch: 'A file edit',
     github_write: 'A GitHub write',
     send_user_message: 'A message send',
+    place_reply: 'A reply',
     schedule_subagent: 'A helper start',
     commit_reviewed: 'A commit',
     vcs_commit_reviewed: 'A commit',
     skill_exec: 'A skill run',
 };
 const LISTED = 20;  // outcomes keeps at most this many errors per list
+const HELD_STATUSES = ['safety_returned', 'safety_unavailable'];  // twin: _outcome_tool_errors.SAFETY_HELD_STATUSES
+const toolNoun = (tool) => tr(`task.tool_noun.${Object.hasOwn(TOOL_NOUNS, tool) ? tool : 'other'}`, TOOL_NOUNS[tool] || 'A tool step');
+
+/** What happened to a call Safety returned or could not read, in the words of its step row and of the open Done card
+ *  alike, or '' for any other status. */
+export function heldCallPhrase(tool, status) {
+    if (!HELD_STATUSES.includes(status)) return '';
+    const noun = toolNoun(tool);
+    return status === 'safety_returned' ? fmt('{noun} was returned by the Safety Supervisor', { noun })
+        : fmt('{noun} was not run: the Safety Supervisor could not read it', { noun });
+}
+
+/** The headline of a finished step that did not succeed: held by Safety (never "failed"), a command's exit, or a
+ *  failed step. */
+export function failedStepHeadline(evt = {}) {
+    const exitCode = Number(evt.exit_code);
+    return heldCallPhrase(evt.tool, evt.status) || (evt.status === 'non_zero_exit'
+        ? `A command returned ${Number.isFinite(exitCode) ? `exit code ${exitCode}` : 'a non-zero exit code'}`
+        : `One of the steps failed${evt.tool ? ` · ${evt.tool}` : ''}`);
+}
+
+// The first error of both lists a view names (unresolved first), how many more, and whether a capped list is named
+// through and through: the loud ones, or with `held` the calls Safety held; never a failed read or details-only leftover.
+function namedToolErrors(execution, held) {
+    const list = (key) => (Array.isArray(execution?.[key]) ? execution[key].filter((item) => item && typeof item === 'object') : []);
+    const listed = [list('unresolved_tool_errors'), list('cosmetic_tool_errors')];
+    const named = listed.map((errors) => errors.filter((item) => !(item.read_only || item.details_only)
+        && HELD_STATUSES.includes(item.status) === held));
+    // "More" only when a capped list is named through and through; otherwise the retained ones are counted exactly.
+    const capped = listed.some((errors, index) => errors.length >= LISTED && named[index].length === errors.length);
+    return { first: (named[0].length ? named[0] : named[1])[0], more: named[0].length + named[1].length - 1, capped };
+}
 
 /** The residual-warning clause naming the first recorded LOUD tool error in plain words (never a tool name, its
  *  result text or a path), or '' when the record names none. A failed read (`read_only`, owner 06.11 A) and a
  *  details-only leftover (`details_only`, owner 09.11 A: a command that ran and failed, a call refused before running)
- *  stay in the details. Twin of tool_error_words.residual_tool_errors_phrase / _outcome_tool_errors.warns_without_review. */
+ *  stay in the details, a held call in the open card (`heldCallsLine`, owner 11.11 A). Twin of
+ *  tool_error_words.residual_tool_errors_phrase / _outcome_tool_errors.warns_without_review. */
 export function residualToolErrorsPhrase(execution = {}) {
-    const list = (key) => (Array.isArray(execution?.[key]) ? execution[key].filter((item) => item && typeof item === 'object') : []);
-    const listed = [list('unresolved_tool_errors'), list('cosmetic_tool_errors')];
-    const [unresolved, cosmetic] = listed.map((errors) => errors.filter((item) => !(item.read_only || item.details_only)));
-    const first = (unresolved.length ? unresolved : cosmetic)[0];
+    const { first, more, capped } = namedToolErrors(execution, false);
     if (!first) return '';
-    const noun = tr(`task.tool_noun.${Object.hasOwn(TOOL_NOUNS, first.tool) ? first.tool : 'other'}`, TOOL_NOUNS[first.tool] || 'A tool step');
+    const noun = toolNoun(first.tool);
     const status = String(first.status || ''), code = Number.isInteger(first.exit_code) ? first.exit_code : null;
     const signal = first.signal ?? '';
     const subject = status === 'unknown_tool' ? tr('task.tool_error.unknown_tool', 'A call named a tool that does not exist')
@@ -172,14 +203,21 @@ export function residualToolErrorsPhrase(execution = {}) {
                 : status.endsWith('timeout') ? fmt('{noun} timed out', { noun })
                     : status === 'argument_error' ? fmt('{noun} was called with invalid arguments', { noun })
                         : fmt('{noun} failed', { noun });
-    const more = unresolved.length + cosmetic.length - 1;
-    // "More" only when a capped list is loud through and through; otherwise the retained loud errors are counted exactly.
-    const capped = (listed[0].length >= LISTED && unresolved.length === listed[0].length)
-        || (listed[1].length >= LISTED && cosmetic.length === listed[1].length);
     const tail = capped ? tr('task.tool_error.more_capped', ', plus more tool errors')
         : more === 1 ? tr('task.tool_error.more_one', ', plus 1 more tool error')
             : more ? fmt(', plus {n} more tool errors', { n: more }) : '';
     return fmt('{subject}{tail}.', { subject, tail });
+}
+
+/** The open Done card's own line for the calls Safety returned or could not read that nothing replaced, counted as
+ *  the loud clause counts, or ''. No collapsed line, notification or host sentence names them (owner 11.11, A). */
+export function heldCallsLine(execution = {}) {
+    const { first, more, capped } = namedToolErrors(execution, true);
+    if (!first) return '';
+    const tail = capped ? tr('task.tool_error.held_more_capped', ', plus more held by Safety')
+        : more === 1 ? tr('task.tool_error.held_more_one', ', plus 1 more held by Safety')
+            : more ? fmt(', plus {n} more held by Safety', { n: more }) : '';
+    return fmt('{subject}{tail}.', { subject: heldCallPhrase(first.tool, first.status), tail });
 }
 
 // Details retain unknown codes once, in order; their visible cause never guesses. Twin: project_dialogue._cause_phrase.

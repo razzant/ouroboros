@@ -874,10 +874,6 @@ class CarrierTurn:
                 )
 
     def observe(self, kind: str, data: Dict[str, Any]) -> None:
-        if kind == "task_heartbeat":  # this carrier's own size rides its turn's beat (the lane's vitals)
-            from supervisor.conversation_lane import carrier_rss
-
-            data["_carrier_rss"] = carrier_rss()
         self._phases.observe(kind, data)
 
     def hooks(self) -> Dict[str, Any]:

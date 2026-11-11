@@ -466,7 +466,7 @@ def test_a_grant_restores_the_newer_work_whether_or_not_its_mark_was_published(p
     parked = (root / "state/queue_snapshot.json").read_bytes()
     assert _read(root, "queue_snapshot.json")["running"][0]["owner_wait"]["state"] == "waiting"
     worker_owner_wait.handle_owner_wait({**pool.event, "phase": "resume"}, workers)
-    worker_owner_wait.maintain_owner_wait_capacity()  # the grant: store commit, mark, resume_granted
+    worker_owner_wait.grant_warm_returns()  # the grant: store commit, mark, resume_granted
     assert pool.original.in_q.get_nowait()["phase"] == "resume_granted"
     assert task_status.load_task_result(root, "owner")["owner_wait"]["state"] == "resumed"
     _ctx, limit = _loop_ctx(root, "owner", attempt=3)
