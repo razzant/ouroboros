@@ -851,10 +851,11 @@ def test_a_build_receipt_says_whether_the_set_acted_and_what_it_left_unread(tmp_
     assert acting["rows_read"] + acting["rows_cold"] == whole["rows_read"]
     assert acting["rows_read"] == acting["rows_open"] + acting["rows_kept"], acting  # law L7d: open, kept by a rule, new
     _append(tmp_path, shared.msg(_ts(5), "New and sealed.", client_message_id="new-sealed"))  # sealed before a read
+    _append(tmp_path, shared.msg(_ts(6), "Newest and open.", client_message_id="new-open"))  # the room's newest
     _seal(tmp_path, _entry(tmp_path, "New and sealed."), 1)
     newer = _work(tmp_path, rooms)
-    assert newer.get("rows_new") == 1 and "rows_cold" in newer, newer
-    assert newer["rows_read"] == newer["rows_open"] + newer["rows_kept"], newer
+    assert newer.get("rows_new") == 2 and "rows_cold" in newer, newer
+    assert newer["rows_read"] == newer["rows_open"] + newer["rows_kept"], newer  # the sealed one is read as new
     ds.revise_text(tmp_path, "chat", row[0]["hint"]["seq"], "Sealed row, revised.")  # the stored facts wait for the fill
     live = _work(tmp_path, rooms)
     assert live.get("tail_whole") == 1 and "rows_cold" not in live, live  # every row was read live: no set acted
