@@ -641,6 +641,7 @@ WS_SHAPES: dict[str, tuple[str, str]] = {
     "extension_lifecycle": ("", "ExtensionLifecycleOutbound"),
     "message_annotation": ("", "MessageAnnotationOutbound"),
     "projects_changed": ("", "ProjectsChangedOutbound"),
+    "ui_preferences_changed": ("", "UiPreferencesChangedOutbound"),
     "task_named": ("", "TaskNamedOutbound"),
     "update_status_ready": ("", "UpdateStatusReadyOutbound"),
     "update_progress_changed": ("", "UpdateProgressChangedOutbound"),
