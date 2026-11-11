@@ -343,7 +343,8 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
                 window.addEventListener('ouro:open-task', (event) => seen.push(event.detail)); return seen; }""")
             page.locator(".costs-allowance-line [data-open-task]").click()
             assert opened.json_value() == [{"task_id": "wake-held", "chat_id": 1}]
-            # ... said on the Consciousness tab with the owner's mark and its door to Costs, and in the Shade.
+            # ... said on the Consciousness tab with the owner's mark and its allowance door, which opens that row in
+            # Costs, and in the Shade.
             for (width, _height, theme), page in pages.items():
                 _costs(page, url)
                 page.locator("[data-costs-consciousness]").click()
@@ -356,8 +357,8 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
                     "does not raise it. Stop now on its card ends it and frees the clock for its next check.")
                 if (shot := _evidence(f"{engine}-{width}-{theme}-held-consciousness.png")) is not None:
                     page.locator("[data-cx-summary]").screenshot(path=str(shot))
-                page.locator('[data-cx-act="costs"]').click()
-                expect(page.locator(FIELD)).to_be_visible(timeout=30_000)
+                page.locator('#page-dashboard [data-setting-row="consciousness-allowance"]').click()
+                expect(page.locator(FIELD)).to_be_focused(timeout=30_000)
                 _nav(page, "chat")
                 chip = page.locator("#page-chat .cx-chip")
                 expect(chip).to_be_visible(timeout=30_000)

@@ -6457,6 +6457,7 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .dashboard-settings-lead { margin: calc(-1 * var(--space-2)) 0 var(--space-3); color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); }
 .dashboard-settings-fold { margin-top: var(--space-3); }
 .dashboard-settings .settings-row-field > .ui-control { width: 4.5rem; }
+.costs-limits .settings-row-field > .ui-control { width: 5.25rem; }  /* money: room for a larger limit */
 .dashboard-settings .settings-row-value { color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); font-weight: 600; white-space: nowrap; }
 .dashboard-settings .settings-row-value[data-tone="warn"] { color: var(--status-warn-fg); }
 .dashboard-settings .settings-row-chevron { color: var(--text-disabled); }
@@ -6470,8 +6471,8 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
    the words, as ui.css moves every row's actions); a row that leads with its glyph says its value as a third line
    and keeps its chevron at the end. */
 @container (max-width: 28rem) {
-    .dashboard-settings .settings-row:is([data-kind="number"], [data-kind="door"]) > :is(.ui-row-title, .ui-row-meta) { grid-column: 1; }
-    .dashboard-settings .settings-row:is([data-kind="number"], [data-kind="door"]) > .ui-row-actions { grid-column: 2; grid-row: 1 / span 2; justify-content: flex-end; }
+    .dashboard-settings .settings-row:is([data-kind="number"]:not(:has([data-setting-no-limit])), [data-kind="door"]) > :is(.ui-row-title, .ui-row-meta) { grid-column: 1; }
+    .dashboard-settings .settings-row:is([data-kind="number"]:not(:has([data-setting-no-limit])), [data-kind="door"]) > .ui-row-actions { grid-column: 2; grid-row: 1 / span 2; justify-content: flex-end; }
     .dashboard-settings .settings-row[data-lead] > :is(.ui-row-title, .ui-row-meta) { grid-column: 2; }
     .dashboard-settings .settings-row[data-lead] > .ui-row-actions { display: contents; }
     .dashboard-settings .settings-row[data-lead] .settings-row-value { grid-column: 2; grid-row: 3; white-space: normal; }

@@ -85,7 +85,7 @@ export function mountTabSettings(host, tab, { state, cards = null, custom = null
     const onShown = () => (shown() ? void read() : rows.leave());
     const onUpdated = (event) => {
         const { source, page: home, row } = event.detail || {};
-        if (source === 'settings-row' && home === page) { onSaved?.(row); void read(); }
+        if (source === 'settings-row' && home === page) { onSaved?.(row); paint(); void read(); }
         else if (source === 'settings-row') paint();
         else if (shown()) void read();
     };

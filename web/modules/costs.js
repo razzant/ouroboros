@@ -267,7 +267,7 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
         </section>
         <section class="ui-card costs-budget" aria-labelledby="costs-budget-title">
             <h3 class="dashboard-card-title" id="costs-budget-title">Budget</h3>
-            <div class="costs-limits">${limitRows(false)}</div>
+            <div class="costs-limits dashboard-settings">${limitRows(false)}</div>
             <div class="costs-allowance">
                 <p class="ui-field-help costs-allowance-spend" id="costs-allowance-spend">Reading…</p>
             </div>
@@ -282,7 +282,7 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
             </details>
             <details class="ui-disclosure">
                 <summary>More limits</summary>
-                <div class="costs-limits">${limitRows(true)}</div>
+                <div class="costs-limits dashboard-settings">${limitRows(true)}</div>
             </details>
         </section>
         <section class="ui-card dashboard-settings costs-subscriptions" aria-labelledby="costs-subscriptions-title">
