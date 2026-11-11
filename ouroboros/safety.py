@@ -1334,6 +1334,8 @@ def _run_llm_check(
             failure = failure or "it returned no verdict with a reason"
     if failure:  # an optional second check that answered nothing leaves the first verdict standing
         _emit_durable_safety_event(ctx, {"type": "safety_second_check_failed", "tool": tool_name, "error": failure})
+        if verdicts[-1].get("owner"):  # its mark stays on record, but no final reading confirmed it for my human's row
+            verdicts[-1] = {**verdicts[-1], "owner_unconfirmed": True}
     status = result["status"]
     return _Assessment(status == "SAFE", "", status=status, verdicts=verdicts,
                        destination="" if status == "SAFE" else "\n".join(_destination_lines(evidence)))
@@ -1499,7 +1501,7 @@ def _assess_call(tool_name, arguments, messages, ctx, python_resolution, resolve
     if waits and not reread:
         return waiting()
     if flag and not waits:  # an owner-marked reading also tells my human, in the Supervisor's own row
-        tell_owner_over_flag(ctx, tool_name, arguments, effect, subject, basis, level)
+        tell_owner_over_flag(ctx, tool_name, arguments, subject, basis, level)
         return let_through("safety_sent_despite_check", "⚠️ SAFETY_NOTE: let through on your later identical call, "
                            "without a new reading; the tool's result says what happened. The Supervisor had read it "
                            f"as {level}: {_reasons(basis)}",

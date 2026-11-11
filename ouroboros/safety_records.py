@@ -173,31 +173,35 @@ def _track_returned(ctx, tool_name, result):
                 _RETURNED.popitem(last=False)
 
 
-def tell_owner_over_flag(ctx, tool_name, arguments, effect, subject, verdicts, level) -> None:
+def tell_owner_over_flag(ctx, tool_name, arguments, subject, verdicts, level) -> None:
     """The Supervisor's own row to my human when Ouroboros's identical re-issue is let through over a flag whose final
     reading marked the act as one my human would want to stop (``"owner": true``). Host-composed from typed facts
     through the terminal outbox, signed as the Supervisor's, one per work and destination: the declared words' places
-    and recipients, else the tool and its declared targets (``delivery_id``, so a reworded repeat, a restart or a later
-    finding there adds none). ``subject`` resolves what the call says and where (``safety._exit_subject``), read only
+    and every recipient, else the exact call, shown redacted as the bundle shows it (``delivery_id``, so reworded words
+    to the same place, a restart or a later finding there add none). A first mark a failed second check left
+    unconfirmed tells nobody. ``subject`` resolves what the call says and where (``safety._exit_subject``), read only
     for a marked flag. Never in the tool's result, never changing what the call does; claims no delivery."""
     final = verdicts[-1] if verdicts else {}
-    if final.get("owner") is not True:
+    if final.get("owner") is not True or final.get("owner_unconfirmed"):  # a failed second check confirmed nothing
         return
     try:
         import hashlib
+        from ouroboros.safety import _render_subject_json
         from ouroboros.tool_access_paths import canonical_data_root
-        from ouroboros.tool_effects import target_values
         from supervisor.schedule_notes import owner_chat_id
         from supervisor.terminal_delivery import enqueue_terminal_delivery_outcome
 
         work, root = _root_id(ctx), canonical_data_root(ctx)
         if not work:
             return
-        _words, destinations, exact, labels = subject()
-        words_to = not exact
-        where = sorted(labels or destinations) if words_to else sorted(
-            {value for values in target_values(effect, arguments or {}).values() for value in values})
-        identity = json.dumps(["words" if words_to else tool_name, where], ensure_ascii=False)
+        said, destinations, exact, _labels = subject()
+        if exact:  # any call that declares no words and place: the exact call is its destination
+            shown = " ".join(_render_subject_json(arguments or {}).split())
+            call, identity = (f"Call: {tool_name} {shown[:240]}{'…' if len(shown) > 240 else ''}",
+                              json.dumps(["call", said], ensure_ascii=False))
+        else:
+            call = f"Call: {tool_name} → {', '.join(sorted(destinations))}"
+            identity = json.dumps(["words", sorted(destinations)], ensure_ascii=False)
         try:
             from ouroboros.projects_registry import task_presentation_snapshot
             label = task_presentation_snapshot(root, work, fallback="").get("target_label") or ""
@@ -206,12 +210,12 @@ def tell_owner_over_flag(ctx, tool_name, arguments, effect, subject, verdicts, l
         quote = " ".join(str(final.get("quote") or "").split())
         text = "\n".join([
             "Safety Supervisor · not Ouroboros's words",
-            "Ouroboros re-issued this after the flag and the host admitted the attempt; "
-            "delivery is not confirmed here.",
-            f"Call: {tool_name}" + (f" → {', '.join(where)}" if where else ""),
+            call,
             f"Flag ({level}): {final.get('reason') or ''}",
             *([f"Quoted: «{quote[:300]}{'…' if len(quote) > 300 else ''}»"] if quote else []),
             f"Work: {label} ({work})" if label else f"Work: {work}",
+            "Ouroboros re-issued this after the flag and the host admitted the attempt; "
+            "delivery is not confirmed here.",
             "Your brakes: /bg stop or /panic in Telegram; "
             "in the app, Stop or Pause the work and set its place Paused."])
         enqueue_terminal_delivery_outcome(root, {
