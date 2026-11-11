@@ -477,8 +477,8 @@ def over_one_state(root: Any, read: Callable[[bool], Tuple[Any, Any]]) -> Any:
     it returned: ``memory_tail_cold.Moved``, ``moved``; standing on the set or not, its rule took the facts read with
     the marks), nothing that capture read is kept: ``read(False)`` begins a new one, read as the path without the set
     reads, which does not consult the set; so at most once. Its receipt names that read; the dropped one is a fact of
-    its own (``capture_restarts``, ``rows_abandoned``). Inside another capture ``read``'s is that capture: its owner
-    begins it again."""
+    its own (``capture_restarts``), every count it paid named apart (``rows_abandoned`` its rows read, any other verb
+    ``<verb>_abandoned``). Inside another capture ``read``'s is that capture: its owner begins it again."""
     store = ChronicleStore(root)
     if store._pinned() is not None:
         return read(True)[0]
@@ -492,7 +492,9 @@ def over_one_state(root: Any, read: Callable[[bool], Tuple[Any, Any]]) -> Any:
         pass
     dropped = back_to(mark)
     counted("capture_restarts")
-    counted("rows_abandoned", dropped.get("rows_read", 0))
+    counted("rows_abandoned", dropped.pop("rows_read", 0))
+    for verb, paid in dropped.items():  # what else the dropped read paid: named, never left in a count of the read shown
+        counted(f"{verb}_abandoned", paid)
     return read(False)[0]
 
 

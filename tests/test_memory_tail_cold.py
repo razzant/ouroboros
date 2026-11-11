@@ -1591,10 +1591,19 @@ def test_a_capture_begun_again_names_the_read_it_shows_and_the_read_it_dropped(m
             store.update_task(tmp_path, "moving", lambda doc: {**doc, "chat_id": rooms["alpha"]})
         return marks
 
+    paid, dropped, real_counted, real_back = [], [], cs.counted, mi.back_to
+
+    def counting(verb, n=1, key=None):  # every record parse the window pays, the dropped read's too
+        if verb == "records_parsed":
+            paid.append(n)
+        return real_counted(verb, n, key)
+
     _forget_process_memos()
     with monkeypatch.context() as patch:
         patch.setattr(cold, "gate", moved_after_the_marks)
         patch.setattr(mi, "_open_pass", lambda *args: passes.append(1) or real_pass(*args))
+        patch.setattr(cs, "counted", counting)
+        patch.setattr(mi, "back_to", lambda mark: dropped.append(real_back(mark)) or dict(dropped[-1]))
         work = _work(tmp_path, rooms)
     with monkeypatch.context() as patch:
         patch.setattr(cold, "gate", lambda _store: None)
@@ -1604,6 +1613,12 @@ def test_a_capture_begun_again_names_the_read_it_shows_and_the_read_it_dropped(m
     assert len(passes) == 2, passes
     assert {term: work.get(term) for term in terms} == {term: whole.get(term) for term in terms}, (work, whole)
     assert work.get("capture_restarts") == 1 and work.get("rows_abandoned") == pass_rows, (work, standing)
+    # No count the dropped read paid is lost: each is named apart, and the parses of both reads are all in the receipt.
+    assert len(dropped) == 1 and dropped[0].get("records_parsed") and dropped[0]["rows_read"] == pass_rows, dropped
+    assert {f"{verb}_abandoned": n for verb, n in dropped[0].items() if verb != "rows_read"} == {
+        verb: n for verb, n in work.items() if verb.endswith("_abandoned") and verb != "rows_abandoned"}, (work, dropped)
+    assert work["records_parsed"] + work["records_parsed_abandoned"] == sum(paid) and work["records_parsed"] == whole[
+        "records_parsed"], (work, whole, paid)
     line = _host_work_line([{"code": _running_code(), "work": work}])
     assert f"{whole['rows_read']:,} rows for {whole['rows_open']:,} open" in line, line
     assert f"begun again without its cold set: {pass_rows:,} rows read and dropped" in line, line
