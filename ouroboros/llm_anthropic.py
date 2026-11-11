@@ -470,6 +470,7 @@ class _AnthropicLaneMixin:
                 temperature, tools, **remote_kwargs,
             )
         target["requested_reasoning_effort"] = normalize_reasoning_effort(reasoning_effort)
+        source_messages = messages
         system, messages = self._build_anthropic_messages(messages, target)
         payload: Dict[str, Any] = {
             "model": str(target.get("resolved_model") or ""),
@@ -497,6 +498,7 @@ class _AnthropicLaneMixin:
         if remote_kwargs.get("stream"):
             payload["stream"] = True
         apply_processing_preference(target, payload)
+        self._cache_declared_system_context(source_messages, payload)
         return payload
 
     @request_wire_scoped
