@@ -12,15 +12,16 @@ import { chipHtml } from './skill_presentation.js';
 import { tr, fmt } from './i18n.js';
 import { failureText, readConsciousness, readConsciousnessFromState, readPlaces } from './consciousness_api.js';
 import { autonomyOf } from './consciousness_autonomy.js';
-import { CHECK_CHIPS, allowanceText, clockText, consciousnessMark, splitWakes, durationText, sendsAsHtml, usdText, wakePhaseText, wakeFactsText, wakeCheckChip, wakeCheckText, wakeCostText } from './consciousness_words.js';
+import { CHECK_CHIPS, allowanceText, clockText, consciousnessMark, safetyLevelOf, splitWakes, durationText, sendsAsHtml, usdText, wakePhaseText, wakeFactsText, wakeCheckChip, wakeCheckText, wakeCostText } from './consciousness_words.js';
 import { mountChatMarkdown, enhanceChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
 import { confirmAndSendRestart, costPresentationDetail } from './chat_activity.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { openCircles, openPlaceSheet } from './place_sheet.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
-import { WRITERS } from './settings_controls.js';
+import { CODECS, GUARDED_WRITERS, WRITERS } from './settings_controls.js';
 import { mountTabSettings } from './dashboard.js';
 import { parseModelSource } from './route_editor_primitives.js';
+import { whenName } from './evolution.js';
 
 const SEP = ' · ';
 const REFRESH_MS = 20000;
@@ -36,6 +37,7 @@ const dots = () => statusMarkHtml('consciousness-mark', { shape: 'moving', hue: 
 WRITERS.wakeRange = (row, value, options) => (Number(value?.[0]) > Number(value?.[1])
     ? { state: 'refused', effect: '', withheld: '', message: 'The shortest wait is above the longest.', code: 'invalid_value' }
     : WRITERS.generic(row, value, options));
+GUARDED_WRITERS.add('wakeRange');  // Undo's token and unset keys go to the generic write with the rest
 
 /** Seconds as the words a person reads: minutes below an hour, hours from there. */
 export function waitWords(seconds) {

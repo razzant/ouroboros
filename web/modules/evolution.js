@@ -1,6 +1,5 @@
 /**
  * Dashboard → Evolution: how Ouroboros changed, on one time line (docs/DESIGN.md §5; ARCHITECTURE §3 "Dashboard").
- *
  * Three independent reads. `/api/state` paints the campaign object (Start and Pause through `/api/command`, consciousness
  * as one status sentence); it is read through the page's one state clock when there is one, whose every answer (its
  * periodic read included) reaches this page too, so a command the runtime applies late shows up without a poll of its
@@ -21,7 +20,7 @@ import { showToast } from './toast.js';
 import { statusMarkHtml } from './status_mark.js';
 import { formatBytes, number, whenLabel } from './storage_format.js';
 import { escapeHtmlAttr as esc } from './ui_primitives.js';
-import { CODECS, WRITERS, commitSetting } from './settings_controls.js';
+import { CODECS, GUARDED_WRITERS, WRITERS, commitSetting } from './settings_controls.js';
 import { rowById } from './settings_rows.js';
 import { mountTabSettings } from './dashboard.js';
 
@@ -494,12 +493,14 @@ CODECS.evolutionWhen = {
     body: ([on, cadence]) => ({ OUROBOROS_POST_TASK_EVOLUTION: Boolean(on), OUROBOROS_POST_TASK_EVOLUTION_CADENCE: cadence }),
 };
 const everyWords = (value, n = Number(String(value?.[1]).slice(8))) => (n === 1 ? 'every task' : `every ${n} tasks`);
-WRITERS.evolutionWhen = async (row, value, options) => {
-    if (!CADENCE.test(String(value?.[1]))) return { state: 'refused', effect: '', withheld: '', message: 'Enter a whole number of tasks, 1 or more.', code: 'invalid_value' };
-    const outcome = await WRITERS.generic(row, value, options);
-    return outcome.old === undefined ? outcome
-        : { ...outcome, old: { off: 'Off', llm: 'After each task', every_n: capital(everyWords(outcome.old)) }[whenMode(outcome.old)] };
+export const whenName = (pair) => ({ off: 'Off', llm: 'After each task', every_n: capital(everyWords(pair)) }[whenMode(pair)]);
+// Checks the count, then writes as the generic writer does. "was" names the old pair, which rides on the name for Undo.
+WRITERS.evolutionWhen = async (row, value, options, undo = value?.pair) => {
+    if (!undo && !CADENCE.test(String(value?.[1]))) return { state: 'refused', effect: '', withheld: '', message: 'Enter a whole number of tasks, 1 or more.', code: 'invalid_value' };
+    const outcome = await WRITERS.generic(row, undo ? [isOn(undo[0]), undo[1]] : value, options);
+    return outcome.old === undefined ? outcome : { ...outcome, old: Object.assign([whenName(outcome.old)], { pair: outcome.old }) };
 };
+GUARDED_WRITERS.add('evolutionWhen');
 /** The choice in its own sentence (dashboard.js `words`): "every N" says only when it asks itself (post_task_evolution.py). */
 export function whenWords(settings, value = CODECS.evolutionWhen.read(settings)) {
     const decides = 'it decides whether one improvement is worth a cycle.';

@@ -421,7 +421,7 @@ export const WRITERS = {
     },
 };
 // Only these writers' endpoints take `if_unchanged`, so only their rows offer Undo.
-const GUARDED_WRITERS = new Set(['generic', 'checker']);
+export const GUARDED_WRITERS = new Set(['generic', 'checker']);
 
 /** Rows a page leaves out: each reads the last settings document. */
 export const HIDDEN_WHEN = {
