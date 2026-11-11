@@ -1,15 +1,15 @@
 /**
  * Dashboard → Evolution: how Ouroboros changed, on one time line (docs/DESIGN.md §5; ARCHITECTURE §3 "Dashboard").
  *
- * Two independent reads. `/api/state` paints the campaign object (Start and Pause through `/api/command`, consciousness
+ * Three independent reads. `/api/state` paints the campaign object (Start and Pause through `/api/command`, consciousness
  * as one status sentence); it is read through the page's one state clock when there is one, whose every answer (its
- * periodic read included) reaches this page too, so a command the runtime applies late shows up without a poll of
- * its own. `/api/evolution-data` answers at once with the saved version history and says whether a
- * newer copy is being measured, which this module polls only while that runs. One measure is drawn at a time. A
- * milestone (a MAJOR or MINOR release, or a version its release author named) is a dot on the line, labelled where there
- * is room; every version is a tick under it, and the chosen version's own release row reads in full beneath. Identity
- * and Scratchpad belong to this installation, not to a release: they are separate measures in the characters their
- * journals record, and a date with no record is a gap, never zero.
+ * periodic read included) reaches this page too, so a command the runtime applies late shows up without a poll of its
+ * own. The cycles' settings card reads `/api/settings` (dashboard.js). `/api/evolution-data` answers at once with the
+ * saved version history and says whether a newer copy is being measured, which this module polls only while that runs.
+ * One measure is drawn at a time. A milestone (a MAJOR or MINOR release, or a version its release author named) is a dot
+ * on the line, labelled where there is room; every version is a tick under it, and the chosen version's own release row
+ * reads in full beneath. Identity and Scratchpad belong to this installation, not to a release: they are separate
+ * measures in the characters their journals record, and a date with no record is a gap, never zero.
  */
 import { formatUsd2 } from './utils.js';
 import { apiFetch, readState } from './api_client.js';
@@ -21,6 +21,9 @@ import { showToast } from './toast.js';
 import { statusMarkHtml } from './status_mark.js';
 import { formatBytes, number, whenLabel } from './storage_format.js';
 import { escapeHtmlAttr as esc } from './ui_primitives.js';
+import { CODECS, WRITERS, commitSetting } from './settings_controls.js';
+import { rowById } from './settings_rows.js';
+import { mountTabSettings } from './dashboard.js';
 
 // ---- The campaign and consciousness --------------------------------------------------------------------------------
 
@@ -39,28 +42,17 @@ export function runtimeTone(status) {
     return 'neutral';
 }
 
+// A status's short word: a null control is never "off", and the boot window (consciousness_view) says "starting".
+const TRANSLATED = { due: 'due', wake_paused: 'paused', wake_outcome_unknown: 'unknown' };
+const SHORT_WORDS = { state_unknown: 'unknown', unknown: 'unknown', thinking: 'thinking', sleeping: 'sleeping',
+    ...Object.fromEntries(NEEDS_OWNER.map((status) => [status, 'needs owner'])), allowance_exhausted: 'allowance',
+    allowance_unknown: 'allowance', wake_failed: 'failed', wake_rejected: 'refused', running: 'running', queued: 'queued',
+    idle_ready: 'idle', waiting_for_idle: 'waiting', waiting_for_restart_verify: 'restart verify', paused: 'paused',
+    paused_failures: 'paused', accounting_unavailable: 'paused', budget_blocked: 'budget', budget_stopped: 'budget',
+    error_backoff: 'retrying', stopped: 'stopped', starting: 'starting' };
 function shortStatusLabel(status, fallback = 'off') {
-    if (status === 'due') return tr('consciousness.due', 'due');
-    if (status === 'wake_paused') return tr('consciousness.wake_paused', 'paused');
-    if (status === 'wake_outcome_unknown') return tr('consciousness.wake_outcome_unknown', 'unknown');
-    if (status === 'state_unknown' || status === 'unknown') return 'unknown';  // a null control is never "off"
-    if (status === 'thinking') return 'thinking';
-    if (status === 'sleeping') return 'sleeping';
-    if (NEEDS_OWNER.includes(status)) return 'needs owner';
-    if (status === 'allowance_exhausted' || status === 'allowance_unknown') return 'allowance';
-    if (status === 'wake_failed') return 'failed';
-    if (status === 'wake_rejected') return 'refused';
-    if (status === 'running') return 'running';
-    if (status === 'queued') return 'queued';
-    if (status === 'idle_ready') return 'idle';
-    if (status === 'waiting_for_idle') return 'waiting';
-    if (status === 'waiting_for_restart_verify') return 'restart verify';
-    if (status === 'paused' || status === 'paused_failures' || status === 'accounting_unavailable') return 'paused';
-    if (status === 'budget_blocked' || status === 'budget_stopped') return 'budget';
-    if (status === 'error_backoff') return 'retrying';
-    if (status === 'stopped') return 'stopped';
-    if (status === 'starting') return 'starting';  // the boot window (consciousness_view): no alarm, a neutral tone
-    return fallback;
+    if (Object.hasOwn(TRANSLATED, status)) return tr(`consciousness.${status}`, TRANSLATED[status]);
+    return Object.hasOwn(SHORT_WORDS, status) ? SHORT_WORDS[status] : fallback;
 }
 
 const capital = (text) => (text ? text[0].toUpperCase() + text.slice(1) : '');
@@ -108,14 +100,11 @@ export function campaignView(runtime, now = new Date()) {
 }
 
 /**
- * Ask for the evolution-campaign objective (pure decision helper, node-tested
- * with an injected dialog). window.prompt is dead on the macOS desktop shell
- * (pywebview/WKWebView answers null silently), which made Start campaign a
- * one-click PAID launch with a hidden-empty objective and no way to cancel.
- * Semantics (owner-approved Б1-8): cancel/Escape/backdrop = do NOT start;
- * confirmed-empty = start with the default autonomous objective downstream
- * (evolution_lifecycle.py); confirmed-text = start with that objective.
- * `running`: the same `/evolve on` gives a running campaign the typed
+ * Ask for the evolution-campaign objective (pure decision helper, node-tested with an injected dialog). window.prompt is
+ * dead on the macOS desktop shell (pywebview/WKWebView answers null silently), which made Start campaign a one-click
+ * PAID launch with a hidden-empty objective and no way to cancel. Semantics (owner-approved Б1-8): cancel/Escape/backdrop
+ * = do NOT start; confirmed-empty = start with the default autonomous objective downstream (evolution_lifecycle.py);
+ * confirmed-text = start with that objective. `running`: the same `/evolve on` gives a running campaign the typed
  * objective in place, and an empty one keeps the campaign's own.
  */
 export async function promptCampaignObjective({ dialogImpl = openConfirmDialog, running = false } = {}) {
@@ -500,34 +489,54 @@ function caption(model, key) {
     return `This installation · ${measure.label}: ${measure.what}, at each version’s date.${since} dates without a record are gaps.`;
 }
 
+// ---- When a cycle may follow your tasks: one row over two keys (settings_rows.js) ----------------------------------
+
+const CADENCE = /^(off|llm|every_n:[1-9]\d*)$/;
+const isOn = (value) => /^(1|true|yes|on)$/i.test(String(value ?? '').trim());
+/** The choice a stored pair [enabled, cadence] stands for: off, llm (after each task) or every_n. */
+export const whenMode = ([on, cadence] = []) => (!isOn(on) || cadence === 'off' ? 'off' : String(cadence).startsWith('every_n:') ? 'every_n' : 'llm');
+// A malformed stored cadence reads as llm, the server's own reading (config.get_post_task_evolution_cadence).
+CODECS.evolutionWhen = {
+    read: (settings, row, cadence = String(settings?.OUROBOROS_POST_TASK_EVOLUTION_CADENCE ?? 'llm').trim().toLowerCase()) =>
+        (settings ? [isOn(settings.OUROBOROS_POST_TASK_EVOLUTION), CADENCE.test(cadence) ? cadence : 'llm'] : undefined),
+    body: ([on, cadence]) => ({ OUROBOROS_POST_TASK_EVOLUTION: Boolean(on), OUROBOROS_POST_TASK_EVOLUTION_CADENCE: cadence }),
+};
+WRITERS.evolutionWhen = async (row, value, options) => {
+    if (!CADENCE.test(String(value?.[1]))) return { state: 'refused', effect: '', withheld: '', message: 'Enter a whole number of tasks, 1 or more.', code: 'invalid_value' };
+    const outcome = await WRITERS.generic(row, value, options);
+    const n = Number(String(outcome.old?.[1]).slice(8));
+    return outcome.old === undefined ? outcome
+        : { ...outcome, old: { off: 'Off', llm: 'After each task', every_n: n === 1 ? 'Every task' : `Every ${n} tasks` }[whenMode(outcome.old)] };
+};
+
 // ---- The page ------------------------------------------------------------------------------------------------------
 
-function element(tag, className, attrs = {}) {
+function element(tag, className, attrs = {}, text = '') {
     const node = document.createElement(tag);
     if (className) node.className = className;
     for (const [name, value] of Object.entries(attrs)) node.setAttribute(name, value);
+    if (text) node.textContent = text;
     return node;
 }
+const press = (buttons, chosen) => buttons.forEach((button) => button.setAttribute('aria-pressed', String(button.classList.toggle('active', chosen(button)))));
 
 /**
  * Mount the page. `stateSnapshots` is app.js's sequencer of every `/api/state` read on the page; app.js hands each of
  * its answers (and each failed read, as null) to the returned `hydrateStateSnapshot`.
  */
 export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog = openConfirmDialog, openDashboardTab = null }) {
-    // One Dashboard tab body is the tab's root and scroller; its two objects are its cards.
+    // One Dashboard tab body is the tab's root and scroller; its three objects are its cards.
     const page = element('div', 'dashboard-body scroll-fade-y', { id: 'page-evolution' });
 
     // The campaign object: built node by node, so its controls keep identity and focus across repaints.
     const campaign = element('section', 'evo-campaign ui-card', { 'aria-label': 'Evolution campaign' });
     const main = element('div', 'evo-campaign-main');
     const head = element('div', 'evo-campaign-line');
-    const name = element('h3', 'dashboard-card-title');
-    name.textContent = 'Evolution campaign';
+    const name = element('h3', 'dashboard-card-title', {}, 'Evolution campaign');
     const chip = element('span', 'ui-chip evo-campaign-chip', { id: 'evo-campaign-chip', 'data-tone': 'neutral' });
     chip.hidden = true;
     head.append(name, chip);
-    const note = element('p', 'evo-meta', { id: 'evo-campaign-note' });
-    note.textContent = 'Reading the runtime state…';
+    const note = element('p', 'evo-meta', { id: 'evo-campaign-note' }, 'Reading the runtime state…');
     const lines = element('div', 'evo-campaign-lines');
     // A failed read never passes an earlier answer off as current: it says how old the shown state is.
     const freshness = element('p', 'ui-status', { id: 'evo-campaign-freshness', 'data-tone': 'warn' });
@@ -542,23 +551,19 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
     mind.addEventListener('click', () => openDashboardTab?.('consciousness'));
     side.append(mind);
     const actions = element('div', 'evo-campaign-actions');
-    const startBtn = element('button', 'btn btn-primary', { id: 'evo-start', type: 'button' });
-    startBtn.textContent = 'Start campaign…';
+    const startBtn = element('button', 'btn btn-primary', { id: 'evo-start', type: 'button' }, 'Start campaign…');
     // Pause keeps its place: offered while a campaign runs (or may), present and inactive while there is nothing to
     // pause, so a state change never moves its neighbours (DESIGN principle 6).
-    const stopBtn = element('button', 'btn btn-default', { id: 'evo-stop', type: 'button' });
-    stopBtn.textContent = 'Pause';
+    const stopBtn = element('button', 'btn btn-default', { id: 'evo-stop', type: 'button' }, 'Pause');
     // A deep self-review beside the campaign (owner 25.10, 5A): the one reviewer picker `/review` uses.
-    const reviewBtn = element('button', 'btn btn-default', { id: 'evo-review', type: 'button' });
-    reviewBtn.textContent = 'Run review…';
+    const reviewBtn = element('button', 'btn btn-default', { id: 'evo-review', type: 'button' }, 'Run review…');
     actions.append(startBtn, stopBtn, reviewBtn);
     campaign.append(main, side, actions);
 
     const story = element('section', 'evo-story ui-card', { 'aria-labelledby': 'evo-story-title' });
     const storyHead = element('div', 'evo-story-head');
     const storyWords = element('div', 'evo-story-words');
-    const storyTitle = element('h3', 'dashboard-card-title', { id: 'evo-story-title' });
-    storyTitle.textContent = 'How Ouroboros changed';
+    const storyTitle = element('h3', 'dashboard-card-title', { id: 'evo-story-title' }, 'How Ouroboros changed');
     const statusLine = element('p', 'evo-story-status', { 'aria-live': 'polite' });
     storyWords.append(storyTitle, statusLine);
     const measures = element('div', 'evo-measures', { role: 'group', 'aria-label': 'Measure' });
@@ -576,8 +581,31 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
     // nothing to select by arrows). On a narrow card they wrap onto a second line, so none hides past the edge (U125).
     const body = element('div', 'evo-story-body');
     story.append(storyHead, body);
-    page.append(campaign, story);
+    // The cycles' settings (settings_rows.js), drawn once: no repaint of the campaign or the history touches them.
+    const cycles = element('section', 'ui-card dashboard-settings', { 'aria-label': 'Cycles' });
+    page.append(campaign, cycles, story);
     mount.appendChild(page);
+    const settings = mountTabSettings(cycles, 'evolution', { state, title: 'Cycles', onPaint: paintWhen,
+        custom: (row) => `<div class="ui-segment-group" role="group" aria-labelledby="setting-${row.id}-name">${row.control.options.map((option) =>
+            `<button type="button" class="ui-segment" data-setting-control data-evo-when="${option.value}" aria-pressed="false">${option.label}</button>`).join('')}</div>`
+            + '<span class="settings-row-field" data-evo-every hidden><input class="ui-control" data-evo-n value="3" inputmode="numeric" autocomplete="off" aria-label="Every how many tasks"><span class="settings-row-unit">tasks</span></span>' });
+    function paintWhen(read) {
+        const value = CODECS.evolutionWhen.read(read), count = cycles.querySelector('[data-evo-n]');
+        if (!value || !count) return;
+        press(cycles.querySelectorAll('[data-evo-when]'), (button) => button.dataset.evoWhen === whenMode(value));
+        count.parentElement.hidden = whenMode(value) !== 'every_n';
+        if (whenMode(value) === 'every_n' && document.activeElement !== count) count.value = value[1].slice(8);
+    }
+    // A choice is saved when it is pressed; the count when its field is left or on Enter.
+    const onWhen = (event) => {
+        const pressed = event.target.closest?.('[data-evo-when]');
+        const mode = event.type === 'click' ? pressed && !pressed.classList.contains('active') && pressed.dataset.evoWhen
+            : event.target.matches?.('[data-evo-n]') && 'every_n';
+        if (mode) void commitSetting(rowById('OUROBOROS_POST_TASK_EVOLUTION'), mode === 'off' ? [false, 'llm']
+            : [true, mode === 'llm' ? 'llm' : `every_n:${cycles.querySelector('[data-evo-n]').value.trim()}`]);
+    };
+    cycles.addEventListener('click', onWhen);
+    cycles.addEventListener('change', onWhen);
 
     const view = { key: 'code_lines', version: null, full: false };
     let model = null;
@@ -674,9 +702,8 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
         if (request === runtimeSeq) hydrateStateSnapshot(answer);
     }
 
-    // One command at a time: Start and Pause stay disabled until the gateway answers
-    // (the objective dialog is modal, so it needs no extra gate). The command's own
-    // outcome arrives in chat: a refusal here means only that it was never sent.
+    // One command at a time: Start and Pause stay disabled until the gateway answers (the objective dialog is modal, so
+    // it needs no extra gate). The command's own outcome arrives in chat: a refusal here means only that it was never sent.
     async function sendCommand(cmd, button, control) {
         commandPending = true;
         paintCampaign();
@@ -841,10 +868,6 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
         paintDetail();
     }
 
-    function stepMilestone(step) {
-        choose(neighbourMilestone(model, view.version, step));
-    }
-
     // Prefer nearby milestone dots. Overlapping dates remain reachable through the version controls and keyboard.
     function nearest(px) {
         const pin = geometry.pins.reduce((best, q) => (!best || Math.abs(q.x - px) < Math.abs(best.x - px) ? q : best), null);
@@ -888,7 +911,7 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
             const at = view.version.i, last = model.versions.length - 1;
             const target = { ArrowRight: at + 1, ArrowUp: at + 1, ArrowLeft: at - 1, ArrowDown: at - 1, Home: 0, End: last }[event.key];
             if (target !== undefined) choose(model.versions[Math.min(last, Math.max(0, target))]);
-            else if (event.key === 'PageUp' || event.key === 'PageDown') stepMilestone(event.key === 'PageDown' ? 1 : -1);
+            else if (event.key === 'PageUp' || event.key === 'PageDown') choose(neighbourMilestone(model, view.version, event.key === 'PageDown' ? 1 : -1));
             else return;
             event.preventDefault();
         });
@@ -903,10 +926,7 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
         const button = event.target.closest?.('[data-measure]');
         if (!button) return;
         view.key = button.dataset.measure;
-        measures.querySelectorAll('[data-measure]').forEach((b) => {
-            b.setAttribute('aria-pressed', String(b === button));
-            b.classList.toggle('active', b === button);
-        });
+        press(measures.querySelectorAll('[data-measure]'), (b) => b === button);
         // A tooltip still under the resting pointer read the previous measure's value: it goes until the pointer moves.
         const tip = body.querySelector('[data-tip]');
         if (tip) tip.hidden = true;
@@ -968,6 +988,7 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
             clearTimeout(pollTimer);
             clearTimeout(startTimer);
             resizeObserver?.disconnect();
+            settings.dispose();
             unsubscribeOpen();
             window.removeEventListener('ouro:page-shown', onPageShown);
             window.removeEventListener('ouro:dashboard-subtab-shown', onSubtabShown);
