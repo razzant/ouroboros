@@ -36,6 +36,7 @@ typed; the pre-existing sites are counted per file in ``ALLOWED_DYNAMIC`` and ma
 from __future__ import annotations
 
 import ast
+import json
 
 import pytest
 import pathlib
@@ -169,14 +170,12 @@ def test_dynamic_marker_returns_do_not_grow() -> None:
 @pytest.fixture
 def model_start(tmp_path, monkeypatch):
     from ouroboros.tools.registry import ToolContext
-    from ouroboros.tools import control_models, control_routing
+    from ouroboros.tools import control_routing
     from ouroboros import config
 
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="caller", task_metadata={})
     ctx._owner_directives = [{"source": "initial_user", "content": "Please use the other one, then keep the report complete."}]
     monkeypatch.setattr(config, "get_runtime_mode", lambda: "pro")
-    monkeypatch.setattr(control_models, "known_models", lambda: [
-        {"model": "vendor/fast-one", "use_local": False}, {"model": "vendor/fast-two", "use_local": False}])
     events = []
     monkeypatch.setattr(control_routing, "_emit_and_wait_for_routing",
                         lambda _ctx, event: (events.append(event) or "live", {"status": "scheduled"}))
@@ -189,12 +188,21 @@ def model_start(tmp_path, monkeypatch):
         _restore_tool_result_sidecar(token)
 
 
+@pytest.fixture
+def configured_model_start(model_start, monkeypatch):
+    from ouroboros.tools import control_models
+
+    monkeypatch.setattr(control_models, "known_models", lambda: [
+        {"model": "vendor/fast-one", "use_local": False}, {"model": "vendor/fast-two", "use_local": False}])
+    return model_start
+
+
 @pytest.mark.parametrize("cite", ["", "words never spoken"])
-def test_a_model_without_verified_words_is_a_typed_refusal_with_no_uncited_retry(model_start, cite):
+def test_a_model_without_verified_words_is_a_typed_refusal_with_no_uncited_retry(configured_model_start, cite):
     from ouroboros.tools.control_routing import _start_task
     from ouroboros.tools.tool_result import _published_tool_result
 
-    ctx, events = model_start
+    ctx, events = configured_model_start
     text = _start_task(ctx, "Write the report", title="Report", model="vendor/fast-one", owner_words=cite)
     assert not events
     result = _published_tool_result(ctx, None)
@@ -203,10 +211,10 @@ def test_a_model_without_verified_words_is_a_typed_refusal_with_no_uncited_retry
 
 
 @pytest.mark.parametrize("model,starts", [("fast", False), ("vendor/fast-one", True), ("vendor/unlisted", True)])
-def test_model_suggestions_never_guess_or_admit_a_route(model_start, model, starts):
+def test_model_suggestions_never_guess_or_admit_a_route(configured_model_start, model, starts):
     from ouroboros.tools.control_routing import _start_task
 
-    ctx, events = model_start
+    ctx, events = configured_model_start
     text = _start_task(ctx, "Write the report", title="Report", model=model, owner_words="use the other one")
     assert bool(events) is starts
     if not starts:
@@ -229,11 +237,11 @@ def test_an_unreadable_local_catalog_preserves_the_typed_choice(model_start, mon
     assert "not verified" in text and events[0]["metadata"]["lead"]["model"] == "arbitrary/new"
 
 
-def test_cyber_start_names_the_minds_choice_without_overruling_a_room_owner(model_start, monkeypatch):
+def test_cyber_start_names_the_minds_choice_without_overruling_a_room_owner(configured_model_start, monkeypatch):
     from ouroboros import config, route_choice, lead_fact
     from ouroboros.tools import control_models, control_routing
 
-    ctx, events = model_start
+    ctx, events = configured_model_start
     monkeypatch.setattr(config, "get_runtime_mode", lambda: "cyber_pro")
     control_routing._start_task(ctx, "Write", title="Report", model="vendor/fast-one")
     ctx.task_metadata = events[0]["metadata"]
@@ -245,3 +253,182 @@ def test_cyber_start_names_the_minds_choice_without_overruling_a_room_owner(mode
     assert not events and "choice for this room binds" in text
     control_routing._start_task(ctx, "Write", title="Report", model="vendor/fast-two", owner_words="use the other one")
     assert events[0]["metadata"]["lead"]["source"] == "owner_words"
+
+
+@pytest.fixture(params=["start_task", "switch_model"])
+def local_model_choices(model_start, monkeypatch, request):
+    """Real catalog/roster readers, with only control effects and transports replaced."""
+    import requests
+    from ouroboros import capability_evidence, config, llm_capability_policy, provider_connections, route_choice, settings_integrity
+    from ouroboros.tools import control_models, control_routing, control_runtime
+    from tests._socket_seal import block_network_except_socketpair
+
+    ctx, events = model_start
+    settings = {}
+    monkeypatch.setattr(settings_integrity, "runtime_setting", settings.get)
+    monkeypatch.setattr(provider_connections, "runtime_setting", settings.get)
+    monkeypatch.setattr(config, "get_fallback_models", lambda: [])
+    monkeypatch.setattr(route_choice, "following_route", lambda _role: ("vendor/main", False))
+    # The host catalogue is shared, not a task/child-drive file.
+    host_root = ctx.drive_root / "host"
+    monkeypatch.setattr(capability_evidence, "canonical_evidence_root", lambda: host_root)
+    catalog = host_root / "state/openrouter_models.json"
+    catalog.parent.mkdir(parents=True)
+    reads = []
+    reader = llm_capability_policy.recorded_openrouter_catalog
+    monkeypatch.setattr(llm_capability_policy, "recorded_openrouter_catalog",
+                        lambda: reads.append("host catalogue") or reader())
+    transports = []
+
+    def no_transport(*_args, **_kwargs):
+        transports.append("unexpected transport")
+        raise AssertionError("Model suggestions must use only local observations")
+
+    monkeypatch.setattr(requests, "get", no_transport)
+    monkeypatch.setattr(llm_capability_policy, "read_owned_gateway", no_transport)
+    block_network_except_socketpair(monkeypatch, no_transport)
+
+    def work_choice(_ctx, choice):
+        events.append({"metadata": {"lead": choice}})
+        return "Primary saved", True
+
+    monkeypatch.setattr(control_models, "request_work_model", work_choice)
+
+    def choose(model):
+        if request.param == "start_task":
+            return control_routing._start_task(ctx, "Write", title="Report", model=model, owner_words="use the other one")
+        return control_runtime._switch_model(ctx, model=model, owner_words="use the other one")
+
+    yield choose, events, settings, catalog, reads, ctx
+    assert not transports
+
+
+@pytest.mark.parametrize("cache", [True, False], ids=["recorded", "absent"])
+def test_inexact_model_uses_the_host_catalogue_without_fetching(local_model_choices, cache):
+    from ouroboros.tools.tool_result import _published_tool_result
+
+    choose, events, settings, catalog, reads, ctx = local_model_choices
+    settings["OPENROUTER_API_KEY"] = "test-only-key"
+    if cache:
+        catalog.write_text(json.dumps({"observed_at": "2026-01-02T03:04:05Z", "models": {
+            "moonshotai/kimi-k3": {"context_length": 200000}}}), encoding="utf-8")
+    text = choose("kimi")
+    assert reads == ["host catalogue"]
+    assert "live catalog check" in text.lower()
+    if cache:
+        assert not events and "moonshotai/kimi-k3" in text
+        assert "cached OpenRouter catalogue" in text and "2026-01-02T03:04:05Z" in text
+        result = _published_tool_result(ctx, None)
+        assert result.status == "error" and result.code == "TOOL_ARG_ERROR"
+    else:
+        assert "not verified" in text and "used as typed" in text
+        assert events[0]["metadata"]["lead"]["model"] == "kimi"
+
+
+@pytest.mark.parametrize("connection,route", [
+    ("missing", ""), ("disabled", ""), ("builtin", "moonshotai/kimi-k3"),
+    ("named", "openrouter@research::moonshotai/kimi-k3"),
+])
+def test_catalogue_suggestions_require_the_connection_to_have_credentials(local_model_choices, connection, route):
+    choose, events, settings, catalog, reads, _ctx = local_model_choices
+    catalog.write_text(json.dumps({"observed_at": "2026-11-10T00:00:00Z", "models": {
+        "moonshotai/kimi-k3": {}}}), encoding="utf-8")
+    if connection in {"builtin", "disabled"}:
+        settings["OPENROUTER_API_KEY"] = "test-only-key"
+    if connection == "disabled":
+        settings["OUROBOROS_CONNECTIONS"] = [{"kind": "openrouter", "name": "default", "enabled": False}]
+    if connection == "named":
+        settings["OUROBOROS_CONNECTIONS"] = [{"kind": "openrouter", "name": "research", "api_key": "test-only-key"}]
+    text = choose("kimi")
+    if route:
+        assert not events and route in text and reads == ["host catalogue"]
+        if connection == "named":
+            assert "\n- moonshotai/" not in text
+    else:
+        assert reads == [] and "moonshotai/kimi-k3" not in text
+        assert "not verified" in text and events[0]["metadata"]["lead"]["model"] == "kimi"
+    assert "test-only-key" not in text
+
+
+@pytest.mark.parametrize("count", [12, 15])
+def test_model_suggestions_are_bounded_counted_and_prefixes_come_first(local_model_choices, count):
+    choose, events, settings, catalog, _reads, _ctx = local_model_choices
+    settings["OPENROUTER_API_KEY"] = "test-only-key"
+    models = {f"aaa/wrapped-kimi-{index:02}": {} for index in range(count - 1)}
+    models["zzz/kimi-k3"] = {}  # Last in the record and alphabet, first by the typed prefix.
+    catalog.write_text(json.dumps({"observed_at": "2026-11-10T00:00:00Z", "models": models}), encoding="utf-8")
+    text = choose("KIMI")
+    suggestions = [line for line in text.splitlines() if line.startswith("- ")]
+    assert not events and len(suggestions) == 12
+    assert suggestions[0].startswith("- zzz/kimi-k3 [")
+    assert all("cached OpenRouter catalogue" in line for line in suggestions)
+    if count > 12:
+        assert "3 more matched; use a more specific name" in text
+        assert "aaa/wrapped-kimi-11" not in text
+    else:
+        assert "more matched" not in text
+
+
+@pytest.mark.parametrize("kind,review,local", [
+    ("api_model", False, False), ("api_model", True, False),
+    ("api_model", False, True), ("agent_session", False, False),
+])
+def test_configured_subagents_and_review_rows_suggest_only_model_routes(local_model_choices, kind, review, local):
+    choose, events, settings, _catalog, reads, _ctx = local_model_choices
+    target = "local-kimi.gguf (local)" if local else "moonshotai/kimi-k3"
+    if kind == "agent_session":
+        target = "codex=kimi-k3"
+    settings["OUROBOROS_SUBAGENTS"] = json.dumps({"enabled": not review, "items": [{
+        "subagent_id": "chosen", "recommended_use": "A configured helper or reviewer.",
+        "route": {"kind": kind, "target_id": target}, "review_eligible": review}]})
+    text = choose("kimi")
+    assert reads == []
+    if kind == "api_model":
+        assert not events and target in text
+        assert ("configured review-pool row" if review else "configured subagent row") in text
+    else:
+        assert target not in text and "not verified" in text
+        assert events[0]["metadata"]["lead"]["model"] == "kimi"
+
+
+def test_exact_catalogue_id_passes_with_its_date_and_configured_duplicate_wins(local_model_choices):
+    choose, events, settings, catalog, _reads, _ctx = local_model_choices
+    settings["OPENROUTER_API_KEY"] = "test-only-key"
+    model = "moonshotai/kimi-k3"
+    catalog.write_text(json.dumps({"observed_at": "2026-11-10T00:00:00Z", "models": {model: {}}}), encoding="utf-8")
+    text = choose(model)
+    assert events[0]["metadata"]["lead"]["model"] == model
+    assert "cached OpenRouter catalogue" in text and "2026-11-10T00:00:00Z" in text
+    settings["OUROBOROS_SUBAGENTS"] = {"enabled": True, "items": [{
+        "subagent_id": "chosen", "recommended_use": "A configured helper.",
+        "route": {"kind": "api_model", "target_id": model}}]}
+    events.clear()
+    text = choose("kimi")
+    assert not events and text.count(model) == 1
+    assert "configured subagent row" in text and "cached OpenRouter" not in text
+
+
+@pytest.mark.parametrize("record", ["not json", '{"models": []}', '{"models": {"moonshotai/kimi-k3": {}}}'])
+def test_broken_or_undated_catalogue_never_claims_verification(local_model_choices, record):
+    choose, events, settings, catalog, _reads, _ctx = local_model_choices
+    settings["OPENROUTER_API_KEY"] = "test-only-key"
+    catalog.write_text(record, encoding="utf-8")
+    text = choose("kimi")
+    if "kimi-k3" in record:
+        assert not events and "cached OpenRouter catalogue (date unavailable)" in text
+    else:
+        assert "not verified" in text and events[0]["metadata"]["lead"]["model"] == "kimi"
+    assert "live catalog check" in text.lower()
+
+
+@pytest.mark.parametrize("scope", ["room", "main"])
+def test_uncited_cyber_scope_hint_names_its_writer_without_claiming_both_are_settings(model_start, monkeypatch, scope):
+    from ouroboros import config
+    from ouroboros.tools.control_runtime import _switch_model
+    from ouroboros.tools.tool_result import _published_tool_result
+
+    ctx, events = model_start
+    monkeypatch.setattr(config, "get_runtime_mode", lambda: "cyber_pro")
+    text = _switch_model(ctx, model="vendor/fast-one", scope=scope)
+    assert not events and _published_tool_result(ctx, None).code == "TOOL_ARG_ERROR"
+    assert "through its existing writer" in text and "existing settings writer" not in text

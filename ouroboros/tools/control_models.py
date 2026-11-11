@@ -24,10 +24,15 @@ def cyber_pro(ctx) -> bool:
 
 
 def known_models() -> list[dict]:
-    """Locally configured routes only. No provider, engine or HTTP discovery on a tool call."""
+    """Configured routes and dated host observations; no provider, engine or HTTP call."""
     from ouroboros.config import get_fallback_models
+    from ouroboros.configured_subagents import SUBAGENTS_SETTING, parse_configured_subagents
+    from ouroboros.llm_capability_policy import recorded_openrouter_catalog
     from ouroboros.model_slots import MODEL_ROLE_SETTINGS
+    from ouroboros.provider_connections import configured_connections
+    from ouroboros.provider_models import route_on_connection
     from ouroboros.route_choice import following_route
+    from ouroboros.route_spec import ROUTE_KIND_API_MODEL
     from ouroboros.settings_integrity import runtime_setting
 
     routes = [following_route(role) for role in MODEL_ROLE_SETTINGS if role != "fallback"]
@@ -36,14 +41,39 @@ def known_models() -> list[dict]:
     local = runtime_setting("LOCAL_MODEL_FILENAME", "") or runtime_setting("LOCAL_MODEL_SOURCE", "")
     if local:
         routes.append((local.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1], True))
-    return [{"model": model, "use_local": local} for model, local in dict.fromkeys(routes) if model]
+    rows = {(model, local): {"model": model, "use_local": local, "source": "local configuration"}
+            for model, local in routes if model}
+    raw = runtime_setting(SUBAGENTS_SETTING, "")
+    try:
+        roster = parse_configured_subagents(raw) if raw else None
+    except ValueError:
+        roster = None  # A broken roster cannot hide other known routes or deny an exact id.
+    for row in roster.items if roster else ():
+        if row.route.kind == ROUTE_KIND_API_MODEL:
+            try:
+                choice = normalize_model_choice({"kind": "model", "model": row.route.target_id})
+            except ValueError:
+                continue
+            rows.setdefault((choice["model"], choice["use_local"]), {
+                "model": choice["model"], "use_local": choice["use_local"],
+                "source": "configured review-pool row" if row.review_eligible else "configured subagent row"})
+    connections = [name for kind, name in configured_connections() if kind == "openrouter"]
+    if connections:
+        models, observed = recorded_openrouter_catalog()
+        source = "host's cached OpenRouter catalogue (" + (f"observed {observed}" if observed else "date unavailable") + ")"
+        for name in connections:
+            for model in models:
+                if model:
+                    route = route_on_connection(model, "openrouter", name)
+                    rows.setdefault((route, False), {"model": route, "use_local": False, "source": source})
+    return list(rows.values())
 
 
 def resolve_model(model: str) -> tuple[dict, str]:
     """Exact ids pass; substring suggestions ask for an exact choice, never guess it.
 
-    The chooser searches every query word in a row's model/source text. These rows are
-    current local settings, not a catalog freshness claim. Unknown values still pass.
+    The chooser searches every query word in a row's route/locality text. A dated
+    catalogue is a source of suggestions, not an admission or freshness claim.
     """
     model = str(model or "").strip()
     choice = normalize_model_choice({"kind": "model", "model": model})
@@ -53,15 +83,21 @@ def resolve_model(model: str) -> tuple[dict, str]:
         rows = []
     exact = next((row for row in rows if row["model"] == choice["model"]), None)
     if exact:
-        return {**choice, "use_local": choice["use_local"] or exact["use_local"]}, "Locally configured route; no live catalog check."
+        return {**choice, "use_local": choice["use_local"] or exact["use_local"]}, (
+            f"Route found in {exact.get('source', 'local configuration')}; no live catalog check.")
     words = model.lower().split()
     matches = [row for row in rows if all(word in (row["model"] + (" local" if row["use_local"] else "")).lower()
                                                 for word in words)]
     if matches:
-        candidates = [row["model"] + (" (local)" if row["use_local"] else "") for row in matches]
-        raise ValueError("Model id is inexact. Matching locally configured routes: " + ", ".join(candidates)
-                         + ". Pass an exact route or ask your human. No live catalog check.")
-    return choice, "Model id not verified: used as typed. Only locally configured routes were checked; no live catalog read."
+        matches.sort(key=lambda row: (
+            not row["model"].rsplit("::", 1)[-1].rsplit("/", 1)[-1].lower().startswith(tuple(words)),
+            row["model"].lower(), row["use_local"]))
+        candidates = [row["model"] + (" (local)" if row["use_local"] else "")
+                      + f" [{row.get('source', 'local configuration')}]" for row in matches[:12]]
+        more = f"\n{len(matches) - 12} more matched; use a more specific name." if len(matches) > 12 else ""
+        raise ValueError("Model id is inexact. Matching known routes:\n- " + "\n- ".join(candidates)
+                         + more + "\nPass an exact route or ask your human. No live catalog check.")
+    return choice, "Model id not verified: used as typed. Local configuration and available host-cached catalogues only; no live catalog check."
 
 
 def start_choice(ctx, model: str, basis: dict | None, project_id: str) -> tuple[dict, str]:
@@ -130,7 +166,7 @@ def cited_switch(ctx, *, model: str, owner_words: str, scope: str, project_id: s
 
     basis, error = cited_owner_basis(ctx, owner_words)
     if error or not basis:
-        hint = (" In Cyber Pro use the existing settings writer for your own room or Main change."
+        hint = (" In Cyber Pro you may make your own room or Main change through its existing writer; this tool carries your human's words."
                 if cyber_pro(ctx) and scope in {"room", "main"} else "")
         return refuse(ctx, "This model choice requires verified owner_words. Cite your human's exact words." + hint)
     def finished(text):
