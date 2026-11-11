@@ -21,7 +21,7 @@ const settle = async (rounds = 10) => { for (let i = 0; i < rounds; i += 1) awai
 const EFFECTS = { OUROBOROS_RUNTIME_MODE: 'restart', OUROBOROS_SERVER_HOST: 'restart', OUROBOROS_SAFETY_MODE: 'next_task',
     OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: 'next_task', OUROBOROS_REVIEW_ENFORCEMENT: 'next_task', OUROBOROS_NETWORK_PASSWORD: 'now',
     OUROBOROS_SAFETY_OWNER_RULES: 'next_task', OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS: 'now', OUROBOROS_UI_DIR: 'restart',
-    OUROBOROS_MAX_WORKERS: 'restart', OUROBOROS_EXTRA_CA_BUNDLE: 'next_task' };
+    OUROBOROS_MAX_WORKERS: 'now', OUROBOROS_EXTRA_CA_BUNDLE: 'next_task' };
 
 /** A settings server: the document, the owner endpoints with their receipts, and what a read derives from them. */
 function fakeServer(routes, values = {}) {
@@ -29,7 +29,7 @@ function fakeServer(routes, values = {}) {
         values: { OUROBOROS_RUNTIME_MODE: 'pro', OUROBOROS_SAFETY_MODE: 'full', OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: 'light',
             OUROBOROS_SAFETY_OWNER_RULES: 'Ask before paying.', OUROBOROS_REVIEW_ENFORCEMENT: 'advisory', OUROBOROS_TASK_REVIEW_MODE: 'auto',
             OUROBOROS_REVIEW_MAX_CYCLES: '2', OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS: 'false', OUROBOROS_SERVER_HOST: '127.0.0.1',
-            OUROBOROS_NETWORK_PASSWORD: '', OUROBOROS_MAX_WORKERS: 10, OUROBOROS_UI_DIR: '', OUROBOROS_EXTRA_CA_BUNDLE: '', ...values } };
+            OUROBOROS_NETWORK_PASSWORD: '', OUROBOROS_MAX_WORKERS: '', OUROBOROS_UI_DIR: '', OUROBOROS_EXTRA_CA_BUNDLE: '', ...values } };
     server.document = () => {
         const { values: now, running } = server;
         const pending = Object.keys(running).filter((key) => String(now[key]) !== String(running[key])).sort();
@@ -432,6 +432,18 @@ test('Advanced holds what an installation rarely changes, and About the reset in
     await type('OUROBOROS_UI_DIR', '/srv/ui');
     assert.equal(advanced.line('OUROBOROS_UI_DIR'), 'Saved · applies after restart');
     assert.equal(advanced.meta('OUROBOROS_UI_DIR'), 'Running: the built-in interface · after restart: /srv/ui');
+    // The cap on acting tasks is optional and acts at once: the server's blank is the row's No limit, both ways.
+    const cap = advanced.row('OUROBOROS_MAX_WORKERS');
+    const noLimit = cap.querySelector('[data-setting-no-limit]');
+    assert.deepEqual([cap.querySelector('[data-setting-control]').value, noLimit.getAttribute('aria-pressed')], ['', 'true']);
+    await type('OUROBOROS_MAX_WORKERS', '4');
+    assert.deepEqual(advanced.server.writes('/api/settings').at(-1), { OUROBOROS_MAX_WORKERS: 4 });
+    assert.equal(advanced.line('OUROBOROS_MAX_WORKERS'), 'Saved · was no limit');
+    assert.equal(noLimit.getAttribute('aria-pressed'), 'false');
+    await advanced.press(noLimit);
+    assert.deepEqual(advanced.server.writes('/api/settings').at(-1), { OUROBOROS_MAX_WORKERS: '' }, 'No limit is sent as the server\'s blank');
+    assert.equal(advanced.line('OUROBOROS_MAX_WORKERS'), 'Saved · was 4');
+    assert.deepEqual([cap.querySelector('[data-setting-control]').value, noLimit.getAttribute('aria-pressed')], ['', 'true']);
     const about = await open(t, 'computer/about');
     assert.ok(about.container.querySelector('#about-version'));
     const fold = about.container.querySelector('details[data-settings-fold]');

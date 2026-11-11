@@ -12,8 +12,12 @@ import { openSignIn, readState } from './api_client.js';
 
 // Consecutive healthy /api/state probes tolerated while the socket stays down
 // before recovery forces a reload (at most one per disconnect episode) — the
-// fuse for a browser runtime whose WebSocket stack froze.
+// fuse for a browser runtime whose WebSocket stack froze. A page whose socket
+// never opened has no frozen connection to heal: reloading it would only repeat
+// itself every few minutes (its own reload starts unconnected too).
 export const RECOVERY_HEALTHY_PROBE_LIMIT = 4;
+// The event that says serverAnswersWhileDown() changed.
+export const SERVER_ANSWERS_EVENT = 'server_answers';
 
 // Pause before the post-open state read is repeated after a non-answer; it grows
 // 1.5x per attempt up to the cap, the same curve the recovery probe uses.
@@ -108,8 +112,33 @@ export class WS {
         this._watchdogTimer = null;
         this._recoveryHealthyProbes = 0;
         this._recoveryReloadFired = false;
+        // Socket attempts started; how many had started when the core first answered in the current
+        // streak of healthy probes (null: none); whether a later attempt failed too.
+        this._attempts = 0;
+        this._answeredAtAttempt = null;
+        this._serverAnswers = false;
         this._pendingMessages = [];
         this._nextClientMessageId = 1;
+    }
+
+    /** While the socket is down: the core answered its state read, and a socket attempt started after that
+     *  answer still did not open. An observation for the room's status, never a cause: a handshake refused
+     *  before accept (4403, 4401), a proxy or network that drops the upgrade and a frozen runtime all reach
+     *  the page as the same 1006. It ends at an open, an unanswered probe, sign-in or a reload. */
+    serverAnswersWhileDown() {
+        return this._serverAnswers && !this.isConnected();
+    }
+
+    _serverAnswered(atAttempt) {
+        // Keep the first answer: a slow handshake may span more healthy probes before it fails.
+        if (atAttempt === null || this._answeredAtAttempt === null) this._answeredAtAttempt = atAttempt;
+        if (atAttempt === null) this._setServerAnswers(false);
+    }
+
+    _setServerAnswers(value) {
+        if (this._serverAnswers === value) return;
+        this._serverAnswers = value;
+        this.emit(SERVER_ANSWERS_EVENT, { serverAnswers: value });
     }
 
     _getUrl() {
@@ -226,18 +255,21 @@ export class WS {
                     return;
                 }
                 if (signedOut) {
+                    this._serverAnswered(null);
                     openSignIn();
                     return;
                 }
                 if (healthy) {
                     const decision = this._applyServedDecision(served, this._wasConnected, false);
                     if (decision !== 'keep') {
+                        this._serverAnswered(null);
                         this._reloadForDecision(decision);
                         return;
                     }
+                    this._serverAnswered(this._attempts);
                     this._recoveryHealthyProbes += 1;
                     if (this._recoveryHealthyProbes >= RECOVERY_HEALTHY_PROBE_LIMIT
-                            && !this._recoveryReloadFired) {
+                            && !this._recoveryReloadFired && this._wasConnected) {
                         // The server is reachable and serves the same page, yet the
                         // socket never reopens: force one reload per disconnect
                         // episode instead of reconnecting in place forever.
@@ -247,6 +279,7 @@ export class WS {
                     }
                 } else {
                     this._recoveryHealthyProbes = 0;
+                    this._serverAnswered(null);
                 }
                 rearm = true;
             } finally {
@@ -348,6 +381,7 @@ export class WS {
         const socket = new WebSocket(this._getUrl());
         this.ws = socket;
         const previouslyConnected = this._wasConnected;
+        const attempt = ++this._attempts;
         let disconnected = false;
 
         const handleDisconnect = () => {
@@ -356,12 +390,17 @@ export class WS {
             // A newer socket owns its own retry; an older socket's late close leaves it alone.
             if (this.ws === socket) { this.ws = null; this._clearPostOpenRetryTimer(); }
             this._clearWatchdogTimer();
+            // Only an attempt begun after the core's answer counts (an open clears the answer).
+            if (this._answeredAtAttempt !== null && attempt > this._answeredAtAttempt) this._setServerAnswers(true);
             this.emit('close');
             this._scheduleReconnect();
         };
 
         socket.onopen = () => {
             if (this.ws !== socket) return;
+            // Ends with the episode; the open event below re-derives every status, so nothing else is told.
+            this._answeredAtAttempt = null;
+            this._serverAnswers = false;
             this._wasConnected = true;
             this._lastMessageAt = Date.now();
             this._clearReconnectTimer();

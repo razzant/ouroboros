@@ -1,16 +1,18 @@
 // Every address of a setting that the code names is a living one (docs/DESIGN.md "Settings"): each literal
 // `openSettings(` path in web/ and skills/, each `{ path: … }` a skill hands to it, and each `row:` it asks to be
 // focused resolves to a page a home row opens or a module registered, or to a described row. The tabs Settings had
-// (Providers, Secrets, Behavior, Advanced, About) are no addresses.
+// (Providers, Secrets, Behavior, Advanced, About) are no addresses. A skill installed before the rework may still
+// name one: the opener then shows the home with that word searched, never an empty page.
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import '../modules/settings.js';
+import { initSettings } from '../modules/settings.js';
 import { isDoorId } from '../modules/settings_home.js';
-import { settingsPageFor, settingsPagePrefixes } from '../modules/settings_pages.js';
-import { HAND_WRITTEN, HOME_ROWS, ROWS } from '../modules/settings_rows.js';
+import { registerSettingsPage, settingsPageFor, settingsPagePrefixes } from '../modules/settings_pages.js';
+import { HAND_WRITTEN, HOME_ROWS, ROWS, SEARCH_DOORS } from '../modules/settings_rows.js';
+import { settle, world } from './helpers/settings_dom.js';
 
 const ROOT = new URL('../../', import.meta.url).pathname;
 const DOORS = new Set([...HOME_ROWS.map((row) => row.to).filter(isDoorId), 'main:context']);
@@ -101,4 +103,40 @@ test('every page the home opens is served, or is named as pending with its lane;
         assert.ok(![...ROWS, ...HAND_WRITTEN].some((row) => row.id === id), `row "${id}" is described: take it off the pending list (${lane})`);
     }
     for (const prefix of ['skill', 'skill-sources']) assert.ok(prefixes.includes(prefix), prefix);
+    for (const door of SEARCH_DOORS) assert.equal(deadPath(door.to), '', `search offers a door to "${door.to}"`);
+});
+
+test('an address no page registers lands on the home with its last word searched; a registered one opens its page', async (t) => {
+    const { content, state, showPage } = world(t);
+    registerSettingsPage('test-known', { title: 'Known', mount(body) { body.innerHTML = '<p data-known>here</p>'; } });
+    const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    const search = () => content.querySelector('#settings-search').value || '';
+    const results = () => content.querySelectorAll('[data-settings-result]').map((row) => row.dataset.settingsResult);
+    const pages = () => content.querySelectorAll('.settings-page').map((level) => level.dataset.settingsPage);
+
+    // A registered path opens its page, and the search field is left alone.
+    assert.equal(await controls.open('test-known'), true);
+    await settle();
+    assert.deepEqual([pages(), state.settingsPath, search()], [['test-known'], 'test-known', '']);
+    assert.ok(content.querySelector('[data-known]'));
+
+    // A tab Settings had, as a skill written before the rework names it: the home, the word searched, the page it
+    // became among the results, and no level with nothing inside. The page that was open is closed.
+    for (const [address, word, found] of [['secrets', 'secrets', 'home:accounts'], ['behavior', 'behavior', 'home:permissions'],
+        ['old-tabs/advanced', 'advanced', 'door:skill'], ['Providers', 'Providers', 'home:accounts']]) {
+        assert.equal(await controls.open(address), true, address);
+        await settle();
+        assert.deepEqual([pages(), state.settingsPath, search()], [[], '', word], address);
+        assert.ok(results().includes(found), `${address}: ${results()}`);
+        assert.ok(content.querySelector('[data-settings-ask]'), 'the Ask line stands under the results');
+    }
+    assert.ok(results().includes('home:accounts'));
+    // A word no setting has still shows the home, never an empty page: the list says so and offers the Ask line.
+    await controls.open('zzz-nowhere');
+    await settle();
+    assert.deepEqual([pages(), search(), results()], [[], 'nowhere', []]);
+    // From a page inside Settings the same holds, and a known path still opens over it.
+    await controls.open('test-known');
+    await settle();
+    assert.deepEqual(pages(), ['test-known']);
 });

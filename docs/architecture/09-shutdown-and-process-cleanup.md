@@ -2,6 +2,8 @@
 
 Signals, timeouts and engine terminal facts prove no OS exit; jobs stay until return. Cold receipts grant custody, not Resume or survival (§6). Switching restores stopped handles; boot retries unconfirmed custody.
 
+Server startup raises descriptor capacity for per-run transports (`server_process.raise_open_file_limit`; platform rules and failures: its docstring).
+
 ### Shutdown doors
 
 | Door | Stops | Keeps | Durable mark |
@@ -26,8 +28,6 @@ Teardown marks its generation, bounded-joins the supervisor and stops workers be
 Manual Restart (`server_restart._perform_owner_restart`) refuses conflicts/unwritable transactions before teardown. Its `door=owner_restart`, `status=prepared`, generation/PID stop same-generation starts without Panic. `prepare_restart_returns` names returns; boot consumes only prior-generation doors after holds/`record_restart`, setting `door_applied_at` independently of ACK. Legacy flags/bytes translate once to this boot's door. Teardown retains saves, reads attach-only custody (never ensuring a daemon) and keeps unconfirmed cleanup visible, without veto.
 
 **Retention.** `restart_retention.py` keeps pauses, revokes unused grants and yields spent carriers to newer continuation custody. Warm owner Pause converts to cold; acknowledged planned/update sleep returns, manual Restart holds it. Doors replace only `saved_sleep_recovery` and `continuation_writer_unsettled`; stronger prior stops survive, even Panic. Panic gives sleeping work `panic_hold`/owner, working work `saved_work_hold{door:panic}`/resume; stored release never changes retrospectively. Source/money/time/Stop still govern; unknown dispatch is not unstarted. Rollback loses Q9 checks; old launchers may need the removed Restart flag (PERSISTENCE).
-
-Schema-2 delegated handoffs (§6) keep each holder, cursor and wake independent; migration is effect-free; live v2 forbids downgrade.
 
 ### Panic path
 

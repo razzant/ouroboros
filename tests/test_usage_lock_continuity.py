@@ -664,8 +664,11 @@ def test_interactive_expiry_rejoins_real_loop_no_call_terminal(root, short_acqui
             propagate_model_control(exc)  # real call_llm_with_retry's typed boundary
             raise
     monkeypatch.setattr(loop, "call_llm_with_retry", call)
+    registry = ToolRegistry(repo_dir=root, drive_root=root)
+    kwargs = _loop_kwargs(root, registry, [])
+    ua.usage_projection(root, root_task_id="dominant")
     with owner(root, task={"_is_direct_chat": True}) as events, held_lock(root):
-        text, usage, trace = loop.run_llm_loop(**_loop_kwargs(root, ToolRegistry(repo_dir=root, drive_root=root), []))
+        text, usage, trace = loop.run_llm_loop(**kwargs)
     assert calls == [1] and not rows(root)
     assert usage["reason_code"] == "accounting_wait_expired"
     assert usage["execution_status"] == "infra_failed"

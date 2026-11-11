@@ -68,7 +68,7 @@ export const SKIP_ROOTS = [
  *  whole, like SKIP_ROOTS: the name reaches `.nav-project-row` as the `title` attribute as
  *  well as its label's text. Composed strings that merely embed a name are a `fmt` job. */
 export const USER_CONTENT = [
-    '.nav-project-row', '.nav-project-kebab', '#project-panel-title', '.chat-live-project-name',
+    '.nav-project-row', '.nav-project-kebab', '.nav-project-pin', '#project-panel-title', '.chat-live-project-name',
     '.files-entry-name', '.files-crumb',
 ].join(',');
 

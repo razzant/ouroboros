@@ -374,11 +374,17 @@ TOOL_CODE_SPECS: Mapping[str, ToolCodeSpec] = MappingProxyType(
             "warning",
             "use a permitted interpreter and script path",
         ),
-        "SAFETY_VIOLATION": _code_spec(
+        "SAFETY_VIOLATION": _code_spec(  # old records only: the Supervisor now returns a call or holds it
             "blocked",
             "safety_violation",
             "error",
             "choose a safe alternative",
+        ),
+        "SAFETY_RETURNED": _code_spec(
+            "blocked", "safety_returned", "warning", "change the call, drop it, or issue it again in a later step",
+        ),
+        "SAFETY_UNAVAILABLE": _code_spec(
+            "unavailable", "safety_unavailable", "warning", "issue the identical call again in a later step",
         ),
         "LEGACY_BLOCKED": _code_spec(
             "blocked",
@@ -591,8 +597,8 @@ TOOL_CODE_SPECS: Mapping[str, ToolCodeSpec] = MappingProxyType(
             "error",
             "follow the legacy failure text",
         ),
-        # Unreachable from core producers (only SAFETY_VIOLATION spells a
-        # violation today, and it is claimed by an exact branch), but a skill or
+        # Unreachable from core producers (none spells a violation now; an old
+        # SAFETY_VIOLATION record is claimed by an exact branch), but a skill or
         # MCP payload can emit an arbitrary ``⚠️ X_VIOLATION`` and the legacy
         # chain gave it its own status. Ported rather than folded into `error`.
         "LEGACY_VIOLATION": _code_spec(
@@ -931,6 +937,8 @@ _EXACT_IDENTIFIER_CODES = MappingProxyType(
         "ARTIFACT_OUTPUT_UNDECLARED": "ARTIFACT_OUTPUT_UNDECLARED",
         "ARTIFACT_OUTPUT_ERROR": "ARTIFACT_OUTPUT_ERROR",
         "SAFETY_VIOLATION": "SAFETY_VIOLATION",
+        "SAFETY_RETURNED": "SAFETY_RETURNED",
+        "SAFETY_UNAVAILABLE": "SAFETY_UNAVAILABLE",
         "CAPABILITY_UNAVAILABLE": "CAPABILITY_UNAVAILABLE",
         "MCP_DISABLED": "MCP_UNAVAILABLE",
         # Catalog gaps differ from proven absence and disabled providers.
@@ -1085,6 +1093,12 @@ def _structured_failure(text: str) -> bool:
 def _classification(code: str, meta: Mapping[str, Any] | None = None) -> tuple[ToolStatus, str, dict[str, Any]]:
     spec = TOOL_CODE_SPECS[code]
     return spec.status, code, dict(meta or {})
+
+
+def safety_refusal(text: str) -> tuple[ToolStatus, str]:
+    """``(status, code)`` of a call ``check_safety`` did not let through: held without a reading, else returned."""
+    code = "SAFETY_UNAVAILABLE" if text.startswith("⚠️ SAFETY_UNAVAILABLE") else "SAFETY_RETURNED"
+    return TOOL_CODE_SPECS[code].status, code
 
 
 def _classify_legacy_text(

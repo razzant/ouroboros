@@ -7,7 +7,7 @@ messages and tools (``shared_values``). The loop runs each round's model call in
 of its own), and the round's ``llm_round``
 carries what the host counted in it (``work``): the bytes of parts scanned for secrets (``secret_scan``, repeated
 keys again as ``secret_scan_again``) and of parts the CAS stored for the first time (``new_parts``,
-``observability.write_part``). R1: on round 2 the two are equal and nothing is scanned twice in the round, whether
+``observability.write_parts``). R1: on round 2 the two are equal and nothing is scanned twice in the round, whether
 the request started with a few messages or with many (BIBLE P5: dialogue does not wait for bookkeeping over
 unrelated history). A breach is a ``TURN_GAPS`` row (tests/_turn_law.py); the one this law opened with recorded
 450,834 bytes scanned for 93 new after a 60-turn start, until each part's redaction became a fact kept per task.

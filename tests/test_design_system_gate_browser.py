@@ -258,10 +258,10 @@ def test_every_page_and_settings_tab_meets_shell_contract(gate_ui, tmp_path, wid
                     # The way to the other places stays on every Settings view: ☰ in the header on a phone.
                     if width < 720 and not page.locator(root + ' .app-page-header [data-mobile-nav-toggle]').is_visible():
                         failures[key + '/menu'] = 'the menu button left the header'
-                # The home, every page a home row opens or a module registered (the fixture skill's form among
-                # them), and one editor of a page that lists entries.
+                # The home, every page a module registered (the list of skill forms and the fixture skill's form
+                # among them), and one editor of a page that lists entries.
                 views = walk_settings(page, measure_settings, skill='gate_skill', settle=lambda: rest(page))
-                assert 'skill-sources' in views and 'skill/gate_skill' in views and len(views) >= 12, views
+                assert {'skill', 'skill/gate_skill', 'skill-sources'} <= set(views), views
                 facts['settings-views'] = views
                 continue
             if name == 'skills':

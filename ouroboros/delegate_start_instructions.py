@@ -222,21 +222,6 @@ def access_instruction(access: str, *, investigation: bool = False) -> str:
     return line
 
 
-def execution_binding_instruction(execution_root: str, authority_root: str) -> str:
-    """State the host's effective write root after private snapshot provisioning.
-
-    The task contract names the stable authority/project root so the host can
-    reconcile and apply a result. That path is not the child write surface once
-    a private delegated snapshot exists. The binding is appended after the
-    inherited assignment so an owner-facing absolute path cannot silently win by
-    omission or by appearing earlier in the work order.
-    """
-    execution = str(execution_root or "").strip()
-    if not execution:
-        return ""
-    return execution_binding_text(execution_root, authority_root)
-
-
 def execution_binding_fingerprint(execution_root: str, authority_root: str,
                                   binding_kind: str = "snapshot") -> str:
     """Digest the typed execution/authority binding stored with custody."""
@@ -250,6 +235,10 @@ def execution_binding_text(execution_root: str, authority_root: str,
                            granted_scratch: str = "") -> str:
     """The binding names one work-product root, never every process write.
 
+    The contract's stable authority/project root remains the integration identity.
+    A private snapshot is the child's write surface, so this separate typed fact
+    names both explicitly without rewriting the canonical work order. It is appended after
+    that order, so an owner-facing absolute path cannot silently win by omission or by appearing earlier.
     ``evidence_root`` defaults to the copy's retained evidence folder; "" (a skill
     payload copy, whose every file is payload) says no folder is retained.
     ``granted_scratch`` is the scratch the run's request grants, the place it names.
@@ -316,14 +305,6 @@ def no_copy_binding_instruction(workdir: str) -> str:
     """Name the root of a run no binding renderer covers (read-only, a direct folder): where
     the engine starts it, ``execution.workspaceRoot`` or else ``scope.root``."""
     return f"\n\nThis run has no private copy: its working directory is {str(workdir or '').strip() or '(unknown)'}."
-
-
-def apply_execution_binding(instructions: str, execution_root: str,
-                            authority_root: str, binding_sha256: str = "", *,
-                            evidence_root: str | None = None, granted_scratch: str = "") -> str:
-    """Append one typed binding without rewriting canonical work-order bytes."""
-    return instructions + execution_binding_text(execution_root, authority_root, binding_sha256,
-                                                 evidence_root=evidence_root, granted_scratch=granted_scratch)
 
 
 def append_coordination_context(

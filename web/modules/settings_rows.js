@@ -186,8 +186,11 @@ export const ROWS = [
     { id: 'computer:about', keys: [], page: 'computer', fold: false, name: 'About', meta: '', more: '',
         control: { kind: 'door', to: 'computer/about' }, aliases: ['version', 'licences'], writer: '', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'OUROBOROS_MAX_WORKERS', keys: ['OUROBOROS_MAX_WORKERS'], page: 'computer/advanced', fold: false,
-        name: 'Tasks at once', meta: 'Worker processes that run tasks side by side.', more: '',
-        control: { kind: 'number', min: 1, max: 50 }, aliases: ['Max Workers', 'workers'], writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
+        name: 'Tasks at once', meta: 'A number caps the tasks acting at once. No limit: this computer\u2019s memory decides.',
+        more: 'With no limit a new project process starts while one more fits in memory. The cap counts acting tasks, not accepted waits '
+            + 'and sleeps: a sleeping task yields its place, and one that returns warm can exceed the cap. Conversation runs separately.',
+        control: { kind: 'number', min: 1, noLimit: true, empty: 'no limit' }, aliases: ['Max Workers', 'workers', 'acting tasks', 'memory'],
+        writer: 'generic', codec: 'ownerCap', confirm: '', hiddenWhen: '' },
     { id: 'OUROBOROS_UI_DIR', keys: ['OUROBOROS_UI_DIR'], page: 'computer/advanced', fold: false,
         name: 'Interface folder', meta: 'Empty serves the built-in interface.',
         more: 'none: no main page, for an interface hosted separately behind the same address. Otherwise an absolute or ~ path, on the '
@@ -323,6 +326,12 @@ export const HOME_ROWS = [
     { id: 'home:updates', group: 'System', name: 'Updates', to: 'dashboard:updates', glyph: 'refresh', aliases: ['Update channel'] },
     { id: 'home:storage', group: 'System', name: 'Storage', to: 'dashboard:storage', glyph: 'drive', aliases: ['Cleanup', 'GC Retention'] },
     { id: 'home:computer', group: 'System', name: 'This computer', to: 'computer', glyph: 'monitor', aliases: ['Advanced', 'About', 'Network', 'Startup'] },
+];
+
+// Doors search offers to pages of Settings that no home row opens (settings_home.js searchEntries): the list of the
+// forms skills registered, which stood under Advanced as "Extension Settings".
+export const SEARCH_DOORS = [
+    { id: 'door:skill', name: 'Skill settings', to: 'skill', glyph: 'skills', aliases: ['Extension Settings', 'Advanced', 'Settings of skills'] },
 ];
 
 /** A page's rows in order; `fold` true or false keeps only the rows behind (or before) the page's fold. */

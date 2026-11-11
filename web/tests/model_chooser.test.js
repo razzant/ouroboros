@@ -23,3 +23,11 @@ test('model choice markup escapes catalog text and retains arbitrary current IDs
         { value: 'a', label: 'a' }, { value: 'b', label: 'B' }, { value: '', label: 'Engine default' },
     ]);
 });
+test('the supplying-program footer closes the hidden popup outside the selectable list', () => {
+    const programs = [{harness: 'future', label: 'Future', programs: [{path: '/vendor/future', version: '7'}]}];
+    const html = modelChooserHtml('', 'typed', 'models', [], {programs});
+    assert.match(html, /data-model-popup hidden><div id="models" role="listbox"><\/div><div class="ui-model-footer"/);
+    assert.match(html, /role="group" aria-label="Supplying program"/);
+    assert.match(html, /hidden><\/div><\/div><span class="ui-field-help" data-model-custom/);
+    assert.equal((html.match(/data-model-footer/g) || []).length, 1);
+});

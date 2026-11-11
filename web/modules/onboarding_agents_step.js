@@ -898,6 +898,7 @@ export function createAgentsStep({
         get accountsKnown() { return accountsKnown(); },
         get reads() { return store.reads; },
         refreshStatus() { return store.refresh(); },
+        adoptCatalog(data) { subagents.adoptCatalog(data); },
         get availableSubagents() { return subagents.setting; },
         get allowEmptyReviewPool() { return subagents.allowEmptyReviewPool; },
         setProcessingPreference(value) { subagents.setProcessingPreference(value); },

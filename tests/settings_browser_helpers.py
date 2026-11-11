@@ -30,14 +30,12 @@ def open_settings(page, path: str = "", row: str = "", *, timeout: float = 10_00
     return level
 
 
-# Settings has no tab strip: what it shows is its home, the pages a home row opens or a module registered, and, where a
-# page lists entries, the editor of one. A skill's page needs a skill: the caller names one that registered a form.
+# Settings has no tab strip: what it shows is its home, every page a module registered, and, where a page lists
+# entries, the editor of one. `skill` is the list of skill forms; a skill's own page needs a skill, so the caller
+# names one that registered a form. A path no page registers is no view: it lands on the home.
 SETTINGS_PATHS = """async (skill) => {
     const { settingsPagePrefixes } = await import('/static/modules/settings_pages.js');
-    const { HOME_ROWS } = await import('/static/modules/settings_rows.js');
-    const home = HOME_ROWS.map((row) => row.to).filter((to) => !/^(dashboard|page|main):/.test(to));
-    return [...new Set([...home, ...settingsPagePrefixes()])].filter((path) => path !== 'skill' || skill)
-        .map((path) => (path === 'skill' ? `skill/${skill}` : path));
+    return settingsPagePrefixes().flatMap((path) => (path === 'skill' && skill ? ['skill', `skill/${skill}`] : [path]));
 }"""
 SETTLED = "() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))"
 

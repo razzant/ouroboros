@@ -19,7 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros import claudexor_harness_install, extension_process_runner, owned_shutdown
+from ouroboros import extension_process_runner, owned_shutdown
 from ouroboros.marketplace import isolated_deps
 from ouroboros.platform_layer import subprocess_new_group_kwargs
 from ouroboros.tools import shell_process, skill_exec, skill_preflight
@@ -263,19 +263,6 @@ def _refused_isolated_deps(tmp_path):
         isolated_deps._run(SLEEP, cwd=tmp_path, env=dict(os.environ), timeout_sec=5)
 
 
-def _refused_harness_install(tmp_path, monkeypatch):
-    from ouroboros import claudexor_runtime
-    from ouroboros.gateways.claudexor import ClaudexorUnavailable
-
-    installer = claudexor_harness_install
-
-    monkeypatch.setattr(claudexor_runtime, "get_runtime_manager", lambda: SimpleNamespace(
-        ensure_cli_command=lambda: ["/exact/node", "/exact/claudexor.cjs"]))
-    with pytest.raises(ClaudexorUnavailable) as refused:
-        installer.install_missing_harness_cli("cursor")
-    assert refused.value.code == "harness_install_spawn_failed"
-
-
 def _refused_update_smoke(tmp_path):
     with pytest.raises(shell_process.CommandAdmissionClosed):
         update_merge._run_update_smoke(SLEEP)
@@ -300,7 +287,7 @@ def _refused_dependency_sync(tmp_path, monkeypatch):
 PRODUCERS = {
     "run_command": _refused_run_command, "skill_exec": _refused_skill, "extension": _refused_extension,
     "skill_preflight": _refused_preflight, "isolated_deps": _refused_isolated_deps,
-    "harness_install": _refused_harness_install, "update_smoke": _refused_update_smoke, "git": _refused_git,
+    "update_smoke": _refused_update_smoke, "git": _refused_git,
     "dependency_sync": _refused_dependency_sync,
 }
 
@@ -321,7 +308,7 @@ def test_every_producer_refuses_after_the_door_in_its_own_contract(registry, mon
     assert popen == [] and shell_process._spawning_subprocesses == 0
 
 
-def test_the_nine_producers_publish_only_through_the_shared_start():
+def test_the_remaining_producers_publish_only_through_the_shared_start():
     """Source shape: each producer function enters ``tracked_start`` and none adds to the set itself."""
     import ast
     import inspect
@@ -329,7 +316,7 @@ def test_the_nine_producers_publish_only_through_the_shared_start():
 
     producers = (shell_process._tracked_subprocess_run, skill_exec._run_skill_subprocess,
                  extension_process_runner._child_process.__wrapped__, skill_preflight._run_check, isolated_deps._run,
-                 claudexor_harness_install.install_missing_harness_cli, update_merge._run_update_smoke,
+                 update_merge._run_update_smoke,
                  git_ops._run_git_process_bounded, git_ops_reset.sync_runtime_dependencies)
     for function in producers:
         source = textwrap.dedent(inspect.getsource(function))
@@ -344,9 +331,7 @@ def test_the_nine_producers_publish_only_through_the_shared_start():
 def test_every_producer_retires_only_an_empty_tree(registry, monkeypatch, tmp_path, producer, remains):
     """Run each real owner/consumer around an explicit Popen+containment double."""
     import io
-    import json
-    from tests.test_claudexor_owned_daemon import _install_receipt
-    from ouroboros import claudexor_runtime, tool_custody
+    from ouroboros import tool_custody
 
     confirmed = []
     monkeypatch.setattr(tool_custody, "external_handoff", lambda kind: lambda: confirmed.append(kind))
@@ -356,7 +341,7 @@ def test_every_producer_retires_only_an_empty_tree(registry, monkeypatch, tmp_pa
         returncode = 0
         args = ["test-owned-command"]
         stdin = None
-        stdout = io.BytesIO(json.dumps(_install_receipt()).encode())
+        stdout = io.BytesIO(b"output")
         stderr = io.BytesIO()
         def poll(self):
             return self.returncode
@@ -375,8 +360,6 @@ def test_every_producer_retires_only_an_empty_tree(registry, monkeypatch, tmp_pa
     monkeypatch.setattr(skill_exec, "_kill_process_group", lambda p: None)
     monkeypatch.setattr(git_ops, "REPO_DIR", tmp_path)
     monkeypatch.setattr(git_ops, "DRIVE_ROOT", registry.data)
-    monkeypatch.setattr(claudexor_runtime, "get_runtime_manager", lambda: SimpleNamespace(
-        ensure_cli_command=lambda: ["test-node", "test-cli"]))
     try:
         if producer == "run_command":
             result = shell_process._tracked_subprocess_run(["test"], text=True)
@@ -398,8 +381,6 @@ def test_every_producer_retires_only_an_empty_tree(registry, monkeypatch, tmp_pa
             assert skill_preflight._run_check(["test"], tmp_path)["returncode"] == 0
         elif producer == "isolated_deps":
             assert isolated_deps._run(["test"], cwd=tmp_path, env={}, timeout_sec=5)["returncode"] == 0
-        elif producer == "harness_install":
-            claudexor_harness_install.install_missing_harness_cli("cursor")
         elif producer == "update_smoke":
             assert update_merge._run_update_smoke(["test"])["ok"]
         elif producer == "git":
@@ -436,9 +417,6 @@ def _bound(data, name, target):
 @pytest.mark.skipif(os.name == "nt", reason="native POSIX witness; Windows Job branches are simulated separately")
 @pytest.mark.parametrize("producer", sorted(PRODUCERS))
 def test_every_real_producer_preserves_a_redirected_background_child(registry, monkeypatch, tmp_path, producer):
-    import json
-    from tests.test_claudexor_owned_daemon import _install_receipt
-    from ouroboros import claudexor_runtime
     from ouroboros.tools import shell as shell_facade
 
     pid_file = tmp_path / "child.pid"
@@ -446,7 +424,7 @@ def test_every_real_producer_preserves_a_redirected_background_child(registry, m
         "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)'],"
         "stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
         f"pathlib.Path({str(pid_file)!r}).write_text(str(p.pid)); "
-        f"print({json.dumps(_install_receipt())!r},flush=True)")
+        "print('output',flush=True)")
     born = []
     original = shell_process.contained_popen
 
@@ -459,8 +437,6 @@ def test_every_real_producer_preserves_a_redirected_background_child(registry, m
         monkeypatch.setattr(module, "contained_popen", spawn)
     monkeypatch.setattr(git_ops, "REPO_DIR", tmp_path)
     monkeypatch.setattr(git_ops, "DRIVE_ROOT", registry.data)
-    monkeypatch.setattr(claudexor_runtime, "get_runtime_manager", lambda: SimpleNamespace(
-        ensure_cli_command=lambda: ["test-node", "test-cli"]))
     try:
         if producer == "run_command":
             assert shell_process._tracked_subprocess_run(["test"], timeout=5).returncode == 0
@@ -475,8 +451,6 @@ def test_every_real_producer_preserves_a_redirected_background_child(registry, m
             assert skill_preflight._run_check(["test"], tmp_path)["returncode"] == 0
         elif producer == "isolated_deps":
             assert isolated_deps._run(["test"], cwd=tmp_path, env=dict(os.environ), timeout_sec=5)["returncode"] == 0
-        elif producer == "harness_install":
-            claudexor_harness_install.install_missing_harness_cli("cursor")
         elif producer == "update_smoke":
             assert update_merge._run_update_smoke(["test"])["ok"]
         elif producer == "git":

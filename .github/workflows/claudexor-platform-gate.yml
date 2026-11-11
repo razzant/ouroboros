@@ -53,29 +53,17 @@
 # (the engine deliberately excludes fakes there); no run response is substituted.
 # Readonly fake runs prove no vendor session or child-process containment.
 #
-# A NARROWER JOB: toolchain. The fixture lane installs the runtime for the daemon
-# but never runs npm, and the live lane pre-installs its harness with setup-node's npm.
-# Neither proves the managed Node/npm toolchain that `install_missing_harness_cli` hands
-# to the engine. The toolchain job does, credential-free and on pushes/PRs: with no
-# node/npm on PATH, no ambient npm config, no CLAUDEXOR_*_BIN override and a disposable
-# home, the production `ensure_cli_command()` installs Node + npm from the pinned
-# official archive, and the managed Node runs the CLI and `npm-cli.js` directly (never
-# an npm .cmd shim) for an offline local-tarball install, a reselect and a repair
-# (scripts/claudexor_toolchain_smoke.py). It never runs `harness install`, so no harness
-# install is claimed by it.
+# toolchain proves engine CLI runtime delivery with no ambient Node/npm: exact
+# official archives, offline local-tarball npm witness, reselect and immutable repair.
+# Vendor maintenance does not use npm; this lane claims no vendor install.
 #
-# A WINDOWS-ONLY JOB: consumer. The same witness, same isolation, then
-# `--harness-install codex`: the production `install_missing_harness_cli` performs a
-# REAL local install of the exact Codex release the engine selects from the npm
-# registry into the disposable home (release-verified or, newer, deterministic-only),
-# and the receipt must name that version and the package-native `codex.exe` or the
-# package-declared Node entry, which must answer `--version` with it directly and by
-# bare name through a shell-less Node spawn, and to which both the harness rows of the
-# daemon Ouroboros starts itself and `claudexor doctor` must resolve; that daemon is
-# always stopped. No login, OAuth, account or model task is attempted. An engine without
-# Windows native Codex install (3.14.0 and older) refuses the dry-run disclosure with
-# its own typed code, so this job stays red until the runtime pin carries that
-# release — there is no skip.
+# consumer additionally starts the isolated owned engine on Windows and installs
+# Codex through the shared maintenance service used by Connect, Settings and tools.
+# It requires an initially absent program, an available vendor install action, a
+# settled selected-version receipt and a selected executable inside disposable HOME.
+# Direct --version and engine doctor must agree with that receipt; every exit stops
+# the owned daemon. An engine without the new contract fails, never skips. No login,
+# OAuth, account or model task is attempted.
 #
 # WHAT MAKES IT RED, ON PURPOSE. There is no "harness unavailable, skipping" branch
 # anywhere below. An absent seam, an engine below the delegated-marker floor, an
@@ -101,6 +89,8 @@ on:
     paths:
       - 'ouroboros/gateways/**'
       - 'ouroboros/claudexor_daemon.py'
+      - 'ouroboros/harness_maintenance.py'
+      - 'ouroboros/harness_program_facts.py'
       - 'ouroboros/claudexor_runtime.py'
       - 'ouroboros/claudexor_runtime_pin.json'
       - 'ouroboros/platform_layer.py'
@@ -132,6 +122,8 @@ on:
     paths:
       - 'ouroboros/gateways/**'
       - 'ouroboros/claudexor_daemon.py'
+      - 'ouroboros/harness_maintenance.py'
+      - 'ouroboros/harness_program_facts.py'
       - 'ouroboros/claudexor_runtime.py'
       - 'ouroboros/claudexor_runtime_pin.json'
       - 'ouroboros/platform_layer.py'
@@ -262,19 +254,19 @@ jobs:
         run: python -I scripts/claudexor_toolchain_smoke.py --root "$RUNNER_TEMP/cx-toolchain"
 
   # ────────────────────────────────────────────────────────────────────────────
-  # Consumer lane — free, credential-free. Real pinned Codex install on Windows.
+  # Consumer lane — free, credential-free. Real vendor Codex install on Windows.
   # ────────────────────────────────────────────────────────────────────────────
   consumer:
-    name: consumer · windows-latest · real pinned Codex local install + doctor, no login, no model task
+    name: consumer · windows-latest · real vendor Codex maintenance + doctor, no login, no model task
     runs-on: windows-latest
-    # Bounds the registry fetches beyond the production install timeout the witness applies.
+    # Bounds vendor network reads beyond the production install timeout the witness applies.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-python-env
-      - name: Install the pinned toolchain, then the pinned Codex through the production installer seam
+      - name: Install the pinned toolchain, then Codex through the shared maintenance service
         # Same isolated start as the toolchain job; no setup-node, no npm, no harness override.
         run: python -I scripts/claudexor_toolchain_smoke.py --root "$RUNNER_TEMP/cx-consumer" --harness-install codex
 

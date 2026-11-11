@@ -1,7 +1,8 @@
 """The Settings shell in a browser (docs/DESIGN.md "Settings"): the home opens a page, and every way back (the page's
 first row, Escape, the browser's Back) returns where the owner was, one level at a time, the home keeping its scroll
 and the field a level held committing before it closes. On a phone the ☰ stays in the header of every page; on a
-desk the sidebar does. A path no page serves shows its chrome with nothing inside."""
+desk the sidebar does. An address no page registers never shows an empty page: the home opens with its last word
+searched."""
 from __future__ import annotations
 
 import pytest
@@ -13,12 +14,16 @@ subscription_ui = setup_browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser]
 
 # A page family of the test's own, in the app's own registry: a field that commits on change, and a row that opens a
-# second level over the first. The events the shell sends are kept.
+# second level over the first. The events the shell sends are kept. The three home rows the test presses get a
+# stand-in page where their own lane has not registered one yet, so each opens a page on any tree.
 TEST_PAGE = """async () => {
-    const { registerSettingsPage } = await import('/static/modules/settings_pages.js');
+    const { registerSettingsPage, settingsPageFor } = await import('/static/modules/settings_pages.js');
     window.testChanges = [];
     window.testShown = [];
     addEventListener('ouro:settings-page-shown', (event) => window.testShown.push(event.detail.path));
+    for (const [path, title] of [['computer', 'This computer'], ['rules', 'Your rules'], ['appearance', 'Appearance']]) {
+        if (!settingsPageFor(path)) registerSettingsPage(path, { title, mount(body) { body.innerHTML = '<p>Stand-in</p>'; } });
+    }
     registerSettingsPage('test-shell', {
         title: (path) => (path === 'test-shell' ? 'Shell test' : 'Deeper'),
         mount(body, { path, ctx }) {
@@ -138,11 +143,28 @@ def test_home_opens_a_page_and_every_way_back_returns_one_level(subscription_ui,
     page.locator(HOME).wait_for(state="visible")
     assert page.evaluate("() => window.testChanges") == ["draft"]
 
-    # A path no page serves yet: the chrome, with nothing inside.
-    empty = open_settings(page, "test-unregistered")
-    assert empty.locator(".settings-page-title").inner_text().strip() == "test-unregistered"
-    assert empty.locator(".settings-page-body").inner_html() == ""
+    # An address no page registers (a skill written for the tabs Settings had): never a page with nothing inside.
+    # The home opens with the address's last word searched, and the results say where the thing lives now.
+    open_settings(page, "test-shell")
+    assert page.evaluate("() => window.__ouroSettings.open('secrets')") is True
+    page.locator(f'{HOME} [data-settings-result="home:accounts"]').wait_for(state="visible")
+    assert top_path(page) == "" and page.locator("#page-settings [data-settings-page]").count() == 0
+    assert page.locator("#settings-search").input_value() == "secrets"
+    assert page.locator(f"{HOME} [data-settings-ask]").is_visible()
+    assert page.evaluate(SETTINGS_LAYERS) == []
+    setup_browser.capture(page, f"settings-unknown-address-{width}x{height}")
+    assert page.evaluate("() => window.__ouroSettings.open('old/advanced')") is True
+    page.locator(f'{HOME} [data-settings-result="door:skill"]').wait_for(state="visible")
+    assert page.locator("#settings-search").input_value() == "advanced"
+    # The door among the results opens the list of skill forms; Back returns to the home with the words still there.
+    page.locator(f'{HOME} [data-settings-result="door:skill"]').click()
+    forms = settings_page(page, "skill")
+    forms.wait_for(state="visible")
+    assert forms.locator(".settings-page-title").inner_text().strip() == "Skill settings"
+    forms.locator("[data-skill-forms]").wait_for(state="visible")
+    assert "No installed skill has settings." in forms.inner_text()
     assert go_back(page) == ""
+    assert page.locator("#settings-search").input_value() == "advanced"
     page.close()
 
 

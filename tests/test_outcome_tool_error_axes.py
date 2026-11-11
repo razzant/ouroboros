@@ -6,6 +6,11 @@ import pytest
 
 from ouroboros.outcomes import derive_loop_outcome, normalize_outcome_axes
 from tests._cases import plain_rows
+from tests._safety_fixtures import supervisor as _supervisor
+from tests.test_place_guard import REAL_CALL_PLACE_FACTS, REAL_EFFECT_OF, places as _places
+from tests.test_tool_effects import published_tool as _published_tool
+
+places, published_tool, supervisor = _places, _published_tool, _supervisor
 
 
 TOOL_ERRORS = [
@@ -88,6 +93,9 @@ def test_advisory_review_cannot_clear_unreviewed_tool_error_warning():
     pytest.param({"tool": "enable_tools", "status": "unknown_tool"}, False, "details_only", id="call-named-no-tool"),
     pytest.param({"tool": "mcp_gitlab__get_commit", "status": "mcp_error"}, True, "", id="unknown-kind"),
     pytest.param({"tool": "skill_exec", "status": "error"}, True, "", id="unknown-builtin-kind-that-ran"),
+    pytest.param({"tool": "github_write", "status": "safety_returned"}, False, "", id="write-safety-returned"),
+    pytest.param({"tool": "run_command", "status": "safety_unavailable"}, False, "",
+                 id="command-safety-could-not-read"),
 ])
 def test_only_a_loud_leftover_warns_without_review(call, loud, flag):
     """Owner 06.11 («A — изменения и команды») revised 09.11 («Q1: A»): with no review, Done turns into Done with
@@ -103,6 +111,89 @@ def test_only_a_loud_leftover_warns_without_review(call, loud, flag):
     [error] = axes["execution"]["unresolved_tool_errors"] or axes["execution"]["cosmetic_tool_errors"]
     assert error["tool"] == call["tool"]
     assert {key for key in ("read_only", "details_only") if error.get(key)} == ({flag} if flag else set())
+
+
+@pytest.mark.parametrize("call", [{"tool": "github_write", "status": "safety_returned"},
+                                  {"tool": "run_command", "status": "safety_unavailable"}])
+def test_a_call_safety_held_is_no_failure_and_no_host_sentence_names_it(call):
+    """A call Safety returned or could not read counts as no tool failure and alone never makes a task Done with
+    warnings, and no host sentence names it, with review details or without: only the open Done card does (owner
+    11.11, A), while a real warning beside it keeps its own sentence. The record keeps it unresolved while its
+    identical call (same tool and target) has not got past Safety. That call replaces it once it got past Safety and
+    then succeeded or failed in its handler, a failure being recorded as itself; a refusal the registry returns before
+    the Safety check (or a status a handler shares with one) and another call through the tool leave it held, and an
+    old record's ``safety_violation`` stays a loud failure."""
+    from ouroboros.outcomes import build_verification_ledger
+    from ouroboros.project_dialogue import _completion_verdict, outcome_phase
+
+    def card(calls):
+        trace = {"tool_calls": [{"args": {}, **item} for item in calls]}
+        outcome = derive_loop_outcome("Delivered answer.", {}, trace)
+        record = {"status": "completed", "reason_code": "final_message", "outcome_axes": outcome["outcome_axes"]}
+        ledger = build_verification_ledger(task={}, loop_outcome=outcome, llm_trace=trace, artifact_bundle={})
+        lines = [_completion_verdict(record, {}, include_review_details=details) for details in (True, False)]
+        assert not [line for line in lines if "Safety Supervisor" in line], lines
+        return outcome_phase(record, {}), lines[0], ledger["summary"]["has_failures"], outcome
+
+    def left(outcome):
+        execution = outcome["outcome_axes"]["execution"]
+        return [e["status"] for e in execution["unresolved_tool_errors"] + execution["cosmetic_tool_errors"]]
+    held = {**call, "is_error": True}
+    phase, line, failed, outcome = card([held])
+    assert (phase, line, failed, outcome["failure"], left(outcome)) == ("done", "", False, None, [call["status"]])
+    assert not outcome["outcome_axes"]["objective"].get("warning")
+    phase, line, failed, outcome = card([held, {"tool": "write_file", "status": "error", "is_error": True}])
+    assert (phase, line, failed, left(outcome)) == ("warn", "A file write failed.", True, [call["status"], "error"])
+    assert card([held, {"tool": call["tool"], "status": "ok"}])[:3] == ("done", "", False)
+    phase, line, failed, _ = card([{**held, "status": "safety_violation"}])
+    assert phase == "warn" and "returned" not in line and failed
+    push = {"tool": "run_command", "args": {"cmd": ["git", "push", "origin", "main"]}}
+    command = {**push, "status": call["status"], "is_error": True}
+    assert left(card([command, {**push, "status": "ok"}])[3]) == []  # its identical call got past Safety
+    assert left(card([command, dict(command)])[3]) == [call["status"]] * 2  # held again: neither got past it
+    for failure in ("non_zero_exit", "timeout"):  # and failed in its handler: it ran
+        phase, line, failed, outcome = card([command, {**push, "status": failure, "is_error": True}])
+        assert (line, failed, left(outcome)) == ("", True, [failure])
+    for refused in ("resource_constraint_blocked", "argument_error", "light_mode_blocked", "unavailable", "cwd_blocked",
+                    "error"):  # refused before the Safety check, or a status a handler shares with such a refusal
+        assert left(card([command, {**push, "status": refused, "is_error": True}])[3])[0] == call["status"], refused
+    other = card([command, {"tool": "run_command", "status": "ok", "args": {"cmd": ["git", "status"]}}])
+    assert other[:3] == ("done", "", False) and left(other[3]) == [call["status"]]  # a different command
+
+
+def test_a_place_paused_after_a_safety_return_keeps_the_return_named(supervisor, published_tool, places, monkeypatch):
+    """Safety returns a message to a place, the place is then paused, and the identical call is refused by the place
+    guard, which the registry asks before Safety: the record still holds the returned call, which only the open Done
+    card names."""
+    from dataclasses import replace
+
+    from ouroboros import place_guard, tool_effects
+    from ouroboros.loop_tool_execution import _typed_result_metadata
+    from ouroboros.project_dialogue import _completion_verdict
+    from ouroboros.tools.registry_guards import _capability_resource_guard_result
+    from ouroboros.tools.tool_result import ToolResult, safety_refusal
+
+    rows, ctx = places
+    ctx._current_llm_call_meta = {"llm_call_id": "round-1"}
+    monkeypatch.setattr(tool_effects, "effect_of", REAL_EFFECT_OF)
+    monkeypatch.setattr(place_guard, "call_place_facts", REAL_CALL_PLACE_FACTS)
+    name, descriptor = published_tool("message", target="room", conversation="room", text="text")
+    args = {"room": "C2", "text": "Prepared notes."}
+    assert _capability_resource_guard_result(ctx, name, args, descriptor) is None
+    supervisor.replies.append({"status": "DANGEROUS", "reason": "The standing words keep these notes private."})
+    allowed, words = supervisor.module.check_safety(name, args, ctx=ctx, ext_tool=descriptor)
+    assert not allowed and len(supervisor.calls) == 1
+    rows[1] = replace(rows[1], state="paused")
+    refused = _capability_resource_guard_result(ctx, name, args, descriptor)
+    assert refused.code == "RESOURCE_CONSTRAINT_BLOCKED"
+    trace = {"tool_calls": [{"tool": name, "args": args, "is_error": True,
+                             **_typed_result_metadata(name, item.text, True, item)}
+                            for item in (ToolResult(*safety_refusal(words), text=words), refused)]}
+    outcome = derive_loop_outcome("Prepared the notes.", {}, trace)
+    record = {"status": "completed", "reason_code": "final_message", "outcome_axes": outcome["outcome_axes"]}
+    unresolved = outcome["outcome_axes"]["execution"]["unresolved_tool_errors"]
+    assert [e["tool"] for e in unresolved if e["status"] == "safety_returned"] == [name]
+    assert "Safety Supervisor" not in _completion_verdict(record, {})
 
 
 def test_a_record_written_before_the_flags_stays_loud():

@@ -396,7 +396,8 @@ html[data-layout="stack"] .resize-handle { display: none; }
 
 @media (hover: hover) {
     .nav-row:hover,
-    .nav-section-toggle:hover {
+    .nav-section-toggle:hover,
+    .nav-project-pin:hover + .nav-project-row:not(.active) {  /* a row's Pin lies over it */
         background: var(--tone-quiet-hover);
         border-color: transparent;
         color: var(--text-primary);
@@ -8600,10 +8601,13 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
     align-items: center;
     width: 100%;
     border-radius: var(--radius-inner);
+    position: relative;  /* its Pin's place; its own stack keeps that Pin under the sidebar's sticky bars */
+    isolation: isolate;
 }
 
 /* Pinned Projects lead the same list: the first row shown after them keeps one step of air, the way the sidebar's
-   zones part. No caption, glyph, tint, rule or column, so nothing reads as one more Project (DESIGN "Shell"). */
+   zones part. No caption, tint, rule or column and no glyph at rest, so nothing reads as one more Project (DESIGN
+   "Shell"). */
 .nav-project-item[data-after-pins] {
     margin-top: var(--space-2);
 }
@@ -8771,7 +8775,8 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
 /* A row's ⋯: under a mouse it appears with the row's hover or focus. On touch the row's menu opens by a long press
    (owner 19.10, 5A; row_menu_gesture.js), so the ⋯ leaves the row's look and its column there, and stays the keyboard's
    and assistive technology's door: it comes back with its column whenever the keyboard reaches it. */
-.nav-project-kebab {
+.nav-project-kebab,
+.nav-project-pin {
     width: var(--nav-control-h);
     height: var(--nav-control-h);
     display: inline-flex;
@@ -8809,9 +8814,39 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
 
 /* Hover paint is not a focus ring: the kebab had only the paint, so a keyboard
    user could not tell it was focused (docs/DESIGN.md "Focus"). */
-.nav-project-kebab:focus-visible {
+.nav-project-kebab:focus-visible,
+.nav-project-pin:focus-visible {
     outline: 2px solid var(--focus-accent-border);
     outline-offset: -2px;
+}
+
+/* A row's Pin or Unpin: the ⋯'s quiet control over the row's icon column, left of the name, in no column of its own.
+   It is drawn while a pointer hovers the row or the keyboard is on it, and is a target only while drawn, so a finger
+   (no hover) presses the row there and keeps the long press's menu. Over the chosen row it takes the row's ink, and
+   the row keeps its hover under it (the rows' hover rule). */
+.nav-project-pin {
+    --pin-w: min(var(--nav-control-h), calc(var(--nav-label-x) - var(--space-1)));  /* a finger's 44px would reach the name */
+    position: absolute;
+    z-index: 1;  /* over the row, which follows it */
+    inset-block: 0;
+    left: calc(1px + (var(--nav-label-x) - var(--pin-w)) / 2);  /* centred on the column, past the row's border */
+    width: var(--pin-w);
+    margin-block: auto;
+    opacity: 0;
+    pointer-events: none;
+}
+.nav-project-pin:focus-visible {
+    opacity: 1;
+    pointer-events: auto;
+    color: var(--text-primary);
+}
+.nav-project-pin:has(+ .nav-project-row.active) { color: var(--tone-crimson-ink); }
+@media (hover: hover) {
+    .nav-project-item:hover > .nav-project-pin {
+        opacity: 1;
+        pointer-events: auto;
+    }
+    .nav-project-pin:hover { color: var(--text-primary); }
 }
 
 /* Touch: a long press opens the row's menu, so the ⋯ takes no room and no finger, and the row's words are not a
@@ -9349,6 +9384,9 @@ html[data-layout="stack"] .project-panel {
     gap: var(--space-1) var(--space-2);
     min-width: 0;
 }
+.harness-maintenance-facts { display: flex; flex-direction: column; min-width: 0; }
+.harness-maintenance-row > .harness-maintenance-actions { min-height: var(--control-h); }
+.harness-maintenance-state > [data-maintenance-details] { margin-left: auto; }
 .harness-maintenance-line {
     flex: 1 1 auto;
     font-size: var(--type-meta);
@@ -9383,8 +9421,13 @@ html[data-layout="stack"] .project-panel {
 .harness-maintenance-exact code { white-space: pre-wrap; overflow-wrap: anywhere; }
 .harness-maintenance-details dl { margin: var(--space-2) 0; }
 .harness-maintenance-details dt { color: var(--text-meta); }
-.harness-maintenance-details dd { margin: 0 0 var(--space-1); color: var(--text-primary); }
+.harness-maintenance-details dd { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 var(--space-1); color: var(--text-primary); }
 .harness-maintenance-details pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.harness-model-program { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); }
+.ui-model-options[data-model-popup] { display: flex; flex-direction: column; overflow: hidden; }
+.ui-model-options[data-model-popup] > [role="listbox"] { min-height: 0; overflow-y: auto; }
+.ui-model-footer { flex: 0 0 auto; padding: var(--space-2) var(--space-3); overflow-wrap: anywhere; }
+
 /* Account rows are purpose-built (identity left, actions right), not the
    settings key/value grid — .settings-custom-secret-row's 0.65fr/1.35fr
    columns inverted the proportions and its align-items:end sank the text.

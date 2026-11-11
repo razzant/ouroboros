@@ -341,7 +341,7 @@ class ContractHttpEntry(TypedDict):
     query: NotRequired[List[str]]
     headers: NotRequired[List[str]]  # request headers the handler reads; a trailing "!" marks a required one
     request: NotRequired[ContractBody]
-    responses: NotRequired[Dict[str, ContractBody]]  # by HTTP status
+    responses: NotRequired[Dict[str, ContractBody]]  # HTTP status, then 4xx/5xx for unlisted errors
     note: NotRequired[str]
 
 

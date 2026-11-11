@@ -415,6 +415,12 @@ export function servedUiStatus(servedUi) {
         : { text: `Serving now: ${label}.`, tone: 'muted' };
 }
 
+// The cap on acting tasks is optional: the server keeps "no cap" as a blank, which the row shows and sends as No limit.
+CODECS.ownerCap = {
+    read: (settings, row) => (!settings ? undefined : String(settings[row.keys[0]] ?? '').trim() === '' ? 'unlimited' : settings[row.keys[0]]),
+    body: (value, row) => ({ [row.keys[0]]: String(value ?? '').trim().toLowerCase() === 'unlimited' ? '' : value }),
+};
+
 let servedUi = null;  // the last answer of /api/state about what is served
 const mountAdvanced = rowsPage('computer/advanced', {
     ids: () => rowsOf('computer/advanced').map((row) => row.id),
