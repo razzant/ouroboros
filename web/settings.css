@@ -55,7 +55,8 @@ html[data-layout="stack"] :is(.settings-home, .settings-page) { padding-inline: 
    Back stays at the top while the page scrolls. A sticky row is held inside its scroller's padding, so with `top: 0`
    what scrolled showed in the page's top inset above it. The row's own box holds that inset instead: it starts at the
    page's top edge (the negative margin), keeps Back where it stood (the same padding) and stays there (the negative
-   `top`), on the room's colour, so what scrolls passes under it and never shows above it. */
+   `top`), on the room's colour, so what scrolls passes under it and never shows above it. It reaches 12 px into the
+   side gutters the same way, over the soft shadow a card casts beside itself. */
 .settings-back-row {
     position: sticky;
     top: calc(-1 * var(--settings-top, 0px));
@@ -64,10 +65,13 @@ html[data-layout="stack"] :is(.settings-home, .settings-page) { padding-inline: 
     align-items: center;
     box-sizing: content-box;
     min-height: var(--control-h-sm);
-    margin: calc(-1 * var(--settings-top, 0px)) 0 var(--space-1);
-    padding-top: var(--settings-top, 0px);
+    margin: calc(-1 * var(--settings-top, 0px)) calc(-1 * var(--space-3)) var(--space-1);
+    padding: var(--settings-top, 0px) var(--space-3) 0;
     background: var(--bg-primary);
 }
+/* On a phone the header above a page keeps its ☰ over that row, so the button's soft shadow is not cut where the row
+   begins (over the home nothing changes: its first card lies over that shadow, as on every page). */
+html[data-layout="stack"] #page-settings > .app-page-header:has(~ .settings-shell[data-settings-view="page"]) { position: relative; z-index: 2; }
 .settings-back {
     display: inline-flex;
     align-items: center;
