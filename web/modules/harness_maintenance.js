@@ -5,6 +5,7 @@
 import { apiClient } from './api_client.js';
 import { absoluteTime, escapeHtmlAttr as escapeHtml } from './utils.js';
 import { errorWords } from './ui_primitives.js';
+import { routeExternalLink } from './skill_presentation.js';
 
 const ACTIVE = new Set(['queued', 'running']);
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'interrupted']);
@@ -130,7 +131,7 @@ export function harnessMaintenanceMarkup(entry, view = {}) {
             ${(operation?.limitations || []).map((sentence) => `<p>${escapeHtml(sentence)}</p>`).join('')}
             ${operation?.progress?.length ? `<pre>${escapeHtml(operation.progress.join('\n'))}</pre>` : ''}
             <div class="harness-maintenance-actions">${extraActions.join('')}
-                ${entry?.releaseNotesUrl ? `<a class="btn btn-default" href="${escapeHtml(entry.releaseNotesUrl)}" rel="noopener noreferrer">Release notes</a>` : ''}</div>
+                ${entry?.releaseNotesUrl ? `<a class="btn btn-default" href="${escapeHtml(entry.releaseNotesUrl)}" target="_blank" rel="noopener noreferrer" data-skill-external>Release notes</a>` : ''}</div>
         </div>
     </div>`;
 }
@@ -204,6 +205,7 @@ export function createHarnessMaintenanceController({
             element.querySelectorAll('[data-maintenance-action]').forEach((control) => {
                 control.addEventListener('click', () => act(harness, control.dataset.maintenanceAction));
             });
+            element.querySelectorAll('[data-skill-external]').forEach((control) => control.addEventListener('click', routeExternalLink));
         });
         onChange();
     }

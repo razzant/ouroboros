@@ -484,6 +484,8 @@ test('details carry actual commands once, script evidence, limitations and no in
     assert.doesNotMatch(html, /<dt>Ran|operation-1/);
     for (const text of ['123 bytes', 'abcdef', 'Installer exited 7', 'Vendor finished.', 'Exit 7', 'https://vendor.test/notes']) assert.ok(html.includes(text));
     assert.match(html, /Updated from 1.0.0/);
+    assert.match(html, /target="_blank" rel="noopener noreferrer" data-skill-external/);
+    assert.doesNotMatch(harnessMaintenanceMarkup(entry()), /Release notes|data-skill-external/);
     const different = {...receipt, commands: [{binary: '/other/program', args: ['update'], env: {}}]};
     assert.match(harnessMaintenanceMarkup(entry({operation: different})), /<dt>Ran/);
     const latest = harnessMaintenanceMarkup(entry({newest: {status: 'unavailable', problem: {message: 'Pointer unreadable'}}}));

@@ -440,3 +440,34 @@ def test_program_facts_and_outcome_stay_once_in_their_places(subscription_ui, wi
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     family.locator(".agent-family-head").scroll_into_view_if_needed()
     capture(page, f"program-facts-{account_count}-{width}")
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+@pytest.mark.parametrize("host", ["desktop", "telegram"])
+def test_release_notes_uses_host_opener_and_keeps_the_app(subscription_ui, width, host):
+    from playwright.sync_api import expect
+    ui, page = subscription_ui, subscription_ui["page"]
+    row = _inventory_row("codex")
+    page.route("**/api/claudexor/maintenance/harnesses*", lambda route: route.fulfill(json={"harnesses": [row]}))
+    page.set_viewport_size({"width": width, "height": 950})
+    page.goto(ui["url"] + "/#settings")
+    page.locator('[data-settings-tab="providers"]').click()
+    family = page.locator('.agent-family-card[data-family="codex"]')
+    family.get_by_role("button", name="Details", exact=True).click()
+    expect(family.get_by_role("link", name="Release notes")).to_have_count(0)
+    row["releaseNotesUrl"] = "https://vendor.example/releases"
+    family.get_by_role("button", name="Check latest", exact=True).click()
+    link = family.get_by_role("link", name="Release notes")
+    expect(link).to_have_attribute("target", "_blank")
+    page.evaluate("""host => {
+        window.__external = [];
+        if (host === 'desktop') window.pywebview = {api: {open_external_url: async url => {
+            window.__external.push(url); return {ok: true};
+        }}};
+        else window.Telegram = {WebApp: {openLink: url => window.__external.push(url)}};
+    }""", host)
+    before = page.url
+    link.click()
+    page.wait_for_function("window.__external.length === 1")
+    assert page.evaluate("window.__external") == [row["releaseNotesUrl"]]
+    assert page.url == before and len(page.context.pages) == 1

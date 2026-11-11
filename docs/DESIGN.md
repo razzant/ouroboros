@@ -2643,7 +2643,8 @@ verdict reads “X available”, “Up to date” or “Latest unknown”. Updat
 newer/unknown versions only; Install for absence, exactly when the engine allows it.
 Nothing updates itself. An unavailable action names the engine's reason. Details holds
 Check latest, paths, override, command/script evidence, vendor lines, limitations and
-release notes. “Ran” appears only if different from “Command”; show time, never an
+release notes through the host opener, keeping the app open. “Ran” appears only if
+different from “Command”; show time, never an
 operation id. A changed receipt can offer Return to its prior version when supported.
 A nonzero installer exit can still mean Updated: retain the limitation sentence.
 A package-manager updater's advice remains advice, never an automatic command.
