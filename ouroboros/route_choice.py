@@ -50,7 +50,7 @@ from ouroboros.settings_integrity import PROJECTED_PROPOSALS_ENV, PROJECTED_SETT
 
 #: Why an acting route is the task's own: the record names the chooser, never a model string.
 OWNER_LEAD_SOURCES = ("room", "owner", "owner_words")
-LEAD_SOURCES = (*OWNER_LEAD_SOURCES, "mind")
+LEAD_SOURCES = (*OWNER_LEAD_SOURCES, "mind", "place", "circle")
 ROUTE_SOURCES = ("task_argument", "configured_row", "switch_model", "wait_card", "fallback", "presence", *LEAD_SOURCES)
 LEAD_KEY = "lead"  # host-minted primary, including a recorded follow
 LEAD_ROLE = "lead"  # no settings slot or role options
@@ -227,9 +227,6 @@ def model_role_slot_override(task_metadata: Mapping) -> Optional[Tuple[str, bool
     """
     metadata = task_metadata if isinstance(task_metadata, Mapping) else {}
     role = str(metadata.get("model_role") or "").strip().lower()
-    if role == LEAD_ROLE:  # a place's turn carries its resolved role route, not a root primary
-        model = str(metadata.get("model") or "").strip()
-        return (model, bool(metadata.get("use_local_model"))) if model else None
     key = MODEL_ROLE_SETTINGS.get(role)
     if not key or role in ("main", "fallback"):
         return None
@@ -311,7 +308,8 @@ def capture_lead(task: dict, drive_root: Any, *, project: Mapping | None = None,
 
     given = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     canonical_root, actor = _actor_scope(task, drive_root)
-    if (LEAD_KEY in given or task.get("model") or task.get("model_role") or given.get("model_role")
+    if (LEAD_KEY in given or task.get("model") or str(task.get("model_role") or "").lower() in MODEL_ROLE_SETTINGS
+            or str(given.get("model_role") or "").lower() in MODEL_ROLE_SETTINGS
             or actor.get("parent_task_id") or actor.get("autonomous")
             or str(task.get("delegation_role") or given.get("delegation_role") or "").lower() == "subagent"
             or (task.get("actor_id") == "consciousness" and not actor.get("scheduled"))):
@@ -396,20 +394,22 @@ def bind_task_route(ctx: Any, task_metadata: Mapping, *, presence: bool) -> None
     ctx.task_model_override = ctx.task_use_local_override = ctx.task_route_source = None
     delegated = str(task_metadata.get("delegation_role") or "").lower() == "subagent"
     cognitive, kind = _cognition(task_metadata)
-    if not (delegated or presence):
+    if not delegated:
         carrier = task_lead(task_metadata)
         if carrier:
             ctx.task_model_override, ctx.task_use_local_override = carrier["model"], carrier["use_local"]
             ctx.task_route_source = carrier["source"]
-        return
+            return
+        if not presence:
+            return
     if delegated and kind == "agent_session" and cognitive.get("follows_role"):
         return
     model = str(task_metadata.get("model") or "").strip()
     if model:
         ctx.task_model_override = model
         ctx.task_route_source = "presence" if presence else _dispatch_source(task_metadata)
-    if "use_local_model" in task_metadata:
-        ctx.task_use_local_override = bool(task_metadata.get("use_local_model"))
+        if "use_local_model" in task_metadata:
+            ctx.task_use_local_override = bool(task_metadata.get("use_local_model"))
 
 
 def round_route(ctx: Any, llm: Any, acting: Tuple[str, bool]) -> Optional[Tuple[str, bool]]:

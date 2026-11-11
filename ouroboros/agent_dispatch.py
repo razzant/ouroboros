@@ -283,10 +283,8 @@ def _initial_effort_for(task: Dict[str, Any], task_type: str) -> str:
             return named
     if stored in EFFORT_SCALE:
         return stored
-    from ouroboros.consciousness_authority import is_focus_wake
-
     role = str(metadata.get("model_role") or "").strip().lower()
-    return resolve_effort("consciousness" if is_focus_wake(metadata) else role or task_type)
+    return resolve_effort(role or task_type)
 
 
 def main_model_named_effort(task_metadata: Dict[str, Any]) -> str:

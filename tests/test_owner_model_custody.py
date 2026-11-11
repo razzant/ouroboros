@@ -233,6 +233,7 @@ def test_the_next_call_uses_the_act_after_a_drain_or_from_a_stale_saved_queue(ho
     assert presses[0].status_code == 200
     assert text == "done" and [model for model, _messages in llm.sent] == [B]
     assert ctx.primary_route == {"model": B, "use_local": False, "role": "lead"}
+    assert ctx.task_metadata.get("model_role") != "lead"
     assert "My human" in str(llm.sent[0][1])
 
 
@@ -301,6 +302,7 @@ def test_stale_worker_results_keep_the_host_primary_and_follow_choice(host):
     assert act(host, model=B).status_code == 200
     write_task_result(host[0], "work", "running", metadata=stale["metadata"], owner_model={"request_id": "stale"})
     assert load_task_result(host[0], "work")["metadata"]["lead"]["model"] == B
+    assert load_task_result(host[0], "work")["metadata"]["model_role"] == "consciousness"
     assert act(host, "follow", request_id="follow").status_code == 200
     write_task_result(host[0], "work", "completed", metadata=stale["metadata"])
     saved = load_task_result(host[0], "work")

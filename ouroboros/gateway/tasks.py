@@ -589,8 +589,6 @@ def _create_task_from_body(request: Request, body: Any) -> JSONResponse:
     except ValueError as exc:
         return json_error(str(exc), 400)
     metadata = {str(k): v for k, v in raw_metadata.items() if str(k) not in _RESERVED_METADATA_KEYS}
-    if str(metadata.get("model_role") or "").strip().lower() == "lead":
-        metadata.pop("model_role")  # this role selector is host-owned for place turns; roots carry lead
     allowed_resources, resource_policy, disabled_tools, acceptance_claims, policy_error = (
         _fold_contract_policies(body, raw_metadata, metadata)
     )

@@ -173,7 +173,10 @@ def preserve_carrier(existing: Mapping, fields: dict) -> dict:
     if carrier is not None and isinstance(fields.get("metadata"), dict):
         fields = {**fields, "metadata": {**fields["metadata"], "lead": copy.deepcopy(carrier)}}
     if existing.get("owner_model") and isinstance(fields.get("metadata"), dict):
-        fields = {**fields, "metadata": {**fields["metadata"], "model_role": primary_role(existing)}}
+        fields = {**fields, "metadata": dict(fields["metadata"])}
+        fields["metadata"].pop("model_role", None)
+        if role := (existing.get("metadata") or {}).get("model_role"):
+            fields["metadata"]["model_role"] = role
     if existing.get("owner_model"):
         fields = {**fields, "owner_model": copy.deepcopy(existing["owner_model"])}
     return fields
@@ -251,7 +254,10 @@ def apply_current(ctx: Any) -> bool:
     primary = recorded_primary(row)
     model, local, role = primary["model"], primary["use_local"], primary["role"]
     following = role != "lead"
-    ctx.task_metadata = {**(getattr(ctx, "task_metadata", None) or {}), "model_role": role}
+    ctx.task_metadata = {**(getattr(ctx, "task_metadata", None) or {})}
+    ctx.task_metadata.pop("model_role", None)
+    if slot := (row.get("metadata") or {}).get("model_role"):
+        ctx.task_metadata["model_role"] = slot
     if carrier:
         ctx.task_metadata["lead"] = carrier
     else:

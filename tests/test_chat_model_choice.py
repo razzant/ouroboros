@@ -301,11 +301,11 @@ def test_a_chosen_route_runs_on_auto_and_route_defaults_from_its_first_plan(room
     assert ctx.task_model_override is None and task_model_binding({"task_metadata": main}) == ("main", None)
     assert _context_route({"metadata": main})[0]["model"] == SOL
 
-    # Delegated and Presence work never take a room's route, whatever their metadata carries.
+    # Delegation has its own route; an integrating place turn binds the same primary carrier.
     for meta, presence in (({**metadata, "delegation_role": "subagent", "model": OPUS}, False), (metadata, True)):
         ctx = _ctx(meta)
         route_choice.bind_task_route(ctx, meta, presence=presence)
-        assert ctx.task_route_source != "room"
+        assert (ctx.task_route_source == "room") is presence
     assert task_model_binding({"task_metadata": {**metadata, "delegation_role": "subagent"}})[0] == "main"
 
 
@@ -408,7 +408,7 @@ def test_api_clients_cannot_mint_a_lead(room, monkeypatch, metadata):
     assert response.status_code == 200, response.text
     from supervisor import queue
     admitted = queue.PENDING[-1]["metadata"]
-    assert admitted["lead"] == LEAD and admitted.get("model_role") != "lead"
+    assert admitted["lead"] == LEAD
     ctx = _ctx(admitted)
     route_choice.bind_task_route(ctx, admitted, presence=False)
     assert (ctx.task_model_override, ctx.task_use_local_override) == (ASTRA, False)
@@ -429,6 +429,38 @@ def test_queue_admission_keeps_an_existing_lead_and_restart_never_recaptures(roo
         queue.PENDING.clear()
     restored = queue.enqueue_task({"id": "legacy", "type": "task", "metadata": {}}, restoring_snapshot=True)
     assert "lead" not in restored["metadata"]
+
+
+def test_schedule_api_refuses_a_carrier_and_an_ordinary_occurrence_takes_its_room(room, monkeypatch):
+    from ouroboros.gateway.schedules import api_schedules_upsert
+    from supervisor.queue_schedules import _task_from_schedule
+
+    root, client = room
+    client.post("/api/owner/chat-model", json={**CHOSEN, "project_id": "alpha"})
+    app = Starlette(routes=[Route("/api/schedules", api_schedules_upsert, methods=["POST"])])
+    app.state.drive_root = root
+    body = {"id": "model-choice", "trigger": {"type": "once", "run_at": "2099-01-01T12:00:00Z"},
+            "task": {"description": "Read", "project_id": "alpha", "metadata": {"lead": LEAD}}}
+    with TestClient(app) as schedules:
+        refused = schedules.post("/api/schedules", json=body)
+        assert refused.status_code == 400 and "reserved" in refused.text
+        body["task"]["metadata"] = {}
+        accepted = schedules.post("/api/schedules", json=body)
+    assert accepted.status_code == 200, accepted.text
+    task = _task_from_schedule(accepted.json()["schedule"])
+    route_choice.capture_lead(task, root)
+    assert task["metadata"]["lead"] == LEAD
+
+
+@pytest.mark.parametrize("presence", [False, True])
+def test_a_bare_lead_selector_cannot_override_a_local_followers_route(room, presence):
+    save_owner({"OUROBOROS_MODEL": "local-only", "USE_LOCAL_MAIN": True})
+    metadata = {"model_role": "lead", "use_local_model": False}
+    ctx = _ctx(metadata)
+    route_choice.bind_task_route(ctx, metadata, presence=presence)
+    assert ctx.task_model_override is None and ctx.task_use_local_override is None
+    assert route_choice.open_route(ctx, None) == ("local-only", True, route_choice.following("main"))
+    assert task_model_binding({"metadata": metadata}) == ("main", None)
 
 
 def test_conversation_capture_uses_canonical_registry_even_with_an_execution_copy(room, tmp_path):

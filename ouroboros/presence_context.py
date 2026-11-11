@@ -867,11 +867,12 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int, drive
     if model:
         from ouroboros.config import get_light_model
         from ouroboros.model_slots import _main_model
-        metadata["model"] = get_light_model() if model == "light" else _main_model() if model == "main" else model
-        metadata["model_layer"] = layer
-        metadata["model_role"] = "lead"
-        if model in {"main", "light"}:
-            metadata["use_local_model"] = runtime_setting(f"USE_LOCAL_{model.upper()}", "").lower() in {"true", "1"}
+        metadata["lead"] = {
+            "source": layer,
+            "model": get_light_model() if model == "light" else _main_model() if model == "main" else model,
+            "use_local": model in {"main", "light"} and runtime_setting(
+                f"USE_LOCAL_{model.upper()}", "").lower() in {"true", "1"},
+        }
     return metadata
 
 

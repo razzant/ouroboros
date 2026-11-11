@@ -480,8 +480,9 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
     model_role = str(metadata.get("model_role") or "").strip()
     # The same work keeps its primary, a recorded follow included (route_choice),
     # never the room's newer choice.
-    from ouroboros.route_choice import LEAD_KEY, lead_snapshot
+    from ouroboros.route_choice import LEAD_KEY, MODEL_ROLE_SETTINGS, lead_snapshot
 
+    model_role = model_role if model_role in MODEL_ROLE_SETTINGS else ""
     lead = lead_snapshot(metadata.get(LEAD_KEY))
     stored = metadata.get("task_contract") if isinstance(metadata.get("task_contract"), dict) else {}
     canonical = result.get("task_contract") if isinstance(result.get("task_contract"), dict) else {}

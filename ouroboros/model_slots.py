@@ -163,8 +163,9 @@ def task_model_binding(task: dict, *, context_fit_plan: object = None,
     actor_role = supervisor_role or (f"subagent:{actor_id}" if actor_id and route.get("kind") == "api_model" else "main")
     lead_role = LEAD_ROLE if actor_role == "main" and task_lead(metadata) else ""
     actor_role = lead_role or actor_role
+    metadata_role = metadata.get("model_role") if metadata.get("model_role") != LEAD_ROLE else ""
     role = str(task.get("model_role") or getattr(context_fit_plan, "model_role", "")
-               or lead_role or metadata.get("model_role") or actor_role)
+               or lead_role or metadata_role or actor_role)
     pin = task.get("credential_profile_id")
     if pin is None and role == LEAD_ROLE:
         pin = ""

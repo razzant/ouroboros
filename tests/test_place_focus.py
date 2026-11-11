@@ -866,8 +866,8 @@ def test_focus_model_inherits_the_admitted_scope(focus, monkeypatch, place_model
         p.edit_circle(root, circle["circle_id"], author="owner", model="circle/later")
     task = task_for((root, admission.place, admission, event))
     metadata = task["metadata"]
-    assert metadata["model_role"] == ("lead" if model else "consciousness")
-    assert metadata.get("model") == model and metadata.get("model_layer") == layer
+    assert metadata["model_role"] == "consciousness"
+    assert metadata.get("lead") == ({"model": model, "source": layer, "use_local": False} if model else None)
     if model is None:
         assert "model" not in metadata and "model_layer" not in metadata
     rendered = frame_focus_content(task, event.text)
@@ -895,9 +895,9 @@ def test_focus_aliases_remain_admission_snapshots(focus, monkeypatch, layer, ali
     frozen = task_for((root, admission.place, admission, event))["metadata"]
     settings.update(main="main/next", light="light/next", local=not local)
     current = task_for((root, admission.place, admission, event))["metadata"]
-    assert frozen["model"] == alias + "/first" and current["model"] == alias + "/next"
-    assert frozen["model_layer"] == current["model_layer"] == layer
-    assert frozen["use_local_model"] is local and current["use_local_model"] is not local
+    assert frozen["lead"]["model"] == alias + "/first" and current["lead"]["model"] == alias + "/next"
+    assert frozen["lead"]["source"] == current["lead"]["source"] == layer
+    assert frozen["lead"]["use_local"] is local and current["lead"]["use_local"] is not local
     records = p.place_records(root)
     assert (records.places[place.place_id].model if layer == "place" else records.circle(circle["circle_id"])["model"]) == alias
 
@@ -936,7 +936,7 @@ def test_an_explicit_place_model_has_its_own_lead_options_and_initial_effort(foc
         assert model_role_option(MODEL_CONTEXT_WINDOWS_KEY, role) == 0
         assert task_processing_preference(task) == ''
         assert acting == model and not local
-        assert metadata['model_layer'] == layer
+        assert metadata['lead']['source'] == layer
         assert _initial_effort_for(task, 'presence') == 'high'
 
 
@@ -967,5 +967,5 @@ def test_place_model_aliases_keep_the_resolved_locality_on_the_lead(focus, monke
     metadata = focus_metadata(replace(admission, place=replace(place, model=alias)), event, 'turn', 1, root)
     ctx = ToolContext(repo_dir=root, drive_root=root, task_metadata=metadata)
     bind_task_route(ctx, metadata, presence=True)
-    assert metadata['model_role'] == 'lead'
+    assert metadata['model_role'] == 'consciousness'
     assert open_route(ctx, None)[:2] == ('chosen-model', local)
