@@ -197,7 +197,7 @@ def test_admission_snapshots_the_room_once_and_records_mains_reference(room, mon
         assert chosen["metadata"]["lead"] == LEAD
     gone = {"id": "gone", "project_id": "nowhere"}
     route_choice.capture_lead(gone, root)
-    assert gone["metadata"]["lead"] == {"source": "main"}
+    assert "lead" not in gone["metadata"]
     def broken(*_args, **_kwargs):
         raise TypeError("programming error")
     monkeypatch.setattr("ouroboros.composer_cognition.read_model_choice", broken)
@@ -432,6 +432,23 @@ def test_conversation_capture_uses_canonical_registry_even_with_an_execution_cop
     projects.create_project(execution, "alpha", origin="owner_ui")
     task = {"id": "split-turn", "project_id": "alpha", "budget_drive_root": str(root)}
     route_choice.capture_lead(task, execution)
+    assert task["metadata"]["lead"] == LEAD
+
+
+def test_unreadable_room_leaves_no_follow_fact_and_a_later_door_can_stamp_it(room, monkeypatch, caplog):
+    root, client = room
+    client.post("/api/owner/chat-model", json={**CHOSEN, "project_id": "alpha"})
+    task = {"id": "unreadable-room", "project_id": "alpha"}
+    with monkeypatch.context() as patch:
+        patch.setattr("ouroboros.composer_cognition.read_model_choice",
+                      lambda *_a, **_k: (_ for _ in ()).throw(OSError("unreadable registry")))
+        route_choice.capture_lead(task, root)
+    assert "lead" not in task["metadata"]
+    assert "Room model choice unreadable" in caplog.text
+    ctx = _ctx(task["metadata"])
+    route_choice.bind_task_route(ctx, task["metadata"], presence=False)
+    assert ctx.task_model_override is None and route_choice.opening_role(ctx) == "main"
+    route_choice.capture_lead(task, root)
     assert task["metadata"]["lead"] == LEAD
 
 

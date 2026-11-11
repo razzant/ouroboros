@@ -295,8 +295,9 @@ def capture_lead(task: dict, drive_root: Any, *, project: Mapping | None = None,
 
     Queue admission supplies its committed registry row under Q (``admitted=True``, None for Main),
     so this stamp performs no IO under Q. Conversation admission reads the canonical root.
-    An existing carrier wins, including a recorded follow. Unreadable rooms follow Main
-    with a warning; a programming error never masquerades as an unreadable room.
+    An existing carrier wins, including a recorded follow. Unreadable rooms leave no
+    carrier and follow Main with a warning, so a later door can still stamp the choice.
+    A programming error never masquerades as an unreadable room.
     """
     from ouroboros.composer_cognition import project_model_choice, read_model_choice
     from ouroboros.settings_integrity import _actor_scope, SettingsIntegrityError
@@ -324,7 +325,7 @@ def capture_lead(task: dict, drive_root: Any, *, project: Mapping | None = None,
 
         logging.getLogger(__name__).warning("Room model choice unreadable for %s; admitted on Main",
                                             project_id or "Main", exc_info=True)
-        choice = {"kind": "main"}
+        return
     if mind_start and choice["kind"] == "main":
         return
     metadata[LEAD_KEY] = ({"source": "room", "model": choice["model"], "use_local": choice["use_local"]}
