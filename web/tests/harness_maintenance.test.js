@@ -927,3 +927,12 @@ for (const prior of ['history', 'pending', 'empty', 'different']) {
         controller.dispose();
     });
 }
+
+for (const reason of ['Program inspection unavailable. Update the app to use this contract.', 'Engine offline']) test(`inspection refusal is introduced once: ${reason}`, async () => {
+    const {controller} = setup({harnessMaintenanceInventory: async () => { throw new Error(reason); }});
+    await controller.refresh();
+    const message = controller.view('fixture').inventoryError;
+    assert.equal((message.match(/Program inspection unavailable/g) || []).length, 1);
+    assert.ok(message.includes(reason));
+    controller.dispose();
+});
