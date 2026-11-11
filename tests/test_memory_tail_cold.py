@@ -733,6 +733,30 @@ def test_a_set_composed_anew_after_a_capture_read_it_answers_that_capture_from_t
     assert json.loads(json.dumps(got)) == json.loads(json.dumps(want))
 
 
+def test_a_row_of_a_places_chat_whose_work_joined_a_project_is_not_read_as_the_places(monkeypatch, tmp_path):
+    """The set keeps a row's chat, never its rooms: a row of a place's chat that the rule moved to a Project (its work
+    bound there) is read with that chat and decided again by the rule, so the place never takes it as its own."""
+    rooms = _settled(tmp_path)
+    place = {"source": "presence:slack", "transport": _TRANSPORT, "presence_provenance": _PROVENANCE}
+    write_task_result(tmp_path, "moved", "completed", result="done", chat_id=PLACE)
+    _append(tmp_path, shared.msg(_ts(1), "Place asks.", chat_id=PLACE, client_message_id="asks", **place))
+    _append(tmp_path, shared.msg(_ts(2), "Moved word.", chat_id=PLACE, direction="out", task_id="moved"))
+    _append(tmp_path, shared.msg(_ts(3), "Alpha later.", chat_id=rooms["alpha"], client_message_id="alpha-later"))
+    _append(tmp_path, shared.msg(_ts(4), "Place newest.", chat_id=PLACE, client_message_id="newest", **place))
+    _append(tmp_path, shared.msg(_ts(5), "Latest main.", client_message_id="latest"))
+    _fill(tmp_path)
+    moved = _entry(tmp_path, "Moved word.")
+    for room in (PLACE, 1):  # where it stood before its work joined a Project: those seals stay
+        _seal(tmp_path, moved, room)
+    bind_task_to_project(tmp_path, "moved", "alpha", origin={"absent": "post_hoc_unresolved"})
+    _seal(tmp_path, moved, rooms["alpha"])  # and in that Project: open nowhere now
+    _compose(tmp_path)
+    assert moved[2] in _cold_positions(tmp_path)
+    work = _work(tmp_path, rooms)
+    assert work.get("tail_whole", 0) == 0 and work.get("rows_asked", 0) >= 1, work
+    _same(monkeypatch, tmp_path, rooms)
+
+
 def _project_place(tmp_path: pathlib.Path, rooms: dict) -> None:
     """Project alpha holds the same words twice, the first sealed, and then the Done row of work a place started there,
     its newest row: a Project that is a place, whose rows come from many chats."""
