@@ -25,7 +25,7 @@ def project_ctx(tmp_path, project_id: str = "demo") -> ToolContext:
 
 def test_reserved_set_is_exactly_the_three_shared_topics():
     assert tools.GLOBAL_ONLY_TOPICS == frozenset({
-        tools.BACKLOG_TOPIC, store.OVERVIEW_TOPIC, tools.PATTERNS_TOPIC})
+        tools.BACKLOG_TOPIC, store.OVERVIEW_TOPIC, "patterns"})
 
 
 def test_the_former_register_keeps_its_one_global_home(tmp_path):
@@ -35,13 +35,13 @@ def test_the_former_register_keeps_its_one_global_home(tmp_path):
     canonical = tmp_path / "memory" / "knowledge" / "patterns.md"
 
     written = tools._knowledge_write(
-        ctx, topic=tools.PATTERNS_TOPIC,
+        ctx, topic="patterns",
         content="# Pattern Register\n\n| Error class | Count |\n|---|---|\n| x | 1 |\n")
 
     assert "✅" in written
     assert canonical.exists()
     assert not (tmp_path / "projects" / "demo" / "knowledge" / "patterns.md").exists()
-    assert "| x | 1 |" in tools._knowledge_read(ctx, tools.PATTERNS_TOPIC)
+    assert "| x | 1 |" in tools._knowledge_read(ctx, "patterns")
 
 
 def test_reserved_topics_resolve_globally_from_a_project_room(subtests, tmp_path):

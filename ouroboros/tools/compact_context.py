@@ -106,7 +106,7 @@ def _inspect(ctx, observed: dict, *, offset: int) -> str:
     units from ``offset`` within the tool's producer page size (``tool_result_limit``), naming
     ``next_offset`` while units remain. The reader rebuilds a restore reference from the one
     ``restore_checkpoint`` and a unit's id and hash instead of receiving it repeated per unit."""
-    from ouroboros.context_compaction import context_units, owner_protected_unit_ids, unit_kind
+    from ouroboros.context_compaction import _capsule_metadata, _first_line, context_units, owner_protected_unit_ids, unit_kind
     from ouroboros.review_history_view import attachment_transfer_options, review_note_options
     from ouroboros.tool_capabilities import tool_result_limit
 
@@ -147,6 +147,9 @@ def _inspect(ctx, observed: dict, *, offset: int) -> str:
         tokens[kind] += unit.context_size_tokens
         row = {"unit_id": unit.unit_id, "raw_sha256": unit.raw_sha256, "kind": kind,
                "tokens": unit.context_size_tokens, "eligible": unit.unit_id not in protected}
+        if kind == "capsule":
+            row.update(authorship=_capsule_metadata(messages[unit.start])[1].get("authorship") or "unrecorded",
+                       first_line=_first_line(messages[unit.start]))
         if exposed is not None:
             row["exposed"] = (unit.unit_id, unit.raw_sha256) in exposed
         rows.append(row)
@@ -187,7 +190,8 @@ def _inspect(ctx, observed: dict, *, offset: int) -> str:
                  "and stays whole. units is one page in transcript order (offset, total; next_offset while more remain: "
                  "call inspect again with that offset). Select complete unit IDs to keep and write a local working_note; "
                  "a restore_unit_refs entry is {checkpoint_ref: restore_checkpoint, unit_id, raw_sha256}. Earlier notes "
-                 "stay where they are unless selected for replacement; select several to merge their account and sources. "
+                 "stay unless replace_note_ids names them (capsule rows show authorship and first_line). Restored "
+                 "sources and host emergency records follow keep_unit_ids; keep_last_n keeps all unnamed capsules. "
                  "view_address selects listed memory forms from this snapshot; a note's restore_view_address restores it whole. Core, governing words, the assignment "
                  "and newer owner/tool messages stay whole."),
     }
@@ -210,7 +214,8 @@ def _inspect(ctx, observed: dict, *, offset: int) -> str:
 
 def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = False, offset: int = 0,
                      expected_view_revision: str = "", working_note: str | None = None,
-                     keep_unit_ids: List[str] | None = None, restore_unit_refs: List[dict] | None = None,
+                     keep_unit_ids: List[str] | None = None, replace_note_ids: List[str] | None = None,
+                     restore_unit_refs: List[dict] | None = None,
                      schema_names: List[str] | None = None, review_transfers: List[dict] | None = None,
                      review_notes: List[dict] | None = None, view_address: List[str] | None = None, **kwargs) -> str:
     """Inspect or queue a replacement through the existing context materializer.
@@ -218,9 +223,11 @@ def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = Fal
     The authored view (inspect / working_note / restore) addresses the dialogue scope:
     complete tool units, capsules, the actor's own completed replies and host prose rows,
     all under the same positional, hash-bound unit ids. Rows carrying the owner's typed
-    words are listed but never eligible. Standalone restoration keeps current units/schemas
-    and authors no note. A count-only request (no note, no restore) is refused: no helper
-    writes the note.
+    words are listed but never eligible. Earlier notes leave only when ``replace_note_ids``
+    names them; host source views and emergency records follow ``keep_unit_ids``.
+    ``keep_last_n`` keeps every unnamed capsule. Standalone restoration
+    keeps current units/schemas and authors no note. A count-only request (no note, no
+    restore) is refused: no helper writes the note.
     """
     from ouroboros.context_compaction import context_units, unit_kind
     from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
@@ -233,7 +240,7 @@ def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = Fal
         ctx._inspected_context_view = observed
         return _inspect(ctx, observed, offset=offset)
     if working_note is None and restore_unit_refs:
-        if (any(value is not None for value in (keep_last_n, keep_unit_ids, schema_names))
+        if (any(value is not None for value in (keep_last_n, keep_unit_ids, replace_note_ids, schema_names))
                 or review_transfers or review_notes):
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR",
                 text="Standalone restore_unit_refs keeps current units, schemas and review accounts. "
@@ -257,7 +264,7 @@ def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = Fal
     if (not isinstance(working_note, str)
             or any(values is not None and (not isinstance(values, list)
                    or not all(isinstance(v, str) and v for v in values))
-                   for values in (keep_unit_ids, schema_names, view_address))
+                   for values in (keep_unit_ids, replace_note_ids, schema_names, view_address))
             or review_notes is not None and not isinstance(review_notes, list)
             or review_transfers is not None and not isinstance(review_transfers, list)
             or restore_unit_refs is not None and (not isinstance(restore_unit_refs, list)
@@ -276,21 +283,34 @@ def _compact_context(ctx, keep_last_n: int | None = None, *, inspect: bool = Fal
                         owner_note=bool(working_note.strip()))
         except ValueError as exc:
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=str(exc)))
+    named = list(replace_note_ids or ())
+    if named:
+        notes = {unit.unit_id for unit in context_units(observed["messages"], scope="dialogue")
+                 if unit_kind(observed["messages"], unit) == "capsule"}
+        conflict = sorted(set(named) & set(keep_unit_ids or ()))
+        unknown = [unit_id for unit_id in named if unit_id not in notes]
+        if conflict or unknown:
+            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
+                f"keep_unit_ids and replace_note_ids both name {conflict}: a note is either kept or replaced."
+                if conflict else f"replace_note_ids names earlier notes of the observed view (inspect kind capsule); "
+                f"these are not: {unknown}.") + " Current context is unchanged."))
     if keep_unit_ids is None and keep_last_n is not None:
         # keep_last_n counts completed tool units; everything from the N-th most recent
-        # tool unit onward (prose rows between and after them included) stays raw.
+        # tool unit onward (prose rows between and after them included) stays raw. Earlier
+        # capsules (notes and host sources) stay wherever they sit unless named.
         count = max(2, min(keep_last_n, 20))
         units = context_units(observed["messages"], scope="dialogue")
         tool_units = [unit for unit in units if unit_kind(observed["messages"], unit) == "tool"]
         anchor = tool_units[-count].start if len(tool_units) >= count else 0
-        keep_unit_ids = [unit.unit_id for unit in units if unit.start >= anchor
-                         or unit_kind(observed["messages"], unit) == "capsule"]
+        keep_unit_ids = [unit.unit_id for unit in units if unit.unit_id not in named
+                         and (unit.start >= anchor or unit_kind(observed["messages"], unit) == "capsule")]
     ctx._pending_compaction = {
         "observed": observed, "working_note": working_note, "review_transfers": list(review_transfers or []),
         "review_notes": list(review_notes or []),
         "view_address": tuple(view_address or ()),
         "expected_view_revision": observed["revision"],
         "keep_unit_ids": None if keep_unit_ids is None else tuple(keep_unit_ids),
+        "replace_note_ids": tuple(named),
         "restore_unit_refs": tuple(restore_unit_refs or ()),
         "schema_names": None if schema_names is None else tuple(schema_names),
     }
@@ -308,8 +328,9 @@ def get_tools() -> List[ToolEntry]:
                     "restore_unit_refs may be used without a note. Core, assignment, owner words, typed owner-directed "
                     "dialogue and newer tail stay whole. Each older tool call and contiguous results is atomic; exact "
                     "bytes are checkpointed with CAS provenance before replacement, so raw evidence remains retrievable. "
-                    "Unselected notes stay; replacement "
-                    "occupies the first selected unit. Batch usefully, shorter than sources: rewriting loses signed "
+                    "Earlier notes stay unless replace_note_ids names them. Restored sources and host emergency "
+                    "records follow keep_unit_ids; keep_last_n keeps every unnamed capsule. Replacement occupies "
+                    "the first replaced unit. Batch usefully, shorter than sources: rewriting loses signed "
                     "reasoning from the earliest change and cache reuse from there (on Codex from the end of the leading "
                     "system items); round facts report the measured re-read. "
                     "Native review ignores schema_names, review_notes and review_transfers; its inspection reports "
@@ -319,11 +340,12 @@ def get_tools() -> List[ToolEntry]:
                     "type": "object",
                     "properties": {
                         "view_address": {"type": "array", "items": {"type": "string"}, "description": "Exact inspected memory forms; restore_view_address restores a note whole. Applied at the next tool boundary from the same snapshot, preserving other choices and arrivals; receipt measures the complete result and prefix re-reading."},
-                        "inspect": {"type": "boolean", "description": "Pin view_revision; return counts/tokens by kind, one transcript-ordered page of unit IDs/eligibility, restore_checkpoint and schema names; no mutation."},
+                        "inspect": {"type": "boolean", "description": "Pin view_revision; return counts/tokens by kind, one transcript-ordered page of unit IDs/eligibility (capsules: authorship and first_line), restore_checkpoint and schema names; no mutation."},
                         "offset": {"type": "integer", "minimum": 0, "description": "Inspection page's zero-based start; next_offset names remaining units."},
                         "expected_view_revision": {"type": "string", "description": "Exact inspected revision; omitted binds the model-send view producing this call, so inspection is optional."},
                         "working_note": {"type": "string", "description": "For a future reader without sources: keep situation/purpose, who decided what, their status within those sources, scope, changes, corrections and unresolved work; label inference and gaps, invent no detail. Later grants/cancellations supersede only their scope, not unaffected branches; proposals are not approvals, and superseded restrictions do not survive scoped approval. Concise, no fixed template; required for folds."},
-                        "keep_unit_ids": {"type": "array", "items": {"type": "string"}, "description": "Exact complete units to keep raw, overriding keep_last_n; empty keeps none eligible, both selectors omitted keeps all."},
+                        "keep_unit_ids": {"type": "array", "items": {"type": "string"}, "description": "Exact complete units to keep raw, overriding keep_last_n; [] folds eligible tools, prose, restored sources and host emergency records. Other capsules stay unless replace_note_ids names them; both keep selectors omitted keeps all."},
+                        "replace_note_ids": {"type": "array", "items": {"type": "string"}, "description": "Capsule IDs to merge into working_note, required for notes (actor, helper or unrecorded authorship), optional for host source views. The new note names their exact sources, the receipt their first lines. A capsule also in keep_unit_ids is refused."},
                         "restore_unit_refs": {"type": "array", "items": {"type": "object", "properties": {
                             "checkpoint_ref": {"type": "object"}, "unit_id": {"type": "string"}, "raw_sha256": {"type": "string"}},
                             "required": ["checkpoint_ref", "unit_id", "raw_sha256"]},
@@ -342,7 +364,7 @@ def get_tools() -> List[ToolEntry]:
                             "description": "With working_note, declare attachment decisions/reasons transferred to named current plan decisions using inspected source/spec identities; no completeness is inferred, and absent/stale transfer keeps the attachment whole."},
                         "keep_last_n": {
                             "type": "integer",
-                            "description": "With working_note and no keep_unit_ids: recent completed tool units to keep raw (2-20); earlier notes stay.",
+                            "description": "With working_note and no keep_unit_ids: recent completed tool units to keep raw (2-20), everything from that tool unit onward, and every capsule unless replace_note_ids names it.",
                         },
                     },
                     "required": [],
