@@ -12,7 +12,7 @@ the per-task terminal wake (``model_sleep.terminal_readiness``): ``all_terminal`
 selected task settled, ``any_terminal`` at the first. A selected child's attention beacon this
 actor was not shown wakes it too (``unseen_beacon``); another child's ordinary terminal never does,
 a question of the author's own executor still does. ``wake_after_sec``/``wake_at`` add an optional
-inspection time. A sleep has no window to time out: an explicit ``timeout_sec`` is refused.
+inspection time. An unnamed wait takes ``timeout_sec`` as its wake time; a named warm or cold sleep has no window to time out, so an explicit ``timeout_sec`` is refused there.
 
 Readiness reads what the answer reads (``observe``): the in-slot poll's effective reader, so a retry
 successor answers for the id selected and a failed predecessor alone wakes nothing. A selected id
@@ -54,8 +54,8 @@ SLEEP_PARAMS: Dict[str, Dict[str, Any]] = {
         "or owner input arrives or an executor of yours asks a question, and the wait's result then reaches your "
         "next request. A selected task whose record is lost wakes it as unknown, never success.")},
     "wake_after_sec": {"type": "integer", "minimum": 1, "description": (
-        "warm/cold only: also wake to inspect after this many seconds (not with wake_at). Omit to wake on events.")},
-    "wake_at": {"type": "string", "description": "warm/cold only: an absolute ISO-8601 inspection time with timezone."},
+        "A sleep only (not in_slot): also wake to inspect after this many seconds (not with wake_at). Omit to wake on events.")},
+    "wake_at": {"type": "string", "description": "A sleep only (not in_slot): an absolute ISO-8601 inspection time with timezone."},
 }
 
 

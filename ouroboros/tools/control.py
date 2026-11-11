@@ -499,7 +499,7 @@ def get_tools() -> List[ToolEntry]:
                 "view": {"type": "string", "enum": ["answer", "summary", "evidence", "full"], "description": "Settled result view; omitted/full preserves the existing handoff. Early returns remain compact wait observations, not a result or full read."},
                 "known_result_sha256": {"type": "string", "description": "Prior child_result_sha256 in every view; current facts still refresh. This does not change when the wait ends."},
                 "timeout_sec": {"type": "integer", "description":
-                                "In-slot only: maximum seconds to wait (default 180); a larger value is clamped to "
+                                "With no sleep_mode: the sleep's wake time, in seconds. With sleep_mode=in_slot: maximum seconds to wait (default 180); a larger value is clamped to "
                                 f"{_WAIT_TASK_CLAMP_SEC}, and a deadline narrows it (named in the result). Size the window to the child's expected life."},
                 **SLEEP_PARAMS,
             }},
@@ -511,7 +511,7 @@ def get_tools() -> List[ToolEntry]:
                 "task_ids": {"type": "array", "items": {"type": "string"}, "description": "Task IDs returned by schedule_subagent."},
                 "known_result_sha256_by_task": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Optional task_id to previously obtained child_result_sha256 map. Matching children omit only result/trace and return result_unchanged plus a full-read reference. Missing or different hashes return the usual complete body/trace. Current status/cost/outcome/capability facts remain; wait timing is unchanged."},
                 "timeout_sec": {"type": "integer", "description":
-                                "In-slot only: maximum seconds to wait (default 600); a larger value is clamped to "
+                                "With no sleep_mode: the sleep's wake time, in seconds. With sleep_mode=in_slot: maximum seconds to wait (default 600); a larger value is clamped to "
                                 f"{_WAIT_TASKS_CLAMP_SEC}. Size the window to the children's expected life; "
                                 "an expired wait returns the still-live ids and this ceiling; a deadline narrows it (window_bound)."},
                 "mode": {"type": "string", "enum": ["all_terminal", "any_terminal"], "default": "all_terminal"},
