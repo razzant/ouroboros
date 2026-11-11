@@ -2489,66 +2489,84 @@ The Widgets page is a board of live cards. The owner arranges the board; each
 widget's content belongs to its author. The board scrolls with crisp edges: no
 fade dims a card where the list cuts it.
 
+- **One surface per card.** A card is its head (title; a framed card's status and
+  Start; the ⋮ menu and the move grip) over its content: a frame lies on the card
+  itself, with no second box around it, and a stopped frame's facade is a tray in
+  its place. A narrow page (a phone, the mini app) keeps nearly its whole width.
 - **A masonry in the owner's order.** Cards are packed into columns like a
-  Pinterest board: in the order the owner set with each card's move handle,
-  every card goes to the lowest free place its width fits, so cards of different
-  heights stack without a row layout's voids. The board takes its column count
-  from the list's width and the widths its cards ask for; a board where the
-  owner set no width is exactly the board before owner widths existed. A new
-  widget joins the end of the order; the order is stored when the owner moves a
-  card, so after a window reload the widgets added since the last move follow
-  the stored ones alphabetically. A widget whose skill is off is not drawn; its
-  place in the order (moving the other cards keeps its slot) and its width stay
+  Pinterest board: in the order the owner set, every card goes to the lowest free
+  place its width fits. The board takes its column count from the list's width and
+  the widths its cards ask for; a board where the owner set no width is exactly the
+  board before owner widths existed. A card that cannot fit beside the cards above
+  it starts below them, and the board never repacks cards out of the owner's order
+  to hide the gap. A new widget joins the end of the order; the order is stored when
+  the owner moves a card, so after a window reload the widgets added since the last
+  move follow the stored ones alphabetically. A widget whose skill is off is not
+  drawn; its place in the order (moving the others keeps it) and its size stay
   stored for its return, and nothing is reserved meanwhile.
+- **Moving is carrying.** A pointer or a finger on the grip, or a mouse on the
+  head, picks the card up: it follows the pointer, the cards after it make room and
+  an outline marks where it lands; release puts it there, Escape back, and the board
+  scrolls near its edges. The grip's arrow keys and the menu's Move step it.
 - **Width is a column span, the owner's over the author's.** A card spans 1,
   2 or 3 columns, or Full width. Until the owner picks one, the author's `span`
-  decides (`1` one column, `2` two), and the board may widen a lone one-column
-  card beside wide ones to fill its lane. The board never widens or narrows a
-  width the owner chose, except that no card is wider than the board: 3
-  columns on a board of 2 is the whole row. Full width is always the whole
-  row. Because the column count follows the widths the cards ask for, a
-  card's width can make the other cards' columns wider or narrower. The
-  owner's choice holds for that card on every screen of the installation
-  until Reset size returns the author's default.
-- **Widths that do not tile leave gaps; the board does not backfill.** A
-  card that cannot fit beside the cards above it starts below them: a
-  3-column card after a 2-column one on a 4-column board leaves the column
-  beside the first card empty above it. The board never repacks cards out of
-  the owner's order to hide such a gap; the owner closes it by changing a
-  width or the order.
-- **Height follows content.** A card is as tall as its widget: a table shows
-  every row, a framed widget its declared or reported frame height
-  (`docs/CREATING_SKILLS.md`). No card is pinned to a height. When a card
-  grows or shrinks, the masonry packs again, so cards after it can move,
-  even to another column.
+  decides, and the board may widen a lone one-column card beside wide ones to fill
+  its lane. The board never widens or narrows a width the owner chose, except that
+  no card is wider than the board; Full width is always the whole row. Because the
+  column count follows the widths the cards ask for, a card's width can make the
+  other cards' columns wider or narrower.
+- **Height follows content until the owner sets one.** A card is as tall as its
+  widget: a table shows every row, a self-sizing frame its reported content, a
+  fixed frame its declared height (`docs/CREATING_SKILLS.md`); 320 px is a loading
+  height only, held until something is drawn. The owner's height, set apart from the
+  width, is the content's height exactly, enlarging or reducing any card: taller
+  than the content leaves room below it, shorter scrolls (a frame its own document, a
+  host-drawn card its body, never both). A card with more than its height says so on
+  one line under it, `Show all · N px more` (N only what the owner's height hides
+  under an author's ceiling); Show all lifts it and `Back to N px` returns, in this
+  window only, never saved. Natural height and Reset size take the owner's height
+  off and measure again from the loading height; a fixed frame or route page takes
+  the height as its viewport, and Show all returns its declared height. A frame whose
+  document keeps asking for more at every height it is given stops growing where it
+  stands and scrolls; the owner can still set any height, and returning to the
+  board does not start that growth over. When a card's height changes, the masonry
+  packs again.
 - **A narrow list is one column.** When the list is too narrow for two
   columns of 280px — a phone, the Telegram mini app, a narrow window — the
-  cards stack at full width in the same order and widths do not apply; the
-  board returns when the list is wide again. The list's own width decides,
-  not the viewport.
-- **The card menu works on every surface.** Every card's ⋮ menu carries Size
-  (1, 2, 3 columns, Full width and Reset size) beside a framed card's launch
-  policy and, for a skill that places controls in the chat, Shown in chat (one
-  checked item per control), so a touch screen, a keyboard or the mini app — no hover there, and
-  a vertical drag collapses it — can size any card; on a narrow list the menu
-  says that widths apply when the list is wide. Wherever a step would change a
-  card's width, its right edge can also be dragged between the widths the
-  steps give it (Escape cancels) or stepped with its arrow keys; the only card
-  on a board, which every step leaves the whole row, offers no edge.
-- **Arranging never restarts a widget.** Reordering, resizing or a change of
-  the column count changes only where a card is painted; a running widget
-  keeps its frame and its state. Keyboard focus keeps the card's original
-  position until the window reloads.
+  cards stack at full width in the same order and widths do not apply (heights
+  do). The list's own width decides, not the viewport.
+- **Edges, keys and the menu size every card.** The right edge drags the width
+  between its steps, the bottom edge the height, above or below the content's own
+  (within a few pixels of it, where the board sees it, it is natural again), the
+  corner both, each previewed live, Escape cancelling; the edges lie mostly in the
+  gap beside the card, so content near its edge stays the widget's. Under a finger a
+  card keeps a touch-tall foot, its grip at the right: up and down the height,
+  sideways the width; gaps scroll. Their arrow keys step widths and heights. Every
+  card's ⋮ menu carries Move, Size (1, 2, 3 columns, Full width, Reset size:
+  author's width, natural height) and Height (Natural height and three heights)
+  beside a framed card's launch policy and, for a skill that places controls in the
+  chat, Shown in chat (one checked item per control), for touch, keyboard and the
+  mini app; on a narrow list the menu says that widths apply when the list is wide.
+  The only card on a board has no right edge.
+- **Arranging never restarts a widget.** Moving, resizing, Show all, Back or a
+  change of the column count changes only where and how tall a card is painted; a
+  running widget keeps its frame and its state. Keyboard focus keeps the card's
+  original position until the window reloads.
+- **Each card starts on its own.** Cards start together when Widgets is shown,
+  each showing Running or its fault when its own start ends, so a slow widget never
+  holds back the others. Leaving Widgets stops the cards that do not keep running;
+  one that starts again on return keeps its last height meanwhile (its frame is a
+  new document).
 - **Stop holds until Start.** A running card's Stop is in its ⋮ menu. A card the
   owner stopped rests as its facade with Start on this device across reloads,
   until Start or a launch policy of Auto or Keep running starts it. A card whose
   start the page did not outlive, or whose files went away, rests the same way
   and says so in one line (Skills in the page).
-- **One arrangement per installation.** Order and widths are owner UI state
+- **One arrangement per installation.** Order and sizes are owner UI state
   stored on the server, the same for every window and device of the
   installation; when two windows arrange at once the last change wins. A
-  width that failed to save stays on screen and says so under the list until
-  a later width change saves it; nothing retries on its own.
+  size that failed to save stays on screen and says so under the list until
+  a later change saves it; nothing retries on its own.
 
 ### Storage
 
