@@ -448,6 +448,23 @@ def test_ui_smoke_list_editor_remove_hands_the_caret_on(direct_server_with_data,
             if surface == 'fallbacks':
                 open_settings(page, 'models')
                 fallbacks = page.locator('[data-fallback-remove]')
+                refused = []
+
+                def refuse_write(route):
+                    if route.request.method != "POST":
+                        route.fallback()
+                        return
+                    refused.append(route.request.post_data_json)
+                    route.fulfill(status=409, json={"error": "List changed elsewhere", "code": "settings_changed_elsewhere"})
+
+                page.route("**/api/settings", refuse_write)
+                fallbacks.first.press("Enter")
+                page.locator("[data-confirm-ok]").click()
+                expect(page.locator('[data-entry-result]')).to_contain_text("Changed on another device")
+                expect(fallbacks).to_have_count(3)
+                expect(fallbacks.first).to_be_enabled()
+                assert len(refused) == 1, "a refused removal is never retried behind the owner's back"
+                page.unroute("**/api/settings", refuse_write)
                 remove(fallbacks, 0, '[data-entry-open]')
                 remove(fallbacks, 1, '[data-entry-open]')
                 remove(fallbacks, 0, '[data-fallback-add]')

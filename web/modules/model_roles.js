@@ -828,6 +828,7 @@ function mountModels(container, { path, ctx }) {
             if (list.map((entry) => entry.value).join(',') === shown) outcome = await writeModelKeys('models:fallbacks', fallbackBody(fresh, change(list)), fresh, { ask: ctx.ask });
         } catch (error) { outcome = { state: 'refused', effect: 'now', withheld: '', message: error?.message || String(error), code: '' }; }
         await read();
+        setButtonBusy(button, false);
         setResult(entryResult, saveWords(outcome, saved));
     };
     const onClick = async (event) => {
