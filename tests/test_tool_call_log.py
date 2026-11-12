@@ -337,8 +337,14 @@ def test_the_recent_tools_header_counts_calls_not_rows(tmp_path):
 @pytest.mark.parametrize("real_first", [True, False])
 def test_a_duplicate_host_error_settlement_never_hides_the_real_one(real_first, stub):
     real, host = _log_row("tool_call", "i", status="ok"), _log_row("tool_call", "i", status=stub)
-    [call] = logical_calls([_log_row("tool_call_started", "i"), *([real, host] if real_first else [host, real])])
+    rows = [_log_row("tool_call_started", "i"), *([real, host] if real_first else [host, real])]
+    [call] = logical_calls(rows)
     assert call["state"] == "settled" and call["settled"] is real
+    # The benchmark trace converter reads the same journal by the same rule.
+    from devtools.benchmarks.terminal_bench.atif import _tool_call_steps
+
+    [step] = _tool_call_steps(rows)
+    assert step["status"] == "ok"
 
 
 @pytest.mark.parametrize("exc", [RuntimeError("live emit failed"), SystemExit(3)])

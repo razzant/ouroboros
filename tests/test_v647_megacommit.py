@@ -414,6 +414,10 @@ def test_configured_actor_can_record_typed_zero_run_only_before_leaf(tmp_path):
         "work_order_fingerprint": "a" * 64,
         "physical_started": False,
     }
+    # A decision outside the list is refused by naming what arrived, and records nothing.
+    refused = _verify_and_record(ctx, contract_kind="delegation_zero_run", zero_run_decision="Maybe", zero_run_basis="x")
+    assert "zero_run_decision='maybe' must be one of" in refused
+    assert "zero_run_receipt_recorded" not in ctx._configured_actor_bootstrap
     result = _verify_and_record(
         ctx,
         contract_kind="delegation_zero_run",
