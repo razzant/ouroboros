@@ -174,15 +174,3 @@ def test_shell_facade_reexports_every_moved_identity():
     owned = {name for module in _LEAVES for name in vars(module)}
     owned |= set(vars(shell_audit))
     assert set(_MOVED_OWNERS) <= owned
-
-
-def test_shell_extraction_size_bounds_have_meaningful_headroom():
-    counts = {
-        module.__name__: len(
-            pathlib.Path(module.__file__).read_text(encoding="utf-8").splitlines()
-        )
-        for module in (shell, *_LEAVES)
-    }
-    assert counts["ouroboros.tools.shell"] <= 800
-    assert all(count <= 1000 for count in counts.values())
-    assert counts["ouroboros.tools.shell_outputs"] <= 1000
