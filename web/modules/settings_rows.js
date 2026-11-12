@@ -41,7 +41,7 @@ export const ROWS = [
         control: { kind: 'choices', options: [
             { value: 'light', label: 'Light', note: 'Works on your projects. Never changes its own code.' },
             { value: 'advanced', label: 'Advanced', note: 'May grow its own skills and outer layer.' },
-            { value: 'pro', label: 'Pro', note: 'May change its protected core. Every change goes through review.' },
+            { value: 'pro', label: 'Pro', note: 'May change its protected core. Reviews work as you set them.' },
             { value: 'cyber_pro', label: 'Cyber Pro', note: 'Full say over itself and this computer. Reviews advise, it decides.' }] },
         aliases: ['Runtime mode', 'self-modification', 'own code', 'Light', 'Advanced', 'Pro', 'Cyber Pro'],
         writer: 'runtimeMode', codec: '', confirm: 'raiseAccess', hiddenWhen: '' },
