@@ -6075,8 +6075,8 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
         padding-block-end: max(0px, calc((var(--touch-target-min) - var(--type-meta) * var(--line-meta)) / 2));
     }
 }
-/* Costs "By period" (cost_period.js): a period's cost per model as one thin bar of four classes (by tokens, a fifth
-   part for input whose calls reported no complete cache counts) with their amounts
+/* Costs "By period" (cost_period.js): a period's cost per model as one thin bar of four classes (and a fifth part
+   outside them: by tokens the input in no class, by money the cost not split) with their amounts
    listed under it (identity is never colour alone), then the cache writes by what they followed. Neither the
    crimson nor the amber series is used, so no class reads as an alarm or a warning: cache is the blue series (what
    was written in full, what was read in its tint), output the green one, uncached input the neutral ink. */

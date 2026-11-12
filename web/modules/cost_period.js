@@ -1,9 +1,8 @@
 // Dashboard › Costs, "By period": what the model calls started in a period cost, by token class, and what each
 // cache write followed (`GET /api/cost-breakdown?period=…`, ouroboros/gateway/cost_period.py). The parts are each
 // call's RECORDED cost shared out by the model's price list, never invoice lines; what could not be shared is named
-// beside them. Four fixed hues name the four classes (ui.css `--chart-series-*`), a fainter neutral the input in no
-// class: none of them is a verdict, and the
-// card raises no signal. The page's totals and tables above stay all-time; the period governs this card alone.
+// beside them. Four fixed hues name the four classes (ui.css `--chart-series-*`), a fainter neutral what is outside
+// them (by tokens the input in no class, by money the cost not split): none of them is a verdict, and the card raises no signal. The page's totals and tables above stay all-time; the period governs this card alone.
 import { formatUsd, number } from './storage_format.js';
 import { apiFetch } from './api_client.js';
 import { escapeHtmlAttr } from './ui_primitives.js';
@@ -47,7 +46,7 @@ export function costPeriodPresentation(view) {
         const shared = split ? split.reduce((sum, part) => sum + part.usd, 0) : 0;
         const notes = [];  // one line under the parts: what the amounts leave out, then the price ratio
         if (!split && Number(row.cost) > 0) notes.push('Not split by class: these calls have no price list, token counts or named cache lifetime at hand.');
-        else if (Number(row.unshared_cost) > 0) notes.push(`${formatUsd(row.unshared_cost)} is not split (no price list, token counts or named cache lifetime for those calls).`);
+        else if (Number(row.unshared_cost) > 0) notes.push('Not split: no price list, token counts or named cache lifetime for those calls.');
         if (row.uncounted_calls) notes.push(`${number(row.uncounted_calls)} ${row.uncounted_calls === 1 ? 'call' : 'calls'} reported no complete cache counts: `
             + `${compactTokens(row.uncounted_input_tokens)} input tokens are in no class.`);
         if (row.open_rows) notes.push(`${number(row.open_rows)} ${row.open_rows === 1 ? 'call is' : 'calls are'} still open.`);

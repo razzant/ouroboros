@@ -61,7 +61,7 @@ test('a period shows each model\'s recorded cost by class, and tokens alone wher
     assert.deepEqual(unlisted.notes, ['Not split by class: these calls have no price list, token counts or named cache lifetime at hand.',
         '1 call reported no complete cache counts: 2k input tokens are in no class.', 'The bar is by tokens: the recorded cost could not be split.']);
     // Every positive amount left out is said, however small: the parts and it add up to the sum shown.
-    assert.deepEqual(cheap.notes, ['$0.0040 is not split (no price list, token counts or named cache lifetime for those calls).']);
+    assert.deepEqual(cheap.notes, ['Not split: no price list, token counts or named cache lifetime for those calls.']);
     // By money every figure of a part is of the same calls, and what was not split is a part of the head's sum.
     assert.deepEqual(cheap.parts.map((part) => part.text), ['$0.00 · 0% · 0 tokens', '$0.00 · 0% · 0 tokens',
         '$0.0020 · 25% · 4 tokens', '$0.0020 · 25% · 40 tokens', '$0.0040 · 50% · 1 call']);
