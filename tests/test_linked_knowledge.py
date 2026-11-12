@@ -727,6 +727,35 @@ def test_empty_optional_write_values_take_the_omitted_path_and_say_so(tmp_path):
     assert _files(tmp_path) == before
 
 
+def test_a_null_reason_takes_the_omitted_path_and_archive_still_requires_one(tmp_path):
+    """reason is optional text outside archive, so a null one means what omission means: the write goes ahead,
+    records no reason and says so. Archive still requires a non-empty reason and refuses, writing nothing."""
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="null"))
+    target = address(tmp_path, "null-reason")
+    first = store.write_knowledge_note(target, "# Null\n\nOne.\n").current
+    said, rows = ["reason=None ignored: no reason is recorded"], len(history(target))
+
+    def write(**arguments):
+        revision = store.read_knowledge_note(target).revision
+        return registry.execute("knowledge_write", {"topic": "null-reason", "scope": "global", "reason": None,
+                                                    "expected_revision": revision, **arguments})
+
+    for arguments in ({"mode": "edit", "old_str": "One.", "content": "Two."}, {"mode": "append", "content": "Three.\n"},
+                      {"mode": "overwrite", "content": "# Null\n\nFour.\n"}, {"mode": "revert", "version": first.revision}):
+        assert _meta(write(**arguments))["ignored_arguments"] == said, arguments
+    assert target.path.read_bytes() == first.raw and len(history(target)) == rows + 4
+    assert not any("reason" in row for row in history(target)[rows:])
+    before = _files(tmp_path)
+    for reason in (None, "", "  "):
+        reply = write(mode="archive", reason=reason)
+        assert reply.startswith("⚠️ TOOL_ARG_ERROR: reason is required for archive"), (reason, reply)
+    assert _files(tmp_path) == before
+    assert "ignored_arguments" not in _meta(write(mode="archive", reason="kept elsewhere"))
+    assert _meta(write(mode="restore"))["ignored_arguments"] == said
+    assert store.read_knowledge_note(target).state == "active"
+
+
 def test_a_blank_version_outside_revert_takes_the_omitted_path_and_a_revert_still_needs_one(tmp_path):
     """A model fills version with whitespace as well as with nothing (the experiment saw ' ' 18 times): a blank
     value names no revision, so outside revert it is ignored and said; inside revert 'requires version' stays,

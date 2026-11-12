@@ -286,6 +286,9 @@ def _knowledge_write(
     if old_str == "" and mode != "edit":
         notes.append(ignored_argument_note("old_str", old_str, "only mode=edit replaces text"))
         old_str = None
+    if reason is None and mode != "archive":  # optional text: null is an omitted reason; archive still requires one
+        notes.append(ignored_argument_note("reason", reason, "no reason is recorded"))
+        reason = ""
     try:
         sanitized = _sanitize_topic(topic)
         lifecycle = mode in ("archive", "restore")
