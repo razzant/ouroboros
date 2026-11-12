@@ -267,7 +267,7 @@ def test_the_rosters_switch_names_what_it_stops(role_ui):
 
 
 @pytest.mark.parametrize("long_labels", [False, True])
-@pytest.mark.parametrize("consumer,width,tracks", [("settings", 360, 1), ("settings", 720, 1), ("wizard", 700, 3)])
+@pytest.mark.parametrize("consumer,width,tracks", [("settings", 360, 1), ("settings", 720, 1), ("settings", 1360, 3), ("wizard", 700, 3)])
 def test_narrow_consumers_lay_the_form_out_by_their_own_width(role_ui, long_labels, consumer, width, tracks, record_property):
     ui = role_ui
     rows = _roster(ui)
