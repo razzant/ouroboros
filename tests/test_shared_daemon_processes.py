@@ -490,7 +490,7 @@ def test_launcher_forced_stop_ends_engine_before_server_fallback(monkeypatch):
     monkeypatch.setattr(launcher, "kill_process_tree", lambda proc, **kw: calls.append((proc.pid, kw)))
     monkeypatch.setattr(launcher, "_cleanup_recorded_server_group_for_pid", lambda *a: None)
     launcher.stop_agent()
-    assert calls == ["graceful", "engine", (9990011, {"exclude_pids": {9990022}}), "engine"]
+    assert calls == ["graceful", "engine", (9990011, {"exclude_pids": {9990022}})]
 
 
 def test_recorded_server_cleanup_preserves_daemon_exclusions(tmp_path, monkeypatch):

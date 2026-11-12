@@ -1,8 +1,8 @@
 """The owner's Restart Claudexor action: what a restart ends, then the restart itself (D30).
 
-The engine belongs to the installation, not to this server: every program that uses this
-installation's engine has its runs on it, so the header Restart leaves it alone. This is
-the one deliberate way to replace a sick engine process, and it says first what it ends.
+Accounts restarts this installation's engine while the application stays running, after
+showing which runs end. Application Exit/Restart also ends the owned engine and its tree;
+hiding the window and ordinary worker retirement do not.
 
 ``restart_preview`` is passive: it attaches to a serving engine (never starts one), reads
 the engine's own list of live runs and attributes each by this installation's delegated-run
@@ -13,7 +13,7 @@ engine that does not answer has an unknown number of runs, never zero.
 
 ``restart_engine`` acts only on the preview the owner saw (its ``token``); a changed set of
 runs, engine or pin is refused with the fresh preview. It makes the attested owned-daemon
-stop (``OwnedClaudexorDaemon.stop_outcome``, as Panic and the planned pin change make it)
+stop (``OwnedClaudexorDaemon.stop_outcome``; application teardown uses its force mode)
 and then the ordinary start (``ensure_owned_gateway``). The stop and the next start stay
 separate facts in the receipt: an unconfirmed stop, or a stopped engine that did not start
 again, is said, not folded into success. The runs this installation delegated end with
