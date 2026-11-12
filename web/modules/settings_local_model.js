@@ -79,7 +79,7 @@ function mountLocalModel(container, { path, ctx }) {
     const typed = (key) => String(container.querySelector(`[data-setting-row="${key}"] [data-setting-control]`)?.value ?? '').trim();
     const launchBody = () => ({
         source: typed('LOCAL_MODEL_SOURCE'), filename: typed('LOCAL_MODEL_FILENAME'), port: parseInt(typed('LOCAL_MODEL_PORT'), 10) || 8766,
-        n_gpu_layers: parseInt(typed('LOCAL_MODEL_N_GPU_LAYERS'), 10), n_ctx: parseInt(typed('LOCAL_MODEL_CONTEXT_LENGTH'), 10) || 16384,
+        n_gpu_layers: parseInt(typed('LOCAL_MODEL_N_GPU_LAYERS'), 10), n_ctx: parseInt(typed('LOCAL_MODEL_CONTEXT_LENGTH'), 10) || 65536,
         chat_format: typed('LOCAL_MODEL_CHAT_FORMAT'),
     });
 
