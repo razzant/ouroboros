@@ -177,7 +177,7 @@ def find_version(address: Any, version: Any) -> tuple[str, dict]:
             continue
         text = (row.get("new_content") if own else
                 row["old_content"] if "old_content" in row else _referenced_text(address, row.get("old_content_ref")))
-        verified = isinstance(text, str) and bool(text) and _sha(text) == version
+        verified = isinstance(text, str) and _sha(text) == version  # an empty text is the version sha256(b"")
         if own and (verified or held is not None):
             return (text if verified else held), row
         if verified:
@@ -209,7 +209,7 @@ def held_version(journal: Path, address: Any, revision: str, tail_bytes: int) ->
     for _offset, row in tail_rows(journal, address, tail_bytes):
         if row.get("new_sha256") == revision:
             text = row.get("new_content")
-            if not isinstance(text, str) or not text or _sha(text) != revision:
+            if not isinstance(text, str) or _sha(text) != revision:
                 return None
             return {"facts": row_facts(row), "text": text, "since": [row_facts(item) for item in reversed(since)]}
         since.append(row)
@@ -301,7 +301,8 @@ def removed_sections(old: Any, new: Any) -> list[dict[str, Any]] | None:
 def _listed(row: Mapping[str, Any]) -> dict[str, Any]:
     """The facts a listing line shows, without the row's note texts (a long history is not held whole)."""
     text = row.get("new_content")
-    stored = isinstance(text, str) and not row.get("content_digested") and bool(text or not row.get("new_sha256"))
+    stored = isinstance(text, str) and not row.get("content_digested") and bool(
+        text or not row.get("new_sha256") or row.get("new_sha256") == _sha(""))
     return {**{key: row.get(key) for key in ("new_sha256", "old_sha256", "ts", "focus", "mode", "reason", "delta",
                                              "old_chars", "new_chars", "reverted_from")}, "text_stored": stored}
 

@@ -857,8 +857,8 @@ def write_knowledge_note(
                    "writer": writer or UNKNOWN_STAMP, "route": route or UNKNOWN_STAMP,
                    "writer_input_ref": writer_input_ref or UNKNOWN_STAMP, "focus": focus or UNKNOWN_STAMP,
                    "old_chars": len(old_text), "new_chars": len(updated.text),
-                   "old_sha256": hashlib.sha256(current.raw).hexdigest() if current and current.raw else "",
-                   "new_sha256": updated.revision if raw else "",
+                   # An existing empty file is the version sha256(b""); only a note's absence has none.
+                   "old_sha256": current.revision if current is not None else "", "new_sha256": updated.revision,
                    **({"old_content_ref": recorded} if recorded else {"old_content": old_text}),
                    "new_content": updated.text, "source_ref": updated.source_ref(), "delta": delta,
                    **({"summary": summary} if summary is not None else {}),

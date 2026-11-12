@@ -155,6 +155,39 @@ def test_an_empty_or_null_view_or_version_reads_the_current_note_and_says_so(tmp
     assert "view='diff'" in registry.execute("knowledge_read", {"topic": TOPIC, "scope": "global", "view": "diff"})
 
 
+def test_an_emptied_plain_note_keeps_its_revision_and_its_calls_work(tmp_path):
+    """Emptying a note without frontmatter publishes the version sha256(b""): its row records it, the next
+    receipt's read and revert calls reach it, and the listing shows it stored. A note's absence is no version."""
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(context(tmp_path))
+    target, empty = address(tmp_path, "plain"), hashlib.sha256(b"").hexdigest()
+    target.path.parent.mkdir(parents=True, exist_ok=True)
+    target.path.write_bytes(b"# Plain\n\nNo frontmatter.\n")
+    emptied = store.write_knowledge_note(target, "", expected_revision=store.read_knowledge_note(target).revision)
+    assert emptied.ok and target.path.read_bytes() == b"" and emptied.current.revision == empty
+    journal = target.shelf.parent / "knowledge_history.jsonl"
+    assert json.loads(journal.read_text(encoding="utf-8").splitlines()[-1])["new_sha256"] == empty
+    receipt = registry.execute("knowledge_write", {"topic": "plain", "scope": "global", "content": "# Again\n",
+                                                   "expected_revision": empty})
+    assert receipt.startswith("✅"), receipt
+    meta = json.loads(receipt.split("\n", 1)[1])
+    assert meta["knowledge_previous"]["revision"] == empty
+    assert json.loads(journal.read_text(encoding="utf-8").splitlines()[-1])["old_sha256"] == empty
+    stale = registry.execute("knowledge_write", {"topic": "plain", "scope": "global", "content": "Mine.\n",
+                                                 "expected_revision": empty})  # the empty version, held
+    assert "revision_conflict" in stale and "1 block(s)" in stale and "\n+ # Again\n" in stale, stale
+    read = registry.execute(meta["knowledge_read_previous"]["tool"], meta["knowledge_read_previous"]["arguments"])
+    assert "Earlier version, not the current note" in read and '"complete_chars": 0' in read, read
+    reverted = registry.execute(meta["knowledge_revert"]["tool"], meta["knowledge_revert"]["arguments"])
+    assert reverted.startswith("✅") and target.path.read_bytes() == b"", reverted
+    listing = versions.render_history(store.read_knowledge_note(target))
+    assert f"- {empty} · " in listing and "(no revision recorded)" not in listing and "text not stored" not in listing
+    created = store.write_knowledge_note(address(tmp_path, "created"), "# Created\n").current
+    assert json.loads(journal.read_text(encoding="utf-8").splitlines()[-1])["old_sha256"] == ""  # absent: no version
+    refused = store.write_knowledge_note(created.address, "", "revert", created.revision, version=empty)
+    assert not refused.ok and refused.reason.startswith(f"version_unavailable: no version {empty}"), refused.reason
+
+
 def test_the_backward_scan_finds_every_row_across_block_edges(tmp_path, monkeypatch):
     monkeypatch.setattr(versions, "_BLOCK", 97)  # shorter than every row: lines span several reads
     target = address(tmp_path)
