@@ -28,14 +28,15 @@ BODY = "Exact producer bytes: Ж, e\u0301, emoji 🧠.\r\n" * 1000 + "CONSEQUENT
 OWNER = "Keep the original contract until the replacement is verified."
 
 
-def test_the_view_imports_first_in_a_fresh_interpreter():
-    """Nothing the view imports reaches back into it while it loads (razzant/ouroboros#3008: a worker or
-    process that met it before ``context_compaction`` died on the import)."""
+def test_the_view_and_compaction_import_in_either_order_in_a_fresh_interpreter():
+    """Neither module needs the other to have loaded first (razzant/ouroboros#3008: a worker or process that
+    met the view before ``context_compaction`` died on the import)."""
     repo = pathlib.Path(__file__).resolve().parents[1]
-    done = subprocess.run([sys.executable, "-c", "import ouroboros.context_source_view"], cwd=repo,
-                          env={**os.environ, "PYTHONPATH": str(repo), "PYTHONDONTWRITEBYTECODE": "1"},
-                          check=False, capture_output=True, text=True, timeout=120)
-    assert done.returncode == 0, done.stderr[-2000:]
+    for first, second in (("context_source_view", "context_compaction"), ("context_compaction", "context_source_view")):
+        done = subprocess.run([sys.executable, "-c", f"import ouroboros.{first}, ouroboros.{second}"], cwd=repo,
+                              env={**os.environ, "PYTHONPATH": str(repo), "PYTHONDONTWRITEBYTECODE": "1"},
+                              check=False, capture_output=True, text=True, timeout=120)
+        assert done.returncode == 0, (first, done.stderr[-2000:])
 
 
 def _tool(call_id="reused", *, invocation=None, facts=None, text=BODY):
