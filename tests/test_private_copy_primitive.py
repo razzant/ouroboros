@@ -315,7 +315,7 @@ def test_the_startup_import_alone_reads_the_legacy_registry_and_keeps_its_bytes(
     receipt = sw.import_legacy_registry(data)
 
     digest = hashlib.sha256(raw).hexdigest()
-    assert not legacy.exists() and receipt["kept"] == f"archive/subagent_worktrees_{digest[:12]}.json"
+    assert not legacy.exists() and receipt["kept"] == f"archive/subagent_worktrees_{digest}.json"
     assert (data / receipt["kept"]).read_bytes() == raw, "the original stays, byte for byte"
     assert (receipt["rows"], receipt["moved"], receipt["legacy_sha256"]) == (3, 1, digest)
     assert json.loads((data / "state" / "private_copies" / ".legacy-import.json").read_text(encoding="utf-8")) == receipt

@@ -267,8 +267,8 @@ def import_legacy_registry(data_dir: Optional[Any] = None) -> Optional[Dict[str,
                 if _names_copy(row) and not _record_file(row["path"], data_dir).exists():
                     _put_record(row, data_dir)
                     moved += 1
-        kept = root / "archive" / f"subagent_worktrees_{digest[:12]}.json"
-        write_bytes_atomic(kept, data)  # a copy, then the unlink below: ``archive/`` may sit on another volume
+        kept = root / "archive" / f"subagent_worktrees_{digest}.json"
+        write_bytes_atomic(kept, data)  # named by its digest, so a rewrite is the same bytes; a copy: maybe another volume
         receipt = {"at": utc_now_iso(), "rows": rows, "moved": moved, "legacy_sha256": digest,
                    "kept": kept.relative_to(root).as_posix()}
         atomic_write_json(_records_dir(data_dir) / ".legacy-import.json", receipt, trailing_newline=True)
