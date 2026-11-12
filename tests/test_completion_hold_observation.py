@@ -737,19 +737,22 @@ def test_the_notice_shown_before_a_continuation_is_not_shown_again_after_it(tmp_
     assert _claim_pre_delivery_notice(SimpleNamespace(_ctx=resumed), tmp_path, "t", trace, []) == ""
 
 
-@pytest.mark.parametrize("mode", ["auto", "off"])
-def test_the_notice_offers_a_result_review_only_where_this_install_runs_one(tmp_path, monkeypatch, mode):
-    """Task review Off refuses every result review (``review_result.refuse_when_off``): there the notice says so
-    and offers the check and the honest delivery; under Auto it also offers the review call."""
+@pytest.mark.parametrize("mode", ["auto", "off", "auto_without_review_tool"])
+def test_the_notice_offers_a_result_review_only_where_this_actor_can_ask_for_one(tmp_path, monkeypatch, mode):
+    """Task review Off refuses every result review (``review_result.refuse_when_off``), and an actor whose tools
+    lack ``review_change`` cannot call it: there the notice offers the check and the honest delivery only; under
+    Auto, with the tool, it also offers the review call."""
     from ouroboros.loop_nudges import _pre_delivery_notice
 
     tools, trace, _content = _nudge_case("pre_delivery_notice", tmp_path, monkeypatch)
-    monkeypatch.setattr("ouroboros.config.get_task_review_mode", lambda: mode)
+    monkeypatch.setattr("ouroboros.config.get_task_review_mode", lambda: mode.split("_")[0])
+    if mode == "auto_without_review_tool":
+        tools.available_tools = lambda: ["write_file", "verify_and_record", "finish_task"]
     notice = _pre_delivery_notice(tools, tmp_path, "t", trace, [])
     assert notice.startswith("Before delivery: nothing has examined this result since it last changed.")
-    assert ('review_change with subject="result"' in notice) is (mode != "off")
+    assert ('review_change with subject="result"' in notice) is (mode == "auto")
     assert ("off on this install" in notice) is (mode == "off")
-    assert "verify_and_record" in notice and "deliver it as it is" in notice
+    assert "verify_and_record runs the check" in notice and "or deliver it as it is" in notice
 
 
 @pytest.mark.parametrize("cause", ["findings", "blocking_refusal", "pass"])

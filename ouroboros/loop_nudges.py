@@ -379,6 +379,14 @@ def _zero_run_closed(ctx: Any, receipt_rows: List[Dict[str, Any]]) -> bool:
         return False
 
 
+def _callable_tools(tools: Any) -> Optional[frozenset]:
+    """The tools this actor may call now; None when unreadable, and then the notice withholds no path."""
+    try:
+        return frozenset(tools.available_tools())
+    except Exception:
+        return None
+
+
 def _pre_delivery_notice(tools: ToolRegistry, drive_root: Any, task_id: str, llm_trace: Dict[str, Any],
                          receipt_rows: List[Dict[str, Any]]) -> str:
     """The one finish-door notice (audit 11.11, item 18; owner 12.11: keep the pushback at the exit and make
@@ -396,19 +404,23 @@ def _pre_delivery_notice(tools: ToolRegistry, drive_root: Any, task_id: str, llm
     if (result_unexamined(llm_trace) and not required_root_wave(tools._ctx)
             and not _zero_run_closed(tools._ctx, receipt_rows)):
         mode = get_task_review_mode()  # Off refuses a result review; Required reviews only a root at delivery
-        review = ("ask for a result review (review_change with subject=\"result\" and the seats you choose; its "
-                  "verdict comes back before delivery); " if mode != "off" else "")
+        callable_tools = _callable_tools(tools)  # a path this actor cannot take is never offered
+        can_review = mode != "off" and (callable_tools is None or "review_change" in callable_tools)
+        paths = (["check the result against what was asked (verify_and_record runs the check and records what it "
+                  "showed)"] if callable_tools is None or "verify_and_record" in callable_tools else [])
+        paths += (["ask for a result review (review_change with subject=\"result\" and the seats you choose; its "
+                   "verdict comes back before delivery)"] if can_review else [])
+        deliver = "deliver it as it is and say in the answer what was not checked, which the record then shows"
         lines += [
             "Before delivery: nothing has examined this result since it last changed.",
             f"Changed: {_changed_fact(llm_trace)}.",
             f"Recorded about it: {_recorded_fact(drive_root, task_id, receipt_rows)}.",
             f"This answer is read by: {_reader_fact(tools._ctx)}.",
             "Result review: off on this install (task review mode Off)." if mode == "off" else
+            "Result review: none for this answer; this actor has no review_change." if not can_review else
             f"Result review: none for this answer; under {mode.capitalize()} a result review "
             f"{'of a child ' if mode == 'required' else ''}runs only when you ask for one.",
-            "Ways forward: check the result against what was asked (verify_and_record runs the check and records "
-            f"what it showed); {review}or deliver it as it is and say in the answer what was not checked, which the "
-            "record then shows.",
+            "Ways forward: " + "; ".join([*paths, f"or {deliver}" if paths else deliver]) + ".",
         ]
     try:
         running = _running_children(tools, drive_root, task_id)
