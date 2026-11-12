@@ -85,7 +85,7 @@ export function bindSecretReveal(input, button, { savedSelector, savedLabel = ()
             // it, when the caller says a value is saved and nothing was typed over it.
             if (saved ? saved() : value && value === applied && input.dataset.forceClear !== '1') {
                 const selector = savedSelector?.();
-                if (!selector) throw new Error('The saved value has no lookup identity. Reload settings or enter a new value.');
+                if (!selector) throw new Error('The saved value has no lookup identity. Enter a new value.');
                 const sourceLabel = savedLabel();
                 button.setAttribute('aria-busy', 'true');
                 status.textContent = 'Loading…';
