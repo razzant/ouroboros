@@ -188,10 +188,11 @@ def _bound_delta_meta(meta: dict) -> None:
     """Keep the tool receipt inside its existing metadata limit; history holds the full delta.
 
     Over the limit, the largest of what can give way goes first, until the receipt fits: a delta
-    list (``_DELTA_LISTS``; an empty one has nothing to give) becomes its count, an omission flag
-    and its sha256; the bare append's outline and the replaced version's reason become their size,
-    sha256 and the read that shows them. A transport bound on the receipt, never a judgment of
-    what matters: a small list is not dropped while a larger one overflows.
+    list (``_DELTA_LISTS``; an empty one has nothing to give) becomes its count, an omission flag,
+    its sha256 and the read that shows it (``view='history'``); the bare append's outline and the
+    replaced version's reason become their size, sha256 and the read that shows them. A transport
+    bound on the receipt, never a judgment of what matters: a small list is not dropped while a
+    larger one overflows.
     """
     arguments = ((meta.get("knowledge_source") or {}).get("read") or {}).get("arguments", {})
 
@@ -216,7 +217,8 @@ def _bound_delta_meta(meta: dict) -> None:
         else:
             meta["knowledge_delta"] = {**delta, field: [], f"{field}_count": len(value), f"{field}_omitted": True,
                                        f"{field}_sha256": hashlib.sha256(
-                                           json.dumps(value, ensure_ascii=False).encode("utf-8")).hexdigest()}
+                                           json.dumps(value, ensure_ascii=False).encode("utf-8")).hexdigest(),
+                                       f"{field}_read": read("history")}
 
 
 def _residency(note: knowledge_store.KnowledgeNote, delta: dict | None = None) -> str:

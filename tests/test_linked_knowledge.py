@@ -253,6 +253,30 @@ def test_large_removed_heading_delta_keeps_tool_receipt_and_full_history(tmp_pat
     assert reported["old_chars"] == len(original.text)
 
 
+def test_an_omitted_delta_list_names_the_history_read_that_shows_it(tmp_path):
+    """A receipt that cannot hold a delta list keeps its count and sha256 and names the read that shows the list, as
+    the omitted outline and previous reason do. Folding a 40-section Cyrillic note: the receipt's JSON escapes each
+    Cyrillic character to 6 bytes, so the removed sections give way; view='history' lists them."""
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="fold"))
+    sections = "".join(f"## Раздел {index:02d}\n\n{'Первая строка раздела про реку и старый мост. ' * 3}\n\n"
+                       for index in range(40))
+
+    def write(**arguments):
+        return registry.execute("knowledge_write", {"topic": "folds/река", "scope": "global", **arguments})
+
+    _meta(write(content="# Река\n\n" + sections))
+    revision = store.read_knowledge_note(address(tmp_path, "folds/река")).revision
+    delta = _meta(write(content="# Река\n\nСвёрнуто: сорок разделов в одном.\n", expected_revision=revision))["knowledge_delta"]
+    read = {"tool": "knowledge_read", "arguments": {"topic": "folds/река", "scope": "global", "view": "history"}}
+    assert delta["removed_sections"] == [] and delta["removed_sections_count"] == 40, delta
+    omitted = [field for field in ("removed_sections", "removed_headings", "added_headings") if delta.get(f"{field}_omitted")]
+    assert "removed_sections" in omitted and all(delta[f"{field}_read"] == read for field in omitted), delta
+    listing = registry.execute(read["tool"], read["arguments"])
+    folded = next(line for line in listing.splitlines() if line.startswith("- "))  # newest first: the fold's row
+    assert all(f"## Раздел {index:02d} (" in folded for index in range(40)), folded
+
+
 def test_edit_preserves_crlf_and_multibyte_surroundings(tmp_path):
     target = address(tmp_path, "legacy")
     target.path.parent.mkdir(parents=True)
