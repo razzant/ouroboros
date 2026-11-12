@@ -94,6 +94,24 @@ def _iso(ts: float) -> str:
     return _dt.datetime.fromtimestamp(float(ts), tz=_dt.timezone.utc).isoformat() if ts else ""
 
 
+def model_route() -> Optional[Dict[str, Any]]:
+    """The model the next wake thinks with, read from the settings as they are now (no network, no store):
+    ``route_choice.following_route``, the consciousness slot's model when the slot names one (``layer``
+    ``consciousness``), else Main's (``main``), with the route's local flag. ``None`` when it cannot be read."""
+    from ouroboros.model_slots import MODEL_ROLE_SETTINGS
+    from ouroboros.route_choice import following_route
+    from ouroboros.settings_integrity import runtime_setting
+
+    try:
+        model, local = following_route("consciousness")
+        own = str(runtime_setting(MODEL_ROLE_SETTINGS["consciousness"], "") or "").strip()
+    except Exception:  # every status read asks again; the unknown is the null itself, so the log stays quiet
+        log.debug("The consciousness model route could not be read from the settings", exc_info=True)
+        return None
+    model = str(model or "").strip()
+    return {"value": model, "layer": "consciousness" if own else "main", "local": bool(local)} if model else None
+
+
 def allowance_fact(window: Dict[str, Any]) -> Dict[str, Any]:
     """The one projection of the allowance window a wake decision met: a wake's preparation and a skip's
     record carry the same keys (known spend, unmetered calls, the limit, spend by cause, the reset time);
@@ -730,6 +748,7 @@ class BackgroundConsciousness:
                 "allowance_status": str(window.get("status") or ""),
                 "allowance_open_rows": window.get("accounting_open_rows"),
                 "allowance_room_after": str(window.get("room_after") or ""),
+                "model_route": model_route(),
                 "places_brief": [{key: place.get(key) for key in ("place_id", "label", "state", "unanswered")}
                                  for place in places] if places is not None else None}
 

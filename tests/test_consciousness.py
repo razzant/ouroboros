@@ -1179,7 +1179,7 @@ def test_status_snapshot_carries_the_alarm_facts(clock):
         "last_wake_outcome", "last_error", "spent_24h_usd", "daily_usd", "allowance_resets_at",
         "tasks_running", "max_tasks", "live_wake_task_id", "unknown_unmetered", "integrity_degraded",
         "spend_by_cause", "counted_roots", "places_brief", "appointment_at", "live_wake_held",
-        "live_wake_hold", "allowance_status", "allowance_open_rows", "allowance_room_after",
+        "live_wake_hold", "allowance_status", "allowance_open_rows", "allowance_room_after", "model_route",
     }
     assert snapshot["enabled"] is True and snapshot["level"] == "act"
     assert snapshot["unknown_unmetered"] == 0 and snapshot["integrity_degraded"] is False
@@ -1189,6 +1189,25 @@ def test_status_snapshot_carries_the_alarm_facts(clock):
     # The current window's own verdict; no held wake, so no hold; an absent count stays absent, never 0.
     assert snapshot["allowance_status"] == "available" and snapshot["live_wake_hold"] is None
     assert snapshot["allowance_open_rows"] is None and snapshot["allowance_room_after"] == ""
+
+
+def test_status_snapshot_names_the_model_its_next_wake_thinks_with(clock, monkeypatch):
+    """``model_route``: the consciousness slot's model when the slot names one, else Main's, with the route's
+    local flag (``route_choice.following_route``); a route that cannot be read is null, never a guess."""
+    from ouroboros import route_choice
+
+    monkeypatch.setenv("OUROBOROS_MODEL", "openai/gpt-6-astra")
+    monkeypatch.setenv("USE_LOCAL_MAIN", "false")
+    monkeypatch.setenv("OUROBOROS_MODEL_CONSCIOUSNESS", "anthropic/claude-opus-5-5")
+    monkeypatch.setenv("USE_LOCAL_CONSCIOUSNESS", "")
+    route = lambda: clock.clock.status_snapshot()["model_route"]  # noqa: E731
+    assert route() == {"value": "anthropic/claude-opus-5-5", "layer": "consciousness", "local": False}
+    monkeypatch.setenv("OUROBOROS_MODEL_CONSCIOUSNESS", "")
+    assert route() == {"value": "openai/gpt-6-astra", "layer": "main", "local": False}
+    monkeypatch.setenv("USE_LOCAL_CONSCIOUSNESS", "true")  # an empty slot with its own local flag: Main's model, local
+    assert route() == {"value": "openai/gpt-6-astra", "layer": "main", "local": True}
+    monkeypatch.setattr(route_choice, "following_route", lambda *_a, **_k: (_ for _ in ()).throw(OSError("unreadable")))
+    assert route() is None
 
 
 def test_the_status_view_may_ride_a_snapshot_and_a_wake_admission_never_does(clock, monkeypatch):
