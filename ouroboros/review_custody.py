@@ -645,6 +645,17 @@ def review_retry_cancelled(usage_ctx: Any) -> bool:
     format-repair/empty responses). Keep the durable stop check in one seam so
     every path observes the same fail-closed owner decision before dispatch.
     """
+    return bool(review_stop_cause(usage_ctx))
+
+
+REVIEW_STOP_WORDS = {"owner_stop": "the owner stopped this work",
+                     "owner_deadline": "the owner's deadline for this work has passed",
+                     "stop_unreadable": "the owner's stop record could not be read, which stops the work"}
+
+
+def review_stop_cause(usage_ctx: Any) -> str:
+    """What durably stops this work's review now: ``owner_stop`` (a cancel of the task or its retry root),
+    ``stop_unreadable`` (the cancel projection could not be read, never a licence to go on) or ``""``."""
     if usage_ctx is not None:
         task_id = str(getattr(usage_ctx, "task_id", "") or "")
         drive_root = getattr(usage_ctx, "drive_root", None)
@@ -656,15 +667,15 @@ def review_retry_cancelled(usage_ctx: Any) -> bool:
                 )
 
                 if cancel_pending(drive_root, task_id, strict=True):
-                    return True
+                    return "owner_stop"
                 retry_root = _validated_retry_root_cancel_key(drive_root, task_id)
                 if retry_root and cancel_pending(drive_root, retry_root, strict=True):
-                    return True
+                    return "owner_stop"
             except Exception:
                 # An unreadable cancel projection must not authorize another
                 # paid/retryable physical attempt.
-                return True
-    return False
+                return "stop_unreadable"
+    return ""
 
 
 def retryable_review_exception(

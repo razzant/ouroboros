@@ -695,7 +695,7 @@ def test_review_gate_return_boundaries_reach_consumers(invoke, monkeypatch, case
         monkeypatch.setattr(git, "_aggregate_review_verdict", lambda *a: (False, "", "", [], []))
         monkeypatch.setattr(git, "_review_custody_pending", lambda *a, counted_only=False: False)
         monkeypatch.setattr(git, "_subject_binding_mismatch_outcome", lambda *a: None)
-        monkeypatch.setattr("ouroboros.review_custody.review_retry_cancelled", lambda *a: case == "stopped")
+        monkeypatch.setattr("ouroboros.review_custody.review_stop_cause", lambda *a: "owner_stop" if case == "stopped" else "")
         monkeypatch.setattr("ouroboros.deadline_utils.owner_deadline_exhausted_for_context", lambda *a: False)
         monkeypatch.setattr(git, "classify_review_block", lambda **k: "infra")
         monkeypatch.setattr(git, "_finalize_blocked_review", lambda *a, **k: k["combined_msg"])
@@ -713,7 +713,7 @@ def test_review_gate_return_boundaries_reach_consumers(invoke, monkeypatch, case
     _assert_consumers(result, "LEGACY_WARNING" if case == "advisory" else "LEGACY_BLOCKED")
     assert invoke.ctx._pending_review_attempt is custody
     if case == "stopped":
-        assert result.text.startswith("⚠️ REVIEW_STOPPED:")
+        assert result.text.startswith("⚠️ REVIEW_STOPPED: the owner stopped this work; this commit was not made.")
 
 
 @pytest.mark.parametrize("refused", [False, True])

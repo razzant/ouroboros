@@ -338,8 +338,9 @@ def _finalize_blocked_review(
     pre_fingerprint: Dict[str, Any],
     post_fingerprint: Dict[str, Any],
     block_class: str = "",
+    phase: str = "blocking_review",
 ) -> str:
-    """Persist a genuine blocked review result, then unstage the reviewed diff."""
+    """Persist a genuine blocked review result (``phase=owner_control`` for the owner's stop), then unstage the diff."""
     _git()._record_commit_attempt(
         ctx,
         commit_message,
@@ -348,7 +349,7 @@ def _finalize_blocked_review(
         block_details=combined_msg,
         duration_sec=time.time() - commit_start,
         critical_findings=combined_findings,
-        phase="blocking_review",
+        phase=phase,
         block_class=block_class,
         pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
         post_review_fingerprint=post_fingerprint.get("fingerprint", ""),
@@ -836,7 +837,7 @@ def _reviewed_stage_cycle(
     )
     if _subject_mismatch is not None:
         return _subject_mismatch
-    from ouroboros.review_custody import review_retry_cancelled
+    from ouroboros.review_custody import REVIEW_STOP_WORDS, review_retry_cancelled, review_stop_cause
     from ouroboros.deadline_utils import owner_deadline_exhausted_for_context
 
     material = (blocked or combined_findings or getattr(ctx, "_last_review_critical_findings", [])
@@ -847,8 +848,12 @@ def _reviewed_stage_cycle(
             and not (review_retry_cancelled(ctx) or owner_deadline_exhausted_for_context(ctx))
             and (owed := _owed_before_git(ctx, commit_message, commit_start, post_fingerprint, skip_tests))):
         return owed  # the owner-control decision below follows these owed tests, so it gates Git (#2410)
-    if review_retry_cancelled(ctx) or owner_deadline_exhausted_for_context(ctx):
-        blocked, combined_msg, block_reason = True, "⚠️ REVIEW_STOPPED: owner cancellation or deadline prevents this commit.", "owner_stopped"
+    stop = review_stop_cause(ctx) or ("owner_deadline" if owner_deadline_exhausted_for_context(ctx) else "")
+    if stop:  # the owner's control, not a review refusal: say what stopped it and keep what the review said
+        record = str(getattr(ctx, "_current_review_record_id", "") or "")
+        blocked, block_reason, combined_msg = True, "owner_stopped", (
+            f"⚠️ REVIEW_STOPPED: {REVIEW_STOP_WORDS[stop]}; this commit was not made. The review's own outcome stays in its "
+            f"record{f' ({record})' if record else ''}." + (f"\n\nThe review said before the stop:\n{combined_msg}" if combined_msg else ""))
     if (author_source is None and (hand_back_all or (ordinary_advisory and material))
             and block_reason != "owner_stopped"):
         return _return_commit_feedback(ctx, commit_message, commit_start, pre_fingerprint, post_fingerprint,
@@ -868,7 +873,7 @@ def _reviewed_stage_cycle(
             ctx, commit_message, commit_start, combined_msg=combined_msg,
             block_reason=block_reason, combined_findings=combined_findings,
             pre_fingerprint=pre_fingerprint, post_fingerprint=post_fingerprint,
-            block_class=block_class,
+            block_class=block_class, phase="owner_control" if block_reason == "owner_stopped" else "blocking_review",
         )
         if block_reason == "owner_stopped":
             blocked_message = _publish_tool_result(ctx, ToolResult(

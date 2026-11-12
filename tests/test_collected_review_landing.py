@@ -219,6 +219,8 @@ def test_the_owner_window_is_decided_after_the_owed_landing_tests(author, monkey
         assert _commit_count(a) == commits + 1, landed
     else:
         assert "REVIEW_STOPPED" in landed and _commit_count(a) == commits, landed
+        cause = "the owner stopped this work" if control == "stop" else "the owner's deadline for this work has passed"
+        assert cause in landed and "this commit was not made" in landed, landed
     assert [selection["full_tests"] for selection in tests.selections] == [False, True]
     assert sorted(a.reviewer.rounds) == ["m1", "m2"], "one physical send per seat"
 
@@ -234,4 +236,5 @@ def test_a_landing_whose_owner_window_already_closed_runs_no_tests(author, monke
     a.ctx.task_metadata = {"deadline_at": "2000-01-01T00:00:00+00:00"}
     stopped = _collect(a, reference, **FULL)
     assert "REVIEW_STOPPED" in stopped and _commit_count(a) == commits, stopped
+    assert "the owner's deadline for this work has passed" in stopped, stopped
     assert len(tests.selections) == 1 and sorted(a.reviewer.rounds) == ["m1", "m2"]
