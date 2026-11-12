@@ -457,7 +457,8 @@ def test_overheard_reader_guard_and_local_prices_share_the_conversation_state(tm
     lined = mv.FloorLevel((("F6g", (group["key"],)),))
     fact = mf.view_facts(alone, lined, window_tokens=budget, mode="max", allowances={"margin": budget})
     assert not fact["floor"]["folded_rooms"] and shortage_from_trace({VIEW_TRACE_KEY: fact}) is None
-    assert len(forms.folded_rooms([overheard], {"F6w": {w["id"] for r in overheard["rooms"] for w in r["words"]}})) == 3
+    # Unread words that yield alone are host facts too (rev_grok REV1 R2): no room owes a telling for them.
+    assert forms.folded_rooms([overheard], {"F6w": {w["id"] for r in overheard["rooms"] for w in r["words"]}}) == []
     # Under pressure the new line arrives before this room's final reply yields to a work line.
     from tests.test_memory_distance_forms import completed_room, size
     completed, _gist = completed_room()
@@ -525,6 +526,40 @@ def test_unread_host_counts_do_not_create_page_debt_or_restore_it_at_the_window_
     # A considered word is still an untold source, even beside unread host facts.
     others[0]["words"][0]["rank"] = 1
     assert forms.folded_rooms([group], {"F6a": [group["key"], "unread"]}) == [others[0]["room_id"]]
+
+
+@pytest.mark.parametrize("overheard", [True, False])
+def test_an_unread_word_yielding_alone_through_a_real_fit_owes_no_telling(overheard):
+    """rev_grok REV1 R2: across a one-token gap the fit took one unread word (F6w) and printed its host line, yet
+    ``folded_rooms`` listed the room, so a writer with consciousness off would draft a page sealing words nobody
+    considered. Unread words are host facts wherever they yield, in an overheard room and in one where my human or I
+    spoke; a considered word that yields the same way still owes a telling."""
+    from ouroboros import memory_floor as mf
+    from ouroboros.memory_inventory import VIEW_TRACE_KEY, shortage_from_trace
+    from tests import _memory_view_synthetic as syn
+
+    def fitted(rank):
+        group = syn.conversation(5, words=4, word_chars=2_000)
+        group.update(place=overheard, catalogue_start=0)
+        room = group["rooms"][0]
+        room["overheard"] = overheard
+        for word in room["words"]:
+            word["rank"] = rank
+        snap = syn.snapshot(room_facts=syn.room("1"), conversations=[group])
+        whole = mf.tokens_of(mv.story_chars(snap)) + mf.tokens_of(mv.room_chars(snap))
+        level = mf.fit_memory_view(snap, {"margin": whole - 1, "physical": whole - 1, "budget": None})
+        fact = mf.view_facts(snap, level, window_tokens=whole, mode="max", allowances={"margin": whole - 1})
+        return snap, level, fact, room["room_id"]
+
+    snap, level, fact, _room = fitted(2)
+    assert dict(level.steps) == {"F6w": 1}, level
+    assert "No recorded consideration: 1 words;" in mv.render_room(snap, level)
+    assert fact["floor"]["folded_rooms"] == [] and shortage_from_trace({VIEW_TRACE_KEY: fact}) is None
+    # The other direction: a considered word yields as its opening, an untold source that owes a telling.
+    snap, level, fact, room_id = fitted(1)
+    assert dict(level.steps) == {"F6w": 1} and "opening, no retelling" in mv.render_room(snap, level), level
+    assert fact["floor"]["folded_rooms"] == [room_id]
+    assert shortage_from_trace({VIEW_TRACE_KEY: fact}).kind == "other_room"
 
 
 @pytest.mark.parametrize("own_text", ["", "Their own first line.\nTheir later text."])

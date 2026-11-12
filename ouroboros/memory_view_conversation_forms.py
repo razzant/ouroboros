@@ -393,16 +393,18 @@ def owed(groups: Iterable[Mapping[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def folded_rooms(groups: Iterable[Mapping[str, Any]], gone: Mapping[str, Iterable[str]]) -> List[str]:
-    """Rooms with a recorded person's words or my reply whose words (F6w) or group (F6g) yielded beyond host facts,
-    oldest open row first: what a writer may seal where consciousness is off (``memory_inventory.shortage_from_trace``)."""
+    """Rooms with a recorded person's words or my reply whose words (F6w) or group (F6g, F6a) yielded beyond host facts,
+    oldest open row first: what a writer may seal where consciousness is off (``memory_inventory.shortage_from_trace``).
+    Unread words are host facts wherever they yield: alone (F6w), in their room's or conversation's line, or in the
+    window's global count. A group line owes a telling for a room where my human or I spoke, unless that count names
+    its unread words; any other room owes one only for a yielded word that is not unread."""
     words = {ident.removeprefix("bare:") for ident in gone.get("F6w", ())}
     lined = {g["key"] for g in groups if group_form(g, gone) or g["key"] in gone.get("F6a", ())}
     def needs_telling(group, room):
-        # Neither an unread host count nor the window's global unread emergency asks for a retelling.
-        counted_unread = (room.get("overheard") and group["key"] in lined) or (
-            group["key"] in gone.get("F6a", ()) and "unread" in gone.get("F6a", ()))
-        return any(not (counted_unread and _unread(word)) and (
-            group["key"] in lined or word["id"] in words) for word in room["words"])
+        counted = group["key"] in gone.get("F6a", ()) and "unread" in gone.get("F6a", ())
+        if group["key"] in lined and not room.get("overheard") and not counted:
+            return True
+        return any(not _unread(word) and (group["key"] in lined or word["id"] in words) for word in room["words"])
     return [room for _first, room in sorted(
         (item["first"], item["room_id"]) for group in groups for item in group["rooms"] if item["engaged"] and item["words"]
         and needs_telling(group, item))]
