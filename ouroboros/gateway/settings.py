@@ -906,6 +906,12 @@ async def api_settings_get(request: Request) -> JSONResponse:
     }
     meta["connections"] = connections_meta(settings, document)
     meta["main_connection_choice"] = main_connection_choice(settings, document)  # Main waits for the owner's pick
+    try:  # what the limits cannot count, said under them on Dashboard › Costs
+        from ouroboros.pricing import known_spend_gaps
+        # No valid catalog is no helper: the runtime refuses an invalid one whole.
+        meta["known_spend_gaps"] = known_spend_gaps(settings, meta["available_subagents"]["candidate"] or {})
+    except Exception:
+        log.warning("Could not build the known-spend gaps; Costs says nothing of them", exc_info=True)
     safe["_meta"] = meta
     return JSONResponse(safe)
 

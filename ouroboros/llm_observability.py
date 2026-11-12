@@ -15,7 +15,7 @@ import threading
 import time
 from typing import Any, Dict, Iterator, Optional, Tuple
 
-from ouroboros.context_timing import STEPS as _STEPS, host_step, measured_sections, section_spans, timed
+from ouroboros.context_timing import STEPS as _STEPS, carry_spans, host_step, measured_sections, section_spans, timed
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.anthropic_native_custody import public_custody_projection
 from ouroboros.utils import emit_cognitive_operation_event, sanitize_tool_result_for_log
@@ -73,11 +73,14 @@ def round_window(slot: Any = None) -> Iterator[None]:
     ``round_starts`` on ``slot``, used once) and the process's ``_rusage`` since the round's start. When that call
     fails the loop opens another, without ``slot``, around the recovery (a configured fallback, an owner-wait resend),
     whose answer carries the recovery's own facts. Facts for the log only: nothing reads them to decide."""
-    since = getattr(slot, "_round_prep_since", None)
+    since, prologue = getattr(slot, "_round_prep_since", None), getattr(slot, "_round_prologue", None)
     if since is not None:
         slot._round_prep_since = None
+    if prologue is not None:  # a turn's restore, route rebind and tools, measured before its first round (``loop``)
+        slot._round_prologue = None
     now = (time.perf_counter(), time.thread_time(), threading.get_ident())
     with measured_sections():
+        carry_spans("prologue", prologue)
         token = _STEPS.set({"steps": {}, "mark": since[:3] if since else now, "rusage": since[3] if since else _rusage()})
         try:
             if since is not None:

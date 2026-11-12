@@ -197,8 +197,9 @@ def route(github, *, classification: dict, attribution: dict, head: str, run_url
     A culprit's pull request gets one comment and one open issue per culprit pull request is
     created or extended; reds without blame not tracked yet get one issue per kind. `checkpoint(record)`
     then receives that hand-over before any recheck starts, so a step killed during the recheck still
-    leaves it. `same_run(ids)` answers what this run already settles: "passed" at the head on this system, "kept" for
-    an id it owes no recheck (the run ran nothing of its module, or its own report was no whole pass);
+    leaves it. `same_run(ids)` answers what this run already settles: "passed" at the head on this system,
+    "kept" for an id it owes no recheck (the run ran nothing of its existing module, or its own report was no
+    whole pass);
     `recheck(ids)` runs the others once and answers `outcomes` values; `size_recheck(base, ids)` does
     so for size ids, measured against `base`. An issue loses each id that passes, named in a comment,
     and closes when none is left. A failed GitHub call becomes a warning in the record and the

@@ -21,6 +21,7 @@ from ouroboros.review_cycles import REASON_REVIEW_CYCLES_EXHAUSTED  # noqa: F401
 from ouroboros.outcomes import REASON_DELIVERY_CONTROL_DEGRADED, REASON_OWNER_REQUESTED_FINALIZATION, RESULT_INFRA_FAILED, extract_final_answer, latest_agent_defined_verification, latest_unreconciled_failed_verification, latest_unreconciled_masked_verification, reviewable_effect_projection, should_nudge_verification, turn_has_reviewable_effects  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.observability import new_execution_id  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.observability import task_timing_scope, timed_phase
+from ouroboros.context_timing import measured_sections, section_spans
 from ouroboros.llm_observability import round_starts, round_window
 from ouroboros.tool_policy import CAPABILITY_OMISSION_HEADER, format_capability_omissions, initial_tool_schemas, list_non_core_tools  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.tools.registry import ToolRegistry
@@ -471,27 +472,29 @@ def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dic
     """
     from ouroboros.presence_carrier import reenter
 
-    carried, (saved, saved_pause, saved_working) = reenter(tools._ctx), carriers
-    if saved:
-        resumed = (*resume_native_loop(tools, saved, messages, trace, usage, seen), cost_ceiling, True, False, False)
-    elif saved_pause:
-        resumed = resume_paused_loop(tools, saved_pause, messages, trace, usage, seen,
-                                     budget_remaining_usd=budget_remaining_usd)
-        no_tool = saved_pause.get("resume_point", {}).get("budget_tail") == "no_tool"
-        resumed = (*resumed, _resolve_task_cost_ceiling(tools._ctx, budget_remaining_usd), not no_tool, no_tool, no_tool)
-    elif saved_working:
-        *resumed, tool_tail = working_checkpoint.resume_from_working(tools, saved_working, messages, trace, usage, seen)
-        no_tool = not tool_tail and (saved_working.get("working") or {}).get("boundary") == working_checkpoint.RESUMED
-        resumed = (*resumed, _resolve_task_cost_ceiling(tools._ctx, budget_remaining_usd), tool_tail, no_tool, not tool_tail)
-    else:
-        resumed = (*route, cost_ceiling, False, False, False)
-        apply_current(tools._ctx)
-        from ouroboros.place_reply import seed_no_send
-        seed_no_send(tools._ctx, trace)  # a fresh place-carrying lineage starts having said nothing there
-    if carried is not None:
-        carried.reentered(tools._ctx, messages)
-    from ouroboros.subagent_bootstrap import append_startup_receipt
-    append_startup_receipt(tools._ctx, messages, getattr(tools._ctx, "_configured_startup_wake", ""), seen)
+    with measured_sections():  # restore, route rebind and tools: the first round's receipt names their spans
+        carried, (saved, saved_pause, saved_working) = reenter(tools._ctx), carriers
+        if saved:
+            resumed = (*resume_native_loop(tools, saved, messages, trace, usage, seen), cost_ceiling, True, False, False)
+        elif saved_pause:
+            resumed = resume_paused_loop(tools, saved_pause, messages, trace, usage, seen,
+                                         budget_remaining_usd=budget_remaining_usd)
+            no_tool = saved_pause.get("resume_point", {}).get("budget_tail") == "no_tool"
+            resumed = (*resumed, _resolve_task_cost_ceiling(tools._ctx, budget_remaining_usd), not no_tool, no_tool, no_tool)
+        elif saved_working:
+            *resumed, tool_tail = working_checkpoint.resume_from_working(tools, saved_working, messages, trace, usage, seen)
+            no_tool = not tool_tail and (saved_working.get("working") or {}).get("boundary") == working_checkpoint.RESUMED
+            resumed = (*resumed, _resolve_task_cost_ceiling(tools._ctx, budget_remaining_usd), tool_tail, no_tool, not tool_tail)
+        else:
+            resumed = (*route, cost_ceiling, False, False, False)
+            apply_current(tools._ctx)
+            from ouroboros.place_reply import seed_no_send
+            seed_no_send(tools._ctx, trace)  # a fresh place-carrying lineage starts having said nothing there
+        if carried is not None:
+            carried.reentered(tools._ctx, messages)
+        from ouroboros.subagent_bootstrap import append_startup_receipt
+        append_startup_receipt(tools._ctx, messages, getattr(tools._ctx, "_configured_startup_wake", ""), seen)
+        tools._ctx._round_prologue = section_spans()
     return resumed
 
 

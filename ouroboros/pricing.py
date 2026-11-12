@@ -7,14 +7,15 @@ usage event emission. Missing pricing is data, not a model-admission gate.
 
 from __future__ import annotations
 
+import json
 import queue
 import threading
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import logging
 
-from ouroboros.provider_models import normalize_model_identity, provider_for_model
+from ouroboros.provider_models import normalize_model_identity, parse_model_route, provider_for_model
 from ouroboros.utils import utc_now_iso
 from ouroboros.config import runtime_setting
 
@@ -66,6 +67,11 @@ def _fetch_live_rows(provider: str, model: str = "") -> Dict[str, Tuple[Optional
     return {}
 
 
+# The routes ``get_pricing`` reads a live catalog for. Cloud.ru prices in roubles: its catalog is known only with a
+# positive ``OUROBOROS_RUB_USD_RATE`` (llm_pricing.fetch_cloudru_pricing).
+CATALOG_PROVIDERS = frozenset({"openrouter", "cloudru"})
+
+
 def get_pricing(
     *, provider: str = "openrouter", allow_live_fetch: bool = True, model: str = "",
 ) -> Dict[str, Tuple[Optional[float], ...]]:
@@ -78,7 +84,7 @@ def get_pricing(
     sharing this cache's TTL and in-flight owner. It never fetches all endpoints.
     """
     provider = str(provider or "").strip().lower()
-    if provider not in {"openrouter", "cloudru"} or (model and provider != "openrouter"):
+    if provider not in CATALOG_PROVIDERS or (model and provider != "openrouter"):
         return {}
     exact = str(model or "").strip()  # the slug the endpoints API names; the cache keys its identity
     model = normalize_model_identity(exact) if exact else ""
@@ -485,3 +491,104 @@ def emit_llm_usage_event(
         })
     except Exception:
         log.debug("Failed to put llm_usage event to queue", exc_info=True)
+
+
+def price_source(provider: Any, settings: Optional[Mapping[str, Any]] = None) -> str:
+    """How a route's price is known: ``local`` (no charge), ``subscription`` (the plan's time, not money),
+    ``catalog`` (its provider's live catalog, ``get_pricing``) or ``unknown`` (a call adds nothing to known spend)."""
+    kind = str(provider or "").strip().lower()
+    if kind in ("local", "claudexor"):
+        return "local" if kind == "local" else "subscription"
+    if kind == "cloudru":
+        read = settings.get if settings is not None else (lambda key: runtime_setting(key, ""))
+        try:
+            rate = float(read("OUROBOROS_RUB_USD_RATE") or 0)
+        except (TypeError, ValueError):
+            rate = 0.0
+        # One catalog for every Cloud.ru connection, read with the built-in key (llm_pricing.fetch_cloudru_pricing).
+        return "catalog" if rate > 0 and str(read("CLOUDRU_FOUNDATION_MODELS_API_KEY") or "").strip() else "unknown"
+    return "catalog" if kind in CATALOG_PROVIDERS else "unknown"
+
+
+# The Models roles in their order, with the label Settings gives each.
+_SPEND_ROLES = (("main", "Main"), ("light", "Light"), ("safety", "Safety Supervisor"), ("vision", "Vision"),
+                ("consciousness", "Consciousness"), ("fallback", "Fallback"))
+
+
+def _role_routes(settings: Mapping[str, Any], role: str) -> List[Tuple[str, bool]]:
+    """The ``(model, local)`` routes a role's calls may take by this document, as the runtime resolves them (a model
+    labelled `` (local)`` parses as the local lane). A slot naming its own model takes its own flag
+    (route_choice.model_role_slot_override). An empty one runs Main's model: Consciousness on its own flag when set,
+    Vision on Main's (slot_lane_label), Light on both (its helpers keep Main's flag: the runtime splits). Safety runs
+    its own slot, else a set Light, else Main, on that slot's flag (safety_config)."""
+    from ouroboros.model_slots import MODEL_ROLE_SETTINGS
+
+    def flag(key: str, words: Tuple[str, ...] = ("true", "1")) -> Optional[bool]:
+        # A stored False is set, as ``runtime_setting`` reads it ('False'); only an absent or blank key is unset.
+        raw = settings.get(key)
+        if raw is None or not str(raw).strip():
+            return None
+        return str(raw).strip().lower() in words
+
+    def route(model: Any, local: Optional[bool]) -> Tuple[str, bool]:
+        return str(model or "").strip(), bool(local)
+
+    def own(slot: str) -> str:
+        return str(settings.get(MODEL_ROLE_SETTINGS[slot]) or "").strip()
+
+    main = route(own("main"), flag("USE_LOCAL_MAIN"))
+    if role == "main":
+        return [main]
+    if role == "fallback":
+        local = flag("USE_LOCAL_FALLBACK")
+        return [route(entry, local) for entry in own("fallback").split(",") if entry.strip()]
+    if role == "safety":
+        slot = "safety" if own("safety") else "light" if own("light") else "main"
+        return [route(own(slot), flag(f"USE_LOCAL_{slot.upper()}", ("true", "1", "yes", "on")))]
+    local = flag(f"USE_LOCAL_{role.upper()}")
+    if own(role):
+        return [route(own(role), local)]
+    if local is None or role == "vision":
+        return [main]
+    return list(dict.fromkeys([route(own("main"), local)] + ([main] if role == "light" else [])))
+
+
+def _subagent_rows(value: Any) -> List[Mapping[str, Any]]:
+    """The catalog's rows: each enabled one can run even with the catalog switched off, since a review names any
+    enabled row (reviewer_slot_config.catalog_review_row)."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value or "null")
+        except ValueError:
+            return []
+    items = value.get("items") if isinstance(value, Mapping) else value
+    return [row for row in items if isinstance(row, Mapping)] if isinstance(items, list) else []
+
+
+def known_spend_gaps(settings: Mapping[str, Any], subagents: Any = None) -> List[str]:
+    """What spends money the limits cannot count, as Dashboard › Costs names it under them: a role whose route has
+    no known price (``all model roles`` when none of the configured ones has), the first leg of built-in web
+    search, and enabled API helpers (``Agents``; ``subagents`` is the resolved list, else the document's)."""
+    def unpriced(model: str, local: bool) -> bool:
+        return bool(model) and price_source("local" if local else parse_model_route(model).kind, settings) == "unknown"
+
+    routed = [(label, _role_routes(settings, role)) for role, label in _SPEND_ROLES]
+    routed = [(label, routes) for label, routes in routed if any(model for model, _ in routes)]
+    roles = [label for label, routes in routed if any(unpriced(model, local) for model, local in routes)]
+    gaps = ["all model roles"] if len(roles) > 1 and len(roles) == len(routed) else roles
+    try:
+        from ouroboros.search_routes import resolve_web_search_route
+        legs = resolve_web_search_route(settings=settings).get("legs") or []
+    except Exception:
+        log.debug("Could not resolve the web search route for the spend gaps", exc_info=True)
+        legs = []
+    first = str((legs[0] if legs else {}).get("source") or "")
+    if first and first != "ddgs" and price_source(first, settings) == "unknown":
+        gaps.append("Web search")
+    for row in _subagent_rows(subagents if subagents is not None else settings.get("OUROBOROS_SUBAGENTS")):
+        route = row.get("route") if isinstance(row.get("route"), Mapping) else {}
+        target = str(route.get("target_id") or "")
+        if row.get("enabled", True) is not False and route.get("kind") == "api_model" and unpriced(target, False):
+            gaps.append("Agents")
+            break
+    return gaps

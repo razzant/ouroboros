@@ -183,6 +183,19 @@ def test_prepared_upload_reuses_canonical_bytes_without_serializing_or_hashing(g
     assert wire.generation_count == 0
 
 
+def test_each_upload_control_request_has_its_own_span_on_the_measuring_receipt(gateway_factory):
+    """W2 H7: an upload's control requests (open, state, bytes, finalize) are each named on the receipt of the window
+    measuring them, inside ``daemon.upload``, so a long upload names its slow request; outside a window: nothing."""
+    from ouroboros import context_timing
+
+    gateway = gateway_factory(ModelWire())
+    with context_timing.measured_sections():
+        gateway.upload_model_request(_request(), idempotency_key="timed")
+        names = set(context_timing.section_spans()["sections_ms"])
+    assert {f"daemon.upload.{step}" for step in ("open", "state", "bytes", "finalize")} <= names
+    assert context_timing.section_spans() == {}
+
+
 @pytest.mark.parametrize("facts", [{}, {"sha256": "0" * 64, "size_bytes": 1},
                                   {"sha256": "not-a-hash", "size_bytes": 2}])
 def test_prepared_upload_requires_measured_identity_before_network(gateway_factory, facts):
