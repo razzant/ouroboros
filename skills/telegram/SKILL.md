@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.10
+version: 1.4.11
 type: extension
 entry: plugin.py
 plugin_api: "2.4"
@@ -125,9 +125,9 @@ The bridge routes every Telegram API call through the optional skill-local
 and the companion's menu button lifecycle. The Settings form masks the proxy
 and never reads its stored credentials back into the browser.
 
-The bridge also forwards the owner's notes and skill notices (`reminder` and
-`skill_notice` System rows, written for the owner) to the pinned chat when the
-mirror mode is `telegram_only`; mode `all` already mirrored them.
+The bridge also forwards the owner's notes, skill notices and the Safety Supervisor's notices
+(`reminder`, `skill_notice` and `safety_notice` System rows, written for the owner) to the pinned
+chat when the mirror mode is `telegram_only`; mode `all` already mirrored them.
 
 The bridge speaks the install's interface language (Settings → Appearance → Language):
 `/language` lists English and the languages the install already has,
