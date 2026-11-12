@@ -558,10 +558,10 @@ export function routeChoiceGroups({
             ? modelValues
             : [{ value: '', disabled: true, label: catalogKnown && accountsKnown
                 ? (hasConfiguredAccounts
-                    ? 'No model sources listed — refresh Model Catalog'
-                    : 'No model sources listed — connect one in Accounts')
+                    ? 'No model sources listed: press Read again in Models'
+                    : 'No model sources listed: connect one in Accounts')
                 : catalogKnown ? 'No model sources listed; accounts have not been checked'
-                    : 'Model sources have not been read — use Refresh model catalog' }] }] : []),
+                    : 'Model sources not read yet: press Read again in Models' }] }] : []),
         { label: 'API keys', options: apiValues },
         ...(includeSessions ? [sessionValues.length
             ? { label: 'Agents · sessions', options: sessionValues }

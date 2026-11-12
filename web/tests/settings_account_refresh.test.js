@@ -36,7 +36,7 @@ test('account login/status changes produce a new catalog refresh key', () => {
 test('an empty confirmed catalog still asks for an account on a clean install', async () => {
     const { routeChoiceGroups } = await import('../modules/route_editor_primitives.js');
     const empty = routeChoiceGroups({ catalogKnown: true, accountsKnown: true, hasConfiguredAccounts: false });
-    assert.equal(empty[0].options[0].label, 'No model sources listed — connect one in Accounts');
+    assert.equal(empty[0].options[0].label, 'No model sources listed: connect one in Accounts');
     const stale = routeChoiceGroups({ catalogKnown: true, accountsKnown: true, hasConfiguredAccounts: true });
-    assert.equal(stale[0].options[0].label, 'No model sources listed — refresh Model Catalog');
+    assert.equal(stale[0].options[0].label, 'No model sources listed: press Read again in Models');
 });
