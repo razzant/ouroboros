@@ -362,38 +362,46 @@ def render_history(note: Any) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _quoted(text: str, sign: str) -> list[str]:
-    pieces = text.split("\n")
-    if pieces and pieces[-1] == "":
+def _lines(raw: bytes, start: int, end: int, sign: str) -> tuple[int, list[str]]:
+    """How many whole lines ``raw[start:end]`` holds, and each after ``sign``; a last line without a line end says so."""
+    text = raw[start:end].decode("utf-8")
+    pieces = text.split("\n") if text else []
+    if text.endswith("\n"):
         pieces.pop()
-    return [f"{sign} {piece}" for piece in pieces]
+    return len(pieces), [f"{sign} {piece}" for piece in pieces] + ([] if not text or text.endswith("\n")
+                                                                   else ["\\ (no line end)"])
 
 
 def render_changes(note: Any, held: Mapping[str, Any]) -> str:
-    """Every change between the version a stale write holds and the current text, each block whole.
+    """Every change between the version a stale write holds and the current text, in whole lines.
 
-    After the rows written since that version, each block is ``- removed`` / ``+ added`` with its
-    line and the heading it sits under in the current note; then the outline and the full read.
-    The held version plus these blocks is the current note. Nothing here is cut: a reply that
-    cannot carry all of it sends the complete current note instead (``tools/knowledge.py``)."""
-    address, new_raw = note.address, note.raw
+    After the rows written since that version, each block is the whole lines it touches: ``- `` every
+    line of the held version, then ``+ `` every line of the current one, with where each side's lines
+    begin and the heading the block sits under in the current note; then the outline and the full
+    read. Putting each block's ``+`` lines in place of its ``-`` lines in the held version gives the
+    current note (``text_change.line_blocks``). Nothing here is cut: a reply that cannot carry all of
+    it sends the complete current note instead (``tools/knowledge.py``)."""
+    address, old_raw, new_raw = note.address, held["text"].encode("utf-8"), note.raw
     headings = note.source.headings if note.source else ()
-    change, body, shift = text_change.exact_change(held["text"], note.text), [], 0
-    for start, removed, added in change:
-        at = start + shift  # the block's first byte in the current note
-        line, under = new_raw.count(b"\n", 0, at) + 1, next((h for h in reversed(headings) if h.span.start_byte <= at), None)
+    blocks = text_change.line_blocks(held["text"], note.text, text_change.exact_change(held["text"], note.text))
+    body = []
+    for old_start, old_end, new_start, new_end, removed, added in blocks:
+        under = next((h for h in reversed(headings) if h.span.start_byte <= new_start), None)
         where = f"under {'#' * under.level} {under.title}" if under else "before the first heading"
-        body.append(f"@ line {line}, {where}: {len(removed)} chars removed, {len(added)} added")
-        body += _quoted(removed, "-") + _quoted(added, "+")
-        shift += len(added.encode("utf-8")) - len(removed.encode("utf-8"))
+        (old_count, old_lines), (new_count, new_lines) = (_lines(old_raw, old_start, old_end, "-"),
+                                                          _lines(new_raw, new_start, new_end, "+"))
+        old_line, new_line = old_raw.count(b"\n", 0, old_start) + 1, new_raw.count(b"\n", 0, new_start) + 1
+        body.append(f"@ yours: {old_count} line(s) from line {old_line} → current: {new_count} line(s) from line "
+                    f"{new_line}, {where}: {removed} chars removed, {added} added")
+        body += old_lines + new_lines
     facts = held["facts"]
     head = [f"The revision you sent is an earlier version of this note, written {facts['ts']} by focus "
             f"{focus_text(facts['focus'])} ({facts['mode']}; reason: {reason_text(facts['reason'])}). "
             f"Current revision: {note.revision}.", "Written since that version, oldest first:"]
     head += [f"- {item['ts']} · focus {focus_text(item['focus'])} · {item['mode']} · reason: {reason_text(item['reason'])}"
              f" → {item['revision']}" for item in held["since"]] or ["- (no row: the file changed outside the writer)"]
-    head.append(f"What changed from your version to the current text ({len(change)} block(s); your version plus "
-                "these blocks is the current note):")
+    head.append(f"What changed from your version to the current text, in whole lines ({len(blocks)} block(s)): "
+                "in your version, put each block's + lines in place of its - lines and you have the current note.")
     tail = ["Outline of the current note:", render_outline(note).rstrip("\n"),
             f"The complete current text is knowledge_read(topic={address.topic!r}, scope={address.scope!r})."]
     return "\n".join(head + body + tail) + "\n"

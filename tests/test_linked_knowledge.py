@@ -12,7 +12,7 @@ import pytest
 from ouroboros import knowledge as store
 from ouroboros.tools import knowledge as tools
 from ouroboros.tools.registry import ToolContext, ToolRegistry
-from tests._knowledge_history_shared import replaced
+from tests._knowledge_history_shared import applied_blocks, replaced
 
 
 def address(tmp_path, topic="people/Антон", scope="global"):
@@ -730,13 +730,34 @@ def test_a_stale_revision_its_history_holds_gets_the_changes_instead_of_the_whol
     stale = tools._knowledge_write(ctx, "plan", "# Plan\n\nMine.\n", scope="global", expected_revision=held.revision)
     assert "revision_conflict" in stale and f"expected_revision={current.revision!r}" in stale
     assert "presence task_id=other · edit · reason: another focus learned more" in stale
-    assert "+ , revised" in stale and "under # Plan" in stale and "Outline of 'plan'" in stale
+    assert "- Step one.\n+ Step one, revised.\n" in stale and "under # Plan" in stale and "Outline of 'plan'" in stale
+    assert applied_blocks(held.text, stale) == current.text  # your version plus the blocks is the current note
     assert "The complete current text is knowledge_read(topic='plan', scope='global')." in stale
     assert current.text not in stale and store.read_knowledge_note(target).raw == current.raw
     unknown = tools._knowledge_write(ctx, "plan", "Mine.", scope="global", expected_revision="0" * 64)
     assert "revision_conflict" in unknown and unknown.endswith(current.text)  # a revision the tail lacks: as before
     required = tools._knowledge_write(ctx, "plan", "Mine.", scope="global")
     assert "revision_required" in required and required.endswith(current.text)
+
+
+def test_a_stale_reply_places_every_change_in_whole_lines(tmp_path):
+    """A change inside a line is shown as its whole line on both sides, so it can be placed: a fragment that
+    repeats in its line (``3`` → ``5``) and a pure insertion inside a line. Line by line, the held version plus
+    the blocks is the current note."""
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="mine")
+    target = address(tmp_path, "limits")
+    held = store.write_knowledge_note(target, "# Limits\n\nRetries: 3; timeout: 3; workers: 3.\n\n## People\n\n"
+                                      "Alice met Bob, and Alice called Carol.\n\nKept.\n").current
+    current = store.write_knowledge_note(target, held.text.replace("timeout: 3", "timeout: 5").replace(
+        "and Alice called", "and Alice never called"), expected_revision=held.revision).current
+    stale = tools._knowledge_write(ctx, "limits", "# Limits\n\nMine.\n", scope="global", expected_revision=held.revision)
+    assert "revision_conflict" in stale and "2 block(s)" in stale and current.text not in stale
+    assert ("@ yours: 1 line(s) from line 7 → current: 1 line(s) from line 7, under # Limits: 1 chars removed, 1 added\n"
+            "- Retries: 3; timeout: 3; workers: 3.\n+ Retries: 3; timeout: 5; workers: 3.\n") in stale
+    assert ("under ## People: 0 chars removed, 6 added\n- Alice met Bob, and Alice called Carol.\n"
+            "+ Alice met Bob, and Alice never called Carol.\n") in stale
+    assert "\n- 3\n" not in stale and "\n+ never \n" not in stale  # no fragment without its line
+    assert applied_blocks(held.text, stale) == current.text
 
 
 def test_a_stale_revision_gets_every_change_since_or_the_whole_note_never_a_clipped_diff(tmp_path, monkeypatch):
@@ -752,7 +773,8 @@ def test_a_stale_revision_gets_every_change_since_or_the_whole_note_never_a_clip
 
     whole = tools._knowledge_write(ctx, "plan", "Mine.", scope="global", expected_revision="0" * 64)  # today's reply
     complete = stale()
-    assert "6 block(s)" in complete and complete.count("\n- old\n") == 6 and complete.count("\n+ new\n") == 6
+    assert "6 block(s)" in complete and complete.count("\n- old words ") == 6 and complete.count("\n+ new words ") == 6
+    assert applied_blocks(held.text, complete) == current.text
     assert current.text not in complete and whole.endswith(current.text) and "What changed" not in whole
     monkeypatch.setattr(tools, "tool_result_limit", lambda name: len(complete))
     assert stale() == complete  # exactly at the bound: every change, whole

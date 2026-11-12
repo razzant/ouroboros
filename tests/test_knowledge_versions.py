@@ -11,6 +11,7 @@ from ouroboros import markdown_source
 from ouroboros import text_change
 from ouroboros.tools import knowledge as tools
 from ouroboros.tools.registry import ToolContext
+from tests._knowledge_history_shared import applied_blocks
 
 TOPIC = "notes/река"
 RIVER = ("---\ntype: note\nsummary: When the river matters.\n---\n# Река\n\nБерег 🌊.\n\n## Мост\n\nСтарый мост.\n\n"
@@ -157,9 +158,10 @@ def test_the_changes_since_a_held_version_show_every_block_whole(tmp_path):
     rendered = versions.render_changes(current, facts)
     change = text_change.exact_change(held.text, current.text)
     assert len(change) == 7 and "7 block(s)" in rendered and len(rendered) > 7500  # no bound shapes it
-    for _start, removed, added in change:  # each block's text, whole, on its own lines
-        assert f"\n- {removed}\n" in rendered and f"\n+ {added}\n" in rendered
-    assert rendered.count("\n@ line ") == 7 and "not shown" not in rendered and "more block(s)" not in rendered
+    for old_line, new_line in (("old words " * 150, "new words " * 150), ("tiny", "small")):  # whole lines, uncut
+        assert f"\n- {old_line}\n+ {new_line}\n" in rendered
+    assert rendered.count("\n@ yours: 1 line(s) from line ") == 7 and "not shown" not in rendered
+    assert applied_blocks(held.text, rendered) == current.text
     assert rendered.endswith("The complete current text is knowledge_read(topic='notes/река', scope='global').\n")
 
 

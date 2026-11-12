@@ -86,7 +86,7 @@ def test_the_backlog_is_an_ordinary_note_written_read_and_revised_through_the_to
     # A stale revision the history holds refuses with what changed since it; a blind overwrite needs one.
     stale = registry.execute("knowledge_write", {"topic": BACKLOG, "content": "Rewritten.",
                                                  "expected_revision": appended.revision})
-    assert "revision_conflict" in stale and "+ resume once, then stop" in stale and edited.revision in stale
+    assert "revision_conflict" in stale and "+ Freeform: late phases resume once, then stop." in stale and edited.revision in stale
     assert "revision_required" in registry.execute("knowledge_write", {"topic": BACKLOG, "content": "Rewritten."})
     assert store.read_knowledge_note(address).raw == edited.raw
     # Every revision keeps its complete new source and the old one, inline or named once.

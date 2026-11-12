@@ -140,6 +140,56 @@ def exact_change(old: str, new: str) -> Change:
     return [(0, old, new)] if old != new else []
 
 
+def line_blocks(old: str, new: str, change: Iterable) -> List[Tuple[int, int, int, int, int, int]]:
+    """An exact ``change`` from ``old`` to ``new``, each block widened to the whole lines it touches.
+
+    ``(old_start, old_end, new_start, new_end, removed_chars, added_chars)`` in UTF-8 bytes:
+    ``old[old_start:old_end]`` became ``new[new_start:new_end]``; each span begins at a line start
+    and ends after a line end (or at its text's end), on its own side. A block widens only over text
+    both versions share, and blocks whose widened lines touch or overlap become one (its character
+    counts are their sums). Every byte outside the blocks is the same in both texts, in order, so
+    putting each block's new lines in place of its old lines turns ``old`` into ``new``.
+    """
+    old_raw, new_raw = old.encode("utf-8"), new.encode("utf-8")
+
+    def ended(block: list) -> bool:  # both ends sit on a line boundary of their own text
+        return all(at in (0, len(raw)) or raw[at - 1] == 0x0A for raw, at in ((old_raw, block[1]), (new_raw, block[3])))
+
+    def merge(block: list, item: list) -> None:
+        block[1], block[3], block[4], block[5] = item[1], item[3], block[4] + item[4], block[5] + item[5]
+
+    blocks: list = []
+    shift = 0
+    for start, removed, added in _checked(change):
+        gone, put = len(removed.encode("utf-8")), len(added.encode("utf-8"))
+        item = [start, start + gone, start + shift, start + shift + put, len(removed), len(added)]
+        shift += put - gone
+        floor = 0
+        if blocks:
+            last = blocks[-1]
+            if not ended(last):  # the last block's line runs on: to its end, unless that is in this item
+                stop = old_raw.find(b"\n", last[1], item[0])
+                if stop < 0:
+                    merge(last, item)
+                    continue
+                last[3] += stop + 1 - last[1]
+                last[1] = stop + 1
+            floor = last[1]
+        begin = old_raw.rfind(b"\n", floor, item[0]) + 1 or floor
+        if blocks and begin == floor:  # this item's first line begins where the last block ends: they touch
+            merge(blocks[-1], item)
+            continue
+        item[2] -= item[0] - begin
+        item[0] = begin
+        blocks.append(item)
+    if blocks and not ended(blocks[-1]):
+        last, stop = blocks[-1], old_raw.find(b"\n", blocks[-1][1])
+        end = stop + 1 if stop >= 0 else len(old_raw)
+        last[3] += end - last[1]
+        last[1] = end
+    return [tuple(block) for block in blocks]
+
+
 def change_chars(change: Iterable) -> tuple[int, int]:
     """Characters removed and added by a change, counted separately."""
     removed = added = 0
