@@ -118,14 +118,14 @@ def _publish_settlement(tools, drive_logs, row):
 def _settle_host_error(tools, drive_logs, live, invocation, outcome):
     """Record a submission failure or a failed future through one settlement guard.
 
-    A control that ended the call (Pause, Cancel, a deadline: the exception carries its
-    ``control_reason``) settles as ``interrupted`` with that reason, never as a host failure."""
+    A control that ended the call (Pause, Cancel, a deadline: the exception carries its ``control_reason``;
+    a send fenced by a pause being written names it as ``pausing``) settles as ``interrupted``, never as a host failure."""
     try:
         exc = outcome if isinstance(outcome, BaseException) else outcome.exception()
     except BaseException as failure:
         exc = failure
     if exc is not None and claim_settlement(invocation):
-        reason = str(getattr(exc, "control_reason", "") or "")
+        reason = str(getattr(exc, "control_reason", "") or ("pausing" if getattr(exc, "limit_scope", "") == "pausing" else ""))
         _publish_settlement(tools, drive_logs, {
             **live, "ts": utc_now_iso(), "type": CALL_SETTLED, "is_error": True,
             **({"status": HOST_INTERRUPTED, "control_reason": reason} if reason else {"status": "host_error"}),
@@ -452,7 +452,7 @@ def _typed_result_metadata(
 
     The rules below are deliberately NOT text classification and stay here: the
     untruncated artifact-registration fallback, the plan-review metadata, the
-    process facts with the ``run_command`` exit-0 override, and the
+    process facts, and the
     skill-publish projection — all keyed on the tool name and on trusted meta.
     """
     text = str(result or "")

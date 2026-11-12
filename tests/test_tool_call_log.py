@@ -179,6 +179,25 @@ def test_a_control_that_ends_the_call_settles_as_interrupted_with_its_reason(tmp
     assert row["result_preview"].endswith(f"interrupted: {control}")
 
 
+@pytest.mark.parametrize("fenced", [True, False])
+def test_a_send_fenced_by_a_pause_is_interrupted_and_a_money_stop_is_not(tmp_path, fenced):
+    """A tool whose own model send meets the fence of a pause being written was ended by that pause: the
+    row says ``interrupted`` and ``pausing``, the fence's own word. A spend limit reached inside a tool
+    is no control of the call and stays the host's row."""
+    from ouroboros.usage_accounting import BudgetExceeded, DispatchFenced
+
+    def ended(_name, _args):
+        if fenced:
+            raise DispatchFenced("model dispatch fenced: task t is entering an exact pause", limit_scope="pausing")
+        raise BudgetExceeded("known spend reached the limit")
+
+    with pytest.raises(BudgetExceeded):
+        _call(_Registry(tmp_path, ended), tmp_path)
+    [call] = logical_calls(_rows(tmp_path / "child" / "logs" / "tools.jsonl"))
+    row = call["settled"]
+    assert (row["status"], row.get("control_reason")) == (("interrupted", "pausing") if fenced else ("host_error", None))
+
+
 def test_host_error_producer_reaches_memory_as_failure(tmp_path, monkeypatch):
     from ouroboros.memory import Memory
     from ouroboros.usage_accounting import UsageAccountingError

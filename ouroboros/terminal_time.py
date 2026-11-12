@@ -1,7 +1,7 @@
 """Host-owned per-attempt terminal occurrence, separate from publication time.
 
 An occurrence is observed by whoever performs the live transition: an executor ending
-its own attempt (``executor_terminal``), or the supervisor cancelling work it holds
+its own attempt (``executor_terminal``), or the supervisor carrying out a requested cancel
 (``supervisor_cancel``: when it recorded the cancel, never the moment a process died).
 Recovery and legacy records stay unknown. A trusted replica transfers a matching fact;
 its receiver never becomes a new clock. No history scan or timestamp inference.

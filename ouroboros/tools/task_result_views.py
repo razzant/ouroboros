@@ -121,7 +121,7 @@ def authority_selection(authority: Dict[str, Any], task_id: str, fields: Any, *,
         "partial": fields is not None, "source": source}
     if absent:
         payload.update(absent_fields=absent, absent_fields_note=(
-            "this record carries no field with these names; selected_fields and omitted_fields together name the fields it has"))
+            "this view of the record carries no field with these names; selected_fields and omitted_fields together name the fields it has"))
     if digest and digest != projection_sha:
         return {**payload, "status": "unavailable", "reason": "authority_identity_mismatch",
                 "expected_authority_projection_sha256": digest}

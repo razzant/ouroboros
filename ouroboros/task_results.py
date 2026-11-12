@@ -561,7 +561,7 @@ def write_task_result(
                                         suggested_name=title or existing.get("title") or None)
         now = utc_now_iso()
         # The clock belongs to whoever performs this transition: the executor ending its attempt, or
-        # (``_cancel_observed``) the supervisor cancelling work it holds. No field can claim either.
+        # (``_cancel_observed``) the supervisor carrying out a requested cancel. No field can claim either.
         projected_fields.update(terminal_time_patch(existing, projected_fields, status=projected_status,
             task_id=task_id, observed_at=now if (_terminal_observed or _cancel_observed) else None,
             replica=_terminal_time_source, source="executor_terminal" if _terminal_observed else SUPERVISOR_CANCEL))
