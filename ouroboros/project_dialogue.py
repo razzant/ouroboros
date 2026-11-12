@@ -1215,7 +1215,7 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
     """
     from ouroboros.outcomes import (
         ACCEPTANCE_ACCEPTED, ACCEPTANCE_BYPASS_REASON_BY_RAIL, REASON_FINAL_MESSAGE, REASON_OWNER_REQUESTED_FINALIZATION,
-        WARN_DELEGATED_CUSTODY_UNRECONCILED, WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW, plan_review_awaiting,
+        DETAIL_ONLY_WARNINGS, WARN_DELEGATED_CUSTODY_UNRECONCILED, WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW, plan_review_awaiting,
     )
     from ouroboros.tool_error_words import residual_tool_errors_phrase
 
@@ -1292,7 +1292,7 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
     warnings.append(objective.get("warning") or "")
     excluded = {"", "delegated_custody_unreconciled", "terminal_delivery_unknown", "terminal_delivery_exhausted"}
     if not include_review_details:
-        excluded.add("receipt_absent")
+        excluded |= DETAIL_ONLY_WARNINGS
     named = residual_tool_errors_phrase(execution)  # the failure the record holds, in owner words
     warning_clauses = [(str(w) == WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW and named) or TASK_CAUSE_PHRASES.get(str(w), str(w))
                        for w in warnings if str(w) not in excluded]

@@ -130,7 +130,9 @@ def test_a_quiet_run_with_open_delegated_custody_is_never_silenced(wake):
     with store.open_store(wake.root, write=True) as txn:
         txn.put_custody("leaf", {"run_id": "leaf", "task_id": TASK_ID, "source": "delegated_subagent"},
                         state=current.HELD)
-    text, usage, trace, bus = wake.run([finish(INTERNAL, silent=True)])
+    # The first finish is told once that its own run is still open (audit 11.11, item 18); the second stands.
+    text, usage, trace, bus = wake.run([finish(INTERNAL, silent=True), finish(INTERNAL, silent=True)])
+    assert len(wake.calls) == 2
     assert usage.get("wake_silent") is True
     pending, stored = emit(wake, text, usage, trace, bus=bus)
     shown = sends(pending)

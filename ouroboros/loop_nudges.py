@@ -388,10 +388,9 @@ def _pre_delivery_notice(tools: ToolRegistry, drive_root: Any, task_id: str, llm
     from ouroboros.tools.review_result import required_root_wave
 
     lines: List[str] = []
-    # An author who already declared that nothing is machine-checkable decided knowingly (owner 11.10: «только
-    # осознанно»); the record still says nothing examined the result (consilium R5, Р2 (ii)).
-    declared = any(str(row.get("status") or "") == "declared" for row in receipt_rows)
-    if (result_unexamined(llm_trace) and not declared and not required_root_wave(tools._ctx)
+    # A declaration that nothing is machine-checkable does not skip it: an early formal record must not buy the
+    # door back (consilium R5, Р2 (i): opus, fable; grok for skipping). The notice states the declaration.
+    if (result_unexamined(llm_trace) and not required_root_wave(tools._ctx)
             and not _zero_run_closed(tools._ctx, receipt_rows)):
         lines += [
             "Before delivery: nothing has examined this result since it last changed.",
@@ -469,7 +468,7 @@ def _maybe_inject_finalization_nudges(
 
         receipt_rows = read_verification_receipts(drive_root, task_id)
 
-    def _inject(reminder: str, note: str, cause: str) -> bool:
+    def _inject(reminder: str, note: str, cause: str, *, progress: bool = True) -> bool:
         # The one nudge protocol every advisory injection below follows: land
         # the model's pending text, append the reminder, record the note once
         # (live progress AND the durable trail), name the hold's typed cause
@@ -477,7 +476,8 @@ def _maybe_inject_finalization_nudges(
         if content and content.strip():
             messages.append({"role": "assistant", "content": content})
         _loop()._append_or_merge_user_message(messages, f"[SYSTEM REMINDER]\n{reminder}")
-        emit_progress(note)
+        if progress:
+            emit_progress(note)
         llm_trace["reasoning_notes"].append(note)
         tools._ctx._completion_hold_cause = cause
         return True
@@ -537,7 +537,9 @@ def _maybe_inject_finalization_nudges(
         return _inject(finalization_msg, finalization_msg, "skill_not_finalized")
     notice = _claim_pre_delivery_notice(tools, drive_root, task_id, llm_trace, receipt_rows)
     if notice:
-        return _inject(notice, "Pre-delivery facts shown before final response.", "pre_delivery_notice")
+        # A nanny's notice stays out of the owner chat's progress (owner 2026-08-15: nanny chat spam removed).
+        return _inject(notice, "Pre-delivery facts shown before final response.", "pre_delivery_notice",
+                       progress=not getattr(tools._ctx, "_nanny_route_dispatched", False))
     # No "expected output but nothing attempted" re-loop (A3, removed for #1748): plain
     # prose can itself be the requested deliverable, and the transcript already shows
     # the model its own calls.

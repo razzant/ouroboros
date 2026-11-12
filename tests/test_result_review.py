@@ -1816,7 +1816,8 @@ def test_a_reasoned_pending_finish_warns_until_a_late_pass_of_its_exact_subject_
     """Required + Advisory (owner, 8 Nov 2026): the author may finish while the floor's review still runs, with its
     reason; the task is Done with warnings and the review stays owed. When that review settles after the task ended,
     the real late path keeps its mark, and only a PASS of exactly the delivered subject clears the warning it caused.
-    A warning the review never answered (Astra, 8 Nov: ``receipt_absent``, no host-attested verification) stays."""
+    A warning the review never answered (Astra, 8 Nov: ``receipt_absent``) stays in the record; nothing examined the
+    result is a detail, so after that PASS the headline is Done (owner, 9 Nov 2026)."""
     from ouroboros.chronicle_store import ChronicleStore, is_late_review_mark
     from ouroboros.late_review_marks import replay_owed_late_reviews
     from ouroboros.outcomes import _merge_objective_warning, _objective_axis, _review_axis
@@ -1875,12 +1876,12 @@ def test_a_reasoned_pending_finish_warns_until_a_late_pass_of_its_exact_subject_
     if late == "PASS":  # the open card reads what this reload reads; a FAIL announces no outcome and keeps the warning
         [event] = announced
         assert (event["task_id"], event["record_id"]) == (ctx.task_id, record_id)
-        assert event["current_outcome"]["outcome_phase"] == outcome_phase(stored, {}) == ("warn" if warning else "done")
+        assert event["current_outcome"]["outcome_phase"] == outcome_phase(stored, {}) == "done"
     else:
         assert announced == []
     if late == "PASS":
-        assert completion_status_label(stored, {}) == ("Done with warnings" if warning else "Done"), \
-            "a PASS of exactly the delivered subject resolves the warning it caused, and only that one"
+        assert completion_status_label(stored, {}) == "Done", \
+            "a PASS of exactly the delivered subject resolves the warning it caused; a detail stays a detail"
         resolved = stored["outcome_axes"]["review"]
         assert resolved["status"] == "pass" and resolved["late_verdict"]["record_id"] == record_id
         assert resolved["pending_finish_resolved"]["review"]["author_finish"] == "author_finish_pending"

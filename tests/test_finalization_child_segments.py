@@ -248,8 +248,8 @@ def test_a_child_change_between_or_inside_segments_holds_the_retained_answer(tre
 
         done = _inject_once(monkeypatch, loop, "_project_child_result_dispositions", act,
                             after=True, when=third_projection)
-    else:
-        done = _inject_once(monkeypatch, loop, "_maybe_enforce_child_absorption_gate", act, after=True)
+    else:  # the finish door's last check inside the first segment
+        done = _inject_once(monkeypatch, loop, "_maybe_inject_finalization_nudges", act, after=True)
     gate = run_gate(root, monkeypatch, ["First answer.", _finish("Second answer.")], admission=boundary == "drain")
     after = {row["task_id"]: _child_result_sha256(row) for row in _load_direct_child_results(root, "parent1", "parent1")}
     assert done and after["child1"] != before["child1"], "the change moved the child's identity"

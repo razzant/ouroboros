@@ -118,6 +118,9 @@ export const TASK_CAUSE_PHRASES = {
 
 // The codes above of a helper the host could not start: its only result is the host's notice to its parent (codes,
 // alternatives), so its card's collapsed line states the cause and the notice stays in Details.
+// Warnings that are details for the owner and never raise the headline (9 Nov 2026): nothing checked the result,
+// a red check no later run passed, finished children without a decision. Twin: outcomes.DETAIL_ONLY_WARNINGS.
+export const DETAIL_ONLY_WARNINGS = ['receipt_absent', 'verification_red_unreconciled', 'children_undecided'];
 export const UNSTARTED_REASONS = new Set(['subagent_executor_unavailable', 'delegate_tools_invisible', 'delegate_visibility_unverified']);
 
 export function taskReasonPhrase(code) {

@@ -57,7 +57,7 @@
       "name": "a stored warning of the retired tool-count check stays legible beside the receipt caveat",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "pass", "warning": "receipt_absent", "warnings": ["receipt_absent", "expected_output_ungrounded"]}}},
       "phase": "warn", "headline": "Done with warnings",
-      "acceptance_clause": "No host verification receipt was recorded; this does not establish whether other checks ran · A retired check recorded no tool calls or structured answer; it does not assess the written result."
+      "acceptance_clause": "Nothing checked this result after its last change: no check ran and no result review was asked for; this does not establish whether other checks ran · A retired check recorded no tool calls or structured answer; it does not assess the written result."
     },
     {
       "name": "partial result remains visible beside earlier approval",
@@ -983,10 +983,28 @@
     },
     {
       "name": "a healed custody stamp leaves the row's other warning standing",
-      "record": {"status": "completed", "reason_code": "delegated_custody_unreconciled", "delegated_runs_unreconciled": [], "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message"}, "objective": {"status": "not_evaluated", "source": "none", "warning": "delegated_custody_unreconciled", "warnings": ["delegated_custody_unreconciled", "receipt_absent"]}}},
+      "record": {"status": "completed", "reason_code": "delegated_custody_unreconciled", "delegated_runs_unreconciled": [], "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message"}, "objective": {"status": "not_evaluated", "source": "none", "warning": "delegated_custody_unreconciled", "warnings": ["delegated_custody_unreconciled", "expected_output_ungrounded"]}}},
       "phase": "warn",
       "headline": "Done with warnings",
-      "acceptance_clause": "No host verification receipt was recorded; this does not establish whether other checks ran."
+      "acceptance_clause": "A retired check recorded no tool calls or structured answer; it does not assess the written result."
+    },
+    {
+      "name": "nothing examined the result is a detail: the headline stays Done and the clause says it",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message"}, "objective": {"status": "not_evaluated", "source": "none", "warning": "receipt_absent", "warnings": ["receipt_absent"]}}},
+      "phase": "done", "headline": "Done",
+      "acceptance_clause": "Nothing checked this result after its last change: no check ran and no result review was asked for; this does not establish whether other checks ran."
+    },
+    {
+      "name": "a red check no later run passed is a detail: the headline stays Done and the clause says it",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message"}, "objective": {"status": "not_evaluated", "source": "none", "warning": "verification_red_unreconciled", "warnings": ["verification_red_unreconciled"]}}},
+      "phase": "done", "headline": "Done",
+      "acceptance_clause": "A check of this result failed and no later run of the same check passed."
+    },
+    {
+      "name": "finished children without a recorded decision are a detail: the headline stays Done and the clause says it",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message"}, "objective": {"status": "not_evaluated", "source": "none", "warning": "children_undecided", "warnings": ["children_undecided"]}}},
+      "phase": "done", "headline": "Done",
+      "acceptance_clause": "Some finished sub-task results carry no recorded decision on how this answer used them."
     },
     {
       "name": "a provider failure says its own sentence",
@@ -1348,7 +1366,7 @@
       "acceptance_clause": "Ouroboros delivered this answer before the reviewers answered; their verdict is kept when it arrives · The owner asked for the corrected answer before the evening call, the fix is verified by the focused tests and by reading the produced file back, and the reviewers' verdict will be read when it arrives."
     },
     {"name": "the current outcome a late PASS of exactly the delivered answer announces (late_review_marks.current_outcome) reads Done", "record": {"task_id": "task-1", "status": "completed", "reason_code": "final_message", "_result_text_present": false, "quiet_effective": false, "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message"}, "review": {"status": "pass", "source": "result_review", "aggregate_signals": ["PASS"]}, "objective": {"status": "pass", "source": "result_review", "review_status": "pass"}}, "outcome_phase": "done"}, "phase": "done", "headline": "Done", "acceptance_clause": "", "exact_clause": true},
-    {"name": "the same late PASS keeps an independent receipt_absent: Done with warnings and its own sentence", "record": {"task_id": "task-1", "status": "completed", "reason_code": "final_message", "_result_text_present": false, "quiet_effective": false, "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message"}, "review": {"status": "pass", "source": "result_review", "aggregate_signals": ["PASS"]}, "objective": {"warnings": ["receipt_absent"], "warning": "receipt_absent", "status": "pass", "source": "result_review", "review_status": "pass"}}, "outcome_phase": "warn"}, "phase": "warn", "headline": "Done with warnings", "acceptance_clause": "No host verification receipt was recorded; this does not establish whether other checks ran.", "exact_clause": true},
+    {"name": "the same late PASS keeps an independent receipt_absent as a detail: Done and its own sentence", "record": {"task_id": "task-1", "status": "completed", "reason_code": "final_message", "_result_text_present": false, "quiet_effective": false, "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message"}, "review": {"status": "pass", "source": "result_review", "aggregate_signals": ["PASS"]}, "objective": {"warnings": ["receipt_absent"], "warning": "receipt_absent", "status": "pass", "source": "result_review", "review_status": "pass"}}, "outcome_phase": "done"}, "phase": "done", "headline": "Done", "acceptance_clause": "Nothing checked this result after its last change: no check ran and no result review was asked for; this does not establish whether other checks ran.", "exact_clause": true},
     {
       "name": "the author's acceptance of an earlier approved version is Done and says which version the reviewers approved",
       "record": {

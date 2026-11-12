@@ -909,8 +909,7 @@ def get_tools() -> list[ToolEntry]:
                            "(partial_finding/blocker/question/milestone) and a tail of its result — "
                            "a PURE READ. Use this to check intermediate findings or decide whether to keep "
                            "waiting / steer / cancel, without committing to a finalization decision. It "
-                           "changes no state: the pre-finalization reminder is change-based and is cleared "
-                           "only by discard_child_result / cancel_task, not by reading.",
+                           "changes no state: reading records no decision about the child's result.",
             "parameters": {"type": "object", "properties": {
                 "task_id": {"type": "string"},
                 "view": {"type": "string", "enum": ["summary", "partials", "tail"], "default": "summary",

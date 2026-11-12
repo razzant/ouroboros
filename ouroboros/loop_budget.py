@@ -937,8 +937,6 @@ def _prepare_post_tool_budget_context(
                 llm_trace,
                 control="skill_revision_required",
             )
-        # An absorption hold with unchanged evidence keeps holding: only
-        # dispositions close the gate, and a disposition changes evidence.
     # Cross-model fallback can adopt a different route during this round.
     limit_ctx.active_model = active_model
     limit_ctx.active_use_local = active_use_local

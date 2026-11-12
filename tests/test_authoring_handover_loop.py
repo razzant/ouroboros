@@ -281,34 +281,33 @@ def test_owner_followup_after_incomplete_can_resume_tools_and_heal_warning(episo
 
 
 def test_second_toolless_handover_preserves_real_verification_nudge(episode):
-    from ouroboros.outcomes import append_verification_receipt
-    assert append_verification_receipt(episode.root, TASK, {
-        "status": "fail", "kind": "run", "check": "existing project check", "returncode": 1,
-    })
-    replacement = finish("Final with disclosed failed check")
+    """The host's one pre-delivery notice (a written result nothing examined; audit 11.11, item 18) still
+    reaches the successor after the handover is recorded incomplete, and the next answer is delivered."""
+    from tests.test_completion_hold_observation import holds
+
+    write = _tool("write_file", path="report.md", content="Unchecked report")
+    replacement = finish("Final with the unchecked report disclosed")
     text, usage, trace = episode.run([
-        _read(), None, _text("Initial WIP"), finish("Still incomplete"), replacement,
+        write, None, _text("Initial WIP"), finish("Still incomplete"), replacement,
     ])
-    assert text == "Final with disclosed failed check"
+    assert text == "Final with the unchecked report disclosed"
+    assert trace["tool_calls"][0]["is_error"] is False
     assert len(_handover_notes(trace)) == 1
-    assert sum("Red-verification nudge" in note for note in trace["reasoning_notes"]) == 1
-    assert any("host-attested verification is RED" in str(row.get("content", ""))
-               for row in episode.calls[-1]["messages"])
+    assert [(row["reason"], row["subreason"]) for row in holds(episode.root)] == [
+        ("finalization_nudge", "authoring_handover"), ("finalization_nudge", "pre_delivery_notice")]
     assert usage["reason_code"] == "authoring_handover_incomplete"
 
 
 def test_second_toolless_handover_preserves_real_skill_readiness_nudge(episode):
-    from ouroboros.outcomes import append_verification_receipt
     from tests.test_loop_skill_finalization import _write_self_authored_skill
 
     _write_self_authored_skill(episode.root)
-    # Isolate the skill reminder from the separately covered verification rail.
-    assert append_verification_receipt(episode.root, TASK, {"status": "observed", "kind": "artifact"})
     write = _tool("write_file", path="notes.txt", content="Authored skill notes",
                   root="skill_payload", bucket="external", skill_name="alpha")
+    final = finish("Skill is authored but still needs review and enablement.")
+    # The skill reminder comes first; the one pre-delivery notice (the write nothing examined) holds the next finish.
     text, usage, trace = episode.run([
-        write, None, _text("Initial WIP"), finish("Still incomplete"),
-        finish("Skill is authored but still needs review and enablement."),
+        write, None, _text("Initial WIP"), finish("Still incomplete"), final, final,
     ])
     assert text == "Skill is authored but still needs review and enablement."
     assert trace["tool_calls"][0]["is_error"] is False

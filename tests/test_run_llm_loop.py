@@ -3,8 +3,8 @@
 Split out of ``tests/test_loop_misc.py`` when that module was divided by
 theme; every moved block is verbatim. Covers assistant metadata round-trips,
 the direct-final admission fence, the budget rail, display-only reasoning,
-finalize_now, per-task model overrides, the swarm force-plan gate and the
-subagent handoff/absorption rails.
+finalize_now, per-task model overrides, the swarm force-plan gate, the
+subagent handoff and the running children the finish door names.
 """
 from __future__ import annotations
 
@@ -571,15 +571,12 @@ def test_run_llm_loop_appends_orphan_note_when_finalizing_with_unhandled_child(t
         calls["count"] += 1
         if calls["count"] == 1:
             return {"role": "assistant", "content": "child1 is still running; I will finalize now."}, 0.0
-        if calls["count"] < 4:
-            return finish("Best effort: child1 is still running."), 0.0
-        assert calls["count"] == 4
-        return finish("Best effort: child1 is still running.", action="stop",
-                      rationale="The child is still collecting evidence; this task is unfinished."), 0.0
+        assert calls["count"] == 2
+        return finish("Best effort: child1 is still running."), 0.0
 
     monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call_llm_with_retry)
 
-    result, _usage, trace = run_llm_loop(
+    result, _usage, _trace = run_llm_loop(
         messages=messages,
         tools=ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path),
         llm=FakeLLM(),
@@ -590,83 +587,51 @@ def test_run_llm_loop_appends_orphan_note_when_finalizing_with_unhandled_child(t
         drive_root=tmp_path,
     )
 
-    # Handoff and repeated finish remain held; only the explicit unfinished stop exits.
-    assert calls["count"] == 4
+    # The handoff holds once (the running child named inside it); the next finish is delivered.
+    assert calls["count"] == 2
     assert sum(1 for item in progress if "Subagent handoff status refreshed" in item) == 1
-    assert trace["task_completion"]["action"] == "stop"
     assert not _usage.get("_best_effort_extracted")
     # The selected partial answer is preserved beside the host-authored child notice.
     assert result.startswith("Best effort: child1 is still running.")
     assert "child1" in result and "NOTE: finalized" in _usage["terminal_host_notice"]
 
-def test_run_llm_loop_keeps_child_absorption_open_until_explicit_stop(tmp_path, monkeypatch):
+def test_a_parent_finishing_beside_a_running_child_is_told_once_inside_the_one_handoff(tmp_path, monkeypatch):
+    """Audit 11.11, item 18: a parent finishing while a direct child still runs is told so once, at the door where
+    the subagent handoff fires, inside that one message (one return, not two); its second finish is accepted, and
+    the record keeps what an unfinished stop already wrote: the orphan note and a degraded execution."""
+    from ouroboros.loop import _pre_delivery_notice
+    from ouroboros.outcomes import derive_loop_outcome
     from ouroboros.task_results import STATUS_RUNNING, write_task_result
     from ouroboros.tools.registry import ToolRegistry
+    from tests.test_completion_hold_observation import holds
 
-    write_task_result(
-        tmp_path,
-        "child1",
-        STATUS_RUNNING,
-        parent_task_id="parent1",
-        root_task_id="parent1",
-        delegation_role="subagent",
-        role="reviewer",
-        result="still collecting evidence",
-    )
-    messages = [{"role": "user", "content": "inspect"}]
-    calls = {"count": 0}
-    seen_requests = []
-    progress = []
-    tools = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    tools._ctx.task_contract = {"delegation_budget": {"may_delegate": True, "may_fan_out": True}}
-
-    class FakeLLM:
-        def default_model(self):
-            return "test-model"
+    monkeypatch.setattr(loop_mod, "get_task_review_mode", lambda: "off")
+    write_task_result(tmp_path, "child1", STATUS_RUNNING, parent_task_id="parent1", root_task_id="parent1",
+                      delegation_role="subagent", role="reviewer", result="still collecting evidence")
+    requests = []
 
     def fake_call_llm_with_retry(_llm, request_messages, *_args, **_kwargs):
-        calls["count"] += 1
-        seen_requests.append([dict(m) for m in request_messages])
-        if calls["count"] == 1:
-            return {"role": "assistant", "content": "answer 1"}, 0.0
-        if calls["count"] < 4:
-            return finish(f"answer {calls['count']}"), 0.0
-        assert calls["count"] == 4
-        return finish("Stopped with child1 still running.", action="stop",
-                      rationale="The child's evidence is still missing."), 0.0
+        requests.append([dict(row) for row in request_messages])
+        return finish("Partial: child1 is still running."), 0.0
 
     monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call_llm_with_retry)
-    monkeypatch.setattr(loop_mod, "_forced_final_answer",
-                        lambda *_a, **_kw: pytest.fail("reminder count cannot buy a forced final"))
-
+    tools = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     result, usage, trace = run_llm_loop(
-        messages=messages,
-        tools=tools,
-        llm=FakeLLM(),
-        drive_logs=tmp_path,
-        emit_progress=lambda text, **_meta: progress.append(text),
-        incoming_messages=queue.Queue(),
-        task_id="parent1",
-        drive_root=tmp_path,
-    )
+        messages=[{"role": "user", "content": "inspect"}], tools=tools,
+        llm=SimpleNamespace(default_model=lambda: "test-model"), drive_logs=tmp_path / "logs",
+        emit_progress=lambda *_a, **_k: None, incoming_messages=queue.Queue(), task_id="parent1",
+        drive_root=tmp_path)
 
-    from ouroboros.outcomes import derive_loop_outcome
-    from ouroboros.task_results import load_task_result
+    notice = _pre_delivery_notice(tools, tmp_path, "parent1", trace, [])
+    assert sum("child1" in line for line in notice.splitlines()) == 1, "one line names the running child"
+    assert result == "Partial: child1 is still running." and len(requests) == 2, "the second finish is accepted"
+    [door] = [row for row in requests[1] if "[SUBAGENT_RESULTS" in str(row.get("content") or "")]
+    assert notice in door["content"], "the notice rides the handoff's own message"
+    assert sum(notice in str(row.get("content") or "") for row in requests[1]) == 1
+    assert [(row["reason"], row["subreason"]) for row in holds(tmp_path)] == [("subagent_handoff", None)]
+    assert "child1" in usage["terminal_host_notice"], "the orphan note"
+    assert derive_loop_outcome(result, usage, trace)["outcome_axes"]["execution"]["status"] == "degraded"
 
-    assert result == "Stopped with child1 still running."
-    assert trace["task_completion"]["action"] == "stop"
-    assert derive_loop_outcome(result, usage, trace)["outcome_axes"]["objective"]["reason"] == "author_stop"
-    assert not usage.get("_best_effort_extracted")
-    assert "child task(s) not explicitly absorbed" in usage["terminal_host_notice"]
-    assert calls["count"] == 4
-    assert load_task_result(tmp_path, "child1")["status"] == "running"
-    absorption_round_delta = seen_requests[2][len(seen_requests[1]):]
-    delta_text = "\n".join(str(m.get("content") or "") for m in absorption_round_delta)
-    assert "[CHILD_ABSORPTION_REQUIRED]" in delta_text and "child1 [running]" in delta_text
-    assert "[DELIVERY_FINALIZATION_CONTROL]" not in delta_text
-    # The next attempted finish receives the same actual obligation, never a forced terminal.
-    assert "[CHILD_ABSORPTION_REQUIRED]" in str(seen_requests[3])
-    assert "[FINALIZE_WITH_UNABSORBED_CHILDREN]" not in str(seen_requests)
 
 def test_run_llm_loop_does_not_include_current_subagent_in_own_handoff(tmp_path, monkeypatch):
     from ouroboros.task_results import STATUS_RUNNING, write_task_result

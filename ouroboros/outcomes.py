@@ -404,18 +404,17 @@ def current_custody_debt(*records: Any) -> Optional[list]:
 
 
 def objective_warned(objective: Any, debt: Optional[list]) -> bool:
-    """The headline's objective warning: a nonempty current debt list warns, and an older
-    row's custody warning stops counting once that list is known empty; every other warning,
-    and one beside an absent list, keep the stored word. Twin: log_events.js ``objectiveWarned``."""
+    """The headline's objective warning: a nonempty current debt list warns, and an older row's custody warning
+    stops counting once that list is known empty; every other warning, and one beside an absent list, keep the stored
+    word; a detail-only fact (``DETAIL_ONLY_WARNINGS``) asks nothing of the owner (9 Nov 2026). Twin:
+    log_events.js ``objectiveWarned``."""
     objective = objective if isinstance(objective, dict) else {}
-    warnings = objective.get("warnings") if isinstance(objective.get("warnings"), list) else []
-    # A detail-only fact (nothing examined this result, a red check) asks nothing of the owner (9 Nov 2026).
-    codes = [code for code in [objective.get("warning"), *warnings] if code and code not in DETAIL_ONLY_WARNINGS]
     if debt:
         return True
-    if debt is None or (codes[:1] != [WARN_DELEGATED_CUSTODY_UNRECONCILED]):
-        return bool(codes)
-    return any(code != WARN_DELEGATED_CUSTODY_UNRECONCILED for code in codes)
+    warnings = objective.get("warnings") if isinstance(objective.get("warnings"), list) else []
+    return any(code and code not in DETAIL_ONLY_WARNINGS
+               and not (debt is not None and code == WARN_DELEGATED_CUSTODY_UNRECONCILED)
+               for code in [objective.get("warning"), *warnings])
 
 # Tools/roots whose successful use means the turn produced reviewable work.
 # Root-aware write tools: these take a `root` arg, so the scratch-exclusion rule

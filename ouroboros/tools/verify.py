@@ -5,7 +5,9 @@ One call runs the check AND attests the result, so it replaces the run the agent
 would have done anyway (≈ zero extra rounds). The contract KIND is agent-declared
 (LLM-first, P5 — the host never infers from prose whether a machine-checkable
 contract exists); the host only executes and attests what it can. Receipts feed
-the verification ledger and suppress the receipt_absent transparency flag.
+the verification ledger; an executed check after the result's last change examines it
+(``outcomes.result_unexamined``), while a declaration or a confirmed path is recorded as
+what it is and leaves the receipt_absent detail standing.
 """
 
 from __future__ import annotations

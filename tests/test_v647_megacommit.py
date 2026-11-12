@@ -63,7 +63,7 @@ def test_query_code_user_files_empty_path_hard_error():
 def test_a_turn_without_effects_carries_no_tool_count_warning():
     """The retired M2 check warned when a declared deliverable came with no tool calls and no
     FINAL ANSWER marker; plain prose can itself be the deliverable (#1748), so how many tools
-    an answer used is no judgment of it. FR3 still flags real effects without grounding."""
+    an answer used is no judgment of it. A written result nothing examined is still flagged."""
     from ouroboros import outcomes as O
 
     for final_answer in ("", "42"):
@@ -72,7 +72,8 @@ def test_a_turn_without_effects_carries_no_tool_count_warning():
         O.apply_receipt_absent_flag(clean, {"tool_calls": []}, tempfile.mkdtemp(), "m1")
         assert clean["outcome_axes"]["objective"] == {"status": "not_evaluated"}
     effects = {"outcome_axes": {"execution": {"status": "ok"}, "objective": {"status": "not_evaluated"}}, "final_answer": ""}
-    O.apply_receipt_absent_flag(effects, {"tool_calls": [{"tool": "commit_reviewed", "status": "ok"}]}, tempfile.mkdtemp(), "m2")
+    written = {"tool": "write_file", "status": "ok", "args": {"path": "report.md"}}
+    O.apply_receipt_absent_flag(effects, {"tool_calls": [written]}, tempfile.mkdtemp(), "m2")
     assert effects["outcome_axes"]["objective"]["warnings"] == ["receipt_absent"]
 
 
@@ -394,18 +395,13 @@ def test_verify_and_record_handler_artifact_and_declared(tmp_path):
         artifact_paths=["../" * 15 + "etc/passwd"],
     )
     assert "OBSERVED" not in escaped and "REFUSED_OUT_OF_SCOPE" in escaped
-    # no_visible_machine_contract -> honest declared receipt (grounding)
+    # no_visible_machine_contract -> honest declared receipt (a declaration, not an examination)
     assert "DECLARED" in _verify_and_record(ctx, contract_kind="no_visible_machine_contract", check="manual UI review")
     assert read_verification_receipts(ctx.drive_root, "vhandler")[-1]["status"] == "declared"
 
 
 def test_configured_actor_can_record_typed_zero_run_only_before_leaf(tmp_path):
-    from ouroboros.outcomes import (
-        apply_receipt_absent_flag,
-        read_verification_receipts,
-        should_nudge_verification,
-        verification_grounding_present,
-    )
+    from ouroboros.outcomes import apply_receipt_absent_flag, read_verification_receipts
     from ouroboros.tools.verify import _verify_and_record
 
     ctx = _verify_ctx(tmp_path)
@@ -433,15 +429,9 @@ def test_configured_actor_can_record_typed_zero_run_only_before_leaf(tmp_path):
     assert ctx._configured_actor_bootstrap["zero_run_receipt_recorded"] is True
 
     # A no-leaf lifecycle decision is not proof that the requested deliverable
-    # is correct.  It remains visible in the receipt packet without suppressing
-    # receipt_absent or masquerading as host-attested grounding.  The actor also
-    # must not become grounding. The pure receipt helper has no tool-profile
-    # context, so it still reports that a reviewable effect needs verification;
-    # the loop suppresses that impossible reminder only for the readonly actor
-    # profile whose generic verify surface disappears after zero-run.
+    # is correct.  It remains visible in the receipt packet without examining the
+    # result: the record still says nothing examined it (receipt_absent).
     trace = {"tool_calls": [{"tool": "integrate_subagent_patch", "status": "ok", "args": {}}]}
-    assert verification_grounding_present(trace, ctx.drive_root, ctx.task_id) is False
-    assert should_nudge_verification(trace, ctx.drive_root, ctx.task_id) is True
     loop_outcome = {
         "outcome_axes": {
             "execution": {"status": "ok"},

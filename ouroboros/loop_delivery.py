@@ -153,7 +153,6 @@ def _compute_subagent_handoff(tools: Any, drive_root: Any, task_id: str, content
         # by parsing final PROSE; finalizing with unhandled children appends a loud orphan note (P1).
         if pairs - shown:
             tools._ctx._subagent_handoff_shown = shown | pairs
-            tools._ctx._child_absorption_reminded = False
             _absorb_budget = 160_000 if str(get_context_mode()).lower() == "max" else 60_000
             return format_subagent_absorption_message(
                 children, parent_task_id=task_id, budget_chars=_absorb_budget,

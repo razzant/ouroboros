@@ -160,11 +160,13 @@ def test_result_review_cards_say_the_authors_acceptance_in_both_themes(direct_se
             browser.close()
 
 
-RECEIPT = "No host verification receipt was recorded; this does not establish whether other checks ran."
+RECEIPT = ("Nothing checked this result after its last change: no check ran and no result review was asked for; "
+           "this does not establish whether other checks ran.")
 # name: (independent warning at the end, late verdict, headline after, words the collapsed line never says after)
 LATE = {
     "late-pass": ("", "PASS", "Done", BEFORE),
-    "late-pass-receipt": ("receipt_absent", "PASS", "Done with warnings", BEFORE),
+    # Nothing examined the result is a detail: the headline is Done and the line still says it (9 Nov 2026).
+    "late-pass-receipt": ("receipt_absent", "PASS", "Done", BEFORE),
     "late-fail": ("", "FAIL", "Done with warnings", RECEIPT),
     # A newer state (a custody debt recorded after the late PASS) is shown first; the late frame, published after it,
     # still carries the older revision.
@@ -195,7 +197,8 @@ def test_a_late_pass_repaints_the_open_card_and_its_reload_reads_the_same(direct
     late verdict then settles: the real resolver (``resolve_pending_result_review``) writes the stored outcome and the
     existing ``review_late_result`` event carries its CURRENT outcome, delivered here as ``bridge.push_log`` frames it
     (``address_task_event``; the route itself: tests/test_log_forwarding.py). The open card repaints only on a PASS of
-    exactly the delivered answer and drops only the warning that wait caused: an independent ``receipt_absent`` stays,
+    exactly the delivered answer and drops only the warning that wait caused: an independent ``receipt_absent`` stays
+    as a detail (Done, its sentence still in the line),
     a late FAIL keeps its warning, a replay changes nothing, a seat's result without an outcome touches no card, a task
     with no card here gets none, and a late outcome older than a newer state the card shows never paints over it, even
     published after it: its revision orders it, not its later ``ts`` (the card's clock; Astra, 10 Nov 2026). A reload
