@@ -1128,11 +1128,11 @@ def _pool_bound(drive_root: Any, evidence: CapabilityEvidence, route: Dict[str, 
 
 
 def _pinned_record(drive_root: Any, route: Dict[str, Any], fingerprint: str = "") -> Optional[CapabilityEvidence]:
-    """A pinned route whose catalog read failed: the fresh statement of the same profile AND the same account
-    fingerprint for this model, as that account's own record (its own date; nothing stored). The fingerprint is the
-    route's identity when it carries one, else the newest one observed behind that profile on any model of its source:
-    a profile name alone proves no account, so a statement of another fingerprint, a stale one, or Auto leave the
-    window unknown."""
+    """A route bound to a profile whose catalog read failed (a pin, or an Auto receipt rebind carrying the account that
+    served): the fresh statement of the same profile AND the same account fingerprint for this model, as that account's
+    own record (its own date; nothing stored). The fingerprint is the route's identity when it carries one, else the
+    newest one observed behind that profile on any model of its source: a profile name alone proves no account, so a
+    statement of another fingerprint, a stale one, or Auto leave the window unknown."""
     options = route.get("options") or {}
     profile = options.get("credential_profile_id")
     if route.get("provider") != "claudexor" or not profile:
