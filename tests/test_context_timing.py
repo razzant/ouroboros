@@ -123,11 +123,13 @@ def test_a_pass_repeated_by_design_counts_again_only_what_one_pass_repeats():
         counted("reads", key="k")
         with another_pass():
             counted("reads", key="k")  # the repeat by design
-            assert section_spans()["work"] == {"reads": 2}
-            counted("reads", key="k")  # done twice within that pass
-        assert section_spans()["work"] == {"reads": 3, "reads_again": 1}
+            counted("reads", key="j")  # first done in this pass
+            assert section_spans()["work"] == {"reads": 3}
+            counted("reads", key="j")  # done twice within that pass
+        assert section_spans()["work"] == {"reads": 4, "reads_again": 1}
         counted("reads", key="k")  # done again after both passes
-        assert section_spans()["work"] == {"reads": 4, "reads_again": 2}
+        counted("reads", key="j")  # done again after the pass that first did it
+        assert section_spans()["work"] == {"reads": 6, "reads_again": 3}
     with another_pass():  # outside a measured window it counts nothing and fails nothing
         counted("reads", key="k")
     assert section_spans() == {}
