@@ -291,7 +291,7 @@ def _window_end(custody: Any, invocation: Dict[str, Any]) -> str:
     from ouroboros.deadline_utils import parse_deadline_ts
     from ouroboros.delegate_custody import run_timing
 
-    started, cap = run_timing(custody, str(invocation.get("run_id") or "")) if invocation.get("run_id") else ("", 0)
+    started, cap = run_timing(custody, str(invocation.get("run_id") or ""), window=True) if invocation.get("run_id") else ("", 0)
     body = invocation.get("request") or {}
     cap = int(cap or invocation.get("max_seconds") or body.get("maxSeconds") or 0)
     if cap <= 0:

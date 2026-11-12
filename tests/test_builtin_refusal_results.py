@@ -14,6 +14,7 @@ from ouroboros.tools.tool_result import (
     _restore_tool_result_sidecar,
 )
 from tests._cases import case_folders
+from tests._delegated_transport_shared import _delegate_registry
 from tests._run_wait_shared import wake_now
 
 
@@ -163,23 +164,6 @@ def test_existing_warning_and_review_policy_are_not_blanket_reclassified(text, c
 # not owned, containment fault, refused cancel) was recorded as a SUCCESSFUL
 # tool call on the outcome axis, in the acceptance packet, and in the
 # supervising task's own reasoning.
-
-
-def _delegate_registry(tmp_path, monkeypatch, task_id="t-family"):
-    """A real registry, with the family's five entries registered as production does."""
-    from ouroboros.tools.registry import ToolRegistry
-    import ouroboros.safety as safety
-
-    monkeypatch.setattr(safety, "check_safety", lambda *_a, **_k: (True, ""))
-    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    registry._ctx.task_id = task_id
-    from ouroboros.task_results import write_task_result
-
-    write_task_result(tmp_path, task_id, "running", root_task_id=task_id, task_attempt=1)
-    registry._ctx.task_metadata = {"root_task_id": task_id, "parent_task_id": task_id}
-    assert {"delegate_start", "delegate_wait", "delegate_cancel", "delegate_answer",
-            "delegate_message"} <= set(registry._entries)
-    return registry
 
 
 # Each row is a call that refuses BEFORE any daemon work, so the dispatch
