@@ -1074,7 +1074,7 @@ this Project" came to be drawn six ways. The rule is therefore about intents.
 ### Chat authorship and System rows
 
 Voice follows authorship, not severity or transport. Model-authored replies use
-Ouroboros's assistant voice; host-composed commands, receipts and diagnostics use
+Ouroboros's voice; host-composed commands, receipts and diagnostics use
 System voice. A **System row** is a chat message with `role="system"`, in the
 yellow/amber system treatment or its task-card placement. `role` alone selects
 voice; `system_type` names the kind, not the author (the Project question and
