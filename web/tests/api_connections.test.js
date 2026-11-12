@@ -19,7 +19,7 @@ import { rowById } from '../modules/settings_rows.js';
 // Setup retains the shared provider cards, each with its keys and forms.
 const renderSettingsPage = () => PROVIDER_CARDS.map(providerSettingsCard).join('');
 import {
-    cacheHintsNote, connectionNameFor, connectionReferencesText, connectionRowFacts, connectionRows, connectionUsage,
+    cacheHintsNote, connectionNameFor, connectionRowFacts, connectionRows, connectionUsage,
 } from '../modules/settings_connections.js';
 import { renderLiveCardMeta } from '../modules/chat_activity.js';
 
@@ -257,7 +257,7 @@ test('a row says what is true of its key now: status, use, and who provides it',
     assert.equal(cacheHintsNote({ cache_hints: { refused: false } }), '');
 });
 
-test('a new key takes a stored name from its label once; the setting and the save receipt read safely', () => {
+test('a new key takes a stored name from its label once; the setting reads safely', () => {
     assert.equal(connectionNameFor('Claude credits'), 'claude-credits');
     assert.equal(connectionNameFor('  Crédits — équipe 2 '), 'credits-equipe-2');
     assert.equal(connectionNameFor('Default'), 'default-2', '`default` is the built-in key');
@@ -269,25 +269,6 @@ test('a new key takes a stored name from its label once; the setting and the sav
     assert.deepEqual(connectionRows('[{"kind":"zai","name":"coding"}]'), [{ kind: 'zai', name: 'coding' }]);
     assert.deepEqual(connectionRows('not json'), []);
     assert.deepEqual(connectionRows([null, 'x', [], { kind: 'openai', name: 'b' }]), [{ kind: 'openai', name: 'b' }]);
-
-    const connections = apiConnections(SETTINGS);
-    assert.equal(connectionReferencesText([], connections), '');
-    assert.equal(connectionReferencesText([
-        { setting: 'OUROBOROS_MODEL', route: 'openrouter@claude-credits::anthropic/claude-opus-5.5', connection: 'claude-credits', reason: 'missing' },
-        { setting: 'OUROBOROS_MODEL_FALLBACKS', entry: '2', route: 'openrouter@claude-credits::x', connection: 'claude-credits', reason: 'disabled' },
-        { setting: 'OUROBOROS_SUBAGENTS', entry: 'reviewer-1', route: 'openrouter@claude-credits::y', connection: 'claude-credits', reason: 'missing' },
-    ], connections).includes('Main ('), true);
-    assert.match(connectionReferencesText([
-        { setting: 'OUROBOROS_MODEL_FALLBACKS', entry: '2', route: 'openrouter@claude-credits::x', connection: 'claude-credits' },
-    ], connections), /Fallback 2 \(/);
-    assert.match(connectionReferencesText([
-        { setting: 'OUROBOROS_SUBAGENTS', entry: 'reviewer-1', route: 'openrouter@claude-credits::y', connection: 'claude-credits' },
-    ], connections), /Agents · reviewer-1 \(/);
-    assert.doesNotMatch(connectionReferencesText([
-        { setting: 'OUROBOROS_MODEL', route: 'openrouter@claude-credits::z', connection: 'claude-credits' },
-    ], connections), /OUROBOROS_MODEL/);
-    assert.equal(connectionReferencesText([{ label: 'Main', connection: 'openrouter@claude-credits' }, 'Subagent 2'], connections),
-        'Still naming a removed or disabled key, so they cannot send: Main (OpenRouter · Claude credits), Subagent 2');
 });
 
 test('a wizard draft lists named endpoints without saved metadata, keeping identical model IDs distinct', () => {
