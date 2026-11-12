@@ -166,7 +166,8 @@ def commit_row(page, row_id: str, value=None, *, timeout: float = 10_000) -> str
 def open_entry(page, entry_id: str, *, timeout: float = 10_000):
     """Press an entity list's head and return the editor level it opened."""
     before = top_path(page)
-    settings_page(page, before).locator(f'[data-entry-id="{entry_id}"]').first.locator('[data-entry-open]').click()
+    settings_page(page, before).locator(f'[data-entry-id="{entry_id}"]').first.locator(
+        '[data-entry-open], [data-subagent-field="open"]').click()
     page.wait_for_function("before => { const levels = [...document.querySelectorAll('#page-settings "
                            "[data-settings-page]')].filter((e) => !e.hidden); return levels.length && "
                            "levels.at(-1).dataset.settingsPage !== before; }", arg=before, timeout=timeout)
