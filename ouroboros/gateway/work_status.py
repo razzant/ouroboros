@@ -624,6 +624,8 @@ def place_questions(works: List[Dict[str, Any]], questions: Iterable[Mapping[str
             continue
         room = str(row.get("project_chat_id") if row.get("project_id") else WEB_UI_CHAT_ID)
         item = {"kind": "open_question", "task_id": task_id, **({"quiz_id": quiz_id} if quiz_id else {})}
+        if row.get("quiz_state") not in {"open", "expired_terminal"}:
+            item["code"] = "delivery_unknown"  # answered: only its unknown delivery waits (``question_waits``)
         work = holders.get((room, task_id))
         held = loose.setdefault(room, []) if work is None else work["turn"]
         # A member's own wait names its question, sometimes without its quiz: the same question is said once.
@@ -663,13 +665,23 @@ def roll_up_room(works: List[Mapping[str, Any]], *, complete: bool = True,
             "confirmed": confirmed, "works": [work["work_id"] for work in works]}
 
 
+def _same_question(one: Mapping[str, Any], other: Mapping[str, Any]) -> bool:
+    """The same task's question, by its quiz id when both name one."""
+    quizzes = (one.get("quiz_id"), other.get("quiz_id"))
+    return one.get("task_id") == other.get("task_id") and (None in quizzes or quizzes[0] == quizzes[1])
+
+
 def roll_up_summary(rooms: Mapping[Any, Mapping[str, Any]], works: List[Mapping[str, Any]],
                     *, complete: bool = True) -> Dict[str, Any]:
     """The tray's one line: counts by activity, how many wait for the owner, and confirmation."""
     counts = {activity: 0 for activity in ACTIVITY_ORDER}
     for work in works:
         counts[work["activity"] if work["activity"] in counts else "unknown"] += 1
-    # What waits for the owner: each work with a turn once, and each question no work holds (``place_questions``).
-    loose = sum(1 for room in rooms.values() for item in room.get("turn") or () if not item.get("work_id"))
+    # What waits for the owner: each work with a turn once, and each question no work holds (``place_questions``)
+    # unless a counted work already carries it (a private Presence question is asked in Main while its work stands
+    # in its Project): one question is counted once, though both rooms show it.
+    carried = [item for work in works for item in work["turn"] if item.get("kind") in {"question", "open_question"}]
+    loose = sum(1 for room in rooms.values() for item in room.get("turn") or ()
+                if not item.get("work_id") and not any(_same_question(item, held) for held in carried))
     return {"counts": counts, "turn": sum(bool(work["turn"]) for work in works) + loose,
             "confirmed": complete and all(room.get("confirmed", True) for room in rooms.values())}
