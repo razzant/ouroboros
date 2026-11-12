@@ -174,6 +174,7 @@ function conclusionBody(frame) {
 export function noticeTitle(systemType, source) {
     const author = text(source).trim();
     if (systemType === 'skill_notice') return author ? `Notice from ${author}` : 'Notice from a skill';
+    if (systemType === 'safety_notice') return 'Safety Supervisor';
     return `Reminder from ${author || 'Ouroboros'}`;
 }
 
@@ -291,7 +292,7 @@ export function classifyLiveFrame(frame, { kind = 'chat', isMain = false, isRoot
 
     // A message for the owner that nobody speaks NOW: no new category, the same
     // `important` toggle (DESIGN §9).
-    if (systemType === 'reminder' || systemType === 'skill_notice') {
+    if (systemType === 'reminder' || systemType === 'skill_notice' || systemType === 'safety_notice') {
         return {
             category: 'important',
             key: `important:${rowKey}`,

@@ -1,4 +1,4 @@
-"""Claudexor v3 conversation threads: create, append, read, export and conditional retirement.
+"""Claudexor v3 conversation threads: create, append, turn lookup, read, export and conditional retirement.
 
 Transport only, beside ``gateways/claudexor.py`` (docs/DEVELOPMENT.md "Gateway Boundary
 Pattern"): the engine owns continuity, export inventories and the retirement decision; this
@@ -62,6 +62,12 @@ class ClaudexorThreadGateway:
         if not isinstance(body, dict):
             raise ClaudexorUnavailable("malformed_response", "thread turn returned no handle")
         return body
+
+    def lookup_thread_turn(self, thread_id: str, request: Dict[str, Any], *, idempotency_key: str) -> Dict[str, Any]:
+        """``POST /v2/threads/:id/turns/lookup``: the turn a recorded append holds, read with that append's own
+        body and key; nothing is appended or enqueued. The engine's answer is returned unprojected."""
+        return _object(self._request("POST", _thread_path(thread_id, "turns", "lookup"), json_body=dict(request),
+                                     headers={"Idempotency-Key": str(idempotency_key)}), "thread turn lookup")
 
     def get_thread(self, thread_id: str) -> Dict[str, Any]:
         """Read turns, native-session bindings, and continuity receipts."""

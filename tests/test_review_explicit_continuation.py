@@ -419,6 +419,58 @@ def test_an_author_that_ended_never_sends_a_recorded_choice(stopped_wave, monkey
     assert len(a.engine.posts) == 1
 
 
+@pytest.mark.parametrize("elapsed", [5, 300])
+def test_a_lost_original_start_keeps_its_window_when_recovered(stopped_wave, monkeypatch, elapsed):
+    """The real public review/continue handlers: an accepted original POST loses its reply. Recovery may
+    collect it after expiry, but a continuation gets only the original time remaining, never a fresh cap."""
+    from datetime import datetime, timedelta, timezone
+
+    from ouroboros import deadline_utils, review_custody, utils
+
+    a = stopped_wave
+    a.engine.store = "store-a"
+    original = datetime.now(timezone.utc)
+    now = {"value": original}
+    monkeypatch.setenv("OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC", "30")
+    monkeypatch.setattr(delegate_custody, "utc_now_iso", lambda: now["value"].isoformat())
+    monkeypatch.setattr(utils, "utc_now_iso", lambda: now["value"].isoformat())
+    monkeypatch.setattr(review_custody, "utc_now", lambda: now["value"])
+    monkeypatch.setattr(deadline_utils, "utc_now", lambda: now["value"])
+    start = a.engine.start
+
+    def lost_initial(gateway, request, key):
+        handle = start(gateway, request, key)
+        if len(a.engine.posts) == 1:
+            now["value"] = original + timedelta(seconds=elapsed)
+            raise ClaudexorUnavailable("daemon_unreachable", "accepted original review; reply lost")
+        return handle
+
+    def lookup(gateway, request, *, idempotency_key):
+        if idempotency_key not in a.engine.keys:  # an explicitly chosen successor has not been submitted yet
+            return {"status": "not_found", "storeId": "store-a"}
+        return {"status": "found", "storeId": "store-a", "handle": {
+            "jobId": "job-original", "runId": a.engine.keys[idempotency_key], "state": "failed"}}
+
+    monkeypatch.setattr(a.engine, "start", lost_initial)
+    monkeypatch.setattr(FakeGateway, "store_identity", "store-a", raising=False)
+    monkeypatch.setattr(FakeGateway, "operations", lambda self: [{"method": "POST", "path": "/v2/runs/lookup"}], raising=False)
+    monkeypatch.setattr(FakeGateway, "lookup_run", lookup, raising=False)
+    first = _wave(a)
+    if not first.get("continuable_seats"):
+        first = _call(a, review_reference=first["review_reference"])
+    assert len(a.engine.posts) == 1 and a.engine.posts[0][0]["maxSeconds"] == 30
+    held = delegate_custody.replay(a.data)["run-1"]
+    assert held.started_ts == now["value"].isoformat(), "publication time is not rewritten as the old request time"
+    assert held.window_origin == original.isoformat() and held.max_seconds == 30
+    choice = [{"seat_id": "second", "operation_id": first["continuable_seats"][0]["operation_id"]}]
+    continued = _call(a, review_reference=first["review_reference"], continue_seats=choice)
+    if elapsed > 30:
+        assert continued.get("reason") == "window_spent" and len(a.engine.posts) == 1, continued
+    else:
+        assert continued["state"] == "settled" and len(a.engine.posts) == 2, continued
+        assert 0 < a.engine.posts[1][0]["maxSeconds"] <= 30 - elapsed
+
+
 def test_a_spent_original_window_refuses_at_zero_and_writes_nothing(stopped_wave, monkeypatch):
     a = stopped_wave
     first = _wave(a)
@@ -876,7 +928,6 @@ def test_an_existing_checkout_is_held_for_the_deciding_task_against_a_pass_that_
     frozen subject. The normal retirement still happens once the deciding task ended."""
     import pathlib
 
-    from ouroboros import review_execution as execution
     from ouroboros import review_session_custody
     from ouroboros.owner_continue import binding_sha
     from ouroboros.review_checking_prune import (
@@ -915,7 +966,7 @@ def test_an_existing_checkout_is_held_for_the_deciding_task_against_a_pass_that_
     def removal_then_send(invocation, data_root, record, run_id):
         removals.append(_remove_unless_kept(a.data, checkout.parent, _review_rounds(a.data), judged))
         return real_prepare(invocation, data_root, record, run_id)
-    monkeypatch.setattr(execution, "prepare_continuation_send", removal_then_send)
+    monkeypatch.setattr(review_session_custody, "prepare_continuation_send", removal_then_send)  # the recovered seat's one send step
     seen = _root_at_post(a, named)
     a.ctx.task_id = successor
     with _scope(a, successor):

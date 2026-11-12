@@ -292,6 +292,7 @@ D20 = "Presence"
 "ouroboros/delegate_message_store.py" = "D07"
 "ouroboros/delegate_reply.py" = "D07"
 "ouroboros/delegate_output.py" = "D07"
+"ouroboros/delegate_accepted.py" = "D07"
 "ouroboros/delegate_pending.py" = "D07"
 "ouroboros/delegate_progress.py" = "D07"
 "ouroboros/delegate_recovery.py" = "D07"
@@ -1394,6 +1395,7 @@ lazy_only = [
   "D13->D08",
   "D13->D09",
   "D13->D14",
+  "D13->D16",
   "D14->D01",
   "D14->D07",
   "D14->D08",

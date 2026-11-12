@@ -14,7 +14,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
 | D05 | Tool surfaces: files, code, shell, media, external | 55 | 0 |
 | D06 | Review stack | 101 | 0 |
-| D07 | Delegation, subagents & Claudexor | 112 | 0 |
+| D07 | Delegation, subagents & Claudexor | 113 | 0 |
 | D08 | Supervisor: queue, workers, events & runtime control | 79 | 0 |
 | D09 | Cancellation, owner control & process custody | 28 | 0 |
 | D10 | Git, update & release machinery | 40 | 0 |
@@ -65,7 +65,7 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
 
 ## Hidden coupling (classified out of the strict graph)
 
-- lazy-only cross-domain pairs: **128**
+- lazy-only cross-domain pairs: **129**
   - D01->D08
   - D01->D10
   - D01->D11
@@ -146,6 +146,7 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
   - D13->D08
   - D13->D09
   - D13->D14
+  - D13->D16
   - D14->D01
   - D14->D07
   - D14->D08
@@ -566,6 +567,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/configured_subagents.py`
 - `ouroboros/copy_capture_proof.py`
 - `ouroboros/copy_environments.py`
+- `ouroboros/delegate_accepted.py`
 - `ouroboros/delegate_activity.py`
 - `ouroboros/delegate_bootstrap_identity.py`
 - `ouroboros/delegate_capture_attempt.py`

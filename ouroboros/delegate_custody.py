@@ -244,6 +244,7 @@ class RunCustody:
     # incident (``open_containment_faults``), the START_REQUESTED row that minted the
     # run's invocation (``invocation_record``) and its admission bucket (``billing_group``).
     started_ts: str = ""
+    window_started_at: Optional[str] = None  # None: ordinary/legacy STARTED clock; "": recovered origin unknown
     max_seconds: int = 0
     cost_usd: Optional[float] = None
     spend_disclosed: bool = False
@@ -254,6 +255,11 @@ class RunCustody:
     containment_fault: Dict[str, Any] = field(default_factory=dict)
     request_event: Dict[str, Any] = field(default_factory=dict)
     billing_group: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def window_origin(self) -> str:
+        """A recovered window keeps its original request time; STARTED publication stays a separate fact."""
+        return self.started_ts if self.window_started_at is None else self.window_started_at
 
     @property
     def review_owned(self) -> bool:
@@ -937,9 +943,10 @@ def open_snapshot_ids(drive_root: Any) -> set:
     return ids
 
 
-def run_timing(drive_root: Any, run_id: str) -> Tuple[str, int]:
+def run_timing(drive_root: Any, run_id: str, *, window: bool = False) -> Tuple[str, int]:
     """``(started_ts_iso, max_seconds)`` for a run, from its STARTED facts on the row.
 
+    ``window=True`` reads the original window origin instead of a later recovery's publication time.
     Empty/0 when the run is unknown or the row predates the ``max_seconds``
     field — absent facts stay absent, never invented.
     """
@@ -948,7 +955,7 @@ def run_timing(drive_root: Any, run_id: str) -> Tuple[str, int]:
     custody = run(drive_root, str(run_id or "").strip()) if str(run_id or "").strip() else None
     if custody is None:
         return "", 0
-    return custody.started_ts, int(custody.max_seconds or 0)
+    return (custody.window_origin if window else custody.started_ts), int(custody.max_seconds or 0)
 
 
 def idempotency_key(*parts: Any) -> str:
@@ -984,6 +991,7 @@ from ouroboros.delegate_invocation import (  # noqa: E402, F401 -- public custod
     _request_facts,
 )
 from ouroboros.delegate_pending import replay_store_unproven  # noqa: E402, F401 -- public custody reader
+from ouroboros.delegate_accepted import bind_started  # noqa: E402, F401 -- every STARTED writer of an invocation
 
 
 def record_start_requested(drive_root: Any, **payload: Any) -> bool:
@@ -1014,11 +1022,12 @@ def record_start_requested(drive_root: Any, **payload: Any) -> bool:
 
 
 def record_started(drive_root: Any, custody: RunCustody,
-                   shape: Optional[Dict[str, Any]] = None) -> bool:
+                   shape: Optional[Dict[str, Any]] = None, *, publish: bool = True) -> bool:
     """Memoize the run and write its authoritative row. Returns whether the row LANDED.
 
     A start whose row did not land is custodied by this process only: after this
-    worker dies nothing can name, wait on, cancel or settle the live run.
+    worker dies nothing can name, wait on, cancel or settle the live run. ``publish=False``
+    keeps it so on purpose (``delegate_accepted.bind_started`` without its decision lock).
     ``shape`` (access/mode/isolation/delegated/root) rides the SAME row — a shape
     recorded separately can lose one half of itself to a crash between writes.
     The memo update goes through the SAME first-wins merge the replay uses (gate
@@ -1038,6 +1047,8 @@ def record_started(drive_root: Any, custody: RunCustody,
     if previous is not None and previous is not custody:
         _merge_started_into(custody, previous)
     _CUSTODY[custody.run_id] = custody
+    if not publish:
+        return False
     # The C1 binding and the resource reference ride the SAME row (a binding
     # recorded separately can lose half of itself to a crash); shape spreads LAST.
     landed = emit(drive_root, STARTED, {
@@ -1512,6 +1523,7 @@ __all__ = [
     "close_absent_run",
     "custody_log_unreadable",
     "custody_root",
+    "bind_started",
     "daemon_says_absent",
     "delegated_capture_dir",
     "disclosed_spend",

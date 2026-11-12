@@ -14,7 +14,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests._budget_pause_exact_helpers import _fast_hold, _install_queue, _loop_ctx, _mock_pause_observation
+from tests._budget_pause_exact_helpers import _fast_hold, _install_queue, _loop_ctx
+from tests._owner_pause_ended_helpers import _owner_park
 from tests.worker_pool_support import affirm_ready
 
 
@@ -174,19 +175,6 @@ def test_the_boundary_saves_an_exact_owner_pause_buying_no_round_and_observing_r
     assert limit_ctx.accumulated_usage["reason_code"] == "owner_paused"
     marker = budget_pause.exact_pause_marker(row)
     assert marker["reason"] == "owner" and marker["settlement"] == owner_pause.SETTLEMENT_EXTERNAL_RUNNING
-
-
-def _owner_park(tmp_path, monkeypatch, task_id, runs, root="root-1"):
-    from ouroboros import budget_pause
-
-    ctx, limit_ctx = _loop_ctx(tmp_path, task_id)
-    ctx.root_task_id = root
-    _fast_hold(monkeypatch, budget_pause)
-    _mock_pause_observation(monkeypatch, budget_pause, runs)
-    with pytest.raises(budget_pause.BudgetPauseRequested) as raised:
-        budget_pause.enter_owner_pause(limit_ctx)
-    budget_pause.end_dispatch_fence(task_id)
-    return raised.value.pause
 
 
 def test_the_tree_turns_paused_only_when_no_member_runs_and_sent_work_settled(tmp_path, monkeypatch):

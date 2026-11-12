@@ -134,7 +134,7 @@ def _first_process(tmp_path, monkeypatch, *, sent_at_iso: str) -> dict:
 
 
 def _write_durable_custody(tmp_path, monkeypatch, *, started_iso: str, operation_id: str,
-                           max_seconds_on_started: bool = True) -> None:
+                           max_seconds_on_started: bool = True, recovered: bool = False) -> None:
     """The rows the delegated route writes before polling, stamped at ``started_iso``."""
     from ouroboros import delegate_custody as custody
 
@@ -149,14 +149,18 @@ def _write_durable_custody(tmp_path, monkeypatch, *, started_iso: str, operation
              "slot_id": "seat-1"}
     if max_seconds_on_started:
         shape["max_seconds"] = MAX_SECONDS
+    published = datetime.now(timezone.utc).isoformat() if recovered else started_iso
+    monkeypatch.setattr(custody, "utc_now_iso", lambda: published)
     assert custody.record_started(tmp_path, custody.RunCustody(
         run_id=RUN_ID, task_id=TASK_ID, invocation_id=INVOCATION,
+        window_started_at=started_iso if recovered else None,
         route_id="claude", model="cursor/test", ledger_root=str(tmp_path),
     ), shape=shape)
     monkeypatch.undo()
     started_ts, max_seconds = custody.run_timing(tmp_path, RUN_ID)
-    assert started_ts == started_iso
+    assert started_ts == published
     assert max_seconds == (MAX_SECONDS if max_seconds_on_started else 0)
+    assert custody.run_timing(tmp_path, RUN_ID, window=True) == (started_iso, max_seconds)
 
 
 def _second_process(tmp_path, row: dict, *, deadline_at: str, timeout_sec=None) -> tuple:
@@ -224,7 +228,8 @@ def test_rejoin_after_worker_startup_outlasts_the_collection_window(tmp_path, mo
     assert remaining == pytest.approx(MAX_SECONDS - 200, abs=5)
 
 
-def test_restart_rejoin_inherits_the_remaining_original_window(tmp_path, monkeypatch):
+@pytest.mark.parametrize("recovered", [False, True])
+def test_restart_rejoin_inherits_the_remaining_original_window(tmp_path, monkeypatch, recovered):
     """STARTED ``ts = now − 200 s``, ``max_seconds = 600`` → the rejoin worker gets
     ≈400 s, not the 30 s margin and not a new full window — even though the
     owner's own deadline is long spent."""
@@ -232,7 +237,7 @@ def test_restart_rejoin_inherits_the_remaining_original_window(tmp_path, monkeyp
 
     row = _first_process(tmp_path, monkeypatch, sent_at_iso=_past_iso(200))
     _write_durable_custody(tmp_path, monkeypatch, started_iso=_past_iso(200),
-                           operation_id=row["operation_id"])
+                           operation_id=row["operation_id"], recovered=recovered)
     actor, remaining = _second_process(tmp_path, row, deadline_at=SPENT_OWNER_DEADLINE)
     assert remaining == pytest.approx(MAX_SECONDS - 200, abs=5)
     assert remaining > float(NESTED_SETTLEMENT_MARGIN_SEC)
@@ -254,21 +259,26 @@ def test_a_later_collect_does_not_extend_the_window(tmp_path, monkeypatch):
     """Sixty seconds later the same saved facts give ≈340 s: the window ends at
     the same wall-clock instant whichever collect reads it."""
     row = _first_process(tmp_path, monkeypatch, sent_at_iso=_past_iso(260))
+    before = time.monotonic()
     _write_durable_custody(tmp_path, monkeypatch, started_iso=_past_iso(260),
                            operation_id=row["operation_id"])
     _actor, remaining = _second_process(tmp_path, row, deadline_at=SPENT_OWNER_DEADLINE)
-    assert remaining == pytest.approx(MAX_SECONDS - 260, abs=5)
+    # The real custody writes and worker startup consume the window too; a busy host need not
+    # finish them in five seconds. Only that measured work can shorten the expected remainder.
+    elapsed = time.monotonic() - before
+    assert MAX_SECONDS - 260 - elapsed - 1 <= remaining <= MAX_SECONDS - 260 + 1
 
 
 @pytest.mark.parametrize("seconds_ago", [590, 900])
-def test_an_almost_or_fully_expired_run_gets_exactly_the_margin(tmp_path, monkeypatch, seconds_ago):
+@pytest.mark.parametrize("recovered", [False, True])
+def test_an_almost_or_fully_expired_run_gets_exactly_the_margin(tmp_path, monkeypatch, seconds_ago, recovered):
     """``ts = now − 590`` leaves 10 s → the margin; an expired run → the margin;
     never a fresh full window."""
     from ouroboros.config import NESTED_SETTLEMENT_MARGIN_SEC
 
     row = _first_process(tmp_path, monkeypatch, sent_at_iso=_past_iso(seconds_ago))
     _write_durable_custody(tmp_path, monkeypatch, started_iso=_past_iso(seconds_ago),
-                           operation_id=row["operation_id"])
+                           operation_id=row["operation_id"], recovered=recovered)
     _actor, remaining = _second_process(tmp_path, row, deadline_at=SPENT_OWNER_DEADLINE)
     assert remaining == pytest.approx(float(NESTED_SETTLEMENT_MARGIN_SEC), abs=1.0)
 
