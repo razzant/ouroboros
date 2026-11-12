@@ -577,6 +577,8 @@ textarea::placeholder {
   padding: 10px var(--wizard-content-pad) var(--wizard-content-pad);
   border-radius: 0 0 var(--radius-object) var(--radius-object);
   background: linear-gradient(var(--surface-object), var(--surface-object)), var(--bg);
+  /* Its own width decides whether the aside fits beside the buttons (a component follows its container). */
+  container: wizardfooter / inline-size;
 }
 
 @supports (animation-timeline: scroll()) {
@@ -1343,8 +1345,8 @@ textarea::placeholder {
   }
 }
 
-/* A narrow window: the footer is pinned over the step, so its aside would take the step's own lines. */
-@media (max-width: 900px) {
+/* A narrow footer: pinned over the step, its aside would take the step's own lines. */
+@container wizardfooter (max-width: 52rem) {
   .footer-copy {
     display: none;
   }
