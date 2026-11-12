@@ -29,6 +29,8 @@ import {
 function hasSkillUiTab(skill, live = {}) {
     return (live?.ui_tabs || []).some((tab) => (tab?.skill || tab?.skill_name || tab?.extension || '') === skill.name);
 }
+/** Whether the skill registered a settings form: its card then opens the skill's page in Settings. */
+const hasSkillSettings = (skill, live = {}) => (live?.settings_sections || []).some((section) => section?.skill === skill.name);
 
 const sourceTag = (skill) => String(skill?.source || 'native').toLowerCase();
 const installFacts = (skill) => (skill?.install && typeof skill.install === 'object' ? skill.install : null);
@@ -88,8 +90,10 @@ function secretConfigTray(skill) {
         ? `${escapeHtml(missing.join(', '))} ${missing.length > 1 ? 'are' : 'is'} not set.`
         : `Saved settings can’t be read now, so whether ${escapeHtml(unknown.join(', '))} ${unknown.length > 1 ? 'are' : 'is'} set is unknown.`;
     // An unknown value is not a reason to save again.
-    const note = missing.length ? `Save ${missing.length > 1 ? 'them' : 'it'} in Settings → Secrets.` : '';
-    const tray = trayHtml({ sentence, note, actions: smallButton('Open Secrets', String(skill.name || ''), 'open_secrets') });
+    const note = missing.length ? `Save ${missing.length > 1 ? 'them' : 'it'} in Settings › Accounts and keys.` : '';
+    // The button names the keys it is about: Accounts and keys opens at the first one's row.
+    const tray = trayHtml({ sentence, note, actions: smallButton('Open Accounts and keys', String(skill.name || ''), 'open_secrets',
+        `data-keys="${escapeHtml((missing.length ? missing : unknown).join(','))}"`) });
     return { tray, needs: missing.length > 0 };
 }
 
@@ -449,6 +453,7 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
         lockReason: required ? REQUIRED_LOCK : (skill.enabled ? '' : lockReason),
         update: offersChanges(skill) && Boolean(update || withdrawn || install?.update_rejected || install?.pending_update), withdrawn: Boolean(withdrawn),
         widgets: skill.enabled && skill.type === 'extension' && skill.live_loaded && hasSkillUiTab(skill, live),
+        settings: hasSkillSettings(skill, live),
     };
 }
 
@@ -701,14 +706,15 @@ function submitHubReady(skill, githubTokenConfigured) {
     const visible = ['external', 'self_authored', 'user_repo', 'ouroboroshub', 'clawhub'].includes(sourceTag(skill));
     if (!visible) return { visible: false, disabled: true, reason: '' };
     if (githubTokenConfigured !== true) return { visible: true, disabled: true, reason: githubTokenConfigured === false
-        ? 'Publishing needs a GitHub token: Settings → Secrets → GITHUB_TOKEN.' : 'GitHub token status unavailable. Refresh to retry.' };
+        ? 'Publishing needs a GitHub token: Settings › Accounts and keys › GitHub.' : 'GitHub token status unavailable. Refresh to retry.' };
     return { visible: true, publication_ready: false, task_start_allowed: true, disabled: false, reason: '' };
 }
 
-function menuHtml(skill, { reviewing, repairing, submit }) {
+function menuHtml(skill, { reviewing, repairing, submit, settings = false }) {
     const name = escapeHtml(skill.name);
     const items = [];
     items.push(`<button type="button" role="menuitem" class="skills-menu-item" ${actionAttrs(skill.name, 'open_detail')}>Details…</button>`);
+    if (settings) items.push(`<button type="button" role="menuitem" class="skills-menu-item" ${actionAttrs(skill.name, 'open_settings')}>Settings</button>`);
     if (!reviewing && !untrusted(skill) && !(preflightFailed(skill) && repairReady(skill))) {
         const label = skill.review_status === 'pending' && !skill.review_stale ? 'Review' : 'Review again';
         items.push(`<button type="button" role="menuitem" class="skills-menu-item skills-review" ${actionAttrs(skill.name, skill.review_stale ? 'rereview' : 'review')}>${label}</button>`);
@@ -789,9 +795,9 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
         : (skill.lifecycle_kind === 'enable' && lifecyclePending ? true : skill.enabled);
     const toggleLocked = Boolean(lockReason) || lifecyclePending;
     const trayId = `skill-trays-${safeName.replace(/[^A-Za-z0-9_-]/g, '_')}`;
-    const toggle = skill.lifecycle_virtual ? '' : `<label class="skills-switch ${toggleLocked ? 'is-locked' : ''}">
+    const toggle = skill.lifecycle_virtual ? '' : `<label class="ui-switch ${toggleLocked ? 'is-locked' : ''}">
         <input type="checkbox" class="skills-toggle" role="switch" data-skill="${safeName}" ${toggleOn ? 'checked' : ''} ${toggleLocked ? 'disabled' : ''} aria-checked="${toggleOn ? 'true' : 'false'}" aria-label="${escapeHtml(skill.name)}${lifecyclePending ? ` (${escapeHtml(lifecyclePendingLabel(skill.lifecycle_kind))})` : ''}"${model.trays.length ? ` aria-describedby="${trayId}"` : ''}>
-        <span class="skills-switch-track" aria-hidden="true"><span class="skills-switch-thumb"></span></span>
+        <span class="ui-switch-track" aria-hidden="true"><span class="ui-switch-thumb"></span></span>
     </label>`;
     const marks = [
         requiredBy(skill) ? chipHtml('Required by your organization', 'neutral', { attrs: 'data-required-by-organization' })
@@ -801,8 +807,9 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
         model.modified ? chipHtml(model.modified.by === 'owner' ? 'Modified · edited by you' : 'Modified', 'neutral') : '',
         connectsText(skill) ? chipHtml(connectsText(skill), 'neutral') : '',
     ].join('');
-    const widgetsButton = model.widgets && !model.trays.length
-        ? `<div class="skills-card-quiet-actions">${buttonHtml('Open widgets', { tone: 'ghost', attrs: actionAttrs(skill.name, 'open_widgets') })}</div>` : '';
+    const quiet = [model.widgets ? buttonHtml('Open widgets', { tone: 'ghost', attrs: actionAttrs(skill.name, 'open_widgets') }) : '',
+        model.settings ? buttonHtml('Settings', { tone: 'ghost', attrs: actionAttrs(skill.name, 'open_settings') }) : ''].join('');
+    const widgetsButton = quiet && !model.trays.length ? `<div class="skills-card-quiet-actions">${quiet}</div>` : '';
     const errors = [
         skill.lifecycle_status === 'failed' && skill.lifecycle_error && !skill.lifecycle_virtual ? `<div class="skills-load-error">${escapeHtml(skill.lifecycle_error)}</div>` : '',
         skill.health_regressed ? `<div class="skills-load-error">Regression: was live at ${escapeHtml(String((skill.last_known_good || {}).version || '?'))} (${escapeHtml(String((skill.last_known_good || {}).sha || '').slice(0, 12))}); broken after a code update.</div>` : '',
@@ -834,7 +841,7 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
                 <div class="skills-card-who">${installedWhoHtml(skill, model)}</div>
                 ${countsAsYoursText(skill) ? `<p class="skills-card-facts">${escapeHtml(countsAsYoursText(skill))}</p>` : ''}
             </div>
-            <div class="skills-card-toggle"><span class="skills-card-status">${model.chip}</span>${toggle}${skill.lifecycle_virtual ? '' : menuHtml(skill, { reviewing, repairing, submit })}</div>
+            <div class="skills-card-toggle"><span class="skills-card-status">${model.chip}</span>${toggle}${skill.lifecycle_virtual ? '' : menuHtml(skill, { reviewing, repairing, submit, settings: model.settings })}</div>
         </header>
         ${skill.lifecycle_virtual ? '' : details}
         <div class="skills-card-trays" id="${trayId}" data-skill-trays>${model.trays.join('')}${widgetsButton}</div>
@@ -880,7 +887,7 @@ export function patchInstalledSkillEnrichment(card, skill, reviewing, repairing,
     if (control && control.dataset.skillPending !== 'true') {
         const source = next.querySelector('.skills-toggle');
         if (source) {
-            attributes(control.closest('.skills-switch'), source.closest('.skills-switch'));
+            attributes(control.closest('.ui-switch'), source.closest('.ui-switch'));
             attributes(control, source);
             control.checked = source.checked;
             control.disabled = source.disabled;

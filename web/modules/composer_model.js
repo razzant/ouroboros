@@ -213,7 +213,7 @@ export function showMainMoves({ results, dialog = openConfirmDialog, doc = globa
 
 /**
  * The capsule in its room's composer row. `save(body)` is the owner write (`apiClient.ownerChatModel`), `openSettings()`
- * Settings › Accounts, `askMain({next, previous, census})` the Main chat's confirming sheet, `moveWork(taskId)` one
+ * Settings › Accounts and keys, `askMain({next, previous, census})` the Main chat's confirming sheet, `moveWork(taskId)` one
  * work's return to Main and `sayMoves({results})` the sheet of what its ticks did, `store` the window's catalog store,
  * `placeList(list)` the suggestions' place above the row.
  * Returns `{ el, capsule, syncState(data), hasPendingSave, pendingSave, pick, startSearch, destroy }`.

@@ -694,11 +694,18 @@ for (const count of [1, 18]) test(`circle editors share the catalog producer at 
     assert.equal(view.body.querySelector('[data-circles-draft="home:model"]'), field, 'catalog updates keep the real field');
     assert.equal(field.value, 'owner/private');
     assert.equal(programs(field)[0].mixed, true);
+    publish({ read_state: 'transport' });  // a Refresh that failed: settings_catalog.js broadcasts no items
+    assert.equal(programs(field)[0].mixed, true, 'a failed refresh keeps the suggestions read before it');
     await view.press('[data-circles-act="new"]');
     await settled();
     const created = view.body.querySelector('[data-circles-draft="new:model"]');
     assert.deepEqual(programs(created), programs(field), 'new and saved editors use the same producer');
     assert.equal(reads, 1, 'the existing catalog read supplies every editor and refresh event');
+    // A failed read Settings broadcasts (a transport error has no list) changes nothing and throws nothing.
+    const before = programs(created);
+    publish({ read_state: 'transport', errors: [{ provider_id: 'catalog', error: 'Timed out' }] });
+    publish({ items: [], read_state: 'failed' });
+    assert.deepEqual(programs(created), before, 'a failed read keeps the suggestions shown');
     publish({ items: [api], model_sources: [], account_catalogs: [] });
     for (const input of view.body.querySelectorAll('[data-model-chooser]')) assert.deepEqual(programs(input), []);
     view.destroy();

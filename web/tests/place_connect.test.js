@@ -148,11 +148,11 @@ test('the empty-list settings door opens the declared section; without a declara
     const scrolled = [], tabs = [], skills = [];
     forms.forEach((form, index) => { form.scrollIntoView = () => scrolled.push(index); });
     window.addEventListener('ouro:open-skills', (event) => skills.push(event.detail.skill));
-    await openConnectorSettings(github, async (tab) => tabs.push(tab));
-    assert.deepEqual(tabs, ['advanced']);
+    await openConnectorSettings(github, async (path) => tabs.push(path));
+    assert.deepEqual(tabs, ['skill/github']);
     assert.deepEqual(scrolled, [1]);
-    await openConnectorSettings({ ...github, settings: '' }, async (tab) => tabs.push(tab));
-    assert.deepEqual(tabs, ['advanced']);
+    await openConnectorSettings({ ...github, settings: '' }, async (path) => tabs.push(path));
+    assert.deepEqual(tabs, ['skill/github']);
     assert.deepEqual(skills, ['github']);
 });
 

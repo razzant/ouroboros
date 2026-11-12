@@ -6,7 +6,7 @@ Whether, when and where to ask the owner is the mind's judgment; this tool is it
 the address their browser stopped on (the builtin return page finishes it by itself when that
 browser reaches this server), and ``sign_out`` forgets this installation's tokens and asks the
 provider to revoke them. The owner's own app registration (a provider that registers no apps
-itself) is entered on the server's card in Settings → MCP, never through a tool argument.
+itself) is entered on the server's card in Settings → Tools, never through a tool argument.
 
 The server process owns the tool catalog (``docs/PERSISTENCE.md``), so a completion here hands
 ``mcp_signed_in`` to its host on the turn's event queue, and the host lists that server again

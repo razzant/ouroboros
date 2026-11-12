@@ -1,7 +1,7 @@
 """The model-concurrency cap is a Settings field: seen, saved, read back and applied by the real owner.
 
 The REAL SPA against the REAL isolated server (``direct_server_with_data``: its own copy of this source, data
-root, ports and mock provider): the field is edited in Settings › Advanced › Runtime Limits, saved through the
+root, ports and mock provider): the field is edited in Settings › Models › More, saved through the
 real gateway, read back from ``settings.json`` and from a fresh page load, and the runtime's own reader
 (``model_concurrency._cap``) is pointed at that very document. 0 (no limit), 3 (the factory value) and 7, and an
 earlier saved 5, must all round-trip; an unrelated save must leave a saved 0 alone. An install whose document
@@ -19,42 +19,32 @@ import os
 from pathlib import Path
 
 import pytest
+from tests.settings_browser_helpers import open_settings, commit_row, setting_row
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
 
 KEY = "OUROBOROS_MODEL_MAX_CONCURRENCY"
-FIELD = "#s-model-max-concurrency"
-IMMEDIATE = "Settings saved. Changes took effect immediately"
-SECTION = "//section[@data-settings-panel='advanced']//div[contains(@class,'form-section')][.//h3[normalize-space()='Runtime Limits']]"
-DESKTOP, PHONE = (1232, 880), (390, 844)
+FIELD = '[data-setting-row="OUROBOROS_MODEL_MAX_CONCURRENCY"] [data-setting-control]'
+DESKTOP, PHONE = (1232, 880), (320, 640)
 
-_MEASURE = """([fieldSel, sectionXPath]) => {
+_MEASURE = r"""fieldSel => {
     const input = document.querySelector(fieldSel);
-    const field = input.closest('.form-field');
-    const section = document.evaluate(sectionXPath, document, null, 9, null).singleNodeValue;
-    const help = document.getElementById('s-model-max-concurrency-help');
-    const label = field.querySelector('label');
-    const neighbourHelp = document.getElementById('s-evo-budget-help');
-    const box = (el) => { const r = el.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom].map(Math.round); };
-    const style = (el) => getComputedStyle(el);
+    const field = input.closest('[data-setting-row]');
+    const section = field.closest('.settings-card');
+    const help = field.querySelector('[data-setting-meta]');
+    const label = field.querySelector('.ui-row-title');
+    const box = el => el.getBoundingClientRect();
     return {
         pageOverflowX: document.documentElement.scrollWidth - innerWidth,
         fieldOverflowX: field.scrollWidth - field.clientWidth,
         sectionOverflowX: section.scrollWidth - section.clientWidth,
         helpOverflowX: help.scrollWidth - help.clientWidth,
         labelOverflowX: label.scrollWidth - label.clientWidth,
-        inputInsideSection: box(input)[0] >= box(section)[0] && box(input)[2] <= box(section)[2],
-        helpInsideSection: box(help)[0] >= box(section)[0] && box(help)[2] <= box(section)[2],
-        helpColor: style(help).color, helpSize: style(help).fontSize, neighbourHelpColor: style(neighbourHelp).color,
-        labelSize: style(label).fontSize, labelWeight: style(label).fontWeight,
-        labelLines: Math.round(label.getBoundingClientRect().height / parseFloat(style(label).lineHeight)),
-        helpLines: Math.round(help.getBoundingClientRect().height / parseFloat(style(help).lineHeight)),
-        inputHeight: Math.round(input.getBoundingClientRect().height),
-        toolTimeoutHeight: Math.round(document.getElementById('s-tool-timeout').getBoundingClientRect().height),
+        inputInsideSection: box(input).left >= box(section).left && box(input).right <= box(section).right,
+        helpInsideSection: box(help).left >= box(section).left && box(help).right <= box(section).right,
         inputMin: input.min, inputType: input.type, inputValue: input.value, inputValid: input.validity.valid,
         described: input.getAttribute('aria-describedby'),
-        helpText: help.textContent.replace(/\\s+/g, ' ').trim(), labelText: label.textContent.trim(),
-        field: box(field), section: box(section), input: box(input),
+        helpText: field.textContent.replace(/\s+/g, ' ').trim(), labelText: label.textContent.trim(),
     };
 }"""
 
@@ -97,35 +87,32 @@ class _Run:
     def load_settings(self, page, size):
         from playwright.sync_api import expect
 
-        if size[0] < 720:
-            page.locator(".page.active [data-mobile-nav-toggle]:visible").click()
-        page.click('[data-nav-page="settings"]')
-        expect(page.locator("#btn-save-settings")).to_be_enabled(timeout=30_000)
-        expect(page.locator("#settings-status")).to_have_text("Settings refreshed", timeout=30_000)
-        page.click('[data-settings-tab="advanced"]')
+        open_settings(page, 'models', KEY, timeout=30_000)
         expect(page.locator(FIELD)).to_be_visible()
+        setting_row(page, KEY).locator('.settings-row-more > summary').click()
 
     def reload(self, page, size):
         page.reload(wait_until="domcontentloaded")
         page.wait_for_function("() => window.__testSockets?.some(s => s.readyState === 1)")
         self.load_settings(page, size)
 
-    def save(self, page, expected=IMMEDIATE):
-        from playwright.sync_api import expect
+    def save(self, page):
+        result = commit_row(page, KEY, page.input_value(FIELD), timeout=20_000)
+        assert result.startswith('Saved'), result
 
-        page.click("#btn-save-settings")
-        expect(page.locator("#settings-status")).to_contain_text(expected, timeout=20_000)
+    def unrelated_save(self, page, value):
+        open_settings(page, 'tools', 'OUROBOROS_TOOL_TIMEOUT_SEC')
+        assert commit_row(page, 'OUROBOROS_TOOL_TIMEOUT_SEC', value).startswith('Saved')
+        self.load_settings(page, DESKTOP)
 
     def shot(self, page, name):
-        """The window with the field in view, and the field's own box with its label and help."""
-        field = page.locator(FIELD).locator("xpath=ancestor::div[contains(@class,'form-field')][1]")
-        field.evaluate("el => el.scrollIntoView({block: 'center'})")
+        field = setting_row(page, KEY)
+        field.scroll_into_view_if_needed()
         page.screenshot(path=str(self.evidence / f"concurrency-{name}-{self.engine}.png"))
-        page.locator(f"xpath={SECTION}").screenshot(path=str(self.evidence / f"concurrency-{name}-section-{self.engine}.png"))
         field.screenshot(path=str(self.evidence / f"concurrency-{name}-field-{self.engine}.png"))
 
     def measure(self, page):
-        return page.evaluate(_MEASURE, [FIELD, SECTION])
+        return page.evaluate(_MEASURE, FIELD)
 
     def exercise(self):
         from playwright.sync_api import expect
@@ -147,17 +134,16 @@ class _Run:
         # An unrelated save leaves a saved 0 (no limit) alone: it is a choice, never read back as "unset".
         page.fill(FIELD, "0")
         self.save(page)
-        repo = f"owner/unrelated-save-{self.engine}"  # a change in each pass: an unchanged save says "No changes detected"
-        page.fill("#s-gh-repo", repo)
-        self.save(page)
-        assert self.stored()[KEY] == 0 and self.stored()["GITHUB_REPO"] == repo
+        timeout = 601 if self.engine == 'chromium' else 602
+        self.unrelated_save(page, timeout)
+        assert self.stored()[KEY] == 0 and self.stored()['OUROBOROS_TOOL_TIMEOUT_SEC'] == timeout
         assert self.runtime_cap() == 0
         self.reload(page, DESKTOP)
         assert page.input_value(FIELD) == "0"
-        # A non-integer is not sent: native validation names the field and the document keeps its 0.
+        # A non-integer is not sent: the row refuses it and the document keeps its 0.
         page.fill(FIELD, "2.5")
-        page.click("#btn-save-settings")
-        expect(page.locator("#settings-status")).to_contain_text("Concurrent Requests", timeout=20_000)
+        page.locator(FIELD).blur()
+        expect(setting_row(page, KEY).locator('[data-setting-result]')).to_contain_text('Not saved', timeout=20_000)
         assert self.stored()[KEY] == 0
         page.fill(FIELD, "7")
         self.save(page)
@@ -177,10 +163,10 @@ class _Run:
 
         page.route("**/api/settings", serve_other_wait)
         self.open_settings_in(page, DESKTOP)
-        assert page.locator("#s-model-slot-wait").inner_text() == "90"
+        assert "waits up to 90 s" in setting_row(page, KEY).inner_text()
         wide.close()
         plain = self.open_settings("light", DESKTOP)
-        assert plain.locator("#s-model-slot-wait").inner_text() == "180", "an install that never set it shows the default"
+        assert "waits up to 180 s" in setting_row(plain, KEY).inner_text(), "an install that never set it shows the default"
         plain.context.close()
 
         # --- the same window, dark: the saved value, its words and fit ---------------------------------------
@@ -194,8 +180,8 @@ class _Run:
         for theme in ("light", "dark"):
             page = self.open_settings(theme, PHONE)
             assert page.input_value(FIELD) == "7"
-            self.shot(page, f"{theme}-390-saved-7")
-            facts[f"{theme}-390"] = self.measure(page)
+            self.shot(page, f"{theme}-320-saved-7")
+            facts[f"{theme}-320"] = self.measure(page)
             page.context.close()
 
         # --- an install that ALREADY holds a cap of 0 or less: shown as saved, never blocking, never rewritten ---
@@ -205,11 +191,10 @@ class _Run:
         assert page.eval_on_selector(FIELD, "el => el.validity.valid"), "and passes the field's own validity"
         self.shot(page, "light-1232-negative-loaded")
         facts["light-1232-negative"] = self.measure(page)
-        repo = f"owner/negative-unrelated-{self.engine}"
-        page.fill("#s-gh-repo", repo)
-        self.save(page)  # the ordinary immediate-effect acknowledgement: the save gate did not block it
+        timeout = 603 if self.engine == 'chromium' else 604
+        self.unrelated_save(page, timeout)
         assert self.stored()[KEY] == -1 and isinstance(self.stored()[KEY], int), self.stored().get(KEY)
-        assert self.stored()["GITHUB_REPO"] == repo
+        assert self.stored()['OUROBOROS_TOOL_TIMEOUT_SEC'] == timeout
         assert page.request.get(self.url + "/api/settings").json()[KEY] == -1
         assert self.runtime_cap() == -1 and self.runtime_enabled() is False, "the runtime reader still reads it as saved"
         self.reload(page, DESKTOP)
@@ -271,16 +256,12 @@ def test_concurrency_field(direct_server_with_data, monkeypatch):
             assert facts["pageOverflowX"] <= 0 and facts["fieldOverflowX"] <= 1 and facts["sectionOverflowX"] <= 1, where
             assert facts["helpOverflowX"] <= 1 and facts["labelOverflowX"] <= 1, where
             assert facts["inputInsideSection"] and facts["helpInsideSection"], where
-            # The neighbouring fields' own help ink and the one meta size; the same control height as its sibling.
-            assert facts["helpColor"] == facts["neighbourHelpColor"] and facts["helpSize"] == "12px", where
-            assert facts["labelSize"] == "12px" and facts["inputHeight"] == facts["toolTimeoutHeight"], where
-            assert facts["inputType"] == "number" and facts["inputMin"] == "", where  # no minimum is declared
-            assert facts["inputValid"], where  # whatever is saved, a negative one included, passes the save gate
-            assert facts["described"].startswith("s-model-max-concurrency-help"), where
-            assert facts["labelLines"] == 1, where
+            assert facts['inputType'] == 'text' and facts['inputMin'] == '', where
+            assert facts['inputValid'], where
+            assert 'setting-OUROBOROS_MODEL_MAX_CONCURRENCY-meta' in facts['described'], where
         desktop = windows["light-1232"]
-        assert desktop["labelText"] == "Concurrent Requests per Model"
+        assert desktop["labelText"] == "Requests at once per model"
         words = desktop["helpText"]
-        assert "counted per model, key and server" in words and "0 or less = no limit" in words
+        assert "counted per model, key and server" in words and "0 or less sets no limit" in words
         assert "waits up to 180 s, then is refused and not sent" in words
-        assert "Claudexor routes are not limited here" in words
+        assert "Routes your subscriptions serve are not limited here" in words

@@ -16,6 +16,10 @@ const viewListeners = new WeakMap();
 // The whole-inventory read's slot among them: its failure survives a remount like a row's.
 const WHOLE_INVENTORY = '*';
 
+/** What this session already read about a provider's program, or null: the list of providers says one fact of it
+ *  (Accounts and keys) and reads nothing itself. */
+export const knownProgram = (harness) => sessionIntents.get(String(harness))?.entry || null;
+
 export function maintenanceOperationPending(operation) {
     return Boolean(operation?.id) && (!TERMINAL.has(operation.state)
         || operation.termination === 'unconfirmed');

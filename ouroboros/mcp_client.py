@@ -321,10 +321,10 @@ class MCPNameResolution:
             text = f"⚠️ MCP_TOOL_NOT_FOUND: {name!r} is {self.detail or 'not in ' + where}. Nothing was executed."
             return ToolResult(status="error", code="UNKNOWN_TOOL", text=text)
         if self.status == "mcp_disabled":
-            text = "⚠️ MCP_DISABLED: enable MCP in Settings → Advanced to use this tool."
+            text = "⚠️ MCP_DISABLED: enable MCP in Settings → Tools to use this tool."
         elif self.status == "server_disabled":
             text = (f"⚠️ MCP_DISABLED: MCP server {server!r} is disabled in Settings → "
-                    f"Advanced; {name!r} was not executed.")
+                    f"Tools; {name!r} was not executed.")
         else:
             text = (f"⚠️ MCP_CATALOG_UNAVAILABLE: MCP server {server!r} has incomplete discovery evidence "
                     f"({self.detail}); whether {name!r} exists is "

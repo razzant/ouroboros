@@ -329,7 +329,7 @@ _PRODUCER_SHAPES = (
     # publish one code from different first lines, which only a shape can express;
     # a catalog miss is the caller's unknown tool (#1262), the registry's own
     # unknown-tool code published under the MCP marker.
-    ("mcp_disabled", "mcp_svc__ping", "⚠️ MCP_DISABLED: enable MCP in Settings → Advanced to use this tool.", "MCP_UNAVAILABLE", ()),
+    ("mcp_disabled", "mcp_svc__ping", "⚠️ MCP_DISABLED: enable MCP in Settings → Tools to use this tool.", "MCP_UNAVAILABLE", ()),
     # mcp_client._call_tool_result: a remote server needs the owner's sign-in (mcp_oauth); the call was never sent.
     ("mcp_auth_required", "mcp_svc__ping", "⚠️ MCP_AUTH_REQUIRED: server 'svc' needs the owner's sign-in (not_signed_in). Nothing ran there.", "MCP_AUTH_REQUIRED", (("dynamic_provider", True), ("mcp_call_not_sent", True), ("sign_in_reason", "not_signed_in"))),
     ("mcp_tool_not_found", "mcp_svc__ping", "⚠️ MCP_TOOL_NOT_FOUND: 'mcp_svc__ping' is not in the current tool catalog of MCP server 'svc'. Nothing was executed.", "UNKNOWN_TOOL", ()),

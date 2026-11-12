@@ -27,15 +27,6 @@
    takes the hit extension instead (.ui-hit-area, DESIGN §10). */
 :is(.dashboard-shell, .settings-shell) button.consciousness-inline-link { min-inline-size: 0; min-block-size: 0; }
 @media (hover: hover) { .consciousness-inline-link:hover { text-decoration: underline; text-underline-offset: 3px; } }
-/* Under a finger each such door reaches the touch minimum around its line, so a sentence ending in one and the control
-   under it part by that reach and their hit areas never overlap (ui.css .ui-hit-area): two such sentences
-   (.consciousness-door-line) stand a touch minimum and a hairline gap apart, line to line. */
-@media (pointer: coarse) {
-    .consciousness-door-line + .consciousness-door-line {
-        margin-block-start: calc(var(--touch-target-min) - var(--type-meta) * var(--line-meta) + var(--space-1));
-    }
-    [data-consciousness-places] + .consciousness-more { margin-block-start: var(--space-5); }
-}
 /* The owner's own words keep the owner's voice: the blue tint and its ink, here in an editable field. */
 textarea.ui-control.consciousness-owner-words {
     min-height: 0;
@@ -111,10 +102,7 @@ textarea.ui-control.consciousness-owner-words {
 @media (hover: hover) { .cx-door:hover { text-decoration: underline; text-underline-offset: 3px; } }
 :is(.cx-money, .cx-state-note, .cx-toggle, .cx-wakes, .cx-wakes-note, .cx-wakes-coverage, .cx-door)[hidden] { display: none; }
 
-/* ---- Settings › Behavior › Consciousness ------------------------------------------------------------------------ */
-.consciousness-levels { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
-.consciousness-levels li { color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); }
-.consciousness-levels strong { color: var(--text-primary); font-weight: 600; }
+/* ---- Place rows: Circles and a place's rooms (circles.js, place_history.js) ------------------------------------- */
 .consciousness-place-rows { display: flex; flex-direction: column; gap: var(--space-1); margin: 0; padding: 0; list-style: none; }
 /* A place row is a door: the whole tray opens its sheet, one state layer over all of it. */
 .consciousness-place-row {
@@ -137,13 +125,6 @@ textarea.ui-control.consciousness-owner-words {
 @media (hover: hover) { .consciousness-place-row:hover { background: var(--menu-item-hover); } }
 .consciousness-place-name { min-width: 0; font-size: var(--type-body); line-height: var(--line-body); font-weight: 600; overflow-wrap: anywhere; }
 .consciousness-place-facts { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); text-align: end; }
-.consciousness-model-value { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-2); color: var(--text-primary); font-size: var(--type-body); line-height: var(--line-body); }
-
-/* ---- Settings › Behavior › Safety Supervisor ---------------------------------------------------------------------- */
-.safety-levels { display: flex; flex-direction: column; gap: var(--space-3); }
-.safety-line { margin: 0; color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); }
-.settings-effort-card .safety-line { font-size: var(--type-meta); line-height: var(--line-meta); }
-#page-settings .form-section textarea.consciousness-owner-words { font-size: var(--type-body); line-height: var(--line-body); }
 
 /* ---- Agents: the second-check mark beside Reviewer ------------------------------------------------------------- */
 .available-subagent-recheck {

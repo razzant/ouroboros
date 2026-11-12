@@ -195,7 +195,7 @@ def test_fork_denial_keeps_github_status_and_message(responses):
         github.prepare_publish_repository(types.SimpleNamespace(), attempt, owner="hub", repo="project",
                                            base_branch="main", login="alice")
     assert caught.value.reason_code == "fork_prepare_failed" and caught.value.http_status == 403
-    assert "Resource not accessible" in caught.value.detail and "Settings → Secrets" in caught.value.repair_hint
+    assert "Resource not accessible" in caught.value.detail and "Settings → Accounts and keys" in caught.value.repair_hint
     assert not attempt.marks
 
 
@@ -234,7 +234,7 @@ def test_other_branch_failures_never_synchronize(responses, status):
     assert len(calls) == 2
 
 
-@pytest.mark.parametrize("status,failure,hint", [(403, "http", "Settings → Secrets"), (409, "http", "conflict"),
+@pytest.mark.parametrize("status,failure,hint", [(403, "http", "Settings → Accounts and keys"), (409, "http", "conflict"),
                                                (None, "timeout", "outcome may be unknown")])
 def test_sync_failure_preserves_evidence_and_stops(responses, status, failure, hint):
     calls, _ = responses(

@@ -403,7 +403,7 @@ test('every count the capsule prints agrees with its noun: one model, several mo
     r.controls.destroy();
 });
 
-test('one source is no source step; nothing but Main says so and offers the way to Settings › Accounts', async () => {
+test('one source is no source step; nothing but Main says so and offers the way to Settings › Accounts and keys', async () => {
     const one = room({ storeOptions: { catalog: { model_sources: CATALOG.model_sources, items: CATALOG.items.slice(0, 3) } } });
     await one.open();
     await one.press('Search');
@@ -419,9 +419,9 @@ test('one source is no source step; nothing but Main says so and offers the way 
     await alone.press('Search');
     assert.deepEqual(alone.notes(), ['Only Main\'s model can lead work here.']);
     assert.deepEqual(alone.rows().map((row) => row.key), [`route|${ASTRA}`, 'accounts']);
-    assert.equal(alone.rows()[1].text, 'Add a subscription or a key in Settings › Accounts');
+    assert.equal(alone.rows()[1].text, 'Add a subscription or a key in Settings › Accounts and keys');
     await alone.take('accounts');
-    assert.deepEqual([alone.settingsOpened, alone.el.dataset.open], [['providers'], 'false']);
+    assert.deepEqual([alone.settingsOpened, alone.el.dataset.open], [['accounts'], 'false']);
     alone.controls.destroy();
 
     const failed = room({ storeOptions: { catalog: new Error('offline') } });
