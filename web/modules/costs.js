@@ -12,6 +12,7 @@ import { mountCostPeriod } from './cost_period.js';
 import { READ_OK, accountRows, facetReadState } from './claudexor_status_store.js';
 import { humanizeResetAt, quotaSummary } from './harness_accounts.js';
 import { controlIcon } from './page_icons.js';
+import { fmt, translateString } from './i18n.js';
 import { parseModelSource } from './route_editor_primitives.js';
 
 // The limits card is rows of settings_rows.js (their home is this tab), drawn and written by settings_controls.js: each
@@ -276,6 +277,7 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
         <section class="ui-card costs-budget" aria-labelledby="costs-budget-title">
             <h3 class="dashboard-card-title" id="costs-budget-title">Budget limits</h3>
             <div class="costs-limits dashboard-settings">${limitRows(false)}</div>
+            <p class="ui-field-help costs-gaps" id="costs-gaps" hidden></p>
             <div class="costs-allowance">
                 <p class="ui-field-help costs-allowance-spend" id="costs-allowance-spend">Reading…</p>
             </div>
@@ -431,6 +433,18 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
         page.querySelector('[data-costs-subscriptions]').innerHTML = subscriptionDoors(payload, { transportError }).map(subscriptionDoorHtml).join('');
     }
 
+    // What the limits cannot count, one line under them (pricing.known_spend_gaps). The words are composed here,
+    // so the overlay leaves them alone and a language change says them again.
+    let spendGaps = [];
+    function paintGaps() {
+        const line = page.querySelector('#costs-gaps');
+        if (!line) return;
+        line.textContent = spendGaps.length ? fmt('Not counted: {roles} (price unknown).',
+            { roles: spendGaps.map((name) => translateString(name)).join(', ') }) : '';
+        line.hidden = !spendGaps.length;
+        if (spendGaps.length) line.dataset.i18nFmt = 'spend gaps'; else delete line.dataset.i18nFmt;
+    }
+
     async function loadLimits() {
         try {
             const settings = await readSettings();
@@ -438,6 +452,8 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
             const note = fields.map((field) => String(field.note || '').trim()).find(Boolean) || '';
             const noteEl = page.querySelector('#costs-budget-help');
             if (noteEl && note) noteEl.textContent = note;
+            spendGaps = Array.isArray(settings?._meta?.known_spend_gaps) ? settings._meta.known_spend_gaps.map(String) : [];
+            paintGaps();
         } catch { /* the rows keep the last values they read */ }
         limits.paint();
     }
@@ -474,6 +490,7 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
         else if (state.activePage === 'dashboard') { refreshCostsPanel(); loadSubscriptions(); periodCard.reload(); }  // the period is read when the tab is looked at
     });
     window.addEventListener('ouro:page-shown', (event) => { if (event.detail?.page !== 'dashboard') limits.leave(); });
+    window.addEventListener('ouro:language-changed', paintGaps);
     window.addEventListener('ouro:settings-updated', (event) => {
         const { source, page: home, row } = event.detail || {};
         if (source !== 'settings-row' || home !== LIMITS_PAGE) { refreshCostsPanel(); return; }

@@ -885,6 +885,7 @@ class SettingsMeta(SettingsNetworkMeta, SettingsTiming, total=False):
     restart_state: SettingsRestartState
     connections: list[Dict[str, Any]]  # every API connection as the picker shows it (provider_connections.connections_meta)
     main_connection_choice: list[str]  # the connections an unauthored Main waits to be chosen among (server_runtime)
+    known_spend_gaps: list[str]  # what spends money the limits cannot count: no known price (pricing.known_spend_gaps)
 
 
 class SettingsSaveResponse(SettingsReceipt, total=False):
