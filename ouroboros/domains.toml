@@ -233,6 +233,7 @@ D20 = "Presence"
 "ouroboros/delegation_knowledge_index.py" = "D03"  # a helper that started without knowledge meets the knowledge index with its first delegation
 "ouroboros/consolidator.py" = "D15"
 "ouroboros/knowledge.py" = "D15"
+"ouroboros/text_change.py" = "D15"  # the exact two-way change between two note versions (pure)
 "ouroboros/memory_publication.py" = "D15"
 "ouroboros/markdown_source.py" = "D18"
 "ouroboros/reference_books.py" = "D18"
