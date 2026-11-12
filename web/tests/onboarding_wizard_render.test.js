@@ -315,7 +315,7 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
 // was saved before: exactly the answer that used to confirm a save it knew nothing about. A call for which
 // `server.hold(call)` is true waits for `server.release(prefix)`, and is answered as things stand then.
 const SAVE_TIMEOUT = { status: 503, body: { code: 'settings_save_timeout', saved: null,
-    error: 'the settings save is still running in the server after 60s and was left to finish on its own; reload Settings to see what landed' } };
+    error: 'the settings save is still running in the server after 60s and was left to finish on its own; open Settings again to see what landed' } };
 const receipt = (runtimeMode, restartRequired) => ({ ok: true, status: 'saved', runtime_mode: runtimeMode,
     restart_required: restartRequired, preset: { applied: false, reason: 'not_requested', harnesses: [], receipt: {} } });
 const SUMMARY_FIRST = {
