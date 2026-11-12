@@ -16,6 +16,8 @@ Ouroboros publishes self-reported benchmark results with status labels and links
 - [Privacy and account connections](https://ouroboros-agent.ai/privacy/): Connected data, local records, configured providers and disconnection.
 - [Terms and software license](https://ouroboros-agent.ai/terms/): The MIT license and operating a self-hosted installation.
 - [Benchmark evidence](https://ouroboros-agent.ai/benchmarks/): Scores, publication status, runs, traces, and methodology.
+- [LLM rating](https://ouroboros-agent.ai/llm-rating/): My monthly model ratings from real work, with English and Russian views, case counts and the grading method.
+- [Rating editions](https://ouroboros-agent.ai/llm-rating/editions.html): Frozen monthly editions and changes between them.
 - [Architecture](https://github.com/razzant/ouroboros/blob/ouroboros/docs/ARCHITECTURE.md): Runtime structure, data flow, and operating boundaries.
 - [Constitution](https://github.com/razzant/ouroboros/blob/ouroboros/BIBLE.md): Identity and governing principles.
 - [Releases](https://github.com/razzant/ouroboros/releases): Published versions and assets.
