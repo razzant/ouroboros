@@ -75,13 +75,16 @@ def question_display_rooms(drive_root: Any, task_id: str, quizzes: Any, *, rooms
 
 
 def _native_question(task_id: str, quiz_id: str, block: dict, owner_wait: Any) -> dict:
-    """Main's own question is already its native card in Main: navigation needs its identity only."""
+    """Main's own question is already its native card in Main: its identity, lifecycle and the wait facts its rows
+    say (a room's question row words it as the card does), as a Project's pointer carries them."""
     from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+    from ouroboros.project_dialogue import owner_wait_projection
 
     row = {"task_id": task_id, "quiz_id": quiz_id, "chat_id": WEB_UI_CHAT_ID, "native": True,
-           "quiz_state": str(block.get("state") or "open"), "ts": str(block.get("asked_at") or "")}
-    if isinstance(owner_wait, dict) and owner_wait.get("quiz_id") == quiz_id:
-        row["owner_wait_state"] = str(owner_wait.get("state") or "")
+           "quiz_state": str(block.get("state") or "open"), "ts": str(block.get("asked_at") or ""),
+           **owner_wait_projection(quiz_id, owner_wait, block)}
+    if block.get("wait_for_answer") is True:
+        row["wait_for_answer"] = True
     return row
 
 
