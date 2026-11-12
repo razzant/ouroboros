@@ -2,7 +2,11 @@
 // review enforcement) and a managed deployment's part of it (`policy_state.deployment`, also the wizard's
 // `bootstrap.deployment`), read here once. A control offers only what the policy file allows and its row says whose
 // limit that is; what it fixes is said, never edited and never hidden.
-import { SAFETY_LEVELS } from './consciousness_words.js';
+import { rowById } from './settings_rows.js';
+
+// The Safety scale's shown words, from the row that draws them. The setup wizard imports this module, so it reads the
+// words from the data module and never from consciousness_words.js, which brings the chat modules with it.
+const SAFETY_LEVELS = rowById('OUROBOROS_SAFETY_MODE').control.options;
 
 /** What a managed deployment's policy file fixes, or null outside one. */
 export const deploymentOf = (meta) => meta?.policy_state?.deployment || null;
