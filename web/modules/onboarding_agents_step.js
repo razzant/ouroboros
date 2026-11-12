@@ -123,6 +123,28 @@ export function subscriptionDeclaration({ connected = [], skipPresets = false } 
     };
 }
 
+/**
+ * True when the engine's declared model sources (the catalog's `model_sources`) are known and none of
+ * the connected accounts is one: these accounts run agents, and no model discovery can change that.
+ * An empty list is unknown, never "none".
+ */
+export function agentsOnlyAccess(connected = [], sources = []) {
+    const serving = new Set((sources || []).map((source) => String(source?.credentialHarness || '')));
+    return connected.length > 0 && serving.size > 0 && !connected.some((harness) => serving.has(harness));
+}
+
+/** Why Accounts cannot continue while nothing connected can serve a model role, with the way forward. */
+export function mainSourceReason(connected = [], sources = [], { snapshot, catalogKnown = false } = {}) {
+    if (!connected.length) return 'Connect Codex, enter an API key, or choose a local model before continuing.';
+    if (!agentsOnlyAccess(connected, sources)) {
+        return 'Could not confirm that a connected account can run Ouroboros’s own model. '
+            + 'Retry model discovery, add an API key, or choose a local model.';
+    }
+    const serving = sources.map((source) => String(source.label || source.id)).join(' or ');
+    return `${joinLabels(familyLabels(connected, snapshot, { catalogKnown }))} can run agents; `
+        + `Ouroboros itself still needs a model. Connect ${serving}, add an API key, or choose a local model.`;
+}
+
 /** Open provider/local/model draft shared by preview and final completion. */
 export function onboardingSettingsDraft({
     state = {}, providerFields = [], budgetFields = [], modelSlots = [],
@@ -387,9 +409,8 @@ export function agentsOutcomeText(connected = [], {
             + `${taskOnlyHarnesses.length === 1 ? 'is task-only and does' : 'are task-only and do'} `
             + 'not change reviewer routes.');
     }
-    clauses.push(connected.includes('codex')
-        ? 'Codex can also supply your model roles without an API key.'
-        : 'Main still needs Codex, an API key, or a local model.');
+    // What Main still needs is said once, beside Continue, and only while it is true (`mainSourceReason`).
+    if (connected.includes('codex')) clauses.push('Codex can also supply your model roles without an API key.');
     clauses.push(SIGN_IN_SCOPE_NOTE);
     return clauses.join(' ');
 }
@@ -481,11 +502,8 @@ export function rotationDiagramSvg() {
 // View.
 // ---------------------------------------------------------------------------
 
-// NOTE ON ELEMENTS: nothing load-bearing here is a `<p>`. The wizard's
-// short-viewport rule hides `.panel-card p` wholesale (it is how the flow stays
-// unscrolled on a laptop), and the ladder is the one thing on this step that
-// must survive that adaptation — what gets hidden instead is the ARTWORK, whose
-// every fact is in this text anyway.
+// A short viewport drops the ARTWORK (web/onboarding.css), whose every fact is
+// in this text anyway; the ladder's own words stay at every size.
 export function ladderHtml() {
     const rungs = VALUE_LADDER.map((rung) => `
         <li class="agent-rung">

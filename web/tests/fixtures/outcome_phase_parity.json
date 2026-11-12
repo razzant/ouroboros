@@ -902,7 +902,7 @@
       "record": {"status": "failed", "reason_code": "context_capacity", "outcome_axes": {"execution": {"status": "infra_failed", "reason_code": "context_capacity"}}},
       "phase": "error",
       "headline": "Failed",
-      "acceptance_clause": "This route's window cannot hold the task's context."
+      "acceptance_clause": "This model's window is too small for this work."
     },
     {
       "name": "an unreadable handbook the task itself requires says its own sentence",
