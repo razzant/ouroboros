@@ -188,6 +188,24 @@ def test_an_emptied_plain_note_keeps_its_revision_and_its_calls_work(tmp_path):
     assert not refused.ok and refused.reason.startswith(f"version_unavailable: no version {empty}"), refused.reason
 
 
+def test_a_version_lookup_that_misses_names_the_torn_lines_of_this_note(tmp_path):
+    """A torn journal line naming the note may have lost the very version asked for: a miss counts every such
+    line, not only those holding the version, and says so; a clean miss names no gap."""
+    ctx = context(tmp_path)
+    target = address(tmp_path)
+    store.write_knowledge_note(target, "# Река\n\nOne.\n")
+    missing = "0" * 64
+    clean = tools._knowledge_read(ctx, TOPIC, version=missing)
+    assert clean == f"⚠️ TOOL_ERROR: version_unavailable: no version {missing} of this note in its history"
+    journal = target.shelf.parent / "knowledge_history.jsonl"
+    offset = journal.stat().st_size
+    with journal.open("a", encoding="utf-8") as stream:  # torn before its revision fields
+        stream.write(json.dumps({"topic": TOPIC, "mode": "edit"}, ensure_ascii=False)[:-1] + ', "new_sh\n')
+    torn = tools._knowledge_read(ctx, TOPIC, version=missing)
+    assert torn == (f"⚠️ TOOL_ERROR: version_unavailable: no version {missing} of this note in its history (1 journal "
+                    f"line(s) naming this note are not JSON and were skipped (the first at byte offset {offset}))")
+
+
 def test_the_backward_scan_finds_every_row_across_block_edges(tmp_path, monkeypatch):
     monkeypatch.setattr(versions, "_BLOCK", 97)  # shorter than every row: lines span several reads
     target = address(tmp_path)

@@ -166,7 +166,7 @@ def find_version(address: Any, version: Any) -> tuple[str, dict]:
     inline ``old_content`` or the text its ``old_content_ref`` names when its ``old_sha256`` is; it
     is returned only when it hashes to the version. The row is the one that wrote the version, or
     ``{}`` when none did (an outside edit, or a write before history). ``VersionUnavailable`` says
-    why there is no text."""
+    why there is no text and names the gaps among the lines that name this note."""
     if not isinstance(version, str) or len(version) != 64 or version.strip("0123456789abcdef"):
         raise VersionUnavailable("a version is a revision: the 64 lowercase hex characters of its sha256")
     why, held = "", None
@@ -188,7 +188,11 @@ def find_version(address: Any, version: Any) -> tuple[str, dict]:
             why = why or "the row that names it holds no text (digest-era)"
     if held is not None:
         return held, {}
-    gaps = "; ".join(history.gaps())
+    # A torn line may have lost the very version asked for: on a miss, count every line naming this note.
+    unfiltered = NoteHistory(address)
+    for _row in unfiltered:
+        pass
+    gaps = "; ".join(unfiltered.gaps())
     raise VersionUnavailable((why or f"no version {version} of this note in its history")
                              + (f" ({gaps})" if gaps else ""))
 
