@@ -17,8 +17,8 @@ import subprocess
 from typing import Iterable
 
 
-# Minimal witnesses of the contracts verification and every install rely on, and pins
-# that read their subject as data, which no import of a change reaches (#3188).
+# Minimal witnesses of the contracts verification and every install rely on, and the inventory
+# pin: book chapters, runtime text, tracked paths and UI modules reach it through no import (#3188).
 # Replacing a witness is a verifier change and requires full qualification.
 # The whole Node lane is unconditional in both runners, outside this Python list.
 FLOOR_TESTS = {

@@ -300,10 +300,10 @@ def test_floor_exists_in_this_checkout():
 
 
 def test_a_change_an_inventory_reads_as_data_runs_its_pin_and_stays_selected():
-    """An inventory reads its sources as data, so no import names its pin: a book chapter (#3187), a new
-    folder named like a data-layout entry (#3235) and a control's text (#3207) each left the target red
-    while the selection of that change named only the floor. The pin runs for every change now, and such
-    a change still selects nothing else and never escalates to full."""
+    """An inventory reads its sources as data, so changing them selects its pin through no import: a book
+    chapter (#3187), a new folder named like a data-layout entry (#3235) and a control's text (#3207) each
+    left the target red while the selection of its merge never named the pin. The pin runs for every change
+    now, and such a change still selects nothing else and never escalates to full."""
     root = Path(__file__).resolve().parents[1]
     for change in ("docs/architecture/01-high-level-architecture.md", "docs/llm-rating/data/latest.json",
                    "web/modules/onboarding_wizard.js"):
