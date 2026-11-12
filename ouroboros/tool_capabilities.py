@@ -367,7 +367,7 @@ RESULT_VIEW_PARAMS: dict[str, dict[str, Any]] = {
                            "description": "Chars of the output's tail to show in this turn (see view_head_chars)."},
 }
 
-# Declared range parameters whose presence means the caller chose the result's
+# Declared range parameters where a non-null value means the caller chose the result's
 # form (a page, a window, a cursor): such a result is a REQUESTED form that may
 # use the free room of the frame, not an unsolicited body sharing the eighth.
 EXPLICIT_RANGE_ARGS: frozenset[str] = frozenset({
