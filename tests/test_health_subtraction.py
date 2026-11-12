@@ -104,6 +104,24 @@ def test_the_self_lines_state_each_file_s_last_update_record_and_never_its_mtime
     assert said()[0] == "identity.md: last update_identity record unreadable", "the newest record has no date"
     append_jsonl(journal, {"ts": (now - timedelta(minutes=3)).isoformat(), "focus": {"role": "main"}})
     assert said()[0] == "identity.md: last update_identity less than an hour ago (main)"
+    # An append the publisher did not finish: the newest record is unknown, never the readable one before it.
+    world = memory / "world_journal.jsonl"
+    with world.open("ab") as handle:
+        handle.write(b'{"ts": "2026-11-12T11:00:00+00:00", "focus": {"role": "ma')
+    assert said()[1] == "WORLD.md: last update_world record unreadable", "a torn last line hides the newest record"
+    publish("WORLD.md", "world_journal.jsonl", "consciousness", timedelta(hours=2))
+    assert said()[1] == "WORLD.md: last update_world record unreadable", \
+        "the next append joined to the torn line: one line that does not parse, never the older record"
+    with world.open("ab") as handle:
+        handle.write(b"\n")
+    publish("WORLD.md", "world_journal.jsonl", "consciousness", timedelta(hours=1))
+    assert said()[1] == "WORLD.md: last update_world 1 h ago (consciousness)", "a whole record after them is the fact"
+    with journal.open("ab") as handle:
+        handle.write(b'{"ts": "2026-11-12T11:30:00+00:00", "focus"')
+    assert said()[0] == "identity.md: last update_identity record unreadable", "the same for the identity journal"
+    with journal.open("ab") as handle:
+        handle.write(b": {}}\n")
+    assert said()[0] == "identity.md: last update_identity less than an hour ago", "a completed line reads again"
     monkeypatch.setattr(context_health, "_SELF_JOURNAL_TAIL_BYTES", 16)
     assert said() == ["identity.md: last update_identity record unreadable", "WORLD.md: last update_world record unreadable"], \
         "a record longer than the tail is unknown, never no record"

@@ -237,6 +237,31 @@ _SELF_FILES = (("identity.md", "identity_journal.jsonl", "update_identity", True
 # budget (``context._SECTION_BUDGETS``: identity 80 000 chars, the map 16 000) and four bytes a character
 # a record stays under 700 KB: this tail holds one such record together with the line break before it.
 _SELF_JOURNAL_TAIL_BYTES = 1024 * 1024
+# Whether each self-file journal's last line parses, once per file identity: ``{path: (identity, parses)}``.
+_SELF_LAST_LINES: Dict[str, tuple] = {}
+
+
+def _last_line_parses(journal: pathlib.Path, info: Any) -> bool:
+    """Whether the journal's last non-empty line is a JSON object. ``publish_memory_file`` appends with no
+    record-boundary repair, so an interrupted append leaves a torn last line, and the next append joins it
+    into one line that does not parse: either way the newest record is unknown, never the one before it.
+    Read back from the end within the journal's tail, once per file identity: a last line longer than the
+    tail holds no record the tail could show either."""
+    identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+    kept = _SELF_LAST_LINES.get(str(journal))
+    if kept is not None and kept[0] == identity:
+        return kept[1]
+    with journal.open("rb") as handle:
+        start = max(0, info.st_size - _SELF_JOURNAL_TAIL_BYTES)
+        handle.seek(start)
+        body = handle.read(info.st_size - start).rstrip()
+    last = body.rsplit(b"\n", 1)
+    try:
+        parses = (len(last) == 2 or start == 0) and isinstance(json.loads(last[-1]), dict) if body else True
+    except ValueError:
+        parses = False
+    _SELF_LAST_LINES[str(journal)] = (identity, parses)
+    return parses
 
 
 def _age_in_hours(seconds: float) -> str:
@@ -259,18 +284,23 @@ def _last_self_update(journal: pathlib.Path, tool: str, compared: Optional[pathl
     that is not the host's (``legacy_wrap``, role ``host``: the profiler's first fencing of the map), with
     its age and the writing focus's role. No journal, or a journal read whole without such a record, is no
     record. A tail that holds bytes but no record of the mind's (a record longer than the tail, lines that
-    do not parse), or a newest record without a date, is unreadable: unknown, never "no record".
+    do not parse), a last line that does not parse (``_last_line_parses``), or a newest record without a
+    date, is unreadable: unknown, never "no record" and never the record before it.
     ``compared`` is the file the journal belongs to: when the dated record carries the hash it published
     (``new_sha256``) and the file's bytes hash otherwise, the line says so, as a fact without a cause or an
     author. A record without that hash, or bytes that cannot be read, add nothing."""
     from ouroboros.deadline_utils import parse_deadline_ts, utc_now
 
     try:
-        size = journal.stat().st_size
+        info = journal.stat()
+        size = info.st_size
         rows = cached_tail_objects(journal, _SELF_JOURNAL_TAIL_BYTES)
+        torn = not _last_line_parses(journal, info)
     except FileNotFoundError:
         return f"no {tool} record"
     except OSError:
+        return f"last {tool} record unreadable"
+    if torn:
         return f"last {tool} record unreadable"
     mine = [row for row in rows if row.get("source_type") != "legacy_wrap" and _focus_role(row) != "host"]
     if not mine:
