@@ -813,5 +813,7 @@ def test_knowledge_tools_project_whole_where_parameter_prose_does_not_arrive(nam
     assert description.startswith(lead + "\n" + _SCHEMA_CLAUSE), f"{name} lead clipped on the custom route"
     words = (["view='outline'", "view='history'", "version="] if name == "knowledge_read" else
              ["overwrite", "append", "edit", "edits", "section", "revert", "archive", "restore", "reason",
-              "summary", "expected_revision"])
+              "summary", "expected_revision", "names the note's enduring scope and when to open it",
+              "not a dated log of the latest edit", "Text a write removes stays in the note's history",
+              "view='history' or version=", "put back (mode='revert')"])
     assert all(word in lead for word in words), [word for word in words if word not in lead]
