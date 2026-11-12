@@ -304,10 +304,11 @@ export function createRoomWork({
                 view: { word: tr('room_work.sending', 'Sending…'), secondary: '', tone: 'live', mark: 'moving', owner: false,
                     outcome: '', focus: '' } });
         }
-        // Every question of the room's turn is reachable from the list: a work's row leads to its first one, and each
-        // further question of that work, or one no listed work holds (its work ended), has its own row.
-        const linked = new Set(listOf(state.works).map((work) => workQuestion(work))
-            .filter(Boolean).map((ask) => `${ask.taskId}:${ask.quizId}`));
+        // Every question of the room's turn is reachable from the list: a confirmed work's row leads to its first one
+        // (decorate), and each further question of that work, one whose work is unconfirmed (its row offers no way
+        // there) or one no listed work holds (its work ended), has its own row.
+        const linked = new Set(listOf(state.works).filter((work) => work.confirmed !== false)
+            .map((work) => workQuestion(work)).filter(Boolean).map((ask) => `${ask.taskId}:${ask.quizId}`));
         for (const entry of current ? listOf(state.room?.turn) : []) {
             if (!['question', 'open_question'].includes(entry?.kind) || !entry.task_id) continue;
             if (entry.work_id ? !entry.quiz_id : entry.kind !== 'open_question') continue;
@@ -559,8 +560,9 @@ export function createRoomWork({
         main.dataset.target = navigable ? 'card' : lookable ? 'history' : detailable ? 'details' : 'none';
         // The whole name is in the DOM; CSS clamps it to two lines, focus and open details show it whole.
         if (view.full !== full) { view.full = full; view.nameEl.textContent = full; }
-        // The work's shape in its word's ink; something in it that waits for the owner is the amber dot in its place
-        // (a pause is not the owner's move), and a known outcome is a dot in the outcome's tone beside its word.
+        // The work's shape in its word's ink; something in it that waits for the owner takes the owner's hue as
+        // status_mark.js markView draws it (a pause is not the owner's move), and a known outcome is a dot in the
+        // outcome's tone beside its word.
         paintStatusMark(view.mark, markView({ mark: row.view.mark, owner: row.view.owner, outcome: row.view.outcome }));
         if (view.word.textContent !== row.view.word) view.word.textContent = row.view.word;
         const secondary = String(row.view.secondary || '');
@@ -800,9 +802,9 @@ export function createRoomWork({
         trigger.title = text;  // the whole status, never clipped away (an extra, not the only path)
         caret.hidden = !listed;
         // The work's shape in the word's ink; while something in the room waits for the owner (a question, or an action
-        // only the owner takes) the amber dot takes its place and the word keeps its own ink: Working with a question
-        // elsewhere stays Working. A pause by the owner or by Ouroboros is not the owner's move. The room at rest says
-        // Online beside its green dot.
+        // only the owner takes) the mark takes the owner's hue as status_mark.js markView draws it, and the word keeps
+        // its own ink: Working with a question elsewhere stays Working. A pause by the owner or by Ouroboros is not the
+        // owner's move. The room at rest says Online beside its green dot.
         const owner = statusBadge.dataset.owner === '1';
         const reshaped = paintStatusMark(mark, tone === 'failed' ? START_FAILED
             : tone === 'online' && !owner ? AT_REST : markView({ mark: statusBadge.dataset.mark, owner }));

@@ -243,6 +243,49 @@ test('two questions of one work have two reachable rows: the work\'s row leads t
     } finally { shade?.destroy(); restoreDom(prior); }
 });
 
+test('a known question keeps a door while its work is unconfirmed; a confirmed work keeps one door, no duplicate', async () => {
+    const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
+    let shade = null;
+    try {
+        const node = (tag, cls, parent) => {
+            const el = document.createElement(tag); el.className = cls; parent.appendChild(el); return el;
+        };
+        const page = node('div', 'page', mount);
+        const header = node('div', 'chat-page-header', page);
+        const titleRow = node('div', 'app-page-title-row', node('div', 'app-page-title-block', header));
+        const badge = node('span', 'status-badge online', node('div', 'app-page-actions ui-chrome-group', header));
+        const messages = node('div', 'chat-messages', page);
+        const item = { kind: 'open_question', task_id: 'w', quiz_id: 'q1' };
+        const reveals = [];
+        let confirmed = true;
+        shade = createRoomWork({ page, statusBadge: badge, messagesDiv: messages, ws: { isConnected: () => true },
+            reading: { stick: true, cancel() {}, scroll() {} },
+            works: () => workState([{ ...running('w'), turn: [item], confirmed }],
+                room('working', { turn: [{ work_id: 'w', ...item }] })),
+            liveCardRecords: new Map(), pendingSubmissions: new Map(),
+            revealQuestion: async (...args) => { reveals.push(args.slice(0, 2)); return true; } });
+        const trigger = titleRow.children.find((el) => el.classList.contains('rw-trigger'));
+        const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].querySelector('.rw-list');
+        const shut = () => { if (trigger.getAttribute('aria-expanded') === 'true') trigger.click(); };
+        const doors = async () => {
+            shut();
+            trigger.click();
+            const pills = list.children.map((row) => [row.dataset.id, row.children
+                .find((child) => child.classList.contains('rw-verb'))?.children
+                .find((child) => child.classList.contains('rw-pill-question'))]).filter(([, pill]) => pill);
+            for (const [, pill] of pills) { pill.click(); await Promise.resolve(); }
+            shut();
+            return pills.map(([id]) => id);
+        };
+        // Confirmed: the work's own row is the one door to its question.
+        assert.deepEqual(await doors(), ['w']);
+        // Unconfirmed: the work's row offers no way there, so the question's own row is its door.
+        confirmed = false;
+        assert.deepEqual(await doors(), ['question:w:q1']);
+        assert.deepEqual(reveals, [['w', 'q1'], ['w', 'q1']]);
+    } finally { shade?.destroy(); restoreDom(prior); }
+});
+
 test('a question row says its own words as long as its turn item makes the row, read or no read', () => {
     const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
     let shade = null;
