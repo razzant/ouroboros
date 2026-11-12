@@ -52,7 +52,6 @@ def body(tmp_path, monkeypatch):
     shared.git(repo, "commit", "-q", "-m", "ignore caches")
     shared.git(repo, "cherry-pick", "--no-commit", fixture["head_sha"])
     set_review_pool(monkeypatch, shared.golden_pool())
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
     sends: list = []
     monkeypatch.setattr(substrate, "run_review_request", shared.golden_substrate(sends))

@@ -810,8 +810,8 @@ def test_a_compacted_review_source_keeps_its_continuation_and_author_record(task
 
 
 def _rejected_review(task, monkeypatch, *, operation=True):
-    """A Blocking review that FAILs through the public tool; ``operation``: its seat names its operation, as every
-    production seat does (a record without it proves no settlement)."""
+    """A review that FAILs through the public tool, returned before Git; ``operation``: its seat names its operation,
+    as every production seat does (a record without it proves no settlement)."""
     from ouroboros.review_dispatch import invoke_review_paid_stamp
     from tests.test_review_commit_landing import REJECTING
     from tests.test_review_ledger import CRITICAL
@@ -834,7 +834,7 @@ def _rejected_review(task, monkeypatch, *, operation=True):
 @pytest.mark.parametrize("evidence", ["settled_record", "record_naming_no_operation"])
 def test_a_compacted_attempt_collected_with_its_exact_bytes_returns_its_outcome_without_rebuilding_custody(
         task, monkeypatch, evidence):
-    """Independent review (regression surface): a Blocking FAIL whose attempt row history compaction stripped, then
+    """Independent review (regression surface): a FAIL whose attempt row history compaction stripped, then
     collected through its reference with the exact reviewed bytes staged, returns its whole recorded outcome
     read-only from its bound settled record (every seat's answer). No custody is rebuilt from the stripped row, the
     FAIL is never rewritten (it became QUORUM_FAILED), nothing is dispatched, staged or committed. A record whose

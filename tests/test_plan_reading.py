@@ -2,8 +2,8 @@
 reading. It travels the ordinary ask — participants, the intention ledger, the mailbox — carrying
 the objective with its author, the owner's words and the room but no plan; its replies are advice
 that move no objection in any mode, while the same participant objecting to a stored revision holds
-as before. A reading of declared own-body work hears every marked reviewer under Blocking without
-spending the first body revision's ask. Each rule is pinned both ways through the real ToolContext,
+as before. A reading of declared own-body work is seated like a body plan's first ask (a counted
+reviewer, and a reason when it narrows the pool) without spending the first body revision's ask. Each rule is pinned both ways through the real ToolContext,
 the real plan record and the fake review substrate of ``tests/test_plan_task_tool.py``; the last two
 tests pin the cached prefix of a participant's packet."""
 from __future__ import annotations

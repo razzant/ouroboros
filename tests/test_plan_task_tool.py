@@ -3,7 +3,7 @@ ToolContext, the real plan record and a FAKE review substrate. Pinned in both
 directions: typed $0 refusals write nothing and call nobody; a write records a
 revision and calls nobody; an ask sends exactly to the named participants with each
 participant's own delivery and continuation; replies settle into the record and the
-intention ledger record; only the raiser's withdrawal releases a Blocking hold."""
+intention ledger record; only the raiser's withdrawal closes an objection, which holds nothing."""
 from __future__ import annotations
 
 import json
