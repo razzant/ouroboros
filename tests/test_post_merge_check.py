@@ -831,25 +831,30 @@ def _identified(directory, reports, *, sha=HEAD, run_id="77", platform="Linux", 
 def test_only_tests_this_run_passed_whole_at_its_head_on_its_system_spare_a_recheck(tmp_path):
     ids = ["tests/t.py::test_a", "tests/t.py::test_flaky", "tests/t.py::test_skip", "tests/s.py::test_serial",
            "tests/t.py::test_breach", "tests/t.py::test_not_selected", "tests/t.py::test_torn", "tests/u.py",
-           "tests/u.py::test_whole", "tests/b.py::test_b", "tests/t.py::test_param"]
+           "tests/u.py::test_whole", "tests/b.py::test_b", "tests/t.py::test_param",
+           "tests/test_post_merge_check.py::test_of_a_module_these_passes_did_not_run", "tests/gone.py::test_x"]
     _selection(tmp_path)
     _identified(tmp_path / "parallel", [*_whole(ids[0]), _row(ids[1], "failed"), _row(ids[2], "skipped", "setup"),
                                         *_whole(ids[4], _xfail(ids[4])), _row(ids[6], phase="setup"), _row(ids[6]),
                                         *_whole(ids[8]), *_whole("tests/t.py::test_param[1]")], collection=["tests/b.py"])
     _identified(tmp_path / "serial", [*_whole(ids[3]), *_whole(ids[9])])
-    # A failure (even one its retry passed), skip, xfail, a test without its teardown, a module or function id and a
-    # test of a module that did not collect in another pass are rechecked.
+    # Kept without a recheck: an id whose own report was no whole pass (a failure, even one its retry passed, a skip,
+    # an xfail, a test without its teardown, a test of a module that did not collect in another pass) and a test of a
+    # module these passes ran nothing of, while its file exists. Left for the recheck: a test, module or function id
+    # without a report in a module they ran, and a test whose file is gone.
+    kept = dict.fromkeys([ids[1], ids[2], ids[4], ids[6], ids[9], ids[11]], "kept")
     assert pmc.same_run_passes(tmp_path, ids, head=HEAD, system="linux", run_id="77") == {
-        ids[0]: "passed", ids[3]: "passed", ids[8]: "passed"}
+        ids[0]: "passed", ids[3]: "passed", ids[8]: "passed", **kept}
     for other in ({"sha": "e" * 40}, {"run_id": "78"}, {"platform": "Windows"}):
         _identified(tmp_path / "parallel", _whole(ids[0]), **other)
         _identified(tmp_path / "serial", _whole(ids[3]), **other)
-        assert pmc.same_run_passes(tmp_path, ids, head=HEAD, system="linux", run_id="77") == {}, other
+        # a pass of another commit, run or system ran nothing here: only the existing module's test is kept
+        assert pmc.same_run_passes(tmp_path, ids, head=HEAD, system="linux", run_id="77") == {ids[11]: "kept"}, other
     for label in ("parallel", "serial"):  # a pass killed before its export names no commit, run or system
         (tmp_path / label / "results.json").unlink()
         (tmp_path / label / "events.jsonl").write_text(json.dumps(
             {"event": "report", "nodeid": ids[0], "phase": "call", "outcome": "passed"}) + "\n", encoding="utf-8")
-    assert pmc.same_run_passes(tmp_path, ids, head=HEAD, system="linux", run_id="77") == {}
+    assert pmc.same_run_passes(tmp_path, ids, head=HEAD, system="linux", run_id="77") == {ids[11]: "kept"}
 
 
 def test_route_records_its_hand_over_before_the_recheck_and_reuses_this_runs_passes(tmp_path, monkeypatch, capsys):

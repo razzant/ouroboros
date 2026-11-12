@@ -146,8 +146,8 @@ def issue_body(block: dict, *, head: str, run_url: str, author: str = "", seen: 
         opening = f"These tests fail on `ouroboros` on {system}, but the post-merge check could not find the merge that broke them."
     rows = "\n".join(f"- {_named(nodeid)}" for nodeid in block["ids"])
     return (f"{opening}\n\n{rows}\n\n{seen} at `{head}`: {run_url}\n\n{_FORWARD}{_size_hint(block)} The "
-            f"post-merge check takes each test off this list once it passes on `ouroboros` on {system}, and closes "
-            f"this issue when none is left.\n\n{machine_block(block)}\n")
+            f"post-merge check takes a test off this list when a check on {system} runs it and it passes, or when it is gone, "
+            f"and closes this issue when none is left.\n\n{machine_block(block)}\n")
 
 
 def find_merged_pr(github, sha: str) -> dict | None:
@@ -190,7 +190,8 @@ def route(github, *, classification: dict, attribution: dict, head: str, run_url
     A culprit's pull request gets one comment and one open issue per culprit pull request is
     created or extended; reds without blame not tracked yet get one issue per kind. `checkpoint(record)`
     then receives that hand-over before any recheck starts, so a step killed during the recheck still
-    leaves it. `same_run(ids)` answers the ids this run already passed at the head on this system;
+    leaves it. `same_run(ids)` answers what this run already settles: "passed" at the head on this system, "kept" for
+    an id it owes no recheck (the run ran nothing of its module, or its own report was no whole pass);
     `recheck(ids)` runs the others once and answers `outcomes` values; `size_recheck(base, ids)` does
     so for size ids, measured against `base`. An issue loses each id that passes, named in a comment,
     and closes when none is left. A failed GitHub call becomes a warning in the record and the

@@ -187,7 +187,7 @@ def test_an_issue_loses_each_test_that_passes_and_keeps_what_is_not_green():
                                                                                   "tests/t.py::test_gone"]}]
     body = github.issues[5]["body"]
     assert routing.parse_machine_block(body)["ids"] == left and github.issues[5]["state"] == "open"
-    assert f"Still not passing at `{HEAD}`" in body and "takes each test off this list once it passes" in body
+    assert f"Still not passing at `{HEAD}`" in body and "takes a test off this list when a check on Windows runs it and it passes" in body
     [(number, text)] = github.comments  # the record of what left the issue
     assert number == 5 and text.startswith(f"Green at `{HEAD}` on Windows (https://example.invalid/run/7)")
     assert "`tests/t.py::test_fixed`" in text and "`tests/t.py::test_gone`" in text and "Still tracked here: 4." in text
@@ -235,24 +235,27 @@ def test_the_hand_over_is_recorded_before_the_recheck_which_skips_what_this_run_
 
     culprit = "c" * 40
     github = FakeGitHub(label=True, prs={culprit: [_pr(2067, culprit, login="author")]}, issues=[
-        _issue(6, {"kind": "pre-existing", "ids": ["tests/t.py::test_elsewhere", "tests/t.py::test_ran_here"]})])
+        _issue(6, {"kind": "pre-existing", "ids": ["tests/t.py::test_elsewhere", "tests/t.py::test_ran_here"]}),
+        _issue(7, {"kind": "culprit", "culprit": "d" * 40, "pr": 2000, "ids": ["tests/quiet.py::test_not_run"]})])
     verdicts = [{"id": "tests/t.py::test_new", "verdict": "culprit", "culprit": culprit, "last_good": "b" * 40}]
     saved, asked = [], []
 
     def recheck(ids):
         # This run's red already reached its author and an issue before the long session starts.
         [handed] = saved
-        assert handed["created"] == [101] and handed["comments"] == [2067] and handed["complete"] is False
+        assert handed["created"] == [102] and handed["comments"] == [2067] and handed["complete"] is False
         asked.append(ids)
         return dict.fromkeys(ids, "passed")
 
     record = _route(github, ["tests/t.py::test_new"], verdicts, recheck=recheck,
-                    same_run=lambda ids: {"tests/t.py::test_ran_here": "passed"},
+                    same_run=lambda ids: {"tests/t.py::test_ran_here": "passed", "tests/quiet.py::test_not_run": "kept"},
                     checkpoint=lambda handed: saved.append(copy.deepcopy(handed)))
+    # A record whose module this run did not run is not run again for it, and stays as it was.
     assert asked == [["tests/t.py::test_elsewhere"]]
-    assert record["same_run"] == {"tests/t.py::test_ran_here": "passed"}
+    assert record["same_run"] == {"tests/t.py::test_ran_here": "passed", "tests/quiet.py::test_not_run": "kept"}
     assert record["rechecked"] == {"tests/t.py::test_elsewhere": "passed"}
-    assert record["closed"] == [6] and record["complete"] is True
+    assert record["closed"] == [6] and record["complete"] is True and github.issues[7]["state"] == "open"
+    assert routing.parse_machine_block(github.issues[7]["body"])["ids"] == ["tests/quiet.py::test_not_run"]
     assert [number for number, _ in github.comments] == [2067, 6]
 
 
