@@ -197,9 +197,7 @@ function mountList(container, { ctx = {} }) {
     const busy = new Set();   // keys whose switch is in flight
     let settings = null;
     let skills = [];
-    let rows = [];
-    let handle = null;
-    let secrets = null;
+    const otherRows = new Map();  // each row keeps its field, caret and result while the skills list arrives
     let reveal = '';
     let gone = false;
     // A list is drawn again only when its words changed, so a head that holds focus is not replaced under it.
@@ -235,25 +233,45 @@ function mountList(container, { ctx = {} }) {
     function paintOther() {
         if (!settings) return;
         const next = otherKeyRows(settings, skills);
-        const html = next.map((row) => (row.control.kind === 'secret' ? secretRowHtml(row) : settingsRow(row))).join('');
-        if (drawn.other !== html) {
-            handle?.dispose();
-            secrets?.dispose();
-            rows = next;
-            otherEl.innerHTML = drawn.other = html;
-            handle = bindSettingRows(otherEl, { rows, ask: ctx.ask });
-            secrets = bindSecretRows(otherEl, { rowOf: (id) => rows.find((row) => row.id === id), ask: ctx.ask });
-        } else handle.paint();
-        secrets.paint(settings);
+        const keep = new Set(next.map((row) => row.id));
+        for (const [id, mounted] of otherRows) {
+            if (keep.has(id)) continue;
+            mounted.handle.dispose();
+            mounted.secrets.dispose();
+            mounted.node.remove();
+            otherRows.delete(id);
+        }
+        next.forEach((row, index) => {
+            let mounted = otherRows.get(row.id);
+            if (!mounted) {
+                const node = otherEl.ownerDocument.createElement('div');
+                node.className = 'settings-rows';
+                node.innerHTML = row.control.kind === 'secret' ? secretRowHtml(row) : settingsRow(row);
+                otherEl.insertBefore(node, otherEl.children[index] || null);
+                mounted = { node, row, handle: bindSettingRows(node, { rows: [row], ask: ctx.ask }),
+                    secrets: bindSecretRows(node, { rowOf: () => row, ask: ctx.ask }) };
+                otherRows.set(row.id, mounted);
+            } else {
+                Object.assign(mounted.row, row);
+                if (otherEl.children[index] !== mounted.node) otherEl.insertBefore(mounted.node, otherEl.children[index] || null);
+                mounted.node.querySelector('[data-setting-meta]').textContent = row.meta || '';
+                mounted.handle.paint();
+            }
+            mounted.secrets.paint(settings);
+        });
     }
     const paint = () => { paintProviders(); paintKeys(); paintOther(); };
 
     async function read({ withSkills = false } = {}) {
-        const [document, extensions] = await Promise.all([Promise.resolve().then(() => ctx.readSettings()).catch(() => null),
-            withSkills ? readSkills().catch(() => null) : null]);
+        // Skills enrich the page independently: their read cannot hold up a key or erase a field being edited.
+        if (withSkills) void readSkills().then((extensions) => {
+            if (gone || !Array.isArray(extensions?.skills)) return;
+            skills = extensions.skills;
+            paintOther();
+        }).catch(() => {});
+        const document = await Promise.resolve().then(() => ctx.readSettings()).catch(() => null);
         if (gone) return;
-        settings = document || settings;   // a failed read keeps what is drawn
-        if (Array.isArray(extensions?.skills)) skills = extensions.skills;
+        settings = document || settings;
         paint();
     }
 
@@ -283,10 +301,10 @@ function mountList(container, { ctx = {} }) {
     // key whose write landed puts its field away.
     const onSaved = (event) => {
         if (event.detail?.source !== 'settings-row' || event.detail.page !== 'accounts') return;
-        secrets?.close(event.detail.row);
+        otherRows.get(event.detail.row)?.secrets.close(event.detail.row);
         void read();
     };
-    const onPage = (event) => { if (event.detail?.page !== 'settings') handle?.leave(); };
+    const onPage = (event) => { if (event.detail?.page !== 'settings') otherRows.forEach(({ handle }) => handle.leave()); };
     const offStore = store.subscribe((view) => paintProviders(view), { visible: () => false });
     const win = globalThis.window;
     container.addEventListener('click', onClick);
@@ -306,8 +324,7 @@ function mountList(container, { ctx = {} }) {
         gone = true;
         if (list === mine) list = null;
         offStore();
-        handle?.dispose();
-        secrets?.dispose();
+        otherRows.forEach(({ handle, secrets }) => { handle.dispose(); secrets.dispose(); });
         container.removeEventListener('click', onClick);
         container.removeEventListener('change', onChange);
         win?.removeEventListener?.('ouro:settings-page-shown', onShown);

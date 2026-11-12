@@ -705,6 +705,8 @@ export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiCl
         const provider = key.fresh ? `<div class="form-field ui-field"><label for="${uid}-kind">Provider</label><select id="${uid}-kind" class="ui-control" data-key-kind>${
             PROVIDER_CARDS.map((each) => `<option value="${each.kind}"${each.kind === kind ? ' selected' : ''}>${escapeHtml(each.title)}</option>`).join('')}</select></div>` : '';
         const legacy = builtin && kind === 'openai' && rowById('OPENAI_BASE_URL');
+        const legacyFixed = legacy && checkerReads(deployment, legacy.id);
+        const legacyRow = legacyFixed ? { ...legacy, meta: checkerFieldsNote(['Legacy OpenAI Base URL']) } : legacy;
         container.innerHTML = `<p class="settings-page-lead">${key.fresh ? 'A second key of a provider, under a name of its own. A role or an agent names the key it uses.'
             : `${escapeHtml(usedWords(usage.get(id())))}.${on ? '' : ' It is off: nothing is sent through it.'}`}</p>
             <section class="ui-card settings-card accounts-key" data-connection-row data-kind="${kind}"${builtin ? ` data-builtin="1" data-setting-row="accounts:key:${kind}"` : ` data-uid="${uid}" data-name="${escapeHtml(key.name)}"${key.fresh ? ' data-draft="1"' : ''}`}>
@@ -720,10 +722,10 @@ export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiCl
                 ${card().note ? `<p class="settings-card-note">${card().note}</p>` : ''}
             </section>
             ${legacy ? `<section class="ui-card settings-card"><details class="ui-disclosure" data-settings-fold><summary>More: legacy base address</summary>
-                <div class="settings-rows">${settingsRow(legacy)}</div></details></section>` : ''}
+                <div class="settings-rows">${settingsRow(legacyRow)}</div></details></section>` : ''}
             ${key.fresh || fixed ? '' : `<div class="ui-action-row settings-foot">
                 <button type="button" class="btn btn-default" data-key-toggle>${on ? 'Turn off' : 'Turn on'}</button>
-                ${builtin && !(entry()?.configured && entry().source !== 'environment' && !(kind === 'openai-compatible' && legacyAddressOf(settings)))
+                ${builtin && (card().fields.some((field) => checkerReads(deployment, field.settingKey)) || !(entry()?.configured && entry().source !== 'environment' && !(kind === 'openai-compatible' && legacyAddressOf(settings))))
         ? '' : '<button type="button" class="btn btn-danger" data-editor-remove>Remove</button>'}</div>`}`;
         for (const field of card().fields) {
             const input = fieldInput(field);
@@ -741,7 +743,8 @@ export function mountKeyPage(container, { path, ctx = {}, test = (body) => apiCl
         // A key with one secret has nothing to clear that Remove does not: its field keeps Show alone.
         if (card().fields.filter((field) => field.secret).length < 2) container.querySelectorAll('.secret-clear').forEach((button) => { button.hidden = true; });
         bindSecretInputs(container);
-        if (legacy) rows = bindSettingRows(find('[data-settings-fold]'), { ask: ctx.ask });
+        if (legacy) rows = bindSettingRows(find('[data-settings-fold]'), { rows: [legacyRow], ask: ctx.ask });
+        if (legacyFixed) find('[data-settings-fold] [data-setting-control]').readOnly = true;
         if (said) setResult(find('[data-editor-result]'), said);
     }
 

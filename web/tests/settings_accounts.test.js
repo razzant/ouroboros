@@ -407,7 +407,7 @@ test('a stored key\'s row says only whether a value is saved: no echo, no "was",
     assert.doesNotMatch(secretRowHtml(storedKeyRow('TEAM_HOOK', 'Your own key')), /value="/, 'the row is drawn with no value');
     const list = await world.mount('accounts');
     const row = (id) => world.all('[data-setting-row]').find((node) => node.dataset.settingRow === id);
-    assert.deepEqual(world.find('[data-other-rows]').children.map((node) => node.dataset.settingRow), ['GITHUB_TOKEN', 'GITHUB_REPO', 'SLACK_BOT_TOKEN', 'TEAM_HOOK']);
+    assert.deepEqual(world.find('[data-other-rows]').children.map((node) => node.children[0].dataset.settingRow), ['GITHUB_TOKEN', 'GITHUB_REPO', 'SLACK_BOT_TOKEN', 'TEAM_HOOK']);
     const token = row('GITHUB_TOKEN');
     const input = token.querySelector('[data-setting-control]');
     assert.equal(token.querySelector('[data-secret-state]').textContent, 'Saved');
@@ -418,10 +418,10 @@ test('a stored key\'s row says only whether a value is saved: no echo, no "was",
     assert.equal(token.querySelector('[data-secret-field]').hidden, true);
     assert.doesNotMatch(world.container.textContent, /ghp_real|https:\/\/hook/);
     // Replace opens the field; a typed value is written when the field is left, like every typed row.
-    await world.find('[data-other-rows]').fire('click', { target: token.querySelector('[data-secret-open]') });
+    await token.parentElement.fire('click', { target: token.querySelector('[data-secret-open]') });
     assert.equal(token.querySelector('[data-secret-field]').hidden, false);
     input.value = 'ghp_new';
-    await world.find('[data-other-rows]').fire('change', { target: input });
+    await token.parentElement.fire('change', { target: input });
     await settle();
     assert.deepEqual(world.posts(), [{ GITHUB_TOKEN: 'ghp_new' }]);
     const result = row('GITHUB_TOKEN').querySelector('[data-setting-result]');
@@ -433,18 +433,18 @@ test('a stored key\'s row says only whether a value is saved: no echo, no "was",
     // The plain row beside it keeps the row helper's words: what it was, and Undo.
     const repo = row('GITHUB_REPO').querySelector('[data-setting-control]');
     repo.value = 'studio/other';
-    await world.find('[data-other-rows]').fire('change', { target: repo });
+    await row('GITHUB_REPO').parentElement.fire('change', { target: repo });
     await settle();
     assert.equal(row('GITHUB_REPO').querySelector('[data-setting-result]').textContent, 'Saved · applies to new tasks · was studio/home · Undo');
     // Remove asks first; declined, nothing is sent; confirmed, the key is cleared and the row offers Add.
     const sent = world.posts().length;
     world.state.answer = false;
-    await world.find('[data-other-rows]').fire('click', { target: row('TEAM_HOOK').querySelector('[data-secret-remove]') });
+    await row('TEAM_HOOK').parentElement.fire('click', { target: row('TEAM_HOOK').querySelector('[data-secret-remove]') });
     await settle();
     assert.equal(world.asked.length, 1);
     assert.equal(world.posts().length, sent);
     world.state.answer = true;
-    await world.find('[data-other-rows]').fire('click', { target: row('TEAM_HOOK').querySelector('[data-secret-remove]') });
+    await row('TEAM_HOOK').parentElement.fire('click', { target: row('TEAM_HOOK').querySelector('[data-secret-remove]') });
     await settle();
     assert.deepEqual(world.posts().at(-1), { TEAM_HOOK: '' });
     assert.equal(row('TEAM_HOOK'), undefined, 'a key of the owner\'s own that holds nothing is no row');

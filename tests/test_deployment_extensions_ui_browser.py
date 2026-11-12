@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from tests.settings_browser_helpers import open_settings
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -182,7 +183,7 @@ def _post(url, path, body):
 
 @pytest.mark.ui_browser
 def test_required_extensions_in_skills_settings_and_the_worker(direct_server_with_data, tmp_path, monkeypatch):  # noqa: F811
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import expect, sync_playwright
 
     calls = _model_answers(monkeypatch)
     fixture = direct_server_with_data
@@ -209,6 +210,12 @@ def test_required_extensions_in_skills_settings_and_the_worker(direct_server_wit
             _shot(page, evidence, "unmanaged-skills-light-1400", card)
             _answered(page, data_dir, calls, _ask(page, url, "Reply briefly."))
             _shot(page, evidence, "unmanaged-chat-light-1400")
+            # Unmanaged, the key the tracker asked for is the owner's to add.
+            listing = open_settings(page, "accounts", row="SENTRY_DSN", timeout=30_000)
+            asked = listing.locator('[data-setting-row="SENTRY_DSN"]')
+            asked.wait_for(state="visible", timeout=30_000)  # the skills' requests arrive after the page draws
+            expect(asked.locator("[data-secret-open]")).to_be_visible()
+            expect(asked.locator("[data-secret-state]")).not_to_contain_text("organization")
             page.close()
 
             # --- hold: the tracker is required but not granted, so this worker holds ordinary work ---
@@ -242,15 +249,13 @@ def test_required_extensions_in_skills_settings_and_the_worker(direct_server_wit
                     page = browser.new_page(viewport={"width": 1400, "height": 1000})
                     page.add_init_script("localStorage.setItem('ouroboros.theme', 'light')")
                     page.goto(url + "/#settings", wait_until="domcontentloaded")
-                    page.wait_for_function("() => document.querySelector('#btn-save-settings')?.disabled === false")
-                    page.locator('[data-settings-tab="secrets"]').click()
-                    fixed = page.locator('[data-organization-setting="SENTRY_DSN"]')
-                    fixed.wait_for(state="visible", timeout=30_000)
-                    assert fixed.inner_text() == "Set by your organization for error_tracker; its value is not shown."
-                    row = page.locator('.settings-requested-secret-row', has=fixed)
-                    assert row.locator("input").evaluate("node => node.readOnly")
-                    assert not row.locator("[data-row-secret-toggle]").is_visible()
-                    assert page.locator('[data-settings-tab="secrets"]').get_attribute("aria-selected") == "true"
+                    # The key the tracker asked for is a row of Accounts and keys; its value is the organization's.
+                    listing = open_settings(page, "accounts", row="SENTRY_DSN", timeout=30_000)
+                    row = listing.locator('[data-setting-row="SENTRY_DSN"]')
+                    row.wait_for(state="visible", timeout=30_000)
+                    expect(row.locator("[data-secret-state]")).to_have_text("Set by your organization for error_tracker")
+                    assert row.locator("[data-secret-open]").is_hidden(), "no Add or Replace for a fixed value"
+                    assert row.locator("[data-secret-field]").is_hidden(), "no field, Show or Remove for a fixed value"
                     _shot(page, evidence, "managed-hold-secret-light-1400", row)
                     before = _ask(page, url, "Reply briefly.")
                     page.wait_for_function(f"() => ({_HELD})() > {before[1]}", timeout=90_000)
