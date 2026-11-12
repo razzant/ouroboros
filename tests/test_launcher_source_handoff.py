@@ -189,7 +189,7 @@ def hand_over(native_guard, tmp_path, monkeypatch):
     monkeypatch.setattr(bootstrap_module, "source_launcher_importable", lambda *a, **kw: True)
 
     def run(argv, *, windows, frozen=False, acquired=True, spawn_error=None, console_clients=0,
-            cancelled=lambda: False):
+            cancelled=lambda: False, preparation=None):
         def popen(args, **kwargs):
             if spawn_error:
                 calls.append("refused")
@@ -222,7 +222,8 @@ def hand_over(native_guard, tmp_path, monkeypatch):
         bootstrap_module.exec_source_launcher(
             ctx, argv, release_lock=lambda: calls.append("release"),
             acquire_lock=lambda: calls.append("acquire") or acquired,
-            before_release=lambda: calls.append("remove icon"), on_failure=lambda: calls.append("restore shell"),
+            before_release=preparation or (lambda: calls.append("remove icon")),
+            on_failure=lambda: calls.append("restore shell"),
             desktop="--no-ui" not in argv, macos=False, cancelled=cancelled)
         return ctx
 
@@ -307,6 +308,28 @@ def test_cancelled_handoff_keeps_panic_alive_even_if_the_lock_was_taken(hand_ove
     except Exited:
         pass
     assert hand_over.calls == ["remove icon", "release", "acquire"], "never hard-exit over pending Panic persistence"
+
+
+@pytest.mark.parametrize("windows", [True, False])
+def test_native_preparation_can_decline_without_unlock_exec_or_shell_restoration(hand_over, windows):
+    def preparation():
+        hand_over.calls.append("native exit not confirmed")
+        return False
+
+    ctx = hand_over([], windows=windows, preparation=preparation)
+    assert hand_over.calls == ["native exit not confirmed"]
+    assert any("declined source handoff" in row[1] for row in ctx.log.lines)
+
+
+def test_confirmed_native_exit_precedes_icon_unlock_and_exec(hand_over):
+    def preparation():
+        hand_over.calls.extend(["native exit completed", "remove icon"])
+        return True
+
+    with pytest.raises(Handover):
+        hand_over([], windows=False, preparation=preparation)
+    assert hand_over.calls[:3] == ["native exit completed", "remove icon", "release"]
+    assert hand_over.calls[3][0] == "exec"
 
 
 # --------------------------------------------------------------------------------- cold start ---

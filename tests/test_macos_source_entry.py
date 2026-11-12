@@ -264,8 +264,8 @@ def _lifecycle(l, monkeypatch, *, returncode=42, landed=lambda: None, waited=lam
     monkeypatch.setattr(module, "_update_server_process_record_port", lambda *a: None)
     monkeypatch.setattr(module, "_wait_for_server", lambda *a, **kw: True)
     monkeypatch.setattr(module, "_cleanup_recorded_server_group_for_pid", lambda *a: None)
-    monkeypatch.setattr(module, "_sync_existing_repo_from_bundle", lambda: l.calls.append("sync"))
-    monkeypatch.setattr(module, "_install_deps", lambda: l.calls.append("deps") or True)
+    monkeypatch.setattr(module, "sync_existing_repo_from_bundle", lambda ctx: l.calls.append("sync"))
+    monkeypatch.setattr(module, "install_deps", lambda ctx: l.calls.append("deps") or True)
     monkeypatch.setattr(module.time, "sleep", lambda *a: None)
     monkeypatch.setitem(sys.modules, "ouroboros.delegate_recovery",
                         types.SimpleNamespace(acknowledge_observed_restart_exit=lambda *a, **kw: True))
@@ -326,8 +326,8 @@ def test_panic_during_exit_42_cannot_handoff(launch, monkeypatch, stop_at):
         return True
 
     target, name = {
-        "sleep": (l.module.time, "sleep"), "sync": (l.module, "_sync_existing_repo_from_bundle"),
-        "deps": (l.module, "_install_deps"), "change-check": (l.module, "launcher_sources_changed"),
+        "sleep": (l.module.time, "sleep"), "sync": (l.module, "sync_existing_repo_from_bundle"),
+        "deps": (l.module, "install_deps"), "change-check": (l.module, "launcher_sources_changed"),
     }[stop_at]
     monkeypatch.setattr(target, name, stop)
     try:

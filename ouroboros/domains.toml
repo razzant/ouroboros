@@ -149,6 +149,7 @@ D20 = "Presence"
 "ouroboros/launcher_appearance.py" = "D18"
 "ouroboros/launcher_readiness.py" = "D18"
 "ouroboros/launcher_window_chrome.py" = "D18"
+"ouroboros/launcher_macos_handoff.py" = "D18"
 "ouroboros/launcher_page_zoom.py" = "D18"
 "ouroboros/launcher_context_menu.py" = "D18"
 "ouroboros/standalone_page.py" = "D18"  # a page served before any asset: the builtin theme.js and ui.css inlined

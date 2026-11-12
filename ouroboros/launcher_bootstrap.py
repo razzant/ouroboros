@@ -913,16 +913,21 @@ LAUNCHER_HANDOFF_ENV = "OUROBOROS_LAUNCHER_HANDOFF"
 
 
 def exec_source_launcher(context: BootstrapContext, argv: list[str], *, release_lock: Callable[[], None],
-                         acquire_lock: Callable[[], bool], before_release: Callable[[], None],
+                         acquire_lock: Callable[[], bool], before_release: Callable[[], bool | None],
                          on_failure: Callable[[], None], desktop: bool, macos: bool, cancelled=lambda: False) -> None:
     """Hand off to compatible managed source; keep the shell on probe or spawn refusal.
 
-    macOS selects its signed entry and probes imports/protocol with plain Python before
-    teardown or unlocking. POSIX replaces the process image with that exact command.
-    Windows spawns a quoted argv, preserving an attached CLI console and hiding only
-    when there is none. Remove the old icon while holding the lock; a definite refusal
-    reacquires it before restoring the shell, or exits if another launcher took it.
-    A successor that starts and then fails is not a spawn refusal; no retry state is kept.
+    Source imports are probed before teardown; refusal keeps the current shell.
+    macOS additionally checks MACOS_SOURCE_ENTRY_PROTOCOL and selects its signed
+    entry, retaining app identity, profile and the runtime-venv option. Body, venv
+    and import probes use plain Python; other successors drop consumed --runtime-venv.
+    POSIX replaces the process image with that exact command. Windows spawns quoted
+    argv, hides GUI successors and preserves attached CLI consoles. Stop fences
+    teardown/spawn; the old icon leaves while the lock is held. A definite refusal
+    retakes the lock before restoring the shell unless stopping, or exits if another
+    launcher took it; a released lock is never released again. Explicit False from
+    before_release preserves the shell and lock (legacy None means ready). A successor
+    that starts and then crashes has no fallback; no retry state is kept.
     """
     from ouroboros.platform_layer import IS_WINDOWS, inherited_console_kwargs
 
@@ -943,7 +948,9 @@ def exec_source_launcher(context: BootstrapContext, argv: list[str], *, release_
     env = embedded_python_env(context.data_dir, {**os.environ, LAUNCHER_HANDOFF_ENV: "1"})
     if cancelled():
         return
-    before_release()
+    if before_release() is False:
+        context.log.warning("Native window preparation declined source handoff; keeping the current launcher")
+        return
     release_lock()
     try:
         if cancelled():

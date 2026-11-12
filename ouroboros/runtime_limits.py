@@ -46,6 +46,8 @@ EXTENSION_CHILD_CLEANUP_GRACE_SEC = 2
 # teardown — the terminal-custody write `kill_workers` — starts well inside the first. The pair is one
 # budget, not two knobs: raise the drain only with the launcher wait (which ships with a release).
 LAUNCHER_STOP_GRACE_SEC = 10.0
+# Native fullscreen animation acknowledgement before source exec; never used by Panic or Quit.
+MACOS_HANDOFF_FULLSCREEN_WAIT_SEC = 10.0
 SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_SEC = 3.0
 # A process-ending stop waits at most this long for launches and Resumes already writing their marks to hand
 # over to the still-running pool before it names returns and retires the pool (``pause_admission``). On Quit

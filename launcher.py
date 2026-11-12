@@ -66,11 +66,11 @@ from ouroboros.launcher_bootstrap import (
     BootstrapContext,
     bootstrap_repo as _bootstrap_repo,
     check_git as _check_git, launcher_sources_changed, remember_loaded_checkout,
-    install_deps as _install_deps_impl,
+    install_deps,
     embedded_python_env, update_external_host,
     exec_source_launcher, find_embedded_python, macos_source_entry, parse_launch_options, shell_runtime_facts,
     automatic_launch_allowed,
-    sync_existing_repo_from_bundle as _sync_existing_repo_from_bundle_impl,
+    sync_existing_repo_from_bundle,
 )
 from ouroboros.desktop_media import attach_media_permissions, display_ready as _display_ready, host_environment, route_gtk_browser
 from ouroboros.runtime_venv import PREPARATION_DEPS_TIMEOUT_SEC, RuntimeVenvRefused, mark_ready, prepare_runtime_venv
@@ -81,6 +81,7 @@ from ouroboros.launcher_onboarding import (
 )
 from ouroboros.launcher_background import (Background, DesktopApi, activate_running_instance, background_env, other_copy_line,
                                            request_tray_cleanup, restore_tray_after_handoff, stop_tray_before_exit)
+from ouroboros.launcher_macos_handoff import MacOSWindowHandoff
 from ouroboros.launcher_server_reaper import reap_same_install_strays as _reap_same_install_strays_impl
 from ouroboros.launcher_context_menu import attach_every_window
 from ouroboros.launcher_readiness import wait_for_server as _wait_for_server
@@ -226,8 +227,10 @@ def _already_running_window(line: str) -> None:
 
 def _exec_source_launcher() -> None:
     exec_source_launcher(_bootstrap_context(), _launch_argv, release_lock=release_pid_lock,
-                         acquire_lock=acquire_pid_lock, before_release=lambda: stop_tray_before_exit(lambda: None),
-                         on_failure=restore_tray_after_handoff, desktop=not _external_ui, macos=IS_MACOS,
+                         acquire_lock=acquire_pid_lock, before_release=lambda: _native_handoff.before_release(
+                             _shutdown_event.is_set, lambda: stop_tray_before_exit(lambda: None)),
+                         on_failure=lambda: (_native_handoff.release(), restore_tray_after_handoff()),
+                         desktop=not _external_ui, macos=IS_MACOS,
                          cancelled=_shutdown_event.is_set)
 
 
@@ -260,13 +263,6 @@ def bootstrap_repo() -> bool:
     return _bootstrap_repo(_bootstrap_context())
 
 
-def _sync_existing_repo_from_bundle() -> None:
-    _sync_existing_repo_from_bundle_impl(_bootstrap_context())
-
-
-def _install_deps() -> bool:
-    return _install_deps_impl(_bootstrap_context())
-
 _agent_proc: Optional[subprocess.Popen] = None
 _agent_job: Optional[object] = None
 _agent_lock = threading.Condition()  # also tells a waiting stop that a start was published
@@ -281,6 +277,7 @@ _shutdown_event = threading.Event()
 _agent_restart_requested = threading.Event()
 _agent_exit_before_ready = threading.Event()  # the child exited before it served: the UI wait ends now
 _webview_window = None
+_native_handoff = MacOSWindowHandoff()
 # Linux-only browser-fallback flag (#56): set by _detect_headless() when no
 # pywebview GUI backend can initialize. Stays False on macOS/Windows — the
 # probe never runs there, so every `if _headless:` branch is dead code on
@@ -799,15 +796,15 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
 
         if exit_code == RESTART_EXIT_CODE:
             log.info("Agent requested restart (exit code 42). Restarting...")
-            _sync_existing_repo_from_bundle()  # a deployment policy's packages are its administrator's: none synced
-            if not os.environ.get("OUROBOROS_DEPLOYMENT_POLICY", "").strip() and not _install_deps():
+            sync_existing_repo_from_bundle(_bootstrap_context())  # a deployment policy's packages are its administrator's: none synced
+            if not os.environ.get("OUROBOROS_DEPLOYMENT_POLICY", "").strip() and not install_deps(_bootstrap_context()):
                 # Retry dependency sync once before letting imports fail under the crash fuse.
                 log.error(
                     "Dependency install failed after the restart request; "
                     "retrying once in %ds.", _DEPS_RETRY_DELAY_SEC,
                 )
                 time.sleep(_DEPS_RETRY_DELAY_SEC)
-                if not _install_deps():
+                if not install_deps(_bootstrap_context()):
                     log.error(
                         "Dependency install failed twice; starting the agent anyway "
                         "under the crash fuse (%d crashes in %ds stops the launcher). "
@@ -1325,7 +1322,7 @@ def main(argv=()):
             "Continuing startup after a failed dependency install; the agent may "
             "be missing packages (see the pip output above)."
         )
-    elif _runtime_venv is not None and not _runtime_venv.ready and _install_deps():
+    elif _runtime_venv is not None and not _runtime_venv.ready and install_deps(_bootstrap_context()):
         try:
             _runtime_venv = mark_ready(_runtime_venv)  # a failed install stays preparing and retries next start
         except RuntimeVenvRefused as refusal:
@@ -1577,6 +1574,7 @@ def main(argv=()):
         background_color="#0f0f11",
         text_select=True, hidden=background.start_hidden(options.launch_intent),
     )
+    _native_handoff.attach(window)
     _webview_window = attach_media_permissions(background.attach(window), url)  # Persist cookies and website data (ouroboros.theme); rebuild/limits: ARCHITECTURE §3.
     webview.start(func=background.run, debug=False, private_mode=False,
                   menu=setup_recovery_menu(window, lambda: _generation_port))

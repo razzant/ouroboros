@@ -40,6 +40,7 @@ _ADDED_OWNERS = {
     # A spawned direct-Restart successor's bounded wait for its exiting parent's data-root admission.
     "SERVER_ADMISSION_WAIT_SEC": runtime_limits,
     "STOP_ADMISSION_DRAIN_SEC": runtime_limits,
+    "MACOS_HANDOFF_FULLSCREEN_WAIT_SEC": runtime_limits,
     # The supervisor loop's bounded events pass and the budget-projection retry interval.
     "SUPERVISOR_EVENT_BATCH_MAX_EVENTS": runtime_limits,
     "SUPERVISOR_EVENT_BATCH_MAX_SEC": runtime_limits,
