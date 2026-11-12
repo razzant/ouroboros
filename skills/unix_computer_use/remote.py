@@ -180,6 +180,14 @@ PASTE_CHORD_ARGV = ("osascript", "-l", "JavaScript", str(_PASTE_CHORD_JS))
 PBCOPY_LOCALE = "en_US.UTF-8"
 
 
+def command_chord_argv(char: str, *, remote: bool = False) -> list[str]:
+    """key() of Command and one character on a Mac: the same program posts Command + the key that gives ``char`` under
+    Command in the active layout. The character is the program's own argument after it (locally the file, over SSH
+    its source through ``-e``, shell-quoted word by word with the rest of the argv), never written into the source."""
+    program = ["-e", _PASTE_CHORD_JS.read_text(encoding="utf-8")] if remote else [str(_PASTE_CHORD_JS)]
+    return ["osascript", "-l", "JavaScript", *program, char]
+
+
 def ssh_paste_command(text: str) -> str:
     """SSH paste: the clipboard write and the paste chord are two stages of one remote call, and the receipt says which
     ones ran (the marker between them). The text arrives as UTF-8 bytes, so pbcopy is told so: it decodes with the

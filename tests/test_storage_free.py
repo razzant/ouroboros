@@ -887,7 +887,7 @@ def test_pseudo_owner_seat_homes_use_their_own_proof_in_free(tmp_path, monkeypat
     else:
         snapshot = {"runs": {"run": SimpleNamespace(
             execution_root=str(area), terminal_state="succeeded" if state == "done" else "",
-            started_ts=marker["created_at"], max_seconds=0)}, "pending": []}
+            started_ts=marker["created_at"], window_origin=marker["created_at"], max_seconds=0)}, "pending": []}
     monkeypatch.setattr(current, "task_snapshot", lambda _root, _task_id: snapshot)
     _fake_sizer(monkeypatch)
     owner = _owner({}, offered=("review_evidence",))
@@ -918,7 +918,8 @@ def test_each_pseudo_owner_seat_home_is_judged_on_its_own_runs_whatever_the_orde
         (home / "checking.json").write_text(json.dumps(marker), encoding="utf-8")
         (home / "area").rmdir()
         runs[home.name] = SimpleNamespace(execution_root=str(home / "area"), terminal_state=state,
-                                          started_ts=marker["created_at"], max_seconds=0)
+                                          started_ts=marker["created_at"], window_origin=marker["created_at"],
+                                          max_seconds=0)
     reads = []
     monkeypatch.setattr(current, "task_snapshot", lambda _root, task_id: reads.append(task_id) or {"runs": runs, "pending": []})
     _fake_sizer(monkeypatch)
