@@ -1,4 +1,5 @@
-"""An input-measurement route on the existing owned llama-cpp-python server."""
+"""The owned llama-cpp-python server: an input-measurement route, and a replayed tool call rendered with object
+arguments when a model's chat template fails on the JSON text the OpenAI wire carries (Qwen3.8's does)."""
 
 import hashlib
 import inspect
