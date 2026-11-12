@@ -10,8 +10,9 @@ from ouroboros import delegate_custody as custody
 from ouroboros.agent_task_pipeline import _store_task_result
 from ouroboros.loop_llm_call import call_llm_with_retry
 from ouroboros.outcomes import collect_trace_refs
-from ouroboros.subagent_history import record_task_execution, subagent_last_delegation
+from ouroboros.subagent_history import record_last_delegation, record_task_execution, subagent_last_delegation
 from tests._store_shared import result_exists
+from tests._usage_store_testing import ledger_rows, root, write_journal  # noqa: F401 -- the fixture
 
 
 TARGET = "claudexor::codex-models=gpt-fixture"
@@ -22,6 +23,24 @@ def _task(pin=""):
         "schema": 1, "selected_subagent_id": "worker", "config_fingerprint": "fixture",
         "route": {"kind": "api_model", "target_id": TARGET, "credential_profile_id": pin},
         "effort": "high", "processing_preference": "standard"}}
+
+
+PAID = "openrouter::openai/gpt-fixture"  # the roster's spelling; the ledger names the same model as its route sends it
+
+
+def _paid_task(target=PAID):
+    task = _task()
+    task["configured_subagent"]["route"]["target_id"] = target
+    return task
+
+
+def _settled(index, *, cost, model="openai/gpt-fixture", task_id="history-actor", source="agent.task"):
+    """One physical attempt of a task as the usage ledger keeps it; ``cost=None`` is a route without a price."""
+    base = dict(attempt_id=f"first-{index}", kind="attempt", root_task_id="r", task_id=task_id, provider="openrouter",
+                model=model, category="task", source=source, reservation_upper_bound_usd=5.0,
+                pricing_known=cost is not None, ts=f"2026-11-12T10:{index:02d}:00Z")
+    return [{**base, "state": "reserved"}, {**base, "state": "dispatched"},
+            {**base, "state": "settled", "cost_usd": cost, "cost_final": cost is not None, "prompt_tokens": 900}]
 
 
 def _call(tmp_path, usage, *, pin="", observed="account-a", broken=False, model=TARGET, provider="claudexor"):
@@ -261,3 +280,141 @@ def test_received_empty_response_keeps_served_identity(tmp_path, monkeypatch, ca
     assert telemetry["authoritative_identity"] and telemetry["trace_call_count"] == 3
     assert telemetry["provider_distribution"] == {"openrouter": 3}
     assert raw[1]["failure_code"] == "provider_incomplete_response"
+
+
+def _first_calls(data_root):
+    return subagent_last_delegation(data_root).get("first_call_costs")
+
+
+def test_a_paid_rows_first_call_price_is_the_ledgers_first_attempt_on_its_model(root, monkeypatch):  # noqa: F811
+    """The sample is the task's FIRST settled attempt on the row's own model: a call another model made first
+    (a tool's own model call) and the row's later, larger calls are not it. The roster and the ledger spell the
+    model differently, and the measured price reaches the context in the review seats' words."""
+    from ouroboros.context_runtime_facts import _delegation_capability_fact
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", root)
+    write_journal(root, [*_settled(0, cost=9.0, model="openai/gpt-other"), *_settled(1, cost=0.0432),
+                         *_settled(2, cost=0.9), *_settled(3, cost=7.0, task_id="another-task")])
+    ledger_rows(root)  # the server's one-time import; a display read never imports
+    usage = {}
+    assert _call(root, usage, model=PAID, provider="openrouter")
+    record_task_execution(_paid_task(), usage, drive_root=root)
+    (sample,) = _first_calls(root)["worker"]
+    assert (sample["task_id"], sample["of"], sample["usd"]) == ("history-actor", [PAID, "standard"], 0.0432)
+    shown = _delegation_capability_fact()["subagents_last_executions"][0]
+    assert shown["first_call"] == "≈$0.04 per first call (1 measured)" and shown["outcome"] == "succeeded"
+    record_task_execution(_paid_task(), usage, drive_root=root)  # the same task observed again is one sample
+    assert len(_first_calls(root)["worker"]) == 1
+
+
+def test_an_unpriced_first_call_is_cost_unknown_never_zero(root, monkeypatch):  # noqa: F811
+    from ouroboros.context_runtime_facts import _delegation_capability_fact
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", root)
+    target = "openai::gpt-fixture"  # a direct key: the ledger settles its calls without a price
+    write_journal(root, _settled(0, cost=None))
+    ledger_rows(root)
+    usage = {}
+    assert _call(root, usage, model=target, provider="openai")
+    record_task_execution(_paid_task(target), usage, drive_root=root)
+    (sample,) = _first_calls(root)["worker"]
+    assert sample["usd"] is None
+    assert _delegation_capability_fact()["subagents_last_executions"][0]["first_call"] == "cost unknown"
+
+
+@pytest.mark.parametrize("case", ["fallback_answered_first", "subscription_engine", "ledger_unreadable", "no_attempt"])
+def test_no_first_call_sample_without_the_rows_own_paid_first_answer(root, monkeypatch, case):  # noqa: F811
+    """A fallback's first answer is not the row's price, the subscription engine states no per-call cash, and a
+    ledger that cannot be read (or holds no such attempt) is no sample: the execution record is written all the same."""
+    from ouroboros import usage_store
+    from ouroboros.context_runtime_facts import _delegation_capability_fact
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", root)
+    write_journal(root, _settled(0, cost=0.05) if case != "no_attempt" else _settled(0, cost=0.05, task_id="another-task"))
+    ledger_rows(root)
+    usage, target, provider = {}, PAID, "openrouter"
+    if case == "fallback_answered_first":
+        assert _call(root, usage, model="openrouter::openai/gpt-other", provider="openrouter")
+    if case == "subscription_engine":
+        target, provider = TARGET, "claudexor"
+    if case == "ledger_unreadable":
+        def unreadable(*args, **kwargs):
+            raise RuntimeError("fixture: the usage store is busy")
+        monkeypatch.setattr(usage_store, "read", unreadable)
+    assert _call(root, usage, model=target, provider=provider)
+    record_task_execution(_paid_task(target), usage, drive_root=root)
+    row = subagent_last_delegation(root)
+    assert row["outcome"] == "succeeded" and "first_call_costs" not in row
+    assert "first_call" not in _delegation_capability_fact()["subagents_last_executions"][0]
+
+
+def test_first_call_samples_are_bounded_per_row_and_follow_its_price_class(tmp_path, monkeypatch):
+    """The projection keeps a row's newest 20 samples of its current price class, so its size has a bound
+    (26 rows x 20 samples). A row moved to another model or processing tier starts over: the other tier's
+    price per token is not this one's. A row that leaves the projection takes its samples."""
+    from ouroboros.configured_subagents import MAX_CONFIGURED_SUBAGENTS
+    from ouroboros.context_runtime_facts import _delegation_capability_fact
+    from ouroboros.subagent_history import FIRST_CALLS_KEPT
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
+
+    def run(index, *, actor="worker", target=PAID, processing="standard", usd=None):
+        record_last_delegation(route="api_model", requested_model=target, applied_model="", run_id=f"run-{actor}-{index}",
+            selected_subagent_id=actor, drive_root=tmp_path, occurred_at=f"2026-11-12T10:{index:02d}:00+00:00",
+            outcome="succeeded", task_id=f"task-{actor}-{index}", first_call={"usd": index / 10 if usd is None else usd},
+            identity={"kind": "api_model", "target_id": target, "processing_preference": processing})
+
+    def shown():
+        return _delegation_capability_fact()["subagents_last_executions"][0]["first_call"]
+
+    for index in range(1, 26):
+        run(index)
+    ring = _first_calls(tmp_path)["worker"]
+    assert len(ring) == FIRST_CALLS_KEPT == 20 and [item["usd"] for item in ring] == [index / 10 for index in range(6, 26)]
+    assert shown() == "≈$1.55 per first call (median of 20 measured, $0.60–$2.50)"
+    run(26, processing="priority", usd=4.0)  # the same model on another processing tier is another price
+    assert [item["usd"] for item in _first_calls(tmp_path)["worker"]] == [4.0]
+    assert shown() == "≈$4.00 per first call (1 measured)"
+    run(27, target="openrouter::openai/gpt-next", usd=0.5)  # the row now names another model: its price starts over
+    assert [item["usd"] for item in _first_calls(tmp_path)["worker"]] == [0.5]
+    assert shown() == "≈$0.50 per first call (1 measured)"
+    record_last_delegation(route="api_model", requested_model="openrouter::openai/gpt-next", applied_model="",
+        run_id="run-worker-28", selected_subagent_id="worker", drive_root=tmp_path, outcome="failed",
+        occurred_at="2026-11-12T10:28:00+00:00", task_id="task-worker-28",
+        identity={"kind": "api_model", "target_id": "openrouter::openai/gpt-next", "processing_preference": "standard"})
+    assert shown() == "≈$0.50 per first call (1 measured)", "a later record without a sample keeps the measured ones"
+    for index in range(MAX_CONFIGURED_SUBAGENTS):  # newer rows fill the projection; the oldest row and its samples leave
+        run(30 + index, actor=f"newer-{index}")
+    kept = subagent_last_delegation(tmp_path)
+    assert "worker" not in kept["latest_by_subagent"] and "worker" not in kept["first_call_costs"]
+    assert len(kept["first_call_costs"]) == MAX_CONFIGURED_SUBAGENTS
+
+
+def test_a_helpers_measured_first_call_price_changes_no_cached_block(tmp_path, monkeypatch):
+    """A helper's first-call price moves whenever one of its tasks ends. It rides in the changing part
+    (``subagents_last_executions`` of the runtime facts), so the cache-marked blocks and the leading system
+    items keep their bytes on both send paths; in a cached block every helper's task end would re-send it."""
+    from ouroboros import context
+    from ouroboros.llm_messages import split_leading_system_prefix
+    from tests.test_doc_context import _make_env_and_memory
+
+    env, memory = _make_env_and_memory(tmp_path)
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", env.drive_root)
+    sends = []
+    for index, usd in enumerate((0.0432, 0.9)):
+        record_last_delegation(route="api_model", requested_model=PAID, applied_model="", run_id="run-1",
+            selected_subagent_id="worker", drive_root=env.drive_root, occurred_at="2026-11-12T10:00:00+00:00",
+            outcome="succeeded", task_id=f"task-{index}", first_call={"usd": usd} if index else None,
+            identity={"kind": "api_model", "target_id": PAID, "processing_preference": "standard"})
+        if index:  # the same record with its first measured price: only the price differs between the two starts
+            kept = subagent_last_delegation(env.drive_root)
+            kept["first_call_costs"] = {"worker": [{"task_id": "task-1", "ts": "2026-11-12T10:00:00+00:00",
+                                                    "of": [PAID, "standard"], "usd": usd}]}
+            (env.drive_root / "state" / "subagent_last_delegation.json").write_text(json.dumps(kept), encoding="utf-8")
+        messages, _ = context.build_llm_messages(env=env, memory=memory, task={"id": "root", "type": "task", "text": "w"})
+        marked = [block["text"] for block in messages[0]["content"] if block.get("cache_control")]
+        wire, moved = split_leading_system_prefix(messages)
+        assert moved > 0
+        sends.append((marked, [row for row in wire if row["role"] == "system"],
+                      json.dumps([row for row in wire if row["role"] != "system"], ensure_ascii=False)))
+    (marked_before, system_before, tail_before), (marked_after, system_after, tail_after) = sends
+    assert len(marked_before) >= 2 and marked_before == marked_after, "the cache-marked blocks keep their bytes"
+    assert system_before == system_after, "the leading system items keep their bytes"
+    assert "per first call" not in tail_before and "≈$0.90 per first call (1 measured)" in tail_after
+    assert "per first call" not in json.dumps([marked_after, system_after], ensure_ascii=False)

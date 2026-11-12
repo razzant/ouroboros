@@ -12,6 +12,7 @@ from ouroboros.utils import utc_now_iso, write_text_atomic
 
 log = logging.getLogger(__name__)
 LAST_DELEGATION_FILENAME = "subagent_last_delegation.json"
+FIRST_CALLS_KEPT = 20  # a row's kept first-call samples: the bound of a measurement (``review_price.RECENT_REVIEWS``)
 
 
 def _timestamp_key(value: Any) -> tuple[int, datetime]:
@@ -31,6 +32,60 @@ def _last_delegation_path(drive_root=None):
     from ouroboros.config import DATA_DIR
 
     return pathlib.Path(drive_root or DATA_DIR) / "state" / LAST_DELEGATION_FILENAME
+
+
+def _price_class(identity: Any) -> list[str]:
+    """What a row's price per token depends on among its execution choices: the model and its processing tier."""
+    identity = identity if isinstance(identity, Mapping) else {}
+    return [str(identity.get("target_id") or ""), str(identity.get("processing_preference") or "")]
+
+
+def _first_call_cost(drive_root, task_id: str, model: str) -> Optional[dict]:
+    """What this task's first call on ``model`` cost, as the usage ledger settled it: the first attempt of the
+    task that came back with input counted. The ledger names a model as its route sends it, so the two
+    spellings meet in ``normalize_model_identity``. ``usd`` is None when that attempt carries no price;
+    an unreadable ledger (the display wait, never longer) or no such attempt is no sample."""
+    from ouroboros import usage_store
+    from ouroboros.provider_models import normalize_model_identity
+
+    own = normalize_model_identity(model)
+    try:
+        with usage_store.read(drive_root, allow_stale=True) as txn:
+            row = next((row for row in txn.conn.execute(
+                "SELECT model, cost_usd FROM attempts INDEXED BY attempts_task WHERE task_id=? "
+                "AND source='agent.task' AND state='settled' AND COALESCE(prompt_tokens, 0) > 0 "
+                "ORDER BY seq_first", (task_id,)) if normalize_model_identity(str(row["model"] or "")) == own), None)
+    except Exception:
+        log.debug("first-call cost unavailable from the usage ledger", exc_info=True)
+        return None
+    return None if row is None else {"usd": None if row["cost_usd"] is None else float(row["cost_usd"])}
+
+
+def _kept_first_calls(old: Any, rows: Mapping[str, Any], actor: str, sample: Optional[dict]) -> dict:
+    """Every kept row's first-call samples, ``sample`` added to ``actor``'s: one per task, of the row's
+    current price class only, the newest ``FIRST_CALLS_KEPT``. A row that left the projection takes its samples."""
+    kept = {key: [item for item in ring if isinstance(item, dict)] for key, ring in
+            (old.items() if isinstance(old, dict) else ()) if key in rows and isinstance(ring, list)}
+    if sample and actor in rows:
+        ring = [item for item in kept.get(actor, ()) if item.get("of") == sample["of"]
+                and item.get("task_id") != sample["task_id"]]
+        kept[actor] = [*ring, sample][-FIRST_CALLS_KEPT:]
+    return {key: ring for key, ring in kept.items() if ring}
+
+
+def first_call_fact(samples: Any, row: Mapping[str, Any]) -> dict[str, str]:
+    """A row's measured first-call price in the review seats' words (``review_price_text``): the median of its
+    kept samples of its current price class. No sample is no fact; samples without a price are "cost unknown"."""
+    import statistics
+
+    from ouroboros.review_price import ReviewPrice, review_price_text
+
+    own = [item for item in samples or () if isinstance(item, dict) and item.get("of") == _price_class(row.get("identity"))]
+    if not own:
+        return {}
+    usd = [float(item["usd"]) for item in own if isinstance(item.get("usd"), (int, float)) and not isinstance(item.get("usd"), bool)]
+    price = ReviewPrice(usd=statistics.median(usd), reviews=len(usd), low=min(usd), high=max(usd)) if usd else None
+    return {"first_call": review_price_text(price, "first call")}
 
 
 def subagent_last_delegation(drive_root=None) -> dict[str, Any]:
@@ -84,13 +139,16 @@ def record_last_delegation(*, route: str, requested_model: str, applied_model: s
                            failure_code: str = "", reset_at: str = "",
                            identity: Mapping[str, Any] | None = None, task_id: str = "",
                            invocation_id: str = "", attempt_id: str = "", fallback=None,
-                           observed_route: Mapping[str, Any] | None = None) -> None:
+                           observed_route: Mapping[str, Any] | None = None,
+                           first_call: Mapping[str, Any] | None = None) -> None:
     """Keep the latest fact per actor plus the old top-level receipt interface.
 
     Occurrence and observation differ when recovery collects an old run. Replays
     neither refresh its date nor displace a newer fact. Task, invocation and
     attempt ids are kept as trace references when present, and ``identity``
-    carries the originally requested effort. The existing actor-count
+    carries the originally requested effort. ``first_call`` is one measured sample of what the
+    row's first answered call cost (``_first_call_cost``): each kept row holds its last
+    ``FIRST_CALLS_KEPT`` of its current price class, one per task. The existing actor-count
     bound keeps this a compact projection; the event log retains full history.
     """
     from ouroboros.configured_subagents import MAX_CONFIGURED_SUBAGENTS
@@ -109,7 +167,7 @@ def record_last_delegation(*, route: str, requested_model: str, applied_model: s
             legacy_actor = str(old.get("selected_subagent_id") or "")
             if legacy_actor and legacy_actor not in rows:
                 rows[legacy_actor] = {key: value for key, value in old.items()
-                                      if key != "latest_by_subagent"}
+                                      if key not in ("latest_by_subagent", "first_call_costs")}
             old_actor = rows.get(selected_subagent_id) or {}
             previous = old_actor if old_actor.get("run_id") == run_id else old if old.get("run_id") == run_id else {}
             if run_id and previous and (not occurred_at or (
@@ -139,7 +197,11 @@ def record_last_delegation(*, route: str, requested_model: str, applied_model: s
             rows = dict(sorted(rows.items(), key=lambda item: _timestamp_key(item[1].get("ts")),
                                reverse=True)[:MAX_CONFIGURED_SUBAGENTS])
             latest = row if not old or (occurred_at and _timestamp_key(row["ts"]) >= _timestamp_key(old.get("ts"))) else old
-            write_text_atomic(path, json.dumps({**latest, "latest_by_subagent": rows}, ensure_ascii=False, indent=1))
+            costs = _kept_first_calls(old.get("first_call_costs"), rows, selected_subagent_id, first_call and {
+                "task_id": task_id, "ts": row["ts"], "of": _price_class(identity), **first_call})
+            write_text_atomic(path, json.dumps({**{key: value for key, value in latest.items() if key != "first_call_costs"},
+                                                "latest_by_subagent": rows, **({"first_call_costs": costs} if costs else {})},
+                                               ensure_ascii=False, indent=1))
         finally:
             release_exclusive_file_lock(lock_path, lock)
     except Exception:
@@ -193,6 +255,12 @@ def record_task_execution(task: Mapping[str, Any], usage: Mapping[str, Any], *, 
         return  # No observation is not success or failure.
     other = next((row for row in reversed(calls) if isinstance(row, dict)
                   and row.get("usable_solve_response") and not selected(row)), {}) if failure else {}
+    # The row's first-call price is measured when the task's first usable answer was its own model's (never a
+    # fallback's) on a route that bills money: the subscription engine and the local lane state no per-call cash.
+    from ouroboros.usage_accounting import paid_admission
+    first = next((row for row in calls if isinstance(row, dict) and row.get("usable_solve_response")), None)
+    first_call = (_first_call_cost(drive_root, str(task.get("id") or ""), model)
+                  if first and selected(first) and paid_admission(first.get("provider"), None) else None)
     fallback = {key: other[key] for key in ("model", "llm_call_id", "ts") if key in other}
     if other:
         fallback.update(_api_observed_facts(other))
@@ -205,7 +273,7 @@ def record_task_execution(task: Mapping[str, Any], usage: Mapping[str, Any], *, 
         drive_root=drive_root, occurred_at=when, outcome=outcome,
         failure_code=failure, reset_at=str(call.get("reset_at") or availability.get("reset_at") or ""),
         identity=identity, task_id=str(task.get("id") or ""),
-        attempt_id=str(call.get("llm_call_id") or ""), fallback=fallback)
+        attempt_id=str(call.get("llm_call_id") or ""), fallback=fallback, first_call=first_call)
 
 
 def _api_observed_facts(call: Mapping[str, Any], *, failed: bool = False) -> dict:
