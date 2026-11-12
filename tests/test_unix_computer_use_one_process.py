@@ -540,3 +540,367 @@ def test_screenshot_with_unreadable_displays_has_no_mapped_input(tmp_path, monke
     assert "locked" in named["coordinate_note"] and "Capture only" in named["coordinate_note"]
     assert [args[0] for args in state["helper"]] == ["displays"], "no resolution is attempted without a display list"
     assert [argv for argv in state["calls"] if argv[0] == "screencapture"][-1][1:-1] == ["-x"], "the default capture: no -D"
+
+
+# --- optional retained-window observation wait ---
+
+def simple(value="Loading thread"):
+    return {"win": {"role": "AXWindow", "title": "Thread", "children": ["line"]},
+            "line": {"role": "AXStaticText", "value": value}}
+
+
+def test_tree_wait_keeps_selected_window_and_exposure_and_finds_delayed_text():
+    nodes = simple()
+    nodes["other"] = {"role": "AXWindow", "title": "Other", "children": ["other_line"]}
+    nodes["other_line"] = {"role": "AXStaticText", "value": "wrong window"}
+    ax = FakeAX(nodes, windows=["win", "other"], focused="win")
+    clock = Clock()
+    reads, exposures = [], []
+    multi = ax.multi
+    exposure = ax.request_manual_accessibility
+
+    def changed(el, names):
+        if el == "line" and names == native._WALK_ATTRS:
+            reads.append(el)
+            if len(reads) == 1:
+                ax.focused = "other"  # a fresh focused-window lookup would switch targets
+            if len(reads) == 2:
+                nodes["line"]["value"] = "Ready: command text"
+        return multi(el, names)
+
+    ax.multi = changed
+    ax.request_manual_accessibility = lambda app: (exposures.append(app), exposure(app))[1]
+    out = native.op_tree(200, 150, 500, ax=ax, until_text="command text", now=clock,
+                         pause=lambda seconds: setattr(clock, "t", clock.t + seconds))
+    assert out["ok"] is True and out["until_text"] == {"status": "matched", "reads": 2, "node_id": 2, "field": "value"}
+    assert out["window"] == "Thread" and len(reads) == 2 and exposures == ["app"]
+    assert ax.performed == [] and ax.balanced()
+
+
+def test_tree_wait_timeout_distinguishes_full_and_clipped_reads_and_window_loss():
+    clock = Clock()
+    advance = lambda seconds: setattr(clock, "t", clock.t + seconds)
+    full = FakeAX(simple("Loading thread"), windows=["win"], focused="win")
+    absent = native.op_tree(200, 150, 300, ax=full, until_text="Ready", now=clock, pause=advance)
+    assert absent["ok"] is True and absent["until_text"] == {"status": "not_observed", "reason": "timeout", "reads": 2}
+    assert absent["nodes"][-1]["value"] == "Loading thread" and full.balanced()
+
+    clock.t = 0
+    clipped = FakeAX(simple("before expected suffix"), windows=["win"], focused="win")
+    cut = native.op_tree(200, 150, 300, ax=clipped, until_text="expected", text_limit=6, now=clock, pause=advance)
+    assert cut["until_text"]["status"] == "unknown" and cut["until_text"]["reason"] == "read_incomplete"
+    assert cut["nodes"][-1]["value"] == "before" and cut["nodes"][-1]["value_len"] == len("before expected suffix")
+    assert clipped.balanced()
+
+    clock.t = 0
+    lost = FakeAX(simple(), windows=["win"], focused="win")
+    multi = lost.multi
+    count = []
+
+    def disappears(el, names):
+        if el == "win" and names == native._WALK_ATTRS:
+            count.append(el)
+            if len(count) == 2:
+                return -25202, []
+        return multi(el, names)
+
+    lost.multi = disappears
+    gone = native.op_tree(200, 150, 500, ax=lost, until_text="Ready", now=clock, pause=advance)
+    assert gone["until_text"] == {"status": "unknown", "reason": "window_gone", "reads": 2}
+    assert gone["reason"] == "accessibility_read_failed" and len(count) == 2 and lost.balanced()
+
+
+def test_first_and_later_read_exceptions_preserve_failure_and_last_view():
+    clock = Clock()
+    first = FakeAX(simple(), windows=["win"], focused="win")
+    first.multi = lambda el, names: (_ for _ in ()).throw(RuntimeError("first read failed"))
+    failed = native.op_tree(200, 150, 300, ax=first, until_text="Ready", now=clock)
+    assert failed["ok"] is False and failed["reason"] == "observation_error"
+    assert failed["until_text"] == {"status": "unknown", "reason": "read_failed", "reads": 0}
+    assert failed["visited"] == 0 and failed["nodes"] == [] and failed["errors"] == {}
+    assert failed["error"] == "RuntimeError: first read failed" and failed["truncated_by"] == ["read_errors"]
+    assert first.balanced()
+
+    later = FakeAX(simple(), windows=["win"], focused="win")
+    multi = later.multi
+    roots = []
+
+    def fail_second(el, names):
+        if el == "win" and names == native._WALK_ATTRS:
+            roots.append(el)
+            if len(roots) == 2:
+                raise RuntimeError("later read failed")
+        return multi(el, names)
+
+    later.multi = fail_second
+    clock.t = 0
+    last = native.op_tree(200, 150, 300, ax=later, until_text="Ready", now=clock,
+                          pause=lambda seconds: setattr(clock, "t", clock.t + seconds))
+    assert last["ok"] is True and last["visited"] == 2 and last["nodes"][-1]["value"] == "Loading thread"
+    assert last["until_text"] == {"status": "unknown", "reason": "read_failed", "reads": 1, "tree_read": 1, "tree_age_ms": 150,
+                                  "latest": {"reason": "observation_error", "error": "RuntimeError: later read failed"}}
+    assert len(roots) == 2 and later.balanced()
+
+
+def test_wait_cutoff_before_first_read_and_positive_match_with_cuts():
+    clock = Clock()
+    clock.t = 1.0
+    ax = FakeAX(simple(), windows=["win"], focused="win")
+    walked = []
+    multi = ax.multi
+
+    def count(el, names):
+        if names == native._WALK_ATTRS:
+            walked.append(el)
+        return multi(el, names)
+
+    ax.multi = count
+    cutoff = native.op_tree(200, 150, 300, ax=ax, until_text="Ready", started=0.0, now=clock)
+    assert cutoff["ok"] is False and cutoff["reason"] == "budget_exhausted"
+    assert cutoff["until_text"] == {"status": "unknown", "reason": "read_incomplete", "reads": 0}
+    assert cutoff["nodes"] == [] and cutoff["visited"] == 0 and cutoff["errors"] == {} and walked == []
+    assert ax.balanced()
+
+    nodes = simple("Ready")
+    nodes["win"]["children"].append("unread")
+    nodes["unread"] = {"role": "AXStaticText", "value": "another row"}
+    cut_ax = FakeAX(nodes, windows=["win"], focused="win")
+    clock.t = 0
+    matched = native.op_tree(200, 2, 300, ax=cut_ax, until_text="Ready", now=clock)
+    assert matched["until_text"] == {"status": "matched", "reads": 1, "node_id": 2, "field": "value"}
+    assert matched["truncated"] is True and "max_nodes" in matched["truncated_by"] and cut_ax.balanced()
+
+
+def test_action_wait_repeats_only_the_read_after_the_checkpoint(monkeypatch):
+    monkeypatch.setattr(native, "op_resolve", lambda query: {"ok": True, "candidates": [app_dict(KEYNOTE)]})
+    nodes = deck()
+    ax = FakeAX(nodes, windows=["win"], focused="win")
+    clock = Clock()
+    count, saved = [], []
+    multi = ax.multi
+
+    def delayed(el, names):
+        if el == "field" and names == native._WALK_ATTRS and ax.performed:
+            count.append(el)
+            if len(count) == 2:
+                nodes["field"]["value"] = "Ready: full thread"
+        return multi(el, names)
+
+    ax.multi = delayed
+    out = native.op_element(json.dumps({"app": "Keynote", "do": "press", "select": {"identifier": "toolbar.play"},
+                                        "observe": True, "until_text": "full thread", "timeout_ms": 500}),
+                            ax=ax, front=lambda: None, now=clock,
+                            settle=lambda seconds: setattr(clock, "t", clock.t + seconds), emit=saved.append)
+    assert out["action_outcome"] == "completed" and ax.performed == [("play", "AXPress")]
+    assert len(saved) == 1 and "observation" not in saved[0] and saved[0]["dispatched"] is True
+    assert out["observation"]["until_text"] == {"status": "matched", "reads": 2, "node_id": 3, "field": "value"}
+    assert len(count) == 2 and ax.balanced()
+
+
+def test_action_unknown_outcome_stays_unknown_when_text_is_seen(monkeypatch):
+    monkeypatch.setattr(native, "op_resolve", lambda query: {"ok": True, "candidates": [app_dict(KEYNOTE)]})
+    ax = FakeAX(deck(), windows=["win"], focused="win", perform=lambda _el, _action: TIMEOUT)
+    out = element(ax, {"do": "press", "select": {"identifier": "toolbar.play"}, "observe": True,
+                       "until_text": "old"})
+    assert out["action_outcome"] == "unknown" and out["dispatched"] is True
+    assert out["observation"]["until_text"]["status"] == "matched"
+    assert ax.performed == [("play", "AXPress")] and ax.balanced()
+
+
+def test_action_wait_keeps_the_last_read_with_nodes_when_a_later_read_fails(monkeypatch):
+    """observe_window answers a read that raised as observation_error (it never raises): the wait ends there and keeps
+    the read before it whole, naming it and the failure in until_text, as a read that raised in ax_tree does; a later
+    attempt the budget ran out in keeps it too. The press stays one."""
+    monkeypatch.setattr(native, "op_resolve", lambda query: {"ok": True, "candidates": [app_dict(KEYNOTE)]})
+    nodes = simple()
+    nodes["win"]["children"].append("load")
+    nodes["load"] = {"role": "AXButton", "title": "Load", "identifier": "load", "actions": ["AXPress"], "enabled": True}
+    spent = ("the call's time budget (timeout_ms) was spent before the window could be read again; read it with ax_tree")
+    for failure, expected in (
+            (RuntimeError("AX lost"), {"status": "unknown", "reason": "read_failed", "reads": 1, "tree_read": 1, "tree_age_ms": 150,
+                                       "latest": {"reason": "observation_error", "error": "RuntimeError: AX lost"}}),
+            ("budget", {"status": "unknown", "reason": "read_incomplete", "reads": 2, "tree_read": 1, "tree_age_ms": 350,
+                        "latest": {"reason": "budget_exhausted", "error": spent}})):
+        ax = FakeAX(nodes, windows=["win"], focused="win")
+        clock, roots, saved = Clock(), [], []
+        multi, attr = ax.multi, ax.attr
+
+        def second_read_fails(el, names):
+            if el == "win" and names == native._WALK_ATTRS and ax.performed:
+                roots.append(el)
+                if len(roots) == 2 and failure != "budget":
+                    raise failure
+            return multi(el, names)
+
+        def late_title(el, name):  # observe_window spends the rest of the budget reading the window's title
+            if el == "win" and name == "AXTitle" and ax.performed and len(roots) == 1 and failure == "budget":
+                clock.t = 0.5
+            return attr(el, name)
+
+        ax.multi, ax.attr = second_read_fails, late_title
+        out = native.op_element(json.dumps({"app": "Keynote", "do": "press", "select": {"identifier": "load"},
+                                            "observe": True, "until_text": "Ready", "timeout_ms": 500}),
+                                ax=ax, front=lambda: None, now=clock, emit=saved.append,
+                                settle=lambda seconds: setattr(clock, "t", clock.t + seconds))
+        seen = out["observation"]
+        assert out["action_outcome"] == "completed" and ax.performed == [("load", "AXPress")] and len(saved) == 1
+        assert seen["ok"] is True and seen["until_text"] == expected, seen
+        assert [row.get("value") for row in seen["nodes"]][1] == "Loading thread" and seen["window"]["title"] == "Thread"
+        assert ax.balanced()
+
+
+def test_tree_wait_never_lets_a_later_loss_replace_a_finished_read():
+    """Reading costs time (the clock moves 50 ms per element read): the deadline lands inside the last read, which
+    returns only part of the window. That part, a root the app could not answer (busy) or a failed element never
+    replaces an earlier read that finished its own walk, even one cut by max_nodes or skipped web content: the answer
+    keeps it, numbers it and its age, says what the latest read answered, and stays unknown. A match answers the read
+    it was found in, cuts included; a later read without the loss stands again."""
+    def run(timeout, *, busy=(), broken=None, broken_from=2, max_nodes=150, web=False, ready_at=None):
+        nodes = simple()
+        nodes["win"]["children"] += (["web"] if web else []) + ["row1", "row2"]
+        nodes["row1"], nodes["row2"] = {"role": "AXStaticText", "value": "row one"}, {"role": "AXStaticText", "value": "row two"}
+        nodes["web"] = {"role": "AXWebArea", "children": ["inner"]}
+        nodes["inner"] = {"role": "AXStaticText", "value": "never walked without include_web"}
+        ax = FakeAX(nodes, windows=["win"], focused="win")
+        clock, roots = Clock(), []
+        multi = ax.multi
+
+        def timed(el, names):
+            if names == native._WALK_ATTRS:
+                if el == "win":
+                    roots.append(el)
+                    if len(roots) == ready_at:
+                        nodes["line"]["value"] = "Ready"
+                clock.t = round(clock.t + 0.05, 6)  # decimal time: a pause to the deadline lands exactly on it
+                if (el == "win" and len(roots) in busy) or (el == broken and len(roots) >= broken_from):
+                    return TIMEOUT, []
+            return multi(el, names)
+
+        ax.multi = timed
+        out = native.op_tree(200, max_nodes, timeout, ax=ax, until_text="Ready", now=clock,
+                             pause=lambda seconds: setattr(clock, "t", round(clock.t + seconds, 6)))
+        assert ax.balanced() and len(roots) == out["until_text"]["reads"], out
+        return out
+
+    def loss(visited, *cuts, errors=None):
+        return {"visited": visited, "truncated_by": list(cuts), "errors": errors or {}}
+
+    busy_root = loss(0, "read_errors", errors={"CannotComplete": 1})
+    # 4 elements = 200 ms a read, 150 ms between: reads start at 0, 0.35, 0.70, 1.05; at 1.12 the fourth is cut after 2
+    cut = run(1120)
+    assert cut["ok"] is True and cut["visited"] == 4 and cut["nodes"][-1]["value"] == "row two", cut
+    assert cut["until_text"] == {"status": "unknown", "reason": "read_incomplete", "reads": 4, "tree_read": 3,
+                                 "tree_age_ms": 250, "latest": loss(2, "timeout")}, cut
+    # Each finished read is cut by its own bounds (3 nodes, the web area unread): it still outranks the deadline's cut.
+    bounded = run(970, max_nodes=3, web=True)  # 150 ms reads start at 0, 0.30, 0.60, 0.90; the fourth is cut after 2
+    assert bounded["visited"] == 3 and set(bounded["truncated_by"]) == {"web_content_skipped", "max_nodes"}, bounded
+    assert bounded["until_text"] == {"status": "unknown", "reason": "read_incomplete", "reads": 4, "tree_read": 3,
+                                     "tree_age_ms": 250, "latest": loss(2, "max_nodes", "timeout")}, bounded
+    # A match in the cut read is that read, cuts and all.
+    seen = run(1120, ready_at=4)
+    assert seen["until_text"] == {"status": "matched", "reads": 4, "node_id": 2, "field": "value"}, seen
+    assert seen["visited"] == 2 and seen["truncated_by"] == ["timeout"], seen
+    # The same deadline between reads: the last read finished and stands, a definite not_observed.
+    whole = run(1000)
+    assert whole["until_text"] == {"status": "not_observed", "reason": "timeout", "reads": 3} and whole["visited"] == 4
+    # A busy root (no node) as the latest read; a finished read after it stands again.
+    busy = run(500, busy={2})
+    assert busy["visited"] == 4 and busy["until_text"] == {"status": "unknown", "reason": "read_incomplete", "reads": 2,
+                                                           "tree_read": 1, "tree_age_ms": 300, "latest": busy_root}, busy
+    recovered = run(850, busy={2})  # reads at 0, 0.35 (busy, 50 ms), 0.55; the deadline falls in the pause after it
+    assert recovered["until_text"] == {"status": "not_observed", "reason": "timeout", "reads": 3}, recovered
+    # An element that keeps failing after the first read: the first, finished one stays; the latest is named.
+    broken = run(1000, broken="row2")
+    assert broken["visited"] == 4 and broken["until_text"]["tree_read"] == 1, broken
+    assert broken["until_text"]["latest"] == loss(3, "read_errors", errors={"CannotComplete": 1}), broken
+    # With no read finished whole, the first partial one still outlives a later read that returned nothing.
+    partial = run(500, broken="row2", broken_from=1, busy={2})
+    assert partial["visited"] == 3 and partial["until_text"]["tree_read"] == 1, partial
+    assert partial["until_text"]["latest"] == busy_root and partial["until_text"]["status"] == "unknown", partial
+
+
+def test_wait_option_refusals_and_plugin_transport(tmp_path, monkeypatch):
+    bad = native.op_element({"app": "Keynote", "do": "press", "select": {"identifier": "toolbar.play"},
+                             "until_text": "Ready"})
+    assert bad["reason"] == "bad_option" and bad["dispatched"] is False
+    assert native.op_observe({"app": "Keynote", "until_text": 7})["reason"] == "bad_option"
+
+    seen = {"ok": True, "nodes": [{"id": 1, "role": "Window"}],
+            "until_text": {"status": "matched", "reads": 2, "node_id": 1, "field": "title"}}
+    _module, api, state = mac(tmp_path, monkeypatch, helper=lambda args, st: {
+        "ok": True, "target": app_dict(KEYNOTE), **({"observation": seen, "dispatched": True, "action_outcome": "completed"}
+                                                if args[0] == "element" else seen)})
+    read = receipt(api.tools["ax_tree"](app="Keynote", until_text="Ready"))
+    assert read["until_text"] == seen["until_text"] and json.loads(state["helper"][-1][1])["until_text"] == "Ready"
+    acted = receipt(api.tools["element_act"](app="Keynote", do="press", select={"identifier": "toolbar.play"},
+                                              observe=True, until_text="Ready"))
+    assert acted["observation"] == seen and json.loads(state["helper"][-1][1])["until_text"] == "Ready"
+    assert api.meta["ax_tree"]["schema"]["properties"]["until_text"]["default"] == ""
+    assert api.meta["element_act"]["schema"]["properties"]["until_text"]["default"] == ""
+
+    remote, transport = ssh_mac(tmp_path / "remote", monkeypatch)
+    refused = receipt(remote["ax_tree"](until_text="Ready"))
+    assert refused["reason"] == "unsupported_option" and refused["backend"] == "ssh_macos"
+    assert not [argv for argv in transport.calls if argv[:1] == ["ssh"] and "observe" in " ".join(argv)]
+
+
+def test_helper_stopped_during_wait_preserves_action_receipt(tmp_path, monkeypatch):
+    module, api, _state = mac(tmp_path, monkeypatch)
+    saved = {"ok": True, "dispatched": True, "action_outcome": "completed", "target": app_dict(KEYNOTE),
+             "checkpoint": "action"}
+
+    def stopped(cmd, *args, **kwargs):
+        if any(str(part).endswith("macos_native.py") for part in cmd):
+            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"), output=(json.dumps(saved) + "\n").encode())
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(module.subprocess, "run", stopped)
+    out = receipt(api.tools["element_act"](app="Keynote", do="press", select={"identifier": "toolbar.play"},
+                                              observe=True, until_text="Ready"))
+    assert out["dispatched"] is True and out["action_outcome"] == "completed"
+    assert out["observation"]["reason"] == "helper_stopped"
+    assert out["observation"]["until_text"] == {"status": "unknown", "reason": "helper_stopped", "reads": 0}
+
+    monkeypatch.setattr(module.subprocess, "run", lambda cmd, *a, **k: (_ for _ in ()).throw(
+        subprocess.TimeoutExpired(cmd, k.get("timeout"))))
+    silent = receipt(api.tools["element_act"](app="Keynote", do="press", select={"identifier": "toolbar.play"},
+                                                 observe=True, until_text="Ready"))
+    assert silent["dispatched"] is None and silent["action_outcome"] == "unknown"
+    assert silent["observation"]["until_text"]["status"] == "unknown"
+
+
+def test_public_ax_tree_preserves_failed_wait_view(tmp_path, monkeypatch):
+    # The helper's answer for a window that vanished during the wait: the read that found it gone, no tree or marks.
+    last = {"ok": False, "reason": "accessibility_read_failed", "error": "no element of the window could be read: ...",
+            "nodes": [], "visited": 0, "truncated": True, "truncated_by": ["read_errors"], "errors": {"InvalidUIElement": 1},
+            "until_text": {"status": "unknown", "reason": "window_gone", "reads": 2},
+            "window": "Thread", "window_id": 39, "target": app_dict(KEYNOTE)}
+    _module, api, _state = mac(tmp_path, monkeypatch, helper=lambda args, st: last)
+    out = receipt(api.tools["ax_tree"](app="Keynote", until_text="Ready"))
+    assert out["ok"] is False and out["app"] == app_dict(KEYNOTE) and "marks" not in out
+    for key in ("reason", "error", "nodes", "visited", "truncated", "truncated_by", "errors", "until_text", "window", "window_id"):
+        assert out[key] == last[key], key
+
+
+def test_wait_never_infers_across_fields_or_skipped_web():
+    clock = Clock()
+    def read():
+        return {"ok": True, "visited": 1, "nodes": [{"id": 1, "title": "Ready", "value": "thread"}],
+                "truncated": True, "truncated_by": ["web_content_skipped"], "errors": {}}
+    out = native.wait_for_text(read, "Readythread", deadline=0.3, now=clock,
+                               pause=lambda seconds: setattr(clock, "t", clock.t + seconds))
+    assert out["until_text"]["status"] == "unknown"
+    assert out["truncated_by"] == ["web_content_skipped"]
+
+
+def test_wait_rereads_transient_child_error_without_claiming_absence():
+    clock = Clock()
+    views = iter([
+        {"ok": True, "visited": 1, "nodes": [{"id": 1, "title": "Thread"}],
+         "truncated": True, "truncated_by": ["read_errors"], "errors": {"InvalidUIElement": 1}},
+        {"ok": True, "visited": 2, "nodes": [{"id": 1, "title": "Thread"}, {"id": 2, "value": "loaded"}],
+         "truncated": False, "truncated_by": [], "errors": {}},
+    ])
+    out = native.wait_for_text(lambda: next(views), "loaded", deadline=0.5, now=clock,
+                               pause=lambda seconds: setattr(clock, "t", clock.t + seconds))
+    assert out["until_text"] == {"status": "matched", "reads": 2, "node_id": 2, "field": "value"}
