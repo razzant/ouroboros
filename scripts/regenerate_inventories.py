@@ -72,9 +72,19 @@ _CODE_SPAN = re.compile(r"`([^`]+)`")
 
 
 def _tracked_all() -> set[str]:
-    out = subprocess.run(["git", "ls-files"], cwd=REPO_ROOT,
-                         capture_output=True, text=True, check=True).stdout
-    return set(out.split())
+    """The candidate's files: tracked, or untracked and not ignored, and present on disk.
+
+    The commit gate stages a candidate and unstages it after a red, and Ouroboros cannot stage by
+    hand, so an inventory must read the same staged or not; a clean checkout reads its tracked files.
+    """
+    out = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+                         cwd=REPO_ROOT, capture_output=True, check=True).stdout
+    return {p for p in out.decode("utf-8", "surrogateescape").split("\0") if p and (REPO_ROOT / p).is_file()}
+
+
+def _candidate_population() -> list[str]:
+    """The candidate's runtime modules, read the way ``_tracked_all`` reads files."""
+    return sorted(p for p in tracked_population(REPO_ROOT, untracked=True) if (REPO_ROOT / p).is_file())
 
 
 def _split_row(line: str) -> list[str]:
@@ -180,7 +190,7 @@ def build_frozen_inventory(book: ReferenceBook | None = None) -> tuple[str, list
         findings.append(f"frozen: §11.1 references missing file: {span}")
         return "MISSING"
 
-    contracts_pkg = sorted(p for p in tracked_population(REPO_ROOT)
+    contracts_pkg = sorted(p for p in _candidate_population()
                            if p.startswith("ouroboros/contracts/")
                            and not p.endswith("__init__.py"))
     referenced = set()
@@ -277,10 +287,8 @@ def build_layout_inventory(book: ReferenceBook | None = None) -> tuple[str, list
         for i in range(1, len(parts)):
             tracked_dirs.add("/".join(parts[:i]))
 
-    # A tracked module deleted but not yet staged reads as gone, as it will once staged.
     runtime_blob = "\n".join(
-        (REPO_ROOT / p).read_text(encoding="utf-8", errors="replace")
-        for p in sorted(tracked_population(REPO_ROOT)) if (REPO_ROOT / p).is_file())
+        (REPO_ROOT / p).read_text(encoding="utf-8", errors="replace") for p in _candidate_population())
 
     findings: list[str] = []
     rows: list[tuple[str, str, str]] = []
@@ -460,7 +468,7 @@ def main(argv: list[str] | None = None) -> int:
                 stale.append(str(rel))
         else:
             out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(rendered, encoding="utf-8")
+            out_path.write_text(rendered, encoding="utf-8", newline="\n")  # the repository's LF, on Windows too
             print(f"wrote {rel}")
 
     for f in all_findings:

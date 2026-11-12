@@ -53,12 +53,11 @@ def facades():
 
 def _assert_identical(out_path: pathlib.Path, rendered: str):
     rendered += "\n" if not rendered.endswith("\n") else ""
-    regenerate = f"`{sys.executable} scripts/regenerate_inventories.py`"
-    assert out_path.is_file(), f"{out_path.name} is missing — run {regenerate}"
+    regenerate = f"run scripts/regenerate_inventories.py with this test's Python ({sys.executable})"
+    assert out_path.is_file(), f"{out_path.name} is missing: {regenerate}"
     assert out_path.read_text(encoding="utf-8") == rendered, (
-        f"{out_path.name} is stale (regeneration changes it). The generator takes tracked paths from the git "
-        f"index and the rest from the working tree: stage new and deleted files, run {regenerate}, and commit "
-        "docs/inventories/ in the same commit as the changes it describes (alone when they are already in the base).")
+        f"{out_path.name} is stale: {regenerate} and commit docs/inventories/ with the changes it describes; "
+        "when those are another task's uncommitted work, that task's commit owes it.")
 
 
 def test_frozen_contracts_inventory_is_byte_identical(frozen):
@@ -302,31 +301,40 @@ def test_frozen_section_uses_markdown_headings_not_fenced_examples():
     assert "Fake content" not in section and "Outside" not in section
 
 
-def test_a_deleted_module_reads_the_same_whether_its_deletion_is_staged_or_not(tmp_path, monkeypatch):
-    """The commit gate unstages a candidate after a red, and another task's deletion may sit unstaged:
-    a tracked module deleted on disk reads as gone either way, so the inventory builds and its row turns red."""
+def test_the_inventory_reads_a_candidate_the_same_staged_or_not(tmp_path, monkeypatch):
+    """The commit gate stages a candidate and unstages it after a red, and Ouroboros cannot stage by hand:
+    a new folder, a new module and a deleted module read the same staged or not, and every row follows the disk."""
     import subprocess
 
     def git(*args):
         subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
                        cwd=tmp_path, check=True, capture_output=True)
 
-    (tmp_path / "docs").mkdir()
-    (tmp_path / "docs" / "ARCHITECTURE.md").write_text(
-        "# Book\n\n## Data layout (`~/Ouroboros/`)\n\n"
-        "````\n~/Ouroboros/\n└── data/\n    └── gone.json\n````\n", encoding="utf-8")
-    (tmp_path / "ouroboros").mkdir()
-    (tmp_path / "ouroboros" / "keeps.py").write_text("ROOT = 'data'\n", encoding="utf-8")
-    (tmp_path / "ouroboros" / "gone.py").write_text("STORE = 'gone.json'\n", encoding="utf-8")
+    def write(path, text):
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_text(text, encoding="utf-8")
+
+    tree = ("# Book\n\n## Data layout (`~/Ouroboros/`)\n\n"
+            "````\n~/Ouroboros/\n└── data/\n    ├── state/\n{}    └── gone.json\n````\n")
+    write("docs/ARCHITECTURE.md", tree.format(""))
+    write("ouroboros/keeps.py", "ROOT, STATE = 'data', 'state'\n")
+    write("ouroboros/gone.py", "STORE = 'gone.json'\n")
     git("init", "-q")
     git("add", ".")
     git("commit", "-qm", "base")
     monkeypatch.setattr(inv, "REPO_ROOT", tmp_path)
+    assert inv.build_layout_inventory()[1] == []
+    write("docs/ARCHITECTURE.md", tree.format("    ├── fresh.json\n"))
+    write("ouroboros/fresh.py", "STORE = 'fresh.json'\n")
+    write("skills/demo/state/notes.md", "a folder named like a layout entry\n")
     (tmp_path / "ouroboros" / "gone.py").unlink()
     unstaged = inv.build_layout_inventory()
-    git("rm", "-q", "--cached", "ouroboros/gone.py")
+    git("add", "-A")
     assert unstaged == inv.build_layout_inventory()
-    assert "| `gone.json` | `gone.json` | UNRESOLVED |" in unstaged[0] and unstaged[1]
+    for row in ("| `data/` | `data` | code-ref |", "| `state/` | `state` | repo-dir |",
+                "| `fresh.json` | `fresh.json` | code-ref |", "| `gone.json` | `gone.json` | UNRESOLVED |"):
+        assert row in unstaged[0], row
+    assert len(unstaged[1]) == 1
 
 
 def test_missing_member_refuses_generator_before_partial_inventory(tmp_path, monkeypatch):
