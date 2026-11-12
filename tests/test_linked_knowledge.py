@@ -5,12 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+from contextlib import contextmanager
 
 import pytest
 
 from ouroboros import knowledge as store
 from ouroboros.tools import knowledge as tools
-from ouroboros.tools.registry import ToolContext
+from ouroboros.tools.registry import ToolContext, ToolRegistry
 from tests._knowledge_history_shared import replaced
 
 
@@ -148,6 +149,7 @@ def test_exact_edit_preserves_other_knowledge_and_reports_its_delta(tmp_path):
     assert change["delta"] == {"old_chars": len(original.text), "new_chars": len(updated.text),
                                 "old_body_chars": store.body_chars(original), "new_body_chars": store.body_chars(updated),
                                 "change_chars": len(updated.text) - len(original.text), "removed_headings": [],
+                                "removed_chars": 3, "added_chars": 3, "removed_sections": [],  # "Old" → "New"
                                 "body_changed": True, "summary_changed": False}
     assert json.loads(reply.split("\n", 1)[1])["knowledge_delta"] == change["delta"]
 
@@ -504,3 +506,289 @@ def test_history_names_an_earlier_copy_from_a_tail_that_starts_mid_journal(tmp_p
         store.write_knowledge_note(address(tmp_path, f"later/{index}"), "y" * 1500)
     store.write_knowledge_note(target, "# Report\n\nThird.", expected_revision=second.current.revision)
     assert history(target)[-1]["old_content"] == second.current.text
+
+
+def _files(root):
+    return {path: path.read_bytes() for path in root.rglob("*") if path.is_file() and not path.name.endswith(".lock")}
+
+
+def _meta(reply):
+    assert reply.startswith("✅"), reply
+    return json.loads(reply.split("\n", 1)[1])
+
+
+def _item(old_str=None, section=None, new_str=""):
+    """An item as a strict provider sends it: every field present, the unused selector null."""
+    return {"old_str": old_str, "section": section, "new_str": new_str}
+
+
+def test_several_exact_items_land_in_one_revision_or_none_does(tmp_path):
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="editor")
+    target = address(tmp_path, "people/rowan")
+    original = store.write_knowledge_note(target, "# Rowan\n\n- Host: old-a.\n" + "Filler line.\n" * 40
+                                          + "- Port: 8080.\n").current
+    rows, before = len(history(target)), _files(tmp_path)
+    refused = tools._knowledge_write(ctx, "people/rowan", mode="edit", scope="global", expected_revision=original.revision,
+                                     edits=[_item("old-a", new_str="new-a"), _item("Absent.", new_str="x")])
+    assert "edit_refused: item 2 (old_str): not found" in refused and "Nothing was written." in refused
+    assert original.text not in refused and "Outline of" not in refused  # the note is not resent for a quoted item
+    assert _files(tmp_path) == before
+    _meta(tools._knowledge_write(ctx, "people/rowan", mode="edit", scope="global", expected_revision=original.revision,
+                                 edits=[_item("old-a", new_str="new-a"), _item("8080", new_str="9090")]))
+    updated = store.read_knowledge_note(target)
+    assert updated.text == original.text.replace("old-a", "new-a").replace("8080", "9090")
+    assert len(history(target)) == rows + 1 and history(target)[-1]["new_content"] == updated.text
+    assert history(target)[-1]["mode"] == "edit" and replaced(tmp_path, history(target)[-1]) == original.text
+
+
+def test_items_are_found_in_the_original_and_may_touch_but_never_overlap(tmp_path):
+    target = address(tmp_path, "swap")
+    original = store.write_knowledge_note(target, "# Swap\n\nalpha beta gamma\n").current
+    swapped = store.write_knowledge_note(target, "", "edit", original.revision,
+                                         edits=[_item("alpha", new_str="beta"), _item("beta", new_str="alpha")])
+    assert swapped.ok and swapped.current.text.endswith("beta alpha gamma\n")  # no item sees another's result
+    touching = store.write_knowledge_note(target, "", "edit", swapped.current.revision,
+                                          edits=[_item("beta ", new_str="B "), _item("alpha", new_str="A")])
+    assert touching.ok and touching.current.text.endswith("B A gamma\n")
+    overlapping = store.write_knowledge_note(target, "", "edit", touching.current.revision,
+                                             edits=[_item("B A", new_str="x"), _item("A gamma", new_str="y")])
+    assert overlapping.reason == "edit_refused: item 2: overlaps item 1"
+    assert target.path.read_bytes() == touching.current.raw
+
+
+def test_a_refused_item_says_whether_its_text_is_missing_or_where_it_repeats(tmp_path):
+    target = address(tmp_path, "lines")
+    original = store.write_knowledge_note(target, "---\ntype: note\n---\n# Lines\n\nrepeat\nonce\nrepeat\n"
+                                          + "x\n" * 10).current
+    assert store.write_knowledge_note(target, "", "edit", original.revision, edits=[
+        _item("once", new_str="1"), _item("repeat", new_str="2")]).reason == (
+        "edit_refused: item 2 (old_str): found 2 times at lines 6, 8")
+    assert store.write_knowledge_note(target, "", "edit", original.revision, edits=[
+        _item("x\n", new_str="")]).reason == "edit_refused: item 1 (old_str): found 10 times at lines 9, 10, 11, 12, 13, 14, 15, 16"
+    assert store.write_knowledge_note(target, "", "edit", original.revision, edits=[
+        _item("missing", new_str="")]).reason == "edit_refused: item 1 (old_str): not found"
+    assert store.write_knowledge_note(target, "", "edit", original.revision, edits=[_item("once", new_str="1")]).ok
+
+
+def test_items_keep_crlf_multibyte_and_a_missing_final_newline_byte_exact(tmp_path):
+    target = address(tmp_path, "legacy")
+    target.path.parent.mkdir(parents=True)
+    raw = "# Река\r\nСтарый берег 🌊.\r\nДо встречи.\r\n## Хвост\r\nбез перевода строки".encode("utf-8")
+    target.path.write_bytes(raw)
+    original = store.read_knowledge_note(target)
+    changed = store.write_knowledge_note(target, "", "edit", original.revision,
+                                         edits=[_item("Старый", new_str="Новый"), _item("строки", new_str="строк")])
+    assert changed.ok and changed.current.raw == raw.replace("Старый".encode(), "Новый".encode()).replace(
+        "строки".encode(), "строк".encode())
+
+
+def test_item_shapes_and_spellings_that_cannot_mean_one_thing_are_argument_errors(tmp_path):
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="editor")
+    original = store.write_knowledge_note(address(tmp_path, "shape"), "# Shape\n\nText.\n").current
+    for kwargs, message in (
+            ({"edits": [_item("Text.", "# Shape", "x")]}, "exactly one selector"),
+            ({"edits": [_item(new_str="x")]}, "exactly one selector"),
+            ({"edits": [_item("Text.", new_str=None)]}, "new_str must be text"),
+            ({"edits": []}, "non-empty array"),
+            ({"edits": [_item("Text.", new_str="x")], "old_str": "Text."}, "edits carries its own replacements"),
+            ({"edits": [_item("Text.", new_str="x")], "content": "x"}, "edits carries its own replacements")):
+        reply = tools._knowledge_write(ctx, "shape", mode="edit", scope="global", expected_revision=original.revision, **kwargs)
+        assert reply.startswith("⚠️ TOOL_ARG_ERROR") and message in reply, (kwargs, reply)
+    assert "edits is used only with mode=edit" in tools._knowledge_write(
+        ctx, "shape", "x", mode="overwrite", scope="global", expected_revision=original.revision, edits=[_item("x")])
+    assert store.read_knowledge_note(original.address).raw == original.raw
+    _meta(tools._knowledge_write(ctx, "shape", mode="edit", scope="global", expected_revision=original.revision,
+                                 edits=[{"old_str": "Text.", "section": "", "new_str": "Prose."}]))  # "" means "not this kind"
+
+
+SECTIONS = ("# Top\n\nIntro.\n\n## Old part\n\nOld text.\n\n### Detail\n\nDetail text.\n\n"
+            "## Kept\n\nKept text.\n\n```\n## Fenced\n```\n\n## Last\n\nLast text.\n")
+OLD_PART = "## Old part\n\nOld text.\n\n### Detail\n\nDetail text.\n\n"
+
+
+def test_a_section_item_replaces_its_heading_with_every_child_and_empty_deletes_it(tmp_path):
+    target = address(tmp_path, "sections")
+    original = store.write_knowledge_note(target, SECTIONS).current
+    new_part = store.write_knowledge_note(target, "", "edit", original.revision,
+                                          edits=[_item(section="## Old part", new_str="## New part\n\nNew text.\n\n")])
+    assert new_part.ok and new_part.current.text == original.text.replace(OLD_PART, "## New part\n\nNew text.\n\n")
+    assert new_part.delta["removed_sections"] == [
+        {"heading": "## Old part", "chars": len(OLD_PART), "first_line": "Old text."},
+        {"heading": "### Detail", "chars": len("### Detail\n\nDetail text.\n\n"), "first_line": "Detail text."}]
+    longer = store.write_knowledge_note(target, "", "edit", new_part.current.revision,
+                                        edits=[_item(section="## Kept\n\nKept", new_str="")])  # a longer quote from the heading
+    assert longer.ok and "## Kept" not in longer.current.text and "## Fenced" not in longer.current.text
+    assert longer.current.text.endswith("New text.\n\n## Last\n\nLast text.\n")
+
+
+def test_a_section_selector_must_begin_a_real_heading_and_its_refusal_shows_the_outline(tmp_path):
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="editor")
+    original = store.write_knowledge_note(address(tmp_path, "sections"), SECTIONS).current
+    before = _files(tmp_path)
+
+    def edit(*items):
+        return tools._knowledge_write(ctx, "sections", mode="edit", scope="global", expected_revision=original.revision,
+                                      edits=list(items))
+
+    fenced = edit(_item(section="## Fenced"))  # inside a code fence: not a heading
+    assert "item 1 (section): does not begin at a heading line" in fenced and "Outline of 'sections'" in fenced
+    assert "## Kept — line 17" in fenced and original.text not in fenced
+    assert "does not begin at a heading line" in edit(_item(section="Old text."))
+    nested = edit(_item(section="## Old part"), _item(section="### Detail"))
+    assert "item 2: overlaps item 1" in nested and "Outline of" in nested
+    past = edit(_item(section="### Detail\n\nDetail text.\n\n## Kept"))
+    assert "runs past the end of its section" in past
+    quoted = edit(_item("Absent"))
+    assert "item 1 (old_str): not found" in quoted and "Outline of" not in quoted
+    assert _files(tmp_path) == before
+    assert _meta(edit(_item(section="### Detail")))["knowledge_delta"]["removed_sections"][0]["heading"] == "### Detail"
+
+
+def test_a_setext_heading_has_no_section_of_its_own_to_replace(tmp_path):
+    original = store.write_knowledge_note(address(tmp_path, "setext"), "# Top\n\nSetext\n------\n\nUnder it.\n").current
+    refused = store.write_knowledge_note(original.address, "", "edit", original.revision,
+                                         edits=[_item(section="Setext\n------")])
+    assert refused.reason.startswith("edit_refused: item 1 (section): the heading at line 7 has no section of its own")
+    assert store.write_knowledge_note(original.address, "", "edit", original.revision,
+                                      edits=[_item(section="# Top", new_str="# Top\n")]).ok
+
+
+def test_revert_publishes_the_exact_bytes_of_an_earlier_version(tmp_path):
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="editor")
+    target = address(tmp_path, "shore")
+    target.path.parent.mkdir(parents=True)
+    first_raw = "# Река\r\nСтарый берег.\r\n".encode("utf-8")
+    target.path.write_bytes(first_raw)  # written outside the writer: only the next row's old_content holds it
+    first = store.read_knowledge_note(target)
+    second = store.write_knowledge_note(target, "# Река\r\nНовый берег.\r\n", expected_revision=first.revision).current
+    assert "revision_required" in tools._knowledge_write(ctx, "shore", mode="revert", scope="global", version=first.revision)
+    assert target.path.read_bytes() == second.raw
+    _meta(tools._knowledge_write(ctx, "shore", mode="revert", scope="global", version=first.revision,
+                                 expected_revision=second.revision, reason="the old shore was right"))
+    restored = store.read_knowledge_note(target)
+    assert restored.raw == first_raw and restored.revision == first.revision
+    row = history(target)[-1]
+    assert (row["mode"], row["reverted_from"], row["reason"]) == ("revert", first.revision, "the old shore was right")
+    assert "old shore" not in restored.text and row["new_content"] == first_raw.decode("utf-8")
+    same = tools._knowledge_write(ctx, "shore", mode="revert", scope="global", version=first.revision,
+                                  expected_revision=first.revision)
+    assert same.startswith("✅ Knowledge 'shore' unchanged (revert)")
+    for extra in ({"content": "x"}, {"summary": "s"}, {"old_str": "x"}, {"edits": [_item("x")]}):
+        assert tools._knowledge_write(ctx, "shore", mode="revert", scope="global", version=second.revision,
+                                      expected_revision=first.revision, **extra).startswith("⚠️ TOOL_ARG_ERROR")
+    assert "mode=revert requires version" in tools._knowledge_write(ctx, "shore", mode="revert", scope="global",
+                                                                     expected_revision=first.revision)
+
+
+def test_a_version_without_verified_text_is_a_typed_refusal(tmp_path):
+    target = address(tmp_path, "typed")
+    note = store.write_knowledge_note(target, "# Typed\n\nNow.\n").current
+    journal = target.shelf.parent / "knowledge_history.jsonl"
+    claimed, digested = hashlib.sha256(b"never stored").hexdigest(), hashlib.sha256(b"digest era").hexdigest()
+    base = {"topic": "typed", "address": {"scope": "global"}, "publication": "source_capture"}
+    with journal.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({**base, "new_sha256": claimed, "new_content": "other text"}) + "\n")
+        stream.write(json.dumps({**base, "new_sha256": digested, "new_content": "", "content_digested": True}) + "\n")
+    before = _files(tmp_path)
+    for version, why in (("0" * 64, "no version " + "0" * 64), (claimed, "the stored text does not hash to the version"),
+                         (digested, "holds no text (digest-era)"), ("not-a-revision", "64 lowercase hex")):
+        result = store.write_knowledge_note(target, "", "revert", note.revision, version=version)
+        assert not result.ok and result.reason.startswith("version_unavailable: ") and why in result.reason, result.reason
+    assert _files(tmp_path) == before
+
+
+def test_a_reason_rides_on_the_history_row_and_never_into_the_note(tmp_path):
+    target = address(tmp_path, "reasons")
+    original = store.write_knowledge_note(target, "# Reasons\n\nOld claim.\n").current
+    edited = store.write_knowledge_note(target, "New claim.", "edit", original.revision, old_str="Old claim.",
+                                        reason="the measurement changed")
+    assert edited.ok and history(target)[-1]["reason"] == "the measurement changed"
+    assert "measurement" not in edited.current.text
+    plain = store.write_knowledge_note(target, "Newer claim.", "edit", edited.current.revision, old_str="New claim.")
+    assert plain.ok and "reason" not in history(target)[-1]
+    with pytest.raises(ValueError, match="reason is required for archive"):
+        store.write_knowledge_note(target, "", "archive", plain.current.revision)
+    assert store.write_knowledge_note(target, "", "archive", plain.current.revision, reason="kept elsewhere").ok
+    assert history(target)[-1]["reason"] == "kept elsewhere"
+
+
+def test_the_receipt_names_the_replaced_version_counts_both_ways_and_its_calls_work(tmp_path):
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="editor")
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(ctx)
+    original = store.write_knowledge_note(address(tmp_path, "host"), "# Host\n\nThe host is old.\n\n## Gone\n\nObsolete.\n",
+                                          writer="turn").current
+    meta = _meta(tools._knowledge_write(ctx, "host", mode="edit", scope="global", expected_revision=original.revision,
+                                        reason="the host moved", edits=[_item("old", new_str="new")]))
+    delta = meta["knowledge_delta"]
+    assert (delta["removed_chars"], delta["added_chars"], delta["change_chars"]) == (3, 3, 0)  # net zero, both counted
+    previous = meta["knowledge_previous"]
+    assert previous["revision"] == original.revision and previous["mode"] == "overwrite"
+    assert previous["focus"] == "unknown" and previous["reason"] == "unknown" and previous["ts"] != "unknown"
+    assert "The host is" not in json.dumps(meta, ensure_ascii=False)  # nothing the call quoted is echoed
+    assert "knowledge_outline" not in meta  # the write named its revision: it saw the earlier text
+    second = store.read_knowledge_note(original.address)
+    gone = _meta(tools._knowledge_write(ctx, "host", mode="edit", scope="global", expected_revision=second.revision,
+                                        edits=[_item(section="## Gone")]))
+    assert gone["knowledge_delta"]["removed_sections"] == [{"heading": "## Gone", "chars": len("## Gone\n\nObsolete.\n"),
+                                                            "first_line": "Obsolete."}]
+    assert gone["knowledge_previous"]["reason"] == "the host moved"
+    assert gone["knowledge_previous"]["focus"]["task_id"] == "editor"
+    read_back = registry.execute(gone["knowledge_read_previous"]["tool"], gone["knowledge_read_previous"]["arguments"])
+    assert read_back.endswith(second.text) and "Earlier version, not the current note" in read_back
+    _meta(registry.execute(gone["knowledge_revert"]["tool"], gone["knowledge_revert"]["arguments"]))
+    assert store.read_knowledge_note(original.address).raw == second.raw
+
+
+def test_a_stale_revision_its_history_holds_gets_the_changes_instead_of_the_whole_note(tmp_path):
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="mine")
+    target = address(tmp_path, "plan")
+    held = store.write_knowledge_note(target, "# Plan\n\nStep one.\n\n## Later\n\nDetail.\n", writer="turn").current
+    current = store.write_knowledge_note(target, "Step one, revised.", "edit", held.revision, old_str="Step one.",
+                                         reason="another focus learned more", focus={"role": "presence", "task_id": "other"}).current
+    stale = tools._knowledge_write(ctx, "plan", "# Plan\n\nMine.\n", scope="global", expected_revision=held.revision)
+    assert "revision_conflict" in stale and f"expected_revision={current.revision!r}" in stale
+    assert "presence task_id=other · edit · reason: another focus learned more" in stale
+    assert "+ , revised" in stale and "under # Plan" in stale and "Outline of 'plan'" in stale
+    assert "The complete current text is knowledge_read(topic='plan', scope='global')." in stale
+    assert current.text not in stale and store.read_knowledge_note(target).raw == current.raw
+    unknown = tools._knowledge_write(ctx, "plan", "Mine.", scope="global", expected_revision="0" * 64)
+    assert "revision_conflict" in unknown and unknown.endswith(current.text)  # a revision the tail lacks: as before
+    required = tools._knowledge_write(ctx, "plan", "Mine.", scope="global")
+    assert "revision_required" in required and required.endswith(current.text)
+
+
+def test_a_stale_revision_beyond_the_tail_gets_the_whole_note_as_before(tmp_path, monkeypatch):
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="mine")
+    target = address(tmp_path, "far")
+    held = store.write_knowledge_note(target, "# Far\n\nOne.\n").current
+    current = store.write_knowledge_note(target, "Two.", "edit", held.revision, old_str="One.").current
+    for index in range(4):
+        store.write_knowledge_note(address(tmp_path, f"filler/{index}"), "z" * 3000)
+    monkeypatch.setattr(store, "_JOURNAL_TAIL_BYTES", 4096)
+    stale = tools._knowledge_write(ctx, "far", "Mine.", scope="global", expected_revision=held.revision)
+    assert "revision_conflict" in stale and stale.endswith(current.text) and "What changed" not in stale
+
+
+def test_the_writer_reads_its_row_address_and_appends_under_the_shelf_lock(tmp_path, monkeypatch):
+    target = address(tmp_path, "locked")
+    first = store.write_knowledge_note(target, "# Locked\n\nFirst.\n").current
+    held, seen = [], []
+    real_lock, real_newest, real_append = store.knowledge_write_lock, store._newest_row, store.append_jsonl
+
+    @contextmanager
+    def lock(shelf):
+        with real_lock(shelf):
+            held.append(shelf)
+            try:
+                yield
+            finally:
+                held.pop()
+
+    monkeypatch.setattr(store, "knowledge_write_lock", lock)
+    monkeypatch.setattr(store, "_newest_row", lambda *args: seen.append(("row address", list(held))) or real_newest(*args))
+    monkeypatch.setattr(store, "append_jsonl", lambda *args, **kwargs: seen.append(("append", list(held)))
+                        or real_append(*args, **kwargs))
+    assert store.write_knowledge_note(target, "# Locked\n\nSecond.\n", expected_revision=first.revision).ok
+    assert seen == [("row address", [target.shelf]), ("append", [target.shelf])]
+    assert replaced(tmp_path, history(target)[-1]) == first.text  # the address read under the lock names the row

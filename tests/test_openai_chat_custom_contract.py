@@ -797,3 +797,21 @@ def test_actual_profile_catalogs_carry_every_tool_lead_whole(tmp_path, profile):
             over[name] = len(lead) - (MAX_CUSTOM_DESCRIPTION_CHARS - len(clause) - 1)
     assert "schedule_subagent" in checked, sorted(checked)
     assert over == {}, f"{profile}: leads clipped by the custom description bound (chars over): {over}"
+
+
+@pytest.mark.parametrize("name", ["knowledge_read", "knowledge_write"])
+def test_knowledge_tools_project_whole_where_parameter_prose_does_not_arrive(name):
+    """The custom route drops parameter descriptions and clips description plus schema to 4,096
+    characters, so every knowledge mode must be explained in the tool's own lead, unclipped."""
+    from ouroboros.tools.knowledge import get_tools
+
+    entry = next(entry for entry in get_tools() if entry.name == name)
+    projected = project_function_tools_to_openai_custom([{"type": "function", "function": entry.schema}]).wire_tools()
+    description = projected[0]["custom"]["description"]
+    lead = " ".join(entry.schema["description"].split())
+    assert len(description) <= MAX_CUSTOM_DESCRIPTION_CHARS
+    assert description.startswith(lead + "\n" + _SCHEMA_CLAUSE), f"{name} lead clipped on the custom route"
+    words = (["view='outline'", "view='history'", "version="] if name == "knowledge_read" else
+             ["overwrite", "append", "edit", "edits", "section", "revert", "archive", "restore", "reason",
+              "summary", "expected_revision"])
+    assert all(word in lead for word in words), [word for word in words if word not in lead]

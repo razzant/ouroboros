@@ -559,3 +559,24 @@ def test_tool_metadata_closure_retains_only_named_previous_note_source(tmp_path)
     # Missing arbitrary metadata is data, not a reason to refuse retention.
     (task_artifact_dir_path(child, task) / unrelated["path"]).unlink()
     assert retain_named_refs(payload, child, custody, task) == retained
+
+
+def test_a_revert_never_crosses_archive_states_while_restore_still_unarchives(tmp_path):
+    _, registry, address, original = setup(tmp_path)
+    receipt(transition(registry, original))  # archived: the row keeps the active version inline
+    archived = store.read_knowledge_note(address)
+
+    def files():
+        return {p: p.read_bytes() for p in address.shelf.parent.rglob("*") if p.is_file() and not p.name.endswith(".lock")}
+
+    before = files()
+    refused = registry.execute("knowledge_write", {"topic": TOPIC, "mode": "revert", "version": original.revision,
+                                                   "expected_revision": archived.revision})
+    assert "revert_changes_archive_state" in refused and files() == before
+    receipt(transition(registry, archived, "restore"))
+    restored = store.read_knowledge_note(address)
+    assert restored.state == "active" and body(restored) == body(original)
+    receipt(registry.execute("knowledge_write", {"topic": TOPIC, "mode": "revert", "version": original.revision,
+                                                 "expected_revision": restored.revision, "reason": "the exact bytes"}))
+    assert address.path.read_bytes() == RAW  # inside one archive state the stored bytes come back exactly
+    assert history(address)[-1]["reverted_from"] == original.revision

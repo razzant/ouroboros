@@ -22,13 +22,13 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D12 | Settings & configuration | 28 | 0 |
 | D13 | Safety, guards & runtime mode | 12 | 0 |
 | D14 | Skills & extensions | 73 | 0 |
-| D15 | Memory, knowledge, consciousness & self-evolution | 36 | 0 |
+| D15 | Memory, knowledge, consciousness & self-evolution | 37 | 0 |
 | D16 | Observability, usage accounting & cost | 32 | 0 |
 | D17 | Projects, workspaces & task results | 59 | 0 |
 | D18 | Launcher, packaging, platform & shared substrate | 41 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 26 | 0 |
-| **total** | | **1029** | **0** |
+| **total** | | **1030** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -1083,6 +1083,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/evolution_fingerprint.py`
 - `ouroboros/improvement_backlog.py`
 - `ouroboros/knowledge.py`
+- `ouroboros/knowledge_versions.py`
 - `ouroboros/late_review_marks.py`
 - `ouroboros/mark_anchors.py`
 - `ouroboros/memory.py`
