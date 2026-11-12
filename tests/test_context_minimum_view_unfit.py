@@ -69,6 +69,8 @@ def test_the_refusal_a_person_reads_says_need_limit_and_next_step_without_intern
     assert "larger window" in text and "send the request again" in text and "Context Length" in text
     # A room's own model outlives the default: the room's control is named first, the default as what it is.
     assert text.index("model button under the message box") < text.index("default for chats that follow Main")
+    # A window is a role's setting; a chat with its own model has none, so the correction names Main's alone.
+    assert "If this chat follows Main and the model's real limit is higher, set Main's window" in text
     # No promise the host cannot keep: Continue keeps the work's recorded model, and Nano was already tried.
     assert "Continue" not in text and "Context mode" not in text
     assert str(error) not in text and "=" not in text and "cannot fit" not in text

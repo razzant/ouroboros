@@ -210,6 +210,7 @@ def _context_capacity_terminal(unfit: Any) -> Tuple[str, Dict[str, Any], Dict[st
     # The comparison the fitter refused on: input plus the reserve kept for the reply and the work, against the
     # route's limit. The further room a start wants is no threshold (a start with less runs): named only as measured.
     # The paths named are the ones every surface keeps: the room's model button, Settings › Models, Context Length.
+    # A window is a role's setting: a chat with its own model has none to correct, so only Main's is named.
     limit, book = unfit.window_tokens, unfit.required_book_tokens
     needs = -(-(unfit.estimated_input_tokens + unfit.response_reserve_tokens) // 1000) * 1000  # "about": rounded up
     text = (f"⚠️ This model's context window is too small to start this work: the start needs about {needs:,} tokens "
@@ -220,8 +221,8 @@ def _context_capacity_terminal(unfit: Any) -> Tuple[str, Dict[str, Any], Dict[st
     else:
         text += (" Choose a model with a larger window and send the request again: in the app, the model button under "
                  "the message box sets it for this chat, and Settings › Models sets the default for chats that follow "
-                 "Main. For a local model, raise its Context Length in Settings and restart it. If the model's real "
-                 "limit is higher, set its window in Settings › Models.")
+                 "Main. For a local model, raise its Context Length in Settings and restart it. If this chat follows "
+                 "Main and the model's real limit is higher, set Main's window in Settings › Models.")
     inside = [("core, request and tools", unfit.fixed_input_tokens - book), ("handbook", book),
               ("further memory", unfit.memory_view_tokens)]
     text += (f"\n\nMeasured, in tokens: input {unfit.estimated_input_tokens:,} ("
