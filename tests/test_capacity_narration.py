@@ -1,6 +1,6 @@
 """A full local concurrency limit is narrated as local capacity, never as a provider outage.
 
-The real limiter's refusal (its one slot held by a live holder, the waiter's bound spent)
+The real limiter's refusal (its one slot held by a live holder, the caller's deadline spent)
 is classified ``transport_unavailable`` with the typed ``model_capacity_unavailable`` code,
 and no request is sent. The transport episode keeps its own wait, pacing and retries; only
 its words follow that code, per attempt: a later attempt that fails another way, or an
@@ -68,10 +68,40 @@ def test_the_terminal_names_local_capacity_and_the_unsent_last_request(refused_u
                                                           **TERMINAL)
 
     assert text.startswith("⚠️ Local model capacity stayed unavailable: ")
-    assert "Concurrent Requests per Model" in text and "so it was not sent" in text
+    assert "Requests at once per model" in text and "so it was not sent" in text
     assert "outage" not in text and "did not reach the provider" not in text
     assert text.endswith("Last reported code: model_capacity_unavailable.")
     assert ("this turn" in text) == interactive and ("3.0 min" in text) == bool(waited)
+
+
+def test_a_full_own_queue_never_opens_the_fallback_list(refused_usage):
+    """Owner, 13 Nov 2026: a work whose send found no slot in the install's own queue waits and keeps its model; the
+    fallback list is for a model that failed. On the real limiter's and classifier's facts: that refusal closes the
+    walk, while the same never-sent attempt with a cause outside the install (a broken connect) keeps it open."""
+    ctx = _ctx(is_direct_chat=False, _accumulated_usage=dict(refused_usage))
+    kind = refused_usage["_last_llm_error_kind"]
+    assert kind == "transport_unavailable" and mc.capacity_refusal(refused_usage)
+    assert loop_transport.fallback_chain_allowed(ctx, kind, None, refused_usage) is False
+    connect = {**refused_usage, "_last_llm_provider_code": "connect_error"}
+    assert loop_transport.fallback_chain_allowed(ctx, kind, None, connect) is True
+
+
+def test_a_queued_send_tells_its_work_that_it_waits_and_keeps_its_model():
+    """The feed reads the wait while it lasts; the work's own count takes the seconds of each send that got its slot,
+    and nothing else moves it (the mind reads that count on its facts line)."""
+    said, usage = [], {}
+    note = loop_transport.slot_wait_note(said.append, usage)
+    note(0.0)
+    note(600.0)
+    assert said[0] == ("🌐 No local model slot is free under Requests at once per model — this request waits in line "
+                       "(nothing sent, $0) and keeps its model.")
+    assert "(10 min so far; nothing sent, $0)" in said[1] and usage == {}
+    note(630.0, True)
+    note(120.0, True)
+    assert usage == {loop_transport.SLOT_WAITED_KEY: 750.0} and len(said) == 2
+    loop_transport.slot_wait_note(None, usage)(5.0)  # a work with no feed still counts, and says nothing
+    loop_transport.slot_wait_note(None, usage)(30.0, True)
+    assert usage == {loop_transport.SLOT_WAITED_KEY: 780.0}
 
 
 def test_another_released_failure_and_an_unknown_outcome_keep_their_own_words(refused_usage):

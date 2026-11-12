@@ -7,7 +7,7 @@ import test from 'node:test';
 import '../modules/settings.js';
 import { SAFETY_MODEL_KEYS } from '../modules/consciousness_api.js';
 import { applyMcpSettings, collectMcpSettings } from '../modules/mcp_settings.js';
-import { MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_KEY, fallbackBody, fallbackEntries, roleBody, routeWords, slotWaitSeconds,
+import { MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_KEY, fallbackBody, fallbackEntries, roleBody, routeWords,
     writeModelKeys } from '../modules/model_roles.js';
 import { MODEL_PROCESSING_PREFERENCES_KEY } from '../modules/route_editor_primitives.js';
 import { forgetSettingRows, outcomeLine, readSettings } from '../modules/settings_controls.js';
@@ -32,7 +32,7 @@ const VALUES = {
     [MODEL_ACCOUNTS_KEY]: { main: 'studio-01', vision: 'studio-02' }, [MODEL_CONTEXT_KEY]: { light: 64000, fallback: [0, 128000, 0] },
     [MODEL_PROCESSING_PREFERENCES_KEY]: { consciousness: 'economy' },
     OUROBOROS_WEBSEARCH_BACKEND: 'auto', OUROBOROS_WEBSEARCH_MODEL: '', OUROBOROS_CONTEXT_MODE: 'max', OUROBOROS_IMAGE_INPUT_MODE: 'auto',
-    OUROBOROS_PROCESSING_PREFERENCE: '', OUROBOROS_PROMPT_CACHE_TTL: '1h', OUROBOROS_MODEL_MAX_CONCURRENCY: 3, OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC: 45,
+    OUROBOROS_PROCESSING_PREFERENCE: '', OUROBOROS_PROMPT_CACHE_TTL: '1h', OUROBOROS_MODEL_MAX_CONCURRENCY: 3,
     OPENAI_API_KEY: 'sk-...', ANTHROPIC_API_KEY: 'sk-...', OPENROUTER_API_KEY: 'sk-...',
 };
 const EFFECT_OF = (key) => (key.startsWith('LOCAL_MODEL_') ? 'local_model' : key.startsWith('MCP_') ? 'now'
@@ -363,7 +363,10 @@ test('the Models list shows each role\'s route in the picture\'s order, and the 
         ['gpt-light', 'Light model', 'Main model', 'Main model', 'Auto']);
     assert.deepEqual(rowsOf('models', { fold: false }).map((row) => row.id), ['OUROBOROS_IMAGE_INPUT_MODE', 'models:context', 'models:local', 'models:catalogue']);
     assert.deepEqual(rowsOf('models', { fold: true }).map((row) => row.id), ['OUROBOROS_PROCESSING_PREFERENCE', 'OUROBOROS_PROMPT_CACHE_TTL', 'OUROBOROS_MODEL_MAX_CONCURRENCY']);
-    assert.match(page.container.querySelector('[data-setting-row="OUROBOROS_MODEL_MAX_CONCURRENCY"]').textContent, /waits up to 45 s/);
+    // A request over the limit waits in line and is never sent elsewhere for waiting: the queue names no clock of its own.
+    const limit = page.container.querySelector('[data-setting-row="OUROBOROS_MODEL_MAX_CONCURRENCY"]').textContent;
+    assert.match(limit, /waits in line until a slot frees.*never sent elsewhere for waiting/s);
+    assert.doesNotMatch(limit, /waits up to|\{wait\}/);
     // The catalogue is an action of its row, with its own result beside it; it is read when the page is shown.
     const catalogue = page.container.querySelector('[data-setting-row="models:catalogue"]');
     assert.equal(inside(catalogue, '#btn-refresh-model-catalog').textContent, 'Read again');
@@ -436,13 +439,12 @@ test('the fallbacks\' order and removal are written on the list: the order throu
     assert.match(page.container.querySelector('[data-entry-result]').textContent, /^Removed/);
 });
 
-test('a route is said in the owner\'s words, and the slot wait keeps its bounds', () => {
+test('a route is said in the owner\'s words', () => {
     assert.deepEqual(routeWords('claudexor::codex=gpt-x'), { name: 'gpt-x', mark: 'codex', source: 'Codex subscription · your accounts in turn' });
     assert.equal(routeWords('anthropic@work::claude-opus').source, 'Anthropic (work) · by API key');
     assert.equal(routeWords('google/gemini-pro').name, 'gemini-pro');
     assert.deepEqual(routeWords('', { follows: 'Light' }), { name: 'Light model', source: '', mark: '', follows: true });
     assert.equal(routeWords('openai::x', { local: true }).name, 'Local model');
-    assert.deepEqual([slotWaitSeconds('45'), slotWaitSeconds(-3), slotWaitSeconds(''), slotWaitSeconds('soon')], [45, 0, 180, 180]);
 });
 
 test('a saved local-model setting says it applies when the local model is restarted, never a restart of Ouroboros', async (t) => {

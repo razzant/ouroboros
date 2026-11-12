@@ -111,8 +111,8 @@ def test_preparation_expiry_prevents_a_physical_send(call_env, monkeypatch, cons
 
 @pytest.mark.parametrize("consumer", ["naming", "translation"])
 def test_slot_wait_spends_the_same_deadline(call_env, monkeypatch, consumer):
-    # Hold the actual per-route slot; its queue and expiry check remain production code.
-    monkeypatch.setattr(model_concurrency, "_max_slot_wait_sec", lambda: 12)
+    # Hold the actual per-route slot; its queue and expiry check remain production code. The caller's deadline is the
+    # wait's only bound: the queue has no clock of its own.
     with model_concurrency.model_call_slot("unseen-light", route=call_env.route):
         refused(call_env, consumer)
     assert call_env.now[0] == pytest.approx(110)

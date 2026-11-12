@@ -151,22 +151,11 @@ class _Run:
         facts = {"light-1232": self.measure(page)}
         page.context.close()
 
-        # --- the wait the help names is this install's own value, never a copy of the default ---------------
-        wide = self.browser.new_context(viewport={"width": DESKTOP[0], "height": DESKTOP[1]})
-        page = wide.new_page()
-
-        def serve_other_wait(route):
-            if route.request.method != "GET":
-                return route.fallback()
-            response = route.fetch()  # the real document, with one number changed for this page load
-            route.fulfill(response=response, json={**response.json(), "OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC": 90})
-
-        page.route("**/api/settings", serve_other_wait)
-        self.open_settings_in(page, DESKTOP)
-        assert "waits up to 90 s" in setting_row(page, KEY).inner_text()
-        wide.close()
+        # --- the help says what a request over the limit does: it waits in line and is never sent elsewhere ----
         plain = self.open_settings("light", DESKTOP)
-        assert "waits up to 180 s" in setting_row(plain, KEY).inner_text(), "an install that never set it shows the default"
+        help_text = setting_row(plain, KEY).inner_text()
+        assert "waits in line until a slot frees" in help_text and "never sent elsewhere for waiting" in help_text
+        assert "waits up to" not in help_text, "the queue has no clock of its own to name"
         plain.context.close()
 
         # --- the same window, dark: the saved value, its words and fit ---------------------------------------
@@ -263,5 +252,5 @@ def test_concurrency_field(direct_server_with_data, monkeypatch):
         assert desktop["labelText"] == "Requests at once per model"
         words = desktop["helpText"]
         assert "counted per model, key and server" in words and "0 or less sets no limit" in words
-        assert "waits up to 180 s, then is refused and not sent" in words
+        assert "waits in line until a slot frees" in words and "never sent elsewhere for waiting" in words
         assert "Routes your subscriptions serve are not limited here" in words

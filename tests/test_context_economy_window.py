@@ -207,6 +207,15 @@ def test_the_facts_line_names_window_room_and_target_excess_apart(monkeypatch):
             "provider-stated input over its estimate)") in refused and "input of this refused request" not in refused
 
 
+def test_the_facts_line_states_the_time_a_work_stood_in_the_installs_own_queue(monkeypatch):
+    """The mind starts the parallel works that fill a model's queue, so it reads what the queue cost this work so
+    far (``loop_transport.slot_wait_note`` counts it); a work that never queued reads nothing about it."""
+    queued = _facts(monkeypatch, _slot_waited_sec=750.0)
+    assert "| waited 12.5 min so far in line under this install's Requests at once per model limit |" in queued
+    for usage in ({}, {"_slot_waited_sec": 0.0}):
+        assert "Requests at once per model" not in _facts(monkeypatch, **usage)
+
+
 # --- #1728: a technical rebind keeps the sent view while it fits -----------------------------------
 
 def _wire(monkeypatch, messages):
