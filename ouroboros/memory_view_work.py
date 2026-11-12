@@ -3,6 +3,8 @@
 The sending task, not a relay's recipient, owns its speech. A work's last reply
 stays whole after its intermediate replies have yielded to its recorded gist.
 A relay that quotes my human's words belongs to no work: no gist stands for them.
+It also holds the smallest view's floor-note wording (``nano_memory_check``, ``address_reader``),
+because ``memory_floor`` and ``memory_view`` sit at their line limits and this one does not.
 """
 from __future__ import annotations
 
@@ -18,6 +20,27 @@ def row_reader(room_id=None):
     room = f"'{room_id}'" if room_id is not None else "<room from address>"
     return (f"Read row addresses with memory_read(room_id={room}, rows=true, from=<first>, to=<last>); "
             "for a single row use its address for both endpoints.")
+
+
+def nano_memory_check(mode, shown, path, room_id=None):
+    """``### Memory check``: the smallest view own note when nothing was cut and nothing lowered."""
+    whole = (f"Nothing is cut for the window or a target: this {mode.capitalize()} view shows memory whole"
+             + (f" apart from {shown} shown by address alone" if shown else ""))
+    return "\n".join(part for part in ("### Memory check", f"{whole}. A form named only by address is not missing: "
+                                  f"{address_reader(room_id or None)}", path) if part)
+
+
+def address_reader(room_id=None):
+    """The call that reads one form the view shows by address alone (``### Memory check``).
+
+    A ``row:...`` address (F1 task lines, F2 my replies, F7 owner rows, an aggregate range) is a chat row,
+    read back verbatim by that address in this room; a page, part or note (F4, F5, F8) is read by its node
+    id. Naming the call keeps an address form from reading as a row memory no longer holds -- the
+    misreading that had a mind report retained memory as missing -- and spares it from guessing a call its
+    request may not send (``memory_floor.memory_read_path``) or another mode would need.
+    """
+    room = f"room_id='{room_id}', " if room_id is not None and str(room_id) != "" else ""
+    return f"memory_read({room}rows=true, from=<row: address>) reads a row, memory_read(node_id=<id>) a record"
 
 
 def speech_facts(row, author):

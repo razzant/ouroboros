@@ -24,7 +24,7 @@ from ouroboros import context_budget
 from ouroboros.context_timing import timed_section
 from ouroboros import memory_view as mv
 from ouroboros import memory_view_conversations as conversations
-from ouroboros import memory_view_legacy as legacy
+from ouroboros import memory_view_legacy as legacy, memory_view_work as werk
 from ouroboros.memory_forms import (LADDER, list_elements as _list_elements, ordinary_pairs, normalized, swallowed,
                                     form_counts, holding_room, Selection, supersedes, WorkPrices, restore)
 from ouroboros.memory_form_facts import holding_lines, telling_emergency, physical_floor
@@ -534,7 +534,8 @@ def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool =
     max_room = shown.memory_facts.get("max_room")  # the start's fact: a selection keeps its frame
     note = floor_note(level, window_tokens=old.get("window_tokens"), mode=mode,
                       target_tokens=old.get("target_tokens"), budget_mode=plan.preferred_mode,
-                      lowered_from=switched.get("from"), max_room=max_room, snapshot=snapshot)
+                      lowered_from=switched.get("from"), max_room=max_room, snapshot=snapshot,
+                      room_id=snapshot.spec.room_id)
     story, room = mv.render_story(snapshot, level), mv.render_room(snapshot, level, floor_note=note)
     facts = view_facts(snapshot, level, window_tokens=old.get("window_tokens"), mode=mode,
                        allowances={"margin": old.get("allowance_tokens"), "physical": old.get("physical_allowance_tokens"),
@@ -623,12 +624,14 @@ def memory_read_path(tool_names: Optional[Iterable[str]]) -> str:
 def floor_note(level: mv.FloorLevel, *, window_tokens: Optional[int], mode: str, target_tokens: Optional[int] = None,
                lowered_from: Optional[str] = None, tool_names: Optional[Iterable[str]] = None,
                budget_mode: Optional[str] = None, max_room: Optional[Mapping[str, Any]] = None,
-               snapshot: Optional[mv.MemoryViewSnapshot] = None) -> str:
+               snapshot: Optional[mv.MemoryViewSnapshot] = None, room_id: Optional[Any] = None) -> str:
     """Retained cuts, their final visible forms and the sources holding this room.
 
     The three bins distinguish my telling, host facts and emergencies; the global
     unread count is a separate window fact. Nano names the actual reader path.
     The receipt is priced with every candidate and preserves a held view's frame.
+
+    Nano says one or the other in every request: ``### Memory check`` when nothing was cut.
     """
     names = None if tool_names is None else tuple(tool_names)
     counts = dict(level.steps)
@@ -636,7 +639,8 @@ def floor_note(level: mv.FloorLevel, *, window_tokens: Optional[int], mode: str,
     forms = form_counts(snapshot, level) if snapshot else {}
     holding = snapshot and (telling_emergency(snapshot, level) or lowered_from and crowded_by_memory(max_room))
     if not asked and not lowered_from and not holding:
-        return ""
+        # nothing was cut and nothing lowered: Max and Low say nothing, Nano names its reader (``### Memory check``)
+        return werk.nano_memory_check(mode, addressed_text(counts), memory_read_path(names), room_id) if mode == "nano" else ""
     lines, name = ["### Physical floor"], mode.capitalize()
     if asked:
         bounds = ([f"the window ({window_tokens} tokens)"]
@@ -728,7 +732,8 @@ def render_view_for_mode(snapshot: mv.MemoryViewSnapshot, *, mode: str, owner_mo
     uncovered = uncovered_owner_rows(snapshot)
     def receipt(level):
         note = floor_note(level, window_tokens=window, mode=mode, target_tokens=target, lowered_from=lowered_from,
-                          tool_names=tool_names, budget_mode=owner_mode, max_room=max_room, snapshot=snapshot)
+                          tool_names=tool_names, budget_mode=owner_mode, max_room=max_room, snapshot=snapshot,
+                          room_id=snapshot.spec.room_id)
         if allowances["margin"] is not None and size(level) > allowances["margin"]:
             gone = dict(level.addressed)
             held = [f"F7:{ident}" for step, ident, *_ in uncovered if ident not in gone.get(step, ())]

@@ -295,6 +295,47 @@ def test_floor_receipt_names_reachable_sources_and_never_promises_lossless_recal
     assert "chronicle_write" not in note
 
 
+@pytest.mark.parametrize("mode", ["max", "low"])
+def test_a_view_that_cut_nothing_still_says_nothing_outside_nano(mode):
+    """Max and Low keep their silence byte for byte: a note there would cost what another cut costs."""
+    assert mf.floor_note(mv.FULL_VIEW, window_tokens=200_000, mode=mode, room_id="1") == ""
+
+
+def test_a_nano_view_names_the_call_that_reads_an_address_form_even_when_it_cut_nothing():
+    """The smallest view says it in every request: an address form is retained memory, not a missing row
+    (the misreading the owner reported from a project's Nano work), and the mind need not guess a call its
+    request may not send."""
+    quiet = mf.floor_note(mv.FULL_VIEW, window_tokens=200_000, mode="nano", tool_names=("enable_tools",), room_id="1")
+    assert quiet.startswith("### Memory check") and "memory_read reads each" not in quiet
+    assert "A form named only by address is not missing" in quiet
+    assert "memory_read(room_id='1', rows=true, from=<row: address>) reads a row" in quiet
+    assert "memory_read(node_id=<id>) a record" in quiet
+    assert quiet.rstrip().endswith("(memory_read is reachable through enable_tools)")
+    # Its two facts of the request stand alone: the room it names, and how memory_read is reached.
+    assert mf.floor_note(mv.FULL_VIEW, window_tokens=None, mode="nano", tool_names=("memory_read",)) == (
+        "### Memory check\nNothing is cut for the window or a target: this Nano view shows memory whole. A form "
+        "named only by address is not missing: memory_read(rows=true, from=<row: address>) reads a row, "
+        "memory_read(node_id=<id>) a record")
+    # A cut view keeps its floor's own words and gains nothing: the shortest view is not made dearer.
+    cut = mf.floor_note(mv.FloorLevel((("F5", ("p",)),)), window_tokens=200_000, mode="nano", room_id="1")
+    assert cut.startswith("### Physical floor") and "### Memory check" not in cut
+
+
+def test_a_roomy_nano_projection_carries_the_memory_check_with_its_own_room():
+    """The note reaches a real projection with this room's id: the shortest view names the call that reads
+    back the addresses it shows, before any cut gave it a reason to."""
+    snap = syn.snapshot(room_facts=syn.room("1", lane1=[syn.spoken(1, "human", 900)]))
+    story, room, facts = mf.render_view_for_mode(
+        snap, mode="nano", owner_mode="nano", window_tokens=1_000_000, known_window=True, output_reserve=8_192,
+        ratio=1.0, non_memory_tokens=1_000, tool_names=("memory_read",))
+    assert facts["floor"]["steps"] == {} and "### Physical floor" not in room
+    assert room.rstrip().endswith("### Memory check\nNothing is cut for the window or a target: this Nano view shows "
+                                 "memory whole. A form named only by address is not missing: "
+                                 "memory_read(room_id='1', rows=true, from=<row: address>) reads a row, "
+                                 "memory_read(node_id=<id>) a record")
+    assert story == mv.render_story(snap)  # the check is this room's block; my story keeps its bytes
+
+
 def test_list_forms_do_not_address_new_or_immune_rows_and_stay_silent_when_fit():
     rows = [syn.spoken(i, 'ouroboros', 1000) for i in range(12)]
     rows[4] = {**syn.spoken(4, 'human', 1000), 'owner_side': True, 'immune': True}
