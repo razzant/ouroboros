@@ -4,7 +4,7 @@ Machine extraction of the `docs/ARCHITECTURE.md` "Data layout (`~/Ouroboros/`)" 
 
 Source: `docs/architecture/01-high-level-architecture.md`, physical LF lines 653-762; UTF-8 SHA-256 `7781e5c40fa77cbcc5f9c33c0cb9f0644eb12fb118b3b1479836e7afa2bb8fb6`.
 
-- entries: **99** (code-ref: 92, repo-dir: 6, repo-path: 1)
+- entries: **99** (code-ref: 90, repo-dir: 8, repo-path: 1)
 
 | entry | probe | resolution |
 |---|---|---|
@@ -15,7 +15,7 @@ Source: `docs/architecture/01-high-level-architecture.md`, physical LF lines 653
 | `web/` | `web` | repo-dir |
 | `docs/` | `docs` | repo-dir |
 | `prompts/` | `prompts` | repo-dir |
-| `data/` | `data` | code-ref |
+| `data/` | `data` | repo-dir |
 | `settings.json` | `settings.json` | code-ref |
 | `task_results/` | `task_results` | code-ref |
 | `artifact_versions/<task_id>/` | `artifact_versions` | code-ref |
@@ -72,7 +72,7 @@ Source: `docs/architecture/01-high-level-architecture.md`, physical LF lines 653
 | `review_continuations/` | `review_continuations` | code-ref |
 | `review_migrations/` | `review_migrations` | code-ref |
 | `workspace_executor_processes/` | `workspace_executor_processes` | code-ref |
-| `headless_tasks/<task_id>/data` | `data` | code-ref |
+| `headless_tasks/<task_id>/data` | `data` | repo-dir |
 | `custody_staging/` | `custody_staging` | code-ref |
 | `custody_trash/` | `custody_trash` | code-ref |
 | `betterleaks/` | `betterleaks` | code-ref |
