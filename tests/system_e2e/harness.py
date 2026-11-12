@@ -99,11 +99,12 @@ SCENARIOS = {
     # hot-adoption variant that removes the restart (W3B-F1) — enable after boot
     # must reach the workers already running, not only the pool's next generation.
     "S13": ("skills lifecycle E2E: payload -> stub review -> grants -> enable -> dispatch -> disable/delete + Model Experience; hot-adoption variant: enable after boot dispatches in an ALREADY-SPAWNED worker with no restart", LANE_MOCK),
-    # Ф4 wave 3a (plan §8: commit triad+scope BOTH enforcement classes +
-    # stale-rejection). Renumbered at integration: the parallel
+    # Ф4 wave 3a (plan §8: commit triad+scope after critical feedback +
+    # stale-rejection; the two enforcement classes it once pinned became one when
+    # Blocking retired). Renumbered at integration: the parallel
     # wave-3b lane claimed S11-S13 first; S14 (plan review) retired with its engine.
-    "S15": ("commit triad+scope, ADVISORY class: red verdicts recorded + waved through with durable override, commit lands", LANE_MOCK),
-    "S16": ("commit triad+scope, BLOCKING class: red blocks (HEAD unmoved), identical resubmit refused free, green lands; post-verdict revalidation", LANE_MOCK),
+    "S15": ("commit triad+scope, critical feedback: red verdicts return before Git, the author's explicit continuation goes over them with a durable override, commit lands", LANE_MOCK),
+    "S16": ("commit triad+scope, revision: a red outcome returns before Git (HEAD unmoved), an identical resubmit returns it again at $0, the revised diff's clean PASS returns first too and lands on the author's continuation; post-verdict revalidation", LANE_MOCK),
     # S17 (the acceptance loop) retired with the task-acceptance machine.
     # Ф4 wave 4 (plan §8 remainder: update variations, chat-lineage cancel,
     # absorb kill-recovery, delegated interactive answer).
@@ -555,13 +556,14 @@ class LoopbackModelServer:
         class _Handler(BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802 - stdlib callback name
                 if self.path.rstrip("/").endswith("/models"):
-                    # >=1M ON PURPOSE, and it is load-bearing twice: the capability-
-                    # evidence /models probe stores this as a CONFIRMED window, which
-                    # (a) sizes the triad fit budget (a 400K window under the cold
-                    # 1.65 density floor caps input at ~202K — BELOW the ~226K
-                    # governance pack, blocking every commit_reviewed before
-                    # dispatch), and (b) satisfies the BIBLE P3 >=1M floor that
-                    # scope review's BLOCKING authority requires.
+                    # >=1M ON PURPOSE: the capability-evidence /models probe stores
+                    # this as a CONFIRMED window, which (a) sizes the triad fit
+                    # budget (a 400K window under the cold 1.65 density floor caps
+                    # input at ~202K — BELOW the ~226K governance pack, so every
+                    # commit_reviewed would return without a verdict, nothing
+                    # dispatched), and (b) keeps the seats' absolute output reserves
+                    # (reviewer_window). A window is sizing only, never a condition
+                    # of a review's authority (owner 2026-09-17, BIBLE P3).
                     return self._send({"data": [
                         {"id": model_id, "max_model_len": 2_000_000}
                         for model_id in outer._model_ids()
