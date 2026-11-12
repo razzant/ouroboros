@@ -447,19 +447,16 @@ def _preflight_and_tests_gate(
     goal: str = "",
     scope: str = "",
     review_only: bool = False,
-    landing: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Ahead of the panel: the free deterministic checks, the tests preflight, then the author's
     preflight when one row was named (decision 3A). The checks and the tests block as before
-    (Cyber Pro continues with a warning); the preflight only informs. ``None`` = proceed.
-    ``landing``: a resumed attempt's collected verdict, before Git, owes only this call's tests (#2410)."""
+    (Cyber Pro continues with a warning); the preflight only informs. ``None`` = proceed."""
     from ouroboros.commit_admission import preflight_evidence_unavailable, run_tests_preflight_with_proof
     from ouroboros.tools.commit_gate import deterministic_preflight, run_commit_preflight
 
     ctx._commit_preflight = {"status": "skipped" if skip_advisory_pre_review else "not_performed", "record_id": ""}
     named = bool(preflight_reviewer) and not skip_advisory_pre_review
-    message = "" if landing else deterministic_preflight(
-        ctx, commit_message, classification_paths or None, review_only=review_only)
+    message = deterministic_preflight(ctx, commit_message, classification_paths or None, review_only=review_only)
     reason = "infra_failure" if preflight_evidence_unavailable(message) else "preflight"
     _managed_needs_proof = _managed_candidate_needs_proof(ctx)
     # The retired advisory's own tests rule, for every commit: the suite runs unless the author
@@ -467,7 +464,7 @@ def _preflight_and_tests_gate(
     if not message and (not skip_tests or _managed_needs_proof):
         ctx.emit_progress_fn(
             "Managed candidate lacks a pre-commit test proof — running the mandatory hermetic suite before review..."
-            if _managed_needs_proof else f"Running the tests preflight before {'Git' if landing else 'the panel'}...")
+            if _managed_needs_proof else "Running the tests preflight before the panel...")
         test_err = run_tests_preflight_with_proof(
             ctx, runner=lambda c, **kw: _run_review_preflight_tests(c, **kw))
         if test_err:

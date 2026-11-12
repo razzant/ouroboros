@@ -56,7 +56,8 @@ def returned_reference(result) -> dict:
     """The ``review_reference`` a commit call returned with its outcome before Git."""
     text = str(result)
     assert text.startswith("Review outcome returned before commit"), text
-    return json.loads(text.split("\n", 1)[1])["review_reference"]
+    # The JSON follows the prose; a collected record may append its id line after it.
+    return json.JSONDecoder().raw_decode(text, text.index("\n{") + 1)[0]["review_reference"]
 
 
 def land_after_review(ctx, commit_message, *, commit=None, **commit_kwargs):

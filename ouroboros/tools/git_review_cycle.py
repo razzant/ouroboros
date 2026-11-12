@@ -248,14 +248,6 @@ def _revalidation_outcome(ctx, commit_message, commit_start, before, after, *, w
     }
 
 
-def _owed_before_git(ctx, commit_message, commit_start, post_fingerprint, skip_tests):
-    """A resumed attempt's free collection still owes this call's tests before Git, on the reviewed bytes (#2410)."""
-    return _git()._preflight_and_tests_gate(
-        ctx, commit_message, commit_start, classification_paths=[], skip_tests=skip_tests, landing=True,
-    ) or _revalidation_outcome(ctx, commit_message, commit_start, post_fingerprint,
-                               _git()._fingerprint_staged_diff(pathlib.Path(ctx.repo_dir)))
-
-
 def _publish_pending_review(ctx: ToolContext, message: str, custody_lost: bool) -> str:
     """Both pending handbacks preserve custody facts beside their returned text."""
     return _publish_tool_result(ctx, ToolResult(
@@ -837,17 +829,13 @@ def _reviewed_stage_cycle(
     )
     if _subject_mismatch is not None:
         return _subject_mismatch
-    from ouroboros.review_custody import REVIEW_STOP_WORDS, review_retry_cancelled, review_stop_cause
+    from ouroboros.review_custody import REVIEW_STOP_WORDS, review_stop_cause
     from ouroboros.deadline_utils import owner_deadline_exhausted_for_context
 
     material = (blocked or combined_findings or getattr(ctx, "_last_review_critical_findings", [])
                 or getattr(ctx, "_last_review_advisory_findings", []) or scope_advisory
                 or getattr(ctx, "_last_review_block_reason", "") or triad_block_reason
                 or getattr(ctx, "_review_degraded_reasons", []) or advisory_replay is not None)
-    if (resumes_open and not review_only and not (blocked or hand_back_all or (ordinary_advisory and material))
-            and not (review_retry_cancelled(ctx) or owner_deadline_exhausted_for_context(ctx))
-            and (owed := _owed_before_git(ctx, commit_message, commit_start, post_fingerprint, skip_tests))):
-        return owed  # the owner-control decision below follows these owed tests, so it gates Git (#2410)
     stop = review_stop_cause(ctx) or ("owner_deadline" if owner_deadline_exhausted_for_context(ctx) else "")
     if stop:  # a stop of the work, not a review refusal: say what stopped it and keep what the review returned
         # No record id in the words: ``commit_gate.name_review_record`` appends it, and the stopped seats' offer, after.
