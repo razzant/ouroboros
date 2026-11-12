@@ -1,7 +1,6 @@
 // The home test of web/modules/ui_primitives.js, the portable leaf served to author kits with ui.css: the five
 // field/status exports keep their signatures, the result-of-an-action helpers hold DESIGN "Status and chips"
-// lifetime in both directions, and the shared button role and result/action composition have one owner. The Costs
-// budget save (the first consumer of the lifetime rule) is checked here on the real panel.
+// lifetime in both directions, and the shared button role and result/action composition have one owner.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -9,8 +8,6 @@ import { readFile } from 'node:fs/promises';
 import * as portable from '../modules/ui_primitives.js';
 import * as existing from '../modules/ui_helpers.js';
 import { escapeHtmlAttr } from '../modules/utils.js';
-import { budgetSavePresentation, initCosts } from '../modules/costs.js';
-import { setup } from './dashboard_dom_fixture.js';
 import { domDouble } from './dom_double.js';
 
 const settingsCss = await readFile(new URL('../settings.css', import.meta.url), 'utf8');
@@ -248,11 +245,11 @@ test('neutral controls have one shared button role in both UI shells', () => {
 test('result/action composition has one shared owner, independent of page and viewport', async () => {
     // Real-container reflow and readability are exercised by the browser consumer.
     const pageCss = await readFile(new URL('../style.css', import.meta.url), 'utf8');
-    // Settings composes the shared row (the footer, the catalog refresh, the LAN hint); the private row stays only for
-    // the screens that still read it (Skills › Browse, Updates) and never reaches the shared sheet.
+    // Settings composes the shared row (the catalog refresh, the LAN hint) and has no page-wide Save bar; the private
+    // row stays only for the screens that still read it (Skills › Browse, Updates) and never reaches the shared sheet.
     assert.doesNotMatch(settingsUiJs, /settings-action-row/);
     assert.doesNotMatch(sharedCss, /\.settings-action-row\s*\{/);
-    assert.match(settingsUiJs, /<div class="settings-footer ui-action-row" data-draft="clean">/);
+    assert.doesNotMatch(settingsUiJs + settingsJs + settingsCss, /settings-footer|btn-save-settings/);
     assert.doesNotMatch(pageCss, /\.skills-card-action-row\s*\{[^}]*(?:display:|grid-template|flex:)/);
     // The shared parts: the action row keeps a reserved result line, the result shares the status sentence's tones.
     assert.match(sharedCss, /\.ui-action-row\s*\{[^}]*flex-wrap:\s*wrap/);
@@ -263,14 +260,12 @@ test('result/action composition has one shared owner, independent of page and vi
 });
 
 test('async actions expose the same busy and status semantics', () => {
-    // Save and every API key's Test share one busy helper and one status vocabulary.
+    // Every API key's Test shares the one busy helper and one status vocabulary.
     assert.match(controlsJs, /export function setButtonBusy\(button, busy\)/);
     assert.match(controlsJs, /setAttribute\('aria-busy', 'true'\)/);
-    assert.match(settingsJs, /setButtonBusy\(saveButton, true\)/);
     assert.match(connectionsJs, /setButtonBusy\(button, true\)/);
     assert.match(connectionsJs, /setInlineStatus\(status, 'Testing…', 'muted'\)/);
     assert.match(connectionsJs, /providerTestStatusText\(data\), data\?\.ok \? 'ok' : 'danger'/);
-    assert.match(settingsJs, /refreshModelCatalog\(\{ button: byId\('btn-refresh-model-catalog'\) \}\)/);
     assert.match(connectionsJs, /setInlineStatus\(row\.querySelector\('\[data-connection-test-status\]'\), '', 'muted'\)/);
     assert.match(primitivesJs, /if \(el\.textContent !== next\) el\.textContent = next/);
     // The catalog's result is the shared result line: its count ends by itself, a read gap stays.
@@ -279,191 +274,4 @@ test('async actions expose the same busy and status semantics', () => {
     assert.doesNotMatch(catalogJs, /setInlineStatus/);
     assert.match(catalogJs, /refreshModelCatalog\(\{ button \} = \{\}\)/);
     assert.match(catalogJs, /buttonRefreshes\.get\(button\) === refreshSeq/);
-});
-
-// ---- the Costs budget save: the lifetime rule on the real panel -------------------------------------------------------
-// A plain "saved" ends by itself; a restart still required, a warning and an error stay until the next save replaces
-// them, and one timer owner means an older acknowledgement never erases a newer save's words or its tone.
-
-const reply = (data, status = 200) => ({ ok: status < 400, status, json: async () => data });
-const settle = () => new Promise((resolve) => setImmediate(resolve));
-const ACK = 4000;
-
-test('a save says what happened and only a plain acknowledgement may end by itself', () => {
-    const cases = [
-        [{ no_changes: true }, 'No changes.', 'ok', true],
-        [{ immediate_changed: true }, 'Saved. Took effect immediately.', 'ok', true],
-        [{ next_task_changed: true }, 'Saved. Applies on the next task.', 'ok', true],
-        [{ immediate_changed: true, next_task_changed: true },
-            'Saved. Some changes took effect immediately; others apply on the next task.', 'ok', true],
-        [{ restart_required: true }, 'Saved. Restart required.', 'warn', false],
-        // Nothing changed, but a setting saved earlier still waits for a restart (gateway/settings.py restart_state).
-        [{ no_changes: true, restart_required: true }, 'No changes. Restart still required.', 'warn', false],
-        [{ immediate_changed: true, warnings: ['Limit is below known spend.', 'Cap lowered.'] },
-            'Saved. Took effect immediately. Warnings: Limit is below known spend. | Cap lowered.', 'warn', false],
-    ];
-    for (const [data, text, tone, transient] of cases) {
-        assert.deepEqual(budgetSavePresentation(data), { text, tone, transient }, JSON.stringify(data));
-    }
-    assert.equal(ACK, portable.SAVE_ACK_MS, 'the panel and the leaf agree on the acknowledgement time');
-});
-
-// The real panel, its real click handler and the shared HTTP client on the dashboard DOM fixture, with mocked time.
-function costsPanel(t, answers) {
-    t.mock.timers.enable({ apis: ['setTimeout'] });
-    const env = setup(t);
-    const posts = [];
-    env.routes.set('/api/settings', async (_url, init) => {
-        posts.push(JSON.parse(init.body));
-        const next = answers.shift();
-        if (next instanceof Error) throw next;
-        return next;
-    });
-    initCosts({ mount: env.mount, state: {} });
-    const status = env.mount.querySelector('#budget-save-status');
-    const save = env.mount.querySelector('#btn-save-budget');
-    env.mount.querySelector('#s-budget').value = '200';
-    env.mount.querySelector('#s-per-task-cost').value = '50';
-    const press = async () => { await save.fire('click', { currentTarget: save }); await settle(); };
-    // The result's sentence; its raw text, if any, is the disclosure after it (setResult).
-    const words = () => {
-        const all = status.textContent;
-        const details = status.querySelector('.ui-result-details');
-        return [details ? all.slice(0, all.indexOf('Details')) : all, status.dataset.tone ?? ''];
-    };
-    const raw = () => status.querySelector('.ui-result-details')?.textContent ?? '';
-    const edit = async (id, value) => {
-        const field = env.mount.querySelector(`#${id}`);
-        field.value = value;
-        await save.closest('.costs-budget').fire('input', { target: field });
-    };
-    return { ...env, status, save, posts, press, edit, words, raw, tick: (ms) => t.mock.timers.tick(ms) };
-}
-
-test('the budget form is the reference action row: Save, then its result as the next sibling in one row', (t) => {
-    const panel = costsPanel(t, []);
-    const row = panel.save.parentElement;
-    assert.ok(row.classList.contains('ui-action-row'), 'Save stands in the shared action row');
-    assert.equal(panel.save.nextElementSibling, panel.status, 'the result comes right after its button, never under it');
-    assert.ok(panel.status.classList.contains('ui-result'));
-    assert.equal(row.children.length, 2, 'nothing else sits between the button and its result');
-    assert.equal(panel.save.textContent, 'Save');
-});
-
-test('a plain save acknowledges, then clears its words and its tone after the acknowledgement time', async (t) => {
-    const panel = costsPanel(t, [reply({ immediate_changed: true })]);
-    await panel.press();
-    assert.deepEqual(panel.words(), ['Saved. Took effect immediately.', 'ok']);
-    panel.tick(ACK - 1);
-    assert.deepEqual(panel.words(), ['Saved. Took effect immediately.', 'ok'], 'still there just before it ends');
-    panel.tick(1);
-    assert.deepEqual(panel.words(), ['', ''], 'the acknowledgement ended by itself, its tone with it');
-    assert.equal(panel.save.disabled, false);
-});
-
-test('a restart the save requires, a warning and an error are never erased by time', async (t) => {
-    const panel = costsPanel(t, [reply({ restart_required: true }), reply({ no_changes: true, restart_required: true }),
-        reply({ immediate_changed: true, warnings: ['Limit is below known spend.'] }),
-        reply({ error: 'Settings file is read-only.' }, 500)]);
-    await panel.press();
-    assert.deepEqual(panel.words(), ['Saved. Restart required.', 'warn']);
-    panel.tick(10 * ACK);
-    assert.deepEqual(panel.words(), ['Saved. Restart required.', 'warn'], 'the restart stays required, so its words stay');
-    await panel.press();  // the same values again: nothing changes, and the restart is still owed
-    panel.tick(10 * ACK);
-    assert.deepEqual(panel.words(), ['No changes. Restart still required.', 'warn'], 'it says why it stays');
-    await panel.press();
-    panel.tick(10 * ACK);
-    assert.deepEqual(panel.words(), ['Saved. Took effect immediately. Warnings: Limit is below known spend.', 'warn']);
-    await panel.press();
-    panel.tick(10 * ACK);
-    assert.deepEqual(panel.words(), ['Not saved. Settings file is read-only.', 'danger'],
-        "a failed save is not an acknowledgement, and the server's own reason is its words");
-    assert.equal(panel.raw(), 'Settings file is read-only.', 'the raw text stays one disclosure away');
-});
-
-test('an edit of the budget fields clears the result that time never clears; a failed reach is owner words', async (t) => {
-    const panel = costsPanel(t, [reply({ restart_required: true }), new TypeError('Load failed')]);
-    await panel.press();
-    panel.tick(10 * ACK);
-    assert.deepEqual(panel.words(), ['Saved. Restart required.', 'warn']);
-    const card = panel.save.closest('.costs-budget');
-    const field = panel.mount.querySelector('#s-budget');
-    await card.fire('input', { target: panel.status });
-    assert.deepEqual(panel.words(), ['Saved. Restart required.', 'warn'], 'its own disclosure toggling is no edit');
-    await card.fire('input', { target: field });
-    assert.deepEqual(panel.words(), ['', ''], 'a new edit starts a new subject');
-    await panel.press();
-    assert.deepEqual(panel.words(), ["Not saved. Couldn't reach Ouroboros.", 'danger']);
-    assert.equal(panel.raw(), 'Load failed', "the browser's transport text is never the sentence");
-    assert.doesNotMatch(panel.words()[0], /Error:|Load failed/);
-    field.value = '0';
-    await panel.press();
-    assert.deepEqual(panel.words(), ['Budget values must be at least 0.01.', 'danger'], 'nothing is sent for an invalid value');
-    assert.equal(panel.posts.length, 2);
-});
-
-test('one timer owner: an older acknowledgement never erases what a newer save says', async (t) => {
-    const panel = costsPanel(t, [reply({ immediate_changed: true }), reply({ error: 'Offline.' }, 503),
-        reply({ immediate_changed: true }), reply({ restart_required: true })]);
-    await panel.press();
-    panel.tick(ACK - 1000);
-    await panel.press();  // a failing save inside the window: the first timer must not take it away
-    panel.tick(ACK);
-    assert.deepEqual(panel.words(), ['Not saved. Offline.', 'danger']);
-    assert.equal(panel.raw(), 'Offline.');
-    // Two plain saves: the second one's own full time counts, and the first one's timer is gone.
-    await panel.press();
-    panel.tick(ACK - 1000);
-    await panel.press();  // answered by the restart-required reply
-    panel.tick(ACK);
-    assert.deepEqual(panel.words(), ['Saved. Restart required.', 'warn']);
-});
-
-test('a validation message after an acknowledgement is not erased by the acknowledgement\'s timer either', async (t) => {
-    const panel = costsPanel(t, [reply({ immediate_changed: true })]);
-    await panel.press();
-    await panel.edit('s-budget', '0');
-    panel.tick(ACK - 1);
-    await panel.press();
-    panel.tick(ACK);
-    assert.deepEqual(panel.words(), ['Budget values must be at least 0.01.', 'danger'], 'never in the acknowledgement\'s tone');
-    assert.equal(panel.posts.length, 1, 'an invalid value is never sent');
-});
-
-// The consciousness allowance moved here from Settings (owner, 10 Nov 2026): only what was edited is posted, so a
-// Costs tab left open never writes back an old limit; its save says the clock's next check reads it.
-test('Costs posts only edited limits, the allowance\'s 0 and decimals included, and says when the clock reads it', async (t) => {
-    const panel = costsPanel(t, [reply({ next_task_changed: true }), reply({ immediate_changed: true }),
-        reply({ no_changes: true })]);
-    let reads = 0;
-    panel.routes.set('/api/consciousness', async () => { reads += 1; return reply({ enabled: true, status: 'sleeping',
-        spent_24h_usd: 1.5, daily_usd: 0, allowance_status: 'exhausted' }); });
-    const field = (id) => panel.mount.querySelector(`#${id}`);
-    for (const [id, value] of [['s-budget', '200'], ['s-per-task-cost', '50'], ['s-consciousness-allowance', '300']]) {
-        field(id).value = value;
-        field(id).dataset.loaded = value;  // as loadBudget leaves them
-    }
-    await panel.edit('s-consciousness-allowance', '0');
-    await panel.press();
-    assert.deepEqual(panel.posts, [{ OUROBOROS_CONSCIOUSNESS_DAILY_USD: 0 }], 'the one edited limit, its 0 a number');
-    assert.deepEqual(panel.words(), ['Saved. The next consciousness check uses it; a paused wake keeps its launch limit.', 'ok']);
-    assert.equal(reads, 1, 'its spend and state are read again under the new limit');
-    assert.match(field('costs-allowance-state').textContent, /At \$0 consciousness may not spend/);
-    await panel.edit('s-budget', '250');
-    await panel.press();
-    assert.deepEqual(panel.posts[1], { TOTAL_BUDGET: 250 }, 'the saved allowance is the new baseline, never sent again');
-    assert.equal(reads, 1, 'a budget save does not re-read consciousness');
-    await panel.press();
-    assert.deepEqual(panel.posts[2], {}, 'nothing edited still asks the server, which answers no change');
-    assert.deepEqual(panel.words(), ['No changes.', 'ok']);
-    await panel.edit('s-consciousness-allowance', '12.75');
-    await panel.edit('s-per-task-cost', '');
-    await panel.press();
-    assert.deepEqual(panel.words(), ['Budget values must be at least 0.01.', 'danger'], 'an emptied cap is no number, nothing sent');
-    await panel.edit('s-per-task-cost', '50');
-    await panel.edit('s-consciousness-allowance', '-2');
-    await panel.press();
-    assert.deepEqual(panel.words(), ['The consciousness limit must be a number, 0 or more.', 'danger']);
-    assert.equal(panel.posts.length, 3);
 });

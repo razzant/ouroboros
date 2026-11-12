@@ -394,12 +394,14 @@ def _since(row: Mapping[str, Any]) -> Optional[float]:
 
 def works_snapshot(drive_root: Any, owners: Iterable[Mapping[str, Any]], raw_facts: Mapping[str, Mapping[str, Any]],
                    *, complete: bool = True, bindings: Optional[Mapping[str, Any]] = None,
-                   publication_roots: Optional[set] = None) -> Dict[str, Any]:
+                   publication_roots: Optional[set] = None,
+                   questions: Iterable[Mapping[str, Any]] = ()) -> Dict[str, Any]:
     """``works``, ``rooms``, ``work_summary``, ``works_complete`` and ``works_gaps`` for ``/api/state``;
-    ``bindings`` is the census's task-to-Project map (``_bound_room``). Never raises."""
+    ``bindings`` is the census's task-to-Project map (``_bound_room``); ``questions`` are Main's current questions
+    (``main_decisions``), which the owner's turn of each room counts as Main's pill does. Never raises."""
     try:
         return _snapshot(drive_root, list(owners or ()), dict(raw_facts or {}), complete, dict(bindings or {}),
-                         publication_roots)
+                         publication_roots, list(questions or ()))
     except Exception:
         log.debug("Work projection unavailable for /api/state", exc_info=True)
         return {"works": [], "rooms": {}, "work_summary": ws.roll_up_summary({}, [], complete=False),
@@ -431,7 +433,8 @@ def _bound_room(row: Mapping[str, Any], task_id: str, bindings: Mapping[str, Any
 
 
 def _snapshot(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Mapping[str, Any]],
-              complete: bool, bindings: Mapping[str, Any], publication_roots: Optional[set] = None) -> Dict[str, Any]:
+              complete: bool, bindings: Mapping[str, Any], publication_roots: Optional[set] = None,
+              questions: Iterable[Mapping[str, Any]] = ()) -> Dict[str, Any]:
     from ouroboros.store_hot_facts import snapshot
 
     obs = _Observations(drive_root)
@@ -439,7 +442,7 @@ def _snapshot(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, M
     known = {str(row.get("activity_id") or "") for row in owners} | set(raw) | set(obs.previous)
     try:
         with snapshot([(drive_root, task_id) for task_id in known if task_id]):
-            projected = _project(drive_root, owners, raw, complete, obs, bindings)
+            projected = _project(drive_root, owners, raw, complete, obs, bindings, questions)
     finally:
         if publication_roots is not None:
             publication_roots.update(obs.dependency_roots)
@@ -448,7 +451,8 @@ def _snapshot(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, M
 
 
 def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Mapping[str, Any]],
-             complete: bool, obs: _Observations, bindings: Mapping[str, Any]) -> Dict[str, Any]:
+             complete: bool, obs: _Observations, bindings: Mapping[str, Any],
+             questions: Iterable[Mapping[str, Any]] = ()) -> Dict[str, Any]:
     rows: Dict[str, Dict[str, Any]] = {}
     for row in owners:
         task_id = str(row.get("activity_id") or "")
@@ -580,9 +584,12 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
         works.append(work)
     works.sort(key=lambda work: (str(work.get("room") or ""), ws._rank(work["activity"]),
                                  -float(work.get("since") or 0.0), work["work_id"]))
+    # What waits for the owner is one set: a current question is its room's turn, in its work's when one holds it.
+    loose = ws.place_questions(works, questions)
     by_room: Dict[str, List[Dict[str, Any]]] = {}
     for work in works:
         by_room.setdefault(str(work.get("room") or 0), []).append(work)
-    rooms = {chat: ws.roll_up_room(items, complete=complete) for chat, items in by_room.items()}
+    rooms = {chat: ws.roll_up_room(by_room.get(chat, []), complete=complete, questions=loose.get(chat, ()))
+             for chat in [*by_room, *(chat for chat in loose if chat not in by_room)]}
     return {"works": works, "rooms": rooms, "work_summary": ws.roll_up_summary(rooms, works, complete=complete),
             "works_complete": bool(complete), "works_gaps": obs.gaps}

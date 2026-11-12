@@ -8,7 +8,7 @@ import contextlib
 import contextvars
 import datetime
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator, Literal, Optional, TypedDict
 
 log = logging.getLogger(__name__)
@@ -38,6 +38,10 @@ class PhysicalAttemptContext:
     # ``route`` the window cannot hold the books and core, ``window`` the start's window took it otherwise,
     # ``after_start`` a lower mode the task took after its start (``context_measurement.mode_cause``).
     mode_cause: str = ""
+    # What this request did to its route's cached start, read from the host's own earlier sends on that route
+    # (``transcript_prefix.attempt_prefix_fact``): never the provider's verdict, which is the row's measured counts.
+    # None on rows written before it existed and on sends without a Main candidate.
+    prefix: Optional[dict] = field(default=None, compare=False)
 
 
 OBSERVED = frozenset({"dispatched", "settled", "unresolved"})  # a send the ledger records as made

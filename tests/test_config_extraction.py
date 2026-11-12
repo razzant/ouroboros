@@ -9,7 +9,6 @@ from ouroboros import (
     config,
     model_slots,
     provider_models,
-    review,
     review_model_routes,
     runtime_limits,
     settings_defaults,
@@ -17,7 +16,6 @@ from ouroboros import (
     safety_config,
 )
 
-REPO = pathlib.Path(__file__).parents[1]
 
 _LEAVES = (settings_defaults, settings_scales, model_slots, review_model_routes, runtime_limits, safety_config)
 
@@ -50,6 +48,10 @@ _ADDED_OWNERS = {
     "GIT_READ_CAPTURE_TIMEOUT_SEC": runtime_limits,
     "IMMEDIATE_SETTINGS": settings_scales,
     "RESTART_REQUIRED_SETTINGS": settings_scales,
+    # When a saved choice is consumed (the Settings row's timing): one label over the sets above, the route
+    # keys and the keys the consciousness clock reads at each wake decision.
+    "CONSCIOUSNESS_CLOCK_SETTINGS": settings_scales,
+    "setting_effect": settings_scales,
     # The owner's optional cap on acting tasks: its key, legacy value, disk format and its reads (pool-capacity D).
     "OWNER_CAP_KEY": settings_scales,
     "OWNER_CAP_LEGACY": settings_scales,
@@ -391,14 +393,3 @@ def test_settings_extraction_owner_inventory_is_exact():
             seen[name] = module.__name__
             assert owners.get(name) is module, f"{module.__name__} owns an unmapped name: {name}"
     assert set(seen) == set(owners)
-
-
-def test_settings_extraction_size_bounds_have_meaningful_headroom():
-    """The settings family meets the repository's line contract as the size lane's tip check reads it: a module in
-    the 1001-1500 band or past the cap has its entry in `ouroboros/size_ratchet_manifest.py` (one at 1501-1600 lines
-    needs none). The `size_ratchet` lane is that contract's blocking home; this test keeps no number of its own."""
-    inventory = review.collect_size_ratchet_inventory(REPO, repo_paths=[
-        pathlib.Path(module.__file__).relative_to(REPO).as_posix() for module in (config, *_LEAVES)])
-    manifest = review.load_size_ratchet_manifest(REPO / review.SIZE_RATCHET_MANIFEST_PATH)
-    assert inventory.band_paths <= set(manifest.band_paths)
-    assert inventory.giant_paths <= manifest.giant_paths

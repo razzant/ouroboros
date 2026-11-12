@@ -432,6 +432,8 @@ def test_reseed_from_a_real_previous_seed(tmp_path, monkeypatch, name, source, o
     (name, 'd51b09bd61944f2e4d000f2fcce5e9a890f209fc', '0.1.0')
     for name in ('live_conversation', 'gemini_live', 'grok_realtime', 'openai_realtime')
 ] + [('live_conversation', '96816f122', '0.1.1'),
+     # The Calls UI changed after 0.1.33 shipped: an install that took that payload is reseeded too.
+     ('live_conversation', 'cf6f95cf4', '0.1.33'),
      ('unix_computer_use', 'e471e380e6de1e7f728e0fffbb4457667422ebf4', '0.6.0')])
 @pytest.mark.parametrize("edited", [False, True])
 def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(env, monkeypatch, name, previous_release,
@@ -464,7 +466,7 @@ def test_call_skill_release_reseeds_the_old_payload_but_preserves_owner_edits(en
         assert compute_content_hash(installed) == previous_hash
         assert read_install_record(drive, name) == previous_record
     else:
-        version = {'live_conversation': '0.1.33', 'grok_realtime': '0.1.12', 'gemini_live': '0.1.21', 'openai_realtime': '0.1.10',
+        version = {'live_conversation': '0.1.34', 'grok_realtime': '0.1.12', 'gemini_live': '0.1.21', 'openai_realtime': '0.1.10',
                    'unix_computer_use': '0.7.2'}.get(name, '0.1.1')
         assert f"version: {version}\n" in (installed / "SKILL.md").read_text(encoding="utf-8")
         assert compute_content_hash(installed) == compute_content_hash(repo / "skills" / name)

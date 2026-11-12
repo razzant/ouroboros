@@ -110,7 +110,6 @@
  * @property {string} stateKey
  * @property {string} settingKey
  * @property {string} inputId
- * @property {string} settingsInputId
  * @property {string} title
  * @property {string} label
  * @property {string} note
@@ -214,7 +213,20 @@
 /**
  * `GET /api/settings`: every effective setting with its (masked) value, plus `_meta`.
  * @typedef {Object} SettingsReadResponse
- * @property {import('./api_types.js').SettingsMeta=} _meta
+ * @property {SettingsMeta=} _meta
+ */
+/** `_meta` of `GET /api/settings`.
+ * @typedef {Object} SettingsMeta
+ * @property {Object<string, 'now'|'next_call'|'next_wake'|'next_task'|'restart'|'local_model'>} effects
+ * @property {Object<string, string>} tokens
+ * @property {string[]=} custom_secret_keys
+ * @property {Object=} setup_contract
+ * @property {import('./api_types.js').AvailableSubagentsSettingsMeta=} available_subagents
+ * @property {SettingsPolicyState=} policy_state
+ * @property {SettingsRestartState=} restart_state Component application and source uncertainty.
+ * @property {{kind:string,name:string,label:string,builtin:boolean,enabled:boolean,configured:boolean,source:string,id:string,display:string}[]=} connections Every API connection as the picker shows it.
+ * @property {string[]=} main_connection_choice The connections an unauthored Main waits to be chosen among.
+ * @property {string[]=} known_spend_gaps What spends money the limits cannot count: roles whose route has no known price.
  */
 
 /**
@@ -1292,17 +1304,22 @@
 
 /**
  * @typedef {Object} OwnerSafetyRulesResponse
+ * @property {Object<string, SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
  * @property {boolean} ok
  * @property {string} rules
  */
 
 /**
  * @typedef {Object} OwnerSafetyModelRequest
+ * @property {Object<string, string>=} if_unchanged
  * @property {Object} settings
  */
 
 /**
  * @typedef {Object} OwnerSafetyModelResponse
+ * @property {Object<string, SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
  * @property {boolean} ok
  */
 
@@ -1343,4 +1360,45 @@
  * @property {number} model_calls
  * @property {number} sessions
  * @property {?number} tokens
+ */
+
+/** @typedef {Object} SettingsChange
+ * @property {*=} old
+ * @property {*=} new
+ * @property {boolean=} old_absent
+ * @property {string=} token
+ * @property {'secret'|'structure'=} withheld
+ */
+/** @typedef {Object} SettingsReceipt
+ * @property {Object<string, SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
+ */
+/** @typedef {Object} SettingsTiming
+ * @property {Object<string, 'now'|'next_call'|'next_wake'|'next_task'|'restart'|'local_model'>} effects
+ * @property {Object<string, string>} tokens
+ */
+/** @typedef {Object} SettingsRestartState
+ * @property {boolean=} restart_required
+ * @property {string[]=} restart_keys
+ * @property {string[]=} restart_source_unknown_keys
+ * @property {string[]=} unknown_keys
+ * @property {Object=} local_model
+ * @property {string=} summary
+ * @property {Object<string, *>=} running
+ */
+
+/**
+ * 500 AFTER settings landed: retry the named later step, never re-save (settings/onboarding writes).
+ * @typedef {Object} SettingsPostCommitFailureResponse
+ * @property {Object<string, SettingsChange>=} changes
+ * @property {'unavailable'=} receipt
+ * @property {string} error
+ * @property {string} status  // saved_with_post_commit_error
+ * @property {boolean} saved  // always true
+ * @property {string} post_commit_failed
+ */
+
+/** @typedef {Object} SettingsSaveRequest Open partial document of setting keys.
+ * @property {Object<string, string>=} if_unchanged
+ * @property {string[]=} unset
  */

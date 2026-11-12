@@ -343,10 +343,12 @@ export function reviewCostText(row, cost = null) {
     if (cost.basis !== 'observed_reviews' || typeof usd !== 'number' || !Number.isFinite(usd)) return 'cost unknown';
     const high = Number(cost.high);
     if (usd === 0 && !(high > 0)) return 'no API cost per review';
-    const money = (value) => `$${value < 0.01 ? value.toFixed(4) : value.toFixed(2)}`;
+    // A charge below the printed precision is never a proven zero.
+    const money = (value) => (value > 0 && value < 0.00005 ? '<$0.0001' : `$${value < 0.01 ? value.toFixed(4) : value.toFixed(2)}`);
+    const about = usd > 0 && usd < 0.00005 ? '' : '≈';
     const reviews = Number(cost.reviews) || 0;
-    return reviews < 2 ? `≈${money(usd)} per review (1 measured)`
-        : `≈${money(usd)} per review (median of ${reviews} measured, ${money(Number(cost.low))}–${money(high)})`;
+    return reviews < 2 ? `${about}${money(usd)} per review (1 measured)`
+        : `${about}${money(usd)} per review (median of ${reviews} measured, ${money(Number(cost.low))}–${money(high)})`;
 }
 
 /** What actually ran the last time this row reviewed, with its review record (the card's "Last review"). */

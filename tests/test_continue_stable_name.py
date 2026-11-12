@@ -112,6 +112,28 @@ def test_the_whole_flow_keeps_one_name_a_fresh_line_and_the_old_sentence(env):
     assert load_task_result(env.root, "origin-1")["wake_summary"] == SENTENCE
 
 
+def test_a_gist_of_several_sentences_leaves_its_first_as_a_name_a_continue_replaces(env):
+    """rev_fable REV2 F3: the closing write names a run by its gist's first sentence, but that name was proven the
+    run's own sentence only by equality with the whole gist, so a gist of two sentences kept its first sentence as a
+    name nobody could replace. The first sentence or the whole gist stands as the run's own sentence; any other name,
+    and an author's title, stay."""
+    from ouroboros.project_naming import summary_stands_as_name, work_name_open, work_shown_name
+    gist = SENTENCE + " March and April match; May waits on the bank's export, my step next."
+    _legacy_origin(env.root)
+    write_task_result(env.root, "origin-1", "cancelled", wake_summary=gist, suggested_name=SENTENCE,
+                      cancel_origin={"source": "snapshot_restore", "reason": "server_shutdown"})
+    origin = load_task_result(env.root, "origin-1")
+    assert summary_stands_as_name(origin) and work_name_open(origin) and work_shown_name(origin) != SENTENCE
+    first = _continue(env, "origin-1")
+    assert first["metadata"]["continuation"]["work_name"] != SENTENCE and "also pass work_name" in first["text"]
+    receipt = _update_focus(_ctx(env, first), "Reading the bank's export", RECENT, work_name=SUBJECT)
+    assert f"Work name set: {SUBJECT!r}" in receipt and load_task_result(env.root, "origin-1")["wake_summary"] == gist
+    for record in ({"suggested_name": "Mail check", "wake_summary": gist}, {"suggested_name": "March and April match;",
+                   "wake_summary": gist}, {"suggested_name": SENTENCE, "wake_summary": gist, "title": "Bank export"}):
+        assert not summary_stands_as_name(record), record
+    assert summary_stands_as_name({"suggested_name": SENTENCE, "wake_summary": SENTENCE})  # a record from before
+
+
 def test_a_retried_name_is_the_name_standing(env):
     _legacy_origin(env.root)
     ctx = _ctx(env, _continue(env, "origin-1"))

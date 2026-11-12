@@ -908,13 +908,13 @@ def _memory_journal_sizes(root: pathlib.Path) -> Dict[str, Any]:
 
 
 def _startup_prune_sweeps(*, preserve_task_sources=False, recovery_report=None):
-    """Boot's housekeeping: note whether recovery left a gap, reap the fallback scripts (only before
-    intake, when none can be live) and observe the memory journals' sizes once per generation. History-sized
-    retirers run in the maintenance child; queue-owned copies stay on the custody pass."""
+    """Boot's housekeeping: note whether recovery left a gap and what it left unresolved, reap the fallback
+    scripts (only before intake, when none can be live) and observe the memory journals' sizes once per generation.
+    History-sized retirers run in the maintenance child; queue-owned copies stay on the custody pass."""
     _STARTUP_RECOVERY_GAPS[0] = bool(preserve_task_sources and (
         recovery_report is None or recovery_report.get("errors") or "*" in recovery_report.get("unresolved", [])))
     from ouroboros.maintenance_retirement import record_startup
-    record_startup(DATA_DIR, gaps=_STARTUP_RECOVERY_GAPS[0])
+    record_startup(DATA_DIR, gaps=_STARTUP_RECOVERY_GAPS[0], report=recovery_report)
     if not preserve_task_sources:  # the atomic-temp walk is the maintenance child's temp_sweep job
         from ouroboros.temp_sweep import sweep_stale_temp_files
         sweep_stale_temp_files(DATA_DIR, atomic_temps=False)
@@ -1455,6 +1455,7 @@ def _run_startup_task_recovery(
         report["errors"].append("prior_worker_ownership_unconfirmed")
         log.warning("Startup file/task recovery deferred: prior worker ownership is unconfirmed")
         return report
+    report["prior_workers_ended"] = True  # the one positive answer; an early return above leaves it unknown
     try:
         from ouroboros.task_status import _load_queue_snapshot
         snapshot = _load_queue_snapshot(pathlib.Path(drive_root))
@@ -1475,7 +1476,7 @@ def _run_startup_task_recovery(
     except Exception:
         intent_errors.append("promotion_intent_reconcile_failed")
         log.warning("Startup new-work intent reconciliation deferred", exc_info=True)
-    report = _recover_terminal_task_files(drive_root, protected)
+    report = {**_recover_terminal_task_files(drive_root, protected), "prior_workers_ended": True}
     report["unresolved"].extend(preparations["retained"] + preparations["uncertain"])
     report["errors"].extend(f"preparation:{item}" for item in preparations["errors"])
     report["errors"].extend(intent_errors)

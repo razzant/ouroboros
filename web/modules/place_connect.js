@@ -143,10 +143,10 @@ export function adoptHtml(view) {
     </section>`;
 }
 
-/** The connector's declared settings live in Settings › Advanced; fall back to its Skills entry. */
-export async function openConnectorSettings(connector, openSettingsTab) {
-    if (!connector.settings || !openSettingsTab) { openSkillsFor({ skill: connector.connector }); return; }
-    if (await openSettingsTab('advanced') === false) return;
+/** The connector's declared settings live on its skill's Settings page; fall back to its Skills entry. */
+export async function openConnectorSettings(connector, openSettings) {
+    if (!connector.settings || !openSettings) { openSkillsFor({ skill: connector.connector }); return; }
+    if (await openSettings(`skill/${connector.connector}`) === false) return;
     const section = document.getElementById('extension-settings-sections');
     const form = [...(section?.querySelectorAll('[data-extension-settings-form]') || [])]
         .find((node) => node.dataset.skill === connector.connector && node.dataset.extensionSettingsKey?.startsWith(`${connector.connector}:${connector.settings}:`));
@@ -155,7 +155,7 @@ export async function openConnectorSettings(connector, openSettingsTab) {
 
 /** `circle` = {id, name}: Add a place to that circle; null adds it to no circle. */
 export function openConnectPlace({ returnFocus = document.activeElement, read = readPlaces, connect = connectPlace, update = updatePlace,
-    readStatus = readPlaceConnector, openPlace = openPlaceSheet, openSettingsTab = null, circle = null } = {}) {
+    readStatus = readPlaceConnector, openPlace = openPlaceSheet, openSettings = null, circle = null } = {}) {
     const dialog = sheetShell(escapeHtml(tr('places.add', 'Add a place')),
         circle ? fmt('To {circle}', { circle: circle.name }) : tr('circles.none', 'Not in a circle'), 'place-connect');
     const abort = new AbortController();
@@ -257,7 +257,7 @@ export function openConnectPlace({ returnFocus = document.activeElement, read = 
         if (act === 'browse') { sheet.close(); openSkillsFor({ category: 'connectors' }); return; }
         if (act === 'skills') { sheet.close(); openSkillsFor({ skill: control.dataset.connector }); return; }
         if (act === 'back') { ++generation; view.selected = null; view.status = {}; paint(); return; }
-        if (act === 'settings') { sheet.close(); await openConnectorSettings(view.selected, openSettingsTab); return; }
+        if (act === 'settings') { sheet.close(); await openConnectorSettings(view.selected, openSettings); return; }
         if (act === 'choose') {
             view.selected = view.connectors.find((item) => item.connector === control.dataset.connector);
             if (view.selected) await loadChoices();

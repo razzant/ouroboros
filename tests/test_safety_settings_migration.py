@@ -1,5 +1,6 @@
 """One-time, locked disk migration; later changes are independent."""
 import json
+from unittest.mock import ANY
 
 import pytest
 
@@ -69,7 +70,8 @@ def test_owner_safety_decision_refuses_a_non_object_settings_document(install, d
         assert refused.json()["saved"] is False and install.SETTINGS_PATH.read_bytes() == before
         install.SETTINGS_PATH.unlink()
         response = client.post("/api/owner/safety-mode", json={"kind": "consciousness", "mode": "light"})
-    assert response.status_code == 200 and response.json() == {"ok": True, "safety_mode": "light"}
+    assert response.status_code == 200 and response.json() == {"ok": True, "safety_mode": "light", "changes": {
+        "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": {"old": "full", "new": "light", "old_absent": True, "token": ANY}}}
     assert json.loads(install.SETTINGS_PATH.read_text())["OUROBOROS_CONSCIOUSNESS_SAFETY_MODE"] == "light"
 
 

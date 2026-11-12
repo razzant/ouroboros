@@ -20,6 +20,7 @@ import { showToast } from './toast.js';
 import { escapeHtmlAttr, escapeHtmlText } from './utils.js';
 import { DOTS, durationLabel, formatBytes, isSize, largestPartsHtml, number, plural, signedBytes as signed, whenLabel } from './storage_format.js';
 import { DELETED_ROWS, deletedProjectsHtml } from './storage_deleted.js';
+import { mountTabSettings } from './dashboard.js';
 import { EMPTY_LIST, MANUAL_ROWS, OUTDATES_PLAN, acceptPage, attemptSentences, confirmCopy, doorOffered, excludedCount, holdsPhrase, lostNotice, manualConfirmCopy, manualFacts, manualKnown, manualOf, notStarted, resultSentences, savedGroups, trayHtml, trayState } from './storage_free.js';
 
 export { durationLabel, formatBytes, whenLabel };
@@ -108,24 +109,33 @@ function engineLine(fact, now) {
     return parts.join(' · ');
 }
 
+/** This place's own compression plane (task evidence, reviewer seat homes, closed log segments), never one total
+ *  under two places: what it compressed, what that saved where reported, and an unfinished pass said as such. */
+function compressionLine(fact, job) {
+    const files = plural(fact.compressed, '{n} file compressed', '{count} files compressed');
+    const line = isSize(fact.saved_bytes) ? fmt('{job}: {files}, {size} saved', { job, files, size: formatBytes(fact.saved_bytes) })
+        : fmt('{job}: {files}', { job, files });
+    return fact.state === 'pending' ? fmt('{line}, in progress', { line }) : line;
+}
+
 function jobPhrase(fact, now) {
     const job = fmt(JOB_WORDS[fact.id] || String(fact.id));
     if (fact.last_error) {
         return fmt('{job}: stopped by an error ({error}, {when})', { job, error: fact.last_error.class, when: whenLabel(fact.last_error.at, now) });
     }
-    if (Array.isArray(fact.holds) || isSize(fact.released)) {  // a retirer pass: what it released, what it holds and why
-        const parts = [fact.at ? fmt('{job}: last change {when}', { job, when: whenLabel(fact.at, now) }) : job,
-            plural(fact.released || 0, '{n} released', '{count} released'), holdsPhrase(fact, now),
-            fact.errors > 0 ? plural(fact.errors, '{n} error', '{count} errors') : ''];
+    const compressing = fact.id === 'record_compression' && fact.state !== 'unsupported' && fact.compressed > 0;
+    if (Array.isArray(fact.holds) || isSize(fact.released)) {  // a pass's report: what it released, what it holds and why
+        // A count only from a pass that keeps one: a job that holds without counting what it released says none, never 0.
+        // An unfinished compression pass that has compressed nothing in this place yet is still said as in progress.
+        const head = compressing ? compressionLine(fact, job)
+            : fact.id === 'record_compression' && fact.state === 'pending' ? fmt(JOB_STATES.pending, { job })
+                : fact.at ? fmt('{job}: last change {when}', { job, when: whenLabel(fact.at, now) }) : job;
+        const parts = [head,
+            isSize(fact.released) ? plural(fact.released, '{n} released', '{count} released') : '',
+            holdsPhrase(fact, now), fact.errors > 0 ? plural(fact.errors, '{n} error', '{count} errors') : ''];
         return parts.filter(Boolean).join(' · ');
     }
-    if (fact.id === 'record_compression' && fact.state !== 'unsupported' && fact.compressed > 0) {
-        // This place's own plane (task evidence, or reviewer seat homes), never one total under two places.
-        const files = plural(fact.compressed, '{n} file compressed', '{count} files compressed');
-        const line = isSize(fact.saved_bytes) ? fmt('{job}: {files}, {size} saved', { job, files, size: formatBytes(fact.saved_bytes) })
-            : fmt('{job}: {files}', { job, files });
-        return fact.state === 'pending' ? fmt('{line}, in progress', { line }) : line;
-    }
+    if (compressing) return compressionLine(fact, job);
     return fmt(JOB_STATES[fact.state] || '{job}: {state}', { job, state: String(fact.state || '') });
 }
 
@@ -392,7 +402,6 @@ export function renderStorage(response, { pending = false, readFailed = false, n
         summary: summaryHtml(response, { readFailed, now }),
         facts: countFactsHtml(response?.count),
         bar: barHtml(response, now),
-        auto: response ? fmt('Files of finished tasks are also removed by the app {days} days after the task ends. Project folders stay.', { days: response.retention_days ?? 7 }) : '',
         status: countStatusHtml(response, now),
         announce: announceSentence(response, { readFailed, now, tray }),
         places: placesHtml(response, now, deletedShown),
@@ -440,9 +449,9 @@ export function initStorage({ state, mount } = {}) {
         </section>
         <section class="storage-panel storage-cleanup ui-card" aria-label="Cleanup">
             <h3 class="storage-card-title">Cleanup</h3>
+            <div class="storage-retention dashboard-settings" data-storage-settings></div>
             <div class="storage-tray" data-storage-tray></div>
             <div class="storage-actions storage-cleanup-door"><button type="button" class="btn btn-primary btn-sm" data-free-preview data-key="data-free-preview" data-storage-door hidden>Check for files to remove</button></div>
-            <p class="storage-auto" data-storage-auto data-i18n-fmt="storage.auto"></p>
         </section>
         <section class="storage-panel ui-card" aria-label="Folders" data-storage-panel hidden>
             <div class="storage-tray-head"><h3 class="storage-card-title">Folders</h3></div>
@@ -478,7 +487,8 @@ export function initStorage({ state, mount } = {}) {
     const measureButton = page.querySelector('[data-storage-action="measure"]');
     const stopButton = page.querySelector('[data-storage-action="stop"]');
     const door = page.querySelector('[data-storage-door]');
-    const auto = page.querySelector('[data-storage-auto]');
+    // How long finished work is kept saves itself; a saved value reads the tab again, since it shapes the cleanup planned.
+    const retention = mountTabSettings(page.querySelector('[data-storage-settings]'), 'storage', { state, onSaved: () => void refresh() });
     const scroller = page;
     const details = page.querySelector('[data-storage-details]');
     const painted = new Map();
@@ -520,7 +530,6 @@ export function initStorage({ state, mount } = {}) {
         patch(regions.facts, view.facts, painted);
         details.hidden = !view.facts;
         if (live.textContent !== view.announce) live.textContent = view.announce;
-        if (auto.textContent !== view.auto) auto.textContent = view.auto;
         patch(regions.status, view.status, painted);
         patch(regions.bar, view.bar, painted);
         patch(regions.places, view.places, painted);
@@ -966,7 +975,7 @@ export function initStorage({ state, mount } = {}) {
     function destroy() {
         if (disposed) return;
         disposed = true;
-        cancelRead();
+        cancelRead(), retention.dispose();
         measureButton.removeEventListener('click', onClick);
         stopButton.removeEventListener('click', onClick);
         door.removeEventListener('click', onTrayClick);

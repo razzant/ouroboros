@@ -21,6 +21,7 @@ sources:
     ignore_older_secs: 86400       # older archive generations and finished drives: a one-time backfill, not this tail
     fingerprint:
       strategy: device_and_inode   # rotation renames the file into archive/, keeping its inode
+      # macOS hosts only: a closed generation is later compressed in place and becomes a new inode (README, "What it reads").
     max_line_bytes: 16777216       # the 102400 default DROPS longer rows; real rows reach ~300 KB
 transforms:
   ouroboros_metadata:

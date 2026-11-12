@@ -29,7 +29,7 @@ MAX_CONFIGURED_SUBAGENTS = 26
 REVIEW_DELIVERY_NATIVE = "native"
 REVIEW_DELIVERY_PACKET = "packet"
 REVIEW_DELIVERIES = (REVIEW_DELIVERY_NATIVE, REVIEW_DELIVERY_PACKET)
-# Provenance of a row the runtime minted rather than the owner authored: from
+# Birth marker of a row the runtime minted: from
 # a former review lane (the one-time migration) or from the factory panel.
 MINTED_FROM_REVIEW_LANE = "review_lane"
 MINTED_FROM_FACTORY_DEFAULT = "factory_default"
@@ -109,8 +109,8 @@ class ConfiguredSubagent:
     # ``native``/``packet`` on an api_model row (see REVIEW_DELIVERIES); "" on a
     # session row, which always retrieves. Absent in saved bytes means native.
     delivery: str = ""
-    # ``review_lane``/``factory_default`` when the runtime minted the row; "" for
-    # an owner-authored row. Round-trips as saved.
+    # ``review_lane``/``factory_default`` on some runtime-minted rows; empty does
+    # not establish authorship. Round-trips as saved.
     minted_from: str = ""
 
 
@@ -326,7 +326,7 @@ def configured_subagents_dict(config: ConfiguredSubagents) -> dict[str, Any]:
         if not row.enabled:
             payload["enabled"] = False
         # The review fields follow the same rule: defaults (unmarked, native,
-        # owner-authored) are not written, so a document saved before they
+        # no birth marker) are not written, so a document saved before they
         # existed serializes to the same bytes.
         if row.review_eligible:
             payload["review_eligible"] = True
@@ -460,7 +460,7 @@ def validate_unique_engines(config: ConfiguredSubagents, settings: Mapping[str, 
 
     The handle IS the engine with baselines folded, so an unset row and an
     explicit row with the same effective value are one engine, and no two saved
-    rows the OWNER authored can carry the same name. Two deliberate exceptions,
+    rows without a birth marker can carry the same name. Two deliberate exceptions,
     both about the review pool (THESIS: a reviewer's two seats are the owner's
     honest choice): the twins are BOTH marked review-eligible (the same engine
     judging twice, e.g. once by packet and once natively), or at least one of

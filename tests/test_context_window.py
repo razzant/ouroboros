@@ -328,6 +328,22 @@ def test_a_claudexor_account_reads_the_acceptances_its_receipts_wrote(tmp_path, 
     assert start().window_record.usable == 934_464 and start().window_record.accepted == 200_000
 
 
+@pytest.mark.parametrize("pin", ["", "profile-a"])
+def test_an_answer_naming_no_route_writes_only_to_a_pinned_account(tmp_path, monkeypatch, pin):
+    """H8 (W2, 12.11.2026): a receipt naming no route at all (an older engine) does not say which account served an
+    Auto request, so no acceptance or refusal lands on the account the plan was built on; a pin names its account."""
+    from types import SimpleNamespace
+    from ouroboros.context_window import observed_plan, record_refusal
+
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    plan = SimpleNamespace(provider="claudexor", model="claudexor::codex=gpt-fixture", route_fp="account-a",
+                           window_witness_bound=True, account_pin=pin)
+    usage = {"_model_route": {}, "_last_llm_provider_message": "maximum context length is 200000 tokens"}
+    assert (observed_plan(plan, usage) is plan) is bool(pin)
+    record_refusal(usage, plan)
+    assert bool(ce._load(tmp_path).get("main_windows", {}).get("account-a")) is bool(pin)
+
+
 def test_observation_writes_bound_the_frontier_without_changing_resolution(tmp_path, monkeypatch):
     from datetime import datetime, timedelta, timezone
 

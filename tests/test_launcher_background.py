@@ -702,13 +702,15 @@ def test_windows_keeps_its_one_icon_for_the_whole_run_and_background_decides_onl
 READY = {"supervisor_ready": True, "supervisor_error": None, "works_complete": True}
 
 
-def projection(*works, confirmed=True, **facts):
-    """A /api/state work projection: each work is (activity, transition, has_turn)."""
+def projection(*works, confirmed=True, loose=0, **facts):
+    """A /api/state work projection: each work is (activity, transition, has_turn); ``loose`` unanswered questions
+    belong to no listed work (their work ended). The summary counts what waits as the server does."""
     rows = [{"work_id": f"w{index}", "activity": activity, "transition": transition,
              "turn": [{"kind": "question", "task_id": f"w{index}"}] if turn else [],
              **({"confirmed": confirmed} if confirmed is not None else {})}
             for index, (activity, transition, turn, confirmed) in enumerate(works)]
-    return {**READY, "works": rows, "work_summary": {"counts": {}, "turn": 0, "confirmed": confirmed}, **facts}
+    waits = sum(bool(row["turn"]) for row in rows) + loose
+    return {**READY, "works": rows, "work_summary": {"counts": {}, "turn": waits, "confirmed": confirmed}, **facts}
 
 
 def work(activity, transition="none", turn=False, confirmed=None):
@@ -723,6 +725,8 @@ def work(activity, transition="none", turn=False, confirmed=None):
     # What waits for the owner is counted on the same line.
     (projection(work("working"), work("waiting", turn=True)), "Ouroboros: working on 1 task · 1 waits for you"),
     (projection(work("paused", turn=True), work("waiting", turn=True)), "Ouroboros: waiting · 2 wait for you"),
+    # An unanswered question whose work has ended waits too: no work lists it, the server's count does.
+    (projection(work("working"), loose=1), "Ouroboros: working on 1 task · 1 waits for you"),
     # What the server says it does not know is neither "waiting" nor "working" (review r1).
     (projection(supervisor_ready=False, supervisor_error="Supervisor init failed: boom"),
      "Ouroboros: error, tasks are not running"),

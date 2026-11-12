@@ -211,13 +211,13 @@ export function groupPlaces(circles, places) {
 // The window's one catalog read (model_catalog_store.js) as the Model field's suggestions; a read that failed with
 // nothing listed earlier rejects, so the field says its suggestions could not be read.
 async function readCatalog() {
-    await modelCatalog.read();
+    await Promise.all([modelCatalog.read(), modelCatalog.readConnections()]);  // the tiers say whether a price is paid
     if (modelCatalog.status().failed && !modelCatalog.catalog()?.items?.length) throw new Error('The model catalog could not be read.');
     return modelCatalog.catalog();
 }
 
 /** Mount the page: its shell now, its data when it is shown. */
-export function initCircles({ state, showPage, openSettingsTab, read = readPlaces, readStatus = readPlaceConnector,
+export function initCircles({ state, showPage, openSettings, read = readPlaces, readStatus = readPlaceConnector,
     openSheet = openPlaceSheet, openConnect = openConnectPlace, askConfirm = openConfirmDialog, readModels = readCatalog,
     writes = { createCircle, updateCircle, deleteCircle }, contributions = getContributions() } = {}) {
     const page = document.createElement('div');
@@ -278,13 +278,17 @@ export function initCircles({ state, showPage, openSettingsTab, read = readPlace
         if (selection && node?.setSelectionRange) node.setSelectionRange(...selection);
     }
 
+    // Settings broadcasts every catalog read, a failed one too: that one leaves the suggestions as they are.
+    const onBroadcast = (event) => { if (Array.isArray(event?.detail?.items) && event.detail.read_state !== 'failed') onCatalog(event); };
     function onCatalog(event) {
         if (destroyed) return;
         const data = event.detail;
-        ui.models = modelSuggestions(data);
+        ui.models = modelSuggestions(data, { tierPriced: modelCatalog.tierPriced('lead') });
         ui.catalog = data;
         for (const field of body.querySelectorAll('[data-model-chooser]')) updateModelChooser(field, ui.models, catalogPrograms(data));
     }
+    // The prices beside the suggestions follow the tier Settings saves and the page's language.
+    const resay = () => { if (ui.catalog) onCatalog({ detail: ui.catalog }); };
 
     // The Model field's suggestions, read once when an editor first shows; the field works without them (any id can be
     // typed), and they reach the open field without a repaint, so the caret stays where it is.
@@ -349,7 +353,7 @@ export function initCircles({ state, showPage, openSettingsTab, read = readPlace
 
     function addPlace(circle) {
         openConnect({ returnFocus: current(`[data-circles-act="add-place"][data-circle="${CSS.escape(circle?.id || UNASSIGNED)}"]`),
-            openSettingsTab, circle: circle ? { id: circle.id, name: circle.name } : null });
+            openSettings, circle: circle ? { id: circle.id, name: circle.name } : null });
     }
 
     // The fields stay open while a write is out: `onConflict` hears the circle as it stands now, the facts a resave uses.
@@ -536,7 +540,9 @@ export function initCircles({ state, showPage, openSettingsTab, read = readPlace
     window.addEventListener(PLACES_CHANGED_EVENT, onChanged);
     window.addEventListener('ouro:open-circles', onOpen);
     document.addEventListener('visibilitychange', onVisibility);
-    document.addEventListener('settings-model-catalog:updated', onCatalog);
+    document.addEventListener('settings-model-catalog:updated', onBroadcast);
+    const offTiers = modelCatalog.subscribe(resay);
+    window.addEventListener('ouro:language-changed', resay);
     paint();
     if (shown()) void refresh();
     return {
@@ -556,7 +562,9 @@ export function initCircles({ state, showPage, openSettingsTab, read = readPlace
             window.removeEventListener(PLACES_CHANGED_EVENT, onChanged);
             window.removeEventListener('ouro:open-circles', onOpen);
             document.removeEventListener('visibilitychange', onVisibility);
-            document.removeEventListener('settings-model-catalog:updated', onCatalog);
+            document.removeEventListener('settings-model-catalog:updated', onBroadcast);
+            offTiers();
+            window.removeEventListener('ouro:language-changed', resay);
         },
     };
 }
