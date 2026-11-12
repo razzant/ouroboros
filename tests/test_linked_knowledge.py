@@ -943,6 +943,8 @@ def test_a_stale_revision_beyond_the_tail_gets_the_whole_note_as_before(tmp_path
     monkeypatch.setattr(store, "_JOURNAL_TAIL_BYTES", 4096)
     stale = tools._knowledge_write(ctx, "far", "Mine.", scope="global", expected_revision=held.revision)
     assert "revision_conflict" in stale and stale.endswith(current.text) and "What changed" not in stale
+    lead = next(entry for entry in tools.get_tools() if entry.name == "knowledge_write").schema["description"]
+    assert "in whole lines when the note's recent history holds it" in lead  # the writer's tail, not all history
 
 
 def test_the_writer_reads_its_row_address_and_appends_under_the_shelf_lock(tmp_path, monkeypatch):

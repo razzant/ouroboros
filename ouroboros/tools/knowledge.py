@@ -483,7 +483,7 @@ def get_tools() -> List[ToolEntry]:
                 "knowledge_read, a receipt or a refusal) is required to replace an existing note: overwrite, edit, "
                 "revert, archive, restore and an append with summary; creating a note and a bare append need none. A "
                 "stale revision writes nothing and returns every change since that version in whole lines when the note's "
-                "history holds it and one reply carries them all, else the current note. A receipt names the version "
+                "recent history holds it and one reply carries them all, else the current note. A receipt names the version "
                 "it replaced, who wrote it, and the calls that read it and, for content writes, revert to it. The "
                 "overview always stays active. Legacy index prose stays until an authored global overview retires it."),
             "parameters": {"type": "object", "properties": {
