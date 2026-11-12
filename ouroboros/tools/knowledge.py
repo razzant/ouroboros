@@ -193,10 +193,10 @@ def _bound_delta_meta(meta: dict) -> dict:
     ``knowledge_source`` names; the bare append's outline and the replaced version's reason become
     their size, sha256 and the read that shows them. A transport bound on the receipt, never a
     judgment of what matters: a small list is not dropped while a larger one overflows. Still over
-    with nothing left to give (each call repeats the topic, 6 bytes a character outside ASCII), the
-    host meta keeps only the write's reason, state and revision, the captured previous source of an
-    archive or restore, and the receipt's size and sha256: a saved write's reply carries the receipt
-    as its JSON line, so a landed write is never reported as failed.
+    with nothing left to give (each call repeats the topic, 6 or 12 bytes a character outside ASCII),
+    the host meta keeps only the write's reason, state and revision, the captured previous source of
+    an archive or restore, and the receipt's size and sha256: a ✅ reply carries the receipt as its
+    JSON line, so a landed write is never reported as failed.
     """
     arguments = ((meta.get("knowledge_source") or {}).get("read") or {}).get("arguments", {})
 
