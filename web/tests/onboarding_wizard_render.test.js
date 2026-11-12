@@ -372,7 +372,7 @@ test('an unknown save keeps the draft; Check status reads back THIS attempt, whi
         assert.match(server.sent[0], /^[0-9a-f]{32}$/, 'the attempt id is made before sending');
         let html = doc.getElementById('root').innerHTML;
         assert.match(html, /The save result is unknown\. Your draft has not been discarded\. Use &quot;Check status&quot; to read the result of this save\./);
-        assert.match(html, /class="footer-copy">The last save did not return a confirmed result\.</);
+        assert.match(html, /class="footer-copy footer-warning">The last save did not return a confirmed result\.</);
         assert.doesNotMatch(html, /Saving\.\.\./, 'the wizard is not stuck on Saving...');
         // "Check status" is the ONE primary action while the outcome is unknown; the re-submit stays offered,
         // as an explicit secondary "Retry save" (rc.15 review MINOR 3).

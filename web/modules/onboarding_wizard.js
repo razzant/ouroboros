@@ -1034,7 +1034,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
                     ${state.completedRestartMode || consciousness.running() ? '' : `
                     <div class="wizard-footer">
                         <div class="wizard-error" role="status">${escapeHtml(state.error)}</div>
-                        <div class="footer-copy">${escapeHtml(saveUnknown ? 'The last save did not return a confirmed result.' : meta.footer)}</div>
+                        <div class="footer-copy${saveUnknown ? ' footer-warning' : ''}">${escapeHtml(saveUnknown ? 'The last save did not return a confirmed result.' : meta.footer)}</div>
                         <div class="footer-actions">
                             <button class="btn btn-default" id="back-btn" type="button" ${index === 0 || state.saving || state.preparingRecovery ? 'disabled' : ''}>Back</button>
                             ${state.currentStep === 'accounts' ? `<button class="btn btn-default" id="quick-start-btn" type="button" ${hasModelSubscription() ? '' : 'hidden'}>Review &amp; start</button>` : ''}
