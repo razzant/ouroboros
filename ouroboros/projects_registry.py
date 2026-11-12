@@ -844,7 +844,8 @@ def readable_rooms(drive_root: Any) -> Optional[set]:
         # its cause is named once a process and cause, where a person reading the log looks.
         if (said := f"{type(error).__name__}: {error}") not in _UNREADABLE_SAID:
             _UNREADABLE_SAID.add(said)
-            log.warning("The Project registry vouches for no room; Main's saved history is withheld: %s", said)
+            log.warning("The Project registry vouches for no room; Main's saved history is withheld while it lasts: %s",
+                        said)
         log.debug("readable_rooms failed", exc_info=True)
         return None
 
